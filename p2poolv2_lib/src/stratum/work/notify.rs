@@ -14,6 +14,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::sim_overrides;
+use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
@@ -28,6 +29,8 @@ pub(crate) struct NotifyContext {
     pub pool_signature: Vec<u8>,
     pub pool_difficulty: pool_difficulty::PoolDifficulty,
     pub payout: Box<dyn PayoutDistribution + Send>,
+    /// Latest template transactions, in CTOR, for Stratum V2 coinbase-only jobs.
+    pub pool_transactions: PoolTransactionCache,
 }
 
 /// Build the output distribution for the coinbase transaction using
@@ -72,6 +75,22 @@ fn build_output_distribution(
         })
 }
 
+fn cache_template_transactions(
+    template: &BlockTemplate,
+    cache: &PoolTransactionCache,
+) -> Result<(), WorkError> {
+    let mut transactions = Vec::with_capacity(template.transactions.len());
+    for template_transaction in &template.transactions {
+        let transaction =
+            bitcoin::Transaction::try_from(template_transaction).map_err(|error| WorkError {
+                message: format!("template transaction: {error}"),
+            })?;
+        transactions.push(transaction);
+    }
+    cache.set(transactions);
+    Ok(())
+}
+
 /// Build a PreparedNotifyParams from a template using the notify context.
 ///
 /// Queries chain state (tip, uncles, difficulty) and prepares the
@@ -101,6 +120,7 @@ fn build_prepared_notify(
     //* below, so a confirmed-chain advance between reads cannot make the
     //* coinbase pay a window inconsistent with its declared prev.
     let output_distribution = build_output_distribution(template, target, tip, context)?;
+    cache_template_transactions(template, &context.pool_transactions)?;
 
     PreparedNotifyParamsBuilder::new(
         Arc::clone(template),
@@ -108,6 +128,7 @@ fn build_prepared_notify(
         &context.pool_signature,
         clean_jobs,
     )
+    .pplns_weights(context.payout.pplns_weights())
     .prev_share_blockhash(tip)
     .uncles(uncles)
     .bits(target)
@@ -115,6 +136,7 @@ fn build_prepared_notify(
     .donation(context.config.donation)
     .fee_address(context.config.fee_address().cloned())
     .fee(context.config.fee)
+    .include_merge_mining(context.config.chain == crate::config::Chain::BitcoinCash)
     .build()
 }
 
@@ -147,12 +169,13 @@ fn publish_prepared_notify(
     context: &mut NotifyContext,
     template_tx: &watch::Sender<Option<Arc<PreparedNotifyParams>>>,
 ) -> Result<(), WorkError> {
-    let prepared = build_prepared_notify(template, clean_jobs, context)?;
-    template_tx
-        .send(Some(Arc::new(prepared)))
-        .map_err(|_| WorkError {
-            message: "All template receivers dropped".to_string(),
-        })
+    let prepared = Arc::new(build_prepared_notify(template, clean_jobs, context)?);
+    context
+        .pool_transactions
+        .set_prepared(Arc::clone(&prepared));
+    template_tx.send(Some(prepared)).map_err(|_| WorkError {
+        message: "All template receivers dropped".to_string(),
+    })
 }
 
 /// Start the notifier task that broadcasts prepared templates via a watch channel.
@@ -176,6 +199,7 @@ pub async fn start_notify(
     config: &StratumConfig<crate::config::Parsed>,
     payout: Box<dyn PayoutDistribution + Send>,
     pool_difficulty: pool_difficulty::PoolDifficulty,
+    pool_transactions: PoolTransactionCache,
 ) {
     let pool_signature = match config.pool_signature {
         Some(ref sig) => sig.as_bytes().to_vec(),
@@ -188,6 +212,7 @@ pub async fn start_notify(
         pool_signature,
         pool_difficulty,
         payout,
+        pool_transactions,
     };
 
     let mut latest_template: Option<Arc<BlockTemplate>> = None;
@@ -249,6 +274,7 @@ mod tests {
     /// Create a mock payout that returns a fixed output distribution.
     fn mock_payout_with_distribution(distribution: Vec<OutputPair>) -> MockPayoutDistribution {
         let mut mock_payout = MockPayoutDistribution::default();
+        mock_payout.expect_pplns_weights().returning(|| None);
         mock_payout
             .expect_get_output_distribution()
             .return_once(move |_, _, _, _, _| Ok(distribution));
@@ -285,7 +311,9 @@ mod tests {
         let notify_json = build_notify_from_prepared(
             &prepared,
             Some(&address),
-            Some(&make_test_share_address(1, bitcoin::Network::Signet)),
+            Some(p2poolv2_wallet::share_owner::ShareOwner::Taproot(
+                make_test_share_address(1, bitcoin::Network::Signet).witness_program(),
+            )),
             &tracker_handle,
         )
         .expect("Failed to build notify");
@@ -352,6 +380,7 @@ mod tests {
                 &stratum_config,
                 Box::new(mock_payout),
                 pool_difficulty,
+                PoolTransactionCache::new(),
             )
             .await;
         });
@@ -415,6 +444,7 @@ mod tests {
             amount: Amount::from_sat(5000000000),
         }];
         let mut mock_payout = MockPayoutDistribution::default();
+        mock_payout.expect_pplns_weights().returning(|| None);
         mock_payout
             .expect_get_output_distribution()
             .returning(move |_, _, _, _, _| Ok(test_distribution.clone()));
@@ -427,6 +457,7 @@ mod tests {
                 &stratum_config,
                 Box::new(mock_payout),
                 pool_difficulty,
+                PoolTransactionCache::new(),
             )
             .await;
         });
@@ -465,7 +496,9 @@ mod tests {
         let result = build_notify_from_prepared(
             prepared.as_ref().unwrap(),
             Some(&miner_address),
-            Some(&make_test_share_address(1, bitcoin::Network::Signet)),
+            Some(p2poolv2_wallet::share_owner::ShareOwner::Taproot(
+                make_test_share_address(1, bitcoin::Network::Signet).witness_program(),
+            )),
             &tracker_handle,
         );
         assert!(result.is_ok(), "build_notify_from_prepared should succeed");
@@ -524,6 +557,7 @@ mod tests {
             pool_signature: b"test_pool".to_vec(),
             pool_difficulty,
             payout: Box::new(mock_payout),
+            pool_transactions: PoolTransactionCache::new(),
         };
 
         // Build prepared notify
@@ -535,7 +569,9 @@ mod tests {
         let notify_str = build_notify_from_prepared(
             &prepared,
             Some(&btcaddress),
-            Some(&make_test_share_address(1, bitcoin::Network::Signet)),
+            Some(p2poolv2_wallet::share_owner::ShareOwner::Taproot(
+                make_test_share_address(1, bitcoin::Network::Signet).witness_program(),
+            )),
             &tracker_handle,
         )
         .expect("build_notify_from_prepared should succeed");
@@ -631,7 +667,9 @@ mod tests {
         let notify_json = build_notify_from_prepared(
             &prepared,
             Some(&address),
-            Some(&make_test_share_address(1, bitcoin::Network::Signet)),
+            Some(p2poolv2_wallet::share_owner::ShareOwner::Taproot(
+                make_test_share_address(1, bitcoin::Network::Signet).witness_program(),
+            )),
             &tracker_handle,
         )
         .expect("Failed to build notify");

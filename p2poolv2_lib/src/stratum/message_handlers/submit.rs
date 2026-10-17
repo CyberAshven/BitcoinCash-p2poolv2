@@ -14,11 +14,13 @@ use crate::stratum::{
     server::StratumContext,
     session::Session,
     work::{
-        block_template::BlockTemplate, difficulty::validate::validate_bitcoin_difficulty,
-        tracker::JobId,
+        block_template::BlockTemplate,
+        difficulty::validate::validate_bitcoin_difficulty,
+        error::WorkError,
+        tracker::{JobDetails, JobId},
     },
 };
-use bitcoin::{block::Header, blockdata::block::Block, hashes::Hash};
+use bitcoin::{BlockHash, block::Header, blockdata::block::Block, hashes::Hash};
 use bitcoindrpc::BitcoindRpcClient;
 use serde_json::json;
 use std::time::SystemTime;
@@ -111,45 +113,15 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
         ))]);
     }
 
-    // Under the `sim` feature, never auto-submit a bitcoin block from a stratum
-    // share: on regtest a random header meets the bitcoin target ~50% of the
-    // time, so this would spam spurious block submissions and (via the
-    // confirmation -> re-notify loop) distort the measured uncle rate. Real
-    // block-finds in the load test go only through the statistical block-find
-    // path. See docs/simulation/load-test-plan.md.
-    #[cfg(not(feature = "sim"))]
     if validation_result.meets_bitcoin_difficulty {
-        // Submit block asap - decode transactions only for this rare case
-        let block = build_full_block(
+        submit_found_block(
+            &stratum_context,
             validation_result.header,
             validation_result.coinbase.clone(),
-            &job.blocktemplate,
-        );
-        submit_block(&block, &stratum_context.bitcoindrpc_client).await;
+            &job,
+        )
+        .await?;
     }
-
-    // In P2Poolv2 mode, only shares meeting the pool difficulty target are
-    // eligible for the share chain. The share commitment carries the
-    // ASERT-computed pool target (bits). This gate controls ONLY whether the
-    // share is emitted to the share chain; the hashrate and vardiff accounting
-    // below run on the full vardiff share stream, so a miner whose session
-    // difficulty is below the pool target is still measured accurately instead
-    // of being under-reported. In Hydrapool mode there is no pool target and
-    // every share is eligible.
-    let meets_pool_target = match (stratum_context.mode, &job.share_commitment) {
-        (PoolMode::P2poolv2, Some(commitment)) => {
-            let pool_target = bitcoin::Target::from_compact(commitment.bits);
-            let met = pool_target.is_met_by(block_hash);
-            if !met {
-                debug!(
-                    "Share does not meet pool difficulty, not emitting to share chain: hash {} target {:?}",
-                    block_hash, commitment.bits
-                );
-            }
-            met
-        }
-        _ => true,
-    };
 
     // Mining difficulties are tracked as `truediffone`, i.e. difficulty is computed relative to mainnet
     let truediff = get_true_difficulty(&block_hash);
@@ -178,42 +150,20 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
         nonce.to_string(),
     );
 
-    // Only emit to the share chain when the share meets the pool difficulty
-    // target. Shares below the pool target still count toward hashrate and
-    // vardiff below, but are not part of the share chain / PPLNS accounting.
-    // The extranonce is only needed for the emission, so build it here to avoid
-    // wasted hex parsing when the share does not meet the pool target.
-    if meets_pool_target {
-        let extranonce =
-            Extranonce::from_enonce_hex(&session.enonce1_hex, extranonce2).map_err(|error| {
-                Error::SubmitFailure(format!("Failed to build extranonce: {error}"))
-            })?;
-        // The full coinbase exists only here, so the proof is built now. Every
-        // coinbase this pool builds ends with the commitment, so a failure is
-        // a malformed job, not the miner's fault: log it and emit without a
-        // proof, which keeps the share off the share chain
-        // (`handle_stratum_share` refuses a commitment without a proof) while
-        // still accounting it.
-        let coinbase_proof = job.share_commitment.as_ref().and_then(|commitment| {
-            CoinbaseProof::from_coinbase(&validation_result.coinbase, commitment.non_coinbase_root)
-                .map_err(|error| error!("Failed to build coinbase proof for job {job_id}: {error}"))
-                .ok()
-        });
-        stratum_context
-            .emissions_tx
-            .send(Emission {
-                pplns: stratum_share.clone(),
-                header: validation_result.header,
-                blocktemplate: job.blocktemplate.clone(),
-                share_commitment: job.share_commitment.clone(),
-                coinbase_nsecs: job.coinbase_nsecs,
-                template_merkle_branches: job.template_merkle_branches.clone(),
-                extranonce,
-                coinbase_proof,
-            })
-            .await
-            .map_err(|e| Error::SubmitFailure(format!("Failed to send share to store: {e}")))?;
-    }
+    emit_pool_share(
+        &stratum_context,
+        PoolShare {
+            job_id: JobId(job_id),
+            job: &job,
+            header: validation_result.header,
+            block_hash,
+            coinbase: &validation_result.coinbase,
+            share: stratum_share.clone(),
+            enonce1_hex: &session.enonce1_hex,
+            enonce2_hex: extranonce2,
+        },
+    )
+    .await?;
 
     session.last_share_time = Some(SystemTime::now());
 
@@ -252,6 +202,120 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
     }
 }
 
+/// Submit a block whose header met the bitcoin target.
+///
+/// Under the `sim` feature this does nothing: on regtest a random header
+/// meets the bitcoin target about half the time, so submitting would spam
+/// spurious blocks and (via the confirmation -> re-notify loop) distort the
+/// measured uncle rate. Real block-finds in the load test go only through the
+/// statistical block-find path. See docs/simulation/load-test-plan.md.
+pub(crate) async fn submit_found_block(
+    stratum_context: &StratumContext,
+    header: Header,
+    coinbase: bitcoin::Transaction,
+    job: &JobDetails,
+) -> Result<(), Error> {
+    if !job.block_available {
+        info!(
+            "Private declared block {} must be broadcast by its declarator",
+            header.block_hash()
+        );
+        return Ok(());
+    }
+    #[cfg(not(feature = "sim"))]
+    {
+        // Decode the template transactions only for this rare case.
+        let block = build_full_block(header, coinbase, &job.blocktemplate)
+            .map_err(|error| Error::SubmitFailure(error.to_string()))?;
+        submit_block(&block, &stratum_context.bitcoindrpc_client).await;
+    }
+    #[cfg(feature = "sim")]
+    {
+        let _ = (stratum_context, header, coinbase, job);
+    }
+    Ok(())
+}
+
+/// A share rebuilt from a tracker job, ready for the share chain.
+pub(crate) struct PoolShare<'a> {
+    pub job_id: JobId,
+    pub job: &'a JobDetails,
+    pub header: Header,
+    pub block_hash: BlockHash,
+    pub coinbase: &'a bitcoin::Transaction,
+    pub share: SimplePplnsShare,
+    pub enonce1_hex: &'a str,
+    pub enonce2_hex: &'a str,
+}
+
+/// Emit a share to the share chain when it meets the pool target.
+///
+/// In P2Poolv2 mode only shares meeting the pool difficulty target are
+/// eligible for the share chain. The share commitment carries the
+/// ASERT-computed pool target (bits). This gate controls ONLY whether the
+/// share is emitted; callers keep hashrate and vardiff accounting on the full
+/// share stream, so a miner whose session difficulty is below the pool target
+/// is still measured accurately. In Hydrapool mode there is no pool target
+/// and every share is eligible. Returns whether the share was emitted.
+pub(crate) async fn emit_pool_share(
+    stratum_context: &StratumContext,
+    pool_share: PoolShare<'_>,
+) -> Result<bool, Error> {
+    let job = pool_share.job;
+    let meets_pool_target = match (stratum_context.mode, &job.share_commitment) {
+        (PoolMode::P2poolv2, Some(commitment)) => {
+            let pool_target = bitcoin::Target::from_compact(commitment.bits);
+            let met = pool_target.is_met_by(pool_share.block_hash);
+            if !met {
+                debug!(
+                    "Share does not meet pool difficulty, not emitting to share chain: hash {} target {:?}",
+                    pool_share.block_hash, commitment.bits
+                );
+            }
+            met
+        }
+        _ => true,
+    };
+    if !meets_pool_target {
+        return Ok(false);
+    }
+    // The extranonce is only needed for the emission, so build it here to
+    // avoid wasted hex parsing when the share does not meet the pool target.
+    let extranonce = Extranonce::from_enonce_hex(pool_share.enonce1_hex, pool_share.enonce2_hex)
+        .map_err(|error| Error::SubmitFailure(format!("Failed to build extranonce: {error}")))?;
+    // The full coinbase exists only here, so the proof is built now. Every
+    // coinbase this pool builds ends with the commitment, so a failure is a
+    // malformed job, not the miner's fault: log it and emit without a proof,
+    // which keeps the share off the share chain (`handle_stratum_share`
+    // refuses a commitment without a proof) while still accounting it.
+    let job_id = pool_share.job_id;
+    let coinbase_proof = job.share_commitment.as_ref().and_then(|commitment| {
+        CoinbaseProof::from_coinbase(pool_share.coinbase, commitment.non_coinbase_root)
+            .map_err(|error| {
+                error!(
+                    "Failed to build coinbase proof for job {}: {error}",
+                    job_id.0
+                )
+            })
+            .ok()
+    });
+    stratum_context
+        .emissions_tx
+        .send(Emission {
+            pplns: pool_share.share,
+            header: pool_share.header,
+            blocktemplate: job.blocktemplate.clone(),
+            share_commitment: job.share_commitment.clone(),
+            coinbase_nsecs: job.coinbase_nsecs,
+            template_merkle_branches: job.template_merkle_branches.clone(),
+            extranonce,
+            coinbase_proof,
+        })
+        .await
+        .map_err(|e| Error::SubmitFailure(format!("Failed to send share to store: {e}")))?;
+    Ok(true)
+}
+
 /// Submit block to bitcoind using the shared RPC client.
 pub async fn submit_block(block: &Block, bitcoindrpc_client: &BitcoindRpcClient) {
     tracing::info!(
@@ -265,26 +329,27 @@ pub async fn submit_block(block: &Block, bitcoindrpc_client: &BitcoindRpcClient)
 }
 
 /// Build full block from header, coinbase and blocktemplate
+/// Return an error for malformed template transactions rather than panicking.
 /// Only called for the rare case of finding a bitcoin block (real auto-submit
 /// in non-sim builds; the sim statistical block-find under `sim`).
 pub(crate) fn build_full_block(
     header: Header,
     coinbase: bitcoin::Transaction,
     blocktemplate: &BlockTemplate,
-) -> Block {
+) -> Result<Block, WorkError> {
     let mut all_transactions = Vec::with_capacity(blocktemplate.transactions.len() + 1);
     all_transactions.push(coinbase);
-    all_transactions.extend(blocktemplate.decode_transactions());
+    all_transactions.extend(blocktemplate.decode_transactions()?);
 
-    Block {
+    Ok(Block {
         header,
         txdata: all_transactions,
-    }
+    })
 }
 
 /// Use bitcoin mainnet max attainable target to convert the hash into difficulty
 /// This global difficulty to used to track difficult adjustment by the pool, independent of the chain that is being mined.
-fn get_true_difficulty(hash: &bitcoin::BlockHash) -> u128 {
+pub(crate) fn get_true_difficulty(hash: &bitcoin::BlockHash) -> u128 {
     let mut bytes = hash.to_byte_array();
     bytes.reverse();
     let diff = u128::from_str_radix(&hex::encode(&bytes[..16]), 16).unwrap();
@@ -344,6 +409,7 @@ mod handle_submit_tests {
         let job_id = JobId(u64::from_str_radix(&notify.params.job_id, 16).unwrap());
 
         let merkle_branches = build_merkle_branches_for_template(&template)
+            .unwrap()
             .into_iter()
             .map(bitcoin::TxMerkleNode::from_raw_hash)
             .collect();
@@ -383,6 +449,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -476,6 +545,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let response = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -569,6 +641,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let response = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -661,6 +736,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -728,6 +806,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -804,6 +885,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -895,6 +979,9 @@ mod handle_submit_tests {
             chain_store_handle: chain_store_handle.clone(),
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let message = handle_submit(submit.clone(), &mut session, ctx)
@@ -932,6 +1019,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let message2 = handle_submit(submit, &mut session, ctx2).await.unwrap();
@@ -1014,6 +1104,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1082,6 +1175,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1161,6 +1257,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         // Verify the inserted job is properly registered
@@ -1258,6 +1357,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1339,6 +1441,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1421,6 +1526,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1481,6 +1589,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1532,6 +1643,7 @@ mod handle_submit_tests {
         let job_id = JobId(u64::from_str_radix(&notify.params.job_id, 16).unwrap());
 
         let merkle_branches = build_merkle_branches_for_template(&template)
+            .unwrap()
             .into_iter()
             .map(bitcoin::TxMerkleNode::from_raw_hash)
             .collect();
@@ -1571,6 +1683,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1615,6 +1730,7 @@ mod handle_submit_tests {
         let job_id = JobId(u64::from_str_radix(&notify.params.job_id, 16).unwrap());
 
         let merkle_branches = build_merkle_branches_for_template(&template)
+            .unwrap()
             .into_iter()
             .map(bitcoin::TxMerkleNode::from_raw_hash)
             .collect();
@@ -1654,6 +1770,9 @@ mod handle_submit_tests {
             chain_store_handle,
             mode: PoolMode::Hydrapool,
             miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let messages = handle_submit(submit, &mut session, ctx).await.unwrap();

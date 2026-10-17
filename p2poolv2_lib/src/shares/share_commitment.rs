@@ -3,15 +3,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::address_serde;
+use super::bch_coinbase::BchCoinbase;
 use super::option_address_serde;
-use super::share_block::{ShareBlock, ShareHeader};
+use super::share_block::{ShareBlock, ShareHeader, decode_optional_address};
 use super::transactions::coinbase::compute_non_coinbase_root;
-use bitcoin::WitnessProgram;
-use bitcoin::consensus::Encodable;
+use super::validation::MAX_UNCLES;
+use bitcoin::consensus::encode::VarInt;
+use bitcoin::consensus::{Decodable, Encodable, serialize};
 use bitcoin::hashes::Hash;
 use bitcoin::io::Write;
 use bitcoin::{Address, BlockHash, CompactTarget, TxMerkleNode, hashes};
-use p2poolv2_wallet::witness_program_codec;
 use serde::Serialize;
 
 /// Share commitment created by miner and embedded in the bitcoin
@@ -44,8 +45,8 @@ pub struct ShareCommitment {
     /// Hashed directly. The coinbase is no longer in the commitment,
     /// as it carries the weak block hash, so this is now the only thing
     /// binding a miner to the proof of work produced.
-    #[serde(with = "p2poolv2_wallet::witness_program_codec::serde_hex")]
-    pub miner_address: WitnessProgram,
+    #[serde(with = "p2poolv2_wallet::share_owner::serde_hex")]
+    pub miner_address: p2poolv2_wallet::share_owner::ShareOwner,
     /// Merkle root over this share's *non-coinbase* transactions.
     ///
     /// The coinbase is deliberately absent: it carries the weak block hash, so
@@ -71,6 +72,9 @@ pub struct ShareCommitment {
     pub fee: Option<u16>,
     /// Total bitcoin coinbase value
     pub coinbase_value: u64,
+    /// Declared BCH layout, committed before hashing begins. Legacy jobs omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bch_coinbase: Option<BchCoinbase>,
 }
 
 /// Bytes the timestamp contributes to the commitment encoding.
@@ -165,7 +169,7 @@ pub(crate) fn commitment_digest(
     time: u32,
     suffix: &[u8],
     miner_bitcoin_address: Option<&Address>,
-    miner_address: Option<WitnessProgram>,
+    miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
 ) -> hashes::sha256::Hash {
     let mut serialized = Vec::with_capacity(
         prefix.len() + COMMITMENT_TIME_SIZE + suffix.len() + COMMITMENT_TAIL_SIZE,
@@ -182,7 +186,7 @@ pub(crate) fn commitment_digest(
             .expect("encoding address script_pubkey should never fail");
     }
     if let Some(program) = miner_address {
-        witness_program_codec::consensus_encode(&program, &mut serialized)
+        p2poolv2_wallet::share_owner::consensus_encode(&program, &mut serialized)
             .expect("encoding miner address should never fail");
     }
 
@@ -190,6 +194,53 @@ pub(crate) fn commitment_digest(
 }
 
 impl ShareCommitment {
+    /// Decode this pool's BCH job terms; authenticity is checked by the pool's token registry.
+    /// A declarator supplies its own identities and selected template revenue.
+    pub fn from_mining_job_token(
+        token: &[u8],
+        miner_bitcoin_address: Address,
+        miner_address: p2poolv2_wallet::share_owner::ShareOwner,
+        coinbase_value: u64,
+    ) -> Result<Self, bitcoin::consensus::encode::Error> {
+        let invalid = bitcoin::consensus::encode::Error::ParseFailed;
+        if token.len() < 33 || token.len() > 255 || token[0] != 1 {
+            return Err(invalid("unknown BCH job token format"));
+        }
+        let mut reader = &token[33..];
+        let prev_share_blockhash = BlockHash::consensus_decode(&mut reader)?;
+        let uncle_count = VarInt::consensus_decode(&mut reader)?.0;
+        if uncle_count > MAX_UNCLES as u64 {
+            return Err(invalid("too many job token uncles"));
+        }
+        let uncles = (0..uncle_count)
+            .map(|_| BlockHash::consensus_decode(&mut reader))
+            .collect::<Result<Vec<_>, _>>()?;
+        let bits = CompactTarget::consensus_decode(&mut reader)?;
+        let time = u32::consensus_decode(&mut reader)?;
+        let donation_address = decode_optional_address(&mut reader)?;
+        let donation = u16::consensus_decode(&mut reader)?;
+        let fee_address = decode_optional_address(&mut reader)?;
+        let fee = u16::consensus_decode(&mut reader)?;
+        if !reader.is_empty() {
+            return Err(invalid("trailing BCH job token data"));
+        }
+        Ok(Self {
+            prev_share_blockhash,
+            uncles,
+            miner_bitcoin_address,
+            miner_address,
+            non_coinbase_root: compute_non_coinbase_root(&[]),
+            bits,
+            time,
+            donation_address,
+            donation: (donation > 0).then_some(donation),
+            fee_address,
+            fee: (fee > 0).then_some(fee),
+            coinbase_value,
+            bch_coinbase: None,
+        })
+    }
+
     /// Make a SHA256 hash for commitment using consensus encoding.
     ///
     /// Hash of this commitment, as embedded in the bitcoin coinbase scriptSig.
@@ -211,13 +262,17 @@ impl ShareCommitment {
     /// coinbase is bound separately, by rebuilding it during validation.
     pub fn hash(&self) -> hashes::sha256::Hash {
         let prefix = build_commitment_prefix(self.prev_share_blockhash, &self.uncles, self.bits);
-        let suffix = build_commitment_suffix(
+        let mut suffix = build_commitment_suffix(
             &self.donation_address,
             self.donation,
             &self.fee_address,
             self.fee,
             self.non_coinbase_root,
         );
+        if let Some(coinbase) = &self.bch_coinbase {
+            suffix.push(0x21);
+            suffix.extend_from_slice(&serialize(coinbase));
+        }
         commitment_digest(
             &prefix,
             self.time,
@@ -271,6 +326,7 @@ impl ShareCommitment {
             fee_address: header.fee_address.clone(),
             fee: header.fee,
             coinbase_value: header.coinbase_value,
+            bch_coinbase: header.bch_coinbase.clone(),
         }
     }
 }
@@ -297,7 +353,6 @@ pub(crate) fn encode_optional_address<W: Write + ?Sized>(
 mod tests {
     use super::*;
     use crate::shares::coinbase_proof::CoinbaseProof;
-    use crate::shares::coinbaseaux_flags::CoinbaseAuxFlags;
     use crate::shares::extranonce::Extranonce;
     use crate::shares::share_block::{ShareHeader, ShareTransaction};
     use crate::shares::transactions::coinbase::build_sharechain_coinbase_transaction;
@@ -377,7 +432,7 @@ mod tests {
             commitment1.miner_bitcoin_address, commitment2.miner_bitcoin_address,
             "only the share address may differ for this test to mean anything"
         );
-        commitment2.miner_address = make_test_share_program(2);
+        commitment2.miner_address = make_test_share_program(2).into();
 
         assert_ne!(commitment1.hash(), commitment2.hash());
     }
@@ -437,11 +492,7 @@ mod tests {
         let template: BlockTemplate =
             serde_json::from_str(json_content).expect("Failed to parse template JSON");
 
-        let mut bitcoin_transactions: Vec<bitcoin::Transaction> = template
-            .transactions
-            .iter()
-            .map(bitcoin::Transaction::from)
-            .collect();
+        let mut bitcoin_transactions = template.decode_transactions().unwrap();
         bitcoin_transactions.insert(0, coinbase);
 
         let template_merkle_root: TxMerkleNode = bitcoin::merkle_tree::calculate_root(
@@ -478,11 +529,7 @@ mod tests {
             commitment,
             share_merkle_root,
             bitcoin_header,
-            template
-                .coinbaseaux
-                .get("flags")
-                .and_then(|flags| hex::decode(flags).ok())
-                .map(|bytes| CoinbaseAuxFlags::new(&bytes)),
+            template.share_coinbaseaux_flags(),
             template
                 .default_witness_commitment
                 .as_deref()

@@ -5,7 +5,9 @@
 use crate::accounting::stats::metrics;
 use crate::address::Address as P2PoolAddress;
 pub use crate::config::PoolMode;
+use crate::config::{Chain, Sv2Authority};
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::shares::merge_mining::MergeMiningCommitment;
 #[cfg(not(test))]
 use crate::stratum::client_connections::ClientConnectionsHandle;
 #[cfg(test)]
@@ -19,6 +21,7 @@ use crate::stratum::message_handlers::handle_message;
 use crate::stratum::messages::{Request, Response};
 use crate::stratum::session::Session;
 use crate::stratum::session_timeout::{self, check_session_timeouts};
+use crate::stratum::sv2::{self, PoolTransactionCache, Sv2Mining};
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_from_prepared};
 use crate::stratum::work::tracker::JobTracker;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
@@ -49,10 +52,33 @@ pub struct StratumServer {
     pub mode: PoolMode,
     /// Pool wide share chain address from `[stratum] miner_address`, if set.
     pub miner_address: Option<P2PoolAddress>,
+    /// Bitcoin keeps taproot share addresses. Bitcoin Cash parses CashAddr.
+    pub share_chain: Chain,
+    /// Prefix a Bitcoin Cash share address must use. None on Bitcoin.
+    pub bch_share_network: Option<p2poolv2_wallet::bch_share::BchShareNetwork>,
+    /// Pool wide Bitcoin Cash share hash, when the operator configured one.
+    pub cash_share: Option<[u8; 20]>,
     shutdown_rx: oneshot::Receiver<()>,
     connections_handle: ClientConnectionsHandle,
     emissions_tx: EmissionSender,
     chain_store_handle: ChainStoreHandle,
+    sv2: Option<Sv2Listener>,
+}
+
+/// Local Stratum V2 listener served beside SV1 on the same host name.
+///
+/// It shares the SV1 job tracker, templates, share pipeline and shutdown, so
+/// a Stratum V2 miner earns shares exactly as an SV1 miner does.
+pub struct Sv2Listener {
+    /// TCP port for unencrypted Stratum V2 frames.
+    pub port: u16,
+    /// Latest template transactions in CTOR, for Job Declaration.
+    pub pool_transactions: PoolTransactionCache,
+    /// AuxPoW output each job token carries: `Some` on Bitcoin Cash.
+    pub merge_mining: Option<MergeMiningCommitment>,
+    /// Authority keys for the Noise handshake. `None` serves unencrypted
+    /// frames, which the specification allows only between local roles.
+    pub authority: Option<Sv2Authority>,
 }
 
 /// Builder for StratumServer to avoid dependency on StratumConfig
@@ -76,6 +102,10 @@ pub struct StratumServerBuilder {
     chain_store_handle: Option<ChainStoreHandle>,
     mode: Option<PoolMode>,
     miner_address: Option<P2PoolAddress>,
+    share_chain: Chain,
+    bch_share_network: Option<p2poolv2_wallet::bch_share::BchShareNetwork>,
+    cash_share: Option<[u8; 20]>,
+    sv2: Option<Sv2Listener>,
 }
 
 impl StratumServerBuilder {
@@ -169,6 +199,30 @@ impl StratumServerBuilder {
         self
     }
 
+    pub fn share_chain(mut self, share_chain: Chain) -> Self {
+        self.share_chain = share_chain;
+        self
+    }
+
+    pub fn bch_share_network(
+        mut self,
+        bch_share_network: Option<p2poolv2_wallet::bch_share::BchShareNetwork>,
+    ) -> Self {
+        self.bch_share_network = bch_share_network;
+        self
+    }
+
+    pub fn cash_share(mut self, cash_share: Option<[u8; 20]>) -> Self {
+        self.cash_share = cash_share;
+        self
+    }
+
+    /// Serve Stratum V2 beside SV1. `None`, the default, opens no SV2 socket.
+    pub fn sv2(mut self, sv2: Option<Sv2Listener>) -> Self {
+        self.sv2 = sv2;
+        self
+    }
+
     pub async fn build(self) -> Result<StratumServer, Box<dyn std::error::Error + Send + Sync>> {
         Ok(StratumServer {
             hostname: self.hostname.ok_or("hostname is required")?,
@@ -195,9 +249,13 @@ impl StratumServerBuilder {
             wait_for_chain_sync: self.wait_for_chain_sync.unwrap_or(true),
             mode: self.mode.unwrap_or_default(),
             miner_address: self.miner_address,
+            share_chain: self.share_chain,
+            bch_share_network: self.bch_share_network,
+            cash_share: self.cash_share,
             chain_store_handle: self
                 .chain_store_handle
                 .ok_or("chain store handle is required")?,
+            sv2: self.sv2,
         })
     }
 }
@@ -279,9 +337,40 @@ impl StratumServer {
             }
         };
 
+        // SV1 and SV2 connections share one limit, so opening the SV2 port
+        // does not raise the number of sockets and jobs a node may carry.
         let max_connections = self.max_connections.unwrap_or_else(default_max_connections);
         info!("Stratum server max connections: {}", max_connections);
         let connection_semaphore = Arc::new(Semaphore::new(max_connections as usize));
+
+        // The SV2 listener stops when this sender sends or is dropped, which
+        // happens when the SV1 accept loop below ends for any reason.
+        let (sv2_stop_sender, sv2_stop_receiver) = watch::channel(());
+        if let Some(sv2) = self.sv2.take() {
+            let sv2_listener = sv2::bind(&self.hostname, sv2.port).await.map_err(
+                |bind_error| -> Box<dyn std::error::Error + Send> {
+                    error!(
+                        "Failed to bind Stratum V2 on {}:{}: {bind_error}",
+                        self.hostname, sv2.port
+                    );
+                    Box::new(bind_error)
+                },
+            )?;
+            let mining = Sv2Mining {
+                ctx: self.context(&tracker_handle, &bitcoindrpc_client, &metrics),
+                version_mask: self.version_mask,
+                template_rx: template_rx.clone(),
+            };
+            tokio::spawn(sv2::serve(
+                sv2_listener,
+                Arc::clone(&connection_semaphore),
+                sv2.pool_transactions,
+                sv2.merge_mining,
+                Some(mining),
+                sv2.authority,
+                sv2_stop_receiver,
+            ));
+        }
 
         if let Some(ready_tx) = ready_tx {
             info!(
@@ -301,21 +390,11 @@ impl StratumServer {
                         Ok((stream, addr)) => {
                             match connection_semaphore.clone().try_acquire_owned() {
                                 Ok(permit) => {
-                                    let ctx = StratumContext {
-                                        tracker_handle: tracker_handle.clone(),
-                                        bitcoindrpc_client: bitcoindrpc_client.clone(),
-                                        start_difficulty: self.start_difficulty,
-                                        minimum_difficulty: self.minimum_difficulty,
-                                        maximum_difficulty: self.maximum_difficulty,
-                                        ignore_difficulty: self.ignore_difficulty,
-                                        validate_addresses: self.validate_addresses,
-                                        emissions_tx: self.emissions_tx.clone(),
-                                        network: self.network,
-                                        metrics: metrics.clone(),
-                                        chain_store_handle: self.chain_store_handle.clone(),
-                                        mode: self.mode,
-                                        miner_address: self.miner_address,
-                                    };
+                                    let ctx = self.context(
+                                        &tracker_handle,
+                                        &bitcoindrpc_client,
+                                        &metrics,
+                                    );
                                     accept_connection(
                                         stream,
                                         addr,
@@ -339,14 +418,43 @@ impl StratumServer {
                 }
             }
         }
+        let _ = sv2_stop_sender.send(());
         Ok(())
+    }
+
+    /// Context shared by every SV1 connection and the SV2 listener.
+    fn context(
+        &self,
+        tracker_handle: &Arc<JobTracker>,
+        bitcoindrpc_client: &BitcoindRpcClient,
+        metrics: &metrics::MetricsHandle,
+    ) -> StratumContext {
+        StratumContext {
+            tracker_handle: tracker_handle.clone(),
+            bitcoindrpc_client: bitcoindrpc_client.clone(),
+            start_difficulty: self.start_difficulty,
+            minimum_difficulty: self.minimum_difficulty,
+            maximum_difficulty: self.maximum_difficulty,
+            ignore_difficulty: self.ignore_difficulty,
+            validate_addresses: self.validate_addresses,
+            emissions_tx: self.emissions_tx.clone(),
+            network: self.network,
+            metrics: metrics.clone(),
+            chain_store_handle: self.chain_store_handle.clone(),
+            mode: self.mode,
+            miner_address: self.miner_address,
+            share_chain: self.share_chain,
+            bch_share_network: self.bch_share_network,
+            cash_share: self.cash_share,
+        }
     }
 }
 
 /// Returns a default max connections value based on the OS soft file descriptor limit.
 ///
 /// Computes 90% of the soft NOFILE limit. Falls back to 1024 if the limit
-/// cannot be queried.
+/// cannot be queried, including platforms without POSIX resource limits.
+#[cfg(unix)]
 fn default_max_connections() -> u32 {
     match rlimit::getrlimit(rlimit::Resource::NOFILE) {
         Ok((soft_limit, _hard_limit)) => {
@@ -366,6 +474,11 @@ fn default_max_connections() -> u32 {
             fallback
         }
     }
+}
+
+#[cfg(not(unix))]
+fn default_max_connections() -> u32 {
+    1024
 }
 
 /// Accepts a new stratum connection, spawning a handler task.
@@ -434,6 +547,12 @@ pub(crate) struct StratumContext {
     /// operator configured one. Every share then carries it as its miner
     /// address, and a miner sending a different `p2p=` is rejected at authorize.
     pub miner_address: Option<P2PoolAddress>,
+    /// Which share identity authorize and the work notify use.
+    pub share_chain: Chain,
+    /// Required when [`share_chain`](Self::share_chain) is Bitcoin Cash.
+    pub bch_share_network: Option<p2poolv2_wallet::bch_share::BchShareNetwork>,
+    /// Configured Bitcoin Cash share hash. None when each miner sends `p2p=`.
+    pub cash_share: Option<[u8; 20]>,
 }
 
 /// Handles a single connection to the Stratum server.  This function
@@ -492,10 +611,7 @@ where
                 let (commitment_address, share_address) = if is_hydrapool {
                     (None, None)
                 } else {
-                    (
-                        session.parsed_address.as_ref(),
-                        session.miner_address.as_ref(),
-                    )
+                    (session.parsed_address.as_ref(), session.share_owner)
                 };
                 match build_notify_from_prepared(
                     &prepared,
@@ -548,7 +664,7 @@ where
                     let (commitment_address, share_address) = if is_hydrapool {
                         (None, None)
                     } else {
-                        (session.parsed_address.as_ref(), session.miner_address.as_ref())
+                        (session.parsed_address.as_ref(), session.share_owner)
                     };
                     match build_notify_from_prepared(&prepared, commitment_address, share_address, &ctx.tracker_handle) {
                         Ok(notify_json) => {
@@ -806,6 +922,9 @@ mod stratum_server_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: Some(make_test_share_address(1, bitcoin::Network::Testnet4)),
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         // Run the handler
@@ -928,6 +1047,9 @@ mod stratum_server_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: Some(make_test_share_address(1, bitcoin::Network::Testnet4)),
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         // Run the handler
@@ -1011,6 +1133,9 @@ mod stratum_server_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: Some(make_test_share_address(1, bitcoin::Network::Testnet4)),
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         // Run the handler
@@ -1092,6 +1217,9 @@ mod stratum_server_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: Some(make_test_share_address(1, bitcoin::Network::Testnet4)),
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         // Run the handler
@@ -1192,6 +1320,9 @@ mod stratum_server_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: Some(make_test_share_address(1, bitcoin::Network::Testnet4)),
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         // Spawn the handler in a separate task
@@ -1312,6 +1443,9 @@ mod stratum_server_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: Some(make_test_share_address(1, bitcoin::Network::Testnet4)),
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         // Spawn the handler in a separate task
@@ -1422,6 +1556,9 @@ mod stratum_server_tests {
                 chain_store_handle,
                 mode: PoolMode::P2poolv2,
                 miner_address: Some(make_test_share_address(1, bitcoin::Network::Testnet4)),
+                share_chain: crate::config::Chain::Bitcoin,
+                bch_share_network: None,
+                cash_share: None,
             };
 
             // wait for subscribe/authorize messages
@@ -1504,6 +1641,9 @@ mod stratum_server_tests {
                 chain_store_handle,
                 mode: PoolMode::P2poolv2,
                 miner_address: Some(make_test_share_address(1, bitcoin::Network::Testnet4)),
+                share_chain: crate::config::Chain::Bitcoin,
+                bch_share_network: None,
+                cash_share: None,
             };
 
             let subscribe_message =
@@ -1642,6 +1782,9 @@ mod stratum_server_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: Some(make_test_share_address(1, bitcoin::Network::Testnet4)),
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         // Pre-load a template before starting handle_connection
@@ -1770,6 +1913,9 @@ mod stratum_server_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: Some(make_test_share_address(1, bitcoin::Network::Testnet4)),
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         // Start with no template - will send one after authorization
@@ -1908,6 +2054,9 @@ mod stratum_server_tests {
             chain_store_handle,
             mode: PoolMode::P2poolv2,
             miner_address: Some(make_test_share_address(1, bitcoin::Network::Testnet4)),
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
         };
 
         let (template_tx, template_rx) = watch::channel(None);

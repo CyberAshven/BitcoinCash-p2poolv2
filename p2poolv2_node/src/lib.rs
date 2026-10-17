@@ -16,16 +16,17 @@ pub mod signal;
 use p2poolv2_api::start_api_server;
 use p2poolv2_lib::accounting::payout::build_payout_for_mode;
 use p2poolv2_lib::accounting::stats::metrics;
-use p2poolv2_lib::config::Config;
+use p2poolv2_lib::address::bch_share::BchShareNetwork;
+use p2poolv2_lib::config::{BitcoinCashNetwork, Chain, Config, bitcoin_cash_donation_cashaddr};
 use p2poolv2_lib::node::actor::NodeHandle;
 use p2poolv2_lib::pool_difficulty::PoolDifficulty;
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
-use p2poolv2_lib::shares::share_block::ShareBlock;
+use p2poolv2_lib::shares::merge_mining::MergeMiningCommitment;
 use p2poolv2_lib::store::Store;
 use p2poolv2_lib::store::writer::{StoreHandle, StoreWriter, write_channel};
 use p2poolv2_lib::stratum::client_connections::start_connections_handler;
 use p2poolv2_lib::stratum::emission::Emission;
-use p2poolv2_lib::stratum::server::StratumServerBuilder;
+use p2poolv2_lib::stratum::server::{StratumServerBuilder, Sv2Listener};
 use p2poolv2_lib::stratum::work::gbt::start_gbt;
 use p2poolv2_lib::stratum::work::notify::start_notify;
 use p2poolv2_lib::stratum::work::prepared_notify::PreparedNotifyParams;
@@ -151,7 +152,8 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let exit_sender = watch::Sender::new(ShutdownReason::None);
     let sig_handle = setup_signal_handler(exit_sender.clone());
 
-    let genesis = ShareBlock::build_genesis_for_network(config.stratum.network).unwrap();
+    let genesis = p2poolv2_lib::shares::bch_genesis::genesis_for_stratum(&config.stratum)
+        .expect("share genesis data is fixed");
     let store = Arc::new(Store::new(config.store.path.clone(), false).unwrap());
 
     let (write_tx, write_rx) = write_channel();
@@ -233,6 +235,20 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         }
     };
 
+    if stratum_config.chain == Chain::BitcoinCash {
+        info!(
+            "Bitcoin Cash templates, share owners, and {:?} share chain genesis are selected for {:?}.",
+            stratum_config.bch_share_chain, stratum_config.bitcoin_cash_network
+        );
+        match (stratum_config.donation, stratum_config.bitcoin_cash_network) {
+            (Some(basis_points), Some(network)) => info!(
+                "Donating {basis_points} basis points of each block this node finds to {}. Set donation = 0 to opt out.",
+                bitcoin_cash_donation_cashaddr(network)
+            ),
+            _ => info!("Bitcoin Cash donation is off (donation = 0)."),
+        }
+    }
+
     let exit_sender_gbt = exit_sender.clone();
     let exit_receiver_gbt = exit_sender.subscribe();
     tokio::spawn(async move {
@@ -241,6 +257,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             notify_tx_for_gbt,
             GBT_POLL_INTERVAL,
             stratum_config.network,
+            stratum_config.chain,
             zmq_trigger_rx,
         )
         .await
@@ -259,11 +276,16 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let pool_difficulty_for_notify =
         PoolDifficulty::build(&chain_store_handle).expect("Failed to build pool difficulty");
 
+    let pool_transactions = p2poolv2_lib::stratum::sv2::PoolTransactionCache::new();
     let cloned_stratum_config = stratum_config.clone();
-    let (payout, shared_pplns_window) =
-        build_payout_for_mode(stratum_config.mode, cloned_stratum_config.network);
+    let (payout, shared_pplns_window) = build_payout_for_mode(
+        stratum_config.mode,
+        cloned_stratum_config.network,
+        stratum_config.bitcoin_cash_network,
+    );
     let exit_sender_notify = exit_sender.clone();
     let exit_receiver_notify = exit_sender.subscribe();
+    let notify_transactions = pool_transactions.clone();
     tokio::spawn(async move {
         info!("Starting Stratum notifier...");
         start_notify(
@@ -273,6 +295,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             &cloned_stratum_config,
             payout,
             pool_difficulty_for_notify,
+            notify_transactions,
         )
         .await;
         if *exit_receiver_notify.borrow() == ShutdownReason::None {
@@ -299,6 +322,23 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let exit_sender_stratum = exit_sender.clone();
     let exit_receiver_stratum = exit_sender.subscribe();
     let configured_miner_address = stratum_config.miner_address();
+    let share_chain = stratum_config.chain;
+    let bch_share_network = stratum_config.bitcoin_cash_network.map(bch_share_network);
+    let cash_share = stratum_config
+        .bch_miner_address()
+        .map(|address| address.hash);
+    // Stratum V2 is served by the stratum server beside SV1, sharing its job
+    // tracker, templates and shares. A port that cannot be bound fails the
+    // stratum server's start, which stops the node.
+    let sv2_listener = stratum_config.sv2_port.map(|port| Sv2Listener {
+        port,
+        pool_transactions: pool_transactions.clone(),
+        merge_mining: match share_chain {
+            Chain::BitcoinCash => Some(MergeMiningCommitment::reserved()),
+            Chain::Bitcoin => None,
+        },
+        authority: stratum_config.sv2_authority(),
+    });
 
     tokio::spawn(async move {
         let mut stratum_server = StratumServerBuilder::default()
@@ -321,6 +361,10 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             .chain_store_handle(chain_store_handle_for_stratum)
             .mode(stratum_config.mode)
             .miner_address(configured_miner_address)
+            .share_chain(share_chain)
+            .bch_share_network(bch_share_network)
+            .cash_share(cash_share)
+            .sv2(sv2_listener)
             .build()
             .await
             .unwrap();
@@ -374,6 +418,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         node_handle.clone(),
         monitoring_event_sender,
         stratum_config.network,
+        bch_share_network,
         stratum_config.pool_signature,
     )
     .await
@@ -407,4 +452,12 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     };
 
     Ok((handles, runner))
+}
+
+fn bch_share_network(network: BitcoinCashNetwork) -> BchShareNetwork {
+    match network {
+        BitcoinCashNetwork::Mainnet => BchShareNetwork::Mainnet,
+        BitcoinCashNetwork::Chipnet => BchShareNetwork::Chipnet,
+        BitcoinCashNetwork::Regtest => BchShareNetwork::Regtest,
+    }
 }

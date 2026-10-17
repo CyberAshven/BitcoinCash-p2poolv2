@@ -10,6 +10,7 @@
 //! `OrganiseEvent::Block` and `SwarmSend::BroadcastBlock` events. Runs in a dedicated
 //! tokio task, decoupled from the P2P message handler hot path.
 
+use crate::config::Chain;
 use crate::node::SwarmSend;
 use crate::node::messages::Message;
 use crate::node::organise_worker::{OrganiseEvent, OrganiseSender};
@@ -27,7 +28,7 @@ use crate::shares::share_block::ShareBlock;
 use crate::shares::validation::check_pplns_zone;
 use crate::shares::validation::{DefaultShareValidator, FailureKind, ShareValidator};
 use crate::utils::cpu::available_cpus;
-use bitcoin::BlockHash;
+use bitcoin::{BlockHash, CompactTarget};
 use libp2p::request_response::ResponseChannel;
 use std::fmt;
 use std::sync::Arc;
@@ -93,6 +94,9 @@ pub struct ValidationWorker {
     difficulty_multiplier: u128,
     pool_signature: Vec<u8>,
     pool_difficulty: PoolDifficulty,
+    chain: Chain,
+    /// Easiest share target the validator accepts. Defaults to the main ceiling.
+    target_ceiling: CompactTarget,
 }
 
 impl ValidationWorker {
@@ -115,7 +119,23 @@ impl ValidationWorker {
             difficulty_multiplier,
             pool_signature,
             pool_difficulty,
+            chain: Chain::Bitcoin,
+            target_ceiling: CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
         }
+    }
+
+    /// Select the chain whose share owner this worker's validator accepts.
+    pub fn for_chain(mut self, chain: Chain) -> Self {
+        self.chain = chain;
+        self
+    }
+
+    /// Set the easiest share target this worker's validator accepts.
+    pub fn with_target_ceiling(mut self, target_ceiling: CompactTarget) -> Self {
+        self.target_ceiling = target_ceiling;
+        self
     }
 
     /// Runs the validation worker until the channel closes.
@@ -125,12 +145,15 @@ impl ValidationWorker {
     pub async fn run(mut self) -> Result<(), ValidationWorkerError> {
         info!("Validation worker started");
 
-        let share_validator: Arc<dyn ShareValidator + Send + Sync> =
-            Arc::new(DefaultShareValidator::new(
+        let share_validator: Arc<dyn ShareValidator + Send + Sync> = Arc::new(
+            DefaultShareValidator::new(
                 self.pool_difficulty,
                 self.difficulty_multiplier,
                 self.pool_signature.clone(),
-            ));
+            )
+            .for_chain(self.chain)
+            .with_target_ceiling(self.target_ceiling),
+        );
 
         while let Some(event) = self.validation_rx.recv().await {
             let (block_hash, prefetched_block) = match event {

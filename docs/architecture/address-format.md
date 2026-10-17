@@ -413,6 +413,48 @@ The practical consequence for miners: use a key your wallet manages and
 can export later, not a throwaway. Shares accrue to that key now and
 become spendable when the wallet side ships.
 
+## Bitcoin Cash
+
+Bitcoin Cash does not use this bech32m form. Its share owner is a 20-byte
+P2PKH hash, encoded in the header as tag `0x20`, a length byte of 20, then
+the hash. Tag `0x20` is outside witness versions 0 through 16, so a decoder
+of the Bitcoin layout rejects a cash share, and a decoder that still accepts
+those versions reads an old taproot share unchanged. The text form is
+CashAddr with prefixes `p2pool`, `tp2pool`, and `rp2pool`. That prefix
+comes from `bitcoin_cash_network`. On a Bitcoin Cash node the `network`
+field is replaced by the network `bitcoin_cash_network` implies (mainnet as
+`main`, chipnet as `test`, regtest as `regtest`), so it selects neither the
+prefix nor the genesis there. Payout CashAddr (`bitcoincash`, `bchtest`,
+`bchreg`) is a different string and is not a share address. See
+`p2poolv2_wallet::bch_share` and `p2poolv2_wallet::share_owner`.
+
+A payout address is held as a `bitcoin::Address` under that implied
+network, so its own `Display` is Base58: the right key hash in Bitcoin's
+spelling. The API, the websocket feed and the CLI show `miner_bitcoin_address`,
+`donation_address` and `fee_address` as payout CashAddr under the
+`bitcoin_cash_network` prefix instead (`address_display::payout_address_string`).
+A Bitcoin node has no `bitcoin_cash_network` and shows them unchanged.
+
+A miner gets a share address from their own wallet. Take a regular P2PKH
+receiving address (`q...`) for the key that should own shares, preferably
+not the payout address, and re-encode it:
+
+```sh
+p2poolv2_cli bch-share-address --network mainnet bitcoincash:q...
+# prints p2pool:q... with the same 20-byte hash and a new checksum
+```
+
+The command only changes the prefix and checksum. It takes no private key
+and rejects a P2SH address, because a share is owned by a P2PKH script.
+
+Bitcoin Cash share transactions are checked by a Bitcoin Cash interpreter
+(`shares/bch_script.rs`), not by `bitcoinconsensus`, which applies Bitcoin
+script rules: a spend signed by a Bitcoin Cash wallet (`SIGHASH_FORKID`,
+Schnorr) would fail there and a Bitcoin legacy signature would pass. The
+interpreter accepts a P2PKH spend signed with `SIGHASH_FORKID` by ECDSA or
+Bitcoin Cash Schnorr, the form a Bitcoin Cash wallet uses for the share
+owner's P2PKH key, and rejects every other script.
+
 ## Registration
 
 The HRPs are not yet registered in SLIP-173. Registration is intended,

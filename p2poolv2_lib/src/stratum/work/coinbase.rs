@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::accounting::OutputPair;
+use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::witness_commitment::WitnessCommitment;
 use crate::stratum::session::{EXTRANONCE1_SIZE, EXTRANONCE2_SIZE};
 use crate::stratum::work::error::WorkError;
@@ -201,6 +202,35 @@ pub(crate) fn build_bitcoin_coinbase_transaction(
     nsecs: u64,
     extranonce: Option<&[u8]>,
 ) -> Result<Transaction, WorkError> {
+    build_coinbase(
+        version,
+        output_data,
+        height,
+        aux_flags,
+        default_witness_commitment,
+        pool_signature,
+        commitment_hash,
+        nsecs,
+        extranonce,
+        None,
+    )
+}
+
+/// Build a coinbase, optionally appending the Bitcoin Cash merge-mining output
+/// after the payouts and before the share-commitment padding.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_coinbase(
+    version: Version,
+    output_data: &[OutputPair],
+    height: i64,
+    aux_flags: PushBytesBuf,
+    default_witness_commitment: Option<&WitnessCommitment>,
+    pool_signature: &[u8],
+    commitment_hash: Option<sha256::Hash>,
+    nsecs: u64,
+    extranonce: Option<&[u8]>,
+    merge_mining: Option<crate::shares::merge_mining::MergeMiningCommitment>,
+) -> Result<Transaction, WorkError> {
     if output_data.is_empty() {
         return Err(WorkError {
             message: "Empty output distribution".to_string(),
@@ -227,6 +257,9 @@ pub(crate) fn build_bitcoin_coinbase_transaction(
 
     let mut outputs = build_outputs(output_data);
     append_default_witness_commitment(&mut outputs, default_witness_commitment);
+    if let Some(commitment) = merge_mining {
+        outputs.push(commitment.output());
+    }
     let lock_time = LockTime::from_height(height as u32 - 1).map_err(|_| WorkError {
         message: "Error getting locktime from height".into(),
     })?;
@@ -249,6 +282,42 @@ pub(crate) fn build_bitcoin_coinbase_transaction(
         append_commitment_outputs(&mut coinbase_tx, &hash);
     }
     Ok(coinbase_tx)
+}
+
+/// Reconstruct a declared BCH coinbase with the same canonical payout tail.
+pub(crate) fn build_declared_coinbase(
+    output_data: &[OutputPair],
+    height: u64,
+    commitment_hash: sha256::Hash,
+    extranonce: &[u8],
+    declared: &BchCoinbase,
+) -> Result<Transaction, WorkError> {
+    declared.validate(height).map_err(|message| WorkError {
+        message: message.into(),
+    })?;
+    if extranonce.len() != EXTRANONCE_SEPARATOR.len() {
+        return Err(WorkError {
+            message: "declared BCH extranonce must be 12 bytes".into(),
+        });
+    }
+    let mut coinbase = build_coinbase(
+        Version::TWO,
+        output_data,
+        height as i64,
+        PushBytesBuf::new(),
+        None,
+        &[],
+        None,
+        0,
+        Some(extranonce),
+        Some(declared.merge_mining),
+    )?;
+    let mut script = Vec::with_capacity(declared.prefix.len() + extranonce.len());
+    script.extend_from_slice(&declared.prefix);
+    script.extend_from_slice(extranonce);
+    coinbase.input[0].script_sig = script.into();
+    append_commitment_outputs(&mut coinbase, &commitment_hash);
+    Ok(coinbase)
 }
 
 /// Splits the coinbase transaction into two parts: coinbase1 and coinbase2, separated by our

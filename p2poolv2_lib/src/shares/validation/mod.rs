@@ -6,9 +6,7 @@ mod bitcoin_block_validation;
 
 use super::share_block::{MAX_POOL_TARGET, ShareHeader};
 use crate::accounting::OutputPair;
-use crate::accounting::payout::payout_distribution::{
-    append_proportional_distribution, include_address_and_cut,
-};
+use crate::accounting::payout::payout_distribution::build_pplns_outputs;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
@@ -17,11 +15,15 @@ use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
     MAX_PPLNS_WINDOW_SHARES, WindowError,
 };
+use crate::config::{
+    BITCOIN_CASH_DONATION_PUBKEY_HASH, Chain, MAX_BASIS_POINTS, MAX_BITCOIN_CASH_POOL_CUT,
+};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
+use crate::shares::bch_script;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -43,13 +45,16 @@ use crate::store::block_tx_metadata::{BlockMetadata, Status};
 use crate::store::dag_store::MAX_UNCLES_DEPTH;
 use crate::store::transaction_store::PrevoutCheck;
 use crate::store::writer::StoreError;
+#[cfg(test)]
 use crate::stratum::work::coinbase::build_bitcoin_coinbase_transaction;
+use crate::stratum::work::coinbase::{build_coinbase, build_declared_coinbase};
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoin::hashes::Hash as HashTrait;
 use bitcoin::script::PushBytesBuf;
 use bitcoin::{
-    Address, Amount, BlockHash, CompactTarget, Target, TxMerkleNode, transaction::Version,
+    Address, Amount, BlockHash, CompactTarget, PubkeyHash, ScriptBuf, Target, TxMerkleNode,
+    transaction::Version,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -157,6 +162,13 @@ impl fmt::Display for ValidationError {
 }
 
 impl std::error::Error for ValidationError {}
+
+/// P2PKH script of the built-in Bitcoin Cash donation key.
+fn bitcoin_cash_donation_script() -> ScriptBuf {
+    ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array(
+        BITCOIN_CASH_DONATION_PUBKEY_HASH,
+    ))
+}
 
 /// Maximum uncles in a share block header
 pub const MAX_UNCLES: usize = 3;
@@ -384,6 +396,16 @@ pub struct DefaultShareValidator {
     pool_signature: Vec<u8>,
     /// Time provider used to enforce the future-time bound on share timestamps.
     time_provider: Arc<dyn TimeProvider + Send + Sync>,
+    /// Which chain's share owner this validator accepts.
+    ///
+    /// Bitcoin requires a taproot program and a BIP141 witness commitment.
+    /// Bitcoin Cash requires a 20-byte P2PKH hash and rejects that commitment.
+    chain: Chain,
+    /// Easiest share target this validator accepts.
+    ///
+    /// Bitcoin and the Bitcoin Cash main chain use `MAX_POOL_TARGET`. The mini
+    /// chain uses its own easier ceiling so its genesis target is valid.
+    target_ceiling: CompactTarget,
 }
 
 impl DefaultShareValidator {
@@ -416,7 +438,27 @@ impl DefaultShareValidator {
             difficulty_multiplier,
             pool_signature,
             time_provider,
+            chain: Chain::Bitcoin,
+            target_ceiling: CompactTarget::from_consensus(MAX_POOL_TARGET),
         }
+    }
+
+    /// Select the chain whose share owner this validator accepts.
+    ///
+    /// The default is Bitcoin, which keeps every existing caller on taproot
+    /// shares. A Bitcoin Cash node passes [`Chain::BitcoinCash`].
+    pub fn for_chain(mut self, chain: Chain) -> Self {
+        self.chain = chain;
+        self
+    }
+
+    /// Set the easiest share target this validator accepts.
+    ///
+    /// The default is [`MAX_POOL_TARGET`]. A mini Bitcoin Cash node passes the
+    /// mini ceiling so shares on that chain are not rejected as too easy.
+    pub fn with_target_ceiling(mut self, target_ceiling: CompactTarget) -> Self {
+        self.target_ceiling = target_ceiling;
+        self
     }
 
     /// Require the block body of every uncle to be stored.
@@ -574,12 +616,6 @@ impl DefaultShareValidator {
         Ok(())
     }
 
-    /// Validate scripts and signatures for all non-coinbase transactions.
-    ///
-    /// Iterates over each non-coinbase transaction, collects spent outputs
-    /// from the chain store, and verifies each input script using
-    /// libbitcoinconsensus. Coinbase transactions are skipped since they
-    /// have no inputs to validate.
     /// Validate scripts, input/output values, and sigop cost for all
     /// transactions in the share block.
     ///
@@ -587,6 +623,11 @@ impl DefaultShareValidator {
     /// script verification, input-vs-output value checks, and sigop cost
     /// accumulation in a single pass. The coinbase contributes sigop cost
     /// but is exempt from script and value validation.
+    ///
+    /// Bitcoin scripts are checked by libbitcoinconsensus. Bitcoin Cash
+    /// scripts are checked by [`bch_script::verify_transaction`], because
+    /// Bitcoin rules would reject a `SIGHASH_FORKID` or Schnorr signature
+    /// and accept a Bitcoin one.
     fn validate_scripts_values_and_sigops(
         &self,
         share: &ShareBlock,
@@ -602,7 +643,18 @@ impl DefaultShareValidator {
                 let txid = transaction.compute_txid();
                 let spent_outputs =
                     Self::collect_spent_outputs(transaction, chain_store_handle, &txid)?;
-                Self::validate_scripts_for_tx(transaction, &spent_outputs, &txid)?;
+                match self.chain {
+                    Chain::BitcoinCash => {
+                        Self::validate_bitcoin_cash_scripts_for_tx(
+                            transaction,
+                            &spent_outputs,
+                            &txid,
+                        )?;
+                    }
+                    Chain::Bitcoin => {
+                        Self::validate_scripts_for_tx(transaction, &spent_outputs, &txid)?;
+                    }
+                }
                 Self::validate_input_output_values(transaction, &spent_outputs, &txid)?;
                 let tx_sigop_cost =
                     Self::compute_transaction_sigop_cost(transaction, &spent_outputs);
@@ -689,6 +741,22 @@ impl DefaultShareValidator {
             })?;
         }
         Ok(())
+    }
+
+    /// Verify all input scripts of a Bitcoin Cash share transaction.
+    ///
+    /// Only P2PKH spends with `SIGHASH_FORKID` ECDSA or Schnorr signatures
+    /// pass; see [`bch_script`] for the rules.
+    fn validate_bitcoin_cash_scripts_for_tx(
+        transaction: &ShareTransaction,
+        spent_outputs: &[(usize, bitcoin::TxOut)],
+        txid: &bitcoin::Txid,
+    ) -> Result<(), ValidationError> {
+        bch_script::verify_transaction(&transaction.0, spent_outputs).map_err(|error| {
+            ValidationError::consensus(format!(
+                "Script verification failed for transaction {txid}: {error}"
+            ))
+        })
     }
 
     /// Check that total input value is at least total output value for a
@@ -834,25 +902,58 @@ impl DefaultShareValidator {
         Ok(())
     }
 
-    /// Validate the miner address is a P2TR witness program.
+    /// Validate the miner address for this validator's chain.
     ///
-    /// `ShareHeader` stores a bare `WitnessProgram`, and its decode enforces
-    /// only the BIP141 2 to 40 byte bounds. Restricting that to taproot is
-    /// this pool's rule, and it belongs here rather than in the codec: a node
-    /// that predates a future witness version must still be able to decode a
-    /// header carrying one and reject it on its merits, which is what makes
-    /// widening a soft fork rather than a format break.
-    ///
-    /// `Address::from_witness_program` applies the same rule to anything an
-    /// operator configures or a miner sends as `p2p=`. This is the same rule
-    /// at the other end, for a program that arrived over the wire.
+    /// Bitcoin accepts a taproot witness program. Bitcoin Cash accepts a
+    /// 20-byte P2PKH hash. The header can carry either, and the tag on the
+    /// cash form is outside the witness version range, so a Bitcoin decoder
+    /// rejects a cash share while still reading an old taproot share.
     fn validate_miner_address(&self, share_header: &ShareHeader) -> Result<(), ValidationError> {
-        if !share_header.miner_address.is_p2tr() {
+        match (self.chain, share_header.miner_address) {
+            (Chain::Bitcoin, owner) if owner.is_taproot() => Ok(()),
+            (Chain::BitcoinCash, p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh(_)) => Ok(()),
+            (Chain::Bitcoin, _) => Err(ValidationError::consensus(
+                "Miner address must be a taproot witness program".to_string(),
+            )),
+            (Chain::BitcoinCash, _) => Err(ValidationError::consensus(
+                "Miner address must be a 20-byte Bitcoin Cash P2PKH hash".to_string(),
+            )),
+        }
+    }
+
+    /// Validate the donation and fee a share takes before the PPLNS split.
+    ///
+    /// Each is a share of what is left, so each must be at most 100%. On
+    /// Bitcoin Cash the two together must stay within
+    /// [`MAX_BITCOIN_CASH_POOL_CUT`], and a donation must pay the built-in
+    /// P2Poolv2 donation key. Without the cap a node could set a 100% fee to
+    /// itself and keep every block it finds while its shares still earn from
+    /// everyone else's; without the fixed key the donation field would be a
+    /// second, uncapped fee.
+    fn validate_payout_cuts(&self, share_header: &ShareHeader) -> Result<(), ValidationError> {
+        let donation = share_header.donation.unwrap_or(0);
+        let fee = share_header.fee.unwrap_or(0);
+        if donation > MAX_BASIS_POINTS || fee > MAX_BASIS_POINTS {
             return Err(ValidationError::consensus(format!(
-                "Miner address is witness version {} with a {} byte program, expected version 1 with 32 bytes",
-                share_header.miner_address.version().to_num(),
-                share_header.miner_address.program().len()
+                "Share donation {donation} or fee {fee} exceeds {MAX_BASIS_POINTS} basis points"
             )));
+        }
+        if self.chain != Chain::BitcoinCash {
+            return Ok(());
+        }
+        if u32::from(donation) + u32::from(fee) > u32::from(MAX_BITCOIN_CASH_POOL_CUT) {
+            return Err(ValidationError::consensus(format!(
+                "Share donation {donation} plus fee {fee} exceeds the Bitcoin Cash cap of \
+                 {MAX_BITCOIN_CASH_POOL_CUT} basis points"
+            )));
+        }
+        if donation > 0
+            && let Some(donation_address) = &share_header.donation_address
+            && donation_address.script_pubkey() != bitcoin_cash_donation_script()
+        {
+            return Err(ValidationError::consensus(
+                "Bitcoin Cash share donation must pay the built-in P2Poolv2 donation address",
+            ));
         }
         Ok(())
     }
@@ -901,6 +1002,15 @@ impl DefaultShareValidator {
             .transactions
             .first()
             .ok_or_else(|| ValidationError::consensus("Share block has no transactions"))?;
+
+        if self.chain == Chain::BitcoinCash {
+            if coinbase.input[0].witness.is_empty() && coinbase.output.len() == 1 {
+                return Ok(());
+            }
+            return Err(ValidationError::consensus(
+                "Bitcoin Cash share coinbase must not carry a witness commitment".to_string(),
+            ));
+        }
 
         let witness_stack: Vec<&[u8]> = coinbase.input[0].witness.iter().collect();
         if witness_stack.len() != 1 || witness_stack[0].len() != 32 {
@@ -1015,17 +1125,38 @@ impl DefaultShareValidator {
             None => PushBytesBuf::from(&[0u8]),
         };
         let pool_signature = &self.pool_signature;
-        let reconstructed_coinbase = build_bitcoin_coinbase_transaction(
-            Version::TWO,
-            &expected_outputs,
-            share.header.bitcoin_height as i64,
-            flags,
-            share.header.witness_commitment.as_ref(),
-            pool_signature,
-            Some(expected_commitment_hash),
-            share.header.coinbase_nsecs,
-            Some(share.header.extranonce.as_bytes()),
-        )
+        let merge_mining = if self.chain == Chain::BitcoinCash {
+            Some(crate::shares::merge_mining::MergeMiningCommitment::reserved())
+        } else {
+            None
+        };
+        let reconstructed_coinbase = if let Some(declared) = &share.header.bch_coinbase {
+            if self.chain != Chain::BitcoinCash {
+                return Err(ValidationError::consensus(
+                    "Declared BCH coinbase on Bitcoin chain",
+                ));
+            }
+            build_declared_coinbase(
+                &expected_outputs,
+                share.header.bitcoin_height,
+                expected_commitment_hash,
+                share.header.extranonce.as_bytes(),
+                declared,
+            )
+        } else {
+            build_coinbase(
+                Version::TWO,
+                &expected_outputs,
+                share.header.bitcoin_height as i64,
+                flags,
+                share.header.witness_commitment.as_ref(),
+                pool_signature,
+                Some(expected_commitment_hash),
+                share.header.coinbase_nsecs,
+                Some(share.header.extranonce.as_bytes()),
+                merge_mining,
+            )
+        }
         .map_err(|error| ValidationError::consensus(format!("Error building coinbase {error}")))?;
 
         let reconstructed_coinbase_txid = reconstructed_coinbase.compute_txid();
@@ -1051,37 +1182,17 @@ impl DefaultShareValidator {
         address_difficulty_map: &HashMap<Address, u128>,
         coinbase_value: u64,
     ) -> Result<Vec<OutputPair>, ValidationError> {
-        if address_difficulty_map.is_empty() {
-            return Err(ValidationError::consensus(
-                "Can't build output from empty distribution. There should be at least one payout address",
-            ));
-        }
-
-        let mut distribution = Vec::with_capacity(address_difficulty_map.len() + 2);
-
-        let remaining_after_donation = include_address_and_cut(
-            &mut distribution,
-            Amount::from_sat(coinbase_value),
+        build_pplns_outputs(
+            coinbase_value,
+            address_difficulty_map,
             &share_header.donation_address,
             share_header.donation,
-        );
-        let remaining_after_fees = include_address_and_cut(
-            &mut distribution,
-            remaining_after_donation,
             &share_header.fee_address,
             share_header.fee,
-        );
-
-        append_proportional_distribution(
-            address_difficulty_map,
-            remaining_after_fees,
-            &mut distribution,
         )
         .map_err(|error| {
             ValidationError::consensus(format!("Failed to compute payout distribution: {error}"))
-        })?;
-
-        Ok(distribution)
+        })
     }
 }
 
@@ -1137,6 +1248,7 @@ impl ShareValidator for DefaultShareValidator {
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError> {
         self.validate_miner_address(share_header)?;
+        self.validate_payout_cuts(share_header)?;
 
         let parent_hash = share_header.prev_share_blockhash;
         let parent_header = chain_store_handle
@@ -1190,6 +1302,7 @@ impl ShareValidator for DefaultShareValidator {
         share_header: &ShareHeader,
     ) -> Result<(), ValidationError> {
         self.validate_miner_address(share_header)?;
+        self.validate_payout_cuts(share_header)?;
         if share_header.uncles.len() > MAX_UNCLES {
             return Err(ValidationError::consensus(format!(
                 "Too many uncles: {} exceeds maximum of {}",
@@ -1199,7 +1312,7 @@ impl ShareValidator for DefaultShareValidator {
         }
 
         let declared_target = Target::from_compact(share_header.bits);
-        let max_pool_target = Target::from_compact(CompactTarget::from_consensus(MAX_POOL_TARGET));
+        let max_pool_target = Target::from_compact(self.target_ceiling);
         if declared_target > max_pool_target {
             return Err(ValidationError::consensus(format!(
                 "Share target {declared_target} is easier than maximum pool target {max_pool_target}"
@@ -1506,27 +1619,31 @@ mockall::mock! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shares::coinbaseaux_flags::CoinbaseAuxFlags;
+    use crate::shares::bch_coinbase::BchCoinbase;
     use crate::shares::extranonce::Extranonce;
+    use crate::shares::merge_mining::MergeMiningCommitment;
     use crate::shares::share_block::ShareTransaction;
     use crate::shares::share_commitment::ShareCommitment;
     use crate::shares::witness_commitment::WitnessCommitment;
     use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership};
     use crate::store::transaction_store::PrevoutRejection;
     use crate::store::writer::StoreError;
-    use crate::stratum::work::block_template::BlockTemplate;
+    use crate::stratum::work::block_template::{BlockTemplate, parse_flags};
     use crate::stratum::work::gbt::build_merkle_branches_for_template;
     use crate::test_utils::{
-        TEST_COINBASE_NSECS, TestShareBlockBuilder, build_block_from_work_components,
-        genesis_for_tests, load_share_headers_test_data, make_test_address,
-        setup_pool_difficulty_mocks, test_coinbase_transaction,
+        BCH_TRANSFER_ECDSA_ALL_WITHOUT_FORK_ID, BCH_TRANSFER_SCHNORR_ALL,
+        BCH_TRANSFER_SCRIPT_PUBKEY, TEST_COINBASE_NSECS, TestShareBlockBuilder,
+        build_block_from_work_components, genesis_for_tests, load_share_headers_test_data,
+        make_test_address, setup_pool_difficulty_mocks, test_coinbase_transaction,
     };
     use crate::utils::time_provider::TestTimeProvider;
+    use bitcoin::consensus::encode::deserialize_hex;
     use bitcoin::pow::Work;
-    use bitcoin::script::PushBytesBuf;
+    use bitcoin::script::{Builder, PushBytesBuf};
     use bitcoin::transaction::Version;
-    use bitcoin::{BlockHash, ScriptBuf, TxOut, hashes::Hash};
+    use bitcoin::{BlockHash, Network, ScriptBuf, TxOut, hashes::Hash};
     use mockall::predicate::*;
+    use p2poolv2_wallet::share_owner::ShareOwner;
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
     use std::time::SystemTime;
@@ -1537,6 +1654,244 @@ mod tests {
 
     fn validator_with(pool_difficulty: PoolDifficulty) -> DefaultShareValidator {
         DefaultShareValidator::new(pool_difficulty, 1, b"P2Poolv2".to_vec())
+    }
+
+    #[test]
+    fn bitcoin_rejects_a_cash_share_owner() {
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address =
+            p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
+        let error = validator()
+            .validate_miner_address(&share.header)
+            .unwrap_err();
+        assert!(error.to_string().contains("taproot"), "{error}");
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_p2pkh_owner_and_rejects_taproot() {
+        let mut share = TestShareBlockBuilder::new().build();
+        let cash = p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.miner_address = cash;
+        share.transactions[0] = ShareTransaction(build_sharechain_coinbase_transaction(
+            &cash,
+            share.header.bitcoin_header.block_hash(),
+            &[],
+        ));
+        let bch_validator = validator().for_chain(Chain::BitcoinCash);
+        assert!(bch_validator.validate_miner_address(&share.header).is_ok());
+        assert!(bch_validator.validate_share_coinbase(&share).is_ok());
+        assert!(
+            bch_validator
+                .validate_share_witness_commitment(&share)
+                .is_ok()
+        );
+
+        let taproot = TestShareBlockBuilder::new().build();
+        let error = bch_validator
+            .validate_miner_address(&taproot.header)
+            .unwrap_err();
+        assert!(error.to_string().contains("P2PKH"), "{error}");
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_share_with_its_coinbase_alone() {
+        let share = TestShareBlockBuilder::new().build();
+        assert_eq!(share.transactions.len(), 1);
+        let bch_validator = validator().for_chain(Chain::BitcoinCash);
+        assert!(bch_validator.validate_transaction_count(&share).is_ok());
+    }
+
+    #[test]
+    fn bitcoin_cash_counts_a_non_coinbase_transaction_like_bitcoin() {
+        let mut share = TestShareBlockBuilder::new().build();
+        share
+            .transactions
+            .push(ShareTransaction(test_coinbase_transaction(5)));
+        assert!(
+            validator()
+                .for_chain(Chain::BitcoinCash)
+                .validate_transaction_count(&share)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_schnorr_share_transfer_signed_by_bchn() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let script = ScriptBuf::from_hex(BCH_TRANSFER_SCRIPT_PUBKEY).unwrap();
+        let spent = vec![
+            (
+                0,
+                TxOut {
+                    value: bitcoin::Amount::from_sat(50_000),
+                    script_pubkey: script.clone(),
+                },
+            ),
+            (
+                1,
+                TxOut {
+                    value: bitcoin::Amount::from_sat(70_000),
+                    script_pubkey: script,
+                },
+            ),
+        ];
+        chain_store_handle
+            .expect_get_all_prevouts()
+            .returning(move |_transaction| Ok(spent.clone()));
+        let share = TestShareBlockBuilder::new()
+            .add_transaction(deserialize_hex(BCH_TRANSFER_SCHNORR_ALL).unwrap())
+            .build();
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_scripts_values_and_sigops(&share, &chain_store_handle);
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_share_transfer_signed_without_fork_id() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let script = ScriptBuf::from_hex(BCH_TRANSFER_SCRIPT_PUBKEY).unwrap();
+        let spent = vec![
+            (
+                0,
+                TxOut {
+                    value: bitcoin::Amount::from_sat(50_000),
+                    script_pubkey: script.clone(),
+                },
+            ),
+            (
+                1,
+                TxOut {
+                    value: bitcoin::Amount::from_sat(70_000),
+                    script_pubkey: script,
+                },
+            ),
+        ];
+        chain_store_handle
+            .expect_get_all_prevouts()
+            .returning(move |_transaction| Ok(spent.clone()));
+        let share = TestShareBlockBuilder::new()
+            .add_transaction(deserialize_hex(BCH_TRANSFER_ECDSA_ALL_WITHOUT_FORK_ID).unwrap())
+            .build();
+
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_scripts_values_and_sigops(&share, &chain_store_handle)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("SIGHASH_FORKID"), "{error}");
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_the_bitcoin_op_true_p2sh_spend_bitcoin_accepts() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let (spent_output, spending_tx) = build_p2sh_op_true_spent_output_and_spending_tx();
+        chain_store_handle
+            .expect_get_all_prevouts()
+            .returning(move |_transaction| Ok(vec![(0, spent_output.clone())]));
+        let share = TestShareBlockBuilder::new()
+            .add_transaction(spending_tx)
+            .build();
+
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_scripts_values_and_sigops(&share, &chain_store_handle)
+            .unwrap_err();
+        assert!(error.to_string().contains("P2PKH"), "{error}");
+    }
+
+    #[test]
+    fn bitcoin_keeps_accepting_non_coinbase_share_transactions() {
+        let mut share = TestShareBlockBuilder::new().build();
+        share
+            .transactions
+            .push(ShareTransaction(test_coinbase_transaction(5)));
+        assert!(validator().validate_transaction_count(&share).is_ok());
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_the_default_donation_to_the_built_in_key() {
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.donation_address = Some(Address::p2pkh(
+            PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
+            Network::Testnet,
+        ));
+        share.header.donation = Some(150);
+        let bch_validator = validator().for_chain(Chain::BitcoinCash);
+        assert!(bch_validator.validate_payout_cuts(&share.header).is_ok());
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_donation_to_another_key() {
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.donation_address = Some(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x33; 20]),
+            Network::Testnet,
+        ));
+        share.header.donation = Some(150);
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_payout_cuts(&share.header)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("built-in"), "{error}");
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_fee_at_the_cap_with_no_donation() {
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.fee_address = Some(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x33; 20]),
+            Network::Testnet,
+        ));
+        share.header.fee = Some(MAX_BITCOIN_CASH_POOL_CUT);
+        let bch_validator = validator().for_chain(Chain::BitcoinCash);
+        assert!(bch_validator.validate_payout_cuts(&share.header).is_ok());
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_donation_and_fee_above_the_cap() {
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.donation_address = Some(Address::p2pkh(
+            PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
+            Network::Testnet,
+        ));
+        share.header.donation = Some(150);
+        share.header.fee_address = Some(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x33; 20]),
+            Network::Testnet,
+        ));
+        share.header.fee = Some(MAX_BITCOIN_CASH_POOL_CUT - 149);
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_payout_cuts(&share.header)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("cap"), "{error}");
+    }
+
+    #[test]
+    fn bitcoin_accepts_a_full_donation_to_any_address() {
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.donation_address = Some(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x33; 20]),
+            Network::Testnet,
+        ));
+        share.header.donation = Some(MAX_BASIS_POINTS);
+        assert!(validator().validate_payout_cuts(&share.header).is_ok());
+    }
+
+    #[test]
+    fn bitcoin_rejects_a_fee_above_one_hundred_percent() {
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.fee_address = Some(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x33; 20]),
+            Network::Testnet,
+        ));
+        share.header.fee = Some(MAX_BASIS_POINTS + 1);
+        let error = validator().validate_payout_cuts(&share.header).unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
     }
 
     fn metadata_at_height(height: u32) -> BlockMetadata {
@@ -4027,11 +4382,7 @@ mod tests {
             .build();
         share_block.header.coinbase_value = template.coinbasevalue;
         share_block.header.bitcoin_height = template.height as u64;
-        share_block.header.coinbaseaux_flags = template
-            .coinbaseaux
-            .get("flags")
-            .and_then(|flags| hex::decode(flags).ok())
-            .map(|bytes| CoinbaseAuxFlags::new(&bytes));
+        share_block.header.coinbaseaux_flags = template.share_coinbaseaux_flags();
         share_block.header.witness_commitment = template
             .default_witness_commitment
             .as_deref()
@@ -4061,11 +4412,7 @@ mod tests {
         .unwrap();
 
         // Build full bitcoin transaction list: coinbase + template transactions
-        let template_transactions: Vec<bitcoin::Transaction> = template
-            .transactions
-            .iter()
-            .map(bitcoin::Transaction::from)
-            .collect();
+        let template_transactions = template.decode_transactions().unwrap();
         let mut all_bitcoin_txids = vec![coinbase_tx.compute_txid()];
         all_bitcoin_txids.extend(template_transactions.iter().map(|tx| tx.compute_txid()));
 
@@ -4078,6 +4425,7 @@ mod tests {
 
         // Set merkle branches from template transactions
         share_block.template_merkle_branches = build_merkle_branches_for_template(&template)
+            .unwrap()
             .into_iter()
             .map(TxMerkleNode::from_raw_hash)
             .collect();
@@ -4111,6 +4459,131 @@ mod tests {
             share_block.template_merkle_branches.len(),
             3,
             "Expected 3 merkle branches for 4 template transactions"
+        );
+    }
+
+    #[test]
+    fn a_bchn_template_share_rebuilds_the_coinbase_the_stratum_builder_made() {
+        // BCHN sends `"coinbaseaux": {"flags": ""}`. The stratum builder
+        // pushes one zero byte for it; the header must record no flags so
+        // validators rebuild that same push. A live regtest share was
+        // rejected by every node before this.
+        let template: BlockTemplate = serde_json::from_str(include_str!(
+            "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+        ))
+        .expect("Failed to parse BCHN template JSON");
+
+        let address_a = make_test_address(1);
+
+        let mut share_block = TestShareBlockBuilder::new()
+            .miner_pubkey("020202020202020202020202020202020202020202020202020202020202020202")
+            .build();
+        share_block.header.coinbase_value = template.coinbasevalue;
+        share_block.header.bitcoin_height = template.height as u64;
+        share_block.header.coinbaseaux_flags = template.share_coinbaseaux_flags();
+        share_block.header.witness_commitment = None;
+
+        let commitment_hash = ShareCommitment::from_share_block(&share_block).hash();
+
+        let builder_flags = parse_flags(template.coinbaseaux.get("flags").cloned()).unwrap();
+        let coinbase_tx = build_coinbase(
+            Version::TWO,
+            &[OutputPair {
+                address: address_a.clone(),
+                amount: Amount::from_sat(template.coinbasevalue),
+            }],
+            template.height as i64,
+            builder_flags,
+            None,
+            b"P2Poolv2",
+            Some(commitment_hash),
+            TEST_COINBASE_NSECS,
+            Some(Extranonce::default().as_bytes()),
+            Some(MergeMiningCommitment::reserved()),
+        )
+        .unwrap();
+        share_block.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase_tx.compute_txid().to_raw_hash());
+        share_block.template_merkle_branches = Vec::new();
+
+        let mut mock_window = PplnsWindow::default();
+        mock_window
+            .expect_network()
+            .return_const(bitcoin::Network::Regtest);
+        let addr_a_clone = address_a.clone();
+        mock_window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(HashMap::from([(addr_a_clone.clone(), 1000u128)])));
+        let pplns_window = Arc::new(RwLock::new(mock_window));
+
+        let validator =
+            DefaultShareValidator::new(PoolDifficulty::default(), 1, b"P2Poolv2".to_vec())
+                .for_chain(Chain::BitcoinCash);
+        let result = validator.validate_bitcoin_payout(
+            &share_block,
+            &ChainStoreHandle::default(),
+            pplns_window,
+        );
+        assert!(
+            result.is_ok(),
+            "Expected the BCHN share coinbase to rebuild, got: {}",
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn declared_bch_payouts_are_rebuilt_and_diverted_rewards_are_rejected() {
+        let address = make_test_address(1);
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.coinbaseaux_flags = None;
+        share.header.witness_commitment = None;
+        share.header.coinbase_nsecs = 0;
+        share.header.bitcoin_height = 702;
+        share.header.bch_coinbase = Some(BchCoinbase {
+            prefix: Builder::new()
+                .push_int(702)
+                .push_slice(b"miner")
+                .into_bytes(),
+            merge_mining: MergeMiningCommitment {
+                merkle_root: [0x33; 32],
+                tree_size: 4,
+                nonce: 7,
+            },
+        });
+        let mut coinbase = build_declared_coinbase(
+            &[OutputPair {
+                address: address.clone(),
+                amount: Amount::from_sat(share.header.coinbase_value),
+            }],
+            702,
+            ShareCommitment::from_share_block(&share).hash(),
+            share.header.extranonce.as_bytes(),
+            share.header.bch_coinbase.as_ref().unwrap(),
+        )
+        .unwrap();
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .times(2)
+            .returning(move |_, _, _| Ok(HashMap::from([(address.clone(), 1000u128)])));
+        let window = Arc::new(RwLock::new(window));
+        let validator = validator().for_chain(Chain::BitcoinCash);
+        validator
+            .validate_bitcoin_payout(&share, &ChainStoreHandle::default(), window.clone())
+            .unwrap();
+        coinbase.output[0].script_pubkey = make_test_address(2).script_pubkey();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        assert!(
+            validator
+                .validate_bitcoin_payout(&share, &ChainStoreHandle::default(), window)
+                .is_err()
         );
     }
 

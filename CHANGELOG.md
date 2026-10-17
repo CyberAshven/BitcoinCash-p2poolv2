@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Bitcoin Cash: `stratum.chain = "bitcoin-cash"` with `bitcoin_cash_network`
+  mines from BCHN templates, pays CashAddr scripts, records P2PKH share owners
+  and starts from a main or mini Bitcoin Cash genesis. See `docs/bch-plan.md`
+  and `docs/bch-design.md`.
+- Bitcoin Cash donation: 1.5% of each block a node finds goes to the P2Poolv2
+  donation address by default. `donation` raises or lowers it and 0 opts out;
+  `fee_address` and `fee` remain the operator's own cut.
+- `p2poolv2_cli bch-share-address` prints the Bitcoin Cash share address for a
+  P2PKH CashAddr.
+- Local Stratum V2 listener (`sv2_port`) with both Job Declaration modes and
+  standard and extended mining channels that share the SV1 job tracker,
+  vardiff, block submission and share chain, with optional Noise encryption
+  signed by an operator-supplied authority key.
+
+### Fixed
+
+- A share header with a donation or fee above 10,000 basis points no longer
+  panics the validating node; such shares are rejected.
+- Stratum usernames on a Bitcoin Cash node accept CashAddr payout addresses.
+- Bitcoin Cash nodes derive `stratum.network` from `bitcoin_cash_network`, so
+  nodes on one network no longer split over a leftover Bitcoin value.
+- Stratum V2: Full-Template declarations are matched per connection,
+  `coinbase_outputs` is a counted output list, and the listener accepts host
+  names and stops the node when it cannot bind.
+- Bitcoin Cash shares mined from a BCHN template are no longer rejected by
+  every node. BCHN sends an empty `coinbaseaux` flags string; the coinbase
+  builder pushed one zero byte for it while the share header recorded empty
+  flags, so validators rebuilt a different coinbase. The header now records
+  no flags, as it does for a template without the entry.
+
+### Changed
+
+- On Bitcoin Cash, peers reject shares whose donation plus fee exceed 10%,
+  whose donation pays another address, or that carry non-coinbase
+  transactions.
+
 ## [v0.15.3] - 2026-09-21
 
 ### Changed
