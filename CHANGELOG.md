@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.0.1-alpha] - 2026-10-18
+
+First alpha of P2Poolv2 for Bitcoin Cash, synced with upstream P2Poolv2
+through `2dabcdd2`. Alpha software: run it on chipnet or regtest first.
+
 ### Added
 
 - Bitcoin Cash: `stratum.chain = "bitcoin-cash"` with `bitcoin_cash_network`
