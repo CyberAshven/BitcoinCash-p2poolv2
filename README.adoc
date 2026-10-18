@@ -70,10 +70,18 @@ of this by bootstrapping the signet with first 32 blocks.
 
 === Install P2Poolv2
 
+Download the archive for your platform (Linux x64 or ARM64, Apple Silicon
+macOS, or Windows x64) and `config.sample.toml` from the
+https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases[releases page],
+then check the archive against its `.sha256` file. Don't use the
+`p2poolv2_node-installer.sh` attached to v0.0.1-alpha: it downloads from the
+upstream repository. Releases after it ship an installer that downloads from
+this fork:
+
 [,shell]
 ----
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/p2poolv2/p2poolv2/releases/latest/download/p2poolv2_node-installer.sh | sh
-curl --proto '=https' --tlsv1.2 -LsSf -o config.toml https://github.com/p2poolv2/p2poolv2/releases/latest/download/config.sample.toml
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases/download/<tag>/p2poolv2_node-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf -o config.toml https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases/download/<tag>/config.sample.toml
 ----
 
 The above will install `p2poolv2` and `p2poolv2_cli` in your PATH and download a `config.toml` for you to edit as required.
@@ -169,7 +177,7 @@ assets are distributed as a separate `dashboard.tar.gz` archive.
 +
 [,shell]
 ----
-curl --proto '=https' --tlsv1.2 -LsSf -o dashboard.tar.gz https://github.com/p2poolv2/p2poolv2/releases/latest/download/dashboard.tar.gz
+curl --proto '=https' --tlsv1.2 -LsSf -o dashboard.tar.gz https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases/download/v0.0.1-alpha/dashboard.tar.gz
 tar xzf dashboard.tar.gz
 ----
 
