@@ -9,6 +9,7 @@
 //! instead of re-reading the full window from RocksDB on every notify.
 
 use super::address_keys::AddressKeys;
+use crate::config::Chain;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -19,35 +20,110 @@ use crate::shares::share_block::ShareHeader;
 use crate::sim_overrides;
 use bitcoin::Address;
 use bitcoin::BlockHash;
+#[cfg(any(test, feature = "test-utils", feature = "sim"))]
+use bitcoin::hashes::Hash;
+use bitcoin::{CompactTarget, Target};
+use p2poolv2_wallet::share_owner::ShareOwner;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
+use std::hash;
 use tracing::debug;
 
-/// The PPLNS window: a coinbase pays `PPLNS_WINDOW_SHARES` shares, each
-/// weighted by its difficulty, starting at the newest share that is mature
-/// for it (see `COINBASE_MATURITY`).
+/// The PPLNS window: a coinbase pays at most `PPLNS_WINDOW_SHARES` shares,
+/// each weighted by its difficulty, starting at the newest share that is
+/// mature for it (see `COINBASE_MATURITY`).
 ///
-/// A share count, not a difficulty target or a time span. At the 10 s share
-/// target that is 6 * 60 * 24 * 14 = 120,960 shares, about two weeks.
+/// On Bitcoin this is the window: a share count, not a difficulty target or a
+/// time span. At the 10 s share target that is 6 * 60 * 24 * 14 = 120,960
+/// shares, about two weeks. On Bitcoin Cash it is the cap on a window sized by
+/// the paying block's difficulty (see `BCH_PPLNS_WINDOW_BLOCKS`).
 ///
 /// The cache, its eviction buffer, `PRUNE_DEPTH`, the PPLNS zone and the
 /// prevout depth are all sized by it, together with `COINBASE_MATURITY`
 /// through `PAYOUT_DEPTH`.
 pub const PPLNS_WINDOW_SHARES: usize = 120960;
 
+/// Bitcoin Cash only: a coinbase pays the shares holding this many expected
+/// BCH blocks' worth of work, below the maturity skip and at most
+/// `PPLNS_WINDOW_SHARES` shares.
+///
+/// One BCH block's worth of work is the difficulty in the paying share's own
+/// BCH header, which BCH sets every block with ASERT. The window therefore
+/// spans about this many of the pool's own blocks whatever the pool's size:
+/// short for a large pool, long for a small one, and shorter by itself if BCH
+/// blocks get faster. With 10-minute blocks, pools under about
+/// `BCH_PPLNS_WINDOW_BLOCKS / 2016` of BCH's hashrate reach the cap and pay
+/// upstream's fixed window.
+///
+/// 3, as P2Pool v1 on BCH (jtoomim's `SPREAD`, capped by its share count). A
+/// share is paid by the blocks found while it is in the window, which is
+/// Poisson with this mean: with 3 a share misses every block e^-3 = 5% of the
+/// time and its payout varies by 1 / sqrt(3) = 58%, against 13.5% and 71%
+/// with 2, while the window, the payout delay and the time a miner is paid
+/// after stopping grow linearly with the value. A share-chain rule: every node
+/// must use the same value.
+pub const BCH_PPLNS_WINDOW_BLOCKS: u128 = 3;
+
+/// A paying block difficulty at or below this carries no difficulty to size a
+/// window by, and the window falls back to `PPLNS_WINDOW_SHARES`.
+///
+/// Difficulty is measured against the network's proof-of-work limit, so a
+/// header at that limit has difficulty 1. Chipnet and testnet allow such a
+/// block when it comes 20 minutes after its parent, and every regtest block is
+/// one. Mainnet never has one. Falling back to the cap keeps such a block from
+/// shrinking the window to a single share. Falling back to an older header
+/// would not be safe: only a found block's bits are checked by BCH, so the
+/// bits in any other share are whatever its miner chose.
+const MIN_SIZING_BLOCK_DIFFICULTY: u128 = 1;
+
+/// Difficulty of the bitcoin block a coinbase pays, from the bits in that
+/// block's header, measured against the network's proof-of-work limit.
+///
+/// The producer passes the bits of the template it builds the job on, which
+/// are the bits the share's header carries: a miner cannot change them, and a
+/// declared job must keep them. A validator passes the bits in the share's
+/// own header. Both must use this function, so both size the window from the
+/// same number.
+pub fn bitcoin_block_difficulty(bits: CompactTarget, network: bitcoin::Network) -> u128 {
+    Target::from_compact(bits).difficulty(network)
+}
+
 /// Coinbase outputs cannot be spent until the containing block is this
 /// many blocks deep. 70% of blocks-per-day at 10s block time (0.70 * 86400 / 10).
 ///
 /// A share is paid by a found block only at the same depth, except that the
 /// first `COINBASE_MATURITY` shares of the chain are always mature for payout.
+///
+/// Bitcoin's maturity. Bitcoin Cash uses `BCH_COINBASE_MATURITY`; read the
+/// maturity for a chain with `sim_overrides::coinbase_maturity`.
 pub const COINBASE_MATURITY: usize = 6048;
+
+/// Bitcoin Cash coinbase maturity, in shares: 100, as Satoshi set coinbase
+/// maturity in blocks and BCH keeps it, a count rather than a span of time.
+///
+/// Like `COINBASE_MATURITY` it is one rule for both jobs: a share coinbase
+/// output cannot be spent until it is this deep, and a share is paid by a
+/// found block only at this depth (the first 100 shares of the chain are
+/// always mature for payout). A block's payout can then differ between
+/// share-chain forks only if they split more than 100 shares below the paying
+/// share, far deeper than an uncle (`MAX_UNCLES_DEPTH`).
+pub const BCH_COINBASE_MATURITY: usize = 100;
+
+/// The coinbase maturity a chain's consensus uses, before any sim override.
+pub fn coinbase_maturity_for(chain: Chain) -> usize {
+    match chain {
+        Chain::Bitcoin => COINBASE_MATURITY,
+        Chain::BitcoinCash => BCH_COINBASE_MATURITY,
+    }
+}
 
 /// Shares from a paying share down to the oldest share it can pay: the
 /// coinbase maturity depth plus the PPLNS window.
 ///
 /// Sizes the full-validation zone, the expiry of share chain outputs, and,
-/// doubled, `PRUNE_DEPTH`.
+/// doubled, `PRUNE_DEPTH`. Sized by Bitcoin's maturity, the larger one, so it
+/// also covers Bitcoin Cash's.
 pub const PAYOUT_DEPTH: usize = COINBASE_MATURITY + PPLNS_WINDOW_SHARES;
 
 /// Divisor for the retained eviction buffer beyond the window: the cache
@@ -84,7 +160,7 @@ pub const PRUNE_INTERVAL: usize = 360;
 
 /// Scale factor applied to all difficulty contributions.
 /// Allows integer representation of 90%/10% uncle/nephew weighting.
-pub(crate) const DIFFICULTY_SCALE: u128 = 10;
+pub const DIFFICULTY_SCALE: u128 = 10;
 
 /// Scaled uncle weight: uncle contributes 9/10 of its difficulty.
 pub(crate) const UNCLE_SCALED_WEIGHT: u128 = 9;
@@ -109,10 +185,44 @@ struct ConfirmedEntry {
     height: u32,
     /// Internal key mapping the miner address in AddressKeys.
     internal_key: usize,
+    /// Internal key mapping the share owner (the share chain address) in
+    /// `owner_keys`. The payout never reads it; it lets a window be looked
+    /// up by either of the two addresses a share header carries.
+    owner_key: usize,
     /// Difficulty of the share
     difficulty: u128,
     /// Uncle entries, if any, referenced by the share
     uncle_entries: Vec<UncleEntry>,
+}
+
+impl ConfirmedEntry {
+    /// Work this entry adds to a window sized by block difficulty: its own
+    /// difficulty plus its uncles'.
+    ///
+    /// An uncle's hashes could have found the block as well as the nephew's,
+    /// so both count towards the pool's expected blocks, even though an uncle
+    /// takes no window slot. This bounds the walk only; the weights come from
+    /// `for_each_credit`.
+    fn work(&self) -> u128 {
+        self.uncle_entries
+            .iter()
+            .fold(self.difficulty, |work, uncle_entry| {
+                work.saturating_add(uncle_entry.difficulty)
+            })
+    }
+}
+
+/// Which rule sizes the window below the maturity skip.
+///
+/// Chosen once from the chain the share chain pays on, so the producer, the
+/// validator and the API, which share one window, always use the same rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowSizing {
+    /// `max_window_shares` shares. Bitcoin, unchanged from upstream.
+    FixedShares,
+    /// Shares until their work reaches `expected_blocks` times the paying
+    /// block's difficulty, at most `max_window_shares` shares. Bitcoin Cash.
+    BlockWork { expected_blocks: u128 },
 }
 
 /// Why accumulating the window stopped.
@@ -122,7 +232,8 @@ struct ConfirmedEntry {
 /// the cache ends depends on this node's own confirmed tip.
 #[derive(Debug, PartialEq, Eq)]
 enum WindowStopReason {
-    /// `max_window_shares` shares were counted after the immature skip.
+    /// The window reached its bound after the immature skip:
+    /// `max_window_shares` shares, or on Bitcoin Cash the work target.
     WindowFull,
     /// The walk consumed every entry available to it.
     OutOfEntries,
@@ -130,8 +241,12 @@ enum WindowStopReason {
 
 /// A cached uncle entry with only the fields needed for payout.
 struct UncleEntry {
+    /// Blockhash of the uncle share, so a window view can name it.
+    blockhash: BlockHash,
     /// Internal key mapping the miner address in AddressKeys.
     internal_key: usize,
+    /// Internal key mapping the uncle's share owner in `owner_keys`.
+    owner_key: usize,
     /// Base difficulty of the uncle share before weighting.
     difficulty: u128,
 }
@@ -140,6 +255,143 @@ struct UncleEntry {
 /// confirmed ancestor (newest-to-oldest), paired with that ancestor's index
 /// in `confirmed_entries`.
 type CandidateWalk = (Vec<(BlockHash, ShareHeader)>, usize);
+
+/// The entries a window walk from one anchor runs over, and where in them
+/// the window starts.
+struct ResolvedWindow {
+    /// Candidate entries from the anchor down to the confirmed entry point,
+    /// newest-to-oldest. Empty when the anchor itself is confirmed.
+    candidate_entries: Vec<ConfirmedEntry>,
+    /// Index in `confirmed_entries` the walk continues from.
+    confirmed_start_index: usize,
+    /// Height of the paying share, the share whose parent is the anchor.
+    paying_height: usize,
+    /// Shares, counted down from the anchor, not yet mature for payout.
+    immature_share_count: usize,
+    /// Work the window must hold, or `None` when only the share count bounds
+    /// it (see `PplnsWindow::work_target`).
+    work_target: Option<u128>,
+}
+
+impl ResolvedWindow {
+    /// Height of the share at `walk_index` along the walk, where index 0 is
+    /// the anchor. Heights are contiguous along parent links, which also
+    /// gives the candidate entries, cached with no height, their real one.
+    fn height_at(&self, walk_index: usize) -> u32 {
+        self.paying_height.saturating_sub(walk_index + 1) as u32
+    }
+}
+
+/// One weight a window share contributes, before it is summed per address.
+struct Credit {
+    /// Payout address key the weight is paid to.
+    internal_key: usize,
+    /// Share owner key of the share or uncle that earned it.
+    owner_key: usize,
+    /// The share or uncle that earned it.
+    blockhash: BlockHash,
+    /// The share that includes this uncle, or `None` for the share itself.
+    nephew: Option<BlockHash>,
+    /// Difficulty of the share or uncle before weighting.
+    difficulty: u128,
+    /// Scaled weight credited.
+    weight: u128,
+}
+
+/// One weight a miner earns in a payout window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowCredit {
+    /// The share that earned it: a window share, or an uncle one includes.
+    pub blockhash: BlockHash,
+    /// Height of the window share carrying the weight. An uncle is credited
+    /// at the height of the share that includes it.
+    pub height: u32,
+    /// The window share that includes this uncle, or `None` when
+    /// `blockhash` is itself a window share.
+    pub nephew: Option<BlockHash>,
+    /// Difficulty of the share or uncle before weighting.
+    pub difficulty: u128,
+    /// Weight credited, in the scaled units the distribution sums: a share
+    /// earns `DIFFICULTY_SCALE` times its difficulty plus the nephew bonus
+    /// for each uncle it includes, an uncle `UNCLE_SCALED_WEIGHT` times its
+    /// difficulty.
+    pub weight: u128,
+    /// Payout address the weight is paid to: the share's or the uncle's own
+    /// `miner_bitcoin_address`.
+    pub payout_address: Address,
+}
+
+/// What one miner earns in a payout window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MinerCredits {
+    /// Window shares the miner mined.
+    pub share_count: usize,
+    /// Uncles the miner mined that window shares include.
+    pub uncle_count: usize,
+    /// Sum of the miner's weights.
+    pub weight: u128,
+    /// The miner's weights, newest first, at most the requested number.
+    pub credits: Vec<WindowCredit>,
+}
+
+impl MinerCredits {
+    /// Count one credit, and list it while fewer than `max_credits` are listed.
+    fn add(
+        &mut self,
+        credit: &Credit,
+        height: u32,
+        payout_address: Option<&Address>,
+        max_credits: usize,
+    ) {
+        if credit.nephew.is_some() {
+            self.uncle_count += 1;
+        } else {
+            self.share_count += 1;
+        }
+        self.weight = self.weight.saturating_add(credit.weight);
+        if self.credits.len() < max_credits
+            && let Some(payout_address) = payout_address
+        {
+            self.credits.push(WindowCredit {
+                blockhash: credit.blockhash,
+                height,
+                nephew: credit.nephew,
+                difficulty: credit.difficulty,
+                weight: credit.weight,
+                payout_address: payout_address.clone(),
+            });
+        }
+    }
+}
+
+/// Every miner's credits in one payout window, and the totals of that window.
+///
+/// Built by the same walk and weighting as
+/// `get_distribution_from_start_hash`, so each payout address's `weight` is
+/// its entry in that distribution, and `window_weight` is the distribution's
+/// total. Miners are listed by either of the two addresses a share header
+/// carries, neither derived from the other: a share owner's credits are paid
+/// to the payout address each credit names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowCredits {
+    /// Height of the anchor the window was resolved from.
+    pub anchor_height: u32,
+    /// Height of the newest share in the window, the first one past the
+    /// immature skip.
+    pub newest_height: Option<u32>,
+    /// Height of the oldest share in the window.
+    pub oldest_height: Option<u32>,
+    /// Number of shares in the window.
+    pub window_share_count: usize,
+    /// Sum of every weight in the window: what each payout is a share of.
+    pub window_weight: u128,
+    /// Credits of each payout address (`miner_bitcoin_address`) the window
+    /// credits.
+    pub by_payout_address: HashMap<Address, MinerCredits>,
+    /// Credits of each share owner (`miner_address`, the share chain
+    /// address) the window credits.
+    pub by_share_owner: HashMap<ShareOwner, MinerCredits>,
+}
 
 /// Why a payout distribution could not be produced.
 ///
@@ -174,8 +426,8 @@ impl fmt::Display for WindowError {
             } => write!(
                 formatter,
                 "PPLNS window for anchor {anchor} is truncated by eviction: the walk ran out of \
-                 cached entries at height {oldest_cached_height}, short of {max_window_shares} \
-                 shares"
+                 cached entries at height {oldest_cached_height}, short of its window of at most \
+                 {max_window_shares} shares"
             ),
             WindowError::ReadFailure(error) => write!(formatter, "{error}"),
         }
@@ -210,30 +462,58 @@ pub struct PplnsWindow {
     cached_top_height: Option<u32>,
     /// Address internal key mapping
     address_keys: AddressKeys,
+    /// Share owner internal key mapping, for lookups by share chain address.
+    owner_keys: AddressKeys<ShareOwner>,
     /// Bitcoin network used for computing integer difficulty from Target.
     pub(crate) network: bitcoin::Network,
     /// Number of shares in the payout window. Defaults to
     /// `PPLNS_WINDOW_SHARES`; overridable in tests so eviction can be
     /// exercised without a full-capacity fixture.
     max_window_shares: usize,
-    /// Depth a share must reach before it is paid. Defaults to
-    /// `sim_overrides::coinbase_maturity()`, which is `COINBASE_MATURITY`
-    /// outside sim builds.
+    /// Depth a share must reach before it is paid:
+    /// `sim_overrides::coinbase_maturity` for the chain `for_chain` selects,
+    /// `COINBASE_MATURITY` until then.
     maturity_skip: usize,
+    /// Rule sizing the window below the maturity skip. `FixedShares` until
+    /// `for_chain` selects Bitcoin Cash.
+    sizing: WindowSizing,
 }
 
 impl PplnsWindow {
     /// Create an empty PplnsWindow with preallocated capacity.
+    ///
+    /// The window is the fixed `PPLNS_WINDOW_SHARES` shares, as on Bitcoin.
+    /// A Bitcoin Cash node must call `for_chain`.
     pub fn new(network: bitcoin::Network) -> Self {
         Self {
             confirmed_entries: VecDeque::with_capacity(INITIAL_ENTRIES_CAPACITY),
             cached_tip_blockhash: None,
             cached_top_height: None,
             address_keys: AddressKeys::default(),
+            owner_keys: AddressKeys::default(),
             network,
             max_window_shares: PPLNS_WINDOW_SHARES,
-            maturity_skip: sim_overrides::coinbase_maturity(),
+            maturity_skip: sim_overrides::coinbase_maturity(Chain::Bitcoin),
+            sizing: WindowSizing::FixedShares,
         }
+    }
+
+    /// Select the window rule for the chain this share chain pays on.
+    ///
+    /// Bitcoin keeps the fixed `PPLNS_WINDOW_SHARES` shares behind
+    /// `COINBASE_MATURITY`. Bitcoin Cash pays `BCH_PPLNS_WINDOW_BLOCKS`
+    /// expected blocks' worth of work, capped at `PPLNS_WINDOW_SHARES` shares,
+    /// behind `BCH_COINBASE_MATURITY`. This is consensus: every node on a
+    /// share chain must select the same chain.
+    pub fn for_chain(mut self, chain: Chain) -> Self {
+        self.sizing = match chain {
+            Chain::Bitcoin => WindowSizing::FixedShares,
+            Chain::BitcoinCash => WindowSizing::BlockWork {
+                expected_blocks: BCH_PPLNS_WINDOW_BLOCKS,
+            },
+        };
+        self.maturity_skip = sim_overrides::coinbase_maturity(chain);
+        self
     }
 
     /// Test-only constructor with an injectable maturity depth and window
@@ -245,10 +525,20 @@ impl PplnsWindow {
         maturity_skip: usize,
         max_window_shares: usize,
     ) -> Self {
-        let mut window = Self::new(network);
-        window.maturity_skip = maturity_skip;
-        window.max_window_shares = max_window_shares;
-        window
+        Self::new(network).with_window_sizes(maturity_skip, max_window_shares)
+    }
+
+    /// Test-only override of the maturity depth and window size, applied
+    /// after `for_chain`, which sets the chain's own maturity.
+    #[cfg(test)]
+    pub(super) fn with_window_sizes(
+        mut self,
+        maturity_skip: usize,
+        max_window_shares: usize,
+    ) -> Self {
+        self.maturity_skip = maturity_skip;
+        self.max_window_shares = max_window_shares;
+        self
     }
 }
 
@@ -275,18 +565,28 @@ impl PplnsWindow {
     ///
     /// The walk first skips the shares that are not yet mature for the paying
     /// share -- the share whose parent is `start_hash` -- and then pays the
-    /// next `max_window_shares` shares, each weighted by its difficulty;
-    /// bitcoin difficulty plays no part. A share at height `h` is mature for a
-    /// paying share at height `p` when `p - h >= maturity_skip`, the same
-    /// depth spending a coinbase needs, or when `h < maturity_skip`: the first
-    /// `maturity_skip` shares are always mature for payout, so a young chain
-    /// pays its shares instead of nothing (see `immature_share_count`).
+    /// next shares, each weighted by its difficulty. A share at height `h` is
+    /// mature for a paying share at height `p` when `p - h >= maturity_skip`,
+    /// the same depth spending a coinbase needs, or when `h < maturity_skip`:
+    /// the first `maturity_skip` shares are always mature for payout, so a
+    /// young chain pays its shares instead of nothing (see
+    /// `immature_share_count`).
+    ///
+    /// How many shares are paid depends on the window rule (see
+    /// `work_target`). On Bitcoin it is `max_window_shares` and
+    /// `paying_block_difficulty` plays no part. On Bitcoin Cash it is the
+    /// shares whose work first reaches `BCH_PPLNS_WINDOW_BLOCKS` times
+    /// `paying_block_difficulty`, at most `max_window_shares`.
+    /// `paying_block_difficulty` comes from the paying share's own bitcoin
+    /// header, through `bitcoin_block_difficulty`, never from this node's own
+    /// BCH node or config.
     ///
     /// Candidate shares count towards the skip and the window like confirmed
-    /// ones. Both counts are properties of the chain, so every node derives the
-    /// same distribution for the same anchor whatever its own confirmed tip --
-    /// which is the point: the producer and a validator that has since
-    /// advanced must reconstruct an identical coinbase.
+    /// ones. The skip, the window and the paying header are properties of the
+    /// chain, so every node derives the same distribution for the same anchor
+    /// and header whatever its own confirmed tip -- which is the point: the
+    /// producer and a validator that has since advanced must reconstruct an
+    /// identical coinbase.
     ///
     /// Errors when `start_hash` cannot be resolved to a confirmed ancestor
     /// (e.g. an anchor whose ancestry is not stored) or when a store read
@@ -304,20 +604,161 @@ impl PplnsWindow {
     pub fn get_distribution_from_start_hash(
         &mut self,
         start_hash: BlockHash,
+        paying_block_difficulty: u128,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<HashMap<Address, u128>, WindowError> {
+        let resolved =
+            self.resolve_window(start_hash, paying_block_difficulty, chain_store_handle)?;
+        self.distribution_for_resolved(start_hash, &resolved)
+    }
+
+    /// The distribution of a resolved window: walk it and sum each address's
+    /// credits.
+    fn distribution_for_resolved(
+        &self,
+        start_hash: BlockHash,
+        resolved: &ResolvedWindow,
+    ) -> Result<HashMap<Address, u128>, WindowError> {
+        let mut difficulty_by_key = vec![0u128; self.address_keys.len()];
+        self.walk_window(start_hash, resolved, |_, entry| {
+            Self::add_entry_difficulty(entry, &mut difficulty_by_key);
+        })?;
+
+        Ok(self.collect_distribution(&difficulty_by_key))
+    }
+
+    /// Read-only view of every miner's credits in the window that
+    /// `get_distribution_from_start_hash` pays from `start_hash`.
+    ///
+    /// Runs the same walk and the same weighting, so a payout address's
+    /// `weight` is exactly its entry in that distribution and `window_weight`
+    /// is the distribution's total. A share owner, the share chain address,
+    /// gets the shares and uncles that name it as owner; their weight is paid
+    /// to the payout address each of them names, which its credits report.
+    ///
+    /// One walk serves every miner, so a caller can build this once per
+    /// anchor and answer any number of lookups without taking the window
+    /// again. Each miner lists at most `max_credits` credits, newest first,
+    /// while its counts and weight cover the whole window.
+    ///
+    /// `paying_block_difficulty` sizes the window as it does for the
+    /// distribution. A view of a block not yet found has no paying header, so
+    /// a caller passes its best estimate, such as the anchor's own header.
+    ///
+    /// Errors exactly when `get_distribution_from_start_hash` does.
+    pub fn get_window_credits_from_start_hash(
+        &mut self,
+        start_hash: BlockHash,
+        paying_block_difficulty: u128,
+        chain_store_handle: &ChainStoreHandle,
+        max_credits: usize,
+    ) -> Result<WindowCredits, WindowError> {
+        let resolved =
+            self.resolve_window(start_hash, paying_block_difficulty, chain_store_handle)?;
+
+        let mut by_payout_key = vec![MinerCredits::default(); self.address_keys.len()];
+        let mut by_owner_key = vec![MinerCredits::default(); self.owner_keys.len()];
+        let mut window_credits = WindowCredits {
+            anchor_height: resolved.height_at(0),
+            newest_height: None,
+            oldest_height: None,
+            window_share_count: 0,
+            window_weight: 0,
+            by_payout_address: HashMap::new(),
+            by_share_owner: HashMap::new(),
+        };
+        self.walk_window(start_hash, &resolved, |height, entry| {
+            window_credits.newest_height.get_or_insert(height);
+            window_credits.oldest_height = Some(height);
+            window_credits.window_share_count += 1;
+            Self::for_each_credit(entry, |credit| {
+                window_credits.window_weight =
+                    window_credits.window_weight.saturating_add(credit.weight);
+                let payout_address = self.address_keys.value_for(credit.internal_key);
+                by_payout_key[credit.internal_key].add(
+                    &credit,
+                    height,
+                    payout_address,
+                    max_credits,
+                );
+                by_owner_key[credit.owner_key].add(&credit, height, payout_address, max_credits);
+            });
+        })?;
+
+        window_credits.by_payout_address = credited_by_value(&self.address_keys, by_payout_key);
+        window_credits.by_share_owner = credited_by_value(&self.owner_keys, by_owner_key);
+        Ok(window_credits)
+    }
+
+    /// Resolve the anchor and work out where its window starts and what
+    /// bounds it: the walk's entries, the paying share's height, the immature
+    /// skip and the work target.
+    fn resolve_window(
+        &mut self,
+        start_hash: BlockHash,
+        paying_block_difficulty: u128,
+        chain_store_handle: &ChainStoreHandle,
+    ) -> Result<ResolvedWindow, WindowError> {
         let (candidate_entries, confirmed_start_index) =
             self.resolve_start_hash(start_hash, chain_store_handle)?;
+        Ok(self.resolved_window(
+            candidate_entries,
+            confirmed_start_index,
+            paying_block_difficulty,
+        ))
+    }
+
+    /// The window for an anchor already resolved to its candidate entries and
+    /// confirmed entry point.
+    fn resolved_window(
+        &self,
+        candidate_entries: Vec<ConfirmedEntry>,
+        confirmed_start_index: usize,
+        paying_block_difficulty: u128,
+    ) -> ResolvedWindow {
         let paying_height = self.paying_height(&candidate_entries, confirmed_start_index);
         let immature_share_count = self.immature_share_count(paying_height);
-
-        let mut difficulty_by_key = vec![0u128; self.address_keys.len()];
-        let stop_reason = self.accumulate_window_difficulty(
-            &candidate_entries,
+        ResolvedWindow {
+            candidate_entries,
             confirmed_start_index,
+            paying_height,
             immature_share_count,
-            &mut difficulty_by_key,
-        );
+            work_target: self.work_target(paying_block_difficulty),
+        }
+    }
+
+    /// Work the window must hold for a paying block of this difficulty, or
+    /// `None` when only the `max_window_shares` count bounds it.
+    ///
+    /// `None` on Bitcoin, and on Bitcoin Cash for a paying header at the
+    /// network's proof-of-work limit (see `MIN_SIZING_BLOCK_DIFFICULTY`).
+    fn work_target(&self, paying_block_difficulty: u128) -> Option<u128> {
+        match self.sizing {
+            WindowSizing::FixedShares => None,
+            WindowSizing::BlockWork { .. }
+                if paying_block_difficulty <= MIN_SIZING_BLOCK_DIFFICULTY =>
+            {
+                None
+            }
+            WindowSizing::BlockWork { expected_blocks } => {
+                Some(paying_block_difficulty.saturating_mul(expected_blocks))
+            }
+        }
+    }
+
+    /// Call `visit` with each share in the window resolved from `start_hash`
+    /// and its height, newest first, and refuse a walk eviction truncated.
+    ///
+    /// Errors when the walk exhausts the cache before skipping the immature
+    /// shares and counting a full window, and the cache no longer reaches the
+    /// chain start (see `get_distribution_from_start_hash`).
+    fn walk_window(
+        &self,
+        start_hash: BlockHash,
+        resolved: &ResolvedWindow,
+        visit: impl FnMut(u32, &ConfirmedEntry),
+    ) -> Result<(), WindowError> {
+        let stop_reason = self.walk_window_entries(resolved, visit);
 
         if stop_reason == WindowStopReason::OutOfEntries && !self.reaches_chain_start() {
             return Err(WindowError::InsufficientEntries {
@@ -329,8 +770,7 @@ impl PplnsWindow {
                 max_window_shares: self.max_window_shares,
             });
         }
-
-        Ok(self.collect_distribution(&difficulty_by_key))
+        Ok(())
     }
 
     /// Whether the oldest cached entry is the first block of the chain, so a
@@ -435,6 +875,7 @@ impl PplnsWindow {
                     *blockhash,
                     0,
                     header.miner_bitcoin_address.clone(),
+                    header.miner_address,
                     difficulty,
                     uncle_entries,
                 )
@@ -481,33 +922,53 @@ impl PplnsWindow {
 
     /// Walk the candidate entries and then the confirmed entries from the
     /// confirmed entry point, skip the first `immature_share_count`, and
-    /// accumulate difficulty per address for the next `max_window_shares`.
+    /// call `visit` with each share of the window that follows and its height.
+    ///
+    /// The window ends after `max_window_shares` shares, or, with a
+    /// `work_target`, after the first share that brings the window's work
+    /// (see `ConfirmedEntry::work`) to the target, whichever comes first. So a
+    /// window holds at least one share, and at least the target work unless
+    /// the share count bounds it.
     ///
     /// Returns the reason the walk stopped. `OutOfEntries` means the cache
     /// itself ran out, which is the one stop reason that is not a property of
     /// the chain: the caller must check whether eviction has trimmed the back
     /// before trusting the result.
-    fn accumulate_window_difficulty(
+    fn walk_window_entries(
         &self,
-        candidate_entries: &[ConfirmedEntry],
-        confirmed_start_index: usize,
-        immature_share_count: usize,
-        difficulty_by_key: &mut [u128],
+        resolved: &ResolvedWindow,
+        mut visit: impl FnMut(u32, &ConfirmedEntry),
     ) -> WindowStopReason {
-        let mut consumed = 0;
-        for entry in candidate_entries
+        let mut window_entries = resolved
+            .candidate_entries
             .iter()
-            .chain(self.confirmed_entries.iter().skip(confirmed_start_index))
-            .skip(immature_share_count)
-            .take(self.max_window_shares)
+            .chain(
+                self.confirmed_entries
+                    .iter()
+                    .skip(resolved.confirmed_start_index),
+            )
+            .enumerate()
+            .skip(resolved.immature_share_count)
+            .take(self.max_window_shares);
+        let reached_work_target = |window_work: u128| {
+            resolved
+                .work_target
+                .is_some_and(|target| window_work >= target)
+        };
+
+        let mut consumed = 0;
+        let mut window_work: u128 = 0;
+        while !reached_work_target(window_work)
+            && let Some((walk_index, entry)) = window_entries.next()
         {
             consumed += 1;
-            Self::add_entry_difficulty(entry, difficulty_by_key);
+            window_work = window_work.saturating_add(entry.work());
+            visit(resolved.height_at(walk_index), entry);
         }
 
-        // Distinguish "counted a full window" from "the cache ran out": only
-        // the latter depends on where eviction trimmed the back.
-        if consumed == self.max_window_shares {
+        // Distinguish "reached the window's bound" from "the cache ran out":
+        // only the latter depends on where eviction trimmed the back.
+        if consumed == self.max_window_shares || reached_work_target(window_work) {
             WindowStopReason::WindowFull
         } else {
             WindowStopReason::OutOfEntries
@@ -518,22 +979,44 @@ impl PplnsWindow {
     /// scaled difficulty plus the nephew bonus for each uncle it includes,
     /// and each uncle's miner gets the uncle weight.
     fn add_entry_difficulty(entry: &ConfirmedEntry, difficulty_by_key: &mut [u128]) {
+        Self::for_each_credit(entry, |credit| {
+            difficulty_by_key[credit.internal_key] =
+                difficulty_by_key[credit.internal_key].saturating_add(credit.weight);
+        });
+    }
+
+    /// Call `credit` with each weight one window share contributes: first the
+    /// uncle weight for each uncle it includes, then the share's own scaled
+    /// difficulty plus the nephew bonus for those uncles.
+    ///
+    /// The one place the PPLNS weighting is applied, so the distribution and
+    /// a single miner's view of the window cannot disagree.
+    fn for_each_credit(entry: &ConfirmedEntry, mut credit: impl FnMut(Credit)) {
         let mut nephew_bonus: u128 = 0;
         for uncle_entry in &entry.uncle_entries {
-            difficulty_by_key[uncle_entry.internal_key] = difficulty_by_key
-                [uncle_entry.internal_key]
-                .saturating_add(uncle_entry.difficulty.saturating_mul(UNCLE_SCALED_WEIGHT));
+            credit(Credit {
+                internal_key: uncle_entry.internal_key,
+                owner_key: uncle_entry.owner_key,
+                blockhash: uncle_entry.blockhash,
+                nephew: Some(entry.blockhash),
+                difficulty: uncle_entry.difficulty,
+                weight: uncle_entry.difficulty.saturating_mul(UNCLE_SCALED_WEIGHT),
+            });
             nephew_bonus = nephew_bonus
                 .saturating_add(uncle_entry.difficulty.saturating_mul(NEPHEW_SCALED_BONUS));
         }
 
-        difficulty_by_key[entry.internal_key] = difficulty_by_key[entry.internal_key]
-            .saturating_add(
-                entry
-                    .difficulty
-                    .saturating_mul(DIFFICULTY_SCALE)
-                    .saturating_add(nephew_bonus),
-            );
+        credit(Credit {
+            internal_key: entry.internal_key,
+            owner_key: entry.owner_key,
+            blockhash: entry.blockhash,
+            nephew: None,
+            difficulty: entry.difficulty,
+            weight: entry
+                .difficulty
+                .saturating_mul(DIFFICULTY_SCALE)
+                .saturating_add(nephew_bonus),
+        });
     }
 
     /// Free address-key slots no longer referenced by any cached entry.
@@ -548,17 +1031,17 @@ impl PplnsWindow {
     /// tip-anchored `get_distribution` performed inline.
     fn prune_unreferenced_keys(&mut self) {
         let mut referenced = vec![false; self.address_keys.len()];
+        let mut owner_referenced = vec![false; self.owner_keys.len()];
         for entry in &self.confirmed_entries {
             referenced[entry.internal_key] = true;
+            owner_referenced[entry.owner_key] = true;
             for uncle_entry in &entry.uncle_entries {
                 referenced[uncle_entry.internal_key] = true;
+                owner_referenced[uncle_entry.owner_key] = true;
             }
         }
-        for (index, is_referenced) in referenced.iter().enumerate() {
-            if !is_referenced {
-                self.address_keys.remove(index);
-            }
-        }
+        remove_unreferenced_keys(&mut self.address_keys, &referenced);
+        remove_unreferenced_keys(&mut self.owner_keys, &owner_referenced);
     }
 
     /// Convert the Vec-based difficulty accumulation into a HashMap<Address, u128>.
@@ -745,6 +1228,7 @@ impl PplnsWindow {
                 blockhash,
                 height,
                 header.miner_bitcoin_address,
+                header.miner_address,
                 difficulty,
                 uncle_entries,
             );
@@ -784,16 +1268,19 @@ impl PplnsWindow {
         }
     }
 
-    /// Build a ConfirmedEntry, resolving the miner address to an internal key.
+    /// Build a ConfirmedEntry, resolving the miner address and the share
+    /// owner to internal keys.
     fn build_confirmed_entry(
         &mut self,
         blockhash: BlockHash,
         height: u32,
         miner_address: Address,
+        share_owner: ShareOwner,
         difficulty: u128,
         uncle_entries: Vec<UncleEntry>,
     ) -> ConfirmedEntry {
         let internal_key = self.address_keys.key_for(miner_address);
+        let owner_key = self.owner_keys.key_for(share_owner);
 
         ConfirmedEntry {
             blockhash,
@@ -801,14 +1288,25 @@ impl PplnsWindow {
             difficulty,
             uncle_entries,
             internal_key,
+            owner_key,
         }
     }
 
-    /// Build an UncleEntry, resolving the miner address to an internal key.
-    fn build_uncle_entry(&mut self, miner_address: Address, difficulty: u128) -> UncleEntry {
+    /// Build an UncleEntry, resolving the miner address and the share owner
+    /// to internal keys.
+    fn build_uncle_entry(
+        &mut self,
+        blockhash: BlockHash,
+        miner_address: Address,
+        share_owner: ShareOwner,
+        difficulty: u128,
+    ) -> UncleEntry {
         let internal_key = self.address_keys.key_for(miner_address);
+        let owner_key = self.owner_keys.key_for(share_owner);
         UncleEntry {
+            blockhash,
             internal_key,
+            owner_key,
             difficulty,
         }
     }
@@ -829,10 +1327,40 @@ impl PplnsWindow {
         let mut uncle_lookup = HashMap::with_capacity(uncle_headers.len());
         for (blockhash, header) in uncle_headers {
             let difficulty = header.get_difficulty(self.network);
-            let uncle_entry = self.build_uncle_entry(header.miner_bitcoin_address, difficulty);
+            let uncle_entry = self.build_uncle_entry(
+                blockhash,
+                header.miner_bitcoin_address,
+                header.miner_address,
+                difficulty,
+            );
             uncle_lookup.insert(blockhash, uncle_entry);
         }
         Ok(uncle_lookup)
+    }
+}
+
+/// Key each miner's credits by the value its slot in `keys` holds, keeping
+/// only the miners the window credits.
+fn credited_by_value<T: Clone + Eq + hash::Hash>(
+    keys: &AddressKeys<T>,
+    credits_by_key: Vec<MinerCredits>,
+) -> HashMap<T, MinerCredits> {
+    let mut by_value = HashMap::with_capacity(credits_by_key.len());
+    for (index, miner_credits) in credits_by_key.into_iter().enumerate() {
+        let is_credited = miner_credits.share_count + miner_credits.uncle_count > 0;
+        if is_credited && let Some(value) = keys.value_for(index) {
+            by_value.insert(value.clone(), miner_credits);
+        }
+    }
+    by_value
+}
+
+/// Free each slot of `keys` that `referenced` marks unreferenced.
+fn remove_unreferenced_keys<T: PartialEq>(keys: &mut AddressKeys<T>, referenced: &[bool]) {
+    for (index, is_referenced) in referenced.iter().enumerate() {
+        if !is_referenced {
+            keys.remove(index);
+        }
     }
 }
 
@@ -862,8 +1390,10 @@ fn resolve_uncle_entries(
     for uncle_hash in uncle_hashes {
         if let Some(uncle_entry) = uncle_lookup.get(uncle_hash) {
             entries.push(UncleEntry {
+                blockhash: uncle_entry.blockhash,
                 difficulty: uncle_entry.difficulty,
                 internal_key: uncle_entry.internal_key,
+                owner_key: uncle_entry.owner_key,
             });
         } else {
             tracing::warn!("Uncle header not found for {uncle_hash}, skipping");
@@ -872,13 +1402,20 @@ fn resolve_uncle_entries(
     entries
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+/// Share owner every benchmark entry gets.
+#[cfg(any(test, feature = "test-utils", feature = "sim"))]
+const BENCHMARK_SHARE_OWNER: ShareOwner = ShareOwner::CashP2pkh([0u8; 20]);
+
+#[cfg(any(test, feature = "test-utils", feature = "sim"))]
 impl PplnsWindow {
     /// Populate the window cache directly for benchmarking.
     ///
     /// Accepts confirmed shares and uncles as tuples of primitives,
     /// bypassing the chain store. Confirmed shares should be ordered
     /// newest-to-oldest. Uncle data is provided as (miner_address_string, difficulty).
+    ///
+    /// The payout never reads share owners or uncle hashes, so every entry
+    /// gets the same placeholder owner and uncles the all-zero hash.
     #[allow(clippy::type_complexity)] // benchmark-only shim: tuples mirror the store rows verbatim
     pub fn populate_for_benchmark(
         &mut self,
@@ -897,7 +1434,12 @@ impl PplnsWindow {
                     .parse::<bitcoin::Address<_>>()
                     .unwrap()
                     .assume_checked();
-                uncle_entries.push(self.build_uncle_entry(uncle_miner, uncle_difficulty));
+                uncle_entries.push(self.build_uncle_entry(
+                    BlockHash::all_zeros(),
+                    uncle_miner,
+                    BENCHMARK_SHARE_OWNER,
+                    uncle_difficulty,
+                ));
             }
 
             let miner_address = miner_address_string
@@ -909,6 +1451,7 @@ impl PplnsWindow {
                 blockhash,
                 height,
                 miner_address,
+                BENCHMARK_SHARE_OWNER,
                 difficulty,
                 uncle_entries,
             );
@@ -927,6 +1470,25 @@ impl PplnsWindow {
     pub fn prune_unreferenced_keys_for_benchmark(&mut self) {
         self.prune_unreferenced_keys();
     }
+
+    /// Distribution for an anchor that is already cached, without a chain
+    /// store, for benchmarks and the offline payout simulation.
+    ///
+    /// Runs the same skip, window walk and truncation check as
+    /// `get_distribution_from_start_hash`. Errors with `ReadFailure` when the
+    /// anchor is not cached.
+    pub fn distribution_for_cached_anchor(
+        &self,
+        start_hash: BlockHash,
+        paying_block_difficulty: u128,
+    ) -> Result<HashMap<Address, u128>, WindowError> {
+        let confirmed_start_index = self.find_start_index(start_hash).ok_or_else(|| {
+            WindowError::ReadFailure(format!("anchor {start_hash} is not cached").into())
+        })?;
+        let resolved =
+            self.resolved_window(Vec::new(), confirmed_start_index, paying_block_difficulty);
+        self.distribution_for_resolved(start_hash, &resolved)
+    }
 }
 
 #[cfg(test)]
@@ -941,6 +1503,7 @@ mockall::mock! {
         pub fn get_distribution_from_start_hash(
             &mut self,
             start_hash: BlockHash,
+            paying_block_difficulty: u128,
             chain_store_handle: &ChainStoreHandle,
         ) -> Result<HashMap<Address, u128>, WindowError>;
     }
@@ -953,14 +1516,18 @@ mod tests {
     use crate::shares::share_block::ShareHeader;
     use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
     use crate::test_utils::{
-        PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G, PUBKEY_G, build_test_header,
-        build_test_header_with_uncles,
+        PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G, PUBKEY_G, TestShareBlockBuilder,
+        build_test_header, build_test_header_with_uncles,
     };
-    use bitcoin::Work;
     use bitcoin::hashes::Hash;
+    use bitcoin::{Network, Work};
 
     /// Network used for test difficulty calculations.
     const TEST_NETWORK: bitcoin::Network = bitcoin::Network::Signet;
+
+    /// Paying block difficulty for tests of the fixed Bitcoin window, which
+    /// does not read it.
+    const BITCOIN_BLOCK_DIFFICULTY: u128 = 1;
 
     /// Create a ConfirmedEntry from a ShareHeader with no uncles.
     fn entry_from_header(
@@ -972,6 +1539,7 @@ mod tests {
             header.block_hash(),
             height,
             header.miner_bitcoin_address.clone(),
+            header.miner_address,
             header.get_difficulty(TEST_NETWORK),
             Vec::new(),
         )
@@ -988,6 +1556,7 @@ mod tests {
             header.block_hash(),
             height,
             header.miner_bitcoin_address.clone(),
+            header.miner_address,
             header.get_difficulty(TEST_NETWORK),
             uncle_entries,
         )
@@ -996,7 +1565,9 @@ mod tests {
     /// Create an UncleEntry from a ShareHeader for test setup.
     fn uncle_entry_from_header(window: &mut PplnsWindow, header: &ShareHeader) -> UncleEntry {
         window.build_uncle_entry(
+            header.block_hash(),
             header.miner_bitcoin_address.clone(),
+            header.miner_address,
             header.get_difficulty(TEST_NETWORK),
         )
     }
@@ -1367,6 +1938,7 @@ mod tests {
                 BlockHash::all_zeros(),
                 index as u32 + 2,
                 padding_address.clone(),
+                header_a.miner_address,
                 1u128,
                 Vec::new(),
             );
@@ -1402,6 +1974,7 @@ mod tests {
         let result = window
             .get_distribution_from_start_hash(
                 header2.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
                 &MockChainStoreHandle::default(),
             )
             .expect("tip should be in window");
@@ -1439,6 +2012,7 @@ mod tests {
         let result = window
             .get_distribution_from_start_hash(
                 header2.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
                 &MockChainStoreHandle::default(),
             )
             .expect("header2 should be in window");
@@ -1457,6 +2031,7 @@ mod tests {
         let result = window
             .get_distribution_from_start_hash(
                 header1.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
                 &MockChainStoreHandle::default(),
             )
             .expect("header1 should be in window");
@@ -1489,7 +2064,11 @@ mod tests {
                 "not found".into(),
             ))
         });
-        let result = window.get_distribution_from_start_hash(unknown_hash, &mock_store);
+        let result = window.get_distribution_from_start_hash(
+            unknown_hash,
+            BITCOIN_BLOCK_DIFFICULTY,
+            &mock_store,
+        );
         assert!(result.is_err());
     }
 
@@ -1516,6 +2095,7 @@ mod tests {
         let result = window
             .get_distribution_from_start_hash(
                 nephew_header.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
                 &MockChainStoreHandle::default(),
             )
             .expect("nephew should be in window");
@@ -1779,7 +2359,11 @@ mod tests {
 
         // All 3 shares are by PUBKEY_G
         let dist = window
-            .get_distribution_from_start_hash(tip_a, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                tip_a,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .expect("tip should be in window");
         assert_eq!(dist.len(), 1);
         assert_eq!(dist[miner_g], 3 * difficulty * DIFFICULTY_SCALE);
@@ -1829,7 +2413,11 @@ mod tests {
 
         // Now: 2 shares by PUBKEY_G (heights 0-1) + 1 share by PUBKEY_2G (height 2)
         let dist = window
-            .get_distribution_from_start_hash(fork_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                fork_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .expect("fork tip should be in window");
         assert_eq!(dist.len(), 2);
         assert_eq!(
@@ -2063,7 +2651,11 @@ mod tests {
         assert_eq!(window.confirmed_entries.len(), 3);
 
         let distribution = window
-            .get_distribution_from_start_hash(tip_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                tip_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .expect("tip should be in window");
         assert!(
             !distribution.contains_key(&evicted_only_miner),
@@ -2198,6 +2790,7 @@ mod tests {
         // share_a (confirmed) is findable in the window
         let result = window.get_distribution_from_start_hash(
             share_a.block_hash(),
+            BITCOIN_BLOCK_DIFFICULTY,
             &MockChainStoreHandle::default(),
         );
         assert!(
@@ -2242,8 +2835,11 @@ mod tests {
             share_b.block_hash(),
             "share_c's parent is share_b"
         );
-        let result =
-            window.get_distribution_from_start_hash(share_c.prev_share_blockhash, &mock_store);
+        let result = window.get_distribution_from_start_hash(
+            share_c.prev_share_blockhash,
+            BITCOIN_BLOCK_DIFFICULTY,
+            &mock_store,
+        );
         assert!(
             result.is_ok(),
             "share_c must be able to find its parent share_b in the PPLNS window during sync"
@@ -2326,7 +2922,11 @@ mod tests {
         window.update(&mock1).unwrap();
 
         let before = window
-            .get_distribution_from_start_hash(parent_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                parent_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .expect("parent is in the window at the tip");
 
         // Update 2: tip = sibling (height 4). Simple extension -> loads
@@ -2355,7 +2955,11 @@ mod tests {
         window.update(&mock2).unwrap();
 
         let after = window
-            .get_distribution_from_start_hash(parent_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                parent_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .expect("parent is still in the window after the sibling promotion");
 
         assert_eq!(
@@ -2420,7 +3024,11 @@ mod tests {
         window.update(&mock1).unwrap();
 
         let before = window
-            .get_distribution_from_start_hash(parent_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                parent_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .expect("the anchor has a full window of cached entries below it");
 
         // Tip = sibling (height 4). Cache becomes [sibling, parent, c, b]:
@@ -2448,7 +3056,11 @@ mod tests {
         window.update(&mock2).unwrap();
 
         let after = window
-            .get_distribution_from_start_hash(parent_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                parent_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .expect("the anchor still has a full window of cached entries below it");
 
         assert_eq!(
@@ -2508,7 +3120,11 @@ mod tests {
         window.update(&store).unwrap();
 
         let distribution = window
-            .get_distribution_from_start_hash(parent_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                parent_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .unwrap();
 
         // parent, c and b: the last three shares, one miner each; `a` is
@@ -2563,7 +3179,11 @@ mod tests {
         window.update(&store).unwrap();
 
         let distribution = window
-            .get_distribution_from_start_hash(parent_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                parent_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .unwrap();
 
         assert_eq!(distribution.len(), 4);
@@ -2627,7 +3247,11 @@ mod tests {
         // Cache is capped at MAX_SHARES + 1, so it holds [sibling, parent, c, b]
         // and `a` is evicted: the back no longer reaches the chain start.
         let error = window
-            .get_distribution_from_start_hash(c.block_hash(), &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                c.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .expect_err("only two entries are cached below the anchor, short of the window");
         assert!(
             error.to_string().contains("truncated by eviction"),
@@ -2663,7 +3287,11 @@ mod tests {
         window.update(&store).unwrap();
 
         let distribution = window
-            .get_distribution_from_start_hash(tip_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                tip_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .unwrap();
 
         assert_eq!(distribution.len(), 2);
@@ -2708,7 +3336,11 @@ mod tests {
             .returning(|_| Ok(Vec::new()));
 
         let distribution = window
-            .get_distribution_from_start_hash(candidate_hash, &candidate_store)
+            .get_distribution_from_start_hash(
+                candidate_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &candidate_store,
+            )
             .unwrap();
 
         assert_eq!(distribution.len(), 2);
@@ -2740,7 +3372,11 @@ mod tests {
         window.update(&store).unwrap();
 
         let error = window
-            .get_distribution_from_start_hash(height_four_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                height_four_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .expect_err("the skip leaves one cached entry below the anchor, short of the window");
 
         assert!(
@@ -2768,7 +3404,11 @@ mod tests {
         window.update(&store).unwrap();
 
         let distribution = window
-            .get_distribution_from_start_hash(tip_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                tip_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .unwrap();
 
         assert_eq!(distribution.len(), 2);
@@ -2796,7 +3436,11 @@ mod tests {
         window.update(&store).unwrap();
 
         let distribution = window
-            .get_distribution_from_start_hash(tip_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                tip_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .unwrap();
 
         assert_eq!(distribution.len(), 3);
@@ -2827,11 +3471,903 @@ mod tests {
         window.update(&store).unwrap();
 
         let distribution = window
-            .get_distribution_from_start_hash(tip_hash, &MockChainStoreHandle::default())
+            .get_distribution_from_start_hash(
+                tip_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
             .unwrap();
 
         assert_eq!(distribution.len(), 3);
         assert!(!distribution.contains_key(&height_four_miner));
         assert!(!distribution.contains_key(&height_three_miner));
+    }
+
+    //* The credits walk and weigh the window exactly as the distribution
+    //* does: every payout address gets its distribution entry, a nephew's
+    //* weight is its scaled difficulty plus the bonus for the uncle it
+    //* includes, and the window total is the sum of the distribution.
+    #[test]
+    fn test_window_credits_match_the_distribution_for_every_payout_address() {
+        let genesis_hash = BlockHash::all_zeros();
+        let header_one = build_test_header(&genesis_hash.to_string(), PUBKEY_2G, 2);
+        let uncle_header = build_test_header(&genesis_hash.to_string(), PUBKEY_3G, 2);
+        let nephew_header = build_test_header_with_uncles(
+            &header_one.block_hash().to_string(),
+            PUBKEY_G,
+            2,
+            vec![uncle_header.block_hash()],
+        );
+
+        let mut window = PplnsWindow::new(TEST_NETWORK);
+        let uncle_entry = uncle_entry_from_header(&mut window, &uncle_header);
+        let nephew_entry =
+            entry_from_header_with_uncles(&mut window, &nephew_header, 1, vec![uncle_entry]);
+        let entry_one = entry_from_header(&mut window, &header_one, 0);
+        window.confirmed_entries.push_back(nephew_entry);
+        window.confirmed_entries.push_back(entry_one);
+
+        let distribution = window
+            .get_distribution_from_start_hash(
+                nephew_header.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
+            .unwrap();
+        let window_credits = window
+            .get_window_credits_from_start_hash(
+                nephew_header.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+                10,
+            )
+            .unwrap();
+
+        let nephew_miner = &nephew_header.miner_bitcoin_address;
+        let uncle_miner = &uncle_header.miner_bitcoin_address;
+        let miner_one = &header_one.miner_bitcoin_address;
+        assert_eq!(window_credits.by_payout_address.len(), distribution.len());
+        assert_eq!(
+            window_credits.by_payout_address[nephew_miner].weight,
+            distribution[nephew_miner]
+        );
+        assert_eq!(
+            window_credits.by_payout_address[uncle_miner].weight,
+            distribution[uncle_miner]
+        );
+        assert_eq!(
+            window_credits.by_payout_address[miner_one].weight,
+            distribution[miner_one]
+        );
+        assert_eq!(
+            window_credits.window_weight,
+            distribution.values().sum::<u128>()
+        );
+        assert_eq!(window_credits.anchor_height, 1);
+        assert_eq!(window_credits.window_share_count, 2);
+        assert_eq!(window_credits.newest_height, Some(1));
+        assert_eq!(window_credits.oldest_height, Some(0));
+        let nephew_credits = &window_credits.by_payout_address[nephew_miner];
+        assert_eq!(nephew_credits.share_count, 1);
+        assert_eq!(nephew_credits.uncle_count, 0);
+        assert_eq!(
+            nephew_credits.credits,
+            vec![WindowCredit {
+                blockhash: nephew_header.block_hash(),
+                height: 1,
+                nephew: None,
+                difficulty: nephew_header.get_difficulty(TEST_NETWORK),
+                weight: distribution[nephew_miner],
+                payout_address: nephew_miner.clone(),
+            }]
+        );
+    }
+
+    //* An uncle is credited at the height of the window share that includes
+    //* it, and the credit names both the uncle and that nephew.
+    #[test]
+    fn test_window_credits_list_an_uncle_at_its_nephew_height() {
+        let genesis_hash = BlockHash::all_zeros();
+        let header_one = build_test_header(&genesis_hash.to_string(), PUBKEY_2G, 2);
+        let uncle_header = build_test_header(&genesis_hash.to_string(), PUBKEY_3G, 2);
+        let uncle_difficulty = uncle_header.get_difficulty(TEST_NETWORK);
+        let nephew_header = build_test_header_with_uncles(
+            &header_one.block_hash().to_string(),
+            PUBKEY_G,
+            2,
+            vec![uncle_header.block_hash()],
+        );
+
+        let mut window = PplnsWindow::new(TEST_NETWORK);
+        let uncle_entry = uncle_entry_from_header(&mut window, &uncle_header);
+        let nephew_entry =
+            entry_from_header_with_uncles(&mut window, &nephew_header, 1, vec![uncle_entry]);
+        let entry_one = entry_from_header(&mut window, &header_one, 0);
+        window.confirmed_entries.push_back(nephew_entry);
+        window.confirmed_entries.push_back(entry_one);
+
+        let window_credits = window
+            .get_window_credits_from_start_hash(
+                nephew_header.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+                10,
+            )
+            .unwrap();
+
+        let uncle_credits = &window_credits.by_payout_address[&uncle_header.miner_bitcoin_address];
+        assert_eq!(uncle_credits.share_count, 0);
+        assert_eq!(uncle_credits.uncle_count, 1);
+        assert_eq!(uncle_credits.weight, uncle_difficulty * UNCLE_SCALED_WEIGHT);
+        assert_eq!(
+            uncle_credits.credits,
+            vec![WindowCredit {
+                blockhash: uncle_header.block_hash(),
+                height: 1,
+                nephew: Some(nephew_header.block_hash()),
+                difficulty: uncle_difficulty,
+                weight: uncle_difficulty * UNCLE_SCALED_WEIGHT,
+                payout_address: uncle_header.miner_bitcoin_address.clone(),
+            }]
+        );
+    }
+
+    //* Two shares pay the same payout address but name different share
+    //* owners. Each owner gets only its own share and the payout address
+    //* that share names, while the payout address gets both.
+    #[test]
+    fn test_window_credits_key_share_owners_apart_from_payout_addresses() {
+        let genesis_hash = BlockHash::all_zeros();
+        let owner_one = ShareOwner::CashP2pkh([0x11; 20]);
+        let owner_two = ShareOwner::CashP2pkh([0x22; 20]);
+        let header_one = TestShareBlockBuilder::new()
+            .prev_share_blockhash(genesis_hash.to_string())
+            .miner_pubkey(PUBKEY_G)
+            .share_owner(owner_one)
+            .build()
+            .header;
+        let header_two = TestShareBlockBuilder::new()
+            .prev_share_blockhash(header_one.block_hash().to_string())
+            .miner_pubkey(PUBKEY_G)
+            .share_owner(owner_two)
+            .build()
+            .header;
+
+        let mut window = PplnsWindow::new(TEST_NETWORK);
+        let entry_two = entry_from_header(&mut window, &header_two, 1);
+        let entry_one = entry_from_header(&mut window, &header_one, 0);
+        window.confirmed_entries.push_back(entry_two);
+        window.confirmed_entries.push_back(entry_one);
+
+        let window_credits = window
+            .get_window_credits_from_start_hash(
+                header_two.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+                10,
+            )
+            .unwrap();
+
+        let weight_one = header_one.get_difficulty(TEST_NETWORK) * DIFFICULTY_SCALE;
+        let owner_one_credits = &window_credits.by_share_owner[&owner_one];
+        assert_eq!(owner_one_credits.share_count, 1);
+        assert_eq!(owner_one_credits.weight, weight_one);
+        assert_eq!(owner_one_credits.credits.len(), 1);
+        assert_eq!(
+            owner_one_credits.credits[0].blockhash,
+            header_one.block_hash()
+        );
+        assert_eq!(owner_one_credits.credits[0].height, 0);
+        assert_eq!(
+            owner_one_credits.credits[0].payout_address,
+            header_one.miner_bitcoin_address
+        );
+        assert_eq!(window_credits.by_share_owner[&owner_two].share_count, 1);
+        assert_eq!(
+            window_credits.by_payout_address[&header_one.miner_bitcoin_address].share_count,
+            2
+        );
+    }
+
+    //* A miner with nothing in the window is absent, and the window's totals
+    //* are still there.
+    #[test]
+    fn test_window_credits_leave_out_a_miner_with_nothing_in_the_window() {
+        let genesis_hash = BlockHash::all_zeros();
+        let header_one = build_test_header(&genesis_hash.to_string(), PUBKEY_G, 2);
+        let header_two = build_test_header(&header_one.block_hash().to_string(), PUBKEY_2G, 2);
+        let unknown = build_test_header(&genesis_hash.to_string(), PUBKEY_3G, 2);
+
+        let mut window = PplnsWindow::new(TEST_NETWORK);
+        let entry_two = entry_from_header(&mut window, &header_two, 1);
+        let entry_one = entry_from_header(&mut window, &header_one, 0);
+        window.confirmed_entries.push_back(entry_two);
+        window.confirmed_entries.push_back(entry_one);
+
+        let window_credits = window
+            .get_window_credits_from_start_hash(
+                header_two.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+                10,
+            )
+            .unwrap();
+
+        let window_weight = (header_one.get_difficulty(TEST_NETWORK)
+            + header_two.get_difficulty(TEST_NETWORK))
+            * DIFFICULTY_SCALE;
+        assert_eq!(window_credits.window_share_count, 2);
+        assert_eq!(window_credits.window_weight, window_weight);
+        assert!(
+            !window_credits
+                .by_payout_address
+                .contains_key(&unknown.miner_bitcoin_address)
+        );
+        assert!(
+            !window_credits
+                .by_share_owner
+                .contains_key(&unknown.miner_address)
+        );
+    }
+
+    //* The listed credits stop at the requested number, newest first, while
+    //* the counts and the weight still cover every share in the window.
+    #[test]
+    fn test_window_credits_cap_listed_credits() {
+        let genesis_hash = BlockHash::all_zeros();
+        let header_one = build_test_header(&genesis_hash.to_string(), PUBKEY_G, 2);
+        let header_two = build_test_header(&header_one.block_hash().to_string(), PUBKEY_G, 2);
+        let header_three = build_test_header(&header_two.block_hash().to_string(), PUBKEY_G, 2);
+
+        let mut window = PplnsWindow::new(TEST_NETWORK);
+        let entry_three = entry_from_header(&mut window, &header_three, 2);
+        let entry_two = entry_from_header(&mut window, &header_two, 1);
+        let entry_one = entry_from_header(&mut window, &header_one, 0);
+        window.confirmed_entries.push_back(entry_three);
+        window.confirmed_entries.push_back(entry_two);
+        window.confirmed_entries.push_back(entry_one);
+
+        let window_credits = window
+            .get_window_credits_from_start_hash(
+                header_three.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+                2,
+            )
+            .unwrap();
+
+        let miner_credits = &window_credits.by_payout_address[&header_one.miner_bitcoin_address];
+        assert_eq!(miner_credits.share_count, 3);
+        assert_eq!(miner_credits.weight, window_credits.window_weight);
+        assert_eq!(miner_credits.credits.len(), 2);
+        assert_eq!(
+            miner_credits.credits[0].blockhash,
+            header_three.block_hash()
+        );
+        assert_eq!(miner_credits.credits[1].blockhash, header_two.block_hash());
+    }
+
+    //* Same chain as test_distribution_skips_immature_shares_from_anchor:
+    //* heights 5 and 4 are immature and the window is heights 3 and 2, so the
+    //* height four miner has nothing in it.
+    #[test]
+    fn test_window_credits_skip_immature_shares_like_the_distribution() {
+        let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
+        let (headers, tip_hash) = build_test_chain(6, &miners);
+        let height_four_miner = headers[1].header.miner_bitcoin_address.clone();
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+        store
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(5)));
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(headers.clone()));
+        let mut window = PplnsWindow::new_with_window_sizes(TEST_NETWORK, 3, 2);
+        window.update(&store).unwrap();
+
+        let window_credits = window
+            .get_window_credits_from_start_hash(
+                tip_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+                10,
+            )
+            .unwrap();
+
+        assert_eq!(window_credits.anchor_height, 5);
+        assert_eq!(window_credits.newest_height, Some(3));
+        assert_eq!(window_credits.oldest_height, Some(2));
+        assert_eq!(window_credits.window_share_count, 2);
+        assert!(
+            !window_credits
+                .by_payout_address
+                .contains_key(&height_four_miner)
+        );
+    }
+
+    //* A candidate anchor above the confirmed tip is cached with no height;
+    //* the credits give it its real one. The confirmed chain is heights 0..=4
+    //* and PUBKEY_G mined height 0 and the candidate at height 5.
+    #[test]
+    fn test_window_credits_give_candidate_entries_their_heights() {
+        let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
+        let (headers, tip_hash) = build_test_chain(5, &miners);
+        let height_zero_hash = headers[4].blockhash;
+        let candidate = build_test_header(&tip_hash.to_string(), PUBKEY_G, 2);
+        let candidate_hash = candidate.block_hash();
+        let candidate_miner = candidate.miner_bitcoin_address.clone();
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+        store
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(4)));
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(headers.clone()));
+        let mut window = PplnsWindow::new_with_window_sizes(TEST_NETWORK, 0, 10);
+        window.update(&store).unwrap();
+        let mut candidate_store = MockChainStoreHandle::default();
+        candidate_store
+            .expect_get_share_header()
+            .withf(move |hash| *hash == candidate_hash)
+            .returning(move |_| Ok(candidate.clone()));
+        candidate_store
+            .expect_get_share_headers()
+            .returning(|_| Ok(Vec::new()));
+
+        let window_credits = window
+            .get_window_credits_from_start_hash(
+                candidate_hash,
+                BITCOIN_BLOCK_DIFFICULTY,
+                &candidate_store,
+                10,
+            )
+            .unwrap();
+
+        let miner_credits = &window_credits.by_payout_address[&candidate_miner];
+        assert_eq!(window_credits.window_share_count, 6);
+        assert_eq!(window_credits.newest_height, Some(5));
+        assert_eq!(miner_credits.share_count, 2);
+        assert_eq!(miner_credits.credits[0].blockhash, candidate_hash);
+        assert_eq!(miner_credits.credits[0].height, 5);
+        assert_eq!(miner_credits.credits[1].blockhash, height_zero_hash);
+        assert_eq!(miner_credits.credits[1].height, 0);
+    }
+
+    //* Same cache as test_distribution_errors_when_eviction_truncates_the_window:
+    //* the credits refuse the truncated window just as the distribution does.
+    #[test]
+    fn test_window_credits_error_when_eviction_truncates_the_window() {
+        const MAX_SHARES: usize = 3;
+        let genesis = BlockHash::all_zeros();
+
+        let a = build_test_header(&genesis.to_string(), PUBKEY_G, 2);
+        let b = build_test_header(&a.block_hash().to_string(), PUBKEY_2G, 2);
+        let c = build_test_header(&b.block_hash().to_string(), PUBKEY_3G, 2);
+        let parent = build_test_header(&c.block_hash().to_string(), PUBKEY_4G, 2);
+        let sibling = build_test_header(&parent.block_hash().to_string(), PUBKEY_5G, 2);
+
+        let mut window = PplnsWindow::new_with_window_sizes(TEST_NETWORK, 0, MAX_SHARES);
+
+        let all_headers = vec![
+            ConfirmedHeaderResult {
+                height: 4,
+                blockhash: sibling.block_hash(),
+                header: sibling.clone(),
+            },
+            ConfirmedHeaderResult {
+                height: 3,
+                blockhash: parent.block_hash(),
+                header: parent.clone(),
+            },
+            ConfirmedHeaderResult {
+                height: 2,
+                blockhash: c.block_hash(),
+                header: c.clone(),
+            },
+            ConfirmedHeaderResult {
+                height: 1,
+                blockhash: b.block_hash(),
+                header: b.clone(),
+            },
+            ConfirmedHeaderResult {
+                height: 0,
+                blockhash: a.block_hash(),
+                header: a.clone(),
+            },
+        ];
+        let sibling_tip = sibling.block_hash();
+        let mut mock = MockChainStoreHandle::default();
+        mock.expect_get_chain_tip()
+            .returning(move || Ok(sibling_tip));
+        mock.expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(4)));
+        mock.expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(all_headers.clone()));
+        window.update(&mock).unwrap();
+
+        let error = window
+            .get_window_credits_from_start_hash(
+                c.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+                10,
+            )
+            .expect_err("only two entries are cached below the anchor, short of the window");
+        assert!(
+            error.to_string().contains("truncated by eviction"),
+            "unexpected error: {error}"
+        );
+    }
+
+    //* Share owners are interned like payout addresses, and freed with them
+    //* once the last entry naming one is evicted.
+    #[test]
+    fn test_update_prunes_owner_key_of_evicted_share() {
+        let genesis_hash = BlockHash::all_zeros();
+        let header_a = build_test_header(&genesis_hash.to_string(), PUBKEY_G, 2);
+        let header_b = build_test_header(&header_a.block_hash().to_string(), PUBKEY_2G, 2);
+
+        let mut window = PplnsWindow::new(TEST_NETWORK);
+        let entry_b = entry_from_header(&mut window, &header_b, 1);
+        let entry_a = entry_from_header(&mut window, &header_a, 0);
+        let owner_key_a = entry_a.owner_key;
+        let owner_key_b = entry_b.owner_key;
+        window.confirmed_entries.push_back(entry_b);
+        window.confirmed_entries.push_back(entry_a);
+        assert_eq!(
+            window.owner_keys.value_for(owner_key_a),
+            Some(&header_a.miner_address)
+        );
+
+        window.confirmed_entries.pop_back();
+        window.prune_unreferenced_keys();
+
+        assert_eq!(window.owner_keys.value_for(owner_key_a), None);
+        assert_eq!(
+            window.owner_keys.value_for(owner_key_b),
+            Some(&header_b.miner_address)
+        );
+    }
+
+    //* Bitcoin Cash window tests. Unless noted, five shares at heights 4 down
+    //* to 0, one miner each, all of the same difficulty `share_difficulty`.
+    //* There is no maturity skip and the cap is four shares, so the walk
+    //* starts at the anchor (height 4) and the cap alone pays heights 4 to 1.
+    //* A paying block difficulty equal to `share_difficulty` means every
+    //* share is one block's worth of work: the large pool regime.
+
+    #[test]
+    fn test_bch_window_large_pool_pays_three_blocks_of_work() {
+        let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
+        let (headers, tip_hash) = build_test_chain(5, &miners);
+        let share_difficulty = headers[0].header.get_difficulty(TEST_NETWORK);
+        let height_four_miner = headers[0].header.miner_bitcoin_address.clone();
+        let height_three_miner = headers[1].header.miner_bitcoin_address.clone();
+        let height_two_miner = headers[2].header.miner_bitcoin_address.clone();
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+        store
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(4)));
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(headers.clone()));
+        let mut window = PplnsWindow::new(TEST_NETWORK)
+            .for_chain(Chain::BitcoinCash)
+            .with_window_sizes(0, 4);
+        window.update(&store).unwrap();
+
+        let distribution = window
+            .get_distribution_from_start_hash(
+                tip_hash,
+                share_difficulty,
+                &MockChainStoreHandle::default(),
+            )
+            .unwrap();
+
+        assert_eq!(distribution.len(), 3);
+        assert_eq!(
+            distribution[&height_four_miner],
+            share_difficulty * DIFFICULTY_SCALE
+        );
+        assert_eq!(
+            distribution[&height_three_miner],
+            share_difficulty * DIFFICULTY_SCALE
+        );
+        assert_eq!(
+            distribution[&height_two_miner],
+            share_difficulty * DIFFICULTY_SCALE
+        );
+    }
+
+    //* A target of three blocks plus three difficulty units is not reached by
+    //* heights 4 to 2, so height 1, the share that reaches it, is paid too.
+    //* The cap is five shares here, so height 0 is left out by the target.
+    #[test]
+    fn test_bch_window_includes_the_share_that_reaches_the_work_target() {
+        let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
+        let (headers, tip_hash) = build_test_chain(5, &miners);
+        let share_difficulty = headers[0].header.get_difficulty(TEST_NETWORK);
+        let height_one_miner = headers[3].header.miner_bitcoin_address.clone();
+        let height_zero_miner = headers[4].header.miner_bitcoin_address.clone();
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+        store
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(4)));
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(headers.clone()));
+        let mut window = PplnsWindow::new(TEST_NETWORK)
+            .for_chain(Chain::BitcoinCash)
+            .with_window_sizes(0, 5);
+        window.update(&store).unwrap();
+
+        let distribution = window
+            .get_distribution_from_start_hash(
+                tip_hash,
+                share_difficulty + 1,
+                &MockChainStoreHandle::default(),
+            )
+            .unwrap();
+
+        assert_eq!(distribution.len(), 4);
+        assert!(distribution.contains_key(&height_one_miner));
+        assert!(!distribution.contains_key(&height_zero_miner));
+    }
+
+    //* A block worth 100 shares asks for 300 shares of work, more than the
+    //* four-share cap: the small pool regime pays the capped window, heights
+    //* 4 to 1, and height 0 is left out.
+    #[test]
+    fn test_bch_window_small_pool_is_capped_at_window_shares() {
+        let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
+        let (headers, tip_hash) = build_test_chain(5, &miners);
+        let share_difficulty = headers[0].header.get_difficulty(TEST_NETWORK);
+        let height_zero_miner = headers[4].header.miner_bitcoin_address.clone();
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+        store
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(4)));
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(headers.clone()));
+        let mut window = PplnsWindow::new(TEST_NETWORK)
+            .for_chain(Chain::BitcoinCash)
+            .with_window_sizes(0, 4);
+        window.update(&store).unwrap();
+
+        let distribution = window
+            .get_distribution_from_start_hash(
+                tip_hash,
+                share_difficulty * 100,
+                &MockChainStoreHandle::default(),
+            )
+            .unwrap();
+
+        assert_eq!(distribution.len(), 4);
+        assert!(!distribution.contains_key(&height_zero_miner));
+    }
+
+    //* A chipnet block mined under the 20-minute rule has difficulty 1. It
+    //* must not shrink the window to one share: it pays the capped window,
+    //* heights 4 to 1, as a fixed window would.
+    #[test]
+    fn test_bch_window_minimum_difficulty_block_pays_the_capped_window() {
+        let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
+        let (headers, tip_hash) = build_test_chain(5, &miners);
+        let height_zero_miner = headers[4].header.miner_bitcoin_address.clone();
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+        store
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(4)));
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(headers.clone()));
+        let mut window = PplnsWindow::new(TEST_NETWORK)
+            .for_chain(Chain::BitcoinCash)
+            .with_window_sizes(0, 4);
+        window.update(&store).unwrap();
+        let chipnet_minimum_difficulty =
+            bitcoin_block_difficulty(CompactTarget::from_consensus(0x1d00ffff), Network::Testnet);
+
+        let distribution = window
+            .get_distribution_from_start_hash(
+                tip_hash,
+                chipnet_minimum_difficulty,
+                &MockChainStoreHandle::default(),
+            )
+            .unwrap();
+
+        assert_eq!(distribution.len(), 4);
+        assert!(!distribution.contains_key(&height_zero_miner));
+    }
+
+    //* Bits easier than the proof-of-work limit give difficulty 0. They size
+    //* nothing either, so they also pay the capped window.
+    #[test]
+    fn test_bch_window_zero_difficulty_block_pays_the_capped_window() {
+        let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
+        let (headers, tip_hash) = build_test_chain(5, &miners);
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+        store
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(4)));
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(headers.clone()));
+        let mut window = PplnsWindow::new(TEST_NETWORK)
+            .for_chain(Chain::BitcoinCash)
+            .with_window_sizes(0, 4);
+        window.update(&store).unwrap();
+
+        let distribution = window
+            .get_distribution_from_start_hash(tip_hash, 0, &MockChainStoreHandle::default())
+            .unwrap();
+
+        assert_eq!(distribution.len(), 4);
+    }
+
+    //* Difficulty 2 is the easiest block that sizes the window: six units of
+    //* work, which the anchor's share alone holds.
+    #[test]
+    fn test_bch_window_difficulty_two_block_is_sized() {
+        let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
+        let (headers, tip_hash) = build_test_chain(5, &miners);
+        let height_four_miner = headers[0].header.miner_bitcoin_address.clone();
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+        store
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(4)));
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(headers.clone()));
+        let mut window = PplnsWindow::new(TEST_NETWORK)
+            .for_chain(Chain::BitcoinCash)
+            .with_window_sizes(0, 4);
+        window.update(&store).unwrap();
+
+        let distribution = window
+            .get_distribution_from_start_hash(tip_hash, 2, &MockChainStoreHandle::default())
+            .unwrap();
+
+        assert_eq!(distribution.len(), 1);
+        assert!(distribution.contains_key(&height_four_miner));
+    }
+
+    //* Bitcoin keeps upstream's fixed window: a block worth one share still
+    //* pays the four-share window.
+    #[test]
+    fn test_bitcoin_window_ignores_paying_block_difficulty() {
+        let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
+        let (headers, tip_hash) = build_test_chain(5, &miners);
+        let share_difficulty = headers[0].header.get_difficulty(TEST_NETWORK);
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+        store
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(4)));
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(headers.clone()));
+        let mut window = PplnsWindow::new(TEST_NETWORK)
+            .for_chain(Chain::Bitcoin)
+            .with_window_sizes(0, 4);
+        window.update(&store).unwrap();
+
+        let distribution = window
+            .get_distribution_from_start_hash(
+                tip_hash,
+                share_difficulty,
+                &MockChainStoreHandle::default(),
+            )
+            .unwrap();
+
+        assert_eq!(distribution.len(), 4);
+    }
+
+    //* An uncle's work counts towards the target. The share at height 1 and
+    //* its uncle hold three blocks' worth together, so the window ends there
+    //* and the share at height 0 is not paid, though the uncle takes no slot.
+    #[test]
+    fn test_bch_window_counts_uncle_work_towards_the_target() {
+        let genesis_hash = BlockHash::all_zeros();
+        let header_a = build_test_header(&genesis_hash.to_string(), PUBKEY_G, 2);
+        let uncle = build_test_header(&genesis_hash.to_string(), PUBKEY_2G, 2);
+        let header_b = build_test_header_with_uncles(
+            &header_a.block_hash().to_string(),
+            PUBKEY_3G,
+            2,
+            vec![uncle.block_hash()],
+        );
+        let share_difficulty = header_b.get_difficulty(TEST_NETWORK);
+        let uncle_difficulty = uncle.get_difficulty(TEST_NETWORK);
+        let mut window = PplnsWindow::new(TEST_NETWORK)
+            .for_chain(Chain::BitcoinCash)
+            .with_window_sizes(0, 4);
+        let uncle_entry = uncle_entry_from_header(&mut window, &uncle);
+        let entry_b = entry_from_header_with_uncles(&mut window, &header_b, 1, vec![uncle_entry]);
+        let entry_a = entry_from_header(&mut window, &header_a, 0);
+        window.confirmed_entries.push_back(entry_b);
+        window.confirmed_entries.push_back(entry_a);
+
+        let distribution = window
+            .get_distribution_from_start_hash(
+                header_b.block_hash(),
+                (share_difficulty + uncle_difficulty) / 3,
+                &MockChainStoreHandle::default(),
+            )
+            .unwrap();
+
+        assert_eq!(distribution.len(), 2);
+        assert_eq!(
+            distribution[&header_b.miner_bitcoin_address],
+            share_difficulty * DIFFICULTY_SCALE + uncle_difficulty * NEPHEW_SCALED_BONUS
+        );
+        assert_eq!(
+            distribution[&uncle.miner_bitcoin_address],
+            uncle_difficulty * UNCLE_SCALED_WEIGHT
+        );
+        assert!(!distribution.contains_key(&header_a.miner_bitcoin_address));
+    }
+
+    //* As in test_distribution_refuses_when_skip_and_window_exceed_cache, the
+    //* cache holds heights 7 down to 2 and the walk anchored at height 4 skips
+    //* heights 4 and 3. Three blocks' worth needs more than height 2, and
+    //* height 1 is evicted, so the truncated result is refused.
+    #[test]
+    fn test_bch_window_refuses_when_work_target_runs_past_the_cache() {
+        let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
+        // Newest first: index 3 is height 4.
+        let (headers, tip_hash) = build_test_chain(8, &miners);
+        let height_four_hash = headers[3].blockhash;
+        let share_difficulty = headers[0].header.get_difficulty(TEST_NETWORK);
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+        store
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(7)));
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(headers.clone()));
+        let mut window = PplnsWindow::new(TEST_NETWORK)
+            .for_chain(Chain::BitcoinCash)
+            .with_window_sizes(3, 2);
+        window.update(&store).unwrap();
+
+        let error = window
+            .get_distribution_from_start_hash(
+                height_four_hash,
+                share_difficulty,
+                &MockChainStoreHandle::default(),
+            )
+            .expect_err("three blocks' worth needs the evicted height 1");
+
+        assert!(
+            error.to_string().contains("truncated by eviction"),
+            "unexpected error: {error}"
+        );
+    }
+
+    //* The same cache and anchor, with a block worth a third of a share: height 2
+    //* alone reaches the target, so the walk ends inside the cache and the
+    //* result is the same on every node, though the cache misses height 0.
+    #[test]
+    fn test_bch_window_reached_inside_the_cache_is_paid() {
+        let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
+        // Newest first: index 3 is height 4, index 5 is height 2.
+        let (headers, tip_hash) = build_test_chain(8, &miners);
+        let height_four_hash = headers[3].blockhash;
+        let height_two_miner = headers[5].header.miner_bitcoin_address.clone();
+        let share_difficulty = headers[0].header.get_difficulty(TEST_NETWORK);
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+        store
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(7)));
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(headers.clone()));
+        let mut window = PplnsWindow::new(TEST_NETWORK)
+            .for_chain(Chain::BitcoinCash)
+            .with_window_sizes(3, 2);
+        window.update(&store).unwrap();
+
+        let distribution = window
+            .get_distribution_from_start_hash(
+                height_four_hash,
+                share_difficulty / 3,
+                &MockChainStoreHandle::default(),
+            )
+            .unwrap();
+
+        assert_eq!(distribution.len(), 1);
+        assert!(distribution.contains_key(&height_two_miner));
+    }
+
+    //* The offline simulation's entry point runs the same walk as the store
+    //* entry point for a cached anchor.
+    #[test]
+    fn test_cached_anchor_distribution_matches_store_walk() {
+        let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
+        let (headers, tip_hash) = build_test_chain(5, &miners);
+        let share_difficulty = headers[0].header.get_difficulty(TEST_NETWORK);
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+        store
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(4)));
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(headers.clone()));
+        let mut window = PplnsWindow::new(TEST_NETWORK)
+            .for_chain(Chain::BitcoinCash)
+            .with_window_sizes(0, 4);
+        window.update(&store).unwrap();
+
+        let from_store = window
+            .get_distribution_from_start_hash(
+                tip_hash,
+                share_difficulty + 1,
+                &MockChainStoreHandle::default(),
+            )
+            .unwrap();
+        let from_cache = window
+            .distribution_for_cached_anchor(tip_hash, share_difficulty + 1)
+            .unwrap();
+
+        assert_eq!(from_cache, from_store);
+    }
+
+    #[test]
+    fn test_chipnet_minimum_difficulty_bits_have_difficulty_one() {
+        let difficulty =
+            bitcoin_block_difficulty(CompactTarget::from_consensus(0x1d00ffff), Network::Testnet);
+
+        assert_eq!(difficulty, MIN_SIZING_BLOCK_DIFFICULTY);
+    }
+
+    #[test]
+    fn test_regtest_bits_have_difficulty_one() {
+        let difficulty =
+            bitcoin_block_difficulty(CompactTarget::from_consensus(0x207fffff), Network::Regtest);
+
+        assert_eq!(difficulty, MIN_SIZING_BLOCK_DIFFICULTY);
+    }
+
+    //* Bitcoin Cash matures a share after 100 shares, as Satoshi's coinbase
+    //* maturity counts 100 blocks: a paying share at height 1,000 skips the 99
+    //* shares above height 900.
+    #[test]
+    fn test_bch_window_matures_shares_after_one_hundred_shares() {
+        let window = PplnsWindow::new(TEST_NETWORK).for_chain(Chain::BitcoinCash);
+
+        assert_eq!(
+            window.immature_share_count(1_000),
+            BCH_COINBASE_MATURITY - 1
+        );
+    }
+
+    //* The first 100 shares of a Bitcoin Cash chain are always mature for
+    //* payout, so a paying share at height 150 skips only the 50 shares from
+    //* height 100 up.
+    #[test]
+    fn test_bch_window_keeps_the_first_hundred_shares_mature() {
+        let window = PplnsWindow::new(TEST_NETWORK).for_chain(Chain::BitcoinCash);
+
+        assert_eq!(window.immature_share_count(150), 50);
+    }
+
+    #[test]
+    fn test_bitcoin_window_keeps_upstream_maturity() {
+        let window = PplnsWindow::new(TEST_NETWORK).for_chain(Chain::Bitcoin);
+
+        assert_eq!(window.immature_share_count(20_000), COINBASE_MATURITY - 1);
     }
 }

@@ -7,10 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v0.0.1-alpha] - 2026-10-18
+## [v0.0.1-alpha] - 2026-10-18, refreshed 2026-10-19
 
 First alpha of P2Poolv2 for Bitcoin Cash, synced with upstream P2Poolv2
 through `2dabcdd2`. Alpha software: run it on chipnet or regtest first.
+The pre-release is refreshed in place with `main` until the beta; the
+2026-10-19 refresh adds the Template Distribution client, the template
+refresh after a found block, the `/miner` API, and the BCH payout window
+sized by block difficulty with a 100-share maturity (a share-chain rule
+change: nodes start from a new store).
 
 ### Added
 
@@ -31,6 +36,12 @@ through `2dabcdd2`. Alpha software: run it on chipnet or regtest first.
   (P2PKH with `SIGHASH_FORKID` ECDSA or Schnorr).
 - `docs/architecture/payout-distribution.md` describes the whole payout
   scheme, including the maturity window.
+- API `GET /miner?address=...` returns one miner's shares and uncles in the
+  share chain PPLNS window, its summed weight, its share of the window and
+  its fraction of the next block's PPLNS payout, so explorers and miner
+  software need not index the chain. It takes a payout address (CashAddr
+  with or without prefix on Bitcoin Cash) or a share chain address, and is
+  computed by the payout code's own `PplnsWindow`.
 
 ### Fixed
 
