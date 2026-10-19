@@ -369,7 +369,7 @@ impl NodeActor {
                 .bits,
         );
 
-        let pool_difficulty = PoolDifficulty::build(&chain_store_handle)
+        let pool_difficulty = PoolDifficulty::build(&chain_store_handle, chain)
             .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
 
         // The clone is redundant for the real PoolDifficulty, which is Copy, but

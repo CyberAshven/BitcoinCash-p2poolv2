@@ -155,7 +155,10 @@ a full donation (10,000) still skips miner address validation.
   about 17 hours after it is mined. `difficulty_multiplier` is gone. The
   only 10 and 600 second constants (`IDEAL_BLOCK_TIME`, `HALFLIFE` in
   `sim_overrides.rs`) are the share chain's own ASERT, not the Bitcoin Cash
-  block interval.
+  block interval. On Bitcoin Cash that ASERT is anchored at each share's
+  parent, not at genesis, so a chain started long after its genesis time or
+  restarted after an outage does not sit at its ceiling while it makes up
+  the missing shares (`docs/difficulty_adjustment/asert.md`).
 - **Faster blocks (CHIP-2025-03).** A proposal to move Bitcoin Cash to
   1-minute blocks, gathering statements for the 2027 upgrade (lock-in
   2026-11-15, activation 2027-05-15 per the research forum thread). It is

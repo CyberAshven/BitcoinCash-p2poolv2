@@ -58,6 +58,10 @@ or no-ops in production builds (zero overhead). Key overrides:
   be overridden for time-compressed runs.
 - **Genesis anchoring**: `sim_overrides::genesis_timestamp()` and
   `anchor_target()` anchor ASERT at launch time and steady-state difficulty.
+  On Bitcoin Cash, where ASERT is anchored at each share's parent, the
+  genesis time sets only the interval the second share is measured from,
+  so a launch-time anchor still starts the chain regulated
+  (`docs/difficulty_adjustment/asert.md`).
 - **PPLNS window**: no override. On Bitcoin the window is
   `PPLNS_WINDOW_SHARES` shares on every network. On Bitcoin Cash it is sized
   by the paying header's difficulty, but every regtest header is at the

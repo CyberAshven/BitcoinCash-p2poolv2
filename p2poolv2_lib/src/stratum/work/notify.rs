@@ -99,15 +99,13 @@ fn build_prepared_notify(
         .map_err(|error| WorkError {
             message: format!("Failed to get mining base: {error}"),
         })?;
-    let (tip_height, parent_time) = context
+    let parent = context
         .chain_store_handle
-        .get_share_height_and_time(&tip)
+        .get_asert_parent(&tip)
         .map_err(|error| WorkError {
-            message: format!("Failed to get tip height: {error}"),
+            message: format!("Failed to read the mining base for ASERT: {error}"),
         })?;
-    let target = context
-        .pool_difficulty
-        .calculate_target_clamped(parent_time, tip_height);
+    let target = context.pool_difficulty.calculate_target_clamped(parent);
 
     //* Anchor the payout on the same `tip` we commit as prev_share_blockhash
     //* below, so a confirmed-chain advance between reads cannot make the
@@ -249,6 +247,7 @@ pub async fn start_notify(
 mod tests {
     use super::*;
     use crate::accounting::payout::payout_distribution::MockPayoutDistribution;
+    use crate::pool_difficulty::AsertParent;
     use crate::stratum::messages::Notify;
     use crate::stratum::work::block_template::{BlockTemplate, TemplateTransaction};
     use crate::stratum::work::coinbase::extract_outputs_from_coinbase2;
@@ -350,9 +349,14 @@ mod tests {
         chain_store_handle
             .expect_get_mining_base_and_uncles()
             .returning(move || Ok((genesis_hash, vec![])));
-        chain_store_handle
-            .expect_get_share_height_and_time()
-            .returning(|_| Ok((0, genesis_for_tests().header.time)));
+        chain_store_handle.expect_get_asert_parent().returning(|_| {
+            let genesis_header = genesis_for_tests().header;
+            Ok(AsertParent::from_header(
+                &genesis_header,
+                0,
+                genesis_header.time,
+            ))
+        });
 
         let pool_difficulty =
             pool_difficulty::PoolDifficulty::new(genesis_header.bits, genesis_header.time, 0);
@@ -423,9 +427,14 @@ mod tests {
         let pool_difficulty =
             pool_difficulty::PoolDifficulty::new(genesis_header.bits, genesis_header.time, 0);
 
-        chain_store_handle
-            .expect_get_share_height_and_time()
-            .returning(|_| Ok((0, genesis_for_tests().header.time)));
+        chain_store_handle.expect_get_asert_parent().returning(|_| {
+            let genesis_header = genesis_for_tests().header;
+            Ok(AsertParent::from_header(
+                &genesis_header,
+                0,
+                genesis_header.time,
+            ))
+        });
 
         let stratum_config = StratumConfig::new_for_test_default().parse().unwrap();
 
@@ -519,9 +528,14 @@ mod tests {
             .expect_get_mining_base_and_uncles()
             .returning(move || Ok((genesis_hash, vec![])));
 
-        chain_store_handle
-            .expect_get_share_height_and_time()
-            .returning(|_| Ok((0, genesis_for_tests().header.time)));
+        chain_store_handle.expect_get_asert_parent().returning(|_| {
+            let genesis_header = genesis_for_tests().header;
+            Ok(AsertParent::from_header(
+                &genesis_header,
+                0,
+                genesis_header.time,
+            ))
+        });
 
         // Setup config and tracker
         let stratum_config = StratumConfig::new_for_test_default().parse().unwrap();

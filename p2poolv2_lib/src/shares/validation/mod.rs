@@ -266,9 +266,9 @@ pub trait ShareValidator {
     /// Also validates that the advertised bits in the share header match
     /// the pool difficulty as computed by our node.
     ///
-    /// Looks up the parent share in the chain store to obtain the parent timestamp
-    /// and height, then uses the stored pool difficulty to calculate the expected
-    /// target for this share. Returns an error if the bitcoin block hash does not
+    /// Looks up the parent share in the chain store to obtain its height, time,
+    /// bits and its own parent's time, then uses the stored pool difficulty to
+    /// calculate the expected target for this share. Returns an error if the bitcoin block hash does not
     /// meet the calculated target.
     fn validate_with_pool_difficulty(
         &self,
@@ -1250,31 +1250,15 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_payout_cuts(share_header)?;
 
         let parent_hash = share_header.prev_share_blockhash;
-        let parent_header = chain_store_handle
-            .get_share_header(&parent_hash)
+        let parent = chain_store_handle
+            .get_asert_parent(&parent_hash)
             .map_err(|_| {
                 ValidationError::recoverable(format!(
                     "Parent share {parent_hash} not found in store"
                 ))
             })?;
 
-        let parent_metadata = chain_store_handle
-            .get_block_metadata(&parent_hash)
-            .map_err(|_| {
-                ValidationError::recoverable(format!(
-                    "Parent share {parent_hash} not found in store"
-                ))
-            })?;
-
-        let parent_height = parent_metadata.expected_height.ok_or_else(|| {
-            ValidationError::recoverable(format!("Parent share {parent_hash} not found in store"))
-        })?;
-
-        let parent_time = parent_header.time;
-
-        let calculated_target = self
-            .pool_difficulty
-            .calculate_target_clamped(parent_time, parent_height);
+        let calculated_target = self.pool_difficulty.calculate_target_clamped(parent);
         let target = Target::from_compact(calculated_target);
         let bitcoin_block_hash = share_header.bitcoin_header.block_hash();
 

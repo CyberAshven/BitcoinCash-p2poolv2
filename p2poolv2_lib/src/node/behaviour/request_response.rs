@@ -14,6 +14,7 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::{
 };
 use crate::config::Chain;
 use crate::node::messages::{MAX_P2P_MESSAGE_SIZE, Message, RawMessage};
+use crate::pool_difficulty::BCH_ASERT_ANCHOR_TAG;
 use bitcoin::BlockHash;
 
 /// Hex characters of the share chain genesis hash carried in the protocol
@@ -33,8 +34,8 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
     tag
 }
 
-/// Tag naming the share chain payout rule a Bitcoin Cash node enforces, or
-/// `None` on Bitcoin, whose protocol strings stay upstream's.
+/// Tag naming the share chain rules a Bitcoin Cash node enforces beyond
+/// upstream's, or `None` on Bitcoin, whose protocol strings stay upstream's.
 ///
 /// Bitcoin Cash sizes the PPLNS window by the paying block's difficulty
 /// (`BCH_PPLNS_WINDOW_BLOCKS`) behind its own maturity
@@ -44,17 +45,22 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// exchange shares the other rejects. The tag is derived from the constants,
 /// so changing either rule changes the tag without anyone having to remember
 /// a version bump, as re-anchoring genesis does for `genesis_tag`.
+///
+/// Bitcoin Cash also anchors ASERT at each share's parent
+/// (`BCH_ASERT_ANCHOR_TAG`). A node anchoring at genesis computes another
+/// target for every share once the chain has been behind schedule, so it
+/// is kept apart the same way.
 fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
         Chain::BitcoinCash => Some(format!(
-            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}"
+            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}"
         )),
     }
 }
 
 /// The share chain part of every protocol string: the genesis tag, followed
-/// on Bitcoin Cash by the payout rule tag.
+/// on Bitcoin Cash by the rule tag.
 fn share_chain_segment(chain: Chain, genesis_hash: BlockHash) -> String {
     match share_chain_rule_tag(chain) {
         Some(rule_tag) => format!("{}/{rule_tag}", genesis_tag(genesis_hash)),
@@ -317,7 +323,25 @@ mod tests {
 
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
-            format!("/p2pool/test/{expected_tag}/pplns-k3-m100/1.0.0")
+            format!("/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/1.0.0")
+        );
+    }
+
+    /// A chipnet node from before the parent anchor derived
+    /// `/p2pool/test/<genesis tag>/pplns-k3-m100/1.0.0` from the same
+    /// genesis. It computes other ASERT targets, so the new string differs
+    /// and the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_genesis_anchor_string() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+            .unwrap()
+            .block_hash();
+        let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
+        let genesis_anchor_string = format!("/p2pool/test/{expected_tag}/pplns-k3-m100/1.0.0");
+
+        assert_ne!(
+            protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
+            genesis_anchor_string
         );
     }
 
@@ -350,7 +374,7 @@ mod tests {
 
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
-            format!("/p2pool/test/{expected_tag}/pplns-k3-m100/kad/1.0.0")
+            format!("/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/kad/1.0.0")
         );
     }
 }
