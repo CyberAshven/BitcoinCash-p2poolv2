@@ -10,6 +10,23 @@ are calculated via PPLNS and paid directly from coinbase transactions.
 Project name is P2Poolv2 (no whitespace). Rust edition 2024, minimum
 rust-version 1.88.
 
+## Branch and releases (Bitcoin Cash fork)
+
+This fork, `CyberAshven/BitcoinCash-p2poolv2`, has one branch: `alpha`.
+Commit to it directly, or open a pull request into it. Open pull requests
+on the fork, never on upstream:
+`gh pr create --repo CyberAshven/BitcoinCash-p2poolv2 --base alpha`.
+
+- `Cargo.toml` keeps version `0.0.1-alpha` and the fork's `homepage` and
+  `repository` links. Don't cut new versions before the beta.
+- To refresh the `v0.0.1-alpha` pre-release, move that annotated tag to
+  the newest `alpha` commit and force-push the tag. CI then rebuilds and
+  replaces every release file: Linux, macOS, Windows and the Docker image.
+- When merging upstream `p2poolv2/p2poolv2`, merge into `alpha` and keep
+  the version and links. If new workspace crates arrive, run
+  `cargo update --workspace --offline` so `Cargo.lock` gives them the
+  alpha version.
+
 ## Build and test commands
 
 ```sh
