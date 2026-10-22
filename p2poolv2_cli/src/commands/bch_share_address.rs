@@ -17,7 +17,7 @@
 //! two roles apart.
 //!
 //! Deliberately takes an address and never a private key: no P2Poolv2 crate
-//! generates or handles private keys.
+//! generates private keys, and only `bch-trade` reads one, to sign a trade.
 
 use bitcoin::ScriptBuf;
 use p2poolv2_lib::address::bch_share::BchShareAddress;
