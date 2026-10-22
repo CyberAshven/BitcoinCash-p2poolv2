@@ -763,6 +763,10 @@ impl MiningChannels {
             enonce2_hex.clone(),
             format!("{:08x}", submission.nonce),
         );
+        // The share is credited at the job's channel difficulty, so Hydrapool
+        // stores it only when its hash meets the channel target, as SV1 does
+        // with the session difficulty. `ignore_difficulty` never opens this.
+        let hash_meets_channel_target = channel_job.target.is_met_by(block_hash);
         emit_pool_share(
             &self.ctx,
             PoolShare {
@@ -772,14 +776,14 @@ impl MiningChannels {
                 block_hash,
                 coinbase: &coinbase,
                 share: share.clone(),
+                meets_credited_difficulty: hash_meets_channel_target,
             },
         )
         .await
         .map_err(|error| error.to_string())?;
         channel.session.last_share_time = Some(SystemTime::now());
         let truediff = get_true_difficulty(&block_hash);
-        let meets_channel_target =
-            self.ctx.ignore_difficulty || channel_job.target.is_met_by(block_hash);
+        let meets_channel_target = self.ctx.ignore_difficulty || hash_meets_channel_target;
         if meets_channel_target {
             let _ = self
                 .ctx
@@ -956,6 +960,7 @@ mod tests {
     use super::*;
     use crate::accounting::OutputPair;
     use crate::accounting::stats::metrics;
+    use crate::shares::coinbase_proof::CoinbaseProof;
     use crate::stratum::sv2::session::encode_message;
     use crate::stratum::work::block_template::BlockTemplate;
     use crate::stratum::work::prepared_notify::PreparedNotifyParamsBuilder;
@@ -1082,7 +1087,9 @@ mod tests {
         let mut accepted_payload = payload(&accepted[0]);
         let accepted = SubmitSharesSuccess::from_bytes(&mut accepted_payload).unwrap();
         assert_eq!(accepted.new_shares_sum, 5);
-        assert_eq!(emissions.try_recv().unwrap().pplns.difficulty, 5);
+        // The share chain share carries no PPLNS credit; the reply above is
+        // where the job's difficulty shows.
+        assert_eq!(emissions.try_recv().unwrap().header, header);
         channels.on_template(&test_bch_prepared());
         let next_job = channels.channels[&1].jobs.values().next_back().unwrap();
         assert_eq!(next_job.target, next_target);
@@ -1284,6 +1291,8 @@ mod tests {
             ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Signet,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1406,13 +1415,16 @@ mod tests {
                 .new_shares_sum,
             1
         );
-        assert_eq!(emission.pplns.difficulty, 1);
         assert_eq!(
-            emission.pplns.btcaddress.as_deref(),
-            Some("tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d")
+            emission.share_commitment.miner_bitcoin_address.to_string(),
+            "tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d"
         );
-        assert!(emission.share_commitment.is_some());
-        assert!(emission.coinbase_proof.is_some());
+        let expected_proof = CoinbaseProof::from_coinbase(
+            &emission.bitcoin_coinbase,
+            emission.share_commitment.share_witness_root,
+        )
+        .unwrap();
+        assert_eq!(emission.coinbase_proof, expected_proof);
 
         let repeated = channels
             .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut duplicate, None)
@@ -1530,6 +1542,8 @@ mod tests {
             ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Signet,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1656,6 +1670,8 @@ mod tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Signet,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1725,6 +1741,248 @@ mod tests {
         assert!(emissions_rx.try_recv().is_ok());
     }
 
+    /// Hydrapool stores an SV2 share for PPLNS at the job's channel
+    /// difficulty when its hash meets the channel target, as SV1 does with
+    /// the session difficulty, and never emits it to the share chain.
+    #[tokio::test]
+    async fn a_hydrapool_share_meeting_the_channel_target_is_queued_at_the_job_difficulty() {
+        let template: BlockTemplate = serde_json::from_str(include_str!(
+            "../../../../p2poolv2_tests/test_data/gbt/regtest/ckpool/one-txn/gbt.json"
+        ))
+        .unwrap();
+        let payout_key: CompressedPublicKey =
+            "020202020202020202020202020202020202020202020202020202020202020202"
+                .parse()
+                .unwrap();
+        let prepared = Arc::new(
+            PreparedNotifyParamsBuilder::new(
+                Arc::new(template.clone()),
+                vec![OutputPair {
+                    address: Address::p2wpkh(&payout_key, Network::Signet),
+                    amount: Amount::from_sat(template.coinbasevalue),
+                }],
+                b"P2Poolv2",
+                true,
+            )
+            .build()
+            .unwrap(),
+        );
+        let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
+        mock_submit_block_with_any_body(&mock_server).await;
+        let (emissions_tx, mut emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, mut pplns_shares_rx) = mpsc::channel(10);
+        let stats_dir = tempfile::tempdir().unwrap();
+        let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
+        let ctx = StratumContext {
+            tracker_handle: start_tracker_actor(),
+            bitcoindrpc_client: BitcoindRpcClient::new(
+                &bitcoinrpc_config.url,
+                &bitcoinrpc_config.username,
+                &bitcoinrpc_config.password,
+            )
+            .unwrap(),
+            start_difficulty: 7,
+            minimum_difficulty: 1,
+            maximum_difficulty: None,
+            ignore_difficulty: false,
+            validate_addresses: true,
+            emissions_tx,
+            pplns_shares_tx,
+            network: Network::Signet,
+            metrics: metrics_handle,
+            chain_store_handle,
+            mode: PoolMode::Hydrapool,
+            miner_address: None,
+            share_chain: Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
+            template_refresh_tx: None,
+        };
+        let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+        let mut open = payload(
+            &encode_message(
+                OpenStandardMiningChannel {
+                    request_id: 1,
+                    user_identity: USERNAME.try_into().unwrap(),
+                    nominal_hash_rate: 1.0,
+                    max_target: U256::new(&[0xff; 32]).unwrap(),
+                },
+                MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+            )
+            .unwrap(),
+        );
+        let opened = channels
+            .handle(
+                MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+                &mut open,
+                Some(Arc::clone(&prepared)),
+            )
+            .await
+            .unwrap();
+        let mut success_payload = payload(&opened[0]);
+        let channel_id = OpenStandardMiningChannelSuccess::from_bytes(&mut success_payload)
+            .unwrap()
+            .channel_id;
+        let mut job_payload = payload(&opened[1]);
+        let job = NewMiningJob::from_bytes(&mut job_payload).unwrap();
+        let mut prev_hash_payload = payload(&opened[2]);
+        let prev_hash = SetNewPrevHash::from_bytes(&mut prev_hash_payload).unwrap();
+        // Any hash meets the job's target; its credit stays difficulty 7.
+        channels
+            .channels
+            .get_mut(&channel_id)
+            .unwrap()
+            .jobs
+            .get_mut(&job.job_id)
+            .unwrap()
+            .target = Target::MAX;
+
+        let mut submit = payload(
+            &encode_message(
+                SubmitSharesStandard {
+                    channel_id,
+                    sequence_number: 1,
+                    job_id: job.job_id,
+                    nonce: 0,
+                    ntime: prev_hash.min_ntime,
+                    version: job.version,
+                },
+                MESSAGE_TYPE_SUBMIT_SHARES_STANDARD,
+            )
+            .unwrap(),
+        );
+        let response = channels
+            .handle(MESSAGE_TYPE_SUBMIT_SHARES_STANDARD, &mut submit, None)
+            .await
+            .unwrap();
+        assert_eq!(frame_type(&response[0]), MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS);
+        let share = pplns_shares_rx.try_recv().unwrap();
+        assert_eq!(share.difficulty, 7);
+        assert_eq!(
+            share.btcaddress.as_deref(),
+            Some("tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d")
+        );
+        assert!(emissions_rx.try_recv().is_err());
+    }
+
+    /// A Hydrapool SV2 share whose hash misses the channel target is not
+    /// stored, even though it would be credited at the channel difficulty.
+    #[tokio::test]
+    async fn a_hydrapool_share_below_the_channel_target_is_not_queued() {
+        let template: BlockTemplate = serde_json::from_str(include_str!(
+            "../../../../p2poolv2_tests/test_data/gbt/regtest/ckpool/one-txn/gbt.json"
+        ))
+        .unwrap();
+        let payout_key: CompressedPublicKey =
+            "020202020202020202020202020202020202020202020202020202020202020202"
+                .parse()
+                .unwrap();
+        let prepared = Arc::new(
+            PreparedNotifyParamsBuilder::new(
+                Arc::new(template.clone()),
+                vec![OutputPair {
+                    address: Address::p2wpkh(&payout_key, Network::Signet),
+                    amount: Amount::from_sat(template.coinbasevalue),
+                }],
+                b"P2Poolv2",
+                true,
+            )
+            .build()
+            .unwrap(),
+        );
+        let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
+        mock_submit_block_with_any_body(&mock_server).await;
+        let (emissions_tx, mut emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, mut pplns_shares_rx) = mpsc::channel(10);
+        let stats_dir = tempfile::tempdir().unwrap();
+        let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
+        let ctx = StratumContext {
+            tracker_handle: start_tracker_actor(),
+            bitcoindrpc_client: BitcoindRpcClient::new(
+                &bitcoinrpc_config.url,
+                &bitcoinrpc_config.username,
+                &bitcoinrpc_config.password,
+            )
+            .unwrap(),
+            // A channel target far harder than the test share.
+            start_difficulty: 1_000_000_000_000,
+            minimum_difficulty: 1,
+            maximum_difficulty: None,
+            ignore_difficulty: false,
+            validate_addresses: true,
+            emissions_tx,
+            pplns_shares_tx,
+            network: Network::Signet,
+            metrics: metrics_handle,
+            chain_store_handle,
+            mode: PoolMode::Hydrapool,
+            miner_address: None,
+            share_chain: Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
+            template_refresh_tx: None,
+        };
+        let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+        let mut open = payload(
+            &encode_message(
+                OpenStandardMiningChannel {
+                    request_id: 1,
+                    user_identity: USERNAME.try_into().unwrap(),
+                    nominal_hash_rate: 1.0,
+                    max_target: U256::new(&[0xff; 32]).unwrap(),
+                },
+                MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+            )
+            .unwrap(),
+        );
+        let opened = channels
+            .handle(
+                MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+                &mut open,
+                Some(Arc::clone(&prepared)),
+            )
+            .await
+            .unwrap();
+        let mut success_payload = payload(&opened[0]);
+        let channel_id = OpenStandardMiningChannelSuccess::from_bytes(&mut success_payload)
+            .unwrap()
+            .channel_id;
+        let mut job_payload = payload(&opened[1]);
+        let job = NewMiningJob::from_bytes(&mut job_payload).unwrap();
+        let mut prev_hash_payload = payload(&opened[2]);
+        let prev_hash = SetNewPrevHash::from_bytes(&mut prev_hash_payload).unwrap();
+
+        let mut submit = payload(
+            &encode_message(
+                SubmitSharesStandard {
+                    channel_id,
+                    sequence_number: 1,
+                    job_id: job.job_id,
+                    nonce: 0,
+                    ntime: prev_hash.min_ntime,
+                    version: job.version,
+                },
+                MESSAGE_TYPE_SUBMIT_SHARES_STANDARD,
+            )
+            .unwrap(),
+        );
+        let response = channels
+            .handle(MESSAGE_TYPE_SUBMIT_SHARES_STANDARD, &mut submit, None)
+            .await
+            .unwrap();
+        let mut error_payload = payload(&response[0]);
+        let error = SubmitSharesError::from_bytes(&mut error_payload).unwrap();
+        assert_eq!(error.error_code.as_utf8_or_hex(), "difficulty-too-low");
+        assert!(pplns_shares_rx.try_recv().is_err());
+        assert!(emissions_rx.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn a_connection_cannot_open_more_than_the_channel_cap() {
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
@@ -1743,6 +2001,8 @@ mod tests {
             ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Signet,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1815,6 +2075,8 @@ mod tests {
             ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Signet,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1959,6 +2221,8 @@ mod tests {
             ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Signet,
             metrics: metrics_handle,
             chain_store_handle,
@@ -2021,6 +2285,8 @@ mod tests {
             ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Signet,
             metrics: metrics_handle,
             chain_store_handle,
@@ -2079,6 +2345,8 @@ mod tests {
             ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Regtest,
             metrics: metrics_handle,
             chain_store_handle,
@@ -2139,6 +2407,8 @@ mod tests {
             ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Regtest,
             metrics: metrics_handle,
             chain_store_handle,
@@ -2195,6 +2465,8 @@ mod tests {
             ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Signet,
             metrics: metrics_handle,
             chain_store_handle,
@@ -2279,6 +2551,8 @@ mod tests {
             ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Signet,
             metrics: metrics_handle,
             chain_store_handle,
@@ -2333,6 +2607,8 @@ mod tests {
             ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Signet,
             metrics: metrics_handle,
             chain_store_handle,

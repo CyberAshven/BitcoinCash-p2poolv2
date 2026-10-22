@@ -551,10 +551,10 @@ mod tests {
             selected.compute_txid().to_string()
         );
         let share = ShareHeader::from_commitment_and_header(
-            emission.share_commitment.unwrap(),
+            emission.share_commitment,
             emission.header,
             u64::from(emission.blocktemplate.height),
-            emission.coinbase_proof.unwrap(),
+            emission.coinbase_proof,
         );
         assert_eq!(
             share
@@ -635,10 +635,10 @@ mod tests {
             selected.compute_txid().as_byte_array()
         );
         let share = ShareHeader::from_commitment_and_header(
-            emission.share_commitment.unwrap(),
+            emission.share_commitment,
             emission.header,
             u64::from(emission.blocktemplate.height),
-            emission.coinbase_proof.unwrap(),
+            emission.coinbase_proof,
         );
         assert_eq!(
             share
@@ -687,6 +687,8 @@ mod tests {
             ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            // P2Poolv2 mode never queues a Hydrapool PPLNS share.
+            pplns_shares_tx: mpsc::channel(10).0,
             network: Network::Signet,
             metrics: metrics.clone(),
             chain_store_handle,

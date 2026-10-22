@@ -59,6 +59,13 @@ bootstrap_address = "bitcoincash:q..."
 Point `[bitcoinrpc]` at BCHN's RPC port and `zmqpubhashblock` at its ZMQ
 endpoint.
 
+Under `[network]`, list the share chain peers to join in `dial_peers`, for
+example `dial_peers = ["/ip4/203.0.113.1/tcp/6884"]`. A Bitcoin Cash node
+never uses DNS seeds: the seeds built into P2Poolv2 are Bitcoin nodes, and
+there are no Bitcoin Cash seeds yet. `dns_seed` is ignored and always off on
+`chain = "bitcoin-cash"`, so without `dial_peers` the node only waits for
+peers to dial it.
+
 ### Donation and pool fee
 
 By default each block this node finds donates 1.5% (150 basis points) to the

@@ -296,12 +296,15 @@ async fn share(State(dashboard): State<Arc<DashboardState>>, Path(hash): Path<St
         }
     };
     let found = read_store(state, move |state| {
+        // The page shows the header only, never the body, so a pruned share
+        // renders like any other and the prune height is not needed.
         let output = build_share_output(
             &state.chain_store_handle,
             &blockhash,
             false,
             state.app_config.network,
             state.app_config.cash_network,
+            0,
         )?;
         let is_block = state
             .chain_store_handle

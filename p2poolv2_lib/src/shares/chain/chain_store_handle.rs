@@ -8,12 +8,14 @@
 //! height calculation, chain work tracking, and reorg handling. Read operations
 //! are synchronous and direct, while writes are serialized through the store writer.
 
+use crate::accounting::payout::sharechain_pplns::pplns_window::PRUNE_INTERVAL;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::pool_difficulty::AsertParent;
 use crate::shares::share_block::{ShareBlock, ShareHeader, is_terminal_blockhash};
 use crate::store::block_tx_metadata::{BlockMetadata, Status};
 use crate::store::dag_store::{BlockValidSearch, ShareDag, UncleInfo};
 use crate::store::found_block::FoundBlock;
+use crate::store::prune_blocks::{PruneStats, get_range_to_prune};
 use crate::store::transaction_store::PrevoutCheck;
 use crate::store::writer::{StoreError, StoreHandle};
 use bitcoin::{BlockHash, TxMerkleNode, Work};
@@ -811,6 +813,78 @@ impl ChainStoreHandle {
         self.store_handle.mark_block_valid(blockhash).await
     }
 
+    /// Lowest height from which block bodies may still need pruning, below
+    /// `target`. See `Store::find_prune_start`.
+    pub fn find_prune_start(&self, target: u32) -> Result<u32, StoreError> {
+        self.store_handle.store().find_prune_start(target)
+    }
+
+    /// Delete the block bodies at heights `[from, target)`.
+    ///
+    /// Sends one writer command per `PRUNE_INTERVAL` heights, so other
+    /// writes interleave between chunks. The caller must only prune below
+    /// the confirmed tip, since the candidate index entries in the range are
+    /// deleted too.
+    pub async fn prune_block_bodies(
+        &self,
+        from: u32,
+        target: u32,
+    ) -> Result<PruneStats, StoreError> {
+        let mut stats = PruneStats::default();
+        let mut chunk_start = from;
+        while chunk_start < target {
+            let chunk_end = chunk_start
+                .saturating_add(PRUNE_INTERVAL as u32)
+                .min(target);
+            let chunk_stats = self
+                .store_handle
+                .prune_block_bodies_chunk(chunk_start, chunk_end)
+                .await?;
+            stats.add(chunk_stats);
+            chunk_start = chunk_end;
+        }
+        Ok(stats)
+    }
+
+    /// Prune block bodies below the prune target when due.
+    ///
+    /// `get_range_to_prune` decides whether a prunning run is due and
+    /// over which heights. Range can be up to `Store::prune_target`,
+    /// which follows the confirmed tip. Deletion never reaches
+    /// heights the confirmed chain has not got to, which is required
+    /// when deleting candidate index entries. Allowing runs only
+    /// while the node is current stops a stale or withheld chain from
+    /// pruning.
+    ///
+    /// `next_prune_start` holds where the previous run stopped. It starts empty
+    /// and is derived from the store on the first run, so nothing is persisted.
+    /// Space and tombstones are reclaimed by RocksDB's automatic compaction;
+    /// a manual compaction would block it and rewrite every body column
+    /// family, since their keys are hashes, not heights.
+    pub async fn prune_block_bodies_if_due(
+        &self,
+        next_prune_start: &mut Option<u32>,
+    ) -> Result<(), StoreError> {
+        let Some(range) = get_range_to_prune(
+            self.is_current(),
+            self.store_handle.store().prune_target()?,
+            *next_prune_start,
+            |prune_target| self.find_prune_start(prune_target),
+        )?
+        else {
+            return Ok(());
+        };
+
+        let stats = self.prune_block_bodies(range.start, range.end).await?;
+        *next_prune_start = Some(range.end);
+        info!(
+            "Pruned block bodies at heights {}..{}: {} blocks, {} transactions",
+            range.start, range.end, stats.blocks, stats.transactions
+        );
+
+        Ok(())
+    }
+
     /// Store the coinbase merkle branches of a batch of synced headers, so
     /// headers held without their bodies can be served on with their proofs.
     pub async fn add_header_template_merkle_branches(
@@ -952,6 +1026,9 @@ mockall::mock! {
         pub async fn organise_block(&self) -> Result<Option<u32>, StoreError>;
         pub async fn mark_invalid(&self, blockhash: BlockHash) -> Result<(), StoreError>;
         pub async fn mark_block_valid(&self, blockhash: BlockHash) -> Result<(), StoreError>;
+        pub fn find_prune_start(&self, target: u32) -> Result<u32, StoreError>;
+        pub async fn prune_block_bodies(&self, from: u32, target: u32) -> Result<PruneStats, StoreError>;
+        pub async fn prune_block_bodies_if_due(&self, next_prune_start: &mut Option<u32>) -> Result<(), StoreError>;
         pub async fn add_header_template_merkle_branches(&self, entries: Vec<(BlockHash, Vec<TxMerkleNode>)>) -> Result<(), StoreError>;
         pub fn get_template_merkle_branches(&self, blockhash: &BlockHash) -> Result<Vec<TxMerkleNode>, StoreError>;
         pub async fn promote_block(&self, header: ShareHeader) -> Result<Option<u32>, StoreError>;
@@ -972,7 +1049,8 @@ mod tests {
     use crate::store::Store;
     use crate::store::writer::StoreError;
     use crate::test_utils::{
-        TestShareBlockBuilder, genesis_for_tests, setup_test_chain_store_handle,
+        TestShareBlockBuilder, build_confirmed_test_chain, genesis_for_tests,
+        setup_test_chain_store_handle,
     };
     use bitcoin::BlockHash;
     use bitcoin::hashes::Hash;
@@ -1992,5 +2070,28 @@ mod tests {
         let unknown_hash = BlockHash::all_zeros();
         let result = chain_handle.find_fork_point_height(&unknown_hash).unwrap();
         assert_eq!(result, None);
+    }
+
+    /// A node that is not current never prunes, even with bodies far below
+    /// the target: its confirmed tip may lag the candidate tip.
+    #[tokio::test]
+    async fn test_prune_block_bodies_if_due_skips_when_not_current() {
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+        let blocks = build_confirmed_test_chain(&chain_store_handle, 4).await;
+        let mut next_prune_start = None;
+
+        chain_store_handle
+            .prune_block_bodies_if_due(&mut next_prune_start)
+            .await
+            .unwrap();
+
+        assert!(!chain_store_handle.is_current());
+        assert_eq!(next_prune_start, None);
+        assert!(
+            chain_store_handle
+                .store_handle()
+                .store()
+                .share_block_exists(&blocks[1].block_hash())
+        );
     }
 }

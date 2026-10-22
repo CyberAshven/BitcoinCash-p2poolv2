@@ -40,6 +40,11 @@ use tracing::{debug, error, info, warn};
 /// {"id": 1, "method": "mining.submit", "params": ["username", "4f", "fe36a31b", "504e86ed", "e9695791", "1fffe000"]}
 ///
 /// Handling version mask, we check mask is valid and then apply it to the block header
+///
+/// Where an accepted share goes depends on the pool mode. In P2Poolv2 mode a
+/// share meeting the pool target is emitted to the share chain. In Hydrapool
+/// mode a share whose hash meets the session difficulty is queued for the PPLNS
+/// share worker; it is never emitted.
 pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
     message: SimpleRequest<'a>,
     session: &mut Session<D>,
@@ -149,6 +154,12 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
         nonce.to_string(),
     );
 
+    // The hash proves work only up to `truediff`. A share is credited at the
+    // session difficulty, so it may only be stored when its hash meets that
+    // difficulty. `ignore_difficulty` is a testing aid for the miner response
+    // and metrics below; it must never open this gate.
+    let hash_meets_session_difficulty = truediff >= current_difficulty as u128;
+
     emit_pool_share(
         &stratum_context,
         PoolShare {
@@ -158,6 +169,7 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
             block_hash,
             coinbase: &validation_result.coinbase,
             share: stratum_share.clone(),
+            meets_credited_difficulty: hash_meets_session_difficulty,
         },
     )
     .await?;
@@ -165,8 +177,8 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
     session.last_share_time = Some(SystemTime::now());
 
     // If we are in testing mode and ignoring difficulty, accept share as meeting current difficulty
-    let meets_session_difficulty = stratum_context.ignore_difficulty
-        || truediff >= session.difficulty_adjuster.get_current_difficulty() as u128;
+    let meets_session_difficulty =
+        stratum_context.ignore_difficulty || hash_meets_session_difficulty;
 
     if meets_session_difficulty {
         let _ = stratum_context
@@ -245,7 +257,8 @@ pub(crate) async fn submit_found_block(
     Ok(())
 }
 
-/// A share rebuilt from a tracker job, ready for the share chain.
+/// A share rebuilt from a tracker job, ready for the share chain or the
+/// Hydrapool PPLNS share worker.
 pub(crate) struct PoolShare<'a> {
     pub job_id: JobId,
     pub job: &'a JobDetails,
@@ -253,62 +266,88 @@ pub(crate) struct PoolShare<'a> {
     pub block_hash: BlockHash,
     pub coinbase: &'a bitcoin::Transaction,
     pub share: SimplePplnsShare,
+    /// Whether the share's hash meets the difficulty it is credited at: the
+    /// SV1 session difficulty or the SV2 channel target. Never opened by
+    /// `ignore_difficulty`, which only changes the miner's reply and metrics.
+    pub meets_credited_difficulty: bool,
 }
 
-/// Emit a share to the share chain when it meets the pool target.
+/// Send an accepted share where the pool mode stores it.
 ///
-/// In P2Poolv2 mode only shares meeting the pool difficulty target are
-/// eligible for the share chain. The share commitment carries the
-/// ASERT-computed pool target (bits). This gate controls ONLY whether the
-/// share is emitted; callers keep hashrate and vardiff accounting on the full
-/// share stream, so a miner whose session difficulty is below the pool target
-/// is still measured accurately. In Hydrapool mode there is no pool target
-/// and every share is eligible. Returns whether the share was emitted.
+/// P2Poolv2 emits it to the share chain when it meets the pool target
+/// (`emit_share_chain_share`). Hydrapool queues it for the PPLNS share worker
+/// when its hash meets the difficulty it is credited at, and never emits it.
+/// Callers keep hashrate and vardiff accounting on the full share stream
+/// either way. Shared by SV1 and SV2. Returns whether the share was sent.
 pub(crate) async fn emit_pool_share(
     stratum_context: &StratumContext,
     pool_share: PoolShare<'_>,
 ) -> Result<bool, Error> {
-    let job = pool_share.job;
-    let meets_pool_target = match (stratum_context.mode, &job.share_commitment) {
-        (PoolMode::P2poolv2, Some(commitment)) => {
-            let pool_target = bitcoin::Target::from_compact(commitment.bits);
-            let met = pool_target.is_met_by(pool_share.block_hash);
-            if !met {
-                debug!(
-                    "Share does not meet pool difficulty, not emitting to share chain: hash {} target {:?}",
-                    pool_share.block_hash, commitment.bits
-                );
+    match stratum_context.mode {
+        PoolMode::P2poolv2 => emit_share_chain_share(stratum_context, pool_share).await,
+        PoolMode::Hydrapool => {
+            if !pool_share.meets_credited_difficulty {
+                return Ok(false);
             }
-            met
+            // The send only enqueues, so the connection returns to the miner
+            // without waiting on the store.
+            stratum_context
+                .pplns_shares_tx
+                .send(pool_share.share)
+                .await
+                .map_err(|e| {
+                    Error::SubmitFailure(format!("Failed to send PPLNS share to store: {e}"))
+                })?;
+            Ok(true)
         }
-        _ => true,
+    }
+}
+
+/// Emit a P2Poolv2 share to the share chain when it meets the pool target.
+///
+/// The share commitment carries the ASERT-computed pool target (bits), and on
+/// Bitcoin Cash the declared coinbase layout. A job without a commitment (no
+/// miner share address) has nothing to emit. Returns whether the share was
+/// emitted.
+async fn emit_share_chain_share(
+    stratum_context: &StratumContext,
+    pool_share: PoolShare<'_>,
+) -> Result<bool, Error> {
+    let job = pool_share.job;
+    let Some(commitment) = &job.share_commitment else {
+        return Ok(false);
     };
-    if !meets_pool_target {
+    let pool_target = bitcoin::Target::from_compact(commitment.bits);
+    if !pool_target.is_met_by(pool_share.block_hash) {
+        debug!(
+            "Share does not meet pool difficulty, not emitting to share chain: hash {} target {:?}",
+            pool_share.block_hash, commitment.bits
+        );
         return Ok(false);
     }
     // The full coinbase exists only here, so the proof is built now. Every
     // coinbase this pool builds ends with the commitment, so a failure is a
-    // malformed job, not the miner's fault: log it and emit without a proof,
-    // which keeps the share off the share chain (`handle_stratum_share`
-    // refuses a commitment without a proof) while still accounting it.
-    let job_id = pool_share.job_id;
-    let coinbase_proof = job.share_commitment.as_ref().and_then(|commitment| {
-        CoinbaseProof::from_coinbase(pool_share.coinbase, commitment.share_witness_root)
-            .map_err(|error| {
-                error!(
-                    "Failed to build coinbase proof for job {}: {error}",
-                    job_id.0
-                )
-            })
-            .ok()
-    });
+    // malformed job, not the miner's fault: log it and keep the share off the
+    // share chain. Hashrate and vardiff accounting still run in the caller.
+    let coinbase_proof = match CoinbaseProof::from_coinbase(
+        pool_share.coinbase,
+        commitment.share_witness_root,
+    ) {
+        Ok(coinbase_proof) => coinbase_proof,
+        Err(error) => {
+            error!(
+                "Failed to build coinbase proof for job {}, not emitting to share chain: {error}",
+                pool_share.job_id.0
+            );
+            return Ok(false);
+        }
+    };
     stratum_context
         .emissions_tx
         .send(Emission {
-            pplns: pool_share.share,
             header: pool_share.header,
             blocktemplate: job.blocktemplate.clone(),
-            share_commitment: job.share_commitment.clone(),
+            share_commitment: commitment.clone(),
             template_merkle_branches: job.template_merkle_branches.clone(),
             bitcoin_coinbase: pool_share.coinbase.clone(),
             coinbase_proof,
@@ -395,8 +434,8 @@ mod handle_submit_tests {
     use crate::stratum::work::gbt::build_merkle_branches_for_template;
     use crate::stratum::work::tracker::start_tracker_actor;
     use crate::test_utils::{
-        TEST_COINBASE_NSECS, create_test_commitment, load_valid_stratum_work_components,
-        setup_test_chain_store_handle,
+        TEST_COINBASE_NSECS, build_pool_job_submit, create_test_commitment,
+        load_valid_stratum_work_components, setup_test_chain_store_handle,
     };
     use bitcoin::BlockHash;
     use bitcoindrpc::test_utils::{mock_submit_block_with_any_body, setup_mock_bitcoin_rpc};
@@ -450,7 +489,8 @@ mod handle_submit_tests {
             job_id,
         );
 
-        let (emissions_tx, mut emissions_rx) = mpsc::channel(10);
+        let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, mut pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -472,6 +512,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Signet,
             metrics: metrics_handle.clone(),
             chain_store_handle,
@@ -501,19 +542,8 @@ mod handle_submit_tests {
         assert_eq!(template_refresh_rx.try_recv(), Ok(()));
         assert!(template_refresh_rx.try_recv().is_err());
 
-        let share = emissions_rx.try_recv().unwrap();
-        assert_eq!(share.pplns.btcaddress, Some(session.btcaddress.unwrap()));
-
-        // Verify share_commitment is properly set
-        assert!(share.share_commitment.is_some());
-        let commitment = share.share_commitment.unwrap();
-        assert_eq!(
-            commitment.miner_bitcoin_address,
-            create_test_commitment().miner_bitcoin_address
-        );
-
-        // Verify merkle branches are passed through from JobDetails to Emission
-        assert!(share.template_merkle_branches.is_empty());
+        // P2Poolv2 mode never queues a hydrapool PPLNS share
+        assert!(pplns_shares_rx.try_recv().is_err());
 
         // Verify that the block is submitted to the mock server
         mock_server.verify().await;
@@ -553,7 +583,8 @@ mod handle_submit_tests {
             job_id,
         );
 
-        let (emissions_tx, mut emissions_rx) = mpsc::channel(10);
+        let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -575,6 +606,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Signet,
             metrics: metrics_handle.clone(),
             chain_store_handle,
@@ -600,20 +632,6 @@ mod handle_submit_tests {
 
         // Verify that the block is submitted to the mock server
         mock_server.verify().await;
-
-        let stratum_share = emissions_rx.recv().await.unwrap();
-        assert_eq!(
-            stratum_share.pplns.btcaddress,
-            Some(session.btcaddress.unwrap())
-        );
-
-        // Verify share_commitment is properly set
-        assert!(stratum_share.share_commitment.is_some());
-        let commitment = stratum_share.share_commitment.unwrap();
-        assert_eq!(
-            commitment.miner_bitcoin_address,
-            create_test_commitment().miner_bitcoin_address
-        );
 
         assert_eq!(metrics_handle.get_metrics().await.accepted_total, 1);
     }
@@ -652,6 +670,7 @@ mod handle_submit_tests {
         );
 
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -672,6 +691,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Signet,
             metrics: metrics_handle.clone(),
             chain_store_handle,
@@ -747,6 +767,7 @@ mod handle_submit_tests {
         );
 
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -768,6 +789,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Signet,
             metrics: metrics_handle.clone(),
             chain_store_handle,
@@ -819,6 +841,7 @@ mod handle_submit_tests {
         session.user_id = Some(1);
 
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -839,6 +862,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Signet,
             metrics: metrics_handle.clone(),
             chain_store_handle,
@@ -864,41 +888,28 @@ mod handle_submit_tests {
         assert_eq!(err.message, "Job not found");
     }
 
+    /// Session difficulty decides the miner response and metrics; the pool
+    /// target alone decides share chain emission. A share below session
+    /// difficulty that meets the pool target is rejected to the miner but
+    /// still emitted.
     #[tokio::test]
-    async fn test_handle_submit_with_less_difficulty_than_session_even_if_we_meet_bitcoin_diff_should_increment_rejected()
-     {
+    async fn test_handle_submit_with_less_difficulty_than_session_is_rejected_but_emitted() {
         let mut session =
             Session::<DifficultyAdjuster>::new(10_000, 10_000, None, DEFAULT_VERSION_MASK);
         session.subscribed = true;
+        session.enonce1 = u32::from_le_bytes([0xde, 0xad, 0xbe, 0xef]);
+        session.enonce1_hex = "deadbeef".to_string();
+        session.btcaddress = Some("tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d".to_string());
+        session.user_id = Some(1);
         let tracker_handle = start_tracker_actor();
 
         let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         mock_submit_block_with_any_body(&mock_server).await;
 
-        let (template, notify, submit, authorize_response) =
-            load_valid_stratum_work_components("../p2poolv2_tests/test_data/validation/stratum/b/");
-
-        let enonce1 = authorize_response.result.unwrap()[1].clone();
-        let enonce1: &str = enonce1.as_str().unwrap();
-        session.enonce1 =
-            u32::from_le_bytes(hex::decode(enonce1).unwrap().as_slice().try_into().unwrap());
-        session.enonce1_hex = enonce1.to_string();
-        session.btcaddress = Some("tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d".to_string());
-        session.user_id = Some(1);
-
-        let job_id = JobId(u64::from_str_radix(&notify.params.job_id, 16).unwrap());
-
-        let _ = tracker_handle.insert_job(
-            Arc::new(template),
-            notify.params.coinbase1.to_string(),
-            notify.params.coinbase2.to_string(),
-            Some(create_test_commitment()),
-            TEST_COINBASE_NSECS,
-            vec![],
-            job_id,
-        );
+        let submit = build_pool_job_submit(&tracker_handle, &session.enonce1_hex);
 
         let (emissions_tx, mut emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -913,12 +924,13 @@ mod handle_submit_tests {
                 &bitcoinrpc_config.password,
             )
             .unwrap(),
-            start_difficulty: 10000,
+            start_difficulty: 10_000,
             minimum_difficulty: 1,
-            maximum_difficulty: Some(2),
+            maximum_difficulty: None,
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Signet,
             metrics: metrics_handle.clone(),
             chain_store_handle,
@@ -938,23 +950,13 @@ mod handle_submit_tests {
         };
 
         assert_eq!(response.id, Some(Id::Number(4)));
-
-        // The response should indicate that the share met required difficulty
         assert_eq!(response.result, Some(json!(false)));
 
         let share = emissions_rx.try_recv().unwrap();
-        assert_eq!(share.pplns.btcaddress, Some(session.btcaddress.unwrap()));
-
-        // Verify share_commitment is properly set
-        assert!(share.share_commitment.is_some());
-        let commitment = share.share_commitment.unwrap();
         assert_eq!(
-            commitment.miner_bitcoin_address,
+            share.share_commitment.miner_bitcoin_address,
             create_test_commitment().miner_bitcoin_address
         );
-
-        // Verify that the block is submitted to the mock server
-        mock_server.verify().await;
 
         assert_eq!(metrics_handle.get_metrics().await.accepted_total, 0);
         assert_eq!(metrics_handle.get_metrics().await.rejected_total, 1);
@@ -964,42 +966,26 @@ mod handle_submit_tests {
     async fn test_handle_submit_duplicate_share_is_rejected() {
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
         session.subscribed = true;
+        session.enonce1 = u32::from_le_bytes([0xde, 0xad, 0xbe, 0xef]);
+        session.enonce1_hex = "deadbeef".to_string();
+        session.btcaddress = Some("tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d".to_string());
+        session.user_id = Some(1);
         let tracker_handle = start_tracker_actor();
 
         let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         mock_submit_block_with_any_body(&mock_server).await;
 
-        let (template, notify, submit, authorize_response) =
-            load_valid_stratum_work_components("../p2poolv2_tests/test_data/validation/stratum/b/");
-
-        let enonce1 = authorize_response.result.unwrap()[1].clone();
-        let enonce1: &str = enonce1.as_str().unwrap();
-        session.enonce1 =
-            u32::from_le_bytes(hex::decode(enonce1).unwrap().as_slice().try_into().unwrap());
-        session.enonce1_hex = enonce1.to_string();
-        session.btcaddress = Some("tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d".to_string());
-        session.user_id = Some(1);
-
-        let job_id = JobId(u64::from_str_radix(&notify.params.job_id, 16).unwrap());
-
-        let _ = tracker_handle.insert_job(
-            Arc::new(template),
-            notify.params.coinbase1.to_string(),
-            notify.params.coinbase2.to_string(),
-            Some(create_test_commitment()),
-            TEST_COINBASE_NSECS,
-            vec![],
-            job_id,
-        );
+        let submit = build_pool_job_submit(&tracker_handle, &session.enonce1_hex);
 
         let (emissions_tx, mut emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
             .unwrap();
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
-        // First submission should succeed
+        // First submission is emitted
         let ctx = StratumContext {
             tracker_handle: tracker_handle.clone(),
             bitcoindrpc_client: BitcoindRpcClient::new(
@@ -1008,12 +994,13 @@ mod handle_submit_tests {
                 &bitcoinrpc_config.password,
             )
             .unwrap(),
-            start_difficulty: 10000,
+            start_difficulty: 1,
             minimum_difficulty: 1,
-            maximum_difficulty: Some(2),
+            maximum_difficulty: None,
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx: emissions_tx.clone(),
+            pplns_shares_tx: pplns_shares_tx.clone(),
             network: bitcoin::network::Network::Signet,
             metrics: metrics_handle.clone(),
             chain_store_handle: chain_store_handle.clone(),
@@ -1033,11 +1020,7 @@ mod handle_submit_tests {
             [Message::Response(response)] => response,
             _ => panic!("Expected a Response message"),
         };
-
-        // First submission should succeed
-        assert_eq!(response.result, Some(json!(true)));
-
-        // Verify emission was sent for first submission
+        assert!(response.error.is_none());
         let _share = emissions_rx.try_recv().unwrap();
 
         // Second submission of the same share should be rejected as duplicate
@@ -1049,12 +1032,13 @@ mod handle_submit_tests {
                 &bitcoinrpc_config.password,
             )
             .unwrap(),
-            start_difficulty: 10000,
+            start_difficulty: 1,
             minimum_difficulty: 1,
-            maximum_difficulty: Some(2),
+            maximum_difficulty: None,
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Signet,
             metrics: metrics_handle.clone(),
             chain_store_handle,
@@ -1073,7 +1057,7 @@ mod handle_submit_tests {
             _ => panic!("Expected a Response message"),
         };
 
-        // Duplicate submission should return error code 4
+        // Duplicate submission should return error code 22
         assert_eq!(response2.result, None);
         let err = response2.error.as_ref().unwrap();
         assert_eq!(err.code, 22, "should be DuplicateShare (code 22)");
@@ -1081,46 +1065,27 @@ mod handle_submit_tests {
 
         // No additional emission should be sent for duplicate
         assert!(emissions_rx.try_recv().is_err());
-
-        // Only the first share should have been accepted
-        assert_eq!(metrics_handle.get_metrics().await.accepted_total, 1);
     }
 
     #[tokio::test]
     async fn test_handle_submit_accepts_low_difficulty_share_when_ignore_difficulty_is_true() {
-        // Set high session difficulty (10_000) so the share won't meet it normally
+        // Session difficulty 10_000 is far above what the share's hash meets
         let mut session =
             Session::<DifficultyAdjuster>::new(10_000, 10_000, None, DEFAULT_VERSION_MASK);
         session.subscribed = true;
+        session.enonce1 = u32::from_le_bytes([0xde, 0xad, 0xbe, 0xef]);
+        session.enonce1_hex = "deadbeef".to_string();
+        session.btcaddress = Some("tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d".to_string());
+        session.user_id = Some(1);
         let tracker_handle = start_tracker_actor();
 
         let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         mock_submit_block_with_any_body(&mock_server).await;
 
-        let (template, notify, submit, authorize_response) =
-            load_valid_stratum_work_components("../p2poolv2_tests/test_data/validation/stratum/b/");
-
-        let enonce1 = authorize_response.result.unwrap()[1].clone();
-        let enonce1: &str = enonce1.as_str().unwrap();
-        session.enonce1 =
-            u32::from_le_bytes(hex::decode(enonce1).unwrap().as_slice().try_into().unwrap());
-        session.enonce1_hex = enonce1.to_string();
-        session.btcaddress = Some("tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d".to_string());
-        session.user_id = Some(1);
-
-        let job_id = JobId(u64::from_str_radix(&notify.params.job_id, 16).unwrap());
-
-        let _ = tracker_handle.insert_job(
-            Arc::new(template),
-            notify.params.coinbase1.to_string(),
-            notify.params.coinbase2.to_string(),
-            Some(create_test_commitment()),
-            TEST_COINBASE_NSECS,
-            vec![],
-            job_id,
-        );
+        let submit = build_pool_job_submit(&tracker_handle, &session.enonce1_hex);
 
         let (emissions_tx, mut emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -1135,12 +1100,13 @@ mod handle_submit_tests {
                 &bitcoinrpc_config.password,
             )
             .unwrap(),
-            start_difficulty: 10000,
+            start_difficulty: 10_000,
             minimum_difficulty: 1,
-            maximum_difficulty: Some(2),
-            ignore_difficulty: true, // Ignore difficulty check
+            maximum_difficulty: None,
+            ignore_difficulty: true,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Signet,
             metrics: metrics_handle.clone(),
             chain_store_handle,
@@ -1166,16 +1132,87 @@ mod handle_submit_tests {
 
         // Emission should be sent
         let share = emissions_rx.try_recv().unwrap();
-        assert_eq!(share.pplns.btcaddress, Some(session.btcaddress.unwrap()));
+        assert_eq!(
+            share.share_commitment.miner_bitcoin_address,
+            create_test_commitment().miner_bitcoin_address
+        );
 
         // Share should be counted as accepted (not rejected)
-        // accepted_total tracks total difficulty of accepted shares, which equals session difficulty (10000)
+        // accepted_difficulty_total tracks the session difficulty of accepted shares (10000)
         assert_eq!(metrics_handle.get_metrics().await.accepted_total, 1);
         assert_eq!(
             metrics_handle.get_metrics().await.accepted_difficulty_total,
             10000
         );
         assert_eq!(metrics_handle.get_metrics().await.rejected_total, 0);
+    }
+
+    /// The emitted coinbase proof is the midstate of the coinbase the miner
+    /// hashed, and the template merkle branches are passed through from the
+    /// job.
+    #[tokio::test]
+    async fn test_handle_submit_emits_coinbase_proof_of_share_coinbase() {
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        session.subscribed = true;
+        session.enonce1 = u32::from_le_bytes([0xde, 0xad, 0xbe, 0xef]);
+        session.enonce1_hex = "deadbeef".to_string();
+        session.btcaddress = Some("tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d".to_string());
+        session.user_id = Some(1);
+        let tracker_handle = start_tracker_actor();
+
+        let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
+        mock_submit_block_with_any_body(&mock_server).await;
+
+        let submit = build_pool_job_submit(&tracker_handle, &session.enonce1_hex);
+
+        let (emissions_tx, mut emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
+        let stats_dir = tempfile::tempdir().unwrap();
+        let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+
+        let ctx = StratumContext {
+            tracker_handle: tracker_handle.clone(),
+            bitcoindrpc_client: BitcoindRpcClient::new(
+                &bitcoinrpc_config.url,
+                &bitcoinrpc_config.username,
+                &bitcoinrpc_config.password,
+            )
+            .unwrap(),
+            start_difficulty: 1,
+            minimum_difficulty: 1,
+            maximum_difficulty: None,
+            ignore_difficulty: false,
+            validate_addresses: true,
+            emissions_tx,
+            pplns_shares_tx,
+            network: bitcoin::network::Network::Signet,
+            metrics: metrics_handle.clone(),
+            chain_store_handle,
+            mode: PoolMode::P2poolv2,
+            miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
+            template_refresh_tx: None,
+        };
+
+        handle_submit(submit, &mut session, ctx).await.unwrap();
+
+        let share = emissions_rx.try_recv().unwrap();
+        let expected_proof = CoinbaseProof::from_coinbase(
+            &share.bitcoin_coinbase,
+            share.share_commitment.share_witness_root,
+        )
+        .unwrap();
+        assert_eq!(share.coinbase_proof, expected_proof);
+
+        let job = tracker_handle
+            .get_job(tracker_handle.get_latest_job_id())
+            .unwrap();
+        assert_eq!(share.template_merkle_branches, job.template_merkle_branches);
     }
 
     #[tokio::test]
@@ -1192,6 +1229,7 @@ mod handle_submit_tests {
         );
         let tracker_handle = start_tracker_actor();
         let (emissions_tx, _) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (chain_store_handle, _) = setup_test_chain_store_handle(true).await;
         let (_mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let stats_dir = tempfile::tempdir().unwrap();
@@ -1213,6 +1251,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Regtest,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1276,6 +1315,7 @@ mod handle_submit_tests {
         );
 
         let (emissions_tx, _) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -1296,6 +1336,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Signet,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1377,6 +1418,7 @@ mod handle_submit_tests {
 
         let (_mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let (emissions_tx, _) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -1397,6 +1439,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Regtest,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1462,6 +1505,7 @@ mod handle_submit_tests {
 
         let (_mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let (emissions_tx, _) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -1482,6 +1526,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Regtest,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1548,6 +1593,7 @@ mod handle_submit_tests {
 
         let (_mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let (emissions_tx, _) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -1568,6 +1614,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Regtest,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1611,6 +1658,7 @@ mod handle_submit_tests {
         );
         let tracker_handle = start_tracker_actor();
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
         let (_mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let stats_dir = tempfile::tempdir().unwrap();
@@ -1632,6 +1680,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Regtest,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1707,6 +1756,7 @@ mod handle_submit_tests {
         );
 
         let (emissions_tx, mut emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -1727,6 +1777,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Signet,
             metrics: metrics_handle.clone(),
             chain_store_handle,
@@ -1795,6 +1846,7 @@ mod handle_submit_tests {
         );
 
         let (emissions_tx, mut emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, mut pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -1815,6 +1867,7 @@ mod handle_submit_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Signet,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1834,12 +1887,194 @@ mod handle_submit_tests {
         // Share is accepted despite not meeting pool difficulty
         assert_eq!(response.result, Some(json!(true)));
 
-        // Share was emitted for PPLNS accounting
-        let share = emissions_rx.try_recv().unwrap();
+        // Share is queued for the PPLNS share worker at the session
+        // difficulty, and never emitted to the share chain.
+        let share = pplns_shares_rx.try_recv().unwrap();
         assert_eq!(
-            share.pplns.btcaddress,
+            share.btcaddress,
             Some("tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d".to_string())
         );
+        assert_eq!(share.difficulty, 1);
+        assert!(
+            emissions_rx.try_recv().is_err(),
+            "hydrapool share must not be emitted to the share chain"
+        );
+    }
+
+    /// Regression for GHSA-mmw7-mxvq-79wq: a hydrapool share whose hash does
+    /// not meet the session difficulty must not be stored for PPLNS, because
+    /// it would be credited at the session difficulty the miner chose.
+    #[tokio::test]
+    async fn test_hydrapool_mode_does_not_store_share_below_session_difficulty() {
+        let mut session =
+            Session::<DifficultyAdjuster>::new(10_000, 10_000, None, DEFAULT_VERSION_MASK);
+        session.subscribed = true;
+        let tracker_handle = start_tracker_actor();
+
+        let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
+        mock_submit_block_with_any_body(&mock_server).await;
+
+        let (template, notify, submit, authorize_response) =
+            load_valid_stratum_work_components("../p2poolv2_tests/test_data/validation/stratum/b/");
+
+        let enonce1 = authorize_response.result.unwrap()[1].clone();
+        let enonce1: &str = enonce1.as_str().unwrap();
+        session.enonce1 =
+            u32::from_le_bytes(hex::decode(enonce1).unwrap().as_slice().try_into().unwrap());
+        session.enonce1_hex = enonce1.to_string();
+        session.btcaddress = Some("tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d".to_string());
+        session.user_id = Some(1);
+
+        let job_id = JobId(u64::from_str_radix(&notify.params.job_id, 16).unwrap());
+
+        let _ = tracker_handle.insert_job(
+            Arc::new(template),
+            notify.params.coinbase1.to_string(),
+            notify.params.coinbase2.to_string(),
+            None,
+            TEST_COINBASE_NSECS,
+            vec![],
+            job_id,
+        );
+
+        let (emissions_tx, mut emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, mut pplns_shares_rx) = mpsc::channel(10);
+        let stats_dir = tempfile::tempdir().unwrap();
+        let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+
+        let ctx = StratumContext {
+            tracker_handle: tracker_handle.clone(),
+            bitcoindrpc_client: BitcoindRpcClient::new(
+                &bitcoinrpc_config.url,
+                &bitcoinrpc_config.username,
+                &bitcoinrpc_config.password,
+            )
+            .unwrap(),
+            start_difficulty: 10_000,
+            minimum_difficulty: 1,
+            maximum_difficulty: None,
+            ignore_difficulty: false,
+            validate_addresses: true,
+            emissions_tx,
+            pplns_shares_tx,
+            network: bitcoin::network::Network::Signet,
+            metrics: metrics_handle.clone(),
+            chain_store_handle,
+            mode: PoolMode::Hydrapool,
+            miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
+            template_refresh_tx: None,
+        };
+
+        let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
+        let response = match &messages[..] {
+            [Message::Response(response)] => response,
+            _ => panic!("expected Response"),
+        };
+        assert_eq!(response.result, Some(json!(false)));
+
+        assert!(
+            pplns_shares_rx.try_recv().is_err(),
+            "hydrapool share below session difficulty must not be stored"
+        );
+        assert!(
+            emissions_rx.try_recv().is_err(),
+            "hydrapool share below session difficulty must not be emitted"
+        );
+        assert_eq!(metrics_handle.get_metrics().await.rejected_total, 1);
+    }
+
+    /// `ignore_difficulty` only changes the miner response and metrics. It
+    /// must not let a hydrapool share below session difficulty into PPLNS
+    /// storage.
+    #[tokio::test]
+    async fn test_hydrapool_mode_ignore_difficulty_does_not_store_share_below_session_difficulty() {
+        let mut session =
+            Session::<DifficultyAdjuster>::new(10_000, 10_000, None, DEFAULT_VERSION_MASK);
+        session.subscribed = true;
+        let tracker_handle = start_tracker_actor();
+
+        let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
+        mock_submit_block_with_any_body(&mock_server).await;
+
+        let (template, notify, submit, authorize_response) =
+            load_valid_stratum_work_components("../p2poolv2_tests/test_data/validation/stratum/b/");
+
+        let enonce1 = authorize_response.result.unwrap()[1].clone();
+        let enonce1: &str = enonce1.as_str().unwrap();
+        session.enonce1 =
+            u32::from_le_bytes(hex::decode(enonce1).unwrap().as_slice().try_into().unwrap());
+        session.enonce1_hex = enonce1.to_string();
+        session.btcaddress = Some("tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d".to_string());
+        session.user_id = Some(1);
+
+        let job_id = JobId(u64::from_str_radix(&notify.params.job_id, 16).unwrap());
+
+        let _ = tracker_handle.insert_job(
+            Arc::new(template),
+            notify.params.coinbase1.to_string(),
+            notify.params.coinbase2.to_string(),
+            None,
+            TEST_COINBASE_NSECS,
+            vec![],
+            job_id,
+        );
+
+        let (emissions_tx, mut emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, mut pplns_shares_rx) = mpsc::channel(10);
+        let stats_dir = tempfile::tempdir().unwrap();
+        let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+
+        let ctx = StratumContext {
+            tracker_handle: tracker_handle.clone(),
+            bitcoindrpc_client: BitcoindRpcClient::new(
+                &bitcoinrpc_config.url,
+                &bitcoinrpc_config.username,
+                &bitcoinrpc_config.password,
+            )
+            .unwrap(),
+            start_difficulty: 10_000,
+            minimum_difficulty: 1,
+            maximum_difficulty: None,
+            ignore_difficulty: true,
+            validate_addresses: true,
+            emissions_tx,
+            pplns_shares_tx,
+            network: bitcoin::network::Network::Signet,
+            metrics: metrics_handle.clone(),
+            chain_store_handle,
+            mode: PoolMode::Hydrapool,
+            miner_address: None,
+            share_chain: crate::config::Chain::Bitcoin,
+            bch_share_network: None,
+            cash_share: None,
+            template_refresh_tx: None,
+        };
+
+        let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
+        let response = match &messages[..] {
+            [Message::Response(response)] => response,
+            _ => panic!("expected Response"),
+        };
+        assert_eq!(response.result, Some(json!(true)));
+
+        assert!(
+            pplns_shares_rx.try_recv().is_err(),
+            "hydrapool share below session difficulty must not be stored"
+        );
+        assert!(
+            emissions_rx.try_recv().is_err(),
+            "hydrapool share below session difficulty must not be emitted"
+        );
+        assert_eq!(metrics_handle.get_metrics().await.accepted_total, 1);
     }
 
     async fn submit_block_against(result: serde_json::Value) -> bool {

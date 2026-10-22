@@ -33,12 +33,14 @@
 #                  signatures are not consensus, so they differ per node to show
 #                  it; each must stay within the 16-byte config limit)
 #   DIAL_FANOUT    how many earlier peers each dials   (default 3)
-#   MATURITY_SHARES  coinbase maturity depth in shares  (default 6048, the
-#                  production value; lower it so a short run reaches the
-#                  payout maturity skip. Consensus: one value for all nodes)
 #   LATE_MINER     node index launched with its emitter off (default unset).
 #                  It syncs but mines nothing until failures.sh late-miner
 #                  restarts it with the emitter on
+#   FORK_GROUP_FROM  split the swarm into two groups that never connect
+#                  (default unset). Nodes at this index and above form the
+#                  minority group and dial only each other, so the share chain
+#                  forks at launch. Used by failures.sh deep-fork-refused and
+#                  shallow-fork-reorged
 #   PROFILE        cargo profile: release | debug      (default release)
 #
 # NOTE: release is the default on purpose. libp2p-request-response has a
@@ -80,8 +82,8 @@ LATENCY_MS="${LATENCY_MS:-0}"
 # Scale the latency base by the same factor so uncle rate (latency/interval) is
 # preserved; LATENCY_MS is thus given in 10s-interval terms.
 IDEAL_BLOCK_TIME="${IDEAL_BLOCK_TIME:-10}"
-MATURITY_SHARES="${MATURITY_SHARES:-6048}"
 LATE_MINER="${LATE_MINER:-}"
+FORK_GROUP_FROM="${FORK_GROUP_FROM:-}"
 LATENCY_MS=$(awk -v l="$LATENCY_MS" -v t="$IDEAL_BLOCK_TIME" 'BEGIN{printf "%.0f", l*t/10}')
 LATENCY_DIST="${LATENCY_DIST:-spread}"
 DIST_SEED="${DIST_SEED:-42}"
@@ -215,11 +217,17 @@ for i in $(seq 0 $((N - 1))); do
   node_pool_signature="${POOL_SIGNATURE_PREFIX}$i"
 
   # Topology: each node dials up to DIAL_FANOUT earlier nodes (chain + chords),
-  # which yields a single connected component. Node 0 dials nobody.
+  # which yields a single connected component. Node 0 dials nobody. With
+  # FORK_GROUP_FROM set, a node in the minority group dials only earlier nodes
+  # of its own group, so the two groups form separate components.
+  group_start=0
+  if [ -n "$FORK_GROUP_FROM" ] && [ "$i" -ge "$FORK_GROUP_FROM" ]; then
+    group_start="$FORK_GROUP_FROM"
+  fi
   dial=""
   for k in $(seq 1 "$DIAL_FANOUT"); do
     j=$((i - k))
-    if [ "$j" -ge 0 ]; then
+    if [ "$j" -ge "$group_start" ]; then
       peer_port=$((BASE_P2P + j))
       if [ -n "$dial" ]; then dial="$dial, "; fi
       dial="$dial\"/ip4/127.0.0.1/tcp/$peer_port\""
@@ -245,7 +253,6 @@ dial_timeout_secs = 30
 
 [store]
 path = "$store"
-background_task_frequency_hours = 24
 pplns_ttl_days = 7
 
 [stratum]
@@ -286,7 +293,6 @@ propagation_delay_ms = $node_latency
 asert_anchor_time = $ASERT_ANCHOR
 network_hashrate = $NETWORK_HASHRATE
 ideal_block_time_secs = $IDEAL_BLOCK_TIME
-coinbase_maturity = $MATURITY_SHARES
 EOF
 
   "$BIN" --config "$cfg" > "$log" 2>&1 &

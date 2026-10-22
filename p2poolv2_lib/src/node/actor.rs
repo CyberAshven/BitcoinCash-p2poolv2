@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::monitoring_events::MonitoringEventSender;
 use crate::node::Node;
 use crate::node::SwarmSend;
+use crate::node::dns_seeds;
 use crate::node::emission_worker::EmissionWorker;
 use crate::node::messages::Message;
 use crate::node::organise_worker::{OrganiseWorker, create_organise_channel};
@@ -531,6 +532,12 @@ impl NodeActor {
         kademlia_bootstrap_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         kademlia_bootstrap_interval.tick().await;
 
+        let dns_seed_timer = tokio::time::sleep(dns_seeds::dns_seed_delay(
+            self.node.peer_reconnector.has_peers(),
+        ));
+        tokio::pin!(dns_seed_timer);
+        let mut dns_seed_pending = self.node.dns_seeds.is_some();
+
         let stop_reason = loop {
             tokio::select! {
                 buf = self.node.swarm_rx.recv() => {
@@ -580,6 +587,10 @@ impl NodeActor {
                 }
                 _ = kademlia_bootstrap_interval.tick() => {
                     self.node.attempt_kademlia_bootstrap();
+                }
+                () = &mut dns_seed_timer, if dns_seed_pending => {
+                    dns_seed_pending = false;
+                    self.node.query_dns_seeds_if_isolated();
                 }
             }
         };
@@ -653,6 +664,11 @@ impl NodeActor {
                     debug!("Disconnected peer: {peer_id}");
                 }
             }
+            // Event sent from dns seed resolution
+            SwarmSend::Dial(address) => match self.node.swarm.dial(address.clone()) {
+                Ok(_) => info!("Dialed {address}"),
+                Err(error) => debug!("Failed to dial {address}: {error}"),
+            },
         }
     }
 
