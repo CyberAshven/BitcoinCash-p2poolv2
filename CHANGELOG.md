@@ -75,6 +75,11 @@ The pre-release is refreshed in place with `main` until the beta.
 
 ### Fixed
 
+- A Stratum V2 channel starts at the difficulty its declared
+  `nominal_hash_rate` settles on, within the node's minimum and maximum,
+  as the SV2 spec asks. Before, every channel started at `start_difficulty`,
+  which left a small device days from its first share. A channel that
+  declares no rate still starts at `start_difficulty`.
 - A Bitcoin Cash share address in `p2p=` ends at its first dot, so the
   `.<worker>` the Stratum V2 reference translator appends to a channel's
   `user_identity` no longer makes the node refuse the channel.
