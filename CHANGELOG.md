@@ -7,15 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v0.0.1-alpha] - 2026-10-18, refreshed 2026-10-19
+## [v0.0.1-alpha] - 2026-10-18, refreshed 2026-10-19 and 2026-10-22
 
 First alpha of P2Poolv2 for Bitcoin Cash, synced with upstream P2Poolv2
 through `2dabcdd2`. Alpha software: run it on chipnet or regtest first.
-The pre-release is refreshed in place with `main` until the beta; the
-2026-10-19 refresh adds the Template Distribution client, the template
-refresh after a found block, the `/miner` API, and the BCH payout window
-sized by block difficulty with a 100-share maturity (a share-chain rule
-change: nodes start from a new store).
+The pre-release is refreshed in place with `main` until the beta.
+
+- The 2026-10-19 refresh adds the Template Distribution client, the
+  template refresh after a found block, the `/miner` API, and the BCH payout
+  window sized by block difficulty with a 100-share maturity. That is a
+  share-chain rule change: nodes start from a new store.
+- The 2026-10-22 refresh adds:
+  - the dashboard rendered in Rust by the node;
+  - `[api] web_root` for a self-hosted frontend and `public_dashboard` for
+    a public node;
+  - the Rust/WASM dashboard (`p2poolv2_web`) with `/hashrate` and
+    `/found_blocks`;
+  - `/jd_prepare` for external SV2 job declarators;
+  - BCH share difficulty anchored at each share's parent. This changes the
+    share chain's rules, not Bitcoin Cash consensus: nodes start from a new
+    store.
 
 ### Added
 
