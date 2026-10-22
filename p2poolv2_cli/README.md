@@ -151,6 +151,46 @@ sign for the key. Use the result as `[stratum] miner_address`, or as the
 stratum password `p2p=<address>`. See
 `docs/architecture/address-format.md`.
 
+### bch-trade
+
+Trade Bitcoin Cash shares for BCH. Builds the contracts and signs the
+lock, claim and refund transactions on either chain offline; does not
+require a running node or config file, and never broadcasts. The protocol,
+timeouts and failure cases are in `docs/atomic-swap/bch-share-trading.md`.
+
+Every command takes `--chain share` or `--chain bch` and `--network
+mainnet|chipnet|regtest`. Share-chain addresses are share addresses
+(`p2pool:`, `tp2pool:`, `rp2pool:`, from `bch-share-address`) and Bitcoin
+Cash addresses P2PKH CashAddr, so an address meant for one chain is refused
+on the other.
+
+```sh
+# Seller: hash the secret (pick it with e.g. `openssl rand -hex 32`).
+p2poolv2_cli bch-trade secret-hash --secret-file secret.hex
+
+# Both: build each contract from the agreed terms and compare.
+p2poolv2_cli bch-trade contract --chain share --network chipnet   --secret-hash <hash> --claim-address tp2pool:q<buyer>   --refund-address tp2pool:q<seller> --refund-height <share height>
+p2poolv2_cli bch-trade contract --chain bch --network chipnet   --secret-hash <hash> --claim-address bchtest:q<seller>   --refund-address bchtest:q<buyer> --refund-height <bch height>
+p2poolv2_cli bch-trade inspect --chain bch --network chipnet --redeem-script <hex>
+
+# Lock coins into a contract (the seller on the share chain, the buyer on
+# Bitcoin Cash, who can also pay the printed P2SH32 address from a wallet).
+p2poolv2_cli bch-trade lock --chain share --network chipnet   --redeem-script <hex> --coin <txid>:<vout>:<units> --amount <units>   --change-address tp2pool:q<seller> --wif-file seller.wif
+
+# Claim with the secret, read it from a counterparty's claim, or refund.
+p2poolv2_cli bch-trade claim --chain bch --network chipnet --redeem-script <hex>   --coin <txid>:0:<sats> --to bchtest:q<seller> --wif-file seller.wif --secret-file secret.hex
+p2poolv2_cli bch-trade extract-secret --redeem-script <hex> --transaction <claim hex>
+p2poolv2_cli bch-trade refund --chain share --network chipnet --redeem-script <hex>   --coin <txid>:0:<units> --to tp2pool:q<seller> --wif-file seller.wif
+```
+
+Keys are WIF exports from the owner's wallet, read from `--wif-file` or a
+hidden prompt and never taken on the command line; the secret is read the
+same way. A mainnet key is refused on chipnet or regtest and the other way
+round. Fees default to 1 satoshi per byte on Bitcoin Cash and 0 on the
+share chain (`--fee-rate`). Outputs below BCHN's dust threshold (546 for
+P2PKH, 576 for a contract) are refused. Share-chain transactions are not
+relayed or mined by nodes yet; see the status section of the design.
+
 ### gen-auth
 
 Generate API authentication credentials. Does not require a running

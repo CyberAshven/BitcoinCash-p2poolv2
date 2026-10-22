@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Share trading for Bitcoin Cash (decision 13). This changes the share
+chain's rules, not Bitcoin Cash consensus: nodes start from a new store,
+and Bitcoin Cash protocol strings carry `trade-htlc`.
+
+### Added
+
+- Bitcoin Cash share trading: a miner sells share units for BCH with one
+  hash time locked contract behind P2SH32 on each chain and no Lightning.
+  The seller locks shares, the buyer locks BCH under the same secret hash,
+  the seller's BCH claim reveals the secret and the buyer claims the shares
+  with it; refunds use height locks. See
+  `docs/atomic-swap/bch-share-trading.md`.
+- `p2poolv2_cli bch-trade` (`contract`, `inspect`, `secret-hash`, `lock`,
+  `claim`, `refund`, `extract-secret`) builds and signs both legs offline,
+  with a WIF key read from a file or a hidden prompt and never generated.
+
+### Changed
+
+- Share-chain consensus on Bitcoin Cash: the interpreter also accepts a
+  claim or refund of the share-trading contract; every output of a
+  non-coinbase share transaction must be P2PKH or P2SH32 at or above BCHN's
+  dust threshold (546 or 576 units), so `OP_RETURN`, P2SH20 and dust outputs
+  invalidate a share; and a share transaction must be final at its share's
+  height. Bitcoin keeps upstream's rules.
+
 ## [v0.0.1-alpha] - 2026-10-18, refreshed 2026-10-19 and 2026-10-22
 
 First alpha of P2Poolv2 for Bitcoin Cash, synced with upstream P2Poolv2

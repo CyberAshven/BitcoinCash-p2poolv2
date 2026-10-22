@@ -39,7 +39,9 @@ p2poolv2_cli bch-share-address --network mainnet bitcoincash:q...
 
 Use `--network chipnet` (`bchtest:` to `tp2pool:`) or `--network regtest`
 (`bchreg:` to `rp2pool:`) on the test networks. The command takes no private
-key.
+key. Keep the wallet that holds this key: it signs if you ever sell shares
+for BCH with `p2poolv2_cli bch-trade`
+([atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md)).
 
 ## 3. Configure the node
 
