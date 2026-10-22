@@ -10,6 +10,9 @@
 //! in with `include_bytes!`, so the node serves them from static memory and
 //! reads nothing from disk. See `assets/README.md` for their sources and
 //! licences.
+//!
+//! They are also the Rust/WASM dashboard's (`p2poolv2_web`) only styling:
+//! trunk bundles the same files, and `style_guard` keeps it that way.
 
 use axum::extract::Path;
 use axum::http::{StatusCode, header};
@@ -17,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 
 /// Changed whenever an asset changes, so browsers holding a cached copy fetch
 /// the new one. Pages link every asset with `?v=` this value.
-pub(crate) const ASSET_VERSION: &str = "1";
+pub(crate) const ASSET_VERSION: &str = "2";
 
 /// How long browsers may reuse an asset before asking again.
 const CACHE_CONTROL: &str = "public, max-age=86400";
