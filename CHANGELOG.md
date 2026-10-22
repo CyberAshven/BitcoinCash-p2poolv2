@@ -49,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- On Bitcoin Cash, share difficulty anchors ASERT at each share's parent
+  instead of genesis, the same on mainnet, chipnet and regtest. A late start
+  or an outage no longer leaves shares at the easiest difficulty, where
+  PPLNS paid by submission count instead of work. Bitcoin keeps the genesis
+  anchor. This changes only the share chain, not Bitcoin Cash consensus. It
+  is a share chain consensus change: Bitcoin Cash protocol strings carry
+  `asert-parent`, and existing chipnet and regtest nodes restart together on
+  a new store path.
 - On Bitcoin Cash, peers reject shares whose donation plus fee exceed 10%, or
   whose donation pays another address.
 - A found block's coinbase now pays only shares that are mature for it. The
