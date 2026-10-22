@@ -28,7 +28,9 @@ use super::session::DeclaredJob;
 use super::session::{encode_frame, string_field};
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::config::{BitcoinCashNetwork, Chain, PoolMode};
-use crate::stratum::difficulty_adjuster::{DifficultyAdjuster, DifficultyAdjusterTrait};
+use crate::stratum::difficulty_adjuster::{
+    DifficultyAdjuster, DifficultyAdjusterTrait, TARGET_DRR,
+};
 use crate::stratum::message_handlers::authorize_response::{
     resolve_cash_share, resolve_share_address,
 };
@@ -266,11 +268,14 @@ impl MiningChannels {
                 let request = OpenStandardMiningChannel::from_bytes(payload)
                     .map_err(|error| error.to_string())?;
                 self.open(
-                    ChannelKind::Standard,
-                    request.request_id,
-                    request.user_identity.as_utf8_or_hex(),
-                    request.max_target.as_bytes(),
-                    0,
+                    OpenRequest {
+                        kind: ChannelKind::Standard,
+                        request_id: request.request_id,
+                        user_identity: request.user_identity.as_utf8_or_hex(),
+                        nominal_hash_rate: request.nominal_hash_rate,
+                        max_target: request.max_target.as_bytes(),
+                        min_extranonce_size: 0,
+                    },
                     current,
                 )
                 .await
@@ -279,11 +284,14 @@ impl MiningChannels {
                 let request = OpenExtendedMiningChannel::from_bytes(payload)
                     .map_err(|error| error.to_string())?;
                 self.open(
-                    ChannelKind::Extended,
-                    request.request_id,
-                    request.user_identity.as_utf8_or_hex(),
-                    request.max_target.as_bytes(),
-                    request.min_extranonce_size,
+                    OpenRequest {
+                        kind: ChannelKind::Extended,
+                        request_id: request.request_id,
+                        user_identity: request.user_identity.as_utf8_or_hex(),
+                        nominal_hash_rate: request.nominal_hash_rate,
+                        max_target: request.max_target.as_bytes(),
+                        min_extranonce_size: request.min_extranonce_size,
+                    },
                     current,
                 )
                 .await
@@ -412,13 +420,17 @@ impl MiningChannels {
 
     async fn open(
         &mut self,
-        kind: ChannelKind,
-        request_id: u32,
-        user_identity: String,
-        max_target: &[u8],
-        min_extranonce_size: u16,
+        request: OpenRequest<'_>,
         current: Option<Arc<PreparedNotifyParams>>,
     ) -> Result<Vec<Vec<u8>>, String> {
+        let OpenRequest {
+            kind,
+            request_id,
+            user_identity,
+            nominal_hash_rate,
+            max_target,
+            min_extranonce_size,
+        } = request;
         if self.channels.len() >= MAX_CHANNELS_PER_CONNECTION {
             return open_error(
                 request_id,
@@ -436,7 +448,12 @@ impl MiningChannels {
             );
         }
         let mut session = Session::<DifficultyAdjuster>::new(
-            self.ctx.start_difficulty,
+            initial_difficulty(
+                nominal_hash_rate,
+                self.ctx.start_difficulty,
+                self.ctx.minimum_difficulty,
+                self.ctx.maximum_difficulty,
+            ),
             self.ctx.minimum_difficulty,
             self.ctx.maximum_difficulty,
             self.version_mask,
@@ -880,6 +897,46 @@ fn device_max_target(max_target: &[u8]) -> Target {
     }
 }
 
+/// What an `OpenStandardMiningChannel` or `OpenExtendedMiningChannel`
+/// asks for. A standard channel asks for no extranonce space.
+struct OpenRequest<'a> {
+    kind: ChannelKind,
+    request_id: u32,
+    user_identity: String,
+    nominal_hash_rate: f32,
+    max_target: &'a [u8],
+    min_extranonce_size: u16,
+}
+
+/// Hashes a difficulty-1 share takes on average.
+const HASHES_PER_DIFFICULTY: f64 = 4_294_967_296.0;
+
+/// The first difficulty of a channel whose client declares
+/// `nominal_hash_rate` hashes a second: the difficulty the adjuster settles
+/// on for that rate, within the node's minimum and maximum. The SV2 spec has
+/// the pool set a channel's first target from this rate, so a small device
+/// is not left at a difficulty it needs days to meet. A client that declares
+/// nothing usable starts at the node's `start_difficulty`.
+fn initial_difficulty(
+    nominal_hash_rate: f32,
+    start_difficulty: u64,
+    minimum_difficulty: u64,
+    maximum_difficulty: Option<u64>,
+) -> u64 {
+    if !nominal_hash_rate.is_finite() || nominal_hash_rate <= 0.0 {
+        return start_difficulty;
+    }
+    let shares_per_second = f64::from(nominal_hash_rate) / HASHES_PER_DIFFICULTY;
+    let settled = (shares_per_second / TARGET_DRR).round();
+    let difficulty = if settled >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        settled as u64
+    };
+    let difficulty = difficulty.max(minimum_difficulty);
+    maximum_difficulty.map_or(difficulty, |maximum| difficulty.min(maximum))
+}
+
 /// Split a `user_identity` into the SV1-style username and its options.
 ///
 /// The options start at the first token, after a comma, space, tab or
@@ -1027,7 +1084,9 @@ mod tests {
         let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
             request_id: 1,
             user_identity: identity.as_str().try_into().unwrap(),
-            nominal_hash_rate: 1.0,
+            // No declared rate, so the channel starts at the node's
+            // start difficulty.
+            nominal_hash_rate: 0.0,
             max_target: U256::new(&[0xff; 32]).unwrap(),
             min_extranonce_size: 8,
         })
@@ -1807,7 +1866,9 @@ mod tests {
                 OpenStandardMiningChannel {
                     request_id: 1,
                     user_identity: USERNAME.try_into().unwrap(),
-                    nominal_hash_rate: 1.0,
+                    // No declared rate, so the channel starts at the node's
+                    // start difficulty.
+                    nominal_hash_rate: 0.0,
                     max_target: U256::new(&[0xff; 32]).unwrap(),
                 },
                 MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
@@ -2190,6 +2251,20 @@ mod tests {
             split_user_identity("address.rig1 p2p=share;d=5"),
             ("address.rig1", "p2p=share;d=5")
         );
+    }
+
+    #[test]
+    fn a_channel_starts_at_the_difficulty_its_declared_rate_settles_on() {
+        // Nothing usable declared: the node's start difficulty.
+        assert_eq!(initial_difficulty(0.0, 1_000, 1, None), 1_000);
+        assert_eq!(initial_difficulty(f32::NAN, 1_000, 1, None), 1_000);
+        assert_eq!(initial_difficulty(-5.0, 1_000, 1, None), 1_000);
+        // A 4 TH/s ASIC settles near 3,104.
+        assert_eq!(initial_difficulty(4.0e12, 1_000, 1, None), 3_104);
+        // A 20 MH/s CPU miner is held at the node's minimum.
+        assert_eq!(initial_difficulty(2.0e7, 1_000, 1, None), 1);
+        // And the node's maximum caps a huge declaration.
+        assert_eq!(initial_difficulty(1.0e18, 1_000, 1, Some(50_000)), 50_000);
     }
 
     #[test]
