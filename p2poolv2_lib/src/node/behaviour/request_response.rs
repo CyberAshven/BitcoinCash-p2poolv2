@@ -15,6 +15,7 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::{
 use crate::config::Chain;
 use crate::node::messages::{MAX_P2P_MESSAGE_SIZE, Message, RawMessage};
 use crate::pool_difficulty::BCH_ASERT_ANCHOR_TAG;
+use crate::shares::bch_script::BCH_SHARE_TRADE_RULE_TAG;
 use bitcoin::BlockHash;
 
 /// Hex characters of the share chain genesis hash carried in the protocol
@@ -50,11 +51,16 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// (`BCH_ASERT_ANCHOR_TAG`). A node anchoring at genesis computes another
 /// target for every share once the chain has been behind schedule, so it
 /// is kept apart the same way.
+///
+/// Last come the share transaction rules (`BCH_SHARE_TRADE_RULE_TAG`): the
+/// share-trading contract, dust-floored P2PKH or P2SH32 outputs and height
+/// finality. A node without them disagrees on shares carrying a contract
+/// spend, a dust output or an `OP_RETURN` output.
 fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
         Chain::BitcoinCash => Some(format!(
-            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}"
+            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}"
         )),
     }
 }
@@ -323,7 +329,7 @@ mod tests {
 
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
-            format!("/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/1.0.0")
+            format!("/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/1.0.0")
         );
     }
 
@@ -342,6 +348,25 @@ mod tests {
         assert_ne!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             genesis_anchor_string
+        );
+    }
+
+    /// A chipnet node from before the share-trading rules derived
+    /// `/p2pool/test/<genesis tag>/pplns-k3-m100/asert-parent/1.0.0`. It
+    /// rejects contract spends and accepts dust outputs, so the new string
+    /// differs and the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_share_trading() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+            .unwrap()
+            .block_hash();
+        let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
+        let before_trading_string =
+            format!("/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/1.0.0");
+
+        assert_ne!(
+            protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
+            before_trading_string
         );
     }
 
@@ -374,7 +399,7 @@ mod tests {
 
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
-            format!("/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/kad/1.0.0")
+            format!("/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/kad/1.0.0")
         );
     }
 }

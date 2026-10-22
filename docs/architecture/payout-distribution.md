@@ -144,8 +144,9 @@ pool holding fraction `f` of BCH's hashrate, so pools under about `K / 2016`
   or maturity, fails the handshake instead of exchanging shares the other
   rejects, and changing either constant changes the tag by itself. The
   share difficulty rule follows it as `asert-parent`
-  (`docs/difficulty_adjustment/asert.md`). Bitcoin's protocol strings are
-  unchanged.
+  (`docs/difficulty_adjustment/asert.md`), and the share transaction rules
+  as `trade-htlc` (`docs/atomic-swap/bch-share-trading.md`). Bitcoin's
+  protocol strings are unchanged.
 
 ## Depths
 

@@ -13,6 +13,7 @@ Audience: contributors and AI agents starting the BCH port. Read
 | Upstream P2Poolv2 sync | Merged upstream main through `2dabcdd2` (35 commits) on 2026-10-18: header-bound share commitments, the bitcoin coinbase carried beside the header, the BIP141 share witness root, mature-only PPLNS. 1,750 workspace tests, clippy and rustfmt pass. The store format changed, so nodes start from a new store path. On 2026-10-22 merged upstream main through `61810c56` (27 commits, upstream v0.16.2): block body pruning, Bitcoin genesis in `.dat` files, DNS seeds, the Hydrapool PPLNS share worker. Bitcoin Cash genesis, protocol strings and payout rules are unchanged, so no new store is needed. DNS seeds are always off on Bitcoin Cash (the seeds are Bitcoin nodes); see [pruning](architecture/pruning.md#bitcoin-cash) for the depths. |
 | Donation, operator fee and bootstrap accounting | Implemented; exact-amount tests and recorded BCHN regtest coinbases. Hydrapool accepts prefixed and prefixless CashAddr usernames. On 2026-10-18 two CPU miners on the regtest mini chain were paid in 38 pool coinbases. After 100 confirmations all 38 outputs were spent in one confirmed transaction. On the merged build each block split its reward by share difficulty among minerA, minerB and the genesis share, plus the donation. Those seven miner outputs were also matured and spent. |
 | P2PKH share ownership and transfers | Implemented; BCHN-signed ECDSA/FORKID and BCH Schnorr vectors, plus rejection tests. |
+| Share trading for BCH (decision 13) | Implemented 2026-10-22 as a share-chain consensus change; design in [atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md). One hash time locked contract behind P2SH32 on both chains; share outputs must be P2PKH or P2SH32 at or above BCHN's dust threshold (546 or 576); share transactions must be final at their share height; protocol strings carry `trade-htlc`. `p2poolv2_cli bch-trade` builds and signs every leg offline. Unit tests sign every spending path through the share-chain interpreter and a test stack machine that runs the same bytes; in-process tests run a whole trade, a refund and an immature lock through the real store and validator. Not yet run through BCHN. No node relays or mines share transactions yet, and payouts still go to `miner_bitcoin_address`, not to the holder of a share output. |
 | Main/mini share chains and P2P propagation | Implemented; recorded three-node regtest and two-node chipnet share validation. |
 | Large BCH template proofs | Implemented; 25-level BCH branches round-trip through share blocks, storage and compressed header batches. Bitcoin proof validation keeps its 16-level limit. |
 | Pool-issued SV1/SV2 jobs and worker cleanup | Implemented; recorded CPU mining plus channel and socket tests. Independent ASIC firmware remains unverified. |
@@ -784,7 +785,9 @@ move most BCH hashrate to the share chain.
       may charge up to 8.5%.
     - **Share trading stays on Bitcoin Cash.** Shares trade through BCH
       covenants, with every share output above the dust limit. No Lightning
-      Network.
+      Network. Implemented the same day as a hash time locked contract
+      behind P2SH32 on both chains, a dust floor on share outputs and height
+      finality; see [atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md).
     - **SAFA.** Experimental and not deployed. Its SHA-256 merge-mining
       covenant is tested with a small test token in the BCH VM only
       (`tools/safa-auxpow`).
@@ -808,9 +811,10 @@ check before code.
 - **Share chain addresses.** Today bech32m over a Taproot (P2TR) key
   (`docs/architecture/address-format.md`, `p2poolv2_wallet`). BCH has no
   Taproot: choose a BCH form (for example CashAddr over a Schnorr key).
-- **Share trading.** The atomic-swap scripts for selling shares
-  (`docs/atomic-swap/`) need BCH scripts, or the feature waits while the mini
-  share chain covers small miners.
+- **Share trading.** Done 2026-10-22: a BCH hash time locked contract on
+  each chain replaces upstream's Lightning leg
+  ([atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md)).
+  Share-transaction relay and inclusion are still upstream's open TODO.
 - **Block rules.** CTOR (lexicographic transaction order), no block weight
   (BCH's adaptive block size limit, ABLA), BIP34 height, ASERT on the main
   chain, 100-block coinbase maturity, CashAddr payout scripts.
@@ -837,10 +841,16 @@ check before code.
   difficulty behind a 100-share maturity, and a finder bonus and the share
   period are weighed, under decision 11. Tempnet, a test network that runs 1-minute blocks, can test a
   tuning.
-- Which covenant scripts beyond P2PKH the share-chain interpreter accepts
-  for share trading (decision 13: covenants, above dust, no Lightning).
-  P2PKH transfers with `SIGHASH_FORKID` ECDSA or Schnorr are checked since
-  2026-10-15.
+- Covenant scripts beyond P2PKH for share trading: settled 2026-10-22. The
+  share-chain interpreter accepts one more spend, the share-trading hash
+  time locked contract behind P2SH32, alongside P2PKH (checked since
+  2026-10-15), and share outputs must be P2PKH or P2SH32 above dust
+  ([atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md)).
+  Still open: an introspection template (a claim anyone can complete, a
+  cancel the buyer alone signs), relaying and mining share transactions,
+  and paying a share's PPLNS payouts to the holder of its output, which is
+  upstream's marketplace design and what gives a traded share its BCH
+  income.
 - Merge-mining commitment format and size budget (Stratum V2's
   `CoinbaseOutputConstraints` already declares coinbase space).
 - Binding each miner's payout address to their shares over SV2 (sv2-p2pool

@@ -108,24 +108,28 @@ a full donation (10,000) still skips miner address validation.
   genesis share uses the same P2PKH form.
   `p2poolv2_cli bch-share-address` re-encodes a P2PKH CashAddr from the
   miner's wallet under the share prefix; it takes no private key.
-- **Share trading.** The atomic-swap scripts are not ported, and the mini
-  share chain stays the stand-in named in the plan. No v1 code is copied.
-  Share transfers are checked by a Bitcoin Cash interpreter
-  (`shares/bch_script.rs`, 2026-10-15) instead of `bitcoinconsensus`, whose
-  Bitcoin rules reject a Bitcoin Cash wallet's `SIGHASH_FORKID` signature and
-  accept a Bitcoin legacy one. It accepts one spend: a P2PKH output and a
-  `<signature> <public key>` input of two direct pushes, signed with
-  `SIGHASH_FORKID` (`ALL`, `NONE` or `SINGLE`, optionally `ANYONECANPAY`) by
-  ECDSA (strict DER, low S) or Bitcoin Cash Schnorr (64 bytes, not BIP340),
-  with a compressed or uncompressed key and no witness. Spending P2SH,
-  multisig, token-prefixed outputs or the atomic-swap scripts, and
-  `SIGHASH_UTXOS`, are rejected, which is stricter than Bitcoin Cash. The
-  outputs a transfer creates are not restricted, so a share sent to any
-  other script cannot be spent on the share chain. The digest and both
-  signature checks are tested against transactions BCHN 29.2.0's
-  `bitcoin-tx` signed (Schnorr and ECDSA; `ALL`, `NONE`, `SINGLE` and
-  `ANYONECANPAY`). No node builds shares with transfers today
-  (`handle_stratum_share` adds none), the same as on Bitcoin.
+- **Share trading.** A BCH hash time locked contract behind P2SH32 replaces
+  upstream's Lightning leg; see
+  [atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md). No
+  v1 code is copied. Share transactions are checked by a Bitcoin Cash
+  interpreter (`shares/bch_script.rs`, 2026-10-15) instead of
+  `bitcoinconsensus`, whose Bitcoin rules reject a Bitcoin Cash wallet's
+  `SIGHASH_FORKID` signature and accept a Bitcoin legacy one. It accepts two
+  spends: a P2PKH output with a `<signature> <public key>` input of two
+  direct pushes, and since 2026-10-22 a claim or refund of the share-trading
+  contract behind P2SH32 (`shares/bch_htlc.rs`). Signatures use
+  `SIGHASH_FORKID` (`ALL`, `NONE` or `SINGLE`, optionally `ANYONECANPAY`)
+  with ECDSA (strict DER, low S) or Bitcoin Cash Schnorr (64 bytes, not
+  BIP340), a compressed or uncompressed key and no witness. Spending P2SH20,
+  multisig, token-prefixed outputs or any other script, and
+  `SIGHASH_UTXOS`, are rejected, which is stricter than Bitcoin Cash. Since
+  2026-10-22 the outputs a share transaction creates must be P2PKH or
+  P2SH32 at or above BCHN's dust threshold, and a share transaction must be
+  final at its share's height. The digest and both signature checks are
+  tested against transactions BCHN 29.2.0's `bitcoin-tx` signed (Schnorr
+  and ECDSA; `ALL`, `NONE`, `SINGLE` and `ANYONECANPAY`). No node builds
+  shares with transfers today (`handle_stratum_share` adds none), the same
+  as on Bitcoin.
 - **Block rules.** CTOR, compact-target agreement, witness exclusion, and the
   node size limit are checked on the template before use. The constructed
   coinbase starts with the BIP34 height push, and BCHN 29.2.0 accepted blocks

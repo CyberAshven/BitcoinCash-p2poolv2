@@ -453,7 +453,11 @@ script rules: a spend signed by a Bitcoin Cash wallet (`SIGHASH_FORKID`,
 Schnorr) would fail there and a Bitcoin legacy signature would pass. The
 interpreter accepts a P2PKH spend signed with `SIGHASH_FORKID` by ECDSA or
 Bitcoin Cash Schnorr, the form a Bitcoin Cash wallet uses for the share
-owner's P2PKH key, and rejects every other script.
+owner's P2PKH key, and a claim or refund of the share-trading contract
+behind P2SH32 ([bch-share-trading.md](../atomic-swap/bch-share-trading.md)),
+and rejects every other script. The outputs it creates must be P2PKH or
+P2SH32 and at or above BCHN's dust threshold. `p2poolv2_cli bch-trade`
+builds and signs those transactions with a key the owner's wallet exports.
 
 ## Registration
 

@@ -7,13 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Share trading for Bitcoin Cash (decision 13). This changes the share
+chain's rules, not Bitcoin Cash consensus: nodes start from a new store,
+and Bitcoin Cash protocol strings carry `trade-htlc`.
+
 Synced with upstream P2Poolv2 through `61810c56` (its v0.16.2). The fork
-keeps version `0.0.1-alpha`. Bitcoin Cash genesis shares, protocol strings,
-the PPLNS window and maturity, the ASERT parent anchor and the donation and
-fee cap are unchanged, so chipnet nodes keep their store.
+keeps version `0.0.1-alpha`. The sync itself leaves Bitcoin Cash genesis
+shares, protocol strings, the PPLNS window and maturity, the ASERT parent
+anchor and the donation and fee cap as they were.
 
 ### Added
 
+- Bitcoin Cash share trading: a miner sells share units for BCH with one
+  hash time locked contract behind P2SH32 on each chain and no Lightning.
+  The seller locks shares, the buyer locks BCH under the same secret hash,
+  the seller's BCH claim reveals the secret and the buyer claims the shares
+  with it; refunds use height locks. See
+  `docs/atomic-swap/bch-share-trading.md`.
+- `p2poolv2_cli bch-trade` (`contract`, `inspect`, `secret-hash`, `lock`,
+  `claim`, `refund`, `extract-secret`) builds and signs both legs offline,
+  with a WIF key read from a file or a hidden prompt and never generated.
 - Nodes delete block bodies more than `PRUNE_DEPTH + PRUNE_INTERVAL`
   (254,376) shares below the confirmed tip, in a background task every 6
   hours while the node is current (from upstream). Headers and their merkle
@@ -34,6 +47,12 @@ fee cap are unchanged, so chipnet nodes keep their store.
 
 ### Changed
 
+- Share-chain consensus on Bitcoin Cash: the interpreter also accepts a
+  claim or refund of the share-trading contract; every output of a
+  non-coinbase share transaction must be P2PKH or P2SH32 at or above BCHN's
+  dust threshold (546 or 576 units), so `OP_RETURN`, P2SH20 and dust outputs
+  invalidate a share; and a share transaction must be final at its share's
+  height. Bitcoin keeps upstream's rules.
 - `network.dial_peers` is optional and defaults to empty, and a node without
   a `listen_address` still dials its `dial_peers` (from upstream).
 - Hydrapool shares go to a dedicated PPLNS share worker and are stored only

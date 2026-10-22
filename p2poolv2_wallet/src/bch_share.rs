@@ -30,6 +30,8 @@ const GENERATOR: [u64; 5] = [
 ];
 const P2PKH_VERSION: u8 = 0x00;
 const P2SH_VERSION: u8 = 0x08;
+/// Script hash type with size code 3, a 256-bit hash.
+const P2SH32_VERSION: u8 = P2SH_VERSION | 0x03;
 
 /// Script a 20-byte CashAddr payload pays, named by its version byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,10 +57,25 @@ impl CashAddrType {
 /// is the same encoding under `bitcoincash`, `bchtest` or `bchreg`, which is
 /// how the API and CLI spell a Bitcoin Cash payout.
 pub fn encode_cashaddr(prefix: &str, address_type: CashAddrType, hash: &[u8; 20]) -> String {
-    let mut payload = [0u8; 21];
-    payload[0] = address_type.version();
-    payload[1..].copy_from_slice(hash);
-    let payload_five = convert_bits(&payload, 8, 5, true).expect("21 bytes convert to 5-bit");
+    encode_versioned_payload(prefix, address_type.version(), hash)
+}
+
+/// CashAddr text for a P2SH32 locking script's 32-byte hash under `prefix`.
+///
+/// Bitcoin Cash wallets pay a P2SH32 output (`OP_HASH256 <hash> OP_EQUAL`,
+/// May 2023) to this form: a `p` address with a longer payload than P2SH.
+/// The version byte keeps the script hash type and sets the size code for a
+/// 256-bit hash.
+pub fn encode_p2sh32_cashaddr(prefix: &str, hash: &[u8; 32]) -> String {
+    encode_versioned_payload(prefix, P2SH32_VERSION, hash)
+}
+
+/// CashAddr text for a version byte and hash under `prefix`.
+fn encode_versioned_payload(prefix: &str, version: u8, hash: &[u8]) -> String {
+    let mut payload = Vec::with_capacity(1 + hash.len());
+    payload.push(version);
+    payload.extend_from_slice(hash);
+    let payload_five = convert_bits(&payload, 8, 5, true).expect("bytes convert to 5-bit");
     let checksum = create_checksum(prefix, &payload_five);
     let mut characters = String::with_capacity(prefix.len() + 1 + payload_five.len() + 8);
     characters.push_str(prefix);
@@ -336,6 +353,25 @@ fn convert_bits(data: &[u8], from: u32, to: u32, pad: bool) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The 32-byte P2SH vector of the CashAddr specification, payload
+    /// 3173ef6623c6b48ffd1a3dcc0cc6489b0a07bb47a37f47cfef4fe69de825c060.
+    #[test]
+    fn p2sh32_matches_the_cashaddr_specification_vector() {
+        let hash = [
+            0x31, 0x73, 0xef, 0x66, 0x23, 0xc6, 0xb4, 0x8f, 0xfd, 0x1a, 0x3d, 0xcc, 0x0c, 0xc6,
+            0x48, 0x9b, 0x0a, 0x07, 0xbb, 0x47, 0xa3, 0x7f, 0x47, 0xcf, 0xef, 0x4f, 0xe6, 0x9d,
+            0xe8, 0x25, 0xc0, 0x60,
+        ];
+        assert_eq!(
+            encode_p2sh32_cashaddr("bchtest", &hash),
+            "bchtest:pvch8mmxy0rtfrlarg7ucrxxfzds5pamg73h7370aa87d80gyhqxq7fqng6m6"
+        );
+        assert_eq!(
+            encode_p2sh32_cashaddr("pref", &hash),
+            "pref:pvch8mmxy0rtfrlarg7ucrxxfzds5pamg73h7370aa87d80gyhqxq4k9m7qf9"
+        );
+    }
 
     #[test]
     fn p2pkh_payout_matches_the_cashaddr_vector() {

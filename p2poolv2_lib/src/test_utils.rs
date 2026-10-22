@@ -1818,3 +1818,311 @@ pub const BCH_TRANSFER_ECDSA_ALL_UNCOMPRESSED: &str = "0200000002111111111111111
 pub const BCH_TRANSFER_SCHNORR_ALL_UNCOMPRESSED: &str = "0200000002111111111111111111111111111111111111111111111111111111111111111100000000844162e08427e8d97160b476e4f2ee0a9f6fb2b675addabea4c4befa923fb81a606db0d99d342a0906efe6928c04f654ef01e11f0caad52c34323e08f57451d8fe684141046abbb610b315c17ddc6ab3f855f02bc6ac95690dee2b1ff88da99b6d173739060b128a9b4ede8c494a88d554185050346e2c84b04ff981f6fec341ac2be26975ffffffff22222222222222222222222222222222222222222222222222222222222222220300000084412e1d0273dbbde057a37537be3b250e3df71d539199782f8f05d1302874d5a5476a4845df7ac89b5fd166ad590b50b888a5db50f13a305b8348f4368a2688f6fd4141046abbb610b315c17ddc6ab3f855f02bc6ac95690dee2b1ff88da99b6d173739060b128a9b4ede8c494a88d554185050346e2c84b04ff981f6fec341ac2be26975feffffff0260ea0000000000001976a914dd51b25d7d8555950a798d7d8b43ca4e91d809d788ac8813000000000000016a00000000";
 /// Same transaction signed with plain SIGHASH_ALL, as a Bitcoin wallet would.
 pub const BCH_TRANSFER_ECDSA_ALL_WITHOUT_FORK_ID: &str = "02000000021111111111111111111111111111111111111111111111111111111111111111000000006a473044022079405c5f28850faaaaba9334004ed4bdda2acf6eaa0d1ab299eb4cf1436e960c022032061ddfa3a47ef57623afda44eaed3cab0b18b35fa144e09610433463b43ce90121036abbb610b315c17ddc6ab3f855f02bc6ac95690dee2b1ff88da99b6d17373906ffffffff2222222222222222222222222222222222222222222222222222222222222222030000006a47304402203cb29b30ad15f9df714e36f912400a167f790fdd1b46294bf26d0c6412aa2b06022040e76dc10848070ab48ef64f88ab4b3f90e8d2f9a96bccf5df77fb7bdebcb26c0121036abbb610b315c17ddc6ab3f855f02bc6ac95690dee2b1ff88da99b6d17373906feffffff0260ea0000000000001976a9147b00ca78ec9935f4794bf1b1af2c08f2e33dfc7488ac8813000000000000016a00000000";
+
+// Share-trading fixtures. Fixed private keys for the two sides of a trade,
+// spelled out here so tests sign real Bitcoin Cash transactions without any
+// code that generates keys, and the seller's 32-byte secret.
+/// Private key of the seller, who mines the shares and holds the secret.
+pub const TRADE_SELLER_SECRET_KEY: [u8; 32] = [0x5e; 32];
+/// Private key of the buyer, who pays BCH for the shares.
+pub const TRADE_BUYER_SECRET_KEY: [u8; 32] = [0xb7; 32];
+/// The secret whose SHA256 locks both legs of a trade.
+pub const TRADE_SECRET: [u8; 32] = [0x42; 32];
+
+/// A small Bitcoin Cash script machine for the opcodes the share-trading
+/// contract uses, run opcode by opcode over the actual bytes.
+///
+/// The share-chain interpreter (`shares::bch_script`) matches the contract
+/// as a template and reads its parameters at fixed offsets. No BCHN runs in
+/// the test suite, so this machine executes the same bytes as a stack
+/// machine instead, as BCHN would, and tests check that both agree. It
+/// follows BCHN's rules for these opcodes: a push-only unlocking script,
+/// minimal pushes, minimal-if, BIP65 lock time, null-fail, clean stack and
+/// P2SH32 evaluation of the redeem script. Any other opcode is an error.
+#[cfg(test)]
+pub mod bch_vm {
+    use crate::shares::bch_htlc::{encode_script_number, p2sh32_hash};
+    use crate::shares::bch_script::verify_signature;
+    use bitcoin::hashes::{Hash, hash160, sha256, sha256d};
+    use bitcoin::{Sequence, Transaction, TxOut};
+
+    const OP_PUSHDATA1: u8 = 0x4c;
+    const OP_PUSHDATA2: u8 = 0x4d;
+    const OP_1NEGATE: u8 = 0x4f;
+    const OP_RESERVED: u8 = 0x50;
+    const OP_1: u8 = 0x51;
+    const OP_16: u8 = 0x60;
+    const OP_IF: u8 = 0x63;
+    const OP_ELSE: u8 = 0x67;
+    const OP_ENDIF: u8 = 0x68;
+    const OP_DROP: u8 = 0x75;
+    const OP_DUP: u8 = 0x76;
+    const OP_SIZE: u8 = 0x82;
+    const OP_EQUAL: u8 = 0x87;
+    const OP_EQUALVERIFY: u8 = 0x88;
+    const OP_SHA256: u8 = 0xa8;
+    const OP_HASH160: u8 = 0xa9;
+    const OP_HASH256: u8 = 0xaa;
+    const OP_CHECKSIG: u8 = 0xac;
+    const OP_CHECKLOCKTIMEVERIFY: u8 = 0xb1;
+    const LOCKTIME_THRESHOLD: u64 = 500_000_000;
+
+    /// What the machine needs from the spending transaction.
+    #[derive(Clone, Copy)]
+    struct Context<'a> {
+        transaction: &'a Transaction,
+        input_index: usize,
+        amount: u64,
+        script_code: &'a [u8],
+    }
+
+    /// Run input `input_index` of `transaction` against the P2SH32 output it
+    /// spends. `Ok` means BCHN's interpreter would accept the spend.
+    pub fn run_p2sh32_spend(
+        transaction: &Transaction,
+        input_index: usize,
+        spent_output: &TxOut,
+    ) -> Result<(), String> {
+        let input = transaction
+            .input
+            .get(input_index)
+            .ok_or("input out of range")?;
+        let locking_script = spent_output.script_pubkey.as_bytes();
+        if p2sh32_hash(locking_script).is_none() {
+            return Err("the spent output is not P2SH32".to_string());
+        }
+        let unlocking_script = input.script_sig.as_bytes();
+        let mut stack: Vec<Vec<u8>> = Vec::with_capacity(8);
+        let unlocking_context = Context {
+            transaction,
+            input_index,
+            amount: spent_output.value.to_sat(),
+            script_code: unlocking_script,
+        };
+        execute(unlocking_script, &mut stack, unlocking_context, true)?;
+        let mut redeem_stack = stack.clone();
+        let locking_context = Context {
+            script_code: locking_script,
+            ..unlocking_context
+        };
+        execute(locking_script, &mut stack, locking_context, false)?;
+        if !stack.last().is_some_and(|top| cast_to_bool(top)) {
+            return Err("the P2SH32 hash does not match".to_string());
+        }
+        let redeem_script = redeem_stack.pop().ok_or("no redeem script")?;
+        let redeem_context = Context {
+            script_code: &redeem_script,
+            ..locking_context
+        };
+        execute(&redeem_script, &mut redeem_stack, redeem_context, false)?;
+        if redeem_stack.len() != 1 || !cast_to_bool(&redeem_stack[0]) {
+            return Err(format!(
+                "the redeem script left {} items, not one true item",
+                redeem_stack.len()
+            ));
+        }
+        Ok(())
+    }
+
+    fn execute(
+        script: &[u8],
+        stack: &mut Vec<Vec<u8>>,
+        context: Context,
+        push_only: bool,
+    ) -> Result<(), String> {
+        let mut branches: Vec<bool> = Vec::with_capacity(2);
+        let mut position = 0;
+        while position < script.len() {
+            let opcode = script[position];
+            position += 1;
+            let executing = branches.iter().all(|branch| *branch);
+            if opcode <= OP_16 && opcode != OP_1NEGATE && opcode != OP_RESERVED {
+                let data = read_push(script, opcode, &mut position)?;
+                if executing {
+                    stack.push(data);
+                }
+            } else if push_only {
+                return Err(format!("opcode {opcode:#04x} in a push-only script"));
+            } else {
+                execute_opcode(opcode, executing, stack, &mut branches, context)?;
+            }
+        }
+        if branches.is_empty() {
+            Ok(())
+        } else {
+            Err("unbalanced OP_IF".to_string())
+        }
+    }
+
+    /// Read the data a push opcode pushes, enforcing minimal encoding.
+    fn read_push(script: &[u8], opcode: u8, position: &mut usize) -> Result<Vec<u8>, String> {
+        if (OP_1..=OP_16).contains(&opcode) {
+            return Ok(vec![opcode - OP_1 + 1]);
+        }
+        let length = match opcode {
+            OP_PUSHDATA1 => {
+                let length = usize::from(*script.get(*position).ok_or("truncated push")?);
+                *position += 1;
+                if length <= 0x4b {
+                    return Err("OP_PUSHDATA1 for a short push".to_string());
+                }
+                length
+            }
+            OP_PUSHDATA2 | 0x4e => {
+                return Err("OP_PUSHDATA2 or OP_PUSHDATA4 for a push this short".to_string());
+            }
+            _ => usize::from(opcode),
+        };
+        let data = script
+            .get(*position..*position + length)
+            .ok_or("truncated push")?
+            .to_vec();
+        *position += length;
+        if data.len() == 1 && ((1..=16).contains(&data[0]) || data[0] == 0x81) {
+            return Err("a small number pushed as data".to_string());
+        }
+        Ok(data)
+    }
+
+    fn execute_opcode(
+        opcode: u8,
+        executing: bool,
+        stack: &mut Vec<Vec<u8>>,
+        branches: &mut Vec<bool>,
+        context: Context,
+    ) -> Result<(), String> {
+        match opcode {
+            OP_IF => {
+                let branch = if executing {
+                    let condition = pop(stack)?;
+                    if !(condition.is_empty() || condition == [1]) {
+                        return Err("OP_IF argument is not minimal".to_string());
+                    }
+                    cast_to_bool(&condition)
+                } else {
+                    false
+                };
+                branches.push(branch);
+                Ok(())
+            }
+            OP_ELSE => {
+                let top = branches.last_mut().ok_or("OP_ELSE without OP_IF")?;
+                *top = !*top;
+                Ok(())
+            }
+            OP_ENDIF => branches
+                .pop()
+                .map(|_| ())
+                .ok_or_else(|| "OP_ENDIF without OP_IF".to_string()),
+            _ if !executing => Ok(()),
+            OP_DROP => pop(stack).map(|_| ()),
+            OP_DUP => {
+                let top = stack.last().ok_or("empty stack")?.clone();
+                stack.push(top);
+                Ok(())
+            }
+            OP_SIZE => {
+                let length = stack.last().ok_or("empty stack")?.len();
+                stack.push(encode_script_number(length as u32));
+                Ok(())
+            }
+            OP_EQUAL => {
+                let right = pop(stack)?;
+                let left = pop(stack)?;
+                stack.push(if left == right { vec![1] } else { Vec::new() });
+                Ok(())
+            }
+            OP_EQUALVERIFY => {
+                let right = pop(stack)?;
+                let left = pop(stack)?;
+                if left == right {
+                    Ok(())
+                } else {
+                    Err("OP_EQUALVERIFY failed".to_string())
+                }
+            }
+            OP_SHA256 => {
+                let data = pop(stack)?;
+                stack.push(sha256::Hash::hash(&data).to_byte_array().to_vec());
+                Ok(())
+            }
+            OP_HASH160 => {
+                let data = pop(stack)?;
+                stack.push(hash160::Hash::hash(&data).to_byte_array().to_vec());
+                Ok(())
+            }
+            OP_HASH256 => {
+                let data = pop(stack)?;
+                stack.push(sha256d::Hash::hash(&data).to_byte_array().to_vec());
+                Ok(())
+            }
+            OP_CHECKSIG => check_signature(stack, context),
+            OP_CHECKLOCKTIMEVERIFY => check_lock_time(stack, context),
+            other => Err(format!("unsupported opcode {other:#04x}")),
+        }
+    }
+
+    /// `OP_CHECKSIG` with null-fail: a failing non-empty signature is an
+    /// error rather than a false result.
+    fn check_signature(stack: &mut Vec<Vec<u8>>, context: Context) -> Result<(), String> {
+        let public_key = pop(stack)?;
+        let signature = pop(stack)?;
+        let valid = !signature.is_empty()
+            && verify_signature(
+                context.transaction,
+                context.input_index,
+                context.script_code,
+                context.amount,
+                &signature,
+                &public_key,
+            )
+            .is_ok();
+        if !valid && !signature.is_empty() {
+            return Err("OP_CHECKSIG failed with a non-empty signature".to_string());
+        }
+        stack.push(if valid { vec![1] } else { Vec::new() });
+        Ok(())
+    }
+
+    /// BIP65: the top item is a non-negative, minimally encoded number of at
+    /// most five bytes, of the same kind (height or time) as the
+    /// transaction's lock time and no greater than it, and the input's
+    /// sequence is not final.
+    fn check_lock_time(stack: &[Vec<u8>], context: Context) -> Result<(), String> {
+        let top = stack.last().ok_or("empty stack")?;
+        if top.len() > 5 || top.last().is_some_and(|byte| byte & 0x80 != 0) {
+            return Err("lock time is not a non-negative five-byte number".to_string());
+        }
+        let required = top
+            .iter()
+            .rev()
+            .fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
+        if top.last() == Some(&0) && (top.len() == 1 || top[top.len() - 2] & 0x80 == 0) {
+            return Err("lock time is not minimally encoded".to_string());
+        }
+        let lock_time = u64::from(context.transaction.lock_time.to_consensus_u32());
+        if (required < LOCKTIME_THRESHOLD) != (lock_time < LOCKTIME_THRESHOLD) {
+            return Err("lock time kinds differ".to_string());
+        }
+        if required > lock_time {
+            return Err("lock time not reached".to_string());
+        }
+        if context.transaction.input[context.input_index].sequence == Sequence::MAX {
+            return Err("final sequence".to_string());
+        }
+        Ok(())
+    }
+
+    fn pop(stack: &mut Vec<Vec<u8>>) -> Result<Vec<u8>, String> {
+        stack.pop().ok_or_else(|| "empty stack".to_string())
+    }
+
+    /// Script truth: any non-zero byte, except a lone sign bit in the last
+    /// byte (negative zero).
+    fn cast_to_bool(value: &[u8]) -> bool {
+        match value.split_last() {
+            None => false,
+            Some((last, rest)) => rest.iter().any(|byte| *byte != 0) || (*last & 0x7f) != 0,
+        }
+    }
+}

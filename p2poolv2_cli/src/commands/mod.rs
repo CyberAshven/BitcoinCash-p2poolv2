@@ -6,6 +6,7 @@ pub mod address;
 pub mod api_client;
 pub mod bch_auxpow;
 pub mod bch_share_address;
+pub mod bch_trade;
 pub mod blocked_ips;
 pub mod candidates;
 pub mod chain_info;
@@ -32,7 +33,7 @@ use std::path::Path;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
-    /// Path to p2poolv2 config file (not required for address, bch-share-address, bch-auxpow, gen-auth or --db-path commands)
+    /// Path to p2poolv2 config file (not required for address, bch-share-address, bch-auxpow, bch-trade, gen-auth or --db-path commands)
     #[arg(short, long, env("P2POOL_CONFIG"), global = true)]
     pub config: Option<String>,
 
@@ -161,6 +162,15 @@ pub enum Commands {
         #[command(subcommand)]
         command: bch_auxpow::AuxpowCommand,
     },
+    /// Trade shares for BCH: build the contracts and sign the lock, claim and
+    /// refund transactions on either chain, offline
+    ///
+    /// See docs/atomic-swap/bch-share-trading.md for the protocol. Keys are
+    /// read from a WIF file or a hidden prompt and never generated.
+    BchTrade {
+        #[command(subcommand)]
+        command: bch_trade::TradeCommand,
+    },
     /// Generate API authentication credentials (salt, password, HMAC)
     GenAuth {
         /// Username for API authentication
@@ -229,6 +239,9 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         }
         Some(Commands::BchAuxpow { command }) => {
             commands::bch_auxpow::execute(command)?;
+        }
+        Some(Commands::BchTrade { command }) => {
+            commands::bch_trade::execute(command)?;
         }
         Some(Commands::Db { command }) => {
             let db_path = cli
