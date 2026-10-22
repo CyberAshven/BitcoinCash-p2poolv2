@@ -1,0 +1,6 @@
+[build]
+target = "index.html"
+dist = "dist"
+# Served from the root of the node's `[api] web_root`. For another mount
+# point build with `--public-url /path/`.
+public_url = "/"

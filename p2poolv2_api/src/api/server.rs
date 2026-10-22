@@ -167,6 +167,11 @@ pub(crate) fn build_router_with_history(
             "/share_headers",
             get(endpoints::share_headers::share_headers),
         )
+        .route("/found_blocks", get(endpoints::found_blocks::found_blocks))
+        .merge(endpoints::hashrate::router(
+            app_state.clone(),
+            history.clone(),
+        ))
         .merge(dashboard::router(app_state.clone(), history));
     let share_chain_routes = match web.web_root {
         Some(web_root) => {
@@ -1179,5 +1184,62 @@ mod tests {
             Some(&"*".parse().unwrap()),
             "access-control-allow-origin header should be present"
         );
+    }
+
+    async fn get_json(app: Router, uri: &str) -> (http::StatusCode, serde_json::Value) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let request = http::Request::builder()
+            .uri(uri)
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn test_hashrate_route_serves_history() {
+        let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+        let history = Arc::new(dashboard::history::HashrateHistory::default());
+        history.push_sample(dashboard::history::Sample {
+            time: 1000,
+            pool: Some(5.0),
+            local: None,
+            network: Some(7.0),
+        });
+        let app = build_router_with_history(
+            state.clone(),
+            state.app_config.clone(),
+            history,
+            WebOptions::default(),
+        );
+
+        let (status, body) = get_json(app, "/hashrate?window=600").await;
+        assert_eq!(status, http::StatusCode::OK);
+        assert_eq!(body["pool_hashrate"], 5.0);
+        assert!(body["local_hashrate"].is_null());
+        assert_eq!(body["history"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_hashrate_route_rejects_out_of_range_window() {
+        let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+        let app = build_router(state.clone(), state.app_config.clone());
+
+        let (status, _) = get_json(app, "/hashrate?window=10").await;
+        assert_eq!(status, http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_found_blocks_route_returns_json_list() {
+        let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+        let app = build_router(state.clone(), state.app_config.clone());
+
+        let (status, body) = get_json(app, "/found_blocks").await;
+        assert_eq!(status, http::StatusCode::OK);
+        assert!(body.as_array().unwrap().is_empty());
     }
 }
