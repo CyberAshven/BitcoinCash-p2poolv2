@@ -4,14 +4,29 @@
 
 //! Bitcoin Cash script checks for share-chain transactions.
 //!
-//! A Bitcoin Cash share coinbase pays its owner's P2PKH script, so a share
-//! transfer spends P2PKH outputs. This module accepts exactly that spend: a
-//! 25-byte `OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG` output
-//! and a `<signature> <public key>` input of two direct pushes. Spending any
-//! other output form (P2SH, multisig, token-prefixed outputs, the atomic-swap
-//! scripts) is rejected, which is stricter than Bitcoin Cash and never looser.
-//! The outputs a transfer creates are not restricted, as on Bitcoin, so a
-//! share sent to any other script can never be spent on the share chain.
+//! The share chain accepts two spends and nothing else, which is stricter
+//! than Bitcoin Cash and never looser:
+//!
+//! - **P2PKH.** A share coinbase pays its owner's 25-byte
+//!   `OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG` script, spent
+//!   by a `<signature> <public key>` input of two direct pushes.
+//! - **The share-trading contract.** A P2SH32 output
+//!   (`OP_HASH256 <32 bytes> OP_EQUAL`) whose redeem script is exactly the
+//!   hash time locked contract of [`bch_htlc`]. The input is push-only with
+//!   minimal pushes and ends with the redeem script. It claims with
+//!   `<signature> <public key> <32-byte secret> OP_1` or refunds with
+//!   `<signature> <public key> OP_0` once the transaction's lock time
+//!   reaches the contract's refund height (BIP65: a height, at least the
+//!   refund height, and a non-final input sequence). These are the checks
+//!   BCHN's script interpreter makes for the same bytes; any other redeem
+//!   script, P2SH20, multisig and token-prefixed outputs are rejected.
+//!
+//! Outputs are restricted too ([`verify_outputs`]): every output a share
+//! transaction creates is P2PKH or P2SH32 and holds at least BCHN's dust
+//! threshold for that output, so every share output stays above the dust
+//! limit and can be spent again. A transaction is also final at the height
+//! of the share that includes it ([`verify_final`]), so the refund path
+//! cannot be mined before its height.
 //!
 //! Signature rules follow BCHN's standard script flags:
 //!
@@ -22,12 +37,17 @@
 //! - Any other body is ECDSA in strict DER (BIP66) with a low S value.
 //! - The public key is a compressed or uncompressed SEC1 key; hybrid keys
 //!   are rejected.
+//! - The script code a contract signature commits to is the redeem script.
 //! - Inputs carry no witness, because Bitcoin Cash has no witness data.
 
+use crate::shares::bch_htlc::{
+    HtlcContract, LOCKTIME_THRESHOLD, SECRET_LENGTH, minimal_pushes, p2sh32_hash,
+};
 use crate::shares::bch_sighash::{self, SighashError, SighashType};
-use bitcoin::hashes::{Hash, hash160};
+use bitcoin::consensus::encode::VarInt;
+use bitcoin::hashes::{Hash, hash160, sha256, sha256d};
 use bitcoin::secp256k1::{self, Message, Secp256k1};
-use bitcoin::{Transaction, TxOut};
+use bitcoin::{Sequence, Transaction, TxOut};
 use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::elliptic_curve::{Group, PrimeField};
@@ -48,6 +68,23 @@ const SCHNORR_SIGNATURE_LENGTH: usize = 64;
 const COMPRESSED_KEY_LENGTH: usize = 33;
 const UNCOMPRESSED_KEY_LENGTH: usize = 65;
 
+/// Name of these share transaction rules in Bitcoin Cash protocol strings:
+/// the share-trading contract, the P2PKH or P2SH32 dust-floored outputs and
+/// height finality. A node without them rejects shares this node accepts
+/// (a contract spend) and accepts shares it rejects (a dust or `OP_RETURN`
+/// output), so the two must not peer.
+pub const BCH_SHARE_TRADE_RULE_TAG: &str = "trade-htlc";
+
+/// BCHN's default `-dustrelayfee`, `DUST_RELAY_TX_FEE` in `policy.h`, in
+/// satoshis per kilobyte.
+pub const DUST_RELAY_FEE_PER_KILOBYTE: u64 = 1_000;
+/// Bytes BCHN assumes an input spending an output takes: outpoint (36),
+/// script length (1), a P2PKH signature and key (107) and sequence (4).
+const DUST_SPENDING_INPUT_SIZE: u64 = 32 + 4 + 1 + 107 + 4;
+/// BCHN calls an output dust when spending it would cost more than a third
+/// of its value at the dust relay fee.
+const DUST_FEE_MULTIPLE: u64 = 3;
+
 /// Why a Bitcoin Cash share transaction failed its script checks.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BchScriptError {
@@ -57,14 +94,16 @@ pub enum BchScriptError {
     /// An input carries witness data, which Bitcoin Cash does not have.
     #[error("input {input_index} carries witness data")]
     WitnessPresent { input_index: usize },
-    /// The spent output or the input script is not the supported P2PKH spend.
-    #[error("input {input_index} is not a <signature> <public key> spend of a P2PKH output")]
+    /// The spent output or the input script is not a supported spend.
+    #[error(
+        "input {input_index} is not a <signature> <public key> spend of a P2PKH output or a claim or refund of the share-trading contract"
+    )]
     UnsupportedScript { input_index: usize },
     /// The public key is not a compressed or uncompressed key on the curve.
     #[error("input {input_index} public key is not a valid compressed or uncompressed key")]
     InvalidPublicKey { input_index: usize },
-    /// The public key does not hash to the spent output's key hash.
-    #[error("input {input_index} public key does not match the P2PKH key hash")]
+    /// The public key does not hash to the key hash the output names.
+    #[error("input {input_index} public key does not match the spent output's key hash")]
     PublicKeyHashMismatch { input_index: usize },
     /// The sighash type is not one Bitcoin Cash accepts here.
     #[error("input {input_index}: {source}")]
@@ -81,6 +120,45 @@ pub enum BchScriptError {
     /// The signature does not verify against the key and the digest.
     #[error("input {input_index} signature does not verify")]
     SignatureRejected { input_index: usize },
+    /// The redeem script does not hash to the spent P2SH32 output.
+    #[error("input {input_index} redeem script does not match the P2SH32 output")]
+    ScriptHashMismatch { input_index: usize },
+    /// The claimed secret is not 32 bytes (`OP_SIZE <32> OP_EQUALVERIFY`).
+    #[error("input {input_index} secret is not {SECRET_LENGTH} bytes")]
+    SecretSize { input_index: usize },
+    /// The claimed secret does not hash to the contract's secret hash.
+    #[error("input {input_index} secret does not match the contract's secret hash")]
+    SecretMismatch { input_index: usize },
+    /// A refund whose transaction lock time is not a block height.
+    #[error(
+        "input {input_index} refund needs a lock time below {LOCKTIME_THRESHOLD}, got {lock_time}"
+    )]
+    LockTimeNotHeight { input_index: usize, lock_time: u32 },
+    /// A refund whose transaction lock time is below the refund height.
+    #[error(
+        "input {input_index} refund lock time {lock_time} is below the contract's refund height {refund_height}"
+    )]
+    RefundTooEarly {
+        input_index: usize,
+        lock_time: u32,
+        refund_height: u32,
+    },
+    /// A refund whose input sequence is final, which disables its lock time.
+    #[error("input {input_index} refund has a final sequence, which disables the lock time")]
+    FinalSequence { input_index: usize },
+    /// An output that is neither P2PKH nor P2SH32.
+    #[error("output {output_index} is neither P2PKH nor P2SH32")]
+    UnsupportedOutput { output_index: usize },
+    /// An output below BCHN's dust threshold for it.
+    #[error("output {output_index} holds {value}, below the dust threshold {threshold}")]
+    DustOutput {
+        output_index: usize,
+        value: u64,
+        threshold: u64,
+    },
+    /// The transaction's lock time is not yet reached at the including height.
+    #[error("transaction lock time {lock_time} is not final at share height {block_height}")]
+    NotFinal { lock_time: u32, block_height: u32 },
 }
 
 /// Check every input of a non-coinbase Bitcoin Cash share transaction.
@@ -103,27 +181,208 @@ pub fn verify_transaction(
     Ok(())
 }
 
+/// Check that every output is P2PKH or P2SH32 and not dust.
+///
+/// Applies to the outputs of non-coinbase share transactions. A share
+/// coinbase pays one whole share unit to its owner's P2PKH script, far above
+/// the threshold.
+pub fn verify_outputs(transaction: &Transaction) -> Result<(), BchScriptError> {
+    for (output_index, output) in transaction.output.iter().enumerate() {
+        let script = output.script_pubkey.as_bytes();
+        if p2pkh_hash(script).is_none() && p2sh32_hash(script).is_none() {
+            return Err(BchScriptError::UnsupportedOutput { output_index });
+        }
+        let threshold = dust_threshold(output);
+        let value = output.value.to_sat();
+        if value < threshold {
+            return Err(BchScriptError::DustOutput {
+                output_index,
+                value,
+                threshold,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// BCHN's dust threshold for an output, `GetDustThreshold` in `policy.cpp`.
+///
+/// Three times the fee, at [`DUST_RELAY_FEE_PER_KILOBYTE`], for the output's
+/// serialized size plus the input that would spend it: 546 for P2PKH
+/// (34 + 148 bytes) and 576 for P2SH32 (44 + 148 bytes). The value of an
+/// output at or above the threshold is not dust.
+pub fn dust_threshold(output: &TxOut) -> u64 {
+    let script_length = output.script_pubkey.len();
+    let output_size = 8 + VarInt::from(script_length).size() + script_length;
+    let spend_size = output_size as u64 + DUST_SPENDING_INPUT_SIZE;
+    DUST_FEE_MULTIPLE * (spend_size * DUST_RELAY_FEE_PER_KILOBYTE / 1_000)
+}
+
+/// Check that `transaction` is final in a share at `block_height`.
+///
+/// Bitcoin's `IsFinalTx`: a zero lock time, or every input sequence final,
+/// or a height lock time below the including height. A time lock time with a
+/// non-final sequence is not final here, which is stricter than Bitcoin
+/// Cash: no share transaction needs one, and a share's own time is a weaker
+/// clock than a height.
+pub fn verify_final(transaction: &Transaction, block_height: u32) -> Result<(), BchScriptError> {
+    let lock_time = transaction.lock_time.to_consensus_u32();
+    let sequences_final = transaction
+        .input
+        .iter()
+        .all(|input| input.sequence == Sequence::MAX);
+    if lock_time == 0
+        || sequences_final
+        || (lock_time < LOCKTIME_THRESHOLD && lock_time < block_height)
+    {
+        return Ok(());
+    }
+    Err(BchScriptError::NotFinal {
+        lock_time,
+        block_height,
+    })
+}
+
 /// Check one input against the output it spends.
 fn verify_input(
     transaction: &Transaction,
     input_index: usize,
     spent_output: &TxOut,
 ) -> Result<(), BchScriptError> {
-    let input = &transaction.input[input_index];
-    if !input.witness.is_empty() {
+    if !transaction.input[input_index].witness.is_empty() {
         return Err(BchScriptError::WitnessPresent { input_index });
     }
     let script_pubkey = spent_output.script_pubkey.as_bytes();
-    let pubkey_hash =
-        p2pkh_hash(script_pubkey).ok_or(BchScriptError::UnsupportedScript { input_index })?;
-    let (signature, public_key) = signature_and_key(input.script_sig.as_bytes())
-        .ok_or(BchScriptError::UnsupportedScript { input_index })?;
-    if !is_compressed_or_uncompressed(public_key) {
+    if let Some(pubkey_hash) = p2pkh_hash(script_pubkey) {
+        let (signature, public_key) =
+            signature_and_key(transaction.input[input_index].script_sig.as_bytes())
+                .ok_or(BchScriptError::UnsupportedScript { input_index })?;
+        let spend = KeySpend {
+            script_code: script_pubkey,
+            pubkey_hash,
+            signature,
+            public_key,
+        };
+        verify_key_spend(transaction, input_index, spent_output, &spend)
+    } else if let Some(script_hash) = p2sh32_hash(script_pubkey) {
+        verify_contract_spend(transaction, input_index, spent_output, script_hash)
+    } else {
+        Err(BchScriptError::UnsupportedScript { input_index })
+    }
+}
+
+/// A signature and key that must match a key hash, signed over `script_code`.
+struct KeySpend<'a> {
+    script_code: &'a [u8],
+    pubkey_hash: &'a [u8; 20],
+    signature: &'a [u8],
+    public_key: &'a [u8],
+}
+
+/// Check a claim or refund of the share-trading contract.
+fn verify_contract_spend(
+    transaction: &Transaction,
+    input_index: usize,
+    spent_output: &TxOut,
+    script_hash: &[u8; 32],
+) -> Result<(), BchScriptError> {
+    let unsupported = BchScriptError::UnsupportedScript { input_index };
+    let pushes = minimal_pushes(transaction.input[input_index].script_sig.as_bytes())
+        .ok_or(unsupported.clone())?;
+    let (redeem_script, arguments) = pushes.split_last().ok_or(unsupported.clone())?;
+    if sha256d::Hash::hash(redeem_script).as_byte_array() != script_hash {
+        return Err(BchScriptError::ScriptHashMismatch { input_index });
+    }
+    let contract = HtlcContract::from_redeem_script(redeem_script).ok_or(unsupported.clone())?;
+    match arguments {
+        [signature, public_key, secret, [1]] => {
+            if secret.len() != SECRET_LENGTH {
+                return Err(BchScriptError::SecretSize { input_index });
+            }
+            if sha256::Hash::hash(secret).to_byte_array() != contract.secret_hash {
+                return Err(BchScriptError::SecretMismatch { input_index });
+            }
+            let spend = KeySpend {
+                script_code: redeem_script,
+                pubkey_hash: &contract.claim_pubkey_hash,
+                signature,
+                public_key,
+            };
+            verify_key_spend(transaction, input_index, spent_output, &spend)
+        }
+        [signature, public_key, []] => {
+            verify_refund_lock_time(transaction, input_index, contract.refund_height)?;
+            let spend = KeySpend {
+                script_code: redeem_script,
+                pubkey_hash: &contract.refund_pubkey_hash,
+                signature,
+                public_key,
+            };
+            verify_key_spend(transaction, input_index, spent_output, &spend)
+        }
+        _ => Err(unsupported),
+    }
+}
+
+/// `<refund height> OP_CHECKLOCKTIMEVERIFY` as BIP65 defines it for a height.
+fn verify_refund_lock_time(
+    transaction: &Transaction,
+    input_index: usize,
+    refund_height: u32,
+) -> Result<(), BchScriptError> {
+    let lock_time = transaction.lock_time.to_consensus_u32();
+    if lock_time >= LOCKTIME_THRESHOLD {
+        return Err(BchScriptError::LockTimeNotHeight {
+            input_index,
+            lock_time,
+        });
+    }
+    if lock_time < refund_height {
+        return Err(BchScriptError::RefundTooEarly {
+            input_index,
+            lock_time,
+            refund_height,
+        });
+    }
+    if transaction.input[input_index].sequence == Sequence::MAX {
+        return Err(BchScriptError::FinalSequence { input_index });
+    }
+    Ok(())
+}
+
+/// `OP_DUP OP_HASH160 <key hash> OP_EQUALVERIFY OP_CHECKSIG` for one input.
+fn verify_key_spend(
+    transaction: &Transaction,
+    input_index: usize,
+    spent_output: &TxOut,
+    spend: &KeySpend,
+) -> Result<(), BchScriptError> {
+    if !is_compressed_or_uncompressed(spend.public_key) {
         return Err(BchScriptError::InvalidPublicKey { input_index });
     }
-    if hash160::Hash::hash(public_key).as_byte_array() != pubkey_hash {
+    if hash160::Hash::hash(spend.public_key).as_byte_array() != spend.pubkey_hash {
         return Err(BchScriptError::PublicKeyHashMismatch { input_index });
     }
+    verify_signature(
+        transaction,
+        input_index,
+        spend.script_code,
+        spent_output.value.to_sat(),
+        spend.signature,
+        spend.public_key,
+    )
+}
+
+/// `OP_CHECKSIG` for one input: a sighash-typed signature over the digest
+/// that commits to `script_code` and the spent `amount`.
+pub(crate) fn verify_signature(
+    transaction: &Transaction,
+    input_index: usize,
+    script_code: &[u8],
+    amount: u64,
+    signature: &[u8],
+    public_key: &[u8],
+) -> Result<(), BchScriptError> {
     let (body, sighash_byte) = signature
         .split_last()
         .map(|(last, body)| (body, *last))
@@ -133,17 +392,12 @@ fn verify_input(
             input_index,
             source,
         })?;
-    let digest = bch_sighash::signature_hash(
-        transaction,
-        input_index,
-        script_pubkey,
-        spent_output.value.to_sat(),
-        sighash_type,
-    )
-    .map_err(|source| BchScriptError::Sighash {
-        input_index,
-        source,
-    })?;
+    let digest =
+        bch_sighash::signature_hash(transaction, input_index, script_code, amount, sighash_type)
+            .map_err(|source| BchScriptError::Sighash {
+                input_index,
+                source,
+            })?;
 
     if body.len() == SCHNORR_SIGNATURE_LENGTH {
         verify_schnorr(body, public_key, &digest, input_index)
@@ -153,7 +407,7 @@ fn verify_input(
 }
 
 /// The 20-byte key hash of a P2PKH script, or `None` for any other script.
-fn p2pkh_hash(script: &[u8]) -> Option<&[u8; 20]> {
+pub fn p2pkh_hash(script: &[u8]) -> Option<&[u8; 20]> {
     if script.len() != P2PKH_SCRIPT_LENGTH
         || script[0] != OP_DUP
         || script[1] != OP_HASH160
@@ -318,13 +572,21 @@ mod tests {
     use bitcoin::{Amount, ScriptBuf, Witness};
     use k256::elliptic_curve::ops::Neg;
 
+    use crate::shares::bch_htlc::{p2sh32_script, secret_hash};
+    use crate::shares::bch_trade::{
+        Coin, TradeKey, build_claim_transaction, build_refund_transaction,
+    };
+    use crate::test_utils::bch_vm::run_p2sh32_spend;
     use crate::test_utils::{
         BCH_TRANSFER_ECDSA_ALL, BCH_TRANSFER_ECDSA_ALL_UNCOMPRESSED,
         BCH_TRANSFER_ECDSA_ALL_WITHOUT_FORK_ID, BCH_TRANSFER_ECDSA_NONE, BCH_TRANSFER_SCHNORR_ALL,
         BCH_TRANSFER_SCHNORR_ALL_ANYONE_CAN_PAY, BCH_TRANSFER_SCHNORR_ALL_UNCOMPRESSED,
         BCH_TRANSFER_SCHNORR_SINGLE, BCH_TRANSFER_SCRIPT_PUBKEY,
-        BCH_TRANSFER_UNCOMPRESSED_SCRIPT_PUBKEY,
+        BCH_TRANSFER_UNCOMPRESSED_SCRIPT_PUBKEY, TRADE_BUYER_SECRET_KEY, TRADE_SECRET,
+        TRADE_SELLER_SECRET_KEY,
     };
+    use bitcoin::absolute::LockTime;
+    use bitcoin::{NetworkKind, OutPoint, PrivateKey, Txid};
 
     #[test]
     fn schnorr_all_signed_by_bchn_verifies() {
@@ -875,5 +1137,1158 @@ mod tests {
         assert!(!is_compressed_or_uncompressed(&[0x07; 65]));
         assert!(is_compressed_or_uncompressed(&[0x04; 65]));
         assert!(is_compressed_or_uncompressed(&[0x02; 33]));
+    }
+
+    // The share-trading contract. Each test signs a real Bitcoin Cash
+    // transaction with the fixed trade keys: the buyer claims shares with the
+    // secret, the seller refunds them after the refund height.
+
+    #[test]
+    fn a_claim_with_the_secret_verifies() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x31; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &buyer.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(verify_transaction(&claim, &spent), Ok(()));
+        assert_eq!(verify_outputs(&claim), Ok(()));
+    }
+
+    /// A Bitcoin Cash Schnorr signature over the same digest, as a wallet
+    /// signing with `-signschnorr` would produce. The nonce is negated when
+    /// its point's Y is not a square, as the Schnorr specification requires
+    /// of signers.
+    #[test]
+    fn a_schnorr_signed_claim_verifies() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x32; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &buyer.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        let digest = bch_sighash::signature_hash(
+            &claim,
+            0,
+            &contract.redeem_script(),
+            coin.value.to_sat(),
+            SighashType::from_byte(0x41).unwrap(),
+        )
+        .unwrap();
+        let secret_scalar =
+            Scalar::from_repr(FieldBytes::clone_from_slice(&TRADE_BUYER_SECRET_KEY)).unwrap();
+        let first_nonce = Scalar::from(0x1234_5678u64);
+        let first_point = (ProjectivePoint::GENERATOR * first_nonce)
+            .to_affine()
+            .to_encoded_point(false);
+        let first_y = FieldElement::from_bytes(first_point.y().unwrap()).unwrap();
+        let nonce = if bool::from(first_y.sqrt().is_some()) {
+            first_nonce
+        } else {
+            first_nonce.neg()
+        };
+        let nonce_x = *(ProjectivePoint::GENERATOR * nonce)
+            .to_affine()
+            .to_encoded_point(false)
+            .x()
+            .unwrap();
+        let mut challenge = Sha256::new();
+        challenge.update(nonce_x);
+        challenge.update(buyer.public_key());
+        challenge.update(digest);
+        let challenge_scalar = <Scalar as Reduce<U256>>::reduce_bytes(&challenge.finalize());
+        let mut signature = Vec::with_capacity(65);
+        signature.extend_from_slice(&nonce_x);
+        signature.extend_from_slice(&(nonce + challenge_scalar * secret_scalar).to_repr());
+        signature.push(0x41);
+        claim.input[0].script_sig =
+            contract.claim_unlocking_script(&signature, buyer.public_key(), &TRADE_SECRET);
+
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(verify_transaction(&claim, &spent), Ok(()));
+    }
+
+    #[test]
+    fn a_claim_with_the_wrong_secret_is_rejected() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x33; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &buyer.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        // The signature does not cover the unlocking script, so it stays
+        // valid and only the secret is wrong.
+        let signature = minimal_pushes(claim.input[0].script_sig.as_bytes()).unwrap()[0].to_vec();
+        claim.input[0].script_sig =
+            contract.claim_unlocking_script(&signature, buyer.public_key(), &[0x43; 32]);
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&claim, &spent),
+            Err(BchScriptError::SecretMismatch { input_index: 0 })
+        );
+    }
+
+    /// `OP_SIZE <32> OP_EQUALVERIFY` refuses a secret of any other length,
+    /// even one that hashes to the contract's secret hash.
+    #[test]
+    fn a_claim_with_a_31_byte_secret_is_rejected() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let short_secret = [0x42u8; 31];
+        let contract = HtlcContract::new(
+            sha256::Hash::hash(&short_secret).to_byte_array(),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let redeem_script = contract.redeem_script();
+        let mut claim = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: OutPoint::new(Txid::from_byte_array([0x34; 32]), 0),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(40_000_000),
+                script_pubkey: buyer.p2pkh_script(),
+            }],
+        };
+        let signature = buyer
+            .sign_input(&claim, 0, &redeem_script, Amount::from_sat(40_000_000))
+            .unwrap();
+        let mut script_sig = Vec::with_capacity(250);
+        script_sig.push(signature.len() as u8);
+        script_sig.extend_from_slice(&signature);
+        script_sig.push(buyer.public_key().len() as u8);
+        script_sig.extend_from_slice(buyer.public_key());
+        script_sig.push(31);
+        script_sig.extend_from_slice(&short_secret);
+        script_sig.push(0x51);
+        script_sig.push(0x4c);
+        script_sig.push(redeem_script.len() as u8);
+        script_sig.extend_from_slice(&redeem_script);
+        claim.input[0].script_sig = ScriptBuf::from_bytes(script_sig);
+        let spent = [(
+            0,
+            TxOut {
+                value: Amount::from_sat(40_000_000),
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&claim, &spent),
+            Err(BchScriptError::SecretSize { input_index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_claim_signed_by_the_refund_key_is_rejected() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x35; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        // The seller knows the secret too, but the claim path names the
+        // buyer's key.
+        let mut claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &seller.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        let signature = seller
+            .sign_input(&claim, 0, &contract.redeem_script(), coin.value)
+            .unwrap();
+        claim.input[0].script_sig =
+            contract.claim_unlocking_script(&signature, seller.public_key(), &TRADE_SECRET);
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&claim, &spent),
+            Err(BchScriptError::PublicKeyHashMismatch { input_index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_claim_with_the_claim_key_but_another_signature_is_rejected() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x36; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &seller.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        let signature = seller
+            .sign_input(&claim, 0, &contract.redeem_script(), coin.value)
+            .unwrap();
+        claim.input[0].script_sig =
+            contract.claim_unlocking_script(&signature, buyer.public_key(), &TRADE_SECRET);
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&claim, &spent),
+            Err(BchScriptError::SignatureRejected { input_index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_claim_signature_commits_to_the_outputs() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x37; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &buyer.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        // Anyone who sees the secret could try to redirect the claim.
+        claim.output[0].script_pubkey = seller.p2pkh_script();
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&claim, &spent),
+            Err(BchScriptError::SignatureRejected { input_index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_refund_at_the_refund_height_verifies() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x38; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let refund =
+            build_refund_transaction(&coin, &contract, &seller, &seller.p2pkh_script(), 0).unwrap();
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(verify_transaction(&refund, &spent), Ok(()));
+        assert_eq!(verify_final(&refund, 5_001), Ok(()));
+    }
+
+    #[test]
+    fn an_early_refund_is_rejected() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x39; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut refund =
+            build_refund_transaction(&coin, &contract, &seller, &seller.p2pkh_script(), 0).unwrap();
+        refund.lock_time = LockTime::from_consensus(4_999);
+        let signature = seller
+            .sign_input(&refund, 0, &contract.redeem_script(), coin.value)
+            .unwrap();
+        refund.input[0].script_sig =
+            contract.refund_unlocking_script(&signature, seller.public_key());
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&refund, &spent),
+            Err(BchScriptError::RefundTooEarly {
+                input_index: 0,
+                lock_time: 4_999,
+                refund_height: 5_000,
+            })
+        );
+    }
+
+    /// A final sequence turns the lock time off, so BIP65 fails the
+    /// `OP_CHECKLOCKTIMEVERIFY` instead of letting the refund through early.
+    #[test]
+    fn a_refund_with_a_final_sequence_is_rejected() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x3a; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut refund =
+            build_refund_transaction(&coin, &contract, &seller, &seller.p2pkh_script(), 0).unwrap();
+        refund.input[0].sequence = Sequence::MAX;
+        let signature = seller
+            .sign_input(&refund, 0, &contract.redeem_script(), coin.value)
+            .unwrap();
+        refund.input[0].script_sig =
+            contract.refund_unlocking_script(&signature, seller.public_key());
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&refund, &spent),
+            Err(BchScriptError::FinalSequence { input_index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_refund_with_a_time_lock_is_rejected() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x3b; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut refund =
+            build_refund_transaction(&coin, &contract, &seller, &seller.p2pkh_script(), 0).unwrap();
+        refund.lock_time = LockTime::from_consensus(1_800_000_000);
+        let signature = seller
+            .sign_input(&refund, 0, &contract.redeem_script(), coin.value)
+            .unwrap();
+        refund.input[0].script_sig =
+            contract.refund_unlocking_script(&signature, seller.public_key());
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&refund, &spent),
+            Err(BchScriptError::LockTimeNotHeight {
+                input_index: 0,
+                lock_time: 1_800_000_000,
+            })
+        );
+    }
+
+    #[test]
+    fn a_refund_signed_by_the_claim_key_is_rejected() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x3c; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut refund =
+            build_refund_transaction(&coin, &contract, &seller, &buyer.p2pkh_script(), 0).unwrap();
+        let signature = buyer
+            .sign_input(&refund, 0, &contract.redeem_script(), coin.value)
+            .unwrap();
+        refund.input[0].script_sig =
+            contract.refund_unlocking_script(&signature, buyer.public_key());
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&refund, &spent),
+            Err(BchScriptError::PublicKeyHashMismatch { input_index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_redeem_script_of_another_contract_is_rejected() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let earlier_refund = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            100,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x3d; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let refund =
+            build_refund_transaction(&coin, &earlier_refund, &seller, &seller.p2pkh_script(), 0)
+                .unwrap();
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&refund, &spent),
+            Err(BchScriptError::ScriptHashMismatch { input_index: 0 })
+        );
+    }
+
+    /// Any other script behind P2SH32 is refused even when its hash matches,
+    /// here a redeem script of `OP_1` that anyone could spend on Bitcoin Cash.
+    #[test]
+    fn a_redeem_script_outside_the_template_is_rejected() {
+        let anyone_can_spend = [0x51u8];
+        let spend = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: OutPoint::new(Txid::from_byte_array([0x3e; 32]), 0),
+                // A minimal push of the one-byte redeem script: 0x51 is 81,
+                // not a small number with an opcode of its own.
+                script_sig: ScriptBuf::from_bytes(vec![0x01, 0x51]),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(40_000_000),
+                script_pubkey: ScriptBuf::from_hex(BCH_TRANSFER_SCRIPT_PUBKEY).unwrap(),
+            }],
+        };
+        let spent = [(
+            0,
+            TxOut {
+                value: Amount::from_sat(40_000_000),
+                script_pubkey: p2sh32_script(
+                    &sha256d::Hash::hash(&anyone_can_spend).to_byte_array(),
+                ),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&spend, &spent),
+            Err(BchScriptError::UnsupportedScript { input_index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_claim_selector_other_than_one_is_rejected() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x3f; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &buyer.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        // OP_1 becomes OP_2: truthy in a bare OP_IF, but not Bitcoin Cash's
+        // minimal-if form, and not the template.
+        let mut script_sig = claim.input[0].script_sig.to_bytes();
+        let selector_index = script_sig.len() - contract.redeem_script().len() - 3;
+        assert_eq!(script_sig[selector_index], 0x51);
+        script_sig[selector_index] = 0x52;
+        claim.input[0].script_sig = ScriptBuf::from_bytes(script_sig);
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&claim, &spent),
+            Err(BchScriptError::UnsupportedScript { input_index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_claim_with_an_extra_push_is_rejected() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x40; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &buyer.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        // An extra element would be left on the stack, which Bitcoin Cash's
+        // clean-stack rule rejects.
+        let mut script_sig = vec![0x00];
+        script_sig.extend_from_slice(claim.input[0].script_sig.as_bytes());
+        claim.input[0].script_sig = ScriptBuf::from_bytes(script_sig);
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: contract.locking_script(),
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&claim, &spent),
+            Err(BchScriptError::UnsupportedScript { input_index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_contract_behind_p2sh20_is_rejected() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x41; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &buyer.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        let p2sh20 = ScriptBuf::new_p2sh(&bitcoin::ScriptHash::hash(&contract.redeem_script()));
+        let spent = [(
+            0,
+            TxOut {
+                value: coin.value,
+                script_pubkey: p2sh20,
+            },
+        )];
+        assert_eq!(
+            verify_transaction(&claim, &spent),
+            Err(BchScriptError::UnsupportedScript { input_index: 0 })
+        );
+    }
+
+    #[test]
+    fn dust_thresholds_follow_bchn() {
+        let p2pkh = TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_hex(BCH_TRANSFER_SCRIPT_PUBKEY).unwrap(),
+        };
+        let p2sh32 = TxOut {
+            value: Amount::ZERO,
+            script_pubkey: p2sh32_script(&[0x11; 32]),
+        };
+        let p2sh20 = TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_hex("a9147b00ca78ec9935f4794bf1b1af2c08f2e33dfc7487")
+                .unwrap(),
+        };
+        assert_eq!(dust_threshold(&p2pkh), 546);
+        assert_eq!(dust_threshold(&p2sh32), 576);
+        assert_eq!(dust_threshold(&p2sh20), 540);
+    }
+
+    #[test]
+    fn a_p2pkh_output_at_the_dust_threshold_is_accepted_and_one_below_is_not() {
+        let mut transaction = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![TxOut {
+                value: Amount::from_sat(546),
+                script_pubkey: ScriptBuf::from_hex(BCH_TRANSFER_SCRIPT_PUBKEY).unwrap(),
+            }],
+        };
+        assert_eq!(verify_outputs(&transaction), Ok(()));
+        transaction.output[0].value = Amount::from_sat(545);
+        assert_eq!(
+            verify_outputs(&transaction),
+            Err(BchScriptError::DustOutput {
+                output_index: 0,
+                value: 545,
+                threshold: 546,
+            })
+        );
+    }
+
+    #[test]
+    fn a_p2sh32_output_below_576_is_dust() {
+        let transaction = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(576),
+                    script_pubkey: p2sh32_script(&[0x11; 32]),
+                },
+                TxOut {
+                    value: Amount::from_sat(575),
+                    script_pubkey: p2sh32_script(&[0x22; 32]),
+                },
+            ],
+        };
+        assert_eq!(
+            verify_outputs(&transaction),
+            Err(BchScriptError::DustOutput {
+                output_index: 1,
+                value: 575,
+                threshold: 576,
+            })
+        );
+    }
+
+    #[test]
+    fn an_op_return_output_is_rejected() {
+        let transaction: Transaction = deserialize_hex(BCH_TRANSFER_SCHNORR_ALL).unwrap();
+        assert_eq!(
+            verify_outputs(&transaction),
+            Err(BchScriptError::UnsupportedOutput { output_index: 1 })
+        );
+    }
+
+    #[test]
+    fn a_p2sh20_output_is_rejected() {
+        let transaction = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: ScriptBuf::from_hex(
+                    "a9147b00ca78ec9935f4794bf1b1af2c08f2e33dfc7487",
+                )
+                .unwrap(),
+            }],
+        };
+        assert_eq!(
+            verify_outputs(&transaction),
+            Err(BchScriptError::UnsupportedOutput { output_index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_zero_lock_time_is_final() {
+        let transaction: Transaction = deserialize_hex(BCH_TRANSFER_SCHNORR_ALL).unwrap();
+        assert_eq!(transaction.lock_time, LockTime::ZERO);
+        assert_eq!(verify_final(&transaction, 1), Ok(()));
+    }
+
+    #[test]
+    fn a_height_lock_time_is_final_only_above_it() {
+        let mut transaction: Transaction = deserialize_hex(BCH_TRANSFER_SCHNORR_ALL).unwrap();
+        // Input 1 has sequence 0xfffffffe, so the lock time applies.
+        transaction.lock_time = LockTime::from_consensus(5_000);
+        assert_eq!(
+            verify_final(&transaction, 5_000),
+            Err(BchScriptError::NotFinal {
+                lock_time: 5_000,
+                block_height: 5_000,
+            })
+        );
+        assert_eq!(verify_final(&transaction, 5_001), Ok(()));
+    }
+
+    #[test]
+    fn final_sequences_make_any_lock_time_final() {
+        let mut transaction: Transaction = deserialize_hex(BCH_TRANSFER_SCHNORR_ALL).unwrap();
+        transaction.lock_time = LockTime::from_consensus(5_000);
+        transaction.input[1].sequence = Sequence::MAX;
+        assert_eq!(verify_final(&transaction, 10), Ok(()));
+    }
+
+    #[test]
+    fn a_time_lock_time_is_never_final_on_the_share_chain() {
+        let mut transaction: Transaction = deserialize_hex(BCH_TRANSFER_SCHNORR_ALL).unwrap();
+        transaction.lock_time = LockTime::from_consensus(1_700_000_000);
+        assert_eq!(
+            verify_final(&transaction, 4_000_000),
+            Err(BchScriptError::NotFinal {
+                lock_time: 1_700_000_000,
+                block_height: 4_000_000,
+            })
+        );
+    }
+
+    // The same spends run opcode by opcode on `test_utils::bch_vm`, which
+    // executes the contract's bytes the way BCHN does instead of matching
+    // them as a template. Each case must get the same verdict from both.
+
+    #[test]
+    fn the_stack_machine_accepts_the_claim_the_interpreter_accepts() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x61; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &buyer.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        let spent = TxOut {
+            value: coin.value,
+            script_pubkey: contract.locking_script(),
+        };
+        assert_eq!(run_p2sh32_spend(&claim, 0, &spent), Ok(()));
+        assert_eq!(verify_transaction(&claim, &[(0, spent)]), Ok(()));
+    }
+
+    #[test]
+    fn the_stack_machine_accepts_the_refund_the_interpreter_accepts() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            950_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x62; 32]), 0),
+            value: Amount::from_sat(50_000),
+        };
+        let refund =
+            build_refund_transaction(&coin, &contract, &seller, &seller.p2pkh_script(), 1).unwrap();
+        let spent = TxOut {
+            value: coin.value,
+            script_pubkey: contract.locking_script(),
+        };
+        assert_eq!(run_p2sh32_spend(&refund, 0, &spent), Ok(()));
+        assert_eq!(verify_transaction(&refund, &[(0, spent)]), Ok(()));
+    }
+
+    #[test]
+    fn the_stack_machine_rejects_a_wrong_secret_like_the_interpreter() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x63; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &buyer.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        let signature = minimal_pushes(claim.input[0].script_sig.as_bytes()).unwrap()[0].to_vec();
+        claim.input[0].script_sig =
+            contract.claim_unlocking_script(&signature, buyer.public_key(), &[0x43; 32]);
+        let spent = TxOut {
+            value: coin.value,
+            script_pubkey: contract.locking_script(),
+        };
+        assert_eq!(
+            run_p2sh32_spend(&claim, 0, &spent),
+            Err("OP_EQUALVERIFY failed".to_string())
+        );
+        assert!(verify_transaction(&claim, &[(0, spent)]).is_err());
+    }
+
+    #[test]
+    fn the_stack_machine_rejects_an_early_refund_like_the_interpreter() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x64; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut refund =
+            build_refund_transaction(&coin, &contract, &seller, &seller.p2pkh_script(), 0).unwrap();
+        refund.lock_time = LockTime::from_consensus(4_999);
+        let signature = seller
+            .sign_input(&refund, 0, &contract.redeem_script(), coin.value)
+            .unwrap();
+        refund.input[0].script_sig =
+            contract.refund_unlocking_script(&signature, seller.public_key());
+        let spent = TxOut {
+            value: coin.value,
+            script_pubkey: contract.locking_script(),
+        };
+        assert_eq!(
+            run_p2sh32_spend(&refund, 0, &spent),
+            Err("lock time not reached".to_string())
+        );
+        assert!(verify_transaction(&refund, &[(0, spent)]).is_err());
+    }
+
+    #[test]
+    fn the_stack_machine_rejects_a_claim_by_the_refund_key_like_the_interpreter() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x65; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &seller.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        let signature = seller
+            .sign_input(&claim, 0, &contract.redeem_script(), coin.value)
+            .unwrap();
+        claim.input[0].script_sig =
+            contract.claim_unlocking_script(&signature, seller.public_key(), &TRADE_SECRET);
+        let spent = TxOut {
+            value: coin.value,
+            script_pubkey: contract.locking_script(),
+        };
+        assert_eq!(
+            run_p2sh32_spend(&claim, 0, &spent),
+            Err("OP_EQUALVERIFY failed".to_string())
+        );
+        assert!(verify_transaction(&claim, &[(0, spent)]).is_err());
+    }
+
+    #[test]
+    fn the_stack_machine_rejects_a_refund_with_a_final_sequence_like_the_interpreter() {
+        let buyer = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let seller = TradeKey::new(
+            PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: OutPoint::new(Txid::from_byte_array([0x66; 32]), 0),
+            value: Amount::from_sat(40_000_000),
+        };
+        let mut refund =
+            build_refund_transaction(&coin, &contract, &seller, &seller.p2pkh_script(), 0).unwrap();
+        refund.input[0].sequence = Sequence::MAX;
+        let signature = seller
+            .sign_input(&refund, 0, &contract.redeem_script(), coin.value)
+            .unwrap();
+        refund.input[0].script_sig =
+            contract.refund_unlocking_script(&signature, seller.public_key());
+        let spent = TxOut {
+            value: coin.value,
+            script_pubkey: contract.locking_script(),
+        };
+        assert_eq!(
+            run_p2sh32_spend(&refund, 0, &spent),
+            Err("final sequence".to_string())
+        );
+        assert!(verify_transaction(&refund, &[(0, spent)]).is_err());
     }
 }

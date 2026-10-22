@@ -5,8 +5,10 @@
 pub mod auxpow;
 pub mod bch_coinbase;
 pub mod bch_genesis;
+pub mod bch_htlc;
 pub mod bch_script;
 pub mod bch_sighash;
+pub mod bch_trade;
 pub mod chain;
 pub mod coinbase_proof;
 pub(crate) mod compact_block;

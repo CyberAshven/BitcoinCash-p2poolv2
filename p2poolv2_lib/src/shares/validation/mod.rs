@@ -327,7 +327,8 @@ pub trait ShareValidator {
     /// itself: no outpoint spent twice within the block, every outpoint
     /// present in the `Outputs` column family, every coinbase root within
     /// `PAYOUT_DEPTH` of this block, and every coinbase output mature at this
-    /// block's height.
+    /// block's height. On Bitcoin Cash every non-coinbase transaction must
+    /// also be final at this block's height.
     ///
     /// Rules whose answer depends on which branch is confirmed are not checked
     /// here. See the implementation for why.
@@ -480,6 +481,21 @@ impl DefaultShareValidator {
     pub fn with_target_ceiling(mut self, target_ceiling: CompactTarget) -> Self {
         self.target_ceiling = target_ceiling;
         self
+    }
+
+    /// Validate a share block's transactions: the context-free transaction
+    /// checks, then scripts, values and sigops against the outputs they spend.
+    ///
+    /// Part of [`ShareValidator::validate_share_block`]. Public so tests of
+    /// share trading can run the real transaction rules over shares built by
+    /// hand, without a proof of work or a bitcoin coinbase.
+    pub fn validate_share_transactions(
+        &self,
+        share: &ShareBlock,
+        chain_store_handle: &ChainStoreHandle,
+    ) -> Result<(), ValidationError> {
+        self.validate_transactions(share)?;
+        self.validate_scripts_values_and_sigops(share, chain_store_handle)
     }
 
     /// Require the block body of every uncle to be stored.
@@ -764,20 +780,44 @@ impl DefaultShareValidator {
         Ok(())
     }
 
-    /// Verify all input scripts of a Bitcoin Cash share transaction.
+    /// Verify the inputs and outputs of a Bitcoin Cash share transaction.
     ///
-    /// Only P2PKH spends with `SIGHASH_FORKID` ECDSA or Schnorr signatures
-    /// pass; see [`bch_script`] for the rules.
+    /// Inputs: P2PKH spends and claims or refunds of the share-trading
+    /// contract, with `SIGHASH_FORKID` ECDSA or Schnorr signatures. Outputs:
+    /// P2PKH or P2SH32, each at or above BCHN's dust threshold. See
+    /// [`bch_script`] for the rules.
     fn validate_bitcoin_cash_scripts_for_tx(
         transaction: &ShareTransaction,
         spent_outputs: &[(usize, bitcoin::TxOut)],
         txid: &bitcoin::Txid,
     ) -> Result<(), ValidationError> {
-        bch_script::verify_transaction(&transaction.0, spent_outputs).map_err(|error| {
-            ValidationError::consensus(format!(
-                "Script verification failed for transaction {txid}: {error}"
-            ))
-        })
+        bch_script::verify_transaction(&transaction.0, spent_outputs)
+            .and_then(|()| bch_script::verify_outputs(&transaction.0))
+            .map_err(|error| {
+                ValidationError::consensus(format!(
+                    "Script verification failed for transaction {txid}: {error}"
+                ))
+            })
+    }
+
+    /// Check that every non-coinbase transaction is final at `block_height`,
+    /// the height of the share that includes it.
+    ///
+    /// This is what stops a contract refund, whose lock time is the refund
+    /// height, from being mined in a share at or below that height.
+    fn validate_bitcoin_cash_finality(
+        share: &ShareBlock,
+        block_height: u32,
+    ) -> Result<(), ValidationError> {
+        for transaction in share.transactions.iter().skip(1) {
+            bch_script::verify_final(&transaction.0, block_height).map_err(|error| {
+                ValidationError::consensus(format!(
+                    "Transaction {} is not final: {error}",
+                    transaction.compute_txid()
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     /// Check that total input value is at least total output value for a
@@ -1336,9 +1376,7 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_uncle_bodies_present(share, chain_store_handle)?;
         self.validate_block_size(share)?;
         self.validate_transaction_count(share)?;
-        self.validate_transactions(share)?;
-        self.validate_scripts_values_and_sigops(share, chain_store_handle)?;
-        Ok(())
+        self.validate_share_transactions(share, chain_store_handle)
     }
 
     fn validate_below_pplns_depth(
@@ -1461,6 +1499,9 @@ impl ShareValidator for DefaultShareValidator {
     ///    block, so an output stays spendable for a full PPLNS window after
     ///    it matures.
     /// 4. A coinbase output is mature relative to this block's own height.
+    /// 5. On Bitcoin Cash, every non-coinbase transaction is final at this
+    ///    block's height (`bch_script::verify_final`), so a share-trading
+    ///    refund cannot be mined before its refund height.
     ///
     /// Each answer is fixed by the block and by data stamped on the outputs
     /// when they were stored, so a failure is a permanent verdict and the
@@ -1503,6 +1544,9 @@ impl ShareValidator for DefaultShareValidator {
                 ))
             })?
             + 1;
+        if self.chain == Chain::BitcoinCash {
+            Self::validate_bitcoin_cash_finality(share, block_height)?;
+        }
         let min_coinbase_root_height = block_height.saturating_sub(PAYOUT_DEPTH as u32);
         match chain_store_handle
             .check_prevouts(
@@ -1605,6 +1649,10 @@ mod tests {
         BCH_COINBASE_MATURITY, COINBASE_MATURITY, PPLNS_WINDOW_SHARES,
     };
     use crate::shares::bch_coinbase::BchCoinbase;
+    use crate::shares::bch_htlc::{HtlcContract, secret_hash};
+    use crate::shares::bch_trade::{
+        Coin, TradeKey, build_claim_transaction, build_lock_transaction, build_refund_transaction,
+    };
     use crate::shares::merge_mining::MergeMiningCommitment;
     use crate::shares::share_block::ShareTransaction;
     use crate::shares::share_commitment::ShareCommitment;
@@ -1617,9 +1665,10 @@ mod tests {
     use crate::stratum::work::gbt::build_merkle_branches_for_template;
     use crate::test_utils::{
         BCH_TRANSFER_ECDSA_ALL_WITHOUT_FORK_ID, BCH_TRANSFER_SCHNORR_ALL,
-        BCH_TRANSFER_SCRIPT_PUBKEY, TEST_COINBASE_NSECS, TestShareBlockBuilder,
-        build_block_from_work_components, genesis_for_tests, load_share_headers_test_data,
-        make_test_address, setup_pool_difficulty_mocks, test_coinbase_transaction,
+        BCH_TRANSFER_SCRIPT_PUBKEY, TEST_COINBASE_NSECS, TRADE_BUYER_SECRET_KEY, TRADE_SECRET,
+        TRADE_SELLER_SECRET_KEY, TestShareBlockBuilder, build_block_from_work_components,
+        genesis_for_tests, load_share_headers_test_data, make_test_address,
+        setup_pool_difficulty_mocks, test_coinbase_transaction,
     };
     use crate::utils::time_provider::TestTimeProvider;
     use bitcoin::consensus::encode::deserialize_hex;
@@ -1691,8 +1740,11 @@ mod tests {
         );
     }
 
+    /// BCHN's Schnorr-signed transfer pays 0.00005 to `OP_RETURN OP_0`. Its
+    /// signatures are good (`bch_script` verifies them), but a share output
+    /// must be P2PKH or P2SH32, so the share chain refuses the burn.
     #[test]
-    fn bitcoin_cash_accepts_a_schnorr_share_transfer_signed_by_bchn() {
+    fn bitcoin_cash_rejects_a_bchn_signed_transfer_that_pays_op_return() {
         let mut chain_store_handle = ChainStoreHandle::default();
         let script = ScriptBuf::from_hex(BCH_TRANSFER_SCRIPT_PUBKEY).unwrap();
         let spent = vec![
@@ -1718,10 +1770,321 @@ mod tests {
             .add_transaction(deserialize_hex(BCH_TRANSFER_SCHNORR_ALL).unwrap())
             .build();
 
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_scripts_values_and_sigops(&share, &chain_store_handle)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(
+            error
+                .to_string()
+                .contains("output 1 is neither P2PKH nor P2SH32"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_share_lock_into_the_trade_contract() {
+        let seller = TradeKey::new(
+            bitcoin::PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, bitcoin::NetworkKind::Test)
+                .unwrap(),
+        );
+        let buyer = TradeKey::new(
+            bitcoin::PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, bitcoin::NetworkKind::Test)
+                .unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([0x51; 32]), 0),
+            value: bitcoin::Amount::from_int_btc(1),
+        };
+        let lock = build_lock_transaction(
+            &[coin],
+            &seller,
+            &contract,
+            bitcoin::Amount::from_sat(40_000_000),
+            &seller.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        let seller_script = seller.p2pkh_script();
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_get_all_prevouts()
+            .returning(move |_transaction| {
+                Ok(vec![(
+                    0,
+                    TxOut {
+                        value: bitcoin::Amount::from_int_btc(1),
+                        script_pubkey: seller_script.clone(),
+                    },
+                )])
+            });
+        let share = TestShareBlockBuilder::new().add_transaction(lock).build();
+
         let result = validator()
             .for_chain(Chain::BitcoinCash)
-            .validate_scripts_values_and_sigops(&share, &chain_store_handle);
+            .validate_share_transactions(&share, &chain_store_handle);
         assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_share_claim_with_the_secret() {
+        let seller = TradeKey::new(
+            bitcoin::PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, bitcoin::NetworkKind::Test)
+                .unwrap(),
+        );
+        let buyer = TradeKey::new(
+            bitcoin::PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, bitcoin::NetworkKind::Test)
+                .unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            5_000,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([0x52; 32]), 0),
+            value: bitcoin::Amount::from_sat(40_000_000),
+        };
+        let claim = build_claim_transaction(
+            &coin,
+            &contract,
+            &buyer,
+            &TRADE_SECRET,
+            &buyer.p2pkh_script(),
+            0,
+        )
+        .unwrap();
+        let locking_script = contract.locking_script();
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_get_all_prevouts()
+            .returning(move |_transaction| {
+                Ok(vec![(
+                    0,
+                    TxOut {
+                        value: bitcoin::Amount::from_sat(40_000_000),
+                        script_pubkey: locking_script.clone(),
+                    },
+                )])
+            });
+        let share = TestShareBlockBuilder::new().add_transaction(claim).build();
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_share_transactions(&share, &chain_store_handle);
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    /// A transfer that splits a share into a dust output is refused, even
+    /// though its signature is valid.
+    #[test]
+    fn bitcoin_cash_rejects_a_share_output_below_the_dust_threshold() {
+        let seller = TradeKey::new(
+            bitcoin::PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, bitcoin::NetworkKind::Test)
+                .unwrap(),
+        );
+        let buyer = TradeKey::new(
+            bitcoin::PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, bitcoin::NetworkKind::Test)
+                .unwrap(),
+        );
+        let mut transfer = Transaction {
+            version: Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::new(
+                    bitcoin::Txid::from_byte_array([0x53; 32]),
+                    0,
+                ),
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: bitcoin::Amount::from_sat(545),
+                    script_pubkey: buyer.p2pkh_script(),
+                },
+                TxOut {
+                    value: bitcoin::Amount::from_sat(99_999_455),
+                    script_pubkey: seller.p2pkh_script(),
+                },
+            ],
+        };
+        let signature = seller
+            .sign_input(
+                &transfer,
+                0,
+                seller.p2pkh_script().as_bytes(),
+                bitcoin::Amount::from_int_btc(1),
+            )
+            .unwrap();
+        transfer.input[0].script_sig = Builder::new()
+            .push_slice(PushBytesBuf::try_from(signature).unwrap())
+            .push_slice(PushBytesBuf::try_from(seller.public_key().to_vec()).unwrap())
+            .into_script();
+        let seller_script = seller.p2pkh_script();
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_get_all_prevouts()
+            .returning(move |_transaction| {
+                Ok(vec![(
+                    0,
+                    TxOut {
+                        value: bitcoin::Amount::from_int_btc(1),
+                        script_pubkey: seller_script.clone(),
+                    },
+                )])
+            });
+        let share = TestShareBlockBuilder::new()
+            .add_transaction(transfer)
+            .build();
+
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_share_transactions(&share, &chain_store_handle)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(
+            error
+                .to_string()
+                .contains("output 0 holds 545, below the dust threshold 546"),
+            "{error}"
+        );
+    }
+
+    /// A refund signed with the refund height as its lock time cannot be
+    /// mined in the share at that height: the transaction is not final yet.
+    #[test]
+    fn bitcoin_cash_rejects_a_refund_in_a_share_at_its_refund_height() {
+        let seller = TradeKey::new(
+            bitcoin::PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, bitcoin::NetworkKind::Test)
+                .unwrap(),
+        );
+        let buyer = TradeKey::new(
+            bitcoin::PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, bitcoin::NetworkKind::Test)
+                .unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            100,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([0x54; 32]), 0),
+            value: bitcoin::Amount::from_sat(40_000_000),
+        };
+        let refund =
+            build_refund_transaction(&coin, &contract, &seller, &seller.p2pkh_script(), 0).unwrap();
+        let mut chain_store_handle = ChainStoreHandle::default();
+        // The parent is at height 99, so the share is at the refund height.
+        chain_store_handle
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(99)));
+        chain_store_handle.expect_check_prevouts().never();
+        let share = TestShareBlockBuilder::new().add_transaction(refund).build();
+
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_prevouts(&share, &chain_store_handle)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(
+            error
+                .to_string()
+                .contains("lock time 100 is not final at share height 100"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_refund_in_the_share_above_its_refund_height() {
+        let seller = TradeKey::new(
+            bitcoin::PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, bitcoin::NetworkKind::Test)
+                .unwrap(),
+        );
+        let buyer = TradeKey::new(
+            bitcoin::PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, bitcoin::NetworkKind::Test)
+                .unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            100,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([0x55; 32]), 0),
+            value: bitcoin::Amount::from_sat(40_000_000),
+        };
+        let refund =
+            build_refund_transaction(&coin, &contract, &seller, &seller.p2pkh_script(), 0).unwrap();
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(100)));
+        chain_store_handle
+            .expect_check_prevouts()
+            .with(always(), eq(101), always(), always())
+            .returning(|_, _, _, _| Ok(PrevoutCheck::Accepted));
+        let share = TestShareBlockBuilder::new().add_transaction(refund).build();
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_prevouts(&share, &chain_store_handle);
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    /// Bitcoin keeps upstream's rules: no finality check of its own.
+    #[test]
+    fn bitcoin_does_not_check_share_transaction_finality() {
+        let seller = TradeKey::new(
+            bitcoin::PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, bitcoin::NetworkKind::Test)
+                .unwrap(),
+        );
+        let buyer = TradeKey::new(
+            bitcoin::PrivateKey::from_slice(&TRADE_BUYER_SECRET_KEY, bitcoin::NetworkKind::Test)
+                .unwrap(),
+        );
+        let contract = HtlcContract::new(
+            secret_hash(&TRADE_SECRET),
+            buyer.pubkey_hash(),
+            seller.pubkey_hash(),
+            100,
+        )
+        .unwrap();
+        let coin = Coin {
+            outpoint: bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([0x56; 32]), 0),
+            value: bitcoin::Amount::from_sat(40_000_000),
+        };
+        let refund =
+            build_refund_transaction(&coin, &contract, &seller, &seller.p2pkh_script(), 0).unwrap();
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_get_block_metadata()
+            .returning(|_| Ok(metadata_at_height(10)));
+        chain_store_handle
+            .expect_check_prevouts()
+            .returning(|_, _, _, _| Ok(PrevoutCheck::Accepted));
+        let share = TestShareBlockBuilder::new().add_transaction(refund).build();
+
+        assert!(
+            validator()
+                .validate_prevouts(&share, &chain_store_handle)
+                .is_ok()
+        );
     }
 
     #[test]
