@@ -1,0 +1,162 @@
+/* Additions for the pages the node renders in Rust, on top of
+   CashDragon0's dashboard.css. Nothing here needs JavaScript. */
+
+header.site-header .header-search {
+  display: flex;
+  gap: 0.35rem;
+  margin: 0;
+}
+header.site-header .header-search input[type="search"] {
+  height: auto;
+  width: 16rem;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.6rem;
+  margin: 0;
+}
+header.site-header .tabs li a[aria-current="page"] {
+  text-decoration: none;
+}
+
+nav[aria-label="breadcrumb"] {
+  font-size: 0.78rem;
+  margin-bottom: 0.6rem;
+}
+nav[aria-label="breadcrumb"] ul {
+  flex-wrap: wrap;
+}
+.back-link {
+  display: inline-block;
+  font-size: 0.8rem;
+  margin-bottom: 0.6rem;
+}
+
+.kpi-card a {
+  color: inherit;
+  text-decoration: none;
+}
+.kpi-card a:hover .kpi-value {
+  text-decoration: underline;
+}
+
+.panel-more {
+  display: flex;
+  justify-content: flex-end;
+  font-size: 0.78rem;
+  padding-top: 0.5rem;
+}
+.more-row .page-of {
+  align-self: center;
+  font-size: 0.78rem;
+  color: var(--pico-muted-color);
+  margin: 0 0.6rem;
+}
+.more-row .more-btn[aria-disabled="true"] {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+tr.uncle-row {
+  opacity: 0.6;
+}
+.badge-block {
+  display: inline-block;
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ms-green);
+  background: var(--ms-green-dim);
+  border: 1px solid rgba(10, 193, 142, 0.4);
+  border-radius: 999px;
+  padding: 0.02rem 0.45rem;
+}
+
+.stat-item .v.mono {
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+/* Miners table: one <details> per miner, so its workers open without a
+   script. */
+.miners-grid details > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.miners-grid details > summary::-webkit-details-marker {
+  display: none;
+}
+.miners-grid details > summary::after {
+  display: none;
+}
+.miners-grid .toggle::before {
+  content: "+";
+  color: var(--ms-green);
+  font-weight: 700;
+}
+.miners-grid details[open] .toggle::before {
+  content: "\2212";
+}
+
+/* The hashrate chart, drawn as SVG on the server. */
+.chart-wrap figure {
+  margin: 0;
+}
+.chart-wrap svg {
+  height: auto;
+}
+.chart-wrap .grid {
+  stroke: #2c2f32;
+  stroke-width: 1;
+}
+.chart-wrap .axis {
+  fill: var(--pico-muted-color);
+  font-size: 11px;
+  font-family: var(--pico-font-family-monospace);
+}
+.chart-wrap .line {
+  fill: none;
+  stroke-width: 2;
+}
+.chart-wrap .dot {
+  stroke: none;
+  opacity: 0.85;
+}
+.chart-wrap .line.pool {
+  stroke: var(--ms-green);
+}
+.chart-wrap .dot.pool,
+.chart-wrap .key.pool {
+  fill: var(--ms-green);
+  color: var(--ms-green);
+}
+.chart-wrap .line.local {
+  stroke: #22d3ee;
+}
+.chart-wrap .dot.local,
+.chart-wrap .key.local {
+  fill: #22d3ee;
+  color: #22d3ee;
+}
+.chart-wrap figcaption {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.72rem;
+  color: var(--pico-muted-color);
+  padding-top: 0.4rem;
+}
+.chart-wrap .key::before {
+  content: "";
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  margin-right: 0.35rem;
+  background: currentColor;
+}
+.chart-wrap p.empty {
+  color: var(--pico-muted-color);
+  text-align: center;
+  padding: 3rem 0;
+  font-size: 0.85rem;
+  margin: 0;
+}

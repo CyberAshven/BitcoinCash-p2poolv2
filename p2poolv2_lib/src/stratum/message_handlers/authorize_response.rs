@@ -83,6 +83,17 @@ pub(crate) fn resolve_share_address(
     }
 }
 
+/// The share address in a `p2p=` value, without a worker suffix.
+///
+/// Stratum V2 proxies append `.<worker>` to the whole `user_identity`: the
+/// reference translator sends `<identity>.<downstream worker>`, or
+/// `<account>.translator-proxy` when it aggregates channels. Both land after
+/// the options. A share address is CashAddr, which never contains a dot, so
+/// the address ends at the first one.
+fn share_address_text(value: &str) -> &str {
+    value.split('.').next().unwrap_or(value)
+}
+
 /// Resolve a Bitcoin Cash share owner from configuration and `p2p=`.
 ///
 /// Same conflict rules as [`resolve_share_address`]: a configured hash owns
@@ -97,7 +108,9 @@ pub(crate) fn resolve_cash_share(
     if mode == PoolMode::Hydrapool {
         return Ok(None);
     }
-    let supplied = password.and_then(|password| extract_string_value(password, "p2p="));
+    let supplied = password
+        .and_then(|password| extract_string_value(password, "p2p="))
+        .map(share_address_text);
     let supplied_hash = supplied.map(|address| {
         bch_share::parse(address, network)
             .map(|decoded| decoded.hash)
@@ -1614,6 +1627,26 @@ mod resolve_cash_share_tests {
         )
         .unwrap();
         assert_eq!(owner, Some(ShareOwner::CashP2pkh([0x22; 20])));
+    }
+
+    /// The Stratum V2 reference translator appends `.<worker>` to the whole
+    /// identity, so the suffix lands on the share address.
+    #[test]
+    fn a_proxy_worker_suffix_after_the_share_address_is_ignored() {
+        let text = BchShareAddress::new(BchShareNetwork::Chipnet, [0x22; 20]).encode();
+        for options in [
+            format!("p2p={text}.miner1"),
+            format!("p2p={text}.translator-proxy"),
+        ] {
+            let owner = resolve_cash_share(
+                None,
+                Some(&options),
+                BchShareNetwork::Chipnet,
+                PoolMode::P2poolv2,
+            )
+            .unwrap();
+            assert_eq!(owner, Some(ShareOwner::CashP2pkh([0x22; 20])), "{options}");
+        }
     }
 
     #[test]

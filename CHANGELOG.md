@@ -127,6 +127,9 @@ The pre-release is refreshed in place with `main` until the beta.
 
 ### Fixed
 
+- A Bitcoin Cash share address in `p2p=` ends at its first dot, so the
+  `.<worker>` the Stratum V2 reference translator appends to a channel's
+  `user_identity` no longer makes the node refuse the channel.
 - A share header with a donation or fee above 10,000 basis points no longer
   panics the validating node; such shares are rejected.
 - Stratum usernames on a Bitcoin Cash node accept CashAddr payout addresses.

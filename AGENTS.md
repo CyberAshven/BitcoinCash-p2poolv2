@@ -10,6 +10,13 @@ are calculated via PPLNS and paid directly from coinbase transactions.
 Project name is P2Poolv2 (no whitespace). Rust edition 2024, minimum
 rust-version 1.88.
 
+## Languages (Bitcoin Cash fork)
+
+All code is Rust. CSS and HTML are allowed for styling only: the
+dashboard's pages are rendered by Rust and load no script, and the WASM
+dashboard's only JavaScript is the loader `wasm-bindgen` generates. Don't
+add hand-written JavaScript, TypeScript or Python.
+
 ## Branches and releases (Bitcoin Cash fork)
 
 This fork, `CyberAshven/BitcoinCash-p2poolv2`, has two branches:
