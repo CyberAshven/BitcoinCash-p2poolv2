@@ -40,6 +40,7 @@ token suitable for the config file.
 - [GET /miner](#get-miner) -- One miner's shares and weight in the PPLNS window
 - [GET /hashrate](#get-hashrate) -- Hashrate history as JSON
 - [GET /found_blocks](#get-found_blocks) -- Bitcoin blocks found by the pool
+- [POST /share_transaction](#post-share_transaction) -- Submit a signed share transaction (Bitcoin Cash)
 - [GET /peers](#get-peers) -- Connected peers
 - [GET /pplns_shares](#get-pplns_shares) -- PPLNS accounting data
 - [WebSocket /ws](#websocket-ws) -- Real-time event subscriptions
@@ -331,6 +332,23 @@ exposes as `bitcoin_block_found_time_seconds`.
 [{"bitcoin_height":289001,"bitcoin_blockhash":"0000...","share_blockhash":"47fb...",
   "bitcoin_time":1792675942,"miner_bitcoin_address":"bchtest:qr..."}]
 ```
+
+### POST /share_transaction
+
+Bitcoin Cash: hand a signed share transaction to this node, such as a
+`p2poolv2_cli bch-trade` lock, claim or refund. The node checks it against
+the confirmed share chain under every share-chain rule, adds it to its share
+transaction pool, relays it to its peers and mines it in the shares it
+builds (`docs/atomic-swap/bch-share-trading.md`, "Share transactions on the
+network"). Always behind the login, also on a node whose share chain pages
+are public. `p2poolv2_cli transactions submit` calls it.
+
+**Request:** `{"hex": "<consensus-serialized transaction>"}`, at most 50 KiB
+of transaction.
+
+**Response:** `{"txid": "...", "status": "accepted"}`, or `"already_in_pool"`
+when the node had it. A transaction that breaks a rule gets 400 with the
+rule in `error`; a Bitcoin node, which keeps no pool, answers 503.
 
 ### GET /peers
 

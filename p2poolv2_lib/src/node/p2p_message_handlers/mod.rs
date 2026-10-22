@@ -16,6 +16,7 @@ use crate::service::p2p_service::RequestContext;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::shares::transaction_pool::{ShareTransactionPool, SubmitOutcome, TransactionSource};
 use crate::shares::validation::ShareValidator;
 use crate::utils::time_provider::TimeProvider;
 use receivers::getblocks::handle_getblocks;
@@ -102,8 +103,14 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
             }
         }
         Message::Transaction(transaction) => {
-            debug!("Received transaction: {:?}", transaction);
-            Ok(())
+            handle_share_transaction(
+                transaction,
+                ctx.peer,
+                ctx.share_transaction_pool.as_ref(),
+                ctx.response_channel,
+                ctx.swarm_tx,
+            )
+            .await
         }
         Message::Handshake(handshake_data) => {
             handle_handshake(
@@ -147,6 +154,39 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
             Ok(())
         }
     }
+}
+
+/// Handle a share transaction a peer relayed: acknowledge it, then offer it
+/// to the share transaction pool, which checks it, rate limits peers and
+/// relays it on when it is new. A transaction the pool refuses is dropped
+/// without penalising the peer: it may only have lost a race with another
+/// spend or a new share. A node without a pool (Bitcoin) only acknowledges.
+async fn handle_share_transaction<C: Send + Sync>(
+    transaction: bitcoin::Transaction,
+    peer: libp2p::PeerId,
+    share_transaction_pool: Option<&ShareTransactionPool>,
+    response_channel: C,
+    swarm_tx: mpsc::Sender<SwarmSend<C>>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if let Err(error) = swarm_tx
+        .send(SwarmSend::Response(response_channel, Message::Ack))
+        .await
+    {
+        error!("Failed to send Transaction ack to peer {peer}: {error}");
+        return Err(format!("Failed to send Transaction ack: {error}").into());
+    }
+    let Some(pool) = share_transaction_pool else {
+        debug!("Ignoring share transaction from peer {peer}: this node keeps no pool");
+        return Ok(());
+    };
+    match pool.submit(transaction, TransactionSource::Peer(peer)) {
+        Ok(SubmitOutcome::Accepted(txid)) => {
+            debug!("Accepted share transaction {txid} from peer {peer}")
+        }
+        Ok(SubmitOutcome::AlreadyInPool(_)) => {}
+        Err(rejection) => debug!("Refused share transaction from peer {peer}: {rejection}"),
+    }
+    Ok(())
 }
 
 /// Handle a response message received from a peer.
@@ -296,6 +336,7 @@ mod tests {
             validation_tx,
             block_receiver_handle: block_receiver_handle.clone(),
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         };
 
         let result = handle_request(ctx).await;
@@ -347,6 +388,7 @@ mod tests {
             validation_tx,
             block_receiver_handle: block_receiver_handle.clone(),
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         };
 
         let result = handle_request(ctx).await;
@@ -405,6 +447,7 @@ mod tests {
             validation_tx,
             block_receiver_handle: block_receiver_handle.clone(),
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         };
 
         let result = handle_request(ctx).await;
@@ -459,6 +502,7 @@ mod tests {
             validation_tx,
             block_receiver_handle: block_receiver_handle.clone(),
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         };
 
         let result = handle_request(ctx).await;
@@ -495,6 +539,7 @@ mod tests {
             validation_tx,
             block_receiver_handle: block_receiver_handle.clone(),
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         };
 
         let result = handle_request(ctx).await;
@@ -535,6 +580,7 @@ mod tests {
             validation_tx,
             block_receiver_handle: block_receiver_handle.clone(),
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         };
 
         let result = handle_request(ctx).await;
@@ -578,6 +624,7 @@ mod tests {
             validation_tx,
             block_receiver_handle: block_receiver_handle.clone(),
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         };
 
         let result = handle_request(ctx).await;
@@ -619,6 +666,7 @@ mod tests {
             validation_tx,
             block_receiver_handle: block_receiver_handle.clone(),
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         };
 
         let result = handle_request(ctx).await;
@@ -649,6 +697,7 @@ mod tests {
             validation_tx,
             block_receiver_handle: block_receiver_handle.clone(),
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         };
 
         let result = handle_request(ctx).await;
@@ -690,6 +739,7 @@ mod tests {
             validation_tx,
             block_receiver_handle: block_receiver_handle.clone(),
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         };
 
         let result = handle_request(ctx).await;
@@ -729,6 +779,7 @@ mod tests {
             validation_tx,
             block_receiver_handle,
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         };
 
         let result = handle_request(ctx).await;
@@ -790,6 +841,7 @@ mod tests {
             validation_tx,
             block_receiver_handle,
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         };
 
         let result = handle_request(ctx).await;

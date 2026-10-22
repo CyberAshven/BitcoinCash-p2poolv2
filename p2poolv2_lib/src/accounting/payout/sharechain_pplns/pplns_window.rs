@@ -9,6 +9,7 @@
 //! instead of re-reading the full window from RocksDB on every notify.
 
 use super::address_keys::AddressKeys;
+use super::payout_rights::{ChainShare, PayoutRights, has_share_transactions, share_coinbase_txid};
 use crate::config::Chain;
 #[cfg(test)]
 #[mockall_double::double]
@@ -16,20 +17,20 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ConfirmedHeaderResult;
-use crate::shares::share_block::ShareHeader;
+use crate::shares::share_block::{ShareHeader, ShareTransaction};
 #[cfg(not(feature = "sim"))]
 use crate::store::dag_store::MAX_UNCLES_DEPTH;
+use crate::store::writer::StoreError;
 use bitcoin::Address;
 use bitcoin::BlockHash;
-#[cfg(any(test, feature = "test-utils", feature = "sim"))]
 use bitcoin::hashes::Hash;
-use bitcoin::{CompactTarget, Target};
+use bitcoin::{CompactTarget, PubkeyHash, Target, Txid};
 use p2poolv2_wallet::share_owner::ShareOwner;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::hash;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// The PPLNS window: a coinbase pays at most `PPLNS_WINDOW_SHARES` shares,
 /// each weighted by its difficulty, starting at the newest share that is
@@ -234,6 +235,10 @@ struct ConfirmedEntry {
     difficulty: u128,
     /// Uncle entries, if any, referenced by the share
     uncle_entries: Vec<UncleEntry>,
+    /// Txid of the share's coinbase, which carries its payout right. Set on
+    /// Bitcoin Cash, where the payout rights index needs it to evict the
+    /// share; all zeros on Bitcoin.
+    coinbase_txid: Txid,
 }
 
 impl ConfirmedEntry {
@@ -312,6 +317,9 @@ struct ResolvedWindow {
     /// Work the window must hold, or `None` when only the share count bounds
     /// it (see `PplnsWindow::work_target`).
     work_target: Option<u128>,
+    /// Payout address key of every share whose payout right is held, as of
+    /// the anchor, by someone other than its own miner. Empty on Bitcoin.
+    transferred_payees: HashMap<BlockHash, usize>,
 }
 
 impl ResolvedWindow {
@@ -320,6 +328,19 @@ impl ResolvedWindow {
     /// gives the candidate entries, cached with no height, their real one.
     fn height_at(&self, walk_index: usize) -> u32 {
         self.paying_height.saturating_sub(walk_index + 1) as u32
+    }
+
+    /// Payout address key for a window share's own weight: the holder of its
+    /// payout right when that is not its own miner, else its own
+    /// `miner_bitcoin_address`.
+    fn share_payee(&self, entry: &ConfirmedEntry) -> usize {
+        if self.transferred_payees.is_empty() {
+            return entry.internal_key;
+        }
+        self.transferred_payees
+            .get(&entry.blockhash)
+            .copied()
+            .unwrap_or(entry.internal_key)
     }
 }
 
@@ -358,7 +379,8 @@ pub struct WindowCredit {
     /// difficulty.
     pub weight: u128,
     /// Payout address the weight is paid to: the share's or the uncle's own
-    /// `miner_bitcoin_address`.
+    /// `miner_bitcoin_address`, or on Bitcoin Cash the P2PKH address of
+    /// whoever else holds the share's payout right.
     pub payout_address: Address,
 }
 
@@ -452,6 +474,15 @@ pub enum WindowError {
         oldest_cached_height: u32,
         max_window_shares: usize,
     },
+    /// Bitcoin Cash: the anchor forks off the cached chain deeper than the
+    /// payout rights index can undo, so who holds each window share's right
+    /// at the anchor is unknown. Like `InsufficientEntries`, permanent for
+    /// this node: the undo log only moves forward with the confirmed tip.
+    RightsHistoryTooShallow {
+        anchor: BlockHash,
+        fork_depth: usize,
+        undo_depth: usize,
+    },
     /// A store read failed, or the anchor's ancestry is not stored. Either may
     /// resolve later.
     ReadFailure(Box<dyn Error + Send + Sync>),
@@ -469,6 +500,15 @@ impl fmt::Display for WindowError {
                 "PPLNS window for anchor {anchor} is truncated by eviction: the walk ran out of \
                  cached entries at height {oldest_cached_height}, short of its window of at most \
                  {max_window_shares} shares"
+            ),
+            WindowError::RightsHistoryTooShallow {
+                anchor,
+                fork_depth,
+                undo_depth,
+            } => write!(
+                formatter,
+                "Payout rights for anchor {anchor} cannot be resolved: it forks {fork_depth} \
+                 shares below the cached tip, and the rights index undoes at most {undo_depth}"
             ),
             WindowError::ReadFailure(error) => write!(formatter, "{error}"),
         }
@@ -517,6 +557,9 @@ pub struct PplnsWindow {
     /// Rule sizing the window below the maturity skip. `FixedShares` until
     /// `for_chain` selects Bitcoin Cash.
     sizing: WindowSizing,
+    /// Bitcoin Cash: who holds each cached share's payout right, at the
+    /// cached tip. `None` on Bitcoin, which pays `miner_bitcoin_address`.
+    rights: Option<PayoutRights>,
 }
 
 impl PplnsWindow {
@@ -535,16 +578,19 @@ impl PplnsWindow {
             max_window_shares: PPLNS_WINDOW_SHARES,
             maturity_skip: COINBASE_MATURITY,
             sizing: WindowSizing::FixedShares,
+            rights: None,
         }
     }
 
     /// Select the window rule for the chain this share chain pays on.
     ///
     /// Bitcoin keeps the fixed `PPLNS_WINDOW_SHARES` shares behind
-    /// `COINBASE_MATURITY`. Bitcoin Cash pays `BCH_PPLNS_WINDOW_BLOCKS`
-    /// expected blocks' worth of work, capped at `PPLNS_WINDOW_SHARES` shares,
-    /// behind `BCH_COINBASE_MATURITY`. This is consensus: every node on a
-    /// share chain must select the same chain.
+    /// `COINBASE_MATURITY`, paid to each share's `miner_bitcoin_address`.
+    /// Bitcoin Cash pays `BCH_PPLNS_WINDOW_BLOCKS` expected blocks' worth of
+    /// work, capped at `PPLNS_WINDOW_SHARES` shares, behind
+    /// `BCH_COINBASE_MATURITY`, to whoever holds each share's payout right
+    /// (see `payout_rights`). This is consensus: every node on a share chain
+    /// must select the same chain.
     pub fn for_chain(mut self, chain: Chain) -> Self {
         self.sizing = match chain {
             Chain::Bitcoin => WindowSizing::FixedShares,
@@ -553,6 +599,10 @@ impl PplnsWindow {
             },
         };
         self.maturity_skip = coinbase_maturity_for(chain);
+        self.rights = match chain {
+            Chain::Bitcoin => None,
+            Chain::BitcoinCash => Some(PayoutRights::default()),
+        };
         self
     }
 
@@ -670,7 +720,8 @@ impl PplnsWindow {
     ) -> Result<HashMap<Address, u128>, WindowError> {
         let mut difficulty_by_key = vec![0u128; self.address_keys.len()];
         self.walk_window(start_hash, resolved, |_, entry| {
-            Self::add_entry_difficulty(entry, &mut difficulty_by_key);
+            let share_payee = resolved.share_payee(entry);
+            Self::add_entry_difficulty(entry, share_payee, &mut difficulty_by_key);
         })?;
 
         Ok(self.collect_distribution(&difficulty_by_key))
@@ -720,7 +771,7 @@ impl PplnsWindow {
             window_credits.newest_height.get_or_insert(height);
             window_credits.oldest_height = Some(height);
             window_credits.window_share_count += 1;
-            Self::for_each_credit(entry, |credit| {
+            Self::for_each_credit(entry, resolved.share_payee(entry), |credit| {
                 window_credits.window_weight =
                     window_credits.window_weight.saturating_add(credit.weight);
                 let payout_address = self.address_keys.value_for(credit.internal_key);
@@ -748,12 +799,21 @@ impl PplnsWindow {
         paying_block_difficulty: u128,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<ResolvedWindow, WindowError> {
-        let (candidate_entries, confirmed_start_index) =
+        let (candidate_headers, confirmed_start_index) =
             self.resolve_start_hash(start_hash, chain_store_handle)?;
+        let transferred_payees = self.transferred_payees(
+            start_hash,
+            &candidate_headers,
+            confirmed_start_index,
+            chain_store_handle,
+        )?;
+        let candidate_entries =
+            self.build_entries_from_headers(&candidate_headers, chain_store_handle)?;
         Ok(self.resolved_window(
             candidate_entries,
             confirmed_start_index,
             paying_block_difficulty,
+            transferred_payees,
         ))
     }
 
@@ -764,6 +824,7 @@ impl PplnsWindow {
         candidate_entries: Vec<ConfirmedEntry>,
         confirmed_start_index: usize,
         paying_block_difficulty: u128,
+        transferred_payees: HashMap<BlockHash, usize>,
     ) -> ResolvedWindow {
         let paying_height = self.paying_height(&candidate_entries, confirmed_start_index);
         let immature_share_count = self.immature_share_count(paying_height);
@@ -773,7 +834,67 @@ impl PplnsWindow {
             paying_height,
             immature_share_count,
             work_target: self.work_target(paying_block_difficulty),
+            transferred_payees,
         }
+    }
+
+    /// Bitcoin Cash: the payout address key of every share whose payout right
+    /// is held, at the anchor, by someone other than its own miner.
+    ///
+    /// The rights at the anchor are the index's, with the cached shares above
+    /// the anchor's fork point undone and the anchor's branch shares (the
+    /// candidate headers, newest first) applied, so the answer depends on the
+    /// anchor's own ancestry only. Empty on Bitcoin.
+    ///
+    /// Errors with `RightsHistoryTooShallow` when the fork point is deeper
+    /// than the index can undo, and with `ReadFailure` when a branch share's
+    /// transactions cannot be read.
+    fn transferred_payees(
+        &mut self,
+        start_hash: BlockHash,
+        candidate_headers: &[(BlockHash, ShareHeader)],
+        confirmed_start_index: usize,
+        chain_store_handle: &ChainStoreHandle,
+    ) -> Result<HashMap<BlockHash, usize>, WindowError> {
+        let Some(rights) = &self.rights else {
+            return Ok(HashMap::new());
+        };
+        let fork_height = self.confirmed_entries[confirmed_start_index].height;
+        let holders = {
+            let mut overlay =
+                rights
+                    .overlay(confirmed_start_index, fork_height)
+                    .map_err(|too_shallow| WindowError::RightsHistoryTooShallow {
+                        anchor: start_hash,
+                        fork_depth: too_shallow.requested,
+                        undo_depth: too_shallow.available,
+                    })?;
+            for (height_above_fork, (blockhash, header)) in
+                (1u32..).zip(candidate_headers.iter().rev())
+            {
+                let transactions =
+                    branch_share_transactions(blockhash, header, chain_store_handle)?;
+                overlay.apply_share(
+                    ChainShare::from_header(*blockhash, fork_height + height_above_fork, header),
+                    share_coinbase_txid(header),
+                    &transactions,
+                );
+            }
+            overlay.transferred_holders()
+        };
+
+        let mut key_by_holder: HashMap<[u8; 20], usize> = HashMap::with_capacity(holders.len());
+        let mut payees = HashMap::with_capacity(holders.len());
+        for (share, holder) in holders {
+            let key = *key_by_holder.entry(holder).or_insert_with(|| {
+                self.address_keys.key_for(Address::p2pkh(
+                    PubkeyHash::from_byte_array(holder),
+                    self.network,
+                ))
+            });
+            payees.insert(share, key);
+        }
+        Ok(payees)
     }
 
     /// Work the window must hold for a paying block of this difficulty, or
@@ -835,27 +956,22 @@ impl PplnsWindow {
             .is_none_or(|entry| entry.height == 0)
     }
 
-    /// Resolve the anchor to its candidate entries and confirmed entry point.
+    /// Resolve the anchor to its candidate headers and confirmed entry point.
     ///
-    /// If start_hash is in confirmed_entries, returns empty candidate
-    /// entries and the confirmed index. Otherwise walks backward through
-    /// parent pointers in the store, building candidate entries until a
-    /// confirmed ancestor is found. Errors when no confirmed ancestor is
-    /// reachable or a store read fails.
+    /// If start_hash is in confirmed_entries, returns no candidate headers
+    /// and the confirmed index. Otherwise walks backward through parent
+    /// pointers in the store, collecting candidate headers (newest first)
+    /// until a confirmed ancestor is found. Errors when no confirmed ancestor
+    /// is reachable or a store read fails.
     fn resolve_start_hash(
-        &mut self,
+        &self,
         start_hash: BlockHash,
         chain_store_handle: &ChainStoreHandle,
-    ) -> Result<(Vec<ConfirmedEntry>, usize), Box<dyn Error + Send + Sync>> {
+    ) -> Result<CandidateWalk, Box<dyn Error + Send + Sync>> {
         if let Some(confirmed_index) = self.find_start_index(start_hash) {
             return Ok((Vec::new(), confirmed_index));
         }
-
-        let (candidate_headers, confirmed_index) =
-            self.collect_candidate_headers(start_hash, chain_store_handle)?;
-        let candidate_entries =
-            self.build_entries_from_headers(&candidate_headers, chain_store_handle)?;
-        Ok((candidate_entries, confirmed_index))
+        self.collect_candidate_headers(start_hash, chain_store_handle)
     }
 
     /// Walk backward from start_hash through parent pointers until
@@ -1024,11 +1140,15 @@ impl PplnsWindow {
         }
     }
 
-    /// Credit one share to the distribution: its miner gets the share's
+    /// Credit one share to the distribution: `share_payee` gets the share's
     /// scaled difficulty plus the nephew bonus for each uncle it includes,
     /// and each uncle's miner gets the uncle weight.
-    fn add_entry_difficulty(entry: &ConfirmedEntry, difficulty_by_key: &mut [u128]) {
-        Self::for_each_credit(entry, |credit| {
+    fn add_entry_difficulty(
+        entry: &ConfirmedEntry,
+        share_payee: usize,
+        difficulty_by_key: &mut [u128],
+    ) {
+        Self::for_each_credit(entry, share_payee, |credit| {
             difficulty_by_key[credit.internal_key] =
                 difficulty_by_key[credit.internal_key].saturating_add(credit.weight);
         });
@@ -1038,9 +1158,16 @@ impl PplnsWindow {
     /// uncle weight for each uncle it includes, then the share's own scaled
     /// difficulty plus the nephew bonus for those uncles.
     ///
+    /// The share's own weight goes to `share_payee`: the share's own
+    /// `miner_bitcoin_address` key, or on Bitcoin Cash the key of whoever else
+    /// holds its payout right (`ResolvedWindow::share_payee`). An uncle's
+    /// weight always goes to the uncle's own `miner_bitcoin_address`: an
+    /// uncle's coinbase output can never be spent on the chain, so its right
+    /// never moves.
+    ///
     /// The one place the PPLNS weighting is applied, so the distribution and
     /// a single miner's view of the window cannot disagree.
-    fn for_each_credit(entry: &ConfirmedEntry, mut credit: impl FnMut(Credit)) {
+    fn for_each_credit(entry: &ConfirmedEntry, share_payee: usize, mut credit: impl FnMut(Credit)) {
         let mut nephew_bonus: u128 = 0;
         for uncle_entry in &entry.uncle_entries {
             credit(Credit {
@@ -1056,7 +1183,7 @@ impl PplnsWindow {
         }
 
         credit(Credit {
-            internal_key: entry.internal_key,
+            internal_key: share_payee,
             owner_key: entry.owner_key,
             blockhash: entry.blockhash,
             nephew: None,
@@ -1128,19 +1255,13 @@ impl PplnsWindow {
             return Ok(false);
         };
 
-        if let Some(cached_height) = self.cached_top_height {
-            let is_simple_extension =
-                self.is_simple_extension(cached_height, tip_height, chain_store_handle)?;
-
-            if is_simple_extension {
-                self.load_range(chain_store_handle, cached_height + 1, tip_height)?;
-            } else {
-                self.handle_reorg(chain_store_handle, tip_height)?;
-            }
-        } else {
-            // no cached top height, first load
-            let estimated_min_height = tip_height.saturating_sub(self.cache_capacity() as u32);
-            self.load_range(chain_store_handle, estimated_min_height, tip_height)?;
+        if let Err(error) = self.load_to_tip(tip_height, chain_store_handle) {
+            // A load that failed part way has pushed some entries, and on
+            // Bitcoin Cash applied them to the payout rights index, without
+            // moving the cached tip. Start over on the next update rather than
+            // load the same shares twice.
+            self.invalidate();
+            return Err(error);
         }
 
         self.evict_overflow();
@@ -1149,6 +1270,29 @@ impl PplnsWindow {
         self.cached_top_height = Some(tip_height);
 
         Ok(true)
+    }
+
+    /// Bring the cached entries from the cached tip to the confirmed tip at
+    /// `tip_height`: extend them, roll back a reorg, or load them all on the
+    /// first update.
+    fn load_to_tip(
+        &mut self,
+        tip_height: u32,
+        chain_store_handle: &ChainStoreHandle,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        match self.cached_top_height {
+            Some(cached_height) => {
+                if self.is_simple_extension(cached_height, tip_height, chain_store_handle)? {
+                    self.load_range(chain_store_handle, cached_height + 1, tip_height)
+                } else {
+                    self.handle_reorg(chain_store_handle, tip_height)
+                }
+            }
+            None => {
+                let estimated_min_height = tip_height.saturating_sub(self.cache_capacity() as u32);
+                self.load_range(chain_store_handle, estimated_min_height, tip_height)
+            }
+        }
     }
 
     /// Check whether the new tip is a simple extension of the cached chain.
@@ -1174,20 +1318,21 @@ impl PplnsWindow {
     }
 
     /// Handle a reorg by finding the fork point and doing targeted removal
-    /// and reload. Falls back to full invalidation for deep reorgs.
+    /// and reload. Falls back to full invalidation for deep reorgs, and on
+    /// Bitcoin Cash for a fork deeper than the payout rights index can undo.
     fn handle_reorg(
         &mut self,
         chain_store_handle: &ChainStoreHandle,
         tip_height: u32,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         match self.find_fork_height(chain_store_handle)? {
-            Some(fork_height) => {
+            Some(fork_height) if self.rights_can_undo_above(fork_height) => {
                 debug!("Reorg detected in PPLNS window, rolling back to fork height {fork_height}");
                 self.remove_entries_above_height(fork_height);
                 self.cached_top_height = Some(fork_height);
                 self.load_range(chain_store_handle, fork_height + 1, tip_height)?;
             }
-            None => {
+            _ => {
                 debug!("Deep reorg detected in PPLNS window, full cache invalidation");
                 self.invalidate();
                 let estimated_min_height = tip_height.saturating_sub(self.cache_capacity() as u32);
@@ -1197,11 +1342,27 @@ impl PplnsWindow {
         Ok(())
     }
 
+    /// Whether the payout rights index can undo every cached share above
+    /// `fork_height`. Always true on Bitcoin, which has no index.
+    fn rights_can_undo_above(&self, fork_height: u32) -> bool {
+        let shares_above_fork = self
+            .confirmed_entries
+            .iter()
+            .take_while(|entry| entry.height > fork_height)
+            .count();
+        self.rights
+            .as_ref()
+            .is_none_or(|rights| rights.undo_depth() >= shares_above_fork)
+    }
+
     /// Clear all cached state, forcing a full reload on next update.
     fn invalidate(&mut self) {
         self.confirmed_entries.clear();
         self.cached_tip_blockhash = None;
         self.cached_top_height = None;
+        if let Some(rights) = &mut self.rights {
+            rights.clear();
+        }
     }
 
     /// Find the fork height by walking cached entries from newest to oldest.
@@ -1232,20 +1393,32 @@ impl PplnsWindow {
     /// Remove all cached entries with height strictly above the fork height.
     ///
     /// Pops entries from the front of the deque (newest first) until the
-    /// front entry's height equals the fork height.
+    /// front entry's height equals the fork height, undoing each one's
+    /// changes to the payout rights index on Bitcoin Cash. The caller checks
+    /// `rights_can_undo_above` first.
     fn remove_entries_above_height(&mut self, fork_height: u32) {
         while let Some(front) = self.confirmed_entries.front() {
             if front.height <= fork_height {
                 return;
             }
-            self.confirmed_entries.pop_front();
+            if let Some(entry) = self.confirmed_entries.pop_front()
+                && let Some(rights) = &mut self.rights
+                && !rights.undo_share(&entry.blockhash)
+            {
+                warn!(
+                    "Payout rights index has no undo record for share {}",
+                    entry.blockhash
+                );
+            }
         }
     }
 
     /// Load confirmed headers for a height range and add them to the cache.
     ///
     /// Fetches headers from the chain store, resolves uncle data and builds
-    /// confirmed entries. New entries are prepended (newest at front).
+    /// confirmed entries. New entries are prepended (newest at front). On
+    /// Bitcoin Cash each share is also applied to the payout rights index,
+    /// oldest first, reading its transactions when its header commits to any.
     fn load_range(
         &mut self,
         chain_store_handle: &ChainStoreHandle,
@@ -1273,7 +1446,21 @@ impl PplnsWindow {
         {
             let difficulty = header.get_difficulty(self.network);
             let uncle_entries = resolve_uncle_entries(&header.uncles, &uncle_lookup_table);
-            let entry = self.build_confirmed_entry(
+            let coinbase_txid = match &mut self.rights {
+                Some(rights) => {
+                    let coinbase_txid = share_coinbase_txid(&header);
+                    let transactions =
+                        confirmed_share_transactions(&blockhash, &header, chain_store_handle)?;
+                    rights.apply_share(
+                        ChainShare::from_header(blockhash, height, &header),
+                        coinbase_txid,
+                        &transactions,
+                    );
+                    coinbase_txid
+                }
+                None => Txid::all_zeros(),
+            };
+            let mut entry = self.build_confirmed_entry(
                 blockhash,
                 height,
                 header.miner_bitcoin_address,
@@ -1281,6 +1468,7 @@ impl PplnsWindow {
                 difficulty,
                 uncle_entries,
             );
+            entry.coinbase_txid = coinbase_txid;
             self.confirmed_entries.push_front(entry);
         }
 
@@ -1313,7 +1501,15 @@ impl PplnsWindow {
     /// anchor and refuses a result that ran into an evicted back.
     fn evict_overflow(&mut self) {
         while self.confirmed_entries.len() > self.cache_capacity() {
-            self.confirmed_entries.pop_back();
+            if let Some(entry) = self.confirmed_entries.pop_back()
+                && let Some(rights) = &mut self.rights
+            {
+                rights.evict_share(&entry.blockhash, &entry.coinbase_txid);
+            }
+        }
+        let cached_shares = self.confirmed_entries.len();
+        if let Some(rights) = &mut self.rights {
+            rights.limit_undo(cached_shares);
         }
     }
 
@@ -1338,6 +1534,7 @@ impl PplnsWindow {
             uncle_entries,
             internal_key,
             owner_key,
+            coinbase_txid: Txid::all_zeros(),
         }
     }
 
@@ -1386,6 +1583,59 @@ impl PplnsWindow {
         }
         Ok(uncle_lookup)
     }
+}
+
+/// The transactions of a confirmed share being added to the cache, for the
+/// payout rights index: none when its header commits to none.
+///
+/// A confirmed share with transactions but no stored body was confirmed from
+/// its header alone, which happens only far below the candidate tip during
+/// sync (deeper than `PRUNE_DEPTH`, where bodies are never fetched). Its
+/// transactions can only move rights of shares at least that deep, which no
+/// payout validated in the PPLNS zone reaches, so it is applied as carrying
+/// none. Any other read failure is an error.
+fn confirmed_share_transactions(
+    blockhash: &BlockHash,
+    header: &ShareHeader,
+    chain_store_handle: &ChainStoreHandle,
+) -> Result<Vec<ShareTransaction>, Box<dyn Error + Send + Sync>> {
+    if !has_share_transactions(header) {
+        return Ok(Vec::new());
+    }
+    match chain_store_handle.get_share_transactions(blockhash) {
+        Ok(transactions) => Ok(transactions),
+        Err(StoreError::NotFound(_)) => {
+            debug!(
+                "Confirmed share {blockhash} has no stored body; its transactions move no payout rights here"
+            );
+            Ok(Vec::new())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The transactions of a share on a payout anchor's branch, above the
+/// cached chain: none when its header commits to none.
+///
+/// Unlike a confirmed share, a branch share's transactions can move the
+/// rights of the anchor's own window, so a missing body is a read failure
+/// the caller may retry, never an empty share.
+fn branch_share_transactions(
+    blockhash: &BlockHash,
+    header: &ShareHeader,
+    chain_store_handle: &ChainStoreHandle,
+) -> Result<Vec<ShareTransaction>, WindowError> {
+    if !has_share_transactions(header) {
+        return Ok(Vec::new());
+    }
+    chain_store_handle
+        .get_share_transactions(blockhash)
+        .map_err(|error| {
+            WindowError::ReadFailure(
+                format!("Failed to read the transactions of branch share {blockhash}: {error}")
+                    .into(),
+            )
+        })
 }
 
 /// Key each miner's credits by the value its slot in `keys` holds, keeping
@@ -1534,8 +1784,12 @@ impl PplnsWindow {
         let confirmed_start_index = self.find_start_index(start_hash).ok_or_else(|| {
             WindowError::ReadFailure(format!("anchor {start_hash} is not cached").into())
         })?;
-        let resolved =
-            self.resolved_window(Vec::new(), confirmed_start_index, paying_block_difficulty);
+        let resolved = self.resolved_window(
+            Vec::new(),
+            confirmed_start_index,
+            paying_block_difficulty,
+            HashMap::new(),
+        );
         self.distribution_for_resolved(start_hash, &resolved)
     }
 }

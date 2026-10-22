@@ -37,6 +37,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::ShareBlock;
+use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::ShareValidator;
 use behaviour::request_response::protocol_string;
 use behaviour::{P2PoolBehaviour, P2PoolBehaviourEvent};
@@ -140,6 +141,7 @@ impl Node {
         monitoring_event_sender: MonitoringEventSender,
         share_validator: Arc<dyn ShareValidator + Send + Sync>,
         response_worker_tx: ResponseWorkerSender,
+        share_transaction_pool: Option<ShareTransactionPool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let id_keys = libp2p::identity::Keypair::generate_ed25519();
 
@@ -274,6 +276,7 @@ impl Node {
             block_receiver_handle,
             share_validator,
             response_worker_tx,
+            share_transaction_pool,
         );
 
         let peer_reconnector = peer_reconnector::PeerReconnector::new(&config.network.dial_peers);
@@ -812,6 +815,7 @@ mod tests {
             monitoring_tx,
             Arc::new(crate::shares::validation::MockDefaultShareValidator::default()),
             response_worker_tx,
+            None,
         )
         .expect("Node initialization failed");
 
@@ -927,6 +931,7 @@ mod tests {
             monitoring_tx,
             Arc::new(crate::shares::validation::MockDefaultShareValidator::default()),
             response_worker_tx,
+            None,
         )
         .expect("Node initialization failed")
     }

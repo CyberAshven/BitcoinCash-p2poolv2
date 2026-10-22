@@ -11,7 +11,9 @@
 use crate::accounting::payout::sharechain_pplns::pplns_window::PRUNE_INTERVAL;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::pool_difficulty::AsertParent;
-use crate::shares::share_block::{ShareBlock, ShareHeader, is_terminal_blockhash};
+use crate::shares::share_block::{
+    ShareBlock, ShareHeader, ShareTransaction, is_terminal_blockhash,
+};
 use crate::store::block_tx_metadata::{BlockMetadata, Status};
 use crate::store::dag_store::{BlockValidSearch, ShareDag, UncleInfo};
 use crate::store::found_block::FoundBlock;
@@ -174,6 +176,19 @@ impl ChainStoreHandle {
         self.store_handle.get_output(txid, vout)
     }
 
+    /// Whether any outpoint is spent by a transaction on the confirmed chain.
+    pub fn is_any_prevout_spent(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<bool, StoreError> {
+        self.store_handle.store().is_any_prevout_spent(outpoints)
+    }
+
+    /// Whether every txid is in at least one block on the confirmed chain.
+    pub fn are_all_txids_confirmed(&self, txids: &[bitcoin::Txid]) -> Result<bool, StoreError> {
+        self.store_handle.store().are_all_txids_confirmed(txids)
+    }
+
     /// Check whether a share block exists without deserializing it.
     pub fn share_block_exists(&self, blockhash: &BlockHash) -> bool {
         self.store_handle.share_block_exists(blockhash)
@@ -190,6 +205,27 @@ impl ChainStoreHandle {
     /// Get a share from the chain.
     pub fn get_share(&self, share_hash: &BlockHash) -> Option<ShareBlock> {
         self.store_handle.get_share(share_hash)
+    }
+
+    /// The share transactions of a stored share block, coinbase first.
+    ///
+    /// `NotFound` when the share's body is not stored: its header was synced
+    /// without it, or the body was pruned. Every stored body has at least its
+    /// coinbase, so an empty list never means a missing body.
+    pub fn get_share_transactions(
+        &self,
+        share_hash: &BlockHash,
+    ) -> Result<Vec<ShareTransaction>, StoreError> {
+        let transactions = self
+            .store_handle
+            .store()
+            .get_txs_by_blockhash_index(share_hash)?;
+        if transactions.is_empty() {
+            return Err(StoreError::NotFound(format!(
+                "No stored body for share {share_hash}"
+            )));
+        }
+        Ok(transactions)
     }
 
     /// Get shares at a specific height.
@@ -984,6 +1020,9 @@ mockall::mock! {
         pub fn check_prevouts(&self, outpoints: &[bitcoin::OutPoint], spending_height: u32, min_coinbase_root_height: u32, coinbase_maturity: usize) -> Result<PrevoutCheck, StoreError>;
         pub fn all_block_and_uncle_data_available(&self, blockhashes: &[BlockHash], prune_height: u32) -> Result<bool, StoreError>;
         pub fn get_output(&self, txid: &bitcoin::Txid, vout: u32) -> Result<bitcoin::TxOut, StoreError>;
+        pub fn is_any_prevout_spent(&self, outpoints: &[bitcoin::OutPoint]) -> Result<bool, StoreError>;
+        pub fn are_all_txids_confirmed(&self, txids: &[bitcoin::Txid]) -> Result<bool, StoreError>;
+        pub fn get_share_transactions(&self, share_hash: &BlockHash) -> Result<Vec<ShareTransaction>, StoreError>;
         pub fn share_block_exists(&self, blockhash: &BlockHash) -> bool;
         pub fn first_existing_share_header(&self, blockhashes: &[BlockHash]) -> Option<BlockHash>;
         pub fn get_share(&self, share_hash: &BlockHash) -> Option<ShareBlock>;

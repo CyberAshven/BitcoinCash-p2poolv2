@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::shares::coinbase_proof::CoinbaseProof;
+use crate::shares::share_block::ShareTransaction;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::stratum::work::block_template::BlockTemplate;
 use bitcoin::Transaction;
@@ -28,6 +29,9 @@ pub struct Emission {
     /// Midstate proof of the commitment in the bitcoin coinbase, built where
     /// the full coinbase is still in hand, at submission.
     pub coinbase_proof: CoinbaseProof,
+    /// The job's share transactions after the coinbase, the set the
+    /// commitment's `share_witness_root` covers.
+    pub share_transactions: Arc<[ShareTransaction]>,
 }
 
 pub type EmissionSender = mpsc::Sender<Emission>;

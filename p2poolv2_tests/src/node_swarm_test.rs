@@ -114,6 +114,7 @@ async fn test_three_nodes_connectivity() {
         monitoring_tx1,
         notify_tx1,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
+        None,
     )
     .await
     .expect("Failed to create node 1");
@@ -128,6 +129,7 @@ async fn test_three_nodes_connectivity() {
         monitoring_tx2,
         notify_tx2,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
+        None,
     )
     .await
     .expect("Failed to create node 2");
@@ -142,6 +144,7 @@ async fn test_three_nodes_connectivity() {
         monitoring_tx3,
         notify_tx3,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
+        None,
     )
     .await
     .expect("Failed to create node 3");
@@ -335,6 +338,7 @@ async fn test_three_nodes_share_sync() {
         monitoring_tx1,
         notify_tx1,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
+        None,
     )
     .await
     .expect("Failed to create node 1");
@@ -351,6 +355,7 @@ async fn test_three_nodes_share_sync() {
         monitoring_tx2,
         notify_tx2,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
+        None,
     )
     .await
     .expect("Failed to create node 2");
@@ -364,6 +369,7 @@ async fn test_three_nodes_share_sync() {
         monitoring_tx3,
         notify_tx3,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
+        None,
     )
     .await
     .expect("Failed to create node 3");

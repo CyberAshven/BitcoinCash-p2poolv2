@@ -2175,6 +2175,7 @@ mod tests {
             share_commitment: None,
             coinbase_nsecs: 0,
             template_merkle_branches: Vec::new(),
+            share_transactions: Arc::from([]),
         };
         let header = Header {
             version: Version::from_consensus(0x2000_0000),
@@ -2226,6 +2227,7 @@ mod tests {
             share_commitment: None,
             coinbase_nsecs: 0,
             template_merkle_branches: Vec::new(),
+            share_transactions: Arc::from([]),
         };
         let header = Header {
             version: Version::from_consensus(0x2000_0000),

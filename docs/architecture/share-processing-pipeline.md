@@ -213,10 +213,17 @@ outside the worker, by the direct `organise_header` calls described above.
 ### handle_stratum_share (`shares/handle_stratum_share.rs`)
 - Async function that processes emissions. An `Emission` always carries a
   share commitment and its coinbase proof; only P2Poolv2 mode emits.
-- Builds `ShareBlock`, persists it and organises its header onto the
-  candidate chain in one atomic write via
-  `ChainStoreHandle::add_share_block_and_organise_header()`, and returns the
-  `ShareBlock`
+- Builds `ShareBlock`: the share coinbase, then the job's share
+  transactions (`Emission::share_transactions`, empty on Bitcoin and for
+  declared jobs). On Bitcoin Cash the notifier drew them from the share
+  transaction pool when it built the job (`ShareTransactionPool::select_for_share`)
+  and committed their witness root in every miner's share commitment, so the
+  set is fixed by the proof of work (see
+  `docs/atomic-swap/bch-share-trading.md`, "Share transactions on the
+  network")
+- Persists it and organises its header onto the candidate chain in one
+  atomic write via `ChainStoreHandle::add_share_block_and_organise_header()`,
+  and returns the `ShareBlock`
 
 ### PplnsShareWorker (`accounting/payout/simple_pplns/share_worker.rs`)
 - Hydrapool mode only; hydrapool shares never become an `Emission`
@@ -247,7 +254,10 @@ never derived from one another, and every stage below treats them separately:
   the one its header implies, so output 0 must pay the header's
   `miner_address`.
 - The PPLNS window, `append_proportional_distribution` and
-  `validate_bitcoin_payout` use `miner_bitcoin_address` only.
+  `validate_bitcoin_payout` use `miner_bitcoin_address` only, except that on
+  Bitcoin Cash a share whose payout right another key holds pays that key
+  hash's P2PKH address (`payout-distribution.md`, "Bitcoin Cash payout
+  rights").
 
 `ShareCommitment::hash()` digests `miner_address` directly, together with
 `share_witness_root`, the BIP141 witness root of the share's non-coinbase

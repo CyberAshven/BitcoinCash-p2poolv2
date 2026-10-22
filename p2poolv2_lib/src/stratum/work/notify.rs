@@ -14,6 +14,7 @@ use crate::pool_difficulty;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
 use std::sync::Arc;
@@ -31,6 +32,9 @@ pub(crate) struct NotifyContext {
     pub payout: Box<dyn PayoutDistribution + Send>,
     /// Latest template transactions, in CTOR, for Stratum V2 coinbase-only jobs.
     pub pool_transactions: PoolTransactionCache,
+    /// Bitcoin Cash: the share transactions waiting for a share. `None` on
+    /// Bitcoin, whose shares carry their coinbase alone.
+    pub share_transaction_pool: Option<ShareTransactionPool>,
 }
 
 /// Build the output distribution for the coinbase transaction using
@@ -112,6 +116,11 @@ fn build_prepared_notify(
     //* coinbase pay a window inconsistent with its declared prev.
     let output_distribution = build_output_distribution(template, tip, context)?;
     cache_template_transactions(template, &context.pool_transactions)?;
+    let share_transactions = context
+        .share_transaction_pool
+        .as_ref()
+        .map(|pool| pool.select_for_share(tip))
+        .unwrap_or_default();
 
     PreparedNotifyParamsBuilder::new(
         Arc::clone(template),
@@ -128,6 +137,7 @@ fn build_prepared_notify(
     .fee_address(context.config.fee_address().cloned())
     .fee(context.config.fee)
     .include_merge_mining(context.config.chain == crate::config::Chain::BitcoinCash)
+    .share_transactions(share_transactions)
     .build()
 }
 
@@ -183,6 +193,10 @@ fn publish_prepared_notify(
 /// has moved past, with nothing to age the job out and only a repeated error
 /// log to show for it. The block template fetcher shuts the node down on the
 /// same class of failure.
+///
+/// On Bitcoin Cash `share_transaction_pool` supplies the share transactions
+/// each notify's shares carry; Bitcoin passes `None`.
+#[allow(clippy::too_many_arguments)] // wiring constructor: each parameter is a distinct collaborator, a params struct would only move the list
 pub async fn start_notify(
     mut notifier_rx: mpsc::Receiver<NotifyCmd>,
     template_tx: watch::Sender<Option<Arc<PreparedNotifyParams>>>,
@@ -191,6 +205,7 @@ pub async fn start_notify(
     payout: Box<dyn PayoutDistribution + Send>,
     pool_difficulty: pool_difficulty::PoolDifficulty,
     pool_transactions: PoolTransactionCache,
+    share_transaction_pool: Option<ShareTransactionPool>,
 ) {
     let pool_signature = match config.pool_signature {
         Some(ref sig) => sig.as_bytes().to_vec(),
@@ -204,6 +219,7 @@ pub async fn start_notify(
         pool_difficulty,
         payout,
         pool_transactions,
+        share_transaction_pool,
     };
 
     let mut latest_template: Option<Arc<BlockTemplate>> = None;
@@ -378,6 +394,7 @@ mod tests {
                 Box::new(mock_payout),
                 pool_difficulty,
                 PoolTransactionCache::new(),
+                None,
             )
             .await;
         });
@@ -460,6 +477,7 @@ mod tests {
                 Box::new(mock_payout),
                 pool_difficulty,
                 PoolTransactionCache::new(),
+                None,
             )
             .await;
         });
@@ -565,6 +583,7 @@ mod tests {
             pool_difficulty,
             payout: Box::new(mock_payout),
             pool_transactions: PoolTransactionCache::new(),
+            share_transaction_pool: None,
         };
 
         // Build prepared notify

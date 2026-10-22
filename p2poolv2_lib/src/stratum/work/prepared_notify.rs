@@ -8,21 +8,22 @@ use super::coinbase::build_bitcoin_coinbase_transaction;
 use super::coinbase::{LOCKTIME_LENGTH, build_coinbase, get_timestamp_bytes, split_coinbase};
 use super::error::WorkError;
 use super::gbt::build_merkle_branches_for_template;
-use super::tracker::{JobId, JobTracker};
+use super::tracker::{JobDetails, JobId, JobTracker};
 use crate::accounting::OutputPair;
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
-use crate::shares::share_block::encode_optional_address;
+use crate::shares::share_block::{ShareTransaction, encode_optional_address};
 use crate::shares::share_commitment::{
     ShareCommitment, build_commitment_prefix, build_commitment_suffix, commitment_digest,
 };
 use crate::shares::transactions::coinbase::compute_witness_root;
+use crate::shares::validation::BLOCK_TXS_SIZE_LIMIT;
 use crate::shares::witness_commitment::WitnessCommitment;
 use crate::stratum::util::{reverse_four_byte_chunks, to_be_hex};
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::{self, Hash};
 use bitcoin::transaction::Version;
-use bitcoin::{Address, BlockHash, CompactTarget};
+use bitcoin::{Address, BlockHash, CompactTarget, WitnessMerkleNode};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -145,6 +146,12 @@ pub struct PreparedNotifyParams {
     /// Merkle branches for the template transactions (excluding coinbase).
     /// Passed through to JobDetails so validators can verify the bitcoin merkle root.
     merkle_branches: Vec<bitcoin::TxMerkleNode>,
+    /// Share transactions every share on these params carries after its
+    /// coinbase, shared with each job.
+    share_transactions: Arc<[ShareTransaction]>,
+    /// BIP141 witness root of `share_transactions`, committed by every
+    /// miner's share commitment.
+    share_witness_root: WitnessMerkleNode,
 }
 
 impl PreparedNotifyParams {
@@ -203,6 +210,11 @@ impl PreparedNotifyParams {
     /// The ASERT-computed pool target for shares built on these params.
     pub fn bits(&self) -> bitcoin::CompactTarget {
         self.bits
+    }
+
+    /// The share transactions shares built on these params carry.
+    pub fn share_transactions(&self) -> &[ShareTransaction] {
+        &self.share_transactions
     }
 }
 
@@ -297,6 +309,7 @@ pub(crate) struct PreparedNotifyParamsBuilder {
     fee_address: Option<Address>,
     fee: Option<u16>,
     include_merge_mining: bool,
+    share_transactions: Vec<ShareTransaction>,
 }
 
 impl PreparedNotifyParamsBuilder {
@@ -321,7 +334,18 @@ impl PreparedNotifyParamsBuilder {
             fee_address: None,
             fee: None,
             include_merge_mining: false,
+            share_transactions: Vec::new(),
         }
+    }
+
+    /// Share transactions for every share on these params to carry after its
+    /// coinbase, in order, already checked against the mining base (on
+    /// Bitcoin Cash, `ShareTransactionPool::select_for_share`). `build` drops
+    /// transactions from the end until the share fits `BLOCK_TXS_SIZE_LIMIT`
+    /// with its coinbases.
+    pub fn share_transactions(mut self, share_transactions: Vec<ShareTransaction>) -> Self {
+        self.share_transactions = share_transactions;
+        self
     }
 
     pub fn prev_share_blockhash(mut self, prev_share_blockhash: BlockHash) -> Self {
@@ -418,6 +442,9 @@ impl PreparedNotifyParamsBuilder {
             self.template.validate_bch_block_size(&coinbase)?;
         }
 
+        let share_transactions = fit_share_transactions(self.share_transactions, &coinbase);
+        let share_witness_root = compute_witness_root(&share_transactions);
+
         let (coinbase1, coinbase2_full) = split_coinbase(&coinbase)?;
 
         let (coinbase2_middle, coinbase2_locktime) = split_coinbase2(
@@ -463,7 +490,7 @@ impl PreparedNotifyParamsBuilder {
             self.donation,
             &self.fee_address,
             self.fee,
-            compute_witness_root(&[]),
+            share_witness_root,
         );
 
         Ok(PreparedNotifyParams {
@@ -489,8 +516,42 @@ impl PreparedNotifyParamsBuilder {
                 .into_iter()
                 .map(bitcoin::TxMerkleNode::from_raw_hash)
                 .collect(),
+            share_transactions: share_transactions.into(),
+            share_witness_root,
         })
     }
+}
+
+/// Bytes a miner's bitcoin coinbase may add to the one `build` sizes: the
+/// extranonce and the nanosecond timestamp.
+const BITCOIN_COINBASE_SIZE_ALLOWANCE: usize = 64;
+
+/// Bytes kept for the share coinbase, which holds the weak block hash and so
+/// cannot be built before the share is found.
+const SHARE_COINBASE_SIZE_ALLOWANCE: usize = 256;
+
+/// Drop share transactions from the end until they fit
+/// `BLOCK_TXS_SIZE_LIMIT` beside the share coinbase and `bitcoin_coinbase`,
+/// which a share block also carries.
+fn fit_share_transactions(
+    mut share_transactions: Vec<ShareTransaction>,
+    bitcoin_coinbase: &bitcoin::Transaction,
+) -> Vec<ShareTransaction> {
+    let budget = (BLOCK_TXS_SIZE_LIMIT as usize).saturating_sub(
+        bitcoin_coinbase.total_size()
+            + BITCOIN_COINBASE_SIZE_ALLOWANCE
+            + SHARE_COINBASE_SIZE_ALLOWANCE,
+    );
+    let mut total: usize = share_transactions
+        .iter()
+        .map(|transaction| transaction.total_size())
+        .sum();
+    while total > budget
+        && let Some(dropped) = share_transactions.pop()
+    {
+        total -= dropped.total_size();
+    }
+    share_transactions
 }
 
 /// Hex of the commitment digest for one miner.
@@ -567,7 +628,7 @@ pub(crate) fn insert_miner_job(
             uncles: prepared.uncles.clone(),
             miner_bitcoin_address: bitcoin_address.clone(),
             miner_address: share_address,
-            share_witness_root: compute_witness_root(&[]),
+            share_witness_root: prepared.share_witness_root,
             bits: prepared.bits,
             time: fresh_time,
             donation_address: prepared.donation_address.clone(),
@@ -599,14 +660,19 @@ pub(crate) fn insert_miner_job(
     );
 
     let job_id = tracker_handle.get_next_job_id();
-    tracker_handle.insert_job(
-        Arc::clone(&prepared.template),
-        prepared.coinbase1.clone(),
-        coinbase2.clone(),
-        share_commitment,
-        nsecs,
-        prepared.merkle_branches.clone(),
+    tracker_handle.insert_job_details(
         job_id,
+        JobDetails {
+            block_available: true,
+            blocktemplate: Arc::clone(&prepared.template),
+            coinbase1: prepared.coinbase1.clone(),
+            coinbase2: coinbase2.clone(),
+            generation_timestamp: fresh_time as u64,
+            share_commitment,
+            coinbase_nsecs: nsecs,
+            template_merkle_branches: prepared.merkle_branches.clone(),
+            share_transactions: Arc::clone(&prepared.share_transactions),
+        },
     );
     (job_id, coinbase2)
 }
@@ -652,7 +718,11 @@ mod tests {
     use crate::test_utils::make_test_share_address;
     use crate::test_utils::make_test_share_program;
     use crate::test_utils::test_bch_prepared;
-    use bitcoin::{CompressedPublicKey, Network};
+    use crate::test_utils::test_coinbase_transaction;
+    use bitcoin::{
+        Amount, CompressedPublicKey, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+        TxOut, Txid, Witness, absolute,
+    };
     use p2poolv2_wallet::share_owner::ShareOwner;
 
     #[test]
@@ -742,6 +812,76 @@ mod tests {
         let output_distribution = test_output_distribution(&template);
         PreparedNotifyParamsBuilder::new(template, output_distribution, b"test_pool", clean_jobs)
             .bits(CompactTarget::from_consensus(0x1d00ffff))
+    }
+
+    /// A share transaction of `size` bytes or slightly more, distinct for
+    /// each `byte`.
+    fn share_transaction_of_size(byte: u8, size: usize) -> ShareTransaction {
+        ShareTransaction(Transaction {
+            version: Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::new(Txid::from_byte_array([byte; 32]), 0),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![byte; size]),
+            }],
+        })
+    }
+
+    #[test]
+    fn share_transactions_past_the_block_size_limit_are_dropped_from_the_end() {
+        let first = share_transaction_of_size(1, 90_000);
+        let second = share_transaction_of_size(2, 90_000);
+        let third = share_transaction_of_size(3, 90_000);
+
+        let kept = fit_share_transactions(
+            vec![first.clone(), second.clone(), third],
+            &test_coinbase_transaction(1),
+        );
+
+        assert_eq!(kept, vec![first, second]);
+    }
+
+    #[test]
+    fn share_transactions_within_the_block_size_limit_are_all_kept() {
+        let first = share_transaction_of_size(1, 1_000);
+        let second = share_transaction_of_size(2, 1_000);
+
+        let kept = fit_share_transactions(
+            vec![first.clone(), second.clone()],
+            &test_coinbase_transaction(1),
+        );
+
+        assert_eq!(kept, vec![first, second]);
+    }
+
+    #[tokio::test]
+    async fn a_job_without_share_transactions_commits_to_the_empty_root() {
+        let prepared = test_bch_prepared();
+        let tracker = start_tracker_actor();
+        let payout = Address::p2pkh(
+            bitcoin::PubkeyHash::from_byte_array([1; 20]),
+            Network::Regtest,
+        );
+
+        let (job_id, _) = insert_miner_job(
+            &prepared,
+            Some(&payout),
+            Some(ShareOwner::CashP2pkh([9; 20])),
+            &tracker,
+        );
+
+        let job = tracker.get_job(job_id).unwrap();
+        assert!(job.share_transactions.is_empty());
+        assert_eq!(
+            job.share_commitment.unwrap().share_witness_root,
+            compute_witness_root(&[])
+        );
     }
 
     #[test]
