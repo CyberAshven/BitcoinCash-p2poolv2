@@ -314,7 +314,13 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "sim"))]
+    use crate::accounting::payout::sharechain_pplns::pplns_window::{
+        BCH_COINBASE_MATURITY, PAYOUT_DEPTH, PPLNS_WINDOW_SHARES,
+    };
     use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
+    #[cfg(not(feature = "sim"))]
+    use crate::store::dag_store::MAX_UNCLES_DEPTH;
     use crate::test_utils::{
         TestShareBlockBuilder, build_confirmed_test_chain, confirm_test_block,
         setup_test_chain_store_handle, test_funding_transaction,
@@ -326,6 +332,43 @@ mod tests {
     #[test]
     fn test_prune_height_for_tip_below_depth_is_zero() {
         assert_eq!(prune_height_for_tip(PRUNE_DEPTH as u32 - 1), 0);
+    }
+
+    /// Bitcoin Cash pays a found block's coinbase to shares at most 121,063
+    /// below it: the 100-share maturity skip, the window capped at 120,960
+    /// shares and an uncle of the deepest one. That walk stays inside
+    /// `PAYOUT_DEPTH`, so the full-validation zone covers it, and far above
+    /// the prune height and target. The walk reads headers only, which are
+    /// never pruned, so this margin is for the zone, not for the window.
+    #[test]
+    #[cfg(not(feature = "sim"))]
+    fn test_bitcoin_cash_payout_walk_stays_above_the_prune_target() {
+        let tip: u32 = 1_000_000;
+        let deepest_paid_depth =
+            BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES + MAX_UNCLES_DEPTH as usize;
+        assert_eq!(deepest_paid_depth, 121_063);
+        assert!(deepest_paid_depth <= PAYOUT_DEPTH);
+        let deepest_paid_height = tip - deepest_paid_depth as u32;
+        assert_eq!(deepest_paid_height, 878_937);
+        assert_eq!(prune_height_for_tip(tip), 745_984);
+        assert_eq!(prune_target_for_tip(tip), 745_624);
+        assert!(prune_height_for_tip(tip) < deepest_paid_height);
+    }
+
+    /// A Bitcoin Cash share coinbase output is spendable from depth 100 until
+    /// it expires at `PAYOUT_DEPTH`, the same expiry as Bitcoin. An in-zone
+    /// spend at `tip - PAYOUT_DEPTH` may spend an output down to
+    /// `tip - 2 * PAYOUT_DEPTH`, which is exactly the prune height: that
+    /// body is still held.
+    #[test]
+    #[cfg(not(feature = "sim"))]
+    fn test_bitcoin_cash_spendable_outputs_stay_above_the_prune_height() {
+        let tip: u32 = 1_000_000;
+        assert_eq!(BCH_COINBASE_MATURITY, 100);
+        assert_eq!(PAYOUT_DEPTH, 127_008);
+        let oldest_spendable_root = tip - 2 * PAYOUT_DEPTH as u32;
+        assert_eq!(oldest_spendable_root, prune_height_for_tip(tip));
+        assert!(prune_target_for_tip(tip) < oldest_spendable_root);
     }
 
     #[test]

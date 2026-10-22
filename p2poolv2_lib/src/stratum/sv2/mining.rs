@@ -1830,7 +1830,8 @@ mod tests {
         let job = NewMiningJob::from_bytes(&mut job_payload).unwrap();
         let mut prev_hash_payload = payload(&opened[2]);
         let prev_hash = SetNewPrevHash::from_bytes(&mut prev_hash_payload).unwrap();
-        // Any hash meets the job's target; its credit stays difficulty 7.
+        // Any hash meets the job's target (all ones, easier than
+        // `Target::MAX`, which is difficulty 1); its credit stays difficulty 7.
         channels
             .channels
             .get_mut(&channel_id)
@@ -1838,7 +1839,7 @@ mod tests {
             .jobs
             .get_mut(&job.job_id)
             .unwrap()
-            .target = Target::MAX;
+            .target = Target::from_le_bytes([0xff; 32]);
 
         let mut submit = payload(
             &encode_message(
