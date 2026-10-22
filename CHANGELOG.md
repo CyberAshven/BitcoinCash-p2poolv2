@@ -12,9 +12,9 @@ chain's rules, not Bitcoin Cash consensus: nodes start from a new store,
 and Bitcoin Cash protocol strings carry `trade-htlc`.
 
 Synced with upstream P2Poolv2 through `61810c56` (its v0.16.2). The fork
-keeps version `0.0.1-alpha`. Bitcoin Cash genesis shares, protocol strings,
-the PPLNS window and maturity, the ASERT parent anchor and the donation and
-fee cap are unchanged, so chipnet nodes keep their store.
+keeps version `0.0.1-alpha`. The sync itself leaves Bitcoin Cash genesis
+shares, protocol strings, the PPLNS window and maturity, the ASERT parent
+anchor and the donation and fee cap as they were.
 
 ### Added
 
