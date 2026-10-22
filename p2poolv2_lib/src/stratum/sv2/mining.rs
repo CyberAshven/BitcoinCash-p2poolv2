@@ -268,12 +268,14 @@ impl MiningChannels {
                 let request = OpenStandardMiningChannel::from_bytes(payload)
                     .map_err(|error| error.to_string())?;
                 self.open(
-                    ChannelKind::Standard,
-                    request.request_id,
-                    request.user_identity.as_utf8_or_hex(),
-                    request.nominal_hash_rate,
-                    request.max_target.as_bytes(),
-                    0,
+                    OpenRequest {
+                        kind: ChannelKind::Standard,
+                        request_id: request.request_id,
+                        user_identity: request.user_identity.as_utf8_or_hex(),
+                        nominal_hash_rate: request.nominal_hash_rate,
+                        max_target: request.max_target.as_bytes(),
+                        min_extranonce_size: 0,
+                    },
                     current,
                 )
                 .await
@@ -282,12 +284,14 @@ impl MiningChannels {
                 let request = OpenExtendedMiningChannel::from_bytes(payload)
                     .map_err(|error| error.to_string())?;
                 self.open(
-                    ChannelKind::Extended,
-                    request.request_id,
-                    request.user_identity.as_utf8_or_hex(),
-                    request.nominal_hash_rate,
-                    request.max_target.as_bytes(),
-                    request.min_extranonce_size,
+                    OpenRequest {
+                        kind: ChannelKind::Extended,
+                        request_id: request.request_id,
+                        user_identity: request.user_identity.as_utf8_or_hex(),
+                        nominal_hash_rate: request.nominal_hash_rate,
+                        max_target: request.max_target.as_bytes(),
+                        min_extranonce_size: request.min_extranonce_size,
+                    },
                     current,
                 )
                 .await
@@ -416,14 +420,17 @@ impl MiningChannels {
 
     async fn open(
         &mut self,
-        kind: ChannelKind,
-        request_id: u32,
-        user_identity: String,
-        nominal_hash_rate: f32,
-        max_target: &[u8],
-        min_extranonce_size: u16,
+        request: OpenRequest<'_>,
         current: Option<Arc<PreparedNotifyParams>>,
     ) -> Result<Vec<Vec<u8>>, String> {
+        let OpenRequest {
+            kind,
+            request_id,
+            user_identity,
+            nominal_hash_rate,
+            max_target,
+            min_extranonce_size,
+        } = request;
         if self.channels.len() >= MAX_CHANNELS_PER_CONNECTION {
             return open_error(
                 request_id,
@@ -884,6 +891,17 @@ fn device_max_target(max_target: &[u8]) -> Target {
         Ok(bytes) => Target::from_le_bytes(bytes),
         Err(_) => Target::MAX_ATTAINABLE_MAINNET,
     }
+}
+
+/// What an `OpenStandardMiningChannel` or `OpenExtendedMiningChannel`
+/// asks for. A standard channel asks for no extranonce space.
+struct OpenRequest<'a> {
+    kind: ChannelKind,
+    request_id: u32,
+    user_identity: String,
+    nominal_hash_rate: f32,
+    max_target: &'a [u8],
+    min_extranonce_size: u16,
 }
 
 /// Hashes a difficulty-1 share takes on average.

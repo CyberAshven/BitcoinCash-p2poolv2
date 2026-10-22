@@ -327,6 +327,15 @@ fn share_link(blockhash: &str) -> Markup {
     html! { a.addr href=(share_href(blockhash)) title=(blockhash) { (short(blockhash)) } }
 }
 
+/// When a miner or worker last sent a share; one that has not sent any
+/// yet was never seen.
+fn last_seen(now: u64, then: u64) -> Markup {
+    if then == 0 {
+        return html! { span { "never" } };
+    }
+    html! { span title=(fmt_utc(then)) { (fmt_ago(now, then)) } }
+}
+
 fn ago_cell(now: u64, then: u64) -> Markup {
     html! { td title=(fmt_utc(then)) { (fmt_ago(now, then)) } }
 }
@@ -669,7 +678,7 @@ fn worker_rows(now: u64, workers: &[WorkerRow]) -> Markup {
                 span { (fmt_difficulty(worker.accepted_work as f64)) }
                 span {}
                 span { "best " (fmt_difficulty(worker.best_share as f64)) }
-                span title=(fmt_utc(worker.last_share_at)) { (fmt_ago(now, worker.last_share_at)) }
+                (last_seen(now, worker.last_share_at))
                 span {}
             }
         }
@@ -701,7 +710,7 @@ pub(crate) fn miners(view: &MinersView) -> Markup {
                                 span { (fmt_difficulty(miner.accepted_work as f64)) }
                                 span { (miner.payout_fraction.map(percent).unwrap_or_else(|| "—".to_string())) }
                                 span { (fmt_difficulty(miner.best_share as f64)) }
-                                span title=(fmt_utc(miner.last_share_at)) { (fmt_ago(view.now, miner.last_share_at)) }
+                                (last_seen(view.now, miner.last_share_at))
                                 span.toggle aria-label="Workers" {}
                             }
                             div.worker-list {
@@ -1016,6 +1025,12 @@ mod tests {
             short(&"é".repeat(30)),
             format!("{}…{}", "é".repeat(10), "é".repeat(6))
         );
+    }
+
+    #[test]
+    fn a_worker_without_shares_was_never_seen() {
+        assert_eq!(last_seen(1_000, 0).into_string(), "<span>never</span>");
+        assert!(last_seen(1_000, 940).into_string().contains("1 min ago"));
     }
 
     #[test]
