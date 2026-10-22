@@ -9,7 +9,8 @@
 //! are synchronous and direct, while writes are serialized through the store writer.
 
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
-use crate::shares::share_block::{ShareBlock, ShareHeader};
+use crate::pool_difficulty::AsertParent;
+use crate::shares::share_block::{ShareBlock, ShareHeader, is_terminal_blockhash};
 use crate::store::block_tx_metadata::{BlockMetadata, Status};
 use crate::store::dag_store::{BlockValidSearch, ShareDag, UncleInfo};
 use crate::store::found_block::FoundBlock;
@@ -323,34 +324,28 @@ impl ChainStoreHandle {
         is_tip_current(tip_header.time, now_secs)
     }
 
-    /// Get the height and time of a specific share, for ASERT target
-    /// calculation.
+    /// Read what ASERT needs from `share_hash` as the parent of the next
+    /// share: its height, time and bits, and its own parent's time.
     ///
-    /// Height comes from block metadata, time from the share header, both
-    /// keyed on the given `share_hash`. Callers building work pass the same
-    /// hash they declare as `prev_share_blockhash`, so the target (`bits`)
-    /// they compute is derived from that exact parent rather than a
-    /// separately re-read live tip that may have advanced in between.
-    ///
-    /// Returns (height, time) where time is the share's timestamp (the
-    /// parent time for the next share being built).
-    pub fn get_share_height_and_time(
-        &self,
-        share_hash: &BlockHash,
-    ) -> Result<(u32, u32), StoreError> {
-        let headers = self.get_share_headers(&[*share_hash])?;
-        let header = headers
-            .into_iter()
-            .next()
-            .map(|(_, header)| header)
-            .ok_or_else(|| StoreError::NotFound(format!("No header found for {share_hash}")))?;
-
+    /// Height comes from block metadata, time and bits from the share header,
+    /// and the previous time from the header of the share's own parent, all
+    /// keyed on the given `share_hash`. Genesis has no parent, so its previous
+    /// time is its own. Callers building work pass the same hash they declare
+    /// as `prev_share_blockhash`, so the target (`bits`) they compute is
+    /// derived from that exact parent rather than a separately re-read live
+    /// tip that may have advanced in between.
+    pub fn get_asert_parent(&self, share_hash: &BlockHash) -> Result<AsertParent, StoreError> {
+        let header = self.get_share_header(share_hash)?;
         let metadata = self.get_block_metadata(share_hash)?;
         let height = metadata.expected_height.ok_or_else(|| {
             StoreError::NotFound(format!("No height in metadata for {share_hash}"))
         })?;
-
-        Ok((height, header.time))
+        let previous_time = if is_terminal_blockhash(&header.prev_share_blockhash) {
+            header.time
+        } else {
+            self.get_share_header(&header.prev_share_blockhash)?.time
+        };
+        Ok(AsertParent::from_header(&header, height, previous_time))
     }
 
     /// Get the genesis blockhash from the chain.
@@ -933,7 +928,7 @@ mockall::mock! {
         pub fn is_current(&self) -> bool;
         pub fn get_mining_base(&self) -> Result<BlockHash, StoreError>;
         pub fn get_mining_base_and_uncles(&self) -> Result<(BlockHash, Vec<BlockHash>), StoreError>;
-        pub fn get_share_height_and_time(&self, share_hash: &BlockHash) -> Result<(u32, u32), StoreError>;
+        pub fn get_asert_parent(&self, share_hash: &BlockHash) -> Result<AsertParent, StoreError>;
         pub fn get_genesis_blockhash(&self) -> Option<BlockHash>;
         pub fn get_genesis_header(&self) -> Result<ShareHeader, StoreError>;
         pub fn get_children_blockhashes(&self, blockhash: &BlockHash) -> Result<Option<Vec<BlockHash>>, StoreError>;
@@ -973,6 +968,7 @@ mockall::mock! {
 
 #[cfg(test)]
 mod tests {
+    use crate::pool_difficulty::AsertParent;
     use crate::store::Store;
     use crate::store::writer::StoreError;
     use crate::test_utils::{
@@ -1022,6 +1018,65 @@ mod tests {
     async fn test_chain_store_handle_creation() {
         let (chain_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
         assert_eq!(chain_handle.network(), bitcoin::Network::Signet);
+    }
+
+    /// Genesis has no parent, so as an ASERT parent its previous time is
+    /// its own time.
+    #[tokio::test]
+    async fn test_get_asert_parent_of_genesis_uses_its_own_time() {
+        let (chain_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+        let genesis = genesis_for_tests();
+        chain_handle
+            .init_or_setup_genesis(genesis.clone())
+            .await
+            .unwrap();
+
+        let parent = chain_handle
+            .get_asert_parent(&genesis.block_hash())
+            .unwrap();
+
+        assert_eq!(
+            parent,
+            AsertParent {
+                height: 0,
+                time: genesis.header.time,
+                bits: genesis.header.bits,
+                previous_time: genesis.header.time,
+            }
+        );
+    }
+
+    /// A share's ASERT parent carries its own height, time and bits and
+    /// its parent's time, the interval the Bitcoin Cash rule reads.
+    #[tokio::test]
+    async fn test_get_asert_parent_reads_the_share_and_its_parent_time() {
+        let (chain_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+        let genesis = genesis_for_tests();
+        chain_handle
+            .init_or_setup_genesis(genesis.clone())
+            .await
+            .unwrap();
+        let share = TestShareBlockBuilder::new()
+            .prev_share_blockhash(genesis.block_hash().to_string())
+            .nonce(0xe9695792)
+            .time(genesis.header.time + 7)
+            .build();
+        chain_handle
+            .store_handle()
+            .store()
+            .store_with_valid_metadata(&share);
+
+        let parent = chain_handle.get_asert_parent(&share.block_hash()).unwrap();
+
+        assert_eq!(
+            parent,
+            AsertParent {
+                height: 1,
+                time: genesis.header.time + 7,
+                bits: share.header.bits,
+                previous_time: genesis.header.time,
+            }
+        );
     }
 
     #[tokio::test]

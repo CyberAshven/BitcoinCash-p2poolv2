@@ -7,6 +7,7 @@ use crate::node::p2p_message_handlers::MAX_HEADERS_IN_RESPONSE;
 use crate::node::p2p_message_handlers::senders::send_getheaders;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::{SwarmSend, messages::Message};
+use crate::pool_difficulty::AsertParent;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::pool_difficulty::PoolDifficulty;
@@ -320,25 +321,20 @@ fn validate_header_chain(
     Ok(())
 }
 
-/// Get the blockhash's timestamp and height, checking the batch-local
-/// cache first and falling back to the store. Store results are cached
-/// for subsequent lookups within the same batch.
-fn get_share_time_and_height(
+/// Get what ASERT needs from the blockhash as a parent, checking the
+/// batch-local cache first and falling back to the store. Store results
+/// are cached for subsequent lookups within the same batch.
+fn get_cached_asert_parent(
     blockhash: &BlockHash,
-    cache: &mut HashMap<BlockHash, (u32, u32)>,
+    cache: &mut HashMap<BlockHash, AsertParent>,
     chain_store_handle: &ChainStoreHandle,
-) -> Result<(u32, u32), Box<dyn Error + Send + Sync>> {
+) -> Result<AsertParent, Box<dyn Error + Send + Sync>> {
     if let Some(&cached) = cache.get(blockhash) {
         return Ok(cached);
     }
-    let metadata = chain_store_handle.get_block_metadata(blockhash)?;
-    let header = chain_store_handle.get_share_header(blockhash)?;
-    let height = metadata
-        .expected_height
-        .ok_or_else(|| StoreError::Database(format!("No height found for {blockhash}")))?;
-    let result = (header.time, height);
-    cache.insert(*blockhash, result);
-    Ok(result)
+    let parent = chain_store_handle.get_asert_parent(blockhash)?;
+    cache.insert(*blockhash, parent);
+    Ok(parent)
 }
 
 /// Validate that the batch forms a connected DAG with valid difficulty.
@@ -364,7 +360,7 @@ fn validate_dag_connectivity_and_difficulty(
     known_hashes.extend(anchor_hashes);
 
     let mut cumulative_work = Work::from_hex("0x00").unwrap();
-    let mut time_height_cache: HashMap<BlockHash, (u32, u32)> =
+    let mut asert_parent_cache: HashMap<BlockHash, AsertParent> =
         HashMap::with_capacity(share_headers.len() + 1);
     let mut blocks_per_height: HashMap<u32, usize> = HashMap::with_capacity(64);
 
@@ -383,10 +379,10 @@ fn validate_dag_connectivity_and_difficulty(
             });
         }
 
-        let (parent_time, parent_height) =
-            get_share_time_and_height(&parent_hash, &mut time_height_cache, chain_store_handle)?;
+        let parent =
+            get_cached_asert_parent(&parent_hash, &mut asert_parent_cache, chain_store_handle)?;
 
-        let expected_bits = pool_difficulty.calculate_target_clamped(parent_time, parent_height);
+        let expected_bits = pool_difficulty.calculate_target_clamped(parent);
         if header.bits != expected_bits {
             return Err(HeaderSyncError::AsertMismatch {
                 block_hash: header.block_hash(),
@@ -395,11 +391,14 @@ fn validate_dag_connectivity_and_difficulty(
             });
         }
 
-        let header_height = parent_height + 1;
+        let header_height = parent.height + 1;
         check_dense_height(&mut blocks_per_height, header_height)?;
 
         let header_hash = header.block_hash();
-        time_height_cache.insert(header_hash, (header.time, header_height));
+        asert_parent_cache.insert(
+            header_hash,
+            AsertParent::from_header(header, header_height, parent.time),
+        );
         known_hashes.insert(header_hash);
         cumulative_work = cumulative_work + header.get_work();
     }
@@ -653,6 +652,16 @@ mod tests {
         chain_store_handle
             .expect_get_share_header()
             .returning(move |_| Ok(parent_header.clone()));
+        let asert_parent_header = template_header.clone();
+        chain_store_handle
+            .expect_get_asert_parent()
+            .returning(move |_| {
+                Ok(AsertParent::from_header(
+                    &asert_parent_header,
+                    0,
+                    asert_parent_header.time,
+                ))
+            });
         chain_store_handle
             .expect_get_block_metadata()
             .returning(|_| {
@@ -693,7 +702,7 @@ mod tests {
         let mut pool_difficulty = PoolDifficulty::default();
         pool_difficulty
             .expect_calculate_target_clamped()
-            .returning(|_, _| CompactTarget::from_consensus(MAX_POOL_TARGET));
+            .returning(|_| CompactTarget::from_consensus(MAX_POOL_TARGET));
         pool_difficulty
             .expect_target_ceiling()
             .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
@@ -1496,8 +1505,15 @@ mod tests {
         let mut chain_store_handle = ChainStoreHandle::default();
         let template_header = build_valid_test_header();
         chain_store_handle
-            .expect_get_share_header()
-            .returning(move |_| Ok(template_header.clone()));
+            .expect_get_asert_parent()
+            .withf(move |hash| *hash == anchor_a_hash || *hash == anchor_b_hash)
+            .returning(move |_| {
+                Ok(AsertParent::from_header(
+                    &template_header,
+                    0,
+                    template_header.time,
+                ))
+            });
         chain_store_handle
             .expect_get_block_metadata()
             .returning(move |hash| {

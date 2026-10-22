@@ -39,7 +39,7 @@ use std::str::FromStr;
 // Imports only needed for internal tests
 #[cfg(any(test, feature = "test-utils"))]
 use crate::accounting::OutputPair;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
 #[cfg(test)]
 use crate::accounting::stats::metrics;
@@ -49,6 +49,8 @@ use crate::address::Address as P2PoolAddress;
 use crate::config::{Chain, PoolMode};
 #[cfg(test)]
 use crate::config::{StratumConfig, Sv2Authority};
+#[cfg(test)]
+use crate::pool_difficulty::AsertParent;
 #[cfg(test)]
 use crate::pool_difficulty::MockPoolDifficulty;
 #[cfg(test)]
@@ -63,6 +65,8 @@ use crate::shares::share_commitment::ShareCommitment;
 use crate::shares::transactions::coinbase::compute_witness_root;
 #[cfg(test)]
 use crate::shares::witness_commitment::WitnessCommitment;
+#[cfg(test)]
+use crate::sim_overrides;
 #[cfg(test)]
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 #[cfg(test)]
@@ -83,7 +87,7 @@ use crate::stratum::session::{EXTRANONCE1_SIZE, EXTRANONCE2_SIZE};
 use crate::stratum::sv2::{Declaration, DeclaredJob, encode_message};
 #[cfg(test)]
 use crate::stratum::sv2::{NoiseTransport, decode_plain_frames};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 use crate::stratum::work::block_template::BlockTemplate;
 #[cfg(test)]
 use crate::stratum::work::block_template::TemplateTransaction;
@@ -95,12 +99,14 @@ use crate::stratum::work::coinbase::{EXTRANONCE_SEPARATOR, build_declared_coinba
 use crate::stratum::work::gbt::build_merkle_branches_for_template;
 #[cfg(test)]
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
 #[cfg(test)]
 use crate::stratum::work::tracker::start_tracker_actor;
 #[cfg(test)]
 use binary_sv2::{B064K, B0255, Deserialize, GetSize, Seq0255, Serialize, U256};
+#[cfg(test)]
+use bitcoin::Target;
 #[cfg(test)]
 use bitcoin::TxMerkleNode;
 #[cfg(test)]
@@ -134,7 +140,7 @@ use noise_sv2::{INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE, Initiator};
 use p2poolv2_wallet::bch_share::BchShareNetwork;
 #[cfg(test)]
 use rand::{RngExt, rng};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::VecDeque;
@@ -516,7 +522,7 @@ pub fn bch_template_transaction(index: u32) -> TemplateTransaction {
 }
 
 /// A BCH payout snapshot with distinct weights.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub fn test_bch_prepared() -> Arc<PreparedNotifyParams> {
     let template: BlockTemplate = serde_json::from_str(include_str!(
         "../../bitcoindrpc/test_data/bchn-regtest-template.json"
@@ -525,8 +531,20 @@ pub fn test_bch_prepared() -> Arc<PreparedNotifyParams> {
     test_bch_prepared_for_template(template)
 }
 
+/// Allocated native token and BCH template for API/interoperability fixtures.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_bch_job_token_and_template() -> (Vec<u8>, Arc<BlockTemplate>) {
+    let prepared = test_bch_prepared();
+    (
+        prepared
+            .mining_job_token([0x11; 32], prepared.template().curtime)
+            .unwrap(),
+        Arc::clone(prepared.template()),
+    )
+}
+
 /// Apply the reusable BCH payout snapshot to an externally supplied template.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub fn test_bch_prepared_for_template(template: BlockTemplate) -> Arc<PreparedNotifyParams> {
     let first = Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([1; 20]),
@@ -888,8 +906,8 @@ pub const TEST_TIP_TIME: u32 = TEST_ANCHOR_TIME + 20;
 #[cfg(any(test, feature = "test-utils"))]
 pub const TEST_COINBASE_NSECS: u64 = 1_577_836_800_000_000_000;
 
-/// Build a PoolDifficulty anchored on-schedule so that
-/// calculate_target(TEST_TIP_TIME, 1) returns the anchor target (0x1b4188f5).
+/// Build a PoolDifficulty anchored on-schedule so that the target for a
+/// parent at height 1 and time TEST_TIP_TIME is the anchor target (0x1b4188f5).
 #[cfg(any(test, feature = "test-utils"))]
 pub fn on_schedule_pool_difficulty() -> PoolDifficulty {
     PoolDifficulty::new(
@@ -899,13 +917,54 @@ pub fn on_schedule_pool_difficulty() -> PoolDifficulty {
     )
 }
 
+/// Mine shares on `pool_difficulty` with one miner of constant hashrate and
+/// return the last share mined, as the parent of the next share.
+///
+/// The first share builds on `start` and is mined at `first_share_time`.
+/// Every share takes the miner's expected time at its target: the ideal
+/// block time scaled by the share's difficulty over the difficulty of
+/// `steady_target`, at which this miner makes one share per ideal block
+/// time. A share never takes less than `minimum_interval` seconds, as when
+/// every stratum submission already meets the share target. Intervals are
+/// whole seconds, as share timestamps are. Mining stops with the first share
+/// whose time reaches `until_time`.
+#[cfg(test)]
+pub fn mine_at_constant_hashrate(
+    pool_difficulty: &PoolDifficulty,
+    start: AsertParent,
+    steady_target: CompactTarget,
+    first_share_time: u32,
+    minimum_interval: u32,
+    until_time: u32,
+) -> AsertParent {
+    let steady_difficulty = Target::from_compact(steady_target).difficulty_float();
+    let ideal_block_time = sim_overrides::ideal_block_time() as f64;
+    let mut parent = start;
+    let mut share_time = first_share_time;
+    let mut reached_until_time = false;
+    while !reached_until_time {
+        let bits = pool_difficulty.calculate_target_clamped(parent);
+        parent = AsertParent {
+            height: parent.height + 1,
+            time: share_time,
+            bits,
+            previous_time: parent.time,
+        };
+        reached_until_time = share_time >= until_time;
+        let difficulty = Target::from_compact(bits).difficulty_float();
+        let expected_interval = (ideal_block_time * difficulty / steady_difficulty).round() as u32;
+        share_time += expected_interval.max(minimum_interval);
+    }
+    parent
+}
+
 /// Set up mock expectations on a MockChainStoreHandle and MockPoolDifficulty
 /// for validate_with_pool_difficulty.
 ///
-/// Configures get_share_header and get_block_metadata on the chain
-/// store to return a genesis parent at height 0, and calculate_target
-/// on the pool difficulty (called with parent_height=0) to return the
-/// given target_bits.
+/// Configures get_asert_parent, get_share_header and get_block_metadata on
+/// the chain store to return a genesis parent at height 0, and
+/// calculate_target_clamped on the pool difficulty to return the given
+/// target_bits.
 #[cfg(test)]
 pub fn setup_pool_difficulty_mocks(
     chain_store_handle: &mut MockChainStoreHandle,
@@ -913,6 +972,18 @@ pub fn setup_pool_difficulty_mocks(
     parent_hash: BlockHash,
     target_bits: u32,
 ) {
+    chain_store_handle
+        .expect_get_asert_parent()
+        .with(mockall::predicate::eq(parent_hash))
+        .returning(|_| {
+            let genesis_header = genesis_for_tests().header;
+            Ok(AsertParent::from_header(
+                &genesis_header,
+                0,
+                genesis_header.time,
+            ))
+        });
+
     chain_store_handle
         .expect_get_share_header()
         .with(mockall::predicate::eq(parent_hash))
@@ -932,7 +1003,7 @@ pub fn setup_pool_difficulty_mocks(
 
     pool_difficulty
         .expect_calculate_target_clamped()
-        .returning(move |_, _| CompactTarget::from_consensus(target_bits));
+        .returning(move |_| CompactTarget::from_consensus(target_bits));
     pool_difficulty
         .expect_target_ceiling()
         .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
@@ -944,8 +1015,9 @@ use crate::shares::share_block::MAX_POOL_TARGET;
 /// Set up mock expectations on a MockChainStoreHandle for
 /// validate_header_chain in handle_share_headers.
 ///
-/// Configures get_genesis_header, get_share_header, and get_block_metadata
-/// to return genesis-like data at height 0 with zero chain work. This allows
+/// Configures get_genesis_header, get_share_header, get_asert_parent and
+/// get_block_metadata to return genesis-like data at height 0 with zero
+/// chain work. This allows
 /// single-header batches with bits = MAX_POOL_TARGET to pass ASERT validation.
 #[cfg(test)]
 pub fn setup_header_chain_validation_mocks(chain_store_handle: &mut MockChainStoreHandle) {
@@ -961,6 +1033,17 @@ pub fn setup_header_chain_validation_mocks(chain_store_handle: &mut MockChainSto
     chain_store_handle
         .expect_get_share_header()
         .returning(move |_| Ok(genesis_for_parent.clone()));
+
+    let genesis_for_asert = genesis_header.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &genesis_for_asert,
+                0,
+                genesis_for_asert.time,
+            ))
+        });
 
     chain_store_handle
         .expect_get_block_metadata()

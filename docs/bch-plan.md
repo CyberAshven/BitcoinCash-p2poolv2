@@ -5,7 +5,7 @@ with the maintainer of [Pickaxe](https://github.com/CyberAshven/pickaxe-miner).
 Audience: contributors and AI agents starting the BCH port. Read
 [AGENTS.md](../AGENTS.md) and `docs/architecture/` before changing code.
 
-## Current requirement checks (2026-10-18)
+## Current requirement checks (2026-10-19)
 
 | Requirement | Status and evidence |
 |---|---|
@@ -22,7 +22,8 @@ Audience: contributors and AI agents starting the BCH port. Read
 | Mineable Job Declaration in both modes | Both the mocked regression and the two-node BCHN regtest use authenticated Noise connections through the actual listener. Both modes mine blocks and emit verifiable proofs. Independent client interoperability remains pending. |
 | Templates from an SV2 Template Provider | Implemented 2026-10-18 (`template_source = "sv2"`, Bitcoin Cash only); see [Template Distribution client](#template-distribution-client-2026-10-18). On BCHN regtest the node mined four blocks from bchn-sv2-bridge, one with five mempool transactions, and each reached BCHN through `SubmitSolution`. Noise against a real provider, Pickaxe's provider and Knuth remain untested. |
 | Miner-selected auxiliary commitments | Bounded shared trees and full coinbase/header proofs are implemented. An experimental SAFA variant verifies the proof inside the BCH VM and paid tokens in a real two-node regtest. Final SAFA policy, independent covenant review and chipnet issuance remain open. See [bch-auxpow.md](bch-auxpow.md). |
-| PPLNS window and maturity; independent ASIC/JD interoperability | PPLNS adopted 2026-10-19 (PR #4, decision 11): on Bitcoin Cash a coinbase pays the shares holding 3 BCH blocks' worth of work (`BCH_PPLNS_WINDOW_BLOCKS`, as P2Pool v1 on BCH), sized by the paying header's own difficulty and capped at 120,960 shares, behind a 100-share maturity (Satoshi's 100, `BCH_COINBASE_MATURITY`). Bitcoin keeps upstream's fixed window and 6,048-share maturity. Not yet run on chipnet; the chipnet nodes restart together on a fresh store path. Independent ASIC and Job Declaration interoperability remains pending. |
+| PPLNS window and maturity; independent ASIC/JD interoperability | PPLNS adopted 2026-10-19 (PR #4, decision 11): on Bitcoin Cash a coinbase pays the shares holding 3 BCH blocks' worth of work (`BCH_PPLNS_WINDOW_BLOCKS`, as P2Pool v1 on BCH), sized by the paying header's own difficulty and capped at 120,960 shares, behind a 100-share maturity (Satoshi's 100, `BCH_COINBASE_MATURITY`). Bitcoin keeps upstream's fixed window and 6,048-share maturity. Running on chipnet since 2026-10-19 13:24 on a fresh store, where every share sat at the mini ceiling, so the window always hit its cap (see the share difficulty row). Independent ASIC and Job Declaration interoperability remains pending. |
+| Share difficulty (ASERT anchor) | Decided 2026-10-22 as decision 12, a consensus change in [PR #6](https://github.com/CyberAshven/BitcoinCash-p2poolv2/pull/6); see decision 12 and [difficulty_adjustment/asert.md](difficulty_adjustment/asert.md). The chipnet mini chain restarted on 2026-10-19 13:24 (build `e8afeee8`) put every share at difficulty 4, the mini ceiling `0x1c384bd7`, where a 4 TH/s ASIC should hold about 9,300, and shares came every 3 seconds instead of 10. The cause is ASERT's genesis anchor: the Bitcoin Cash genesis carries the regtest timestamp of 2026-04-22, so the chain started about 1.55 million shares behind schedule and would stay at the ceiling for about two and a half months. PPLNS then paid by submission count: a CPU miner got 2.4% of chipnet block 328,554 beside the ASIC. On Bitcoin Cash the PR anchors ASERT at each share's parent; unit tests bring a 4 TH/s miner from the mini ceiling to its steady difficulty within eight half-lives (80 minutes) of a late start or a two-day outage, where the genesis anchor stays at the ceiling. Bitcoin keeps the genesis anchor. |
 | Remote CI and chipnet block | Rust tests, linting, Security and BCH Covenant Tests pass on GitHub; Code Coverage fails only at the Codecov upload until the fork has a `CODECOV_TOKEN`. First chipnet block on 2026-10-18: height 328451, `00000000000cb752459c2b08e1955e5f33252b0207b1c7b5b2f069d5254b9025`, found by an Avalon ASIC on Stratum V1 through the two-node chipnet pool, with templates from a remote BCHN 29.1.0 (Start9, over Tailscale). Its coinbase paid 25.00462191 BCH: 1.5% (0.37506932) to the donation address, the PPLNS window to two miners (17.05914219 and 7.50989553), 0.06051487 to the genesis share's NUMS key, then the merge-mining, padding and share-commitment outputs. Two more blocks found within five seconds at the same height lost, because nothing refreshed the template right after a found block. PR #3 fixed that on 2026-10-18: an accepted block now triggers an immediate template fetch, and the pool hears BCHN's ZMQ over Tailscale. After the fix the pool found blocks 328455 and 328456 at real difficulty, each submitted once with no sibling, paying the donation and the window. |
 
 ## Implementation checkpoint (2026-10-13)
@@ -732,6 +733,43 @@ move most BCH hashrate to the share chain.
         are six times the shares to store and relay and a higher uncle
         rate; measure the uncle rate on chipnet and in the swarm sim's
         latency runs before reconsidering.
+12. **Share difficulty anchor: decided 2026-10-22 (PR #6, consensus
+    change).** The maintainer accepted the parent anchor on one condition:
+    Bitcoin Cash mainnet and chipnet run the same rules, with only the
+    network switch between them. The rule is chosen by chain (Bitcoin or
+    Bitcoin Cash), never by Bitcoin Cash network. It changes only the share
+    chain; Bitcoin Cash blocks the pool finds are ordinary blocks under
+    Bitcoin Cash consensus. Upstream anchors
+    the share chain's ASERT at genesis, which counts every second since the
+    genesis time. The Bitcoin Cash genesis carries the regtest genesis
+    timestamp (2026-04-22) on every network, so the chipnet mini chain
+    restarted on 2026-10-19 began about 1.55 million shares behind schedule
+    and sat at its ceiling: every stratum submission became a share at
+    difficulty 4, PPLNS paid by submission count instead of work, and the
+    window sized by work under decision 11 always hit its cap. Any outage
+    does the same for about 0.4 times its length at 3-second submissions.
+    - **Rule.** On Bitcoin Cash, anchor ASERT at each share's
+      parent: BCH's own aserti3 with the parent as anchor block, so the
+      anchor target is the parent's bits and the time delta is the parent's
+      interval from its own parent. Without the ceiling it gives the genesis
+      rule's targets; at the ceiling it drops the time the chain spent
+      behind schedule. Bitcoin keeps the genesis anchor.
+    - **Rejected.** A later genesis time fixes one start and changes the
+      genesis hash, and every later start or outage repeats the problem.
+      Anchoring at the first share, as BCH anchors at its activation block,
+      fixes the start but not outages, and a fork at height 1, cheap at the
+      ceiling, makes the anchor ambiguous.
+    - **Evidence.** Unit tests in `pool_difficulty.rs` mine a 4 TH/s miner
+      submitting every 3 seconds: from the mini ceiling to its steady
+      difficulty (about 9,300) within eight half-lives of a late start or
+      a two-day outage, where the genesis anchor stays at the ceiling, and
+      a launch-time genesis, as the sim uses, stays regulated on both rules.
+      Details in [difficulty_adjustment/asert.md](difficulty_adjustment/asert.md).
+    - **Activation.** A flag day like decision 11: chipnet and regtest
+      nodes upgrade together on a new store path, and Bitcoin Cash protocol
+      strings carry `asert-parent` after `pplns-k3-m100`, so nodes on the
+      old rule fail the handshake. Mainnet has not started and begins with
+      the rule from its first share.
 
 ## BCH porting checklist
 
@@ -759,7 +797,8 @@ check before code.
 - **Share window and difficulty.** Tune the PPLNS window and share interval
   for BCH's 10-minute blocks; keep every share above dust; define the main
   and mini share chains. Share difficulty already uses ASERT
-  (`docs/difficulty_adjustment/`).
+  (`docs/difficulty_adjustment/`); on Bitcoin Cash it anchors at each
+  share's parent instead of genesis (decision 12).
 - **Stratum V2 server.** On the reference crates (`stratum-core`), beside or
   instead of SV1, with both Job Declaration modes.
 

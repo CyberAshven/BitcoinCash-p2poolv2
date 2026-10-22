@@ -19,6 +19,19 @@ change: nodes start from a new store).
 
 ### Added
 
+- The dashboard is rendered in Rust by the node itself: an overview with
+  pool, node and network hashrate, a one-day hashrate chart drawn as SVG,
+  found blocks and recent shares, plus miner (`/dashboard/miner`) and share
+  (`/dashboard/share/<hash>`) pages. Pages carry no scripts and sit behind
+  the API's authentication unless `public_dashboard` is set; the node keeps
+  the hashrate history, one sample a minute for a day. Builds on the
+  dashboard design in PR #8 by CashDragon0.
+- `[api] web_root` serves a self-hosted frontend (TypeScript, Rust/WASM or
+  any static build) for every path the API does not use, beside the JSON API
+  it reads. Without one, `/` leads to the dashboard.
+- `[api] public_dashboard` opens the dashboard, the `web_root` frontend and
+  the read-only share chain routes to anyone for a public node, while
+  `/metrics`, `/peers`, `/blocked_ips` and `/jd_prepare` keep the API login.
 - Bitcoin Cash: `stratum.chain = "bitcoin-cash"` with `bitcoin_cash_network`
   mines from BCHN templates, pays CashAddr scripts, records P2PKH share owners
   and starts from a main or mini Bitcoin Cash genesis. See `docs/bch-plan.md`
@@ -43,6 +56,12 @@ change: nodes start from a new store).
   with or without prefix on Bitcoin Cash) or a share chain address, and is
   computed by the payout code's own `PplnsWindow`.
 
+### Removed
+
+- The JavaScript dashboard (`p2poolv2_api/static`), its `dashboard.tar.gz`
+  release archive and `P2POOL_STATIC_DIR`. The Docker image, systemd unit
+  and Ansible role no longer install dashboard files.
+
 ### Fixed
 
 - A share header with a donation or fee above 10,000 basis points no longer
@@ -59,6 +78,14 @@ change: nodes start from a new store).
 
 ### Changed
 
+- On Bitcoin Cash, share difficulty anchors ASERT at each share's parent
+  instead of genesis, the same on mainnet, chipnet and regtest. A late start
+  or an outage no longer leaves shares at the easiest difficulty, where
+  PPLNS paid by submission count instead of work. Bitcoin keeps the genesis
+  anchor. This changes only the share chain, not Bitcoin Cash consensus. It
+  is a share chain consensus change: Bitcoin Cash protocol strings carry
+  `asert-parent`, and existing chipnet and regtest nodes restart together on
+  a new store path.
 - On Bitcoin Cash, peers reject shares whose donation plus fee exceed 10%, or
   whose donation pays another address.
 - A found block's coinbase now pays only shares that are mature for it. The

@@ -145,19 +145,6 @@ impl BlockReceiver {
         Some(pending_block.share_block)
     }
 
-    /// Look up parent (time, expected_height) for ASERT.
-    fn get_parent_time_and_height(
-        &self,
-        parent_hash: &BlockHash,
-    ) -> Result<(u32, u32), Box<dyn Error + Send + Sync>> {
-        let header = self.chain_store_handle.get_share_header(parent_hash)?;
-        let metadata = self.chain_store_handle.get_block_metadata(parent_hash)?;
-        let expected_height = metadata.expected_height.ok_or_else(|| {
-            format!("Parent block {parent_hash} is missing expected_height metadata")
-        })?;
-        Ok((header.time, expected_height))
-    }
-
     /// Height below which block bodies are never fetched, so ancestry checks
     /// must not require them.
     ///
@@ -207,14 +194,14 @@ impl BlockReceiver {
         }
     }
 
-    /// ASERT difficulty check against the parent's stored time and height.
+    /// ASERT difficulty check against the parent as stored.
     fn validate_asert(&self, share_block: &ShareBlock) -> Result<(), Box<dyn Error + Send + Sync>> {
         let parent_hash = share_block.header.prev_share_blockhash;
-        let (parent_time, parent_height) = self.get_parent_time_and_height(&parent_hash)?;
+        let parent = self.chain_store_handle.get_asert_parent(&parent_hash)?;
         let expected_bits = self
             .share_validator
             .pool_difficulty()
-            .calculate_target_clamped(parent_time, parent_height);
+            .calculate_target_clamped(parent);
         if share_block.header.bits != expected_bits {
             let block_hash = share_block.block_hash();
             return Err(format!(
@@ -396,6 +383,7 @@ mod tests {
     use super::*;
     use crate::node::request_response_handler::block_fetcher;
     use crate::node::validation_worker;
+    use crate::pool_difficulty::AsertParent;
     #[mockall_double::double]
     use crate::pool_difficulty::PoolDifficulty;
     use crate::shares::validation::MockDefaultShareValidator;
@@ -761,9 +749,15 @@ mod tests {
                 }
             });
         mock_store
-            .expect_get_share_header()
+            .expect_get_asert_parent()
             .with(mockall::predicate::eq(parent_hash))
-            .returning(move |_| Ok(parent_header_clone.clone()));
+            .returning(move |_| {
+                Ok(AsertParent::from_header(
+                    &parent_header_clone,
+                    0,
+                    parent_header_clone.time,
+                ))
+            });
         mock_store
             .expect_add_share_block_and_organise_header()
             .returning(|_| Ok(None));
@@ -772,7 +766,7 @@ mod tests {
         let mut pool_difficulty = PoolDifficulty::default();
         pool_difficulty
             .expect_calculate_target_clamped()
-            .returning(|_, _| {
+            .returning(|_| {
                 CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET)
             });
         mock_validator
@@ -1001,9 +995,13 @@ mod tests {
                 chain: ChainMembership::None,
             })
         });
-        mock_store
-            .expect_get_share_header()
-            .returning(move |_| Ok(parent_header_clone.clone()));
+        mock_store.expect_get_asert_parent().returning(move |_| {
+            Ok(AsertParent::from_header(
+                &parent_header_clone,
+                0,
+                parent_header_clone.time,
+            ))
+        });
         mock_store
             .expect_add_share_block_and_organise_header()
             .with(mockall::predicate::always())
@@ -1014,7 +1012,7 @@ mod tests {
         let mut pool_difficulty = PoolDifficulty::default();
         pool_difficulty
             .expect_calculate_target_clamped()
-            .returning(|_, _| {
+            .returning(|_| {
                 CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET)
             });
         mock_validator
@@ -1083,14 +1081,18 @@ mod tests {
                     Err(StoreError::NotFound("not found".to_string()))
                 }
             });
-        mock_store
-            .expect_get_share_header()
-            .returning(move |_| Ok(parent_header_clone.clone()));
+        mock_store.expect_get_asert_parent().returning(move |_| {
+            Ok(AsertParent::from_header(
+                &parent_header_clone,
+                0,
+                parent_header_clone.time,
+            ))
+        });
 
         let mut mock_pool_difficulty = PoolDifficulty::default();
         mock_pool_difficulty
             .expect_calculate_target_clamped()
-            .returning(|_, _| CompactTarget::from_consensus(0x1d00ffff));
+            .returning(|_| CompactTarget::from_consensus(0x1d00ffff));
         let mut mock_validator = MockDefaultShareValidator::default();
         mock_validator
             .expect_pool_difficulty()
@@ -1206,9 +1208,13 @@ mod tests {
                     chain: ChainMembership::Confirmed,
                 })
             });
-        mock_store
-            .expect_get_share_header()
-            .returning(move |_| Ok(root_header_clone.clone()));
+        mock_store.expect_get_asert_parent().returning(move |_| {
+            Ok(AsertParent::from_header(
+                &root_header_clone,
+                0,
+                root_header_clone.time,
+            ))
+        });
         mock_store
             .expect_add_share_block_and_organise_header()
             .returning(|_| Ok(None));
@@ -1217,7 +1223,7 @@ mod tests {
         let mut pool_difficulty = PoolDifficulty::default();
         pool_difficulty
             .expect_calculate_target_clamped()
-            .returning(|_, _| {
+            .returning(|_| {
                 CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET)
             });
         mock_validator
@@ -1321,9 +1327,15 @@ mod tests {
                 })
             });
         mock_store
-            .expect_get_share_header()
+            .expect_get_asert_parent()
             .with(mockall::predicate::eq(parent_hash))
-            .returning(move |_| Ok(parent_header_clone.clone()));
+            .returning(move |_| {
+                Ok(AsertParent::from_header(
+                    &parent_header_clone,
+                    0,
+                    parent_header_clone.time,
+                ))
+            });
         mock_store
             .expect_add_share_block_and_organise_header()
             .returning(|_| Ok(None));
@@ -1332,7 +1344,7 @@ mod tests {
         let mut pool_difficulty = PoolDifficulty::default();
         pool_difficulty
             .expect_calculate_target_clamped()
-            .returning(|_, _| {
+            .returning(|_| {
                 CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET)
             });
         mock_validator

@@ -2,11 +2,13 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::config::Chain;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::shares::share_block::ShareHeader;
 use bitcoin::{CompactTarget, Target};
 use std::error::Error;
 use std::fmt;
@@ -35,6 +37,10 @@ const MAX_TARGET_CONSENSUS: u32 = 0x1b4188f5;
 
 /// Fixed-point radix for the ASERT exponent representation (2^16)
 const RADIX: i64 = 65536;
+
+/// Name of the Bitcoin Cash ASERT rule in protocol strings: every share
+/// after the first is anchored at its parent (see [`PoolDifficulty`]).
+pub const BCH_ASERT_ANCHOR_TAG: &str = "asert-parent";
 
 /// Convert a `Target` to a `U512` via its little-endian byte representation.
 fn target_to_u512(target: Target) -> U512 {
@@ -85,7 +91,8 @@ fn asert_easy_clamp(anchor_target: CompactTarget) -> u32 {
 ///   - `halflife`: ASERT halflife parameter in seconds
 ///   - `ideal_block_time`: target time between blocks in seconds
 ///
-/// Returns the computed compact target for the next block.
+/// Returns the computed compact target for the next block, never easier than
+/// [`asert_easy_clamp`] for this anchor.
 pub(crate) fn asert_calculate_target(
     anchor_target: CompactTarget,
     time_delta: i64,
@@ -93,10 +100,31 @@ pub(crate) fn asert_calculate_target(
     halflife: u32,
     ideal_block_time: u32,
 ) -> CompactTarget {
-    let easy_clamp = asert_easy_clamp(anchor_target);
-    let max_target = target_to_u512(Target::from_compact(CompactTarget::from_consensus(
-        easy_clamp,
-    )));
+    asert_target_with_easy_clamp(
+        anchor_target,
+        time_delta,
+        height_delta,
+        halflife,
+        ideal_block_time,
+        CompactTarget::from_consensus(asert_easy_clamp(anchor_target)),
+    )
+}
+
+/// The ASERT computation of [`asert_calculate_target`] with the easiest
+/// allowed target passed in.
+///
+/// The genesis anchor derives its clamp from the anchor target, which is a
+/// chain constant. The Bitcoin Cash parent anchor cannot: its anchor target
+/// is the parent's bits, so it passes the chain's ceiling instead.
+fn asert_target_with_easy_clamp(
+    anchor_target: CompactTarget,
+    time_delta: i64,
+    height_delta: i64,
+    halflife: u32,
+    ideal_block_time: u32,
+    easy_clamp: CompactTarget,
+) -> CompactTarget {
+    let max_target = target_to_u512(Target::from_compact(easy_clamp));
 
     // Step 1: Compute exponent in 16.16 fixed-point format.
     // Use i128 to prevent overflow on the numerator multiplication.
@@ -137,7 +165,7 @@ pub(crate) fn asert_calculate_target(
     if num_shifts >= 0 {
         let available_bits = 512 - next_target.bits();
         if num_shifts as usize > available_bits {
-            return CompactTarget::from_consensus(easy_clamp);
+            return easy_clamp;
         }
         next_target <<= num_shifts as usize;
     } else {
@@ -213,13 +241,52 @@ impl fmt::Display for PoolDifficultyError {
 
 impl Error for PoolDifficultyError {}
 
+/// The parent of the share whose target is being computed or checked.
+///
+/// Bitcoin reads `height` and `time`. Bitcoin Cash reads `bits`, `time` and
+/// `previous_time`. Callers fill every field from the same parent, so either
+/// rule sees the share it was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AsertParent {
+    /// Height of the parent share.
+    pub height: u32,
+    /// Timestamp of the parent share.
+    pub time: u32,
+    /// Target the parent share was mined at.
+    pub bits: CompactTarget,
+    /// Timestamp of the parent's own parent. Genesis has no parent and uses
+    /// its own time, as the genesis anchor does.
+    pub previous_time: u32,
+}
+
+impl AsertParent {
+    /// Descriptor for `header` at `height`, whose own parent has timestamp
+    /// `previous_time`.
+    pub fn from_header(header: &ShareHeader, height: u32, previous_time: u32) -> Self {
+        Self {
+            height,
+            time: header.time,
+            bits: header.bits,
+            previous_time,
+        }
+    }
+}
+
 /// Pool difficulty tracker using the ASERT (aserti3-2d renamed as
 /// aserti3-10m) algorithm. Our halflife is 10m instead of 2 days.
 ///
-/// Stores the anchor block parameters needed to compute the difficulty
-/// for any given height and timestamp. The ASERT algorithm is absolute
-/// (not iterative), meaning it only needs the anchor point and the current
-/// block's parameters to compute the next target.
+/// Where the algorithm is anchored depends on the chain:
+///
+/// - Bitcoin anchors at genesis, as upstream does. The algorithm is absolute
+///   (not iterative): the target follows from the anchor point and the
+///   parent's height and time alone.
+/// - Bitcoin Cash anchors at each share's parent: the same integer formula,
+///   with the parent's bits as the anchor target and the parent's own
+///   interval as the time delta. Without clamping this gives the genesis
+///   rule's targets; at the ceiling it stops counting time the chain spent
+///   behind schedule, so a chain started long after its genesis time, or
+///   restarted after an outage, is not held at the ceiling while it makes up
+///   the missing shares. See `docs/difficulty_adjustment/asert.md`.
 #[derive(Clone, Copy)]
 pub struct PoolDifficulty {
     /// The anchor block's compact target (difficulty at the anchor point)
@@ -228,10 +295,14 @@ pub struct PoolDifficulty {
     anchor_parent_time: u32,
     /// The height of the anchor block
     anchor_height: u32,
+    /// Chain whose anchor rule applies: the genesis anchor on Bitcoin, the
+    /// parent anchor on Bitcoin Cash.
+    chain: Chain,
 }
 
 impl PoolDifficulty {
-    /// Create a new PoolDifficulty anchored at the given block.
+    /// Create a new PoolDifficulty anchored at the given block, on Bitcoin's
+    /// genesis anchor rule. Use [`Self::for_chain`] to select another chain.
     ///
     /// For a new chain, the anchor is the genesis block. Use the genesis block's
     /// own timestamp as `anchor_parent_time` since genesis has no parent.
@@ -240,40 +311,51 @@ impl PoolDifficulty {
             anchor_target,
             anchor_parent_time,
             anchor_height,
+            chain: Chain::Bitcoin,
         }
     }
 
-    /// Build a PoolDifficulty anchored at the genesis block from the chain store.
+    /// Build a PoolDifficulty for `chain` anchored at the genesis block from
+    /// the chain store.
     ///
     /// Reads the genesis header to obtain the anchor target and timestamp.
-    /// The anchor height is always 0 since the anchor is genesis.
-    pub fn build(chain_store_handle: &ChainStoreHandle) -> Result<Self, PoolDifficultyError> {
+    /// The anchor height is always 0 since the anchor is genesis. On Bitcoin
+    /// Cash the genesis anchor only sets the first share's target and the
+    /// chain's ceiling; every later share is anchored at its parent.
+    pub fn build(
+        chain_store_handle: &ChainStoreHandle,
+        chain: Chain,
+    ) -> Result<Self, PoolDifficultyError> {
         let genesis_header = chain_store_handle
             .get_genesis_header()
             .map_err(|error| PoolDifficultyError::AnchorNotFound(error.to_string()))?;
-        Ok(Self {
-            anchor_target: genesis_header.bits,
-            anchor_parent_time: genesis_header.time,
-            anchor_height: 0,
-        })
+        Ok(Self::new(genesis_header.bits, genesis_header.time, 0).for_chain(chain))
     }
 
-    /// Calculate the required target for a block given its parent's height and time.
+    /// Select the chain whose anchor rule applies.
+    pub fn for_chain(mut self, chain: Chain) -> Self {
+        self.chain = chain;
+        self
+    }
+
+    /// Calculate the required target for a block given its parent.
     ///
-    /// This is a pure computation from the anchor point. The ASERT formula
-    /// internally adds 1 to the height delta, so callers should pass the
-    /// parent's height, not the height of the block being mined.
-    ///
-    /// Parameters:
-    ///   - `block_parent_time`: the timestamp of the current block's parent
-    ///   - `block_parent_height`: the height of the current block's parent
-    pub fn calculate_target(
-        &self,
-        block_parent_time: u32,
-        block_parent_height: u32,
-    ) -> CompactTarget {
-        let time_delta = block_parent_time as i64 - self.anchor_parent_time as i64;
-        let height_delta = block_parent_height as i64 - self.anchor_height as i64;
+    /// This is a pure computation from the anchor point: genesis on Bitcoin,
+    /// the parent itself on Bitcoin Cash. The ASERT formula internally adds 1
+    /// to the height delta, so callers pass the parent, not the block being
+    /// mined.
+    pub fn calculate_target(&self, parent: AsertParent) -> CompactTarget {
+        match self.chain {
+            Chain::Bitcoin => self.target_from_genesis(parent),
+            Chain::BitcoinCash => self.target_from_parent(parent),
+        }
+    }
+
+    /// Bitcoin's rule: ASERT anchored at genesis, from the parent's height
+    /// and time.
+    fn target_from_genesis(&self, parent: AsertParent) -> CompactTarget {
+        let time_delta = parent.time as i64 - self.anchor_parent_time as i64;
+        let height_delta = parent.height as i64 - self.anchor_height as i64;
 
         asert_calculate_target(
             self.anchor_target,
@@ -284,6 +366,29 @@ impl PoolDifficulty {
         )
     }
 
+    /// Bitcoin Cash's rule: ASERT anchored at the parent, BCH's own anchor
+    /// convention applied one share back. The anchor target is the parent's
+    /// bits, the time delta is the parent's interval from its own parent, and
+    /// the height delta is zero.
+    ///
+    /// When the parent is genesis, its interval is zero and its bits are the
+    /// genesis anchor target, so the first share's target is the genesis
+    /// rule's. Results never exceed the chain's ceiling, which is what lets
+    /// the next share start from the ceiling instead of from a schedule the
+    /// chain has fallen behind.
+    fn target_from_parent(&self, parent: AsertParent) -> CompactTarget {
+        let interval = parent.time as i64 - parent.previous_time as i64;
+
+        asert_target_with_easy_clamp(
+            parent.bits,
+            interval,
+            0,
+            sim_overrides::half_life(),
+            sim_overrides::ideal_block_time(),
+            self.target_ceiling(),
+        )
+    }
+
     /// Calculate the pool target clamped to stay within valid bounds.
     ///
     /// The returned target is clamped in two directions:
@@ -291,12 +396,8 @@ impl PoolDifficulty {
     ///    target smaller than the bitcoin target.
     /// 2. Never easier than the chain ceiling. Bitcoin and the Bitcoin Cash
     ///    main chain use MAX_POOL_TARGET. The mini chain uses its own anchor.
-    pub fn calculate_target_clamped(
-        &self,
-        block_parent_time: u32,
-        block_parent_height: u32,
-    ) -> CompactTarget {
-        let asert_target = self.calculate_target(block_parent_time, block_parent_height);
+    pub fn calculate_target_clamped(&self, parent: AsertParent) -> CompactTarget {
+        let asert_target = self.calculate_target(parent);
 
         let max_pool_target_compact = self.target_ceiling();
         let max_pool_target = Target::from_compact(max_pool_target_compact);
@@ -318,13 +419,8 @@ impl PoolDifficulty {
     /// Calculate the target and return it as a consensus u32.
     ///
     /// Convenience wrapper for compatibility with `ChainStoreHandle::get_current_target()`.
-    pub fn calculate_target_consensus(
-        &self,
-        block_parent_time: u32,
-        block_parent_height: u32,
-    ) -> u32 {
-        self.calculate_target(block_parent_time, block_parent_height)
-            .to_consensus()
+    pub fn calculate_target_consensus(&self, parent: AsertParent) -> u32 {
+        self.calculate_target(parent).to_consensus()
     }
 }
 
@@ -334,10 +430,11 @@ impl PoolDifficulty {
 mockall::mock! {
     pub PoolDifficulty {
         pub fn new(anchor_target: CompactTarget, anchor_parent_time: u32, anchor_height: u32) -> Self;
-        pub fn build(chain_store_handle: &ChainStoreHandle) -> Result<Self, PoolDifficultyError>;
-        pub fn calculate_target(&self, block_parent_time: u32, block_parent_height: u32) -> CompactTarget;
-        pub fn calculate_target_clamped(&self, block_parent_time: u32, block_parent_height: u32) -> CompactTarget;
-        pub fn calculate_target_consensus(&self, block_parent_time: u32, block_parent_height: u32) -> u32;
+        pub fn build(chain_store_handle: &ChainStoreHandle, chain: Chain) -> Result<Self, PoolDifficultyError>;
+        pub fn for_chain(self, chain: Chain) -> Self;
+        pub fn calculate_target(&self, parent: AsertParent) -> CompactTarget;
+        pub fn calculate_target_clamped(&self, parent: AsertParent) -> CompactTarget;
+        pub fn calculate_target_consensus(&self, parent: AsertParent) -> u32;
         pub fn target_ceiling(&self) -> CompactTarget;
     }
 
@@ -353,8 +450,13 @@ mockall::mock! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BchShareChain;
+    use crate::shares::bch_genesis;
+    use crate::shares::bch_genesis::MINI_ANCHOR_TARGET;
     use crate::shares::share_block::{MAX_POOL_TARGET, ShareBlock};
+    use crate::test_utils::mine_at_constant_hashrate;
     use bitcoin::hashes::Hash;
+    use p2poolv2_wallet::bch_share::BchShareNetwork;
 
     // =======================================================================
     // U512 / Target conversion tests
@@ -661,7 +763,12 @@ mod tests {
         let pool_difficulty =
             PoolDifficulty::new(CompactTarget::from_consensus(0x1b4188f5), 1_700_000_000, 0);
         // Parent at height 1, on schedule: 10 * (1+1) = 20 seconds after anchor
-        let target = pool_difficulty.calculate_target(1_700_000_020, 1);
+        let target = pool_difficulty.calculate_target(AsertParent {
+            height: 1,
+            time: 1_700_000_020,
+            bits: CompactTarget::from_consensus(0x1b4188f5),
+            previous_time: 1_700_000_010,
+        });
         assert_eq!(target.to_consensus(), 0x1b4188f5);
     }
 
@@ -669,8 +776,14 @@ mod tests {
     fn test_pool_difficulty_consensus_matches_compact() {
         let pool_difficulty =
             PoolDifficulty::new(CompactTarget::from_consensus(0x1b4188f5), 1_700_000_000, 0);
-        let compact = pool_difficulty.calculate_target(1_700_000_015, 1);
-        let consensus = pool_difficulty.calculate_target_consensus(1_700_000_015, 1);
+        let parent = AsertParent {
+            height: 1,
+            time: 1_700_000_015,
+            bits: CompactTarget::from_consensus(0x1b4188f5),
+            previous_time: 1_700_000_005,
+        };
+        let compact = pool_difficulty.calculate_target(parent);
+        let consensus = pool_difficulty.calculate_target_consensus(parent);
         assert_eq!(consensus, compact.to_consensus());
     }
 
@@ -680,9 +793,24 @@ mod tests {
             PoolDifficulty::new(CompactTarget::from_consensus(0x1b4188f5), 1_700_000_000, 0);
 
         // On schedule: block_parent_time = anchor_parent_time + ideal_block_time * (parent_height + 1)
-        let on_schedule_1 = pool_difficulty.calculate_target(1_700_000_020, 1);
-        let on_schedule_5 = pool_difficulty.calculate_target(1_700_000_060, 5);
-        let on_schedule_100 = pool_difficulty.calculate_target(1_700_001_010, 100);
+        let on_schedule_1 = pool_difficulty.calculate_target(AsertParent {
+            height: 1,
+            time: 1_700_000_020,
+            bits: CompactTarget::from_consensus(0x1b4188f5),
+            previous_time: 1_700_000_010,
+        });
+        let on_schedule_5 = pool_difficulty.calculate_target(AsertParent {
+            height: 5,
+            time: 1_700_000_060,
+            bits: CompactTarget::from_consensus(0x1b4188f5),
+            previous_time: 1_700_000_050,
+        });
+        let on_schedule_100 = pool_difficulty.calculate_target(AsertParent {
+            height: 100,
+            time: 1_700_001_010,
+            bits: CompactTarget::from_consensus(0x1b4188f5),
+            previous_time: 1_700_001_000,
+        });
 
         assert_eq!(on_schedule_1.to_consensus(), 0x1b4188f5);
         assert_eq!(on_schedule_5.to_consensus(), 0x1b4188f5);
@@ -697,7 +825,12 @@ mod tests {
         //
         // On-schedule time is ideal_block_time * (parent_height + 1) =
         //  10 * (1 + 1) = 20 seconds after the anchor.
-        let target = pool_difficulty.calculate_target(1_700_000_010, 1);
+        let target = pool_difficulty.calculate_target(AsertParent {
+            height: 1,
+            time: 1_700_000_010,
+            bits: CompactTarget::from_consensus(0x1b4188f5),
+            previous_time: 1_700_000_000,
+        });
         let anchor_wide = target_to_u512(Target::from_compact(CompactTarget::from_consensus(
             0x1b4188f5,
         )));
@@ -734,8 +867,6 @@ mod tests {
 
     #[test]
     fn test_asert_matches_fixture_share_headers() {
-        use crate::shares::share_block::ShareHeader;
-
         let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../p2poolv2_tests/test_data/share_sync/share_headers.json");
         let json_string =
@@ -752,10 +883,11 @@ mod tests {
         let pool_difficulty = PoolDifficulty::new(genesis.bits, genesis.time, 0);
 
         for index in 1..headers.len() {
-            let parent_time = headers[index - 1].time;
             let parent_height = (index - 1) as u32;
-            let calculated_bits =
-                pool_difficulty.calculate_target_clamped(parent_time, parent_height);
+            let previous_time = headers[index.saturating_sub(2)].time;
+            let parent =
+                AsertParent::from_header(&headers[index - 1], parent_height, previous_time);
+            let calculated_bits = pool_difficulty.calculate_target_clamped(parent);
 
             assert_eq!(
                 calculated_bits.to_consensus(),
@@ -776,7 +908,12 @@ mod tests {
         let anchor = CompactTarget::from_consensus(0x1b4188f5);
         let pool_diff = PoolDifficulty::new(anchor, 1700000000, 0);
 
-        let result = pool_diff.calculate_target_clamped(1700000000, 0);
+        let result = pool_diff.calculate_target_clamped(AsertParent {
+            height: 0,
+            time: 1_700_000_000,
+            bits: CompactTarget::from_consensus(0x1b4188f5),
+            previous_time: 1_699_999_990,
+        });
 
         assert_eq!(
             result.to_consensus(),
@@ -832,10 +969,11 @@ mod tests {
                 "Block {index} prev_share_blockhash does not match parent hash"
             );
 
-            let parent = &blocks[index - 1];
             let parent_height = (index - 1) as u32;
-            let expected_target =
-                pool_difficulty.calculate_target_clamped(parent.header.time, parent_height);
+            let previous_time = blocks[index.saturating_sub(2)].header.time;
+            let parent =
+                AsertParent::from_header(&blocks[index - 1].header, parent_height, previous_time);
+            let expected_target = pool_difficulty.calculate_target_clamped(parent);
             assert_eq!(
                 block.header.bits,
                 expected_target,
@@ -858,12 +996,340 @@ mod tests {
     #[test]
     fn mini_anchor_stays_easier_than_the_main_ceiling() {
         let difficulty = PoolDifficulty::new(
-            CompactTarget::from_consensus(crate::shares::bch_genesis::MINI_ANCHOR_TARGET),
+            CompactTarget::from_consensus(MINI_ANCHOR_TARGET),
             1_700_000_000,
             0,
         );
-        let next = difficulty.calculate_target_clamped(1_700_000_000, 0);
+        let next = difficulty.calculate_target_clamped(AsertParent {
+            height: 0,
+            time: 1_700_000_000,
+            bits: CompactTarget::from_consensus(MINI_ANCHOR_TARGET),
+            previous_time: 1_700_000_000,
+        });
         let main_ceiling = Target::from_compact(CompactTarget::from_consensus(MAX_POOL_TARGET));
         assert!(Target::from_compact(next) > main_ceiling);
+    }
+
+    // =======================================================================
+    // Bitcoin Cash parent anchor tests
+    // =======================================================================
+
+    /// Restart time of the live chipnet mini chain, 2026-10-19 13:24 UTC:
+    /// 180 days after the genesis time the Bitcoin Cash genesis carries.
+    const CHIPNET_RESTART_TIME: u32 = 1_792_416_240;
+
+    /// Hashrate of the Avalon ASIC on the chipnet pool, about 4 TH/s.
+    const ASIC_HASHRATE: f64 = 4.0e12;
+
+    /// Seconds between stratum submissions when each one is a share, as the
+    /// chipnet pool logged at the ceiling.
+    const SUBMISSION_INTERVAL: u32 = 3;
+
+    const TWO_DAYS: u32 = 2 * 24 * 60 * 60;
+
+    #[test]
+    fn parent_anchor_keeps_the_parent_target_when_the_parent_is_on_schedule() {
+        let pool_difficulty =
+            PoolDifficulty::new(CompactTarget::from_consensus(0x1b4188f5), 1_700_000_000, 0)
+                .for_chain(Chain::BitcoinCash);
+
+        let next = pool_difficulty.calculate_target_clamped(AsertParent {
+            height: 500,
+            time: 1_700_005_010,
+            bits: CompactTarget::from_consensus(0x1a4188f5),
+            previous_time: 1_700_005_000,
+        });
+
+        assert_eq!(next, CompactTarget::from_consensus(0x1a4188f5));
+    }
+
+    /// One half-life between the parent and its own parent doubles the
+    /// target, as the genesis anchor does for a chain one half-life behind.
+    #[test]
+    fn parent_anchor_doubles_the_target_after_a_half_life_late_parent() {
+        let pool_difficulty =
+            PoolDifficulty::new(CompactTarget::from_consensus(0x1b4188f5), 1_700_000_000, 0)
+                .for_chain(Chain::BitcoinCash);
+        let parent_bits = CompactTarget::from_consensus(0x1a4188f5);
+
+        let next = pool_difficulty.calculate_target_clamped(AsertParent {
+            height: 500,
+            time: 1_700_005_610,
+            bits: parent_bits,
+            previous_time: 1_700_005_000,
+        });
+
+        assert_eq!(
+            next,
+            asert_calculate_target(parent_bits, 610, 0, 600, 10),
+            "the parent anchor is the genesis formula with the parent as anchor"
+        );
+        let doubled = target_to_u512(Target::from_compact(parent_bits)) * U512::from(2u64);
+        let next_wide = target_to_u512(Target::from_compact(next));
+        assert!(next_wide <= doubled && next_wide > doubled - (doubled >> 10));
+    }
+
+    /// The first share builds on genesis, which has no interval of its own,
+    /// so both anchors give it the same target on the main and mini chains.
+    #[test]
+    fn parent_anchor_gives_the_first_share_the_genesis_anchor_target() {
+        let mini = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+            .unwrap()
+            .header;
+        let mini_genesis_anchor = PoolDifficulty::new(mini.bits, mini.time, 0);
+        let mini_parent_anchor = mini_genesis_anchor.for_chain(Chain::BitcoinCash);
+        let mini_parent = AsertParent::from_header(&mini, 0, mini.time);
+        assert_eq!(
+            mini_parent_anchor.calculate_target_clamped(mini_parent),
+            mini_genesis_anchor.calculate_target_clamped(mini_parent)
+        );
+
+        let main = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+            .unwrap()
+            .header;
+        let main_genesis_anchor = PoolDifficulty::new(main.bits, main.time, 0);
+        let main_parent_anchor = main_genesis_anchor.for_chain(Chain::BitcoinCash);
+        let main_parent = AsertParent::from_header(&main, 0, main.time);
+        assert_eq!(
+            main_parent_anchor.calculate_target_clamped(main_parent),
+            main_genesis_anchor.calculate_target_clamped(main_parent)
+        );
+    }
+
+    /// The parent's bits are below the mini ceiling and easier than the main
+    /// chain's ASERT clamp, so the ceiling has to come from the chain, not
+    /// from the anchor target: a slow parent returns the mini ceiling.
+    #[test]
+    fn parent_anchor_clamps_a_slow_mini_parent_to_the_mini_ceiling() {
+        let pool_difficulty = PoolDifficulty::new(
+            CompactTarget::from_consensus(MINI_ANCHOR_TARGET),
+            1_700_000_000,
+            0,
+        )
+        .for_chain(Chain::BitcoinCash);
+
+        let next = pool_difficulty.calculate_target_clamped(AsertParent {
+            height: 500,
+            time: 1_700_009_000,
+            bits: CompactTarget::from_consensus(0x1c2a0000),
+            previous_time: 1_700_005_000,
+        });
+
+        assert_eq!(next, CompactTarget::from_consensus(MINI_ANCHOR_TARGET));
+    }
+
+    /// The live chipnet case: the mini chain restarted 180 days after its
+    /// genesis time. Anchored at each parent, a 4 TH/s ASIC submitting every
+    /// 3 seconds at the ceiling (difficulty about 4) reaches its steady
+    /// difficulty (about 9,300, eleven doublings up) within eight half-lives.
+    #[test]
+    fn parent_anchor_brings_a_late_mini_chain_to_steady_difficulty() {
+        let genesis = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+            .unwrap()
+            .header;
+        assert!(CHIPNET_RESTART_TIME - genesis.time > 179 * 24 * 60 * 60);
+        let pool_difficulty =
+            PoolDifficulty::new(genesis.bits, genesis.time, 0).for_chain(Chain::BitcoinCash);
+        let steady_target = anchor_target_for_network_hashrate(ASIC_HASHRATE);
+
+        let tip = mine_at_constant_hashrate(
+            &pool_difficulty,
+            AsertParent::from_header(&genesis, 0, genesis.time),
+            steady_target,
+            CHIPNET_RESTART_TIME,
+            SUBMISSION_INTERVAL,
+            CHIPNET_RESTART_TIME + 8 * sim_overrides::half_life(),
+        );
+
+        let next = pool_difficulty.calculate_target_clamped(tip);
+        let ratio = Target::from_compact(next).difficulty_float()
+            / Target::from_compact(steady_target).difficulty_float();
+        assert!(
+            (0.85..=1.15).contains(&ratio),
+            "difficulty is {ratio} of steady after eight half-lives"
+        );
+    }
+
+    /// The same chain on the genesis anchor is about 1.5 million shares
+    /// behind schedule and stays at the ceiling, where every submission is a
+    /// share at the floor difficulty.
+    #[test]
+    fn genesis_anchor_holds_a_late_mini_chain_at_its_ceiling() {
+        let genesis = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+            .unwrap()
+            .header;
+        let pool_difficulty = PoolDifficulty::new(genesis.bits, genesis.time, 0);
+        let steady_target = anchor_target_for_network_hashrate(ASIC_HASHRATE);
+
+        let tip = mine_at_constant_hashrate(
+            &pool_difficulty,
+            AsertParent::from_header(&genesis, 0, genesis.time),
+            steady_target,
+            CHIPNET_RESTART_TIME,
+            SUBMISSION_INTERVAL,
+            CHIPNET_RESTART_TIME + 8 * sim_overrides::half_life(),
+        );
+
+        assert_eq!(
+            pool_difficulty.calculate_target_clamped(tip),
+            CompactTarget::from_consensus(MINI_ANCHOR_TARGET)
+        );
+    }
+
+    /// The main chain's ceiling (difficulty about 1,160) is three doublings
+    /// below the ASIC's steady difficulty, so a late start reaches it within
+    /// four half-lives.
+    #[test]
+    fn parent_anchor_brings_a_late_main_chain_to_steady_difficulty_in_four_half_lives() {
+        let genesis = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+            .unwrap()
+            .header;
+        let pool_difficulty =
+            PoolDifficulty::new(genesis.bits, genesis.time, 0).for_chain(Chain::BitcoinCash);
+        let steady_target = anchor_target_for_network_hashrate(ASIC_HASHRATE);
+
+        let tip = mine_at_constant_hashrate(
+            &pool_difficulty,
+            AsertParent::from_header(&genesis, 0, genesis.time),
+            steady_target,
+            CHIPNET_RESTART_TIME,
+            SUBMISSION_INTERVAL,
+            CHIPNET_RESTART_TIME + 4 * sim_overrides::half_life(),
+        );
+
+        let next = pool_difficulty.calculate_target_clamped(tip);
+        let ratio = Target::from_compact(next).difficulty_float()
+            / Target::from_compact(steady_target).difficulty_float();
+        assert!(
+            (0.85..=1.15).contains(&ratio),
+            "difficulty is {ratio} of steady after four half-lives"
+        );
+    }
+
+    /// Two days without shares drop the next target to the ceiling once.
+    /// Anchored at each parent, the chain then climbs back as from a fresh
+    /// start instead of first making up two days of missing shares.
+    #[test]
+    fn parent_anchor_recovers_from_a_two_day_outage() {
+        let genesis = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+            .unwrap()
+            .header;
+        let pool_difficulty =
+            PoolDifficulty::new(genesis.bits, genesis.time, 0).for_chain(Chain::BitcoinCash);
+        let steady_target = anchor_target_for_network_hashrate(ASIC_HASHRATE);
+        let before_outage = mine_at_constant_hashrate(
+            &pool_difficulty,
+            AsertParent::from_header(&genesis, 0, genesis.time),
+            steady_target,
+            genesis.time + 10,
+            SUBMISSION_INTERVAL,
+            genesis.time + 16 * sim_overrides::half_life(),
+        );
+        let resume_time = before_outage.time + TWO_DAYS;
+
+        let tip = mine_at_constant_hashrate(
+            &pool_difficulty,
+            before_outage,
+            steady_target,
+            resume_time,
+            SUBMISSION_INTERVAL,
+            resume_time + 8 * sim_overrides::half_life(),
+        );
+
+        let next = pool_difficulty.calculate_target_clamped(tip);
+        let ratio = Target::from_compact(next).difficulty_float()
+            / Target::from_compact(steady_target).difficulty_float();
+        assert!(
+            (0.85..=1.15).contains(&ratio),
+            "difficulty is {ratio} of steady eight half-lives after the outage"
+        );
+    }
+
+    /// On the genesis anchor the same outage leaves the chain two days
+    /// behind schedule: still at the ceiling eight half-lives later.
+    #[test]
+    fn genesis_anchor_holds_the_ceiling_after_a_two_day_outage() {
+        let genesis = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+            .unwrap()
+            .header;
+        let pool_difficulty = PoolDifficulty::new(genesis.bits, genesis.time, 0);
+        let steady_target = anchor_target_for_network_hashrate(ASIC_HASHRATE);
+        let before_outage = mine_at_constant_hashrate(
+            &pool_difficulty,
+            AsertParent::from_header(&genesis, 0, genesis.time),
+            steady_target,
+            genesis.time + 10,
+            SUBMISSION_INTERVAL,
+            genesis.time + 16 * sim_overrides::half_life(),
+        );
+        let resume_time = before_outage.time + TWO_DAYS;
+
+        let tip = mine_at_constant_hashrate(
+            &pool_difficulty,
+            before_outage,
+            steady_target,
+            resume_time,
+            SUBMISSION_INTERVAL,
+            resume_time + 8 * sim_overrides::half_life(),
+        );
+
+        assert_eq!(
+            pool_difficulty.calculate_target_clamped(tip),
+            CompactTarget::from_consensus(MINI_ANCHOR_TARGET)
+        );
+    }
+
+    /// The sim anchors genesis at its launch time and at the steady
+    /// difficulty of its network hashrate (`sim_overrides::genesis_timestamp`
+    /// and `anchor_target`). The parent anchor keeps that regulated start:
+    /// the chain stays at its steady difficulty and agrees with the genesis
+    /// anchor.
+    #[test]
+    fn parent_anchor_keeps_a_regulated_start_anchored_at_launch() {
+        let steady_target = anchor_target_for_network_hashrate(ASIC_HASHRATE);
+        let launch_time = CHIPNET_RESTART_TIME;
+        let genesis_anchor = PoolDifficulty::new(steady_target, launch_time, 0);
+        let parent_anchor = genesis_anchor.for_chain(Chain::BitcoinCash);
+        let genesis = AsertParent {
+            height: 0,
+            time: launch_time,
+            bits: steady_target,
+            previous_time: launch_time,
+        };
+
+        let parent_anchor_tip = mine_at_constant_hashrate(
+            &parent_anchor,
+            genesis,
+            steady_target,
+            launch_time + 10,
+            1,
+            launch_time + 36 * sim_overrides::half_life(),
+        );
+        let genesis_anchor_tip = mine_at_constant_hashrate(
+            &genesis_anchor,
+            genesis,
+            steady_target,
+            launch_time + 10,
+            1,
+            launch_time + 36 * sim_overrides::half_life(),
+        );
+
+        let steady_difficulty = Target::from_compact(steady_target).difficulty_float();
+        let parent_anchor_ratio =
+            Target::from_compact(parent_anchor.calculate_target_clamped(parent_anchor_tip))
+                .difficulty_float()
+                / steady_difficulty;
+        let genesis_anchor_ratio =
+            Target::from_compact(genesis_anchor.calculate_target_clamped(genesis_anchor_tip))
+                .difficulty_float()
+                / steady_difficulty;
+        assert!(
+            (0.95..=1.05).contains(&parent_anchor_ratio),
+            "parent anchor difficulty is {parent_anchor_ratio} of steady"
+        );
+        assert!(
+            (0.95..=1.05).contains(&genesis_anchor_ratio),
+            "genesis anchor difficulty is {genesis_anchor_ratio} of steady"
+        );
     }
 }
