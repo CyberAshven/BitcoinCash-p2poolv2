@@ -15,11 +15,12 @@
 //! averaged over the seeds.
 //!
 //! No node, store or bitcoind is involved, and no uncles are modelled. Must
-//! be built with `--features sim`:
+//! be built with `--features pplns-compare`, not `sim`: the sim build
+//! shortens `PPLNS_WINDOW_SHARES` and `COINBASE_MATURITY` to its own depths.
 //!
 //! ```sh
-//! cargo run --release -p p2poolv2_sim --features sim --bin pplns_compare
-//! cargo run --release -p p2poolv2_sim --features sim --bin pplns_compare -- --maturity 360
+//! cargo run --release -p p2poolv2_sim --features pplns-compare --bin pplns_compare
+//! cargo run --release -p p2poolv2_sim --features pplns-compare --bin pplns_compare -- --maturity 360
 //! ```
 
 use bitcoin::hashes::Hash;
@@ -30,7 +31,6 @@ use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::{
     BCH_PPLNS_WINDOW_BLOCKS, COINBASE_MATURITY, DIFFICULTY_SCALE, PPLNS_WINDOW_SHARES,
 };
 use p2poolv2_lib::config::Chain;
-use p2poolv2_lib::sim_overrides;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::collections::HashMap;
@@ -80,8 +80,9 @@ struct Args {
     /// Chains drawn per pool size; the tables average over them.
     #[arg(long, default_value_t = 5)]
     seeds: u64,
-    /// Maturity skip in shares, for every rule. A sim-only override of
-    /// `COINBASE_MATURITY`, to measure a shorter skip.
+    /// Maturity skip in shares, for every rule. Overrides each window's own
+    /// maturity (`COINBASE_MATURITY`, `BCH_COINBASE_MATURITY`), to measure
+    /// another skip.
     #[arg(long, default_value_t = COINBASE_MATURITY)]
     maturity: usize,
 }
@@ -234,7 +235,6 @@ struct RuleSummary {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    sim_overrides::init_coinbase_maturity(args.maturity);
     println!(
         "Fixed window: {PPLNS_WINDOW_SHARES} shares. BCH window: K blocks' worth of work, capped \
          at {PPLNS_WINDOW_SHARES} (the code's K is {BCH_PPLNS_WINDOW_BLOCKS}). Maturity skip {} \
@@ -285,9 +285,11 @@ fn run_regime(regime: &Regime, seed: u64, maturity: usize) -> Result<Vec<RuleSum
         .collect();
 
     let entries = window_entries(&drawn, &addresses);
-    let mut fixed_window = PplnsWindow::new(Network::Bitcoin);
+    let mut fixed_window = PplnsWindow::new(Network::Bitcoin).with_maturity_skip(maturity);
     fixed_window.populate_for_benchmark(entries.clone());
-    let mut sized_window = PplnsWindow::new(Network::Bitcoin).for_chain(Chain::BitcoinCash);
+    let mut sized_window = PplnsWindow::new(Network::Bitcoin)
+        .for_chain(Chain::BitcoinCash)
+        .with_maturity_skip(maturity);
     sized_window.populate_for_benchmark(entries);
 
     // Skip blocks until the fixed window can fill, so no rule is cut short by

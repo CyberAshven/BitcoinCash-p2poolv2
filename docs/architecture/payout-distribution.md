@@ -205,16 +205,17 @@ test with small values (for example 3 and 2).
 | Output expiry | `test_validate_prevouts_expires_coinbase_roots_below_payout_depth` (`shares/validation/mod.rs`) |
 | Fixture coinbases match | `test_fixture_coinbase_reconstruction_matches_bitcoin_merkle_root` (`shares/share_block/mod.rs`, mirrors the walk by hand) |
 
-The offline `pplns_compare` binary (`p2poolv2_sim`, `sim` feature) pays one
+The offline `pplns_compare` binary (`p2poolv2_sim`, `pplns-compare` feature) pays one
 drawn share chain per pool size with both window rules through the real
 `PplnsWindow` and prints window length, payout delay and income variance; see
 `docs/simulation/overview.md`.
 
 End to end, the sim `late-miner` scenario checks the maturity rule against real
-regtest coinbases (`load-tests/sim/maturity_check.py`, RUNBOOK Test G). It
-lowers the maturity through `sim_overrides::coinbase_maturity()`, which is the
-value `PplnsWindow::new` and `validate_prevouts` read; production builds
-always use `COINBASE_MATURITY`.
+regtest coinbases (`load-tests/sim/maturity_check.py`, RUNBOOK Test G). The
+sim build compiles shorter depths: `COINBASE_MATURITY` 20 and
+`PPLNS_WINDOW_SHARES` 80 under `cfg(feature = "sim")`, so a short run reaches
+the maturity skip. Production builds use 6,048 and 120,960. Bitcoin Cash's
+`BCH_COINBASE_MATURITY` (100) is the same in both builds.
 
 ## Example (N = 6,048)
 

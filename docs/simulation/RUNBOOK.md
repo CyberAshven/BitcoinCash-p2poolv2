@@ -340,13 +340,14 @@ The whole thing runs end to end, with the usual pass/fail verdict, via:
 
 ## 9. Test G — payout maturity (late miner)
 
-Checks that a block-find pays a miner only once its shares are mature. A short
-run needs a small maturity, so the swarm is launched with `MATURITY_SHARES`
-(written to every node's `[sim] coinbase_maturity`; consensus, so one value for
-all) and `LATE_MINER`, the node that starts with its emitter off:
+Checks that a block-find pays a miner only once its shares are mature. The
+sim build's coinbase maturity is 20 shares (a compile-time constant, logged by
+each node at startup as `Sim depths: coinbase maturity 20 shares, ...`), so a
+short run reaches it. The swarm is launched with `LATE_MINER`, the node that
+starts with its emitter off:
 
 ```sh
-IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 MATURITY_SHARES=50 LATE_MINER=1 \
+IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 LATE_MINER=1 \
   ./load-tests/sim/run-swarm.sh 10
 LATE_MINER=1 ./load-tests/sim/failures.sh late-miner
 ```
@@ -354,11 +355,11 @@ LATE_MINER=1 ./load-tests/sim/failures.sh late-miner
 Or end to end, with bitcoind setup and the nightly checks:
 
 ```sh
-IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 MATURITY_SHARES=50 LATE_MINER=1 \
+IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 LATE_MINER=1 \
   NODE_COUNT=10 ./load-tests/sim/nightly.sh late-miner
 ```
 
-The scenario waits for the tip to reach `2 * MATURITY_SHARES`, so the payout
+The scenario waits for the tip to reach twice the maturity, so the payout
 skip is at full size, restarts node 1 with its emitter on, and then runs
 `load-tests/sim/maturity_check.py` until it gives a verdict. The checker reads
 only the logs, the node 0 API and bitcoind. It maps each `sim block-find` line
@@ -366,15 +367,15 @@ only the logs, the node 0 API and bitcoind. It maps each `sim block-find` line
 coinbase:
 
 ```
-late miner: node 1 (bcrt1q...), coinbase maturity 50
-first late share: confirmed 131, confirmed or uncle 131
+late miner: node 1 (bcrt1q...), coinbase maturity 20
+first late share: confirmed 51, confirmed or uncle 51
 bitcoin block        paying_h  p-first  mature  late_paid
-3f1c0b9e2a7d4c11..        150       19      no         no
-9a02d7e4b1c35f80..        183       52     yes        yes
-maturity check: PASS (late miner first paid at paying height 183)
+3f1c0b9e2a7d4c11..         62       11      no         no
+9a02d7e4b1c35f80..         74       23     yes        yes
+maturity check: PASS (late miner first paid at paying height 74)
 ```
 
-It fails if the late miner is paid while `p - first < MATURITY_SHARES`, or is
+It fails if the late miner is paid while `p - first` is below the maturity, or is
 not paid by the first block-find past it. The full report is in
 `$RUN_DIR/maturity-check.txt`. Exit codes: 0 pass, 1 fail, 2 no qualifying
 block-find yet, 3 setup error (e.g. the late node shares its payout address
@@ -382,6 +383,73 @@ with another node; keep `DISTINCT_ADDR=1` and a loaded wallet).
 
 Spend maturity is not covered: sim shares carry no share transactions. Unit
 tests pin it.
+
+---
+
+## 9a. Test H — a fresh node joins pruned peers
+
+Checks that a node syncing from genesis gets everything it needs from peers
+that have pruned block bodies. The sim build prunes below 220 shares under
+the tip (prune depth 200 plus interval 20), every 30s, so the run is
+time-compressed to get there in minutes:
+
+```sh
+IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 NODE_COUNT=5 \
+  ./load-tests/sim/nightly.sh pruned-join
+```
+
+The scenario waits for the swarm tip to pass the prune depth plus three
+intervals and for every node to log `Pruned block bodies at heights ...`.
+It then kills one node, deletes its store, moves its log to
+`prejoin-node-<i>.log`, and restarts it. The fresh node must:
+
+- catch up to the swarm tip;
+- report the same confirmed hash as node 0 at a height it holds header-only
+  (below its own prune height) and at one near the tip;
+- get no `NotFound` reply to a body request, so it never asked for a body
+  its peers deleted;
+- log no `Failed to store and organise block`.
+
+The summary prints `pruned-join verdict: PASS` or `FAIL (<reasons>)`, and
+`verify_chain` then checks every store, the fresh one included.
+
+---
+
+## 9b. Test I — the reorg depth limit refuses a deep fork
+
+Checks that a node refuses to reorg onto a heavier branch whose fork point is
+below its prune target, instead of stalling on bodies every node has deleted.
+`FORK_GROUP_FROM` launches the swarm in two groups that never connect: nodes
+at that index and above dial only each other. Hashrate is zipf-weighted by
+index, so the lower group is heavier.
+
+```sh
+IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 NODE_COUNT=6 FORK_GROUP_FROM=4 HASHRATE=1e13 \
+  ./load-tests/sim/nightly.sh deep-fork-refused
+IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 NODE_COUNT=6 FORK_GROUP_FROM=4 HASHRATE=1e13 \
+  ./load-tests/sim/nightly.sh shallow-fork-reorged
+```
+
+`HASHRATE=1e13` matters. Each group's ASERT regulates its own rate, but the
+share target cannot get easier than the clamp (difficulty about 1,000). At
+1s shares a group needs about 4.3e12 H/s to keep pace; with the default
+1e12 per node the minority mines at a fraction of the rate and never reaches
+the prune target.
+
+`deep-fork-refused` waits for every node to prune, then restarts node
+`FORK_GROUP_FROM` with node 0 added to its `dial_peers` and watches it for
+`FORK_OBSERVE_SECS` (default 90). It passes when the node connects to node 0,
+logs `Refusing candidate reorg to <hash>: branch forks below the prune
+target`, keeps the same confirmed hash at a height below its tip, and keeps
+confirming, while node 0 keeps advancing. The convergence check is skipped.
+
+`shallow-fork-reorged` is the control: it reconnects at height 60, before any
+node prunes. The node must log no refusal and end up with node 0's confirmed
+hash, and the normal convergence check applies. Height 60 also keeps the fork
+within the sim PPLNS window cache (about 120 entries), which bounds how deep a
+fork a node can pay out for.
+
+The summary prints `fork verdict: PASS` or `FAIL (<reasons>)`.
 
 ---
 
@@ -397,6 +465,7 @@ tests pin it.
 | PIDs               | `/tmp/p2pool-sim/pids.txt` (line `i+1` is node `i`)        |
 | Failure summary    | `/tmp/p2pool-sim/failure-results.txt`                     |
 | Maturity report    | `/tmp/p2pool-sim/maturity-check.txt` (late-miner only)    |
+| Pre-wipe log       | `/tmp/p2pool-sim/prejoin-node-<i>.log` (pruned-join only) |
 | Node APIs          | `http://127.0.0.1:760<i>` (node i)                        |
 | regtest bitcoind   | datadir `/tmp/p2pool-regtest`, RPC `:19443`, ZMQ `:28332` |
 
@@ -428,10 +497,9 @@ curl -s :7600/chain_info | jq            # tip/candidate heights (prefer logs fo
 | `SHARES_PER_BLOCK`                              | 10000           | shares per block-find (lower = more blocks)                                                                        |
 | `LATENCY_MS`                         | 0               | per-node outbound announce delay (raise for uncles)                                                                |
 | `IDEAL_BLOCK_TIME`                   | 10              | share interval (s); lower = time-compressed, more blocks/min for faster data (auto-scales `LATENCY_MS`); floor ~1s |
-| `WINDOW_SHARES`                      | = `SHARES_PER_BLOCK`       | PPLNS payout window in shares (how many miners appear in a coinbase)                                               |
 | `HASHRATE`                           | 1.0e12          | modeled per-node hashrate (higher = faster shares)                                                                 |
-| `MATURITY_SHARES`                    | 6048            | coinbase maturity in shares, for payout and spending; lower it so a short run reaches the payout maturity skip (Test G) |
 | `LATE_MINER`                         | unset           | node index launched with its emitter off, for `failures.sh late-miner` (Test G)                                    |
+| `FORK_GROUP_FROM`                    | unset           | split the swarm: nodes at this index and above dial only each other, for the fork scenarios (Test I)               |
 | `DISTINCT_ADDR`                      | 1               | each node gets its own payout address via the wallet                                                               |
 | `DIAL_FANOUT`                        | 3               | how many earlier peers each node dials                                                                             |
 | `PROFILE`                            | release         | `release` or `debug`                                                                                               |

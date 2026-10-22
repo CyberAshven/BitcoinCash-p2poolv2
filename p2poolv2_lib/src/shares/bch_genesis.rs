@@ -206,6 +206,67 @@ mod tests {
         assert_eq!(main.header.bits.to_consensus(), MAIN_ANCHOR_TARGET);
     }
 
+    // The Bitcoin Cash genesis shares, pinned. Their hashes name the share
+    // chain in every protocol string, so a change to anything they are built
+    // from (the regtest genesis entry's key and timestamp, the anchor blocks,
+    // the share coinbase or header encoding) would split the network. These
+    // values were computed before and after the upstream sync through
+    // `61810c56`, which moved the Bitcoin genesis blocks to `.dat` files.
+
+    #[test]
+    fn mainnet_main_genesis_hash_is_pinned() {
+        let genesis = build(BchShareNetwork::Mainnet, BchShareChain::Main).unwrap();
+        assert_eq!(
+            genesis.block_hash().to_string(),
+            "fcfb781625666857d4e0c29611554f5f4f571a40050c2a40ba8ff11b09864dd7"
+        );
+    }
+
+    #[test]
+    fn mainnet_mini_genesis_hash_is_pinned() {
+        let genesis = build(BchShareNetwork::Mainnet, BchShareChain::Mini).unwrap();
+        assert_eq!(
+            genesis.block_hash().to_string(),
+            "a29f2325c28df2fca698226eab445f2714b70b3b0a78fd72f5b869143c15d306"
+        );
+    }
+
+    #[test]
+    fn chipnet_main_genesis_hash_is_pinned() {
+        let genesis = build(BchShareNetwork::Chipnet, BchShareChain::Main).unwrap();
+        assert_eq!(
+            genesis.block_hash().to_string(),
+            "f8f765715e48ea06bd67d6594862f9848ef302c0f1b6d8cd0a5d27855f64022e"
+        );
+    }
+
+    #[test]
+    fn chipnet_mini_genesis_hash_is_pinned() {
+        let genesis = build(BchShareNetwork::Chipnet, BchShareChain::Mini).unwrap();
+        assert_eq!(
+            genesis.block_hash().to_string(),
+            "f7cfe7591c0092417cc1dcaa85d170a8affc40eb613ce26dd0d13609c08aecee"
+        );
+    }
+
+    #[test]
+    fn regtest_main_genesis_hash_is_pinned() {
+        let genesis = build(BchShareNetwork::Regtest, BchShareChain::Main).unwrap();
+        assert_eq!(
+            genesis.block_hash().to_string(),
+            "6e579538ad3102851eb5232046c282b67a3fe13f6bad3f3ae8c1023fa3f1d5f7"
+        );
+    }
+
+    #[test]
+    fn regtest_mini_genesis_hash_is_pinned() {
+        let genesis = build(BchShareNetwork::Regtest, BchShareChain::Mini).unwrap();
+        assert_eq!(
+            genesis.block_hash().to_string(),
+            "07849a807e07009682212cdd846a03875238b496529311e9b9a1651066680717"
+        );
+    }
+
     #[test]
     fn bitcoin_stratum_keeps_the_taproot_genesis() {
         let config = crate::config::StratumConfig::new_for_test_default();

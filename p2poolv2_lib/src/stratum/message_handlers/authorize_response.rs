@@ -336,6 +336,7 @@ mod tests {
             Some("x".to_string()),
         );
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -358,6 +359,7 @@ mod tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
@@ -430,6 +432,7 @@ mod tests {
             Some("password".to_string()),
         );
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let tracker_handle = start_tracker_actor();
         let stats_dir = tempfile::tempdir().unwrap();
@@ -452,6 +455,7 @@ mod tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
@@ -564,6 +568,7 @@ mod tests {
             Some("x".to_string()),
         );
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let tracker_handle = start_tracker_actor();
         let stats_dir = tempfile::tempdir().unwrap();
@@ -587,6 +592,7 @@ mod tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
@@ -665,6 +671,7 @@ mod tests {
             Some("d=500".to_string()),
         );
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -687,6 +694,7 @@ mod tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
@@ -726,6 +734,7 @@ mod tests {
             Some("d=50".to_string()),
         );
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -748,6 +757,7 @@ mod tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
@@ -788,6 +798,7 @@ mod tests {
             Some("x".to_string()),
         );
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let tracker_handle = start_tracker_actor();
         let stats_dir = tempfile::tempdir().unwrap();
@@ -811,6 +822,7 @@ mod tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
@@ -856,6 +868,7 @@ mod tests {
             params: std::borrow::Cow::Owned(vec![]),
         };
         let (emissions_tx, _) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let tracker_handle = start_tracker_actor();
         let stats_dir = tempfile::tempdir().unwrap();
@@ -878,6 +891,7 @@ mod tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
@@ -931,6 +945,7 @@ mod p2p_miner_address_tests {
             Some(format!("p2p={SHARE_ADDRESS}")),
         );
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -953,6 +968,7 @@ mod p2p_miner_address_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
@@ -981,6 +997,7 @@ mod p2p_miner_address_tests {
         let request =
             SimpleRequest::new_authorize(12345, BITCOIN_ADDRESS.to_string(), Some("x".to_string()));
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -1003,6 +1020,7 @@ mod p2p_miner_address_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1029,6 +1047,7 @@ mod p2p_miner_address_tests {
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
         let request = SimpleRequest::new_authorize(12345, BITCOIN_ADDRESS.to_string(), None);
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -1051,6 +1070,7 @@ mod p2p_miner_address_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1081,6 +1101,7 @@ mod p2p_miner_address_tests {
             Some("p2p=not-a-share-address".to_string()),
         );
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -1103,6 +1124,7 @@ mod p2p_miner_address_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle.clone(),
             chain_store_handle,
@@ -1177,6 +1199,7 @@ mod p2p_miner_address_tests {
             Some(format!("p2p={SHARE_ADDRESS},d=500")),
         );
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -1199,6 +1222,7 @@ mod p2p_miner_address_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1235,6 +1259,7 @@ mod p2p_miner_address_tests {
             Some(format!("p2p={SHARE_ADDRESS}")),
         );
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -1257,6 +1282,7 @@ mod p2p_miner_address_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle.clone(),
             chain_store_handle,
@@ -1305,6 +1331,7 @@ mod p2p_miner_address_tests {
         let configured = make_test_share_address(2, bitcoin::Network::Testnet4);
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -1327,6 +1354,7 @@ mod p2p_miner_address_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
