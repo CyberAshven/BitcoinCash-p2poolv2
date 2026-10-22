@@ -18,6 +18,7 @@ use crate::api::endpoints::miner::MinerResponse;
 use crate::api::endpoints::share::ShareLookupOutput;
 use bitcoin::BlockHash;
 use maud::{DOCTYPE, Markup, html};
+use serde::Serialize;
 
 /// Seconds between refreshes of the overview page.
 pub(crate) const OVERVIEW_REFRESH_SECONDS: u32 = 30;
@@ -25,7 +26,9 @@ pub(crate) const OVERVIEW_REFRESH_SECONDS: u32 = 30;
 /// Rows on one page of a long table.
 pub(crate) const PAGE_SIZE: usize = 25;
 
-/// What every page shows about the node it is served by.
+/// What every page shows about the node it is served by. `/network` serves
+/// it as JSON for frontends such as `p2poolv2_web`.
+#[derive(Serialize)]
 pub(crate) struct Site {
     /// The chain this node mines, for example "Bitcoin Cash chipnet".
     pub(crate) network: String,
@@ -160,7 +163,8 @@ pub(crate) struct BlockView {
     pub(crate) block: FoundBlockRow,
 }
 
-/// A worker of a miner on this node.
+/// A worker of a miner on this node. `/miners` serves the same rows as JSON.
+#[derive(Serialize)]
 pub(crate) struct WorkerRow {
     pub(crate) name: String,
     pub(crate) active: bool,
@@ -170,7 +174,9 @@ pub(crate) struct WorkerRow {
     pub(crate) last_share_at: u64,
 }
 
-/// A miner on this node, for the miners page.
+/// A miner on this node, for the miners page. `/miners` serves the same rows
+/// as JSON.
+#[derive(Serialize)]
 pub(crate) struct MinerRow {
     pub(crate) address: String,
     pub(crate) workers: Vec<WorkerRow>,
@@ -284,11 +290,11 @@ pub(crate) fn short(hash: &str) -> String {
     format!("{head}…{tail}")
 }
 
-fn optional(value: Option<f64>, format: fn(f64) -> String) -> String {
+pub(crate) fn optional(value: Option<f64>, format: fn(f64) -> String) -> String {
     value.map(format).unwrap_or_else(|| "—".to_string())
 }
 
-fn percent(fraction: f64) -> String {
+pub(crate) fn percent(fraction: f64) -> String {
     format!("{:.2}%", fraction * 100.0)
 }
 
@@ -914,7 +920,7 @@ pub(crate) fn help(site: &Site) -> Markup {
                     li { code { "/chain_info" } ", " code { "/shares" } ", " code { "/share?hash=" } ", " code { "/share_headers" } }
                     li { code { "/miner?address=" } ": a miner's shares and its part of the next payout" }
                     li { code { "/pplns_shares" } ", " code { "/candidates" } ", " code { "/dag" } ", " code { "/transaction" } }
-                    li { code { "/hashrate" } ", " code { "/found_blocks" } }
+                    li { code { "/hashrate" } ", " code { "/found_blocks" } ", " code { "/miners" } ", " code { "/network" } }
                     li { code { "/metrics" } " (Prometheus) and " code { "/peers" } ": always behind the API login" }
                 }
             }

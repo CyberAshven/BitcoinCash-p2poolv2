@@ -17,6 +17,8 @@ pub(crate) mod assets;
 pub(crate) mod chart;
 pub(crate) mod history;
 pub(crate) mod pages;
+#[cfg(test)]
+mod style_guard;
 
 use crate::api::endpoints::MAX_NUM_SHARES_IN_RESPONSE;
 use crate::api::endpoints::miner::miner_report;
@@ -73,8 +75,8 @@ pub(crate) fn router(app: Arc<AppState>, history: Arc<HashrateHistory>) -> Route
 }
 
 /// How the dashboard names the chain this node mines, in full and in the
-/// header badge.
-fn site(state: &AppState) -> Site {
+/// header badge. `/network` serves the same value as JSON.
+pub(crate) fn site(state: &AppState) -> Site {
     let (network, badge) = match state.app_config.cash_network {
         Some(BchShareNetwork::Mainnet) => ("Bitcoin Cash mainnet".to_string(), "mainnet"),
         Some(BchShareNetwork::Chipnet) => ("Bitcoin Cash chipnet".to_string(), "chipnet"),
@@ -222,7 +224,7 @@ fn payout_address_display(state: &AppState, stored: &str) -> String {
 }
 
 /// The miners on this node with their workers, by accepted work, most first.
-async fn local_miners(state: &AppState) -> Vec<MinerRow> {
+pub(crate) async fn local_miners(state: &AppState) -> Vec<MinerRow> {
     let metrics = state.metrics_handle.get_metrics().await;
     let mut miners: Vec<MinerRow> = metrics
         .users
@@ -259,6 +261,49 @@ async fn local_miners(state: &AppState) -> Vec<MinerRow> {
     miners
 }
 
+/// How many of `miners` have a worker online, and how many workers are
+/// online in all.
+pub(crate) fn online_counts(miners: &[MinerRow]) -> (usize, usize) {
+    let miners_online = miners
+        .iter()
+        .filter(|miner| miner.workers.iter().any(|worker| worker.active))
+        .count();
+    let workers_online = miners
+        .iter()
+        .map(|miner| miner.workers.iter().filter(|worker| worker.active).count())
+        .sum();
+    (miners_online, workers_online)
+}
+
+/// Whether a miner on this node is the one looked up as `typed`, which the
+/// window lookup spells `canonical` (a payout address may be typed without
+/// its prefix).
+pub(crate) fn is_looked_up_miner(miner: &MinerRow, typed: &str, canonical: Option<&str>) -> bool {
+    miner.address == typed || canonical.is_some_and(|canonical| miner.address == canonical)
+}
+
+/// Page `page` of `miners`, each with its fraction of the next block's
+/// payout. Only this page's miners are looked up in the window.
+pub(crate) async fn miners_page(
+    state: &AppState,
+    miners: Vec<MinerRow>,
+    page: Option<usize>,
+) -> (Vec<MinerRow>, Paging) {
+    let paging = Paging::of(page, miners.len());
+    let mut shown: Vec<MinerRow> = miners
+        .into_iter()
+        .skip((paging.page - 1) * PAGE_SIZE)
+        .take(PAGE_SIZE)
+        .collect();
+    for miner in &mut shown {
+        miner.payout_fraction = miner_report(state, &miner.address, 1)
+            .await
+            .ok()
+            .map(|report| report.payout_fraction);
+    }
+    (shown, paging)
+}
+
 async fn overview(
     State(dashboard): State<Arc<DashboardState>>,
     Query(query): Query<PageQuery>,
@@ -276,17 +321,7 @@ async fn overview(
         Ok(chain) => chain,
         Err(error) => return error_page(state, error),
     };
-    let metrics = state.metrics_handle.get_metrics().await;
-    let miners_online = metrics
-        .users
-        .values()
-        .filter(|user| user.workers.values().any(|worker| worker.active))
-        .count();
-    let workers_online = metrics
-        .users
-        .values()
-        .map(|user| user.workers.values().filter(|worker| worker.active).count())
-        .sum();
+    let (miners_online, workers_online) = online_counts(&local_miners(state).await);
     let network_difficulty = state.tracker_handle.get_network_difficulty();
     let samples = dashboard.history.samples();
     let local_hashrate = samples.iter().rev().find_map(|sample| sample.local);
@@ -365,20 +400,7 @@ async fn miners(
     Query(query): Query<PageQuery>,
 ) -> Response {
     let state = &dashboard.app;
-    let all = local_miners(state).await;
-    let paging = Paging::of(query.page, all.len());
-    let mut miners: Vec<MinerRow> = all
-        .into_iter()
-        .skip((paging.page - 1) * PAGE_SIZE)
-        .take(PAGE_SIZE)
-        .collect();
-    // Only this page's miners are looked up in the window.
-    for miner in &mut miners {
-        miner.payout_fraction = miner_report(state, &miner.address, 1)
-            .await
-            .ok()
-            .map(|report| report.payout_fraction);
-    }
+    let (miners, paging) = miners_page(state, local_miners(state).await, query.page).await;
     html(pages::miners(&MinersView {
         site: site(state),
         now: unix_now(),
@@ -445,7 +467,7 @@ async fn miner(
     let workers = local_miners(state)
         .await
         .into_iter()
-        .find(|miner| miner.address == report.address || miner.address == address)
+        .find(|miner| is_looked_up_miner(miner, address, Some(&report.address)))
         .map(|miner| miner.workers)
         .unwrap_or_default();
     let paging = Paging::of(query.page, report.shares.len());
@@ -877,6 +899,125 @@ mod tests {
         assert!(body.contains("has not found a block"));
         let (status, _, _) = get(&state, "/dashboard/block/nope").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_network_is_named_as_the_header_names_it() {
+        let (state, _store, _metrics) = build_state(None, Some(BchShareNetwork::Chipnet)).await;
+        let (status, body, _) = get(&state, "/network").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            r#"{"network":"Bitcoin Cash chipnet","badge":"chipnet"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn the_miners_page_is_served_as_json() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        let (status, body, _) = get(&state, "/miners?page=3").await;
+        assert_eq!(status, StatusCode::OK);
+        let miners: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(miners["miners_online"], 0);
+        assert_eq!(miners["workers_online"], 0);
+        assert_eq!(miners["total"], 0);
+        assert_eq!(miners["page"], 1);
+        assert_eq!(miners["pages"], 1);
+        assert_eq!(miners["page_size"], PAGE_SIZE);
+        assert_eq!(miners["miners"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_public_node_opens_the_miners_and_the_network() {
+        let (state, _store, _metrics) = build_state(Some(("operator", "secret-token")), None).await;
+        let (status, _, _) = get_with(&state, "/miners", public()).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, _) = get_with(&state, "/network", public()).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, _) = get(&state, "/miners").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn a_miner_row_serializes_as_the_wasm_app_reads_it() {
+        // p2poolv2_web's `LocalMiner` and `Worker` decode these names.
+        let row = MinerRow {
+            address: "bchtest:q".to_string(),
+            workers: vec![WorkerRow {
+                name: "rig".to_string(),
+                active: true,
+                accepted_work: 10,
+                best_share: 5,
+                last_share_at: 9,
+            }],
+            accepted_work: 10,
+            best_share: 5,
+            last_share_at: 9,
+            payout_fraction: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&row).unwrap(),
+            serde_json::json!({
+                "address": "bchtest:q",
+                "workers": [{
+                    "name": "rig",
+                    "active": true,
+                    "accepted_work": 10,
+                    "best_share": 5,
+                    "last_share_at": 9
+                }],
+                "accepted_work": 10,
+                "best_share": 5,
+                "last_share_at": 9,
+                "payout_fraction": null
+            })
+        );
+    }
+
+    #[test]
+    fn online_counts_count_active_workers() {
+        let miner = |active: &[bool]| MinerRow {
+            address: "bchtest:q".to_string(),
+            workers: active
+                .iter()
+                .map(|active| WorkerRow {
+                    name: "rig".to_string(),
+                    active: *active,
+                    accepted_work: 1,
+                    best_share: 1,
+                    last_share_at: 1,
+                })
+                .collect(),
+            accepted_work: 1,
+            best_share: 1,
+            last_share_at: 1,
+            payout_fraction: None,
+        };
+        let miners = [miner(&[true, false, true]), miner(&[false]), miner(&[])];
+        assert_eq!(online_counts(&miners), (1, 2));
+    }
+
+    #[test]
+    fn a_looked_up_miner_matches_either_spelling() {
+        let miner = MinerRow {
+            address: "qpayout".to_string(),
+            workers: Vec::new(),
+            accepted_work: 0,
+            best_share: 0,
+            last_share_at: 0,
+            payout_fraction: None,
+        };
+        assert!(is_looked_up_miner(&miner, "qpayout", None));
+        assert!(is_looked_up_miner(
+            &miner,
+            "bchtest:qpayout",
+            Some("qpayout")
+        ));
+        assert!(!is_looked_up_miner(
+            &miner,
+            "bchtest:qpayout",
+            Some("bchtest:qpayout")
+        ));
     }
 
     #[tokio::test]
