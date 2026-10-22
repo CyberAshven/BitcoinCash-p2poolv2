@@ -1,10 +1,22 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>P2Pool Dashboard</title>
-    <link data-trunk rel="css" href="style.css" />
+    <title>P2Pool v2</title>
+    <!--
+      The node's own stylesheets, fonts and logos are the only styling source.
+      Trunk bundles them from p2poolv2_api/src/api/dashboard/assets/, so this
+      app and the pages the node renders look the same. The fonts sit next to
+      the bundled stylesheets, where dashboard.css's url()s look for them.
+    -->
+    <link data-trunk rel="icon" href="../p2poolv2_api/src/api/dashboard/assets/logo-circle.svg" />
+    <link data-trunk rel="css" href="../p2poolv2_api/src/api/dashboard/assets/pico.min.css" />
+    <link data-trunk rel="css" href="../p2poolv2_api/src/api/dashboard/assets/dashboard.css" />
+    <link data-trunk rel="css" href="../p2poolv2_api/src/api/dashboard/assets/pages.css" />
+    <link data-trunk rel="copy-file" href="../p2poolv2_api/src/api/dashboard/assets/ubuntu-400.woff2" />
+    <link data-trunk rel="copy-file" href="../p2poolv2_api/src/api/dashboard/assets/ubuntu-700.woff2" />
+    <link data-trunk rel="copy-file" href="../p2poolv2_api/src/api/dashboard/assets/logo-horizontal-wt.svg" />
     <link data-trunk rel="rust" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" />
   </head>
   <body></body>
