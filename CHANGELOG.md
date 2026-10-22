@@ -11,6 +11,11 @@ Share trading for Bitcoin Cash (decision 13). This changes the share
 chain's rules, not Bitcoin Cash consensus: nodes start from a new store,
 and Bitcoin Cash protocol strings carry `trade-htlc`.
 
+Synced with upstream P2Poolv2 through `61810c56` (its v0.16.2). The fork
+keeps version `0.0.1-alpha`. Bitcoin Cash genesis shares, protocol strings,
+the PPLNS window and maturity, the ASERT parent anchor and the donation and
+fee cap are unchanged, so chipnet nodes keep their store.
+
 ### Added
 
 - Bitcoin Cash share trading: a miner sells share units for BCH with one
@@ -22,6 +27,23 @@ and Bitcoin Cash protocol strings carry `trade-htlc`.
 - `p2poolv2_cli bch-trade` (`contract`, `inspect`, `secret-hash`, `lock`,
   `claim`, `refund`, `extract-secret`) builds and signs both legs offline,
   with a WIF key read from a file or a hidden prompt and never generated.
+- Nodes delete block bodies more than `PRUNE_DEPTH + PRUNE_INTERVAL`
+  (254,376) shares below the confirmed tip, in a background task every 6
+  hours while the node is current (from upstream). Headers and their merkle
+  branches are kept, so pruned nodes still serve header sync from genesis,
+  and the candidate chain refuses a reorg whose fork point is below the prune
+  target or less than `MAX_UNCLES_DEPTH` above it. On Bitcoin Cash the PPLNS
+  window reads only headers and reaches at most 121,063 shares deep (100
+  maturity, the 120,960-share cap and uncle depth 3), inside `PAYOUT_DEPTH`
+  (127,008); production builds assert this at compile time. The API's
+  `/share?full=true` marks a pruned share with `"pruned": true`.
+- Built-in DNS seeds as a fallback when no peer is connected, with a
+  `network.dns_seed` option (from upstream; only Bitcoin testnet4 has seeds).
+  They are always off on Bitcoin Cash, whatever `dns_seed` says: the seeds
+  are Bitcoin P2Poolv2 nodes and there are no Bitcoin Cash seeds yet. A
+  Bitcoin Cash node finds peers through `dial_peers` only.
+- The `pplns-compare` feature of `p2poolv2_sim` builds `pplns_compare` with
+  production window sizes; the `sim` feature now shortens them.
 
 ### Changed
 
@@ -31,6 +53,30 @@ and Bitcoin Cash protocol strings carry `trade-htlc`.
   dust threshold (546 or 576 units), so `OP_RETURN`, P2SH20 and dust outputs
   invalidate a share; and a share transaction must be final at its share's
   height. Bitcoin keeps upstream's rules.
+- `network.dial_peers` is optional and defaults to empty, and a node without
+  a `listen_address` still dials its `dial_peers` (from upstream).
+- Hydrapool shares go to a dedicated PPLNS share worker and are stored only
+  when their hash meets the difficulty they are credited at, the session
+  difficulty on Stratum V1 and the channel target on Stratum V2 (from
+  upstream). Only P2Poolv2 mode emits shares to the share chain, and a share
+  whose coinbase proof cannot be built is no longer emitted.
+- Bitcoin genesis shares load from raw `.dat` files, and the Bitcoin testnet4
+  genesis moves to a new block and timestamp (from upstream). Bitcoin Cash
+  genesis shares are built by `bch_genesis` and do not change.
+- The sim build compiles short depths (`COINBASE_MATURITY` 20,
+  `PPLNS_WINDOW_SHARES` 80, `PRUNE_DEPTH` 200, `PRUNE_INTERVAL` 20, background
+  tasks every 30 s) instead of the `[sim] coinbase_maturity` option (from
+  upstream). Bitcoin Cash's 100-share maturity is the same in every build.
+
+### Removed
+
+- The `store.background_task_frequency_hours` option (from upstream). Existing
+  configs that set it still load.
+- The `[sim] coinbase_maturity` option.
+
+### Security
+
+- Updated `rustls-webpki` to 0.103.16 (from upstream).
 
 ## [v0.0.1-alpha] - 2026-10-18, refreshed 2026-10-19 and 2026-10-22
 
@@ -100,6 +146,14 @@ The pre-release is refreshed in place with `main` until the beta.
 
 ### Fixed
 
+- A Stratum V2 channel starts at the difficulty its declared
+  `nominal_hash_rate` settles on, within the node's minimum and maximum,
+  as the SV2 spec asks. Before, every channel started at `start_difficulty`,
+  which left a small device days from its first share. A channel that
+  declares no rate still starts at `start_difficulty`.
+- A Bitcoin Cash share address in `p2p=` ends at its first dot, so the
+  `.<worker>` the Stratum V2 reference translator appends to a channel's
+  `user_identity` no longer makes the node refuse the channel.
 - A share header with a donation or fee above 10,000 basis points no longer
   panics the validating node; such shares are rejected.
 - Stratum usernames on a Bitcoin Cash node accept CashAddr payout addresses.

@@ -10,6 +10,13 @@ are calculated via PPLNS and paid directly from coinbase transactions.
 Project name is P2Poolv2 (no whitespace). Rust edition 2024, minimum
 rust-version 1.88.
 
+## Languages (Bitcoin Cash fork)
+
+All code is Rust. CSS and HTML are allowed for styling only: the
+dashboard's pages are rendered by Rust and load no script, and the WASM
+dashboard's only JavaScript is the loader `wasm-bindgen` generates. Don't
+add hand-written JavaScript, TypeScript or Python.
+
 ## Branches and releases (Bitcoin Cash fork)
 
 This fork, `CyberAshven/BitcoinCash-p2poolv2`, has two branches:
@@ -56,7 +63,8 @@ Read `docs/architecture/` when working in the relevant area:
 - `async-flow.md` -- worker tasks, channel topology, backpressure
 - `store-schema.md` -- RocksDB column families, key encoding, merge ops
 - `store-architecture.md` -- read/write separation, StoreWriter thread
-- `pruning.md` -- TTL-based share pruning
+- `pruning.md` -- two-zone validation, output expiry, and block body
+  pruning (derived boundaries, pruner, reorg depth limit, decisions)
 - `payout-distribution.md` -- how a found block's coinbase is split:
   anchor, maturity skip, PPLNS window, uncle weighting, cuts, and the
   depths sized by `PAYOUT_DEPTH`

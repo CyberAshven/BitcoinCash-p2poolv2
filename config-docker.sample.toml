@@ -1,6 +1,10 @@
 [network]
 listen_address = "/ip4/0.0.0.0/tcp/6884"
 dial_peers = []
+# Resolve the built-in DNS seeds for this network at startup and dial the
+# returned nodes. Set false to rely only on dial_peers. Always off on
+# Bitcoin Cash (chain = "bitcoin-cash"), which has no DNS seeds yet.
+# dns_seed = true
 max_pending_incoming = 10
 max_pending_outgoing = 10
 max_established_incoming = 50
@@ -19,7 +23,6 @@ dial_timeout_secs = 30
 
 [store]
 path = "/p2poolv2/data/store.db"
-background_task_frequency_hours = 24
 pplns_ttl_days = 7
 
 [stratum]

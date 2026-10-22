@@ -6,16 +6,19 @@
 //!
 //! Pages are HTML built on the server from the same store, PPLNS window and
 //! metrics the JSON API reads, so the dashboard and the API cannot disagree.
-//! The browser runs no script. The routes sit behind the API's
-//! authentication unless `[api] public_dashboard` opens them: a node with
-//! `auth_user` set answers with a Basic challenge, which browsers turn into
-//! their own login prompt.
+//! The design is CashDragon0's (PR #8); its stylesheets, font and logo are
+//! compiled into the binary ([`assets`]). The browser runs no script: pages
+//! link to each other, search is a plain form, and long tables have pages.
+//! The routes sit behind the API's authentication unless
+//! `[api] public_dashboard` opens them: a node with `auth_user` set answers
+//! with a Basic challenge, which browsers turn into their own login prompt.
 
+pub(crate) mod assets;
 pub(crate) mod chart;
 pub(crate) mod history;
 pub(crate) mod pages;
-pub(crate) mod style;
 
+use crate::api::endpoints::MAX_NUM_SHARES_IN_RESPONSE;
 use crate::api::endpoints::miner::miner_report;
 use crate::api::endpoints::share::build_share_output;
 use crate::api::error::ApiError;
@@ -23,30 +26,28 @@ use crate::api::server::AppState;
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
-use bitcoin::BlockHash;
+use bitcoin::{BlockHash, Target};
 use history::{HashrateHistory, is_block, newest_shares, pool_hashrate, work_from_bits};
+use maud::Markup;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::address_display::payout_address_string;
-use pages::{FoundBlockRow, MinerView, Overview, RecentShare, ShareView};
+use pages::{
+    BlockView, BlocksView, FoundBlockRow, MinerRow, MinerView, MinersView, Overview, PAGE_SIZE,
+    Paging, ShareRow, ShareView, Site, WorkerRow,
+};
 use serde::Deserialize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Shares listed on the overview.
-const RECENT_SHARES: u32 = 25;
-
 /// Shares a miner's hashrate is estimated from.
 const MINER_HASHRATE_SHARES: u32 = 500;
 
-/// Most window shares listed on a miner's page.
-const MINER_SHARES_LISTED: usize = 100;
-
-/// Most found blocks listed on the overview.
-const BLOCKS_LISTED: usize = 50;
+/// Found blocks the overview lists; the blocks page has them all.
+const RECENT_BLOCKS: usize = 5;
 
 /// What the dashboard handlers share: the API's state and the history its
 /// sampler fills.
@@ -60,18 +61,29 @@ pub(crate) struct DashboardState {
 pub(crate) fn router(app: Arc<AppState>, history: Arc<HashrateHistory>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/dashboard", get(overview))
+        .route("/dashboard/blocks", get(blocks))
+        .route("/dashboard/block/{hash}", get(block))
+        .route("/dashboard/miners", get(miners))
         .route("/dashboard/miner", get(miner))
         .route("/dashboard/share/{hash}", get(share))
+        .route("/dashboard/help", get(help))
+        .route("/dashboard/search", get(search))
+        .route("/dashboard/assets/{name}", get(assets::serve))
         .with_state(Arc::new(DashboardState { app, history }))
 }
 
-/// How the dashboard names the chain this node mines.
-fn network_name(state: &AppState) -> String {
-    match state.app_config.cash_network {
-        Some(BchShareNetwork::Mainnet) => "Bitcoin Cash mainnet".to_string(),
-        Some(BchShareNetwork::Chipnet) => "Bitcoin Cash chipnet".to_string(),
-        Some(BchShareNetwork::Regtest) => "Bitcoin Cash regtest".to_string(),
-        None => format!("Bitcoin {}", state.app_config.network),
+/// How the dashboard names the chain this node mines, in full and in the
+/// header badge.
+fn site(state: &AppState) -> Site {
+    let (network, badge) = match state.app_config.cash_network {
+        Some(BchShareNetwork::Mainnet) => ("Bitcoin Cash mainnet".to_string(), "mainnet"),
+        Some(BchShareNetwork::Chipnet) => ("Bitcoin Cash chipnet".to_string(), "chipnet"),
+        Some(BchShareNetwork::Regtest) => ("Bitcoin Cash regtest".to_string(), "regtest"),
+        None => (format!("Bitcoin {}", state.app_config.network), "bitcoin"),
+    };
+    Site {
+        network,
+        badge: badge.to_string(),
     }
 }
 
@@ -80,6 +92,10 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or_default()
+}
+
+fn html(markup: Markup) -> Response {
+    Html(markup.into_string()).into_response()
 }
 
 /// Run a synchronous store read on a blocking thread.
@@ -101,57 +117,89 @@ fn error_page(state: &AppState, error: ApiError) -> Response {
         ApiError::ServiceUnavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
         ApiError::ServerError(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
     };
-    (
-        status,
-        Html(pages::error(&network_name(state), &message).into_string()),
-    )
-        .into_response()
+    (status, html(pages::error(&site(state), &message))).into_response()
 }
 
-/// The newest confirmed shares, newest first, with the tip height.
-fn recent_shares(state: &AppState) -> (Option<u32>, Vec<RecentShare>) {
-    let shares = newest_shares(state, RECENT_SHARES);
-    let store = state.chain_store_handle.store_handle().store();
-    let tip = shares.last().map(|share| share.height);
-    let recent = shares
-        .iter()
-        .rev()
-        .map(|share| {
-            let display = ShareInfoDisplay::from_share_info(
-                share,
-                Some(state.app_config.network),
-                state.app_config.cash_network,
-            );
-            RecentShare {
-                height: share.height,
-                blockhash: share.blockhash.to_string(),
-                time: share.timestamp,
-                payout_address: display.miner_bitcoin_address,
-                is_block: store
-                    .get_share_header(&share.blockhash)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|header| is_block(&header.bitcoin_header)),
-            }
-        })
-        .collect();
-    (tip, recent)
+/// A `?page=` query, counted from 1.
+#[derive(Deserialize)]
+struct PageQuery {
+    page: Option<usize>,
 }
 
-/// Blocks the pool found, as the store records them on confirmation: how
-/// many in all, and the newest few, newest first.
-fn found_blocks(state: &AppState) -> (usize, Vec<FoundBlockRow>) {
+/// Whether the share `blockhash` met its own Bitcoin Cash block target.
+fn share_found_a_block(state: &AppState, blockhash: &BlockHash) -> bool {
+    state
+        .chain_store_handle
+        .store_handle()
+        .store()
+        .get_share_header(blockhash)
+        .ok()
+        .flatten()
+        .is_some_and(|header| is_block(&header.bitcoin_header))
+}
+
+/// One page of the confirmed share chain, newest first, each share followed
+/// by the uncles it includes, with the tip height.
+fn share_page(state: &AppState, page: Option<usize>) -> (Option<u32>, Paging, Vec<ShareRow>) {
+    let Ok(Some(tip)) = state.chain_store_handle.get_tip_height() else {
+        return (None, Paging::of(None, 0), Vec::new());
+    };
+    let paging = Paging::of(page, tip as usize + 1);
+    let skipped = u32::try_from((paging.page - 1) * PAGE_SIZE).unwrap_or(u32::MAX);
+    let newest = tip.saturating_sub(skipped);
+    let oldest = newest.saturating_sub(PAGE_SIZE as u32 - 1);
+    let shares = state
+        .chain_store_handle
+        .store_handle()
+        .store()
+        .query_shares(oldest, newest)
+        .unwrap_or_default();
+    let mut rows = Vec::with_capacity(shares.len());
+    for share in shares.iter().rev() {
+        let display = ShareInfoDisplay::from_share_info(
+            share,
+            Some(state.app_config.network),
+            state.app_config.cash_network,
+        );
+        rows.push(ShareRow {
+            height: Some(share.height),
+            blockhash: share.blockhash.to_string(),
+            time: share.timestamp,
+            payout_address: display.miner_bitcoin_address,
+            share_address: display.miner_address,
+            difficulty: Some(Target::from_compact(share.bits).difficulty_float()),
+            is_uncle: false,
+            is_block: share_found_a_block(state, &share.blockhash),
+        });
+        for uncle in display.uncles {
+            rows.push(ShareRow {
+                height: uncle.height,
+                blockhash: uncle.blockhash.to_string(),
+                time: uncle.timestamp,
+                payout_address: uncle.miner_bitcoin_address,
+                share_address: uncle.miner_address,
+                difficulty: None,
+                is_uncle: true,
+                is_block: share_found_a_block(state, &uncle.blockhash),
+            });
+        }
+    }
+    (Some(tip), paging, rows)
+}
+
+/// Blocks the pool found, as the store records them on confirmation, newest
+/// first.
+fn found_blocks(state: &AppState) -> Vec<FoundBlockRow> {
     let found = match state.chain_store_handle.get_found_blocks() {
         Ok(found) => found,
         Err(error) => {
             tracing::warn!("Dashboard could not read found blocks: {error}");
-            return (0, Vec::new());
+            return Vec::new();
         }
     };
-    let rows = found
+    found
         .iter()
         .rev()
-        .take(BLOCKS_LISTED)
         .map(|block| FoundBlockRow {
             height: block.bitcoin_height,
             block_hash: block.bitcoin_blockhash,
@@ -159,8 +207,7 @@ fn found_blocks(state: &AppState) -> (usize, Vec<FoundBlockRow>) {
             time: block.bitcoin_time,
             payout_address: payout_address_display(state, &block.miner_bitcoin_address),
         })
-        .collect();
-    (found.len(), rows)
+        .collect()
 }
 
 /// A payout address the store keeps in Bitcoin's spelling, spelled for the
@@ -174,17 +221,58 @@ fn payout_address_display(state: &AppState, stored: &str) -> String {
     }
 }
 
-async fn overview(State(dashboard): State<Arc<DashboardState>>) -> Response {
+/// The miners on this node with their workers, by accepted work, most first.
+async fn local_miners(state: &AppState) -> Vec<MinerRow> {
+    let metrics = state.metrics_handle.get_metrics().await;
+    let mut miners: Vec<MinerRow> = metrics
+        .users
+        .iter()
+        .map(|(address, user)| {
+            let mut workers: Vec<WorkerRow> = user
+                .workers
+                .iter()
+                .map(|(name, worker)| WorkerRow {
+                    name: name.clone(),
+                    active: worker.active,
+                    accepted_work: worker.shares_valid_total,
+                    best_share: worker.best_share,
+                    last_share_at: worker.last_share_at,
+                })
+                .collect();
+            workers.sort_by(|left, right| left.name.cmp(&right.name));
+            MinerRow {
+                address: address.clone(),
+                workers,
+                accepted_work: user.shares_valid_total,
+                best_share: user.best_share,
+                last_share_at: user.last_share_at,
+                payout_fraction: None,
+            }
+        })
+        .collect();
+    miners.sort_by(|left, right| {
+        right
+            .accepted_work
+            .cmp(&left.accepted_work)
+            .then_with(|| left.address.cmp(&right.address))
+    });
+    miners
+}
+
+async fn overview(
+    State(dashboard): State<Arc<DashboardState>>,
+    Query(query): Query<PageQuery>,
+) -> Response {
     let state = &dashboard.app;
-    let chain = read_store(state, |state| {
+    let chain = read_store(state, move |state| {
         (
-            recent_shares(state),
+            share_page(state, query.page),
             pool_hashrate(state),
             found_blocks(state),
         )
     })
     .await;
-    let ((tip_height, recent_shares), pool_hashrate, (blocks_found, blocks)) = match chain {
+    let ((tip_height, shares_paging, shares), pool_hashrate, blocks) = match chain {
         Ok(chain) => chain,
         Err(error) => return error_page(state, error),
     };
@@ -202,9 +290,10 @@ async fn overview(State(dashboard): State<Arc<DashboardState>>) -> Response {
     let network_difficulty = state.tracker_handle.get_network_difficulty();
     let samples = dashboard.history.samples();
     let local_hashrate = samples.iter().rev().find_map(|sample| sample.local);
+    let blocks_found = blocks.len();
 
-    let page = pages::overview(&Overview {
-        network: network_name(state),
+    html(pages::overview(&Overview {
+        site: site(state),
         now: unix_now(),
         tip_height,
         pool_hashrate,
@@ -215,15 +304,93 @@ async fn overview(State(dashboard): State<Arc<DashboardState>>) -> Response {
         workers_online,
         samples,
         blocks_found,
+        blocks: blocks.into_iter().take(RECENT_BLOCKS).collect(),
+        shares,
+        shares_paging,
+    }))
+}
+
+async fn blocks(
+    State(dashboard): State<Arc<DashboardState>>,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    let state = &dashboard.app;
+    let all = match read_store(state, found_blocks).await {
+        Ok(all) => all,
+        Err(error) => return error_page(state, error),
+    };
+    let paging = Paging::of(query.page, all.len());
+    let blocks_found = all.len();
+    let blocks = all
+        .into_iter()
+        .skip((paging.page - 1) * PAGE_SIZE)
+        .take(PAGE_SIZE)
+        .collect();
+    html(pages::blocks(&BlocksView {
+        site: site(state),
+        now: unix_now(),
+        blocks_found,
         blocks,
-        recent_shares,
-    });
-    Html(page.into_string()).into_response()
+        paging,
+    }))
+}
+
+async fn block(State(dashboard): State<Arc<DashboardState>>, Path(hash): Path<String>) -> Response {
+    let state = &dashboard.app;
+    let Ok(block_hash) = BlockHash::from_str(&hash) else {
+        return error_page(
+            state,
+            ApiError::BadRequest(format!("Not a block hash: {hash}")),
+        );
+    };
+    let all = match read_store(state, found_blocks).await {
+        Ok(all) => all,
+        Err(error) => return error_page(state, error),
+    };
+    match all.into_iter().find(|block| block.block_hash == block_hash) {
+        Some(block) => html(pages::block(&BlockView {
+            site: site(state),
+            now: unix_now(),
+            block,
+        })),
+        None => error_page(
+            state,
+            ApiError::NotFound(format!("The pool has not found a block with hash {hash}.")),
+        ),
+    }
+}
+
+async fn miners(
+    State(dashboard): State<Arc<DashboardState>>,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    let state = &dashboard.app;
+    let all = local_miners(state).await;
+    let paging = Paging::of(query.page, all.len());
+    let mut miners: Vec<MinerRow> = all
+        .into_iter()
+        .skip((paging.page - 1) * PAGE_SIZE)
+        .take(PAGE_SIZE)
+        .collect();
+    // Only this page's miners are looked up in the window.
+    for miner in &mut miners {
+        miner.payout_fraction = miner_report(state, &miner.address, 1)
+            .await
+            .ok()
+            .map(|report| report.payout_fraction);
+    }
+    html(pages::miners(&MinersView {
+        site: site(state),
+        now: unix_now(),
+        miners,
+        paging,
+    }))
 }
 
 #[derive(Deserialize)]
 struct MinerPageQuery {
     address: Option<String>,
+    page: Option<usize>,
 }
 
 /// A miner's hashrate from its share of the work in the newest shares: its
@@ -266,7 +433,7 @@ async fn miner(
             ApiError::BadRequest("Enter a payout or share chain address.".to_string()),
         );
     };
-    let report = match miner_report(state, address, MINER_SHARES_LISTED).await {
+    let report = match miner_report(state, address, MAX_NUM_SHARES_IN_RESPONSE as usize).await {
         Ok(report) => report,
         Err(error) => return error_page(state, error),
     };
@@ -275,13 +442,22 @@ async fn miner(
         .await
         .ok()
         .flatten();
-    let page = pages::miner(&MinerView {
-        network: network_name(state),
+    let workers = local_miners(state)
+        .await
+        .into_iter()
+        .find(|miner| miner.address == report.address || miner.address == address)
+        .map(|miner| miner.workers)
+        .unwrap_or_default();
+    let paging = Paging::of(query.page, report.shares.len());
+    html(pages::miner(&MinerView {
+        site: site(state),
+        now: unix_now(),
         report,
         hashrate: estimate.map(|(hashrate, _, _)| hashrate),
         recent_window: estimate.map(|(_, shares, seconds)| (shares, seconds)),
-    });
-    Html(page.into_string()).into_response()
+        workers,
+        paging,
+    }))
 }
 
 async fn share(State(dashboard): State<Arc<DashboardState>>, Path(hash): Path<String>) -> Response {
@@ -296,35 +472,92 @@ async fn share(State(dashboard): State<Arc<DashboardState>>, Path(hash): Path<St
         }
     };
     let found = read_store(state, move |state| {
+        // The page shows the header only, never the body, so a pruned share
+        // renders like any other and the prune height is not needed.
         let output = build_share_output(
             &state.chain_store_handle,
             &blockhash,
             false,
             state.app_config.network,
             state.app_config.cash_network,
+            0,
         )?;
-        let is_block = state
-            .chain_store_handle
-            .store_handle()
-            .store()
-            .get_share_header(&blockhash)
-            .ok()
-            .flatten()
-            .is_some_and(|header| is_block(&header.bitcoin_header));
-        Ok::<_, ApiError>((output, is_block))
+        Ok::<_, ApiError>((output, share_found_a_block(state, &blockhash)))
     })
     .await
     .and_then(|found| found);
     match found {
-        Ok((share, is_block)) => Html(
-            pages::share(&ShareView {
-                network: network_name(state),
-                share,
-                is_block,
-            })
-            .into_string(),
-        )
-        .into_response(),
+        Ok((share, is_block)) => html(pages::share(&ShareView {
+            site: site(state),
+            share,
+            is_block,
+        })),
+        Err(error) => error_page(state, error),
+    }
+}
+
+async fn help(State(dashboard): State<Arc<DashboardState>>) -> Response {
+    html(pages::help(&site(&dashboard.app)))
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: Option<String>,
+}
+
+/// Where a search goes: a share hash to its share, a found block's hash to
+/// its block, anything else to the miner page, which says when it is not an
+/// address.
+async fn search(
+    State(dashboard): State<Arc<DashboardState>>,
+    Query(query): Query<SearchQuery>,
+) -> Response {
+    let state = &dashboard.app;
+    let text = query.q.as_deref().map(str::trim).unwrap_or_default();
+    if text.is_empty() {
+        return error_page(
+            state,
+            ApiError::BadRequest(
+                "Enter a miner address, a share hash or a block hash.".to_string(),
+            ),
+        );
+    }
+    let looks_like_hash = text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !looks_like_hash {
+        return Redirect::to(&pages::miner_href(text)).into_response();
+    }
+    let Ok(hash) = BlockHash::from_str(text) else {
+        return error_page(state, ApiError::BadRequest(format!("Not a hash: {text}")));
+    };
+    let target = read_store(state, move |state| {
+        if state
+            .chain_store_handle
+            .store_handle()
+            .store()
+            .get_share_header(&hash)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            Some(pages::share_href(&hash.to_string()))
+        } else if found_blocks(state)
+            .iter()
+            .any(|block| block.block_hash == hash)
+        {
+            Some(pages::block_href(&hash.to_string()))
+        } else {
+            None
+        }
+    })
+    .await;
+    match target {
+        Ok(Some(href)) => Redirect::to(&href).into_response(),
+        Ok(None) => error_page(
+            state,
+            ApiError::NotFound(format!(
+                "No share and no block found by the pool has hash {text}."
+            )),
+        ),
         Err(error) => error_page(state, error),
     }
 }
@@ -550,5 +783,107 @@ mod tests {
         let (state, _store, _metrics) = build_state(None, None).await;
         let (status, _, _) = get(&state, "/static/dashboard.js").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn every_page_has_the_menu_and_no_script() {
+        let (state, _store, _metrics) = build_state(None, Some(BchShareNetwork::Chipnet)).await;
+        for path in [
+            "/dashboard",
+            "/dashboard/blocks",
+            "/dashboard/miners",
+            "/dashboard/help",
+        ] {
+            let (status, body, _) = get(&state, path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(body.contains("class=\"site-header\""), "{path}");
+            assert!(body.contains("action=\"/dashboard/search\""), "{path}");
+            assert!(body.contains("aria-current=\"page\""), "{path}");
+            assert!(!body.contains("<script"), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_assets_are_served_from_the_binary() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        let (status, body, headers) = get(&state, "/dashboard/assets/dashboard.css").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            headers
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("text/css")
+        );
+        assert!(body.contains(".kpi-card"));
+        let (status, _, _) = get(&state, "/dashboard/assets/pico.min.css").await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, _) = get(&state, "/dashboard/assets/dashboard.js").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn search_opens_a_share_or_a_miner() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        let genesis_block = genesis_for_tests();
+        let genesis = genesis_block.block_hash();
+        state
+            .chain_store_handle
+            .init_or_setup_genesis(genesis_block)
+            .await
+            .unwrap();
+        let (status, _, headers) = get(&state, &format!("/dashboard/search?q={genesis}")).await;
+        assert!(status.is_redirection());
+        assert_eq!(
+            headers.get(header::LOCATION).unwrap(),
+            &format!("/dashboard/share/{genesis}")
+        );
+        let (status, _, headers) = get(&state, "/dashboard/search?q=+tb1qexample+").await;
+        assert!(status.is_redirection());
+        assert_eq!(
+            headers.get(header::LOCATION).unwrap(),
+            "/dashboard/miner?address=tb1qexample"
+        );
+        let (status, body, _) = get(&state, "/dashboard/search?q=").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("Enter a miner address"));
+        let missing = "11".repeat(32);
+        let (status, _, _) = get(&state, &format!("/dashboard/search?q={missing}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_share_page_leads_back_to_its_miner() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        let genesis_block = genesis_for_tests();
+        let genesis = genesis_block.block_hash();
+        state
+            .chain_store_handle
+            .init_or_setup_genesis(genesis_block)
+            .await
+            .unwrap();
+        let (_, body, _) = get(&state, &format!("/dashboard/share/{genesis}")).await;
+        assert!(body.contains("aria-label=\"breadcrumb\""));
+        assert!(body.contains("href=\"/dashboard/miner?address="));
+        assert!(body.contains("href=\"/dashboard/miners\""));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_block_is_a_404_page() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        let (status, body, _) = get(&state, &format!("/dashboard/block/{}", "22".repeat(32))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("has not found a block"));
+        let (status, _, _) = get(&state, "/dashboard/block/nope").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_overview_clamps_its_page() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        let (status, body, _) = get(&state, "/dashboard?page=999").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("No confirmed shares yet."));
     }
 }

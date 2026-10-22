@@ -9,6 +9,7 @@ use crate::shares::share_block::{
 };
 use crate::store::block_tx_metadata::ChainMembership;
 use crate::store::block_tx_metadata::Status::{BlockValid, HeaderValid, Invalid, Pending};
+use crate::store::transaction_store::{BLOCK_TXIDS_SUFFIX, txids_key};
 use bitcoin::BlockHash;
 use bitcoin::Transaction;
 use bitcoin::TxMerkleNode;
@@ -20,6 +21,9 @@ impl Store {
     /// Add a share to the store.
     ///
     /// Returns early if the block already exists (duplicate guard).
+    /// Returns `StoreError::BelowPruneHeight` for a block below the prune
+    /// target, whose body would be deleted again; this also closes the race
+    /// between a block passing the receiver's check and a prune committing.
     /// Stores the header in the Header CF, transaction indexes in
     /// BlockTxids CF, template merkle branches in TemplateMerkleBranches
     /// CF, and the bitcoin coinbase in BitcoinCoinbase CF. All writes are
@@ -46,6 +50,9 @@ impl Store {
 
         let block_height =
             self.compute_block_height_from_parent(&share.header.prev_share_blockhash)?;
+        if block_height < self.prune_target()? {
+            return Err(StoreError::BelowPruneHeight(blockhash));
+        }
 
         // Store transactions and get their metadata
         let txs_metadata = self.add_sharechain_txs(&share.transactions, block_height, batch)?;
@@ -56,7 +63,7 @@ impl Store {
             &blockhash,
             &txids,
             batch,
-            b"_txids",
+            BLOCK_TXIDS_SUFFIX,
             ColumnFamily::BlockTxids,
         )?;
 
@@ -244,8 +251,7 @@ impl Store {
     /// TODO: Replace this with a has_block field in metadata. Will require migration, so pending till we add migration support. See `missing_share_blocks`.
     pub fn share_block_exists(&self, blockhash: &BlockHash) -> bool {
         let block_txids_cf = self.db.cf_handle(&ColumnFamily::BlockTxids).unwrap();
-        let mut key = consensus::serialize(blockhash);
-        key.extend_from_slice(b"_txids");
+        let key = txids_key(blockhash, BLOCK_TXIDS_SUFFIX);
         self.db
             .get_cf::<&[u8]>(&block_txids_cf, &key)
             .ok()
@@ -261,11 +267,7 @@ impl Store {
         let block_txids_cf = self.db.cf_handle(&ColumnFamily::BlockTxids).unwrap();
         let keys: Vec<_> = blockhashes
             .iter()
-            .map(|hash| {
-                let mut key = consensus::serialize(hash);
-                key.extend_from_slice(b"_txids");
-                (&block_txids_cf, key)
-            })
+            .map(|hash| (&block_txids_cf, txids_key(hash, BLOCK_TXIDS_SUFFIX)))
             .collect();
         let results = self.db.multi_get_cf(keys);
 

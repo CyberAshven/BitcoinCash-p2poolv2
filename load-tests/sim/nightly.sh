@@ -17,8 +17,9 @@
 # Env overrides (nightly-specific):
 #   SCENARIO                   failure scenario to inject    (default clean)
 #                              clean | restart-fast | restart-delayed |
-#                              partition | all | late-miner (needs LATE_MINER
-#                              and a small MATURITY_SHARES)
+#                              partition | all | late-miner (needs LATE_MINER)
+#                              | pruned-join | deep-fork-refused |
+#                              shallow-fork-reorged (both need FORK_GROUP_FROM)
 #   NODE_COUNT                 number of sim nodes           (default 20)
 #   CONVERGENCE_WAIT_SECONDS   seconds to settle after the
 #                              scenario, before the checks   (default 60)
@@ -51,15 +52,26 @@ Scenarios (see load-tests/sim/failures.sh --help for the details):
   partition         several nodes fail at once, cutting the dial chain
   all               the three failure scenarios in sequence
   late-miner        payout maturity: a node mining late is paid only once its
-                    shares are mature (needs LATE_MINER, small MATURITY_SHARES)
+                    shares are mature (needs LATE_MINER)
+  pruned-join       a wiped node syncs from genesis off peers that have
+                    pruned block bodies (run time-compressed)
+  deep-fork-refused a minority group forked at genesis refuses to reorg onto
+                    the heavier majority once its fork point is below the
+                    prune target (needs FORK_GROUP_FROM, time-compressed)
+  shallow-fork-reorged  control: the same minority reconnects before the
+                    prune target and reorgs onto the majority
 
 Examples:
   ./load-tests/sim/nightly.sh                              # 20 nodes, 60s, no failures
   ./load-tests/sim/nightly.sh restart-delayed              # long-downtime catch-up
   NODE_COUNT=5 CONVERGENCE_WAIT_SECONDS=30 ./load-tests/sim/nightly.sh
   IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=100 ./load-tests/sim/nightly.sh  # time-compressed, frequent blocks
-  IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 MATURITY_SHARES=50 LATE_MINER=1 \
+  IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 LATE_MINER=1 \
     ./load-tests/sim/nightly.sh late-miner                 # payout maturity
+  IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 \
+    ./load-tests/sim/nightly.sh pruned-join                # fresh node off pruned peers
+  IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 NODE_COUNT=6 FORK_GROUP_FROM=4 HASHRATE=1e13 \
+    ./load-tests/sim/nightly.sh deep-fork-refused          # reorg depth limit
 
 Env vars (nightly-specific):
   SCENARIO                   failure scenario to inject    (default clean)
@@ -74,7 +86,6 @@ Env vars (nightly-specific):
 Env vars (passed through to run-swarm.sh):
   RUN_DIR                    work dir for configs/logs     (default /tmp/p2pool-sim)
   SHARES_PER_BLOCK           shares per block-find         (default 10000)
-  MATURITY_SHARES            coinbase maturity in shares   (default 6048)
   IDEAL_BLOCK_TIME           share interval in seconds     (default 10; lower = time-compressed)
   LATENCY_MS                 per-node outbound delay ms    (default 0)
   DIAL_FANOUT                peers each node dials         (default 3)
@@ -111,8 +122,7 @@ ZMQ="${ZMQ:-tcp://127.0.0.1:28332}"
 RUN_DIR="${RUN_DIR:-/tmp/p2pool-sim}"
 SHARES_PER_BLOCK="${SHARES_PER_BLOCK:-10000}"
 DIAL_FANOUT="${DIAL_FANOUT:-3}"
-MATURITY_SHARES="${MATURITY_SHARES:-6048}"
-export RUN_DIR RPC_URL RPC_USER RPC_PASS ZMQ SHARES_PER_BLOCK DIAL_FANOUT MATURITY_SHARES
+export RUN_DIR RPC_URL RPC_USER RPC_PASS ZMQ SHARES_PER_BLOCK DIAL_FANOUT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -124,9 +134,10 @@ FAILURE_OUTPUT=""
 # Validate the scenario here as well as in failures.sh, so a typo fails now
 # rather than after bitcoind and the swarm have been brought up.
 case "$SCENARIO" in
-  clean|restart-fast|restart-delayed|partition|all|late-miner) ;;
+  clean|restart-fast|restart-delayed|partition|all|late-miner|pruned-join) ;;
+  deep-fork-refused|shallow-fork-reorged) ;;
   *)
-    echo "ERROR: unknown scenario '$SCENARIO' (expected clean, restart-fast, restart-delayed, partition, all or late-miner)" >&2
+    echo "ERROR: unknown scenario '$SCENARIO' (expected clean, restart-fast, restart-delayed, partition, all, late-miner, pruned-join, deep-fork-refused or shallow-fork-reorged)" >&2
     exit 2
     ;;
 esac
@@ -318,11 +329,14 @@ build_analysis_binaries() {
   # as corrupt -- a confusing failure that looks like data loss. cargo is
   # incremental, so this is nearly free when already current. Both binaries
   # live in p2poolv2_node; p2poolv2_cli is a library-only package, so building
-  # it produces no p2poolv2_cli executable at all.
+  # it produces no p2poolv2_cli executable at all. They are built with the
+  # sim feature so verify_chain checks bodies against the sim build's prune
+  # depth: with the production depth it expects every body the sim nodes have
+  # pruned.
   log_message "Building verify_chain and p2poolv2_cli ($profile)..."
   ( cd "$REPO_ROOT" && cargo build -p p2poolv2_node \
       --bin verify_chain --bin p2poolv2_cli \
-      --features debug-tools $profile_flag )
+      --features debug-tools,sim $profile_flag )
 
   local binary
   for binary in "$VERIFY_BIN" "$CLI_BIN"; do
@@ -533,6 +547,22 @@ check_payout_maturity() {
   [ "$MATURITY_VERDICT" = "PASS" ]
 }
 
+# pruned-join only: the verdict failures.sh recorded for the fresh node's sync
+# off pruned peers. Other scenarios skip it.
+check_pruned_join() {
+  JOIN_VERDICT=$(echo "$FAILURE_OUTPUT" | sed -nE 's/^pruned-join verdict: (.*)$/\1/p')
+  JOIN_VERDICT="${JOIN_VERDICT:-missing}"
+  [ "$JOIN_VERDICT" = "PASS" ]
+}
+
+# deep-fork-refused and shallow-fork-reorged only: the verdict failures.sh
+# recorded. Other scenarios skip it.
+check_fork_verdict() {
+  FORK_VERDICT=$(echo "$FAILURE_OUTPUT" | sed -nE 's/^fork verdict: (.*)$/\1/p')
+  FORK_VERDICT="${FORK_VERDICT:-missing}"
+  [ "$FORK_VERDICT" = "PASS" ]
+}
+
 check_uncle_rate() {
   UNCLE_RATE=$(echo "$METRICS_OUTPUT" \
     | grep -oE "uncle rate \(node 0\): [0-9.]+" \
@@ -550,8 +580,14 @@ evaluate_results() {
     failed=1
   fi
 
+  # deep-fork-refused ends with two chains by design: the minority refuses the
+  # majority's deep fork. Its own verdict compares the two groups instead.
   local converged_result="PASS"
-  if ! check_chain_converged; then
+  if [ "$SCENARIO" = "deep-fork-refused" ]; then
+    converged_result="SKIP"
+    DISTINCT_HASHES="n/a"
+    WITHIN2="n/a"
+  elif ! check_chain_converged; then
     converged_result="FAIL"
     failed=1
   fi
@@ -601,6 +637,24 @@ evaluate_results() {
     fi
   fi
 
+  local join_result="SKIP"
+  if [ "$SCENARIO" = "pruned-join" ]; then
+    join_result="PASS"
+    if ! check_pruned_join; then
+      join_result="FAIL"
+      failed=1
+    fi
+  fi
+
+  local fork_result="SKIP"
+  if [ "$SCENARIO" = "deep-fork-refused" ] || [ "$SCENARIO" = "shallow-fork-reorged" ]; then
+    fork_result="PASS"
+    if ! check_fork_verdict; then
+      fork_result="FAIL"
+      failed=1
+    fi
+  fi
+
   echo "=== NIGHTLY SIM RESULTS (scenario: $SCENARIO) ==="
   printf "  nodes alive:        %-4s  (%s/%s)\n" \
     "$alive_result" "$ALIVE_COUNT" "$ALIVE_TOTAL"
@@ -620,6 +674,10 @@ evaluate_results() {
     "$recovery_result" "$FAILURE_TARGETS" "$FAILURE_REJOINED" "$UNRECOVERED_COUNT"
   printf "  payout maturity:    %-4s  (%s)\n" \
     "$maturity_result" "${MATURITY_VERDICT:-late-miner only}"
+  printf "  pruned join:        %-4s  (%s)\n" \
+    "$join_result" "${JOIN_VERDICT:-pruned-join only}"
+  printf "  fork depth limit:   %-4s  (%s)\n" \
+    "$fork_result" "${FORK_VERDICT:-fork scenarios only}"
 
   if [ "$failed" -eq 0 ]; then
     echo "RESULT: PASS"

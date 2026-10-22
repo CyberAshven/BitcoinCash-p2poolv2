@@ -4,31 +4,113 @@
 
 //! The dashboard's pages, rendered to HTML in Rust.
 //!
-//! Every value is escaped by maud; only the fixed stylesheet is inlined raw.
-//! Pages carry no script: the overview refreshes itself with a meta
-//! refresh, tooltips are SVG titles, and the miner lookup is a plain form.
+//! The layout and stylesheet are CashDragon0's design from PR #8, rebuilt
+//! here without a script: every page has the same menu bar, a search box and
+//! a trail back to the overview, its pop-ups are pages of their own, long
+//! tables are split into pages with links, and a miner's workers open with
+//! an HTML `<details>`. The overview refreshes itself with a meta refresh and
+//! chart tooltips are SVG titles. Every value is escaped by maud.
 
+use super::assets;
 use super::chart::{Series, line_chart};
 use super::history::Sample;
-use super::style::STYLE;
 use crate::api::endpoints::miner::MinerResponse;
 use crate::api::endpoints::share::ShareLookupOutput;
 use bitcoin::BlockHash;
-use maud::{DOCTYPE, Markup, PreEscaped, html};
+use maud::{DOCTYPE, Markup, html};
 
 /// Seconds between refreshes of the overview page.
 pub(crate) const OVERVIEW_REFRESH_SECONDS: u32 = 30;
 
-/// A confirmed share as the overview lists it.
-pub(crate) struct RecentShare {
-    pub(crate) height: u32,
+/// Rows on one page of a long table.
+pub(crate) const PAGE_SIZE: usize = 25;
+
+/// What every page shows about the node it is served by.
+pub(crate) struct Site {
+    /// The chain this node mines, for example "Bitcoin Cash chipnet".
+    pub(crate) network: String,
+    /// The short name in the header badge, for example "chipnet".
+    pub(crate) badge: String,
+}
+
+/// The menu bar's pages.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tab {
+    Dashboard,
+    Blocks,
+    Miners,
+    Help,
+    /// A page that belongs to no tab, such as an error.
+    None,
+}
+
+const TABS: [(Tab, &str, &str); 4] = [
+    (Tab::Dashboard, "Dashboard", "/dashboard"),
+    (Tab::Blocks, "Blocks", "/dashboard/blocks"),
+    (Tab::Miners, "Miners", "/dashboard/miners"),
+    (Tab::Help, "Help", "/dashboard/help"),
+];
+
+/// One step of the trail at the top of a page. The last step is the page
+/// itself and has no link.
+pub(crate) struct Crumb {
+    pub(crate) label: String,
+    pub(crate) href: Option<String>,
+}
+
+impl Crumb {
+    fn link(label: impl Into<String>, href: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            href: Some(href.into()),
+        }
+    }
+
+    fn here(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            href: None,
+        }
+    }
+}
+
+/// Which page of a long table is shown, counted from 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Paging {
+    pub(crate) page: usize,
+    pub(crate) pages: usize,
+}
+
+impl Paging {
+    /// The page `requested` of `rows` rows, clamped to the pages there are.
+    pub(crate) fn of(requested: Option<usize>, rows: usize) -> Self {
+        let pages = rows.div_ceil(PAGE_SIZE).max(1);
+        let page = requested.unwrap_or(1).clamp(1, pages);
+        Self { page, pages }
+    }
+
+    /// The rows of `all` on this page.
+    pub(crate) fn slice<'a, T>(&self, all: &'a [T]) -> &'a [T] {
+        let start = ((self.page - 1) * PAGE_SIZE).min(all.len());
+        let end = (start + PAGE_SIZE).min(all.len());
+        &all[start..end]
+    }
+}
+
+/// A confirmed share or one of its uncles, as the overview lists it.
+pub(crate) struct ShareRow {
+    pub(crate) height: Option<u32>,
     pub(crate) blockhash: String,
     pub(crate) time: u32,
     pub(crate) payout_address: String,
+    pub(crate) share_address: String,
+    /// `None` for an uncle, whose bits the list does not carry.
+    pub(crate) difficulty: Option<f64>,
+    pub(crate) is_uncle: bool,
     pub(crate) is_block: bool,
 }
 
-/// A block the pool found, as the overview lists it.
+/// A block the pool found.
 pub(crate) struct FoundBlockRow {
     /// Bitcoin Cash height.
     pub(crate) height: u64,
@@ -43,7 +125,7 @@ pub(crate) struct FoundBlockRow {
 
 /// Everything the overview shows.
 pub(crate) struct Overview {
-    pub(crate) network: String,
+    pub(crate) site: Site,
     pub(crate) now: u64,
     pub(crate) tip_height: Option<u32>,
     pub(crate) pool_hashrate: Option<f64>,
@@ -57,22 +139,74 @@ pub(crate) struct Overview {
     pub(crate) blocks_found: usize,
     /// The newest of them, newest first.
     pub(crate) blocks: Vec<FoundBlockRow>,
-    pub(crate) recent_shares: Vec<RecentShare>,
+    /// This page of the share chain, newest first.
+    pub(crate) shares: Vec<ShareRow>,
+    pub(crate) shares_paging: Paging,
+}
+
+/// The found blocks page.
+pub(crate) struct BlocksView {
+    pub(crate) site: Site,
+    pub(crate) now: u64,
+    pub(crate) blocks_found: usize,
+    pub(crate) blocks: Vec<FoundBlockRow>,
+    pub(crate) paging: Paging,
+}
+
+/// One found block's page.
+pub(crate) struct BlockView {
+    pub(crate) site: Site,
+    pub(crate) now: u64,
+    pub(crate) block: FoundBlockRow,
+}
+
+/// A worker of a miner on this node.
+pub(crate) struct WorkerRow {
+    pub(crate) name: String,
+    pub(crate) active: bool,
+    /// Sum of the difficulty of its accepted shares.
+    pub(crate) accepted_work: u64,
+    pub(crate) best_share: u64,
+    pub(crate) last_share_at: u64,
+}
+
+/// A miner on this node, for the miners page.
+pub(crate) struct MinerRow {
+    pub(crate) address: String,
+    pub(crate) workers: Vec<WorkerRow>,
+    pub(crate) accepted_work: u64,
+    pub(crate) best_share: u64,
+    pub(crate) last_share_at: u64,
+    /// Its fraction of the next block's PPLNS payout, when the window could
+    /// be read for it.
+    pub(crate) payout_fraction: Option<f64>,
+}
+
+/// The miners page.
+pub(crate) struct MinersView {
+    pub(crate) site: Site,
+    pub(crate) now: u64,
+    pub(crate) miners: Vec<MinerRow>,
+    pub(crate) paging: Paging,
 }
 
 /// Everything a miner's page shows.
 pub(crate) struct MinerView {
-    pub(crate) network: String,
+    pub(crate) site: Site,
+    pub(crate) now: u64,
     pub(crate) report: MinerResponse,
     /// The miner's hashrate over the recent shares, if it has any there.
     pub(crate) hashrate: Option<f64>,
     /// How many recent shares, and over how many seconds, it was taken from.
     pub(crate) recent_window: Option<(usize, u32)>,
+    /// Its workers, when it mines on this node.
+    pub(crate) workers: Vec<WorkerRow>,
+    pub(crate) paging: Paging,
 }
 
 /// Everything a share's page shows.
 pub(crate) struct ShareView {
-    pub(crate) network: String,
+    pub(crate) site: Site,
     pub(crate) share: ShareLookupOutput,
     pub(crate) is_block: bool,
 }
@@ -139,12 +273,15 @@ pub(crate) fn fmt_ago(now: u64, then: u64) -> String {
     }
 }
 
-/// A long hash cut to its ends.
+/// A long hash or address cut to its ends.
 pub(crate) fn short(hash: &str) -> String {
-    if hash.len() <= 20 {
+    let length = hash.chars().count();
+    if length <= 20 {
         return hash.to_string();
     }
-    format!("{}…{}", &hash[..10], &hash[hash.len() - 6..])
+    let head: String = hash.chars().take(10).collect();
+    let tail: String = hash.chars().skip(length - 6).collect();
+    format!("{head}…{tail}")
 }
 
 fn optional(value: Option<f64>, format: fn(f64) -> String) -> String {
@@ -155,20 +292,10 @@ fn percent(fraction: f64) -> String {
     format!("{:.2}%", fraction * 100.0)
 }
 
-fn miner_link(address: &str) -> Markup {
-    html! {
-        a.mono href=(format!("/dashboard/miner?address={}", url_component(address))) { (address) }
-    }
-}
-
-fn share_link(blockhash: &str, text: &str) -> Markup {
-    html! { a.mono href=(format!("/dashboard/share/{}", url_component(blockhash))) { (text) } }
-}
-
 /// Percent-encode anything outside the unreserved set, for a query or path
 /// component. Addresses and hashes are ASCII, but the escape keeps a
 /// strange value from changing the URL's structure.
-fn url_component(value: &str) -> String {
+pub(crate) fn url_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b':') {
@@ -180,49 +307,184 @@ fn url_component(value: &str) -> String {
     encoded
 }
 
-fn kpi(label: &str, value: String, note: Option<String>) -> Markup {
+pub(crate) fn miner_href(address: &str) -> String {
+    format!("/dashboard/miner?address={}", url_component(address))
+}
+
+pub(crate) fn share_href(blockhash: &str) -> String {
+    format!("/dashboard/share/{}", url_component(blockhash))
+}
+
+pub(crate) fn block_href(block_hash: &str) -> String {
+    format!("/dashboard/block/{}", url_component(block_hash))
+}
+
+fn miner_link(address: &str) -> Markup {
+    html! { a.addr href=(miner_href(address)) title=(address) { (short(address)) } }
+}
+
+fn share_link(blockhash: &str) -> Markup {
+    html! { a.addr href=(share_href(blockhash)) title=(blockhash) { (short(blockhash)) } }
+}
+
+/// When a miner or worker last sent a share; one that has not sent any
+/// yet was never seen.
+fn last_seen(now: u64, then: u64) -> Markup {
+    if then == 0 {
+        return html! { span { "never" } };
+    }
+    html! { span title=(fmt_utc(then)) { (fmt_ago(now, then)) } }
+}
+
+fn ago_cell(now: u64, then: u64) -> Markup {
+    html! { td title=(fmt_utc(then)) { (fmt_ago(now, then)) } }
+}
+
+/// A KPI card: a label, a value and notes under it.
+fn kpi_card(
+    label: &str,
+    value: String,
+    value_class: &str,
+    href: Option<&str>,
+    notes: &[String],
+) -> Markup {
+    let value = html! { p class=(format!("kpi-value {value_class}")) { (value) } };
     html! {
-        div.kpi {
-            div.label { (label) }
-            div.value { (value) }
-            @if let Some(note) = note { div.note { (note) } }
+        div.kpi-card {
+            p.kpi-label { (label) }
+            @if let Some(href) = href { a href=(href) { (value) } } @else { (value) }
+            @for note in notes { p.kpi-sub { (note) } }
         }
     }
 }
 
-/// The page frame: header, styles and footer around `body`.
-pub(crate) fn layout(title: &str, network: &str, refresh: Option<u32>, body: Markup) -> Markup {
+/// One item of a details list.
+fn stat(key: &str, value: Markup) -> Markup {
+    html! { div.stat-item { div.k { (key) } div.v { (value) } } }
+}
+
+/// Previous and next links for a long table. `base` is the page's URL
+/// without its `page` parameter.
+pub(crate) fn pager(base: &str, paging: Paging) -> Markup {
+    if paging.pages <= 1 {
+        return html! {};
+    }
+    let separator = if base.contains('?') { '&' } else { '?' };
+    let href = |page: usize| format!("{base}{separator}page={page}");
+    let has_previous = paging.page > 1;
+    let has_next = paging.page < paging.pages;
+    html! {
+        nav.more-row aria-label="Pages" {
+            a.outline.more-btn role="button" href=(href(paging.page.saturating_sub(1).max(1)))
+                aria-disabled=[(!has_previous).then_some("true")] rel="prev" { "Previous" }
+            span.page-of { "Page " (paging.page) " of " (paging.pages) }
+            a.outline.more-btn role="button" href=(href((paging.page + 1).min(paging.pages)))
+                aria-disabled=[(!has_next).then_some("true")] rel="next" { "Next" }
+        }
+    }
+}
+
+/// The page frame: head, menu bar, search, trail and footer around `body`.
+pub(crate) fn layout(
+    site: &Site,
+    title: &str,
+    tab: Tab,
+    trail: &[Crumb],
+    refresh: Option<u32>,
+    body: Markup,
+) -> Markup {
     html! {
         (DOCTYPE)
-        html lang="en" {
+        html lang="en" data-theme="dark" {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 @if let Some(seconds) = refresh {
                     meta http-equiv="refresh" content=(seconds);
                 }
-                title { (title) " · P2Pool v2" }
-                style { (PreEscaped(STYLE)) }
+                title { (title) " · P2Pool v2 · " (site.badge) }
+                link rel="icon" type="image/svg+xml" href=(assets::href("logo-circle.svg"));
+                link rel="stylesheet" href=(assets::href("pico.min.css"));
+                link rel="stylesheet" href=(assets::href("dashboard.css"));
             }
             body {
-                header {
-                    h1 { a href="/dashboard" { "P2Pool" span { "v2" } } }
-                    span.network { (network) }
-                    nav { a href="/dashboard" { "Overview" } }
+                header.site-header {
+                    nav {
+                        ul.brand {
+                            li {
+                                a href="/dashboard" {
+                                    img src=(assets::href("logo-horizontal-wt.svg")) alt="Bitcoin Cash";
+                                }
+                                span.brand-meta {
+                                    a.wordmark-link href="/dashboard" {
+                                        span.wordmark { "P2Pool" span.accent { "v2" } }
+                                    }
+                                    span.chain-badge title=(site.network) { (site.badge) }
+                                }
+                            }
+                        }
+                        ul.tabs {
+                            @for (this, label, href) in TABS {
+                                li {
+                                    a.outline.header-btn.active-nav[this == tab] role="button" href=(href)
+                                        aria-current=[(this == tab).then_some("page")] { (label) }
+                                }
+                            }
+                        }
+                        ul.header-right {
+                            li {
+                                form.header-search action="/dashboard/search" method="get" role="search" {
+                                    input type="search" name="q" placeholder="Miner address or share hash"
+                                        aria-label="Miner address or share hash" required;
+                                    button.outline.header-btn type="submit" { "Search" }
+                                }
+                            }
+                        }
+                    }
                 }
-                main { (body) }
-                footer { "Served by this P2Pool node. No scripts, no tracking." }
+                main.container {
+                    @if !trail.is_empty() {
+                        nav aria-label="breadcrumb" {
+                            ul {
+                                @for crumb in trail {
+                                    li {
+                                        @if let Some(href) = &crumb.href {
+                                            a href=(href) { (crumb.label) }
+                                        } @else {
+                                            span aria-current="page" { (crumb.label) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    (body)
+                }
+                footer.site-footer {
+                    div.inner {
+                        span { "P2Pool v2 · " (site.network) }
+                        span { "Rendered by this node in Rust. No scripts, no tracking." }
+                    }
+                }
             }
         }
     }
 }
 
+fn dashboard_crumb() -> Crumb {
+    Crumb::link("Dashboard", "/dashboard")
+}
+
+/// A plain form that opens a miner's page, for the miner page and errors.
 fn lookup_form(value: &str) -> Markup {
     html! {
-        form.lookup action="/dashboard/miner" method="get" {
-            input type="text" name="address" value=(value)
-                placeholder="Payout or share chain address" required aria-label="Miner address";
-            button type="submit" { "Look up miner" }
+        form.search-row action="/dashboard/miner" method="get" {
+            div.grow {
+                label for="miner-address" { "Payout or share chain address" }
+                input #miner-address type="text" name="address" value=(value)
+                    placeholder="bchtest:… or tp2pool:…" required;
+            }
+            button.btn-primary type="submit" { "Look up" }
         }
     }
 }
@@ -232,6 +494,28 @@ fn series(samples: &[Sample], pick: fn(&Sample) -> Option<f64>) -> Vec<(u64, f64
         .iter()
         .filter_map(|sample| pick(sample).map(|value| (sample.time, value)))
         .collect()
+}
+
+fn blocks_table(now: u64, blocks: &[FoundBlockRow]) -> Markup {
+    html! {
+        div.table-x {
+            table.table {
+                thead { tr { th { "Height" } th { "Block hash" } th { "Share" } th { "Found by" } th { "Found" } } }
+                tbody {
+                    @for block in blocks {
+                        @let block_hash = block.block_hash.to_string();
+                        tr {
+                            td { a href=(block_href(&block_hash)) { (block.height) } }
+                            td { a.addr href=(block_href(&block_hash)) title=(block_hash) { (short(&block_hash)) } }
+                            td { (share_link(&block.share_hash.to_string())) }
+                            td { (miner_link(&block.payout_address)) }
+                            (ago_cell(now, u64::from(block.time)))
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn overview(view: &Overview) -> Markup {
@@ -252,127 +536,282 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         fmt_hashrate,
         fmt_day_time,
     );
+    let last_block = view.blocks.first().map(|block| block.time);
     let body = html! {
-        section.kpis {
-            (kpi("Pool hashrate", optional(view.pool_hashrate, fmt_hashrate),
-                Some("from the newest shares".to_string())))
-            (kpi("This node", optional(view.local_hashrate, fmt_hashrate),
-                Some(format!("{} miners, {} workers online", view.miners_online, view.workers_online))))
-            (kpi("Network hashrate", optional(view.network_hashrate, fmt_hashrate),
-                view.network_difficulty.map(|difficulty| format!("difficulty {}", fmt_difficulty(difficulty)))))
-            (kpi("Share chain height",
-                view.tip_height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string()),
-                None))
-            (kpi("Blocks found", view.blocks_found.to_string(),
-                Some("by the pool, from its share chain".to_string())))
+        div.kpi-grid {
+            (kpi_card("Pool hashrate", optional(view.pool_hashrate, fmt_hashrate), "kpi-value-green", None,
+                &["From the newest shares on the share chain".to_string()]))
+            (kpi_card("This node", optional(view.local_hashrate, fmt_hashrate), "kpi-value-local", Some("/dashboard/miners"),
+                &[format!("{} miners, {} workers online", view.miners_online, view.workers_online)]))
+            (kpi_card("Network hashrate (BCH)", optional(view.network_hashrate, fmt_hashrate), "kpi-value-net", None,
+                &[format!("Difficulty {}", optional(view.network_difficulty, fmt_difficulty)),
+                  "Estimated from difficulty, 10-minute blocks".to_string()]))
+            (kpi_card("Share chain height",
+                view.tip_height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string()), "", None, &[]))
+            (kpi_card("Blocks found", view.blocks_found.to_string(), "", Some("/dashboard/blocks"),
+                &[last_block
+                    .map(|time| format!("Last {}", fmt_ago(view.now, u64::from(time))))
+                    .unwrap_or_else(|| "None yet".to_string())]))
         }
-        h2 { "Hashrate" }
-        div.panel { (chart) }
-        h2 { "Find a miner" }
-        div.panel { (lookup_form("")) }
-        h2 { "Blocks found" }
         div.panel {
+            h2 { "Hashrate" span.panel-note { "one sample a minute, the last day" } }
+            div.chart-wrap { (chart) }
+        }
+        div.panel {
+            h2 { "Found blocks" span.panel-note { (view.blocks_found) " in all" } }
             @if view.blocks.is_empty() {
-                p.empty { "The pool has not found a block yet." }
+                p.empty-state { "The pool has not found a Bitcoin Cash block yet. Keep mining." }
             } @else {
-                table {
-                    thead { tr { th { "Height" } th { "Bitcoin Cash block" } th { "Share" } th { "When" } th { "Found by" } } }
-                    tbody {
-                        @for block in &view.blocks {
-                            tr {
-                                td { (block.height) }
-                                td.mono { (short(&block.block_hash.to_string())) }
-                                td { (share_link(&block.share_hash.to_string(), &short(&block.share_hash.to_string()))) }
-                                td title=(fmt_utc(u64::from(block.time))) { (fmt_ago(view.now, u64::from(block.time))) }
-                                td { (miner_link(&block.payout_address)) }
-                            }
-                        }
-                    }
-                }
+                (blocks_table(view.now, &view.blocks))
+                div.panel-more { a href="/dashboard/blocks" { "All found blocks →" } }
             }
         }
-        h2 { "Recent shares" }
         div.panel {
-            @if view.recent_shares.is_empty() {
-                p.empty { "No confirmed shares yet." }
+            h2 {
+                "Recent shares"
+                span.panel-note {
+                    "newest first, uncles under the share that includes them"
+                    @if let Some(tip) = view.tip_height { " · tip " (tip) }
+                }
+            }
+            @if view.shares.is_empty() {
+                p.empty-state {
+                    @if view.tip_height.is_none() { "No confirmed shares yet. Point a miner at this node's stratum port to get started." }
+                    @else { "No shares on this page." }
+                }
             } @else {
-                table {
-                    thead { tr { th { "Height" } th { "Share" } th { "When" } th { "Payout address" } th {} } }
-                    tbody {
-                        @for share in &view.recent_shares {
-                            tr {
-                                td { (share.height) }
-                                td { (share_link(&share.blockhash, &short(&share.blockhash))) }
-                                td title=(fmt_utc(u64::from(share.time))) { (fmt_ago(view.now, u64::from(share.time))) }
-                                td { (miner_link(&share.payout_address)) }
-                                td { @if share.is_block { span.badge { "block" } } }
+                div.table-wrap {
+                    table.table {
+                        thead { tr { th { "Height" } th { "Share hash" } th { "Type" } th { "Miner (payout)" } th { "Share owner" } th { "Time" } th { "Difficulty" } } }
+                        tbody {
+                            @for row in &view.shares {
+                                tr.uncle-row[row.is_uncle] {
+                                    td { (row.height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string())) }
+                                    td { (share_link(&row.blockhash)) }
+                                    td {
+                                        @if row.is_uncle { "uncle" } @else { "share" }
+                                        @if row.is_block { " " span.badge-block { "block" } }
+                                    }
+                                    td { (miner_link(&row.payout_address)) }
+                                    td { (miner_link(&row.share_address)) }
+                                    (ago_cell(view.now, u64::from(row.time)))
+                                    td.mono { (optional(row.difficulty, fmt_difficulty)) }
+                                }
                             }
                         }
                     }
                 }
+                (pager("/dashboard", view.shares_paging))
+            }
+        }
+    };
+    let refresh = (view.shares_paging.page == 1).then_some(OVERVIEW_REFRESH_SECONDS);
+    layout(&view.site, "Dashboard", Tab::Dashboard, &[], refresh, body)
+}
+
+pub(crate) fn blocks(view: &BlocksView) -> Markup {
+    let body = html! {
+        div.panel {
+            h2 { "Found blocks" span.panel-note { (view.blocks_found) " in all, newest first" } }
+            @if view.blocks.is_empty() {
+                p.empty-state { "The pool has not found a Bitcoin Cash block yet. Keep mining." }
+            } @else {
+                (blocks_table(view.now, &view.blocks))
+                (pager("/dashboard/blocks", view.paging))
             }
         }
     };
     layout(
-        "Overview",
-        &view.network,
-        Some(OVERVIEW_REFRESH_SECONDS),
+        &view.site,
+        "Blocks",
+        Tab::Blocks,
+        &[dashboard_crumb(), Crumb::here("Blocks")],
+        None,
+        body,
+    )
+}
+
+pub(crate) fn block(view: &BlockView) -> Markup {
+    let block = &view.block;
+    let block_hash = block.block_hash.to_string();
+    let share_hash = block.share_hash.to_string();
+    let body = html! {
+        a.back-link href="/dashboard/blocks" { "← All found blocks" }
+        div.panel {
+            h2 { "Block " (block.height) span.panel-note { "found by the pool" } }
+            div.stat-list {
+                (stat("Height", html! { (block.height) }))
+                (stat("Found", html! { (fmt_ago(view.now, u64::from(block.time))) }))
+                (stat("Time", html! { (fmt_utc(u64::from(block.time))) }))
+                (stat("Found by", miner_link(&block.payout_address)))
+            }
+        }
+        div.panel {
+            h2 { "Hashes" }
+            div.stat-list {
+                (stat("Block hash", html! { span.mono { (block_hash) } }))
+                (stat("Share carrying it", html! { a.addr href=(share_href(&share_hash)) { (share_hash) } }))
+            }
+        }
+    };
+    layout(
+        &view.site,
+        &format!("Block {}", block.height),
+        Tab::Blocks,
+        &[
+            dashboard_crumb(),
+            Crumb::link("Blocks", "/dashboard/blocks"),
+            Crumb::here(format!("Block {}", block.height)),
+        ],
+        None,
+        body,
+    )
+}
+
+fn worker_rows(now: u64, workers: &[WorkerRow]) -> Markup {
+    html! {
+        @for worker in workers {
+            div.grid-row.worker {
+                span {}
+                span.mono { (worker.name) }
+                span { @if worker.active { "online" } @else { "idle" } }
+                span { (fmt_difficulty(worker.accepted_work as f64)) }
+                span {}
+                span { "best " (fmt_difficulty(worker.best_share as f64)) }
+                (last_seen(now, worker.last_share_at))
+                span {}
+            }
+        }
+    }
+}
+
+pub(crate) fn miners(view: &MinersView) -> Markup {
+    let first_rank = (view.paging.page - 1) * PAGE_SIZE;
+    let body = html! {
+        div.panel {
+            h2 {
+                "Miners"
+                span.panel-note { "mining on this node; window share is across the whole pool. Open a row for its workers." }
+            }
+            @if view.miners.is_empty() {
+                p.empty-state { "No miners have submitted shares to this node yet." }
+            } @else {
+                div.grid-table.miners-grid {
+                    div.grid-head {
+                        span { "#" } span { "Payout address" } span { "Workers" } span { "Accepted work" }
+                        span { "Window share" } span { "Best share" } span { "Last seen" } span {}
+                    }
+                    @for (index, miner) in view.miners.iter().enumerate() {
+                        details {
+                            summary.grid-row {
+                                span { (first_rank + index + 1) }
+                                a.addr href=(miner_href(&miner.address)) title=(miner.address) { (miner.address) }
+                                span { (miner.workers.iter().filter(|worker| worker.active).count()) " / " (miner.workers.len()) }
+                                span { (fmt_difficulty(miner.accepted_work as f64)) }
+                                span { (miner.payout_fraction.map(percent).unwrap_or_else(|| "—".to_string())) }
+                                span { (fmt_difficulty(miner.best_share as f64)) }
+                                (last_seen(view.now, miner.last_share_at))
+                                span.toggle aria-label="Workers" {}
+                            }
+                            div.worker-list {
+                                @if miner.workers.is_empty() {
+                                    p.worker-empty { "No worker-level stats for this address." }
+                                } @else {
+                                    (worker_rows(view.now, &miner.workers))
+                                }
+                            }
+                        }
+                    }
+                }
+                (pager("/dashboard/miners", view.paging))
+            }
+        }
+    };
+    layout(
+        &view.site,
+        "Miners",
+        Tab::Miners,
+        &[dashboard_crumb(), Crumb::here("Miners")],
+        None,
         body,
     )
 }
 
 pub(crate) fn miner(view: &MinerView) -> Markup {
     let report = &view.report;
+    let base = miner_href(&report.address);
+    let shares = view.paging.slice(&report.shares);
     let body = html! {
         div.panel { (lookup_form(&report.address)) }
-        h2 { "Miner" }
         div.panel {
-            dl.fields {
-                dt { "Address" } dd.mono { (report.address) }
-                dt { "Kind" } dd { (if report.address_type == "share" { "share chain address" } else { "payout address" }) }
-                dt { "Window" } dd {
-                    (report.window.share_count) " shares"
-                    @if let (Some(newest), Some(oldest)) = (report.window.newest_height, report.window.oldest_height) {
-                        ", heights " (oldest) " to " (newest)
+            h2 {
+                "Miner"
+                span.panel-note { (if report.address_type == "share" { "share chain address" } else { "payout address" }) }
+            }
+            div.stat-list {
+                (stat("Address", html! { span.mono { (report.address) } }))
+                (stat("Share of the next block's payout", html! { (percent(report.payout_fraction)) }))
+                (stat("Shares in the window", html! {
+                    (report.share_count) " of " (report.window.share_count) " (" (percent(report.share_fraction)) ")"
+                }))
+                (stat("Uncles credited", html! { (report.uncle_count) }))
+                (stat("Hashrate", html! {
+                    (optional(view.hashrate, fmt_hashrate))
+                    @if let Some((shares, seconds)) = view.recent_window {
+                        br; small { "over the last " (shares) " shares, " (seconds / 60) " min" }
                     }
-                }
-                dt { "Mining on" } dd { (share_link(&report.anchor, &format!("height {}", report.anchor_height))) }
+                }))
+                (stat("Mining on", html! {
+                    a href=(share_href(&report.anchor)) { "share " (report.anchor_height) }
+                }))
             }
         }
-        section.kpis {
-            (kpi("Share of the next block's payout", percent(report.payout_fraction),
-                Some("after the donation and any operator fee".to_string())))
-            (kpi("Shares in the window", report.share_count.to_string(),
-                Some(format!("{} of all shares", percent(report.share_fraction)))))
-            (kpi("Uncles credited", report.uncle_count.to_string(), None))
-            (kpi("Hashrate", optional(view.hashrate, fmt_hashrate),
-                view.recent_window.map(|(shares, seconds)| format!("over the last {shares} shares, {} min", seconds / 60))))
+        @if !view.workers.is_empty() {
+            div.panel {
+                h2 { "Workers on this node" }
+                div.grid-table.miners-grid {
+                    div.grid-head {
+                        span {} span { "Worker" } span { "State" } span { "Accepted work" }
+                        span {} span { "Best share" } span { "Last seen" } span {}
+                    }
+                    (worker_rows(view.now, &view.workers))
+                }
+            }
         }
-        h2 { "Shares credited in the window" }
         div.panel {
-            @if report.shares.is_empty() {
-                p.empty { "This address has no shares in the current window." }
+            h2 { "Shares credited in the window" span.panel-note { "newest first" } }
+            @if shares.is_empty() {
+                p.empty-state { "This address has no shares in the current window." }
             } @else {
-                table {
-                    thead { tr { th { "Height" } th { "Share" } th { "Difficulty" } th { "Weight" } th { "Kind" } } }
-                    tbody {
-                        @for share in &report.shares {
-                            tr {
-                                td { (share.height) }
-                                td { (share_link(&share.blockhash, &short(&share.blockhash))) }
-                                td.mono { (share.difficulty) }
-                                td.mono { (share.weight) }
-                                td { @if share.nephew.is_some() { "uncle" } @else { "share" } }
+                div.table-x {
+                    table.table {
+                        thead { tr { th { "Height" } th { "Share" } th { "Kind" } th { "Difficulty" } th { "Weight" } } }
+                        tbody {
+                            @for share in shares {
+                                tr.uncle-row[share.nephew.is_some()] {
+                                    td { (share.height) }
+                                    td { (share_link(&share.blockhash)) }
+                                    td { @if share.nephew.is_some() { "uncle" } @else { "share" } }
+                                    td.mono { (share.difficulty) }
+                                    td.mono { (share.weight) }
+                                }
                             }
                         }
                     }
                 }
+                (pager(&base, view.paging))
             }
         }
     };
     layout(
+        &view.site,
         &format!("Miner {}", short(&report.address)),
-        &view.network,
+        Tab::Miners,
+        &[
+            dashboard_crumb(),
+            Crumb::link("Miners", "/dashboard/miners"),
+            Crumb::here(short(&report.address)),
+        ],
         None,
         body,
     )
@@ -381,62 +820,172 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
 pub(crate) fn share(view: &ShareView) -> Markup {
     let share = &view.share;
     let header = &share.bitcoin_header;
+    let owner = &share.miner_bitcoin_address;
     let body = html! {
-        h2 { "Share" }
+        a.back-link href=(miner_href(owner)) { "← Miner " (short(owner)) }
         div.panel {
-            @if view.is_block {
-                p { span.badge { "block" } " This share met its Bitcoin Cash block target." }
+            h2 {
+                "Share"
+                @if view.is_block { " " span.badge-block { "found a block" } }
+                span.panel-note { (share.validation_status) " · " (share.chain) }
             }
-            dl.fields {
-                dt { "Hash" } dd.mono { (share.blockhash) }
-                dt { "Height" } dd { (share.height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string())) }
-                dt { "Chain" } dd { (share.chain) }
-                dt { "Validation" } dd { (share.validation_status) }
-                dt { "Parent" } dd { (share_link(&share.parent, &share.parent)) }
-                dt { "Payout address" } dd { (miner_link(&share.miner_bitcoin_address)) }
-                dt { "Share chain address" } dd { (miner_link(&share.miner_address)) }
-                dt { "Share bits" } dd.mono { (share.bits) }
-                dt { "Time" } dd { (share.time) }
-                dt { "Uncles" } dd {
-                    @if share.uncles.is_empty() { "none" }
-                    @for uncle in &share.uncles { (share_link(uncle, &short(uncle))) " " }
+            div.stat-list {
+                (stat("Hash", html! { span.mono { (share.blockhash) } }))
+                (stat("Height", html! { (share.height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string())) }))
+                (stat("Parent", share_link(&share.parent)))
+                (stat("Payout address", miner_link(owner)))
+                (stat("Share chain address", miner_link(&share.miner_address)))
+                (stat("Share bits", html! { span.mono { (share.bits) } }))
+                (stat("Time", html! { (share.time) }))
+            }
+        }
+        div.panel {
+            h2 { "Uncles" span.panel-note { (share.uncles.len()) " included" } }
+            @if share.uncles.is_empty() {
+                p.empty-state { "This share includes no uncles." }
+            } @else {
+                div.table-x {
+                    table.table {
+                        thead { tr { th { "Uncle" } } }
+                        tbody { @for uncle in &share.uncles { tr { td { (share_link(uncle)) } } } }
+                    }
                 }
             }
         }
-        h2 { "Bitcoin Cash header" }
         div.panel {
-            dl.fields {
-                dt { "Block hash" } dd.mono { (header.block_hash) }
-                dt { "Previous block" } dd.mono { (header.prev_blockhash) }
-                dt { "Merkle root" } dd.mono { (header.merkle_root) }
-                dt { "Time" } dd { (header.time) }
-                dt { "Bits" } dd.mono { (header.bits) }
-                dt { "Nonce" } dd.mono { (header.nonce) }
-                dt { "Version" } dd.mono { (format!("{:#x}", header.version)) }
+            h2 { "Bitcoin Cash header" }
+            div.stat-list {
+                (stat("Block hash", html! { span.mono { (header.block_hash) } }))
+                (stat("Previous block", html! { span.mono { (header.prev_blockhash) } }))
+                (stat("Merkle root", html! { span.mono { (header.merkle_root) } }))
+                (stat("Time", html! { (header.time) }))
+                (stat("Bits", html! { span.mono { (header.bits) } }))
+                (stat("Nonce", html! { span.mono { (header.nonce) } }))
+                (stat("Version", html! { span.mono { (format!("{:#x}", header.version)) } }))
             }
         }
     };
     layout(
+        &view.site,
         &format!("Share {}", short(&share.blockhash)),
-        &view.network,
+        Tab::Miners,
+        &[
+            dashboard_crumb(),
+            Crumb::link("Miners", "/dashboard/miners"),
+            Crumb::link(short(owner), miner_href(owner)),
+            Crumb::here(format!("Share {}", short(&share.blockhash))),
+        ],
+        None,
+        body,
+    )
+}
+
+pub(crate) fn help(site: &Site) -> Markup {
+    let body = html! {
+        div.panel {
+            div.help-section {
+                h3 { "Connect a miner" }
+                p { "Stratum V1: point the miner at this node's stratum port." }
+                ul {
+                    li { "URL: " code { "stratum+tcp://<this node>:<stratum port>" } }
+                    li { "User: " code { "<payout address>.<worker name>" } }
+                    li { "Password: " code { "p2p=<share chain address>" } ", which names who owns your shares." }
+                }
+                p {
+                    "Stratum V2: connect to the node's SV2 port and pin its authority key. Use "
+                    code { "<payout address>.<worker>,p2p=<share chain address>" } " as the user identity. "
+                    "SV1 devices can mine through an SV2 translator."
+                }
+                p { "Get a share chain address with " code { "p2poolv2_cli bch-share-address" } "." }
+            }
+            div.help-section {
+                h3 { "Pages" }
+                ul {
+                    li { a href="/dashboard" { "Dashboard" } ": hashrate, found blocks and the newest shares." }
+                    li { a href="/dashboard/blocks" { "Blocks" } ": every block the pool found." }
+                    li { a href="/dashboard/miners" { "Miners" } ": the miners on this node and their workers." }
+                    li { "Search: a payout or share chain address opens the miner, a share hash opens the share." }
+                }
+            }
+            div.help-section {
+                h3 { "API endpoints" }
+                p { "The same data as JSON, for explorers and your own frontend:" }
+                ul {
+                    li { code { "/chain_info" } ", " code { "/shares" } ", " code { "/share?hash=" } ", " code { "/share_headers" } }
+                    li { code { "/miner?address=" } ": a miner's shares and its part of the next payout" }
+                    li { code { "/pplns_shares" } ", " code { "/candidates" } ", " code { "/dag" } ", " code { "/transaction" } }
+                    li { code { "/hashrate" } ", " code { "/found_blocks" } }
+                    li { code { "/metrics" } " (Prometheus) and " code { "/peers" } ": always behind the API login" }
+                }
+            }
+            div.help-section {
+                h3 { "About this dashboard" }
+                p {
+                    "This node renders these pages in Rust, from the same store and PPLNS window the API reads. "
+                    "They load no scripts. The design is CashDragon0's."
+                }
+            }
+        }
+    };
+    layout(
+        site,
+        "Help",
+        Tab::Help,
+        &[dashboard_crumb(), Crumb::here("Help")],
         None,
         body,
     )
 }
 
 /// A page for a request the dashboard could not answer.
-pub(crate) fn error(network: &str, message: &str) -> Markup {
+pub(crate) fn error(site: &Site, message: &str) -> Markup {
     let body = html! {
-        div.panel.error { p { (message) } }
-        h2 { "Find a miner" }
-        div.panel { (lookup_form("")) }
+        div.toast role="alert" { (message) }
+        div.panel {
+            h2 { "Find a miner" }
+            (lookup_form(""))
+        }
+        p { a href="/dashboard" { "← Back to the dashboard" } }
     };
-    layout("Not available", network, None, body)
+    layout(
+        site,
+        "Not available",
+        Tab::None,
+        &[dashboard_crumb(), Crumb::here("Not available")],
+        None,
+        body,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn site() -> Site {
+        Site {
+            network: "Bitcoin Cash chipnet".to_string(),
+            badge: "chipnet".to_string(),
+        }
+    }
+
+    fn empty_overview() -> Overview {
+        Overview {
+            site: site(),
+            now: 1_000,
+            tip_height: None,
+            pool_hashrate: None,
+            local_hashrate: None,
+            network_hashrate: None,
+            network_difficulty: None,
+            miners_online: 0,
+            workers_online: 0,
+            samples: Vec::new(),
+            blocks_found: 0,
+            blocks: Vec::new(),
+            shares: Vec::new(),
+            shares_paging: Paging::of(None, 0),
+        }
+    }
 
     #[test]
     fn hashrates_use_unit_prefixes() {
@@ -471,6 +1020,17 @@ mod tests {
         assert_eq!(short("abc"), "abc");
         let hash = "00000000000cb752459c2b08e1955e5f33252b0207b1c7b5b2f069d5254b9025";
         assert_eq!(short(hash), "0000000000…4b9025");
+        // Cut on characters, never inside one.
+        assert_eq!(
+            short(&"é".repeat(30)),
+            format!("{}…{}", "é".repeat(10), "é".repeat(6))
+        );
+    }
+
+    #[test]
+    fn a_worker_without_shares_was_never_seen() {
+        assert_eq!(last_seen(1_000, 0).into_string(), "<span>never</span>");
+        assert!(last_seen(1_000, 940).into_string().contains("1 min ago"));
     }
 
     #[test]
@@ -480,10 +1040,40 @@ mod tests {
     }
 
     #[test]
-    fn the_layout_has_no_script_and_escapes_its_title() {
+    fn paging_clamps_and_slices() {
+        let rows: Vec<usize> = (0..60).collect();
+        let first = Paging::of(None, rows.len());
+        assert_eq!(first, Paging { page: 1, pages: 3 });
+        assert_eq!(first.slice(&rows), &rows[..25]);
+        let last = Paging::of(Some(9), rows.len());
+        assert_eq!(last, Paging { page: 3, pages: 3 });
+        assert_eq!(last.slice(&rows), &rows[50..]);
+        assert_eq!(Paging::of(Some(0), 0), Paging { page: 1, pages: 1 });
+    }
+
+    #[test]
+    fn the_pager_links_neighbouring_pages() {
+        let markup =
+            pager("/dashboard/miner?address=x", Paging { page: 2, pages: 3 }).into_string();
+        assert!(markup.contains("/dashboard/miner?address=x&amp;page=1"));
+        assert!(markup.contains("/dashboard/miner?address=x&amp;page=3"));
+        assert!(markup.contains("Page 2 of 3"));
+        assert!(
+            pager("/dashboard", Paging { page: 1, pages: 1 })
+                .into_string()
+                .is_empty()
+        );
+        let first = pager("/dashboard", Paging { page: 1, pages: 2 }).into_string();
+        assert!(first.contains("aria-disabled=\"true\" rel=\"prev\""));
+    }
+
+    #[test]
+    fn the_layout_marks_the_tab_and_the_trail_without_script() {
         let page = layout(
+            &site(),
             "<b>x</b>",
-            "Bitcoin Cash chipnet",
+            Tab::Blocks,
+            &[dashboard_crumb(), Crumb::here("Blocks")],
             Some(30),
             html! { p { "hi" } },
         )
@@ -491,58 +1081,47 @@ mod tests {
         assert!(!page.contains("<script"));
         assert!(page.contains("&lt;b&gt;x&lt;/b&gt;"));
         assert!(page.contains("http-equiv=\"refresh\""));
-        assert!(page.contains("Bitcoin Cash chipnet"));
+        assert!(page.contains(
+            "class=\"outline header-btn active-nav\" role=\"button\" href=\"/dashboard/blocks\" aria-current=\"page\""
+        ));
+        assert!(page.contains("aria-label=\"breadcrumb\""));
+        assert!(page.contains("action=\"/dashboard/search\""));
+        assert!(page.contains(&assets::href("dashboard.css")));
     }
 
     #[test]
     fn an_empty_overview_renders() {
-        let page = overview(&Overview {
-            network: "Bitcoin Cash chipnet".to_string(),
-            now: 1_000,
-            tip_height: None,
-            pool_hashrate: None,
-            local_hashrate: None,
-            network_hashrate: None,
-            network_difficulty: None,
-            miners_online: 0,
-            workers_online: 0,
-            samples: Vec::new(),
-            blocks_found: 0,
-            blocks: Vec::new(),
-            recent_shares: Vec::new(),
-        })
-        .into_string();
+        let page = overview(&empty_overview()).into_string();
         assert!(page.contains("No confirmed shares yet."));
         assert!(page.contains("Collecting data"));
+        assert!(page.contains("has not found a Bitcoin Cash block yet"));
         assert!(!page.contains("<script"));
     }
 
     #[test]
     fn a_hostile_payout_address_is_escaped_in_the_overview() {
-        let page = overview(&Overview {
-            network: "Bitcoin Cash chipnet".to_string(),
-            now: 1_000,
-            tip_height: Some(1),
-            pool_hashrate: Some(1.0),
-            local_hashrate: None,
-            network_hashrate: None,
-            network_difficulty: None,
-            miners_online: 0,
-            workers_online: 0,
-            samples: Vec::new(),
-            blocks_found: 0,
-            blocks: Vec::new(),
-            recent_shares: vec![RecentShare {
-                height: 1,
-                blockhash: "ab".to_string(),
-                time: 900,
-                payout_address: "<img src=x onerror=alert(1)>".to_string(),
-                is_block: true,
-            }],
-        })
-        .into_string();
-        assert!(!page.contains("<img"));
-        assert!(page.contains("&lt;img"));
-        assert!(page.contains("class=\"badge\""));
+        let mut view = empty_overview();
+        view.tip_height = Some(1);
+        view.shares = vec![ShareRow {
+            height: Some(1),
+            blockhash: "ab".to_string(),
+            time: 900,
+            payout_address: "<img src=x onerror=alert(1)>".to_string(),
+            share_address: "tp2pool:x".to_string(),
+            difficulty: Some(4.0),
+            is_uncle: false,
+            is_block: true,
+        }];
+        let page = overview(&view).into_string();
+        assert!(!page.contains("<img src=x"));
+        assert!(page.contains("&lt;img src=x"));
+        assert!(page.contains("class=\"badge-block\""));
+    }
+
+    #[test]
+    fn the_help_page_explains_the_share_address() {
+        let page = help(&site()).into_string();
+        assert!(page.contains("p2p=&lt;share chain address&gt;"));
+        assert!(page.contains("CashDragon0"));
     }
 }

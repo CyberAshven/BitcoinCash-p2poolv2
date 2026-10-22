@@ -311,10 +311,10 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
     let emission = emissions.try_recv().unwrap();
     assert_eq!(emission.header, full_header);
     let share = ShareHeader::from_commitment_and_header(
-        emission.share_commitment.unwrap(),
+        emission.share_commitment,
         emission.header,
         u64::from(full_height),
-        emission.coinbase_proof.unwrap(),
+        emission.coinbase_proof,
     );
     assert_eq!(
         share
@@ -461,10 +461,10 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
         "private submissions must not broadcast an incomplete block"
     );
     let share = ShareHeader::from_commitment_and_header(
-        emission.share_commitment.unwrap(),
+        emission.share_commitment,
         emission.header,
         u64::from(private_height),
-        emission.coinbase_proof.unwrap(),
+        emission.coinbase_proof,
     );
     assert_eq!(
         share

@@ -13,7 +13,7 @@ use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 #[cfg(not(test))]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
-    PAYOUT_DEPTH, WindowError, bitcoin_block_difficulty,
+    PAYOUT_DEPTH, WindowError, bitcoin_block_difficulty, coinbase_maturity_for,
 };
 use crate::config::{
     BITCOIN_CASH_DONATION_PUBKEY_HASH, Chain, MAX_BASIS_POINTS, MAX_BITCOIN_CASH_POOL_CUT,
@@ -1553,7 +1553,7 @@ impl ShareValidator for DefaultShareValidator {
                 &all_outpoints,
                 block_height,
                 min_coinbase_root_height,
-                sim_overrides::coinbase_maturity(self.chain),
+                coinbase_maturity_for(self.chain),
             )
             .map_err(|error| {
                 ValidationError::store_access(format!("Prevout check failed: {error}"))

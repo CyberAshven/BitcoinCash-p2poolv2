@@ -5,6 +5,7 @@
 mod address_filter;
 pub mod behaviour;
 pub mod connection_tracker;
+mod dns_seeds;
 pub mod emission_worker;
 pub mod organise_worker;
 pub mod p2p_health;
@@ -19,6 +20,7 @@ pub mod messages;
 pub mod p2p_message_handlers;
 
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
+use crate::config::Chain;
 use crate::monitoring_events::{MonitoringEvent, MonitoringEventSender, PeerResponse, PeerStatus};
 use crate::node::messages::Message;
 use crate::node::p2p_health::P2pHealth;
@@ -88,6 +90,9 @@ pub enum SwarmSend<C> {
     /// subsequent broadcasts of the same block are suppressed.
     BroadcastBlock(ShareBlock),
     Disconnect(PeerId),
+    /// Dial an address once, without reconnect tracking. Used for
+    /// addresses returned by DNS seeds.
+    Dial(Multiaddr),
 }
 
 use connection_tracker::{ConnectionAction, ConnectionTracker, PING_FAILURE_THRESHOLD};
@@ -119,6 +124,9 @@ struct Node {
     listen_port: Option<u16>,
     /// Whether kademlia bootstrap has been triggered at least once
     has_bootstrapped_kad: bool,
+    /// DNS seeds to fall back on, or None when disabled in config, the
+    /// network has none, or the chain is Bitcoin Cash.
+    dns_seeds: Option<dns_seeds::DnsSeeds>,
 }
 
 impl Node {
@@ -231,22 +239,31 @@ impl Node {
                     .into());
                 }
             }
+        }
 
-            for peer_addr in &config.network.dial_peers {
-                match peer_addr.parse::<Multiaddr>() {
-                    Ok(remote) => {
-                        if let Err(e) = swarm.dial(remote) {
-                            debug!("Failed to dial {}: {}", peer_addr, e);
-                        } else {
-                            info!("Dialed {}", peer_addr);
-                        }
+        for peer_addr in &config.network.dial_peers {
+            match peer_addr.parse::<Multiaddr>() {
+                Ok(remote) => {
+                    if let Err(e) = swarm.dial(remote) {
+                        debug!("Failed to dial {}: {}", peer_addr, e);
+                    } else {
+                        info!("Dialed {}", peer_addr);
                     }
-                    Err(e) => debug!("Invalid multiaddr {}: {}", peer_addr, e),
                 }
+                Err(e) => debug!("Invalid multiaddr {}: {}", peer_addr, e),
             }
         }
 
         let (swarm_tx, swarm_rx) = mpsc::channel(100);
+
+        let dns_seeds = if config.network.dns_seed {
+            dns_seeds::dns_seeds_for_chain(config.stratum.chain, config.stratum.network)
+        } else {
+            None
+        };
+        if config.stratum.chain == Chain::BitcoinCash {
+            info!("DNS seeds are off on Bitcoin Cash, which has none yet; dialing dial_peers only");
+        }
 
         let request_response_handler = RequestResponseHandler::new(
             config.network.clone(),
@@ -291,7 +308,25 @@ impl Node {
             external_address_confirmed,
             listen_port,
             has_bootstrapped_kad: false,
+            dns_seeds,
         })
+    }
+
+    /// Queries the DNS seeds and dials the returned addresses, unless a peer
+    /// is already connected. The actor calls this once, after
+    /// dns_seeds::dns_seed_delay.
+    fn query_dns_seeds_if_isolated(&self) {
+        let connected_peer_count = self.connection_tracker.connected_peer_count();
+        match self.dns_seeds {
+            Some(seeds) if connected_peer_count == 0 => {
+                info!("No peers connected, querying DNS seeds");
+                dns_seeds::spawn_dns_seed_dials(seeds, self.swarm_tx.clone());
+            }
+            Some(_) => {
+                info!("Skipping DNS seeds, {connected_peer_count} peers already connected");
+            }
+            None => {}
+        }
     }
 
     /// Returns a Vec of peer IDs that are currently connected to this node
@@ -682,7 +717,8 @@ mod tests {
     use super::ChainStoreHandle;
     use super::P2PoolBehaviourEvent;
     use crate::config::{
-        ApiConfig, Config, LoggingConfig, NetworkConfig, StoreConfig, StratumConfig,
+        ApiConfig, BitcoinCashNetwork, Chain, Config, LoggingConfig, NetworkConfig, StoreConfig,
+        StratumConfig,
     };
     use crate::monitoring_events::create_monitoring_event_channel;
     use crate::node::Node;
@@ -720,6 +756,7 @@ mod tests {
             dial_timeout_secs: 2,
             blocked_ips: vec![],
             external_address: None,
+            dns_seed: false,
         };
         network_config.dial_peers = vec![unreachable_peer];
         network_config.dial_timeout_secs = 2;
@@ -733,7 +770,6 @@ mod tests {
             },
             store: StoreConfig {
                 path: "test_chain.db".to_string(),
-                background_task_frequency_hours: 1,
                 pplns_ttl_days: 3,
             },
 
@@ -841,6 +877,7 @@ mod tests {
                 dial_timeout_secs: 2,
                 blocked_ips: vec![],
                 external_address,
+                dns_seed: false,
             },
             bitcoinrpc: BitcoinRpcConfig {
                 url: "http://localhost:8332".to_string(),
@@ -849,7 +886,6 @@ mod tests {
             },
             store: StoreConfig {
                 path: "test_chain.db".to_string(),
-                background_task_frequency_hours: 1,
                 pplns_ttl_days: 3,
             },
             stratum: StratumConfig::new_for_test_default(),
@@ -910,6 +946,56 @@ mod tests {
             "Expected external address {expected} not found in {external_addrs:?}"
         );
         assert!(node.external_address_confirmed);
+    }
+
+    #[tokio::test]
+    async fn test_dns_seeds_enabled_on_network_with_seeds() {
+        let mut config = build_test_config("", None);
+        config.stratum.network = bitcoin::Network::Testnet4;
+        config.network.dns_seed = true;
+        let node = build_test_node(config);
+
+        assert!(node.dns_seeds.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_dns_seeds_disabled_by_config() {
+        let mut config = build_test_config("", None);
+        config.stratum.network = bitcoin::Network::Testnet4;
+        config.network.dns_seed = false;
+        let node = build_test_node(config);
+
+        assert!(node.dns_seeds.is_none());
+    }
+
+    /// A Bitcoin Cash node gets no DNS seeds even with `dns_seed` on and a
+    /// network that has Bitcoin seeds: those seeds are Bitcoin nodes.
+    #[tokio::test]
+    async fn test_dns_seeds_disabled_on_bitcoin_cash() {
+        let mut config = build_test_config("", None);
+        config.stratum.chain = Chain::BitcoinCash;
+        config.stratum.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        config.stratum.network = bitcoin::Network::Testnet4;
+        config.network.dns_seed = true;
+        let node = build_test_node(config);
+
+        assert!(node.dns_seeds.is_none());
+    }
+
+    /// A node that does not listen still dials its configured peers.
+    #[tokio::test]
+    async fn test_dial_peers_are_dialed_without_listen_address() {
+        let mut config = build_test_config("", None);
+        config.network.dial_peers = vec!["/ip4/127.0.0.1/tcp/65535".to_string()];
+        let node = build_test_node(config);
+
+        assert_eq!(
+            node.swarm
+                .network_info()
+                .connection_counters()
+                .num_pending_outgoing(),
+            1
+        );
     }
 
     #[tokio::test]
