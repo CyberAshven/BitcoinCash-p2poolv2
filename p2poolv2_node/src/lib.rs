@@ -315,7 +315,8 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 
     let chain_store_handle_for_notify = chain_store_handle.clone();
     let pool_difficulty_for_notify =
-        PoolDifficulty::build(&chain_store_handle).expect("Failed to build pool difficulty");
+        PoolDifficulty::build(&chain_store_handle, stratum_config.chain)
+            .expect("Failed to build pool difficulty");
 
     let pool_transactions = p2poolv2_lib::stratum::sv2::PoolTransactionCache::new();
     let cloned_stratum_config = stratum_config.clone();
