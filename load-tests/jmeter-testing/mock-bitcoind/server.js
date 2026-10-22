@@ -87,7 +87,7 @@ net.createServer({ noDelay: true }, (socket) => {
 
         const method = parsed.method;
         const id = parsed.id;
-        const handler = methods[method];
+        const handler = Object.hasOwn(methods, method) ? methods[method] : undefined;
 
         let rpcResponse;
         if (handler) {
