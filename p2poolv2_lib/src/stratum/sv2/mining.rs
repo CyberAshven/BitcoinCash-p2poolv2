@@ -1866,7 +1866,9 @@ mod tests {
                 OpenStandardMiningChannel {
                     request_id: 1,
                     user_identity: USERNAME.try_into().unwrap(),
-                    nominal_hash_rate: 1.0,
+                    // No declared rate, so the channel starts at the node's
+                    // start difficulty.
+                    nominal_hash_rate: 0.0,
                     max_target: U256::new(&[0xff; 32]).unwrap(),
                 },
                 MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
