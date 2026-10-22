@@ -16,7 +16,7 @@ publish.workspace = true
 # (formatting, chart scaling, parsing) is unit tested there.
 [dependencies]
 leptos = { version = "0.8", features = ["csr"] }
-gloo-net = { version = "0.6", default-features = false, features = ["http", "json", "websocket"] }
+gloo-net = { version = "0.7", default-features = false, features = ["http", "json", "websocket"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 futures = { workspace = true }
 serde = { workspace = true }
