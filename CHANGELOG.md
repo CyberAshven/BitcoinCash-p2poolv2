@@ -44,6 +44,9 @@ anchor and the donation and fee cap as they were.
   Bitcoin Cash node finds peers through `dial_peers` only.
 - The `pplns-compare` feature of `p2poolv2_sim` builds `pplns_compare` with
   production window sizes; the `sim` feature now shortens them.
+- `/miners` serves the miners on this node with their workers as JSON, paged
+  and built like `/dashboard/miners`, and `/network` names the chain the node
+  mines as the dashboard header does. Both open with `public_dashboard`.
 
 ### Changed
 
@@ -67,6 +70,14 @@ anchor and the donation and fee cap as they were.
   `PPLNS_WINDOW_SHARES` 80, `PRUNE_DEPTH` 200, `PRUNE_INTERVAL` 20, background
   tasks every 30 s) instead of the `[sim] coinbase_maturity` option (from
   upstream). Bitcoin Cash's 100-share maturity is the same in every build.
+- The Rust/WASM dashboard (`p2poolv2_web`) looks and behaves like the one the
+  node renders: the same markup, menu, search, trail and pages (Dashboard,
+  Blocks, Miners, Help, block, miner and share pages), addressed by URL
+  fragment. Its own `style.css` is gone; trunk bundles the node's
+  stylesheets, fonts and logos from `p2poolv2_api/src/api/dashboard/assets/`,
+  the only styling source, and tests fail if a stylesheet appears elsewhere
+  or a class either dashboard uses has no selector there. It keeps live
+  shares over `/ws`, the zoomable hashrate chart and the API login settings.
 
 ### Removed
 
