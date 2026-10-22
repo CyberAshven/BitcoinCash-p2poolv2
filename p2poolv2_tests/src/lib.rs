@@ -10,6 +10,7 @@ mod node_swarm_test;
 mod organise_pipeline_test;
 #[cfg(test)]
 mod pruned_serving_test;
+#[cfg(test)]
 mod share_trading_test;
 #[cfg(test)]
 mod stratum_server_test;
