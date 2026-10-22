@@ -557,7 +557,7 @@ move most BCH hashrate to the share chain.
    ([jtoomim/p2pool](https://github.com/jtoomim/p2pool), and
    [BitcoinCash1/p2poolBCH](https://github.com/BitcoinCash1/p2poolBCH), a fork
    of frstrtr's): both are GPL-3.0, so copying their code (not just their
-   ideas) changes this fork's license; see open questions.
+   ideas) changes this fork's license; settled in decision 13.
 2. **Miner protocol: Stratum V2 first.** Encryption with an authenticated
    server key, binary framing, standard and extended channels, and Job
    Declaration, added the way ckpool added SV2 beside SV1. P2Poolv2's current
@@ -771,6 +771,26 @@ move most BCH hashrate to the share chain.
       old rule fail the handshake. Mainnet has not started and begins with
       the rule from its first share.
 
+13. **Scope settled with the maintainer (2026-10-22).**
+    - **Mainnet readiness.** Mainnet, chipnet and regtest share one code
+      path; only the network setting differs. Work finished and tested on
+      chipnet counts as mainnet ready.
+    - **Cap.** 10% stays the share-chain cap on donation plus pool fee,
+      public pool hosts included. With the default 1.5% donation, a host
+      may charge up to 8.5%.
+    - **Share trading stays on Bitcoin Cash.** Shares trade through BCH
+      covenants, with every share output above the dust limit. No Lightning
+      Network.
+    - **SAFA.** Experimental and not deployed. Its SHA-256 merge-mining
+      covenant is tested with a small test token in the BCH VM only
+      (`tools/safa-auxpow`).
+    - **License.** The maintainer holds P2Pool v1's code under AGPL-3.0, so
+      copying it is allowed. The fork is distributed under AGPL-3.0, and
+      upstream P2Poolv2 files keep their MIT/Apache-2.0 notices.
+    - **Independent clients.** Stratum V2 and Job Declaration tests against
+      other software, including the maintainer's Avalon ASIC on chipnet, are
+      run by the developers, not left to the maintainer.
+
 ## BCH porting checklist
 
 Found by reading P2Poolv2's code and docs; each item needs a short design
@@ -804,8 +824,6 @@ check before code.
 
 ## Open questions
 
-- License: if v1 code is copied, relicense the fork as GPL-3.0 or AGPL-3.0
-  (AGPL-3.0 matches Pickaxe).
 - PPLNS window length, share interval and share difficulty for the main and
   mini share chains. Wait for the outcome of CHIP-2025-03 (1-minute blocks,
   lock-in 2026-11-15) before tuning. Since the 2026-10-18 upstream sync the
@@ -815,11 +833,10 @@ check before code.
   difficulty behind a 100-share maturity, and a finder bonus and the share
   period are weighed, under decision 11. Tempnet, a test network that runs 1-minute blocks, can test a
   tuning.
-- Whether 10% is the right consensus cap on donation plus fee.
-- Which scripts beyond P2PKH the share-chain interpreter should accept
-  (P2SH, the atomic-swap scripts, `SIGHASH_UTXOS`); P2PKH transfers with
-  `SIGHASH_FORKID` ECDSA or Schnorr are checked since 2026-10-15.
-- Keep P2Poolv2's share trading on BCH, or rely on the mini share chain.
+- Which covenant scripts beyond P2PKH the share-chain interpreter accepts
+  for share trading (decision 13: covenants, above dust, no Lightning).
+  P2PKH transfers with `SIGHASH_FORKID` ECDSA or Schnorr are checked since
+  2026-10-15.
 - Merge-mining commitment format and size budget (Stratum V2's
   `CoinbaseOutputConstraints` already declares coinbase space).
 - Binding each miner's payout address to their shares over SV2 (sv2-p2pool
