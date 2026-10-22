@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Share trading for Bitcoin Cash (decision 13). This changes the share
-chain's rules, not Bitcoin Cash consensus: nodes start from a new store,
-and Bitcoin Cash protocol strings carry `trade-htlc`.
+Share trading for Bitcoin Cash (decision 13), and a trade now carries
+value: nodes relay and mine share transactions, and a coinbase pays each
+window share's weight to whoever holds the share's payout right. This
+changes the share chain's rules, not Bitcoin Cash consensus: nodes start
+from a new store, and Bitcoin Cash protocol strings carry `trade-htlc` and
+then `payout-holder`.
 
 Synced with upstream P2Poolv2 through `61810c56` (its v0.16.2). The fork
 keeps version `0.0.1-alpha`. The sync itself leaves Bitcoin Cash genesis
@@ -27,6 +30,19 @@ anchor and the donation and fee cap as they were.
 - `p2poolv2_cli bch-trade` (`contract`, `inspect`, `secret-hash`, `lock`,
   `claim`, `refund`, `extract-secret`) builds and signs both legs offline,
   with a WIF key read from a file or a hidden prompt and never generated.
+- Bitcoin Cash share transaction pool: a node checks signed share
+  transactions against the confirmed share chain under every share-chain
+  rule, keeps at most 1,000 of them and 4 MiB (each at most 50 KiB, for 3
+  hours, oldest evicted first, spending only confirmed unspent outputs),
+  relays them to its peers as `Transaction` requests (peer transactions
+  admitted at most 10 a second, bursts of 100), and mines them in the shares
+  it builds, within 99 transactions and 64 KiB a share, with the share
+  commitment covering them. A transaction leaves the pool once confirmed and
+  returns if a reorg takes it off the confirmed chain. Bitcoin nodes keep
+  building shares with the coinbase alone.
+- `POST /share_transaction` (behind the API login) and
+  `p2poolv2_cli transactions submit` hand a signed share transaction to a
+  node, for example a `bch-trade` lock or claim.
 - Nodes delete block bodies more than `PRUNE_DEPTH + PRUNE_INTERVAL`
   (254,376) shares below the confirmed tip, in a background task every 6
   hours while the node is current (from upstream). Headers and their merkle
@@ -53,6 +69,16 @@ anchor and the donation and fee cap as they were.
   dust threshold (546 or 576 units), so `OP_RETURN`, P2SH20 and dust outputs
   invalidate a share; and a share transaction must be final at its share's
   height. Bitcoin keeps upstream's rules.
+- Payout rule on Bitcoin Cash: a coinbase pays each PPLNS window share's own
+  weight to the key hash holding the share's payout right at the paying
+  share, instead of always to its `miner_bitcoin_address`. The right starts
+  on the share's coinbase output and moves from a spending transaction's
+  input `i` to its output `i`; a P2SH32 output keeps the previous holder, so
+  a share locked in a trade contract pays the seller until the buyer's claim.
+  While the miner holds its own right, it is paid at `miner_bitcoin_address`
+  as before; uncles are always paid to their miner. Protocol strings carry
+  `payout-holder`. Bitcoin keeps upstream's payee. See
+  `docs/atomic-swap/bch-share-trading.md`, "Payout rights".
 - `network.dial_peers` is optional and defaults to empty, and a node without
   a `listen_address` still dials its `dial_peers` (from upstream).
 - Hydrapool shares go to a dedicated PPLNS share worker and are stored only

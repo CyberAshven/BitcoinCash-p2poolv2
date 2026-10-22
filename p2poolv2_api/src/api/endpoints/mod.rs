@@ -11,6 +11,7 @@ pub mod jd_prepare;
 pub mod miner;
 pub mod share;
 pub mod share_headers;
+pub mod share_transaction;
 pub mod shares;
 pub mod transaction;
 

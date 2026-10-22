@@ -389,7 +389,9 @@ fn parse_bitcoin_miner(address: &str, network: Network) -> Result<MinerAddress, 
 /// failure is a server error.
 fn window_error(error: WindowError) -> ApiError {
     match error {
-        WindowError::InsufficientEntries { .. } => ApiError::ServiceUnavailable(error.to_string()),
+        WindowError::InsufficientEntries { .. } | WindowError::RightsHistoryTooShallow { .. } => {
+            ApiError::ServiceUnavailable(error.to_string())
+        }
         WindowError::ReadFailure(_) => {
             ApiError::ServerError(format!("Failed to read the PPLNS window: {error}"))
         }

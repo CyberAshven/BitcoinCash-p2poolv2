@@ -206,6 +206,7 @@ mod tests {
             validation_tx,
             block_receiver_handle,
             share_validator: Arc::new(MockDefaultShareValidator::default()),
+            share_transaction_pool: None,
         }
     }
 

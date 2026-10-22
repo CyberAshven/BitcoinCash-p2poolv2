@@ -19,12 +19,13 @@ use p2poolv2_lib::accounting::payout::{build_payout_for_mode, payout_pplns_windo
 use p2poolv2_lib::accounting::stats::metrics;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::config::{
-    BitcoinCashNetwork, Chain, Config, TemplateProvider, bitcoin_cash_donation_cashaddr,
+    BitcoinCashNetwork, Chain, Config, PoolMode, TemplateProvider, bitcoin_cash_donation_cashaddr,
 };
 use p2poolv2_lib::node::actor::NodeHandle;
 use p2poolv2_lib::pool_difficulty::PoolDifficulty;
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::shares::merge_mining::MergeMiningCommitment;
+use p2poolv2_lib::shares::transaction_pool::ShareTransactionPool;
 use p2poolv2_lib::store::Store;
 use p2poolv2_lib::store::writer::{StoreHandle, StoreWriter, write_channel};
 use p2poolv2_lib::stratum::client_connections::start_connections_handler;
@@ -330,6 +331,14 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         stratum_config.bitcoin_cash_network,
     );
     let api_pplns_window = payout_pplns_window(stratum_config.mode, &shared_pplns_window);
+    // Bitcoin Cash share chain nodes take, relay and mine share transactions;
+    // Bitcoin nodes and Hydrapool keep building shares with the coinbase alone.
+    let share_transactions = (stratum_config.chain == Chain::BitcoinCash
+        && stratum_config.mode == PoolMode::P2poolv2)
+        .then(|| ShareTransactionPool::new(chain_store_handle.clone()));
+    let notify_share_transaction_pool = share_transactions
+        .as_ref()
+        .map(|(share_transaction_pool, _)| share_transaction_pool.clone());
     let exit_sender_notify = exit_sender.clone();
     let exit_receiver_notify = exit_sender.subscribe();
     let notify_transactions = pool_transactions.clone();
@@ -343,6 +352,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             payout,
             pool_difficulty_for_notify,
             notify_transactions,
+            notify_share_transaction_pool,
         )
         .await;
         if *exit_receiver_notify.borrow() == ShutdownReason::None {
@@ -467,6 +477,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         monitoring_event_sender.clone(),
         notify_tx_for_node,
         shared_pplns_window,
+        share_transactions,
     )
     .await
     {

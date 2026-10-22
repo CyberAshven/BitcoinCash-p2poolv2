@@ -1055,9 +1055,10 @@ impl DefaultShareValidator {
                 // retains, and the window's oldest entry only moves forward
                 // with the confirmed tip, so no retry can bring it back into
                 // range. Drop the share without a verdict.
-                WindowError::InsufficientEntries { .. } => ValidationError::unresolvable(format!(
-                    "Cannot resolve PPLNS window from prev_share_blockhash: {error}"
-                )),
+                WindowError::InsufficientEntries { .. }
+                | WindowError::RightsHistoryTooShallow { .. } => ValidationError::unresolvable(
+                    format!("Cannot resolve PPLNS window from prev_share_blockhash: {error}"),
+                ),
                 // A store read failed or the ancestry is not stored yet; either
                 // may resolve later.
                 WindowError::ReadFailure(_) => ValidationError::recoverable(format!(

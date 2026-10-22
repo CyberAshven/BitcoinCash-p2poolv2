@@ -22,6 +22,7 @@ use crate::stratum::{
 use bitcoin::{BlockHash, block::Header, blockdata::block::Block, hashes::Hash};
 use bitcoindrpc::BitcoindRpcClient;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
@@ -351,6 +352,7 @@ async fn emit_share_chain_share(
             template_merkle_branches: job.template_merkle_branches.clone(),
             bitcoin_coinbase: pool_share.coinbase.clone(),
             coinbase_proof,
+            share_transactions: Arc::clone(&job.share_transactions),
         })
         .await
         .map_err(|e| Error::SubmitFailure(format!("Failed to send share to store: {e}")))?;

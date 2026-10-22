@@ -187,6 +187,12 @@ pub(crate) fn build_router_with_history(
             "/jd_prepare",
             post(endpoints::jd_prepare::prepare).layer(axum::extract::DefaultBodyLimit::max(8192)),
         )
+        .route(
+            "/share_transaction",
+            post(endpoints::share_transaction::submit).layer(axum::extract::DefaultBodyLimit::max(
+                endpoints::share_transaction::MAX_SHARE_TRANSACTION_REQUEST_BYTES,
+            )),
+        )
         .route("/metrics", get(metrics))
         .route("/peers", get(peers))
         .route("/blocked_ips", get(get_blocked_ips))

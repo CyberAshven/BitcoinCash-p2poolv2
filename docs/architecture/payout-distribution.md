@@ -33,17 +33,25 @@ through `bitcoin_block_difficulty`).
 5. **Weights:** share difficulty x 10. Each uncle of a paid share: the
    uncle's miner gets 9/10 of its difficulty and the nephew's miner 1/10.
    Uncles use no window slots.
-6. **Split:** addresses sorted by string, `amount * weight / total`
+6. **Payee:** on Bitcoin, each share's and uncle's `miner_bitcoin_address`.
+   On Bitcoin Cash a share's own weight, nephew bonus included, goes to
+   whoever holds the share's payout right at the anchor: its
+   `miner_bitcoin_address` while the holder is the share's own
+   `miner_address` key hash, else the P2PKH address of the holder's key hash.
+   An uncle's weight always goes to the uncle's `miner_bitcoin_address`. See
+   "Bitcoin Cash payout rights" below.
+7. **Split:** addresses sorted by string, `amount * weight / total`
    truncated, and the last address gets the remainder.
 
 ## Invariants
 
 - **Deterministic.** The distribution is a function of the chain below
-  the anchor and, on Bitcoin Cash, the paying share's own header only. No
-  config, no difficulty from a node's own bitcoin node, no local tip, and no
-  validation status. The producer and every validator must build identical
-  outputs, so any change to the walk, the window or the weights is a
-  consensus change.
+  the anchor and, on Bitcoin Cash, the paying share's own header and the
+  share transactions in the anchor's ancestry only. No config, no difficulty
+  from a node's own bitcoin node, no local tip, and no validation status.
+  The producer and every validator must build identical outputs, so any
+  change to the walk, the window, the weights or the payee is a consensus
+  change.
 - **One code path.** The notifier (`Payout::fill_distribution_from_shares`)
   and the validator (`validate_bitcoin_payout`) call the same
   `PplnsWindow::get_distribution_from_start_hash` on the same shared window,
@@ -52,7 +60,10 @@ through `bitcoin_block_difficulty`).
   carries, because a stratum miner cannot change them and a declared job must
   keep them (`validate_custom_job` checks `nbits`). The validator reads them
   from the header.
-- **Payee is `miner_bitcoin_address`.** Never `miner_address`.
+- **Payee is `miner_bitcoin_address`** on Bitcoin, and on Bitcoin Cash for
+  every share whose payout right its own miner holds. Never `miner_address`
+  as an address: on Bitcoin Cash a transferred right pays the P2PKH address
+  of its holder's key hash, which may be another key than the miner's.
 - **No fallback payee.** An empty window, zero total weight, an unresolved
   anchor or a store error is an `Err`. Never pay `bootstrap_address`: it
   is node-local.
@@ -144,9 +155,38 @@ pool holding fraction `f` of BCH's hashrate, so pools under about `K / 2016`
   or maturity, fails the handshake instead of exchanging shares the other
   rejects, and changing either constant changes the tag by itself. The
   share difficulty rule follows it as `asert-parent`
-  (`docs/difficulty_adjustment/asert.md`), and the share transaction rules
-  as `trade-htlc` (`docs/atomic-swap/bch-share-trading.md`). Bitcoin's
+  (`docs/difficulty_adjustment/asert.md`), the share transaction rules as
+  `trade-htlc` and the payout to the holder of each share's payout right as
+  `payout-holder` (`docs/atomic-swap/bch-share-trading.md`). Bitcoin's
   protocol strings are unchanged.
+
+## Bitcoin Cash payout rights
+
+The full rule and its reasoning are in
+[bch-share-trading.md](../atomic-swap/bch-share-trading.md#payout-rights).
+In short:
+
+- A share's payout right starts on its coinbase output, held by its own
+  `miner_address`. A share transaction spending an output carrying a right
+  through input `i` passes the right to its output `i`; with no output `i`
+  the right stays with its holder for good. A P2PKH output's key hash
+  becomes the holder; a P2SH32 output (the trade contract) keeps the holder
+  it had, so a seller holds a locked share until the claim or the refund.
+- The holder at the paying share counts every share transaction on the
+  anchor's own chain up to and including the anchor. Uncles' transactions
+  never count, and an uncle's own weight never moves.
+- `PplnsWindow` keeps the index (`payout_rights.rs`) beside its confirmed
+  entries: moved rights by share, by outpoint, and each cached share's
+  coinbase txid, all evicted with their share. `update` applies newly
+  confirmed shares in height order and undoes reorged-out ones from per-share
+  undo records kept for up to the newest `RIGHTS_UNDO_DEPTH` (1,210) shares
+  and `RIGHTS_UNDO_MAX_CHANGES` (100,000) changed entries; a deeper reorg
+  reloads. A walk from an anchor below the cached tip undoes the cached
+  shares above its fork point in an overlay, then applies its branch shares;
+  an anchor forking deeper than the undo log is `RightsHistoryTooShallow`,
+  dropped without a verdict like `InsufficientEntries`.
+- Each output carries at most one right, so a share moves at most one right
+  per input and the index never holds more than one entry per cached share.
 
 ## Depths
 
@@ -175,6 +215,7 @@ See `pruning.md` for the two-window retention model.
 | Bits to `D` | `bitcoin_block_difficulty` |
 | Peer isolation by rule | `share_chain_rule_tag`, `protocol_string` (`node/behaviour/request_response.rs`) |
 | Window walk and weights | `walk_window_entries` (with `ConfirmedEntry::work` for the BCH bound), `for_each_credit` (the only place the weights are applied) |
+| BCH payee of a share's own weight | `PplnsWindow::transferred_payees`, `ResolvedWindow::share_payee`; the index in `sharechain_pplns/payout_rights.rs` (`PayoutRights`, `RightsOverlay`) |
 | Entry point | `PplnsWindow::get_distribution_from_start_hash` |
 | Every miner's credits (API `/miner`, one walk per anchor) | `PplnsWindow::get_window_credits_from_start_hash`, same walk and weights; on BCH the API sizes it from the anchor share's own header |
 | Producer | `Payout::fill_distribution_from_shares` (`sharechain_pplns/payout.rs`), from `build_output_distribution` (`stratum/work/notify.rs`); the window is built by `build_payout_for_mode` (`accounting/payout/mod.rs`) |
@@ -204,6 +245,8 @@ test with small values (for example 3 and 2).
 | Bitcoin keeps `W` | `test_bitcoin_window_ignores_paying_block_difficulty` |
 | Producer and validator agree | `test_bch_notifier_and_validator_build_identical_outputs`, `test_bch_validator_with_other_header_bits_builds_other_outputs` (`sharechain_pplns/payout.rs`) |
 | Output expiry | `test_validate_prevouts_expires_coinbase_roots_below_payout_depth` (`shares/validation/mod.rs`) |
+| BCH: a claim pays the buyer, a refund the seller, a reorg undoes a claim, the holder depends on the anchor only, Bitcoin unchanged | `p2poolv2_tests/src/share_payout_rights_test.rs` |
+| BCH: rights move input `i` to output `i`, freeze, keep the holder through P2SH32, undo, evict, overlay | `payout_rights.rs` tests |
 | Fixture coinbases match | `test_fixture_coinbase_reconstruction_matches_bitcoin_merkle_root` (`shares/share_block/mod.rs`, mirrors the walk by hand) |
 
 The offline `pplns_compare` binary (`p2poolv2_sim`, `pplns-compare` feature) pays one

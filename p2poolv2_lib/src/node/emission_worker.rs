@@ -136,6 +136,7 @@ mod tests {
             template_merkle_branches: vec![],
             bitcoin_coinbase: test_coinbase_transaction(1),
             coinbase_proof: CoinbaseProof::default(),
+            share_transactions: Arc::from([]),
         }
     }
 

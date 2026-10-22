@@ -97,7 +97,10 @@ pub trait PayoutDistribution {
 }
 
 /// Apply donation, operator fee and the exact share-chain difficulty weights.
-pub(crate) fn build_pplns_outputs(
+///
+/// The coinbase outputs payout validation rebuilds from a window's weights;
+/// public so integration tests can check the coinbase a window implies.
+pub fn build_pplns_outputs(
     value: u64,
     weights: &HashMap<Address, u128>,
     donation_address: &Option<Address>,
