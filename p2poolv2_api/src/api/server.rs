@@ -168,6 +168,8 @@ pub(crate) fn build_router_with_history(
             get(endpoints::share_headers::share_headers),
         )
         .route("/found_blocks", get(endpoints::found_blocks::found_blocks))
+        .route("/miners", get(endpoints::miners::miners))
+        .route("/network", get(endpoints::network::network))
         .merge(endpoints::hashrate::router(
             app_state.clone(),
             history.clone(),

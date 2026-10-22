@@ -24,6 +24,12 @@ backend = "http://127.0.0.1:46884/share"
 backend = "http://127.0.0.1:46884/miner"
 
 [[proxy]]
+backend = "http://127.0.0.1:46884/miners"
+
+[[proxy]]
+backend = "http://127.0.0.1:46884/network"
+
+[[proxy]]
 backend = "http://127.0.0.1:46884/hashrate"
 
 [[proxy]]
