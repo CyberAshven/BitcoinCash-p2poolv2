@@ -17,7 +17,8 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ConfirmedHeaderResult;
 use crate::shares::share_block::ShareHeader;
-use crate::sim_overrides;
+#[cfg(not(feature = "sim"))]
+use crate::store::dag_store::MAX_UNCLES_DEPTH;
 use bitcoin::Address;
 use bitcoin::BlockHash;
 #[cfg(any(test, feature = "test-utils", feature = "sim"))]
@@ -42,7 +43,13 @@ use tracing::debug;
 /// The cache, its eviction buffer, `PRUNE_DEPTH`, the PPLNS zone and the
 /// prevout depth are all sized by it, together with `COINBASE_MATURITY`
 /// through `PAYOUT_DEPTH`.
+///
+/// The sim build uses 80 shares instead, with the other sim depths below, so
+/// a fast sim chain reaches the prune depth and prunes often.
+#[cfg(not(feature = "sim"))]
 pub const PPLNS_WINDOW_SHARES: usize = 120960;
+#[cfg(feature = "sim")]
+pub const PPLNS_WINDOW_SHARES: usize = 80;
 
 /// Bitcoin Cash only: a coinbase pays the shares holding this many expected
 /// BCH blocks' worth of work, below the maturity skip and at most
@@ -96,8 +103,14 @@ pub fn bitcoin_block_difficulty(bits: CompactTarget, network: bitcoin::Network) 
 /// first `COINBASE_MATURITY` shares of the chain are always mature for payout.
 ///
 /// Bitcoin's maturity. Bitcoin Cash uses `BCH_COINBASE_MATURITY`; read the
-/// maturity for a chain with `sim_overrides::coinbase_maturity`.
+/// maturity for a chain with `coinbase_maturity_for`.
+///
+/// The sim build uses 20 shares, so a short run reaches the payout maturity
+/// skip.
+#[cfg(not(feature = "sim"))]
 pub const COINBASE_MATURITY: usize = 6048;
+#[cfg(feature = "sim")]
+pub const COINBASE_MATURITY: usize = 20;
 
 /// Bitcoin Cash coinbase maturity, in shares: 100, as Satoshi set coinbase
 /// maturity in blocks and BCH keeps it, a count rather than a span of time.
@@ -108,9 +121,12 @@ pub const COINBASE_MATURITY: usize = 6048;
 /// always mature for payout). A block's payout can then differ between
 /// share-chain forks only if they split more than 100 shares below the paying
 /// share, far deeper than an uncle (`MAX_UNCLES_DEPTH`).
+///
+/// The same in the sim build: the sim swarm runs Bitcoin only, and the
+/// Bitcoin Cash protocol strings carry this value.
 pub const BCH_COINBASE_MATURITY: usize = 100;
 
-/// The coinbase maturity a chain's consensus uses, before any sim override.
+/// The coinbase maturity a chain's consensus uses.
 pub fn coinbase_maturity_for(chain: Chain) -> usize {
     match chain {
         Chain::Bitcoin => COINBASE_MATURITY,
@@ -123,8 +139,20 @@ pub fn coinbase_maturity_for(chain: Chain) -> usize {
 ///
 /// Sizes the full-validation zone, the expiry of share chain outputs, and,
 /// doubled, `PRUNE_DEPTH`. Sized by Bitcoin's maturity, the larger one, so it
-/// also covers Bitcoin Cash's.
+/// also covers Bitcoin Cash's: a Bitcoin Cash coinbase pays at most
+/// `BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES` shares deep (121,060), and an
+/// uncle of the deepest of them is at most `MAX_UNCLES_DEPTH` deeper, all
+/// within 127,008. The assertion below holds production builds to that. The
+/// sim build shortens Bitcoin's depths only.
 pub const PAYOUT_DEPTH: usize = COINBASE_MATURITY + PPLNS_WINDOW_SHARES;
+
+// Bitcoin Cash's payout walk and its spendable outputs must fit inside the
+// depths sized by Bitcoin's maturity: the full-validation zone, output expiry
+// and, through `PRUNE_DEPTH`, the block bodies a node keeps.
+#[cfg(not(feature = "sim"))]
+const _: () = assert!(
+    BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES + MAX_UNCLES_DEPTH as usize <= PAYOUT_DEPTH
+);
 
 /// Divisor for the retained eviction buffer beyond the window: the cache
 /// keeps the window plus `window / PPLNS_WINDOW_BUFFER_DIVISOR` extra shares
@@ -147,16 +175,29 @@ pub const PAYOUT_DEPTH: usize = COINBASE_MATURITY + PPLNS_WINDOW_SHARES;
 /// resource choice, not a consensus rule: nodes with different values disagree
 /// only about which deep forks they are willing to follow, and a dropped share
 /// leaves no verdict behind.
+///
+/// The sim build uses 4, a 20 entry buffer over its 80 share window: 1% of
+/// that window would be one entry, and shares built one parent behind the tip
+/// under propagation delay would be dropped.
+#[cfg(not(feature = "sim"))]
 const PPLNS_WINDOW_BUFFER_DIVISOR: usize = 100;
+#[cfg(feature = "sim")]
+const PPLNS_WINDOW_BUFFER_DIVISOR: usize = 4;
 
 /// Number of blocks from the chain tip that must be retained by each node.
 /// Equals 2x `PAYOUT_DEPTH`: one payout depth for full tx validation and one
 /// for PoW-only validation that provides output availability.
 pub const PRUNE_DEPTH: usize = 2 * PAYOUT_DEPTH;
 
-/// Pruning runs every PRUNE_INTERVAL blocks (approximately 1 hour at
-/// 10s/block: 60 * 6 = 360).
+/// The gap between the prune height and the prune target, and the size of
+/// one prune chunk: 360 shares, about 1 hour at 10s/block (60 * 6 = 360).
+///
+/// The sim build uses 20 shares, giving a sim prune target 220 shares below
+/// the tip.
+#[cfg(not(feature = "sim"))]
 pub const PRUNE_INTERVAL: usize = 360;
+#[cfg(feature = "sim")]
+pub const PRUNE_INTERVAL: usize = 20;
 
 /// Scale factor applied to all difficulty contributions.
 /// Allows integer representation of 90%/10% uncle/nephew weighting.
@@ -470,9 +511,8 @@ pub struct PplnsWindow {
     /// `PPLNS_WINDOW_SHARES`; overridable in tests so eviction can be
     /// exercised without a full-capacity fixture.
     max_window_shares: usize,
-    /// Depth a share must reach before it is paid:
-    /// `sim_overrides::coinbase_maturity` for the chain `for_chain` selects,
-    /// `COINBASE_MATURITY` until then.
+    /// Depth a share must reach before it is paid: `coinbase_maturity_for`
+    /// the chain `for_chain` selects, `COINBASE_MATURITY` until then.
     maturity_skip: usize,
     /// Rule sizing the window below the maturity skip. `FixedShares` until
     /// `for_chain` selects Bitcoin Cash.
@@ -493,7 +533,7 @@ impl PplnsWindow {
             owner_keys: AddressKeys::default(),
             network,
             max_window_shares: PPLNS_WINDOW_SHARES,
-            maturity_skip: sim_overrides::coinbase_maturity(Chain::Bitcoin),
+            maturity_skip: COINBASE_MATURITY,
             sizing: WindowSizing::FixedShares,
         }
     }
@@ -512,7 +552,16 @@ impl PplnsWindow {
                 expected_blocks: BCH_PPLNS_WINDOW_BLOCKS,
             },
         };
-        self.maturity_skip = sim_overrides::coinbase_maturity(chain);
+        self.maturity_skip = coinbase_maturity_for(chain);
+        self
+    }
+
+    /// Override the maturity skip, after `for_chain`, for the offline payout
+    /// comparison (`pplns_compare` in `p2poolv2_sim`), which measures other
+    /// skips than the chain's own. Consensus code never calls it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_maturity_skip(mut self, maturity_skip: usize) -> Self {
+        self.maturity_skip = maturity_skip;
         self
     }
 

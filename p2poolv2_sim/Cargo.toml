@@ -30,7 +30,10 @@ rand = { workspace = true, optional = true }
 default = []
 # No-PoW load-test simulation; see docs/simulation/load-test-plan.md.
 # MUST NEVER be enabled in a release/production build.
-sim = ["p2poolv2_lib/sim", "dep:rand"]
+sim = ["p2poolv2_lib/sim", "p2poolv2_node/sim", "dep:rand"]
+# Offline PPLNS window comparison (`pplns_compare`). Not `sim`: it needs the
+# production window and maturity, which the sim build shortens.
+pplns-compare = ["p2poolv2_lib/test-utils", "dep:rand"]
 
 [[bin]]
 name = "p2poolv2_sim"
@@ -40,4 +43,4 @@ path = "src/main.rs"
 [[bin]]
 name = "pplns_compare"
 path = "src/pplns_compare.rs"
-required-features = ["sim"]
+required-features = ["pplns-compare"]

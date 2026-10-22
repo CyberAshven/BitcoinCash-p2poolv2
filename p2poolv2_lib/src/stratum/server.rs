@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::accounting::payout::simple_pplns::share_worker::PplnsShareSender;
 use crate::accounting::stats::metrics;
 use crate::address::Address as P2PoolAddress;
 pub use crate::config::PoolMode;
@@ -61,6 +62,7 @@ pub struct StratumServer {
     shutdown_rx: oneshot::Receiver<()>,
     connections_handle: ClientConnectionsHandle,
     emissions_tx: EmissionSender,
+    pplns_shares_tx: PplnsShareSender,
     chain_store_handle: ChainStoreHandle,
     sv2: Option<Sv2Listener>,
     /// Asks the template task for a new template after a found block.
@@ -100,6 +102,7 @@ pub struct StratumServerBuilder {
     shutdown_rx: Option<oneshot::Receiver<()>>,
     connections_handle: Option<ClientConnectionsHandle>,
     emissions_tx: Option<EmissionSender>,
+    pplns_shares_tx: Option<PplnsShareSender>,
     zmqpubhashblock: Option<String>,
     chain_store_handle: Option<ChainStoreHandle>,
     mode: Option<PoolMode>,
@@ -182,6 +185,11 @@ impl StratumServerBuilder {
         self
     }
 
+    pub fn pplns_shares_tx(mut self, pplns_shares_tx: PplnsShareSender) -> Self {
+        self.pplns_shares_tx = Some(pplns_shares_tx);
+        self
+    }
+
     pub fn zmqpubhashblock(mut self, zmqpubhashblock: String) -> Self {
         self.zmqpubhashblock = Some(zmqpubhashblock);
         self
@@ -257,6 +265,7 @@ impl StratumServerBuilder {
                 .connections_handle
                 .ok_or("connections_handle is required")?,
             emissions_tx: self.emissions_tx.ok_or("shares_tx is required")?,
+            pplns_shares_tx: self.pplns_shares_tx.ok_or("pplns_shares_tx is required")?,
             max_connections: self.max_connections.unwrap_or(None),
             wait_for_chain_sync: self.wait_for_chain_sync.unwrap_or(true),
             mode: self.mode.unwrap_or_default(),
@@ -451,6 +460,7 @@ impl StratumServer {
             ignore_difficulty: self.ignore_difficulty,
             validate_addresses: self.validate_addresses,
             emissions_tx: self.emissions_tx.clone(),
+            pplns_shares_tx: self.pplns_shares_tx.clone(),
             network: self.network,
             metrics: metrics.clone(),
             chain_store_handle: self.chain_store_handle.clone(),
@@ -553,6 +563,8 @@ pub(crate) struct StratumContext {
     pub ignore_difficulty: bool,
     pub validate_addresses: bool,
     pub emissions_tx: EmissionSender,
+    /// Hydrapool PPLNS shares go here, never through `emissions_tx`.
+    pub pplns_shares_tx: PplnsShareSender,
     pub network: bitcoin::network::Network,
     pub metrics: metrics::MetricsHandle,
     pub chain_store_handle: ChainStoreHandle,
@@ -833,6 +845,7 @@ mod stratum_server_tests {
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
 
         let (shares_tx, _shares_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -860,6 +873,7 @@ mod stratum_server_tests {
             .shutdown_rx(shutdown_rx)
             .connections_handle(connections_handle)
             .emissions_tx(shares_tx)
+            .pplns_shares_tx(pplns_shares_tx)
             .chain_store_handle(chain_store_handle)
             .build()
             .await
@@ -915,6 +929,7 @@ mod stratum_server_tests {
         let (_shutdown_tx, shutdown_rx) = oneshot::channel();
         let tracker_handle = start_tracker_actor();
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -937,6 +952,7 @@ mod stratum_server_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Regtest,
             chain_store_handle,
             mode: PoolMode::P2poolv2,
@@ -1041,6 +1057,7 @@ mod stratum_server_tests {
         let tracker_handle = start_tracker_actor();
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -1063,6 +1080,7 @@ mod stratum_server_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Regtest,
             chain_store_handle,
             mode: PoolMode::P2poolv2,
@@ -1128,6 +1146,7 @@ mod stratum_server_tests {
         let tracker_handle = start_tracker_actor();
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -1149,6 +1168,7 @@ mod stratum_server_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             metrics: metrics_handle,
             network: bitcoin::network::Network::Regtest,
             chain_store_handle,
@@ -1213,6 +1233,7 @@ mod stratum_server_tests {
         let tracker_handle = start_tracker_actor();
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -1234,6 +1255,7 @@ mod stratum_server_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Regtest,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1317,6 +1339,7 @@ mod stratum_server_tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8082);
         let tracker_handle = start_tracker_actor();
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -1338,6 +1361,7 @@ mod stratum_server_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1441,6 +1465,7 @@ mod stratum_server_tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8082);
         let tracker_handle = start_tracker_actor();
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -1462,6 +1487,7 @@ mod stratum_server_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Regtest,
             metrics: metrics_handle,
             chain_store_handle,
@@ -1554,6 +1580,7 @@ mod stratum_server_tests {
             let tracker_handle = start_tracker_actor();
             let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
             let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+            let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
             let stats_dir = tempfile::tempdir().unwrap();
             let metrics_handle =
                 metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -1577,6 +1604,7 @@ mod stratum_server_tests {
                 ignore_difficulty: false,
                 validate_addresses: true,
                 emissions_tx,
+                pplns_shares_tx,
                 network: bitcoin::network::Network::Regtest,
                 chain_store_handle,
                 mode: PoolMode::P2poolv2,
@@ -1640,6 +1668,7 @@ mod stratum_server_tests {
             let tracker_handle = start_tracker_actor();
             let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
             let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+            let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
             let stats_dir = tempfile::tempdir().unwrap();
             let metrics_handle =
                 metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
@@ -1663,6 +1692,7 @@ mod stratum_server_tests {
                 ignore_difficulty: false,
                 validate_addresses: true,
                 emissions_tx,
+                pplns_shares_tx,
                 network: bitcoin::network::Network::Signet,
                 chain_store_handle,
                 mode: PoolMode::P2poolv2,
@@ -1783,6 +1813,7 @@ mod stratum_server_tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8090);
         let tracker_handle = start_tracker_actor();
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -1805,6 +1836,7 @@ mod stratum_server_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             chain_store_handle,
             mode: PoolMode::P2poolv2,
@@ -1915,6 +1947,7 @@ mod stratum_server_tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8091);
         let tracker_handle = start_tracker_actor();
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -1937,6 +1970,7 @@ mod stratum_server_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Testnet4,
             chain_store_handle,
             mode: PoolMode::P2poolv2,
@@ -2057,6 +2091,7 @@ mod stratum_server_tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8092);
         let tracker_handle = start_tracker_actor();
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -2079,6 +2114,7 @@ mod stratum_server_tests {
             ignore_difficulty: false,
             validate_addresses: true,
             emissions_tx,
+            pplns_shares_tx,
             network: bitcoin::network::Network::Regtest,
             chain_store_handle,
             mode: PoolMode::P2poolv2,
@@ -2158,6 +2194,7 @@ mod stratum_server_tests {
         let (_mock_rpc_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
 
         let (shares_tx, _shares_rx) = mpsc::channel(10);
+        let (pplns_shares_tx, _pplns_shares_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
         let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
             .await
@@ -2200,6 +2237,7 @@ mod stratum_server_tests {
             .shutdown_rx(shutdown_rx)
             .connections_handle(connections_handle)
             .emissions_tx(shares_tx)
+            .pplns_shares_tx(pplns_shares_tx)
             .chain_store_handle(chain_store_handle)
             .build()
             .await

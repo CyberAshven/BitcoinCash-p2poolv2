@@ -1041,6 +1041,9 @@ where
 #[derive(Debug, Deserialize, Clone)]
 pub struct NetworkConfig {
     pub listen_address: String,
+    /// Peers to dial at startup and reconnect to with backoff. Optional;
+    /// when absent the node finds peers through DNS seeds alone.
+    #[serde(default)]
     pub dial_peers: Vec<String>,
     pub max_pending_incoming: u32,
     pub max_pending_outgoing: u32,
@@ -1063,6 +1066,20 @@ pub struct NetworkConfig {
     /// Format: Multiaddr string, e.g. "/ip4/203.0.113.1/tcp/6884"
     #[serde(default)]
     pub external_address: Option<String>,
+    // Fall back to the built-in DNS seeds for this network when no peer is
+    // connected. Seeds are queried at startup without dial_peers, or 10s
+    // after startup when dial_peers are set but none connected. Set false
+    // to rely only on dial_peers.
+    //
+    // Always off on Bitcoin Cash, whatever the file says: the built-in seeds
+    // are Bitcoin P2Poolv2 nodes and there are no Bitcoin Cash seeds yet
+    // (`Config::with_bitcoin_cash_dns_seed_off`).
+    #[serde(default = "default_dns_seed")]
+    pub dns_seed: bool,
+}
+
+fn default_dns_seed() -> bool {
+    true
 }
 
 impl Default for NetworkConfig {
@@ -1089,6 +1106,7 @@ impl Default for NetworkConfig {
             dial_timeout_secs: 30,
             blocked_ips: vec![],
             external_address: None,
+            dns_seed: true,
         }
     }
 }
@@ -1096,9 +1114,6 @@ impl Default for NetworkConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct StoreConfig {
     pub path: String,
-    /// How often to run background cleanup tasks (in hours)
-    #[serde(default = "default_background_task_frequency_hours")]
-    pub background_task_frequency_hours: u64,
     /// Time-to-live for PPLNS shares (in days)
     #[serde(default = "default_pplns_ttl_days")]
     pub pplns_ttl_days: u64,
@@ -1106,10 +1121,6 @@ pub struct StoreConfig {
 
 fn default_wait_for_chain_sync() -> bool {
     true
-}
-
-fn default_background_task_frequency_hours() -> u64 {
-    1
 }
 
 fn default_pplns_ttl_days() -> u64 {
@@ -1242,12 +1253,6 @@ pub struct SimConfig {
     /// identical across nodes (ASERT consensus). Omit for the default 10s.
     #[serde(default)]
     pub ideal_block_time_secs: Option<u32>,
-    /// Sim-only override of the coinbase maturity depth (shares), which sets
-    /// both when a share coinbase can be spent and when a share can be paid.
-    /// Smaller = a short run reaches the payout maturity skip. MUST be
-    /// identical across nodes (consensus). Omit for the production 6,048.
-    #[serde(default)]
-    pub coinbase_maturity: Option<usize>,
 }
 
 /// Config for p2poolv2 nodes
@@ -1276,6 +1281,9 @@ impl Config {
     /// The P2P protocol id and every difficulty calculation read that field,
     /// so two Bitcoin Cash nodes on the same network must not disagree on it
     /// because one left a Bitcoin value such as `signet` in its file.
+    ///
+    /// On Bitcoin Cash, `network.dns_seed` is also turned off (see
+    /// [`Config::with_bitcoin_cash_dns_seed_off`]).
     pub fn load(path: &str) -> Result<Self, config::ConfigError> {
         let loaded: Self = config::Config::builder()
             .add_source(config::File::with_name(path))
@@ -1290,13 +1298,31 @@ impl Config {
             )
             .build()?
             .try_deserialize()?;
-        Ok(loaded.with_bitcoin_cash_network_derived())
+        Ok(loaded
+            .with_bitcoin_cash_network_derived()
+            .with_bitcoin_cash_dns_seed_off())
     }
 
     /// Set `stratum.network` from `bitcoin_cash_network` on a Bitcoin Cash
     /// node. Bitcoin configurations are returned unchanged.
     pub fn with_bitcoin_cash_network_derived(mut self) -> Self {
         self.stratum.network = self.stratum.effective_network();
+        self
+    }
+
+    /// Turn `network.dns_seed` off on a Bitcoin Cash node, even when the file
+    /// or the environment sets it. Bitcoin configurations are returned
+    /// unchanged.
+    ///
+    /// The built-in DNS seeds are Bitcoin P2Poolv2 nodes, compiled in per
+    /// Bitcoin network, and a Bitcoin Cash node's `stratum.network` is a
+    /// Bitcoin network. There are no Bitcoin Cash seeds yet, so a Bitcoin Cash
+    /// node finds its peers through `dial_peers` only. The node applies the
+    /// same rule again when it picks its seeds.
+    pub fn with_bitcoin_cash_dns_seed_off(mut self) -> Self {
+        if self.stratum.chain == Chain::BitcoinCash {
+            self.network.dns_seed = false;
+        }
         self
     }
 
@@ -1337,11 +1363,6 @@ impl Config {
 
     pub fn with_store_path(mut self, store_path: String) -> Self {
         self.store.path = store_path;
-        self
-    }
-
-    pub fn with_background_task_frequency_hours(mut self, hours: u64) -> Self {
-        self.store.background_task_frequency_hours = hours;
         self
     }
 
@@ -1455,7 +1476,7 @@ impl Config {
 mod tests {
     use super::*;
     use p2poolv2_wallet::bch_share::{BchShareAddress, BchShareNetwork};
-    use temp_env::with_var;
+    use temp_env::{with_var, with_vars};
     use tokio_test::assert_err;
 
     #[test]
@@ -1536,7 +1557,6 @@ mod tests {
         assert_eq!(config.api.auth_token, Some("secret_token".to_string()));
 
         // Test values from config.sample.toml
-        assert_eq!(config.store.background_task_frequency_hours, 24);
         assert_eq!(config.store.pplns_ttl_days, 7);
     }
 
@@ -1544,11 +1564,9 @@ mod tests {
     fn test_config_store_background_settings() {
         let config = Config::load("../config.sample.toml")
             .unwrap()
-            .with_background_task_frequency_hours(2)
-            .with_pplns_ttl_days(7);
+            .with_pplns_ttl_days(9);
 
-        assert_eq!(config.store.background_task_frequency_hours, 2);
-        assert_eq!(config.store.pplns_ttl_days, 7);
+        assert_eq!(config.store.pplns_ttl_days, 9);
     }
 
     /// Characterisation tests for environment-variable overrides.
@@ -1619,6 +1637,73 @@ mod tests {
                 assert_eq!(config.network.listen_address, "/ip4/10.0.0.1/tcp/6884");
             },
         );
+    }
+
+    /// dial_peers is optional, so it can be commented out of the config and
+    /// the node relies on DNS seeds alone.
+    #[test]
+    fn dial_peers_defaults_to_empty_when_absent() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(config.network.dial_peers.is_empty());
+    }
+
+    /// DNS seeds are on unless the operator turns them off.
+    #[test]
+    fn dns_seed_defaults_to_true_when_absent() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(config.network.dns_seed);
+    }
+
+    #[test]
+    fn env_override_disables_dns_seed() {
+        with_var("P2POOL_NETWORK__DNS_SEED", Some("false"), || {
+            let config = Config::load("../config.sample.toml").unwrap();
+            assert!(!config.network.dns_seed);
+        });
+    }
+
+    /// A Bitcoin Cash node never uses the built-in DNS seeds, which are
+    /// Bitcoin nodes: loading turns `dns_seed` off even when it is set.
+    #[test]
+    fn bitcoin_cash_chipnet_load_turns_dns_seed_off_even_when_set() {
+        with_vars(
+            [
+                ("P2POOL_STRATUM__CHAIN", Some("bitcoin-cash")),
+                ("P2POOL_STRATUM__BITCOIN_CASH_NETWORK", Some("chipnet")),
+                ("P2POOL_NETWORK__DNS_SEED", Some("true")),
+            ],
+            || {
+                let config = Config::load("../config.sample.toml").unwrap();
+                assert_eq!(config.stratum.chain, Chain::BitcoinCash);
+                assert!(!config.network.dns_seed);
+            },
+        );
+    }
+
+    /// Bitcoin Cash mainnet's `stratum.network` is Bitcoin mainnet, so it
+    /// must not inherit Bitcoin's seeds either.
+    #[test]
+    fn bitcoin_cash_mainnet_load_turns_dns_seed_off_by_default() {
+        with_vars(
+            [
+                ("P2POOL_STRATUM__CHAIN", Some("bitcoin-cash")),
+                ("P2POOL_STRATUM__BITCOIN_CASH_NETWORK", Some("mainnet")),
+            ],
+            || {
+                let config = Config::load("../config.sample.toml").unwrap();
+                assert_eq!(config.stratum.network, Network::Bitcoin);
+                assert!(!config.network.dns_seed);
+            },
+        );
+    }
+
+    #[test]
+    fn with_bitcoin_cash_dns_seed_off_leaves_bitcoin_seeds_on() {
+        let config = Config::load("../config.sample.toml")
+            .unwrap()
+            .with_bitcoin_cash_dns_seed_off();
+        assert_eq!(config.stratum.chain, Chain::Bitcoin);
+        assert!(config.network.dns_seed);
     }
 
     /// A single-underscore key no longer resolves, so an operator carrying the

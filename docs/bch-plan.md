@@ -10,7 +10,7 @@ Audience: contributors and AI agents starting the BCH port. Read
 | Requirement | Status and evidence |
 |---|---|
 | BCHN templates and CashAddr payouts | Implemented; RPC/transaction fixtures and address tests. Final job size includes the actual coinbase and CompactSize transaction count. |
-| Upstream P2Poolv2 sync | Merged upstream main through `2dabcdd2` (35 commits) on 2026-10-18: header-bound share commitments, the bitcoin coinbase carried beside the header, the BIP141 share witness root, mature-only PPLNS. 1,750 workspace tests, clippy and rustfmt pass. The store format changed, so nodes start from a new store path. |
+| Upstream P2Poolv2 sync | Merged upstream main through `2dabcdd2` (35 commits) on 2026-10-18: header-bound share commitments, the bitcoin coinbase carried beside the header, the BIP141 share witness root, mature-only PPLNS. 1,750 workspace tests, clippy and rustfmt pass. The store format changed, so nodes start from a new store path. On 2026-10-22 merged upstream main through `61810c56` (27 commits, upstream v0.16.2): block body pruning, Bitcoin genesis in `.dat` files, DNS seeds, the Hydrapool PPLNS share worker. Bitcoin Cash genesis, protocol strings and payout rules are unchanged, so no new store is needed. DNS seeds are always off on Bitcoin Cash (the seeds are Bitcoin nodes); see [pruning](architecture/pruning.md#bitcoin-cash) for the depths. |
 | Donation, operator fee and bootstrap accounting | Implemented; exact-amount tests and recorded BCHN regtest coinbases. Hydrapool accepts prefixed and prefixless CashAddr usernames. On 2026-10-18 two CPU miners on the regtest mini chain were paid in 38 pool coinbases. After 100 confirmations all 38 outputs were spent in one confirmed transaction. On the merged build each block split its reward by share difficulty among minerA, minerB and the genesis share, plus the donation. Those seven miner outputs were also matured and spent. |
 | P2PKH share ownership and transfers | Implemented; BCHN-signed ECDSA/FORKID and BCH Schnorr vectors, plus rejection tests. |
 | Main/mini share chains and P2P propagation | Implemented; recorded three-node regtest and two-node chipnet share validation. |
@@ -684,7 +684,11 @@ move most BCH hashrate to the share chain.
       100 shares below the paying share, while uncles, the forks seen in
       normal running, are at most `MAX_UNCLES_DEPTH` (3) deep. P2Pool v1 ran
       with no skip at all. `PAYOUT_DEPTH` and pruning stay sized by
-      Bitcoin's larger 6,048, so they cover it. Bitcoin keeps 6,048.
+      Bitcoin's larger 6,048, so they cover it: a Bitcoin Cash coinbase
+      pays at most 121,063 shares deep (100, the 120,960 cap and uncle
+      depth 3), inside `PAYOUT_DEPTH` (127,008), and block bodies are kept
+      to `PRUNE_DEPTH + PRUNE_INTERVAL` (254,376); production builds assert
+      the first at compile time. Bitcoin keeps 6,048.
     - **Simulation** (`pplns_compare` in `p2poolv2_sim`, the real
       `PplnsWindow`, five seeds per pool size, a 10% and a 0.1% miner and a
       5% miner who mines for 20 days; no uncles). Today is the fixed window
