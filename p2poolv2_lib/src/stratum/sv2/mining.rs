@@ -2122,6 +2122,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_bitcoin_cash_channel_opens_through_a_translator_worker_suffix() {
+        let (emissions_tx, _emissions_rx) = mpsc::channel(10);
+        let stats_dir = tempfile::tempdir().unwrap();
+        let metrics_handle = metrics::start_metrics(stats_dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
+        let ctx = StratumContext {
+            tracker_handle: start_tracker_actor(),
+            bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass")
+                .unwrap(),
+            start_difficulty: 1,
+            minimum_difficulty: 1,
+            maximum_difficulty: None,
+            ignore_difficulty: true,
+            validate_addresses: true,
+            emissions_tx,
+            network: Network::Regtest,
+            metrics: metrics_handle,
+            chain_store_handle,
+            mode: PoolMode::P2poolv2,
+            miner_address: None,
+            share_chain: Chain::BitcoinCash,
+            bch_share_network: Some(BchShareNetwork::Regtest),
+            cash_share: None,
+            template_refresh_tx: None,
+        };
+        let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+        let share_address = BchShareAddress::new(BchShareNetwork::Regtest, [0x22; 20]).encode();
+        // What the Stratum V2 reference translator sends for an SV1 device:
+        // the configured identity with `.<downstream worker>` appended.
+        let identity = format!(
+            "bchreg:qzh5k63rhy4jg6jtyssmzddju5kkng4jzu8ktcypfm.rig1,p2p={share_address}.miner1"
+        );
+
+        let mut open = payload(
+            &encode_message(
+                OpenStandardMiningChannel {
+                    request_id: 1,
+                    user_identity: identity.as_str().try_into().unwrap(),
+                    nominal_hash_rate: 1.0,
+                    max_target: U256::new(&[0xff; 32]).unwrap(),
+                },
+                MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+            )
+            .unwrap(),
+        );
+        let opened = channels
+            .handle(MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL, &mut open, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            frame_type(&opened[0]),
+            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS
+        );
+        assert_eq!(
+            channels.channels[&1].session.share_owner,
+            Some(ShareOwner::CashP2pkh([0x22; 20]))
+        );
+    }
+
+    #[tokio::test]
     async fn a_bitcoin_cash_channel_with_a_taproot_share_address_is_refused() {
         let (emissions_tx, _emissions_rx) = mpsc::channel(10);
         let stats_dir = tempfile::tempdir().unwrap();
