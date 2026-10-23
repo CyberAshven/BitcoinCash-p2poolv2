@@ -40,6 +40,8 @@ use std::str::FromStr;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::accounting::OutputPair;
 #[cfg(any(test, feature = "test-utils"))]
+use crate::accounting::payout::coinbase_budget::PayoutSplit;
+#[cfg(any(test, feature = "test-utils"))]
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
 #[cfg(test)]
 use crate::accounting::stats::metrics;
@@ -563,12 +565,23 @@ pub fn test_bch_prepared_for_template(template: BlockTemplate) -> Arc<PreparedNo
         bitcoin::Network::Regtest,
     );
     let weights = HashMap::from([(first, 1), (second, 3)]);
-    let outputs =
-        build_pplns_outputs(template.coinbasevalue, &weights, &None, None, &None, None).unwrap();
+    let anchor = BlockHash::from_byte_array([0x33; 32]);
+    let payout_split = PayoutSplit::BchBudget { anchor };
+    let outputs = build_pplns_outputs(
+        template.coinbasevalue,
+        &weights,
+        &None,
+        None,
+        &None,
+        None,
+        payout_split,
+    )
+    .unwrap();
     Arc::new(
         PreparedNotifyParamsBuilder::new(Arc::new(template), outputs, b"P2Poolv2", true)
             .pplns_weights(Some(weights))
-            .prev_share_blockhash(BlockHash::from_byte_array([0x33; 32]))
+            .payout_split(payout_split)
+            .prev_share_blockhash(anchor)
             .bits(CompactTarget::from_consensus(0x2100ffff))
             .include_merge_mining(true)
             .build()

@@ -83,11 +83,12 @@ impl Store {
                 );
                 return Ok(None);
             }
-            // Refuse a reorg forking below the prune target: its fork point's
-            // body is deleted, so it could never be confirmed.
-            if self.reorg_branch_forks_below_prune_target(&blockhash)? {
+            // Refuse a reorg forking more than MAX_REORG_DEPTH below the
+            // confirmed tip: its blocks may spend outputs this node never
+            // fetched or stamped with an unknown coinbase root.
+            if self.reorg_branch_forks_below_reorg_floor(&blockhash)? {
                 info!(
-                    "Refusing candidate reorg to {blockhash}: branch forks below the prune target"
+                    "Refusing candidate reorg to {blockhash}: branch forks more than MAX_REORG_DEPTH below the confirmed tip"
                 );
                 return Ok(None);
             }

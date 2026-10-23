@@ -19,7 +19,6 @@ use tracing::debug;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::{Chain, Height, TopResult, height_to_key_with_suffix};
-use crate::store::dag_store::MAX_UNCLES_DEPTH;
 use crate::store::prune_blocks::prune_height_for_tip;
 
 const CANDIDATE_SUFFIX: &str = ":c";
@@ -551,29 +550,29 @@ impl Store {
     }
 
     /// Whether the reorg branch ending at `blockhash` forks from the candidate
-    /// or confirmed chain too close to, or below, the prune target
-    /// (`Store::prune_target`, from the confirmed tip).
+    /// or confirmed chain below the reorg floor (`Store::reorg_floor`), more
+    /// than `MAX_REORG_DEPTH` (`PAYOUT_DEPTH`) below the confirmed tip.
     ///
-    /// Bodies below the prune target are deleted, so the confirmed chain can
-    /// never reorg onto such a branch: `reorg_confirmed` needs the fork
-    /// point's body. Refusing the candidate reorg turns that open-ended stall
-    /// into a clean refusal, a reorg depth limit. Following such a branch
-    /// would take out-working the whole pool for about `PRUNE_DEPTH` blocks.
+    /// A block on such a branch may validly spend an output this node never
+    /// fetched or stamped with an unknown coinbase root, so it could reject a
+    /// valid block (see `MAX_REORG_DEPTH`). Below the prune target the fork
+    /// point's body is deleted too, and `reorg_confirmed` could never adopt
+    /// the branch. Refusing the candidate reorg turns either into a clean
+    /// refusal, a reorg depth limit. Following such a branch would take
+    /// out-working the whole pool for about `PAYOUT_DEPTH` blocks.
     ///
-    /// The limit sits `MAX_UNCLES_DEPTH` above the target. The branch's first
-    /// block may name an uncle up to `MAX_UNCLES_DEPTH - 1` heights below the
-    /// fork point, and after a height-dropping reorg the gates may ask for
-    /// that uncle's body, which must not be deleted. The margin is
-    /// conservative by one height.
+    /// The floor is far above the prune target, so the branch's uncles, at
+    /// most `MAX_UNCLES_DEPTH - 1` heights below the fork point, still have
+    /// their bodies (a compile-time assertion in `prune_blocks.rs`).
     ///
-    /// Returns false when the confirmed tip is too low for any pruning (or
-    /// absent), or when the branch does not reach either chain.
-    pub(super) fn reorg_branch_forks_below_prune_target(
+    /// Returns false when the confirmed tip is within `MAX_REORG_DEPTH` of
+    /// genesis (or absent), or when the branch does not reach either chain.
+    pub(super) fn reorg_branch_forks_below_reorg_floor(
         &self,
         blockhash: &BlockHash,
     ) -> Result<bool, StoreError> {
-        let prune_target = self.prune_target()?;
-        if prune_target == 0 {
+        let reorg_floor = self.reorg_floor()?;
+        if reorg_floor == 0 {
             return Ok(false);
         }
         let Some(branch) =
@@ -592,7 +591,7 @@ impl Store {
                     "Branch point {branch_point} missing expected_height"
                 ))
             })?;
-        Ok(branch_point_height < prune_target + MAX_UNCLES_DEPTH as u32)
+        Ok(branch_point_height < reorg_floor)
     }
 
     /// Reorgs the candidate chain to the branch ending at `blockhash`.

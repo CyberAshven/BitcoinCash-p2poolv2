@@ -80,6 +80,7 @@ pub async fn handle_stratum_share(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounting::payout::coinbase_budget::PayoutSplit;
     use crate::accounting::payout::payout_distribution::build_pplns_outputs;
     use crate::address::share_owner::ShareOwner;
     use crate::config::Chain;
@@ -351,6 +352,7 @@ mod tests {
             None,
             &None,
             None,
+            PayoutSplit::EveryPayee,
         )
         .unwrap();
         let pool_transaction = ShareTransaction(Transaction {

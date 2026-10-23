@@ -9,6 +9,7 @@
 //! adjusts the difficulty to maintain an optimal share submission frequency.
 
 use crate::accounting::calc::{decay_time, sane_time_diff, time_bias};
+use crate::config::DEFAULT_MAXIMUM_DIFFICULTY;
 #[cfg(test)]
 use mockall::automock;
 use std::time::SystemTime;
@@ -35,6 +36,9 @@ pub const BIAS_TIME_CONSTANT: f64 = 300.0; // 5 minutes
 
 /// Minimum time between decays in seconds
 pub const MIN_DECAY_INTERVAL: f64 = 0.05;
+
+/// Lowest difficulty a session is ever given. Difficulty 0 has no share target.
+pub const MINIMUM_SESSION_DIFFICULTY: u64 = 1;
 
 /// DifficultyAdjuster implements the dynamic difficulty adjustment algorithm based on CKPool.
 ///
@@ -67,9 +71,11 @@ pub struct DifficultyAdjuster {
     pub last_diff_change_job_id: Option<u64>,
     /// Pool minimum difficulty
     pub pool_minimum_difficulty: u64,
-    /// Pool maximum difficulty
+    /// Pool maximum difficulty. `None` caps at [`DEFAULT_MAXIMUM_DIFFICULTY`];
+    /// a parsed config always sets it.
     pub pool_maximum_difficulty: Option<u64>,
-    /// Unaccounted shares
+    /// Difficulty of shares that arrived too soon after the last decay to be
+    /// decayed, saturating at `u64::MAX`.
     pub unaccounted_shares: u64,
 }
 
@@ -194,7 +200,8 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
         debug!("Recording share submission with difficulty: {}", share_diff);
 
         // Update the share submission counter
-        self.share_submission_difficulty_counter += 1;
+        self.share_submission_difficulty_counter =
+            self.share_submission_difficulty_counter.saturating_add(1);
 
         // Calculate time elapsed since the first share
         let time_since_first_share = sane_time_diff(current_timestamp, self.first_share_timestamp);
@@ -339,6 +346,11 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
     }
 
     /// Apply constraints to difficulty given the pool min/max difficulty and the optionally provided client's suggested difficulty
+    ///
+    /// The result is at least `MINIMUM_SESSION_DIFFICULTY` and at most the
+    /// pool maximum, which is [`DEFAULT_MAXIMUM_DIFFICULTY`] when none is
+    /// configured, whatever the client asks for. The maximum wins over the
+    /// minimum when an operator configures them crossed.
     fn apply_difficulty_constraints(
         &self,
         calculated_diff: u64,
@@ -362,10 +374,11 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
         }
 
         // Cap diff to pool maximum difficulty
-        if let Some(maximum) = self.pool_maximum_difficulty {
-            diff = diff.min(maximum);
-        }
-        diff
+        let maximum = self
+            .pool_maximum_difficulty
+            .unwrap_or(DEFAULT_MAXIMUM_DIFFICULTY)
+            .max(MINIMUM_SESSION_DIFFICULTY);
+        diff.clamp(MINIMUM_SESSION_DIFFICULTY, maximum)
     }
 
     fn update_last_decay_timestamp(
@@ -380,7 +393,9 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
             if self.last_decay_timestamp.is_none() {
                 self.last_decay_timestamp = Some(current_timestamp);
             }
-            self.unaccounted_shares += self.current_difficulty;
+            self.unaccounted_shares = self
+                .unaccounted_shares
+                .saturating_add(self.current_difficulty);
             debug!("Skipping update, last decay was too recent.");
             return Err("Last decay was too recent".into());
         }
@@ -391,7 +406,9 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
     }
 
     fn account_for_unaccounted_shares(&mut self) -> u64 {
-        let difficulty = self.current_difficulty + self.unaccounted_shares;
+        let difficulty = self
+            .current_difficulty
+            .saturating_add(self.unaccounted_shares);
         debug!(
             "Total difficulty unaccounted for: {} = current_difficulty {} + unaccounted_shares {}",
             difficulty, self.current_difficulty, self.unaccounted_shares
@@ -435,6 +452,8 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::StdRng;
+    use rand::{RngExt, SeedableRng};
     use std::time::Duration;
 
     #[test]
@@ -867,5 +886,223 @@ mod tests {
         let new_difficulty = adjuster.calculate_new_difficulty(None, time_since_first_share);
 
         assert_eq!(new_difficulty, 439);
+    }
+
+    /// A miner asking for `d=u64::MAX` on a pool with no configured maximum:
+    /// shares arriving faster than `MIN_DECAY_INTERVAL` pile their difficulty
+    /// into `unaccounted_shares`, which must saturate rather than overflow.
+    #[test]
+    fn test_shares_at_the_largest_difficulty_do_not_overflow_unaccounted_shares() {
+        let mut adjuster = DifficultyAdjuster::new(u64::MAX, 1, None);
+        let current_timestamp = SystemTime::now();
+
+        let _ = adjuster.record_share_submission(u128::MAX, 1, None, current_timestamp);
+        let _ = adjuster.record_share_submission(u128::MAX, 2, None, current_timestamp);
+        let _ = adjuster.record_share_submission(u128::MAX, 3, None, current_timestamp);
+        let _ = adjuster.record_share_submission(u128::MAX, 4, None, current_timestamp);
+
+        assert_eq!(adjuster.unaccounted_shares, u64::MAX);
+    }
+
+    /// Accounting the pile adds the current difficulty to it, which must
+    /// saturate too.
+    #[test]
+    fn test_account_for_unaccounted_shares_saturates() {
+        let mut adjuster = DifficultyAdjuster::new(u64::MAX, 1, None);
+        adjuster.unaccounted_shares = u64::MAX;
+
+        assert_eq!(adjuster.account_for_unaccounted_shares(), u64::MAX);
+        assert_eq!(adjuster.unaccounted_shares, 0);
+    }
+
+    /// The share counter saturates instead of wrapping when a session never
+    /// changes difficulty.
+    #[test]
+    fn test_share_counter_saturates() {
+        let mut adjuster = DifficultyAdjuster::new(1, 1, None);
+        let current_timestamp = SystemTime::now();
+        let _ = adjuster.record_share_submission(1, 1, None, current_timestamp);
+        adjuster.share_submission_difficulty_counter = u32::MAX;
+
+        let _ = adjuster.record_share_submission(1, 2, None, current_timestamp);
+
+        assert_eq!(adjuster.share_submission_difficulty_counter, u32::MAX);
+    }
+
+    /// `d=u64::MAX` on a pool with no configured maximum is capped at the
+    /// default maximum.
+    #[test]
+    fn test_constraints_cap_the_largest_request_at_the_default_maximum() {
+        let adjuster = DifficultyAdjuster::new(1, 1, None);
+
+        assert_eq!(
+            adjuster.apply_difficulty_constraints(u64::MAX, Some(u64::MAX)),
+            DEFAULT_MAXIMUM_DIFFICULTY
+        );
+    }
+
+    /// A configured maximum above the default is the operator's choice and
+    /// is kept.
+    #[test]
+    fn test_constraints_keep_a_configured_maximum_above_the_default() {
+        let adjuster = DifficultyAdjuster::new(1, 1, Some(u64::MAX));
+
+        assert_eq!(
+            adjuster.apply_difficulty_constraints(u64::MAX, Some(u64::MAX)),
+            u64::MAX
+        );
+    }
+
+    /// Difficulty 0 has no share target, so even a pool minimum of 0 gives 1.
+    #[test]
+    fn test_constraints_never_give_difficulty_zero() {
+        let adjuster = DifficultyAdjuster::new(0, 0, Some(0));
+
+        assert_eq!(
+            adjuster.apply_difficulty_constraints(0, None),
+            MINIMUM_SESSION_DIFFICULTY
+        );
+    }
+
+    /// Property: whatever the pool bounds, the computed difficulty and the
+    /// client's suggestion, the constrained difficulty lies between
+    /// `MINIMUM_SESSION_DIFFICULTY` and the effective maximum. Inputs are
+    /// drawn from a fixed seed, half of them from the extremes.
+    #[test]
+    fn property_constraints_stay_between_one_and_the_effective_maximum() {
+        let extremes = [
+            0,
+            1,
+            2,
+            u64::from(u32::MAX),
+            DEFAULT_MAXIMUM_DIFFICULTY,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        let mut rng = StdRng::seed_from_u64(0x4d34_0001);
+        let mut draw = || {
+            if rng.random_bool(0.5) {
+                extremes[rng.random_range(0..extremes.len())]
+            } else {
+                rng.random_range(0..=u64::MAX)
+            }
+        };
+
+        for _ in 0..10_000 {
+            let minimum = draw();
+            let maximum = draw();
+            let configured_maximum = (maximum % 2 == 0).then_some(maximum);
+            let calculated = draw();
+            let suggested = draw();
+            let suggestion = (suggested % 3 != 0).then_some(suggested);
+            let adjuster = DifficultyAdjuster::new(1, minimum, configured_maximum);
+            let effective_maximum = configured_maximum
+                .unwrap_or(DEFAULT_MAXIMUM_DIFFICULTY)
+                .max(MINIMUM_SESSION_DIFFICULTY);
+
+            let constrained = adjuster.apply_difficulty_constraints(calculated, suggestion);
+
+            assert!(
+                (MINIMUM_SESSION_DIFFICULTY..=effective_maximum).contains(&constrained),
+                "constrained {constrained} outside 1..={effective_maximum} for minimum {minimum}, maximum {configured_maximum:?}, calculated {calculated}, suggestion {suggestion:?}"
+            );
+        }
+    }
+
+    /// Property: no start difficulty, pool bounds and run of shares overflows,
+    /// and every difficulty the adjuster hands out lies between
+    /// `MINIMUM_SESSION_DIFFICULTY` and the effective maximum. Runs mix shares
+    /// arriving together (which pile into `unaccounted_shares`) with gaps of
+    /// minutes, at share difficulties up to `u128::MAX`.
+    #[test]
+    fn property_no_share_run_overflows_or_leaves_the_bounds() {
+        let extremes = [
+            0,
+            1,
+            u64::from(u32::MAX),
+            DEFAULT_MAXIMUM_DIFFICULTY,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        let gaps = [
+            Duration::ZERO,
+            Duration::from_millis(1),
+            Duration::from_millis(49),
+            Duration::from_millis(51),
+            Duration::from_secs(1),
+            Duration::from_secs(31),
+            Duration::from_secs(MIN_SECONDS_BEFORE_ADJUST + 1),
+            Duration::from_secs(86_400),
+        ];
+        let mut rng = StdRng::seed_from_u64(0x4d34_0002);
+        let start_timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        for _ in 0..256 {
+            let start = extremes[rng.random_range(0..extremes.len())];
+            let minimum = extremes[rng.random_range(0..extremes.len())];
+            let configured_maximum = rng
+                .random_bool(0.5)
+                .then(|| extremes[rng.random_range(0..extremes.len())]);
+            let effective_maximum = configured_maximum
+                .unwrap_or(DEFAULT_MAXIMUM_DIFFICULTY)
+                .max(MINIMUM_SESSION_DIFFICULTY);
+            let mut adjuster = DifficultyAdjuster::new(start, minimum, configured_maximum);
+            let mut timestamp = start_timestamp;
+
+            for job_id in 0..200 {
+                timestamp += gaps[rng.random_range(0..gaps.len())];
+                let share_difficulty = if rng.random_bool(0.5) {
+                    u128::MAX
+                } else {
+                    rng.random_range(0..=u128::MAX)
+                };
+                let suggestion = rng
+                    .random_bool(0.25)
+                    .then(|| extremes[rng.random_range(0..extremes.len())]);
+
+                let (new_difficulty, _) = adjuster.record_share_submission(
+                    share_difficulty,
+                    job_id,
+                    suggestion,
+                    timestamp,
+                );
+
+                if let Some(new_difficulty) = new_difficulty {
+                    assert!(
+                        (MINIMUM_SESSION_DIFFICULTY..=effective_maximum).contains(&new_difficulty),
+                        "difficulty {new_difficulty} outside 1..={effective_maximum}"
+                    );
+                    assert_eq!(adjuster.current_difficulty, new_difficulty);
+                }
+            }
+        }
+    }
+
+    /// Property: accounting the pile is the saturating sum of the current
+    /// difficulty and the pile, and empties the pile.
+    #[test]
+    fn property_accounting_the_pile_saturates_and_empties_it() {
+        let mut rng = StdRng::seed_from_u64(0x4d34_0003);
+
+        for _ in 0..10_000 {
+            let current = if rng.random_bool(0.5) {
+                u64::MAX - rng.random_range(0..4)
+            } else {
+                rng.random_range(0..=u64::MAX)
+            };
+            let pile = if rng.random_bool(0.5) {
+                u64::MAX - rng.random_range(0..4)
+            } else {
+                rng.random_range(0..=u64::MAX)
+            };
+            let mut adjuster = DifficultyAdjuster::new(current, 1, None);
+            adjuster.unaccounted_shares = pile;
+
+            assert_eq!(
+                adjuster.account_for_unaccounted_shares(),
+                current.saturating_add(pile)
+            );
+            assert_eq!(adjuster.unaccounted_shares, 0);
+        }
     }
 }

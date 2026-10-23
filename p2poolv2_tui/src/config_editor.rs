@@ -214,9 +214,9 @@ pub const FIELDS: [FieldSpec; 44] = [
     optional(
         "stratum",
         "maximum_difficulty",
-        "Highest difficulty a miner is given (unset: no limit)",
+        "Highest difficulty a miner is given, also when it asks for more",
         ValueKind::Integer,
-        None,
+        Some("4294967296"),
     ),
     optional(
         "stratum",

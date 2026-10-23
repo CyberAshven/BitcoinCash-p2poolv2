@@ -729,7 +729,7 @@ scenario_deep_fork_refused() {
   sleep "$FORK_OBSERVE_SECS"
 
   links="$(count_links_between "$index" 0)"
-  refusals="$(log_since_reconnect "$index" | grep -c "branch forks below the prune target")"
+  refusals="$(log_since_reconnect "$index" | grep -c "branch forks more than MAX_REORG_DEPTH below the confirmed tip")"
   minority_hash_after="$(api_confirmed_hash "$index" "$check_height")"
   minority_tip_after="$(log_tip_height "$index")"
   majority_tip_after="$(log_tip_height 0)"
@@ -798,7 +798,7 @@ scenario_shallow_fork_reorged() {
   sleep "$FORK_OBSERVE_SECS"
 
   links="$(count_links_between "$index" 0)"
-  refusals="$(log_since_reconnect "$index" | grep -c "branch forks below the prune target")"
+  refusals="$(log_since_reconnect "$index" | grep -c "branch forks more than MAX_REORG_DEPTH below the confirmed tip")"
   check_height=$(($(log_tip_height 0) - interval))
   minority_hash="$(api_confirmed_hash "$index" "$check_height")"
   majority_hash="$(api_confirmed_hash 0 "$check_height")"

@@ -39,8 +39,8 @@ use std::str::FromStr;
 /// Fee rate on Bitcoin Cash when none is given: BCHN's minimum relay fee,
 /// 1,000 satoshis per kilobyte.
 const DEFAULT_BCH_FEE_PER_BYTE: u64 = 1;
-/// Fee rate on the share chain when none is given. Share transactions pay
-/// no fee.
+/// Fee rate on the share chain when none is given. Share transactions need
+/// no fee; a full pool admits the ones burning the most units per byte.
 const DEFAULT_SHARE_FEE_PER_BYTE: u64 = 0;
 
 /// The chain a contract lives on.
@@ -122,8 +122,9 @@ pub enum TradeCommand {
         /// Address that receives the change
         #[arg(long)]
         change_address: String,
-        /// Fee in satoshis per byte: 1 on Bitcoin Cash and 0 on the share
-        /// chain by default
+        /// Fee per byte, in satoshis or share units: 1 on Bitcoin Cash and 0
+        /// on the share chain by default. Raise it on the share chain when a
+        /// node's pool is full: it ranks transactions by units burned per byte
         #[arg(long)]
         fee_rate: Option<u64>,
         /// File holding the signing key as WIF. Prompts when omitted.
@@ -143,8 +144,9 @@ pub enum TradeCommand {
         /// Address that receives the claimed coins
         #[arg(long)]
         to: String,
-        /// Fee in satoshis per byte: 1 on Bitcoin Cash and 0 on the share
-        /// chain by default
+        /// Fee per byte, in satoshis or share units: 1 on Bitcoin Cash and 0
+        /// on the share chain by default. Raise it on the share chain when a
+        /// node's pool is full: it ranks transactions by units burned per byte
         #[arg(long)]
         fee_rate: Option<u64>,
         /// File holding the claim key as WIF. Prompts when omitted.
@@ -167,8 +169,9 @@ pub enum TradeCommand {
         /// Address that receives the refund
         #[arg(long)]
         to: String,
-        /// Fee in satoshis per byte: 1 on Bitcoin Cash and 0 on the share
-        /// chain by default
+        /// Fee per byte, in satoshis or share units: 1 on Bitcoin Cash and 0
+        /// on the share chain by default. Raise it on the share chain when a
+        /// node's pool is full: it ranks transactions by units burned per byte
         #[arg(long)]
         fee_rate: Option<u64>,
         /// File holding the refund key as WIF. Prompts when omitted.

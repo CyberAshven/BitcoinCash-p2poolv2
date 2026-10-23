@@ -10,12 +10,13 @@ spendability, and deleting old block bodies.
 
 **Status.**
 - Implemented: header sync, body fetch, two-zone validation, output
-  spendability, the confirmation pipeline, block body deletion and the
-  reorg depth limit ("Block Body Pruning").
+  spendability, the confirmation pipeline, block body deletion, the
+  missing-input marker ("Missing Input at Write Time") and the reorg depth
+  limit at `PAYOUT_DEPTH` below the confirmed tip ("Reorg Depth Limit"). The
+  marker and the tighter limit landed on 2026-10-23, after share
+  transactions (2026-10-22) made them necessary.
 - Open: the reorg depth limit redoes its refusal on every announcement of a
   refused block (see "Reorg Depth Limit").
-- Designed, not implemented: the missing-input marker ("Missing Input at
-  Write Time").
 
 ## Overview
 
@@ -74,11 +75,13 @@ them:
   PAYOUT_DEPTH`. The sim build shortens Bitcoin's maturity and the window
   only; Bitcoin Cash's maturity stays 100 there, and the sim swarm runs
   Bitcoin.
-- The Bitcoin Cash validator accepts P2PKH share transfers, but no node
-  builds shares with them yet (`handle_stratum_share.rs`). Before one does,
-  the deferred items below apply to Bitcoin Cash as to Bitcoin: the
-  missing-input marker ("Missing Input at Write Time") and the tighter reorg
-  depth limit ("Reorg Depth Limit").
+- Bitcoin Cash nodes relay share transactions and mine them in their shares
+  (since 2026-10-22, `shares/transaction_pool.rs`, `handle_stratum_share.rs`),
+  so a block may spend an output this node never fetched. Both rules that
+  makes necessary are in place, on Bitcoin Cash and Bitcoin alike: the
+  missing-input marker ("Missing Input at Write Time") and the reorg depth
+  limit at `PAYOUT_DEPTH` (127,008 shares) below the confirmed tip ("Reorg
+  Depth Limit").
 
 ## Model: Rules for Validity, Boundaries for Storage
 
@@ -212,29 +215,33 @@ Relevant code:
 - `node/validation_worker.rs` (`validate_and_emit`)
 - `node/organise_worker.rs` (`validate_and_promote_block`)
 
-## Output Spendability (coinbase_root_height)
+## Output Spendability (coinbase root)
 
-Each `StoredTxOut` carries a `coinbase_root_height` field: the block
-height of the oldest coinbase ancestor in the output's spending chain.
+Each `StoredTxOut` carries a `coinbase_root: CoinbaseRoot`: the block
+height of the oldest coinbase ancestor in the output's spending chain
+(`Height(h)`), or `Unknown` when an input was missing at write time (see
+"Missing Input at Write Time").
 
 ### Computation (store-at-write)
 
-- Coinbase outputs: `coinbase_root_height = block_height`
-- Spending tx outputs: `coinbase_root_height = min(coinbase_root_height
-  of all inputs)`
+- Coinbase outputs: `Height(block_height)`
+- Spending tx outputs: the oldest root of all inputs, where `Unknown` is
+  older than every height
 
-Computed at write time in `add_sharechain_txs`. In-block spending
-chains (output created and spent within the same block) use a
-batch-local `HashMap` cache since uncommitted batch data is not
-readable from RocksDB.
+Computed at write time in `add_sharechain_txs`
+(`oldest_coinbase_root_for_inputs`). In-block spending chains (output
+created and spent within the same block) use a batch-local `HashMap` cache
+since uncommitted batch data is not readable from RocksDB.
 
 ### Validation
 
 `validate_prevouts` computes `min_coinbase_root_height = block_height -
 PAYOUT_DEPTH` from the spending block's own height and passes it to
-`check_prevouts`. Outputs with `coinbase_root_height <
-min_coinbase_root_height` are rejected in the same batch read that checks
-output existence and coinbase maturity -- one pass covers all three.
+`check_prevouts`. An output with an `Unknown` root is rejected
+(`PrevoutRejection::UnknownCoinbaseRoot`), and one whose root height is
+below `min_coinbase_root_height` is rejected (`CoinbaseRootTooOld`), in the
+same batch read that checks output existence and coinbase maturity -- one
+pass covers all four.
 
 A coinbase output cannot be spent before depth `COINBASE_MATURITY`, so
 expiring at `PAYOUT_DEPTH` keeps a full `PPLNS_WINDOW_SHARES` of spendable
@@ -251,12 +258,11 @@ O(inputs) at write time, bounded by block size (~5000 inputs max).
 
 ### Error handling
 
-- `min_coinbase_root_height_for_inputs` returns `StoreError` if any
-  input output is missing or undecodable (prevents persisting height 0
-  which would make outputs permanently unspendable). A missing input
-  currently leaves the block unstored and not marked invalid. The
-  planned fix records an explicit unknown root instead of an error
-  (see "Missing Input at Write Time").
+- `oldest_coinbase_root_for_inputs` records `CoinbaseRoot::Unknown` for a
+  missing input, never height 0, which would make outputs permanently
+  unspendable, and never an error, which left the block unstored and
+  confirmation stalled. A read or decode failure on any input still
+  propagates as `StoreError` (see "Missing Input at Write Time").
 - `compute_block_height_from_parent` returns `StoreError` if parent
   metadata is missing (genesis is special-cased to height 0).
 - The parent's `expected_height` is required in `validate_prevouts`; its
@@ -264,9 +270,9 @@ O(inputs) at write time, bounded by block size (~5000 inputs max).
   which would disable the spend rule.
 
 Relevant code:
-- `store/transaction_store.rs` (`StoredTxOut`,
-  `min_coinbase_root_height_for_inputs`,
-  `check_prevouts`)
+- `store/transaction_store.rs` (`StoredTxOut`, `CoinbaseRoot`,
+  `oldest_coinbase_root_for_inputs`, `check_prevouts`,
+  `recheck_block_prevouts_with_overlay`)
 - `store/share_store.rs` (`compute_block_height_from_parent`)
 - `shares/validation/mod.rs` (`validate_prevouts`)
 
@@ -346,12 +352,14 @@ Out of scope:
 
 ### Boundaries
 
-Nothing about pruning is persisted. Both boundaries are computed from the
-candidate tip (`store/prune_blocks.rs`):
+Nothing about pruning is persisted. The boundaries are computed from the
+tips (`store/prune_blocks.rs`): the gates' from the candidate tip, deletion's
+and the reorg floor's from the confirmed tip:
 
 ```
-prune_height_for_tip(tip) = tip - PRUNE_DEPTH                   // the gates
-prune_target_for_tip(tip) = tip - PRUNE_DEPTH - PRUNE_INTERVAL  // deletion
+prune_height_for_tip(candidate tip) = tip - PRUNE_DEPTH                   // the gates
+prune_target_for_tip(confirmed tip) = tip - PRUNE_DEPTH - PRUNE_INTERVAL  // deletion
+reorg_floor_for_tip(confirmed tip)  = tip - MAX_REORG_DEPTH               // reorg limit
 ```
 
 - **The gates use `prune_height`.** `organise_block`,
@@ -499,44 +507,74 @@ At 6 hours a run deletes about 2,160 heights, and the node holds between
     returns only heights above the deleted range; its doc says so.
   - `organise_block`, `detach_candidate_branch` and
     `reorg_candidate_from_candidate` read only above the confirmed tip.
-- **Parent-wait buffer.** Eviction (`mine-on-bitcoin-chain.md` change 2) is
-  still pending; when it lands it should use `prune_height`.
+- **Parent-wait buffer.** `BlockReceiver`'s pending buffer is bounded
+  (`PendingLimits`: 1,024 blocks, 32 MiB, 10 minutes, oldest evicted first;
+  `share-processing-pipeline.md`, "BlockReceiver ancestry gate"). An entry
+  waiting on a parent below `prune_height` is released by the ancestry gate,
+  which exempts that parent, or expires.
 
 ### Reorg Depth Limit
 
 Pruning makes the prune target an implicit checkpoint. A heavier branch
 forking below it needs the fork point's body, which every node has deleted,
 so following it would stall confirmation for as long as the attacker keeps
-the work lead.
+the work lead. Share transactions tighten that further, to
+`MAX_REORG_DEPTH = PAYOUT_DEPTH` (127,008 shares, ~14.7 days) below the
+confirmed tip (`store/prune_blocks.rs`):
+
+- A block on a branch forking at height `f` may validly spend outputs whose
+  coinbase root is above `f - PAYOUT_DEPTH`.
+- With `f` at least `tip - PAYOUT_DEPTH`, every such output is above the
+  tip's `prune_height`: its body was fetched and never deleted, and its root
+  was stamped from stored inputs, never `Unknown`.
+- A deeper fork onto a heavier but lower branch (a majority that slows its
+  timestamps so ASERT raises its difficulty) could put a fully validated
+  block above an output this node never fetched or stamped `Unknown`, and
+  this node would reject a valid block.
+
+Upstream's design note said "about `PAYOUT_DEPTH + PRUNE_INTERVAL`". That
+bound covers deleted bodies only. A node that synced within the last
+`PRUNE_INTERVAL` never fetched the bodies in the extra interval, and an
+output stamped `Unknown` may have its true root anywhere below the
+`prune_height` of its write time, that interval included. `PAYOUT_DEPTH`
+covers both, at the cost of one hour of depth.
 
 `organise_header` therefore refuses to reorg the candidate chain onto a
-branch whose fork point is below `prune_target_for_tip(candidate tip)`.
-`reorg_branch_forks_below_prune_target` (`store/organise/candidate.rs`)
-walks `get_branch_to_chain` to the branch point, the same walk
-`reorg_candidate` does, and compares its height. On a refusal it logs
-`Refusing candidate reorg to <hash>: branch forks below the prune target`
-at info and returns `Ok(None)`, as the invalid-branch refusal does. The
-walk stops on chain membership, not on the candidate index, so deleting
-candidate entries does not affect it.
+branch whose fork point is below `reorg_floor_for_tip(confirmed tip)`,
+`confirmed tip - MAX_REORG_DEPTH`. `reorg_branch_forks_below_reorg_floor`
+(`store/organise/candidate.rs`) walks `get_branch_to_chain` to the branch
+point, the same walk `reorg_candidate` does, and compares its height. On a
+refusal it logs `Refusing candidate reorg to <hash>: branch forks more than
+MAX_REORG_DEPTH below the confirmed tip` at info and returns `Ok(None)`, as
+the invalid-branch refusal does. The walk stops on chain membership, not on
+the candidate index, so deleting candidate entries does not affect it.
+
+The floor follows the confirmed tip, not the candidate tip, as the prune
+target does. During a sync the candidate tip runs far ahead of the confirmed
+one, and a fresh node whose candidate chain first follows a tall but light
+branch must still be able to reorg onto the heavier one. The floor is a
+whole `PAYOUT_DEPTH` above the prune height, so the old margin for uncles
+below the fork point is implied; a compile-time assertion in
+`prune_blocks.rs` holds `MAX_REORG_DEPTH + MAX_UNCLES_DEPTH` within
+`PRUNE_DEPTH + PRUNE_INTERVAL`.
 
 What different attacks achieve:
 
 | Attack | Result |
 |---|---|
 | A lower tip by itself (a lighter fork, a withheld chain) | Harmless: lighter branches are never followed, and the 360-height gap absorbs honest tip drops |
-| A heavier branch forking above the prune target | Followed normally; every body it needs is still held |
-| A heavier branch forking below the prune target | Refused. Building one means out-working about 29.4 days of the whole pool. Honest nodes keep confirming and mining their own chain |
-| Spending a pruned output | Needs share transactions, which do not exist yet. With them, the limit must tighten (below) |
-| A fake tall tip to move the prune target up | Blocked: headers are PoW-bound, and pruning only runs while `is_current()` |
+| A heavier branch forking at most `MAX_REORG_DEPTH` below the confirmed tip | Followed normally; every body it needs is still held, and every root it reads is known |
+| A heavier branch forking deeper | Refused. Building one means out-working about 14.7 days of the whole pool. Honest nodes keep confirming and mining their own chain |
+| Spending an output this node never fetched | A block that does so is stored with `Unknown` outputs (see "Missing Input at Write Time"); the limit keeps every fully validated spender above such outputs |
+| A fake tall tip to move the floor or the prune target up | Blocked: headers are PoW-bound, the floor follows the confirmed tip, and pruning only runs while `is_current()` |
 
 Fresh nodes syncing from genesis have no competing fork, so they are
-unaffected. Two nodes could only diverge over a majority fork more than
-29.4 days deep, depending on which branch each saw first. That is accepted.
-
-**With share transactions** the limit must tighten to a fork depth of about
-`PAYOUT_DEPTH + PRUNE_INTERVAL` (~14.7 days). Otherwise a valid in-zone
-spend could need a deleted output after a deep, height-dropping reorg. See
-"Missing Input at Write Time".
+unaffected. Two nodes could only diverge over a majority fork more than 14.7
+days deep, depending on which branch each saw first. That is accepted, as is
+the remaining corner: two successive heavier-but-lower majority reorgs, each
+within the limit, can still drop the tip far enough to reach an `Unknown`
+root. A node partitioned from the pool for more than 14.7 days cannot rejoin
+by itself and needs a fresh store.
 
 **Open issue: the refusal is not remembered.** The node redoes it on every
 announcement of a block on the refused branch: it sends `getheaders`, gets
@@ -558,15 +596,23 @@ refused.
   `getheaders` and `getdata` handlers against a pruned store, and the
   locator.
 - Reorg depth limit: `candidate.rs` unit tests for
-  `reorg_branch_forks_below_prune_target`.
+  `reorg_branch_forks_below_reorg_floor` (more than `MAX_REORG_DEPTH` deep
+  refused, exactly that deep followed, the old prune-target margin now
+  refused, the floor following the confirmed tip), and `prune_blocks.rs`
+  tests of `reorg_floor_for_tip`.
+- Missing input: `share_store.rs`, `transaction_store.rs` (the marker, its
+  encoding, propagation, `UnknownCoinbaseRoot`, the confirmation re-check of
+  unheld sources) and `p2poolv2_tests/src/missing_input_test.rs` (cases (a)
+  and (b) through the real store and validator).
 - Sim (`load-tests/sim`, RUNBOOK Tests H and I). The sim build compiles
   short depths (prune depth 200, interval 20, background interval 30s; see
   `docs/simulation/overview.md`), so every scenario prunes:
   - `pruned-join`: a wiped node syncs from genesis off pruned peers;
   - `deep-fork-refused`: a minority group forked at genesis refuses the
-    heavier majority once every node has pruned;
+    heavier majority once every node has pruned (the fork is then far below
+    the sim reorg floor, 100 shares below the confirmed tip);
   - `shallow-fork-reorged`: the control, where the same minority reconnects
-    above the prune target and follows the majority.
+    at height 60, above the reorg floor, and follows the majority.
 
 ### Deferred
 
@@ -580,13 +626,16 @@ refused.
   headers (see `mine-on-bitcoin-chain.md` "Retention"). Its pruning belongs
   in the same background task.
 
-## Missing Input at Write Time (decided, deferred)
+## Missing Input at Write Time
 
-**Problem.** `add_sharechain_txs` computes root heights at write time,
-before validation, for every block. `min_coinbase_root_height_for_inputs`
-returns `StoreError::NotFound` for a missing input, and
-`store_and_emit_validation` returns `Err`. The block is then neither
-stored nor marked Invalid. Two cases hit this:
+**Status.** Implemented 2026-10-23, the day after share transactions
+shipped, on Bitcoin Cash and Bitcoin alike.
+
+**Problem (before the fix).** `add_sharechain_txs` computes root heights at
+write time, before validation, for every block. The old
+`min_coinbase_root_height_for_inputs` returned `StoreError::NotFound` for a
+missing input, and `store_and_emit_validation` returned `Err`. The block was
+then neither stored nor marked Invalid. Two cases hit this:
 
 - **(a) A block in the full-validation zone whose input does not
   exist.**
@@ -602,25 +651,37 @@ stored nor marked Invalid. Two cases hit this:
   - The block is valid. The input is within the block's own window,
     `>= h - PAYOUT_DEPTH`, but below `tip - PRUNE_DEPTH`, so this node
     never fetched it. Marking the block invalid would split nodes.
-  - This cannot happen yet, because no non-coinbase share transactions
-    exist (`handle_stratum_share.rs` TODO).
-  - Once they exist, a valid block on the best chain becomes
-    unstorable, and that stall does not heal.
+  - Since share transactions shipped (2026-10-22) this can happen to a
+    syncing node: a valid block on the best chain was unstorable, and that
+    stall did not heal.
 
-**Fix.** `StoredTxOut` gets `enum CoinbaseRoot { Height(u32), Unknown }`.
+**Fix.** `StoredTxOut` has `coinbase_root: CoinbaseRoot`, `enum CoinbaseRoot
+{ Height(u32), Unknown }` (`store/transaction_store.rs`).
 - **Write.** Record `Unknown` only when an input is not found. Read and
   decode errors still propagate.
 - **Propagate.** `Unknown` is the bottom value: a transaction with any
   `Unknown` input writes `Unknown` outputs.
 - **Validate.** `check_prevouts` rejects it with
   `PrevoutRejection::UnknownCoinbaseRoot`.
-- **Display.** The wallet API shows such outputs as unknown or expired.
+- **Confirm.** `recheck_block_prevouts_with_overlay` asks whether each
+  source txid is confirmed only for the sources this node holds
+  (`are_held_txids_confirmed_with_overlay`). A spender of an output this node
+  never held can only have had a proof-of-work-only verdict, because full
+  validation fails on a missing output; asking would mark the block of case
+  (b) Invalid at confirmation, on this node only. Its outpoints are still
+  checked for a double spend. The transaction pool keeps refusing unknown
+  sources (`are_all_txids_confirmed`).
+- **Display.** No API shows `StoredTxOut` today. A wallet or outputs
+  endpoint must show such outputs as unknown or expired.
 
 What this gives each case:
-- In (a), the block is stored, and `validate_prevouts` marks it Invalid.
-- In (b), the true root is below `prune_height`. Any spender this node
-  fully validates needs a root above that, so rejecting `Unknown`
-  matches every node that holds the true value.
+- In (a), the block is stored, and full validation marks it Invalid: the
+  missing output fails `validate_share_transactions` and `validate_prevouts`.
+- In (b), the block is stored and confirmed. Its true root is below
+  `prune_height`. Any spender this node fully validates needs a root above
+  that, so rejecting `Unknown` matches every node that holds the true
+  value, as long as the tip has not dropped below the write-time tip (see
+  "Reorg Depth Limit").
 - The ancestry gate guarantees that every ancestor body at or above
   `prune_height` is present, so a missing input is always one of these
   two cases.
@@ -630,17 +691,20 @@ What this gives each case:
 - The "never persist height 0" rule (see "Error handling") stays true.
 - The enum makes every reader handle `Unknown`.
 
-**Cost.** One byte per output. A chain reset is planned, so no
-migration is needed.
+**Cost.** One byte per output. The store format changes, so nodes start
+from a new store path; no migration.
 
-**When.** The fix goes in before, or together with, share
-transactions, and is not part of the pruning work. Its tests:
+**Tests:**
 - an in-zone block spending a missing output is stored and marked
-  Invalid;
+  Invalid (`missing_input_test.rs`, case (a));
 - a PoW-only block spending an unfetched output is stored, gets
-  `Unknown` outputs, and is confirmed;
-- spending an `Unknown` output is rejected with `UnknownCoinbaseRoot`;
-- `Height(0)` stays distinct from `Unknown`.
+  `Unknown` outputs, and is confirmed (`missing_input_test.rs`, case (b),
+  and `test_recheck_accepts_a_spend_of_an_output_this_node_never_held`);
+- spending an `Unknown` output is rejected with `UnknownCoinbaseRoot`,
+  through an in-block chain too
+  (`test_unknown_coinbase_root_propagates_and_is_rejected`);
+- `Height(0)` stays distinct from `Unknown`, in the encoding too
+  (`test_coinbase_root_height_zero_stays_distinct_from_unknown`).
 
 **Not taken:** keeping bodies down to `tip - 3 * PAYOUT_DEPTH` to
 compute exact roots. That is 50% more body storage for values that can
@@ -678,6 +742,17 @@ never matter.
   not sim config, so every node built from one binary agrees on them.
 - **Deferred:** the conditional-delete tombstone fix, and the fix for the
   repeated refusal (see "Reorg Depth Limit").
+
+## Decisions (2026-10-23, share transactions)
+
+- **The missing-input marker is in,** as designed on 2026-10-15, plus the
+  confirmation re-check skipping sources this node never held, without
+  which case (b) was marked Invalid at confirmation instead of stalling.
+- **The reorg depth limit is `PAYOUT_DEPTH` below the confirmed tip,** not
+  the prune target and not `PAYOUT_DEPTH + PRUNE_INTERVAL` (see "Reorg Depth
+  Limit").
+- **Still open:** the repeated refusal, and the corner of two successive
+  heavier-but-lower majority reorgs.
 
 ## Alternatives Rejected
 

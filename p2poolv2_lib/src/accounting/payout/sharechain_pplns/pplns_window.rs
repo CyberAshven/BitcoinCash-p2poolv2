@@ -2419,6 +2419,69 @@ mod tests {
         );
     }
 
+    /// The window credits every uncle reference it walks, so an uncle that
+    /// two nephews on one chain both name is paid twice, and each nephew gets
+    /// its bonus. This is why an uncle may have only one nephew on a chain:
+    /// `validate_uncles` rejects the second nephew, so no valid chain holds
+    /// this shape.
+    #[test]
+    fn test_window_pays_an_uncle_once_for_each_nephew_naming_it() {
+        let genesis_hash = BlockHash::all_zeros();
+        let header_one = build_test_header(&genesis_hash.to_string(), PUBKEY_2G, 2);
+        let uncle_header = build_test_header(&genesis_hash.to_string(), PUBKEY_3G, 2);
+        let uncle_difficulty = uncle_header.get_difficulty(TEST_NETWORK);
+        let first_nephew_header = build_test_header_with_uncles(
+            &header_one.block_hash().to_string(),
+            PUBKEY_G,
+            2,
+            vec![uncle_header.block_hash()],
+        );
+        let second_nephew_header = build_test_header_with_uncles(
+            &first_nephew_header.block_hash().to_string(),
+            PUBKEY_4G,
+            2,
+            vec![uncle_header.block_hash()],
+        );
+        let second_nephew_difficulty = second_nephew_header.get_difficulty(TEST_NETWORK);
+
+        let mut window = PplnsWindow::new(TEST_NETWORK);
+        let first_uncle_entry = uncle_entry_from_header(&mut window, &uncle_header);
+        let second_uncle_entry = uncle_entry_from_header(&mut window, &uncle_header);
+        let second_nephew_entry = entry_from_header_with_uncles(
+            &mut window,
+            &second_nephew_header,
+            2,
+            vec![second_uncle_entry],
+        );
+        let first_nephew_entry = entry_from_header_with_uncles(
+            &mut window,
+            &first_nephew_header,
+            1,
+            vec![first_uncle_entry],
+        );
+        let entry_one = entry_from_header(&mut window, &header_one, 0);
+        window.confirmed_entries.push_back(second_nephew_entry);
+        window.confirmed_entries.push_back(first_nephew_entry);
+        window.confirmed_entries.push_back(entry_one);
+
+        let distribution = window
+            .get_distribution_from_start_hash(
+                second_nephew_header.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY,
+                &MockChainStoreHandle::default(),
+            )
+            .expect("the anchor is in the window");
+
+        assert_eq!(
+            distribution[&uncle_header.miner_bitcoin_address],
+            2 * uncle_difficulty * UNCLE_SCALED_WEIGHT
+        );
+        assert_eq!(
+            distribution[&second_nephew_header.miner_bitcoin_address],
+            second_nephew_difficulty * DIFFICULTY_SCALE + uncle_difficulty * NEPHEW_SCALED_BONUS
+        );
+    }
+
     #[test]
     fn test_empty_chain() {
         let genesis_hash = BlockHash::all_zeros();

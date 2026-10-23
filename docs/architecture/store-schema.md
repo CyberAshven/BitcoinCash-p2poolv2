@@ -180,7 +180,13 @@ Stores individual transaction outputs.
 
 | Key                       | Value                |
 |---------------------------|----------------------|
-| `{txid}:{index}` (string) | `TxOut` (serialized) |
+| `{txid}:{index}` (string) | `StoredTxOut` (serialized): the `TxOut`, an `is_coinbase` byte, then the coinbase root: tag `0` and a 4-byte height, or tag `1` for `CoinbaseRoot::Unknown` |
+
+The coinbase root is the oldest coinbase in the output's spending chain,
+stamped at write time. `Unknown` marks an output with an input this node did
+not hold when it was written; spending it is rejected (`pruning.md`, "Missing
+Input at Write Time"). The tag byte was added with that marker, so stores
+written before it do not decode: start from a new store path.
 
 ---
 

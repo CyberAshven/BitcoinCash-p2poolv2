@@ -149,7 +149,7 @@ opportunistic -- it depends on a peer sending the block again, which this node
 does not solicit.
 
 The BlockReceiver's ancestry gate (below) makes the common causes unreachable,
-but not all of them: `collect_recent_ancestors` walks `MAX_UNCLES_DEPTH` of
+but not all of them: `collect_recent_ancestry` walks `MAX_UNCLES_DEPTH` of
 ancestry, and an uncle's `expected_height` may be absent. Until a re-delivery
 arrives, such a block stalls, and in the PPLNS zone a stalled candidate stops
 confirmation at its height.
@@ -173,7 +173,23 @@ and `collect_spent_outputs` would fail on a block that is perfectly valid.
 Blocks below `prune_height` are exempt because their bodies are never fetched;
 requiring one would stall the chain permanently at the boundary. Spends cannot
 reach below it either: `min_coinbase_root_height` caps them one payout depth
-back (`PAYOUT_DEPTH`) while bodies are retained for two (`PRUNE_DEPTH`).
+back (`PAYOUT_DEPTH`) while bodies are retained for two (`PRUNE_DEPTH`). A
+block spending an output below it, which only a proof-of-work-only verdict
+can accept, is stored with an unknown coinbase root on its outputs
+(`pruning.md`, "Missing Input at Write Time").
+
+The buffer is bounded (`PendingLimits` in `block_receiver.rs`): at most
+`MAX_PENDING_BLOCKS` (1,024) blocks and `MAX_PENDING_BYTES` (32 MiB, by
+consensus encoding), the oldest evicted first, and a block that has waited
+longer than `PENDING_BLOCK_TTL` (10 minutes) is dropped on the next arrival. A
+block naming a parent that never arrives costs one share of proof of work
+(the admission gate checks its coinbase proof), and the mini chain's shares
+are cheap, so without the bounds a peer could grow the buffer without limit.
+The bound is global, not per peer: peer identities are free. An honest block
+that is evicted or expires while still on the candidate chain is fetched again
+by the block fetcher's missing-data scan. Upstream's design diagram
+(`receive_block.puml`, "No cap. No TTL. No eviction.") still describes the
+unbounded buffer.
 
 ### OrganiseEvent::InvalidBlock(BlockHash)
 - **Purpose**: Record that a block failed pre-context validation
@@ -675,15 +691,47 @@ derives a root whose header fails proof of work. `MAX_HEADERS_IN_RESPONSE`
 (900) is sized so the worst case still fits `MAX_P2P_MESSAGE_SIZE`: a distinct
 16-deep branch per header with its root included.
 
+### Header timestamps
+
+Header sync applies the timestamp rules of full validation to every header
+before it is organised (`validate_dag_connectivity_and_difficulty` in
+`receivers/share_headers.rs`, `ShareValidator::validate_header_timestamp`):
+`header.time` must be greater than the median of up to `MTP_WINDOW` (11)
+ancestor times and at most `MAX_FUTURE_TIME_SECS` (120) ahead of the local
+clock. Ancestor times come from the batch for headers earlier in it and from
+the store otherwise, each store header read once per batch. Both paths call
+the same `check_median_time_past` and `check_future_time_limit`.
+
+Before, only `validate_timestamp` checked them, in `validate_with_chain_context`,
+which runs inside the full-validation zone only. Blocks below it, and headers
+held without bodies, had unconstrained times, and with the parent-anchored
+ASERT on Bitcoin Cash (decision 12) each header's target comes straight from
+its parent's time. A batch with a bad timestamp is refused whole, without a
+retry, as an ASERT mismatch is. The block receipt path does not repeat the
+check: a block it stores goes on to full validation, or lies below the zone,
+where its header was already checked at header sync.
+
 ### Uncle selection vs uncle acceptance
 
 These are deliberately different rules, and the asymmetry is intentional.
 
 **Acceptance** (`validate_uncles`, `validate_uncle_positions`) is a pure
 function of chain shape: count, no duplicates, and the structural position
-rules (an uncle is below the nephew, within `MAX_UNCLES_DEPTH`, and not on the
-nephew's own ancestry). It deliberately does **not** consult mutable per-node
-state.
+rules (an uncle is below the nephew, within `MAX_UNCLES_DEPTH`, not on the
+nephew's own ancestry, and not already an uncle of one of the nephew's
+ancestors). It deliberately does **not** consult mutable per-node state.
+
+The last rule is upstream's "an uncle may have only one nephew"
+(`architecture/validation.adoc`; the wiki's "Uncle Blocks" rule 4). It is
+measured on the nephew's own ancestry, read from the headers
+`collect_recent_ancestry` already walks: an uncle sits at most
+`MAX_UNCLES_DEPTH` below any nephew, so only the nephew's parent and
+grandparent can have named it before. Siblings on different branches may
+each name the same uncle, as the wiki allows, because only one of them can
+stay on the chain. Without the rule the payout window, which credits every
+reference it walks, paid such an uncle twice and both nephews a bonus.
+Applied on Bitcoin and Bitcoin Cash alike; on Bitcoin Cash it is part of the
+`uncle-once` protocol tag.
 
 Whether an uncle's block body is stored is exactly that kind of state, so it is
 checked separately (`validate_uncle_bodies_present`) and only for blocks inside

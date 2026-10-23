@@ -5,7 +5,7 @@ use crate::node::validation_worker;
 use crate::pool_difficulty::AsertParent;
 #[mockall_double::double]
 use crate::pool_difficulty::PoolDifficulty;
-use crate::shares::validation::MockDefaultShareValidator;
+use crate::shares::validation::{BLOCK_TXS_SIZE_LIMIT, MockDefaultShareValidator};
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership};
 use crate::store::writer::StoreError;
 use crate::test_utils::TestShareBlockBuilder;
@@ -28,7 +28,7 @@ fn test_add_to_pending_inserts_block() {
     let share_block = TestShareBlockBuilder::new().build();
     let block_hash = share_block.block_hash();
 
-    receiver.add_to_pending(block_hash, share_block);
+    receiver.add_to_pending(block_hash, share_block, Instant::now());
 
     assert_eq!(receiver.pending_count(), 1);
     assert!(receiver.pending.contains_key(&block_hash));
@@ -56,7 +56,7 @@ fn test_add_to_pending_updates_descendants_index() {
         .build();
     let child_hash = child_block.block_hash();
 
-    receiver.add_to_pending(child_hash, child_block);
+    receiver.add_to_pending(child_hash, child_block, Instant::now());
 
     assert_eq!(
         receiver.descendants.get(&parent_hash).unwrap(),
@@ -83,7 +83,7 @@ fn test_add_to_pending_uncle_descendants() {
         .build();
     let block_hash = share_block.block_hash();
 
-    receiver.add_to_pending(block_hash, share_block);
+    receiver.add_to_pending(block_hash, share_block, Instant::now());
 
     assert_eq!(
         receiver.descendants.get(&uncle_hash).unwrap(),
@@ -113,7 +113,7 @@ fn test_remove_from_pending_cleans_descendants() {
         .build();
     let child_hash = child_block.block_hash();
 
-    receiver.add_to_pending(child_hash, child_block);
+    receiver.add_to_pending(child_hash, child_block, Instant::now());
     assert!(receiver.descendants.contains_key(&parent_hash));
 
     let removed = receiver.remove_from_pending(&child_hash);
@@ -139,7 +139,7 @@ fn test_genesis_parent_not_tracked_in_descendants_key() {
     let share_block = TestShareBlockBuilder::new().build();
     let block_hash = share_block.block_hash();
 
-    receiver.add_to_pending(block_hash, share_block);
+    receiver.add_to_pending(block_hash, share_block, Instant::now());
 
     assert!(!receiver.descendants.contains_key(&BlockHash::all_zeros()));
 }
@@ -412,6 +412,12 @@ async fn test_process_share_block_with_ready_parent_commits() {
         .returning(|_| Ok(None));
 
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    mock_store
+        .expect_get_share_header()
+        .returning(|_| Ok(TestShareBlockBuilder::new().build().header));
     let mut pool_difficulty = PoolDifficulty::default();
     pool_difficulty
         .expect_calculate_target_clamped()
@@ -458,6 +464,90 @@ async fn test_process_share_block_with_ready_parent_commits() {
             panic!("Expected ValidateBlockHash, got ValidateShareBlock")
         }
     }
+}
+
+/// A block whose timestamp breaks the rules header sync applies is
+/// dropped before it is stored or organised, as an ASERT mismatch is. The
+/// check reads the parent's stored header for median time past.
+#[tokio::test]
+async fn test_process_share_block_with_an_invalid_timestamp_is_dropped() {
+    let parent_hash = BlockHash::from_byte_array([0x88; 32]);
+    let parent_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695790)
+        .time(1_700_000_000)
+        .build()
+        .header;
+    let parent_header_for_asert = parent_header.clone();
+
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store
+        .expect_get_candidate_tip_height()
+        .returning(|| Ok(Some(0)));
+    mock_store
+        .expect_all_block_and_uncle_data_available()
+        .returning(|_, _| Ok(true));
+    mock_store
+        .expect_get_block_metadata()
+        .returning(|_| Err(StoreError::NotFound("not found".to_string())));
+    mock_store
+        .expect_get_asert_parent()
+        .with(mockall::predicate::eq(parent_hash))
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &parent_header_for_asert,
+                0,
+                parent_header_for_asert.time,
+            ))
+        });
+    mock_store
+        .expect_get_share_header()
+        .with(mockall::predicate::eq(parent_hash))
+        .returning(move |_| Ok(parent_header.clone()));
+    mock_store
+        .expect_add_share_block_and_organise_header()
+        .never();
+
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_timestamp()
+        .withf(|_, ancestor_times| ancestor_times == [1_700_000_000])
+        .times(1)
+        .returning(|_, _| {
+            Err(crate::shares::validation::ValidationError::consensus(
+                "Share timestamp is not greater than median time past",
+            ))
+        });
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    );
+    let mut child_block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(parent_hash.to_string())
+        .nonce(0xe9695791)
+        .time(1_700_000_000)
+        .build();
+    child_block.header.bits =
+        CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET);
+
+    let result = receiver.process_share_block(child_block).await;
+
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+    assert_eq!(receiver.pending_count(), 0);
+    assert!(validation_rx.try_recv().is_err());
 }
 
 /// A body for a block already known below the prune height is dropped
@@ -551,6 +641,12 @@ async fn test_process_share_block_refused_below_prune_target_is_ok() {
         .returning(|share| Err(StoreError::BelowPruneHeight(share.block_hash())));
 
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    mock_store
+        .expect_get_share_header()
+        .returning(|_| Ok(TestShareBlockBuilder::new().build().header));
     let mut pool_difficulty = PoolDifficulty::default();
     pool_difficulty
         .expect_calculate_target_clamped()
@@ -633,16 +729,16 @@ async fn test_process_share_block_missing_parent_buffers_without_fetching() {
     );
 }
 
-/// The receiver itself does not bound the pending buffer: every block
-/// naming a parent that never arrives takes a slot it never releases.
+/// Below its bounds the receiver buffers whatever it is given: every
+/// block naming a parent that has not arrived takes its own slot.
 ///
-/// That is safe only because the admission gate in `handle_share_block`
-/// now runs `validate_coinbase_proof`, which binds the share fields --
+/// The admission gate in `handle_share_block` runs
+/// `validate_coinbase_proof`, which binds the share fields --
 /// `prev_share_blockhash` included -- to the bitcoin header's proof of
-/// work. A bitcoin header replayed under another parent fails there, so
-/// each block reaching this buffer costs a share's worth of real work.
-/// This test drives the receiver directly, below that gate, to pin the
-/// receiver's half: it buffers whatever it is given.
+/// work, so each block reaching this buffer costs a share's worth of real
+/// work. The buffer's own bounds (`PendingLimits`) cap what that work can
+/// hold; see the eviction and expiry tests below. This test drives the
+/// receiver directly, below that gate.
 #[tokio::test]
 async fn test_replayed_header_under_distinct_parents_fills_pending() {
     const REPLAYS: u8 = 32;
@@ -697,6 +793,215 @@ async fn test_replayed_header_under_distinct_parents_fills_pending() {
         REPLAYS as usize,
         "and its own descendants entry"
     );
+}
+
+/// Over `max_blocks` the oldest pending block is evicted, with its
+/// descendants-index entries and its bytes.
+#[test]
+fn test_pending_buffer_evicts_the_oldest_block_beyond_its_block_cap() {
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _) = validation_worker::create_validation_channel();
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(MockDefaultShareValidator::default()),
+        ChainStoreHandle::default(),
+        block_fetcher_handle,
+        validation_tx,
+    )
+    .with_pending_limits(PendingLimits {
+        max_blocks: 2,
+        ..PendingLimits::default()
+    });
+    let first = TestShareBlockBuilder::new()
+        .prev_share_blockhash(BlockHash::from_byte_array([1; 32]).to_string())
+        .build();
+    let second = TestShareBlockBuilder::new()
+        .prev_share_blockhash(BlockHash::from_byte_array([2; 32]).to_string())
+        .build();
+    let third = TestShareBlockBuilder::new()
+        .prev_share_blockhash(BlockHash::from_byte_array([3; 32]).to_string())
+        .build();
+    let second_size = buffered_size(&second);
+    let third_size = buffered_size(&third);
+    let start = Instant::now();
+
+    receiver.add_to_pending(first.block_hash(), first.clone(), start);
+    receiver.add_to_pending(second.block_hash(), second.clone(), start);
+    receiver.add_to_pending(third.block_hash(), third.clone(), start);
+
+    assert_eq!(receiver.pending_count(), 2);
+    assert!(!receiver.pending.contains_key(&first.block_hash()));
+    assert!(receiver.pending.contains_key(&second.block_hash()));
+    assert!(receiver.pending.contains_key(&third.block_hash()));
+    assert!(
+        !receiver
+            .descendants
+            .contains_key(&BlockHash::from_byte_array([1; 32]))
+    );
+    assert_eq!(receiver.pending_bytes(), second_size + third_size);
+    assert_eq!(receiver.arrival_order.len(), 2);
+}
+
+/// Over `max_bytes` the oldest pending block is evicted too.
+#[test]
+fn test_pending_buffer_evicts_the_oldest_block_beyond_its_byte_cap() {
+    let first = TestShareBlockBuilder::new()
+        .prev_share_blockhash(BlockHash::from_byte_array([1; 32]).to_string())
+        .build();
+    let second = TestShareBlockBuilder::new()
+        .prev_share_blockhash(BlockHash::from_byte_array([2; 32]).to_string())
+        .build();
+    let third = TestShareBlockBuilder::new()
+        .prev_share_blockhash(BlockHash::from_byte_array([3; 32]).to_string())
+        .build();
+    let block_size = buffered_size(&first);
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _) = validation_worker::create_validation_channel();
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(MockDefaultShareValidator::default()),
+        ChainStoreHandle::default(),
+        block_fetcher_handle,
+        validation_tx,
+    )
+    .with_pending_limits(PendingLimits {
+        max_bytes: 2 * block_size + block_size / 2,
+        ..PendingLimits::default()
+    });
+    let start = Instant::now();
+
+    receiver.add_to_pending(first.block_hash(), first.clone(), start);
+    receiver.add_to_pending(second.block_hash(), second.clone(), start);
+    receiver.add_to_pending(third.block_hash(), third.clone(), start);
+
+    assert_eq!(receiver.pending_count(), 2);
+    assert!(!receiver.pending.contains_key(&first.block_hash()));
+    assert!(receiver.pending_bytes() <= 2 * block_size + block_size / 2);
+}
+
+/// A block larger than the whole byte bound is never buffered.
+#[test]
+fn test_pending_buffer_drops_a_block_larger_than_its_byte_cap() {
+    let block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(BlockHash::from_byte_array([1; 32]).to_string())
+        .build();
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _) = validation_worker::create_validation_channel();
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(MockDefaultShareValidator::default()),
+        ChainStoreHandle::default(),
+        block_fetcher_handle,
+        validation_tx,
+    )
+    .with_pending_limits(PendingLimits {
+        max_bytes: buffered_size(&block) - 1,
+        ..PendingLimits::default()
+    });
+
+    receiver.add_to_pending(block.block_hash(), block, Instant::now());
+
+    assert_eq!(receiver.pending_count(), 0);
+    assert_eq!(receiver.pending_bytes(), 0);
+    assert!(receiver.descendants.is_empty());
+}
+
+/// A pending block expires once it has waited longer than `max_age`, and
+/// not before.
+#[test]
+fn test_pending_block_expires_after_its_max_age() {
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _) = validation_worker::create_validation_channel();
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(MockDefaultShareValidator::default()),
+        ChainStoreHandle::default(),
+        block_fetcher_handle,
+        validation_tx,
+    )
+    .with_pending_limits(PendingLimits {
+        max_age: Duration::from_secs(10),
+        ..PendingLimits::default()
+    });
+    let block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(BlockHash::from_byte_array([1; 32]).to_string())
+        .build();
+    let received_at = Instant::now();
+    receiver.add_to_pending(block.block_hash(), block.clone(), received_at);
+
+    receiver.expire_pending(received_at + Duration::from_secs(10));
+    assert_eq!(receiver.pending_count(), 1);
+
+    receiver.expire_pending(received_at + Duration::from_secs(11));
+    assert_eq!(receiver.pending_count(), 0);
+    assert_eq!(receiver.pending_bytes(), 0);
+    assert!(receiver.descendants.is_empty());
+    assert!(receiver.arrival_order.is_empty());
+}
+
+/// Expiry runs on every arrival: a block that waited past
+/// `PENDING_BLOCK_TTL` is gone once the next block comes in.
+#[tokio::test]
+async fn test_process_share_block_drops_pending_blocks_past_their_ttl() {
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store
+        .expect_get_candidate_tip_height()
+        .returning(|| Ok(Some(0)));
+    mock_store
+        .expect_all_block_and_uncle_data_available()
+        .returning(|_, _| Err(StoreError::NotFound("no metadata".to_string())));
+    mock_store
+        .expect_get_block_metadata()
+        .returning(|_| Err(StoreError::NotFound("not found".to_string())));
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _validation_rx) = validation_worker::create_validation_channel();
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(MockDefaultShareValidator::default()),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    );
+    let stale = TestShareBlockBuilder::new()
+        .prev_share_blockhash(BlockHash::from_byte_array([0x91; 32]).to_string())
+        .build();
+    let fresh = TestShareBlockBuilder::new()
+        .prev_share_blockhash(BlockHash::from_byte_array([0x92; 32]).to_string())
+        .build();
+    let start = Instant::now();
+
+    receiver
+        .process_share_block_at(stale.clone(), start)
+        .await
+        .unwrap();
+    receiver
+        .process_share_block_at(
+            fresh.clone(),
+            start + PENDING_BLOCK_TTL + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(receiver.pending_count(), 1);
+    assert!(!receiver.pending.contains_key(&stale.block_hash()));
+    assert!(receiver.pending.contains_key(&fresh.block_hash()));
+}
+
+/// The default bounds hold at least 160 blocks of the largest size the
+/// admission gate lets through, and at most 32 MiB.
+#[test]
+fn test_default_pending_limits_hold_enough_of_the_largest_blocks() {
+    let limits = PendingLimits::default();
+
+    assert_eq!(limits.max_bytes, 32 * 1024 * 1024);
+    assert!(limits.max_bytes / BLOCK_TXS_SIZE_LIMIT as usize >= 160);
+    assert!(limits.max_blocks >= 160);
 }
 
 #[tokio::test]
@@ -777,6 +1082,12 @@ async fn test_process_share_block_already_header_valid_still_stores_body() {
         .returning(|_| Ok(None));
 
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    mock_store
+        .expect_get_share_header()
+        .returning(|_| Ok(TestShareBlockBuilder::new().build().header));
     let mut pool_difficulty = PoolDifficulty::default();
     pool_difficulty
         .expect_calculate_target_clamped()
@@ -984,6 +1295,12 @@ async fn test_cascade_commits_child_when_parent_arrives() {
         .returning(|_| Ok(None));
 
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    mock_store
+        .expect_get_share_header()
+        .returning(|_| Ok(TestShareBlockBuilder::new().build().header));
     let mut pool_difficulty = PoolDifficulty::default();
     pool_difficulty
         .expect_calculate_target_clamped()
@@ -1102,6 +1419,12 @@ async fn test_pending_block_re_received_with_ready_parent_is_processed() {
         .returning(|_| Ok(None));
 
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    mock_store
+        .expect_get_share_header()
+        .returning(|_| Ok(TestShareBlockBuilder::new().build().header));
     let mut pool_difficulty = PoolDifficulty::default();
     pool_difficulty
         .expect_calculate_target_clamped()

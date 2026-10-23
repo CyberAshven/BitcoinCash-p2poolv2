@@ -8,10 +8,13 @@
 //! target from the confirmed tip, and the pruner's start point from the
 //! data; nothing is persisted. See `docs/architecture/pruning.md`.
 
-use crate::accounting::payout::sharechain_pplns::pplns_window::{PRUNE_DEPTH, PRUNE_INTERVAL};
+use crate::accounting::payout::sharechain_pplns::pplns_window::{
+    PAYOUT_DEPTH, PRUNE_DEPTH, PRUNE_INTERVAL,
+};
 use crate::shares::share_block::Txids;
 use crate::store::Store;
 use crate::store::column_families::ColumnFamily;
+use crate::store::dag_store::MAX_UNCLES_DEPTH;
 use crate::store::transaction_store::{
     BITCOIN_TXIDS_SUFFIX, BLOCK_TXIDS_SUFFIX, outpoint_key, txids_key,
 };
@@ -61,6 +64,38 @@ pub fn prune_target_for_tip(confirmed_tip_height: u32) -> u32 {
     confirmed_tip_height.saturating_sub((PRUNE_DEPTH + PRUNE_INTERVAL) as u32)
 }
 
+/// Deepest fork, counted below the confirmed tip, that the candidate chain
+/// reorgs onto: `PAYOUT_DEPTH`.
+///
+/// Share transactions need it this shallow. A block on a branch forking at
+/// height `f` may validly spend outputs whose coinbase root is above
+/// `f - PAYOUT_DEPTH`. With `f` at most `PAYOUT_DEPTH` below the tip, every
+/// such output is above the tip's `prune_height`: its body was fetched and
+/// never deleted, and its root was stamped from stored inputs, never
+/// `CoinbaseRoot::Unknown`. A deeper fork could need an output this node
+/// never fetched, or stamped `Unknown`, after a reorg onto a heavier but
+/// lower branch, and would reject a valid block. Upstream's design note says
+/// about `PAYOUT_DEPTH + PRUNE_INTERVAL`, which covers deleted bodies only;
+/// the extra `PRUNE_INTERVAL` would let a node that synced within the last
+/// interval miss a body it never fetched. See `docs/architecture/pruning.md`,
+/// "Reorg Depth Limit".
+pub const MAX_REORG_DEPTH: usize = PAYOUT_DEPTH;
+
+// The limit keeps every body a followed branch needs: its blocks' uncles sit
+// at most `MAX_UNCLES_DEPTH` below the fork point, which must stay above the
+// prune target, where deletion stops.
+const _: () = assert!(MAX_REORG_DEPTH + MAX_UNCLES_DEPTH as usize <= PRUNE_DEPTH + PRUNE_INTERVAL);
+
+/// Lowest branch point a candidate reorg may fork from, for a confirmed tip.
+///
+/// Measured from the confirmed tip, not the candidate tip, as the prune
+/// target is: a fresh node whose candidate chain first follows a tall but
+/// light branch can still reorg onto the heavier one until it has confirmed
+/// the light branch.
+pub fn reorg_floor_for_tip(confirmed_tip_height: u32) -> u32 {
+    confirmed_tip_height.saturating_sub(MAX_REORG_DEPTH as u32)
+}
+
 /// The heights `[start, prune_target)` the pruner should delete now, or None
 /// when it has nothing to do.
 ///
@@ -98,9 +133,22 @@ impl Store {
         }
     }
 
+    /// The lowest branch point a candidate reorg may fork from, for the
+    /// current confirmed tip (`reorg_floor_for_tip`).
+    ///
+    /// Returns 0 when there is no confirmed tip yet. Store read errors are
+    /// propagated.
+    pub fn reorg_floor(&self) -> Result<u32, StoreError> {
+        match self.get_top_confirmed_height() {
+            Ok(confirmed_tip_height) => Ok(reorg_floor_for_tip(confirmed_tip_height)),
+            Err(StoreError::NotFound(_)) => Ok(0),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The prune target for the current confirmed tip: bodies below it are
-    /// deleted and never stored again. The pruner, the writer guard and the
-    /// reorg depth limit all read it here.
+    /// deleted and never stored again. The pruner and the writer guard read
+    /// it here.
     ///
     /// Returns 0 when there is no confirmed tip yet. Store read errors are
     /// propagated.
@@ -316,11 +364,9 @@ mod tests {
     use super::*;
     #[cfg(not(feature = "sim"))]
     use crate::accounting::payout::sharechain_pplns::pplns_window::{
-        BCH_COINBASE_MATURITY, PAYOUT_DEPTH, PPLNS_WINDOW_SHARES,
+        BCH_COINBASE_MATURITY, PPLNS_WINDOW_SHARES,
     };
     use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
-    #[cfg(not(feature = "sim"))]
-    use crate::store::dag_store::MAX_UNCLES_DEPTH;
     use crate::test_utils::{
         TestShareBlockBuilder, build_confirmed_test_chain, confirm_test_block,
         setup_test_chain_store_handle, test_funding_transaction,
@@ -332,6 +378,27 @@ mod tests {
     #[test]
     fn test_prune_height_for_tip_below_depth_is_zero() {
         assert_eq!(prune_height_for_tip(PRUNE_DEPTH as u32 - 1), 0);
+    }
+
+    /// The reorg floor sits `PAYOUT_DEPTH` below the confirmed tip: 127,008
+    /// shares in production, about 14.7 days, half the old prune-target
+    /// limit and a full `PAYOUT_DEPTH` above the prune height.
+    #[test]
+    #[cfg(not(feature = "sim"))]
+    fn test_reorg_floor_is_payout_depth_below_the_confirmed_tip() {
+        let tip: u32 = 1_000_000;
+        assert_eq!(MAX_REORG_DEPTH, 127_008);
+        assert_eq!(reorg_floor_for_tip(tip), 872_992);
+        assert_eq!(
+            reorg_floor_for_tip(tip) - prune_height_for_tip(tip),
+            PAYOUT_DEPTH as u32
+        );
+    }
+
+    #[test]
+    fn test_reorg_floor_for_tip_below_the_limit_is_zero() {
+        assert_eq!(reorg_floor_for_tip(MAX_REORG_DEPTH as u32 - 1), 0);
+        assert_eq!(reorg_floor_for_tip(0), 0);
     }
 
     /// Bitcoin Cash pays a found block's coinbase to shares at most 121,063
