@@ -102,6 +102,11 @@ impl SwarmSettings {
             base_api: env_vars::parsed("BASE_API", 7600)?,
             rpc: RpcSettings::from_env(),
             zmq: env_vars::string("ZMQ", "tcp://127.0.0.1:28332"),
+            // A Bitcoin regtest address, because the sim node only mines the
+            // Bitcoin chain today: p2poolv2_sim parses `[sim] miner_address`
+            // as a Bitcoin address and the configs leave `stratum.chain` at
+            // its Bitcoin default. Switch to a `bchreg:` CashAddr once the
+            // sim runs `chain = "bitcoin-cash"` (see docs/tooling.md).
             miner_address: env_vars::string(
                 "MINER_ADDRESS",
                 "bcrt1qqclp5usts33x0cgy2l5839659t7798w7g5a0fu",
@@ -340,12 +345,13 @@ pub fn build_sim_binary(profile: &str) -> ToolResult<PathBuf> {
 }
 
 /// A fresh payout address from the regtest wallet, or `None` without one.
+///
+/// Only the label is passed, so the node picks its own default address type.
+/// The script asked for `bech32`, a Bitcoin-only type that a Bitcoin Cash
+/// node rejects; BCHN answers with a CashAddr.
 async fn new_address(bitcoind: &Bitcoind) -> Option<String> {
     match bitcoind
-        .call(
-            "getnewaddress",
-            vec![Value::from("sim"), Value::from("bech32")],
-        )
+        .call("getnewaddress", vec![Value::from("sim")])
         .await
     {
         Ok(CallOutcome::Result(Value::String(address))) if !address.is_empty() => Some(address),

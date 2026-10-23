@@ -10,6 +10,11 @@
 //! `load-tests/jmeter-testing/mock-bitcoind/server.js` and serves the same
 //! responses on the same port.
 //!
+//! The built-in template and the `iswitness` field of `validateaddress` are
+//! Bitcoin's, because the load test they serve is: `config-load-test.toml`
+//! mines Bitcoin signet and the CKPool configs are Bitcoin too. Pass a
+//! Bitcoin Cash template with `--template` to load-test a Bitcoin Cash node.
+//!
 //! HTTP is handled by hand on a raw TCP socket, as the JavaScript server did:
 //! CKPool reads with LF-only line endings and non-blocking reads, so each
 //! response (headers and body) goes out in one write.

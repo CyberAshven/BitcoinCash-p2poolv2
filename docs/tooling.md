@@ -69,6 +69,33 @@ The harness needs a Unix host: it signals nodes with `kill` and finds them
 with `pgrep -f`, as the scripts did. `tcp_monitor` and `pool_diagnose` read
 `/proc` and are Linux only (`tcp_monitor` falls back to `netstat` elsewhere).
 
+## Bitcoin Cash and the remaining Bitcoin assumptions
+
+The ports carry no Bitcoin constant they do not need. The nightly's wallet
+fallback fee is 1 sat/byte (`0.00001` per kilobyte), not the script's
+10 sat/vbyte, and new payout addresses come from `getnewaddress` with only a
+label, so the node picks its own address type (CashAddr on BCHN) instead of
+the Bitcoin-only `bech32`. The log tools, `tcp-monitor` and `pool-diagnose`
+are chain-agnostic, and `maturity-check` reads payees from either form of
+`getblock` output.
+
+Three Bitcoin assumptions remain, because the code they drive is still
+Bitcoin-only:
+
+- The sim swarm runs the Bitcoin chain against a Bitcoin Core regtest node
+  (CI installs Bitcoin Core), and `MINER_ADDRESS` defaults to a `bcrt1`
+  address. `p2poolv2_sim` parses `[sim] miner_address` as a Bitcoin address,
+  and its configs leave `stratum.chain` at the Bitcoin default. Moving the
+  swarm to Bitcoin Cash needs the sim node to accept `chain =
+  "bitcoin-cash"` with a `bchreg:` CashAddr, and the nightly to install
+  BCHN; the harness then only needs new defaults.
+- `mock-bitcoind` serves a Bitcoin signet template and answers
+  `validateaddress` with `iswitness`, because the JMeter load test it serves
+  (`config-load-test.toml`, the CKPool configs) mines Bitcoin signet.
+  `--template` serves a Bitcoin Cash template instead.
+- The JMeter plan and configs under `load-tests/jmeter-testing/` are data
+  and are unchanged.
+
 ## Mapping from the old scripts
 
 | Old file | Replacement |

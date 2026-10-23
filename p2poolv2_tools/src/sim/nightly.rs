@@ -32,6 +32,12 @@ use std::time::Duration;
 /// The regtest RPC port the nightly starts bitcoind on.
 const REGTEST_RPC_PORT: u16 = 19443;
 
+/// The wallet's fallback fee rate, in coins per kilobyte: 1 sat/byte, the
+/// usual Bitcoin Cash relay floor. The script used 0.0001 (10 sat/vbyte), a
+/// Bitcoin rate. The nightly sends no transactions, so this only keeps the
+/// wallet usable.
+const FALLBACK_FEE_PER_KB: &str = "0.00001";
+
 /// The nightly's own settings, from the same environment variables
 /// `nightly.sh` read. The swarm and failure settings come from the
 /// environment too, as they did for the scripts it ran.
@@ -158,7 +164,7 @@ async fn ensure_bitcoind_running(
         .arg(format!("-rpcuser={}", settings.rpc.user))
         .arg(format!("-rpcpassword={}", settings.rpc.password))
         .arg(format!("-zmqpubhashblock={}", settings.zmq))
-        .arg("-fallbackfee=0.0001")
+        .arg(format!("-fallbackfee={FALLBACK_FEE_PER_KB}"))
         .stdin(Stdio::null())
         .status()
         .map_err(|error| {
