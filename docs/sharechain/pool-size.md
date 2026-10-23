@@ -36,7 +36,7 @@ which applies ABLA, and only governs what it builds itself.
 | A Bitcoin Cash transaction, coinbase included | 1,000,000 bytes (`MAX_TX_SIZE` in BCHN's `src/consensus/consensus.h`, checked for coinbases too in `src/consensus/tx_check.cpp`), about 29,000 P2PKH payouts | Bitcoin Cash consensus. The 100 KB standard transaction size is relay policy and does not apply to a coinbase, which is never relayed alone. |
 | A share body: its share transactions plus the Bitcoin Cash coinbase it carries | 200 KiB (`BLOCK_TXS_SIZE_LIMIT`), about 6,000 P2PKH payouts | Share-chain rule (this project's own; can be changed with a new protocol tag) |
 | A coinbase in Stratum V2 messages: the extended job's prefix and suffix, Job Declaration, `SubmitSolution` to a Template Provider | 65,535 bytes per field, about 1,900 P2PKH payouts | Stratum V2 protocol. A block the provider cannot take goes to BCHN over RPC instead. |
-| What a Stratum V1 device accepts in `coinb1` and `coinb2` | Not measured on this pool's devices. Upstream reports stock Antminer firmware takes "just over a dozen outputs" (discussion [#668](https://github.com/p2poolv2/p2poolv2/discussions/668): an OCEAN block with 16 payouts in a 784-byte coinbase); P2Pool v1 warned that S9s may crash near 226 payees. | Device firmware. Every Stratum V1 device hashes the whole coinbase, also behind an SV2 translator; Stratum V2 standard channels never see it. |
+| What a Stratum V1 device accepts in `coinb1` and `coinb2` | Not measured on this pool's devices. Upstream reports stock Antminer firmware takes "just over a dozen outputs" (discussion [#668](https://github.com/p2poolv2/p2poolv2/discussions/668): an OCEAN block with 16 payouts in a 784-byte coinbase); P2Pool v1 warned that S9s may crash near 226 payees. OCEAN's own gateway sets caps per device, from 755 bytes for older S19 stock firmware to 16 KB, and none for Braiins firmware ([audit](../bch-btc-assumptions-audit.md), item A1). | Device firmware. Every Stratum V1 device hashes the whole coinbase, also behind an SV2 translator; Stratum V2 standard channels never see it. |
 | A token covenant that checks a merge-mining proof | The covenant hashes the whole Bitcoin Cash coinbase in the VM, and a stack element is at most 10,000 bytes since May 2025 ([CHIP-2021-05 VM limits](https://upgradespecs.bitcoincashnode.org/2025-05-15-upgrade/)), so such a coinbase must stay under 10,000 bytes. | Bitcoin Cash VM limits, for shares that merge-mine tokens ([Auxiliary work proofs](../bch-auxpow.md)) |
 
 The P2PKH counts assume 34 bytes per payout and leave room for the rest of the
@@ -78,7 +78,8 @@ Still open:
 Like every payout rule, the change will be a share-chain rule change: a flag
 day on a fresh store, with a new tag in the Bitcoin Cash protocol strings. It
 never changes Bitcoin Cash consensus. Until it lands, the cap above is what
-nodes enforce.
+nodes enforce. The [Bitcoin assumptions audit](../bch-btc-assumptions-audit.md)
+lists the code each part touches (items A1, A2, A8, A9 and A16).
 
 ## Other limits on pool size
 
