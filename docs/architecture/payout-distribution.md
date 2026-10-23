@@ -393,16 +393,20 @@ In short:
 
 ## Depths
 
-All sized from `PAYOUT_DEPTH = N + W` (127,008). If you change `N` or `W`,
-these move with it. The Bitcoin Cash window is at most `W` shares, so it
-needs no more depth than the fixed window.
+All sized from each chain's payout depth (`ChainDepths::for_chain`): on
+Bitcoin `PAYOUT_DEPTH = N + W` (127,008), on Bitcoin Cash `BCH_PAYOUT_DEPTH =
+100 + W + MAX_UNCLES_DEPTH` (121,063), from its own 100-share maturity. If you
+change `N`, the Bitcoin Cash maturity or `W`, these move with it. The Bitcoin
+Cash window is at most `W` shares, so it needs no more depth than the fixed
+window.
 
 | Quantity | Value | Where |
 |---|---|---|
-| Window cache | `N + W + W/100` | `PplnsWindow::cache_capacity` |
-| Full-validation zone | `PAYOUT_DEPTH` | `is_in_pplns_zone` |
-| Output expiry | `PAYOUT_DEPTH` | `validate_prevouts` (`min_coinbase_root_height`) |
-| Body retention | `2 * PAYOUT_DEPTH` | `PRUNE_DEPTH` |
+| Window cache | `N + W + W/100` (`N` the chain's maturity) | `PplnsWindow::cache_capacity` |
+| Full-validation zone | the payout depth | `is_within_payout_depth` |
+| Output expiry | the payout depth | `validate_prevouts` (`min_coinbase_root_height`) |
+| Reorg depth limit | the payout depth | `ChainDepths::max_reorg_depth` |
+| Body retention | 2 x the payout depth | `ChainDepths::prune_depth` (`PRUNE_DEPTH`, `BCH_PRUNE_DEPTH`) |
 
 See `pruning.md` for the two-window retention model.
 

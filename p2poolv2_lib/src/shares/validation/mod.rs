@@ -16,7 +16,7 @@ use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 #[cfg(not(test))]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
-    PAYOUT_DEPTH, WindowError, bitcoin_block_difficulty, coinbase_maturity_for,
+    ChainDepths, WindowError, bitcoin_block_difficulty,
 };
 use crate::config::{
     BITCOIN_CASH_DONATION_PUBKEY_HASH, BitcoinCashNetwork, Chain, MAX_BASIS_POINTS,
@@ -363,13 +363,14 @@ fn bitcoin_coinbase_value(coinbase: &Transaction) -> Result<u64, ValidationError
 /// Check whether a block is in the PPLNS zone (needing full
 /// validation) or the prune zone (PoW-only validation).
 ///
-/// The PPLNS zone spans `PAYOUT_DEPTH`, the maturity depth plus the PPLNS
-/// window, so every share a coinbase near the tip can pay is fully validated.
+/// The PPLNS zone spans the chain's payout depth (`ChainDepths`), the
+/// maturity depth plus the PPLNS window, so every share a coinbase near the
+/// tip can pay is fully validated.
 ///
-/// PPLNS zone: block_height > tip_height - PAYOUT_DEPTH
+/// PPLNS zone: block_height > tip_height - payout depth
 /// Prune zone: everything else below that height
-pub fn is_within_payout_depth(block_height: u32, tip_height: u32) -> bool {
-    block_height > tip_height.saturating_sub(PAYOUT_DEPTH as u32)
+pub fn is_within_payout_depth(depths: ChainDepths, block_height: u32, tip_height: u32) -> bool {
+    depths.is_within_payout_depth(block_height, tip_height)
 }
 
 /// Look up a block's height and the candidate tip height from the store,
@@ -383,6 +384,7 @@ pub fn is_within_payout_depth(block_height: u32, tip_height: u32) -> bool {
 pub fn check_pplns_zone(
     blockhash: &BlockHash,
     chain_store_handle: &ChainStoreHandle,
+    depths: ChainDepths,
 ) -> Result<bool, String> {
     let block_height = match chain_store_handle.get_block_metadata(blockhash) {
         Ok(metadata) => match metadata.expected_height {
@@ -400,7 +402,7 @@ pub fn check_pplns_zone(
         .get_candidate_tip_height()
         .map_err(|error| format!("Failed to get candidate tip height: {error}"))?
         .unwrap_or(0);
-    Ok(is_within_payout_depth(block_height, candidate_tip))
+    Ok(is_within_payout_depth(depths, block_height, candidate_tip))
 }
 
 /// Trait for share validation operations.
@@ -1814,7 +1816,7 @@ impl ShareValidator for DefaultShareValidator {
     ///
     /// 1. No outpoint is spent by more than one input in this block.
     /// 2. Every outpoint exists in the `Outputs` column family.
-    /// 3. Every outpoint's coinbase root is within `PAYOUT_DEPTH` of this
+    /// 3. Every outpoint's coinbase root is within the chain's payout depth of this
     ///    block, so an output stays spendable for a full PPLNS window after
     ///    it matures.
     /// 4. A coinbase output is mature relative to this block's own height.
@@ -1866,13 +1868,14 @@ impl ShareValidator for DefaultShareValidator {
         if self.chain == Chain::BitcoinCash {
             Self::validate_bitcoin_cash_finality(share, block_height)?;
         }
-        let min_coinbase_root_height = block_height.saturating_sub(PAYOUT_DEPTH as u32);
+        let depths = ChainDepths::for_chain(self.chain);
+        let min_coinbase_root_height = block_height.saturating_sub(depths.payout_depth as u32);
         match chain_store_handle
             .check_prevouts(
                 &all_outpoints,
                 block_height,
                 min_coinbase_root_height,
-                coinbase_maturity_for(self.chain),
+                depths.coinbase_maturity,
             )
             .map_err(|error| {
                 ValidationError::store_access(format!("Prevout check failed: {error}"))
@@ -1972,7 +1975,8 @@ mod tests {
     use super::*;
     use crate::accounting::OutputPair;
     use crate::accounting::payout::sharechain_pplns::pplns_window::{
-        BCH_COINBASE_MATURITY, COINBASE_MATURITY, PPLNS_WINDOW_SHARES,
+        BCH_COINBASE_MATURITY, BCH_PAYOUT_DEPTH, COINBASE_MATURITY, PAYOUT_DEPTH,
+        PPLNS_WINDOW_SHARES,
     };
     use crate::shares::bch_coinbase::BchCoinbase;
     use crate::shares::bch_htlc::{HtlcContract, secret_hash};
@@ -5250,6 +5254,50 @@ mod tests {
         assert!(result.is_ok(), "got: {result:?}");
     }
 
+    /// On Bitcoin Cash an output expires `BCH_PAYOUT_DEPTH` (121,063) below
+    /// the spending share and matures at 100, Bitcoin Cash's own depths
+    /// rather than Bitcoin's 127,008 and 6,048.
+    #[test]
+    fn bitcoin_cash_outputs_expire_at_its_own_payout_depth() {
+        let parent_height = 200_000u32;
+        let spending_height = parent_height + 1;
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_get_block_metadata()
+            .returning(move |_| Ok(metadata_at_height(parent_height)));
+        chain_store_handle
+            .expect_check_prevouts()
+            .withf(
+                move |_outpoints, _spending_height, min_coinbase_root_height, coinbase_maturity| {
+                    *min_coinbase_root_height == spending_height - BCH_PAYOUT_DEPTH as u32
+                        && *coinbase_maturity == BCH_COINBASE_MATURITY
+                },
+            )
+            .returning(|_, _, _, _| Ok(PrevoutCheck::Accepted));
+        let spending_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::new(bitcoin::Txid::all_zeros(), 0),
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(10_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let share = TestShareBlockBuilder::new()
+            .add_transaction(spending_tx)
+            .build();
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_prevouts(&share, &chain_store_handle);
+        assert!(result.is_ok(), "got: {result:?}");
+    }
+
     #[test]
     fn test_build_expected_outputs_empty_distribution_returns_error() {
         let header = TestShareBlockBuilder::new()
@@ -6713,44 +6761,60 @@ mod tests {
     #[test]
     fn test_is_in_pplns_zone_at_tip() {
         // Block at tip height is in PPLNS zone
-        assert!(is_within_payout_depth(300_000, 300_000));
+        assert!(is_within_payout_depth(
+            ChainDepths::BITCOIN,
+            300_000,
+            300_000
+        ));
     }
 
     #[test]
     fn test_is_in_pplns_zone_within_pplns_depth() {
         // Block just inside PPLNS zone
         let tip = 300_000u32;
-        let pplns_boundary = tip - PAYOUT_DEPTH as u32;
-        assert!(is_within_payout_depth(pplns_boundary + 1, tip));
+        let pplns_boundary = tip - ChainDepths::BITCOIN.payout_depth as u32;
+        assert!(is_within_payout_depth(
+            ChainDepths::BITCOIN,
+            pplns_boundary + 1,
+            tip
+        ));
     }
 
     #[test]
     fn test_is_in_pplns_zone_at_boundary_is_prune_zone() {
         // Block exactly at boundary is NOT in PPLNS zone (prune zone)
         let tip = 300_000u32;
-        let pplns_boundary = tip - PAYOUT_DEPTH as u32;
-        assert!(!is_within_payout_depth(pplns_boundary, tip));
+        let pplns_boundary = tip - ChainDepths::BITCOIN.payout_depth as u32;
+        assert!(!is_within_payout_depth(
+            ChainDepths::BITCOIN,
+            pplns_boundary,
+            tip
+        ));
     }
 
     #[test]
     fn test_is_in_pplns_zone_below_boundary_is_prune_zone() {
         let tip = 300_000u32;
-        let pplns_boundary = tip - PAYOUT_DEPTH as u32;
-        assert!(!is_within_payout_depth(pplns_boundary - 1, tip));
+        let pplns_boundary = tip - ChainDepths::BITCOIN.payout_depth as u32;
+        assert!(!is_within_payout_depth(
+            ChainDepths::BITCOIN,
+            pplns_boundary - 1,
+            tip
+        ));
     }
 
     #[test]
     fn test_is_in_pplns_zone_short_chain() {
         // Chain shorter than PPLNS depth: all blocks are in PPLNS zone
-        assert!(is_within_payout_depth(1, 100));
-        assert!(is_within_payout_depth(50, 100));
+        assert!(is_within_payout_depth(ChainDepths::BITCOIN, 1, 100));
+        assert!(is_within_payout_depth(ChainDepths::BITCOIN, 50, 100));
     }
 
     #[test]
     fn test_is_in_pplns_zone_height_zero() {
         // Height 0 with any tip is NOT in PPLNS zone (0 > anything is false)
-        assert!(!is_within_payout_depth(0, 0));
-        assert!(!is_within_payout_depth(0, 300_000));
+        assert!(!is_within_payout_depth(ChainDepths::BITCOIN, 0, 0));
+        assert!(!is_within_payout_depth(ChainDepths::BITCOIN, 0, 300_000));
     }
 
     #[test]
@@ -6764,7 +6828,7 @@ mod tests {
             .returning(|_| Err(StoreError::NotFound("not found".into())));
 
         let blockhash = TestShareBlockBuilder::new().build().block_hash();
-        let result = check_pplns_zone(&blockhash, &chain_store_handle);
+        let result = check_pplns_zone(&blockhash, &chain_store_handle, ChainDepths::BITCOIN);
 
         assert!(result.is_ok());
         assert!(
@@ -6788,7 +6852,7 @@ mod tests {
             });
 
         let blockhash = TestShareBlockBuilder::new().build().block_hash();
-        let result = check_pplns_zone(&blockhash, &chain_store_handle);
+        let result = check_pplns_zone(&blockhash, &chain_store_handle, ChainDepths::BITCOIN);
 
         assert!(result.is_ok());
         assert!(
@@ -6805,7 +6869,7 @@ mod tests {
             .returning(|_| Err(StoreError::Database("disk failure".into())));
 
         let blockhash = TestShareBlockBuilder::new().build().block_hash();
-        let result = check_pplns_zone(&blockhash, &chain_store_handle);
+        let result = check_pplns_zone(&blockhash, &chain_store_handle, ChainDepths::BITCOIN);
 
         assert!(result.is_err());
         assert!(

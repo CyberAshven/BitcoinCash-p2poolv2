@@ -9,7 +9,7 @@
 //! data; nothing is persisted. See `docs/architecture/pruning.md`.
 
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
-    PAYOUT_DEPTH, PRUNE_DEPTH, PRUNE_INTERVAL,
+    ChainDepths, PRUNE_DEPTH, PRUNE_INTERVAL,
 };
 use crate::shares::share_block::Txids;
 use crate::store::Store;
@@ -44,12 +44,13 @@ impl PruneStats {
     }
 }
 
-/// Lowest height whose block body a node must hold for a candidate tip.
+/// Lowest height whose block body a node must hold for a candidate tip:
+/// the chain's prune depth (`ChainDepths::prune_depth`) below it.
 ///
 /// Blocks below it are promoted header-only and their bodies are never
 /// fetched. The confirmation and ancestry gates use this boundary.
-pub fn prune_height_for_tip(candidate_tip_height: u32) -> u32 {
-    candidate_tip_height.saturating_sub(PRUNE_DEPTH as u32)
+pub fn prune_height_for_tip(depths: ChainDepths, candidate_tip_height: u32) -> u32 {
+    candidate_tip_height.saturating_sub(depths.prune_depth() as u32)
 }
 
 /// Height below which block bodies are deleted, for a confirmed tip.
@@ -60,12 +61,14 @@ pub fn prune_height_for_tip(candidate_tip_height: u32) -> u32 {
 /// passes the candidate tip, so the target stays at least one
 /// `PRUNE_INTERVAL` below the gates' `prune_height_for_tip`: peers slightly
 /// behind can still fetch bodies near the boundary.
-pub fn prune_target_for_tip(confirmed_tip_height: u32) -> u32 {
-    confirmed_tip_height.saturating_sub((PRUNE_DEPTH + PRUNE_INTERVAL) as u32)
+pub fn prune_target_for_tip(depths: ChainDepths, confirmed_tip_height: u32) -> u32 {
+    confirmed_tip_height.saturating_sub((depths.prune_depth() + PRUNE_INTERVAL) as u32)
 }
 
 /// Deepest fork, counted below the confirmed tip, that the candidate chain
-/// reorgs onto: `PAYOUT_DEPTH`.
+/// reorgs onto: the chain's payout depth (`ChainDepths::max_reorg_depth`).
+/// This constant is Bitcoin's, `PAYOUT_DEPTH`; Bitcoin Cash's is
+/// `BCH_PAYOUT_DEPTH`.
 ///
 /// Share transactions need it this shallow. A block on a branch forking at
 /// height `f` may validly spend outputs whose coinbase root is above
@@ -79,11 +82,12 @@ pub fn prune_target_for_tip(confirmed_tip_height: u32) -> u32 {
 /// the extra `PRUNE_INTERVAL` would let a node that synced within the last
 /// interval miss a body it never fetched. See `docs/architecture/pruning.md`,
 /// "Reorg Depth Limit".
-pub const MAX_REORG_DEPTH: usize = PAYOUT_DEPTH;
+pub const MAX_REORG_DEPTH: usize = ChainDepths::BITCOIN.max_reorg_depth();
 
 // The limit keeps every body a followed branch needs: its blocks' uncles sit
 // at most `MAX_UNCLES_DEPTH` below the fork point, which must stay above the
-// prune target, where deletion stops.
+// prune target, where deletion stops. `ChainDepths` asserts the same for
+// Bitcoin Cash.
 const _: () = assert!(MAX_REORG_DEPTH + MAX_UNCLES_DEPTH as usize <= PRUNE_DEPTH + PRUNE_INTERVAL);
 
 /// Lowest branch point a candidate reorg may fork from, for a confirmed tip.
@@ -92,8 +96,8 @@ const _: () = assert!(MAX_REORG_DEPTH + MAX_UNCLES_DEPTH as usize <= PRUNE_DEPTH
 /// target is: a fresh node whose candidate chain first follows a tall but
 /// light branch can still reorg onto the heavier one until it has confirmed
 /// the light branch.
-pub fn reorg_floor_for_tip(confirmed_tip_height: u32) -> u32 {
-    confirmed_tip_height.saturating_sub(MAX_REORG_DEPTH as u32)
+pub fn reorg_floor_for_tip(depths: ChainDepths, confirmed_tip_height: u32) -> u32 {
+    confirmed_tip_height.saturating_sub(depths.max_reorg_depth() as u32)
 }
 
 /// The heights `[start, prune_target)` the pruner should delete now, or None
@@ -127,7 +131,9 @@ impl Store {
     /// propagated.
     pub fn prune_height(&self) -> Result<u32, StoreError> {
         match self.get_top_candidate_height() {
-            Ok(candidate_tip_height) => Ok(prune_height_for_tip(candidate_tip_height)),
+            Ok(candidate_tip_height) => {
+                Ok(prune_height_for_tip(self.depths(), candidate_tip_height))
+            }
             Err(StoreError::NotFound(_)) => Ok(0),
             Err(error) => Err(error),
         }
@@ -140,7 +146,9 @@ impl Store {
     /// propagated.
     pub fn reorg_floor(&self) -> Result<u32, StoreError> {
         match self.get_top_confirmed_height() {
-            Ok(confirmed_tip_height) => Ok(reorg_floor_for_tip(confirmed_tip_height)),
+            Ok(confirmed_tip_height) => {
+                Ok(reorg_floor_for_tip(self.depths(), confirmed_tip_height))
+            }
             Err(StoreError::NotFound(_)) => Ok(0),
             Err(error) => Err(error),
         }
@@ -154,7 +162,9 @@ impl Store {
     /// propagated.
     pub fn prune_target(&self) -> Result<u32, StoreError> {
         match self.get_top_confirmed_height() {
-            Ok(confirmed_tip_height) => Ok(prune_target_for_tip(confirmed_tip_height)),
+            Ok(confirmed_tip_height) => {
+                Ok(prune_target_for_tip(self.depths(), confirmed_tip_height))
+            }
             Err(StoreError::NotFound(_)) => Ok(0),
             Err(error) => Err(error),
         }
@@ -364,7 +374,10 @@ mod tests {
     use super::*;
     #[cfg(not(feature = "sim"))]
     use crate::accounting::payout::sharechain_pplns::pplns_window::{
-        BCH_COINBASE_MATURITY, PPLNS_WINDOW_SHARES,
+        BCH_COINBASE_MATURITY, PAYOUT_DEPTH, PPLNS_WINDOW_SHARES,
+    };
+    use crate::accounting::payout::sharechain_pplns::pplns_window::{
+        BCH_PAYOUT_DEPTH, BCH_PRUNE_DEPTH,
     };
     use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
     use crate::test_utils::{
@@ -375,9 +388,16 @@ mod tests {
     use bitcoin::hashes::Hash;
     use tempfile::tempdir;
 
+    const BITCOIN: ChainDepths = ChainDepths::BITCOIN;
+    const BITCOIN_CASH: ChainDepths = ChainDepths::BITCOIN_CASH;
+
     #[test]
     fn test_prune_height_for_tip_below_depth_is_zero() {
-        assert_eq!(prune_height_for_tip(PRUNE_DEPTH as u32 - 1), 0);
+        assert_eq!(prune_height_for_tip(BITCOIN, PRUNE_DEPTH as u32 - 1), 0);
+        assert_eq!(
+            prune_height_for_tip(BITCOIN_CASH, BCH_PRUNE_DEPTH as u32 - 1),
+            0
+        );
     }
 
     /// The reorg floor sits `PAYOUT_DEPTH` below the confirmed tip: 127,008
@@ -388,69 +408,102 @@ mod tests {
     fn test_reorg_floor_is_payout_depth_below_the_confirmed_tip() {
         let tip: u32 = 1_000_000;
         assert_eq!(MAX_REORG_DEPTH, 127_008);
-        assert_eq!(reorg_floor_for_tip(tip), 872_992);
+        assert_eq!(reorg_floor_for_tip(BITCOIN, tip), 872_992);
         assert_eq!(
-            reorg_floor_for_tip(tip) - prune_height_for_tip(tip),
+            reorg_floor_for_tip(BITCOIN, tip) - prune_height_for_tip(BITCOIN, tip),
             PAYOUT_DEPTH as u32
         );
     }
 
     #[test]
     fn test_reorg_floor_for_tip_below_the_limit_is_zero() {
-        assert_eq!(reorg_floor_for_tip(MAX_REORG_DEPTH as u32 - 1), 0);
-        assert_eq!(reorg_floor_for_tip(0), 0);
+        assert_eq!(reorg_floor_for_tip(BITCOIN, MAX_REORG_DEPTH as u32 - 1), 0);
+        assert_eq!(reorg_floor_for_tip(BITCOIN, 0), 0);
+        assert_eq!(
+            reorg_floor_for_tip(BITCOIN_CASH, BCH_PAYOUT_DEPTH as u32 - 1),
+            0
+        );
     }
 
-    /// Bitcoin Cash pays a found block's coinbase to shares at most 121,063
-    /// below it: the 100-share maturity skip, the window capped at 120,960
-    /// shares and an uncle of the deepest one. That walk stays inside
-    /// `PAYOUT_DEPTH`, so the full-validation zone covers it, and far above
-    /// the prune height and target. The walk reads headers only, which are
-    /// never pruned, so this margin is for the zone, not for the window.
+    /// Bitcoin Cash's depths come from its own 100-share maturity (audit
+    /// A12): a found block's coinbase pays shares at most 121,063 below it
+    /// (the maturity skip, the window capped at 120,960 shares and an uncle
+    /// of the deepest one), which is exactly `BCH_PAYOUT_DEPTH`. The
+    /// full-validation zone, output expiry and the reorg limit are that
+    /// depth; the prune depth is twice it, 242,126, against Bitcoin's
+    /// 127,008 and 254,016.
     #[test]
     #[cfg(not(feature = "sim"))]
-    fn test_bitcoin_cash_payout_walk_stays_above_the_prune_target() {
+    fn test_bitcoin_cash_depths_come_from_its_100_share_maturity() {
+        assert_eq!(BCH_COINBASE_MATURITY, 100);
+        assert_eq!(
+            BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES + MAX_UNCLES_DEPTH as usize,
+            121_063
+        );
+        assert_eq!(BCH_PAYOUT_DEPTH, 121_063);
+        assert_eq!(BITCOIN_CASH.max_reorg_depth(), 121_063);
+        assert_eq!(BCH_PRUNE_DEPTH, 242_126);
+        assert_eq!(BITCOIN_CASH.prune_depth(), 242_126);
+        assert_eq!(PAYOUT_DEPTH, 127_008);
+        assert_eq!(PRUNE_DEPTH, 254_016);
         let tip: u32 = 1_000_000;
-        let deepest_paid_depth =
-            BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES + MAX_UNCLES_DEPTH as usize;
-        assert_eq!(deepest_paid_depth, 121_063);
-        assert!(deepest_paid_depth <= PAYOUT_DEPTH);
-        let deepest_paid_height = tip - deepest_paid_depth as u32;
+        let deepest_paid_height = tip - BCH_PAYOUT_DEPTH as u32;
         assert_eq!(deepest_paid_height, 878_937);
-        assert_eq!(prune_height_for_tip(tip), 745_984);
-        assert_eq!(prune_target_for_tip(tip), 745_624);
-        assert!(prune_height_for_tip(tip) < deepest_paid_height);
+        assert_eq!(reorg_floor_for_tip(BITCOIN_CASH, tip), 878_937);
+        assert_eq!(prune_height_for_tip(BITCOIN_CASH, tip), 757_874);
+        assert_eq!(prune_target_for_tip(BITCOIN_CASH, tip), 757_514);
+        assert!(prune_height_for_tip(BITCOIN_CASH, tip) < deepest_paid_height);
     }
 
     /// A Bitcoin Cash share coinbase output is spendable from depth 100 until
-    /// it expires at `PAYOUT_DEPTH`, the same expiry as Bitcoin. An in-zone
-    /// spend at `tip - PAYOUT_DEPTH` may spend an output down to
-    /// `tip - 2 * PAYOUT_DEPTH`, which is exactly the prune height: that
-    /// body is still held.
+    /// it expires at `BCH_PAYOUT_DEPTH`. An in-zone spend at
+    /// `tip - BCH_PAYOUT_DEPTH` may spend an output down to
+    /// `tip - 2 * BCH_PAYOUT_DEPTH`, which is exactly the prune height: that
+    /// body is still held, and the deepest fork the node follows, with its
+    /// uncles, stays above the prune target.
     #[test]
-    #[cfg(not(feature = "sim"))]
     fn test_bitcoin_cash_spendable_outputs_stay_above_the_prune_height() {
         let tip: u32 = 1_000_000;
-        assert_eq!(BCH_COINBASE_MATURITY, 100);
-        assert_eq!(PAYOUT_DEPTH, 127_008);
-        let oldest_spendable_root = tip - 2 * PAYOUT_DEPTH as u32;
-        assert_eq!(oldest_spendable_root, prune_height_for_tip(tip));
-        assert!(prune_target_for_tip(tip) < oldest_spendable_root);
+        let oldest_spendable_root = tip - 2 * BCH_PAYOUT_DEPTH as u32;
+        assert_eq!(
+            oldest_spendable_root,
+            prune_height_for_tip(BITCOIN_CASH, tip)
+        );
+        assert!(prune_target_for_tip(BITCOIN_CASH, tip) < oldest_spendable_root);
+        assert!(
+            reorg_floor_for_tip(BITCOIN_CASH, tip) - u32::from(MAX_UNCLES_DEPTH)
+                > prune_target_for_tip(BITCOIN_CASH, tip)
+        );
     }
 
     #[test]
     fn test_prune_height_for_tip_above_depth() {
-        assert_eq!(prune_height_for_tip(PRUNE_DEPTH as u32 + 7), 7);
+        assert_eq!(prune_height_for_tip(BITCOIN, PRUNE_DEPTH as u32 + 7), 7);
+        assert_eq!(
+            prune_height_for_tip(BITCOIN_CASH, BCH_PRUNE_DEPTH as u32 + 7),
+            7
+        );
     }
 
     #[test]
     fn test_prune_target_for_tip_lags_prune_height_by_interval() {
         let candidate_tip_height = (PRUNE_DEPTH + PRUNE_INTERVAL) as u32 + 7;
-        assert_eq!(prune_target_for_tip(candidate_tip_height), 7);
+        assert_eq!(prune_target_for_tip(BITCOIN, candidate_tip_height), 7);
         assert_eq!(
-            prune_height_for_tip(candidate_tip_height),
+            prune_height_for_tip(BITCOIN, candidate_tip_height),
             7 + PRUNE_INTERVAL as u32
         );
+    }
+
+    /// A store sized for Bitcoin Cash prunes and reorgs by its depths.
+    #[test]
+    fn test_a_bitcoin_cash_store_uses_its_own_depths() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false)
+            .unwrap()
+            .with_chain(crate::config::Chain::BitcoinCash);
+        assert_eq!(store.depths(), BITCOIN_CASH);
+        assert_eq!(store.stored_chain(), None);
     }
 
     #[test]
@@ -542,7 +595,7 @@ mod tests {
 
     #[test]
     fn test_prune_target_for_tip_below_depth_and_interval_is_zero() {
-        assert_eq!(prune_target_for_tip(PRUNE_DEPTH as u32), 0);
+        assert_eq!(prune_target_for_tip(BITCOIN, PRUNE_DEPTH as u32), 0);
     }
 
     #[test]

@@ -118,7 +118,7 @@ Miner mines a share
        the right's holder is paid the share's weight by each block found;
        the holder may sell the right for BCH (a share transaction)
   -> the share leaves the window: the right earns nothing more
-  -> more than 127,008 shares after the root: the output can no longer be spent
+  -> more than 121,063 shares after the root: the output can no longer be spent
 ```
 
 Upstream ties a share output's earnings to its root height. On Bitcoin Cash

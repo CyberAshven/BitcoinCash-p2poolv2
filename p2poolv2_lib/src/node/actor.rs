@@ -7,6 +7,7 @@
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 #[cfg(not(test))]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
+use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::accounting::stats::metrics::MetricsHandle;
 use crate::command::Command;
@@ -489,7 +490,8 @@ impl NodeActor {
             metrics.clone(),
             pplns_window.clone(),
             share_validator.clone(),
-        );
+        )
+        .with_depths(ChainDepths::for_chain(chain));
         let mut workers: JoinSet<Result<(), String>> = JoinSet::new();
         let mut worker_names: HashMap<tokio::task::Id, &'static str> = HashMap::with_capacity(4);
 
@@ -538,7 +540,8 @@ impl NodeActor {
             chain_store_handle.clone(),
             block_fetcher_tx_for_receiver,
             validation_tx_for_worker.clone(),
-        );
+        )
+        .with_depths(ChainDepths::for_chain(chain));
         let block_receiver_id = workers
             .spawn(async move {
                 block_receiver.run().await;

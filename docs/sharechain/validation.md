@@ -140,7 +140,7 @@ no one creates share units from nothing. On Bitcoin Cash:
 - a transaction must be final at its share's height;
 - a share coinbase output can be spent once it is 100 shares deep, and no
   output can be spent once the coinbase it descends from is more than
-  127,008 shares deep (`PAYOUT_DEPTH`);
+  121,063 shares deep (`BCH_PAYOUT_DEPTH`);
 - a share holds at most 100 transactions (`TXS_COUNT_LIMIT`), its body (its
   share transactions plus the Bitcoin Cash coinbase it carries) at most
   200 KiB (`BLOCK_TXS_SIZE_LIMIT`);
@@ -187,7 +187,7 @@ withholding attacks this allows.
 
 ## How deep validation goes
 
-Shares within `PAYOUT_DEPTH` (127,008 shares) of the tip are fully validated:
+Shares within `BCH_PAYOUT_DEPTH` (121,063 shares) of the tip are fully validated:
 every share a coinbase near the tip can pay. Deeper shares, met while a new
 node syncs, get every check above except the payout, uncle-body and share
 transaction checks (`is_within_payout_depth`, `validate_below_pplns_depth`).

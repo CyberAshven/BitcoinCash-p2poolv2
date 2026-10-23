@@ -13,14 +13,15 @@ every output descended from it carries it. Once an output's root height is
 too deep, the output can no longer be spent. This limits every output to the
 life of the proof of work behind its root coinbase.
 
-On Bitcoin Cash and on Bitcoin the limit is the same depth, `PAYOUT_DEPTH`:
-an output can be spent in a share at height `h` only if its root height is at
-least `h - 127,008`. That is upstream's maturity (6,048 shares) plus its
-120,960-share window; this fork keeps the one constant for both chains,
-because it bounds how much of the chain every node must keep
-([Pruning](../architecture/pruning.md)). A share coinbase output itself can
-first be spent 100 shares after its share on Bitcoin Cash (6,048 on
-Bitcoin).
+On Bitcoin Cash the limit is `BCH_PAYOUT_DEPTH`: an output can be spent in a
+share at height `h` only if its root height is at least `h - 121,063`. That
+is Bitcoin Cash's 100-share maturity, the 120,960-share window and 3 shares
+for an uncle of the deepest window share, the deepest share a coinbase can
+pay; it also bounds how much of the chain every node must keep
+([Pruning](../architecture/pruning.md)). Bitcoin keeps upstream's
+`PAYOUT_DEPTH`, 127,008 (its 6,048-share maturity plus the window). A share
+coinbase output itself can first be spent 100 shares after its share on
+Bitcoin Cash (6,048 on Bitcoin).
 
 ```text
 coinbase output, root height 1,000
@@ -30,7 +31,7 @@ output, root height 1,000
   | spent at 60,000
   v
 output, root height 1,000
-  | a spend at 128,009 or later is rejected: past 1,000 + 127,008
+  | a spend at 122,064 or later is rejected: past 1,000 + 121,063
   x
 ```
 

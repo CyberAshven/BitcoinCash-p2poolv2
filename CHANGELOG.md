@@ -199,6 +199,16 @@ anchor and the donation and fee cap as they were.
   `computed / 8` to `computed × 1.05` or the proof-of-work limit on test
   networks. Tested on all 14,000 lines of the aserti3-2d specification's
   vectors and on real mainnet and chipnet headers.
+- Bitcoin Cash depths come from its own 100-share maturity instead of
+  Bitcoin's 6,048 (share-chain rule, audit A12): `BCH_PAYOUT_DEPTH` is
+  100 + 120,960 + 3 = 121,063 shares (the deepest share a coinbase pays,
+  uncle included), down from 127,008. It sets when share outputs expire, the
+  full-validation zone and the reorg depth limit; the prune depth is twice
+  it, 242,126, down from 254,016. `ChainDepths` holds each chain's depths,
+  and the store, the block receiver, the organise and validation workers,
+  the share transaction pool and `verify_chain` use the node's. Bitcoin
+  keeps upstream's. The Bitcoin Cash sim build now uses its own depths too
+  (183 and 366) instead of Bitcoin's sim 100 and 200.
 - Bitcoin Cash share transactions are budgeted by BCH's SigChecks instead
   of Bitcoin's BIP141 sigop cost (share-chain rule, audit A13): at most
   3,000 in a transaction (`MAX_TX_SIGCHECKS`) and 1,452 in a share's

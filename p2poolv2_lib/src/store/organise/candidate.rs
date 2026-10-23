@@ -355,7 +355,7 @@ impl Store {
             Err(StoreError::NotFound(_)) => return Ok(min_fork_and_confirmed_height),
             Err(error) => return Err(error),
         };
-        let prune_floor = prune_height_for_tip(candidate_height);
+        let prune_floor = prune_height_for_tip(self.depths(), candidate_height);
 
         Ok(std::cmp::max(min_fork_and_confirmed_height, prune_floor))
     }

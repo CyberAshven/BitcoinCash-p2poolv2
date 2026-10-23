@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::shares::share_block::ShareBlock;
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::store::column_families::ColumnFamily;
@@ -41,6 +42,9 @@ pub struct Store {
     db: DB,
     // Thread-safe chain state for use by ChainStore
     genesis_blockhash: Arc<RwLock<Option<BlockHash>>>,
+    /// The chain's share-chain depths, which size pruning and the reorg
+    /// depth limit.
+    depths: ChainDepths,
 }
 
 /// Merge operator for appending BlockHashes to a Vec<BlockHash>.
@@ -228,8 +232,37 @@ impl Store {
             db,
             // Initialise chain state fields
             genesis_blockhash: Arc::new(RwLock::new(None)),
+            depths: ChainDepths::BITCOIN,
         };
         Ok(store)
+    }
+
+    /// Size the prune depth, prune target and reorg depth limit by `chain`'s
+    /// own depths ([`ChainDepths::for_chain`]). A new store uses Bitcoin's;
+    /// a Bitcoin Cash node sets its own before anything reads them.
+    pub fn with_chain(mut self, chain: crate::config::Chain) -> Self {
+        self.depths = ChainDepths::for_chain(chain);
+        self
+    }
+
+    /// The share-chain depths this store prunes and reorgs by.
+    pub fn depths(&self) -> ChainDepths {
+        self.depths
+    }
+
+    /// The chain a stored share chain belongs to, read from its genesis
+    /// share's owner: a Bitcoin Cash genesis pays a P2PKH share owner, a
+    /// Bitcoin one a taproot program. `None` for a store without a genesis.
+    /// For tools that open a store without a node config.
+    pub fn stored_chain(&self) -> Option<crate::config::Chain> {
+        let genesis = self.get_confirmed_at_height(0).ok()?;
+        let header = self.get_share_header(&genesis).ok()??;
+        Some(match header.miner_address {
+            p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh(_) => {
+                crate::config::Chain::BitcoinCash
+            }
+            p2poolv2_wallet::share_owner::ShareOwner::Taproot(_) => crate::config::Chain::Bitcoin,
+        })
     }
 
     /// Get a rocksb write batch

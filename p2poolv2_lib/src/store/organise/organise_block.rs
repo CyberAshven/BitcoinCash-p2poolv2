@@ -31,7 +31,7 @@ impl Store {
             Err(StoreError::NotFound(_)) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let prune_height = prune_height_for_tip(candidate_tip_height);
+        let prune_height = prune_height_for_tip(self.depths(), candidate_tip_height);
 
         let candidates =
             self.find_promotable_candidates(&top_confirmed, candidate_tip_height, prune_height)?;

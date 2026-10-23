@@ -78,8 +78,10 @@ or no-ops in production builds (zero overhead). Key overrides:
   | `COINBASE_MATURITY` (Bitcoin) | 6,048 | 20 |
   | `BCH_COINBASE_MATURITY` (Bitcoin Cash) | 100 | 100 |
   | `PPLNS_WINDOW_SHARES` | 120,960 | 80 |
-  | `PAYOUT_DEPTH` | 127,008 | 100 |
-  | `PRUNE_DEPTH` | 254,016 | 200 |
+  | `PAYOUT_DEPTH` (Bitcoin) | 127,008 | 100 |
+  | `PRUNE_DEPTH` (Bitcoin) | 254,016 | 200 |
+  | `BCH_PAYOUT_DEPTH` (Bitcoin Cash) | 121,063 | 183 |
+  | `BCH_PRUNE_DEPTH` (Bitcoin Cash) | 242,126 | 366 |
   | `PRUNE_INTERVAL` | 360 | 20 |
   | window eviction buffer | 1,210 | 20 |
   | `BACKGROUND_TASK_INTERVAL` (node) | 6 h | 30 s |
@@ -87,23 +89,24 @@ or no-ops in production builds (zero overhead). Key overrides:
   They are constants, not config, so every node built from one binary agrees
   on them. The eviction buffer is raised to a quarter of the window (1% of 80
   would be one entry, and shares built behind the tip under propagation delay
-  would be dropped). The reorg depth limit sits at the prune target, 220
-  shares below the tip, which keeps it well above the forks the failure
-  scenarios create (a 90s partition is 18 shares at 5s blocks). The cost is
-  that sim no longer runs a production-size PPLNS window; `cargo bench --bench
-  pplns_window` covers its compute cost.
+  would be dropped). The reorg depth limit is one payout depth below the
+  confirmed tip (183 shares on Bitcoin Cash), which keeps it well above the
+  forks the failure scenarios create (a 90s partition is 18 shares at 5s
+  blocks). The cost is that sim no longer runs a production-size PPLNS
+  window; `cargo bench --bench pplns_window` covers its compute cost.
 
   These replace the old `[sim] coinbase_maturity` option. Bitcoin Cash's
   maturity, `BCH_COINBASE_MATURITY` (100), is not shortened: it is a
   share-chain rule, which the sim build does not change, and the Bitcoin
   Cash protocol strings carry it. The swarm runs Bitcoin Cash, so a share
   is paid only 100 shares deep, and a payout walk reaches 100 + 80 shares
-  below the paying share, plus at most 3 for an uncle. That is deeper than
-  the sim `PAYOUT_DEPTH` (100) but within `PRUNE_DEPTH` (200) and the
-  payout window cache (100 + 80 + 20 entries). Production builds assert at
-  compile time that Bitcoin Cash's maturity plus the window fits inside
-  `PAYOUT_DEPTH`; the sim build skips that assertion. The `late-miner`
-  scenario waits for twice the maturity, a 200-share tip.
+  below the paying share, plus at most 3 for an uncle: the sim
+  `BCH_PAYOUT_DEPTH`, 183, from which Bitcoin Cash's output expiry,
+  full-validation zone, reorg limit and prune depth (366) follow, as in
+  production (since the share-chain rule batch of 2026-10-24; before it the
+  Bitcoin Cash sim used Bitcoin's 100 and 200). The node logs the depths it
+  uses (`Sim depths: ...`), and the prune scenarios read them from there.
+  The `late-miner` scenario waits for twice the maturity, a 200-share tip.
 - **Propagation delay**: `sim_overrides::spawn_delayed_broadcast()` models
   network latency with per-broadcast jitter.
 - **Auto-submit**: disabled under sim (a header meets the regtest target
@@ -241,7 +244,7 @@ failure mode that caused it.
 | `partition` | `DIAL_FANOUT` consecutive nodes fail at once, cutting the dial chain, then all come back |
 | `late-miner` | payout maturity: node `LATE_MINER` starts with its emitter off and starts mining once the chain is two maturity depths deep (a 200-share tip: Bitcoin Cash keeps its 100-share maturity in the sim build); `maturity-check` checks against the BCHN regtest coinbases that it is paid only once its shares are mature. Needs `LATE_MINER`; not part of `all` (RUNBOOK Test G) |
 | `pruned-join` | block body pruning: once the swarm is past the sim prune target and every node has pruned, one node's store is wiped and it rejoins as a fresh node. It must catch up, agree with node 0 on confirmed hashes below and above its prune height, never get a not-found reply (it never asks for a body its peers deleted), and never fail to store a block. Runs time-compressed; not part of `all` (RUNBOOK Test H) |
-| `deep-fork-refused` | reorg depth limit: the swarm is launched split (`FORK_GROUP_FROM`), so the chain forks at genesis. Once every node has pruned, the first minority node reconnects to node 0. The majority chain has more work, but its fork point is more than `MAX_REORG_DEPTH` (the sim `PAYOUT_DEPTH`, 100 shares) below the minority's confirmed tip, and below its prune target, so the node must log the refusal, keep its confirmed chain and keep confirming, while the majority keeps advancing. The nightly convergence check is skipped: two chains are the expected outcome. Not part of `all` (RUNBOOK Test I) |
+| `deep-fork-refused` | reorg depth limit: the swarm is launched split (`FORK_GROUP_FROM`), so the chain forks at genesis. Once every node has pruned, the first minority node reconnects to node 0. The majority chain has more work, but its fork point is more than `MAX_REORG_DEPTH` (the sim `BCH_PAYOUT_DEPTH`, 183 shares) below the minority's confirmed tip, and below its prune target, so the node must log the refusal, keep its confirmed chain and keep confirming, while the majority keeps advancing. The nightly convergence check is skipped: two chains are the expected outcome. Not part of `all` (RUNBOOK Test I) |
 | `shallow-fork-reorged` | control for `deep-fork-refused`: the same split, but the reconnect happens at height 60, before any node prunes and within the 100-share reorg floor, and the minority must reorg onto the majority (the convergence check applies). Not part of `all` (RUNBOOK Test I) |
 | `all` | the three failure scenarios in sequence (local use) |
 

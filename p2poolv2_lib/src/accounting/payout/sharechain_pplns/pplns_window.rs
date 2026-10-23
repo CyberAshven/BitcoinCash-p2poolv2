@@ -18,7 +18,6 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ConfirmedHeaderResult;
 use crate::shares::share_block::{ShareHeader, ShareTransaction};
-#[cfg(not(feature = "sim"))]
 use crate::store::dag_store::MAX_UNCLES_DEPTH;
 use crate::store::writer::StoreError;
 use bitcoin::Address;
@@ -136,25 +135,102 @@ pub fn coinbase_maturity_for(chain: Chain) -> usize {
     }
 }
 
-/// Shares from a paying share down to the oldest share it can pay: the
-/// coinbase maturity depth plus the PPLNS window.
+/// Bitcoin: shares from a paying share down to the oldest share it can pay,
+/// the coinbase maturity depth plus the PPLNS window: 127,008 (upstream's).
 ///
-/// Sizes the full-validation zone, the expiry of share chain outputs, and,
-/// doubled, `PRUNE_DEPTH`. Sized by Bitcoin's maturity, the larger one, so it
-/// also covers Bitcoin Cash's: a Bitcoin Cash coinbase pays at most
-/// `BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES` shares deep (121,060), and an
-/// uncle of the deepest of them is at most `MAX_UNCLES_DEPTH` deeper, all
-/// within 127,008. The assertion below holds production builds to that. The
-/// sim build shortens Bitcoin's depths only.
+/// Sizes Bitcoin's full-validation zone, the expiry of its share chain
+/// outputs, its reorg depth limit and, doubled, `PRUNE_DEPTH`. Bitcoin Cash
+/// sizes the same from its own 100-share maturity (`BCH_PAYOUT_DEPTH`); read
+/// a chain's depths with [`ChainDepths::for_chain`].
 pub const PAYOUT_DEPTH: usize = COINBASE_MATURITY + PPLNS_WINDOW_SHARES;
 
-// Bitcoin Cash's payout walk and its spendable outputs must fit inside the
-// depths sized by Bitcoin's maturity: the full-validation zone, output expiry
-// and, through `PRUNE_DEPTH`, the block bodies a node keeps.
-#[cfg(not(feature = "sim"))]
-const _: () = assert!(
-    BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES + MAX_UNCLES_DEPTH as usize <= PAYOUT_DEPTH
-);
+/// Bitcoin Cash: shares from a paying share down to the deepest share its
+/// coinbase can pay: the 100-share maturity skip (`BCH_COINBASE_MATURITY`),
+/// the window capped at `PPLNS_WINDOW_SHARES`, and an uncle of the deepest
+/// window share, at most `MAX_UNCLES_DEPTH` below it. 121,063 shares, about
+/// 14 days at 10 s, against Bitcoin's 127,008 (audit A12).
+///
+/// A share-chain rule, since it sets when share chain outputs expire: an
+/// output whose coinbase root is more than this deep below the spending
+/// share can no longer be spent. It also sizes the full-validation zone,
+/// so every share a coinbase can pay is fully validated, and the reorg depth
+/// limit (`MAX_REORG_DEPTH`), and doubled it is `BCH_PRUNE_DEPTH`.
+pub const BCH_PAYOUT_DEPTH: usize =
+    BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES + MAX_UNCLES_DEPTH as usize;
+
+/// The depths of one chain's share-chain rules and storage, each derived
+/// from its coinbase maturity and the PPLNS window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainDepths {
+    /// Depth a share coinbase output must reach before it is spent, and a
+    /// share before a found block pays it.
+    pub coinbase_maturity: usize,
+    /// Depth of the deepest share a coinbase can pay; see `PAYOUT_DEPTH` and
+    /// `BCH_PAYOUT_DEPTH`.
+    pub payout_depth: usize,
+}
+
+impl ChainDepths {
+    /// Bitcoin's depths: upstream's, from its 6,048-share maturity.
+    pub const BITCOIN: Self = Self {
+        coinbase_maturity: COINBASE_MATURITY,
+        payout_depth: PAYOUT_DEPTH,
+    };
+
+    /// Bitcoin Cash's depths, from its 100-share maturity.
+    pub const BITCOIN_CASH: Self = Self {
+        coinbase_maturity: BCH_COINBASE_MATURITY,
+        payout_depth: BCH_PAYOUT_DEPTH,
+    };
+
+    /// The depths a chain's rules use.
+    pub const fn for_chain(chain: Chain) -> Self {
+        match chain {
+            Chain::Bitcoin => Self::BITCOIN,
+            Chain::BitcoinCash => Self::BITCOIN_CASH,
+        }
+    }
+
+    /// Blocks from the tip whose bodies a node keeps: two payout depths, one
+    /// fully validated and one below it holding the outputs a spend at the
+    /// bottom of the first may still use.
+    pub const fn prune_depth(self) -> usize {
+        2 * self.payout_depth
+    }
+
+    /// Deepest fork below the confirmed tip the candidate chain reorgs onto:
+    /// one payout depth (see `MAX_REORG_DEPTH` in `store::prune_blocks`).
+    pub const fn max_reorg_depth(self) -> usize {
+        self.payout_depth
+    }
+
+    /// True when the share at `block_height` is within a payout depth of the
+    /// tip at `tip_height`: the zone where shares are fully validated.
+    pub fn is_within_payout_depth(self, block_height: u32, tip_height: u32) -> bool {
+        block_height > tip_height.saturating_sub(self.payout_depth as u32)
+    }
+}
+
+// Each chain's depths: the payout walk, its uncles and its spendable outputs
+// fit the full-validation zone, and the deepest followed fork with its uncles
+// stays above the prune target, where deletion stops.
+const _: () = {
+    let depths = [ChainDepths::BITCOIN, ChainDepths::BITCOIN_CASH];
+    let mut index = 0;
+    while index < depths.len() {
+        let chain = depths[index];
+        assert!(chain.coinbase_maturity + PPLNS_WINDOW_SHARES <= chain.payout_depth);
+        assert!(
+            chain.max_reorg_depth() + MAX_UNCLES_DEPTH as usize
+                <= chain.prune_depth() + PRUNE_INTERVAL
+        );
+        index += 1;
+    }
+    // Bitcoin Cash's own: the walk, an uncle below it, exactly.
+    assert!(
+        BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES + MAX_UNCLES_DEPTH as usize == BCH_PAYOUT_DEPTH
+    );
+};
 
 /// Divisor for the retained eviction buffer beyond the window: the cache
 /// keeps the window plus `window / PPLNS_WINDOW_BUFFER_DIVISOR` extra shares
@@ -186,10 +262,15 @@ const PPLNS_WINDOW_BUFFER_DIVISOR: usize = 100;
 #[cfg(feature = "sim")]
 const PPLNS_WINDOW_BUFFER_DIVISOR: usize = 4;
 
-/// Number of blocks from the chain tip that must be retained by each node.
+/// Bitcoin: blocks from the chain tip whose bodies each node retains.
 /// Equals 2x `PAYOUT_DEPTH`: one payout depth for full tx validation and one
 /// for PoW-only validation that provides output availability.
-pub const PRUNE_DEPTH: usize = 2 * PAYOUT_DEPTH;
+pub const PRUNE_DEPTH: usize = ChainDepths::BITCOIN.prune_depth();
+
+/// Bitcoin Cash: blocks from the chain tip whose bodies each node retains,
+/// 2x `BCH_PAYOUT_DEPTH`: 242,126 shares, about 28 days at 10 s, against
+/// Bitcoin's 254,016.
+pub const BCH_PRUNE_DEPTH: usize = ChainDepths::BITCOIN_CASH.prune_depth();
 
 /// The gap between the prune height and the prune target, and the size of
 /// one prune chunk: 360 shares, about 1 hour at 10s/block (60 * 6 = 360).

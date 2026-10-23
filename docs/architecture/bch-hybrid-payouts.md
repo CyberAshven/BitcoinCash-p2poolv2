@@ -730,8 +730,8 @@ several hops. A share that arrives `t` seconds late is built on by others
 for those seconds, so about `1 - e^(-t/10)` more shares go stale: 1 second
 costs about 10%, 6.4 seconds about 47%. Stale shares become uncles (9/10 of
 their weight) or orphans, which hurts small miners on slow links most.
-Storage grows the same way: shares are kept for `2 * PAYOUT_DEPTH` (254,016
-shares), about 9 GB of coinbases at 1,000 payees and 254 GB at 29,398. These
+Storage grows the same way: shares are kept for `BCH_PRUNE_DEPTH` (242,126
+shares), about 8 GB of coinbases at 1,000 payees and 242 GB at 29,398. These
 are estimates from sizes and link speeds; the network sim being built in
 parallel should measure propagation delay and stale rate against coinbase
 size from 1 KB to 1 MB.

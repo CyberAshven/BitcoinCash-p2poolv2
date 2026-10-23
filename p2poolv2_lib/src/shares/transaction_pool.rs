@@ -24,7 +24,7 @@
 
 use crate::accounting::payout::sharechain_pplns::payout_rights::has_share_transactions;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
-    BCH_COINBASE_MATURITY, PAYOUT_DEPTH,
+    BCH_COINBASE_MATURITY, BCH_PAYOUT_DEPTH,
 };
 use crate::shares::bch_script::{self, BchScriptError};
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -745,7 +745,7 @@ impl ShareTransactionPool {
         match store.check_prevouts(
             &outpoints,
             height,
-            height.saturating_sub(PAYOUT_DEPTH as u32),
+            height.saturating_sub(BCH_PAYOUT_DEPTH as u32),
             BCH_COINBASE_MATURITY,
         )? {
             PrevoutCheck::Accepted => {}
@@ -889,7 +889,7 @@ fn check_against_confirmed_chain(
     if let PrevoutCheck::Rejected(rejection) = chain_store_handle.check_prevouts(
         &outpoints,
         height,
-        height.saturating_sub(PAYOUT_DEPTH as u32),
+        height.saturating_sub(BCH_PAYOUT_DEPTH as u32),
         BCH_COINBASE_MATURITY,
     )? {
         return Err(PoolRejection::Prevout(rejection));
@@ -1522,10 +1522,9 @@ mod tests {
         assert!(matches!(refused, Err(PoolRejection::Script(_))));
     }
 
-    // The sim build's PAYOUT_DEPTH is 100, so there a share coinbase output
-    // can be spent only exactly 100 shares deep and anything built on it
-    // expires a share later. The tests that go deeper run in production
-    // builds only.
+    // The sim build's BCH_PAYOUT_DEPTH is 183 (100 + its 80-share window +
+    // 3), so there a share coinbase output expires 83 shares after it
+    // matures. The tests that go deeper run in production builds only.
     #[cfg(not(feature = "sim"))]
     #[tokio::test]
     async fn a_refund_before_its_refund_height_is_refused() {

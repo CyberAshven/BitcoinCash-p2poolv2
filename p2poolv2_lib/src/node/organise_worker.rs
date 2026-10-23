@@ -16,6 +16,7 @@
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 #[cfg(not(test))]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
+use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::accounting::stats::metrics::MetricsHandle;
 use crate::monitoring_events::{MonitoringEvent, MonitoringEventSender};
 use crate::node::validation_worker::{ValidationEvent, ValidationSender};
@@ -159,6 +160,8 @@ pub struct OrganiseWorker {
     /// height during forks or rapid sync. Drained when the parent becomes
     /// BlockValid or confirmed.
     pending_blocks: BTreeMap<u32, Vec<BufferedBlock>>,
+    /// The chain's depths, which size the full-validation (PPLNS) zone.
+    depths: ChainDepths,
 }
 
 /// Validation state of a block's parent, deciding how the block is handled.
@@ -229,7 +232,15 @@ impl OrganiseWorker {
             share_validator,
             metrics,
             pending_blocks: BTreeMap::new(),
+            depths: ChainDepths::BITCOIN,
         }
+    }
+
+    /// Size the full-validation zone by `depths` (`ChainDepths::for_chain`);
+    /// Bitcoin's until set.
+    pub fn with_depths(mut self, depths: ChainDepths) -> Self {
+        self.depths = depths;
+        self
     }
 
     /// Runs the organise worker until the channel closes or a fatal error occurs.
@@ -539,14 +550,15 @@ impl OrganiseWorker {
         let blockhash = share_block.block_hash();
         debug!("Organising block: {blockhash:?}");
 
-        let in_pplns_zone = match check_pplns_zone(&blockhash, &self.chain_store_handle) {
-            Ok(result) => result,
-            Err(error_message) => {
-                error!("Error checking for zone, will retry {blockhash}: {error_message}");
-                self.buffer_block(parent_height, share_block, content_validated);
-                return Ok(ProcessOutcome::NotAdvanced);
-            }
-        };
+        let in_pplns_zone =
+            match check_pplns_zone(&blockhash, &self.chain_store_handle, self.depths) {
+                Ok(result) => result,
+                Err(error_message) => {
+                    error!("Error checking for zone, will retry {blockhash}: {error_message}");
+                    self.buffer_block(parent_height, share_block, content_validated);
+                    return Ok(ProcessOutcome::NotAdvanced);
+                }
+            };
 
         let validation_result = if !in_pplns_zone {
             Ok(())

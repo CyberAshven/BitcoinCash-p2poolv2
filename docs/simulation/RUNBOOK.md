@@ -428,8 +428,8 @@ tests pin it.
 ## 9a. Test H — a fresh node joins pruned peers
 
 Checks that a node syncing from genesis gets everything it needs from peers
-that have pruned block bodies. The sim build prunes below 220 shares under
-the tip (prune depth 200 plus interval 20), every 30s, so the run is
+that have pruned block bodies. The Bitcoin Cash sim build prunes below 386 shares under
+the tip (prune depth 366 plus interval 20), every 30s, so the run is
 time-compressed to get there in minutes:
 
 ```sh
@@ -481,7 +481,7 @@ the prune target.
 logs `Refusing candidate reorg to <hash>: branch forks more than
 MAX_REORG_DEPTH below the confirmed tip`, keeps the same confirmed hash at a
 height below its tip, and keeps confirming, while node 0 keeps advancing. The
-convergence check is skipped. The sim reorg floor is `PAYOUT_DEPTH` (100
+convergence check is skipped. The sim reorg floor is `BCH_PAYOUT_DEPTH` (183
 shares) below the confirmed tip, so the genesis fork is refused well before
 every node has pruned; the test still waits for pruning so the fork point is
 below the prune target too.

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::validation_worker::{ValidationEvent, ValidationSender};
 #[cfg(test)]
@@ -143,6 +144,8 @@ pub struct BlockReceiver {
     /// Prune height from the last successful candidate tip read, used when
     /// the tip cannot be read.
     last_prune_height: u32,
+    /// The chain's depths, which size the prune height.
+    depths: ChainDepths,
 }
 
 /// Size of a share block as the pending buffer counts it: its consensus
@@ -176,7 +179,15 @@ impl BlockReceiver {
             block_fetcher_handle,
             validation_tx,
             last_prune_height: 0,
+            depths: ChainDepths::BITCOIN,
         }
+    }
+
+    /// Size the prune height by `depths` (`ChainDepths::for_chain`);
+    /// Bitcoin's until set.
+    pub fn with_depths(mut self, depths: ChainDepths) -> Self {
+        self.depths = depths;
+        self
     }
 
     /// Use other bounds on the pending buffer than `PendingLimits::default`.
@@ -324,7 +335,7 @@ impl BlockReceiver {
     fn current_prune_height(&mut self) -> u32 {
         match self.chain_store_handle.get_candidate_tip_height() {
             Ok(Some(tip_height)) => {
-                self.last_prune_height = prune_height_for_tip(tip_height);
+                self.last_prune_height = prune_height_for_tip(self.depths, tip_height);
                 self.last_prune_height
             }
             Ok(None) => 0,

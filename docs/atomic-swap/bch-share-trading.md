@@ -467,9 +467,9 @@ chain is at height 50,000 and Bitcoin Cash at height 300,000.
    contract's locking script and 40,000,000 units; it has at least 100 share
    confirmations; the refund height is far enough ahead (see Timeouts); and
    the output does not expire first. An output expires when its root
-   coinbase falls more than `PAYOUT_DEPTH` (127,008) shares below the
+   coinbase falls more than `BCH_PAYOUT_DEPTH` (121,063) shares below the
    spending share, so the refund height plus a day of shares must stay
-   below the root height plus 127,008.
+   below the root height plus 121,063.
 6. **Buyer locks BCH.** Pay 50,000 satoshis to the BCH contract's P2SH32
    address from any wallet that pays `p` CashAddr, or from a P2PKH coin:
 

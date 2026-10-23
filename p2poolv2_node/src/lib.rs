@@ -174,7 +174,11 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 
     let genesis = p2poolv2_lib::shares::bch_genesis::genesis_for_stratum(&config.stratum)
         .expect("share genesis data is fixed");
-    let store = Arc::new(Store::new(config.store.path.clone(), false).unwrap());
+    let store = Arc::new(
+        Store::new(config.store.path.clone(), false)
+            .unwrap()
+            .with_chain(config.stratum.chain),
+    );
 
     let (write_tx, write_rx) = write_channel();
     let store_writer = StoreWriter::new(store.clone(), write_rx);

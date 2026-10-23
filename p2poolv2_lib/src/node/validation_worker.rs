@@ -10,6 +10,7 @@
 //! `OrganiseEvent::Block` and `SwarmSend::BroadcastBlock` events. Runs in a dedicated
 //! tokio task, decoupled from the P2P message handler hot path.
 
+use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::config::{BitcoinCashNetwork, Chain};
 use crate::node::SwarmSend;
 use crate::node::messages::Message;
@@ -148,6 +149,7 @@ impl ValidationWorker {
     /// Returns `Err(ValidationWorkerError)` on fatal failure.
     pub async fn run(mut self) -> Result<(), ValidationWorkerError> {
         info!("Validation worker started");
+        let depths = ChainDepths::for_chain(self.chain);
 
         let share_validator: Arc<dyn ShareValidator + Send + Sync> = Arc::new(
             DefaultShareValidator::new(self.pool_difficulty)
@@ -187,6 +189,7 @@ impl ValidationWorker {
                     chain_store_handle,
                     organise_tx,
                     swarm_tx,
+                    depths,
                 )
                 .await;
             });
@@ -217,6 +220,7 @@ async fn validate_and_emit(
     chain_store_handle: ChainStoreHandle,
     organise_tx: OrganiseSender,
     swarm_tx: mpsc::Sender<SwarmSend<ResponseChannel<Message>>>,
+    depths: ChainDepths,
 ) {
     let locally_mined = prefetched_block.is_some();
     let share_block = match prefetched_block {
@@ -230,7 +234,7 @@ async fn validate_and_emit(
         },
     };
 
-    let in_pplns_zone = match check_pplns_zone(&block_hash, &chain_store_handle) {
+    let in_pplns_zone = match check_pplns_zone(&block_hash, &chain_store_handle, depths) {
         Ok(result) => result,
         Err(error_message) => {
             error!("Error checking for pplns zone: {error_message}");
@@ -653,6 +657,7 @@ mod tests {
             mock_chain_handle,
             organise_tx,
             swarm_tx,
+            ChainDepths::BITCOIN,
         )
         .await;
 
@@ -694,6 +699,7 @@ mod tests {
             mock_chain_handle,
             organise_tx,
             swarm_tx,
+            ChainDepths::BITCOIN,
         )
         .await;
 

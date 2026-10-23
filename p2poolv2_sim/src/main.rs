@@ -28,7 +28,7 @@ use config::SimNodeConfig;
 use identity::ChainSelection;
 #[cfg(feature = "sim")]
 use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::{
-    PPLNS_WINDOW_SHARES, PRUNE_DEPTH, PRUNE_INTERVAL, coinbase_maturity_for,
+    ChainDepths, PPLNS_WINDOW_SHARES, PRUNE_INTERVAL,
 };
 #[cfg(feature = "sim")]
 use p2poolv2_lib::logging::setup_logging;
@@ -91,12 +91,16 @@ async fn main() -> ExitCode {
     sim_overrides::init_propagation_delay(sim_cfg.propagation_delay_ms.unwrap_or(0));
     // The depths are compile-time sim constants. Each chain keeps its own
     // maturity: Bitcoin's is the sim's 20 shares, Bitcoin Cash's stays 100,
-    // a share-chain rule the sim build does not change. `cargo sim
-    // maturity-check` reads it from this line.
+    // a share-chain rule the sim build does not change, and each chain's
+    // prune depth follows from its maturity and the sim window (Bitcoin
+    // Cash: 2 * (100 + 80 + 3) = 366). `cargo sim maturity-check` and the
+    // prune scenarios read them from this line.
+    let depths = ChainDepths::for_chain(node_config.stratum.chain);
     info!(
         "Sim depths: coinbase maturity {} shares, PPLNS window {PPLNS_WINDOW_SHARES} shares, \
-         prune depth {PRUNE_DEPTH} shares, prune interval {PRUNE_INTERVAL} shares",
-        coinbase_maturity_for(node_config.stratum.chain)
+         prune depth {} shares, prune interval {PRUNE_INTERVAL} shares",
+        depths.coinbase_maturity,
+        depths.prune_depth()
     );
 
     let (handles, runner) = match p2poolv2_node::build_node(node_config.clone()).await {
