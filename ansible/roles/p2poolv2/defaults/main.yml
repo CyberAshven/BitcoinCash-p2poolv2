@@ -1,13 +1,19 @@
-# P2Poolv2 role defaults
-# Override these in inventory group_vars or host_vars.
+# P2Poolv2 role defaults (Bitcoin Cash)
+# Override these in inventory group_vars or host_vars, or per instance in
+# p2poolv2_instances (see playbook.yml). Secrets come from the vault
+# (group_vars/all/vault.yml); never write real ones here.
 
 # Version and instance
-p2poolv2_version: "0.12.0"
-p2poolv2_instance: "main"
+# The fork refreshes the v0.0.1-alpha release in place until the beta, so the
+# version string does not change when the binaries do. Set
+# p2poolv2_force_install: true to reinstall a refreshed release.
+p2poolv2_version: "0.0.1-alpha"
+p2poolv2_force_install: false
+p2poolv2_instance: "chipnet"
 
 # GitHub release URL base
 # The installer script auto-detects architecture.
-p2poolv2_release_url: "https://github.com/p2poolv2/p2poolv2/releases/download/v{{ p2poolv2_version }}"
+p2poolv2_release_url: "https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases/download/v{{ p2poolv2_version }}"
 
 # Installation paths
 p2poolv2_bin_dir: "/opt/p2poolv2/bin"
@@ -19,13 +25,16 @@ p2poolv2_group: "p2poolv2"
 
 # --- Network config ---
 p2poolv2_p2p_listen_address: "/ip4/0.0.0.0/tcp/6884"
+# Share chain peers, as "/ip4/<address>/tcp/<port>". Bitcoin Cash has no DNS
+# seeds yet (dns_seed is always off on chain = "bitcoin-cash"), so a node
+# joining a running share chain needs at least one peer here.
 p2poolv2_dial_peers: []
 p2poolv2_blocked_ips: []
 p2poolv2_max_pending_incoming: 10
 p2poolv2_max_pending_outgoing: 10
 p2poolv2_max_established_incoming: 100
 p2poolv2_max_established_outgoing: 100
-p2poolv2_max_established_per_peer: 1
+p2poolv2_max_established_per_peer: 2
 p2poolv2_max_workbase_per_second: 10
 p2poolv2_max_userworkbase_per_second: 10
 p2poolv2_max_miningshare_per_second: 100
@@ -46,24 +55,65 @@ p2poolv2_stratum_port: 3333
 p2poolv2_start_difficulty: 10000
 p2poolv2_minimum_difficulty: 100
 # p2poolv2_maximum_difficulty:
-p2poolv2_solo_address: ""
+
+# Bitcoin Cash. Mainnet and chipnet run the same rules; only
+# p2poolv2_bitcoin_cash_network differs.
+p2poolv2_chain: "bitcoin-cash"
+# "mainnet", "chipnet" or "regtest"
+p2poolv2_bitcoin_cash_network: "chipnet"
+# "main", or "mini" (share target 256 times easier, for small miners). Main
+# and mini are different chains: give each its own store path.
+p2poolv2_bch_share_chain: "main"
+
+# CashAddr for this network (bitcoincash:, bchtest: or bchreg:). Required by
+# the config; only Hydrapool mode pays it.
 p2poolv2_bootstrap_address: ""
-# p2poolv2_donation_address: ""
-# p2poolv2_donation: 0
+# Share address owning every share this node mines (p2pool:, tp2pool: or
+# rp2pool:), from `p2poolv2_cli bch-share-address`. Leave unset when each
+# miner sends its own p2p=<share address>.
+# p2poolv2_miner_address: ""
+# Payout address for solo mining, a CashAddr. Leave unset otherwise.
+# p2poolv2_solo_address: ""
+
+# Every Bitcoin Cash node donates 150 basis points (1.5%) of each block it
+# finds to the project address unless donation is set; 0 opts out. Setting
+# donation_address is optional, and it must be the project address.
+# p2poolv2_donation: 150
+# p2poolv2_donation_address: "bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k"
+# A public pool's own cut, in basis points, taken after the donation. Donation
+# plus fee may not exceed 1000 (10%): peers reject shares above that.
 # p2poolv2_fee_address: ""
 # p2poolv2_fee: 0
+
 # ZMQ always binds to localhost -- never expose to the network
 p2poolv2_zmq_endpoint: "tcp://127.0.0.1:28332"
-p2poolv2_bitcoin_network: "main"
-p2poolv2_version_mask: "1fffffe0"
+# BIP 320's general purpose bits, the code default (BIP 310 negotiation).
+p2poolv2_version_mask: "1fffe000"
 # p2poolv2_pool_signature: "P2Poolv2"
 # p2poolv2_max_connections: 1000
 p2poolv2_pool_mode: "p2poolv2"
+# true when joining a running share chain. A node starting a new share chain
+# sets false, or its Stratum port never opens.
 p2poolv2_wait_for_chain_sync: true
 
-# --- Bitcoin RPC config ---
+# --- Stratum V2 (optional) ---
+# Without authority keys, SV2 frames are unencrypted: keep the port on
+# localhost or a trusted LAN. With both keys every SV2 connection must
+# complete the Noise handshake. Make the keys with an external tool; keep the
+# secret in the vault (vault_sv2_authority_secret_key).
+# p2poolv2_sv2_port: 3336
+# p2poolv2_sv2_authority_public_key: "9b..."
+# p2poolv2_sv2_authority_secret_key: "{{ vault_sv2_authority_secret_key }}"
+# p2poolv2_sv2_cert_validity_secs: 3600
+# Templates from a Stratum V2 Template Provider instead of BCHN's RPC.
+# p2poolv2_template_source: "sv2"
+# p2poolv2_template_provider_address: "127.0.0.1:8442"
+# p2poolv2_template_provider_authority_public_key: "9b..."
+
+# --- BCHN RPC config ---
 # Always localhost -- never bind to 0.0.0.0
-p2poolv2_bitcoin_rpc_url: "http://127.0.0.1:8332"
+# BCHN's RPC port: mainnet 8332, chipnet 48332, regtest 18443.
+p2poolv2_bitcoin_rpc_url: "http://127.0.0.1:48332"
 p2poolv2_bitcoin_rpc_user: ""
 p2poolv2_bitcoin_rpc_pass: ""
 
@@ -80,3 +130,9 @@ p2poolv2_api_port: 46884
 # p2poolv2_api_auth_user: ""
 # p2poolv2_api_auth_token: ""
 p2poolv2_api_cors_allowed: false
+# Open the dashboard, the web_root frontend and the read-only share chain
+# routes to anyone (a public node); /metrics, /peers, /blocked_ips and
+# /jd_prepare keep the login.
+p2poolv2_api_public_dashboard: false
+# Folder with a self-hosted frontend build to serve.
+# p2poolv2_api_web_root: "/srv/p2pool-frontend"

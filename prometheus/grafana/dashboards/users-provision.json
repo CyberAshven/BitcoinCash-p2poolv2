@@ -334,7 +334,7 @@
         "definition": "label_values(worker_shares_valid_total,btcaddress)",
         "hide": 0,
         "includeAll": false,
-        "label": "User's BTC Address",
+        "label": "Payout address (CashAddr)",
         "multi": false,
         "name": "user_address",
         "options": [],

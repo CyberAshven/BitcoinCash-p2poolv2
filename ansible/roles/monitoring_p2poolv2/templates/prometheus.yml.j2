@@ -1,0 +1,24 @@
+# Prometheus for P2Poolv2 -- managed by Ansible (monitoring_p2poolv2)
+# Scrapes instance {{ p2poolv2_monitoring_target.instance }}
+# (Bitcoin Cash {{ p2poolv2_monitoring_target.bitcoin_cash_network }}).
+
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # The job name matches prometheus/prometheus.yml, which the Docker
+  # metrics stack uses.
+  - job_name: "p2pool"
+    scrape_interval: {{ p2poolv2_prometheus_scrape_interval }}
+    metrics_path: "/metrics"
+    static_configs:
+      - targets:
+          - "127.0.0.1:{{ p2poolv2_monitoring_target.api_port }}"
+        labels:
+          p2poolv2_instance: "{{ p2poolv2_monitoring_target.instance }}"
+          bitcoin_cash_network: "{{ p2poolv2_monitoring_target.bitcoin_cash_network }}"
+{% if p2poolv2_metrics_auth_user | default('') | length > 0 %}
+    basic_auth:
+      username: "{{ p2poolv2_metrics_auth_user }}"
+      password: "{{ p2poolv2_metrics_auth_pass }}"
+{% endif %}

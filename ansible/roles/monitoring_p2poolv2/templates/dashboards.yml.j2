@@ -1,0 +1,14 @@
+# Managed by Ansible (monitoring_p2poolv2). The same provider as
+# prometheus/grafana/provisioning/dashboards/dashboards.yml.
+apiVersion: 1
+
+providers:
+  - name: 'P2Poolv2'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 10
+    allowUiUpdates: false
+    options:
+      path: {{ p2poolv2_grafana_dashboards_dir }}

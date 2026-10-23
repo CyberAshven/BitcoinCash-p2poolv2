@@ -1,22 +1,30 @@
 name: p2poolv2
 
-# p2poolv2 uses host networking (Linux only) for P2P connectivity.
-# See docker-compose.p2poolv2.yml for details.
+# A Bitcoin Cash stack: Bitcoin Cash Node (BCHN) and a P2Poolv2 node on the
+# network NETWORK names in .env (regtest, chipnet or mainnet). See README.adoc.
+#
+# With COMPOSE_PROFILES=regtest (the sample's default) the stack also mines:
+# a one-shot gives a CPU miner a Stratum identity from BCHN's dev wallet, and
+# the miner (mujina, written in Rust) mines through the node. On regtest every
+# hash the miner submits is also a block, so blocks arrive within seconds.
+#
+# p2poolv2 and the miner use host networking (Linux only), see
+# docker-compose.p2poolv2.yml. BCHN publishes its RPC and ZMQ ports on the
+# host's loopback interface only.
 
 services:
-  bitcoind:
-    image: p2poolv2/bitcoind:latest
+  bchn:
+    image: p2poolv2/bchn:29.2.0
     build:
-      context: bitcoind
-    volumes:
-      - bitcoin_data:/data
-    ports:
-      - "${BTC_P2P_PORT:-38333}:${BTC_P2P_PORT:-38333}" # P2P port
-      - "${BTC_RPC_PORT:-38332}:${BTC_RPC_PORT:-38332}" # RPC port
-      - "28332:28332" # ZMQ port is always the same
+      context: bchn
     environment:
-      - NETWORK=${NETWORK:-signet}
-    command: -conf=/etc/bitcoin/bitcoin-${NETWORK:-signet}.conf -datadir=/data
+      - NETWORK=${NETWORK:?NETWORK must be set in .env, see docker/.env.sample}
+      - REGTEST_INITIAL_BLOCKS=${REGTEST_INITIAL_BLOCKS:-101}
+    volumes:
+      - bchn_data:/data
+    ports:
+      - "127.0.0.1:${BCHN_RPC_PORT:-18443}:${BCHN_RPC_PORT:-18443}" # RPC: regtest 18443, chipnet 48332, mainnet 8332
+      - "127.0.0.1:28332:28332" # ZMQ hashblock, the same on every network
     restart: unless-stopped
     networks:
       - p2poolv2_network
@@ -26,16 +34,19 @@ services:
         max-size: "100m"
         max-file: "3"
 
-  bitcoin-bootstrap:
-    build:
-      context: bitcoind
+  # Regtest only: mines REGTEST_INITIAL_BLOCKS blocks to BCHN's wallet "miner".
+  # On chipnet and mainnet it exits at once.
+  bchn-bootstrap:
+    image: p2poolv2/bchn:29.2.0
+    pull_policy: never
     depends_on:
-      bitcoind:
+      bchn:
         condition: service_started
     entrypoint: ["/usr/local/bin/bootstrap.sh"]
     environment:
-      - NETWORK=${NETWORK:-signet}
-      - TARGET_HEIGHT=32
+      - NETWORK=${NETWORK:?NETWORK must be set in .env, see docker/.env.sample}
+      - REGTEST_INITIAL_BLOCKS=${REGTEST_INITIAL_BLOCKS:-101}
+      - RPC_HOST=bchn
     healthcheck:
       disable: true
     restart: "no"
@@ -52,19 +63,68 @@ services:
       file: docker-compose.p2poolv2.yml
       service: p2poolv2
     depends_on:
-      bitcoind:
+      bchn:
         condition: service_healthy
 
-  mujina_minerd:
-    extends:
-      file: docker-compose.p2poolv2.yml
-      service: mujina_minerd
+  # Regtest profile: takes a payout address and a share-owner key from BCHN's
+  # wallet "miner" and writes the miner's Stratum user and password.
+  miner-setup:
+    profiles: [regtest]
+    image: p2poolv2:latest
+    pull_policy: never
+    depends_on:
+      bchn:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/regtest/setup-miner.sh"]
+    environment:
+      - RPC_URL=http://bchn:18443
+      - OUTPUT=/shared/miner.env
+    volumes:
+      - ./regtest:/regtest:ro
+      - regtest_miner:/shared
+    healthcheck:
+      disable: true
+    restart: "no"
     networks:
       - p2poolv2_network
 
+  # Regtest profile: mujina's CPU backend, a Stratum V1 miner written in Rust,
+  # pinned by digest (amd64 only). MUJINA_POOL_FORCED_RATE makes it submit that
+  # many candidates a minute below the pool's difficulty; the node rejects them
+  # as shares, but on regtest each one meets the block target and the node
+  # submits it to BCHN as a block. A share on the share chain still needs its
+  # full share difficulty, which takes a CPU hours on the mini chain.
+  miner:
+    profiles: [regtest]
+    image: ghcr.io/256foundation/mujina-minerd:main@sha256:7448991e4cb419cd428f74d3db58b95a2359eb52c898c1bd69d52b06c3b04e5a
+    depends_on:
+      p2poolv2:
+        condition: service_healthy
+      miner-setup:
+        condition: service_completed_successfully
+    network_mode: host
+    entrypoint: ["/bin/sh", "-c", "set -a && . /shared/miner.env && exec mujina-minerd"]
+    environment:
+      - MUJINA_POOL_URL=stratum+tcp://127.0.0.1:${P2POOL_STRATUM_PORT:-3333}
+      - MUJINA_CPUMINER_THREADS=${MUJINA_CPUMINER_THREADS:-1}
+      - MUJINA_CPUMINER_DUTY=${MUJINA_CPUMINER_DUTY:-50}
+      - MUJINA_POOL_FORCED_RATE=${MUJINA_POOL_FORCED_RATE:-6}
+      - MUJINA_USB_DISABLE=1
+      - MUJINA_API_LISTEN=127.0.0.1:${MUJINA_API_PORT:-7785}
+      - MUJINA_LOG=${MUJINA_LOG:-info}
+    volumes:
+      - regtest_miner:/shared:ro
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+
 volumes:
-  bitcoin_data:
+  bchn_data:
   p2poolv2_data:
+  regtest_miner:
 
 networks:
   p2poolv2_network:

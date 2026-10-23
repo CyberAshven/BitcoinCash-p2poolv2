@@ -2,12 +2,13 @@ name: p2poolv2-metrics
 
 services:
   prometheus:
-    image: prom/prometheus:latest
+    # Pinned by version and digest; change both together.
+    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
     volumes:
       - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
@@ -25,7 +26,8 @@ services:
         max-file: "3"
 
   grafana:
-    image: grafana/grafana:latest
+    # Pinned by version and digest; the dashboards were made on Grafana 12.
+    image: grafana/grafana:12.4.13@sha256:41bbc1b5e04416f81891806076db2a2ff60a5d4da5f78d36a88b033a8c199185
     depends_on:
       - prometheus
     volumes:
@@ -33,7 +35,7 @@ services:
       - ../prometheus/grafana/provisioning:/etc/grafana/provisioning:ro
       - ../prometheus/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_SECURITY_ADMIN_USER=admin

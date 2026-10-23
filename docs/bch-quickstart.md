@@ -18,8 +18,11 @@ zmqpubhashblock=tcp://127.0.0.1:28332
 ```
 
 BCHN answers `getblocktemplate` with "Bitcoin is not connected!" until it has
-at least one peer, on regtest as well. On regtest, run a second BCHN node and
-connect the two.
+at least one peer, on regtest as well. On regtest, set
+`allowunconnectedmining=1`, BCHN's option for a node with no peers, or run a
+second BCHN node and connect the two. The Docker dev stack does the former
+(`docker/README.adoc`). Hardware, disk and ports are in
+[requirements.md](requirements.md).
 
 BCHN fills templates only to `-percentblockmaxsize` of the block size limit
 (50% on mainnet by default). Leave it below 100%: the pool adds a coinbase
@@ -95,7 +98,7 @@ tool (for example the Stratum V2 reference implementation's key utility):
 
 ```toml
 sv2_authority_public_key = "9b..."
-# secret via env: P2POOL__STRATUM__SV2_AUTHORITY_SECRET_KEY=...
+# secret via env: P2POOL_STRATUM__SV2_AUTHORITY_SECRET_KEY=...
 sv2_cert_validity_secs = 3600
 ```
 
@@ -121,6 +124,9 @@ the node checks each template's parent there, validates shares against it,
 and falls back to it for blocks.
 
 ## 4. Point miners at the node
+
+Every option (`p2p=`, `d=`, `th=` and the Stratum V2 identity) is in
+[miner-options.md](miner-options.md).
 
 Stratum V1:
 

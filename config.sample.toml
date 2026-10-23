@@ -108,7 +108,7 @@ zmqpubhashblock = "tcp://127.0.0.1:28332"
 # keys, in the Stratum V2 reference implementation's text form, to require
 # the encrypted handshake on every SV2 connection; miners pin the public key.
 # Make the keys with an external tool (this node never generates keys) and
-# prefer the env var P2POOL__STRATUM__SV2_AUTHORITY_SECRET_KEY for the secret.
+# prefer the env var P2POOL_STRATUM__SV2_AUTHORITY_SECRET_KEY for the secret.
 # sv2_authority_public_key = "9b..."
 # sv2_authority_secret_key = "..."
 # Seconds each Noise certificate stays valid. Default 3600.
@@ -130,11 +130,18 @@ zmqpubhashblock = "tcp://127.0.0.1:28332"
 # is ignored and derived from bitcoin_cash_network, so every node on one
 # Bitcoin Cash network agrees on difficulty and the P2P protocol id.
 network = "signet"
-# Use BIP 323 mask for version rolling (see https://github.com/bitcoin/bips/blob/622e47722cd35514e96da37ae89f868e18d581e4/bip-0323.mediawiki#specification)
-version_mask = "1fffffe0"
-# The PPLNS payout window is fixed for the network, not configured: each
-# coinbase pays the last 120,960 shares (about two weeks at the 10 second
-# share target), weighted by share difficulty.
+# Version rolling mask offered to miners (BIP 310 negotiation): the 16 general
+# purpose bits of BIP 320, 0x1fffe000, which ASIC firmware rolls on Bitcoin
+# Cash as on Bitcoin. It is the code default and what Stratum V2 channels allow
+# (version_rolling_allowed). Bitcoin Cash has not adopted BIP 323, whose wider
+# mask 1fffffe0 also hands out bits 5 to 12.
+version_mask = "1fffe000"
+# The PPLNS payout window is a share chain rule, not configured. On Bitcoin
+# Cash each coinbase pays the shares holding the last 3 BCH blocks of work (by
+# the paying block's own difficulty), at most 120,960 shares, behind a
+# 100-share maturity; see docs/architecture/payout-distribution.md. On Bitcoin
+# it pays the last 120,960 shares (about two weeks at the 10 second share
+# target). Both weight shares by difficulty.
 # Add a pool signature, if you want. Comment out the line if you want
 # to mine anonymous blocks. This signature is only used to show others
 # how large your pool is, if you are running private, there is no need

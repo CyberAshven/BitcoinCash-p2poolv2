@@ -228,7 +228,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "The coinbase from the latest share on the chain",
+      "description": "The coinbase outputs of the latest share on the chain, in BCH, by payout address (CashAddr)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -242,6 +242,7 @@
             }
           },
           "decimals": 8,
+          "unit": "suffix: BCH",
           "mappings": []
         },
         "overrides": []
@@ -327,7 +328,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Bitcoin blocks found by the pool. Only bitcoin blocks this node can decipher from the share chain are shown: blocks carried by confirmed shares and their uncles, recorded as the node runs and rebuilt when a node syncs. Blocks found before the current share chain started are not shown. Use the block hash link to check whether a block is still on the bitcoin main chain.",
+      "description": "Bitcoin Cash blocks found by the pool. Only blocks this node can decipher from the share chain are shown: blocks carried by confirmed shares and their uncles, recorded as the node runs and rebuilt when a node syncs. Blocks found before the current share chain started are not shown. The block hash links to a Bitcoin Cash explorer for the node's network (Blockchair on mainnet, chipnet.imaginary.cash on chipnet; regtest has none): use it to check that a block is still on the main chain.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -393,7 +394,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Only bitcoin blocks this node can decipher from the share chain are shown: blocks carried by confirmed shares and their uncles, recorded as the node runs and rebuilt when a node syncs. Blocks found before the current share chain started are not shown. Use the block hash link to check whether a block is still on the bitcoin main chain.",
+      "description": "Only Bitcoin Cash blocks this node can decipher from the share chain are shown: blocks carried by confirmed shares and their uncles, recorded as the node runs and rebuilt when a node syncs. Blocks found before the current share chain started are not shown. The block hash links to a Bitcoin Cash explorer for the node's network (Blockchair on mainnet, chipnet.imaginary.cash on chipnet; regtest has none): use it to check that a block is still on the main chain.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -484,7 +485,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "label_replace(label_replace(max by (blockhash, height, miner, network) (bitcoin_block_found_time_seconds) * 1000, \"explorer\", \"https://mempool.space\", \"network\", \"main\"), \"explorer\", \"https://mempool.space/$1\", \"network\", \"(testnet4|signet)\")",
+          "expr": "label_replace(label_replace(max by (blockhash, height, miner, network) (bitcoin_block_found_time_seconds) * 1000, \"explorer\", \"https://blockchair.com/bitcoin-cash\", \"network\", \"(main|mainnet)\"), \"explorer\", \"https://chipnet.imaginary.cash\", \"network\", \"(test|chipnet)\")",
           "format": "table",
           "instant": true,
           "range": false,
@@ -509,7 +510,7 @@
               "Value": "Found at",
               "blockhash": "Block hash",
               "height": "Height",
-              "miner": "Miner"
+              "miner": "Payout address"
             }
           }
         }

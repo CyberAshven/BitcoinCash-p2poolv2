@@ -84,8 +84,8 @@ COPY --from=builder /usr/local/cargo/bin/p2poolv2 /usr/local/bin/p2poolv2
 COPY --from=builder /usr/local/cargo/bin/p2poolv2_cli /usr/local/bin/p2poolv2_cli
 COPY config-docker.sample.toml /etc/p2poolv2/config.toml
 
-LABEL org.opencontainers.image.source=https://github.com/p2poolv2/p2poolv2
-LABEL org.opencontainers.image.description="P2Poolv2 is a peer-to-peer Bitcoin mining pool where miners coordinate directly and verify their rewards without centralized operators."
+LABEL org.opencontainers.image.source=https://github.com/CyberAshven/BitcoinCash-p2poolv2
+LABEL org.opencontainers.image.description="P2Poolv2 for Bitcoin Cash: a peer-to-peer mining pool where miners coordinate directly and are paid in the coinbase of every block the pool finds."
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 # TODO: add non-root user

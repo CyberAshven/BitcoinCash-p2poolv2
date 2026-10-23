@@ -1,64 +1,176 @@
+= Docker: Bitcoin Cash Node and P2Poolv2
+
 All docker commands are run from the `docker` directory.
 
-== Copy the sample docker env file
+The stack runs Bitcoin Cash Node (BCHN) and a P2Poolv2 node on one Bitcoin
+Cash network, chosen by `NETWORK` in `.env`: `regtest` (the default, a local
+dev chain), `chipnet` or `mainnet`. P2Poolv2 runs the same rules on chipnet
+and mainnet; only the network switch differs.
+
+[cols="1,3"]
+|===
+| Service | What it does
+
+| `bchn`
+| Bitcoin Cash Node 29.2.0 from the official release tarball, pinned by
+  version and SHA-256 (`bchn/Dockerfile`). Its RPC and ZMQ `hashblock` ports
+  are published on the host's loopback interface only.
+
+| `bchn-bootstrap`
+| Regtest: creates BCHN's wallet `miner` and mines `REGTEST_INITIAL_BLOCKS`
+  (101) blocks to it. Exits at once on chipnet and mainnet.
+
+| `p2poolv2`
+| The node, built from this repository (`p2poolv2/Dockerfile`), with
+  `chain = "bitcoin-cash"`. Host networking (Linux).
+
+| `miner-setup` (profile `regtest`)
+| Takes a payout address and a share-owner key from BCHN's dev wallet and
+  writes the miner's Stratum user (`bchreg:...`) and password
+  (`p2p=rp2pool:...`).
+
+| `miner` (profile `regtest`)
+| mujina, a Stratum V1 miner written in Rust, on its CPU backend. Image pinned
+  by digest; amd64 only.
+|===
+
+== Quick start: mine on regtest
 
 [,shell]
 ----
-just setup-dev
-# Edit the .env to your preferences
-$EDITOR .env
-----
-
-Edit the .env file for your choice of p2poolv2 ports etc.
-
-== Start your local p2pool node
-
-[,shell]
-----
+just setup-dev        # copies docker/.env.sample to docker/.env
 cd docker
+docker compose up -d --build
+----
+
+The first build compiles P2Poolv2, which takes a while. To use the published
+image instead, pull and tag it before `up`:
+
+[,shell]
+----
+docker pull ghcr.io/cyberashven/bitcoincash-p2poolv2:latest
+docker tag ghcr.io/cyberashven/bitcoincash-p2poolv2:latest p2poolv2:latest
 docker compose up -d
 ----
 
-== Shutdown your local p2pool node
+What happens:
+
+. `bchn` starts BCHN on regtest with `allowunconnectedmining=1`, so one node
+  serves block templates without peers.
+. `bchn-bootstrap` mines 101 blocks; `bchn` turns healthy.
+. `p2poolv2` starts a regtest node on the mini share chain.
+. `miner-setup` writes the miner's identity; `miner` connects to the node's
+  Stratum port.
+. The miner submits a few candidates a minute (`MUJINA_POOL_FORCED_RATE`).
+  They are far below the pool's share difficulty, so the node rejects them as
+  shares, but on regtest every hash meets the block target: the node submits
+  each one to BCHN as a block whose coinbase pays the 1.5% donation and the
+  PPLNS window.
+
+Check it:
 
 [,shell]
 ----
-docker compose down
+docker compose exec -T bchn bcli getblockcount     # grows past 101
+docker compose logs p2poolv2 | grep "Block submitted successfully"
+# The tip's coinbase pays the regtest donation address, so P2Poolv2 built it:
+docker compose exec -T bchn sh -c 'bcli getblock "$(bcli getbestblockhash)" 2' \
+  | grep -c bchreg:qze95tc2dqrnltvxfa5yhunwx5952f34fvsm6us7sv
+curl -s http://127.0.0.1:46884/chain_info
 ----
+
+The `Docker regtest stack` CI workflow (`.github/workflows/docker-regtest.yml`)
+runs these checks, and a second node, on every pull request that changes the
+stack.
+
+A share on the mini share chain needs about 2e10 hashes (difficulty about
+4.5), which takes a CPU miner hours, so the share chain stays at its genesis
+share and the blocks pay the genesis share's window. Point an ASIC or a Bitaxe
+at `stratum+tcp://<host>:3333` with a `bchreg:` username and
+`p2p=<rp2pool: address>` as password to see shares (see
+link:../docs/miner-options.md[miner options]).
+
+Stop the stack with `docker compose down`; add `-v` to delete the chains and
+start over.
+
+== Chipnet or mainnet
+
+. Copy `config-docker.sample.toml` (repository root) to `config.toml` and set,
+  under `[stratum]`, your own `bootstrap_address` (and `miner_address` if the
+  node owns every share), `wait_for_chain_sync = true`, and under `[network]`
+  the `dial_peers` of the share chain you join: Bitcoin Cash has no DNS seeds
+  yet. Set `[bitcoinrpc] url` to BCHN's port: `http://127.0.0.1:48332` on
+  chipnet, `http://127.0.0.1:8332` on mainnet.
+. In `.env`, set `NETWORK=chipnet` (or `mainnet`), `COMPOSE_PROFILES=` (empty),
+  `BCHN_RPC_PORT=48332` (or `8332`) and `P2POOL_CONFIG=config.toml`.
+. Start BCHN first and let it sync; P2Poolv2 waits for BCHN to leave initial
+  block download:
++
+[,shell]
+----
+docker compose up -d bchn
+docker compose exec bchn bcli getblockchaininfo   # until "initialblockdownload": false
+docker compose up -d
+----
+
+BCHN prunes to 2 GB on chipnet and 10 GB on mainnet (`bchn/bitcoin-*.conf`);
+P2Poolv2 needs templates, not an archive. The RPC login in those files is the
+stack's default and only reachable from the host: change it there and in
+`config.toml` before running on a shared host. See
+link:../docs/requirements.md[requirements] for ports and disk.
 
 == Running multiple P2Poolv2 nodes
 
-First, start the shared infrastructure (bitcoind + default node):
+First, start the shared infrastructure (BCHN + default node):
 
 [,shell]
 ----
 docker compose up -d
 ----
 
-Then start additional nodes, each with its own .env and project name:
+Then start additional nodes, each with its own .env and project name.
+`.env.node2.sample` is a second regtest node on ports 3334, 46885 and 6885
+that dials the first one (`config-node2.regtest.toml`):
 
 [,shell]
 ----
+cp .env.node2.sample .env.node2
 docker compose -f docker-compose.node.yml -p node2 --env-file .env.node2 up -d
 ----
 
-[,shell]
-----
-docker compose -f docker-compose.node.yml -p node3 --env-file .env.node3 up -d
-----
-
-To stop an additional node:
+Both nodes should show the same `chain_tip_height` on `/chain_info`. To stop
+an additional node:
 
 [,shell]
 ----
 docker compose -f docker-compose.node.yml -p node2 down
 ----
 
+== Metrics
+
+`docker-compose.metrics.yml` runs Prometheus and Grafana, pinned by version
+and digest, on the host's loopback interface. Grafana is at
+http://localhost:3000 (admin/admin), with the dashboards from
+`../prometheus/grafana/dashboards`.
+
+[,shell]
+----
+docker compose -f docker-compose.metrics.yml up -d
+----
+
+== Host networking on macOS and Windows
+
+`p2poolv2` and `miner` use `network_mode: host`, which Docker supports on
+Linux. Docker Desktop (macOS, Windows) runs containers in a VM: with its host
+networking feature off, the node's ports bind inside that VM, so a miner on
+the desktop cannot reach them. Run the stack on Linux, or in a Linux VM or WSL
+distribution with its own Docker engine.
+
 == Building with Podman
 
 If you are using Podman instead of Docker, an extra step is required to build
 the P2Poolv2 container image. This is due to a limitation with Dockerfile
-syntax support in Podman. See the related issue: [https://github.com/containers/podman/issues/26458[containers/podman#26458].
+syntax support in Podman. See the related issue: https://github.com/containers/podman/issues/26458[containers/podman#26458].
 
 First, start a BuildKit daemon (needs privileged to handle cache layers, builder containers, etc.):
 
