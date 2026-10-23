@@ -92,6 +92,14 @@ anchor and the donation and fee cap as they were.
 - `/miners` serves the miners on this node with their workers as JSON, paged
   and built like `/dashboard/miners`, and `/network` names the chain the node
   mines as the dashboard header does. Both open with `public_dashboard`.
+- A docs site built with mdBook from `docs/` (`mdbook build docs`, CI job
+  `Docs`), with new pages for requirements, miner options, small-miner
+  arithmetic on Bitcoin Cash and known attacks.
+- Docker: a Bitcoin Cash Node 29.2.0 image from the release tarball, pinned
+  by SHA-256, and a regtest stack that mines through the pool with a Rust CPU
+  miner (mujina), checked by the `Docker regtest stack` CI job.
+- Ansible: Bitcoin Cash keys in the node's config template and a
+  `monitoring_p2poolv2` role for Prometheus and Grafana.
 
 ### Changed
 
@@ -148,6 +156,19 @@ anchor and the donation and fee cap as they were.
   logs `branch forks more than MAX_REORG_DEPTH below the confirmed tip`.
 - Stratum `maximum_difficulty` defaults to 2^32 (about 5.5 EH/s at one share
   every 3.33 seconds) when unset, and a session's difficulty is at least 1.
+- The Docker stacks run Bitcoin Cash: BCHN on regtest, chipnet or mainnet
+  instead of Bitcoin Core on signet, `chain = "bitcoin-cash"` in the image's
+  default config, and Prometheus and Grafana pinned by version and digest.
+- The Ansible role installs this fork's release and writes Bitcoin Cash
+  configs. Optional instance keys no longer render `default(omit)`
+  placeholders into the config.
+- The Grafana dashboards link found blocks to Blockchair (mainnet) or
+  chipnet.imaginary.cash (chipnet) instead of mempool.space, show coinbase
+  amounts in BCH and list miners by payout address.
+- The sample configs offer miners BIP 320's version rolling mask, `1fffe000`,
+  the code default, instead of `1fffffe0`.
+- README rewritten for the Bitcoin Cash fork.
+
 - Share-chain consensus on Bitcoin Cash: the interpreter also accepts a
   claim or refund of the share-trading contract; every output of a
   non-coinbase share transaction must be P2PKH or P2SH32 at or above BCHN's

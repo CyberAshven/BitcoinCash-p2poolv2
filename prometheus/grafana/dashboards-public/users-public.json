@@ -202,7 +202,7 @@
               "Time 2": true
             },
             "renameByName": {
-              "btcaddress": "Miner",
+              "btcaddress": "Payout address",
               "Value #A": "Hashrate",
               "Value #B": "Best share"
             }

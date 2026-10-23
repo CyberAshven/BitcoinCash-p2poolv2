@@ -1,0 +1,20 @@
+# mdBook configuration for the docs site: `mdbook build docs` from the
+# repository root writes the site to target/book. mdBook is written in Rust.
+
+[book]
+title = "P2Poolv2 for Bitcoin Cash"
+authors = ["P2Poolv2 Developers"]
+description = "A peer-to-peer Bitcoin Cash mining pool: miners coordinate directly and are paid in the coinbase of every block the pool finds."
+language = "en"
+src = "."
+
+[build]
+build-dir = "../target/book"
+# A page listed in SUMMARY.md must exist; mdBook must not invent empty ones.
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/CyberAshven/BitcoinCash-p2poolv2"
+edit-url-template = "https://github.com/CyberAshven/BitcoinCash-p2poolv2/edit/alpha/docs/{path}"
+# GitHub Pages project URL, used for the 404 page's links.
+site-url = "/BitcoinCash-p2poolv2/"

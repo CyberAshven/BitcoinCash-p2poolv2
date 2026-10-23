@@ -1,4 +1,4 @@
-= P2Poolv2 Ansible Deployment
+= P2Poolv2 Ansible Deployment (Bitcoin Cash)
 
 == Quick start
 
@@ -30,17 +30,32 @@ Deploy only a specific role:
 ----
 ansible-playbook -i inventory/hosts.yml playbook.yml --tags p2poolv2 --ask-vault-pass
 ansible-playbook -i inventory/hosts.yml playbook.yml --tags nginx --ask-vault-pass
+ansible-playbook -i inventory/hosts.yml playbook.yml --tags monitoring --ask-vault-pass
 ----
 
 == What it does
 
-The playbook deploys one or more P2Poolv2 instances to a host. Each instance gets its own config, systemd service, and data directory. Nginx is configured once per host as a reverse proxy.
+The playbook deploys one or more P2Poolv2 instances to a host, each on a
+Bitcoin Cash network (`mainnet`, `chipnet` or `regtest`). Each instance gets
+its own config, systemd service, and data directory. Nginx is configured once
+per host as a reverse proxy, and Prometheus with Grafana once per host for
+monitoring.
 
-Two roles:
+Three roles:
 
-*p2poolv2*:: Installs the p2poolv2 binary and CLI using the official installer script (auto-detects architecture), templates the TOML config, and manages the systemd service.
+*p2poolv2*:: Installs the p2poolv2 binary and CLI from this fork's release
+  (`https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases`) with the
+  release's installer script (auto-detects architecture), templates the TOML
+  config with `chain = "bitcoin-cash"`, and manages the systemd service.
 
 *nginx_p2poolv2*:: Installs nginx as a reverse proxy in front of the API with rate limiting, WebSocket support, and Let's Encrypt certificates via certbot. Optionally proxies Grafana.
+
+*monitoring_p2poolv2*:: Installs Prometheus (distribution package) and Grafana
+  (Grafana's apt repository), both listening on loopback. Prometheus scrapes
+  one instance's `/metrics`; Grafana gets the repository's dashboards
+  (`prometheus/grafana/dashboards/`) and a Prometheus datasource with the uid
+  they expect, as the Docker metrics stack does. Set
+  `p2poolv2_monitoring_enabled: false` to skip it.
 
 == Directory layout
 
@@ -68,6 +83,11 @@ ansible/
       templates/
         p2poolv2_site.conf.j2           # Nginx site config
       handlers/main.yml                 # Reload handler
+    monitoring_p2poolv2/
+      defaults/main.yml                 # Prometheus and Grafana settings
+      tasks/main.yml                    # Install, configure, provision dashboards
+      templates/                        # prometheus.yml, Grafana env and provisioning
+      handlers/main.yml                 # Restart handlers
 ----
 
 == Server layout
@@ -79,26 +99,55 @@ The roles deploy to the following paths on the target host:
 | Path | Purpose
 
 | `/opt/p2poolv2/bin/` | p2poolv2 and p2poolv2_cli binaries
-| `/opt/p2poolv2/share/static/` | Dashboard static files
 | `/etc/p2poolv2/config-<instance>.toml` | Instance config (mode 0640)
-| `/var/lib/p2poolv2/<instance>/` | RocksDB store and stats
+| `/var/lib/p2poolv2/<instance>/<network>-<share chain>/` | RocksDB store
+| `/var/lib/p2poolv2/<instance>/stats/` | Stats
 | `/var/log/p2poolv2/<instance>/` | Log files
 | `/etc/systemd/system/p2poolv2@.service` | Systemd template unit
 | `/etc/nginx/sites-available/p2poolv2.conf` | Nginx reverse proxy config
+| `/etc/prometheus/prometheus.yml` | Prometheus scrape config (mode 0640)
+| `/etc/grafana/p2poolv2.env` | Grafana settings
+| `/etc/grafana/p2poolv2-admin-password` | Grafana admin password (mode 0640)
+| `/var/lib/grafana/dashboards/` | Provisioned dashboards
+|===
+
+== Bitcoin Cash settings
+
+Each entry of `p2poolv2_instances` takes these keys; the role's
+`defaults/main.yml` documents every variable.
+
+[cols="1,3"]
+|===
+| Key | Meaning
+
+| `bitcoin_cash_network` | `mainnet`, `chipnet` or `regtest`. Mainnet and chipnet run the same rules; only this switch differs.
+| `bch_share_chain` | `main`, or `mini` (share target 256 times easier, for small miners). Each has its own store directory.
+| `bootstrap_address` | A CashAddr for the network (`bitcoincash:`, `bchtest:`, `bchreg:`). Required; only Hydrapool mode pays it.
+| `miner_address` | Optional share address (`p2pool:`, `tp2pool:`, `rp2pool:`) owning every share, made with `p2poolv2_cli bch-share-address`. Without it each miner sends `p2p=<share address>`.
+| `donation` | Optional. Basis points to the project's donation address; 150 (1.5%) when unset, 0 opts out.
+| `fee_address`, `fee` | Optional public pool fee, after the donation. Donation plus fee is capped at 1000 (10%) by the share chain.
+| `dial_peers` | Share chain peers, `/ip4/<address>/tcp/<port>`. Bitcoin Cash has no DNS seeds yet, so a node joining a running share chain lists at least one.
+| `wait_for_chain_sync` | `true` to open Stratum only once synced; `false` for the first node of a new share chain.
+| `sv2_port`, `sv2_authority_public_key`, `sv2_authority_secret_key`, `sv2_cert_validity_secs` | Optional Stratum V2. Without the keys frames are unencrypted (localhost or LAN only). Keep the secret key in the vault.
+| `template_source`, `template_provider_address`, `template_provider_authority_public_key` | Optional: templates from a Stratum V2 Template Provider.
+| `public_dashboard`, `web_root` | Optional `[api]` settings: open the dashboard to anyone, serve a self-hosted frontend.
+| `bitcoin_rpc_url`, `bitcoin_rpc_user`, `bitcoin_rpc_pass`, `zmq_endpoint` | The instance's BCHN.
 |===
 
 == Multiple instances
 
-Define multiple entries in `p2poolv2_instances` in your inventory to run mainnet and testnet4 (or any combination) on the same host. Each instance needs unique ports. Set `enabled: false` on an instance to skip it during deployment.
+Define multiple entries in `p2poolv2_instances` in your inventory to run mainnet and chipnet (or any combination) on the same host. Each instance needs unique ports and its own BCHN. Set `enabled: false` on an instance to skip it during deployment.
 
 [cols="1,1,1"]
 |===
-| Port | Mainnet | Testnet4
+| Port | Mainnet | Chipnet
 
-| Stratum | 3333 | 3334
+| Stratum V1 | 3333 | 3334
+| Stratum V2 (optional) | 3336 | 3337
 | P2P | 6884 | 6885
 | API | 46884 | 46885
-| ZMQ | 28332 | 28333
+| BCHN RPC | 8332 | 48332
+| BCHN ZMQ hashblock | 28332 | 28333
 |===
 
 == Nginx
@@ -107,14 +156,36 @@ Nginx is configured once per host (not per instance). The config includes:
 
 - Reverse proxy to the P2Poolv2 API with rate limiting and WebSocket support
 - HTTP to HTTPS redirect
-- Optional redirect domains (e.g. p2poolv2.org -> testnet4.p2poolv2.org)
+- Optional redirect domains (e.g. a bare domain to a node subdomain)
 - Optional Grafana reverse proxy (set `p2poolv2_grafana_domain`)
 - Let's Encrypt certificates via certbot
 - Basic auth header injection toward the API backend (derived from vault credentials)
 
+== Monitoring
+
+Prometheus listens on `127.0.0.1:9090` and Grafana on `127.0.0.1:3000`; set
+`p2poolv2_grafana_domain` to publish Grafana through nginx. The dashboards
+link found blocks to a Bitcoin Cash explorer chosen by the node's network
+(mainnet: Blockchair, chipnet: chipnet.imaginary.cash). They have no instance
+selector, so Prometheus scrapes one instance: the first enabled one, or the
+one `p2poolv2_monitoring_instance` names. If that instance sets `auth_user`,
+set `p2poolv2_metrics_auth_user` and `p2poolv2_metrics_auth_pass` too.
+
 == Secrets
 
-All credentials are stored in `inventory/group_vars/all/vault.yml`, encrypted with ansible-vault. The vault file is gitignored.
+All credentials are stored in `inventory/group_vars/all/vault.yml`, encrypted
+with ansible-vault. The vault file is gitignored, and the example holds
+placeholders only.
+
+[cols="1,2"]
+|===
+| Variable | Used for
+
+| `vault_bchn_rpc_user`, `vault_bchn_rpc_pass` | BCHN's RPC login
+| `vault_api_auth_user`, `vault_api_auth_pass`, `vault_api_auth_token` | API login, the nginx basic auth header, Prometheus' scrape login
+| `vault_sv2_authority_secret_key` | Stratum V2 Noise authority key
+| `vault_grafana_admin_password` | Grafana's admin password
+|===
 
 To generate an API auth token:
 
@@ -125,10 +196,18 @@ p2poolv2_cli gen-auth <username> <password>
 
 Store the username, password, and resulting token in the vault. The nginx basic auth header is derived automatically from the username and password.
 
+== Upgrades
+
+The fork refreshes the `v0.0.1-alpha` release in place until the beta, so the
+version string stays the same when the binaries change. Run the playbook with
+`-e p2poolv2_force_install=true` to reinstall from the current release.
+
 == Prerequisites
 
 * Ansible 2.12+
-* A target host running Ubuntu (tested on 22.04)
+* A target host running Ubuntu (tested on 22.04) or Debian
 * SSH access with sudo privileges
-* A running Bitcoin Core node on the target (not managed by this playbook)
+* A running Bitcoin Cash Node (BCHN) per network on the target, with
+  `server=1`, an RPC login and `zmqpubhashblock` (not managed by this
+  playbook; see `docs/requirements.md`)
 * DNS records pointing your domain(s) to the target host (for Let's Encrypt)

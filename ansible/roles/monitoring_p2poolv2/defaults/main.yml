@@ -1,0 +1,42 @@
+---
+# Prometheus and Grafana for a P2Poolv2 node, installed natively (systemd),
+# built from the repository's prometheus/ setup: the same dashboards and the
+# same datasource uid as docker/docker-compose.metrics.yml.
+#
+# Debian and Ubuntu only. Prometheus comes from the distribution, Grafana
+# from Grafana's apt repository.
+
+# The P2Poolv2 instance Prometheus scrapes. The dashboards have no instance
+# selector, so one Prometheus watches one node; the default is the first
+# enabled entry of p2poolv2_instances.
+# p2poolv2_monitoring_instance: "chipnet"
+
+# Prometheus listens on loopback only; Grafana reads it there.
+p2poolv2_prometheus_listen_address: "127.0.0.1:9090"
+p2poolv2_prometheus_scrape_interval: "5s"
+p2poolv2_prometheus_retention: "30d"
+
+# Login for /metrics when the instance sets auth_user. Keep the password in
+# the vault.
+# p2poolv2_metrics_auth_user: "{{ vault_api_auth_user }}"
+# p2poolv2_metrics_auth_pass: "{{ vault_api_auth_pass }}"
+
+# Grafana listens on loopback; the nginx role proxies it when
+# p2poolv2_grafana_domain is set.
+p2poolv2_grafana_http_addr: "127.0.0.1"
+p2poolv2_grafana_port: 3000
+p2poolv2_grafana_admin_user: "admin"
+# Required. Applied when Grafana creates its database, on first start.
+# p2poolv2_grafana_admin_password: "{{ vault_grafana_admin_password }}"
+# Let visitors view the dashboards without logging in.
+p2poolv2_grafana_anonymous_viewer: true
+
+# Grafana's apt repository and the package to install. Set the package to
+# "grafana=<version>" to pin a version.
+p2poolv2_grafana_apt_key_url: "https://apt.grafana.com/gpg.key"
+p2poolv2_grafana_apt_repo: "deb [signed-by=/etc/apt/keyrings/grafana.asc] https://apt.grafana.com stable main"
+p2poolv2_grafana_package: "grafana"
+
+# The repository's dashboards and provisioning, next to this playbook.
+p2poolv2_grafana_dashboards_src: "{{ playbook_dir }}/../prometheus/grafana/dashboards/"
+p2poolv2_grafana_dashboards_dir: "/var/lib/grafana/dashboards"

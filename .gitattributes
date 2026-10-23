@@ -4,3 +4,8 @@
 # Genesis bitcoin blocks as raw consensus bytes, pulled in via include_bytes!.
 # Binary: no textual diffs, so magit and editors never render them.
 p2poolv2_lib/src/shares/genesis/*.dat binary
+
+# Copied into Linux containers: LF on every checkout, Windows included, or
+# the shebang lines and BCHN config values break.
+docker/bchn/** text eol=lf
+docker/regtest/** text eol=lf

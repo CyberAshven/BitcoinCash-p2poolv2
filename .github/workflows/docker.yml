@@ -43,7 +43,7 @@ jobs:
             ghcr.io/${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description="P2Poolv2 is a peer-to-peer Bitcoin mining pool where miners coordinate directly and verify their rewards without centralized operators."
+            org.opencontainers.image.description="P2Poolv2 for Bitcoin Cash: a peer-to-peer mining pool where miners coordinate directly and are paid in the coinbase of every block the pool finds."
             org.opencontainers.image.licenses="MIT OR Apache-2.0"
           cache-from: type=gha,scope=build-docker-amd64
           cache-to: type=gha,scope=build-docker-amd64,mode=max
@@ -104,7 +104,7 @@ jobs:
           tags: ghcr.io/${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description="P2Poolv2 is a peer-to-peer Bitcoin mining pool where miners coordinate directly and verify their rewards without centralized operators."
+            org.opencontainers.image.description="P2Poolv2 for Bitcoin Cash: a peer-to-peer mining pool where miners coordinate directly and are paid in the coinbase of every block the pool finds."
             org.opencontainers.image.licenses="MIT OR Apache-2.0"
           cache-from: type=gha,scope=build-docker-${{ matrix.arch }}
           cache-to: type=gha,scope=build-docker-${{ matrix.arch }},mode=max

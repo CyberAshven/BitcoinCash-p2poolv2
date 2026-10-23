@@ -19,10 +19,10 @@ _default:
     set -euo pipefail
 
     [ -f docker/.env ] || cp -v docker/.env.sample docker/.env
-    [ -f config-dev.toml ] || cp -v config.toml config-dev.toml
+    [ -f config-dev.toml ] || cp -v config.sample.toml config-dev.toml
 
     echo 'Edit the ./config-dev.toml file for your specific needs'
-    echo 'You can easily run a local cluster with `just compose`'
+    echo 'Run a local Bitcoin Cash regtest stack with `just compose` (see docker/README.adoc)'
 
 # Run tests for entire workspace or a specific package.
 # The full-workspace run (no package arg) adds a second pass that runs the
@@ -158,11 +158,13 @@ docker-run EXTRA="": dockerize
 [group("docker")]
 container-explore: (docker-run "--entrypoint bash")
 
-# Starts a service specified in docker container
+# Start the Bitcoin Cash Docker stack (BCHN and P2Poolv2) from docker/.env.
+# NETWORK, COMPOSE_PROFILES and P2POOL_CONFIG come from that file, so the
+# P2POOL_CONFIG this justfile exports for `just run` is unset here.
 [group("docker")]
 [working-directory("docker")]
 compose *services="":
-    P2POOL_CONFIG={{ target_config }} docker compose --env-file .env --profile developer up -d --build --force-recreate {{ services }}
+    env -u P2POOL_CONFIG docker compose --env-file .env up -d --build --force-recreate {{ services }}
 
 # Start a shell in a docker compose service
 [group("docker")]

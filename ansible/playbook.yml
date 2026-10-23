@@ -1,9 +1,10 @@
 ---
-# P2Poolv2 deployment playbook
+# P2Poolv2 deployment playbook (Bitcoin Cash)
 #
-# Supports multiple instances (e.g. mainnet + testnet4) on the same host.
+# Supports multiple instances (e.g. mainnet + chipnet) on the same host.
 # Each instance gets its own config, systemd unit, and data dir.
-# Nginx is configured once per host as a reverse proxy.
+# Nginx is configured once per host as a reverse proxy, and Prometheus with
+# Grafana once per host for monitoring.
 #
 # Usage:
 #   ansible-playbook -i inventory/hosts.yml playbook.yml
@@ -11,6 +12,12 @@
 # To deploy only a specific role:
 #   ansible-playbook -i inventory/hosts.yml playbook.yml --tags p2poolv2
 #   ansible-playbook -i inventory/hosts.yml playbook.yml --tags nginx
+#   ansible-playbook -i inventory/hosts.yml playbook.yml --tags monitoring
+#
+# Optional instance keys map to role variables with an empty default; the
+# config template leaves an empty value out. (`default(omit)` does not work
+# here: omit only applies to module arguments, so in role vars it would
+# render its placeholder string into the config.)
 
 - name: Deploy P2Poolv2
   hosts: p2poolv2_nodes
@@ -26,26 +33,42 @@
         p2poolv2_stratum_port: "{{ instance.stratum_port }}"
         p2poolv2_start_difficulty: "{{ instance.start_difficulty }}"
         p2poolv2_minimum_difficulty: "{{ instance.minimum_difficulty }}"
-        p2poolv2_solo_address: "{{ instance.solo_address }}"
+        p2poolv2_maximum_difficulty: "{{ instance.maximum_difficulty | default('') }}"
+        p2poolv2_bitcoin_cash_network: "{{ instance.bitcoin_cash_network }}"
+        p2poolv2_bch_share_chain: "{{ instance.bch_share_chain | default('main') }}"
+        p2poolv2_store_path: "/var/lib/p2poolv2/{{ instance.instance }}/{{ instance.bitcoin_cash_network }}-{{ instance.bch_share_chain | default('main') }}"
         p2poolv2_bootstrap_address: "{{ instance.bootstrap_address }}"
-        p2poolv2_bitcoin_network: "{{ instance.bitcoin_network }}"
+        p2poolv2_miner_address: "{{ instance.miner_address | default('') }}"
+        p2poolv2_solo_address: "{{ instance.solo_address | default('') }}"
+        p2poolv2_donation: "{{ instance.donation | default('') }}"
+        p2poolv2_fee_address: "{{ instance.fee_address | default('') }}"
+        p2poolv2_fee: "{{ instance.fee | default('') }}"
         p2poolv2_bitcoin_rpc_url: "{{ instance.bitcoin_rpc_url }}"
         p2poolv2_bitcoin_rpc_user: "{{ instance.bitcoin_rpc_user }}"
         p2poolv2_bitcoin_rpc_pass: "{{ instance.bitcoin_rpc_pass }}"
         p2poolv2_zmq_endpoint: "{{ instance.zmq_endpoint }}"
         p2poolv2_api_hostname: "{{ instance.api_hostname | default('127.0.0.1') }}"
         p2poolv2_api_port: "{{ instance.api_port }}"
-        p2poolv2_pool_signature: "{{ instance.pool_signature | default(omit) }}"
+        p2poolv2_api_auth_user: "{{ instance.api_auth_user | default('') }}"
+        p2poolv2_api_auth_token: "{{ instance.api_auth_token | default('') }}"
+        p2poolv2_api_public_dashboard: "{{ instance.public_dashboard | default(false) }}"
+        p2poolv2_api_web_root: "{{ instance.web_root | default('') }}"
+        p2poolv2_pool_signature: "{{ instance.pool_signature | default('') }}"
         p2poolv2_pool_mode: "{{ instance.pool_mode | default('p2poolv2') }}"
         p2poolv2_dial_peers: "{{ instance.dial_peers | default([]) }}"
         p2poolv2_blocked_ips: "{{ instance.blocked_ips | default([]) }}"
         p2poolv2_max_established_incoming: "{{ instance.max_established_incoming | default(100) }}"
         p2poolv2_max_established_outgoing: "{{ instance.max_established_outgoing | default(100) }}"
-        p2poolv2_max_established_per_peer: "{{ instance.max_established_per_peer | default(1) }}"
-        p2poolv2_api_auth_user: "{{ instance.api_auth_user | default(omit) }}"
-        p2poolv2_api_auth_token: "{{ instance.api_auth_token | default(omit) }}"
-        p2poolv2_external_address: "{{ instance.external_address | default(omit) }}"
+        p2poolv2_max_established_per_peer: "{{ instance.max_established_per_peer | default(2) }}"
+        p2poolv2_external_address: "{{ instance.external_address | default('') }}"
         p2poolv2_wait_for_chain_sync: "{{ instance.wait_for_chain_sync | default(true) }}"
+        p2poolv2_sv2_port: "{{ instance.sv2_port | default('') }}"
+        p2poolv2_sv2_authority_public_key: "{{ instance.sv2_authority_public_key | default('') }}"
+        p2poolv2_sv2_authority_secret_key: "{{ instance.sv2_authority_secret_key | default('') }}"
+        p2poolv2_sv2_cert_validity_secs: "{{ instance.sv2_cert_validity_secs | default('') }}"
+        p2poolv2_template_source: "{{ instance.template_source | default('') }}"
+        p2poolv2_template_provider_address: "{{ instance.template_provider_address | default('') }}"
+        p2poolv2_template_provider_authority_public_key: "{{ instance.template_provider_authority_public_key | default('') }}"
       loop: "{{ p2poolv2_instances }}"
       loop_control:
         loop_var: instance
@@ -57,3 +80,9 @@
       ansible.builtin.include_role:
         name: nginx_p2poolv2
       tags: [nginx]
+
+    - name: Deploy Prometheus and Grafana
+      ansible.builtin.include_role:
+        name: monitoring_p2poolv2
+      when: p2poolv2_monitoring_enabled | default(true)
+      tags: [monitoring]

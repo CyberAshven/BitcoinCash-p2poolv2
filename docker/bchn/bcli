@@ -1,0 +1,4 @@
+#!/bin/sh
+# bitcoin-cli against this container's BCHN, on the network NETWORK names.
+# Example: docker compose exec bchn bcli getblockchaininfo
+exec bitcoin-cli -datadir=/data -conf="/etc/bchn/bitcoin-${NETWORK:-regtest}.conf" "$@"

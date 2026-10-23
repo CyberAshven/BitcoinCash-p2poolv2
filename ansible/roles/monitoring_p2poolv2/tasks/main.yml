@@ -1,0 +1,181 @@
+---
+# Prometheus and Grafana for a P2Poolv2 node (Debian and Ubuntu).
+
+- name: Check the target is Debian or Ubuntu
+  ansible.builtin.assert:
+    that:
+      - ansible_os_family == "Debian"
+    fail_msg: "monitoring_p2poolv2 supports Debian and Ubuntu only"
+
+# The first enabled instance, or the one p2poolv2_monitoring_instance names.
+- name: Pick the instance Prometheus scrapes
+  ansible.builtin.set_fact:
+    p2poolv2_monitoring_target: "{{ item }}"
+  loop: "{{ p2poolv2_instances }}"
+  loop_control:
+    label: "{{ item.instance }}"
+  when:
+    - p2poolv2_monitoring_target is not defined
+    - item.enabled | default(true) | bool
+    - p2poolv2_monitoring_instance is not defined or item.instance == p2poolv2_monitoring_instance
+
+- name: Check an instance was found
+  ansible.builtin.assert:
+    that:
+      - p2poolv2_monitoring_target is defined
+    fail_msg: "No enabled p2poolv2_instances entry to monitor (p2poolv2_monitoring_instance)"
+
+- name: Require a Grafana admin password
+  ansible.builtin.assert:
+    that:
+      - p2poolv2_grafana_admin_password is defined
+      - p2poolv2_grafana_admin_password | length > 0
+    fail_msg: "Set p2poolv2_grafana_admin_password (from vault_grafana_admin_password)"
+
+# --- Prometheus ---
+
+- name: Install Prometheus
+  ansible.builtin.apt:
+    name: prometheus
+    state: present
+    update_cache: true
+
+- name: Deploy prometheus.yml
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /etc/prometheus/prometheus.yml
+    owner: root
+    group: prometheus
+    mode: "0640"
+  # It may hold the scrape login.
+  diff: false
+  notify: restart prometheus
+
+- name: Listen on loopback and keep the configured retention
+  ansible.builtin.copy:
+    dest: /etc/default/prometheus
+    content: |
+      # Managed by Ansible (monitoring_p2poolv2)
+      ARGS="--web.listen-address={{ p2poolv2_prometheus_listen_address }} --storage.tsdb.retention.time={{ p2poolv2_prometheus_retention }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart prometheus
+
+# --- Grafana ---
+
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download Grafana's apt signing key
+  ansible.builtin.get_url:
+    url: "{{ p2poolv2_grafana_apt_key_url }}"
+    dest: /etc/apt/keyrings/grafana.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Add Grafana's apt repository
+  ansible.builtin.apt_repository:
+    repo: "{{ p2poolv2_grafana_apt_repo }}"
+    filename: grafana
+    state: present
+
+- name: Install Grafana
+  ansible.builtin.apt:
+    name: "{{ p2poolv2_grafana_package }}"
+    state: present
+    update_cache: true
+
+- name: Write Grafana's admin password
+  ansible.builtin.copy:
+    content: "{{ p2poolv2_grafana_admin_password }}"
+    dest: /etc/grafana/p2poolv2-admin-password
+    owner: root
+    group: grafana
+    mode: "0640"
+  no_log: true
+  notify: restart grafana-server
+
+- name: Write Grafana's settings
+  ansible.builtin.template:
+    src: grafana.env.j2
+    dest: /etc/grafana/p2poolv2.env
+    owner: root
+    group: grafana
+    mode: "0644"
+  notify: restart grafana-server
+
+- name: Create the grafana-server drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/grafana-server.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Load the settings into grafana-server
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/grafana-server.service.d/p2poolv2.conf
+    content: |
+      # Managed by Ansible (monitoring_p2poolv2)
+      [Service]
+      EnvironmentFile=/etc/grafana/p2poolv2.env
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart grafana-server
+
+- name: Provision the Prometheus datasource
+  ansible.builtin.template:
+    src: datasource.yml.j2
+    dest: /etc/grafana/provisioning/datasources/p2poolv2.yml
+    owner: root
+    group: grafana
+    mode: "0640"
+  notify: restart grafana-server
+
+- name: Provision the dashboards folder
+  ansible.builtin.template:
+    src: dashboards.yml.j2
+    dest: /etc/grafana/provisioning/dashboards/p2poolv2.yml
+    owner: root
+    group: grafana
+    mode: "0640"
+  notify: restart grafana-server
+
+- name: Create the dashboards directory
+  ansible.builtin.file:
+    path: "{{ p2poolv2_grafana_dashboards_dir }}"
+    state: directory
+    owner: root
+    group: grafana
+    mode: "0755"
+
+- name: Deploy the dashboards
+  ansible.builtin.copy:
+    src: "{{ p2poolv2_grafana_dashboards_src }}"
+    dest: "{{ p2poolv2_grafana_dashboards_dir }}/"
+    owner: root
+    group: grafana
+    mode: "0644"
+
+# --- Services ---
+
+- name: Enable and start Prometheus
+  ansible.builtin.systemd:
+    name: prometheus
+    enabled: true
+    state: started
+
+- name: Enable and start Grafana
+  ansible.builtin.systemd:
+    name: grafana-server
+    enabled: true
+    state: started
+    daemon_reload: true

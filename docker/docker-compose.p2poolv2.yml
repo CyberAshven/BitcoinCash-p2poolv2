@@ -9,8 +9,9 @@
 #
 # With host networking:
 #   - p2poolv2 binds directly to host ports (no port mapping)
-#   - bitcoind URL must use 127.0.0.1 (not Docker DNS name 'bitcoind')
-#   - mujina_minerd connects via host ports (needs host networking or host IP)
+#   - BCHN's RPC and ZMQ are reached on 127.0.0.1, where docker-compose.yml
+#     publishes them (not by the Docker DNS name 'bchn')
+#   - the regtest miner connects to 127.0.0.1 too, so it uses host networking
 #
 # Run with: docker compose up -d p2poolv2
 
@@ -26,21 +27,26 @@ services:
       # underscores stay part of a field name. P2POOL_CONFIG is read by clap
       # rather than the config crate, so it keeps a single underscore.
       #
-      # NETWORK from .env is the single place a compose deployment picks its
-      # chain. It already selects bitcoind's config file in
-      # docker-compose.yml, so driving the share chain and store directory
-      # from it too is what keeps p2poolv2 and bitcoind on the same chain.
+      # The stack is Bitcoin Cash. NETWORK from .env is the single place a
+      # compose deployment picks its network. It already selects BCHN's config
+      # file in docker-compose.yml, so driving bitcoin_cash_network and the
+      # store directory from it too is what keeps p2poolv2 and BCHN on the
+      # same network.
       #
-      # This overrides `network` in the mounted config.toml, which is ignored
-      # under compose. Required rather than defaulted, because a default would
-      # quietly put a deployment on signet while its config said otherwise.
-      - P2POOL_STRATUM__NETWORK=${NETWORK:?NETWORK must be set in .env, see docker/.env.sample}
-      - P2POOL_STORE__PATH=/p2poolv2/data/${NETWORK}
+      # This overrides chain, bitcoin_cash_network and bch_share_chain in the
+      # mounted config.toml. NETWORK is required rather than defaulted,
+      # because a default would quietly put a deployment on one network while
+      # its config said another. The store directory also names the share
+      # chain, because main and mini are different chains.
+      - P2POOL_STRATUM__CHAIN=bitcoin-cash
+      - P2POOL_STRATUM__BITCOIN_CASH_NETWORK=${NETWORK:?NETWORK must be set in .env, see docker/.env.sample}
+      - P2POOL_STRATUM__BCH_SHARE_CHAIN=${BCH_SHARE_CHAIN:-mini}
+      - P2POOL_STORE__PATH=/p2poolv2/data/${NETWORK}-${BCH_SHARE_CHAIN:-mini}
       - P2POOL_CONFIG=/etc/p2poolv2/config.toml
       - P2POOL_STRATUM__PORT=${P2POOL_STRATUM_PORT:-3333}
       - P2POOL_API__PORT=${P2POOL_API_PORT:-46884}
       - P2POOL_NETWORK__LISTEN_ADDRESS=/ip4/${P2POOL_P2P_HOST:-0.0.0.0}/tcp/${P2POOL_P2P_PORT:-6884}
-      # Passed through only when set, so platforms that inject the bitcoind
+      # Passed through only when set, so platforms that inject the BCHN
       # endpoint (Umbrel and similar) can, while a deployment that does not set
       # it keeps whatever its mounted config.toml says. Do not give this a
       # default: that would force every deployment onto one endpoint.
@@ -48,27 +54,17 @@ services:
     network_mode: host
     volumes:
       - p2poolv2_data:/p2poolv2
-      - ../${P2POOL_CONFIG:-config.toml}:/etc/p2poolv2/config.toml:ro
+      - ../${P2POOL_CONFIG:-config-docker.sample.toml}:/etc/p2poolv2/config.toml:ro
+    # The image's own healthcheck asks port 46884; this one follows
+    # P2POOL_API_PORT. It needs /health to answer without a login: leave
+    # auth_user unset or set public_dashboard = true.
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:${P2POOL_API_PORT:-46884}/health"]
+      interval: 5s
+      timeout: 2s
+      start_period: 15s
+      retries: 6
     restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "100m"
-        max-file: "3"
-
-  mujina_minerd:
-    profiles: [developer]
-    scale: ${MUJINA_SCALE:-1}
-    image: ghcr.io/256foundation/mujina-minerd:main
-    depends_on:
-      p2poolv2:
-        condition: service_healthy
-    restart: unless-stopped
-    env_file: .env
-    extra_hosts:
-      - docker.host.internal:host-gateway
-    environment:
-      - RUST_LOG=${MUJINA_RUST_LOG:-trace}
     logging:
       driver: "json-file"
       options:

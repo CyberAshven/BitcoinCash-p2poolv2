@@ -1,0 +1,21 @@
+# Managed by Ansible (monitoring_p2poolv2). The same datasource as
+# prometheus/grafana/provisioning/datasources/prometheus.yml, pointing at the
+# local Prometheus instead of the Docker service name.
+apiVersion: 1
+
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # The dashboards' datasource variable defaults to this uid.
+    uid: prometheus
+    access: proxy
+    url: http://{{ p2poolv2_prometheus_listen_address }}
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: {{ p2poolv2_prometheus_scrape_interval }}

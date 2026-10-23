@@ -1,3 +1,0 @@
-#!/bin/ash
-
-exec bitcoin-cli -datadir=/data/ -conf=/etc/bitcoin/bitcoin-${NETWORK}.conf $@

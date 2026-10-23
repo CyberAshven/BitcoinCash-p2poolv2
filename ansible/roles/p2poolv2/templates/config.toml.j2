@@ -1,5 +1,6 @@
 # P2Poolv2 configuration -- managed by Ansible
 # Instance: {{ p2poolv2_instance }}
+# Bitcoin Cash {{ p2poolv2_bitcoin_cash_network }}, {{ p2poolv2_bch_share_chain }} share chain
 
 [network]
 listen_address = "{{ p2poolv2_p2p_listen_address }}"
@@ -19,7 +20,7 @@ max_inventory_per_second = {{ p2poolv2_max_inventory_per_second }}
 max_transaction_per_second = {{ p2poolv2_max_transaction_per_second }}
 max_requests_per_second = {{ p2poolv2_max_requests_per_second }}
 dial_timeout_secs = {{ p2poolv2_dial_timeout_secs }}
-{% if p2poolv2_external_address is defined %}
+{% if p2poolv2_external_address | default('') | string | length > 0 %}
 external_address = "{{ p2poolv2_external_address }}"
 {% endif %}
 
@@ -32,30 +33,67 @@ hostname = "{{ p2poolv2_stratum_hostname }}"
 port = {{ p2poolv2_stratum_port }}
 start_difficulty = {{ p2poolv2_start_difficulty }}
 minimum_difficulty = {{ p2poolv2_minimum_difficulty }}
-{% if p2poolv2_maximum_difficulty is defined %}
+{% if p2poolv2_maximum_difficulty | default('') | string | length > 0 %}
 maximum_difficulty = {{ p2poolv2_maximum_difficulty }}
 {% endif %}
-solo_address = "{{ p2poolv2_solo_address }}"
-bootstrap_address = "{{ p2poolv2_bootstrap_address }}"
-{% if p2poolv2_donation_address is defined %}
-donation_address = "{{ p2poolv2_donation_address }}"
-donation = {{ p2poolv2_donation | default(0) }}
+chain = "{{ p2poolv2_chain }}"
+{% if p2poolv2_chain == "bitcoin-cash" %}
+bitcoin_cash_network = "{{ p2poolv2_bitcoin_cash_network }}"
+bch_share_chain = "{{ p2poolv2_bch_share_chain }}"
+# Required by the parser, ignored on Bitcoin Cash: derived from
+# bitcoin_cash_network.
+network = "{{ {'mainnet': 'main', 'chipnet': 'test', 'regtest': 'regtest'}[p2poolv2_bitcoin_cash_network] }}"
+{% else %}
+network = "{{ p2poolv2_bitcoin_network | default('main') }}"
 {% endif %}
-{% if p2poolv2_fee_address is defined %}
+{% if p2poolv2_solo_address | default('') | string | length > 0 %}
+solo_address = "{{ p2poolv2_solo_address }}"
+{% endif %}
+bootstrap_address = "{{ p2poolv2_bootstrap_address }}"
+{% if p2poolv2_miner_address | default('') | string | length > 0 %}
+miner_address = "{{ p2poolv2_miner_address }}"
+{% endif %}
+{% if p2poolv2_donation | default('') | string | length > 0 %}
+donation = {{ p2poolv2_donation }}
+{% endif %}
+{% if p2poolv2_donation_address | default('') | string | length > 0 %}
+donation_address = "{{ p2poolv2_donation_address }}"
+{% endif %}
+{% if p2poolv2_fee_address | default('') | string | length > 0 %}
 fee_address = "{{ p2poolv2_fee_address }}"
-fee = {{ p2poolv2_fee | default(0) }}
+fee = {{ p2poolv2_fee if (p2poolv2_fee | default('') | string | length > 0) else 0 }}
 {% endif %}
 zmqpubhashblock = "{{ p2poolv2_zmq_endpoint }}"
-network = "{{ p2poolv2_bitcoin_network }}"
 version_mask = "{{ p2poolv2_version_mask }}"
-{% if p2poolv2_pool_signature is defined %}
+{% if p2poolv2_pool_signature | default('') | string | length > 0 %}
 pool_signature = "{{ p2poolv2_pool_signature }}"
 {% endif %}
-{% if p2poolv2_max_connections is defined %}
+{% if p2poolv2_max_connections | default('') | string | length > 0 %}
 max_connections = {{ p2poolv2_max_connections }}
 {% endif %}
-wait_for_chain_sync = {{ p2poolv2_wait_for_chain_sync | lower }}
+wait_for_chain_sync = {{ p2poolv2_wait_for_chain_sync | bool | lower }}
 mode = "{{ p2poolv2_pool_mode }}"
+{% if p2poolv2_sv2_port | default('') | string | length > 0 %}
+sv2_port = {{ p2poolv2_sv2_port }}
+{% endif %}
+{% if p2poolv2_sv2_authority_public_key | default('') | string | length > 0 %}
+sv2_authority_public_key = "{{ p2poolv2_sv2_authority_public_key }}"
+{% endif %}
+{% if p2poolv2_sv2_authority_secret_key | default('') | string | length > 0 %}
+sv2_authority_secret_key = "{{ p2poolv2_sv2_authority_secret_key }}"
+{% endif %}
+{% if p2poolv2_sv2_cert_validity_secs | default('') | string | length > 0 %}
+sv2_cert_validity_secs = {{ p2poolv2_sv2_cert_validity_secs }}
+{% endif %}
+{% if p2poolv2_template_source | default('') | string | length > 0 %}
+template_source = "{{ p2poolv2_template_source }}"
+{% endif %}
+{% if p2poolv2_template_provider_address | default('') | string | length > 0 %}
+template_provider_address = "{{ p2poolv2_template_provider_address }}"
+{% endif %}
+{% if p2poolv2_template_provider_authority_public_key | default('') | string | length > 0 %}
+template_provider_authority_public_key = "{{ p2poolv2_template_provider_authority_public_key }}"
+{% endif %}
 
 [bitcoinrpc]
 url = "{{ p2poolv2_bitcoin_rpc_url }}"
@@ -65,16 +103,20 @@ password = "{{ p2poolv2_bitcoin_rpc_pass }}"
 [logging]
 file = "{{ p2poolv2_log_file }}"
 level = "{{ p2poolv2_log_level }}"
-console = {{ p2poolv2_log_console | lower }}
+console = {{ p2poolv2_log_console | bool | lower }}
 stats_dir = "{{ p2poolv2_stats_dir }}"
 
 [api]
 hostname = "{{ p2poolv2_api_hostname }}"
 port = {{ p2poolv2_api_port }}
-{% if p2poolv2_api_auth_user is defined %}
+{% if p2poolv2_api_auth_user | default('') | string | length > 0 %}
 auth_user = "{{ p2poolv2_api_auth_user }}"
 {% endif %}
-{% if p2poolv2_api_auth_token is defined %}
+{% if p2poolv2_api_auth_token | default('') | string | length > 0 %}
 auth_token = "{{ p2poolv2_api_auth_token }}"
 {% endif %}
-cors_allowed = {{ p2poolv2_api_cors_allowed | lower }}
+cors_allowed = {{ p2poolv2_api_cors_allowed | bool | lower }}
+public_dashboard = {{ p2poolv2_api_public_dashboard | bool | lower }}
+{% if p2poolv2_api_web_root | default('') | string | length > 0 %}
+web_root = "{{ p2poolv2_api_web_root }}"
+{% endif %}

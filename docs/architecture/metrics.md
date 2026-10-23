@@ -129,16 +129,18 @@ find; it records nothing.
 - *Blocks found*: Stat of `bitcoin_blocks_found_total` (instant).
 - *Found blocks table*: a Table panel over
   `bitcoin_block_found_time_seconds * 1000` (Instant query, Format =
-  Table, value unit `dateTimeAsIso`). The `network` label (bitcoin core
-  names: main, testnet4, signet, regtest) is mapped to an `explorer`
-  label in the query with `label_replace`: `https://mempool.space` for
-  main and `https://mempool.space/<network>` for testnet4 and signet. A
-  data link on the `blockhash` field points at
+  Table, value unit `dateTimeAsIso`). The `network` label is the node's
+  `stratum.network` in bitcoin core names; a Bitcoin Cash node derives it
+  from `bitcoin_cash_network`: `main` on mainnet, `test` on chipnet,
+  `regtest` on regtest. The query maps it to an `explorer` label with
+  `label_replace`: `https://blockchair.com/bitcoin-cash` for `main` (or
+  `mainnet`) and `https://chipnet.imaginary.cash` for `test` (or
+  `chipnet`). A data link on the `blockhash` field points at
   `${__data.fields.explorer}/block/${__value.raw}`; the `explorer` and
   `network` columns are hidden with a field override (not removed by the
   organize transform, which would make them unavailable to the link).
-  Regtest and private signets have no public explorer, so their links
-  do not resolve.
+  Regtest has no public explorer, so its links do not resolve. The
+  `miner` label is shown as "Payout address".
 
 ### Pool-wide sharechain hashrate (Release 2) -- pool item #2
 

@@ -1,19 +1,22 @@
 # Compose file for running additional p2poolv2 nodes against the shared
-# bitcoind started by docker-compose.yml.
+# BCHN started by docker-compose.yml.
 #
 # Usage:
-#   # First, start the shared infrastructure (bitcoind + default node):
+#   # First, start the shared infrastructure (BCHN + default node):
 #   docker compose up -d
 #
-#   # Then start additional nodes, each with its own .env and project name:
+#   # Then start additional nodes, each with its own .env and project name.
+#   # .env.node2.sample is a regtest second node that dials the first:
+#   cp .env.node2.sample .env.node2
 #   docker compose -f docker-compose.node.yml -p node2 --env-file .env.node2 up -d
-#   docker compose -f docker-compose.node.yml -p node3 --env-file .env.node3 up -d
 #
 #   # To stop an additional node:
 #   docker compose -f docker-compose.node.yml -p node2 down
 #
 # Note: p2poolv2 uses host networking (see docker-compose.p2poolv2.yml).
 # All nodes share the same host ports - ensure port variables don't conflict.
+# Each project gets its own store volume, so each node keeps its own share
+# chain copy.
 
 services:
   p2poolv2:

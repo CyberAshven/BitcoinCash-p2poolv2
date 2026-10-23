@@ -1,0 +1,182 @@
+# Known attacks and threat model
+
+Well-studied attacks on mining pools, and how they apply to P2Poolv2 on
+Bitcoin Cash. Adapted from upstream's draft "Handling Known Attacks" (its
+docs, `handling_known_attacks.adoc`), with Bitcoin Cash notes and this fork's
+status. Status is one of **mitigated**, **partial** or **open**; nothing
+here is a proof, and mainnet has not started.
+
+## What is at stake
+
+- **Miners' payouts.** Each BCH block the pool finds pays the PPLNS window in
+  its coinbase. An attacker wins by taking a larger slice of the window, by
+  making blocks get lost, or by stopping honest nodes from mining.
+- **The share chain's agreement.** Every node must rebuild the same coinbase
+  for every share. A node that disagrees forks off and its miners are paid
+  on a chain nobody else follows.
+- **Traded shares.** A share's payout right can be sold for BCH; the share
+  chain's script and payout-right rules guard it
+  ([atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md)).
+
+Bitcoin Cash itself is never forked by P2Poolv2: blocks the pool finds are
+ordinary BCH blocks, and every share-chain rule changes only the share chain.
+
+## Attacks on the reward scheme
+
+### Pool hopping
+
+Under proportional payouts, miners join early in a round and leave late
+(Rosenfeld 2011, [arXiv:1112.4980](https://arxiv.org/abs/1112.4980)).
+
+**Mitigated.** PPLNS resists hopping. On Bitcoin Cash the window is measured
+in work, not shares: `K = 3` blocks of work by the paying block's own
+difficulty (plan decision 11), so share difficulty changes do not bring
+timing back into a share's value.
+
+### Block withholding (sabotage)
+
+The attacker submits shares but throws away any hash that also meets the BCH
+block target (Rosenfeld 2011, section 6.2).
+
+**Open.** A share carries its coinbase and merkle branch, not the block's
+transactions, so other nodes cannot rebuild and broadcast the block from a
+block-grade share; the finder's node must. A block-finder bonus was weighed
+and deferred (decision 11): it adds little cost for a large withholder. The
+dashboard's effort panel shows a pool that finds fewer blocks than its work
+predicts.
+
+### Miner's dilemma and pool infiltration
+
+A pool mines inside a victim pool and withholds blocks there
+(Eyal 2015, [arXiv:1411.7099](https://arxiv.org/abs/1411.7099)).
+
+**Open,** with the same defences as block withholding.
+
+### Fork after withholding (FAW) and power adjusting withholding (PAW)
+
+The attacker holds a found block and releases it only when a competitor
+appears (Kwon et al., CCS 2017,
+[arXiv:1708.09790](https://arxiv.org/abs/1708.09790)), or shifts hashrate
+between infiltration and its own mining (Gao et al., CCS 2019).
+
+**Open.** A late block-grade share still earns 9/10 as an uncle. Cutting
+uncle credit for block-grade shares that were stale when peers first saw
+them is the candidate rule; it also costs honest orphans, so it needs
+modelling first. Per-address hashrate in Grafana helps spot PAW.
+
+## Attacks on the share chain
+
+### Selfish mining on the share chain
+
+The attacker withholds shares to orphan honest ones and grow its window
+share (Eyal and Sirer 2013, [arXiv:1311.0243](https://arxiv.org/abs/1311.0243);
+Sapirshtein et al., [arXiv:1507.06183](https://arxiv.org/abs/1507.06183)).
+Ten-second shares give latency more weight.
+
+**Partial.** Uncles blunt it: an orphaned honest share is still paid 9/10.
+Uncle rewards can also make selfish mining pay in some ranges, as Ethereum
+analyses found; an MDP model of the 9/10 split is still to be done
+(upstream issue #162). Fast relay keeps the attacker's edge small.
+
+### Share withholding and timestamp games
+
+The attacker times share submissions (Chang, SecureComm 2020), or skews
+timestamps to lower the share difficulty and mint cheap shares.
+
+**Partial.** Full validation checks a share's time against the median of its
+ancestors and rejects shares more than 120 seconds in the future. On Bitcoin
+Cash the share chain's ASERT is anchored at each share's parent (decision
+12), so a share's target follows its parent's interval directly, which makes
+timestamp rules matter more. Header sync does not yet check timestamps; it
+checks proof of work and difficulty only. Targets use integer fixed-point
+aserti3, so every node computes the same one.
+
+### Stubborn mining, eclipse and partitioning
+
+The attacker isolates nodes so they mine on a stale tip (Nayak et al. 2016,
+[eprint 2015/796](https://eprint.iacr.org/2015/796); Heilman et al. 2015,
+[eprint 2015/263](https://eprint.iacr.org/2015/263)), or splits the network
+by routing (Apostolaki et al. 2017,
+[arXiv:1605.07524](https://arxiv.org/abs/1605.07524)).
+
+**Partial.** Nodes cap connections (`max_established_*`, `max_connections`)
+and can block addresses at run time (`/blocked_ips`), and a node on a stale
+tip asks peers for headers. There are no anchor peers kept across restarts,
+no spread across networks, and no alert when the tip stops; the Grafana node
+dashboard shows the peer count in red at zero. Bitcoin Cash has no P2Poolv2
+DNS seeds yet: operators list peers in `dial_peers` by hand, so list several
+on different networks.
+
+### Resource exhaustion
+
+**Partial.**
+
+- Message rates are capped per peer (`max_*_per_second`).
+- Shares whose parent is unknown wait in memory; each costs the attacker a
+  share's proof of work, but the map has no size cap or expiry yet. On the
+  mini chain shares are cheap.
+- The share-transaction pool holds at most 1,000 transactions and 4 MiB and
+  evicts the oldest. It has no fee or priority rule yet, so a flood can push
+  out honest transfers.
+- A very large `d=` in the Stratum password can overflow vardiff's
+  accounting. Operators should set `maximum_difficulty`.
+
+## Attacks on miners
+
+### Stratum hijacking and eavesdropping
+
+Stratum V1 is plaintext: an attacker on the path can read a miner's earnings
+and swap jobs (Recabarren and Carbunar, PETS 2017,
+[arXiv:1703.06545](https://arxiv.org/abs/1703.06545)).
+
+**Mitigated for Stratum V2.** The node speaks Stratum V2 with Noise
+encryption, signed by the operator's authority key, which miners pin
+(`sv2_authority_public_key`). Stratum V1 stays plaintext: run the node on the
+miners' LAN, which is P2Poolv2's intended setup. The coinbase pays the
+payout address the miner chose, so a hijacker must swap the whole job.
+
+### Coinbase size and stock firmware
+
+Every miner in the window gets a coinbase output. Upstream reports that
+stock Antminer firmware accepts only about a dozen outputs. An attacker with
+many tiny addresses could also push small honest miners out of a capped
+coinbase (the "rich list" attack).
+
+**Open.** Not yet measured on Bitcoin Cash hardware. There is no output cap
+today, so the rich-list attack has nothing to capture, but large windows may
+not fit stock firmware. Stratum V2 standard channels, which hash headers
+only, avoid the limit. A covenant payout tree in one output, which BCH's
+introspection opcodes allow without a fork, is the lasting fix being
+considered.
+
+## Bitcoin Cash chain risks
+
+### Mining on a made-up or hostile BCH chain
+
+A node can be fed templates for a chain the network does not follow, and a
+coinbase may pay work done on such a chain.
+
+**Open.** Shares do not yet carry or check the BCH headers they build on
+(upstream's "mine on the current chain" design). On BCH it needs aserti3-2d
+and chipnet's 20-minute rule. BCHN's automatic finalization of blocks ten
+deep limits how deep a BCH reorg can go, but does not replace the rule. Run
+your own BCHN, or a Template Provider you trust, and keep it well connected.
+
+### Share-chain reorgs and traded shares
+
+**Partial.** Payouts skip the newest 100 shares, so a block's payout differs
+between share-chain forks only when they split deeper than that. Moving
+payout rights are undone on reorgs. A node can still stall on a valid branch
+that spends an output it never fetched; the rule that rejects such spends at
+write time is planned with the transaction work.
+
+## For operators
+
+- Keep BCHN's RPC and ZMQ on localhost.
+- Set `maximum_difficulty` on a public node.
+- Use Stratum V2 with authority keys for miners outside your LAN.
+- List several `dial_peers`, and watch the peer count and the share chain
+  tip in Grafana.
+- Keep the clock in sync.
+- Put a rate-limiting reverse proxy in front of a public API
+  (`public_dashboard = true`); the Ansible nginx role does this.
