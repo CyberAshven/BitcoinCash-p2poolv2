@@ -434,12 +434,6 @@ fn response_payload(frame: &[u8]) -> Vec<u8> {
 fn coinbase_only_keeps_transactions_private_and_rejects_declare() {
     let cache = PoolTransactionCache::new();
     cache.set_prepared(test_bch_prepared());
-    let first = transaction_with_lock(1);
-    let second = transaction_with_lock(2);
-    let mut pool = vec![first.clone(), second.clone()];
-    sort_ctor(&mut pool);
-    pool.reverse();
-    cache.set(pool);
     let shared = Arc::new(Mutex::new(JobRegistry::new(
         cache,
         Some(MergeMiningCommitment::empty()),

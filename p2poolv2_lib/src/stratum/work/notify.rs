@@ -31,7 +31,7 @@ pub(crate) struct NotifyContext {
     pub pool_signature: Vec<u8>,
     pub pool_difficulty: pool_difficulty::PoolDifficulty,
     pub payout: Box<dyn PayoutDistribution + Send>,
-    /// Latest template transactions, in CTOR, for Stratum V2 coinbase-only jobs.
+    /// Latest prepared template, for Stratum V2 Job Declaration tokens.
     pub pool_transactions: PoolTransactionCache,
     /// Bitcoin Cash: the share transactions waiting for a share. `None` on
     /// Bitcoin, whose shares carry their coinbase alone.
@@ -73,22 +73,6 @@ fn build_output_distribution(
         })
 }
 
-fn cache_template_transactions(
-    template: &BlockTemplate,
-    cache: &PoolTransactionCache,
-) -> Result<(), WorkError> {
-    let mut transactions = Vec::with_capacity(template.transactions.len());
-    for template_transaction in &template.transactions {
-        let transaction =
-            bitcoin::Transaction::try_from(template_transaction).map_err(|error| WorkError {
-                message: format!("template transaction: {error}"),
-            })?;
-        transactions.push(transaction);
-    }
-    cache.set(transactions);
-    Ok(())
-}
-
 /// Build a PreparedNotifyParams from a template using the notify context.
 ///
 /// Queries chain state (tip, uncles, difficulty) and prepares the
@@ -116,7 +100,6 @@ fn build_prepared_notify(
     //* below, so a confirmed-chain advance between reads cannot make the
     //* coinbase pay a window inconsistent with its declared prev.
     let output_distribution = build_output_distribution(template, tip, context)?;
-    cache_template_transactions(template, &context.pool_transactions)?;
     let share_transactions = context
         .share_transaction_pool
         .as_ref()

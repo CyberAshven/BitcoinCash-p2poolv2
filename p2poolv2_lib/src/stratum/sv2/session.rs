@@ -64,12 +64,13 @@ pub enum JobDeclarationMode {
     FullTemplate,
 }
 
-/// Transactions from the latest block template, kept in CTOR.
+/// The latest prepared template, which Job Declaration tokens are allocated
+/// against. The template's transactions stay in the template; nothing here
+/// decodes them.
 ///
 /// The lock is the only lock this cache takes.
 #[derive(Clone)]
 pub struct PoolTransactionCache {
-    transactions: Arc<RwLock<Vec<Transaction>>>,
     prepared: Arc<RwLock<Option<Arc<PreparedNotifyParams>>>>,
 }
 
@@ -77,18 +78,8 @@ impl PoolTransactionCache {
     /// Empty cache. The notifier replaces it when a template arrives.
     pub fn new() -> Self {
         Self {
-            transactions: Arc::new(RwLock::new(Vec::new())),
             prepared: Arc::new(RwLock::new(None)),
         }
-    }
-
-    /// Store `transactions` in canonical order.
-    pub fn set(&self, mut transactions: Vec<Transaction>) {
-        sort_ctor(&mut transactions);
-        *self
-            .transactions
-            .write()
-            .expect("pool transaction cache lock") = transactions;
     }
 
     /// Publish the immutable payout and template snapshot used by allocated tokens.

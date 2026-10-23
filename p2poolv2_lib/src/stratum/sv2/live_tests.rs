@@ -106,7 +106,6 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
     ctx.bitcoindrpc_client = pool.clone();
     let cache = PoolTransactionCache::new();
     cache.set_prepared(Arc::clone(&prepared));
-    cache.set(transactions.clone());
     let (template_sender, template_rx) = watch::channel(Some(Arc::clone(&prepared)));
     let authority = test_sv2_authority();
     let listener = bind("127.0.0.1", 0).await.unwrap();
@@ -377,7 +376,6 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
     let private_height = template.height;
     let private_value = template.coinbasevalue + private_fee;
     let prepared = test_bch_prepared_for_template(template);
-    cache.set(Vec::new());
     cache.set_prepared(Arc::clone(&prepared));
     template_sender.send(Some(Arc::clone(&prepared))).unwrap();
     mining.receive(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB).await;

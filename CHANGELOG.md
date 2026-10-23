@@ -309,6 +309,10 @@ anchor and the donation and fee cap as they were.
 - The `store.background_task_frequency_hours` option (from upstream). Existing
   configs that set it still load.
 - The `[sim] coinbase_maturity` option.
+- The decoded copy of every template transaction the notifier kept for
+  Stratum V2, sorted in CTOR on each template and never read (A6 in
+  `docs/bch-btc-assumptions-audit.md`). Job Declaration reads only the
+  prepared template, which stays.
 
 ### Fixed
 
