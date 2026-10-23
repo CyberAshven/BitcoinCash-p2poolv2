@@ -229,6 +229,10 @@ MSRV 1.88, Rust 2024 edition.
 
 * The docs site is built with https://rust-lang.github.io/mdBook/[mdBook]
   from link:docs/[docs/]: `mdbook build docs` writes it to `target/book`.
+* link:website/README.md[website/] is the landing page, HTML and CSS only,
+  styled by the dashboard's own stylesheets, fonts and logo. The `Docs`
+  workflow publishes it to GitHub Pages with the book under `docs/`, once
+  the repository variable `DOCS_PAGES` is `true`.
 * link:docs/bch-quickstart.md[Running on Bitcoin Cash],
   link:docs/requirements.md[requirements],
   link:docs/miner-options.md[miner options],

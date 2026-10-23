@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 
 /// Changed whenever an asset changes, so browsers holding a cached copy fetch
 /// the new one. Pages link every asset with `?v=` this value.
-pub(crate) const ASSET_VERSION: &str = "2";
+pub(crate) const ASSET_VERSION: &str = "3";
 
 /// How long browsers may reuse an asset before asking again.
 const CACHE_CONTROL: &str = "public, max-age=86400";

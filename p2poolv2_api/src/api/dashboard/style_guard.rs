@@ -19,7 +19,13 @@
 //!   script or style of its own, or a stylesheet's `url()` would not
 //!   resolve in the bundle;
 //! - the WASM app formats a number, time or hash differently from the
-//!   pages.
+//!   pages;
+//! - the landing page (`website/index.html`) carries a script or style of
+//!   its own, names a class with no selector, or links a local file that is
+//!   not one of the shared assets, which the Pages workflow could not
+//!   publish beside it;
+//! - the Pages workflow (`.github/workflows/docs.yml`) stops copying the
+//!   assets and the book to where the landing page links them.
 //!
 //! The WASM views spell every class as a literal, `class="..."` or a
 //! `class:name=` toggle, so a scan of their source finds them all; the
@@ -47,8 +53,14 @@ mod web_format;
 /// The stylesheets, in the order both dashboards load them.
 const STYLESHEETS: [&str; 3] = ["pico.min.css", "dashboard.css", "pages.css"];
 
-/// Where the WASM app's `index.html` finds the shared assets.
+/// Where the WASM app's `index.html` and the landing page find the shared
+/// assets. The Pages workflow rewrites this prefix to `assets/` when it
+/// copies the assets beside the landing page.
 const WEB_ASSETS_HREF: &str = "../p2poolv2_api/src/api/dashboard/assets/";
+
+/// Where the published site serves the mdBook documentation, relative to the
+/// landing page.
+const LANDING_DOCS_HREF: &str = "docs/";
 
 /// Classes used without a selector of their own, and why that is fine.
 const UNSTYLED_CLASSES: [(&str, &str); 1] = [(
@@ -73,6 +85,49 @@ fn assets_dir() -> PathBuf {
 
 fn web_dir() -> PathBuf {
     workspace_root().join("p2poolv2_web")
+}
+
+fn website_dir() -> PathBuf {
+    workspace_root().join("website")
+}
+
+/// The landing page's HTML.
+fn landing_page() -> String {
+    read(&website_dir().join("index.html"))
+}
+
+/// The `rel="stylesheet"` links of `html`, by file name, in order.
+fn stylesheet_links(html: &str) -> Vec<&str> {
+    html.split("<link")
+        .skip(1)
+        .filter(|tag| tag.contains("rel=\"stylesheet\""))
+        .filter_map(|tag| attribute_values(tag, "href").into_iter().next())
+        .map(|href| href.rsplit('/').next().unwrap_or(href))
+        .collect()
+}
+
+/// The `on...="` event handler attributes in `html`, each a script.
+fn event_handlers(html: &str) -> Vec<&str> {
+    html.match_indices(" on")
+        .map(|(index, _)| &html[index + 1..])
+        .filter_map(|rest| {
+            let name = identifier(rest);
+            (name.len() > 2 && rest[name.len()..].starts_with("=\"")).then_some(name)
+        })
+        .collect()
+}
+
+/// Whether the landing page may link `link`: an anchor on the page, an
+/// `https` URL, the published docs, or a shared asset that exists.
+fn is_publishable_landing_link(link: &str, ids: &BTreeSet<&str>) -> bool {
+    if let Some(id) = link.strip_prefix('#') {
+        return ids.contains(id);
+    }
+    if link.starts_with("https://") || link == LANDING_DOCS_HREF {
+        return true;
+    }
+    link.strip_prefix(WEB_ASSETS_HREF)
+        .is_some_and(|name| assets_dir().join(name).is_file())
 }
 
 fn read(path: &Path) -> String {
@@ -694,6 +749,90 @@ fn the_node_links_the_same_stylesheets() {
     let page = pages::help(&site()).into_string();
     assert!(page.contains(&assets::href("pico.min.css")));
     assert!(page.contains(&assets::href("dashboard.css")));
+}
+
+#[test]
+fn the_landing_page_loads_the_stylesheets_in_the_nodes_order() {
+    assert_eq!(stylesheet_links(&landing_page()), STYLESHEETS.to_vec());
+}
+
+#[test]
+fn the_landing_page_has_no_script_or_style_of_its_own() {
+    let page = landing_page();
+    assert!(page.contains("<html lang=\"en\" data-theme=\"dark\">"));
+    assert!(!page.contains("<script"));
+    assert!(!page.contains("<style"));
+    assert!(!page.contains(" style="));
+    assert!(!page.contains("javascript:"));
+    assert_eq!(event_handlers(&page), Vec::<&str>::new());
+}
+
+#[test]
+fn event_handlers_are_found_but_prose_is_not() {
+    assert_eq!(
+        event_handlers("<body onload=\"run()\"><p>one only on</p>"),
+        vec!["onload"]
+    );
+}
+
+#[test]
+fn every_class_the_landing_page_names_has_a_selector() {
+    let used = class_attribute_names(&landing_page());
+    assert!(used.contains("landing") && used.contains("chain-share") && used.contains("kpi-card"));
+    assert_eq!(unstyled(&used), Vec::<String>::new());
+}
+
+#[test]
+fn the_landing_page_links_only_what_the_site_publishes() {
+    let page = landing_page();
+    let ids: BTreeSet<&str> = attribute_values(&page, "id").into_iter().collect();
+    let links = index_links(&page);
+    assert!(links.contains(&"../p2poolv2_api/src/api/dashboard/assets/logo-horizontal-wt.svg"));
+    assert!(links.contains(&"#run") && links.contains(&LANDING_DOCS_HREF));
+    let unpublished: Vec<&str> = links
+        .into_iter()
+        .filter(|link| !is_publishable_landing_link(link, &ids))
+        .collect();
+    assert_eq!(unpublished, Vec::<&str>::new());
+}
+
+#[test]
+fn landing_links_are_checked_against_the_page_and_the_assets() {
+    let ids = BTreeSet::from(["top"]);
+    assert!(is_publishable_landing_link("#top", &ids));
+    assert!(!is_publishable_landing_link("#missing", &ids));
+    assert!(is_publishable_landing_link("https://example.org/", &ids));
+    assert!(!is_publishable_landing_link("http://example.org/", &ids));
+    assert!(is_publishable_landing_link("docs/", &ids));
+    assert!(is_publishable_landing_link(
+        "../p2poolv2_api/src/api/dashboard/assets/pages.css",
+        &ids
+    ));
+    assert!(!is_publishable_landing_link(
+        "../p2poolv2_api/src/api/dashboard/assets/missing.css",
+        &ids
+    ));
+    assert!(!is_publishable_landing_link("styles.css", &ids));
+}
+
+#[test]
+fn the_pages_workflow_serves_the_assets_where_the_landing_page_looks() {
+    let workflow = read(
+        &workspace_root()
+            .join(".github")
+            .join("workflows")
+            .join("docs.yml"),
+    );
+    let assets = WEB_ASSETS_HREF
+        .strip_prefix("../")
+        .and_then(|path| path.strip_suffix('/'))
+        .expect("a relative directory");
+    assert!(workflow.contains(&format!("assets={assets}")));
+    assert!(workflow.contains(r#"sed "s#\.\./$assets/#assets/#g" website/index.html"#));
+    let docs = LANDING_DOCS_HREF.trim_end_matches('/');
+    assert!(workflow.contains(&format!("cp -R target/book \"$site/{docs}\"")));
+    assert!(workflow.contains("- \"website/**\""));
+    assert!(workflow.contains("vars.DOCS_PAGES == 'true'"));
 }
 
 #[test]

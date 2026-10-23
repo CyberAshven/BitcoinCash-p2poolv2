@@ -37,6 +37,15 @@ anchor and the donation and fee cap as they were.
 
 ### Added
 
+- A landing page in `website/`, ported from upstream's
+  `p2poolv2/website` (MIT, whose notice it keeps): what the pool is, mining
+  over Stratum V2 first with Stratum V1 supported, running a node, the
+  dashboards and terminal UI, and what has been measured on chipnet and
+  regtest. HTML and CSS only: Bootstrap's script is gone and the menu is a
+  `<details>` dropdown. It wears the dashboard's stylesheets, Ubuntu font
+  and Bitcoin Cash logo, now with their licence files beside them, and
+  `style_guard` checks it. The `Docs` workflow stages it with the book under
+  `docs/` and publishes both when `DOCS_PAGES` is `true`.
 - `p2poolv2_tui`, a terminal UI for a Bitcoin Cash node and its BCHN,
   ported from upstream's PDM (`p2poolv2/pdm`, AGPL-3.0-or-later, which this
   crate keeps). BCHN status over JSON-RPC (chain, peers, mempool) replaces

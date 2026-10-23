@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<!--
+  The P2Poolv2 for Bitcoin Cash landing page.
+
+  Adapted from the P2Poolv2 website, https://github.com/p2poolv2/website
+  (commit 1199458), Copyright (c) 2026 P2Poolv2, MIT License; the notice is
+  in LICENSE-MIT next to this file. The Bitcoin Cash changes are distributed
+  with this fork under AGPL-3.0. See README.md.
+
+  HTML only. The page loads no script: the stylesheets, fonts and logo are
+  the node dashboard's own, from p2poolv2_api/src/api/dashboard/assets/, and
+  the publishing workflow copies them next to this page.
+-->
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>P2Poolv2 for Bitcoin Cash: peer-to-peer mining, audited by every node</title>
+<meta name="description" content="P2Poolv2 for Bitcoin Cash is a peer-to-peer mining pool. Every node keeps the share chain and checks every payout, and each block the pool finds pays its miners in the coinbase. Alpha software, running on chipnet.">
+<meta property="og:title" content="P2Poolv2 for Bitcoin Cash">
+<meta property="og:description" content="Permissionless mining, audited by every node, with payouts in the coinbase on an address you hold. Alpha software, running on chipnet.">
+<meta property="og:type" content="website">
+<link rel="icon" type="image/svg+xml" href="../p2poolv2_api/src/api/dashboard/assets/logo-circle.svg">
+<link rel="preload" href="../p2poolv2_api/src/api/dashboard/assets/ubuntu-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../p2poolv2_api/src/api/dashboard/assets/pico.min.css">
+<link rel="stylesheet" href="../p2poolv2_api/src/api/dashboard/assets/dashboard.css">
+<link rel="stylesheet" href="../p2poolv2_api/src/api/dashboard/assets/pages.css">
+</head>
+<body class="landing">
+
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <nav aria-label="Site">
+    <ul class="brand">
+      <li>
+        <a href="#top">
+          <img src="../p2poolv2_api/src/api/dashboard/assets/logo-horizontal-wt.svg" alt="Bitcoin Cash">
+        </a>
+        <span class="brand-meta">
+          <a class="wordmark-link" href="#top"><span class="wordmark">P2Pool<span class="accent">v2</span></span></a>
+          <span class="chain-badge">Alpha</span>
+        </span>
+      </li>
+    </ul>
+    <ul class="landing-links">
+      <li><a href="#how">How it works</a></li>
+      <li><a href="#mine">Mine</a></li>
+      <li><a href="#run">Run a node</a></li>
+      <li><a href="#status">Status</a></li>
+      <li><a href="docs/">Docs</a></li>
+      <li><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2">Source</a></li>
+    </ul>
+    <ul class="landing-menu">
+      <li>
+        <details class="dropdown">
+          <summary>Menu</summary>
+          <ul dir="rtl">
+            <li><a href="#how">How it works</a></li>
+            <li><a href="#mine">Mine</a></li>
+            <li><a href="#run">Run a node</a></li>
+            <li><a href="#status">Status</a></li>
+            <li><a href="docs/">Docs</a></li>
+            <li><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2">Source</a></li>
+          </ul>
+        </details>
+      </li>
+    </ul>
+  </nav>
+</header>
+
+<main class="container" id="main">
+
+<section class="landing-hero" id="top">
+  <p class="landing-kicker">P2Poolv2 for Bitcoin Cash</p>
+  <h1 class="landing-title">Permissionless mining.<br>Continuously audited.<br>Self-custodial payouts.</h1>
+  <p class="landing-lede">
+    P2Poolv2 is a Bitcoin Cash mining pool that its miners run. Their nodes
+    keep one chain of shares between them, and each block the pool finds pays
+    them in its coinbase.
+  </p>
+
+  <div class="kpi-grid">
+    <div class="kpi-card">
+      <h2 class="kpi-label">Permissionless</h2>
+      <p>The pool checks your work, not your identity. Run your own node, or
+      declare your own template over Stratum V2, and you choose the
+      transactions you mine.</p>
+    </div>
+    <div class="kpi-card">
+      <h2 class="kpi-label">Continuously audited</h2>
+      <p>Every node keeps the share chain and recomputes the payout of every
+      block, so every node checks that each miner is paid correctly.</p>
+    </div>
+    <div class="kpi-card">
+      <h2 class="kpi-label">Self-custodial payouts</h2>
+      <p>Payouts arrive in the coinbase of each block the pool finds, on a
+      Bitcoin Cash address you hold.</p>
+    </div>
+  </div>
+
+  <p class="landing-actions">
+    <a role="button" class="btn-primary" href="#run">Run a node</a>
+    <a role="button" class="outline" href="#mine">Point a miner</a>
+    <a role="button" class="outline secondary" href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases">Download</a>
+  </p>
+
+  <figure class="chain-figure">
+    <div class="chain-scroll">
+      <svg class="chain-dag" viewBox="0 0 900 160" role="img"
+           aria-label="A share chain drawn as a directed acyclic graph: eight shares in a main chain, each pointing back to its parent, with two uncle shares below and one share marked because it also met the Bitcoin Cash network target.">
+        <defs>
+          <marker id="chain-tip" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+            <path class="chain-arrow" d="M8 4 L0 1.2 L0 6.8 Z"></path>
+          </marker>
+        </defs>
+        <g>
+          <path class="chain-edge chain-step-0" marker-end="url(#chain-tip)" d="M20 38 L2 38"></path>
+          <path class="chain-edge chain-step-1" marker-end="url(#chain-tip)" d="M128 38 L64 38"></path>
+          <path class="chain-edge chain-step-2" marker-end="url(#chain-tip)" d="M236 38 L172 38"></path>
+          <path class="chain-edge chain-step-3" marker-end="url(#chain-tip)" d="M344 38 L280 38"></path>
+          <path class="chain-edge chain-step-4" marker-end="url(#chain-tip)" d="M452 38 L388 38"></path>
+          <path class="chain-edge chain-step-5" marker-end="url(#chain-tip)" d="M560 38 L496 38"></path>
+          <path class="chain-edge chain-step-6" marker-end="url(#chain-tip)" d="M668 38 L604 38"></path>
+          <path class="chain-edge chain-step-7" marker-end="url(#chain-tip)" d="M776 38 L712 38"></path>
+          <path class="chain-edge chain-step-4" marker-end="url(#chain-tip)" d="M276 112 L258 54"></path>
+          <path class="chain-edge chain-step-7" marker-end="url(#chain-tip)" d="M600 112 L582 54"></path>
+          <path class="chain-edge chain-edge-uncle chain-step-5" marker-end="url(#chain-tip)" d="M366 54 L304 112"></path>
+          <path class="chain-edge chain-edge-uncle chain-step-8" marker-end="url(#chain-tip)" d="M690 54 L628 112"></path>
+        </g>
+        <g>
+          <rect class="chain-share chain-step-0" x="20" y="22" width="44" height="32"></rect>
+          <rect class="chain-share chain-step-1" x="128" y="22" width="44" height="32"></rect>
+          <rect class="chain-share chain-step-2" x="236" y="22" width="44" height="32"></rect>
+          <rect class="chain-share chain-step-3" x="344" y="22" width="44" height="32"></rect>
+          <rect class="chain-share chain-share-won chain-step-4" x="452" y="22" width="44" height="32"></rect>
+          <rect class="chain-share chain-step-5" x="560" y="22" width="44" height="32"></rect>
+          <rect class="chain-share chain-step-6" x="668" y="22" width="44" height="32"></rect>
+          <rect class="chain-share chain-step-7" x="776" y="22" width="44" height="32"></rect>
+          <rect class="chain-share chain-share-uncle chain-step-4" x="268" y="112" width="38" height="28"></rect>
+          <rect class="chain-share chain-share-uncle chain-step-7" x="592" y="112" width="38" height="28"></rect>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      <ul class="chain-legend">
+        <li><span class="chain-key"></span>A share: a Bitcoin Cash block, mined at the share chain's easier target</li>
+        <li><span class="chain-key chain-key-won"></span>A block: a share that also met the Bitcoin Cash target, and paid the window</li>
+        <li><span class="chain-key chain-key-uncle"></span>An uncle: work that lost a race to another share, paid nine tenths of its weight</li>
+      </ul>
+      <p>
+        Shares land about every ten seconds, each pointing back at its
+        parent. The chain and the coinbase payouts run on
+        <a href="#status">chipnet</a> today.
+      </p>
+    </figcaption>
+  </figure>
+</section>
+
+<section class="landing-band" id="how">
+  <h2>One share chain, checked by every node</h2>
+  <p>
+    A pool server keeps the books: it counts each miner's shares and decides
+    what each block pays. P2Poolv2 moves those books into a chain of shares
+    that every node keeps and checks, and pays miners straight from the
+    block.
+  </p>
+
+  <dl class="landing-defs">
+    <div>
+      <dt>A chain of shares</dt>
+      <dd>
+        Each node builds work from the templates of its own Bitcoin Cash
+        Node (BCHN) and relays every share it finds to its peers. A share is
+        a Bitcoin Cash block whose work meets the share chain's target. That
+        target follows the share chain's own ASERT, which aims for a share
+        every ten seconds. Two share chains run: main, and mini, whose target
+        is 256 times easier for smaller miners.
+      </dd>
+    </div>
+    <div>
+      <dt>A graph, not a line</dt>
+      <dd>
+        A share may name up to three uncles: shares that lost a race to
+        another share. The uncle's miner is paid nine tenths of its weight
+        and the share that names it earns the other tenth, so work that
+        arrives late is still paid. Each uncle is paid once.
+      </dd>
+    </div>
+    <div>
+      <dt>PPLNS, paid from the coinbase</dt>
+      <dd>
+        When a share also meets the Bitcoin Cash target, it is a block. Its
+        coinbase pays the project donation (1.5% by default), any operator fee,
+        and then
+        the shares that hold the last three blocks' worth of work, at most
+        120,960 of them, leaving out the newest 100. Every node rebuilds that
+        coinbase and rejects a share whose coinbase pays differently.
+      </dd>
+    </div>
+    <div>
+      <dt>A coinbase stock firmware can mine</dt>
+      <dd>
+        A Stratum V1 miner hashes the whole coinbase, and stock ASIC firmware
+        reportedly takes only about a dozen outputs. So a coinbase holds
+        at most 11 payouts. The largest payees are paid their exact share,
+        and the rest goes to one of the others, drawn by weight, so each of
+        them is paid its share on average.
+      </dd>
+    </div>
+    <div>
+      <dt>Shares you can sell</dt>
+      <dd>
+        A share's payout right can be sold for BCH through a hash time
+        locked contract on each chain, the share chain and Bitcoin Cash, so
+        a small miner can be paid now rather than when the pool next finds a
+        block. The contracts are in the code and tested inside the node; they
+        have not yet run through BCHN.
+      </dd>
+    </div>
+  </dl>
+
+  <h3>Who keeps the books</h3>
+  <p>
+    Stratum V2 Job Declaration lets a miner build its own template, and that
+    is real progress. But a pool server that keeps the accounting decides
+    what it pays a miner for. A pool operator is a company in a jurisdiction,
+    and companies can be pressured. Such a pool does not need to reject a
+    template; it only needs to stop counting the shares mined on it.
+  </p>
+  <div class="table-x">
+    <table class="table">
+      <caption>What each kind of pool keeps in one place</caption>
+      <thead>
+        <tr><th scope="col"></th><th scope="col">A pool server</th><th scope="col">P2Poolv2</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row">Block template</th><td>The pool's, or the miner's with Stratum V2 Job Declaration</td><td>Your node's, or the miner's with Stratum V2 Job Declaration</td></tr>
+        <tr><th scope="row">Share accounting</th><td>Kept by the operator</td><td>Kept and checked by every node</td></tr>
+        <tr><th scope="row">Payout</th><td>Usually a balance on the operator's books</td><td>In the block's coinbase, on your own address</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="landing-band" id="mine">
+  <h2>How to mine</h2>
+  <p>
+    Point your miners at a node: your own, or one you trust. Stratum V2 comes
+    first. Stratum V1 is there for firmware that cannot speak V2.
+  </p>
+
+  <div class="help-section">
+    <h3>Bring two addresses</h3>
+    <p>
+      Your payout address, a CashAddr such as <code>bitcoincash:q...</code>,
+      receives your share of each block's coinbase. Your share address, such
+      as <code>p2pool:q...</code>, owns your shares on the share chain; it is
+      what you sell if you sell shares. Make it from a P2PKH address in your
+      own wallet. The command takes no private key:
+    </p>
+<pre class="landing-term"><code><span class="term-prompt">$</span> p2poolv2_cli bch-share-address --network mainnet bitcoincash:q...
+<span class="term-comment"># p2pool:q...</span></code></pre>
+    <p>
+      The share address prefix is <code>p2pool:</code> on mainnet,
+      <code>tp2pool:</code> on chipnet and <code>rp2pool:</code> on regtest.
+      The two addresses are different things; never use one in place of the
+      other.
+    </p>
+  </div>
+
+  <div class="help-section">
+    <h3>Stratum V2</h3>
+<pre class="landing-term"><code><span class="term-comment"># the node's sv2_port; config.sample.toml suggests 3336</span>
+host           &lt;node&gt;:&lt;sv2_port&gt;
+user identity  &lt;payout CashAddr&gt;.&lt;worker&gt;
+               add ,p2p=&lt;share address&gt; when the node sets no miner_address
+authority key  the node's public key, when it requires encryption</code></pre>
+    <p>
+      Standard and extended channels are supported, and so is Job
+      Declaration in both modes, for a declarator that follows the
+      <a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/docs/bch-job-declaration.md">Bitcoin Cash coinbase contract</a>.
+      Without an authority key the frames are not encrypted, so keep that
+      port on localhost or a trusted network.
+    </p>
+  </div>
+
+  <div class="help-section">
+    <h3>Stratum V1</h3>
+<pre class="landing-term"><code>url       stratum+tcp://&lt;node&gt;:3333
+user      &lt;payout CashAddr&gt;.&lt;worker&gt;    <span class="term-comment"># the bitcoincash: prefix is optional</span>
+password  x, or p2p=&lt;share address&gt; when the node sets no miner_address</code></pre>
+  </div>
+
+  <div class="help-section">
+    <h3>When you are paid</h3>
+    <p>
+      Your payout is in the coinbase of each block the pool finds while your
+      shares are in its window. It becomes spendable after 100 blocks, as for
+      any Bitcoin Cash coinbase.
+    </p>
+  </div>
+</section>
+
+<section class="landing-band" id="run">
+  <h2>Run a node</h2>
+  <p>
+    A node of your own keeps you in control. It builds your templates from
+    your BCHN, checks every share it hears, and serves your miners. The pool
+    is only as decentralised as the number of nodes in it.
+  </p>
+  <p>
+    BCHN enforces Bitcoin Cash consensus and its own relay policy, including
+    the adaptive block size limit. P2Poolv2 takes its templates and the block
+    size limit from BCHN and adds no limit of its own: Bitcoin Cash can scale
+    and will scale.
+  </p>
+
+  <div class="grid">
+    <div>
+<pre class="landing-term"><code><span class="term-comment"># bitcoin.conf for BCHN</span>
+server=1
+rpcuser=p2pool
+rpcpassword=&lt;your password&gt;
+zmqpubhashblock=tcp://127.0.0.1:28332
+
+<span class="term-comment"># config.toml, under [stratum]</span>
+chain = "bitcoin-cash"
+bitcoin_cash_network = "mainnet"   <span class="term-comment"># or "chipnet", "regtest"</span>
+bch_share_chain = "mini"           <span class="term-comment"># "main" for large miners</span>
+miner_address = "p2pool:q..."
+zmqpubhashblock = "tcp://127.0.0.1:28332"
+
+<span class="term-comment"># under [network], the share chain peers to join</span>
+dial_peers = ["/ip4/203.0.113.1/tcp/6884"]
+
+<span class="term-prompt">$</span> p2poolv2 config.toml</code></pre>
+    </div>
+    <div class="help-section">
+      <h3>Before you start</h3>
+      <ul>
+        <li>Download the archive for your platform and
+        <code>config.sample.toml</code> from the
+        <a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases">releases page</a>,
+        and check it against its <code>.sha256</code> file.</li>
+        <li>Point <code>[bitcoinrpc]</code> at BCHN's RPC port, and
+        <code>zmqpubhashblock</code> at its ZMQ endpoint.</li>
+        <li>List peers in <code>dial_peers</code>. Bitcoin Cash has no share
+        chain DNS seeds yet.</li>
+        <li>Try regtest or chipnet before mainnet.</li>
+        <li>The <a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/docs/bch-quickstart.md">quickstart</a>
+        has every step.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="landing-band" id="watch">
+  <h2>Watch your node</h2>
+  <div class="kpi-grid">
+    <div class="kpi-card">
+      <h3 class="kpi-label">Dashboard</h3>
+      <p>Every node serves one at <code>/dashboard</code> on its API port:
+      hashrate, the share chain, found blocks and each miner's part of the
+      next payout. The node renders it in Rust and the pages run no script.</p>
+      <p><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/README.adoc#dashboards">About the dashboard</a></p>
+    </div>
+    <div class="kpi-card">
+      <h3 class="kpi-label">Interactive dashboard</h3>
+      <p>A live dashboard written in Rust and compiled to WebAssembly, with a
+      zoomable hashrate chart and live shares. Serve it from your node.</p>
+      <p><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/tree/alpha/p2poolv2_web">p2poolv2_web</a></p>
+    </div>
+    <div class="kpi-card">
+      <h3 class="kpi-label">Terminal UI</h3>
+      <p>BCHN's chain, peers and mempool beside the node's shares, miners and
+      found blocks, with a live feed and an editor for the node's
+      config.</p>
+      <p><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/tree/alpha/p2poolv2_tui">p2poolv2_tui</a></p>
+    </div>
+    <div class="kpi-card">
+      <h3 class="kpi-label">Grafana</h3>
+      <p>The node exposes Prometheus metrics at <code>/metrics</code>, and
+      the repository carries Grafana dashboards for them.</p>
+      <p><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/tree/alpha/prometheus">prometheus/</a></p>
+    </div>
+  </div>
+</section>
+
+<section class="landing-band" id="status">
+  <h2>Where the code is today</h2>
+  <p>
+    P2Poolv2 for Bitcoin Cash is alpha software. It runs on chipnet, the
+    Bitcoin Cash test network for upcoming upgrades, and is not yet a proven
+    production pool. Try it on regtest or chipnet first.
+  </p>
+  <div class="grid">
+    <div class="help-section">
+      <h3>Measured</h3>
+      <ul>
+        <li>15 October 2026: two nodes on chipnet relayed and accepted each
+        other's shares.</li>
+        <li>18 October 2026: the first chipnet block, height 328,451, found
+        by an Avalon ASIC over Stratum V1 through a two-node pool. Its
+        coinbase paid the donation and the PPLNS window.</li>
+        <li>Both Job Declaration modes mined blocks on a two-node BCHN
+        regtest over encrypted Stratum V2.</li>
+        <li>18 October 2026: two CPU miners on regtest were paid in 38 coinbases, and every
+        one of those outputs was later spent.</li>
+      </ul>
+    </div>
+    <div class="help-section">
+      <h3>Not yet</h3>
+      <ul>
+        <li>Share trading: tested inside the node, not yet through BCHN or on
+        chipnet.</li>
+        <li>Stock ASIC firmware has not yet mined the 11-payout coinbase.</li>
+        <li>Stratum V2 and Job Declaration clients from other projects have
+        not yet been tested against the pool.</li>
+        <li>The terminal UI is not yet in the release archives.</li>
+      </ul>
+    </div>
+  </div>
+  <p>
+    The <a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/docs/bch-plan.md">plan</a>
+    carries each requirement with its evidence and date.
+  </p>
+</section>
+
+<section class="landing-band" id="docs">
+  <h2>Read the docs</h2>
+  <div class="grid">
+    <div class="help-section">
+      <h3>Start here</h3>
+      <ul>
+        <li><a href="docs/">The documentation</a></li>
+        <li><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/docs/bch-quickstart.md">Running P2Poolv2 on Bitcoin Cash</a></li>
+        <li><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases">Releases</a></li>
+        <li><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2">Source code</a></li>
+      </ul>
+    </div>
+    <div class="help-section">
+      <h3>How it works</h3>
+      <ul>
+        <li><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/docs/bch-design.md">Bitcoin Cash design checks</a></li>
+        <li><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/docs/architecture/payout-distribution.md">How a block's coinbase is split</a></li>
+        <li><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/docs/atomic-swap/bch-share-trading.md">Selling shares for BCH</a></li>
+        <li><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/docs/bch-job-declaration.md">Job Declaration on Bitcoin Cash</a></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="inner">
+    <span>P2Poolv2 for Bitcoin Cash, a fork of
+    <a href="https://github.com/p2poolv2/p2poolv2">P2Poolv2</a>.
+    AGPL-3.0; files from upstream keep their MIT or Apache-2.0 notices.</span>
+    <span>This page loads no script.</span>
+  </div>
+</footer>
+
+</body>
+</html>

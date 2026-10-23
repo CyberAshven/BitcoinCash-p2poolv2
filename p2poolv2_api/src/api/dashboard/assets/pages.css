@@ -1,7 +1,8 @@
 /* Additions for the pages the node renders in Rust, on top of
-   CashDragon0's dashboard.css. The Rust/WASM dashboard (p2poolv2_web)
-   loads these same files, so anything it needs goes here too, never in a
-   stylesheet of its own. Nothing here needs JavaScript. */
+   CashDragon0's dashboard.css. The Rust/WASM dashboard (p2poolv2_web) and
+   the landing page (website/) load these same files, so anything they need
+   goes here too, never in a stylesheet of their own. Nothing here needs
+   JavaScript. */
 
 header.site-header .header-search {
   display: flex;
@@ -195,4 +196,345 @@ tr.uncle-row {
 }
 .chart-wrap .chart-tip.at-right {
   right: 2%;
+}
+
+/* The landing page in website/. It loads these same stylesheets, so it
+   wears the dashboard's colours, font and logo; the rules below cover only
+   what the dashboard has no class for. Every selector starts at .landing,
+   the landing page's <body>, so no dashboard page matches one.
+
+   The share chain figure, the terminal blocks and the type scale are
+   adapted from the P2Poolv2 website's styles.css
+   (https://github.com/p2poolv2/website, Copyright (c) 2026 P2Poolv2, MIT
+   License; see website/LICENSE-MIT), recoloured to the dashboard's
+   variables. */
+
+.landing .skip-link {
+  position: absolute;
+  left: -100vw;
+}
+.landing .skip-link:focus {
+  left: 1rem;
+  top: 1rem;
+  z-index: 10;
+  padding: 0.5rem 0.9rem;
+  background: var(--ms-green);
+  color: var(--pico-primary-inverse);
+}
+
+/* The menu bar: the links in a row on wide screens, and on phones a Pico
+   dropdown, a <details> that opens without a script. */
+.landing .landing-links a {
+  font-size: 0.85rem;
+  color: var(--pico-muted-color);
+  text-decoration: none;
+}
+.landing .landing-links a:hover,
+.landing .landing-links a:focus-visible {
+  color: var(--ms-white);
+}
+.landing .landing-menu {
+  display: none;
+}
+@media (max-width: 767.98px) {
+  .landing .landing-links {
+    display: none;
+  }
+  .landing .landing-menu {
+    display: flex;
+  }
+}
+
+/* Pico drops a container's side padding above 576px, and the dashboard's
+   72rem cap is wider than many laptop screens, so the page keeps the menu
+   bar's 1rem gutter. */
+.landing main.container {
+  padding-inline: 1rem;
+}
+
+.landing .landing-hero {
+  padding: 2.5rem 0 2rem;
+}
+.landing .landing-kicker {
+  margin-bottom: 0.75rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ms-green);
+}
+.landing .landing-title {
+  margin-bottom: 1.25rem;
+  font-size: clamp(2.1rem, 6vw, 3.6rem);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--ms-white);
+}
+.landing .landing-lede {
+  max-width: 40rem;
+  margin-bottom: 1.75rem;
+  font-size: 1.15rem;
+}
+/* The dashboard's grid keeps empty columns for cards still to come; the
+   landing page's rows are complete, so their cards share the width. */
+.landing .kpi-grid {
+  grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr));
+}
+.landing .kpi-card .kpi-label {
+  font-size: 0.72rem;
+  color: var(--ms-green);
+}
+.landing .kpi-card p {
+  margin-bottom: 0.5rem;
+  font-size: 0.92rem;
+}
+.landing .kpi-card p:last-child {
+  margin-bottom: 0;
+}
+/* The overview's cards hide their links' colour; these cards carry plain
+   links. */
+.landing .kpi-card a {
+  color: var(--ms-green);
+  text-decoration: underline;
+}
+.landing .landing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1.5rem 0 0;
+}
+/* White on the dashboard's green is 2.3:1. Its dark ink, at 7:1, clears
+   the 4.5:1 that body-size text needs. */
+.landing .landing-actions .btn-primary,
+.landing .landing-actions .btn-primary:hover {
+  --pico-color: var(--pico-primary-inverse);
+}
+
+/* The share chain figure, the page's one animation. */
+.landing .chain-figure {
+  margin: 2.5rem 0 0;
+}
+.landing .chain-scroll {
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+.landing .chain-dag {
+  display: block;
+  width: 100%;
+  min-width: 660px;
+  height: auto;
+}
+.landing .chain-arrow {
+  fill: var(--ms-green);
+  opacity: 0.8;
+}
+.landing .chain-edge {
+  fill: none;
+  stroke: var(--ms-green);
+  stroke-width: 2;
+  opacity: 0.5;
+}
+.landing .chain-edge-uncle {
+  stroke-dasharray: 5 5;
+  opacity: 0.38;
+}
+.landing .chain-share {
+  fill: var(--pico-card-background-color);
+  stroke: var(--ms-green);
+  stroke-width: 2;
+}
+/* Green carries the chain, so the share that also met the network target
+   is marked in white. */
+.landing .chain-share-won {
+  fill: var(--ms-white);
+  fill-opacity: 0.16;
+  stroke: var(--ms-white);
+}
+.landing .chain-share-uncle {
+  stroke-dasharray: 4 4;
+  stroke-opacity: 0.7;
+}
+.landing .chain-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.75rem;
+  margin: 1.25rem 0 0.75rem;
+  padding: 0;
+  font-size: 0.85rem;
+  color: var(--pico-muted-color);
+}
+.landing .chain-legend li {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0;
+  list-style: none;
+}
+.landing .chain-key {
+  flex: none;
+  width: 17px;
+  height: 13px;
+  background: var(--pico-card-background-color);
+  border: 2px solid var(--ms-green);
+}
+.landing .chain-key-won {
+  background: color-mix(in srgb, var(--ms-white) 16%, transparent);
+  border-color: var(--ms-white);
+}
+.landing .chain-key-uncle {
+  border-style: dashed;
+}
+.landing .chain-figure figcaption p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--pico-muted-color);
+}
+.landing .chain-step-0 {
+  --chain-step: 0;
+}
+.landing .chain-step-1 {
+  --chain-step: 1;
+}
+.landing .chain-step-2 {
+  --chain-step: 2;
+}
+.landing .chain-step-3 {
+  --chain-step: 3;
+}
+.landing .chain-step-4 {
+  --chain-step: 4;
+}
+.landing .chain-step-5 {
+  --chain-step: 5;
+}
+.landing .chain-step-6 {
+  --chain-step: 6;
+}
+.landing .chain-step-7 {
+  --chain-step: 7;
+}
+.landing .chain-step-8 {
+  --chain-step: 8;
+}
+/* The chain builds once, on load, and stays still for readers who ask for
+   less motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .landing .chain-share {
+    opacity: 0;
+    animation: chain-land 460ms ease-out forwards;
+    animation-delay: calc(220ms + var(--chain-step, 0) * 105ms);
+  }
+  .landing .chain-edge {
+    opacity: 0;
+    animation: chain-reach 320ms ease-out forwards;
+    animation-delay: calc(300ms + var(--chain-step, 0) * 105ms);
+  }
+  .landing .chain-edge-uncle {
+    animation-name: chain-reach-uncle;
+  }
+}
+@keyframes chain-land {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes chain-reach {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 0.5;
+  }
+}
+@keyframes chain-reach-uncle {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 0.38;
+  }
+}
+
+/* Sections, ruled off from each other. */
+.landing .landing-band {
+  padding: 3rem 0 1rem;
+  border-top: 1px solid var(--pico-border-color);
+}
+.landing .landing-band > h2 {
+  margin-bottom: 1rem;
+  font-size: clamp(1.5rem, 3.2vw, 2.1rem);
+  color: var(--ms-white);
+}
+.landing .landing-band > h3 {
+  margin: 2rem 0 0.75rem;
+  font-size: 1.05rem;
+  color: var(--ms-white);
+}
+.landing .landing-band > p,
+.landing .landing-band .help-section p {
+  max-width: 44rem;
+}
+.landing .landing-band caption {
+  padding-bottom: 0.5rem;
+  font-size: 0.8rem;
+  text-align: left;
+  color: var(--pico-muted-color);
+}
+.landing .landing-defs {
+  margin: 2rem 0;
+}
+.landing .landing-defs > div {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) 2fr;
+  gap: 0.5rem 2rem;
+  padding: 1.1rem 0;
+  border-top: 1px solid var(--pico-border-color);
+}
+.landing .landing-defs > div:last-child {
+  border-bottom: 1px solid var(--pico-border-color);
+}
+.landing .landing-defs dt {
+  font-weight: 700;
+  color: var(--ms-white);
+}
+.landing .landing-defs dd {
+  max-width: 44rem;
+  margin: 0;
+}
+@media (max-width: 767.98px) {
+  .landing .landing-defs > div {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Terminal blocks. */
+.landing .landing-term {
+  margin-bottom: 1rem;
+  padding: 1rem 1.25rem;
+  overflow-x: auto;
+  background: var(--pico-code-background-color);
+  border: 1px solid var(--pico-border-color);
+  border-left: 2px solid var(--ms-green);
+  border-radius: 0;
+}
+.landing .landing-term code {
+  padding: 0;
+  font-size: 0.82rem;
+  font-weight: 400;
+  line-height: 1.7;
+  white-space: pre;
+  color: var(--ms-white);
+  background: none;
+  border: 0;
+}
+.landing .term-comment {
+  color: var(--pico-muted-color);
+}
+.landing .term-prompt {
+  color: var(--ms-green);
 }
