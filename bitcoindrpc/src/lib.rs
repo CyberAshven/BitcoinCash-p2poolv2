@@ -103,10 +103,31 @@ pub struct GetBlockchainInfo {
     pub initial_block_download: bool,
 }
 
-/// The one field of a verbose `getblockheader` result that is read.
+/// The fields of a verbose `getblockheader` result that are read.
 #[derive(Debug, Deserialize)]
-struct BlockHeaderHeight {
+struct VerboseBlockHeader {
     height: u64,
+    /// BCHN's adaptive block size limit (ABLA) state of the block. Absent
+    /// from Bitcoin Core, and from BCHN for a block it keeps no state for.
+    #[serde(default)]
+    ablastate: Option<AblaState>,
+}
+
+/// The field of BCHN's `ablastate` that is read.
+#[derive(Debug, Deserialize)]
+struct AblaState {
+    nextblocksizelimit: u64,
+}
+
+/// What a verbose `getblockheader` says about a block a template builds on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockHeaderSummary {
+    /// Height of the block.
+    pub height: u64,
+    /// Size limit, in bytes, of a block built on this one: BCHN's
+    /// `ablastate.nextblocksizelimit`, the larger of the node's floor and its
+    /// ABLA limit. `None` when the node reports no ABLA state for the block.
+    pub next_block_size_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -219,18 +240,25 @@ impl BitcoindRpcClient {
         self.request("getblockchaininfo", vec![]).await
     }
 
-    /// Height of the block with `block_hash`, from `getblockheader`.
+    /// Height of the block with `block_hash`, and the size limit BCHN applies
+    /// to a block built on it, from a verbose `getblockheader`.
     ///
     /// An error means the node does not know the block, so a template
     /// building on it is not on this node's chain.
-    pub async fn get_block_height(&self, block_hash: &str) -> Result<u64, BitcoindRpcError> {
-        let header: BlockHeaderHeight = self
+    pub async fn get_block_header_summary(
+        &self,
+        block_hash: &str,
+    ) -> Result<BlockHeaderSummary, BitcoindRpcError> {
+        let header: VerboseBlockHeader = self
             .request(
                 "getblockheader",
                 vec![serde_json::json!(block_hash), serde_json::json!(true)],
             )
             .await?;
-        Ok(header.height)
+        Ok(BlockHeaderSummary {
+            height: header.height,
+            next_block_size_limit: header.ablastate.map(|state| state.nextblocksizelimit),
+        })
     }
 
     /// Fetch a Bitcoin template, negotiating SegWit and Signet when required.

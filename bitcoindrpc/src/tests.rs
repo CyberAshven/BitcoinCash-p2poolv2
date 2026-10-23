@@ -121,6 +121,52 @@ async fn test_getblockchaininfo() {
     );
 }
 
+/// BCHN's verbose header carries the ABLA state; the next block's size limit
+/// is read from it, beyond 32 bits.
+#[tokio::test]
+async fn next_block_size_limit_comes_from_the_abla_state() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_json(serde_json::json!({
+            "method": "getblockheader",
+            "params": ["00000000000000000000000000000000000000000000000000000000000000aa", true],
+            "id": 0,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": {
+                "hash": "aa",
+                "height": 900_000,
+                "ablastate": {
+                    "epsilon": 2_500_000_000_u64,
+                    "beta": 2_500_000_000_u64,
+                    "blocksize": 1_000,
+                    "blocksizelimit": 5_000_000_000_u64,
+                    "nextblocksizelimit": 5_000_000_123_u64,
+                },
+            },
+            "error": null,
+            "id": 0,
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
+    let summary = client
+        .get_block_header_summary(
+            "00000000000000000000000000000000000000000000000000000000000000aa",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        summary,
+        BlockHeaderSummary {
+            height: 900_000,
+            next_block_size_limit: Some(5_000_000_123),
+        }
+    );
+}
+
+/// A header without ABLA state still gives its height, and no limit.
 #[tokio::test]
 async fn block_height_comes_from_the_verbose_block_header() {
     let mock_server = MockServer::start().await;
@@ -139,11 +185,19 @@ async fn block_height_comes_from_the_verbose_block_header() {
         .mount(&mock_server)
         .await;
     let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
-    let height = client
-        .get_block_height("00000000000000000000000000000000000000000000000000000000000000aa")
+    let summary = client
+        .get_block_header_summary(
+            "00000000000000000000000000000000000000000000000000000000000000aa",
+        )
         .await
         .unwrap();
-    assert_eq!(height, 1234);
+    assert_eq!(
+        summary,
+        BlockHeaderSummary {
+            height: 1234,
+            next_block_size_limit: None,
+        }
+    );
 }
 
 #[tokio::test]
@@ -159,7 +213,9 @@ async fn an_unknown_block_header_is_an_error() {
         .await;
     let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
     let result = client
-        .get_block_height("00000000000000000000000000000000000000000000000000000000000000aa")
+        .get_block_header_summary(
+            "00000000000000000000000000000000000000000000000000000000000000aa",
+        )
         .await;
     assert!(matches!(
         result,

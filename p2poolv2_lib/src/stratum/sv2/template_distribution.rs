@@ -31,6 +31,11 @@
 //! height comes from the node over RPC, as the parent's height plus one, so a
 //! provider on another chain than the node's gets no work mined.
 //!
+//! The protocol carries no block size limit either. BCHN decides it: the same
+//! `getblockheader` call reports the limit for a block on the parent
+//! (`ablastate.nextblocksizelimit`), a 32 MB floor that ABLA raises with no
+//! fixed maximum. Templates are checked against that, never a fixed size.
+//!
 //! Only Bitcoin Cash templates are mapped: a provider that requires coinbase
 //! outputs (a Bitcoin provider's segwit commitment) is refused.
 
@@ -48,7 +53,7 @@ use bitcoin::blockdata::script::Builder;
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash;
 use bitcoin::{Block, BlockHash, Target, Transaction};
-use bitcoindrpc::{BitcoinRpcConfig, BitcoindRpcClient};
+use bitcoindrpc::{BitcoinRpcConfig, BitcoindRpcClient, BlockHeaderSummary};
 use codec_sv2::Decoder;
 use common_messages_sv2::{
     MESSAGE_TYPE_RECONNECT, MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
@@ -408,16 +413,25 @@ impl ProviderSession {
     }
 }
 
-/// Block size a provided template is checked against: the network's
-/// default excessive block size, the floor of the adaptive block size limit,
-/// which BCHN 29.2.0 reports as `sizelimit` (32 MB on mainnet and regtest,
-/// 2 MB on chipnet). Template Distribution does not carry the limit, and a
+/// The floor of the network's adaptive block size limit (ABLA): 32 MB on
+/// mainnet and regtest, 2 MB on chipnet. The limit never goes below it, so a
 /// block within the floor is never too large.
-fn block_size_floor(network: BitcoinCashNetwork) -> u32 {
+fn block_size_floor(network: BitcoinCashNetwork) -> u64 {
     match network {
         BitcoinCashNetwork::Mainnet | BitcoinCashNetwork::Regtest => 32_000_000,
         BitcoinCashNetwork::Chipnet => 2_000_000,
     }
+}
+
+/// Block size limit a provided template is checked against.
+///
+/// `reported` is the latest limit BCHN reported for a block on a template's
+/// parent (`ablastate.nextblocksizelimit`), the same limit its own
+/// `getblocktemplate` reports as `sizelimit`. BCHN manages the limit, so it is
+/// used whatever its size. Only while BCHN has reported none, because it is
+/// unreachable or keeps no ABLA state, does the network's floor stand in.
+fn template_size_limit(reported: Option<u64>, network: BitcoinCashNetwork) -> u64 {
+    reported.unwrap_or_else(|| block_size_floor(network))
 }
 
 /// The scriptSig start of every coinbase this pool builds at `height`: the
@@ -438,8 +452,8 @@ fn prefix_matches_height_push(prefix: &[u8], push: &[u8]) -> bool {
     prefix == push || length_prefixed
 }
 
-/// Build the [`BlockTemplate`] for `ready` at `height` on `network` and
-/// check it as a BCHN template is checked.
+/// Build the [`BlockTemplate`] for `ready` at `height` and check it as a BCHN
+/// template is checked, against the block size limit `size_limit`.
 ///
 /// `now` (seconds since the epoch) refreshes the time of a template that came
 /// after its `SetNewPrevHash`. `solutions` is the queue of the connection
@@ -447,7 +461,7 @@ fn prefix_matches_height_push(prefix: &[u8], push: &[u8]) -> bool {
 fn provided_block_template(
     ready: ReadyTemplate,
     height: u64,
-    network: BitcoinCashNetwork,
+    size_limit: u64,
     now: u32,
     solutions: mpsc::Sender<Solution>,
 ) -> Result<BlockTemplate, WorkError> {
@@ -485,9 +499,8 @@ fn provided_block_template(
         .iter()
         .map(|transaction| transaction.total_size() as u64)
         .sum::<u64>();
-    let size_limit = block_size_floor(network);
     if transaction_bytes + u64::from(HEADER_AND_COUNT_SIZE) + u64::from(MAX_SUBMITTED_COINBASE)
-        > u64::from(size_limit)
+        > size_limit
     {
         return Err(invalid("transactions leave no room for the coinbase"));
     }
@@ -517,8 +530,8 @@ fn provided_block_template(
         mintime: tip.header_timestamp,
         mutable: Vec::new(),
         noncerange: "00000000ffffffff".to_string(),
-        sigoplimit: u64::from(size_limit / BYTES_PER_SIGCHECK),
-        sizelimit: u64::from(size_limit),
+        sigoplimit: size_limit / u64::from(BYTES_PER_SIGCHECK),
+        sizelimit: size_limit,
         weightlimit: 0,
         curtime: tip.header_timestamp.max(now),
         bits: format!("{:08x}", tip.bits),
@@ -741,7 +754,8 @@ async fn serve_provider(
                 transport,
                 writer,
                 session: ProviderSession::default(),
-                parent_height: None,
+                parent: None,
+                reported_size_limit: None,
                 found_block: None,
                 solutions_tx,
                 published: false,
@@ -836,6 +850,16 @@ async fn read_setup_reply(
     }
 }
 
+/// The parent the provider's current templates build on.
+#[derive(Clone, Copy, Debug)]
+struct ParentBlock {
+    hash: BlockHash,
+    /// Height of a block on the parent.
+    height: u64,
+    /// Block size limit for a block on the parent (`template_size_limit`).
+    size_limit: u64,
+}
+
 /// One set-up provider connection.
 struct ProviderConnection<'a> {
     provider: &'a TemplateProvider,
@@ -844,8 +868,10 @@ struct ProviderConnection<'a> {
     transport: Transport,
     writer: OwnedWriteHalf,
     session: ProviderSession,
-    /// The parent's hash and the height of a block on it, from the node.
-    parent_height: Option<(BlockHash, u64)>,
+    /// The parent of the latest published template.
+    parent: Option<ParentBlock>,
+    /// The latest block size limit the node reported for a parent.
+    reported_size_limit: Option<u64>,
     /// The last block this node sent the provider, and the height of a
     /// block on it: when the provider names it as the parent, the height is
     /// known without asking the node, which may not have the block yet.
@@ -918,20 +944,46 @@ impl ProviderConnection<'_> {
             .map_err(|error| ConnectionEnd::Failed(format!("write: {error}")))
     }
 
+    /// Make `hash`, with a block on it at `height`, the parent of the
+    /// templates that follow, keeping `reported`, the size limit the node
+    /// reported for a block on it, when there is one.
+    fn enter_parent(&mut self, hash: BlockHash, height: u64, reported: Option<u64>) -> ParentBlock {
+        if reported.is_some() {
+            self.reported_size_limit = reported;
+        }
+        let size_limit = template_size_limit(self.reported_size_limit, self.provider.network);
+        if self.reported_size_limit.is_none() {
+            warn!(
+                "The node reported no block size limit for parent {hash}; checking its templates against the network's {size_limit}-byte floor"
+            );
+        } else {
+            debug!("Template Provider parent {hash}: block size limit {size_limit} bytes");
+        }
+        let parent = ParentBlock {
+            hash,
+            height,
+            size_limit,
+        };
+        self.parent = Some(parent);
+        parent
+    }
+
     /// Map `ready` and send it to the notifier. A template that fails the
     /// checks is logged and skipped; the provider's next one may pass.
     async fn publish(&mut self, ready: ReadyTemplate) -> Result<(), ConnectionEnd> {
         let prev_hash = ready.tip.prev_hash;
-        let height = match (self.parent_height, self.found_block) {
-            (Some((known, height)), _) if known == prev_hash => height,
+        let parent = match (self.parent, self.found_block) {
+            (Some(known), _) if known.hash == prev_hash => known,
+            // The successor of a block this node found: the node may not
+            // have that block yet, so it is not asked, and the last limit it
+            // reported stands. ABLA moves the limit by a small fraction a
+            // block.
             (_, Some((found, height))) if found == prev_hash => {
-                self.parent_height = Some((prev_hash, height));
-                height
+                self.enter_parent(prev_hash, height, None)
             }
-            _ => match lookup_parent_height(self.bitcoind, prev_hash).await {
-                Ok(parent) => {
-                    self.parent_height = Some((prev_hash, parent + 1));
-                    parent + 1
+            _ => match lookup_parent(self.bitcoind, prev_hash).await {
+                Ok(summary) => {
+                    self.enter_parent(prev_hash, summary.height + 1, summary.next_block_size_limit)
                 }
                 Err(reason) => {
                     error!("Template Provider template on parent {prev_hash} skipped: {reason}");
@@ -939,12 +991,13 @@ impl ProviderConnection<'_> {
                 }
             },
         };
+        let height = parent.height;
         let template_id = ready.announced.template_id;
         let now = SystemTimeProvider.seconds_since_epoch() as u32;
         match provided_block_template(
             ready,
             height,
-            self.provider.network,
+            parent.size_limit,
             now,
             self.solutions_tx.clone(),
         ) {
@@ -1005,17 +1058,18 @@ impl ProviderConnection<'_> {
     }
 }
 
-/// Height of `prev_hash` on the node, retried while the node catches up.
-async fn lookup_parent_height(
+/// Height of `prev_hash` on the node and the size limit for a block on it,
+/// retried while the node catches up.
+async fn lookup_parent(
     bitcoind: &BitcoindRpcClient,
     prev_hash: BlockHash,
-) -> Result<u64, String> {
+) -> Result<BlockHeaderSummary, String> {
     let hash = prev_hash.to_string();
-    let mut result = bitcoind.get_block_height(&hash).await;
+    let mut result = bitcoind.get_block_header_summary(&hash).await;
     let mut attempt = 1;
     while result.is_err() && attempt < HEIGHT_ATTEMPTS {
         sleep(HEIGHT_RETRY_DELAY).await;
-        result = bitcoind.get_block_height(&hash).await;
+        result = bitcoind.get_block_header_summary(&hash).await;
         attempt += 1;
     }
     result.map_err(|error| format!("the node does not know the parent: {error}"))

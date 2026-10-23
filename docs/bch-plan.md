@@ -430,8 +430,14 @@ provider or a second node can then supply templates. Bitcoin and
   share chain's (2, `0xfffffffe`, height - 1), because peers check them.
   BCHN accepts any, so the provider's own values are only logged. Template
   Distribution carries no block size limit, so templates are checked against
-  the network's default excessive block size, which BCHN 29.2.0 reports as
-  `sizelimit`: 32 MB on mainnet and regtest, 2 MB on chipnet.
+  the limit BCHN reports for their parent: `ablastate.nextblocksizelimit`
+  from the same `getblockheader` call that gives the height: the larger of
+  the node's floor (32 MB on mainnet, 2 MB on chipnet) and its ABLA limit,
+  with no fixed maximum, as `getblocktemplate`'s `sizelimit` is. The
+  successor of
+  a block this node found keeps the last limit BCHN reported, since BCHN may
+  not have that block yet. The network's floor is used only when BCHN has
+  reported no limit, and a warning says so.
 - **Blocks.** A block found on a provided template goes back to its
   connection as `SubmitSolution`. Declared jobs never do, since they carry
   the declarator's transactions. The protocol has no reply, so a block the

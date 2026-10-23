@@ -390,7 +390,7 @@ fn a_chipnet_template_round_trips_through_template_distribution() {
     let template = provided_block_template(
         ready,
         u64::from(fixture.height),
-        BitcoinCashNetwork::Chipnet,
+        block_size_floor(BitcoinCashNetwork::Chipnet),
         fixture.curtime,
         solutions,
     )
@@ -441,13 +441,101 @@ fn a_regtest_template_is_checked_against_the_regtest_block_size() {
     let template = provided_block_template(
         ready,
         u64::from(fixture.height),
-        BitcoinCashNetwork::Regtest,
+        block_size_floor(BitcoinCashNetwork::Regtest),
         fixture.curtime,
         solutions,
     )
     .unwrap();
     assert_eq!(template.sizelimit, fixture.sizelimit);
     assert_eq!(template.sigoplimit, fixture.sigoplimit);
+}
+
+/// BCHN manages the block size: whatever limit it reports is used, past
+/// the floor and past 32 bits. Only with no limit reported does the
+/// network's floor stand in.
+#[test]
+fn the_size_limit_is_the_one_bchn_reports_and_the_floor_only_without_one() {
+    assert_eq!(
+        template_size_limit(Some(5_000_000_000), BitcoinCashNetwork::Mainnet),
+        5_000_000_000
+    );
+    assert_eq!(
+        template_size_limit(Some(3_000_000), BitcoinCashNetwork::Chipnet),
+        3_000_000
+    );
+    assert_eq!(
+        template_size_limit(None, BitcoinCashNetwork::Mainnet),
+        32_000_000
+    );
+    assert_eq!(
+        template_size_limit(None, BitcoinCashNetwork::Chipnet),
+        2_000_000
+    );
+}
+
+/// The chipnet fixture's template, ready on its parent.
+fn ready_chipnet_template(fixture: &BlockTemplate) -> ReadyTemplate {
+    let mut session = ProviderSession::default();
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(1, true, fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            &mut to_bytes(test_tdp_set_new_prev_hash(1, fixture)).unwrap(),
+        )
+        .unwrap();
+    let mut actions = session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(1, fixture)).unwrap(),
+        )
+        .unwrap();
+    let Some(SessionAction::Ready(ready)) = actions.pop() else {
+        panic!("template was not ready");
+    };
+    ready
+}
+
+/// A provided template takes the size limit it is given, and its SigChecks
+/// limit from it. Its transactions must leave room for the largest coinbase
+/// `SubmitSolution` carries, and one byte less refuses it.
+#[test]
+fn a_provided_template_is_checked_against_the_size_limit_it_is_given() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let transaction_bytes = fixture
+        .decode_transactions()
+        .unwrap()
+        .iter()
+        .map(|transaction| transaction.total_size() as u64)
+        .sum::<u64>();
+    let exact =
+        transaction_bytes + u64::from(HEADER_AND_COUNT_SIZE) + u64::from(MAX_SUBMITTED_COINBASE);
+    let (solutions, _queue) = mpsc::channel(1);
+
+    let template = provided_block_template(
+        ready_chipnet_template(&fixture),
+        u64::from(fixture.height),
+        exact,
+        fixture.curtime,
+        solutions.clone(),
+    )
+    .unwrap();
+    assert_eq!(template.sizelimit, exact);
+    assert_eq!(template.sigoplimit, exact / u64::from(BYTES_PER_SIGCHECK));
+
+    let refused = provided_block_template(
+        ready_chipnet_template(&fixture),
+        u64::from(fixture.height),
+        exact - 1,
+        fixture.curtime,
+        solutions,
+    )
+    .unwrap_err();
+    assert!(refused.message.contains("no room for the coinbase"));
 }
 
 #[test]
@@ -473,7 +561,7 @@ fn a_provided_template_sends_its_solution_back_to_its_connection() {
     let template = provided_block_template(
         ready,
         u64::from(fixture.height),
-        BitcoinCashNetwork::Regtest,
+        block_size_floor(BitcoinCashNetwork::Regtest),
         fixture.curtime,
         solutions,
     )
@@ -520,7 +608,7 @@ fn a_bridge_form_coinbase_prefix_is_accepted() {
         provided_block_template(
             ready,
             u64::from(fixture.height),
-            BitcoinCashNetwork::Regtest,
+            block_size_floor(BitcoinCashNetwork::Regtest),
             fixture.curtime,
             solutions,
         )
@@ -550,7 +638,7 @@ fn a_coinbase_prefix_for_another_height_is_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        BitcoinCashNetwork::Regtest,
+        block_size_floor(BitcoinCashNetwork::Regtest),
         fixture.curtime,
         solutions,
     )
@@ -585,7 +673,7 @@ fn a_coinbase_prefix_with_more_than_the_height_push_is_refused() {
         provided_block_template(
             ready,
             u64::from(fixture.height),
-            BitcoinCashNetwork::Regtest,
+            block_size_floor(BitcoinCashNetwork::Regtest),
             fixture.curtime,
             solutions,
         )
@@ -622,7 +710,7 @@ fn required_coinbase_outputs_are_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        BitcoinCashNetwork::Regtest,
+        block_size_floor(BitcoinCashNetwork::Regtest),
         fixture.curtime,
         solutions,
     )
@@ -664,7 +752,7 @@ fn a_merkle_path_that_does_not_match_the_transactions_is_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        BitcoinCashNetwork::Chipnet,
+        block_size_floor(BitcoinCashNetwork::Chipnet),
         fixture.curtime,
         solutions,
     )
@@ -706,7 +794,7 @@ fn transactions_out_of_ctor_order_are_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        BitcoinCashNetwork::Chipnet,
+        block_size_floor(BitcoinCashNetwork::Chipnet),
         fixture.curtime,
         solutions,
     )
@@ -738,7 +826,7 @@ fn a_target_that_disagrees_with_the_bits_is_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        BitcoinCashNetwork::Regtest,
+        block_size_floor(BitcoinCashNetwork::Regtest),
         fixture.curtime,
         solutions,
     )
@@ -769,7 +857,7 @@ fn a_template_after_its_set_new_prev_hash_takes_the_current_time() {
     let template = provided_block_template(
         ready,
         u64::from(fixture.height),
-        BitcoinCashNetwork::Regtest,
+        block_size_floor(BitcoinCashNetwork::Regtest),
         fixture.curtime + 30,
         solutions,
     )
@@ -961,6 +1049,8 @@ async fn templates_flow_from_an_unencrypted_provider_and_solutions_flow_back() {
     assert_eq!(template.height, fixture.height);
     assert_eq!(template.previousblockhash, fixture.previousblockhash);
     assert_eq!(template.transactions.len(), fixture.transactions.len());
+    // The node reported no ABLA state, so chipnet's floor stands in.
+    assert_eq!(template.sizelimit, 2_000_000);
     let block = Block {
         header: Header {
             version: Version::from_consensus(fixture.version),
@@ -1453,7 +1543,10 @@ async fn the_successor_of_a_block_this_node_found_is_published_without_a_parent_
             serde_json::json!({"method": "getblockheader"}),
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "result": {"height": fixture.height - 1},
+            "result": {
+                "height": fixture.height - 1,
+                "ablastate": {"nextblocksizelimit": 40_000_000},
+            },
             "error": null,
             "id": 0,
         })))
@@ -1510,6 +1603,8 @@ async fn the_successor_of_a_block_this_node_found_is_published_without_a_parent_
     else {
         panic!("expected a template for the notifier");
     };
+    // The node's limit, above regtest's 32 MB floor.
+    assert_eq!(template.sizelimit, 40_000_000);
     let found = Block {
         header: Header {
             version: Version::from_consensus(fixture.version),
@@ -1559,4 +1654,6 @@ async fn the_successor_of_a_block_this_node_found_is_published_without_a_parent_
     };
     assert_eq!(template.height, fixture.height + 1);
     assert_eq!(template.previousblockhash, found.block_hash().to_string());
+    // Not asked about the found block, the node's last limit stands.
+    assert_eq!(template.sizelimit, 40_000_000);
 }
