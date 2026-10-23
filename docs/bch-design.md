@@ -135,13 +135,18 @@ a full donation (10,000) still skips miner address validation.
   coinbase starts with the BIP34 height push, and BCHN 29.2.0 accepted blocks
   built this way on regtest (see below). ABLA is tracked by BCHN, which
   reports the current limit as the template's `sizelimit`; this node does not
-  keep ABLA state of its own. The template check counts template
-  transactions, not the coinbase this node adds. BCHN fills templates only to
+  keep ABLA state of its own. A Template Provider's templates are checked
+  against the limit BCHN reports for their parent (`getblockheader`,
+  `ablastate.nextblocksizelimit`). Each job is checked with the coinbase this
+  node adds, against the same limit. BCHN fills templates only to
   `-percentblockmaxsize` of the limit (default 50% on mainnet, 100% on
-  chipnet), which leaves room for a long PPLNS coinbase; an operator who sets
-  100% on a full mempool risks a found block over the limit. Coinbase
-  maturity (100 blocks) is BCHN's rule on the payout outputs; the share chain
-  keeps its own `COINBASE_MATURITY` for share outputs.
+  chipnet) and always leaves 1,000 bytes for the coinbase, which today's
+  coinbase (at most 782 bytes) fits. A coinbase larger than the room BCHN
+  leaves makes the job fail, and the notifier then stops the node; an
+  operator paying many miners in the coinbase on a full mempool should keep
+  `-percentblockmaxsize` below 100%. Coinbase maturity (100 blocks) is BCHN's
+  rule on the payout outputs; the share chain keeps its own maturity for
+  share outputs, `BCH_COINBASE_MATURITY` (100 shares) on Bitcoin Cash.
 - **Node RPC.** BCHN `getblocktemplate` is selected at startup when
   `chain = "bitcoin-cash"`. `getblocktemplatelight` stays optional and is
   not called. ZMQ `hashblock` still wakes the same template task.
@@ -152,11 +157,16 @@ a full donation (10,000) still skips miner address validation.
 - **Share window and difficulty.** The 10 second share interval is
   unchanged. Bitcoin Cash main and mini now have separate genesis shares.
   Mini is easier by the compact exponent above; it is not a retune of the
-  PPLNS window. Since the 2026-10-18 upstream sync the window is a share
-  count, not work: a coinbase pays `PPLNS_WINDOW_SHARES` (120,960) shares.
-  They start `COINBASE_MATURITY` (6,048) shares below the share that found
-  the block. Past the chain's first 6,048 shares, a new share is first paid
-  about 17 hours after it is mined. `difficulty_multiplier` is gone. The
+  PPLNS window. On Bitcoin Cash the window is work, not a share count
+  (decision 11): a coinbase pays the shares holding 3 BCH blocks' worth of
+  work, sized from the paying share's own BCH header bits
+  (`BCH_PPLNS_WINDOW_BLOCKS`) and capped at `PPLNS_WINDOW_SHARES` (120,960,
+  upstream's two weeks of 10-second shares). The window starts
+  `BCH_COINBASE_MATURITY` (100) shares below the share that found the block,
+  so a new share can be paid by blocks found from about 17 minutes after it
+  is mined. Bitcoin
+  keeps upstream's fixed 120,960-share window behind 6,048 shares.
+  `difficulty_multiplier` is gone. The
   only 10 and 600 second constants (`IDEAL_BLOCK_TIME`, `HALFLIFE` in
   `sim_overrides.rs`) are the share chain's own ASERT, not the Bitcoin Cash
   block interval. On Bitcoin Cash that ASERT is anchored at each share's
@@ -167,8 +177,9 @@ a full donation (10,000) still skips miner address validation.
   1-minute blocks, gathering statements for the 2027 upgrade (lock-in
   2026-11-15, activation 2027-05-15 per the research forum thread). It is
   not activated. If it activates, block difficulty falls about tenfold. The
-  share-count window does not follow it, so the window then spans about ten
-  times as many blocks, unless the BCH constants are retuned. The 10 second
+  work-sized window follows it: it still spans 3 blocks, now about ten times
+  shorter, except for pools small enough to sit at the 120,960-share cap,
+  whose window then spans more blocks. The 10 second
   share interval stays below the block interval. Templates change about ten
   times as often, which the ZMQ `hashblock` path already handles. The CHIP's
   tick-based heights and any change to coinbase maturity are BCHN's to
@@ -176,9 +187,14 @@ a full donation (10,000) still skips miner address validation.
 - **Coinbase size.** An RFC on the research forum (2025-06, not a CHIP)
   suggests limiting the coinbase transaction to about 2 kB, roughly 60
   P2PKH outputs, and was opposed by a BCHN maintainer for the reason that it
-  blocks direct coinbase payouts. Nothing limits the coinbase today beyond
-  block size. If such a limit is adopted, the covenant payout tree in the
-  plan becomes necessary rather than optional.
+  blocks direct coinbase payouts. BCH consensus limits a coinbase only by the
+  1,000,000-byte transaction size and the 100-byte scriptSig. This node
+  limits it further by share-chain rules: at most 11 payouts in a 784-byte
+  job (decision 14), which the owner has decided to replace with direct
+  payouts to every miner, and the 200 KiB share body that carries the
+  coinbase. See [the Bitcoin assumptions audit](bch-btc-assumptions-audit.md),
+  items A1 and A2. If a BCH coinbase limit is adopted, the covenant payout
+  tree in the plan becomes necessary rather than optional.
 - **Stratum V2.** A local listener starts when `stratum.sv2_port` is set.
   SV1 stays. Without authority keys, frames are the unencrypted framing the
   Stratum V2 specification allows between local roles; with them, the Noise
@@ -275,7 +291,9 @@ a full donation (10,000) still skips miner address validation.
   merkle root, a little-endian tree size, and a little-endian nonce (44
   bytes). With no aux chain declared, the root, size, and nonce are zero.
   The share coinbase stays one P2PKH output. Bitcoin block coinbases omit
-  the output. A per-share aux choice is not stored in the share header.
+  the output. Jobs the pool builds carry the empty commitment; a declared
+  job's aux choice is stored in its share header (`bch_coinbase`, with the
+  declared scriptSig prefix) so peers can rebuild the coinbase.
 
 ## Live regtest run, 2026-10-14
 
