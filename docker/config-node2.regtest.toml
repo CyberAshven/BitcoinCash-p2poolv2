@@ -1,0 +1,57 @@
+# Second regtest P2Poolv2 node for docker-compose.node.yml (.env.node2.sample).
+# The same node as config-docker.sample.toml, except that it dials the first
+# node. Compose sets the ports, network, share chain and store path.
+
+[network]
+listen_address = "/ip4/0.0.0.0/tcp/6885"
+# The first node's P2P port on this host (host networking). libp2p dials
+# /ip4 addresses only, not DNS names.
+dial_peers = ["/ip4/127.0.0.1/tcp/6884"]
+max_pending_incoming = 10
+max_pending_outgoing = 10
+max_established_incoming = 50
+max_established_outgoing = 50
+max_established_per_peer = 2
+max_workbase_per_second = 10
+max_userworkbase_per_second = 10
+max_miningshare_per_second = 100
+max_inventory_per_second = 100
+max_transaction_per_second = 100
+max_requests_per_second = 100
+dial_timeout_secs = 30
+
+[store]
+path = "/p2poolv2/data/store.db"
+pplns_ttl_days = 7
+
+[stratum]
+hostname = "0.0.0.0"
+port = 3334
+start_difficulty = 10000
+minimum_difficulty = 100
+chain = "bitcoin-cash"
+bitcoin_cash_network = "regtest"
+bch_share_chain = "mini"
+bootstrap_address = "bchreg:qqzldt8u5mafprrw6uljppyqg30uhl97ey890dqm34"
+zmqpubhashblock = "tcp://127.0.0.1:28332"
+network = "regtest"
+version_mask = "1fffe000"
+# The first node's chain starts at an old genesis share, so it never looks
+# current on a new regtest chain.
+wait_for_chain_sync = false
+pool_signature = "P2Poolv2"
+
+[bitcoinrpc]
+url = "http://127.0.0.1:18443"
+username = "p2pool"
+password = "p2pool"
+
+[logging]
+file = "/p2poolv2/logs/p2pool.log"
+console = true
+level = "info"
+stats_dir = "/p2poolv2/logs/stats"
+
+[api]
+hostname = "0.0.0.0"
+port = 46885

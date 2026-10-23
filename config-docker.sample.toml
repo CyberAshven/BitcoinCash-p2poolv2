@@ -1,9 +1,20 @@
+# P2Poolv2 for Bitcoin Cash, as the Docker image and docker/docker-compose.yml
+# run it: a regtest node with BCHN on 127.0.0.1.
+#
+# Under compose, NETWORK and BCH_SHARE_CHAIN in docker/.env override chain,
+# bitcoin_cash_network, bch_share_chain and the store path below. For chipnet
+# or mainnet, copy this file to config.toml, set the values marked "chipnet or
+# mainnet", and set P2POOL_CONFIG=config.toml in docker/.env. Mainnet and
+# chipnet run the same rules; only the network switch differs.
+
 [network]
 listen_address = "/ip4/0.0.0.0/tcp/6884"
+# Share chain peers to dial at startup and keep reconnecting to, as
+# "/ip4/<address>/tcp/<port>". Bitcoin Cash has no DNS seeds yet, so on
+# chipnet or mainnet list at least one node of the share chain you join;
+# without one the node only waits for peers to dial it.
 dial_peers = []
-# Resolve the built-in DNS seeds for this network at startup and dial the
-# returned nodes. Set false to rely only on dial_peers. Always off on
-# Bitcoin Cash (chain = "bitcoin-cash"), which has no DNS seeds yet.
+# Always off on Bitcoin Cash: the built-in seeds are Bitcoin nodes.
 # dns_seed = true
 max_pending_incoming = 10
 max_pending_outgoing = 10
@@ -20,8 +31,11 @@ max_inventory_per_second = 100
 max_transaction_per_second = 100
 max_requests_per_second = 100
 dial_timeout_secs = 30
+# Address to advertise to peers when the node is behind NAT.
+# external_address = "/ip4/203.0.113.1/tcp/6884"
 
 [store]
+# Compose sets /p2poolv2/data/<NETWORK>-<BCH_SHARE_CHAIN> instead.
 path = "/p2poolv2/data/store.db"
 pplns_ttl_days = 7
 
@@ -30,107 +44,69 @@ hostname = "0.0.0.0"
 port = 3333
 start_difficulty = 10000
 minimum_difficulty = 100
-solo_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
 # Pool operating mode: "p2poolv2" (share chain) or "hydrapool"
 # (standalone PPLNS, no share chain). Default p2poolv2.
 # mode = "p2poolv2"
-# Share chain address owning every share this node mines. In p2poolv2
-# mode a share needs an owner, so a miner that does not send
-# p2p=<address> in its stratum password gets this address instead.
-# Leave it unset only if every one of your miners sends p2p=; otherwise
-# they are rejected at authorize.
-# Not valid with mode = "hydrapool", which has no share chain.
-#
-# Set this to YOUR OWN share chain address before enabling it. There is
-# deliberately no default: any address published here would own the shares
-# of everyone who copied this file, and a placeholder would silently burn
-# them.
-#
-# Note a configured address is authoritative, so a miner that sends a
-# different p2p=<address> is rejected as a conflict. Set this only if you
-# want every share to belong to the node.
-# miner_address = "sp2pool1..."
-# The bitcoin address to use for first jobs when there are no shares
-bootstrap_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
-# Any donation amount for developers to be sent to donation address.
-# On Bitcoin the default is no donation, and both fields must be set together.
-# On Bitcoin Cash (chain = "bitcoin-cash") the donation goes to the built-in
-# P2Poolv2 address bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k
-# (same key under bchtest: and bchreg:), and the default is 150 basis points
-# (1.5%) of each block this node finds. Set donation to raise or lower it, or
-# to 0 to opt out. donation_address may be left out there; if set it must be
-# that same address, because the share chain rejects a Bitcoin Cash donation
-# paid anywhere else.
-# donation_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
-# In basis points, 1% = 100 basis points. Default 0 on Bitcoin, 150 on Bitcoin Cash
-# donation = 0
-# Any fee amount for node/hydrapool provider to be sent to fee address. Default no fee.
-# This is where a public pool operator takes their own cut. It is taken after
-# the donation. On Bitcoin Cash, donation plus fee may not exceed 1000 basis
-# points (10%); peers reject shares above that.
-# fee_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
-# In basis points, 1% = 100 basis points. Default 0
+
+# Bitcoin Cash: templates without SegWit rules, CashAddr payout addresses,
+# canonical transaction order.
+chain = "bitcoin-cash"
+# "mainnet", "chipnet" or "regtest". Under compose, NETWORK sets it.
+bitcoin_cash_network = "regtest"
+# "mini" (share target 256 times easier, for small miners) or "main".
+# Under compose, BCH_SHARE_CHAIN sets it.
+bch_share_chain = "mini"
+
+# Share address owning every share this node mines: a p2pool: (mainnet),
+# tp2pool: (chipnet) or rp2pool: (regtest) address made from a P2PKH key in
+# your own wallet with `p2poolv2_cli bch-share-address`. Leave it unset when
+# every miner sends its own p2p=<share address> in the Stratum password, as
+# the regtest miner does. A miner sending a different p2p= is rejected.
+# There is deliberately no default: an address published here would own the
+# shares of everyone who copied this file.
+# miner_address = "rp2pool:q..."
+
+# A CashAddr for this network. Only Hydrapool mode pays it; a share chain
+# node needs one that parses. chipnet or mainnet: use your own bchtest: or
+# bitcoincash: address.
+bootstrap_address = "bchreg:qqzldt8u5mafprrw6uljppyqg30uhl97ey890dqm34"
+
+# Every Bitcoin Cash node donates 1.5% (150 basis points) of each block it
+# finds to bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k (the same key
+# under bchtest: and bchreg:). Set donation to change it, 0 to opt out.
+# donation = 150
+# A public pool's own cut, after the donation. Donation plus fee may not
+# exceed 1000 basis points (10%); peers reject shares above that.
+# fee_address = "bchreg:q..."
 # fee = 0
-zmqpubhashblock = "tcp://bitcoind:28332"
-# Block chain for templates and payout scripts. Default "bitcoin".
-# "bitcoin-cash" fetches BCHN templates without SegWit rules and requires
-# CashAddr payout addresses. A configured miner_address on that chain is a
-# CashAddr share address (p2pool, tp2pool, or rp2pool), not a payout address.
-# chain = "bitcoin"
-# Required with chain = "bitcoin-cash": "mainnet", "chipnet", or "regtest".
-# bitcoin_cash_network = "chipnet"
-# Main or mini Bitcoin Cash share chain. Default "main". "mini" is rejected
-# unless chain is "bitcoin-cash". Mini's share target is 256 times easier.
-# bch_share_chain = "main"
-# Stratum V2 listen port. Absent means the node does not open an SV2 socket.
-# Local frames are unencrypted, so keep it on localhost or a trusted LAN.
-# A Mining connection opens standard or extended channels with
-# user_identity "<payout address>.<worker>"; its shares belong to
-# miner_address. Without miner_address, a miner appends its own share
-# address as in the SV1 password: "<payout address>.<worker>,p2p=<address>".
-# Job Declaration connections are served too. Bitcoin Cash jobs include one
-# AuxPoW output.
+
+# BCHN's ZMQ hashblock endpoint, as docker-compose.yml publishes it.
+zmqpubhashblock = "tcp://127.0.0.1:28332"
+
+# Stratum V2 next to Stratum V1. Without the authority keys below, frames are
+# unencrypted, which only suits localhost or a trusted LAN; this container
+# listens on every interface, so set the keys before opening the port.
 # sv2_port = 3336
-# Noise encryption for Stratum V2, signed by your authority key. Set both
-# keys, in the Stratum V2 reference implementation's text form, to require
-# the encrypted handshake on every SV2 connection; miners pin the public key.
-# Make the keys with an external tool (this node never generates keys) and
-# prefer the env var P2POOL__STRATUM__SV2_AUTHORITY_SECRET_KEY for the secret.
 # sv2_authority_public_key = "9b..."
+# Keep the secret out of the file: P2POOL_STRATUM__SV2_AUTHORITY_SECRET_KEY
 # sv2_authority_secret_key = "..."
-# Seconds each Noise certificate stays valid. Default 3600.
-# sv2_cert_validity_secs = 3600
-# Where block templates come from. Default "rpc": getblocktemplate from the
-# node in [bitcoinrpc]. "sv2" takes them from a Stratum V2 Template Provider
-# (Template Distribution Protocol), on chain = "bitcoin-cash" only, and sends
-# found blocks back to it; [bitcoinrpc] is still required, to check each
-# template's parent, validate shares and take blocks the provider cannot.
-# template_source = "rpc"
-# HOST:PORT of the Template Provider, with template_source = "sv2".
-# template_provider_address = "127.0.0.1:8442"
-# The provider's authority public key (same text form as above). Pinning it
-# runs the Noise handshake; it is required unless the provider is on this
-# computer (a loopback address).
-# template_provider_authority_public_key = "9b..."
-# The share-chain network can be "main", "testnet4" or "signet"
-# On Bitcoin Cash it is ignored and derived from bitcoin_cash_network.
-network = "signet"
-# Use BIP 323 mask for version rolling (see https://github.com/bitcoin/bips/blob/622e47722cd35514e96da37ae89f868e18d581e4/bip-0323.mediawiki#specification)
-version_mask = "1fffffe0"
-# The PPLNS payout window is fixed for the network, not configured: each
-# coinbase pays the last 120,960 shares (about two weeks at the 10 second
-# share target), weighted by share difficulty.
-# Add a pool signature, if you want. Comment out the line if you want
-# to mine anonymous blocks. This signature is only used to show others
-# how large your pool is, if you are running private, there is no need
-# to add a pool signature. Maximum length 16 bytes.
-# It only tags the coinbases this node builds. It is not part of consensus:
-# peers read each block's signature from its own coinbase, so nodes with
-# different signatures, or none, still accept each other's shares.
+
+# Ignored on Bitcoin Cash (derived from bitcoin_cash_network) but required.
+network = "regtest"
+# Version rolling mask offered to miners: the 16 general purpose bits of
+# BIP 320, which ASIC firmware rolls (BIP 310 negotiation).
+version_mask = "1fffe000"
+# A new regtest share chain never looks current: its genesis share is old.
+# chipnet or mainnet, joining a running share chain: set true, so miners
+# connect only once the node has synced.
+wait_for_chain_sync = false
+# Tags the coinbases this node builds; not part of consensus. Max 16 bytes.
 pool_signature = "P2Poolv2"
 
 [bitcoinrpc]
-url = "http://bitcoind:38332"
+# BCHN's RPC, published on the host's loopback by docker-compose.yml.
+# chipnet: http://127.0.0.1:48332, mainnet: http://127.0.0.1:8332.
+url = "http://127.0.0.1:18443"
 username = "p2pool"
 password = "p2pool"
 
@@ -144,9 +120,12 @@ stats_dir = "/p2poolv2/logs/stats"
 [api]
 hostname = "0.0.0.0"
 port = 46884
-# Optional authentication credentials
+# Optional login for the API and dashboard. auth_token is salt$hmac from
+# `p2poolv2_cli gen-auth <user> <password>`.
 # auth_user = "admin"
-# auth_token is of the format salt:password-hmac. Use can p2poolv2_cli gen-auth to generate a token.
-# auth_token = "your_secret_token"
-# auth_password is the raw password for p2poolv2_cli client auth only. Do not set on server config.
-# auth_password = "your_password"
+# auth_token = "..."
+# Open the dashboard and read-only share chain routes to anyone; /metrics,
+# /peers, /blocked_ips and /jd_prepare keep the login.
+# public_dashboard = false
+# Serve a self-hosted frontend build from this folder.
+# web_root = "/srv/p2pool-frontend"

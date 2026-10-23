@@ -1,0 +1,102 @@
+name: Docker regtest stack
+
+# Brings up docker/docker-compose.yml on Bitcoin Cash regtest (BCHN, the
+# P2Poolv2 node built from this tree, and the regtest CPU miner), checks that
+# blocks are mined through the pool, then starts a second node from
+# docker-compose.node.yml and checks that it finds the first.
+
+on:
+  pull_request:
+    branches: ["main", "alpha"]
+    paths:
+      - "docker/**"
+      - "config-docker.sample.toml"
+      - ".github/workflows/docker-regtest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regtest:
+    name: BCHN regtest stack mines
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build the P2Poolv2 image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: docker/p2poolv2/Dockerfile
+          tags: p2poolv2:latest
+          load: true
+          cache-from: type=gha,scope=docker-regtest
+          cache-to: type=gha,scope=docker-regtest,mode=max
+
+      - name: Start the regtest stack
+        working-directory: docker
+        run: |
+          cp .env.sample .env
+          docker compose up -d
+          docker compose ps
+
+      - name: Wait for blocks mined through the pool
+        working-directory: docker
+        run: |
+          initial=$(sed -n 's/^REGTEST_INITIAL_BLOCKS=//p' .env)
+          target=$((initial + 3))
+          for attempt in $(seq 1 60); do
+            height=$(docker compose exec -T bchn bcli getblockcount 2>/dev/null || echo 0)
+            echo "attempt $attempt: BCHN height $height, waiting for $target"
+            if [ "$height" -ge "$target" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "The pool did not mine 3 blocks in 5 minutes" >&2
+          exit 1
+
+      - name: Check the blocks came from P2Poolv2
+        working-directory: docker
+        run: |
+          docker compose logs p2poolv2 | grep "Block submitted successfully"
+          # P2Poolv2's coinbase pays the 1.5% donation, here under bchreg:.
+          docker compose exec -T bchn sh -c 'bcli getblock "$(bcli getbestblockhash)" 2' \
+            | grep bchreg:qze95tc2dqrnltvxfa5yhunwx5952f34fvsm6us7sv
+          curl -sf http://127.0.0.1:46884/chain_info
+
+      - name: Start a second node
+        working-directory: docker
+        run: |
+          cp .env.node2.sample .env.node2
+          docker compose -f docker-compose.node.yml -p node2 --env-file .env.node2 up -d --wait
+          for attempt in $(seq 1 30); do
+            if docker compose -f docker-compose.node.yml -p node2 logs p2poolv2 | grep "Identified Peer"; then
+              curl -sf http://127.0.0.1:46885/chain_info
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "The second node did not identify the first" >&2
+          exit 1
+
+      - name: Show logs
+        if: always()
+        working-directory: docker
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --tail=150
+          docker compose -f docker-compose.node.yml -p node2 logs --no-color --tail=80 || true
+
+      - name: Stop the stack
+        if: always()
+        working-directory: docker
+        run: |
+          docker compose -f docker-compose.node.yml -p node2 down -v || true
+          docker compose down -v

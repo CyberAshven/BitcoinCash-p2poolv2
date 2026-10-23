@@ -333,7 +333,7 @@ pub struct StratumConfig<State = Raw> {
     #[serde(default)]
     pub sv2_authority_public_key: Option<String>,
     /// Stratum V2 authority secret key (Base58Check of the 32 bytes). Prefer
-    /// `P2POOL__STRATUM__SV2_AUTHORITY_SECRET_KEY` over the file.
+    /// `P2POOL_STRATUM__SV2_AUTHORITY_SECRET_KEY` over the file.
     #[serde(default)]
     pub sv2_authority_secret_key: Option<String>,
     /// Seconds a Noise certificate signed by the authority key stays valid.
@@ -1273,8 +1273,8 @@ pub struct Config {
 
 #[allow(dead_code)]
 impl Config {
-    /// Load the configuration file at `path`, with `P2POOL__` environment
-    /// overrides.
+    /// Load the configuration file at `path`, with environment overrides
+    /// spelled `P2POOL_<SECTION>__<KEY>`, for example `P2POOL_API__PORT`.
     ///
     /// On Bitcoin Cash, `stratum.network` is replaced by the network implied
     /// by `bitcoin_cash_network` (see [`BitcoinCashNetwork::legacy_network`]).
@@ -1720,17 +1720,19 @@ mod tests {
     /// The exact keys docker/docker-compose.p2poolv2.yml sets, asserted
     /// together so the container and the config schema cannot drift apart.
     ///
-    /// Compose deliberately does not set `stratum.network` or
-    /// `bitcoinrpc.url`. Those are the operator's, from the mounted
-    /// config.toml: an override here would silently contradict that file and
-    /// fail late, either on the wrong chain or against the wrong bitcoind.
+    /// Compose deliberately does not set `bitcoinrpc.url`. That is the
+    /// operator's, from the mounted config.toml: an override here would
+    /// silently contradict that file and fail late, against the wrong BCHN.
     /// `env_override_reaches_the_network_listen_address` covers the one key
     /// that used to be unreachable and now applies.
     #[test]
     fn env_overrides_used_by_docker_compose_all_apply() {
         temp_env::with_vars(
             [
-                ("P2POOL_STORE__PATH", Some("/p2poolv2/data/signet")),
+                ("P2POOL_STRATUM__CHAIN", Some("bitcoin-cash")),
+                ("P2POOL_STRATUM__BITCOIN_CASH_NETWORK", Some("regtest")),
+                ("P2POOL_STRATUM__BCH_SHARE_CHAIN", Some("mini")),
+                ("P2POOL_STORE__PATH", Some("/p2poolv2/data/regtest-mini")),
                 ("P2POOL_STRATUM__PORT", Some("3333")),
                 ("P2POOL_API__PORT", Some("46884")),
                 (
@@ -1740,7 +1742,14 @@ mod tests {
             ],
             || {
                 let config = Config::load("../config.sample.toml").unwrap();
-                assert_eq!(config.store.path, "/p2poolv2/data/signet");
+                assert_eq!(config.stratum.chain, Chain::BitcoinCash);
+                assert_eq!(
+                    config.stratum.bitcoin_cash_network,
+                    Some(BitcoinCashNetwork::Regtest)
+                );
+                assert_eq!(config.stratum.bch_share_chain, BchShareChain::Mini);
+                assert_eq!(config.stratum.network, Network::Regtest);
+                assert_eq!(config.store.path, "/p2poolv2/data/regtest-mini");
                 assert_eq!(config.stratum.port, 3333);
                 assert_eq!(config.api.port, 46884);
                 assert_eq!(config.network.listen_address, "/ip4/0.0.0.0/tcp/6884");
@@ -1767,22 +1776,22 @@ mod tests {
         );
     }
 
-    /// NETWORK drives both the chain and the store directory, and is required
-    /// rather than defaulted.
+    /// NETWORK drives both the Bitcoin Cash network and the store directory,
+    /// and is required rather than defaulted.
     #[test]
-    fn docker_compose_requires_network_and_uses_it_for_chain_and_store() {
+    fn docker_compose_requires_network_and_uses_it_for_bitcoin_cash_network_and_store() {
         let entries: Vec<&str> = include_str!("../../docker/docker-compose.p2poolv2.yml")
             .lines()
             .map(str::trim)
             .filter(|line| line.starts_with("- P2POOL_"))
             .collect();
-        let chain = entries
+        let network = entries
             .iter()
-            .find(|line| line.contains("STRATUM__NETWORK"))
-            .expect("compose should set the chain from NETWORK");
+            .find(|line| line.contains("STRATUM__BITCOIN_CASH_NETWORK"))
+            .expect("compose should set bitcoin_cash_network from NETWORK");
         assert!(
-            chain.contains("${NETWORK:?"),
-            "NETWORK must be required, not defaulted: {chain}"
+            network.contains("${NETWORK:?"),
+            "NETWORK must be required, not defaulted: {network}"
         );
         let store = entries
             .iter()
@@ -1790,8 +1799,51 @@ mod tests {
             .expect("compose should set the store path");
         assert!(
             store.contains("${NETWORK}"),
-            "store path must follow the same NETWORK as the chain: {store}"
+            "store path must follow the same NETWORK as the node: {store}"
         );
+    }
+
+    /// The compose stack is a Bitcoin Cash stack whatever the mounted config
+    /// says.
+    #[test]
+    fn docker_compose_sets_the_bitcoin_cash_chain() {
+        let sets_chain = include_str!("../../docker/docker-compose.p2poolv2.yml")
+            .lines()
+            .map(str::trim)
+            .any(|line| line == "- P2POOL_STRATUM__CHAIN=bitcoin-cash");
+        assert!(sets_chain, "compose should set chain = bitcoin-cash");
+    }
+
+    /// config-docker.sample.toml is the image's default config and the
+    /// compose stack's default mount: a Bitcoin Cash regtest node.
+    #[test]
+    fn docker_sample_config_is_a_bitcoin_cash_regtest_node() {
+        let config = Config::load("../config-docker.sample.toml").unwrap();
+        assert_eq!(config.stratum.chain, Chain::BitcoinCash);
+        assert_eq!(
+            config.stratum.bitcoin_cash_network,
+            Some(BitcoinCashNetwork::Regtest)
+        );
+        assert_eq!(config.stratum.bch_share_chain, BchShareChain::Mini);
+        assert!(!config.network.dns_seed);
+    }
+
+    /// Its CashAddr bootstrap address and the default donation parse on
+    /// regtest, so the node starts from the sample unedited.
+    #[test]
+    fn docker_sample_config_parses() {
+        let config = Config::load("../config-docker.sample.toml").unwrap();
+        let parsed = config.stratum.parse().unwrap();
+        assert_eq!(parsed.network, Network::Regtest);
+        assert_eq!(parsed.version_mask, DEFAULT_VERSION_MASK);
+    }
+
+    /// Both samples offer miners the code's default version rolling mask,
+    /// BIP 320's general purpose bits.
+    #[test]
+    fn sample_config_version_mask_is_the_default() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert_eq!(config.stratum.version_mask, DEFAULT_VERSION_MASK);
     }
 
     #[test]

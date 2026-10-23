@@ -384,8 +384,8 @@
           "text": "",
           "value": ""
         },
-        "description": "The user's bitcoin address for searching workers",
-        "label": "User's BTC Address",
+        "description": "The miner's payout address (CashAddr), the Stratum username before the dot, for searching workers",
+        "label": "Payout address (CashAddr)",
         "name": "user_address",
         "options": [],
         "query": "",

@@ -1,344 +1,236 @@
-image:https://github.com/p2poolv2/p2poolv2/actions/workflows/rust.yml/badge.svg[Rust CI, link=https://github.com/p2poolv2/p2poolv2/actions/workflows/rust.yml]
-image:https://codecov.io/gh/p2poolv2/p2poolv2/graph/badge.svg?token=Xeu4GFdASS[Codecov, link=https://codecov.io/gh/p2poolv2/p2poolv2]
-image:https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg[License: MIT OR Apache-2.0, link=#license]
+image:https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/rust.yml/badge.svg?branch=alpha[Rust CI, link=https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/rust.yml]
+image:https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/docs.yml/badge.svg?branch=alpha[Docs, link=https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/docs.yml]
+image:https://img.shields.io/badge/license-AGPL--3.0-blue.svg[License: AGPL-3.0, link=#license]
 
-== P2Poolv2
+== P2Poolv2 for Bitcoin Cash
 
 ****
 **Mission:** ##Replace pool operators with miners##
 ****
 
-P2Poolv2 is a peer-to-peer Bitcoin mining pool where miners coordinate
-directly and verify their rewards without centralized operators.
+A peer-to-peer Bitcoin Cash mining pool. Each miner runs a node next to its
+own Bitcoin Cash Node (BCHN), builds its own block templates, and agrees on a
+share chain with its peers instead of trusting a pool operator. Every block
+the pool finds pays the miners directly in its coinbase: nothing is held, and
+nobody has to sign before a miner owns its payout.
 
-1. Share chain with uncles - all your work is accounted for.
-2. Pay large miners in coinbase - non custodial solution for top N miners.
-3. Support transactions - pay all miners with atomic swaps by market makers.
-4. Market makers buy shares from smaller miners - earning virgin coins.
+This is a fork of https://github.com/p2poolv2/p2poolv2[P2Poolv2], the
+peer-to-peer Bitcoin pool. Its share chain with uncles, PPLNS accounting,
+Stratum server, storage and P2P network are the work of the P2Poolv2
+developers (see link:AUTHORS[AUTHORS]); this fork ports them to Bitcoin Cash
+and adds what Bitcoin Cash makes possible. Upstream's chat is on
+https://matrix.to/#/#p2poolv2:matrix.org[Matrix], its design notes on its
+https://github.com/p2poolv2/p2poolv2/wiki[wiki] and
+https://github.com/p2poolv2/docs[docs].
 
---
-We chat on https://matrix.to/#/#p2poolv2:matrix.org[Matrix].
+Status: **alpha.** The pool runs on chipnet; mainnet has not started. Try it
+on regtest or chipnet first.
 
-We use https://github.com/p2poolv2/p2poolv2/wiki[github wiki] for most design documents and tools for developers.
+=== Decisions in short
 
-We are tracking progress using our https://github.com/orgs/p2poolv2/projects/1[Github project: Reboot P2Pool].
+The full list, with reasons, is in link:docs/bch-plan.md[docs/bch-plan.md],
+"Decisions so far".
 
-See detailed https://github.com/p2poolv2/p2poolv2/wiki/Developer-Setup-Notes[Developer Setup Notes] on the wiki.
---
+* *Payouts in the coinbase,* no ledger and no custody. PPLNS over a window of
+  three Bitcoin Cash blocks of work (by the paying block's own difficulty), at
+  most 120,960 shares; a share counts once 100 shares deep. Uncles are paid
+  9/10 of their difficulty.
+* *Main and mini share chains.* The mini chain's share target is 256 times
+  easier, for small miners.
+* *Mainnet and chipnet run the same rules;* only the network setting differs.
+  Share-chain rules never fork Bitcoin Cash itself.
+* *Donation and fee.* Each node donates 1.5% of the blocks it finds to the
+  project by default (`donation`, 0 opts out); a public pool may add its own
+  `fee`. The share chain caps both together at 10%.
+* *Bitcoin Cash rules:* CashAddr payouts, P2PKH share owners, canonical
+  transaction order, BCH's ASERT anchored at each share's parent for share
+  difficulty.
+* *Stratum V2 first:* Noise encryption, standard and extended channels, both
+  Job Declaration modes, templates from a Template Provider. Stratum V1 stays
+  for older firmware.
+* *Share trading on Bitcoin Cash:* a share's payout right can be sold for BCH
+  through a hash time locked contract. No Lightning.
+* *All code is Rust,* including the dashboard; CSS and HTML for styling only.
 
-== Running P2Poolv2
+=== Quick start with BCHN
 
-=== Setup Bitcoin Node
+The full guide is link:docs/bch-quickstart.md[docs/bch-quickstart.md];
+hardware, disk and ports are in link:docs/requirements.md[docs/requirements.md].
 
-To run your local p2pool node you need to run a bitcoin node and then
-a p2poolv2 node configured to talk to your bitcoind node to fetch
-blocktemplates and submit blocks.
+. Run BCHN, synced, with in `bitcoin.conf`:
++
+[,ini]
+----
+server=1
+rpcuser=p2pool
+rpcpassword=<a long random password>
+zmqpubhashblock=tcp://127.0.0.1:28332
+----
++
+On regtest add `allowunconnectedmining=1`: BCHN serves no templates without
+peers otherwise.
 
-For signet we provide a `docker/bitcoin-signet.conf` that you can use
-as your bitcoin.conf. We also provide a docker compose service that
-will start signet bitcoind with enough blocks to start mining. If you
-just want to run a signet network run bitcoin as
-
+. Make a share address from a P2PKH receiving address of your own wallet,
+ideally not your payout address. The command takes an address, never a key:
++
 [,shell]
 ----
-cd docker
-docker compose up -d bitcoind
+p2poolv2_cli bch-share-address --network chipnet bchtest:qq...
+# tp2pool:qq...
 ----
 
-The important details you want from your bitcoin.conf are:
-
-. rpcuser
-. rpcpassword
-
-Another important detail is to set your bitcoin config file to allow
-for 500 coinbase outputs. This is required before we ship our atomic
-swap based payout mechanism. With space to accomodate 500 miners, we
-can start running P2Poolv2 with direct payments from coinbase.
-
-For 500 P2WPKH outputs use `blockmaxweight` to 3930000.
-
-[,config]
+. Start from `config.sample.toml` and set, under `[stratum]`:
++
+[,toml]
 ----
-blockmaxweight=3930000
+chain = "bitcoin-cash"
+bitcoin_cash_network = "chipnet"     # or "mainnet", "regtest"
+bch_share_chain = "mini"             # "main" for large miners
+miner_address = "tp2pool:qq..."      # optional: owns every share this node mines
+bootstrap_address = "bchtest:qq..."
+zmqpubhashblock = "tcp://127.0.0.1:28332"
 ----
++
+Point `[bitcoinrpc]` at BCHN (`http://127.0.0.1:48332` on chipnet, `8332` on
+mainnet) and list share chain peers in `[network] dial_peers`: Bitcoin Cash
+has no P2Poolv2 DNS seeds yet.
 
-Finally, you need to mine 32 blocks before you can run p2poolv2 node
-to talk to bitcoind. This is because BIP34 requires coinbase to
-include height using varint format, which conflicts with how these
-first 32 heights are encoded. The bitcoind docker service takes care
-of this by bootstrapping the signet with first 32 blocks.
+. Run `p2poolv2 --config config.toml` and point miners at port 3333.
 
-=== Install P2Poolv2
+=== Install a release
 
 Download the archive for your platform (Linux x64 or ARM64, Apple Silicon
 macOS, or Windows x64) and `config.sample.toml` from the
 https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases[releases page],
-then check the archive against its `.sha256` file. Don't use the
-`p2poolv2_node-installer.sh` attached to v0.0.1-alpha: it downloads from the
-upstream repository. Releases after it ship an installer that downloads from
-this fork:
+and check the archive against its `.sha256` file. On Linux and macOS the
+installer does both:
 
 [,shell]
 ----
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases/download/<tag>/p2poolv2_node-installer.sh | sh
-curl --proto '=https' --tlsv1.2 -LsSf -o config.toml https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases/download/<tag>/config.sample.toml
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases/download/v0.0.1-alpha/p2poolv2_node-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf -o config.toml https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases/download/v0.0.1-alpha/config.sample.toml
 ----
 
-The above will install `p2poolv2` and `p2poolv2_cli` in your PATH and download a `config.toml` for you to edit as required.
+The installer puts `p2poolv2` and `p2poolv2_cli` in your PATH and prints where.
+The `v0.0.1-alpha` release is refreshed in place until the beta, so download
+it again to update.
 
-The location where the binaries are installed will be echoed by the installer.
+=== Docker
+
+The image is `ghcr.io/cyberashven/bitcoincash-p2poolv2` (`latest` or a
+release tag, Linux amd64 and arm64). Its default config is
+link:config-docker.sample.toml[config-docker.sample.toml], a regtest node.
+
+link:docker/README.adoc[docker/README.adoc] runs BCHN and a node together with
+Docker Compose, on regtest, chipnet or mainnet. On regtest the stack also
+mines, with a CPU miner written in Rust:
 
 [,shell]
 ----
-p2poolv2 --help
-p2poolv2_cli --help
-----
-
-=== Run P2Poolv2
-
-. Edit the `config.toml` as required.
-.. At the very least you need to provide the bitcoind rpc details under the `[bitcoinrpc]` section.
-.. Replace `[stratum] miner_address` with your own share chain address. The
-sample ships an unspendable placeholder, so shares mined against it are lost.
-. Run P2Poolv2 `p2poolv2 config.toml`
-. Point your miners to `<yourhost>:<your stratum port in config.toml>`
-. Decide where the share chain address comes from. Every share needs an owner
-on the share chain, and that owner is a different address, on a different
-chain, from the bitcoin address that receives the payout.
-+
---
-The stratum *username* stays the bitcoin payout address, exactly as before.
-
-The share address comes from one of two places:
-
-* *The node's address.* Set `[stratum] miner_address` in `config.toml` and no
-miner needs to change anything -- every share the pool mines is owned by that
-address, while bitcoin PPLNS payouts still go per miner from the username. Use
-this if your miner firmware caps the password field, or if you intend to
-accumulate the tradable shares yourself.
-* *Per miner.* Set the stratum password to `p2p=<address>`, combinable with the
-existing difficulty hints as a comma-separated list, for example
-`p2p=sp2pool1...,d=1000`. A miner that sends a *different* address from the
-node's configured one is rejected rather than silently overridden.
-
-If neither is set, authorize is rejected with `This pool needs a share chain
-address. Set the stratum password to p2p=<address>...`.
-
-Hydrapool mode (`mode = "hydrapool"`) builds no share chain and needs none of
-this; setting `miner_address` there fails at startup.
---
-
-==== Getting a share chain address
-
-Take the key from a wallet that will custody and back it up. The recommended
-source is a Bitcoin Core wallet:
-
-[,shell]
-----
-ADDR=$(bitcoin-cli -signet getnewaddress "p2pool share owner" bech32m)
-bitcoin-cli -signet getaddressinfo "$ADDR"    # check "ismine" and "solvable"
-bitcoin-cli -signet getaddressinfo "$ADDR" | jq -r .witness_program \
-  | p2poolv2_cli address --network signet
-----
-
-`witness_program` is the 32 byte taproot output key; `p2poolv2_cli address`
-encodes it under the share chain prefix for the network you name (`main`,
-`testnet4`, `signet` or `regtest`, as Bitcoin Core names them). Check
-`"ismine": true` and `"solvable": true` in the `getaddressinfo` output, or you
-are assigning shares to a key you cannot sign with.
-
-Use the address either on the node, as `[stratum] miner_address` in
-`config.toml`, or from the miner, as the stratum password:
-
-[,shell]
-----
-p2p=sp2pool1p504yc8zlqs4w077ss6787v8z5zxgke6nc333md75k87t82u5ryqqd9033x,d=1000
-----
-
-The `p2p=` key is case insensitive and the fields may be in any order, comma,
-space, tab or semicolon separated. The stratum *username* stays your bitcoin
-payout address. Note that `p2p=<address>` alone is 71 characters, so check your
-firmware does not truncate the password field; a truncated address fails its
-checksum rather than sending your shares elsewhere.
-
-P2Poolv2 does not generate private keys and ships no tool to do so, by design.
-The encoder takes a public output key only, never a private key.
-
-NOTE: A taproot address is not a share chain address. `tb1p...` and
-`sp2pool1p...` encode the same 32 bytes, but the prefix is covered by the
-checksum, so neither parser accepts the other's form.
-
-=== Dashboard
-
-Every node serves a web dashboard at
-`http://<your api hostname>:<your api port>/dashboard`. Nothing needs
-installing or configuring: the node renders it in Rust, and the pages carry
-no scripts.
-
-* *Overview*: pool, node and network hashrate, the share chain height, a
-  one-day hashrate chart, the blocks the pool found and the newest shares.
-  It refreshes every 30 seconds.
-* *Miner*: `/dashboard/miner?address=...` takes a payout or share chain
-  address. It shows the address's share of the next block's payout, its
-  shares in the PPLNS window and its recent hashrate.
-* *Share*: `/dashboard/share/<hash>` shows a share and its Bitcoin Cash
-  header.
-
-The node keeps the dashboard's hashrate history in memory, one sample a
-minute for a day, and starts it afresh on restart. With `auth_user` set in
-`[api]`, the dashboard asks for the same credentials as the API through the
-browser's own login prompt. Opening the API's root (`/`) leads to the
-dashboard.
-
-==== Your own frontend
-
-A node can also serve a frontend you build yourself, in TypeScript, in Rust
-compiled to WebAssembly, or in anything else that builds to static files.
-Point `web_root` in `[api]` at the folder with the build:
-
-[,toml]
-----
-[api]
-web_root = "/srv/p2pool-frontend"
-----
-
-The node serves that folder for every path the API does not use, with its
-`index.html` for paths the folder lacks, so the frontend's own routing
-works. The frontend reads the same JSON API (`/chain_info`, `/shares`,
-`/share`, `/miner`, `/pplns_shares` and the rest) from the same origin, so
-it needs no CORS. A frontend hosted somewhere else can read a node's API
-with `cors_allowed = true`. The built-in dashboard stays at `/dashboard`.
-
-==== Own node or public node
-
-By default everything the API serves asks for the `auth_user` login when one
-is set. For a public node, set `public_dashboard = true`: the dashboard, the
-`web_root` frontend and the read-only share chain routes they read open to
-anyone, while `/metrics`, `/peers`, `/blocked_ips` and `/jd_prepare` keep the
-login. The share chain is public data that every peer already has. Put a
-reverse proxy with rate limits in front of a node you open to the internet.
-
-=== Interactive web dashboard (Rust/WASM)
-
-`p2poolv2_web` is an interactive dashboard written in Rust with Leptos and
-compiled to WebAssembly: live hashrate, a zoomable hashrate chart, live
-shares, found blocks, share details and miner lookup. Build it with
-`trunk build --release` in `p2poolv2_web/`, then set `web_root` under
-`[api]` to the resulting `dist` directory and open
-`http://<your api hostname>:<your api port>/`. See
-link:./p2poolv2_web/README.md[p2poolv2_web/README.md] for building, serving
-it separately and API authentication.
-
-=== Grafana dashboards
-
-Prometheus + Grafana dashboards for a P2Poolv2 node's `/metrics`.
-
-==== Run the metrics stack (Docker)
-
-[,shell]
-----
+just setup-dev
 cd docker
-docker compose -f docker-compose.metrics.yml up -d
+docker compose up -d --build
 ----
 
-Grafana at http://localhost:3000 (admin/admin). The `*-provision.json` files in
-`dashboards/` are auto-provisioned; Prometheus scrapes the node on `:46884`.
+link:ansible/README.adoc[ansible/README.adoc] deploys nodes, nginx, Prometheus
+and Grafana to Debian and Ubuntu hosts.
 
-=== Use in your own Grafana
+=== Mining
 
-Import the JSON from link:./prometheus/grafana/dashboards-public/[`dashboards-public/`] (choose your
-Prometheus datasource at the prompt). These variable-free copies can also be
-shared read-only via Grafana's *Share externally*.
+Every option, with examples, is in link:docs/miner-options.md[docs/miner-options.md].
 
-Full guide: link:https://github.com/wiki/Dashboards.adoc[`Dashboards.adoc`].
+Stratum V1:
 
+----
+url:      stratum+tcp://<node>:3333
+user:     <payout CashAddr>.<worker>        (the bitcoincash: prefix is optional)
+password: p2p=<share address>               (leave out if the node sets miner_address)
+----
 
-=== Setup Systemd Service
+Add `d=<difficulty>` or `th=<TH/s>` to the password to choose the starting
+difficulty, for example `p2p=tp2pool:qq...,d=65536`.
 
-To setup as a systemd service, use the systemd service file provided
-link:./p2poolv2@.service[p2poolv2@.service]. You can edit that service
-file to require your bitcoind service, if you use one.
+Stratum V2: set `sv2_port` (and authority keys for Noise) on the node; miners
+connect to `<node>:<sv2_port>` with `user_identity` set to
+`<payout CashAddr>.<worker>,p2p=<share address>` and pin the node's authority
+public key.
 
-. Update the service file to point to where you installed your binaries. Use `which p2poolv2` to find where it is installed.
-. Setup `p2poolv2` user/group.
-. `/var/lib/p2poolv2`, `/var/log/p2poolv2`, `/etc/p2poolv2/` directories with permissions for p2poolv2 user.
+How often a small miner finds shares and gets paid on the main and mini
+chains is in link:docs/small-miners.md[docs/small-miners.md].
 
-The above service file can be used for different networks, like so:
+=== Dashboards
+
+* *Built-in dashboard:* every node serves
+  `http://<api hostname>:<api port>/dashboard`, rendered in Rust with no
+  scripts: pool, node and network hashrate, found blocks, the newest shares,
+  and per-miner pages (`/dashboard/miner?address=` takes a payout or share
+  address). With `auth_user` set it asks for the API login; set
+  `public_dashboard = true` for a public node.
+* *Your own frontend:* `web_root` under `[api]` serves a static build that
+  reads the JSON API. `p2poolv2_web` is one, in Rust compiled to WebAssembly;
+  see link:p2poolv2_web/README.md[p2poolv2_web/README.md].
+* *Grafana:* the dashboards in `prometheus/grafana/` read the node's
+  `/metrics`. Found blocks link to a Bitcoin Cash explorer for the node's
+  network. Run them with `docker compose -f docker/docker-compose.metrics.yml up -d`
+  or the Ansible `monitoring_p2poolv2` role.
+
+=== Share trading
+
+A share's coinbase output on the share chain carries the right to its PPLNS
+payouts. A miner can sell that right for BCH, and a market maker can buy it,
+through a hash time locked contract on each chain, signed offline with
+`p2poolv2_cli bch-trade`. Nodes relay and mine share transactions, and each
+block pays every window share's weight to whoever holds its right. See
+link:docs/atomic-swap/bch-share-trading.md[docs/atomic-swap/bch-share-trading.md].
+
+=== Run as a systemd service
+
+Use link:./p2poolv2@.service[p2poolv2@.service], one instance per network:
+
+. Point the service file at your binaries (`which p2poolv2`).
+. Create a `p2poolv2` user and group.
+. Create `/var/lib/p2poolv2`, `/var/log/p2poolv2` and `/etc/p2poolv2/` for
+  that user, with one config per instance.
 
 [,shell]
 ----
 sudo systemctl daemon-reload
-sudo systemctl enable --now p2poolv2@testnet4
-sudo systemctl enable --now p2poolv2@mainnet
+sudo systemctl enable --now p2poolv2@chipnet
 ----
 
-=== Build From Source
+=== Build from source
 
-==== MSRV and Edition
+MSRV 1.88, Rust 2024 edition.
 
-MSRV 1.88 with 2024 edition is required to build p2poolv2.
+. Install Rust from link:https://rustup.rs/[rustup] and
+  link:https://github.com/casey/just?tab=readme-ov-file#installation[just].
+. `git clone https://github.com/CyberAshven/BitcoinCash-p2poolv2.git`
+. `just build-release`
 
-==== Build
+`just test` runs the tests; `just preflight` adds lint and format checks.
 
-. Install rust from link:https://rustup.rs/[rustup]
-. Install link:https://github.com/casey/just?tab=readme-ov-file#installation[just]
-. Build P2Poolv2
-.. Get latest source `git clone git@github.com:p2poolv2/p2poolv2.git`
-.. Build `just build-release`
+=== Documentation
 
-==== Tests
-
-To run CI tests locally run `just test`. To run tests, lint, and format checks use `just preflight`.
-
-=== Docker Support
-
-We also provide dockerfiles and a docker compose to run the node as a
-docker service.
-
-Our recommended way to run a node is using the provided installer and
-using the systemd service.
-
-If you still want to run a node using docker services, see
-link:docker/README.adoc[docker/README.adoc] for details.
-
-== API and CLI READMEs
-
-Both the API and CLI crates provide detailed documentation on how to
-use them in their individual crates.
-
-link:p2poolv2_api/README.md[API Documentation]
-
-link:p2poolv2_cli/README.md[CLI Documentation]
-
-== Run Nightly Script
-
-We have a script that runs a number of nodes for a period of time with
-simulated hashrate. This helps us continuously validate the p2p
-networking, with sync, and maintaining of the DAG is working
-correctly.
-
-[,shell]
-----
-DIAL_FANOUT=3 IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=5 NODE_COUNT=10 CONVERGENCE_WAIT_SECONDS=100 LATENCY_MS=100 ./load-tests/sim/nightly.sh
-----
-
-See the link:docs/simulation/[docs/simulation] directory for detailed
-documentation on how to run the script and interpret the results.
+* The docs site is built with https://rust-lang.github.io/mdBook/[mdBook]
+  from link:docs/[docs/]: `mdbook build docs` writes it to `target/book`.
+* link:docs/bch-quickstart.md[Running on Bitcoin Cash],
+  link:docs/requirements.md[requirements],
+  link:docs/miner-options.md[miner options],
+  link:docs/small-miners.md[small miners],
+  link:docs/known-attacks.md[known attacks and threat model].
+* link:docs/bch-plan.md[Plan and decisions],
+  link:docs/bch-design.md[design checks],
+  link:docs/bch-job-declaration.md[Job Declaration],
+  link:docs/architecture/[architecture].
+* link:p2poolv2_api/README.md[API] and link:p2poolv2_cli/README.md[CLI].
+* link:AGENTS.md[AGENTS.md] for contributors and coding agents.
 
 == License
 
-Licensed under either of
+The fork, as distributed, is licensed under the GNU Affero General Public
+License, version 3 (AGPL-3.0): see decision 13 in
+link:docs/bch-plan.md[docs/bch-plan.md].
 
-* Apache License, Version 2.0 (link:LICENSE-APACHE[LICENSE-APACHE] or
-  https://www.apache.org/licenses/LICENSE-2.0)
-* MIT license (link:LICENSE-MIT[LICENSE-MIT] or
-  https://opensource.org/licenses/MIT)
-
-at your option.
-
-=== Contribution
-
-Unless you explicitly state otherwise, any contribution intentionally
-submitted for inclusion in P2Poolv2 by you, as defined in the Apache-2.0
-license, shall be dual licensed as above, without any additional terms or
-conditions.
+Files that come from upstream P2Poolv2 keep their notices: either the
+Apache License, Version 2.0 (link:LICENSE-APACHE[LICENSE-APACHE]) or the MIT
+license (link:LICENSE-MIT[LICENSE-MIT]), at your option.

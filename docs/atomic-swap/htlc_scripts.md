@@ -201,7 +201,7 @@ OP_CHECKSIG
   - In **P2WSH**, these are **33-byte compressed public keys** (`x, y` coordinates compressed to one byte + 32-byte `x` value).
   - In **P2TR**, only the **32-byte x-only public keys** are used (since Taproot key spends and script spends via Schnorr signatures only require the `x` coordinate).
 
-- In P2WSH, an address-based check (OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY) can be replaced with a direct public key check (<pubkey> OP_CHECKSIG) by removing the hash ops and using the raw public key. Both validate ownership through different methods — one via the pubkey hash, the other via the pubkey itself.
+- In P2WSH, an address-based check (`OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY`) can be replaced with a direct public key check (`<pubkey> OP_CHECKSIG`) by removing the hash ops and using the raw public key. Both validate ownership through different methods — one via the pubkey hash, the other via the pubkey itself.
 
 - **Key Path Spend (in P2TR)** — Should be set to a **Nothing Up My Sleeve (NUMS) point** (a public key with no known private key) to disable key path spending entirely, forcing all spends to go through script paths.
 

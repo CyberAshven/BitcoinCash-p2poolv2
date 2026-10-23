@@ -122,7 +122,7 @@ Maps share blocks to their sharechain transaction IDs.
 
 | Key                    | Value                          |
 |------------------------|--------------------------------|
-| `blockhash` + `_txids` | `Txids` (Vec<Txid> serialized) |
+| `blockhash` + `_txids` | `Txids` (`Vec<Txid>` serialized) |
 
 `share_block_exists` keys off this entry, so a block with no entry is held
 header-only. Body data: deleted by the pruner below the prune target.
@@ -135,7 +135,7 @@ Maps share blocks to their Bitcoin transaction IDs (separate from sharechain txs
 
 | Key                            | Value                          |
 |--------------------------------|--------------------------------|
-| `blockhash` + `_bitcoin_txids` | `Txids` (Vec<Txid> serialized) |
+| `blockhash` + `_bitcoin_txids` | `Txids` (`Vec<Txid>` serialized) |
 
 Nothing writes this column family yet. The pruner still deletes its key for
 every pruned block, so a future writer cannot leak data.

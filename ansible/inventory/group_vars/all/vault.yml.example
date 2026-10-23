@@ -15,14 +15,26 @@
 #
 # Ansible auto-loads all YAML files in group_vars/all/, so vault.yml
 # variables are available to all hosts without any extra include directives.
+# vault.yml is gitignored; never commit a real value, encrypted or not, to
+# this example.
 
-# Bitcoin RPC credentials (shared across instances on the same host)
-vault_bitcoin_rpc_user: "your_rpc_user"
-vault_bitcoin_rpc_pass: "your_rpc_password"
+# Bitcoin Cash Node RPC credentials (shared across instances on the same host)
+vault_bchn_rpc_user: "your_rpc_user"
+vault_bchn_rpc_pass: "your_rpc_password"
 
 # API authentication (optional)
 # Generate the auth_token with: p2poolv2_cli gen-auth <username> <password>
-# The nginx basic auth header is derived automatically from user + pass.
+# The nginx basic auth header and Prometheus' scrape login are derived from
+# user + pass.
 # vault_api_auth_user: "admin"
 # vault_api_auth_pass: "your_api_password"
 # vault_api_auth_token: "salt$password-hmac"
+
+# Stratum V2 authority secret key, in the Stratum V2 reference
+# implementation's text form. Make the key pair with an external tool;
+# P2Poolv2 never generates keys.
+# vault_sv2_authority_secret_key: "..."
+
+# Grafana admin password, applied when Grafana creates its database
+# (first start).
+vault_grafana_admin_password: "change_me"
