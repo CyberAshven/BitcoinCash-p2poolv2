@@ -49,7 +49,7 @@ use crate::store::writer::StoreError;
 #[cfg(test)]
 use crate::stratum::work::coinbase::build_bitcoin_coinbase_transaction;
 use crate::stratum::work::coinbase::{
-    build_coinbase, build_declared_coinbase, parse_bitcoin_coinbase_fields,
+    CoinbaseFields, build_coinbase, build_declared_coinbase, parse_bitcoin_coinbase_fields,
 };
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
@@ -578,6 +578,23 @@ impl DefaultShareValidator {
     pub fn with_bitcoin_cash_network(mut self, network: Option<BitcoinCashNetwork>) -> Self {
         self.bch_asert = network.and_then(BchAsert::for_network);
         self
+    }
+
+    /// Refuse a BIP141 witness commitment output in a Bitcoin Cash coinbase
+    /// (audit A18). Bitcoin Cash has no SegWit and BCHN's templates carry no
+    /// witness commitment, so an honest builder never adds one; without this
+    /// rule the payout rebuild would copy whatever commitment a share
+    /// carried. Bitcoin coinbases keep theirs.
+    fn validate_no_bch_witness_commitment(
+        &self,
+        fields: &CoinbaseFields,
+    ) -> Result<(), ValidationError> {
+        if self.chain == Chain::BitcoinCash && fields.witness_commitment.is_some() {
+            return Err(ValidationError::consensus(
+                "Bitcoin Cash coinbase carries a SegWit witness commitment",
+            ));
+        }
+        Ok(())
     }
 
     /// The ASERT format check of a token share's bitcoin header: its nBits
@@ -1287,8 +1304,11 @@ impl DefaultShareValidator {
         // a tag, not consensus: nodes configured with different signatures
         // must still agree on validity.
         //
-        // Bitcoin Cash adds the reserved AuxPoW output after the payouts. A
-        // declared Bitcoin Cash coinbase has the declarator's scriptSig
+        // Bitcoin Cash puts the merge-mining commitment at output 0: the
+        // exact empty one on a pool-built share, the declared one otherwise,
+        // so a peer rebuilds it byte for byte. A Bitcoin Cash coinbase may
+        // not carry a SegWit witness commitment. A declared Bitcoin Cash
+        // coinbase has the declarator's scriptSig
         // prefix followed by the 12-byte extranonce, so its extranonce is
         // what follows the prefix in the coinbase the miner hashed.
         let reconstructed_coinbase = if let Some(declared) = &share.header.bch_coinbase {
@@ -1318,6 +1338,7 @@ impl DefaultShareValidator {
                 parse_bitcoin_coinbase_fields(&share.bitcoin_coinbase).map_err(|error| {
                     ValidationError::consensus(format!("Malformed bitcoin coinbase: {error}"))
                 })?;
+            self.validate_no_bch_witness_commitment(&fields)?;
             let merge_mining = (self.chain == Chain::BitcoinCash)
                 .then(crate::shares::merge_mining::MergeMiningCommitment::empty);
             build_coinbase(
@@ -1885,6 +1906,47 @@ mod tests {
 
     fn validator_with(pool_difficulty: PoolDifficulty) -> DefaultShareValidator {
         DefaultShareValidator::new(pool_difficulty)
+    }
+
+    /// A Bitcoin Cash coinbase carrying a BIP141 witness commitment is
+    /// refused; the same coinbase is fine on Bitcoin, and a Bitcoin Cash
+    /// coinbase without one passes.
+    #[test]
+    fn bitcoin_cash_coinbase_with_a_witness_commitment_is_refused() {
+        let witness_commitment =
+            WitnessCommitment::from_hex(&format!("6a24aa21a9ed{}", "ab".repeat(32))).unwrap();
+        let build = |witness: Option<&WitnessCommitment>| {
+            build_coinbase(
+                Version::TWO,
+                &[OutputPair {
+                    address: crate::test_utils::make_test_address(1),
+                    amount: Amount::from_sat(312_500_000),
+                }],
+                900_000,
+                PushBytesBuf::new(),
+                witness,
+                b"P2Poolv2",
+                Some(bitcoin::hashes::sha256::Hash::all_zeros()),
+                0,
+                Some(&[0u8; 12]),
+                Some(MergeMiningCommitment::empty()),
+            )
+            .unwrap()
+        };
+        let with_commitment =
+            parse_bitcoin_coinbase_fields(&build(Some(&witness_commitment))).unwrap();
+        assert_eq!(with_commitment.witness_commitment, Some(witness_commitment));
+        let bch = validator().for_chain(Chain::BitcoinCash);
+        let error = bch
+            .validate_no_bch_witness_commitment(&with_commitment)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("SegWit"), "{error}");
+        validator()
+            .validate_no_bch_witness_commitment(&with_commitment)
+            .unwrap();
+        let without = parse_bitcoin_coinbase_fields(&build(None)).unwrap();
+        bch.validate_no_bch_witness_commitment(&without).unwrap();
     }
 
     /// A token share's bitcoin header must pass the ASERT format check on a

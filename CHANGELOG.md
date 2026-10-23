@@ -173,6 +173,10 @@ anchor and the donation and fee cap as they were.
   `computed / 8` to `computed × 1.05` or the proof-of-work limit on test
   networks. Tested on all 14,000 lines of the aserti3-2d specification's
   vectors and on real mainnet and chipnet headers.
+- A Bitcoin Cash coinbase that carries a BIP141 witness commitment output
+  makes its share invalid (share-chain rule, audit A18). Bitcoin Cash has no
+  SegWit and BCHN's templates carry none; the payout rebuild used to copy
+  one. Bitcoin coinbases keep theirs.
 - Coinbase merkle branches between Bitcoin Cash share-chain nodes may have
   32 levels, up from 25 (share-chain rule, audit A14): BCHN's 2 GB guard is
   temporary and Bitcoin Cash has no fixed block size maximum. Merge-mining

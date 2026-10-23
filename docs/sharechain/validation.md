@@ -50,6 +50,18 @@ to its header fields inside the Bitcoin Cash coinbase that the hashed header
 commits to, so a header with proof of work fits only the share header it
 commits to. See [Share commitments](share-commitments.md).
 
+## Token shares pass the ASERT header check
+
+A Bitcoin Cash share whose merge-mining commitment is not the exact empty
+one is a token share. Its Bitcoin Cash header's nBits must be what BCH's
+aserti3-2d gives at the coinbase's height, within the band agreed with
+Pickaxe: from half to 1.05 times the computed target on mainnet, from an
+eighth to 1.05 times, or the proof-of-work limit, on chipnet. A token claim
+checks the same band, so a share outside it could not claim a token. Header
+sync and block receipt run this check. Regtest has no ASERT anchor and skips
+it, and no-token shares are never checked: BCHN alone judges their blocks.
+See [Auxiliary work proofs](../bch-auxpow.md#the-asert-header-check).
+
 ## The body matches the header
 
 The share block hash covers the header and not the body, so a peer could pair
@@ -97,6 +109,11 @@ carries. The rebuild covers:
   behind a 100-share maturity skip and at most 120,960 shares;
 - who is paid: on Bitcoin Cash the holder of each share's payout right
   ([Trading shares for BCH](../atomic-swap/bch-share-trading.md#payout-rights));
+- output 0, the merge-mining v2 commitment: the exact empty one on a
+  pool-built share, the declared root, `h` and salt on a Job Declaration
+  share, rebuilt byte for byte ([Auxiliary work proofs](../bch-auxpow.md));
+- no SegWit: a Bitcoin Cash coinbase that carries a BIP141 witness
+  commitment output is invalid. BCHN's templates never have one;
 - how the payouts become outputs. Today that is the coinbase budget of plan
   decision 14 (at most 11 payouts, the rest paid by a draw). This is an open
   design question and the rule is being redesigned; see
