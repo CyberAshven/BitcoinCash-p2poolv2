@@ -17,8 +17,8 @@ pub fn width(requested: Option<usize>) -> usize {
     if let Some(width) = requested {
         return width;
     }
-    if let Some(columns) = crate::env_vars::optional_string("COLUMNS")
-        .and_then(|columns| columns.trim().parse().ok())
+    if let Some(columns) =
+        crate::env_vars::optional_string("COLUMNS").and_then(|columns| columns.trim().parse().ok())
     {
         return columns;
     }

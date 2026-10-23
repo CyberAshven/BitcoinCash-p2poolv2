@@ -177,7 +177,10 @@ fn run_jmeter(plan: &Path, results: &Path) -> ToolResult<()> {
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default()
     ));
-    log(&format!("Running jmeter load test -> {}", results.display()));
+    log(&format!(
+        "Running jmeter load test -> {}",
+        results.display()
+    ));
     run_jmeter_filtered(&[
         "-n".to_string(),
         "-t".to_string(),
@@ -223,7 +226,11 @@ pub struct PoolProcess {
 impl PoolProcess {
     /// Start `command` with its output in `log_file`, give it time to
     /// settle and check it is still running.
-    pub async fn start(name: &'static str, command: &mut Command, log_file: &Path) -> ToolResult<Self> {
+    pub async fn start(
+        name: &'static str,
+        command: &mut Command,
+        log_file: &Path,
+    ) -> ToolResult<Self> {
         log(&format!("Starting {name} (log: {})...", log_file.display()));
         let output = std::fs::File::create(log_file)
             .map_err(|error| ToolError::io("create", log_file, error))?;
@@ -235,7 +242,9 @@ impl PoolProcess {
             .stdout(output)
             .stderr(errors)
             .spawn()
-            .map_err(|error| ToolError::message(format!("ERROR: {name} failed to start: {error}")))?;
+            .map_err(|error| {
+                ToolError::message(format!("ERROR: {name} failed to start: {error}"))
+            })?;
         let mut process = Self { name, child };
         tokio::time::sleep(Duration::from_secs(SETTLE_SECONDS)).await;
         if !matches!(process.child.try_wait(), Ok(None)) {
@@ -424,7 +433,8 @@ pub async fn benchmark(options: &BenchmarkOptions) -> ToolResult<()> {
 
 /// The last `count` lines of the file at `path`.
 fn tail(path: &Path, count: usize) -> String {
-    let mut lines: std::collections::VecDeque<String> = std::collections::VecDeque::with_capacity(count + 1);
+    let mut lines: std::collections::VecDeque<String> =
+        std::collections::VecDeque::with_capacity(count + 1);
     let _ = for_each_line(path, |line| {
         lines.push_back(line.to_string());
         if lines.len() > count {
@@ -519,9 +529,15 @@ pub async fn flamegraph() -> ToolResult<()> {
         "-t".to_string(),
         plan.display().to_string(),
         "-l".to_string(),
-        temporary.join("flamegraph-loadtest.jtl").display().to_string(),
+        temporary
+            .join("flamegraph-loadtest.jtl")
+            .display()
+            .to_string(),
         "-j".to_string(),
-        temporary.join("flamegraph-jmeter.log").display().to_string(),
+        temporary
+            .join("flamegraph-jmeter.log")
+            .display()
+            .to_string(),
     ])?;
     log("jmeter complete");
 
@@ -614,57 +630,4 @@ pub fn gui() -> ToolResult<bool> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn leading_number_reads_a_prefix() {
-        assert_eq!(leading_number("123"), 123.0);
-        assert_eq!(leading_number(" 12.5ms"), 12.5);
-        assert_eq!(leading_number("abc"), 0.0);
-    }
-
-    #[test]
-    fn summarize_jtl_reports_per_sampler_percentiles() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let path = directory.path().join("run.jtl");
-        std::fs::write(
-            &path,
-            concat!(
-                "timeStamp,elapsed,label,responseCode,responseMessage,threadName,dataType,success\n",
-                "1,30,submit,200,OK,t1,text,true\n",
-                "2,10,submit,200,OK,t1,text,true\n",
-                "3,20,submit,500,ERR,t1,text,false\n",
-                "4,5,subscribe,200,OK,t1,text,true\n",
-            ),
-        )
-        .expect("write jtl");
-        assert_eq!(
-            summarize_jtl(&path, "Default build (portable)"),
-            concat!(
-                "\n",
-                "=== Default build (portable) ===\n",
-                "  Total samples: 4  Errors: 1\n",
-                "\n",
-                "  submit               samples=3        errors=1      avg=20.0     p50=20       p95=30       p99=30       max=30\n",
-                "  subscribe            samples=1        errors=0      avg=5.0      p50=5        p95=5        p99=5        max=5\n",
-            )
-        );
-    }
-
-    #[test]
-    fn summarize_jtl_of_a_missing_file() {
-        assert_eq!(
-            summarize_jtl(Path::new("/nonexistent/run.jtl"), "x"),
-            "  No results file found: /nonexistent/run.jtl\n"
-        );
-    }
-
-    #[test]
-    fn summarize_jtl_with_only_a_header() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let path = directory.path().join("run.jtl");
-        std::fs::write(&path, "timeStamp,elapsed,label\n").expect("write jtl");
-        assert!(summarize_jtl(&path, "x").starts_with("  No samples in "));
-    }
-}
+mod tests;

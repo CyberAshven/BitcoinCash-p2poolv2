@@ -91,16 +91,4 @@ pub fn for_each_line_bytes(path: &Path, mut visit: impl FnMut(&[u8])) -> ToolRes
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    #[test]
-    fn log_lines_strip_endings_and_replace_bad_utf8() {
-        let mut file = tempfile::NamedTempFile::new().expect("temp file");
-        file.write_all(b"first\r\nsec\xffond\nlast")
-            .expect("write temp file");
-        let lines: Vec<String> = LogLines::open(file.path()).expect("open").collect();
-        assert_eq!(lines, vec!["first", "sec\u{fffd}ond", "last"]);
-    }
-}
+mod tests;

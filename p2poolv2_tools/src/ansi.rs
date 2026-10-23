@@ -18,7 +18,8 @@ pub const MAGENTA: &str = "\x1b[35m";
 pub const CYAN: &str = "\x1b[36m";
 pub const WHITE: &str = "\x1b[37m";
 
-static ESCAPE: LazyLock<Regex> = LazyLock::new(|| Regex::new("\x1b\\[[0-9;]*m").expect("valid regex"));
+static ESCAPE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("\x1b\\[[0-9;]*m").expect("valid regex"));
 
 /// `text` with every SGR colour sequence removed.
 pub fn strip(text: &str) -> std::borrow::Cow<'_, str> {
@@ -41,26 +42,4 @@ pub fn pad_to_width(text: &str, width: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strip_removes_colour_sequences() {
-        assert_eq!(strip("\x1b[1m\x1b[32mok\x1b[0m done"), "ok done");
-    }
-
-    #[test]
-    fn visible_length_ignores_colour_sequences() {
-        assert_eq!(visible_length("\x1b[2mabc\x1b[0m"), 3);
-    }
-
-    #[test]
-    fn pad_to_width_pads_by_visible_length() {
-        assert_eq!(pad_to_width("\x1b[2mab\x1b[0m", 4), "\x1b[2mab\x1b[0m  ");
-    }
-
-    #[test]
-    fn pad_to_width_leaves_longer_text_alone() {
-        assert_eq!(pad_to_width("abcdef", 3), "abcdef");
-    }
-}
+mod tests;

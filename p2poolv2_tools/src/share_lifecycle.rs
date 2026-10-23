@@ -10,9 +10,7 @@
 //! them side by side in two columns; given one or three or more, one after
 //! the other.
 
-use crate::ansi::{
-    BLUE, BOLD, CYAN, DIM, GREEN, MAGENTA, RED, RESET, WHITE, YELLOW, pad_to_width,
-};
+use crate::ansi::{BLUE, BOLD, CYAN, DIM, GREEN, MAGENTA, RED, RESET, WHITE, YELLOW, pad_to_width};
 use crate::error::ToolResult;
 use crate::log_file::LogLines;
 use regex::Regex;
@@ -107,7 +105,10 @@ static PATTERNS: LazyLock<Vec<(Regex, Pattern)>> = LazyLock::new(|| {
             r"Adding share and organising header atomically: ([0-9a-f]{64})",
             Pattern::BlockStorePeer,
         ),
-        (r"Adding share to chain: ([0-9a-f]{64})", Pattern::BlockStoreLocal),
+        (
+            r"Adding share to chain: ([0-9a-f]{64})",
+            Pattern::BlockStoreLocal,
+        ),
         (
             r"Share block ([0-9a-f]{64}) validated successfully",
             Pattern::ValidOk,
@@ -125,7 +126,10 @@ static PATTERNS: LazyLock<Vec<(Regex, Pattern)>> = LazyLock::new(|| {
             r"Scheduling dependent ([0-9a-f]{64}) for validation after ([0-9a-f]{64})",
             Pattern::Reschedule,
         ),
-        (r"Sending Inv for block ([0-9a-f]{64}) to peer", Pattern::InvSend),
+        (
+            r"Sending Inv for block ([0-9a-f]{64}) to peer",
+            Pattern::InvSend,
+        ),
         (
             r"Received Inv: BlockHashes\(\[([0-9a-f]{64})\]\)",
             Pattern::InvReceived,
@@ -351,7 +355,10 @@ fn add_parentage(events: &mut [Event], parentage: &HashMap<String, Parentage>) {
 /// Every lifecycle event in `lines`, with parentage added.
 pub fn parse_lines(lines: &[String]) -> Vec<Event> {
     let parentage = build_parentage(lines);
-    let mut events: Vec<Event> = lines.iter().flat_map(|line| events_from_line(line)).collect();
+    let mut events: Vec<Event> = lines
+        .iter()
+        .flat_map(|line| events_from_line(line))
+        .collect();
     add_parentage(&mut events, &parentage);
     events
 }
@@ -431,7 +438,9 @@ pub fn colour_event(event: &Event) -> String {
 pub fn compact_event(event: &Event) -> String {
     let (tag, colour) = tag_and_colour(event);
     let tag = match event.kind {
-        EventKind::BlockStore if event.source == Source::Local => format!("{MAGENTA}[MINED]{RESET}"),
+        EventKind::BlockStore if event.source == Source::Local => {
+            format!("{MAGENTA}[MINED]{RESET}")
+        }
         EventKind::BlockStore => format!("{CYAN}[RECV]{RESET}"),
         _ => tag.trim_end().to_string(),
     };
@@ -467,14 +476,42 @@ pub fn summary(events: &[Event], label: &str) -> String {
     let _ = writeln!(text, "  Unique shares seen:   {}", hashes.len());
     let _ = writeln!(text, "  Locally mined:        {MAGENTA}{local}{RESET}");
     let _ = writeln!(text, "  Received from peers:  {CYAN}{peer}{RESET}");
-    let _ = writeln!(text, "  Headers organised:    {}", count(EventKind::CandidateAdd));
-    let _ = writeln!(text, "  Confirmed:            {GREEN}{}{RESET}", count(EventKind::Confirmed));
-    let _ = writeln!(text, "  Validation OK:        {GREEN}{}{RESET}", count(EventKind::ValidOk));
-    let _ = writeln!(text, "  Validation FAIL:      {RED}{}{RESET}", count(EventKind::ValidFail));
+    let _ = writeln!(
+        text,
+        "  Headers organised:    {}",
+        count(EventKind::CandidateAdd)
+    );
+    let _ = writeln!(
+        text,
+        "  Confirmed:            {GREEN}{}{RESET}",
+        count(EventKind::Confirmed)
+    );
+    let _ = writeln!(
+        text,
+        "  Validation OK:        {GREEN}{}{RESET}",
+        count(EventKind::ValidOk)
+    );
+    let _ = writeln!(
+        text,
+        "  Validation FAIL:      {RED}{}{RESET}",
+        count(EventKind::ValidFail)
+    );
     let _ = writeln!(text, "  Reorgs:               {}", count(EventKind::Reorg));
-    let _ = writeln!(text, "  Fetch timeouts:       {RED}{}{RESET}", count(EventKind::FetchTimeout));
-    let _ = writeln!(text, "  NotFound responses:   {RED}{}{RESET}", count(EventKind::NotFound));
-    let _ = writeln!(text, "  Header chain errors:  {RED}{}{RESET}", count(EventKind::HeaderError));
+    let _ = writeln!(
+        text,
+        "  Fetch timeouts:       {RED}{}{RESET}",
+        count(EventKind::FetchTimeout)
+    );
+    let _ = writeln!(
+        text,
+        "  NotFound responses:   {RED}{}{RESET}",
+        count(EventKind::NotFound)
+    );
+    let _ = writeln!(
+        text,
+        "  Header chain errors:  {RED}{}{RESET}",
+        count(EventKind::HeaderError)
+    );
     text
 }
 
@@ -499,8 +536,15 @@ pub fn write_two_columns(
     writeln!(out, "{DIM}{rule} + {rule}{RESET}")?;
 
     let mut merged: Vec<(&str, bool, &Event)> = Vec::with_capacity(left.len() + right.len());
-    merged.extend(left.iter().map(|event| (event.timestamp.as_str(), false, event)));
-    merged.extend(right.iter().map(|event| (event.timestamp.as_str(), true, event)));
+    merged.extend(
+        left.iter()
+            .map(|event| (event.timestamp.as_str(), false, event)),
+    );
+    merged.extend(
+        right
+            .iter()
+            .map(|event| (event.timestamp.as_str(), true, event)),
+    );
     // Stable, so events with equal timestamps keep their log order.
     merged.sort_by(|first, second| first.0.cmp(second.0));
 
@@ -528,7 +572,11 @@ pub fn write_sequential(
         writeln!(out, "\n{colour}{BOLD}{banner}{RESET}")?;
         writeln!(out, "{colour}{BOLD}  NODE: {label}{RESET}")?;
         writeln!(out, "{colour}{BOLD}{banner}{RESET}")?;
-        writeln!(out, "\n{BOLD}--- Events ({} total) ---{RESET}\n", events.len())?;
+        writeln!(
+            out,
+            "\n{BOLD}--- Events ({} total) ---{RESET}\n",
+            events.len()
+        )?;
         for event in events {
             writeln!(out, "{}", colour_event(event))?;
         }
@@ -537,106 +585,4 @@ pub fn write_sequential(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const HASH_A: &str = "aaaaa00000000000000000000000000000000000000000000000000000000001";
-    const HASH_B: &str = "bbbbb00000000000000000000000000000000000000000000000000000000002";
-
-    fn line(text: &str) -> String {
-        format!("2026-04-23T10:00:00.123456Z DEBUG p2poolv2: {text}")
-    }
-
-    #[test]
-    fn line_without_leading_timestamp_has_no_events() {
-        assert!(events_from_line(&format!("x {}", line("Confirmed reorg needed"))).is_empty());
-    }
-
-    #[test]
-    fn locally_mined_block_store_is_local() {
-        let events = events_from_line(&line(&format!("Adding share to chain: {HASH_A}")));
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].source, Source::Local);
-        assert_eq!(events[0].detail, "Block aaaaa added to chain (locally mined)");
-    }
-
-    #[test]
-    fn peer_block_store_is_peer() {
-        let events = events_from_line(&line(&format!(
-            "Adding share and organising header atomically: {HASH_A}"
-        )));
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].source, Source::Peer);
-        assert_eq!(
-            events[0].detail,
-            "Block aaaaa stored + header organised (from peer)"
-        );
-    }
-
-    #[test]
-    fn confirmed_reads_the_height() {
-        let events = events_from_line(&line(&format!(
-            "Promoted block {HASH_A} to confirmed height Some(42)"
-        )));
-        assert_eq!(events[0].detail, "Block aaaaa CONFIRMED at height 42");
-    }
-
-    #[test]
-    fn uncle_promotion_has_no_height() {
-        let events = events_from_line(&line(&format!(
-            "Promoted block {HASH_A} to confirmed height None"
-        )));
-        assert_eq!(events[0].detail, "Block aaaaa CONFIRMED at height none");
-    }
-
-    #[test]
-    fn parentage_is_appended_to_the_share_events() {
-        let lines = vec![
-            line(&format!(
-                "Received ShareBlock {{ prev_share_blockhash: {HASH_B}, uncles: [{HASH_B}, {HASH_A}] }}"
-            )),
-            line(&format!("Adding share to chain: {HASH_A}")),
-        ];
-        let events = parse_lines(&lines);
-        assert_eq!(
-            events[0].detail,
-            "Block aaaaa added to chain (locally mined) (prev:bbbbb uncles:bbbbb,aaaaa)"
-        );
-    }
-
-    #[test]
-    fn parentage_needs_the_adding_line_right_after_the_dump() {
-        let lines = vec![
-            line(&format!(
-                "Received ShareBlock {{ prev_share_blockhash: {HASH_B}, uncles: [] }}"
-            )),
-            line("something else"),
-            line(&format!("Adding share to chain: {HASH_A}")),
-        ];
-        let events = parse_lines(&lines);
-        assert_eq!(events[0].detail, "Block aaaaa added to chain (locally mined)");
-    }
-
-    #[test]
-    fn summary_counts_local_and_peer_stores() {
-        let lines = vec![
-            line(&format!("Adding share to chain: {HASH_A}")),
-            line(&format!("Adding share and organising header atomically: {HASH_B}")),
-        ];
-        let text = summary(&parse_lines(&lines), "node.log");
-        assert!(text.contains("Unique shares seen:   2\n"));
-        assert!(text.contains(&format!("Locally mined:        {MAGENTA}1{RESET}")));
-        assert!(text.contains(&format!("Received from peers:  {CYAN}1{RESET}")));
-    }
-
-    #[test]
-    fn compact_event_shows_time_of_day() {
-        let events = events_from_line(&line("Confirmed reorg needed"));
-        assert_eq!(
-            compact_event(&events[0]),
-            // The tag keeps its padding: it ends in the reset code, so the
-            // Python tool's rstrip() never reached the spaces.
-            format!("{DIM}10:00:00.123{RESET} {RED}{BOLD}[REORG] {RESET} {RED}{BOLD}Confirmed chain REORG triggered{RESET}")
-        );
-    }
-}
+mod tests;

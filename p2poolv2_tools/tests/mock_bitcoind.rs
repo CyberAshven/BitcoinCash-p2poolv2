@@ -71,7 +71,10 @@ async fn request_split_across_writes_is_served() {
     let address = start_server().await;
     let request = post(r#"{"method":"submitblock","params":["00"],"id":3}"#);
     let mut stream = TcpStream::connect(address).await.expect("connect");
-    stream.write_all(&request[..20]).await.expect("send first part");
+    stream
+        .write_all(&request[..20])
+        .await
+        .expect("send first part");
     stream.flush().await.expect("flush");
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     stream.write_all(&request[20..]).await.expect("send rest");

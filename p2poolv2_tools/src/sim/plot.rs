@@ -104,8 +104,12 @@ pub fn read_series(run_dir: &RunDir) -> ToolResult<Series> {
         })?;
     }
     series.promotions.sort_by(f64::total_cmp);
-    series.uncle_blocks.sort_by(|first, second| first.0.total_cmp(&second.0));
-    series.difficulty.sort_by(|first, second| first.0.total_cmp(&second.0));
+    series
+        .uncle_blocks
+        .sort_by(|first, second| first.0.total_cmp(&second.0));
+    series
+        .difficulty
+        .sort_by(|first, second| first.0.total_cmp(&second.0));
     series.block_finds.sort_by(f64::total_cmp);
     Ok(series)
 }
@@ -198,7 +202,11 @@ pub fn rates(series: &Series, axis: &TimeAxis) -> Rates {
         .zip(&promotions_per_bin)
         .map(|(uncles, promotions)| {
             let total = uncles + promotions;
-            if total > 0.0 { 100.0 * uncles / total } else { 0.0 }
+            if total > 0.0 {
+                100.0 * uncles / total
+            } else {
+                0.0
+            }
         })
         .collect();
 
@@ -266,7 +274,10 @@ pub fn format_general(value: f64, digits: usize) -> String {
     let decimals = (digits as i32 - 1 - exponent).max(0) as usize;
     let fixed = format!("{value:.decimals$}");
     if fixed.contains('.') {
-        fixed.trim_end_matches('0').trim_end_matches('.').to_string()
+        fixed
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     } else {
         fixed
     }
@@ -390,14 +401,22 @@ pub fn plot(run_dir: &RunDir, output: &Path) -> ToolResult<String> {
         target_rate,
     );
     let mut chart = x_axis_chart(&panels[0], span, 0.0..share_top, "share rate /s")?;
-    let binned: Vec<(f64, f64)> = centres.iter().copied().zip(rates.share_rate.iter().copied()).collect();
+    let binned: Vec<(f64, f64)> = centres
+        .iter()
+        .copied()
+        .zip(rates.share_rate.iter().copied())
+        .collect();
     chart
         .draw_series(LineSeries::new(binned.clone(), BLUE_C0.mix(0.25)))
         .map_err(plot_error)?
         .label("binned")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE_C0.mix(0.25)));
     chart
-        .draw_series(binned.iter().map(|point| Circle::new(*point, 2, BLUE_C0.mix(0.25).filled())))
+        .draw_series(
+            binned
+                .iter()
+                .map(|point| Circle::new(*point, 2, BLUE_C0.mix(0.25).filled())),
+        )
         .map_err(plot_error)?;
     chart
         .draw_series(LineSeries::new(
@@ -435,24 +454,37 @@ pub fn plot(run_dir: &RunDir, output: &Path) -> ToolResult<String> {
     let difficulty_low = difficulty_values.clone().fold(f64::INFINITY, f64::min);
     let difficulty_high = difficulty_values.fold(f64::NEG_INFINITY, f64::max);
     let difficulty_range = if difficulty_low.is_finite() {
-        let pad = ((difficulty_high - difficulty_low) * 0.05).max(difficulty_high.abs() * 0.01).max(1e-9);
+        let pad = ((difficulty_high - difficulty_low) * 0.05)
+            .max(difficulty_high.abs() * 0.01)
+            .max(1e-9);
         (difficulty_low - pad)..(difficulty_high + pad)
     } else {
         0.0..1.0
     };
     let mut chart = x_axis_chart(&panels[1], span, difficulty_range, "pool difficulty")?;
     chart
-        .draw_series(series.difficulty.iter().map(|(time, value)| {
-            Circle::new((time - axis.start, *value), 2, ORANGE_C1.filled())
-        }))
+        .draw_series(
+            series.difficulty.iter().map(|(time, value)| {
+                Circle::new((time - axis.start, *value), 2, ORANGE_C1.filled())
+            }),
+        )
         .map_err(plot_error)?;
 
     // Uncle rate: the binned series spikes to 100% in low-count bins, so the
     // axis follows the running average (the comparable value) and binned
     // spikes are clipped.
-    let cumulative_max = rates.cumulative_uncle_rate.iter().copied().fold(0.0, f64::max);
+    let cumulative_max = rates
+        .cumulative_uncle_rate
+        .iter()
+        .copied()
+        .fold(0.0, f64::max);
     let uncle_top = (cumulative_max * 1.3).max(1.0);
-    let mut chart = x_axis_chart(&panels[2], span, 0.0..uncle_top, "uncle rate % (uncles / all shares)")?;
+    let mut chart = x_axis_chart(
+        &panels[2],
+        span,
+        0.0..uncle_top,
+        "uncle rate % (uncles / all shares)",
+    )?;
     let clipped: Vec<(f64, f64)> = centres
         .iter()
         .copied()
@@ -464,7 +496,11 @@ pub fn plot(run_dir: &RunDir, output: &Path) -> ToolResult<String> {
         .label("binned")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], GREEN_C2.mix(0.2)));
     chart
-        .draw_series(clipped.iter().map(|point| Circle::new(*point, 2, GREEN_C2.mix(0.2).filled())))
+        .draw_series(
+            clipped
+                .iter()
+                .map(|point| Circle::new(*point, 2, GREEN_C2.mix(0.2).filled())),
+        )
         .map_err(plot_error)?;
     chart
         .draw_series(LineSeries::new(
@@ -494,7 +530,11 @@ pub fn plot(run_dir: &RunDir, output: &Path) -> ToolResult<String> {
         0.0..((finds.max(1) as f64) * 1.1),
         "block-finds (cumulative)",
     )?;
-    let times: Vec<f64> = series.block_finds.iter().map(|time| time - axis.start).collect();
+    let times: Vec<f64> = series
+        .block_finds
+        .iter()
+        .map(|time| time - axis.start)
+        .collect();
     let mut steps: Vec<(f64, f64)> = Vec::with_capacity(times.len() * 2 + 1);
     for (index, time) in times.iter().enumerate() {
         let count = (index + 1) as f64;
@@ -514,13 +554,19 @@ pub fn plot(run_dir: &RunDir, output: &Path) -> ToolResult<String> {
         .map_err(plot_error)?;
     if finds == 0 {
         let (width, height) = panels[3].dim_in_pixel();
-        let style = ("sans-serif", 14).into_font().color(&GREY).pos(plotters::style::text_anchor::Pos::new(
-            plotters::style::text_anchor::HPos::Center,
-            plotters::style::text_anchor::VPos::Center,
-        ));
+        let style = ("sans-serif", 14).into_font().color(&GREY).pos(
+            plotters::style::text_anchor::Pos::new(
+                plotters::style::text_anchor::HPos::Center,
+                plotters::style::text_anchor::VPos::Center,
+            ),
+        );
         let centre = (width as i32 / 2, height as i32 / 2);
         panels[3]
-            .draw(&Text::new("no block-finds in this run", (centre.0, centre.1 - 9), style.clone()))
+            .draw(&Text::new(
+                "no block-finds in this run",
+                (centre.0, centre.1 - 9),
+                style.clone(),
+            ))
             .map_err(plot_error)?;
         panels[3]
             .draw(&Text::new(
@@ -535,12 +581,27 @@ pub fn plot(run_dir: &RunDir, output: &Path) -> ToolResult<String> {
     let shares = node_shares(run_dir)?;
     let hashrate_total = shares.iter().map(|(hashrate, _)| hashrate).sum::<f64>();
     let emitted_total = shares.iter().map(|(_, emitted)| emitted).sum::<f64>();
-    let as_percent = |part: f64, whole: f64| if whole > 0.0 { 100.0 * part / whole } else { 0.0 };
+    let as_percent = |part: f64, whole: f64| {
+        if whole > 0.0 {
+            100.0 * part / whole
+        } else {
+            0.0
+        }
+    };
     let bars: Vec<(f64, f64)> = shares
         .iter()
-        .map(|(hashrate, emitted)| (as_percent(*hashrate, hashrate_total), as_percent(*emitted, emitted_total)))
+        .map(|(hashrate, emitted)| {
+            (
+                as_percent(*hashrate, hashrate_total),
+                as_percent(*emitted, emitted_total),
+            )
+        })
         .collect();
-    let bar_top = y_limit(bars.iter().flat_map(|(hashrate, emitted)| [*hashrate, *emitted]), 1.0);
+    let bar_top = y_limit(
+        bars.iter()
+            .flat_map(|(hashrate, emitted)| [*hashrate, *emitted]),
+        1.0,
+    );
     let node_count = shares.len().max(1);
     let mut chart = ChartBuilder::on(&panels[4])
         .margin(12)
@@ -562,7 +623,13 @@ pub fn plot(run_dir: &RunDir, output: &Path) -> ToolResult<String> {
     chart
         .draw_series(bars.iter().enumerate().map(|(index, (hashrate, _))| {
             let centre = index as f64 - width / 2.0;
-            Rectangle::new([(centre - width / 2.0, 0.0), (centre + width / 2.0, *hashrate)], BLUE_C0.filled())
+            Rectangle::new(
+                [
+                    (centre - width / 2.0, 0.0),
+                    (centre + width / 2.0, *hashrate),
+                ],
+                BLUE_C0.filled(),
+            )
         }))
         .map_err(plot_error)?
         .label("hashrate %")
@@ -570,7 +637,13 @@ pub fn plot(run_dir: &RunDir, output: &Path) -> ToolResult<String> {
     chart
         .draw_series(bars.iter().enumerate().map(|(index, (_, emitted))| {
             let centre = index as f64 + width / 2.0;
-            Rectangle::new([(centre - width / 2.0, 0.0), (centre + width / 2.0, *emitted)], ORANGE_C1.filled())
+            Rectangle::new(
+                [
+                    (centre - width / 2.0, 0.0),
+                    (centre + width / 2.0, *emitted),
+                ],
+                ORANGE_C1.filled(),
+            )
         }))
         .map_err(plot_error)?
         .label("emitted %")
@@ -594,54 +667,4 @@ pub fn plot(run_dir: &RunDir, output: &Path) -> ToolResult<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn series_with_promotions(times: &[f64]) -> Series {
-        Series {
-            promotions: times.to_vec(),
-            ..Series::default()
-        }
-    }
-
-    #[test]
-    fn time_axis_uses_forty_bins_of_at_least_five_seconds() {
-        let axis = TimeAxis::of(&series_with_promotions(&[100.0, 500.0])).expect("axis");
-        assert_eq!(axis.start, 100.0);
-        assert_eq!(axis.span, 400.0);
-        assert_eq!(axis.bin_seconds, 10.0);
-        assert_eq!(axis.bins, 41);
-    }
-
-    #[test]
-    fn short_runs_get_five_second_bins() {
-        let axis = TimeAxis::of(&series_with_promotions(&[0.0, 20.0])).expect("axis");
-        assert_eq!(axis.bin_seconds, 5.0);
-        assert_eq!(axis.bins, 5);
-    }
-
-    #[test]
-    fn no_events_has_no_axis() {
-        assert!(TimeAxis::of(&Series::default()).is_none());
-    }
-
-    #[test]
-    fn cumulative_uncle_rate_counts_uncles_up_to_each_block() {
-        let series = Series {
-            promotions: vec![0.0, 10.0, 20.0],
-            uncle_blocks: vec![(10.0, 1.0)],
-            ..Series::default()
-        };
-        let axis = TimeAxis::of(&series).expect("axis");
-        let rates = rates(&series, &axis);
-        assert_eq!(rates.cumulative_uncle_rate, vec![0.0, 100.0 / 3.0, 25.0]);
-        assert_eq!(rates.cumulative_share_rate, vec![0.0, 0.2, 0.15]);
-    }
-
-    #[test]
-    fn format_general_matches_printf_g() {
-        assert_eq!(format_general(0.1, 3), "0.1");
-        assert_eq!(format_general(1.0, 3), "1");
-        assert_eq!(format_general(1.0 / 3.0, 3), "0.333");
-    }
-}
+mod tests;

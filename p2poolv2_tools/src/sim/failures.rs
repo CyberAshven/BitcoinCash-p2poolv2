@@ -158,7 +158,8 @@ pub struct FailureSummary {
 impl FailureSummary {
     /// Every killed node recovered and every scenario verdict passed.
     pub fn passed(&self) -> bool {
-        let passed_or_absent = |verdict: &Option<String>| verdict.as_deref().is_none_or(|verdict| verdict == "PASS");
+        let passed_or_absent =
+            |verdict: &Option<String>| verdict.as_deref().is_none_or(|verdict| verdict == "PASS");
         self.unrecovered == 0
             && passed_or_absent(&self.maturity_verdict)
             && passed_or_absent(&self.join_verdict)
@@ -219,7 +220,8 @@ fn rewrite_config(path: &Path, rewrite: impl Fn(&str) -> String) -> ToolResult<(
         rewritten.push('\n');
     }
     let temporary = path.with_extension(format!("toml.{}.tmp", std::process::id()));
-    std::fs::write(&temporary, rewritten).map_err(|error| ToolError::io("write", &temporary, error))?;
+    std::fs::write(&temporary, rewritten)
+        .map_err(|error| ToolError::io("write", &temporary, error))?;
     std::fs::rename(&temporary, path).map_err(|error| ToolError::io("replace", path, error))
 }
 
@@ -614,7 +616,10 @@ impl Injection<'_> {
     fn count_pruned_nodes(&self) -> usize {
         (0..self.node_total)
             .filter(|index| {
-                count_lines(&self.run_dir().node_log(*index), "Pruned block bodies at heights") > 0
+                count_lines(
+                    &self.run_dir().node_log(*index),
+                    "Pruned block bodies at heights",
+                ) > 0
             })
             .count()
     }
@@ -690,10 +695,14 @@ impl Injection<'_> {
         self.kill_nodes(&[index]).await;
         let store = self.run_dir().node_store(index);
         if store.exists() {
-            std::fs::remove_dir_all(&store).map_err(|error| ToolError::io("remove", &store, error))?;
+            std::fs::remove_dir_all(&store)
+                .map_err(|error| ToolError::io("remove", &store, error))?;
         }
         let log = self.run_dir().node_log(index);
-        let moved = self.run_dir().path().join(format!("prejoin-node-{index}.log"));
+        let moved = self
+            .run_dir()
+            .path()
+            .join(format!("prejoin-node-{index}.log"));
         std::fs::rename(&log, &moved).map_err(|error| ToolError::io("move", &log, error))?;
         log_message(&format!(
             "  wiped node {index} store and moved its log to prejoin-node-{index}.log"
@@ -1000,10 +1009,11 @@ pub fn build_summary(scenario: &str, parts: SummaryParts) -> FailureSummary {
         parts.target_list
     };
     let rejoined = format!("{}/{}", parts.rejoined_ok, parts.rejoined_total);
-    let mut lines: Vec<String> = Vec::with_capacity(
-        8 + parts.observation_lines.len() + parts.summary_lines.len(),
-    );
-    lines.push(format!("=== failure injection summary (scenario: {scenario}) ==="));
+    let mut lines: Vec<String> =
+        Vec::with_capacity(8 + parts.observation_lines.len() + parts.summary_lines.len());
+    lines.push(format!(
+        "=== failure injection summary (scenario: {scenario}) ==="
+    ));
     lines.push(format!("targets:{targets}"));
     lines.extend(parts.observation_lines);
     lines.extend(parts.summary_lines);
@@ -1088,7 +1098,10 @@ fn require_fork_setup(settings: &FailureSettings, node_total: usize) -> Result<u
 /// Returns the summary, already printed and written to
 /// `failure-results.txt`. Nodes this process restarts are recorded in
 /// `processes`.
-pub async fn inject(settings: &FailureSettings, processes: &mut ProcessTable) -> Result<FailureSummary, Exit> {
+pub async fn inject(
+    settings: &FailureSettings,
+    processes: &mut ProcessTable,
+) -> Result<FailureSummary, Exit> {
     check_scenario(&settings.scenario).map_err(|error| Exit::usage(format!("ERROR: {error}")))?;
     let run_dir = &settings.run_dir;
     if !run_dir.path().is_dir() {
@@ -1192,98 +1205,4 @@ pub async fn inject(settings: &FailureSettings, processes: &mut ProcessTable) ->
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn targets_avoid_node_zero_and_differ() {
-        let targets = select_targets(42, 10, 3);
-        assert!((1..10).contains(&targets.fast));
-        assert!((1..10).contains(&targets.slow));
-        assert_ne!(targets.fast, targets.slow);
-    }
-
-    #[test]
-    fn partition_keeps_a_node_on_each_side() {
-        let targets = select_targets(7, 6, 3);
-        assert_eq!(targets.partition_width, 3);
-        assert!(targets.partition_start >= 1);
-        assert!(targets.partition_start + targets.partition_width < 6);
-    }
-
-    #[test]
-    fn partition_width_shrinks_for_small_swarms() {
-        let targets = select_targets(1, 3, 3);
-        assert_eq!(targets.partition_width, 1);
-        assert_eq!(targets.partition_start, 1);
-    }
-
-    #[test]
-    fn same_seed_selects_same_targets() {
-        assert_eq!(select_targets(42, 10, 3), select_targets(42, 10, 3));
-    }
-
-    #[test]
-    fn enable_emitter_flips_only_the_flag() {
-        assert_eq!(enable_emitter("enabled = false"), "enabled = true");
-        assert_eq!(enable_emitter("console = true"), "console = true");
-    }
-
-    #[test]
-    fn dial_node_zero_fills_an_empty_list() {
-        assert_eq!(
-            dial_node_zero("dial_peers = []", 7000),
-            "dial_peers = [\"/ip4/127.0.0.1/tcp/7000\"]"
-        );
-    }
-
-    #[test]
-    fn dial_node_zero_prepends_to_a_list() {
-        assert_eq!(
-            dial_node_zero("dial_peers = [\"/ip4/127.0.0.1/tcp/7006\"]", 7000),
-            "dial_peers = [\"/ip4/127.0.0.1/tcp/7000\", \"/ip4/127.0.0.1/tcp/7006\"]"
-        );
-    }
-
-    #[test]
-    fn clean_summary_has_no_targets() {
-        let summary = build_summary("clean", SummaryParts::default());
-        assert_eq!(
-            summary.text,
-            "=== failure injection summary (scenario: clean) ===\ntargets: none\nrejoined: 0/0\nunrecovered nodes: 0\n"
-        );
-        assert!(summary.passed());
-    }
-
-    #[test]
-    fn summary_lists_observations_then_rows_then_verdicts() {
-        let summary = build_summary(
-            "late-miner",
-            SummaryParts {
-                target_list: " 1".to_string(),
-                observation_lines: vec!["maturity check: FAIL (x)".to_string()],
-                summary_lines: vec!["node 1: rejoined=yes".to_string()],
-                rejoined_ok: 1,
-                rejoined_total: 1,
-                maturity_verdict: Some("FAIL".to_string()),
-                join_verdict: None,
-                fork_verdict: None,
-            },
-        );
-        assert_eq!(
-            summary.text,
-            "=== failure injection summary (scenario: late-miner) ===\ntargets: 1\nmaturity check: FAIL (x)\nnode 1: rejoined=yes\nrejoined: 1/1\nunrecovered nodes: 0\nmaturity verdict: FAIL\n"
-        );
-        assert_eq!(summary.targets, "1");
-        assert!(!summary.passed());
-    }
-
-    #[test]
-    fn verdict_from_joins_reasons() {
-        assert_eq!(verdict_from(&[]), "PASS");
-        assert_eq!(
-            verdict_from(&["no-refusal", "minority-stalled"]),
-            "FAIL (no-refusal minority-stalled)"
-        );
-    }
-}
+mod tests;

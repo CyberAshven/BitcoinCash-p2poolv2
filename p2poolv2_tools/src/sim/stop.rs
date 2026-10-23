@@ -43,7 +43,11 @@ fn joined(pids: &[u32]) -> String {
 /// `pids.txt` and to any orphan whose command line names a config in
 /// `run_dir`, then SIGKILL after `grace_seconds`. True when every node
 /// process has exited.
-pub async fn stop_swarm(run_dir: &RunDir, processes: &mut ProcessTable, grace_seconds: u64) -> bool {
+pub async fn stop_swarm(
+    run_dir: &RunDir,
+    processes: &mut ProcessTable,
+    grace_seconds: u64,
+) -> bool {
     let signalled = run_dir
         .read_pids()
         .into_iter()

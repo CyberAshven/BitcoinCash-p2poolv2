@@ -120,7 +120,8 @@ pub fn diagnose(pid: u32) {
     println!();
 
     println!("=== 6. FILE DESCRIPTORS ===");
-    let descriptors = std::fs::read_dir(format!("/proc/{pid}/fd")).map_or(0, |entries| entries.count());
+    let descriptors =
+        std::fs::read_dir(format!("/proc/{pid}/fd")).map_or(0, |entries| entries.count());
     println!("Open file descriptors: {descriptors}");
     println!();
 
@@ -145,7 +146,14 @@ pub fn diagnose(pid: u32) {
 
     println!("=== 9. TOP THREADS BY CPU ===");
     match Command::new("ps")
-        .args(["-T", "-p", &pid_text, "-o", "pid,tid,%cpu,%mem,comm", "--sort=-%cpu"])
+        .args([
+            "-T",
+            "-p",
+            &pid_text,
+            "-o",
+            "pid,tid,%cpu,%mem,comm",
+            "--sort=-%cpu",
+        ])
         .stdin(Stdio::null())
         .output()
     {

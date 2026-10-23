@@ -103,7 +103,9 @@ struct AnalysisBinaries {
 /// `sim` feature, so `verify_chain` checks bodies against the sim build's
 /// prune depth rather than expecting every body the sim nodes pruned.
 fn build_analysis_binaries(profile: &str) -> ToolResult<AnalysisBinaries> {
-    log_message(&format!("Building verify_chain and p2poolv2_cli ({profile})..."));
+    log_message(&format!(
+        "Building verify_chain and p2poolv2_cli ({profile})..."
+    ));
     let built = build(
         &repo::root(),
         &BuildRequest {
@@ -144,7 +146,8 @@ async fn ensure_bitcoind_running(
     log_message("Starting fresh regtest bitcoind...");
     let datadir = &settings.bitcoind_datadir;
     if datadir.exists() {
-        std::fs::remove_dir_all(datadir).map_err(|error| ToolError::io("remove", datadir, error))?;
+        std::fs::remove_dir_all(datadir)
+            .map_err(|error| ToolError::io("remove", datadir, error))?;
     }
     std::fs::create_dir_all(datadir).map_err(|error| ToolError::io("create", datadir, error))?;
     let status = Command::new(bitcoind_binary)
@@ -165,7 +168,9 @@ async fn ensure_bitcoind_running(
             ))
         })?;
     if !status.success() {
-        return Err(Exit::failure(format!("bitcoind failed to start ({status})")));
+        return Err(Exit::failure(format!(
+            "bitcoind failed to start ({status})"
+        )));
     }
 
     const MAX_ATTEMPTS: u32 = 30;
@@ -225,10 +230,7 @@ fn count_alive(run_dir: &RunDir, processes: &mut ProcessTable) -> (usize, usize)
     let mut total = 0;
     for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
         total += 1;
-        if line
-            .parse::<u32>()
-            .is_ok_and(|pid| processes.is_alive(pid))
-        {
+        if line.parse::<u32>().is_ok_and(|pid| processes.is_alive(pid)) {
             alive += 1;
         }
     }
@@ -254,7 +256,10 @@ fn query_store(cli: &Path, store: &Path, arguments: &[&str]) -> String {
                     chrono::Local::now().format("%H:%M:%S"),
                     arguments.join(" "),
                     store.display(),
-                    output.status.code().map_or_else(|| "signal".to_string(), |code| code.to_string())
+                    output
+                        .status
+                        .code()
+                        .map_or_else(|| "signal".to_string(), |code| code.to_string())
                 );
                 for line in String::from_utf8_lossy(&output.stderr).lines().take(5) {
                     eprintln!("    {line}");
@@ -384,10 +389,7 @@ fn verify_all_chains(verify_chain: &Path, run_dir: &RunDir, node_count: usize) -
             if passed {
                 log_message(&format!("  node {index}: PASS"));
             } else {
-                log_message(&format!(
-                    "  node {index}: FAIL (see {})",
-                    report.display()
-                ));
+                log_message(&format!("  node {index}: FAIL (see {})", report.display()));
                 failures += 1;
             }
         }
@@ -424,12 +426,17 @@ pub fn evaluate(scenario: &str, uncle_rate_threshold: &str, evidence: &Evidence)
     // the majority's deep fork. Its own verdict compares the two groups.
     let (converged_result, distinct, within) = match &evidence.convergence {
         None => ("SKIP", "n/a".to_string(), "n/a".to_string()),
-        Some((converged, distinct, within)) => (check(*converged), distinct.clone(), within.clone()),
+        Some((converged, distinct, within)) => {
+            (check(*converged), distinct.clone(), within.clone())
+        }
     };
 
     // Values the scripts read back from the metrics text, with the same
     // fallbacks when the metrics could not be collected.
-    let promotions = evidence.metrics.as_ref().map_or(0, |metrics| metrics.promotions);
+    let promotions = evidence
+        .metrics
+        .as_ref()
+        .map_or(0, |metrics| metrics.promotions);
     let grew_result = check(promotions > 0);
     let panics = evidence
         .metrics
@@ -499,13 +506,22 @@ pub fn evaluate(scenario: &str, uncle_rate_threshold: &str, evidence: &Evidence)
 
     let mut text = String::with_capacity(1024);
     let _ = writeln!(text, "=== NIGHTLY SIM RESULTS (scenario: {scenario}) ===");
-    let _ = writeln!(text, "  nodes alive:        {alive_result:<4}  ({alive_count}/{alive_total})");
+    let _ = writeln!(
+        text,
+        "  nodes alive:        {alive_result:<4}  ({alive_count}/{alive_total})"
+    );
     let _ = writeln!(
         text,
         "  chain converged:    {converged_result:<4}  (distinct hashes: {distinct}, within 2 of tip: {within})"
     );
-    let _ = writeln!(text, "  chain grew:         {grew_result:<4}  (promotions: {promotions})");
-    let _ = writeln!(text, "  no panics:          {panics_result:<4}  (panicked nodes: {panics})");
+    let _ = writeln!(
+        text,
+        "  chain grew:         {grew_result:<4}  (promotions: {promotions})"
+    );
+    let _ = writeln!(
+        text,
+        "  no panics:          {panics_result:<4}  (panicked nodes: {panics})"
+    );
     let _ = writeln!(
         text,
         "  no rejections:      {rejections_result:<4}  (AsertMismatch={asert} merkle/payout={merkle})"
@@ -523,7 +539,10 @@ pub fn evaluate(scenario: &str, uncle_rate_threshold: &str, evidence: &Evidence)
         text,
         "  failure recovery:   {recovery_result:<4}  (targets: {targets}, rejoined {rejoined}, unrecovered {unrecovered})"
     );
-    let _ = writeln!(text, "  payout maturity:    {maturity_result:<4}  ({maturity})");
+    let _ = writeln!(
+        text,
+        "  payout maturity:    {maturity_result:<4}  ({maturity})"
+    );
     let _ = writeln!(text, "  pruned join:        {join_result:<4}  ({join})");
     let _ = writeln!(text, "  fork depth limit:   {fork_result:<4}  ({fork})");
     let _ = writeln!(text, "RESULT: {}", pass_fail(!failed));
@@ -591,11 +610,16 @@ async fn run_after_build(
     stop_swarm(&settings.run_dir, processes, DEFAULT_GRACE_SECONDS).await;
     lifecycle.swarm_running = false;
 
-    let verify = verify_all_chains(&binaries.verify_chain, &settings.run_dir, settings.node_count);
+    let verify = verify_all_chains(
+        &binaries.verify_chain,
+        &settings.run_dir,
+        settings.node_count,
+    );
     let convergence = if settings.scenario == "deep-fork-refused" {
         None
     } else {
-        let convergence = check_chain_converged(&binaries.cli, &settings.run_dir, settings.node_count);
+        let convergence =
+            check_chain_converged(&binaries.cli, &settings.run_dir, settings.node_count);
         Some((
             convergence.converged,
             convergence.distinct_hashes,
@@ -678,110 +702,4 @@ pub async fn run(settings: &NightlySettings) -> u8 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn passing_evidence() -> Evidence {
-        Evidence {
-            alive: (3, 3),
-            convergence: Some((true, "1".to_string(), "3/3".to_string())),
-            metrics: Some(MetricsSummary {
-                promotions: 50,
-                panicked_nodes: 0,
-                asert_mismatches: 0,
-                merkle_payout_mismatches: 0,
-                uncle_rate: Some("12.5".to_string()),
-            }),
-            verify: (0, 3),
-            failures: Some(FailureSummary {
-                text: String::new(),
-                targets: "none".to_string(),
-                rejoined: "0/0".to_string(),
-                unrecovered: 0,
-                maturity_verdict: None,
-                join_verdict: None,
-                fork_verdict: None,
-            }),
-        }
-    }
-
-    #[test]
-    fn clean_run_passes() {
-        let (text, passed) = evaluate("clean", "25", &passing_evidence());
-        assert!(passed);
-        assert_eq!(
-            text,
-            concat!(
-                "=== NIGHTLY SIM RESULTS (scenario: clean) ===\n",
-                "  nodes alive:        PASS  (3/3)\n",
-                "  chain converged:    PASS  (distinct hashes: 1, within 2 of tip: 3/3)\n",
-                "  chain grew:         PASS  (promotions: 50)\n",
-                "  no panics:          PASS  (panicked nodes: 0)\n",
-                "  no rejections:      PASS  (AsertMismatch=0 merkle/payout=0)\n",
-                "  uncle rate:         PASS  (12.5% < 25%)\n",
-                "  verify_chain:       PASS  (3/3 passed)\n",
-                "  failure recovery:   PASS  (targets: none, rejoined 0/0, unrecovered 0)\n",
-                "  payout maturity:    SKIP  (late-miner only)\n",
-                "  pruned join:        SKIP  (pruned-join only)\n",
-                "  fork depth limit:   SKIP  (fork scenarios only)\n",
-                "RESULT: PASS\n",
-            )
-        );
-    }
-
-    #[test]
-    fn uncle_rate_at_the_threshold_fails() {
-        let mut evidence = passing_evidence();
-        if let Some(metrics) = evidence.metrics.as_mut() {
-            metrics.uncle_rate = Some("25.0".to_string());
-        }
-        assert!(!evaluate("clean", "25", &evidence).1);
-    }
-
-    #[test]
-    fn missing_metrics_fail_with_script_fallbacks() {
-        let mut evidence = passing_evidence();
-        evidence.metrics = None;
-        let (text, passed) = evaluate("clean", "25", &evidence);
-        assert!(!passed);
-        assert!(text.contains("  no panics:          FAIL  (panicked nodes: -1)\n"));
-        assert!(text.contains("  uncle rate:         PASS  (0% < 25%)\n"));
-    }
-
-    #[test]
-    fn missing_failure_summary_fails_recovery() {
-        let mut evidence = passing_evidence();
-        evidence.failures = None;
-        let (text, passed) = evaluate("restart-fast", "25", &evidence);
-        assert!(!passed);
-        assert!(text.contains(
-            "  failure recovery:   FAIL  (targets: unknown, rejoined unknown, unrecovered -1)\n"
-        ));
-    }
-
-    #[test]
-    fn late_miner_needs_a_passing_maturity_verdict() {
-        let mut evidence = passing_evidence();
-        let (text, passed) = evaluate("late-miner", "25", &evidence);
-        assert!(!passed);
-        assert!(text.contains("  payout maturity:    FAIL  (missing)\n"));
-        if let Some(summary) = evidence.failures.as_mut() {
-            summary.maturity_verdict = Some("PASS".to_string());
-        }
-        assert!(evaluate("late-miner", "25", &evidence).1);
-    }
-
-    #[test]
-    fn deep_fork_skips_convergence() {
-        let mut evidence = passing_evidence();
-        evidence.convergence = None;
-        let (text, _) = evaluate("deep-fork-refused", "25", &evidence);
-        assert!(text.contains("  chain converged:    SKIP  (distinct hashes: n/a, within 2 of tip: n/a)\n"));
-    }
-
-    #[test]
-    fn first_share_reads_the_cli_answer() {
-        let share = first_share(r#"{"from_height":0,"to_height":5,"shares":[{"height":5,"blockhash":"ab"}]}"#);
-        assert_eq!(share.and_then(|share| share.get("height").and_then(Value::as_u64)), Some(5));
-    }
-}
+mod tests;

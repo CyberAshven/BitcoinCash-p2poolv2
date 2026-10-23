@@ -28,9 +28,8 @@ use std::time::Duration;
 /// sampled, which bounds memory on a log full of errors.
 const MAX_DISTINCT_ERROR_LINES: usize = 100_000;
 
-static ERROR_LINE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)error|panic|failed to build emission").expect("valid regex")
-});
+static ERROR_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)error|panic|failed to build emission").expect("valid regex"));
 static NOT_AN_ERROR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)max_workbase|0 warnings").expect("valid regex"));
 static PROMOTED_ANY_CASE: LazyLock<Regex> =
@@ -204,14 +203,21 @@ pub async fn snapshot(run_dir: &RunDir, base_api: u32) -> ToolResult<String> {
         }
     }
     let _ = writeln!(text, "{rule}");
-    let _ = writeln!(text, "alive: {alive_total}/{node_count}   max tip height: {highest}");
+    let _ = writeln!(
+        text,
+        "alive: {alive_total}/{node_count}   max tip height: {highest}"
+    );
 
     if !tips.is_empty() {
         let mut tip_counts: HashMap<String, u64> = HashMap::with_capacity(tips.len());
         for tip in tips {
             *tip_counts.entry(tip).or_insert(0) += 1;
         }
-        let _ = writeln!(text, "distinct tips: {} (1 = fully converged)", tip_counts.len());
+        let _ = writeln!(
+            text,
+            "distinct tips: {} (1 = fully converged)",
+            tip_counts.len()
+        );
         let _ = writeln!(text, "tip distribution:");
         for line in top_counts(&tip_counts, 8) {
             let _ = writeln!(text, "  {line}");
@@ -265,60 +271,4 @@ pub async fn snapshot(run_dir: &RunDir, base_api: u32) -> ToolResult<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn top_counts_sorts_like_sort_rn() {
-        let counts = HashMap::from([
-            ("a@1".to_string(), 2),
-            ("c@1".to_string(), 1),
-            ("b@1".to_string(), 2),
-        ]);
-        assert_eq!(
-            top_counts(&counts, 8),
-            vec!["      2 b@1", "      2 a@1", "      1 c@1"]
-        );
-    }
-
-    #[test]
-    fn json_length_of_array_counts_items() {
-        assert_eq!(json_length(&json!([1, 2, 3])), Some("3".to_string()));
-    }
-
-    #[test]
-    fn json_length_of_object_counts_keys() {
-        assert_eq!(json_length(&json!({"error": "x"})), Some("1".to_string()));
-    }
-
-    #[test]
-    fn json_length_of_boolean_fails() {
-        assert_eq!(json_length(&json!(true)), None);
-    }
-
-    #[test]
-    fn scan_reads_the_last_promotion_and_errors() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let path = directory.path().join("node-0.log");
-        std::fs::write(
-            &path,
-            concat!(
-                "t Promoted block 0123456789abcdef01 to confirmed height Some(4)\n",
-                "t Promoted block fedcba9876543210ff to confirmed height Some(5)\n",
-                "t ERROR something broke\n",
-                "t error max_workbase exceeded\n",
-                "t ERROR something broke\n",
-            ),
-        )
-        .expect("write log");
-        let scan = scan_log(&path).expect("scan");
-        assert_eq!(
-            scan.tip,
-            Some((Some(5), Some("fedcba987654".to_string())))
-        );
-        assert_eq!(scan.promotion_lines, 2);
-        assert_eq!(scan.error_lines, 2);
-        assert_eq!(scan.errors.get(&b"t ERROR something broke"[..]), Some(&2));
-    }
-}
+mod tests;

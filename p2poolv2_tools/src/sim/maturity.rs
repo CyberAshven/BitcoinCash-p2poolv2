@@ -96,9 +96,8 @@ pub fn read_sim_maturity(run_dir: &RunDir, node: usize) -> ToolResult<u64> {
             maturity = found[1].parse().ok();
         }
     })?;
-    maturity.ok_or_else(|| {
-        ToolError::message(format!("{} has no 'Sim depths' line", path.display()))
-    })
+    maturity
+        .ok_or_else(|| ToolError::message(format!("{} has no 'Sim depths' line", path.display())))
 }
 
 /// `sim.miner_address` from a node config.
@@ -171,7 +170,10 @@ pub fn coinbase_payees(block: &Value) -> BTreeSet<String> {
     let mut payees = BTreeSet::new();
     for output in outputs.into_iter().flatten() {
         let script = output.get("scriptPubKey");
-        if let Some(address) = script.and_then(|script| script.get("address")).and_then(Value::as_str) {
+        if let Some(address) = script
+            .and_then(|script| script.get("address"))
+            .and_then(Value::as_str)
+        {
             payees.insert(address.to_string());
         }
         let listed = script
@@ -263,7 +265,12 @@ async fn late_miner_first_heights(
 }
 
 /// The verdict and its reason for the per-block rows.
-pub fn evaluate(rows: &[BlockRow], maturity: u64, first_confirmed: u64, first_any: u64) -> (Verdict, String) {
+pub fn evaluate(
+    rows: &[BlockRow],
+    maturity: u64,
+    first_confirmed: u64,
+    first_any: u64,
+) -> (Verdict, String) {
     let early: Vec<String> = rows
         .iter()
         .filter(|row| row.late_paid && row.paying_height < first_any + maturity)
@@ -272,7 +279,10 @@ pub fn evaluate(rows: &[BlockRow], maturity: u64, first_confirmed: u64, first_an
     if !early.is_empty() {
         return (
             Verdict::Violation,
-            format!("late miner paid before maturity at paying height(s) {}", early.join(", ")),
+            format!(
+                "late miner paid before maturity at paying height(s) {}",
+                early.join(", ")
+            ),
         );
     }
     let first_mature = rows
@@ -293,7 +303,10 @@ pub fn evaluate(rows: &[BlockRow], maturity: u64, first_confirmed: u64, first_an
         ),
         Some(row) => (
             Verdict::Pass,
-            format!("late miner first paid at paying height {}", row.paying_height),
+            format!(
+                "late miner first paid at paying height {}",
+                row.paying_height
+            ),
         ),
     }
 }
@@ -320,7 +333,10 @@ pub fn report(rows: &[BlockRow], late: (usize, &str), maturity: u64, first: (u64
     sorted.sort_by_key(|row| row.paying_height);
     for row in sorted {
         let depth = row.paying_height as i64 - first_confirmed as i64;
-        let short = format!("{}..", row.bitcoin_hash.get(..16).unwrap_or(&row.bitcoin_hash));
+        let short = format!(
+            "{}..",
+            row.bitcoin_hash.get(..16).unwrap_or(&row.bitcoin_hash)
+        );
         let yes_no = |flag: bool| if flag { "yes" } else { "no" };
         let _ = writeln!(
             text,
@@ -360,14 +376,18 @@ impl MaturityCheck {
         let (Some(first_confirmed), Some(first_any)) = (first.confirmed, first.any) else {
             return Ok((
                 Verdict::Inconclusive,
-                "maturity check: INCONCLUSIVE (late miner has no confirmed share yet)\n".to_string(),
+                "maturity check: INCONCLUSIVE (late miner has no confirmed share yet)\n"
+                    .to_string(),
             ));
         };
 
         let mut rows = Vec::with_capacity(64);
         for (bitcoin_hash, prev_share) in collect_block_finds(&self.run_dir)? {
             let outcome = bitcoind
-                .call("getblock", vec![Value::from(bitcoin_hash.as_str()), Value::from(2)])
+                .call(
+                    "getblock",
+                    vec![Value::from(bitcoin_hash.as_str()), Value::from(2)],
+                )
                 .await?;
             // A block bitcoind rejected (an RPC error here) pays nobody.
             if let CallOutcome::Result(block) = outcome
@@ -395,90 +415,4 @@ impl MaturityCheck {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn row(paying_height: u64, late_paid: bool) -> BlockRow {
-        BlockRow {
-            bitcoin_hash: format!("{paying_height:064x}"),
-            paying_height,
-            late_paid,
-        }
-    }
-
-    #[test]
-    fn early_payment_is_a_violation() {
-        assert_eq!(
-            evaluate(&[row(25, true)], 20, 10, 8),
-            (
-                Verdict::Violation,
-                "late miner paid before maturity at paying height(s) 25".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn no_mature_block_is_inconclusive() {
-        assert_eq!(
-            evaluate(&[row(25, false)], 20, 10, 10).0,
-            Verdict::Inconclusive
-        );
-    }
-
-    #[test]
-    fn unpaid_first_mature_block_is_a_violation() {
-        assert_eq!(
-            evaluate(&[row(31, true), row(30, false)], 20, 10, 10),
-            (
-                Verdict::Violation,
-                "late miner not paid by the first mature block-find at paying height 30"
-                    .to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn paid_first_mature_block_passes() {
-        assert_eq!(
-            evaluate(&[row(29, false), row(30, true)], 20, 10, 10),
-            (
-                Verdict::Pass,
-                "late miner first paid at paying height 30".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn coinbase_payees_reads_address_and_addresses() {
-        let block = json!({"tx": [{"vout": [
-            {"scriptPubKey": {"address": "bcrt1qa"}},
-            {"scriptPubKey": {"addresses": ["bchreg:qb"]}},
-            {"scriptPubKey": {"type": "nulldata"}}
-        ]}]});
-        assert_eq!(
-            coinbase_payees(&block),
-            BTreeSet::from(["bcrt1qa".to_string(), "bchreg:qb".to_string()])
-        );
-    }
-
-    #[test]
-    fn report_lists_rows_by_paying_height() {
-        let text = report(&[row(31, true), row(30, false)], (1, "addr"), 20, (10, 9));
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], "late miner: node 1 (addr), coinbase maturity 20");
-        assert_eq!(lines[1], "first late share: confirmed 10, confirmed or uncle 9");
-        assert_eq!(
-            lines[2],
-            "bitcoin block         paying_h  p-first  mature  late_paid"
-        );
-        assert_eq!(
-            lines[3],
-            "0000000000000000..          30       20     yes         no"
-        );
-        assert_eq!(
-            lines[4],
-            "0000000000000000..          31       21     yes        yes"
-        );
-    }
-}
+mod tests;
