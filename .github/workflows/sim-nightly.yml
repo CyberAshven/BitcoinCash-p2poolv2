@@ -164,3 +164,68 @@ jobs:
             /tmp/p2pool-sim/
             /tmp/nightly-output.log
           retention-days: 7
+
+  # The Bitcoin Cash payout tree against a real BCHN: a token share's coinbase
+  # pays 623 of 700 payees through a two-level tree, the node's own executor
+  # broadcasts it after 100 blocks, and BCHN must accept every node
+  # transaction (regtest requires standard transactions, as mainnet does);
+  # a no-token coinbase paying 3,000 miners directly must be a valid block.
+  payout-tree-bchn:
+    name: Payout tree on BCHN regtest
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: nextest
+
+      # The same verified BCHN release the sim swarm uses.
+      - name: Install BCHN
+        run: |
+          set -euo pipefail
+          dockerfile=docker/bchn/Dockerfile
+          version=$(sed -n 's/^ARG BCHN_VERSION=//p' "$dockerfile" | head -n 1)
+          sum=$(sed -n 's/^ARG BCHN_SHA256_AMD64=//p' "$dockerfile")
+          if [ -z "$version" ] || [ -z "$sum" ]; then
+            echo "BCHN version or checksum not found in $dockerfile" >&2
+            exit 1
+          fi
+          tarball="bitcoin-cash-node-${version}-x86_64-linux-gnu.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/bitcoin-cash-node/bitcoin-cash-node/releases/download/v${version}/${tarball}"
+          echo "${sum}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bchn"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bchn" --strip-components=1
+          sudo install -m 0755 "$RUNNER_TEMP/bchn/bin/bitcoind" "$RUNNER_TEMP/bchn/bin/bitcoin-cli" /usr/local/bin/
+          if ! ldconfig -p | grep 'libatomic\.so\.1' > /dev/null; then
+            sudo apt-get update -q
+            sudo apt-get install -y --no-install-recommends libatomic1
+          fi
+          bitcoind --version
+
+      - name: Start BCHN regtest
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bchn-regtest"
+          bitcoind -regtest -daemon -server=1 -listen=0 -disablewallet=1 \
+            -datadir="$RUNNER_TEMP/bchn-regtest" -rpcport=18443 \
+            -rpcuser=p2pool -rpcpassword=p2pool
+          bitcoin-cli -regtest -datadir="$RUNNER_TEMP/bchn-regtest" -rpcport=18443 \
+            -rpcuser=p2pool -rpcpassword=p2pool -rpcwait getblockchaininfo
+
+      - name: Run the payout tree tests against BCHN
+        env:
+          P2POOL_TEST_BCHN_RPC_URL: http://127.0.0.1:18443
+          P2POOL_TEST_BCHN_RPC_USER: p2pool
+          P2POOL_TEST_BCHN_RPC_PASSWORD: p2pool
+        run: cargo nextest run -p p2poolv2_tests --run-ignored only -E 'test(bchn_regtest)' -j 1
