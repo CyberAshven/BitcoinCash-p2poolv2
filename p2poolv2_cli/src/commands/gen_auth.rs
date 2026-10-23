@@ -7,6 +7,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use p2poolv2_lib::auth::password_to_hmac;
 use rand::RngExt;
 use std::error::Error;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
 
 /// Generate a 16-byte hex salt (32 hex characters)
 fn generate_salt() -> String {
@@ -22,10 +25,34 @@ fn generate_password() -> String {
     URL_SAFE_NO_PAD.encode(password_bytes)
 }
 
+/// Write a generated password to a new file only its owner can read.
+///
+/// Refuses to overwrite an existing file, so an earlier password is never
+/// lost or replaced unnoticed.
+fn write_password_file(path: &Path, password: &str) -> Result<(), Box<dyn Error>> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
+    writeln!(file, "{password}")?;
+    Ok(())
+}
+
 /// Execute the gen-auth command
-pub fn execute(username: String, password: Option<String>) -> Result<(), Box<dyn Error>> {
-    // Determine password (generate, prompt, or use provided). Only a
-    // generated password is shown; the user already knows one they gave.
+pub fn execute(
+    username: String,
+    password: Option<String>,
+    password_file: &Path,
+) -> Result<(), Box<dyn Error>> {
+    // Determine password (generate, prompt, or use provided). A generated
+    // password goes to `password_file`, never to the terminal; the user
+    // already knows one they gave.
     let (password, generated) = match password {
         None => (generate_password(), true),
         Some(ref p) if p == "-" => (rpassword::prompt_password("Enter password: ")?, false),
@@ -43,7 +70,8 @@ pub fn execute(username: String, password: Option<String>) -> Result<(), Box<dyn
     println!("\n=== API Authentication Credentials ===\n");
     println!("Username: {username}");
     if generated {
-        println!("Password: {password}");
+        write_password_file(password_file, &password)?;
+        println!("Password: written to {}", password_file.display());
     }
     println!("Salt:     {salt}");
     println!("HMAC:     {hmac}");
