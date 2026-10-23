@@ -18,6 +18,7 @@
 - [Design checks](bch-design.md)
 - [Job Declaration](bch-job-declaration.md)
 - [Auxiliary work proofs](bch-auxpow.md)
+- [Bitcoin assumptions audit](bch-btc-assumptions-audit.md)
 
 # Architecture
 
