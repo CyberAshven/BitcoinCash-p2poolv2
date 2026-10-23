@@ -24,14 +24,16 @@ says what to do about each.
    a lower bound for one device, not a limit, and Bitcoin Cash allows a
    1,000,000-byte coinbase. The owner has decided that the cap goes: every
    miner is paid directly, and a payout tree is used only for shares that
-   carry merge-mining token commitments past a threshold. That design is done
-   separately.
+   carry merge-mining token commitments past a threshold. That design is the
+   separate proposal
+   [Hybrid payouts on Bitcoin Cash](architecture/bch-hybrid-payouts.md).
 2. **The next limit after the cap.** Every share carries the whole Bitcoin
    Cash coinbase inside a 200 KiB share body, a number taken from upstream.
    With every miner paid directly, that body limit stops the pool at about
    4,000 to 6,000 miners, well short of what Bitcoin Cash allows. It is a
-   share-chain rule, so it changes with the payout design, with the owner's
-   agreement.
+   share-chain rule. The owner has directed that it allow a full
+   1,000,000-byte coinbase, and the hybrid proposal sizes it so (its section
+   8.1).
 3. **A bug in Hydrapool mode.** On Bitcoin Cash, Hydrapool pays every miner,
    but the 784-byte check still applies, so the node stops itself once about
    15 miners are in its window. It goes away with the cap.
@@ -72,7 +74,10 @@ These override the findings.
 - **The coinbase payout cap goes.** `BCH_MAX_COINBASE_PAYOUTS` (11) and
   `BCH_COINBASE_BYTE_BUDGET` (784) are replaced by a hybrid payout designed
   separately: every miner paid directly, and a payout tree only for shares
-  carrying merge-mining token commitments past a threshold.
+  carrying merge-mining token commitments past a threshold. The design is
+  [Hybrid payouts on Bitcoin Cash](architecture/bch-hybrid-payouts.md), a
+  proposal awaiting the owner's agreement. The owner has also directed that
+  the share body allow a full 1,000,000-byte coinbase.
 - **The 100 KB standard transaction size is relay policy**, not a P2Pool
   limit.
 - **The simulation moves to BCHN separately.** Simulation findings are listed
@@ -114,9 +119,9 @@ builds. Risk is what happens if nothing is done.
 
 | # | What | Where (alpha `71231a42`) | Bitcoin origin | Bitcoin Cash reality (source) | Bitcoin Cash replacement | S | B | Risk |
 |---|---|---|---|---|---|---|---|---|
-| A1 | Coinbase pays at most 11 PPLNS outputs; jobs over 784 bytes refused; the tail is paid by a weighted draw | `accounting/payout/coinbase_budget.rs:26-60, 122-276`; `stratum/work/coinbase.rs:54-131`; `stratum/work/prepared_notify.rs:463-466` | Upstream [#668](https://github.com/p2poolv2/p2poolv2/discussions/668): one OCEAN Bitcoin block, 16 payouts in 784 bytes, said to suit stock Antminer firmware. [#708](https://github.com/p2poolv2/p2poolv2/issues/708) plans 25 outputs and a random tail, relying on Lightning | A coinbase is bounded only by `MAX_TX_SIZE` = 1,000,000 bytes and a 2-100 byte scriptSig, room for about 29,000 P2PKH outputs ([consensus.h](https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node/-/raw/master/src/consensus/consensus.h), [tx_check.cpp](https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node/-/raw/master/src/consensus/tx_check.cpp)). A mined 784-byte coinbase is a lower bound. OCEAN's own gateway sets caps per device, from 755 B (older S19 stock firmware) to 16 KB, and none for Braiins ([datum_coinbaser.c](https://github.com/OCEAN-xyz/datum_gateway/blob/85a19fd48caed0d00e2d26045916d30f84b0668a/src/datum_coinbaser.c)). P2Pool v1 on BCH paid up to 4,000 payees and warned only near 226 for S9s ([data.py](https://github.com/jtoomim/p2pool/blob/master/p2pool/data.py)). Stratum V2 standard channels never send the coinbase | Owner's decision: remove. Pay every miner directly; a payout tree only for shares with merge-mining commitments past a threshold. Device limits are handled per connection after M1, never as a chain-wide cap | yes | yes | High: small miners paid by lottery |
-| A2 | The 200 KiB share body includes the carried Bitcoin Cash coinbase; 1 MiB P2P frame and buffers sized from it | `shares/validation/mod.rs:186-189, 1406-1415`; `node/messages.rs:17-27`; `node/p2p_message_handlers/receivers/block_receiver.rs:33-39`; `shares/transaction_pool.rs:56`; `shares/share_block/mod.rs:404` | Upstream constants (commits `19819f07`, `243c994e`) for a Bitcoin share chain with a small coinbase | With every miner paid directly the coinbase is about 408 + 34 bytes per P2PKH payee. 200 KiB holds about 4,080 payees beside 64 KiB of share transactions, about 6,000 without; BCH allows about 29,400. A 1,000,000-byte coinbase does not fit the 1 MiB frame. Every share relays and stores the whole coinbase: about 170 KB per 10-second share at 5,000 payees (arithmetic) | Budget the carried coinbase apart from share transactions, bounded by BCH's 1,000,000-byte `MAX_TX_SIZE`, or carry only the fields a peer cannot rebuild (scriptSig, aux commitment) and rebuild the payouts from the window, which validators already do (`validation/mod.rs:1194-1270`). Re-derive the frame and buffer sizes and put the limit in the protocol tag. Measure M2 first | yes | no | High once A1 lands |
-| A3 | Hydrapool on BCH stops the node at about 15 payees | `stratum/work/notify.rs:141`; `prepared_notify.rs:463-466`; `accounting/payout/simple_pplns/payout.rs:48-50`; `notify.rs:237-245` | The 784-byte budget of A1, applied to every BCH job | Hydrapool pays every payee and is not bound by the share chain. Past 784 bytes the check fails, `start_notify` returns, and the node shuts down (read from the code, not run) | Goes with A1, which removes `check_bch_coinbase_budget`. Until then do not run Hydrapool on BCH with more than about 10 miners | no | yes | High for Hydrapool operators |
+| A1 | Coinbase pays at most 11 PPLNS outputs; jobs over 784 bytes refused; the tail is paid by a weighted draw | `accounting/payout/coinbase_budget.rs:26-60, 122-276`; `stratum/work/coinbase.rs:54-131`; `stratum/work/prepared_notify.rs:463-466` | Upstream [#668](https://github.com/p2poolv2/p2poolv2/discussions/668): one OCEAN Bitcoin block, 16 payouts in 784 bytes, said to suit stock Antminer firmware. [#708](https://github.com/p2poolv2/p2poolv2/issues/708) plans 25 outputs and a random tail, relying on Lightning | A coinbase is bounded only by `MAX_TX_SIZE` = 1,000,000 bytes and a 2-100 byte scriptSig, room for about 29,000 P2PKH outputs ([consensus.h](https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node/-/raw/master/src/consensus/consensus.h), [tx_check.cpp](https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node/-/raw/master/src/consensus/tx_check.cpp)). A mined 784-byte coinbase is a lower bound. OCEAN's own gateway sets caps per device, from 755 B (older S19 stock firmware) to 16 KB, and none for Braiins ([datum_coinbaser.c](https://github.com/OCEAN-xyz/datum_gateway/blob/85a19fd48caed0d00e2d26045916d30f84b0668a/src/datum_coinbaser.c)). P2Pool v1 on BCH paid up to 4,000 payees and warned only near 226 for S9s ([data.py](https://github.com/jtoomim/p2pool/blob/master/p2pool/data.py)). Stratum V2 standard channels never send the coinbase | Owner's decision: remove. Pay every miner directly; a payout tree only for shares with merge-mining commitments past a threshold ([proposal](architecture/bch-hybrid-payouts.md)). Device limits are handled per connection after M1, never as a chain-wide cap | yes | yes | High: small miners paid by lottery |
+| A2 | The 200 KiB share body includes the carried Bitcoin Cash coinbase; 1 MiB P2P frame and buffers sized from it | `shares/validation/mod.rs:186-189, 1406-1415`; `node/messages.rs:17-27`; `node/p2p_message_handlers/receivers/block_receiver.rs:33-39`; `shares/transaction_pool.rs:56`; `shares/share_block/mod.rs:404` | Upstream constants (commits `19819f07`, `243c994e`) for a Bitcoin share chain with a small coinbase | With every miner paid directly the coinbase is about 408 + 34 bytes per P2PKH payee. 200 KiB holds about 4,080 payees beside 64 KiB of share transactions, about 6,000 without; BCH allows about 29,400. A 1,000,000-byte coinbase does not fit the 1 MiB frame. Every share relays and stores the whole coinbase: about 170 KB per 10-second share at 5,000 payees (arithmetic) | Budget the carried coinbase apart from share transactions, bounded by BCH's 1,000,000-byte `MAX_TX_SIZE`, or carry only the fields a peer cannot rebuild (scriptSig, aux commitment) and rebuild the payouts from the window, which validators already do (`validation/mod.rs:1194-1270`). Re-derive the frame and buffer sizes and put the limit in the protocol tag. The owner has directed room for a full 1,000,000-byte coinbase; the [hybrid proposal](architecture/bch-hybrid-payouts.md) (8.1) sizes it so. Measure M2 for the bandwidth cost | yes | no | High once A1 lands |
+| A3 | Hydrapool on BCH stops the node at about 15 payees | `stratum/work/notify.rs:141`; `prepared_notify.rs:463-466`; `accounting/payout/simple_pplns/payout.rs:48-50`; `notify.rs:237-245` | The 784-byte budget of A1, applied to every BCH job | Hydrapool pays every payee and is not bound by the share chain. Past 784 bytes the check fails, `start_notify` returns, and the node shuts down (read from the code, not run) | Goes with A1: the hybrid proposal removes `check_bch_coinbase_budget`. Until then do not run Hydrapool on BCH with more than about 10 miners | no | yes | High for Hydrapool operators |
 | A4 | Template Provider templates checked against a fixed 32 MB / 2 MB floor | `stratum/sv2/template_distribution.rs:411-421, 488-521` | A fixed block size, true of Bitcoin; Template Distribution carries no limit | ABLA since 2024-05-15: 32 MB floor (2 MB on chipnet), no fixed maximum; BCHN's 2 GB guard is temporary ([ABLA CHIP](https://gitlab.com/0353F40E/ebaa/-/raw/main/README.md), [27.0.0 notes](https://docs.bitcoincashnode.org/doc/release-notes/release-notes-27.0.0/)). BCHN reports the next limit as `ablastate.nextblocksizelimit` in `getblockheader` ([doc](https://docs.bitcoincashnode.org/doc/json-rpc/getblockheader/), [blockchain.cpp](https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node/-/raw/master/src/rpc/blockchain.cpp)) | Read the limit for the provider's parent from BCHN with the `getblockheader` call the node already makes for the height. Fall back to the last limit BCHN reported, and to the floor only while BCHN is unreachable. **Done on PR #33** | no | no | Medium: a provider pool stops getting work as BCH scales |
 | A5 | Template `sizelimit` and `sigoplimit` are `u32` | `stratum/work/block_template.rs:51-52` | Bitcoin Core's 4 M weight fits 32 bits | Owner: no fixed maximum; `u32` stops at 4.29 GB, and the 2 GB guard is to go by May 2028 | `u64`, compared as `u64`. **Done on PR #33** | no | no | Low |
 | A6 | Full `getblocktemplate` every 10 s, decoded several times, held per job for 15-30 minutes; a decoded copy is cached and never read | `p2poolv2_node/src/lib.rs:50`; `bitcoindrpc/src/lib.rs:259-306`; `block_template.rs:99-183`; `notify.rs:76-90, 119`; `stratum/sv2/session.rs:66-98`; `stratum/work/tracker/mod.rs:15` | Upstream and ckpool polling of Bitcoin Core, whose blocks stay under 4 M weight | A 32 MB template is about 64 MB of hex JSON (estimate). BCHN has `getblocktemplatelight`/`submitblocklight`, which return a job id and merkle branch and keep the transactions in BCHN ([doc](https://docs.bitcoincashnode.org/doc/getblocktemplatelight/)). Today's median block is about 27 KB (third-party explorer data) | Measure M3. Then a `getblocktemplatelight` mode for SV1 and GBT jobs, full templates only for Job Declaration proposals, and drop the unread cache | no | no | Medium, grows with ABLA |
@@ -260,13 +265,16 @@ Already correct for Bitcoin Cash:
 
 All need new protocol tags and a new store, so they belong in one flag day.
 
-1. **The hybrid payout (A1)**, designed separately: remove `payout-cap11` and
-   the tail draw, pay every miner directly, use a payout tree only for shares
-   with merge-mining commitments past a threshold set from A16's bound.
-2. **The share body (A2):** budget the carried coinbase apart from share
-   transactions, bounded by BCH's 1,000,000-byte transaction limit, or carry a
-   compact coinbase; re-derive frame and buffer sizes; put the limit in the
-   protocol tag. Without this the payout stops at about 4,000 to 6,000 miners.
+1. **The hybrid payout (A1)**, designed separately in
+   [Hybrid payouts on Bitcoin Cash](architecture/bch-hybrid-payouts.md):
+   remove `payout-cap11` and the tail draw, pay every miner directly, use a
+   payout tree only for token shares past T = 3,072 bytes (inside A16's
+   bound).
+2. **The share body (A2):** room for a full 1,000,000-byte coinbase plus the
+   share transactions, as the owner directed and the proposal's section 8.1
+   sets out, or a compact coinbase after M2; re-derive frame and buffer
+   sizes; put the limit in the protocol tag. Without this the payout stops at
+   about 4,000 to 6,000 miners.
 3. **Payout scripts (A10 b):** P2PKH, P2SH20 and P2SH32 in share headers,
    other scripts rejected, outputs ordered by script bytes.
 4. **Merkle branch limit (A14):** 32 levels.
@@ -281,8 +289,10 @@ All need new protocol tags and a new store, so they belong in one flag day.
 ### 2. Changes to the block P2Pool builds, outside the share chain
 
 Need the owner's agreement, and belong with the payout work: Hydrapool's
-budget (A3), never stopping on an oversized block (A8), the provider's
-coinbase reserve (A9), and the Stratum V2 large-block path (A7).
+budget (A3, removed by the proposal), never stopping on an oversized block
+(A8), the provider's coinbase reserve (A9), and the Stratum V2 large-block
+path (A7). The proposal's section 8.2 lists the same outside limits a large
+coinbase meets (SV2's 65,535-byte coinbase fields, `-percentblockmaxsize`).
 
 ### 3. Non-rule fixes, done on PR #33
 
