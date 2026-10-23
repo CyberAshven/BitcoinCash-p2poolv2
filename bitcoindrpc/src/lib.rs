@@ -183,6 +183,10 @@ impl SubmitBlockOutcome {
 pub struct GetBlockchainInfo {
     #[serde(rename = "initialblockdownload")]
     pub initial_block_download: bool,
+    /// The node's chain name: `main`, `test`, `test4`, `chip`, `scale` or
+    /// `regtest` on BCHN. `None` when the node does not report one.
+    #[serde(default)]
+    pub chain: Option<String>,
 }
 
 /// The fields of a verbose `getblockheader` result that are read.
@@ -333,6 +337,13 @@ impl BitcoindRpcClient {
 
     pub async fn getblockchaininfo(&self) -> Result<GetBlockchainInfo, BitcoindRpcError> {
         self.request("getblockchaininfo", vec![]).await
+    }
+
+    /// Hash, as hex, of the block at `height` on the node's best chain. An
+    /// RPC error when the node's chain is shorter.
+    pub async fn get_block_hash(&self, height: u64) -> Result<String, BitcoindRpcError> {
+        self.request("getblockhash", vec![serde_json::json!(height)])
+            .await
     }
 
     /// Height of the block with `block_hash`, and the size limit BCHN applies

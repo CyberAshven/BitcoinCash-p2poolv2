@@ -117,7 +117,52 @@ async fn test_getblockchaininfo() {
         info,
         GetBlockchainInfo {
             initial_block_download: true,
+            chain: None,
         }
+    );
+}
+
+#[tokio::test]
+async fn getblockchaininfo_reads_the_chain_name() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": {"chain": "chip", "initialblockdownload": false},
+            "error": null,
+            "id": 0
+        })))
+        .mount(&mock_server)
+        .await;
+    let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
+
+    let info = client.getblockchaininfo().await.unwrap();
+
+    assert_eq!(info.chain.as_deref(), Some("chip"));
+}
+
+#[tokio::test]
+async fn getblockhash_reads_the_block_at_a_height() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_json(serde_json::json!({
+            "method": "getblockhash",
+            "params": [115252],
+            "id": 0
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": "00000000040ba9641ba98a37b2e5ceead38e4e2930ac8f145c8094f94c708727",
+            "error": null,
+            "id": 0
+        })))
+        .mount(&mock_server)
+        .await;
+    let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
+
+    let hash = client.get_block_hash(115_252).await.unwrap();
+
+    assert_eq!(
+        hash,
+        "00000000040ba9641ba98a37b2e5ceead38e4e2930ac8f145c8094f94c708727"
     );
 }
 

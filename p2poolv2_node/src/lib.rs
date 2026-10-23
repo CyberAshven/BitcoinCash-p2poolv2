@@ -209,6 +209,21 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     };
     info!("Latest tip {} at height {}", tip, height);
 
+    // A Bitcoin Cash node mines only for BCHN on the configured network: the
+    // chain name is checked before waiting for the node to sync, and a block
+    // only Bitcoin Cash has once it has synced.
+    let bitcoin_cash_network = match config.stratum.chain {
+        Chain::BitcoinCash => config.stratum.bitcoin_cash_network,
+        Chain::Bitcoin => None,
+    };
+    if let Some(network) = bitcoin_cash_network
+        && let Err(error) =
+            preflight::verify_bitcoin_cash_chain_name(&config.bitcoinrpc, network).await
+    {
+        error!("Refusing to start: {error}");
+        return Err(ExitCode::FAILURE);
+    }
+
     if let Err(error) = preflight::wait_for_bitcoin_node_synced(
         &config.bitcoinrpc,
         Duration::from_secs(300),
@@ -226,6 +241,13 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
                 return Err(ExitCode::FAILURE);
             }
         }
+    }
+
+    if let Some(network) = bitcoin_cash_network
+        && let Err(error) = preflight::verify_bitcoin_cash_block(&config.bitcoinrpc, network).await
+    {
+        error!("Refusing to start: {error}");
+        return Err(ExitCode::FAILURE);
     }
 
     background_tasks::start_background_tasks(

@@ -42,6 +42,15 @@ anchor and the donation and fee cap as they were.
 
 ### Added
 
+- A Bitcoin Cash node refuses to start unless `[bitcoinrpc]` is BCHN on
+  `bitcoin_cash_network` (V15 in `docs/p2pool-v1-bch-lessons.md`). Before
+  waiting for the sync, `getblockchaininfo` must report BCHN's chain name
+  (`main`, `chip`, `regtest`); after it, the node's block at a height only
+  Bitcoin Cash has must be BCHN's checkpoint (661,648 on mainnet, after the
+  Bitcoin SV and eCash splits; 115,252 on chipnet, where it forked from
+  testnet4). A Bitcoin, Bitcoin SV or eCash node, or BCHN on testnet4, is
+  refused with an error saying what was found.
+
 - A landing page in `website/`, ported from upstream's
   `p2poolv2/website` (MIT, whose notice it keeps): what the pool is, mining
   over Stratum V2 first with Stratum V1 supported, running a node, the

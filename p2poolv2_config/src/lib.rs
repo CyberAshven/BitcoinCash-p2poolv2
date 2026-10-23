@@ -263,6 +263,39 @@ impl BitcoinCashNetwork {
             BitcoinCashNetwork::Regtest => Network::Regtest,
         }
     }
+
+    /// The `chain` BCHN's `getblockchaininfo` reports on this network:
+    /// `CBaseChainParams` in BCHN's `src/chainparamsbase.cpp`.
+    pub fn bchn_chain_name(self) -> &'static str {
+        match self {
+            BitcoinCashNetwork::Mainnet => "main",
+            BitcoinCashNetwork::Chipnet => "chip",
+            BitcoinCashNetwork::Regtest => "regtest",
+        }
+    }
+
+    /// A block only Bitcoin Cash on this network has, as (height, hash): a
+    /// checkpoint from BCHN's `src/chainparams.cpp`. A node whose block at
+    /// that height differs follows another chain. `None` on regtest, whose
+    /// blocks are local.
+    ///
+    /// - Mainnet: block 661,648, the first block after the November 2020
+    ///   upgrade, where eCash (then Bitcoin ABC) split off. It is also after
+    ///   the November 2018 split of Bitcoin SV, and Bitcoin never had it.
+    /// - Chipnet: block 115,252, where chipnet forked from testnet4.
+    pub fn bch_only_block(self) -> Option<(u64, &'static str)> {
+        match self {
+            BitcoinCashNetwork::Mainnet => Some((
+                661_648,
+                "0000000000000000029e471c41818d24b8b74c911071c4ef0b4a0509f9b5a8ce",
+            )),
+            BitcoinCashNetwork::Chipnet => Some((
+                115_252,
+                "00000000040ba9641ba98a37b2e5ceead38e4e2930ac8f145c8094f94c708727",
+            )),
+            BitcoinCashNetwork::Regtest => None,
+        }
+    }
 }
 
 /// Marker type for raw (unparsed) StratumConfig state
@@ -1857,6 +1890,44 @@ mod tests {
         let parsed = config.stratum.parse().unwrap();
         assert_eq!(parsed.network, Network::Regtest);
         assert_eq!(parsed.version_mask, DEFAULT_VERSION_MASK);
+    }
+
+    #[test]
+    fn bchn_chain_names_match_chainparamsbase() {
+        assert_eq!(BitcoinCashNetwork::Mainnet.bchn_chain_name(), "main");
+        assert_eq!(BitcoinCashNetwork::Chipnet.bchn_chain_name(), "chip");
+        assert_eq!(BitcoinCashNetwork::Regtest.bchn_chain_name(), "regtest");
+    }
+
+    /// BCHN `src/chainparams.cpp`, `CMainParams` checkpoint "Axion
+    /// activation", the first block after eCash split off.
+    #[test]
+    fn the_mainnet_bitcoin_cash_block_is_bchn_axion_checkpoint() {
+        assert_eq!(
+            BitcoinCashNetwork::Mainnet.bch_only_block(),
+            Some((
+                661_648,
+                "0000000000000000029e471c41818d24b8b74c911071c4ef0b4a0509f9b5a8ce"
+            ))
+        );
+    }
+
+    /// BCHN `src/chainparams.cpp`, `CChipNetParams` checkpoint "Fork block
+    /// for chipnet", which testnet4 does not have.
+    #[test]
+    fn the_chipnet_bitcoin_cash_block_is_the_chipnet_fork_block() {
+        assert_eq!(
+            BitcoinCashNetwork::Chipnet.bch_only_block(),
+            Some((
+                115_252,
+                "00000000040ba9641ba98a37b2e5ceead38e4e2930ac8f145c8094f94c708727"
+            ))
+        );
+    }
+
+    #[test]
+    fn regtest_has_no_bitcoin_cash_only_block() {
+        assert_eq!(BitcoinCashNetwork::Regtest.bch_only_block(), None);
     }
 
     #[test]

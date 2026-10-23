@@ -64,6 +64,26 @@ bootstrap_address = "bitcoincash:q..."
 Point `[bitcoinrpc]` at BCHN's RPC port and `zmqpubhashblock` at its ZMQ
 endpoint.
 
+At start the node checks that `[bitcoinrpc]` is BCHN on
+`bitcoin_cash_network`, and refuses to start otherwise with an error that
+says what it found:
+
+- before waiting for BCHN to sync, `getblockchaininfo` must report BCHN's
+  chain name for the network: `main`, `chip` or `regtest`. A BCHN node on
+  testnet4 (`test4`) has chipnet's genesis and CashAddr prefix, so only the
+  name tells them apart;
+- once BCHN has synced, its block at a height only Bitcoin Cash has must be
+  BCHN's checkpoint: block 661,648 on mainnet (the first block after the
+  November 2020 upgrade, where eCash split off, and after the 2018 Bitcoin
+  SV split) and block 115,252 on chipnet (where chipnet forked from
+  testnet4). A Bitcoin, Bitcoin SV or eCash node also says `main`, but has
+  another block there. Regtest blocks are local, so regtest checks the name
+  only.
+
+Found blocks go to this node, and also to any extra BCHN nodes you list as
+`[[submit_nodes]]` tables (`url`, `username`, `password`), so a block does
+not depend on one node.
+
 Under `[network]`, list the share chain peers to join in `dial_peers`, for
 example `dial_peers = ["/ip4/203.0.113.1/tcp/6884"]`. A Bitcoin Cash node
 never uses DNS seeds: the seeds built into P2Poolv2 are Bitcoin nodes, and
