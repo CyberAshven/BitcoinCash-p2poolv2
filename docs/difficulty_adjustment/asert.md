@@ -151,6 +151,11 @@ sets only the interval the second share is measured from, so anchoring at
 launch still starts the chain regulated, and a run whose genesis time is far
 in the past starts from the ceiling instead of from a debt.
 
+[bch-daa-analysis.md](bch-daa-analysis.md) compares both anchors, other
+half-lives and upstream's window algorithms over BTC/BCH switching, growth
+from one BitAxe to exahashes and quiet periods, with this code
+(`p2poolv2_daa`, `cargo daa-sim`).
+
 ## Bitcoin
 
 Bitcoin's targets, protocol strings and fixtures are unchanged

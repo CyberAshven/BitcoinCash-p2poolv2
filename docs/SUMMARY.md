@@ -55,6 +55,7 @@
   - [Share chain address format](architecture/address-format.md)
   - [Mine on the current chain](architecture/mine-on-bitcoin-chain.md)
 - [Share difficulty: ASERT](difficulty_adjustment/asert.md)
+- [Share difficulty analysis for Bitcoin Cash](difficulty_adjustment/bch-daa-analysis.md)
 - [Difficulty adjustment in CKPool](difficulty_adjustment/ckpool.md)
 - [Simulation overview](simulation/overview.md)
 - [Simulation runbook](simulation/RUNBOOK.md)
