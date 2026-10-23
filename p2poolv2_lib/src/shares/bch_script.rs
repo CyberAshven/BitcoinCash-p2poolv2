@@ -22,9 +22,11 @@
 //!   script, P2SH20, multisig and token-prefixed outputs are rejected.
 //!
 //! Outputs are restricted too ([`verify_outputs`]): every output a share
-//! transaction creates is P2PKH or P2SH32 and holds at least BCHN's dust
-//! threshold for that output, so every share output stays above the dust
-//! limit and can be spent again. A transaction is also final at the height
+//! transaction creates is P2PKH or P2SH32 and holds at least the value BCHN's
+//! dust formula gives for that output. BCHN applies that formula to
+//! satoshis, as relay policy; the share chain reuses it as its own floor on
+//! share units (10^8 to a share), a share-chain rule BCHN never sees, so a
+//! share cannot be split into crumbs. A transaction is also final at the height
 //! of the share that includes it ([`verify_final`]), so the refund path
 //! cannot be mined before its height.
 //!
@@ -183,7 +185,9 @@ pub fn verify_transaction(
 
 /// Check that every output is P2PKH or P2SH32 and not dust.
 ///
-/// Applies to the outputs of non-coinbase share transactions. A share
+/// Values are share units, and [`dust_threshold`], BCHN's satoshi formula,
+/// serves as the share chain's floor on them. Applies to the outputs of
+/// non-coinbase share transactions. A share
 /// coinbase pays one whole share unit to its owner's P2PKH script, far above
 /// the threshold.
 pub fn verify_outputs(transaction: &Transaction) -> Result<(), BchScriptError> {
