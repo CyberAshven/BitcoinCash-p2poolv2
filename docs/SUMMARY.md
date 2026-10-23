@@ -58,6 +58,7 @@
 - [Difficulty adjustment in CKPool](difficulty_adjustment/ckpool.md)
 - [Simulation overview](simulation/overview.md)
 - [Simulation runbook](simulation/RUNBOOK.md)
+- [Network simulation: what limits P2Pool on BCH](simulation/network-sim.md)
 - [Dependency upgrades](dependency-upgrades.md)
 
 # Upstream background (Bitcoin)
