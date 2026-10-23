@@ -160,6 +160,13 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
+- Prometheus names no longer say Bitcoin (A27 in
+  `docs/bch-btc-assumptions-audit.md`): `bitcoin_blocks_found_total` is
+  `found_blocks_total`, `bitcoin_block_found_time_seconds` is
+  `found_block_time_seconds`, and the per-user and per-worker series are
+  labelled `payout_address` instead of `btcaddress`. Every Grafana dashboard
+  in `prometheus/grafana/` follows; a dashboard of your own needs the same
+  renames. JSON API field names are unchanged.
 - Miners are stored and counted under the canonical text of their decoded
   payout script, not the address as typed (A26 in
   `docs/bch-btc-assumptions-audit.md`): a CashAddr with or without its

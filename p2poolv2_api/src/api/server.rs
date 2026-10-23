@@ -349,7 +349,9 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
     }
 
     if let Some(network_difficulty) = state.tracker_handle.get_network_difficulty() {
-        exposition.push_str("# HELP network_difficulty Current bitcoin network difficulty\n");
+        exposition.push_str(
+            "# HELP network_difficulty Current difficulty of the chain being mined (BCHN's on Bitcoin Cash)\n",
+        );
         exposition.push_str("# TYPE network_difficulty gauge\n");
         exposition.push_str(&format!("network_difficulty {network_difficulty}\n"));
     }
@@ -408,22 +410,17 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
 /// store, so the counter is monotonic.
 fn found_blocks_exposition(found_blocks: &[FoundBlock], network: bitcoin::Network) -> String {
     let mut output = String::with_capacity(256 + found_blocks.len() * 256);
+    output.push_str("# HELP found_blocks_total Total number of blocks found by the pool\n");
+    output.push_str("# TYPE found_blocks_total counter\n");
+    output.push_str(&format!("found_blocks_total {}\n", found_blocks.len()));
     output.push_str(
-        "# HELP bitcoin_blocks_found_total Total number of bitcoin blocks found by the pool\n",
+        "# HELP found_block_time_seconds Header time of a block found by the pool, labeled with blockhash, height, miner (payout address) and network\n",
     );
-    output.push_str("# TYPE bitcoin_blocks_found_total counter\n");
-    output.push_str(&format!(
-        "bitcoin_blocks_found_total {}\n",
-        found_blocks.len()
-    ));
-    output.push_str(
-        "# HELP bitcoin_block_found_time_seconds Bitcoin header time of a block found by the pool, labeled with blockhash, height, miner and network\n",
-    );
-    output.push_str("# TYPE bitcoin_block_found_time_seconds gauge\n");
+    output.push_str("# TYPE found_block_time_seconds gauge\n");
     let network_name = network.to_core_arg();
     for found_block in found_blocks {
         output.push_str(&format!(
-            "bitcoin_block_found_time_seconds{{blockhash=\"{}\",height=\"{}\",miner=\"{}\",network=\"{}\"}} {}\n",
+            "found_block_time_seconds{{blockhash=\"{}\",height=\"{}\",miner=\"{}\",network=\"{}\"}} {}\n",
             found_block.bitcoin_blockhash,
             found_block.bitcoin_height,
             found_block.miner_bitcoin_address,

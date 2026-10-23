@@ -329,7 +329,7 @@ The top-level values are the newest sample (read live before the first one).
 ### GET /found_blocks
 
 Bitcoin blocks found by the pool, newest first. The same data `/metrics`
-exposes as `bitcoin_block_found_time_seconds`.
+exposes as `found_block_time_seconds`.
 
 ```json
 [{"bitcoin_height":289001,"bitcoin_blockhash":"0000...","share_blockhash":"47fb...",

@@ -86,13 +86,10 @@ fn test_found_blocks_exposition_lists_each_block() {
 
     let exposition = found_blocks_exposition(&found_blocks, Network::Bitcoin);
 
-    assert!(
-        exposition
-            .contains("# TYPE bitcoin_blocks_found_total counter\nbitcoin_blocks_found_total 1\n")
-    );
-    assert!(exposition.contains("# TYPE bitcoin_block_found_time_seconds gauge\n"));
+    assert!(exposition.contains("# TYPE found_blocks_total counter\nfound_blocks_total 1\n"));
+    assert!(exposition.contains("# TYPE found_block_time_seconds gauge\n"));
     assert!(exposition.contains(
-            "bitcoin_block_found_time_seconds{blockhash=\"0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5\",height=\"840000\",miner=\"bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh\",network=\"main\"} 1713571767\n"
+            "found_block_time_seconds{blockhash=\"0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5\",height=\"840000\",miner=\"bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh\",network=\"main\"} 1713571767\n"
         ));
 }
 
@@ -100,8 +97,8 @@ fn test_found_blocks_exposition_lists_each_block() {
 fn test_found_blocks_exposition_with_no_blocks() {
     let exposition = found_blocks_exposition(&[], Network::Testnet4);
 
-    assert!(exposition.contains("bitcoin_blocks_found_total 0\n"));
-    assert!(!exposition.contains("bitcoin_block_found_time_seconds{"));
+    assert!(exposition.contains("found_blocks_total 0\n"));
+    assert!(!exposition.contains("found_block_time_seconds{"));
 }
 
 #[tokio::test]
@@ -136,9 +133,9 @@ async fn test_metrics_endpoint_exposes_found_blocks() {
 
     let exposition = metrics(State(state)).await;
 
-    assert!(exposition.contains("bitcoin_blocks_found_total 1\n"));
+    assert!(exposition.contains("found_blocks_total 1\n"));
     assert!(exposition.contains(&format!(
-            "bitcoin_block_found_time_seconds{{blockhash=\"{}\",height=\"{}\",miner=\"{}\",network=\"signet\"}} {}\n",
+            "found_block_time_seconds{{blockhash=\"{}\",height=\"{}\",miner=\"{}\",network=\"signet\"}} {}\n",
             share.header.bitcoin_header.block_hash(),
             share.header.bitcoin_height,
             share.header.miner_bitcoin_address,
