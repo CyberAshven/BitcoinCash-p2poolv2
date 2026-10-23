@@ -74,6 +74,8 @@ use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 #[cfg(test)]
 use crate::stratum;
 #[cfg(test)]
+use crate::stratum::block_submit::FoundBlockSubmitter;
+#[cfg(test)]
 use crate::stratum::emission::EmissionReceiver;
 #[cfg(test)]
 use crate::stratum::messages::Notify;
@@ -765,7 +767,7 @@ pub(crate) async fn test_bch_stratum_context(
         .unwrap();
     let (chain_store_handle, store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new(rpc_url, "user", "pass").unwrap(),
         start_difficulty: 1,

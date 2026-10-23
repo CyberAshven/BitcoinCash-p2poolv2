@@ -6,9 +6,7 @@ use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::config::PoolMode;
 use crate::shares::coinbase_proof::CoinbaseProof;
 #[cfg(not(feature = "sim"))]
-use crate::stratum::block_submit::{
-    FOUND_BLOCK_RETRY_POLICY, spawn_extra_node_submissions, submit_to_primary_node,
-};
+use crate::stratum::block_submit::{spawn_extra_node_submissions, submit_to_primary_node};
 use crate::stratum::{
     difficulty_adjuster::DifficultyAdjusterTrait,
     emission::Emission,
@@ -226,9 +224,10 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
 /// A block on a template from a Stratum V2 Template Provider goes back to
 /// that provider; when the provider's connection cannot take it, it goes to
 /// the node over RPC like every other block. Over RPC the node gets it again
-/// after a connection error or time-out, for up to two minutes
-/// ([`FOUND_BLOCK_RETRY_POLICY`]). Every node in `[[submit_nodes]]` gets it
-/// too, provider or not, from background tasks.
+/// after a connection error or time-out, for up to two minutes on a running
+/// node ([`crate::stratum::block_submit::FOUND_BLOCK_RETRY_POLICY`]). Every
+/// node in `[[submit_nodes]]` gets it too, provider or not, from background
+/// tasks.
 pub(crate) async fn submit_found_block(
     stratum_context: &StratumContext,
     header: Header,
@@ -250,11 +249,12 @@ pub(crate) async fn submit_found_block(
                 .map_err(|error| Error::SubmitFailure(error.to_string()))?,
         );
         info!("Found block {}", block.block_hash());
+        let submitter = &stratum_context.found_block_submitter;
         spawn_extra_node_submissions(
             &block,
-            &stratum_context.extra_submit_clients,
+            &submitter.extra_nodes,
             &stratum_context.metrics,
-            FOUND_BLOCK_RETRY_POLICY,
+            submitter.retry,
         );
         let unsent = match &job.blocktemplate.provided {
             Some(provided) => provided.submit(Arc::unwrap_or_clone(block)).err(),
@@ -265,7 +265,7 @@ pub(crate) async fn submit_found_block(
                 &block,
                 &stratum_context.bitcoindrpc_client,
                 &stratum_context.metrics,
-                &FOUND_BLOCK_RETRY_POLICY,
+                &submitter.retry,
             )
             .await
             .node_has_block()

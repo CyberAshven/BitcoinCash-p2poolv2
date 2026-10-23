@@ -52,6 +52,44 @@ pub const FOUND_BLOCK_RETRY_POLICY: SubmitRetryPolicy = SubmitRetryPolicy {
     max_backoff: Duration::from_secs(10),
 };
 
+/// One attempt per node, never sent again: for tests whose node is
+/// unreachable on purpose, where retries would only make them slow.
+pub const SINGLE_ATTEMPT_POLICY: SubmitRetryPolicy = SubmitRetryPolicy {
+    retry_window: Duration::ZERO,
+    attempt_timeout: Duration::from_secs(30),
+    first_backoff: Duration::ZERO,
+    max_backoff: Duration::ZERO,
+};
+
+/// Where a found block goes besides the node in `[bitcoinrpc]`, and how it
+/// is sent again when a node gives no answer.
+#[derive(Debug, Clone)]
+pub struct FoundBlockSubmitter {
+    /// Extra BCHN nodes from `[[submit_nodes]]`, in file order.
+    pub extra_nodes: Arc<[BitcoindRpcClient]>,
+    /// Retries for every node, [`FOUND_BLOCK_RETRY_POLICY`] on a running node.
+    pub retry: SubmitRetryPolicy,
+}
+
+impl FoundBlockSubmitter {
+    /// Send found blocks to `extra_nodes` too, with
+    /// [`FOUND_BLOCK_RETRY_POLICY`].
+    pub fn new(extra_nodes: Arc<[BitcoindRpcClient]>) -> Self {
+        Self {
+            extra_nodes,
+            retry: FOUND_BLOCK_RETRY_POLICY,
+        }
+    }
+
+    /// No extra nodes and [`SINGLE_ATTEMPT_POLICY`].
+    pub fn single_attempt() -> Self {
+        Self {
+            extra_nodes: Arc::from([]),
+            retry: SINGLE_ATTEMPT_POLICY,
+        }
+    }
+}
+
 /// What became of a found block at one node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockSubmission {

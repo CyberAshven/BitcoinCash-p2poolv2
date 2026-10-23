@@ -2,6 +2,7 @@ use super::*;
 use crate::accounting::OutputPair;
 use crate::accounting::stats::metrics;
 use crate::shares::coinbase_proof::CoinbaseProof;
+use crate::stratum::block_submit::FoundBlockSubmitter;
 use crate::stratum::sv2::session::encode_message;
 use crate::stratum::work::block_template::BlockTemplate;
 use crate::stratum::work::prepared_notify::PreparedNotifyParamsBuilder;
@@ -443,7 +444,7 @@ async fn extended_channel_mines_the_job_it_is_sent_and_its_share_is_emitted() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -697,7 +698,7 @@ async fn standard_channel_mines_the_merkle_root_it_is_sent() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -820,7 +821,7 @@ async fn a_share_below_the_channel_target_keeps_the_block_submission_policy() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new(
             &bitcoinrpc_config.url,
@@ -942,7 +943,7 @@ async fn a_hydrapool_share_meeting_the_channel_target_is_queued_at_the_job_diffi
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new(
             &bitcoinrpc_config.url,
@@ -1072,7 +1073,7 @@ async fn a_hydrapool_share_below_the_channel_target_is_not_queued() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new(
             &bitcoinrpc_config.url,
@@ -1162,7 +1163,7 @@ async fn a_connection_cannot_open_more_than_the_channel_cap() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -1236,7 +1237,7 @@ async fn channels_are_refused_without_a_share_address_or_a_valid_identity() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -1396,7 +1397,7 @@ async fn a_bitcoin_channel_takes_its_share_address_from_p2p() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -1460,7 +1461,7 @@ async fn a_channel_naming_another_share_address_than_the_node_is_refused() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -1520,7 +1521,7 @@ async fn a_bitcoin_cash_channel_takes_its_share_hash_from_p2p() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -1582,7 +1583,7 @@ async fn a_bitcoin_cash_channel_opens_through_a_translator_worker_suffix() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -1647,7 +1648,7 @@ async fn a_bitcoin_cash_channel_with_a_taproot_share_address_is_refused() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -1705,7 +1706,7 @@ async fn update_channel_answers_with_a_target_capped_by_the_new_maximum() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -1791,7 +1792,7 @@ async fn update_channel_for_an_unknown_channel_gets_an_error_reply() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -1847,7 +1848,7 @@ async fn close_channel_removes_the_channel() {
         .unwrap();
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
-        extra_submit_clients: Arc::from([]),
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
