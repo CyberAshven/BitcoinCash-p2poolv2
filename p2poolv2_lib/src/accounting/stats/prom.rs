@@ -68,8 +68,40 @@ impl PoolMetrics {
         ));
         output.push('\n');
 
+        output.push_str(&self.found_block_submission_expositions());
+
         output.push_str(&self.get_worker_expositions());
 
+        output
+    }
+
+    /// Found blocks sent to BCHN nodes since start, by node and outcome, and
+    /// the times one was sent again. The node label is `primary` for
+    /// `[bitcoinrpc]` and `extra1` and on for `[[submit_nodes]]`, never a URL.
+    fn found_block_submission_expositions(&self) -> String {
+        let mut output = String::with_capacity(
+            320 + 96 * (self.found_block_submissions.len() + self.found_block_submit_retries.len()),
+        );
+        output.push_str(
+            "# HELP found_block_submissions_total Found blocks sent to a BCHN node, by node and outcome\n",
+        );
+        output.push_str("# TYPE found_block_submissions_total counter\n");
+        for ((node, outcome), count) in &self.found_block_submissions {
+            output.push_str(&format!(
+                "found_block_submissions_total{{node=\"{node}\",outcome=\"{outcome}\"}} {count}\n"
+            ));
+        }
+        output.push('\n');
+        output.push_str(
+            "# HELP found_block_submit_retries_total Times a found block was sent again to a BCHN node after a connection error, time-out or busy node\n",
+        );
+        output.push_str("# TYPE found_block_submit_retries_total counter\n");
+        for (node, retries) in &self.found_block_submit_retries {
+            output.push_str(&format!(
+                "found_block_submit_retries_total{{node=\"{node}\"}} {retries}\n"
+            ));
+        }
+        output.push('\n');
         output
     }
 
@@ -206,8 +238,37 @@ impl PoolMetrics {
 mod tests {
     use super::*;
     use crate::accounting::stats::user::User;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::time::SystemTime;
+
+    #[test]
+    fn found_block_submissions_are_exposed_by_node_and_outcome() {
+        let metrics = PoolMetrics {
+            found_block_submissions: BTreeMap::from([
+                (("primary".to_string(), "accepted".to_string()), 2),
+                (("extra1".to_string(), "failed".to_string()), 1),
+            ]),
+            found_block_submit_retries: BTreeMap::from([
+                ("primary".to_string(), 0),
+                ("extra1".to_string(), 7),
+            ]),
+            ..Default::default()
+        };
+
+        let exposition = metrics.get_exposition();
+
+        assert!(exposition.contains("# TYPE found_block_submissions_total counter"));
+        assert!(
+            exposition.contains(
+                "found_block_submissions_total{node=\"primary\",outcome=\"accepted\"} 2\n"
+            )
+        );
+        assert!(
+            exposition
+                .contains("found_block_submissions_total{node=\"extra1\",outcome=\"failed\"} 1\n")
+        );
+        assert!(exposition.contains("found_block_submit_retries_total{node=\"extra1\"} 7\n"));
+    }
 
     fn now() -> u64 {
         SystemTime::now()

@@ -385,6 +385,7 @@ async fn disconnect_releases_the_authorized_worker_and_connection_permit() {
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let (emissions_tx, _emissions_rx) = mpsc::channel(10);
     let ctx = StratumContext {
+        extra_submit_clients: Arc::from([]),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,

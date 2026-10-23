@@ -752,6 +752,7 @@ pub(crate) async fn test_bch_stratum_context(
         .unwrap();
     let (chain_store_handle, store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
+        extra_submit_clients: Arc::from([]),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new(rpc_url, "user", "pass").unwrap(),
         start_difficulty: 1,

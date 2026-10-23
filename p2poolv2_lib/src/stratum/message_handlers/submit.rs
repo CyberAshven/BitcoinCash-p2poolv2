@@ -5,6 +5,10 @@
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::config::PoolMode;
 use crate::shares::coinbase_proof::CoinbaseProof;
+#[cfg(not(feature = "sim"))]
+use crate::stratum::block_submit::{
+    FOUND_BLOCK_RETRY_POLICY, spawn_extra_node_submissions, submit_to_primary_node,
+};
 use crate::stratum::{
     difficulty_adjuster::DifficultyAdjusterTrait,
     emission::Emission,
@@ -20,11 +24,10 @@ use crate::stratum::{
     },
 };
 use bitcoin::{BlockHash, block::Header, blockdata::block::Block, hashes::Hash};
-use bitcoindrpc::BitcoindRpcClient;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::SystemTime;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Handle the "mining.submit" message
 /// This function is called when a miner submits a share to the Stratum server.
@@ -222,7 +225,10 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
 ///
 /// A block on a template from a Stratum V2 Template Provider goes back to
 /// that provider; when the provider's connection cannot take it, it goes to
-/// the node over RPC like every other block.
+/// the node over RPC like every other block. Over RPC the node gets it again
+/// after a connection error or time-out, for up to two minutes
+/// ([`FOUND_BLOCK_RETRY_POLICY`]). Every node in `[[submit_nodes]]` gets it
+/// too, provider or not, from background tasks.
 pub(crate) async fn submit_found_block(
     stratum_context: &StratumContext,
     header: Header,
@@ -239,14 +245,30 @@ pub(crate) async fn submit_found_block(
     #[cfg(not(feature = "sim"))]
     {
         // Decode the template transactions only for this rare case.
-        let block = build_full_block(header, coinbase, &job.blocktemplate)
-            .map_err(|error| Error::SubmitFailure(error.to_string()))?;
+        let block = Arc::new(
+            build_full_block(header, coinbase, &job.blocktemplate)
+                .map_err(|error| Error::SubmitFailure(error.to_string()))?,
+        );
+        info!("Found block {}", block.block_hash());
+        spawn_extra_node_submissions(
+            &block,
+            &stratum_context.extra_submit_clients,
+            &stratum_context.metrics,
+            FOUND_BLOCK_RETRY_POLICY,
+        );
         let unsent = match &job.blocktemplate.provided {
-            Some(provided) => provided.submit(block).err(),
-            None => Some(block),
+            Some(provided) => provided.submit(Arc::unwrap_or_clone(block)).err(),
+            None => Some(Arc::unwrap_or_clone(block)),
         };
         if let Some(block) = unsent
-            && submit_block(&block, &stratum_context.bitcoindrpc_client).await
+            && submit_to_primary_node(
+                &block,
+                &stratum_context.bitcoindrpc_client,
+                &stratum_context.metrics,
+                &FOUND_BLOCK_RETRY_POLICY,
+            )
+            .await
+            .node_has_block()
         {
             request_template_refresh(stratum_context);
         }
@@ -357,32 +379,6 @@ async fn emit_share_chain_share(
         .await
         .map_err(|e| Error::SubmitFailure(format!("Failed to send share to store: {e}")))?;
     Ok(true)
-}
-
-/// Submit block to bitcoind using the shared RPC client.
-///
-/// Returns whether bitcoind accepted the submission.
-pub async fn submit_block(block: &Block, bitcoindrpc_client: &BitcoindRpcClient) -> bool {
-    tracing::info!(
-        "Submitting block to bitcoind: {:?}",
-        block.header.block_hash()
-    );
-    match bitcoindrpc_client.submit_block(block).await {
-        // submitblock answers null when it accepts the block, and a reason
-        // such as "duplicate" or "high-hash" when it does not.
-        Ok(result) if result == "null" => {
-            info!("Block submitted successfully");
-            true
-        }
-        Ok(reason) => {
-            warn!("bitcoind did not accept the block: {reason}");
-            false
-        }
-        Err(e) => {
-            error!("Failed to submit block: {}", e);
-            false
-        }
-    }
 }
 
 /// Ask the template task for a new template now, so miners move off the

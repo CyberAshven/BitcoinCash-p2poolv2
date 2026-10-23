@@ -122,8 +122,9 @@ blocks carried by uncles.
 - **Not limited by Prometheus retention.** Every scrape carries the full
   list, so an instant query always shows every found block.
 
-The stratum submit handler still submits the block to bitcoind on a local
-find; it records nothing.
+The stratum submit handler still submits the block to BCHN on a local find;
+what each node answered is counted separately, in
+`found_block_submissions_total` (see "Found block submissions" below).
 
 **Grafana:**
 - *Blocks found*: Stat of `bitcoin_blocks_found_total` (instant).
@@ -220,6 +221,30 @@ real-time confirmed shares count.
 `work_since_last_block / network_difficulty`. Values around 1.0 (100%)
 are expected luck; higher means the pool is running "unlucky" on the
 current block.
+
+### Found block submissions
+
+| Metric | Type | Source |
+|---|---|---|
+| `found_block_submissions_total{node,outcome}` | counter | `MetricsActor`, from `stratum/block_submit.rs` |
+| `found_block_submit_retries_total{node}` | counter | `MetricsActor`, from `stratum/block_submit.rs` |
+
+Counted when this node's miners find a block and it goes to a BCHN node with
+`submitblock`. `node` is `primary` for `[bitcoinrpc]` and `extra1`, `extra2`
+and on for the `[[submit_nodes]]` entries in file order; it never carries a
+URL, which may hold credentials. `outcome` is `accepted`, `duplicate` (the
+node already had the valid block), `inconclusive` (stored without a verdict,
+for example after losing a first-seen race at the same height), `rejected`
+(a reject reason) or `failed` (no answer within the two-minute retry window,
+or the request itself refused, such as a wrong password). Retries count the
+attempts sent again after a connection error, time-out or busy node.
+Runtime-only: the counters reset on restart. A block sent to a Template
+Provider is counted only at the extra nodes; the provider's RPC fallback and
+the simulation count nothing.
+
+**Grafana / alerting:**
+- *A found block not taken*: `increase(found_block_submissions_total{node="primary",outcome=~"rejected|failed"}[1h]) > 0`.
+- *A flaky BCHN connection*: `increase(found_block_submit_retries_total[1d]) > 0`.
 
 ### P2P health
 

@@ -70,6 +70,8 @@ pub struct StratumServer {
     sv2: Option<Sv2Listener>,
     /// Asks the template task for a new template after a found block.
     template_refresh_tx: Option<mpsc::Sender<()>>,
+    /// Extra BCHN nodes from `[[submit_nodes]]` that found blocks also go to.
+    extra_submit_nodes: Vec<BitcoinRpcConfig>,
 }
 
 /// Local Stratum V2 listener served beside SV1 on the same host name.
@@ -115,6 +117,7 @@ pub struct StratumServerBuilder {
     cash_share: Option<[u8; 20]>,
     sv2: Option<Sv2Listener>,
     template_refresh_tx: Option<mpsc::Sender<()>>,
+    extra_submit_nodes: Vec<BitcoinRpcConfig>,
 }
 
 impl StratumServerBuilder {
@@ -246,6 +249,13 @@ impl StratumServerBuilder {
         self
     }
 
+    /// Extra BCHN nodes from `[[submit_nodes]]` that every found block also
+    /// goes to, beside the node in `[bitcoinrpc]`. Empty by default.
+    pub fn extra_submit_nodes(mut self, extra_submit_nodes: Vec<BitcoinRpcConfig>) -> Self {
+        self.extra_submit_nodes = extra_submit_nodes;
+        self
+    }
+
     pub async fn build(self) -> Result<StratumServer, Box<dyn std::error::Error + Send + Sync>> {
         Ok(StratumServer {
             hostname: self.hostname.ok_or("hostname is required")?,
@@ -281,8 +291,27 @@ impl StratumServerBuilder {
                 .ok_or("chain store handle is required")?,
             sv2: self.sv2,
             template_refresh_tx: self.template_refresh_tx,
+            extra_submit_nodes: self.extra_submit_nodes,
         })
     }
+}
+
+/// RPC clients for the extra BCHN nodes in `[[submit_nodes]]`.
+fn extra_submit_clients(
+    extra_submit_nodes: &[BitcoinRpcConfig],
+) -> Result<Arc<[BitcoindRpcClient]>, Box<dyn std::error::Error + Send>> {
+    extra_submit_nodes
+        .iter()
+        .map(|node| {
+            BitcoindRpcClient::new(&node.url, &node.username, &node.password).map_err(
+                |error| -> Box<dyn std::error::Error + Send> {
+                    Box::new(std::io::Error::other(format!(
+                        "Failed to create the RPC client for a [[submit_nodes]] entry: {error}"
+                    )))
+                },
+            )
+        })
+        .collect()
 }
 
 /// Wait for the share chain to become current before accepting miners.
@@ -342,6 +371,7 @@ impl StratumServer {
                 "Failed to create BitcoindRpcClient: {e}"
             )))
         })?;
+        let extra_submit_clients = extra_submit_clients(&self.extra_submit_nodes)?;
 
         if !wait_for_chain_sync(
             &self.chain_store_handle,
@@ -382,7 +412,12 @@ impl StratumServer {
                 },
             )?;
             let mining = Sv2Mining {
-                ctx: self.context(&tracker_handle, &bitcoindrpc_client, &metrics),
+                ctx: self.context(
+                    &tracker_handle,
+                    &bitcoindrpc_client,
+                    &extra_submit_clients,
+                    &metrics,
+                ),
                 version_mask: self.version_mask,
                 template_rx: template_rx.clone(),
             };
@@ -418,6 +453,7 @@ impl StratumServer {
                                     let ctx = self.context(
                                         &tracker_handle,
                                         &bitcoindrpc_client,
+                                        &extra_submit_clients,
                                         &metrics,
                                     );
                                     accept_connection(
@@ -452,9 +488,11 @@ impl StratumServer {
         &self,
         tracker_handle: &Arc<JobTracker>,
         bitcoindrpc_client: &BitcoindRpcClient,
+        extra_submit_clients: &Arc<[BitcoindRpcClient]>,
         metrics: &metrics::MetricsHandle,
     ) -> StratumContext {
         StratumContext {
+            extra_submit_clients: Arc::clone(extra_submit_clients),
             tracker_handle: tracker_handle.clone(),
             bitcoindrpc_client: bitcoindrpc_client.clone(),
             start_difficulty: self.start_difficulty,
@@ -560,6 +598,11 @@ pub(crate) struct StratumContext {
     /// compiles out. See handle_submit in stratum/message_handlers/submit.rs.
     #[cfg_attr(feature = "sim", allow(dead_code))]
     pub bitcoindrpc_client: BitcoindRpcClient,
+    /// Extra BCHN nodes from `[[submit_nodes]]` that every found block also
+    /// goes to. Empty unless configured. Read only on the block submit path,
+    /// which the `sim` feature compiles out.
+    #[cfg_attr(feature = "sim", allow(dead_code))]
+    pub extra_submit_clients: Arc<[BitcoindRpcClient]>,
     pub start_difficulty: u64,
     pub minimum_difficulty: u64,
     pub maximum_difficulty: Option<u64>,
@@ -963,6 +1006,7 @@ mod stratum_server_tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle: tracker_handle.clone(),
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1091,6 +1135,7 @@ mod stratum_server_tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle: tracker_handle.clone(),
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1180,6 +1225,7 @@ mod stratum_server_tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle: tracker_handle.clone(),
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1267,6 +1313,7 @@ mod stratum_server_tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle: tracker_handle.clone(),
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1373,6 +1420,7 @@ mod stratum_server_tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle: tracker_handle.clone(),
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1499,6 +1547,7 @@ mod stratum_server_tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle: tracker_handle.clone(),
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1615,6 +1664,7 @@ mod stratum_server_tests {
             let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(false).await;
 
             let ctx = StratumContext {
+                extra_submit_clients: Arc::from([]),
                 tracker_handle: tracker_handle.clone(),
                 bitcoindrpc_client: BitcoindRpcClient::new(
                     &bitcoinrpc_config.url,
@@ -1703,6 +1753,7 @@ mod stratum_server_tests {
             let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(false).await;
 
             let ctx = StratumContext {
+                extra_submit_clients: Arc::from([]),
                 tracker_handle: tracker_handle.clone(),
                 bitcoindrpc_client: BitcoindRpcClient::new(
                     &bitcoinrpc_config.url,
@@ -1847,6 +1898,7 @@ mod stratum_server_tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle: tracker_handle.clone(),
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1981,6 +2033,7 @@ mod stratum_server_tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle: tracker_handle.clone(),
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -2125,6 +2178,7 @@ mod stratum_server_tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle: tracker_handle.clone(),
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,

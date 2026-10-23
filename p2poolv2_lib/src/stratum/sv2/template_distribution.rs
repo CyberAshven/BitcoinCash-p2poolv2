@@ -42,7 +42,7 @@
 use super::noise::NoiseTransport;
 use super::session::{decode_plain_frames, encode_frame};
 use crate::config::{BitcoinCashNetwork, TemplateProvider};
-use crate::stratum::message_handlers::submit::submit_block;
+use crate::stratum::block_submit::submit_block;
 use crate::stratum::work::block_template::{BlockTemplate, TemplateTransaction};
 use crate::stratum::work::error::WorkError;
 use crate::stratum::work::gbt::build_merkle_branches_for_template;

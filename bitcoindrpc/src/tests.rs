@@ -449,7 +449,126 @@ async fn test_submit_block() {
     let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
 
     let result = client.submit_block(&block).await.unwrap();
-    assert_eq!(result, "null"); // Successful submission returns null
+    assert_eq!(result, SubmitBlockOutcome::Accepted);
+}
+
+#[test]
+fn submitblock_null_is_accepted() {
+    assert_eq!(
+        SubmitBlockOutcome::from_result(&serde_json::Value::Null),
+        SubmitBlockOutcome::Accepted
+    );
+}
+
+#[test]
+fn submitblock_duplicate_means_the_node_has_the_valid_block() {
+    let outcome = SubmitBlockOutcome::from_result(&serde_json::json!("duplicate"));
+    assert_eq!(outcome, SubmitBlockOutcome::Duplicate);
+    assert!(outcome.node_has_block());
+}
+
+#[test]
+fn submitblock_inconclusive_means_the_node_stored_the_block() {
+    let outcome = SubmitBlockOutcome::from_result(&serde_json::json!("inconclusive"));
+    assert_eq!(outcome, SubmitBlockOutcome::Inconclusive);
+    assert!(outcome.node_has_block());
+}
+
+#[test]
+fn submitblock_duplicate_inconclusive_is_inconclusive() {
+    assert_eq!(
+        SubmitBlockOutcome::from_result(&serde_json::json!("duplicate-inconclusive")),
+        SubmitBlockOutcome::Inconclusive
+    );
+}
+
+#[test]
+fn submitblock_duplicate_invalid_is_a_rejection() {
+    let outcome = SubmitBlockOutcome::from_result(&serde_json::json!("duplicate-invalid"));
+    assert_eq!(
+        outcome,
+        SubmitBlockOutcome::Rejected("duplicate-invalid".to_string())
+    );
+    assert!(!outcome.node_has_block());
+}
+
+#[test]
+fn submitblock_reject_reason_is_kept() {
+    assert_eq!(
+        SubmitBlockOutcome::from_result(&serde_json::json!("high-hash")),
+        SubmitBlockOutcome::Rejected("high-hash".to_string())
+    );
+}
+
+/// JSON-RPC 1.0 sends RPC errors with HTTP 500. The error in the body is
+/// the node's answer, not a failure to reach it.
+#[tokio::test]
+async fn an_rpc_error_sent_with_http_500_is_an_rpc_error() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
+            "result": null,
+            "error": {"code": -22, "message": "Block decode failed"},
+            "id": 0,
+        })))
+        .mount(&mock_server)
+        .await;
+    let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
+    let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+
+    let result = client.submit_block(&block).await;
+
+    assert!(matches!(
+        result,
+        Err(BitcoindRpcError::RpcError { code: -22, ref message }) if message == "Block decode failed"
+    ));
+    assert!(!result.unwrap_err().is_transient());
+}
+
+#[tokio::test]
+async fn an_unreachable_node_is_a_transient_transport_error() {
+    let client = BitcoindRpcClient::new("http://127.0.0.1:1", "p2pool", "p2pool").unwrap();
+    let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+
+    let result = client.submit_block(&block).await;
+
+    assert!(matches!(result, Err(BitcoindRpcError::Transport { .. })));
+    assert!(result.unwrap_err().is_transient());
+}
+
+#[test]
+fn a_busy_node_is_transient() {
+    let error = BitcoindRpcError::HttpError {
+        status_code: 503,
+        message: "Work queue depth exceeded".to_string(),
+    };
+    assert!(error.is_transient());
+}
+
+#[test]
+fn a_refused_login_is_not_transient() {
+    let error = BitcoindRpcError::HttpError {
+        status_code: 401,
+        message: String::new(),
+    };
+    assert!(!error.is_transient());
+}
+
+#[test]
+fn a_node_still_starting_is_transient() {
+    let error = BitcoindRpcError::RpcError {
+        code: -28,
+        message: "Loading block index".to_string(),
+    };
+    assert!(error.is_transient());
+}
+
+#[test]
+fn a_cut_off_answer_is_transient() {
+    let error = BitcoindRpcError::ParseError {
+        message: "EOF".to_string(),
+    };
+    assert!(error.is_transient());
 }
 
 #[tokio::test]

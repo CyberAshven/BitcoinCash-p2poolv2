@@ -83,6 +83,22 @@ current difficulty and rejects duplicates. Then:
   submitted straight away: with `submitblock` to BCHN, or back to the
   Template Provider whose template it used.
 
+**Found blocks** (`stratum/block_submit.rs`). A block is worth the whole
+block reward, so it never depends on one RPC call. BCHN gets it again after
+a connection error, a time-out (30 seconds per attempt) or a busy node
+(HTTP 503), with waits from half a second doubling to 10 seconds, for up to
+two minutes. BCHN's answer is final and is not sent again: `null` (accepted),
+`duplicate` (BCHN already has the valid block, for example from an attempt
+whose answer was lost), `inconclusive` (BCHN stored the block without a
+verdict, for example because another block at this height arrived first and
+stays its best chain) or a reject reason. Every node listed in
+`[[submit_nodes]]` also gets the block, from its own task with its own
+retries, also when the block went to a Template Provider. Each result is
+logged and counted in `found_block_submissions_total{node,outcome}`, and
+each retry in `found_block_submit_retries_total{node}` (see
+[Metrics](architecture/metrics.md)). The Template Provider's RPC fallback
+and the simulation retry the same way but count nothing.
+
 Shares below the pool target still count towards the miner's measured
 hashrate and vardiff, but do not enter the share chain.
 

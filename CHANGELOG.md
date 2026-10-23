@@ -273,6 +273,17 @@ anchor and the donation and fee cap as they were.
   difficulty, an SV1 session gets `mining.set_difficulty` and an SV2 channel
   `SetTarget`; a `minimum_difficulty` above the share difficulty is logged
   once. Node policy, not a share-chain rule: peers see nothing new.
+- A found block no longer depends on one RPC call (V9 and V10 in
+  `docs/p2pool-v1-bch-lessons.md`). BCHN gets it again after a connection
+  error, a time-out or a busy node, for up to two minutes; its answer is
+  final and is not sent again. `duplicate` (BCHN already has the valid
+  block) and `inconclusive` (stored without a verdict) now count as BCHN
+  holding the block, and the template refresh follows them too. New
+  optional `[[submit_nodes]]` tables list extra BCHN nodes that every found
+  block also goes to, each from its own task with its own retries. New
+  metrics `found_block_submissions_total{node,outcome}` and
+  `found_block_submit_retries_total{node}`. A JSON-RPC error sent with HTTP
+  500 is now read as the node's RPC error, not as an HTTP failure.
 
 ### Security
 

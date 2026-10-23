@@ -1282,6 +1282,12 @@ pub struct Config {
     pub store: StoreConfig,
     pub stratum: StratumConfig,
     pub bitcoinrpc: BitcoinRpcConfig,
+    /// Extra BCHN nodes every found block also goes to, beside the node in
+    /// `[bitcoinrpc]`, each as a `[[submit_nodes]]` table with `url`,
+    /// `username` and `password`. Optional and empty by default. A block
+    /// then does not depend on one node or one connection.
+    #[serde(default)]
+    pub submit_nodes: Vec<BitcoinRpcConfig>,
     pub logging: LoggingConfig,
     pub api: ApiConfig,
 }
@@ -1851,6 +1857,41 @@ mod tests {
         let parsed = config.stratum.parse().unwrap();
         assert_eq!(parsed.network, Network::Regtest);
         assert_eq!(parsed.version_mask, DEFAULT_VERSION_MASK);
+    }
+
+    #[test]
+    fn a_config_without_submit_nodes_has_no_extra_nodes() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(config.submit_nodes.is_empty());
+    }
+
+    #[test]
+    fn submit_nodes_are_read_in_file_order() {
+        let config: Config = config::Config::builder()
+            .add_source(config::File::with_name("../config.sample.toml"))
+            .add_source(config::File::from_str(
+                r#"
+                [[submit_nodes]]
+                url = "http://bchn-a.example:8332"
+                username = "a"
+                password = "secret-a"
+
+                [[submit_nodes]]
+                url = "http://bchn-b.example:8332"
+                username = "b"
+                password = "secret-b"
+                "#,
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+
+        assert_eq!(config.submit_nodes.len(), 2);
+        assert_eq!(config.submit_nodes[0].url, "http://bchn-a.example:8332");
+        assert_eq!(config.submit_nodes[1].username, "b");
+        assert_eq!(config.submit_nodes[1].password, "secret-b");
     }
 
     /// Both samples offer miners the code's default version rolling mask,

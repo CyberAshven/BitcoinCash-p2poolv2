@@ -114,6 +114,15 @@ url = "http://127.0.0.1:18443"
 username = "p2pool"
 password = "p2pool"
 
+# Extra BCHN nodes a found block also goes to, beside [bitcoinrpc]. Optional.
+# Each gets the block from its own task, sent again after a connection error
+# or time-out for up to two minutes, so a block does not depend on one node.
+# Repeat the table for more nodes.
+# [[submit_nodes]]
+# url = "http://bchn-backup.example:8332"
+# username = "p2pool"
+# password = "p2pool"
+
 [logging]
 file = "/p2poolv2/logs/p2pool.log"
 console = true

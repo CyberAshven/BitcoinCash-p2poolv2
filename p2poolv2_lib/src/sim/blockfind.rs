@@ -15,7 +15,8 @@
 //!
 //! Only compiled under the `sim` feature. See docs/simulation/load-test-plan.md.
 
-use crate::stratum::message_handlers::submit::{build_full_block, submit_block};
+use crate::stratum::block_submit::submit_block;
+use crate::stratum::message_handlers::submit::build_full_block;
 use crate::stratum::work::block_template::BlockTemplate;
 use bitcoin::BlockHash;
 use bitcoin::block::Header;

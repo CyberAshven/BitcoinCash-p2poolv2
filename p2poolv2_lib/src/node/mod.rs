@@ -771,6 +771,7 @@ mod tests {
                 username: "testuser".to_string(),
                 password: "testpass".to_string(),
             },
+            submit_nodes: vec![],
             store: StoreConfig {
                 path: "test_chain.db".to_string(),
                 pplns_ttl_days: 3,
@@ -888,6 +889,7 @@ mod tests {
                 username: "testuser".to_string(),
                 password: "testpass".to_string(),
             },
+            submit_nodes: vec![],
             store: StoreConfig {
                 path: "test_chain.db".to_string(),
                 pplns_ttl_days: 3,

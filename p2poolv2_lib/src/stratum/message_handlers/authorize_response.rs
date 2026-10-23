@@ -324,6 +324,7 @@ mod tests {
     use bitcoindrpc::BitcoindRpcClient;
     use bitcoindrpc::test_utils::setup_mock_bitcoin_rpc;
     use p2poolv2_config::DEFAULT_VERSION_MASK;
+    use std::sync::Arc;
     use tokio::sync::mpsc;
 
     #[tokio::test]
@@ -346,6 +347,7 @@ mod tests {
         let tracker_handle = start_tracker_actor();
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -442,6 +444,7 @@ mod tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -579,6 +582,7 @@ mod tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -681,6 +685,7 @@ mod tests {
         let tracker_handle = start_tracker_actor();
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -744,6 +749,7 @@ mod tests {
         let tracker_handle = start_tracker_actor();
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -809,6 +815,7 @@ mod tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -878,6 +885,7 @@ mod tests {
         let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -929,6 +937,7 @@ mod p2p_miner_address_tests {
     use bitcoindrpc::BitcoindRpcClient;
     use bitcoindrpc::test_utils::setup_mock_bitcoin_rpc;
     use p2poolv2_config::DEFAULT_VERSION_MASK;
+    use std::sync::Arc;
     use tokio::sync::mpsc;
 
     /// BIP086 tweak of PUBKEY_G on testnet4.
@@ -955,6 +964,7 @@ mod p2p_miner_address_tests {
         let tracker_handle = start_tracker_actor();
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1007,6 +1017,7 @@ mod p2p_miner_address_tests {
         let tracker_handle = start_tracker_actor();
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1057,6 +1068,7 @@ mod p2p_miner_address_tests {
         let tracker_handle = start_tracker_actor();
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1111,6 +1123,7 @@ mod p2p_miner_address_tests {
         let tracker_handle = start_tracker_actor();
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1209,6 +1222,7 @@ mod p2p_miner_address_tests {
         let tracker_handle = start_tracker_actor();
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1269,6 +1283,7 @@ mod p2p_miner_address_tests {
         let tracker_handle = start_tracker_actor();
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,
@@ -1341,6 +1356,7 @@ mod p2p_miner_address_tests {
         let tracker_handle = start_tracker_actor();
 
         let ctx = StratumContext {
+            extra_submit_clients: Arc::from([]),
             tracker_handle,
             bitcoindrpc_client: BitcoindRpcClient::new(
                 &bitcoinrpc_config.url,

@@ -239,6 +239,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 
     let stratum_config = config.stratum.clone().parse().unwrap();
     let bitcoinrpc_config = config.bitcoinrpc.clone();
+    let extra_submit_nodes = config.submit_nodes.clone();
 
     let (stratum_shutdown_tx, stratum_shutdown_rx) = tokio::sync::oneshot::channel();
     let (notify_tx, notify_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
@@ -437,7 +438,8 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             .share_chain(share_chain)
             .bch_share_network(bch_share_network)
             .cash_share(cash_share)
-            .sv2(sv2_listener);
+            .sv2(sv2_listener)
+            .extra_submit_nodes(extra_submit_nodes);
         let mut stratum_server = match template_refresh_tx {
             Some(template_refresh_tx) => {
                 stratum_server_builder.template_refresh_tx(template_refresh_tx)
