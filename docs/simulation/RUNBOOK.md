@@ -126,10 +126,11 @@ kill %1    # or: pkill -f 'target/debug/p2poolv2_sim'
 
 ## 4. Test B — 20-node swarm: propagation + convergence (Phase 2)
 
-The harness lives in `load-tests/sim/`. Launch 20 nodes (release):
+The harness is `cargo sim`, the `sim_harness` binary in `p2poolv2_tools` (see
+`docs/tooling.md`). Launch 20 nodes (release):
 
 ```sh
-./load-tests/sim/run-swarm.sh 20
+cargo sim run-swarm 20
 ```
 
 It builds release, generates one config per node under `/tmp/p2pool-sim/`
@@ -137,10 +138,10 @@ It builds release, generates one config per node under `/tmp/p2pool-sim/`
 `dial_peers` topology), launches them, and writes PIDs. Give them ~30 s, then:
 
 ```sh
-./load-tests/sim/observe.sh
+cargo sim observe
 ```
 
-`observe.sh` is a *live* snapshot — tip height/hash and convergence come from the
+`observe` is a *live* snapshot — tip height/hash and convergence come from the
 logs (load-immune), peer count from the API. Read the table:
 - **tip_h** all equal (or split across the latest 1–2 heights) → converging. A
   snapshot often straddles two heights because the tip is advancing; that's
@@ -153,19 +154,19 @@ summary. It reads only the logs, so it's load-immune and is the source of truth
 (safe to run during or after the run):
 
 ```sh
-./load-tests/sim/metrics.sh
+cargo sim metrics
 ```
 
-> **Logs vs API.** Measure *outcomes* from the logs (`metrics.sh`, `plot-metrics.sh`):
+> **Logs vs API.** Measure *outcomes* from the logs (`metrics`, `plot-metrics`):
 > they record what each node actually committed and don't perturb the run. Use the
-> HTTP API (`observe.sh`, `curl :7600/...`) only for *live* watching and current
+> HTTP API (`observe`, `curl :7600/...`) only for *live* watching and current
 > peer state — it's advisory and can time out while a node is busy, so never treat
 > an API non-response as "diverged."
 
 Leave it running for the next test, or stop with:
 
 ```sh
-./load-tests/sim/stop-swarm.sh
+cargo sim stop-swarm
 ```
 
 ---
@@ -178,20 +179,20 @@ rate rises. Run three swarms and compare (stop between each):
 
 ```sh
 for L in 0 200 750; do
-  ./load-tests/sim/stop-swarm.sh >/dev/null 2>&1
-  LATENCY_MS=$L ./load-tests/sim/run-swarm.sh 20 >/dev/null 2>&1
+  cargo sim stop-swarm >/dev/null 2>&1
+  LATENCY_MS=$L cargo sim run-swarm 20 >/dev/null 2>&1
   sleep 45
   echo "=== LATENCY_MS=$L ==="
-  ./load-tests/sim/observe.sh | grep "node 0:"
+  cargo sim observe | grep "node 0:"
 done
-./load-tests/sim/stop-swarm.sh
+cargo sim stop-swarm
 ```
 
-`observe.sh`'s `node 0:` line reports `uncle-rate`. At the regulated 10s interval
+`observe`'s `node 0:` line reports `uncle-rate`. At the regulated 10s interval
 uncle rate ≈ latency/10s (e.g. 750 ms → ~7%), but a 45s read is only ~4 blocks —
 too noisy to trust. For a real number in ~5 min add `IDEAL_BLOCK_TIME=1` (10× more
 blocks, latency auto-scales), e.g.
-`IDEAL_BLOCK_TIME=1 LATENCY_MS=1500 SHARES_PER_BLOCK=20 ./load-tests/sim/run-swarm.sh 20`
+`IDEAL_BLOCK_TIME=1 LATENCY_MS=1500 SHARES_PER_BLOCK=20 cargo sim run-swarm 20`
 → ~12% (≈50 min-equivalent). Knob in §11.
 
 Under the hood it greps the `sim-uncle:` log lines:
@@ -209,9 +210,9 @@ this frequent and watch the **bitcoin** height climb (the sim nodes are mining
 real regtest blocks).
 
 ```sh
-./load-tests/sim/stop-swarm.sh >/dev/null 2>&1
+cargo sim stop-swarm >/dev/null 2>&1
 echo "bitcoin height before: $(B getblockcount)"
-SHARES_PER_BLOCK=20 LATENCY_MS=100 ./load-tests/sim/run-swarm.sh 20
+SHARES_PER_BLOCK=20 LATENCY_MS=100 cargo sim run-swarm 20
 sleep 40
 echo "bitcoin height after:  $(B getblockcount)"
 grep -h "sim block-find" /tmp/p2pool-sim/node-*.log | wc -l        # attempts
@@ -256,14 +257,14 @@ miner's share contribution in the window.
 Stop everything:
 
 ```sh
-./load-tests/sim/stop-swarm.sh
+cargo sim stop-swarm
 ```
 
 ---
 
 ## 8. Test F — a node fails and catches up (Phase 4)
 
-Failures are injected into an already-running swarm by `failures.sh`, which
+Failures are injected into an already-running swarm by `failures`, which
 `SIGKILL`s nodes, restarts them against the *same* config and store, and then
 polls each one's log until its confirmed tip reaches where the rest of the
 swarm has got to.
@@ -271,11 +272,11 @@ swarm has got to.
 Start a swarm and, in a second terminal, kill a node and watch it come back:
 
 ```sh
-./load-tests/sim/run-swarm.sh 6
-FAILURE_WARMUP=20 FAILURE_FAST_DOWN=10 ./load-tests/sim/failures.sh restart-fast
+cargo sim run-swarm 6
+FAILURE_WARMUP=20 FAILURE_FAST_DOWN=10 cargo sim failures restart-fast
 ```
 
-Expect the target to report `alive NO` in `observe.sh` during the downtime,
+Expect the target to report `alive NO` in `observe` during the downtime,
 then `alive yes` with a climbing tip, and a summary ending:
 
 ```
@@ -287,7 +288,7 @@ unrecovered nodes: 0
 The interesting one is the long downtime, which is the default:
 
 ```sh
-./load-tests/sim/failures.sh restart-delayed     # 330s down
+cargo sim failures restart-delayed     # 330s down
 ```
 
 330s crosses the 300s `MAX_TIP_AGE_SECS` threshold, so the node rejoins *not*
@@ -310,19 +311,19 @@ runtime — Kademlia dials peers that were never in `dial_peers` — so the summ
 counts outbound connections crossing the cut and reports what actually happened:
 
 ```sh
-./load-tests/sim/failures.sh partition
+cargo sim failures partition
 # cross-side links at +15s: lower_to_upper=0 upper_to_lower=0   <- a real partition
 ```
 
 The whole thing runs end to end, with the usual pass/fail verdict, via:
 
 ```sh
-./load-tests/sim/nightly.sh restart-delayed
+cargo sim nightly restart-delayed
 ```
 
 **Gotchas specific to failure injection**
 
-1. **Node 0 is never a target.** `metrics.sh` derives the share rate and uncle
+1. **Node 0 is never a target.** `metrics` derives the share rate and uncle
    rate from `node-0.log` alone, so killing it corrupts the run's own metrics.
 2. **Restarts append to the node log** (`>>`, not `>`). Truncating would throw
    away the promotion history every log-based metric is computed from.
@@ -330,10 +331,10 @@ The whole thing runs end to end, with the usual pass/fail verdict, via:
    process start and never persisted, so a rejoin looks like a new node to its
    peers. The Kademlia routing table is in-memory too, so it starts empty.
 4. **Mid-run tip readings come from logs or the API, never the store.** RocksDB
-   holds an exclusive lock while a node runs, which is why `nightly.sh` only
-   does its store-based convergence check after `stop-swarm.sh`.
-5. **`pids.txt` is positional** (line `i+1` is node `i`). `failures.sh` rewrites
-   the line on restart, which is what keeps `observe.sh` and the nightly's
+   holds an exclusive lock while a node runs, which is why `nightly` only
+   does its store-based convergence check after `stop-swarm`.
+5. **`pids.txt` is positional** (line `i+1` is node `i`). `failures` rewrites
+   the line on restart, which is what keeps `observe` and the nightly's
    alive check honest.
 
 ---
@@ -348,20 +349,20 @@ starts with its emitter off:
 
 ```sh
 IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 LATE_MINER=1 \
-  ./load-tests/sim/run-swarm.sh 10
-LATE_MINER=1 ./load-tests/sim/failures.sh late-miner
+  cargo sim run-swarm 10
+LATE_MINER=1 cargo sim failures late-miner
 ```
 
 Or end to end, with bitcoind setup and the nightly checks:
 
 ```sh
 IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 LATE_MINER=1 \
-  NODE_COUNT=10 ./load-tests/sim/nightly.sh late-miner
+  NODE_COUNT=10 cargo sim nightly late-miner
 ```
 
 The scenario waits for the tip to reach twice the maturity, so the payout
 skip is at full size, restarts node 1 with its emitter on, and then runs
-`load-tests/sim/maturity_check.py` until it gives a verdict. The checker reads
+`cargo sim maturity-check` until it gives a verdict. The checker reads
 only the logs, the node 0 API and bitcoind. It maps each `sim block-find` line
 (`... prev_share <hash>`) to the paying share's height and decodes the regtest
 coinbase:
@@ -395,7 +396,7 @@ time-compressed to get there in minutes:
 
 ```sh
 IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 NODE_COUNT=5 \
-  ./load-tests/sim/nightly.sh pruned-join
+  cargo sim nightly pruned-join
 ```
 
 The scenario waits for the swarm tip to pass the prune depth plus three
@@ -425,9 +426,9 @@ index, so the lower group is heavier.
 
 ```sh
 IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 NODE_COUNT=6 FORK_GROUP_FROM=4 HASHRATE=1e13 \
-  ./load-tests/sim/nightly.sh deep-fork-refused
+  cargo sim nightly deep-fork-refused
 IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 NODE_COUNT=6 FORK_GROUP_FROM=4 HASHRATE=1e13 \
-  ./load-tests/sim/nightly.sh shallow-fork-reorged
+  cargo sim nightly shallow-fork-reorged
 ```
 
 `HASHRATE=1e13` matters. Each group's ASERT regulates its own rate, but the
@@ -483,7 +484,7 @@ grep -iE "error|panic" /tmp/p2pool-sim/node-*.log | grep -v median   # problems
 ```
 
 Useful API calls (node 0) — **live/advisory only** (can time out under load; for
-results use the log greps above or `metrics.sh`):
+results use the log greps above or `metrics`):
 
 ```sh
 curl -s :7600/peers | jq length          # peer count (live state — API is right here)
@@ -492,9 +493,9 @@ curl -s :7600/chain_info | jq            # tip/candidate heights (prefer logs fo
 
 ---
 
-## 11. Env knobs for `run-swarm.sh`
+## 11. Env knobs for `run-swarm`
 
-`run-swarm.sh [N]` (default N=20). Override with env vars:
+`run-swarm [N]` (default N=20). Override with env vars:
 
 | Var                                  | Default         | Meaning                                                                                                            |
 |--------------------------------------|-----------------|--------------------------------------------------------------------------------------------------------------------|
@@ -502,7 +503,7 @@ curl -s :7600/chain_info | jq            # tip/candidate heights (prefer logs fo
 | `LATENCY_MS`                         | 0               | per-node outbound announce delay (raise for uncles)                                                                |
 | `IDEAL_BLOCK_TIME`                   | 10              | share interval (s); lower = time-compressed, more blocks/min for faster data (auto-scales `LATENCY_MS`); floor ~1s |
 | `HASHRATE`                           | 1.0e12          | modeled per-node hashrate (higher = faster shares)                                                                 |
-| `LATE_MINER`                         | unset           | node index launched with its emitter off, for `failures.sh late-miner` (Test G)                                    |
+| `LATE_MINER`                         | unset           | node index launched with its emitter off, for `failures late-miner` (Test G)                                       |
 | `FORK_GROUP_FROM`                    | unset           | split the swarm: nodes at this index and above dial only each other, for the fork scenarios (Test I)               |
 | `DISTINCT_ADDR`                      | 1               | each node gets its own payout address via the wallet                                                               |
 | `DIAL_FANOUT`                        | 3               | how many earlier peers each node dials                                                                             |
@@ -516,10 +517,10 @@ curl -s :7600/chain_info | jq            # tip/candidate heights (prefer logs fo
 
 1. **Swarms must run release.** A debug build hits a `debug_assert_eq!` inside
    `libp2p-request-response` under connection churn and nodes abort (you'd see
-   ~most of 20 die). `run-swarm.sh` defaults to release; don't override
+   ~most of 20 die). `run-swarm` defaults to release; don't override
    `PROFILE=debug` for multi-node runs.
-2. **Nodes run in the background.** `run-swarm.sh` returns to your prompt while
-   20 nodes keep running. Always end a session with `stop-swarm.sh` (or
+2. **Nodes run in the background.** `run-swarm` returns to your prompt while
+   20 nodes keep running. Always end a session with `stop-swarm` (or
    `pkill -f release/p2poolv2`) or you'll have orphans on the next run (port
    clashes).
 3. **High block rates drop a few shares.** At very fast chains you'll see

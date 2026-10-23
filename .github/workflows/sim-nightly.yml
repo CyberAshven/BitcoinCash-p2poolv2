@@ -125,10 +125,10 @@ jobs:
           # to be flaky -- raise it here rather than weakening the check itself.
         run: |
           set -o pipefail
-          # Keep this log OUTSIDE the run dir: run-swarm.sh starts by doing
-          # `rm -rf "$RUN_DIR"`, which unlinks the file tee is still writing to,
+          # Keep this log OUTSIDE the run dir: launching the swarm starts by
+          # removing RUN_DIR, which unlinks the file tee is still writing to,
           # so a log written there never reaches the artifact.
-          ./load-tests/sim/nightly.sh 2>&1 | tee /tmp/nightly-output.log
+          cargo run --release -p p2poolv2_tools --bin sim_harness -- nightly 2>&1 | tee /tmp/nightly-output.log
 
       - name: Upload logs on failure
         if: failure()

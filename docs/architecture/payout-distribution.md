@@ -458,7 +458,7 @@ drawn share chain per pool size with both window rules through the real
 `docs/simulation/overview.md`.
 
 End to end, the sim `late-miner` scenario checks the maturity rule against real
-regtest coinbases (`load-tests/sim/maturity_check.py`, RUNBOOK Test G). The
+regtest coinbases (`cargo sim maturity-check`, RUNBOOK Test G). The
 sim build compiles shorter depths: `COINBASE_MATURITY` 20 and
 `PPLNS_WINDOW_SHARES` 80 under `cfg(feature = "sim")`, so a short run reaches
 the maturity skip. Production builds use 6,048 and 120,960. Bitcoin Cash's

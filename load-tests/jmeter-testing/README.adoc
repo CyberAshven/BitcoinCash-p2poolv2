@@ -166,11 +166,12 @@ some required services.
 
 === Run the simulated bitcoin node:
 
+The mock bitcoind is the `mock_bitcoind` binary in `p2poolv2_tools`
+(see `docs/tooling.md`). It listens on port 48332:
+
 [,shell]
 ----
-cd load-tests/jmeter-testing/mock-bitcoind
-npm install
-node server.js
+cargo mock-bitcoind
 ----
 
 === Run the stratum server to test:
@@ -234,15 +235,15 @@ jmeter -n -t stratum.jmx -l ckpool.jtl
 
 === Automated A/B Benchmark
 
-The `benchmark.sh` script automates the full comparison between
-default builds, native builds, and CKPool. It starts mock-bitcoind,
-runs each variant with jmeter, and prints a summary with latency
-percentiles.
+`cargo jmeter-bench benchmark` automates the full comparison between
+default builds, native builds, and CKPool. It serves the mock bitcoind
+itself, runs each variant with jmeter, and prints a summary with
+latency percentiles.
 
 [,shell]
 ----
 cd load-tests/jmeter-testing
-./benchmark.sh
+cargo jmeter-bench benchmark
 ----
 
 To include CKPool in the comparison, pass the path to the ckpool binary:
@@ -250,7 +251,7 @@ To include CKPool in the comparison, pass the path to the ckpool binary:
 [,shell]
 ----
 cd load-tests/jmeter-testing
-./benchmark.sh --ckpool /path/to/ckpool/src/ckpool
+cargo jmeter-bench benchmark --ckpool /path/to/ckpool/src/ckpool
 ----
 
 Options:
@@ -261,6 +262,8 @@ Options:
 - `--ckpool <path>` -- path to ckpool binary (enables CKPool benchmark)
 
 Results are saved as timestamped `.jtl` files in the `results/` directory.
+`cargo jmeter-bench summarize <file.jtl>` prints the same per-sampler
+summary for any results file.
 
 == Modify the Load Test File
 

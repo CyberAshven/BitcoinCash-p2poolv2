@@ -158,9 +158,9 @@ fn collect_block_finds(run_dir: &RunDir) -> ToolResult<Vec<(String, String)>> {
     Ok(finds)
 }
 
-/// Addresses the coinbase of a verbose `getblock` result pays. Both the
-/// `address` field (Bitcoin Core, BCHN 27 and later) and the older
-/// `addresses` list are read.
+/// Addresses the coinbase of a verbose `getblock` result pays. Both an
+/// output's `address` field and an `addresses` list are read, since node
+/// versions differ in which one they print.
 pub fn coinbase_payees(block: &Value) -> BTreeSet<String> {
     let outputs = block
         .get("tx")

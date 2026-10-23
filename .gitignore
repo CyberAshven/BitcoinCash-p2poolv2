@@ -17,6 +17,9 @@ tools/log_dashboard/last_processed.txt
 config.toml
 config-dev.toml
 config-*-copy.toml
+# The cargo aliases for the developer tools (docs/tooling.md) are not a node
+# config.
+!/.cargo/config.toml
 
 
 spec/**/*pdf
@@ -38,9 +41,6 @@ ansible/inventory/group_vars/all/vault.yml
 .idea/
 
 perf.data
-# matplotlib venv for sim plotting
-load-tests/sim/.venv/
-load-tests/sim/__pycache__/
 
 # Rust/WASM dashboard builds
 /p2poolv2_web/dist

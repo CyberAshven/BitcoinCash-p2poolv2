@@ -116,7 +116,7 @@ The harness models a heterogeneous, regulated network:
 - **Heterogeneous + jittered latency** (`LATENCY_DIST=spread` + per-broadcast
   ±50% jitter): uncles arise from propagation *variance*, per-node.
 - **Regulated rate** (`ASERT_ANCHOR`): ASERT holds ~the 10s target (above).
-- **Metrics** (`metrics.sh` + per-node `sim stats` log): emission-vs-hashrate,
+- **Metrics** (`metrics` + per-node `sim stats` log): emission-vs-hashrate,
   ASERT difficulty trajectory, main-chain rate vs target.
 
 ### Running a single sim node (Phase 1)
@@ -150,19 +150,20 @@ Watch the log for `Promoted block … to confirmed height N` climbing.
 
 See the associated RUNBOOK.md for detailed instructions. Here's a simple overview:
 
-`load-tests/sim/` drives a multi-process swarm against the same regtest
+`cargo sim` (the `sim_harness` binary in `p2poolv2_tools`, see
+`docs/tooling.md`) drives a multi-process swarm against the same regtest
 bitcoind. Each node gets its own config (distinct ports, distinct seed, fresh
 store) and a `dial_peers` topology (each dials `DIAL_FANOUT` earlier nodes).
 
 ```sh
-load-tests/sim/run-swarm.sh 20     # build (release) + launch 20 nodes
-load-tests/sim/observe.sh          # LIVE snapshot: tip/convergence (logs), peer count (API)
-load-tests/sim/metrics.sh          # authoritative LOG-based summary: convergence, rate,
-                                   # difficulty, emission∝hashrate, uncles, block-finds
-load-tests/sim/plot-metrics.sh     # PNG time-series (share rate, difficulty, uncle rate,
-                                   # block-finds, hashrate bars) → RUN_DIR/metrics.png
-load-tests/sim/failures.sh S       # inject failure scenario S into the running swarm
-load-tests/sim/stop-swarm.sh       # stop all (incl. orphans matching this RUN_DIR)
+cargo sim run-swarm 20     # build (release) + launch 20 nodes
+cargo sim observe          # LIVE snapshot: tip/convergence (logs), peer count (API)
+cargo sim metrics          # authoritative LOG-based summary: convergence, rate,
+                           # difficulty, emission∝hashrate, uncles, block-finds
+cargo sim plot-metrics     # SVG time-series (share rate, difficulty, uncle rate,
+                           # block-finds, hashrate bars) → RUN_DIR/metrics.svg
+cargo sim failures S       # inject failure scenario S into the running swarm
+cargo sim stop-swarm       # stop all (incl. orphans matching this RUN_DIR)
 ```
 
 Configs/stores/logs land in `RUN_DIR` (default `/tmp/p2pool-sim`). Tunables via
@@ -176,8 +177,8 @@ more blocks/min for faster data, auto-scales `LATENCY_MS`), `DIST_SEED`, `DISTIN
 `POOL_SIGNATURE_PREFIX` (node `i` signs as prefix + `i`; signatures differ per
 node because they are not consensus), `DIAL_FANOUT`, `PROFILE`. Convergence
 shows as `distinct tips: 1` (a snapshot may straddle the latest 1–2 heights while
-the frontier propagates). Run release; always `stop-swarm.sh` before relaunching
-(orphans hold ports — `run-swarm.sh` now also clears its RUN_DIR's leftovers).
+the frontier propagates). Run release; always `stop-swarm` before relaunching
+(orphans hold ports — `run-swarm` now also clears its RUN_DIR's leftovers).
 
 ### Offline PPLNS window comparison
 
@@ -205,10 +206,10 @@ cargo run --release -p p2poolv2_sim --features pplns-compare --bin pplns_compare
 
 ### Failure scenarios (Phase 4)
 
-`failures.sh` injects one named failure mode into a running swarm, kills nodes
+`failures` injects one named failure mode into a running swarm, kills nodes
 with `SIGKILL`, brings them back against the *same* config and store, and
-verifies each one rejoins and catches up to the rest of the swarm. `nightly.sh`
-takes the same scenario name (`nightly.sh restart-delayed`, or `SCENARIO=...`),
+verifies each one rejoins and catches up to the rest of the swarm. `nightly`
+takes the same scenario name (`nightly restart-delayed`, or `SCENARIO=...`),
 and the nightly workflow runs it once per scenario so a failing night names the
 failure mode that caused it.
 
@@ -218,7 +219,7 @@ failure mode that caused it.
 | `restart-fast` | a node fails and comes back immediately |
 | `restart-delayed` | a node fails and comes back after `FAILURE_SLOW_DOWN` (default 330s). That crosses the 300s `MAX_TIP_AGE_SECS` threshold, so the node rejoins *not* current: inv gossip is ignored and it must bulk-sync via `getheaders` and block fetch |
 | `partition` | `DIAL_FANOUT` consecutive nodes fail at once, cutting the dial chain, then all come back |
-| `late-miner` | payout maturity: node `LATE_MINER` starts with its emitter off and starts mining once the chain is two maturity depths deep; `maturity_check.py` checks against the regtest coinbases that it is paid only once its shares are mature. Needs `LATE_MINER`; not part of `all` (RUNBOOK Test G) |
+| `late-miner` | payout maturity: node `LATE_MINER` starts with its emitter off and starts mining once the chain is two maturity depths deep; `maturity-check` checks against the regtest coinbases that it is paid only once its shares are mature. Needs `LATE_MINER`; not part of `all` (RUNBOOK Test G) |
 | `pruned-join` | block body pruning: once the swarm is past the sim prune target and every node has pruned, one node's store is wiped and it rejoins as a fresh node. It must catch up, agree with node 0 on confirmed hashes below and above its prune height, never get a not-found reply (it never asks for a body its peers deleted), and never fail to store a block. Runs time-compressed; not part of `all` (RUNBOOK Test H) |
 | `deep-fork-refused` | reorg depth limit: the swarm is launched split (`FORK_GROUP_FROM`), so the chain forks at genesis. Once every node has pruned, the first minority node reconnects to node 0. The majority chain has more work, but its fork point is more than `MAX_REORG_DEPTH` (the sim `PAYOUT_DEPTH`, 100 shares) below the minority's confirmed tip, and below its prune target, so the node must log the refusal, keep its confirmed chain and keep confirming, while the majority keeps advancing. The nightly convergence check is skipped: two chains are the expected outcome. Not part of `all` (RUNBOOK Test I) |
 | `shallow-fork-reorged` | control for `deep-fork-refused`: the same split, but the reconnect happens at height 60, before any node prunes and within the 100-share reorg floor, and the minority must reorg onto the majority (the convergence check applies). Not part of `all` (RUNBOOK Test I) |
@@ -237,6 +238,6 @@ really was a partition). Second, a restarted node comes back with a **new
 PeerId** — the libp2p keypair is generated per process start, not persisted — so
 rejoining looks to its peers like a new node arriving.
 
-Node 0 is never a target: `metrics.sh` derives the share rate and uncle rate
+Node 0 is never a target: `metrics` derives the share rate and uncle rate
 from `node-0.log` alone, so killing it would corrupt the run's own metrics.
 

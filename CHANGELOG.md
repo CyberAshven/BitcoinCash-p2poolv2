@@ -186,6 +186,15 @@ anchor and the donation and fee cap as they were.
   the only styling source, and tests fail if a stylesheet appears elsewhere
   or a class either dashboard uses has no selector there. It keeps live
   shares over `/ws`, the zoomable hashrate chart and the API login settings.
+- The developer tools are Rust: the `p2poolv2_tools` crate replaces the sim
+  scripts (`cargo sim run-swarm`, `observe`, `metrics`, `failures`,
+  `nightly`, `maturity-check`, `plot-metrics`, `stop-swarm`), the JavaScript
+  mock bitcoind (`cargo mock-bitcoind`), the Python log analysers
+  (`cargo share-lifecycle`, `cargo share-latency`) and the JMeter and
+  diagnosis scripts. The nightly workflow runs `cargo sim nightly`. Same
+  environment variables and run files; `plot-metrics` now writes SVG. See
+  `docs/tooling.md`, which also maps each old script for upstream merges.
+  `tools/safa-auxpow` stays JavaScript until a Rust BCH VM exists.
 
 ### Removed
 
