@@ -33,6 +33,11 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      # The terminal UI's views and models alone, as a ratatui program that
+      # draws them from its own data depends on them.
+      - name: Run clippy on the terminal UI without its clients
+        run: cargo clippy -p p2poolv2_tui --all-targets --no-default-features -- -D warnings
+
   test:
     name: Rust Tests
     runs-on: ubuntu-latest
@@ -56,6 +61,39 @@ jobs:
 
       - name: Run sim-feature tests
         run: cargo nextest run -p p2poolv2_lib --features sim
+
+      - name: Run the terminal UI's tests without its clients
+        run: cargo nextest run -p p2poolv2_tui --no-default-features
+
+  # The terminal UI on Windows, where its operators also run it. It builds
+  # no RocksDB, so only secp256k1's flags are needed.
+  tui-windows:
+    name: Terminal UI (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.99.0
+
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: nextest
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          $env:CFLAGS = '-DSECP256K1_STATIC -DENABLE_MODULE_ELLSWIFT'
+          $env:CXXFLAGS = '-DSECP256K1_STATIC'
+          cargo nextest run -p p2poolv2_tui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run -p p2poolv2_tui -- --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   web:
     name: Web dashboard (WASM)

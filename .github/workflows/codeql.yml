@@ -1,0 +1,68 @@
+name: CodeQL
+
+on:
+  push:
+    branches: ["main", "alpha"]
+  pull_request:
+    branches: ["main", "alpha"]
+  schedule:
+    - cron: "41 5 * * 1" # Mondays at 05:41
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            sarif: actions
+          - language: javascript-typescript
+            sarif: javascript
+          - language: python
+            sarif: python
+          - language: rust
+            sarif: rust
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: "/language:${{ matrix.language }}"
+          upload: failure-only
+          output: sarif-results
+
+      # paths-ignore is a hint to the extractor; also drop test-file results
+      # from the SARIF so test fixtures can never raise alerts.
+      - uses: advanced-security/filter-sarif@2da736ff05ef065cb2894ac6892e47b5eac2c3c0 # v1.1
+        with:
+          patterns: |
+            -p2poolv2_tests/**
+            -**/tests.rs
+            -**/*_tests.rs
+            -**/test_utils.rs
+            -load-tests/**
+          input: sarif-results/${{ matrix.sarif }}.sarif
+          output: sarif-results/${{ matrix.sarif }}.sarif
+
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: sarif-results/${{ matrix.sarif }}.sarif
+          category: "/language:${{ matrix.language }}"
