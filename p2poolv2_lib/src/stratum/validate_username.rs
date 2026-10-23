@@ -274,6 +274,29 @@ mod tests {
         assert!(result.parsed_address.unwrap().script_pubkey().is_p2pkh());
     }
 
+    /// A token-aware CashAddr (type 2, from the CashTokens test vectors) is
+    /// paid with the same P2PKH script as its plain form.
+    #[test]
+    fn bitcoin_cash_accepts_a_token_aware_cashaddr_as_its_plain_payout() {
+        let token_aware = validate_bitcoin_cash(
+            "zr7fzmep8g7h7ymfxy74lgc0v950j3r295x8qj2hgs.rig1",
+            true,
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        let plain = validate_bitcoin_cash(
+            "bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr.rig1",
+            true,
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        assert_eq!(token_aware.worker_name, Some("rig1"));
+        assert_eq!(
+            token_aware.parsed_address.unwrap().script_pubkey(),
+            plain.parsed_address.unwrap().script_pubkey()
+        );
+    }
+
     #[test]
     fn bitcoin_cash_rejects_a_cashaddr_for_another_network() {
         let result = validate_bitcoin_cash(

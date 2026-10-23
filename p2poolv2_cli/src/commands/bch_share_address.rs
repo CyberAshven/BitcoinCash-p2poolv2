@@ -56,7 +56,7 @@ fn encode(cash_address: &str, network: BitcoinCashNetwork) -> Result<String, Box
     )?;
     let script = decoded.script_pubkey();
     let hash = pubkey_hash(&script).ok_or(
-        "only a P2PKH CashAddr (q...) can own shares. Ask the wallet for a regular receiving address.",
+        "only a P2PKH CashAddr (q... or its token-aware z...) can own shares. Ask the wallet for a regular receiving address.",
     )?;
     Ok(BchShareAddress::new(network.share_network(), hash).encode())
 }
@@ -134,6 +134,24 @@ mod tests {
             encoded,
             "rp2pool:qrr4pe4ret3zwmj0428rtksq83ql80w6my7w2wp75h"
         );
+    }
+
+    /// A token-aware CashAddr names the same key as its plain form, so both
+    /// give the same share address (CashTokens test vectors).
+    #[test]
+    fn a_token_aware_p2pkh_encodes_the_same_share_address_as_its_plain_form() {
+        let token_aware = encode(
+            "bchtest:zr7fzmep8g7h7ymfxy74lgc0v950j3r295x8qj2hgs",
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        let plain = encode(
+            "bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr",
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        assert_eq!(token_aware, plain);
+        assert!(token_aware.starts_with("tp2pool:q"), "{token_aware}");
     }
 
     #[test]

@@ -197,6 +197,23 @@ fn bchn_takes_a_cashaddr_without_its_prefix() {
     assert_eq!(result["address"], payout.as_str());
 }
 
+/// The token-aware P2PKH vector from the CashTokens specification: BCHN
+/// keeps its token-aware form and pays the plain P2PKH script.
+#[test]
+fn bchn_validates_a_token_aware_cashaddr() {
+    let token_aware = "bchreg:zr7fzmep8g7h7ymfxy74lgc0v950j3r295umknfytk";
+
+    let result = validate(&bchn(), token_aware);
+
+    assert_eq!(result["isvalid"], true);
+    assert_eq!(result["address"], token_aware);
+    assert_eq!(result["istokenaware"], true);
+    assert_eq!(
+        result["scriptPubKey"],
+        "76a914fc916f213a3d7f1369313d5fa30f6168f9446a2d88ac"
+    );
+}
+
 #[test]
 fn bchn_answers_an_uppercase_cashaddr_in_lowercase() {
     let payout = encode_cashaddr("bchreg", CashAddrType::PayToPublicKeyHash, &[0x11; 20]);

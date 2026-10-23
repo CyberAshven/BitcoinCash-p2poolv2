@@ -35,7 +35,10 @@ A miner needs two addresses, on two different chains:
 - The part before the first dot is the payout address. It must be a P2PKH or
   P2SH CashAddr for the node's network. The prefix may be left out
   (`qq...` is read as `bitcoincash:qq...` on mainnet); the checksum must
-  still match the network's prefix.
+  still match the network's prefix. A token-aware CashAddr (`z...` or
+  `r...`, which CashTokens wallets hand out) is accepted too, and is paid
+  with the same P2PKH or P2SH output as its plain `q...` or `p...` form.
+  P2SH32 addresses (32-byte hashes) are not accepted yet.
 - Everything after the first dot is the worker name. It labels the worker
   in the dashboard and metrics and is optional.
 - At most 128 characters in all.

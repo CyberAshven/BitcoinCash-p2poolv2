@@ -42,6 +42,12 @@ anchor and the donation and fee cap as they were.
 
 ### Added
 
+- Token-aware CashAddr payout addresses (types 2 and 3, `z...` and `r...`,
+  from CashTokens) are accepted wherever a payout address is read: the
+  Stratum username and SV2 identity, `[stratum]` addresses and
+  `bch-share-address` (A10 a in `docs/bch-btc-assumptions-audit.md`). They
+  lock with the same script as their plain form, so the payout output is
+  unchanged; P2SH32 stays refused.
 - A Bitcoin Cash node refuses to start unless `[bitcoinrpc]` is BCHN on
   `bitcoin_cash_network` (V15 in `docs/p2pool-v1-bch-lessons.md`). Before
   waiting for the sync, `getblockchaininfo` must report BCHN's chain name

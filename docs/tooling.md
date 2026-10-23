@@ -121,8 +121,9 @@ chipnet` serves the chipnet one) and answers `validateaddress` as BCHN does
 for a CashAddr, with or without its prefix: `isvalid`, the prefixed
 address, `scriptPubKey`, `isscript` and `istokenaware`. It reads the address
 with the node's own payout parser, which takes the 20-byte P2PKH and P2SH
-addresses this node pays, so a token-aware, P2SH32 or legacy base58
-address, which BCHN also accepts, answers `isvalid: false` alone.
+addresses this node pays, token-aware (`z...`, `r...`) or not, so a P2SH32
+or legacy base58 address, which BCHN also accepts, answers `isvalid: false`
+alone.
 
 One Bitcoin assumption remains, because the test it drives still mines
 Bitcoin:
