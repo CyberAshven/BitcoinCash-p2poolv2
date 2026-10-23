@@ -18,6 +18,7 @@ use crate::config::Chain;
 use crate::node::messages::{MAX_P2P_MESSAGE_SIZE, Message, RawMessage};
 use crate::pool_difficulty::BCH_ASERT_ANCHOR_TAG;
 use crate::shares::bch_script::BCH_SHARE_TRADE_RULE_TAG;
+use crate::shares::validation::BCH_UNCLE_ONCE_RULE_TAG;
 use bitcoin::BlockHash;
 
 /// Hex characters of the share chain genesis hash carried in the protocol
@@ -59,18 +60,22 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// finality. A node without them disagrees on shares carrying a contract
 /// spend, a dust output or an `OP_RETURN` output.
 ///
-/// Then the payout to the holder of each share's payout right
+/// Then comes the payout to the holder of each share's payout right
 /// (`BCH_PAYOUT_HOLDER_RULE_TAG`). A node paying `miner_bitcoin_address`
 /// rebuilds another coinbase once any right has moved.
 ///
-/// Last comes the coinbase budget (`bch_payout_cap_rule_tag`, built from
+/// Then the coinbase budget (`bch_payout_cap_rule_tag`, built from
 /// `BCH_MAX_COINBASE_PAYOUTS`). A node paying every payee rebuilds another
 /// coinbase whenever a window has more payees than the cap.
+///
+/// Last comes the rule that an uncle may have only one nephew on a chain
+/// (`BCH_UNCLE_ONCE_RULE_TAG`). A node without it accepts a share naming an
+/// uncle an ancestor already names, and pays that uncle twice.
 fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
         Chain::BitcoinCash => Some(format!(
-            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}",
+            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_UNCLE_ONCE_RULE_TAG}",
             bch_payout_cap_rule_tag()
         )),
     }
@@ -341,7 +346,7 @@ mod tests {
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-cap11/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-cap11/uncle-once/1.0.0"
             )
         );
     }
@@ -403,6 +408,26 @@ mod tests {
         );
     }
 
+    /// A chipnet node from before the one-nephew uncle rule derived
+    /// `.../trade-htlc/payout-holder/payout-cap11/1.0.0`. It accepts a share
+    /// naming an uncle an ancestor already names, so the new string differs
+    /// and the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_uncle_once() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+            .unwrap()
+            .block_hash();
+        let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
+        let before_uncle_once_string = format!(
+            "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-cap11/1.0.0"
+        );
+
+        assert_ne!(
+            protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
+            before_uncle_once_string
+        );
+    }
+
     /// The isolation the window rule relies on: a chipnet node from before
     /// the rule derived `/p2pool/test/<genesis tag>/1.0.0` from the same
     /// genesis. The new string differs, so the two cannot negotiate and never
@@ -433,7 +458,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-cap11/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-cap11/uncle-once/kad/1.0.0"
             )
         );
     }

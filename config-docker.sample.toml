@@ -30,6 +30,10 @@ hostname = "0.0.0.0"
 port = 3333
 start_difficulty = 10000
 minimum_difficulty = 100
+# Highest difficulty a miner gets, also when it asks for more with d= or
+# mining.suggest_difficulty. Default 4294967296 (2^32), about 5.5 EH/s at one
+# share every 3.33 seconds.
+# maximum_difficulty = 4294967296
 solo_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
 # Pool operating mode: "p2poolv2" (share chain) or "hydrapool"
 # (standalone PPLNS, no share chain). Default p2poolv2.

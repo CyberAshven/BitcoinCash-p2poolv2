@@ -439,9 +439,13 @@ the prune target.
 `deep-fork-refused` waits for every node to prune, then restarts node
 `FORK_GROUP_FROM` with node 0 added to its `dial_peers` and watches it for
 `FORK_OBSERVE_SECS` (default 90). It passes when the node connects to node 0,
-logs `Refusing candidate reorg to <hash>: branch forks below the prune
-target`, keeps the same confirmed hash at a height below its tip, and keeps
-confirming, while node 0 keeps advancing. The convergence check is skipped.
+logs `Refusing candidate reorg to <hash>: branch forks more than
+MAX_REORG_DEPTH below the confirmed tip`, keeps the same confirmed hash at a
+height below its tip, and keeps confirming, while node 0 keeps advancing. The
+convergence check is skipped. The sim reorg floor is `PAYOUT_DEPTH` (100
+shares) below the confirmed tip, so the genesis fork is refused well before
+every node has pruned; the test still waits for pruning so the fork point is
+below the prune target too.
 
 `shallow-fork-reorged` is the control: it reconnects at height 60, before any
 node prunes. The node must log no refusal and end up with node 0's confirmed
