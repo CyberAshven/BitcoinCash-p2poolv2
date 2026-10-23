@@ -1,0 +1,77 @@
+[package]
+name = "p2poolv2_tui"
+description = "Terminal UI for a Bitcoin Cash P2Poolv2 node and its BCHN, ported from P2Poolv2 PDM"
+version.workspace = true
+edition.workspace = true
+# Ported from p2poolv2/pdm, which is AGPL-3.0-or-later; see LICENSE and README.md.
+license = "AGPL-3.0-or-later"
+authors = [
+    "PDM Authors (Raunak Kumar, Francesco Micheli, pool2win and contributors)",
+    "Kulpreet Singh<kp@opdup.com>",
+]
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+keywords = ["bitcoin-cash", "mining", "pool", "tui"]
+categories = ["command-line-utilities"]
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# `client` adds what talks to the outside: the P2Pool API and BCHN clients,
+# the live feed, the node config editor, the settings file and the binary.
+# Without it the crate is the plain-data views and models only, for another
+# ratatui program to draw them from its own data.
+default = ["client"]
+client = [
+    "dep:base64",
+    "dep:clap",
+    "dep:futures",
+    "dep:p2poolv2_config",
+    "dep:reqwest",
+    "dep:rustls",
+    "dep:serde_json",
+    "dep:tokio",
+    "dep:tokio-tungstenite",
+    "dep:toml",
+    "dep:toml_edit",
+]
+
+[dependencies]
+ratatui = "0.30"
+serde = { workspace = true }
+
+base64 = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+p2poolv2_config = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+# Only to install one process-wide crypto provider before the live feed opens
+# a wss:// connection; the workspace enables two, and rustls then needs one
+# chosen.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"], optional = true }
+serde_json = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"], optional = true }
+toml = { version = "0.8", optional = true }
+toml_edit = { version = "0.22", optional = true }
+
+[dev-dependencies]
+insta = "1"
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+wiremock = { workspace = true }
+
+[[bin]]
+name = "p2poolv2_tui"
+path = "src/main.rs"
+required-features = ["client"]
+
+[lib]
+name = "p2poolv2_tui"
+path = "src/lib.rs"
+
+# Not in the release archives yet; build it from source (see README.md).
+[package.metadata.dist]
+dist = false

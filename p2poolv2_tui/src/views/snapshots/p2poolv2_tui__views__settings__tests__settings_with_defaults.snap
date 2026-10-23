@@ -1,0 +1,12 @@
+---
+source: p2poolv2_tui/src/views/settings.rs
+expression: text
+---
++ Settings ----------------------------------------------------------+
+|Node config file (config.toml)                                      |
+|(not set)                                                           |
+|Settings directory                                                  |
+|/home/miner/.config/p2poolv2_tui (default)                          |
+|                                                                    |
+|                                                                    |
++--------------------------------------------------------------------+

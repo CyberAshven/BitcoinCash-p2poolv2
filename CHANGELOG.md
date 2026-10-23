@@ -31,6 +31,18 @@ anchor and the donation and fee cap as they were.
 
 ### Added
 
+- `p2poolv2_tui`, a terminal UI for a Bitcoin Cash node and its BCHN,
+  ported from upstream's PDM (`p2poolv2/pdm`, AGPL-3.0-or-later, which this
+  crate keeps). BCHN status over JSON-RPC (chain, peers, mempool) replaces
+  Bitcoin Core's; the node's status reads `/network`, `/chain_info`,
+  `/hashrate`, `/shares`, `/miners`, `/miner`, `/found_blocks`, `/peers`
+  and the `/ws` live feed; the config editor keeps the file's comments,
+  never writes environment overrides into it and saves only what the node's
+  own parser accepts. No Lightning. One node config points it at
+  everything, and its `bitcoin_cash_network` is the only switch between
+  mainnet and chipnet. Without its default `client` feature the crate is
+  the views over plain data, for other ratatui programs. See
+  `p2poolv2_tui/README.md`.
 - Bitcoin Cash share trading: a miner sells share units for BCH with one
   hash time locked contract behind P2SH32 on each chain and no Lightning.
   The seller locks shares, the buyer locks BCH under the same secret hash,
