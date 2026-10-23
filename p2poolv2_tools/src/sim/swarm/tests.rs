@@ -17,7 +17,7 @@ fn settings(node_count: usize) -> SwarmSettings {
             password: "p2pool".to_string(),
         },
         zmq: "tcp://127.0.0.1:28332".to_string(),
-        miner_address: "bcrt1qminer".to_string(),
+        miner_address: DEFAULT_MINER_ADDRESS.to_string(),
         hashrate: 1.0e12,
         hashrate_distribution: "zipf".to_string(),
         zipf_alpha: 1.0,
@@ -111,11 +111,11 @@ fn late_miner_starts_with_its_emitter_off() {
         &late,
         &NodeIdentity {
             index: 1,
-            payout_address: "bcrt1qpayout",
+            payout_address: "bchreg:qpayout",
             shape: &shape,
         },
     );
-    assert!(config.contains("\n[sim]\nenabled = false\nminer_address = \"bcrt1qpayout\"\n"));
+    assert!(config.contains("\n[sim]\nenabled = false\nminer_address = \"bchreg:qpayout\"\n"));
     assert!(config.contains("pool_signature = \"P2Pool-sim-1\"\n"));
     assert!(config.contains("dial_peers = [\"/ip4/127.0.0.1/tcp/7000\"]\n"));
     assert!(config.contains("seed = 2\n"));
@@ -135,4 +135,26 @@ fn pool_signature_within_the_limit_is_accepted() {
     let mut fitting = settings(100);
     fitting.pool_signature_prefix = "P2Pool-sim-x-".to_string();
     assert!(check_pool_signature(&fitting).is_ok());
+}
+
+#[test]
+fn nodes_mine_bitcoin_cash_regtest() {
+    let shape = NodeShape {
+        hashrate: "5".to_string(),
+        latency_ms: 0,
+    };
+    let config = node_config(
+        &settings(3),
+        &NodeIdentity {
+            index: 2,
+            payout_address: DEFAULT_MINER_ADDRESS,
+            shape: &shape,
+        },
+    );
+
+    assert!(config.contains("\nchain = \"bitcoin-cash\"\nbitcoin_cash_network = \"regtest\"\n"));
+    assert!(config.contains(&format!(
+        "\nbootstrap_address = \"{DEFAULT_MINER_ADDRESS}\"\n"
+    )));
+    assert!(config.contains(&format!("\nshare_address = \"{}\"\n", share_address(2))));
 }

@@ -2,12 +2,15 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Launch a swarm of no-PoW sim nodes against one shared regtest bitcoind.
+//! Launch a swarm of no-PoW sim nodes against one shared BCHN regtest node.
 //! Replaces `load-tests/sim/run-swarm.sh`.
 //!
-//! Each node gets a config with distinct ports, a distinct RNG seed, a fresh
-//! store and a `dial_peers` topology. The nodes keep running after this
-//! returns; `stop-swarm` stops them.
+//! The nodes mine Bitcoin Cash: each config sets `chain = "bitcoin-cash"`
+//! and `bitcoin_cash_network = "regtest"`, a `bchreg:` CashAddr payout
+//! address and an `rp2pool:` share address. Each node gets a config with
+//! distinct ports, a distinct RNG seed, its own share address, a fresh store
+//! and a `dial_peers` topology. The nodes keep running after this returns;
+//! `stop-swarm` stops them.
 //!
 //! The sim binary is built with the release profile by default on purpose.
 //! libp2p-request-response has a `debug_assert_eq!` in
@@ -25,7 +28,8 @@ use crate::process::{
 use crate::repo;
 use crate::seeded::SeededSequence;
 use crate::sim::RunDir;
-use crate::sim::bitcoind::{Bitcoind, CallOutcome, RpcSettings};
+use crate::sim::addresses::{DEFAULT_MINER_ADDRESS, check_payout_address, share_address};
+use crate::sim::bitcoind::{Bitcoind, CallOutcome, RpcSettings, WALLET};
 use serde_json::Value;
 use std::fmt::Write as _;
 use std::fs::File;
@@ -35,21 +39,6 @@ use std::time::Duration;
 
 /// The config rejects a pool signature over 16 bytes.
 const MAX_POOL_SIGNATURE_LENGTH: usize = 16;
-
-/// Share chain identities, cycled across nodes. A share address owns share
-/// coinbase outputs and lives on a different chain from the bitcoin payout
-/// address, so it cannot be derived from `MINER_ADDRESS` and bitcoind cannot
-/// mint one. Without it the sim emitter refuses to start and the swarm
-/// produces no shares at all, so these are fixed regtest addresses rather
-/// than optional. Derived from the well known test pubkeys; throwaway,
-/// regtest only.
-const SHARE_ADDRESSES: [&str; 5] = [
-    "rp2pool1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5ssmq4eld",
-    "rp2pool1pet7ep3czdu9k4wvdlz2fp5p8x2yp7t6ttyqg2c6cmh0lgeuu9lasphrkeq",
-    "rp2pool1pgxxyvcmdncdxs06cudd5yvmwwahaesaj6n3eu7st7x4sw9hrchaqgjhspc",
-    "rp2pool1pjvtc2mkj9vmfneuj7w9dsqle70a040ms5tyfswhhz4vjyskznj5q9rjdk6",
-    "rp2pool1paecncecu260mkwvsr63lw5v4s496v9gfn2en56hv4f0d2w2j97fsplatwc",
-];
 
 /// The swarm's settings, from the same environment variables
 /// `run-swarm.sh` read.
@@ -102,15 +91,7 @@ impl SwarmSettings {
             base_api: env_vars::parsed("BASE_API", 7600)?,
             rpc: RpcSettings::from_env(),
             zmq: env_vars::string("ZMQ", "tcp://127.0.0.1:28332"),
-            // A Bitcoin regtest address, because the sim node only mines the
-            // Bitcoin chain today: p2poolv2_sim parses `[sim] miner_address`
-            // as a Bitcoin address and the configs leave `stratum.chain` at
-            // its Bitcoin default. Switch to a `bchreg:` CashAddr once the
-            // sim runs `chain = "bitcoin-cash"` (see docs/tooling.md).
-            miner_address: env_vars::string(
-                "MINER_ADDRESS",
-                "bcrt1qqclp5usts33x0cgy2l5839659t7798w7g5a0fu",
-            ),
+            miner_address: env_vars::string("MINER_ADDRESS", DEFAULT_MINER_ADDRESS),
             hashrate: env_vars::parsed("HASHRATE", 1.0e12)?,
             hashrate_distribution: env_vars::string("HASHRATE_DIST", "zipf"),
             zipf_alpha: env_vars::parsed("ZIPF_ALPHA", 1.0)?,
@@ -227,7 +208,7 @@ pub fn node_config(settings: &SwarmSettings, node: &NodeIdentity<'_>) -> String 
     let stratum_port = settings.base_stratum + index as u32;
     let api_port = settings.base_api + index as u32;
     let enabled = settings.late_miner != Some(index);
-    let share_address = SHARE_ADDRESSES[index % SHARE_ADDRESSES.len()];
+    let share_address = share_address(index);
     let run_dir = settings.run_dir.path().display().to_string();
     let store = settings.run_dir.node_store(index).display().to_string();
     let mut config = String::with_capacity(2048);
@@ -262,6 +243,9 @@ minimum_difficulty = 1
 solo_address = "{miner}"
 bootstrap_address = "{miner}"
 zmqpubhashblock = "{zmq}"
+chain = "bitcoin-cash"
+bitcoin_cash_network = "regtest"
+# Required, but Bitcoin Cash derives it from bitcoin_cash_network.
 network = "regtest"
 version_mask = "1fffffe0"
 pool_signature = "{prefix}{index}"
@@ -344,16 +328,13 @@ pub fn build_sim_binary(profile: &str) -> ToolResult<PathBuf> {
     executable(&built, "p2poolv2_sim")
 }
 
-/// A fresh payout address from the regtest wallet, or `None` without one.
+/// A fresh payout address from the `p2pool` wallet, or `None` without one.
 ///
-/// Only the label is passed, so the node picks its own default address type.
-/// The script asked for `bech32`, a Bitcoin-only type that a Bitcoin Cash
-/// node rejects; BCHN answers with a CashAddr.
-async fn new_address(bitcoind: &Bitcoind) -> Option<String> {
-    match bitcoind
-        .call("getnewaddress", vec![Value::from("sim")])
-        .await
-    {
+/// Only the label is passed, so the node picks its own default address type:
+/// BCHN answers with a `bchreg:` CashAddr. The script asked for `bech32`, a
+/// Bitcoin-only type that BCHN rejects.
+async fn new_address(wallet: &Bitcoind) -> Option<String> {
+    match wallet.call("getnewaddress", vec![Value::from("sim")]).await {
         Ok(CallOutcome::Result(Value::String(address))) if !address.is_empty() => Some(address),
         _ => None,
     }
@@ -416,15 +397,18 @@ pub async fn run_swarm(
     processes: &mut ProcessTable,
 ) -> ToolResult<PathBuf> {
     check_pool_signature(settings)?;
+    check_payout_address(&settings.miner_address).map_err(ToolError::message)?;
     let binary = build_sim_binary(&settings.profile)?;
 
     let bitcoind = Bitcoind::new(&settings.rpc)?;
     if !bitcoind.is_regtest().await {
         return Err(ToolError::message(format!(
-            "ERROR: regtest bitcoind not reachable at {} (need rpc + zmq up).",
+            "ERROR: regtest BCHN not reachable at {} (need rpc + zmq up).",
             settings.rpc.url
         )));
     }
+    bitcoind.require_bchn().await?;
+    let wallet = Bitcoind::new(&settings.rpc.for_wallet(WALLET))?;
 
     let run_dir = &settings.run_dir;
     kill_leftovers(run_dir).await;
@@ -452,7 +436,7 @@ pub async fn run_swarm(
         // Distinct payout addresses make the PPLNS coinbase a real multi-way
         // split; without a wallet every node falls back to MINER_ADDRESS.
         let payout_address = if settings.distinct_addresses {
-            new_address(&bitcoind).await
+            new_address(&wallet).await
         } else {
             None
         }

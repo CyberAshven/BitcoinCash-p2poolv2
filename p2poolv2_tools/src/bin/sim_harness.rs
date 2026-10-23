@@ -19,16 +19,21 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const SWARM_HELP: &str = "\
-Env (defaults match config-dev.toml and the regtest stack):
+The nodes mine Bitcoin Cash (chain = \"bitcoin-cash\", bitcoin_cash_network =
+\"regtest\") against a BCHN regtest node, with a bchreg: payout address and
+an rp2pool: share address of their own.
+
+Env:
   RUN_DIR        work dir for configs/stores/logs   (default /tmp/p2pool-sim)
   BASE_P2P       first libp2p port                  (default 7000)
   BASE_STRATUM   first stratum port                 (default 7300)
   BASE_API       first API port                     (default 7600)
-  RPC_URL        bitcoind rpc url                   (default http://127.0.0.1:19443)
-  RPC_USER       bitcoind rpc user                  (default p2pool)
-  RPC_PASS       bitcoind rpc pass                  (default p2pool)
+  RPC_URL        BCHN rpc url                       (default http://127.0.0.1:19443)
+  RPC_USER       BCHN rpc user                      (default p2pool)
+  RPC_PASS       BCHN rpc pass                      (default p2pool)
   ZMQ            zmqpubhashblock                    (default tcp://127.0.0.1:28332)
-  MINER_ADDRESS  payout identity for all nodes      (default bcrt1q...a0fu)
+  MINER_ADDRESS  bchreg: payout address for nodes   (default bchreg:qp63...vuwd,
+                 without their own                  the key with secret 1)
   HASHRATE       mean per-node hashrate h/s         (default 1.0e12)
   HASHRATE_DIST  equal | zipf                       (default zipf: power-law,
                  total N*HASHRATE preserved; a few big miners and a long tail)
@@ -42,7 +47,7 @@ Env (defaults match config-dev.toml and the regtest stack):
   ASERT_ANCHOR   shared ASERT anchor time           (default now)
   NETWORK_HASHRATE  total network hashrate          (default N*HASHRATE)
   DISTINCT_ADDR  1 = each node gets its own payout  (default 1; needs a loaded
-                 address via RPC getnewaddress            wallet on the bitcoind)
+                 address via RPC getnewaddress            p2pool wallet on BCHN)
   POOL_SIGNATURE_PREFIX  node i signs as PREFIX<i>  (default P2Pool-sim-;
                  each must stay within the 16-byte config limit)
   DIAL_FANOUT    how many earlier peers each dials  (default 3)
@@ -92,7 +97,7 @@ Env:
   FORK_GROUP_FROM           first node of the minority group (fork scenarios)
   FORK_TIP_TIMEOUT          max wait to reach the reconnect point (s) (default 900)
   FORK_OBSERVE_SECS         watch after the reconnect (s) (default 90)
-  RPC_URL / RPC_USER / RPC_PASS  bitcoind RPC, for the maturity check
+  RPC_URL / RPC_USER / RPC_PASS  BCHN RPC, for the maturity check
 
 Node 0 is never a target: metrics derives the share rate and uncle rate from
 node-0.log alone, so killing it would corrupt the run's own metrics.
@@ -122,13 +127,13 @@ Env (nightly-specific):
   CONVERGENCE_WAIT_SECONDS   settle time after the scenario, before the checks (default 60)
   UNCLE_RATE_THRESHOLD       max uncle rate % to pass      (default 25)
   BITCOIND_DATADIR           regtest data directory        (default /tmp/bitcoind-p2poolv2)
-  BITCOIND_BIN               path to bitcoind              (auto-detected)
+  BITCOIND_BIN               path to BCHN's bitcoind        (default: bitcoind on PATH)
 
 Every run-swarm and failures variable (RUN_DIR, RPC_URL, SHARES_PER_BLOCK,
 LATENCY_MS, IDEAL_BLOCK_TIME, FAILURE_SEED, ...) applies as well.";
 
 /// The sim swarm harness: launch, observe, measure, break and stop a swarm
-/// of no-PoW sim nodes against a regtest bitcoind, or run the whole nightly
+/// of no-PoW sim nodes against a BCHN regtest node, or run the whole nightly
 /// test. Configured through environment variables; see each command's
 /// --help.
 #[derive(Parser)]
@@ -141,7 +146,7 @@ struct Arguments {
 #[derive(Subcommand)]
 enum HarnessCommand {
     /// Build the sim binary and launch a swarm of N nodes against one shared
-    /// regtest bitcoind. The nodes keep running; stop them with stop-swarm.
+    /// BCHN regtest node. The nodes keep running; stop them with stop-swarm.
     #[command(after_help = SWARM_HELP)]
     RunSwarm {
         /// Number of nodes.
@@ -165,7 +170,7 @@ enum HarnessCommand {
         #[arg(default_value = "clean")]
         scenario: String,
     },
-    /// End-to-end nightly run with a pass/fail verdict: bitcoind, swarm,
+    /// End-to-end nightly run with a pass/fail verdict: BCHN, swarm,
     /// failure scenario, convergence, metrics, verify_chain on every store.
     #[command(after_help = NIGHTLY_HELP)]
     Nightly {

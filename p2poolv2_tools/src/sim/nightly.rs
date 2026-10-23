@@ -5,18 +5,22 @@
 //! The nightly simulation: an end-to-end sim run with a pass/fail verdict.
 //! Replaces `load-tests/sim/nightly.sh`.
 //!
-//! Starts a regtest bitcoind if none is running, launches a swarm, injects
+//! Starts a BCHN regtest node if none is running, launches a swarm, injects
 //! a failure scenario, waits for convergence, collects metrics, stops the
 //! swarm, verifies every store, evaluates the pass/fail thresholds and
 //! cleans up. The nightly workflow runs it once per scenario, so each
 //! failure mode gets its own swarm, verdict and artifacts.
+//!
+//! The swarm mines Bitcoin Cash, so the node is Bitcoin Cash Node (BCHN).
+//! Its daemon is called `bitcoind`, like Bitcoin Core's; `BITCOIND_BIN`
+//! names it when it is not on `PATH`.
 
 use crate::cargo_build::{BuildRequest, build, executable};
 use crate::env_vars;
 use crate::error::{ToolError, ToolResult};
 use crate::process::{ProcessTable, find_on_path};
 use crate::repo;
-use crate::sim::bitcoind::{Bitcoind, CallOutcome, RpcSettings};
+use crate::sim::bitcoind::{Bitcoind, CallOutcome, RpcSettings, WALLET};
 use crate::sim::failures::{FailureSettings, FailureSummary, inject};
 use crate::sim::metrics::{self, MetricsSummary};
 use crate::sim::stop::{DEFAULT_GRACE_SECONDS, stop_swarm};
@@ -29,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// The regtest RPC port the nightly starts bitcoind on.
+/// The regtest RPC port the nightly starts BCHN on.
 const REGTEST_RPC_PORT: u16 = 19443;
 
 /// The wallet's fallback fee rate, in coins per kilobyte: 1 sat/byte, the
@@ -78,17 +82,17 @@ impl NightlySettings {
     }
 }
 
-/// `BITCOIND_BIN`, else Homebrew's bitcoind, else bitcoind on `PATH`.
+/// `BITCOIND_BIN`, else `bitcoind` on `PATH`. The script also looked for
+/// Homebrew's bitcoind, which is Bitcoin Core; BCHN comes from its release
+/// tarball.
 fn find_bitcoind(settings: &NightlySettings) -> Result<PathBuf, Exit> {
     if let Some(binary) = &settings.bitcoind_binary {
         return Ok(binary.clone());
     }
-    let homebrew = PathBuf::from("/opt/homebrew/bin/bitcoind");
-    if homebrew.is_file() {
-        return Ok(homebrew);
-    }
     find_on_path("bitcoind").ok_or_else(|| {
-        Exit::failure("ERROR: bitcoind not found. Set BITCOIND_BIN or install bitcoind.")
+        Exit::failure(
+            "ERROR: BCHN's bitcoind not found. Set BITCOIND_BIN or install Bitcoin Cash Node.",
+        )
     })
 }
 
@@ -135,7 +139,12 @@ struct Lifecycle {
     swarm_running: bool,
 }
 
-/// Start a fresh regtest bitcoind unless one already answers.
+/// Start a fresh BCHN regtest node unless one already answers.
+///
+/// Beyond the script's options it passes `-allowunconnectedmining`: BCHN's
+/// `getblocktemplate` refuses work with "Bitcoin is not connected!" while
+/// the node has no peers, on regtest too, and a lone sim node never has
+/// any. Bitcoin Core skips that check on regtest by itself.
 async fn ensure_bitcoind_running(
     settings: &NightlySettings,
     bitcoind_binary: &Path,
@@ -144,12 +153,12 @@ async fn ensure_bitcoind_running(
 ) -> Result<(), Exit> {
     if bitcoind.is_regtest().await {
         log_message(&format!(
-            "regtest bitcoind already running at {}",
+            "regtest BCHN already running at {}",
             settings.rpc.url
         ));
         return Ok(());
     }
-    log_message("Starting fresh regtest bitcoind...");
+    log_message("Starting fresh BCHN regtest node...");
     let datadir = &settings.bitcoind_datadir;
     if datadir.exists() {
         std::fs::remove_dir_all(datadir)
@@ -157,14 +166,7 @@ async fn ensure_bitcoind_running(
     }
     std::fs::create_dir_all(datadir).map_err(|error| ToolError::io("create", datadir, error))?;
     let status = Command::new(bitcoind_binary)
-        .arg("-regtest")
-        .arg(format!("-datadir={}", datadir.display()))
-        .arg("-daemon")
-        .arg(format!("-rpcport={REGTEST_RPC_PORT}"))
-        .arg(format!("-rpcuser={}", settings.rpc.user))
-        .arg(format!("-rpcpassword={}", settings.rpc.password))
-        .arg(format!("-zmqpubhashblock={}", settings.zmq))
-        .arg(format!("-fallbackfee={FALLBACK_FEE_PER_KB}"))
+        .args(bitcoind_arguments(settings))
         .stdin(Stdio::null())
         .status()
         .map_err(|error| {
@@ -174,37 +176,50 @@ async fn ensure_bitcoind_running(
             ))
         })?;
     if !status.success() {
-        return Err(Exit::failure(format!(
-            "bitcoind failed to start ({status})"
-        )));
+        return Err(Exit::failure(format!("BCHN failed to start ({status})")));
     }
 
     const MAX_ATTEMPTS: u32 = 30;
     for attempt in 1..=MAX_ATTEMPTS {
         if bitcoind.is_regtest().await {
             lifecycle.started_bitcoind = true;
-            log_message(&format!("bitcoind ready (attempt {attempt})"));
+            log_message(&format!("BCHN ready (attempt {attempt})"));
             return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     Err(Exit::failure(format!(
-        "ERROR: bitcoind did not become ready within {MAX_ATTEMPTS}s"
+        "ERROR: BCHN did not become ready within {MAX_ATTEMPTS}s"
     )))
 }
 
+/// The command line the nightly starts BCHN with.
+fn bitcoind_arguments(settings: &NightlySettings) -> Vec<String> {
+    vec![
+        "-regtest".to_string(),
+        format!("-datadir={}", settings.bitcoind_datadir.display()),
+        "-daemon".to_string(),
+        format!("-rpcport={REGTEST_RPC_PORT}"),
+        format!("-rpcuser={}", settings.rpc.user),
+        format!("-rpcpassword={}", settings.rpc.password),
+        format!("-zmqpubhashblock={}", settings.zmq),
+        format!("-fallbackfee={FALLBACK_FEE_PER_KB}"),
+        "-allowunconnectedmining".to_string(),
+    ]
+}
+
 /// Make sure the `p2pool` wallet is loaded and the chain is past coinbase
-/// maturity, so the swarm's nodes can get payout addresses.
-async fn ensure_wallet_and_coins(bitcoind: &Bitcoind) -> ToolResult<()> {
+/// maturity, so the swarm's nodes can get payout addresses. The wallet's
+/// own calls go to its endpoint, since BCHN also loads a default wallet.
+async fn ensure_wallet_and_coins(bitcoind: &Bitcoind, rpc: &RpcSettings) -> ToolResult<()> {
     log_message("Ensuring wallet and coins...");
     let created = bitcoind
-        .call("createwallet", vec![Value::from("p2pool")])
+        .call("createwallet", vec![Value::from(WALLET)])
         .await;
     if !matches!(created, Ok(CallOutcome::Result(_))) {
-        let _ = bitcoind
-            .call("loadwallet", vec![Value::from("p2pool")])
-            .await;
+        let _ = bitcoind.call("loadwallet", vec![Value::from(WALLET)]).await;
     }
+    let wallet = Bitcoind::new(&rpc.for_wallet(WALLET))?;
     let block_count = bitcoind
         .result("getblockcount", Vec::new())
         .await
@@ -213,7 +228,7 @@ async fn ensure_wallet_and_coins(bitcoind: &Bitcoind) -> ToolResult<()> {
         .unwrap_or(0);
     if block_count < 101 {
         let blocks_needed = 101 - block_count;
-        let address = bitcoind.result("getnewaddress", Vec::new()).await?;
+        let address = wallet.result("getnewaddress", Vec::new()).await?;
         log_message(&format!(
             "Mining {blocks_needed} blocks to reach height 101..."
         ));
@@ -566,7 +581,8 @@ async fn run_after_build(
 ) -> Result<bool, Exit> {
     let bitcoind = Bitcoind::new(&settings.rpc)?;
     ensure_bitcoind_running(settings, bitcoind_binary, &bitcoind, lifecycle).await?;
-    ensure_wallet_and_coins(&bitcoind).await?;
+    bitcoind.require_bchn().await?;
+    ensure_wallet_and_coins(&bitcoind, &settings.rpc).await?;
 
     log_message(&format!(
         "Starting {}-node sim swarm...",
@@ -661,7 +677,7 @@ async fn cleanup(
         lifecycle.swarm_running = false;
     }
     if lifecycle.started_bitcoind {
-        log_message("Stopping bitcoind (started by this script)...");
+        log_message("Stopping BCHN (started by this script)...");
         if let Some(bitcoind) = bitcoind {
             let _ = bitcoind.call("stop", Vec::new()).await;
         }

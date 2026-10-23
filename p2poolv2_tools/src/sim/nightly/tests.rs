@@ -113,3 +113,38 @@ fn first_share_reads_the_cli_answer() {
         Some(5)
     );
 }
+
+fn nightly_settings() -> NightlySettings {
+    NightlySettings {
+        scenario: "clean".to_string(),
+        node_count: 3,
+        convergence_wait: 60,
+        uncle_rate_threshold: "25".to_string(),
+        bitcoind_datadir: PathBuf::from("/tmp/bitcoind-p2poolv2"),
+        bitcoind_binary: None,
+        rpc: RpcSettings {
+            url: "http://127.0.0.1:19443".to_string(),
+            user: "p2pool".to_string(),
+            password: "p2pool".to_string(),
+        },
+        zmq: "tcp://127.0.0.1:28332".to_string(),
+        run_dir: RunDir::new("/tmp/p2pool-sim"),
+        profile: "release".to_string(),
+    }
+}
+
+#[test]
+fn bchn_mines_without_peers() {
+    let arguments = bitcoind_arguments(&nightly_settings());
+
+    assert!(arguments.contains(&"-regtest".to_string()));
+    assert!(arguments.contains(&"-allowunconnectedmining".to_string()));
+    assert!(arguments.contains(&"-zmqpubhashblock=tcp://127.0.0.1:28332".to_string()));
+}
+
+#[test]
+fn bchn_fallback_fee_is_one_sat_per_byte() {
+    let arguments = bitcoind_arguments(&nightly_settings());
+
+    assert!(arguments.contains(&"-fallbackfee=0.00001".to_string()));
+}

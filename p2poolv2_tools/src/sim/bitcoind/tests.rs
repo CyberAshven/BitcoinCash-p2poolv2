@@ -23,3 +23,27 @@ fn rpc_error_in_body_ignores_a_null_error() {
 fn rpc_error_in_body_ignores_non_json() {
     assert_eq!(rpc_error_in_body("Unauthorized"), None);
 }
+
+#[test]
+fn wallet_endpoint_extends_the_url() {
+    let settings = RpcSettings {
+        url: "http://127.0.0.1:19443/".to_string(),
+        user: "p2pool".to_string(),
+        password: "p2pool".to_string(),
+    };
+
+    let wallet = settings.for_wallet(WALLET);
+
+    assert_eq!(wallet.url, "http://127.0.0.1:19443/wallet/p2pool");
+    assert_eq!(wallet.user, "p2pool");
+}
+
+#[test]
+fn bchn_is_recognised_by_its_user_agent() {
+    assert!(is_bchn_user_agent("/Bitcoin Cash Node:29.2.0(EB32.0)/"));
+}
+
+#[test]
+fn bitcoin_core_is_not_bchn() {
+    assert!(!is_bchn_user_agent("/Satoshi:31.0.0/"));
+}

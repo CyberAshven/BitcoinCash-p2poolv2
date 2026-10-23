@@ -12,6 +12,7 @@
 //! (`node-<i>.toml`, `node-<i>.log`, `store-<i>.db`, positional `pids.txt`,
 //! `failure-results.txt`, `maturity-check.txt`).
 
+pub mod addresses;
 pub mod bitcoind;
 pub mod failures;
 pub mod maturity;

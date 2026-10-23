@@ -4212,11 +4212,14 @@ dependencies = [
 name = "p2poolv2_tools"
 version = "0.0.1-alpha"
 dependencies = [
+ "bitcoin",
  "bitcoindrpc",
  "chrono",
  "clap",
  "glob",
  "memchr",
+ "p2poolv2_config",
+ "p2poolv2_wallet",
  "plotters",
  "regex",
  "reqwest",
