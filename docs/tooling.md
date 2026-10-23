@@ -9,7 +9,7 @@ in `.cargo/config.toml`:
 | Alias | Binary | What it does |
 |---|---|---|
 | `cargo sim <command>` | `sim_harness` | Launch, observe, measure, break and stop a swarm of no-PoW sim nodes, or run the nightly test |
-| `cargo mock-bitcoind` | `mock_bitcoind` | Mock bitcoind JSON-RPC server for stratum load tests |
+| `cargo mock-bitcoind` | `mock_bitcoind` | Mock node JSON-RPC server for stratum load tests, answering as BCHN by default |
 | `cargo share-lifecycle <log>...` | `share_lifecycle` | Lifecycle of each share in one or two node logs |
 | `cargo share-latency <log or glob>...` | `share_latency` | Share propagation and confirmation latencies across node logs |
 | `cargo jmeter-bench <command>` | `jmeter_bench` | JMeter stratum load test drivers: A/B benchmark, flamegraph, remote load, GUI, results summary |
@@ -41,8 +41,10 @@ Only glue is left in shell, and none of it is a tool:
 - `run:` steps in `.github/workflows/*.yml`, and
   `.github/workflows/docker/{determine-tags,create-manifests,cleanup-temp-tags}.sh`,
   which the Docker workflow runs;
-- `docker/bitcoind/bootstrap.sh` and `docker/bitcoind/bcli`, the bitcoind
-  image's entrypoint and CLI wrapper;
+- `docker/bchn/bootstrap.sh`, `docker/bchn/healthcheck.sh` and
+  `docker/bchn/bcli`, the BCHN image's regtest bootstrap, health check and
+  CLI wrapper, and `docker/regtest/setup-miner.sh`, which gives the regtest
+  CPU miner its identity;
 - the `justfile` recipes.
 
 ## The sim harness
@@ -69,32 +71,68 @@ The harness needs a Unix host: it signals nodes with `kill` and finds them
 with `pgrep -f`, as the scripts did. `tcp_monitor` and `pool_diagnose` read
 `/proc` and are Linux only (`tcp_monitor` falls back to `netstat` elsewhere).
 
+### Bitcoin Cash and BCHN
+
+The swarm mines Bitcoin Cash against a Bitcoin Cash Node (BCHN) regtest
+node. Each node config sets `chain = "bitcoin-cash"` and
+`bitcoin_cash_network = "regtest"`, pays a `bchreg:` CashAddr and owns its
+shares with an `rp2pool:` share address of its own:
+
+- `MINER_ADDRESS` defaults to `bchreg:qp63uahgrxged4z5jswyt5dn5v3lzsem6c6mz8vuwd`,
+  the key with secret 1, and `run-swarm` checks it with the node's own
+  CashAddr parser before it launches anything. With `DISTINCT_ADDR=1` (the
+  default) each node takes its own address from the `p2pool` wallet with
+  `getnewaddress`, and BCHN answers with a CashAddr.
+- Node `i` owns its shares with the `rp2pool:` address of the key with
+  secret `i + 2` (`p2poolv2_tools/src/sim/addresses.rs`). These keys are
+  throwaway and regtest only.
+- `p2poolv2_sim` reads both addresses with the node's own parsers for the
+  configured chain, so a sim node and a production node accept the same
+  addresses.
+- Bitcoin Cash keeps its 100-share coinbase maturity in the sim build (a
+  share-chain rule; only Bitcoin's is shortened to 20), so `late-miner`
+  waits for a 200-share tip before the late node starts mining.
+
+`nightly` starts BCHN (`bitcoind` from `BITCOIND_BIN` or `PATH`) when no
+regtest node answers at `RPC_URL`. It adds `-allowunconnectedmining`, which
+a lone node needs: BCHN's `getblocktemplate` refuses work with "Bitcoin is
+not connected!" while it has no peers, on regtest too, where Bitcoin Core
+skips that check. Wallet calls go to `RPC_URL/wallet/p2pool`, because BCHN
+also creates and loads a default wallet. `run-swarm` and `nightly` refuse a
+node whose `getnetworkinfo` user agent is not BCHN's. The sim-nightly
+workflow installs BCHN from its release tarball, checked against the
+version and per-architecture SHA-256 pinned in `docker/bchn/Dockerfile`.
+
 ## Bitcoin Cash and the remaining Bitcoin assumptions
 
-The ports carry no Bitcoin constant they do not need. The nightly's wallet
+The ports carry no Bitcoin constant they do not need. The sim swarm and
+its nightly run Bitcoin Cash against BCHN (above). The nightly's wallet
 fallback fee is 1 sat/byte (`0.00001` per kilobyte), not the script's
 10 sat/vbyte, and new payout addresses come from `getnewaddress` with only a
-label, so the node picks its own address type (CashAddr on BCHN) instead of
-the Bitcoin-only `bech32`. The log tools, `tcp-monitor` and `pool-diagnose`
+label, so BCHN picks its own address type (CashAddr) instead of the
+Bitcoin-only `bech32`. The log tools, `tcp-monitor` and `pool-diagnose`
 are chain-agnostic, and `maturity-check` reads payees from either form of
 `getblock` output.
 
-Three Bitcoin assumptions remain, because the code they drive is still
-Bitcoin-only:
+`mock-bitcoind` answers as BCHN by default: it serves a BCHN regtest
+template (`bitcoindrpc/test_data/bchn-regtest-template.json`; `--network
+chipnet` serves the chipnet one) and answers `validateaddress` as BCHN does
+for a CashAddr, with or without its prefix: `isvalid`, the prefixed
+address, `scriptPubKey`, `isscript` and `istokenaware`. It reads the address
+with the node's own payout parser, which takes the 20-byte P2PKH and P2SH
+addresses this node pays, so a token-aware, P2SH32 or legacy base58
+address, which BCHN also accepts, answers `isvalid: false` alone.
 
-- The sim swarm runs the Bitcoin chain against a Bitcoin Core regtest node
-  (CI installs Bitcoin Core), and `MINER_ADDRESS` defaults to a `bcrt1`
-  address. `p2poolv2_sim` parses `[sim] miner_address` as a Bitcoin address,
-  and its configs leave `stratum.chain` at the Bitcoin default. Moving the
-  swarm to Bitcoin Cash needs the sim node to accept `chain =
-  "bitcoin-cash"` with a `bchreg:` CashAddr, and the nightly to install
-  BCHN; the harness then only needs new defaults.
-- `mock-bitcoind` serves a Bitcoin signet template and answers
-  `validateaddress` with `iswitness`, because the JMeter load test it serves
-  (`config-load-test.toml`, the CKPool configs) mines Bitcoin signet.
-  `--template` serves a Bitcoin Cash template instead.
-- The JMeter plan and configs under `load-tests/jmeter-testing/` are data
-  and are unchanged.
+One Bitcoin assumption remains, because the test it drives still mines
+Bitcoin:
+
+- The JMeter plan and configs under `load-tests/jmeter-testing/` mine
+  Bitcoin signet: `stratum.jmx` authorizes a `tb1` address,
+  `config-load-test.toml` runs the pool on signet, and the CKPool configs
+  are Bitcoin, which CKPool needs (it reads no CashAddr). `jmeter-bench`
+  therefore runs the mock with `--node bitcoin-core`, which keeps the
+  Bitcoin signet template and the script's `validateaddress` answer
+  (every address valid, with `iswitness`).
 
 ## Mapping from the old scripts
 
@@ -146,9 +184,14 @@ They behave as the scripts did, with these deliberate exceptions:
   platform, but picks different nodes and latencies than the scripts did.
 - Built binaries are found from cargo's own build messages, so
   `CARGO_TARGET_DIR` works; the scripts assumed `target/<profile>`.
-- `nightly` talks to bitcoind over JSON-RPC at `RPC_URL` and no longer needs
-  `bitcoin-cli` (`BITCOIN_CLI_BIN` is gone). It still starts `bitcoind` itself
-  when none answers.
+- The scripts ran the swarm on Bitcoin against Bitcoin Core; the harness
+  runs it on Bitcoin Cash against BCHN (see "Bitcoin Cash and BCHN" above).
+- `nightly` talks to BCHN over JSON-RPC at `RPC_URL` and no longer needs
+  `bitcoin-cli` (`BITCOIN_CLI_BIN` is gone). It still starts `bitcoind`
+  itself when none answers, now BCHN's, found through `BITCOIND_BIN` or
+  `PATH`; the script's Homebrew fallback found Bitcoin Core.
+- `mock-bitcoind` answers as BCHN unless given `--node bitcoin-core`, which
+  answers as the JavaScript server did.
 - `metrics` measures the share-rate span from full timestamps, so a run
   across midnight no longer reports a zero rate. Its headings say `->` and
   "proportional to" where the script printed non-ASCII symbols.

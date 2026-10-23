@@ -7,15 +7,19 @@ Mental model: there is **no proof-of-work**. Each node runs a "miner" that just
 *sleeps* between shares (interval ≈ difficulty·2³²/hashrate) and emits
 structurally-valid synthetic shares. They propagate over real libp2p, build a
 real share chain (ASERT, uncles, reorgs, PPLNS), and on a random "block-find"
-a node submits a **real regtest bitcoin block** carrying the PPLNS payout.
+a node submits a **real Bitcoin Cash regtest block** to BCHN carrying the
+PPLNS payout.
 
-Everything below assumes you start from the repo root. These instructions were prepared for a Mac ; it should be fairly trivial to adapt for a Linux machine:
+The sim mines Bitcoin Cash: every node config sets `chain = "bitcoin-cash"`
+and `bitcoin_cash_network = "regtest"`, and the node is Bitcoin Cash Node
+(BCHN). Everything below assumes a Unix shell (the harness signals nodes with
+`kill` and finds them with `pgrep`) and that you start from the repo root:
 
 ```sh
 cd ~/code/p2poolv2
 ```
 
-Tools used: `jq`, `curl`, and `bitcoin-cli` (all already present here).
+Tools used: `jq`, `curl`, and BCHN's `bitcoin-cli`.
 
 ---
 
@@ -24,8 +28,10 @@ Tools used: `jq`, `curl`, and `bitcoin-cli` (all already present here).
 Paste these into your terminal; the rest of the runbook uses them.
 
 ```sh
-# bitcoin-cli against the isolated regtest node used for the sim
-B() { /opt/homebrew/bin/bitcoin-cli -datadir=/tmp/p2pool-regtest "$@"; }
+# BCHN's bitcoin-cli against the isolated regtest node used for the sim
+B() { bitcoin-cli -datadir=/tmp/p2pool-regtest -rpcport=19443 -rpcuser=p2pool -rpcpassword=p2pool "$@"; }
+# the same, for calls to the p2pool wallet
+W() { B -rpcwallet=p2pool "$@"; }
 
 # raw JSON-RPC (same creds as the configs)
 rpc() {
@@ -37,12 +43,19 @@ rpc() {
 
 ---
 
-## 1. Prerequisites: the regtest bitcoind
+## 1. Prerequisites: the BCHN regtest node
 
-The sim talks to one local **regtest** bitcoind (RPC + ZMQ). Check it's up:
+The sim talks to one local **BCHN regtest** node (RPC + ZMQ). Install BCHN
+from its release tarball
+(<https://github.com/bitcoin-cash-node/bitcoin-cash-node/releases>; the
+version and SHA-256 sums CI uses are pinned in `docker/bchn/Dockerfile`), so
+its `bitcoind` and `bitcoin-cli` are on your `PATH`. BCHN's daemon is called
+`bitcoind` like Bitcoin Core's; a Bitcoin Core node will not do, and the
+harness refuses one. Check it's up:
 
 ```sh
 B getblockchaininfo | jq '{chain, blocks}'
+B getnetworkinfo | jq -r .subversion   # /Bitcoin Cash Node:.../
 ```
 
 Expect `"chain": "regtest"` and some block count (≥101). If it errors / isn't
@@ -50,18 +63,28 @@ running, start it and prime a wallet + coins:
 
 ```sh
 mkdir -p /tmp/p2pool-regtest
-/opt/homebrew/bin/bitcoind -regtest -datadir=/tmp/p2pool-regtest -daemon -rpcport=19443 -rpcuser=p2pool -rpcpassword=p2pool -zmqpubhashblock=tcp://127.0.0.1:28332 -fallbackfee=0.0001
+bitcoind -regtest -datadir=/tmp/p2pool-regtest -daemon -rpcport=19443 -rpcuser=p2pool -rpcpassword=p2pool -zmqpubhashblock=tcp://127.0.0.1:28332 -fallbackfee=0.00001 -allowunconnectedmining
 sleep 2
 B createwallet p2pool 2>/dev/null || B loadwallet p2pool
-ADDR=$(B getnewaddress)
+ADDR=$(W getnewaddress)
 B generatetoaddress 101 "$ADDR"     # spendable coinbase + a chain to build on
 ```
+
+`-allowunconnectedmining` matters: BCHN's `getblocktemplate` refuses work
+with "Bitcoin is not connected!" while the node has no peers, on regtest
+too, and a lone regtest node has none. BCHN also creates and loads a default
+wallet, so wallet calls name the `p2pool` wallet (`W`, or the
+`/wallet/p2pool` RPC path the harness uses). A node restarted after its tip
+is more than a day old counts itself in initial block download and refuses
+templates until a new block arrives: mine one (`B generatetoaddress 1
+"$ADDR"`), or start it with `-maxtipage=2000000000` as the Docker regtest
+config does.
 
 Sanity:
 
 ```sh
 B getblockcount          # height
-rpc getnewaddress '["x","bech32"]' | jq -r .result   # wallet works -> prints a bcrt1q... address
+W getnewaddress          # wallet works -> prints a bchreg:q... address
 ```
 
 > The sim never needs you to mine manually again — block-finds do it. The only
@@ -86,17 +109,24 @@ cargo build -p p2poolv2_sim --features sim --release
 
 ## 3. Test A — single node grows the share chain (Phase 1)
 
-Config lives in `config-dev.toml` (already has a `[sim]` block). Run with a
-throwaway store so existing data is untouched, logging to a file:
+The node needs a Bitcoin Cash regtest config with a `[sim]` block (see the
+overview, "Running a single sim node"). The quickest one is the config
+`run-swarm` writes for a one-node swarm; stop that swarm and copy it:
 
+```sh
+cargo sim run-swarm 1 && cargo sim stop-swarm
+cp /tmp/p2pool-sim/node-0.toml /tmp/sim-A.toml
+```
+
+Run with a throwaway store so existing data is untouched, logging to a file.
 Run it as a **single line** (don't split it with a `\` — pasting the
 continuation often drops you into a `dquote>` prompt; if that happens, Ctrl-C):
 
 ```sh
-P2POOL_STORE__PATH=/tmp/store-sim-A.db ./target/debug/p2poolv2_sim --config config-dev.toml > /tmp/sim-A.log 2>&1 &
+P2POOL_STORE__PATH=/tmp/store-sim-A.db ./target/debug/p2poolv2_sim --config /tmp/sim-A.toml > /tmp/sim-A.log 2>&1 &
 ```
 
-zsh prints the background pid itself (e.g. `[1] 12345`).
+The shell prints the background pid itself (e.g. `[1] 12345`).
 
 Watch the chain grow (each line = one confirmed synthetic share):
 
@@ -106,10 +136,10 @@ grep "Promoted block" /tmp/sim-A.log | tail -5
 ```
 
 Expect heights climbing (`... to confirmed height Some(1)`, `Some(2)`, …) every
-few seconds. Cross-check via the API:
+few seconds. Cross-check via the API (port 7600 in the copied config):
 
 ```sh
-curl -s http://127.0.0.1:46884/chain_info | jq '{tip: .chain_tip_height}'
+curl -s http://127.0.0.1:7600/chain_info | jq '{tip: .chain_tip_height}'
 ```
 
 **What you're seeing:** the closed-loop emitter pacing at ≈ difficulty·2³²/H,
@@ -203,25 +233,25 @@ grep "sim-uncle:" /tmp/p2pool-sim/node-0.log | tail -3
 
 ---
 
-## 6. Test D — block-finds submit real regtest blocks (Phase 3)
+## 6. Test D — block-finds submit real BCHN regtest blocks (Phase 3)
 
 Each emitted share is a block with probability `1/SHARES_PER_BLOCK`. Lower `SHARES_PER_BLOCK` to make
-this frequent and watch the **bitcoin** height climb (the sim nodes are mining
-real regtest blocks).
+this frequent and watch the **BCHN** block height climb (the sim nodes are mining
+real Bitcoin Cash regtest blocks).
 
 ```sh
 cargo sim stop-swarm >/dev/null 2>&1
-echo "bitcoin height before: $(B getblockcount)"
+echo "BCHN height before: $(B getblockcount)"
 SHARES_PER_BLOCK=20 LATENCY_MS=100 cargo sim run-swarm 20
 sleep 40
-echo "bitcoin height after:  $(B getblockcount)"
+echo "BCHN height after:  $(B getblockcount)"
 grep -h "sim block-find" /tmp/p2pool-sim/node-*.log | wc -l        # attempts
 grep -h "Block submitted successfully" /tmp/p2pool-sim/node-*.log | wc -l   # accepted
 ```
 
-Expect the bitcoin height to jump several blocks and "submitted successfully"
+Expect the BCHN height to jump several blocks and "submitted successfully"
 lines. The full real path runs for free: block submit → ZMQ `hashblock` → GBT
-refresh → the share chain continues on the new bitcoin tip.
+refresh → the share chain continues on the new BCHN tip.
 
 ---
 
@@ -236,23 +266,29 @@ for ht in $((TIP-2)) $((TIP-1)) $TIP; do
   h=$(B getblockhash $ht)
   echo "=== block $ht coinbase ==="
   B getblock "$h" 2 | jq -r '.tx[0].vout | "outputs: \(length)",
-    (.[] | "  \(.value)  \(.scriptPubKey.address // .scriptPubKey.type)")'
+    (.[] | "  \(.value)  \((.scriptPubKey.addresses // [.scriptPubKey.address // .scriptPubKey.type]) | join(","))")'
 done
 ```
 
-Expect some blocks paying **several distinct `bcrt1q…` addresses** with amounts
-that sum to the subsidy (e.g. `13.75 + 11.25`), plus a `nulldata` output (the
-witness commitment). That split is the PPLNS distribution, proportional to each
-miner's share contribution in the window.
+Expect some blocks paying **several distinct `bchreg:q…` addresses** with
+amounts that sum to the subsidy (e.g. `13.75 + 11.25`), plus `nulldata`
+outputs: the share commitment (`OP_RETURN` and a 32-byte hash) last, and
+sometimes a zero-byte padding output before it. A Bitcoin Cash coinbase
+has no witness commitment. The split is the PPLNS distribution,
+proportional to each miner's share contribution in the window.
 
 > Breadth: the number of payees = distinct miners with weight in the PPLNS
-> window. The window is `PPLNS_WINDOW_SHARES` (120960) shares on every
-> network, sim included, starting below the shares not yet mature for the
-> paying share (`COINBASE_MATURITY`, see
-> `docs/architecture/payout-distribution.md`). The first `COINBASE_MATURITY`
-> shares are always mature, so at the default maturity every share of a sim
-> run is paid and all active miners appear in the coinbase. With 20 nodes you'll see ~17-20 payees
-> per block once the chain is deeper than the window.
+> window, up to `BCH_MAX_COINBASE_PAYOUTS` (11) payout outputs. Past 11
+> payees the largest are paid their exact share and the rest goes to one
+> payee drawn by weight (`docs/architecture/payout-distribution.md`,
+> "Bitcoin Cash coinbase budget"); both are share-chain rules. The window
+> starts below the shares not yet mature for the paying share
+> (`BCH_COINBASE_MATURITY`, 100 shares, which the sim build keeps) and is
+> capped at `PPLNS_WINDOW_SHARES` (80 in the sim build); regtest headers
+> always hit that cap. The first 100 shares of the chain are always mature.
+> With 20 nodes a block pays at most 11 payout outputs once the chain is
+> deeper than maturity plus window; with 10 nodes, up to all 10 miners
+> (a small miner may have no share in an 80-share window).
 
 Stop everything:
 
@@ -342,10 +378,12 @@ cargo sim nightly restart-delayed
 ## 9. Test G — payout maturity (late miner)
 
 Checks that a block-find pays a miner only once its shares are mature. The
-sim build's coinbase maturity is 20 shares (a compile-time constant, logged by
-each node at startup as `Sim depths: coinbase maturity 20 shares, ...`), so a
-short run reaches it. The swarm is launched with `LATE_MINER`, the node that
-starts with its emitter off:
+swarm mines Bitcoin Cash, whose coinbase maturity is 100 shares
+(`BCH_COINBASE_MATURITY`, a share-chain rule the sim build keeps; only
+Bitcoin's is shortened to 20). Each node logs it at startup as
+`Sim depths: coinbase maturity 100 shares, ...`. A time-compressed run
+reaches it in a few minutes. The swarm is launched with `LATE_MINER`, the
+node that starts with its emitter off:
 
 ```sh
 IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 LATE_MINER=1 \
@@ -353,34 +391,34 @@ IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 LATE_MINER=1 \
 LATE_MINER=1 cargo sim failures late-miner
 ```
 
-Or end to end, with bitcoind setup and the nightly checks:
+Or end to end, with BCHN setup and the nightly checks:
 
 ```sh
 IDEAL_BLOCK_TIME=1 SHARES_PER_BLOCK=20 LATE_MINER=1 \
   NODE_COUNT=10 cargo sim nightly late-miner
 ```
 
-The scenario waits for the tip to reach twice the maturity, so the payout
-skip is at full size, restarts node 1 with its emitter on, and then runs
-`cargo sim maturity-check` until it gives a verdict. The checker reads
-only the logs, the node 0 API and bitcoind. It maps each `sim block-find` line
-(`... prev_share <hash>`) to the paying share's height and decodes the regtest
-coinbase:
+The scenario waits for the tip to reach twice the maturity (200 shares), so
+the payout skip is at full size, restarts node 1 with its emitter on, and
+then runs `cargo sim maturity-check` until it gives a verdict. The checker
+reads only the logs, the node 0 API and BCHN. It maps each `sim block-find`
+line (`... prev_share <hash>`) to the paying share's height and decodes the
+regtest coinbase. A report looks like this (heights and hashes vary):
 
 ```
-late miner: node 1 (bcrt1q...), coinbase maturity 20
-first late share: confirmed 51, confirmed or uncle 51
+late miner: node 1 (bchreg:q...), coinbase maturity 100
+first late share: confirmed 231, confirmed or uncle 231
 bitcoin block        paying_h  p-first  mature  late_paid
-3f1c0b9e2a7d4c11..         62       11      no         no
-9a02d7e4b1c35f80..         74       23     yes        yes
-maturity check: PASS (late miner first paid at paying height 74)
+3f1c0b9e2a7d4c11..        318       87      no         no
+9a02d7e4b1c35f80..        337      106     yes        yes
+maturity check: PASS (late miner first paid at paying height 337)
 ```
 
 It fails if the late miner is paid while `p - first` is below the maturity, or is
 not paid by the first block-find past it. The full report is in
 `$RUN_DIR/maturity-check.txt`. Exit codes: 0 pass, 1 fail, 2 no qualifying
 block-find yet, 3 setup error (e.g. the late node shares its payout address
-with another node; keep `DISTINCT_ADDR=1` and a loaded wallet).
+with another node; keep `DISTINCT_ADDR=1` and the `p2pool` wallet loaded).
 
 Spend maturity is not covered: sim shares carry no share transactions. Unit
 tests pin it.
@@ -451,8 +489,9 @@ below the prune target too.
 `shallow-fork-reorged` is the control: it reconnects at height 60, before any
 node prunes. The node must log no refusal and end up with node 0's confirmed
 hash, and the normal convergence check applies. Height 60 also keeps the fork
-within the sim PPLNS window cache (about 120 entries), which bounds how deep a
-fork a node can pay out for.
+within the sim PPLNS window cache (200 entries on Bitcoin Cash: maturity
+100, window 80, buffer 20), which bounds how deep a fork a node can pay out
+for.
 
 The summary prints `fork verdict: PASS` or `FAIL (<reasons>)`.
 
@@ -462,7 +501,7 @@ The summary prints `fork verdict: PASS` or `FAIL (<reasons>)`.
 
 | Thing              | Path                                                      |
 |--------------------|-----------------------------------------------------------|
-| Single-node config | `config-dev.toml` (has `[sim]`)                           |
+| Single-node config | `/tmp/sim-A.toml` (Test A; has `[sim]`)                   |
 | Swarm run dir      | `/tmp/p2pool-sim/`                                        |
 | Per-node config    | `/tmp/p2pool-sim/node-<i>.toml`                           |
 | Per-node log       | `/tmp/p2pool-sim/node-<i>.log`                            |
@@ -472,7 +511,7 @@ The summary prints `fork verdict: PASS` or `FAIL (<reasons>)`.
 | Maturity report    | `/tmp/p2pool-sim/maturity-check.txt` (late-miner only)    |
 | Pre-wipe log       | `/tmp/p2pool-sim/prejoin-node-<i>.log` (pruned-join only) |
 | Node APIs          | `http://127.0.0.1:760<i>` (node i)                        |
-| regtest bitcoind   | datadir `/tmp/p2pool-regtest`, RPC `:19443`, ZMQ `:28332` |
+| BCHN regtest node  | datadir `/tmp/p2pool-regtest`, RPC `:19443`, ZMQ `:28332` |
 
 Useful log greps (per node or across all):
 
@@ -505,6 +544,7 @@ curl -s :7600/chain_info | jq            # tip/candidate heights (prefer logs fo
 | `HASHRATE`                           | 1.0e12          | modeled per-node hashrate (higher = faster shares)                                                                 |
 | `LATE_MINER`                         | unset           | node index launched with its emitter off, for `failures late-miner` (Test G)                                       |
 | `FORK_GROUP_FROM`                    | unset           | split the swarm: nodes at this index and above dial only each other, for the fork scenarios (Test I)               |
+| `MINER_ADDRESS`                      | `bchreg:qp63…vuwd` | payout address of a node without its own; a `bchreg:` CashAddr (the key with secret 1)                       |
 | `DISTINCT_ADDR`                      | 1               | each node gets its own payout address via the wallet                                                               |
 | `DIAL_FANOUT`                        | 3               | how many earlier peers each node dials                                                                             |
 | `PROFILE`                            | release         | `release` or `debug`                                                                                               |
@@ -526,6 +566,7 @@ curl -s :7600/chain_info | jq            # tip/candidate heights (prefer logs fo
 3. **High block rates drop a few shares.** At very fast chains you'll see
    `Share timestamp … not greater than median time past` rejections — a benign
    1-second-granularity artifact, not a failure.
-4. **`getnewaddress` needs a loaded wallet.** If `DISTINCT_ADDR=1` can't reach a
-   wallet it silently falls back to one shared address (you'd see one payout
-   address). Confirm the wallet with the sanity check in step 1.
+4. **`getnewaddress` needs the `p2pool` wallet.** If `DISTINCT_ADDR=1` can't
+   reach it (`RPC_URL/wallet/p2pool`) it silently falls back to one shared
+   address (you'd see one payout address). Confirm the wallet with the sanity
+   check in step 1.

@@ -236,6 +236,17 @@ anchor and the donation and fee cap as they were.
   environment variables and run files; `plot-metrics` now writes SVG. See
   `docs/tooling.md`, which also maps each old script for upstream merges.
   `tools/safa-auxpow` stays JavaScript until a Rust BCH VM exists.
+- The sim swarm and its nightly run Bitcoin Cash against BCHN instead of
+  Bitcoin against Bitcoin Core. `p2poolv2_sim` reads `chain =
+  "bitcoin-cash"` configs with a `bchreg:` payout address and an
+  `rp2pool:` share address through the node's own parsers; the harness
+  writes such configs, `MINER_ADDRESS` defaults to a `bchreg:` address, and
+  the nightly starts BCHN with `-allowunconnectedmining`. CI installs BCHN
+  29.2.0 from its release tarball, checked against the SHA-256 sums in
+  `docker/bchn/Dockerfile`. Bitcoin Cash keeps its 100-share maturity in
+  the sim build. `cargo mock-bitcoind` answers as BCHN on regtest by
+  default; `--node bitcoin-core` keeps the Bitcoin signet answers the JMeter
+  comparison with CKPool needs.
 
 ### Removed
 

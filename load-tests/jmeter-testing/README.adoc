@@ -167,11 +167,13 @@ some required services.
 === Run the simulated bitcoin node:
 
 The mock bitcoind is the `mock_bitcoind` binary in `p2poolv2_tools`
-(see `docs/tooling.md`). It listens on port 48332:
+(see `docs/tooling.md`). It listens on port 48332. It answers as BCHN by
+default; this test plan, `config-load-test.toml` and the CKPool configs
+mine Bitcoin signet, so run it as Bitcoin Core:
 
 [,shell]
 ----
-cargo mock-bitcoind
+cargo mock-bitcoind --node bitcoin-core
 ----
 
 === Run the stratum server to test:
