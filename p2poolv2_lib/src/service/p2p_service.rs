@@ -22,6 +22,7 @@ use crate::node::validation_worker::ValidationSender;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::ShareValidator;
 use crate::utils::time_provider::TimeProvider;
 
@@ -37,6 +38,9 @@ pub struct RequestContext<C, T> {
     pub validation_tx: ValidationSender,
     pub block_receiver_handle: BlockReceiverHandle,
     pub share_validator: Arc<dyn ShareValidator + Send + Sync>,
+    /// Bitcoin Cash: where a relayed share transaction goes. `None` on
+    /// Bitcoin.
+    pub share_transaction_pool: Option<ShareTransactionPool>,
 }
 
 /// The Tower service that processes inbound P2P requests.

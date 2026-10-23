@@ -24,6 +24,7 @@ use crate::stratum::work::tracker::JobTracker;
 use bitcoin::block::Header;
 use bitcoin::{Address, BlockHash, CompactTarget};
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// A synthetic share ready to emit, plus the bitcoin coinbase it was built
 /// with (reused on a block-find to assemble the real regtest block, since the
@@ -130,6 +131,7 @@ pub fn build_sim_emission(params: SimShareParams<'_>) -> Result<BuiltShare, SimS
         template_merkle_branches: job.template_merkle_branches.clone(),
         bitcoin_coinbase: coinbase.clone(),
         coinbase_proof,
+        share_transactions: Arc::clone(&job.share_transactions),
     };
 
     Ok(BuiltShare { emission, coinbase })

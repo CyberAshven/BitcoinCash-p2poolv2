@@ -86,6 +86,24 @@ jobs:
       - name: Build static assets
         run: trunk build --release
 
+      # The app's only styling is the node's dashboard assets, bundled by
+      # trunk. The stylesheet's font url()s are relative, so the fonts must
+      # sit next to it in dist. The style guard in p2poolv2_api checks the
+      # sources; this checks the bundle.
+      - name: Check the bundled stylesheets resolve
+        run: |
+          set -eu
+          ls dist/pico.min-*.css dist/dashboard-*.css dist/pages-*.css
+          test -f dist/logo-horizontal-wt.svg
+          urls=$(grep -oh 'url("[^"]*")' dist/dashboard-*.css dist/pages-*.css | sed 's/^url("//; s/")$//' | grep -v '^data:' || true)
+          test -n "$urls"
+          for url in $urls; do
+            test -f "dist/$url" || { echo "dist/$url is missing"; exit 1; }
+          done
+          if find dist -name '*.css' ! -name 'pico.min-*.css' ! -name 'dashboard-*.css' ! -name 'pages-*.css' | grep -q .; then
+            echo "dist has a stylesheet that is not a shared asset"; exit 1
+          fi
+
       - uses: actions/upload-artifact@v7
         with:
           name: p2poolv2_web

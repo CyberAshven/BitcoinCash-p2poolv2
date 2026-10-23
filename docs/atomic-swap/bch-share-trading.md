@@ -28,20 +28,231 @@ Bitcoin Cash.
   and claims the share units.
 - Either both claims can happen or both refunds can: the secret that pays
   the seller is the secret that pays the buyer.
+- What the buyer gets is the share's **payout right**: from the claim on,
+  every BCH block the pool finds while that share is in its PPLNS window
+  pays the share's weight to the buyer's key hash (see "Payout rights").
+- Nodes accept, relay and mine signed share transactions (see "Share
+  transactions on the network"), so a trade reaches the share chain from any
+  node: `p2poolv2_cli transactions submit` or `POST /share_transaction`.
 
-## What a share unit is worth today
+## What a trade sells
 
 A share coinbase output pays one share unit (10^8 base units) to the
 miner's P2PKH script, `miner_address` in the header. Upstream's design
 ([P2Poolv2 docs, payouts](https://github.com/p2poolv2/docs/tree/main/payouts))
 is that the holder of a share output earns that share's PPLNS payouts, so a
-buyer who bought shares collects their future coinbase payouts. That rule
-is not implemented upstream or here: a found block pays each share's
-`miner_bitcoin_address` ([payout-distribution.md](../architecture/payout-distribution.md),
-"Payee is `miner_bitcoin_address`"). Until a payout-to-holder rule exists,
-a trade moves share-chain units, not the BCH income behind them. The
-trading mechanism below does not depend on that rule and does not change
-when it arrives.
+buyer who bought shares collects their future coinbase payouts. Upstream
+has not implemented it; on Bitcoin Cash this fork does, as the payout right
+below. The units and the right are separate things: the units are
+share-chain currency and stay divisible down to the dust floor, while the
+right is whole and travels as one, so a trade that locks the share output
+at input 0 into the contract at output 0 sells the right, whatever part of
+the units it locks.
+
+## Payout rights
+
+On Bitcoin Cash every share carries one payout right. A coinbase that pays
+the PPLNS window credits each window share's weight to whoever holds that
+share's right at the paying share. Bitcoin keeps upstream's rule and pays
+`miner_bitcoin_address`.
+
+### The holder rule
+
+1. **Origin.** A share's right starts on its coinbase output (output 0, one
+   share unit), held by the share's own `miner_address` key hash.
+2. **Transfer: input i to output i.** When a share transaction spends an
+   output carrying a right through its input `i`, the right passes to output
+   `i` of that transaction. A transaction with no output `i` leaves the right
+   with its current holder, and the right can no longer move ("frozen"): it
+   sits on a spent output. Each output therefore carries at most one right,
+   and a merge of several share outputs into one output transfers only the
+   right on input 0. The trade tools put the sold coin at input 0 and the
+   contract at output 0, so a lock moves the right into the contract.
+3. **Holder.** A right on a P2PKH output is held by that output's key hash.
+   A right on a P2SH32 output, the trade contract or any other, keeps the
+   holder it had before: **the seller holds a locked share until the claim
+   or the refund**. The share chain cannot name anyone else at lock time,
+   because a P2SH32 output shows only the hash of its redeem script; the
+   refund key is revealed only when the refund spends it. A claim passes the
+   right to the buyer's P2PKH output, a refund to the refund key's.
+4. **Which transactions count.** The transactions of the shares on the
+   paying share's own chain, from the share chain's start up to and
+   including the paying share's parent (the PPLNS anchor, the same anchor
+   the window walks from). Uncles' transactions never count: an uncle adds
+   nothing to chain state, and its coinbase output can never be spent on the
+   chain.
+5. **Payee.** Each window share's own weight (its difficulty times 10, plus
+   the nephew bonus for each uncle it includes) goes to its holder:
+   - the holder is the share's own `miner_address` key hash (never
+     transferred, or transferred back): `miner_bitcoin_address`, exactly as
+     before;
+   - any other key hash: the Bitcoin Cash P2PKH address of that key hash.
+     The holder spends it with the same key it signs share transactions
+     with.
+
+   An uncle's weight (9/10 of its difficulty) always goes to the uncle's own
+   `miner_bitcoin_address`.
+
+The rule is a function of the share chain alone: the window, the anchor and
+the transactions in the anchor's ancestry. No node-local state, BCH node or
+configuration enters it, and mainnet, chipnet and regtest run the same code.
+
+### Why input i to output i
+
+Each right's destination depends only on the input that spends it, never on
+the other inputs, so no right's position depends on the history of another
+right. A node tracks only the shares it can still pay (its PPLNS window
+cache); a rule where rights shift outputs by counting each other ("the k-th
+right goes to output k") would let a right this node never tracked move a
+right it does, and two nodes that started at different times would pay
+differently. Pairing inputs and outputs also caps each output at one right,
+so one spend moves at most one right per input: the work and memory per
+share are linear in its inputs, and nobody can build one output holding
+thousands of rights and spend it over and over. A proportional rule (each
+output gets a slice of each right, by value) would need a list of slices
+per output that grows with every split.
+
+### How a node looks a holder up
+
+`PayoutRights` (`accounting/payout/sharechain_pplns/payout_rights.rs`) lives
+in the PPLNS window cache (`PplnsWindow`), which the notifier, the validator
+and the API already share:
+
+- **Index.** A map from share to its moved right (where the right is, its
+  holder, its owner), a reverse map from outpoint to share, and a map from
+  each cached share's coinbase txid to the share. A right still on its
+  coinbase output has no entry. Entries are evicted with their share when it
+  leaves the cache (`cache_capacity`, 122,270 shares on Bitcoin Cash), so
+  the index holds at most one entry per cached share.
+- **Confirm.** `PplnsWindow::update` applies each newly confirmed share's
+  transactions in height order. Only shares whose header commits to share
+  transactions are read from the store: `share_witness_root` differs from
+  the root of an empty set. A confirmed share whose body was never fetched
+  (header-only confirmation more than `PRUNE_DEPTH` below the candidate tip,
+  during sync) is applied as carrying none: its transactions could only move
+  rights of shares that deep, which no payout validated in the PPLNS zone
+  reaches. A branch share's missing body is a read failure instead, retried
+  later.
+- **Partial history.** A node tracks only the shares in its cache. Because
+  a right moves by its own input index alone, a right this node never
+  tracked cannot shift one it does, so a node that started late places every
+  cached right exactly where a node running since genesis does.
+- **Reorg.** Every applied share records the previous entry of each right it
+  changed. A confirmed reorg pops the shares above the fork, newest first,
+  and restores those entries. Undo records are kept for up to the newest
+  1,210 shares (`RIGHTS_UNDO_DEPTH`, the window's eviction buffer, so as deep
+  as the window serves an anchor) and at most 100,000 changed entries in all
+  (`RIGHTS_UNDO_MAX_CHANGES`, about 10 MB); past either, the oldest records go.
+  A reorg deeper than the log reloads the cache, rights included, from the
+  store.
+- **Per anchor.** A payout anchored at the cached tip reads the index as it
+  is. An anchor on a fork or above the cached tip gets an overlay: undo the
+  cached shares above its fork point, then apply its branch shares. An
+  anchor whose fork point lies deeper below the cached tip than the undo log
+  reaches cannot be resolved and is dropped without a verdict, like a window
+  truncated by eviction.
+- **Cost.** A payout scans the moved rights once and the window once;
+  nothing is read per window share. One share moves at most one right per
+  input (at most about 5,000 inputs fit `BLOCK_TXS_SIZE_LIMIT`), so applying
+  or undoing a share and the undo log are bounded too.
+
+### Consequences
+
+- A lock of part of a share output (0.4 share in the example below) sells
+  the whole right with those units; the change keeps the rest of the units
+  and no right. To sell several rights, lock each share output to its own
+  contract output, input `i` to output `i`.
+- A wallet that merges share outputs keeps receiving their payouts: rights
+  beyond the last output freeze with their holder. They can no longer be
+  sold.
+- A transfer counts from the next coinbase on: the paying share's parent is
+  the newest share whose transactions count. The share itself is paid only
+  while it is in the window, so a right is worth what is left of the share's
+  time there (up to 120,960 shares, about two weeks, behind the 100-share
+  maturity).
+
+## Share transactions on the network
+
+A node keeps a bounded pool of signed share transactions, relays them to its
+peers and puts them in the shares it builds. Bitcoin Cash only: a Bitcoin
+node has no pool and ignores relayed transactions, as before.
+
+### Pool (`shares/transaction_pool.rs`)
+
+- **Admission.** A transaction is accepted only if it is valid on top of
+  the confirmed chain at the next height, under every share-chain rule: the
+  context-free checks of a share block (inputs and outputs present, no
+  repeated input, values within the money supply), the Bitcoin Cash
+  interpreter for every input, P2PKH or P2SH32 outputs above dust, inputs
+  at least outputs, finality, coinbase maturity and output expiry. Every
+  input must spend an output of a confirmed transaction that the confirmed
+  chain has not spent, so the pool holds no chains of unconfirmed
+  transactions. A transaction spending an input another pool transaction
+  spends is refused (first seen wins).
+- **Limits.** At most 1,000 transactions and 4 MiB, each at most 50 KiB
+  (`MAX_POOL_TRANSACTIONS`, `MAX_POOL_BYTES`, `MAX_POOL_TRANSACTION_SIZE`).
+  When a new transaction does not fit, the oldest ones are evicted. A
+  transaction expires 3 hours after it arrived. New transactions from peers
+  are admitted at most 10 a second on average, in bursts of up to 100, across
+  all peers (copies of one the pool already has are not counted);
+  transactions over the API are not limited.
+- **Confirmed and reorged.** Every time the node builds work it rechecks the
+  pool against the confirmed chain. A transaction now on the confirmed chain
+  leaves the pool for a list of the last 200 confirmed ones
+  (`MAX_RECENTLY_CONFIRMED`); if a reorg takes it off the confirmed chain and
+  it is still valid, it returns. A transaction that became invalid (an input
+  spent by another transaction, a spent output no longer stored, an expired
+  output) is dropped. One whose input is not yet mature, whose source a
+  reorg took off the confirmed chain, or whose lock time is not yet reached
+  waits until it is ready or expires.
+- **Locking.** The pool's state sits behind one mutex that is never held
+  across an await, a store read or another lock.
+
+### Relay
+
+Accepted transactions go to every connected peer except the one that sent
+them, as the `Transaction` request (message 7) the protocol already had,
+through a bounded channel the node actor drains. A peer answers with `Ack`
+and relays a transaction only the first time it accepts it, so relay ends at
+nodes that already have it. Per-peer request limits apply as to every
+request, and the relay channel drops on overflow (capacity 256): the
+transaction stays in the pool and is mined anyway.
+
+### Inclusion
+
+When the notifier builds work it selects pool transactions in arrival order
+that are valid on the mining base (the confirmed tip or a validated share
+above it): inputs not spent on the confirmed chain nor by a share between
+the confirmed tip and the mining base, final and mature at the share's
+height. It skips a transaction that does not fit and stops adding at 99
+transactions (`TXS_COUNT_LIMIT` less the coinbase), 64 KiB
+(`MAX_SHARE_TRANSACTION_BYTES`) and the sigop budget; the job builder then
+drops transactions from the end until the share's transactions, its share
+coinbase and its bitcoin coinbase fit `BLOCK_TXS_SIZE_LIMIT` (200 KiB).
+
+The chosen set is fixed for the job: its `share_witness_root` goes into the
+share commitment every miner on the job hashes, the job keeps the set, and a
+found share is built with exactly those transactions after its coinbase. A
+share is valid if the set is valid on its parent, whenever it is found.
+Declared Stratum V2 jobs carry no share transactions: their terms travel in
+a 255-byte token.
+
+### Submitting
+
+`p2poolv2_cli bch-trade` builds transactions offline. To mine one, hand its
+hex to any node:
+
+```sh
+p2poolv2_cli --config p2pool.toml transactions submit <hex>
+# or
+curl -u <user>:<password> -H 'Content-Type: application/json' \
+  -d '{"hex":"<hex>"}' http://<api hostname>:<api port>/share_transaction
+```
+
+The node answers `{"txid": ..., "status": "accepted"}` (or
+`"already_in_pool"`) and relays it, or answers 400 with the rule the
+transaction breaks. A Bitcoin node answers 503. The endpoint sits behind
+the API login, also on a node whose dashboard is public.
 
 ## The contract
 
@@ -190,12 +401,15 @@ chain is at height 50,000 and Bitcoin Cash at height 300,000.
    `bch-trade inspect --redeem-script <hex>` decodes a script a
    counterparty sends.
 4. **Seller locks the shares.** From a mature share output (100 shares
-   deep):
+   deep). The coin is input 0 and the contract output 0, so the lock moves
+   the share's payout right into the contract, where the seller keeps
+   holding it:
 
    ```sh
    p2poolv2_cli bch-trade lock --chain share --network chipnet \
      --redeem-script <share contract> --coin <txid>:<vout>:100000000 \
      --amount 40000000 --change-address tp2pool:q<seller> --wif-file seller.wif
+   p2poolv2_cli --config p2pool.toml transactions submit <lock hex>
    ```
 
 5. **Buyer checks the share lock.** The contract output exists with the
@@ -235,13 +449,19 @@ chain is at height 50,000 and Bitcoin Cash at height 300,000.
    p2poolv2_cli bch-trade claim --chain share --network chipnet \
      --redeem-script <share contract> --coin <share lock txid>:0:40000000 \
      --to tp2pool:q<buyer> --wif-file buyer.wif --secret-file secret.hex
+   p2poolv2_cli --config p2pool.toml transactions submit <claim hex>
    ```
 
+   From the share after the claim's share, every BCH block the pool finds
+   while the sold share is in its window pays that share's weight to
+   `bchtest:q<buyer>`, the P2PKH address of the buyer's key hash.
+
 Refunds, if the trade stops: the seller runs `bch-trade refund --chain
-share`, valid in shares above the share refund height; the buyer runs
-`bch-trade refund --chain bch`, valid in blocks above the BCH refund
-height. Every command prints the transaction as hex and JSON and never
-broadcasts it.
+share`, valid in shares above the share refund height, which returns the
+payout right to the seller's refund address; the buyer runs `bch-trade
+refund --chain bch`, valid in blocks above the BCH refund height. Every
+`bch-trade` command prints the transaction as hex and JSON and never
+broadcasts it; `transactions submit` hands a share transaction to a node.
 
 ## Timeouts
 
@@ -327,6 +547,14 @@ validity, so nodes restart on a fresh store as for decisions 11 and 12.
 4. **Protocol string.** Bitcoin Cash protocol strings gain `trade-htlc`
    after `asert-parent`, so nodes with and without these rules fail the
    handshake instead of exchanging shares the other rejects.
+5. **Payout to the holder** (added after the trading rules). A coinbase pays
+   each window share's weight to the holder of its payout right (see
+   "Payout rights"). Every node rebuilds every coinbase from the window, so
+   this is a payout rule like decision 11's window: a node on the old rule
+   rebuilds another coinbase once any right has moved. Share and transaction
+   validity do not change.
+6. **Protocol string.** Bitcoin Cash protocol strings gain `payout-holder`
+   after `trade-htlc` (`BCH_PAYOUT_HOLDER_RULE_TAG`).
 
 ## Tools
 
@@ -339,6 +567,7 @@ validity, so nodes restart on a fresh store as for decisions 11 and 12.
 | `p2poolv2_cli bch-trade claim` | Signs a claim with the secret |
 | `p2poolv2_cli bch-trade refund` | Signs a refund after the refund height |
 | `p2poolv2_cli bch-trade extract-secret` | Reads the secret from a counterparty's claim |
+| `p2poolv2_cli transactions submit` | Hands a signed share transaction to a node, which checks, relays and mines it (`POST /share_transaction`) |
 
 Keys come from a WIF file (`--wif-file`) or a hidden prompt, and the secret
 from `--secret-file` or a prompt; neither is ever taken on the command line
@@ -348,14 +577,24 @@ or generated. The library side is `shares::bch_htlc` (template),
 
 ## Status and limits
 
-- **Share transactions are not relayed or mined yet.** Every node builds
-  its shares with the coinbase alone (`handle_stratum_share`, upstream's
-  open TODO), so the share-chain leg can be built, signed and checked, and
-  the in-process tests mine it, but no live node includes it yet. That needs
-  a share-transaction pool that the work notify path draws from and
-  revalidates on every new parent, a separate change.
-- **Payout to the holder of a share output** is upstream's design and not
-  implemented (see "What a share unit is worth today").
+- **Relay and mining** of share transactions and **payout to the holder**
+  are implemented (see "Payout rights" and "Share transactions on the
+  network") and tested in process: a claim moves a share's payout to the
+  buyer's key hash in the next coinbase, a refund keeps it with the seller,
+  a reorg that removes a claim gives the payout back, an anchor sees the same
+  holders whatever the window's cached tip, a Bitcoin window keeps paying
+  the miner, and a transaction submitted to one node reaches another over the
+  real P2P stack (`p2poolv2_tests/src/share_payout_rights_test.rs`,
+  `share_transaction_relay_test.rs`). A job built with pool transactions
+  commits to them and its found share passes the coinbase proof and body
+  checks (`handle_stratum_share`). Not yet run on chipnet, and no live node
+  has mined a share transaction yet.
+- **Partial rights.** A right is whole. Selling part of a share's payout
+  needs a proportional rule, which the index above cannot bound (see "Why
+  input i to output i").
+- **No fee market.** The pool admits by arrival and evicts the oldest; a
+  holder of many share outputs can keep it full of valid transactions, at
+  the cost of those outputs, until they are mined or expire.
 - **Evidence.** Unit tests sign real Bitcoin Cash transactions for every
   path (claim, Schnorr claim, refund at the height, wrong and short secret,
   early refund, final sequence, time lock, wrong key, redirected output,

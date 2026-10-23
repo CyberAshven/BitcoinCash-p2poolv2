@@ -1,5 +1,7 @@
 /* Additions for the pages the node renders in Rust, on top of
-   CashDragon0's dashboard.css. Nothing here needs JavaScript. */
+   CashDragon0's dashboard.css. The Rust/WASM dashboard (p2poolv2_web)
+   loads these same files, so anything it needs goes here too, never in a
+   stylesheet of its own. Nothing here needs JavaScript. */
 
 header.site-header .header-search {
   display: flex;
@@ -12,9 +14,20 @@ header.site-header .header-search input[type="search"] {
   font-size: 0.72rem;
   padding: 0.2rem 0.6rem;
   margin: 0;
+  /* Pico's search icon, kept clear of the placeholder at this size. */
+  padding-inline-start: 1.8rem;
+  background-position: center left 0.6rem;
+  background-size: 0.8rem auto;
 }
 header.site-header .tabs li a[aria-current="page"] {
   text-decoration: none;
+}
+/* When the menu bar's items do not fit on one line, it wraps instead of
+   scrolling the page sideways, as it does on phones. The WASM dashboard's
+   bar carries a live status and its settings too. */
+header.site-header nav {
+  flex-wrap: wrap;
+  row-gap: 0.35rem;
 }
 
 nav[aria-label="breadcrumb"] {
@@ -159,4 +172,27 @@ tr.uncle-row {
   padding: 3rem 0;
   font-size: 0.85rem;
   margin: 0;
+}
+
+/* The hashrate chart of the Rust/WASM dashboard (p2poolv2_web), which loads
+   these same stylesheets: zooming, a crosshair on the nearest point, and
+   CashDragon0's .chart-tip on the side away from it. The node's own pages
+   never render these classes. */
+.chart-wrap svg.zoomable {
+  cursor: crosshair;
+  user-select: none;
+}
+.chart-wrap .crosshair {
+  stroke: var(--pico-muted-color);
+  stroke-dasharray: 2 2;
+}
+.chart-wrap .selection {
+  fill: var(--ms-green);
+  opacity: 0.15;
+}
+.chart-wrap .chart-tip.at-left {
+  left: 11%;
+}
+.chart-wrap .chart-tip.at-right {
+  right: 2%;
 }

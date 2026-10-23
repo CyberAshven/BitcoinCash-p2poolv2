@@ -23,6 +23,7 @@ use crate::service::spawn_peer_service;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::ShareValidator;
 use crate::utils::time_provider::SystemTimeProvider;
 use libp2p::PeerId;
@@ -68,6 +69,9 @@ pub struct RequestResponseHandler<C: Send + Sync> {
     inbound_failures_total: u64,
     /// Responses dropped on a full or closed worker queue, for P2P health metrics.
     responses_dropped_total: u64,
+    /// Bitcoin Cash: the pool relayed share transactions go to. `None` on
+    /// Bitcoin, which ignores them.
+    share_transaction_pool: Option<ShareTransactionPool>,
 }
 
 /// Implementation of ResponseChannel<Message>, used in production.
@@ -85,6 +89,7 @@ impl RequestResponseHandler<ResponseChannel<Message>> {
         block_receiver_handle: BlockReceiverHandle,
         share_validator: Arc<dyn ShareValidator + Send + Sync>,
         response_worker_handle: ResponseWorkerSender,
+        share_transaction_pool: Option<ShareTransactionPool>,
     ) -> Self {
         Self {
             peer_handles: HashMap::new(),
@@ -100,6 +105,7 @@ impl RequestResponseHandler<ResponseChannel<Message>> {
             outbound_failures_total: 0,
             inbound_failures_total: 0,
             responses_dropped_total: 0,
+            share_transaction_pool,
         }
     }
 
@@ -310,6 +316,7 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
             validation_tx: self.validation_tx.clone(),
             block_receiver_handle: self.block_receiver_handle.clone(),
             share_validator: self.share_validator.clone(),
+            share_transaction_pool: self.share_transaction_pool.clone(),
         };
 
         let peer_handle = match self.peer_handles.get(&peer) {
@@ -475,6 +482,7 @@ mod tests {
             outbound_failures_total: 0,
             inbound_failures_total: 0,
             responses_dropped_total: 0,
+            share_transaction_pool: None,
         };
         (handler, response_worker_rx)
     }

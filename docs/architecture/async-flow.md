@@ -21,6 +21,7 @@ The arms:
 | `swarm_rx` (outbound ops) | `on_swarm_send` | Executes `SwarmSend` from workers: `send_request`, `send_response`, block broadcast, disconnect |
 | `command_rx` (control plane) | `on_command` | `GetPeers`, `SendToPeer`, `BlockIp`, `Shutdown`, ... answered on oneshot replies |
 | `workers.join_next_with_id()` | `on_worker_exit` | Supervision: a fatal error or panic in any worker stops the node |
+| `share_transaction_relay` (Bitcoin Cash) | `on_relay_transaction` | Sends a share transaction the pool accepted to every connected peer but its source, as `Transaction` requests |
 | reconnect / sync-retry / kademlia intervals | inline / `on_sync_retry_tick` | Periodic swarm maintenance. The sync retry (60s, only while not current) is skipped while the confirmed tip keeps moving: during body sync each retry reply re-runs the missing-block scan on the ResponseWorker and stalls block responses, and every case the retry rescues (rejected batch, dead peer, dropped body, drained fetcher) stops the confirmed tip anyway |
 
 The invariant is enforced by types: `handle_swarm_event` and the
@@ -90,6 +91,7 @@ Every channel is bounded, and every edge has an explicit policy:
 | Stratum connection -> PplnsShareWorker | 1000 | awaited send (enqueue only) |
 | ValidationWorker -> OrganiseWorker | 512 | awaited send, holding the validation permit |
 | OrganiseWorker -> ValidationWorker (stranded re-drive, startup seed) | 8192 | `try_send`; skip (next arrival re-drives) |
+| Share transaction pool -> Actor (relay, Bitcoin Cash) | 256 | `try_send`; drop the relay (the transaction stays in the pool and is mined) |
 
 **The cycle rule.** The channel graph must have no cycle of awaited sends.
 Where a cycle is unavoidable, at least one edge in it is non-blocking:

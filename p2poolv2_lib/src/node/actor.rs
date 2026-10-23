@@ -40,6 +40,10 @@ use crate::pool_difficulty::PoolDifficulty;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::shares::transaction_pool::{
+    PoolRejection, RelayReceiver, RelayTransaction, ShareTransactionPool, SubmitOutcome,
+    TransactionSource,
+};
 use crate::shares::validation::{DefaultShareValidator, ShareValidator};
 use crate::stratum::emission::EmissionReceiver;
 use crate::stratum::work::notify::NotifySender;
@@ -61,11 +65,30 @@ use tracing::{debug, error, info};
 pub struct NodeHandle {
     // The channel to send commands to the Node Actor
     command_tx: mpsc::Sender<Command>,
+    /// Bitcoin Cash: the share transaction pool the node relays and mines
+    /// from. `None` on Bitcoin.
+    share_transaction_pool: Option<ShareTransactionPool>,
+}
+
+/// Why `NodeHandle::submit_share_transaction` did not take a transaction.
+#[derive(Debug, thiserror::Error)]
+pub enum ShareTransactionSubmitError {
+    /// This node keeps no share transaction pool: it is on Bitcoin.
+    #[error("this node does not take share transactions")]
+    NoPool,
+    /// The pool checked the transaction and refused it.
+    #[error(transparent)]
+    Rejected(#[from] PoolRejection),
 }
 
 #[allow(dead_code)]
 impl NodeHandle {
     /// Create a new Node and return a handle to interact with it
+    ///
+    /// On Bitcoin Cash `share_transactions` is the share transaction pool and
+    /// the receiver of the transactions it accepts, which the node relays to
+    /// its peers; Bitcoin passes `None`.
+    #[allow(clippy::too_many_arguments)] // wiring constructor: each parameter is a distinct collaborator, a params struct would only move the list
     pub async fn new(
         config: Config,
         chain_store_handle: ChainStoreHandle,
@@ -74,8 +97,13 @@ impl NodeHandle {
         monitoring_event_sender: MonitoringEventSender,
         notify_tx: NotifySender,
         pplns_window: Arc<RwLock<PplnsWindow>>,
+        share_transactions: Option<(ShareTransactionPool, RelayReceiver)>,
     ) -> Result<(Self, oneshot::Receiver<()>), Box<dyn Error + Send + Sync>> {
         let (command_tx, command_rx) = mpsc::channel::<Command>(32);
+        let (share_transaction_pool, relay_rx) = match share_transactions {
+            Some((pool, relay_rx)) => (Some(pool), Some(relay_rx)),
+            None => (None, None),
+        };
         let (node_actor, stopping_rx) = NodeActor::new(
             config,
             chain_store_handle,
@@ -85,6 +113,8 @@ impl NodeHandle {
             monitoring_event_sender,
             notify_tx,
             pplns_window,
+            share_transaction_pool.clone(),
+            relay_rx,
         )
         .unwrap();
 
@@ -92,7 +122,26 @@ impl NodeHandle {
             node_actor.run().await;
         });
 
-        Ok((Self { command_tx }, stopping_rx))
+        Ok((
+            Self {
+                command_tx,
+                share_transaction_pool,
+            },
+            stopping_rx,
+        ))
+    }
+
+    /// Hand a signed share transaction to this node's pool, which checks it
+    /// against the confirmed share chain, relays it to peers and mines it.
+    pub fn submit_share_transaction(
+        &self,
+        transaction: bitcoin::Transaction,
+    ) -> Result<SubmitOutcome, ShareTransactionSubmitError> {
+        let pool = self
+            .share_transaction_pool
+            .as_ref()
+            .ok_or(ShareTransactionSubmitError::NoPool)?;
+        Ok(pool.submit(transaction, TransactionSource::Local)?)
     }
 
     /// Get a list of connected peers
@@ -211,7 +260,21 @@ impl NodeHandle {
                 }
             }
         });
-        Self { command_tx }
+        Self {
+            command_tx,
+            share_transaction_pool: None,
+        }
+    }
+
+    /// A stub NodeHandle, as `new_for_test`, whose share transactions go to
+    /// `share_transaction_pool`.
+    pub fn new_for_test_with_share_transaction_pool(
+        share_transaction_pool: ShareTransactionPool,
+    ) -> Self {
+        Self {
+            share_transaction_pool: Some(share_transaction_pool),
+            ..Self::new_for_test()
+        }
     }
 
     /// Create a stub NodeHandle for tests pre-loaded with a set of generated peers.
@@ -274,7 +337,13 @@ impl NodeHandle {
                 }
             }
         });
-        (Self { command_tx }, peer_id_strings)
+        (
+            Self {
+                command_tx,
+                share_transaction_pool: None,
+            },
+            peer_id_strings,
+        )
     }
 }
 
@@ -325,6 +394,17 @@ struct NodeActor {
     /// Confirmed tip seen at the last sync-retry tick (seeded when the loop
     /// starts). The retry is skipped while the confirmed tip keeps moving.
     last_retry_confirmed_tip: Option<BlockHash>,
+    /// Bitcoin Cash: share transactions the pool accepted, to send to peers.
+    /// `None` on Bitcoin, or once the pool is gone.
+    share_transaction_relay: Option<RelayReceiver>,
+}
+
+/// The next share transaction to relay, or never when there is no relay.
+async fn next_relay_transaction(relay: &mut Option<RelayReceiver>) -> Option<RelayTransaction> {
+    match relay {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 impl NodeActor {
@@ -338,6 +418,8 @@ impl NodeActor {
         monitoring_event_sender: MonitoringEventSender,
         notify_tx: NotifySender,
         pplns_window: Arc<RwLock<PplnsWindow>>,
+        share_transaction_pool: Option<ShareTransactionPool>,
+        share_transaction_relay: Option<RelayReceiver>,
     ) -> Result<(Self, oneshot::Receiver<()>), Box<dyn Error>> {
         // Create organise channel
         let (organise_tx, organise_rx) = create_organise_channel();
@@ -392,6 +474,7 @@ impl NodeActor {
             monitoring_event_sender.clone(),
             share_validator.clone(),
             response_worker_tx,
+            share_transaction_pool,
         )?;
 
         // Spawn organise worker
@@ -506,6 +589,7 @@ impl NodeActor {
                 workers,
                 worker_names,
                 last_retry_confirmed_tip: None,
+                share_transaction_relay,
             },
             stopping_rx,
         ))
@@ -592,6 +676,13 @@ impl NodeActor {
                     dns_seed_pending = false;
                     self.node.query_dns_seeds_if_isolated();
                 }
+                relay = next_relay_transaction(&mut self.share_transaction_relay),
+                    if self.share_transaction_relay.is_some() => {
+                    match relay {
+                        Some(relay) => self.on_relay_transaction(relay),
+                        None => self.share_transaction_relay = None,
+                    }
+                }
             }
         };
 
@@ -619,6 +710,24 @@ impl NodeActor {
                 }
             }
         }
+    }
+
+    /// Send a share transaction the pool accepted to every connected peer but
+    /// the one it came from, as a `Transaction` request each answers with
+    /// `Ack`. A synchronous enqueue per peer, like a block broadcast.
+    fn on_relay_transaction(&mut self, relay: RelayTransaction) {
+        let txid = relay.transaction.compute_txid();
+        let peers = self.node.connected_peers();
+        let mut relayed = 0;
+        for peer in peers.iter().filter(|peer| Some(**peer) != relay.source) {
+            self.node
+                .swarm
+                .behaviour_mut()
+                .request_response
+                .send_request(peer, Message::Transaction(relay.transaction.clone()));
+            relayed += 1;
+        }
+        debug!("Relayed share transaction {txid} to {relayed} peers");
     }
 
     /// Execute one outbound swarm operation. All calls are synchronous swarm
@@ -833,7 +942,10 @@ mod tests {
     #[tokio::test]
     async fn test_node_handle_get_pplns_shares_sends_correct_command() {
         let (command_tx, mut command_rx) = mpsc::channel(32);
-        let node_handle = NodeHandle { command_tx };
+        let node_handle = NodeHandle {
+            command_tx,
+            share_transaction_pool: None,
+        };
 
         let query = GetPplnsShareQuery {
             limit: 42,
@@ -879,7 +991,10 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel(1);
         drop(command_rx); // Close the receiver to cause send error
 
-        let node_handle = NodeHandle { command_tx };
+        let node_handle = NodeHandle {
+            command_tx,
+            share_transaction_pool: None,
+        };
 
         let query = GetPplnsShareQuery {
             limit: 10,

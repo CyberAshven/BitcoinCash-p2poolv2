@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::block_template::BlockTemplate;
+use crate::shares::share_block::ShareTransaction;
 use crate::shares::share_commitment::ShareCommitment;
 use bitcoin::BlockHash;
 use dashmap::DashMap;
@@ -49,6 +50,11 @@ pub struct JobDetails {
     pub coinbase_nsecs: u64,
     /// Merkle branches for the template transactions (excluding coinbase).
     pub template_merkle_branches: Vec<bitcoin::TxMerkleNode>,
+    /// Share transactions after the share coinbase, in order. The share
+    /// commitment's `share_witness_root` covers exactly these, so a share
+    /// found on this job is built with them. Shared by every job on one
+    /// notify; empty for declared jobs.
+    pub share_transactions: Arc<[ShareTransaction]>,
 }
 
 /// Lock-free job tracker using DashMap for concurrent access.
@@ -102,6 +108,7 @@ impl JobTracker {
                 share_commitment,
                 coinbase_nsecs,
                 template_merkle_branches,
+                share_transactions: Arc::from([]),
             },
         );
         job_id

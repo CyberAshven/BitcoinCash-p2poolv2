@@ -168,6 +168,8 @@ pub(crate) fn build_router_with_history(
             get(endpoints::share_headers::share_headers),
         )
         .route("/found_blocks", get(endpoints::found_blocks::found_blocks))
+        .route("/miners", get(endpoints::miners::miners))
+        .route("/network", get(endpoints::network::network))
         .merge(endpoints::hashrate::router(
             app_state.clone(),
             history.clone(),
@@ -186,6 +188,12 @@ pub(crate) fn build_router_with_history(
         .route(
             "/jd_prepare",
             post(endpoints::jd_prepare::prepare).layer(axum::extract::DefaultBodyLimit::max(8192)),
+        )
+        .route(
+            "/share_transaction",
+            post(endpoints::share_transaction::submit).layer(axum::extract::DefaultBodyLimit::max(
+                endpoints::share_transaction::MAX_SHARE_TRANSACTION_REQUEST_BYTES,
+            )),
         )
         .route("/metrics", get(metrics))
         .route("/peers", get(peers))

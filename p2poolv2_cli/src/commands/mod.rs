@@ -196,6 +196,16 @@ pub enum TransactionsCommands {
         #[arg(long, default_value = "false")]
         raw: bool,
     },
+    /// Hand a signed share transaction to the running node (Bitcoin Cash)
+    ///
+    /// The node checks it against the confirmed share chain, relays it to its
+    /// peers and mines it in its shares. Takes the hex `bch-trade` prints;
+    /// reads it from stdin when no argument is given.
+    Submit {
+        /// Signed transaction, consensus serialized, in hex. Omit to read it
+        /// from stdin.
+        hex: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

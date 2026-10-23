@@ -937,6 +937,41 @@ pub async fn build_confirmed_test_chain(
     blocks
 }
 
+/// Set up `genesis_for_tests` and confirm `length` shares above it, the first
+/// owned by `first_share_owner` and the rest by the builder's default owner.
+///
+/// The first share's coinbase output, one share unit, becomes spendable once
+/// the chain is `BCH_COINBASE_MATURITY` shares above it. Each share carries
+/// its coinbase alone and a distinct time. Returns the blocks indexed by
+/// height, genesis at 0.
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn build_confirmed_chain_owned_from(
+    chain_store_handle: &ChainStoreHandle,
+    first_share_owner: ShareOwner,
+    length: usize,
+) -> Vec<ShareBlock> {
+    let genesis = genesis_for_tests();
+    chain_store_handle
+        .init_or_setup_genesis(genesis.clone())
+        .await
+        .unwrap();
+    let mut blocks = Vec::with_capacity(length + 1);
+    blocks.push(genesis);
+    for height in 1..=length {
+        let builder = TestShareBlockBuilder::new()
+            .prev_share_blockhash(blocks[height - 1].block_hash().to_string())
+            .time(1_700_000_000 + height as u32);
+        let builder = match height {
+            1 => builder.share_owner(first_share_owner),
+            _ => builder,
+        };
+        let block = builder.build();
+        confirm_test_block(chain_store_handle, &block).await;
+        blocks.push(block);
+    }
+    blocks
+}
+
 /// Build a share header with a specific miner pubkey and work level.
 #[cfg(any(test, feature = "test-utils"))]
 pub fn build_test_header(

@@ -9,8 +9,11 @@ pub mod found_blocks;
 pub mod hashrate;
 pub mod jd_prepare;
 pub mod miner;
+pub mod miners;
+pub mod network;
 pub mod share;
 pub mod share_headers;
+pub mod share_transaction;
 pub mod shares;
 pub mod transaction;
 
