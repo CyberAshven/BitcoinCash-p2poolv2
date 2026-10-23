@@ -79,6 +79,9 @@ fn setup_minimum_difficulty_mock(mock_validator: &mut MockDefaultShareValidator)
     mock_validator
         .expect_validate_coinbase_proof()
         .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
     let mut pool_difficulty = PoolDifficulty::default();
     pool_difficulty
         .expect_calculate_target_clamped()
@@ -419,6 +422,126 @@ fn test_validate_header_chain_accepts_single_header_linked_to_anchor() {
         &mock_validator,
     );
     assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+}
+
+/// Header sync checks every header's timestamp against the times of its
+/// ancestors, read from the batch for headers earlier in it and from the
+/// store for the anchor's own ancestry. Here the store's anchor has time
+/// T and no parent, so the first header is measured against [T] and the
+/// second against [T + 1, T].
+#[test]
+fn test_validate_header_chain_checks_timestamps_against_batch_and_store_ancestors() {
+    let anchor = TestShareBlockBuilder::new().nonce(1).build();
+    let mut share_a = TestShareBlockBuilder::new()
+        .prev_share_blockhash(anchor.block_hash().to_string())
+        .nonce(2)
+        .time(1_700_000_001)
+        .build()
+        .header;
+    share_a.bits = CompactTarget::from_consensus(MAX_POOL_TARGET);
+    let mut share_b = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share_a.block_hash().to_string())
+        .nonce(3)
+        .time(1_700_000_002)
+        .build()
+        .header;
+    share_b.bits = CompactTarget::from_consensus(MAX_POOL_TARGET);
+
+    // The store returns the template header, at time 1_700_000_000 with
+    // an all-zeros parent, for the anchor.
+    let mut chain_store_handle = ChainStoreHandle::default();
+    setup_chain_validation_mocks(&mut chain_store_handle);
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .withf(|header, ancestor_times| {
+            header.time == 1_700_000_001 && ancestor_times == [1_700_000_000]
+        })
+        .times(1)
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .withf(|header, ancestor_times| {
+            header.time == 1_700_000_002 && ancestor_times == [1_700_000_001, 1_700_000_000]
+        })
+        .times(1)
+        .returning(|_, _| Ok(()));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(MAX_POOL_TARGET));
+    pool_difficulty
+        .expect_target_ceiling()
+        .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    let result = validate_header_chain(
+        &share_header_batch_with_empty_branches(vec![share_a, share_b]),
+        &chain_store_handle,
+        &mock_validator,
+    );
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+}
+
+/// A header whose timestamp breaks the rules rejects the batch before
+/// anything is organised, and the error is not retried.
+#[test]
+fn test_validate_header_chain_rejects_a_header_with_an_invalid_timestamp() {
+    let anchor = TestShareBlockBuilder::new().nonce(1).build();
+    let mut child = TestShareBlockBuilder::new()
+        .prev_share_blockhash(anchor.block_hash().to_string())
+        .nonce(2)
+        .build()
+        .header;
+    child.bits = CompactTarget::from_consensus(MAX_POOL_TARGET);
+
+    let mut chain_store_handle = ChainStoreHandle::default();
+    setup_chain_validation_mocks(&mut chain_store_handle);
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| {
+            Err(ValidationError::consensus(
+                "Share timestamp is not greater than median time past",
+            ))
+        });
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(MAX_POOL_TARGET));
+    pool_difficulty
+        .expect_target_ceiling()
+        .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    let error = validate_header_chain(
+        &share_header_batch_with_empty_branches(vec![child]),
+        &chain_store_handle,
+        &mock_validator,
+    )
+    .unwrap_err();
+
+    assert!(!error.is_retryable());
+    assert!(
+        error.to_string().contains("median time past"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -878,6 +1001,19 @@ fn test_validate_header_chain_accepts_multiple_anchors() {
 
     let mut chain_store_handle = ChainStoreHandle::default();
     let template_header = build_valid_test_header();
+    // Each anchor's own header, read for the median time past walk.
+    let anchor_a_header = anchor_a.header.clone();
+    let anchor_b_header = anchor_b.header.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .withf(move |hash| *hash == anchor_a_hash || *hash == anchor_b_hash)
+        .returning(move |hash| {
+            if *hash == anchor_a_hash {
+                Ok(anchor_a_header.clone())
+            } else {
+                Ok(anchor_b_header.clone())
+            }
+        });
     chain_store_handle
         .expect_get_asert_parent()
         .withf(move |hash| *hash == anchor_a_hash || *hash == anchor_b_hash)

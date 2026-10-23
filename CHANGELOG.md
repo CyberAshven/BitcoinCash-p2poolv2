@@ -14,6 +14,22 @@ changes the share chain's rules, not Bitcoin Cash consensus: nodes start
 from a new store, and Bitcoin Cash protocol strings carry `trade-htlc` and
 then `payout-holder`.
 
+A Bitcoin Cash coinbase now fits stock ASIC firmware: at most 11 payout
+outputs in a coinbase of at most 784 bytes, the tail of small payees paid by
+a draw weighted by their PPLNS weight. Another share-chain rule change:
+protocol strings carry `payout-cap11` after `payout-holder`. The share
+transaction pool ranks transactions by the share units they burn per byte.
+
+Share-chain safety fixes from a review against upstream's design documents
+(2026-10-23). An uncle may have only one nephew on a chain, header sync checks
+share timestamps, a block spending an output a node never fetched is stored
+instead of stalling the node, the reorg depth limit is `PAYOUT_DEPTH`, the
+pending block buffer is bounded and stratum difficulty can no longer
+overflow. The uncle rule and the header timestamp checks change the share
+chain's rules on Bitcoin Cash and Bitcoin, not Bitcoin Cash consensus:
+Bitcoin Cash protocol strings carry `uncle-once` after `payout-cap11`, and
+the store format changes, so nodes start from a new store.
+
 Synced with upstream P2Poolv2 through `61810c56` (its v0.16.2). The fork
 keeps version `0.0.1-alpha`. The sync itself leaves Bitcoin Cash genesis
 shares, protocol strings, the PPLNS window and maturity, the ASERT parent
@@ -45,7 +61,8 @@ anchor and the donation and fee cap as they were.
 - Bitcoin Cash share transaction pool: a node checks signed share
   transactions against the confirmed share chain under every share-chain
   rule, keeps at most 1,000 of them and 4 MiB (each at most 50 KiB, for 3
-  hours, oldest evicted first, spending only confirmed unspent outputs),
+  hours, lowest priority evicted first, spending only confirmed unspent
+  outputs),
   relays them to its peers as `Transaction` requests (peer transactions
   admitted at most 10 a second, bursts of 100), and mines them in the shares
   it builds, within 99 transactions and 64 KiB a share, with the share
@@ -59,8 +76,8 @@ anchor and the donation and fee cap as they were.
   (254,376) shares below the confirmed tip, in a background task every 6
   hours while the node is current (from upstream). Headers and their merkle
   branches are kept, so pruned nodes still serve header sync from genesis,
-  and the candidate chain refuses a reorg whose fork point is below the prune
-  target or less than `MAX_UNCLES_DEPTH` above it. On Bitcoin Cash the PPLNS
+  and the candidate chain refuses a reorg whose fork point is more than
+  `PAYOUT_DEPTH` below the confirmed tip (see Changed). On Bitcoin Cash the PPLNS
   window reads only headers and reaches at most 121,063 shares deep (100
   maturity, the 120,960-share cap and uncle depth 3), inside `PAYOUT_DEPTH`
   (127,008); production builds assert this at compile time. The API's
@@ -78,6 +95,59 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
+- Coinbase budget on Bitcoin Cash (share-chain consensus, decision 14): a
+  coinbase pays at most 11 PPLNS payout outputs (`BCH_MAX_COINBASE_PAYOUTS`)
+  holding at most 374 bytes (`BCH_MAX_PAYOUT_OUTPUT_BYTES`), and no payout
+  below BCHN's dust threshold, so stock Antminer firmware, which upstream
+  reports takes "just over a dozen outputs", can mine every job, over
+  Stratum V1 directly or behind a Stratum V2 translator. Payees that fit
+  are paid as before. Past the budget the largest payees (by weight after
+  the payout-holder rule) are paid their exact share and everything else
+  goes to one of the remaining payees, drawn by weight from the payout
+  anchor, so each one's expected income is unchanged and the coinbase sums
+  exactly. The donation, the fee and the 10% cap are untouched. Job builders
+  refuse a coinbase over `BCH_COINBASE_BYTE_BUDGET` (784 bytes; the largest
+  the rule allows is 782). Protocol strings carry `payout-cap11`. Bitcoin and
+  Hydrapool pay every payee. See `docs/architecture/payout-distribution.md`,
+  "Bitcoin Cash coinbase budget".
+- Bitcoin Cash share transaction pool priority (node policy, decision 15):
+  a transaction's priority is the share units it burns (inputs less
+  outputs) per byte, then its arrival. Shares carry the highest first; a
+  full pool evicts the lowest ones only for a transaction that outranks them
+  all, and otherwise refuses it ("the pool is full ..."), instead of
+  evicting the oldest. No validity change: there is still no consensus fee.
+  `p2poolv2_cli bch-trade --fee-rate` sets the bid on the share chain. See
+  `docs/atomic-swap/bch-share-trading.md`, "Priority".
+- Share-chain consensus, Bitcoin Cash and Bitcoin: an uncle may have only
+  one nephew on a chain. A share naming an uncle that its parent or
+  grandparent already names is invalid (upstream's `validation.adoc` rule,
+  which upstream's code does not enforce yet). Before, such a share was
+  accepted and the PPLNS window paid the uncle twice, with two nephew
+  bonuses. Siblings on different branches may still name the same uncle.
+  Bitcoin Cash protocol strings carry `uncle-once`.
+- Share-chain consensus, Bitcoin Cash and Bitcoin: header sync applies the
+  timestamp rules of full validation to every header before it is organised:
+  later than the median time of its 11 ancestors (read from the batch and the
+  store) and at most 120 seconds ahead of the local clock. Blocks below the
+  full-validation zone had unchecked times, and on Bitcoin Cash each share's
+  ASERT target comes from its parent's time. Block receipt checks the same
+  rules before it stores a block.
+- A block spending an output the node does not hold is stored, with
+  `CoinbaseRoot::Unknown` stamped on its outputs, instead of failing to
+  store. On a syncing node such a block (spending an output below its prune
+  height) sat on the best chain unstorable since share transactions shipped.
+  Spending an `Unknown` output is rejected (`UnknownCoinbaseRoot`), and
+  confirmation no longer asks whether a source the node never held is
+  confirmed, which would have marked that valid block Invalid. A fully
+  validated block spending a missing output is still Invalid. The store
+  format changes (one byte per output).
+- The candidate chain refuses a reorg forking more than `PAYOUT_DEPTH`
+  (127,008 shares, about 14.7 days) below the confirmed tip, down from the
+  prune target (254,376). Share transactions need it: a deeper fork could
+  spend an output the node never fetched or stamped `Unknown`. The refusal
+  logs `branch forks more than MAX_REORG_DEPTH below the confirmed tip`.
+- Stratum `maximum_difficulty` defaults to 2^32 (about 5.5 EH/s at one share
+  every 3.33 seconds) when unset, and a session's difficulty is at least 1.
 - Share-chain consensus on Bitcoin Cash: the interpreter also accepts a
   claim or refund of the share-trading contract; every output of a
   non-coinbase share transaction must be P2PKH or P2SH32 at or above BCHN's
@@ -125,6 +195,15 @@ anchor and the donation and fee cap as they were.
 
 ### Security
 
+- The buffer of blocks waiting for their parent is bounded: at most 1,024
+  blocks and 32 MiB, the oldest evicted first, and a block that waited 10
+  minutes is dropped. It had no cap and no expiry, and a share naming a
+  parent that never arrives waited for ever.
+- A miner asking for `d=18446744073709551615` (or suggesting it) no longer
+  overflows the difficulty adjuster, which panicked in debug builds and
+  wrapped in release: its sums saturate, and the default maximum caps the
+  request. Property tests run the adjuster over extreme start difficulties,
+  bounds and share runs.
 - Updated `rustls-webpki` to 0.103.16 (from upstream).
 
 ## [v0.0.1-alpha] - 2026-10-18, refreshed 2026-10-19 and 2026-10-22

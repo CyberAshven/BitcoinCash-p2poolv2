@@ -12,6 +12,13 @@
 //! See `docs/atomic-swap/bch-share-trading.md`, "Share transactions on the
 //! network".
 //!
+//! Priority: a transaction's fee is the share units it burns, its inputs
+//! less its outputs, and its priority is that fee per byte, then its arrival
+//! (`Priority`). Shares carry the highest priorities first, and a full pool
+//! admits a transaction only by evicting lower ones, lowest first. This is
+//! node policy, not a share-chain rule: a share may still carry any valid
+//! transaction, with or without a fee.
+//!
 //! Locking: the pool's state sits behind one mutex, held only for in-memory
 //! work. It is never held across an await, a store read or another lock.
 
@@ -27,6 +34,7 @@ use crate::store::transaction_store::{PrevoutCheck, PrevoutRejection};
 use crate::store::writer::StoreError;
 use bitcoin::{Amount, BlockHash, OutPoint, Transaction, TxOut, Txid};
 use libp2p::PeerId;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -138,6 +146,11 @@ pub enum PoolRejection {
     TooManySigops { cost: usize, limit: usize },
     #[error("too many transactions from peers; try again later")]
     RateLimited,
+    #[error(
+        "the pool is full and this transaction does not outbid the ones it would evict, \
+         which burn {fee} share units in {size} bytes; burn more units per byte"
+    )]
+    PoolFull { fee: u64, size: usize },
     #[error("the share chain has no confirmed tip yet")]
     NoChainTip,
     #[error("store read failed: {0}")]
@@ -178,6 +191,9 @@ struct PoolEntry {
     txid: Txid,
     size: usize,
     sigop_cost: usize,
+    /// Share units the transaction burns: its inputs less its outputs. The
+    /// share coinbase pays a fixed unit, so nobody receives them.
+    fee: u64,
     arrived_at: u64,
 }
 
@@ -188,7 +204,55 @@ impl PoolEntry {
             .iter()
             .map(|input| input.previous_output)
     }
+
+    fn priority(&self, sequence: u64) -> Priority {
+        Priority {
+            fee: self.fee,
+            size: self.size,
+            sequence,
+        }
+    }
 }
+
+/// Where a pool transaction stands against the others: by fee rate, the
+/// share units it burns per byte, then by arrival. Greater is mined first
+/// and evicted last.
+///
+/// Rates are compared exactly, as fractions (`fee * other size` against
+/// `other fee * size`), so no rounding decides between two transactions.
+/// At equal rates the earlier arrival (smaller sequence) is greater: the
+/// first seen keeps its place, and a newcomer must pay a higher rate to
+/// evict anything. Sequences are unique, so no two priorities are equal.
+#[derive(Debug, Clone, Copy)]
+struct Priority {
+    fee: u64,
+    size: usize,
+    sequence: u64,
+}
+
+impl Ord for Priority {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let own_rate = u128::from(self.fee) * other.size as u128;
+        let other_rate = u128::from(other.fee) * self.size as u128;
+        own_rate
+            .cmp(&other_rate)
+            .then_with(|| other.sequence.cmp(&self.sequence))
+    }
+}
+
+impl PartialOrd for Priority {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Priority {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Priority {}
 
 /// Token bucket for transactions from peers, in milli-tokens.
 #[derive(Debug, Clone, Copy)]
@@ -229,7 +293,11 @@ struct PoolState {
     entries: HashMap<Txid, PoolEntry>,
     /// Arrival order: sequence number to txid, oldest first.
     arrival: BTreeMap<u64, Txid>,
-    /// Sequence number of each entry, to remove it from `arrival`.
+    /// Priority order: lowest first, so eviction takes from the front and
+    /// selection from the back.
+    by_priority: BTreeMap<Priority, Txid>,
+    /// Sequence number of each entry, to remove it from `arrival` and
+    /// `by_priority`.
     sequence_of: HashMap<Txid, u64>,
     /// Which pool transaction spends each outpoint.
     spent_by: HashMap<OutPoint, Txid>,
@@ -246,6 +314,7 @@ impl PoolState {
             limits,
             entries: HashMap::with_capacity(limits.max_transactions),
             arrival: BTreeMap::new(),
+            by_priority: BTreeMap::new(),
             sequence_of: HashMap::with_capacity(limits.max_transactions),
             spent_by: HashMap::with_capacity(limits.max_transactions),
             total_bytes: 0,
@@ -268,40 +337,73 @@ impl PoolState {
         })
     }
 
-    /// Add `entry`, first dropping expired entries and then the oldest ones
-    /// until it fits. Returns the txids it evicted.
+    /// Add `entry`, first dropping expired entries and then, if it still
+    /// does not fit, the lowest-priority entries below it. Returns the txids
+    /// it dropped.
+    ///
+    /// Refuses `entry`, changing nothing but the expiry, when the entries it
+    /// would have to evict are not all below it (`PoolRejection::PoolFull`).
     fn insert(&mut self, entry: PoolEntry, now: u64) -> Result<Vec<Txid>, PoolRejection> {
         if let Some((outpoint, txid)) = self.conflict(&entry.transaction) {
             return Err(PoolRejection::Conflict { outpoint, txid });
         }
         let mut evicted = self.expire(now);
-        while !self.entries.is_empty()
-            && (self.entries.len() + 1 > self.limits.max_transactions
-                || self.total_bytes + entry.size > self.limits.max_bytes)
-        {
-            evicted.extend(self.evict_oldest());
+        let sequence = self.next_sequence;
+        let to_evict = self.eviction_for(entry.size, entry.priority(sequence))?;
+        for txid in &to_evict {
+            self.remove(txid);
         }
+        evicted.extend(to_evict);
         for outpoint in entry.spends() {
             self.spent_by.insert(outpoint, entry.txid);
         }
-        let sequence = self.next_sequence;
         self.next_sequence += 1;
         self.arrival.insert(sequence, entry.txid);
+        self.by_priority
+            .insert(entry.priority(sequence), entry.txid);
         self.sequence_of.insert(entry.txid, sequence);
         self.total_bytes += entry.size;
         self.entries.insert(entry.txid, entry);
         Ok(evicted)
     }
 
-    fn evict_oldest(&mut self) -> Option<Txid> {
-        let oldest = self.arrival.values().next().copied()?;
-        self.remove(&oldest).map(|entry| entry.txid)
+    /// The lowest-priority entries to evict, lowest first, so an entry of
+    /// `size` bytes fits the count and byte limits, every one of them below
+    /// `priority`. `PoolFull` names the first entry in the way.
+    fn eviction_for(&self, size: usize, priority: Priority) -> Result<Vec<Txid>, PoolRejection> {
+        let mut count = self.entries.len();
+        let mut bytes = self.total_bytes;
+        let mut to_evict = Vec::new();
+        let mut lowest_first = self.by_priority.iter();
+        while count + 1 > self.limits.max_transactions || bytes + size > self.limits.max_bytes {
+            match lowest_first.next() {
+                Some((lower, txid)) if *lower < priority => {
+                    count -= 1;
+                    bytes -= lower.size;
+                    to_evict.push(*txid);
+                }
+                Some((in_the_way, _)) => {
+                    return Err(PoolRejection::PoolFull {
+                        fee: in_the_way.fee,
+                        size: in_the_way.size,
+                    });
+                }
+                None => {
+                    return Err(PoolRejection::TooLarge {
+                        size,
+                        limit: self.limits.max_bytes,
+                    });
+                }
+            }
+        }
+        Ok(to_evict)
     }
 
     fn remove(&mut self, txid: &Txid) -> Option<PoolEntry> {
         let entry = self.entries.remove(txid)?;
         if let Some(sequence) = self.sequence_of.remove(txid) {
             self.arrival.remove(&sequence);
+            self.by_priority.remove(&entry.priority(sequence));
         }
         for outpoint in entry.spends() {
             if self.spent_by.get(&outpoint) == Some(txid) {
@@ -330,10 +432,11 @@ impl PoolState {
             .collect()
     }
 
-    /// The entries, oldest first.
-    fn entries_by_arrival(&self) -> Vec<PoolEntry> {
-        self.arrival
+    /// The entries, highest priority first: the order shares carry them.
+    fn entries_by_priority(&self) -> Vec<PoolEntry> {
+        self.by_priority
             .values()
+            .rev()
             .filter_map(|txid| self.entries.get(txid).cloned())
             .collect()
     }
@@ -404,6 +507,10 @@ impl ShareTransactionPool {
     /// Check `transaction` against every share-chain rule on top of the
     /// confirmed chain and admit it, then queue it for relay.
     ///
+    /// A full pool admits it only by evicting transactions of lower priority
+    /// (`Priority`: share units burned per byte, then arrival), and refuses
+    /// it with `PoolRejection::PoolFull` otherwise.
+    ///
     /// Transactions from peers are rate limited, except copies of one the
     /// pool already has, which several peers relay. A transaction already in
     /// the pool is reported as such and not relayed again, which is what ends
@@ -441,14 +548,15 @@ impl ShareTransactionPool {
             .get_tip_height()?
             .ok_or(PoolRejection::NoChainTip)?
             + 1;
-        let sigop_cost =
+        let checked =
             check_against_confirmed_chain(&self.chain_store_handle, &transaction, next_height)?;
 
         let entry = PoolEntry {
             transaction: Arc::new(ShareTransaction(transaction.clone())),
             txid,
             size,
-            sigop_cost,
+            sigop_cost: checked.sigop_cost,
+            fee: checked.fee,
             arrived_at: now_seconds(),
         };
         {
@@ -478,8 +586,9 @@ impl ShareTransactionPool {
         Ok(SubmitOutcome::Accepted(txid))
     }
 
-    /// The pool transactions to put in a share built on `mining_base`, in
-    /// arrival order, within the share budgets.
+    /// The pool transactions to put in a share built on `mining_base`,
+    /// highest priority first (share units burned per byte, then arrival),
+    /// within the share budgets.
     ///
     /// Rechecks the pool on the way: a transaction now on the confirmed chain
     /// moves to the recently confirmed list, one a reorg took off the
@@ -533,7 +642,7 @@ impl ShareTransactionPool {
             let mut state = self.lock_state();
             state.expire(now_seconds());
             (
-                state.entries_by_arrival(),
+                state.entries_by_priority(),
                 state.recently_confirmed.iter().cloned().collect::<Vec<_>>(),
             )
         };
@@ -546,6 +655,12 @@ impl ShareTransactionPool {
             confirmed_readiness.push(self.readiness(entry, next_height)?);
         }
 
+        let mut ready_txids: HashSet<Txid> = pending
+            .iter()
+            .zip(&pending_readiness)
+            .filter(|(_, readiness)| **readiness == Readiness::Ready)
+            .map(|(entry, _)| entry.txid)
+            .collect();
         let mut state = self.lock_state();
         for (entry, readiness) in pending.iter().zip(&pending_readiness) {
             match readiness {
@@ -556,7 +671,7 @@ impl ShareTransactionPool {
                 Readiness::Ready | Readiness::Waiting => {}
             }
         }
-        let mut returned = Vec::new();
+        let mut returned = 0;
         for (entry, readiness) in recently_confirmed.iter().zip(&confirmed_readiness) {
             match readiness {
                 Readiness::Confirmed => {}
@@ -567,34 +682,32 @@ impl ShareTransactionPool {
                     if let Some(mut entry) = state.take_recently_confirmed(&entry.txid) {
                         entry.arrived_at = now_seconds();
                         let txid = entry.txid;
-                        if state.insert(entry, now_seconds()).is_ok()
-                            && *readiness == Readiness::Ready
-                        {
-                            returned.push(txid);
+                        if state.insert(entry, now_seconds()).is_ok() {
+                            returned += 1;
+                            if *readiness == Readiness::Ready {
+                                ready_txids.insert(txid);
+                            }
                         }
                     }
                 }
             }
         }
+        // Highest priority first, over the transactions still in the pool:
+        // a reorged one returns in its own place, and one a concurrent
+        // submit evicted is not chosen.
+        let ready: Vec<PoolEntry> = state
+            .entries_by_priority()
+            .into_iter()
+            .filter(|entry| ready_txids.contains(&entry.txid))
+            .collect();
         drop(state);
-        if !returned.is_empty() {
+        if returned > 0 {
             debug!(
-                "{} share transactions left the confirmed chain and are back in the pool",
-                returned.len()
+                "{returned} share transactions left the confirmed chain and are back in the pool"
             );
         }
 
-        let ready = pending
-            .iter()
-            .zip(&pending_readiness)
-            .filter(|(_, readiness)| **readiness == Readiness::Ready)
-            .map(|(entry, _)| entry)
-            .chain(
-                recently_confirmed
-                    .iter()
-                    .filter(|entry| returned.contains(&entry.txid)),
-            );
-        Ok(select_within_budget(ready, &branch_spends))
+        Ok(select_within_budget(ready.iter(), &branch_spends))
     }
 
     /// The outpoints spent by the shares from just above the confirmed tip
@@ -753,12 +866,12 @@ fn source_txids(transaction: &Transaction) -> Vec<Txid> {
 /// unspent on the confirmed chain; coinbase inputs are mature and no input's
 /// coinbase root has expired; the Bitcoin Cash interpreter accepts every
 /// input; outputs are P2PKH or P2SH32 above dust; inputs cover outputs; it is
-/// final at `height`. Returns its sigop cost.
+/// final at `height`. Returns its sigop cost and the share units it burns.
 fn check_against_confirmed_chain(
     chain_store_handle: &ChainStoreHandle,
     transaction: &Transaction,
     height: u32,
-) -> Result<usize, PoolRejection> {
+) -> Result<ChainCheck, PoolRejection> {
     let spent_outputs = chain_store_handle
         .get_all_prevouts(transaction)
         .map_err(|error| match error {
@@ -808,7 +921,17 @@ fn check_against_confirmed_chain(
             limit,
         });
     }
-    Ok(sigop_cost)
+    Ok(ChainCheck {
+        sigop_cost,
+        fee: (inputs - outputs).to_sat(),
+    })
+}
+
+/// What `check_against_confirmed_chain` learns of an admissible transaction.
+struct ChainCheck {
+    sigop_cost: usize,
+    /// Share units the transaction burns: its inputs less its outputs.
+    fee: u64,
 }
 
 /// BIP141 sigop cost of `transaction`, as share validation counts it.
@@ -891,7 +1014,8 @@ mod tests {
         .unwrap()
     }
 
-    /// A pool entry spending `inputs`, of `size` bytes, arrived at `now`.
+    /// A pool entry spending `inputs`, of `size` bytes, burning no share
+    /// units, arrived at `now`.
     fn entry(inputs: &[OutPoint], size: usize, arrived_at: u64) -> PoolEntry {
         let transaction = Transaction {
             version: transaction::Version::TWO,
@@ -915,7 +1039,16 @@ mod tests {
             transaction: Arc::new(ShareTransaction(transaction)),
             size,
             sigop_cost: 4,
+            fee: 0,
             arrived_at,
+        }
+    }
+
+    /// `entry`, arrived at 0, burning `fee` share units.
+    fn paying_entry(inputs: &[OutPoint], size: usize, fee: u64) -> PoolEntry {
+        PoolEntry {
+            fee,
+            ..entry(inputs, size, 0)
         }
     }
 
@@ -948,33 +1081,160 @@ mod tests {
         assert_eq!(state.entries.len(), 1);
     }
 
+    /// At the count limit a higher fee rate evicts the lowest one, not the
+    /// oldest transaction.
     #[test]
-    fn insert_evicts_the_oldest_transaction_at_the_count_limit() {
+    fn insert_evicts_the_lowest_fee_rate_at_the_count_limit() {
         let mut state = PoolState::new(limits(2, 10_000), 0);
-        let oldest = entry(&[outpoint(1)], 100, 0);
+        let oldest = paying_entry(&[outpoint(1)], 100, 200);
         let oldest_txid = oldest.txid;
+        let cheapest = paying_entry(&[outpoint(2)], 100, 100);
+        let cheapest_txid = cheapest.txid;
         state.insert(oldest, 0).unwrap();
-        state.insert(entry(&[outpoint(2)], 100, 1), 1).unwrap();
+        state.insert(cheapest, 0).unwrap();
 
-        let evicted = state.insert(entry(&[outpoint(3)], 100, 2), 2).unwrap();
+        let evicted = state
+            .insert(paying_entry(&[outpoint(3)], 100, 300), 0)
+            .unwrap();
 
-        assert_eq!(evicted, vec![oldest_txid]);
+        assert_eq!(evicted, vec![cheapest_txid]);
         assert_eq!(state.entries.len(), 2);
-        assert!(!state.contains(&oldest_txid));
-        assert!(!state.spent_by.contains_key(&outpoint(1)));
+        assert!(state.contains(&oldest_txid));
+        assert!(!state.spent_by.contains_key(&outpoint(2)));
+        assert_eq!(state.by_priority.len(), 2);
     }
 
+    /// A full pool refuses a transaction whose fee rate only matches the
+    /// lowest one, and keeps what it has: the first seen keeps its place.
     #[test]
-    fn insert_evicts_the_oldest_transactions_until_the_bytes_fit() {
-        let mut state = PoolState::new(limits(10, 1_000), 0);
-        state.insert(entry(&[outpoint(1)], 400, 0), 0).unwrap();
-        state.insert(entry(&[outpoint(2)], 400, 1), 1).unwrap();
+    fn a_full_pool_refuses_an_equal_fee_rate() {
+        let mut state = PoolState::new(limits(2, 10_000), 0);
+        state
+            .insert(paying_entry(&[outpoint(1)], 100, 100), 0)
+            .unwrap();
+        state
+            .insert(paying_entry(&[outpoint(2)], 100, 100), 0)
+            .unwrap();
 
-        let evicted = state.insert(entry(&[outpoint(3)], 900, 2), 2).unwrap();
+        let refused = state.insert(paying_entry(&[outpoint(3)], 200, 200), 0);
+
+        assert!(matches!(
+            refused,
+            Err(PoolRejection::PoolFull {
+                fee: 100,
+                size: 100
+            })
+        ));
+        assert_eq!(state.entries.len(), 2);
+        assert!(!state.spent_by.contains_key(&outpoint(3)));
+    }
+
+    /// A full pool of transactions burning nothing still admits one that
+    /// burns a unit, and refuses another that burns nothing.
+    #[test]
+    fn a_pool_full_of_free_transactions_admits_only_a_paying_one() {
+        let mut state = PoolState::new(limits(1, 10_000), 0);
+        state.insert(entry(&[outpoint(1)], 100, 0), 0).unwrap();
+
+        let free = state.insert(entry(&[outpoint(2)], 100, 0), 0);
+        let paying = state.insert(paying_entry(&[outpoint(3)], 100, 1), 0);
+
+        assert!(matches!(free, Err(PoolRejection::PoolFull { .. })));
+        assert_eq!(paying.unwrap().len(), 1);
+        assert!(state.spent_by.contains_key(&outpoint(3)));
+    }
+
+    /// At equal fee rates the newest is evicted first.
+    #[test]
+    fn equal_fee_rates_are_evicted_newest_first() {
+        let mut state = PoolState::new(limits(2, 10_000), 0);
+        let older = paying_entry(&[outpoint(1)], 100, 100);
+        let older_txid = older.txid;
+        let newer = paying_entry(&[outpoint(2)], 100, 100);
+        let newer_txid = newer.txid;
+        state.insert(older, 0).unwrap();
+        state.insert(newer, 0).unwrap();
+
+        let evicted = state
+            .insert(paying_entry(&[outpoint(3)], 100, 101), 0)
+            .unwrap();
+
+        assert_eq!(evicted, vec![newer_txid]);
+        assert!(state.contains(&older_txid));
+    }
+
+    /// The lowest fee rates make room for the bytes a higher one needs.
+    #[test]
+    fn insert_evicts_lower_fee_rates_until_the_bytes_fit() {
+        let mut state = PoolState::new(limits(10, 1_000), 0);
+        state
+            .insert(paying_entry(&[outpoint(1)], 400, 400), 0)
+            .unwrap();
+        state
+            .insert(paying_entry(&[outpoint(2)], 400, 800), 0)
+            .unwrap();
+
+        let evicted = state
+            .insert(paying_entry(&[outpoint(3)], 900, 2_700), 0)
+            .unwrap();
 
         assert_eq!(evicted.len(), 2);
         assert_eq!(state.entries.len(), 1);
         assert_eq!(state.total_bytes, 900);
+    }
+
+    /// When the bytes a newcomer needs would take a transaction paying a
+    /// higher rate than it, nothing is evicted and it is refused.
+    #[test]
+    fn insert_evicts_nothing_when_a_higher_fee_rate_is_in_the_way() {
+        let mut state = PoolState::new(limits(10, 1_000), 0);
+        let cheap = paying_entry(&[outpoint(1)], 400, 400);
+        let cheap_txid = cheap.txid;
+        state.insert(cheap, 0).unwrap();
+        state
+            .insert(paying_entry(&[outpoint(2)], 400, 1_200), 0)
+            .unwrap();
+
+        let refused = state.insert(paying_entry(&[outpoint(3)], 900, 1_800), 0);
+
+        assert!(matches!(
+            refused,
+            Err(PoolRejection::PoolFull {
+                fee: 1_200,
+                size: 400
+            })
+        ));
+        assert!(state.contains(&cheap_txid));
+        assert_eq!(state.total_bytes, 800);
+    }
+
+    /// Shares carry the highest fee rate first and, at equal rates, the
+    /// earliest arrival; rates are compared exactly, not rounded.
+    #[test]
+    fn entries_are_ordered_by_fee_rate_then_arrival() {
+        let mut state = PoolState::new(limits(10, 10_000), 0);
+        let one_per_byte = paying_entry(&[outpoint(1)], 300, 300);
+        let three_per_byte = paying_entry(&[outpoint(2)], 100, 300);
+        let one_per_byte_later = paying_entry(&[outpoint(3)], 600, 600);
+        let just_over_one = paying_entry(&[outpoint(4)], 300, 301);
+        let expected = vec![
+            three_per_byte.txid,
+            just_over_one.txid,
+            one_per_byte.txid,
+            one_per_byte_later.txid,
+        ];
+        state.insert(one_per_byte, 0).unwrap();
+        state.insert(three_per_byte, 0).unwrap();
+        state.insert(one_per_byte_later, 0).unwrap();
+        state.insert(just_over_one, 0).unwrap();
+
+        let order: Vec<Txid> = state
+            .entries_by_priority()
+            .iter()
+            .map(|entry| entry.txid)
+            .collect();
+
+        assert_eq!(order, expected);
     }
 
     #[test]
@@ -1008,6 +1268,7 @@ mod tests {
         );
         assert_eq!(state.arrival.len(), 1);
         assert_eq!(state.sequence_of.len(), 1);
+        assert_eq!(state.by_priority.len(), 1);
     }
 
     #[test]

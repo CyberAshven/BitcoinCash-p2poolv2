@@ -18,8 +18,10 @@ use crate::pool_difficulty::PoolDifficulty;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
-use crate::shares::share_block::{MIN_CUMULATIVE_CHAIN_WORK_MULTIPLIER, ShareHeader};
-use crate::shares::validation::ShareValidator;
+use crate::shares::share_block::{
+    MIN_CUMULATIVE_CHAIN_WORK_MULTIPLIER, ShareHeader, is_terminal_blockhash,
+};
+use crate::shares::validation::{MTP_WINDOW, ShareValidator, ValidationError};
 use crate::store::block_tx_metadata::BlockMetadata;
 use crate::store::dag_store::MAX_BLOCKS_PER_HEIGHT;
 use crate::store::writer::StoreError;
@@ -58,6 +60,11 @@ enum HeaderSyncError {
         block_hash: BlockHash,
         declared: u32,
         expected: u32,
+    },
+    /// A header's timestamp breaks median time past or the future limit.
+    InvalidTimestamp {
+        block_hash: BlockHash,
+        error: ValidationError,
     },
     InsufficientWork,
     DenseHeight {
@@ -132,6 +139,9 @@ impl fmt::Display for HeaderSyncError {
                     "ASERT mismatch for {block_hash}: declared bits {declared:#010x}, expected {expected:#010x}"
                 )
             }
+            HeaderSyncError::InvalidTimestamp { block_hash, error } => {
+                write!(formatter, "Invalid timestamp for {block_hash}: {error}")
+            }
             HeaderSyncError::InsufficientWork => {
                 write!(formatter, "Cumulative chain work below minimum")
             }
@@ -160,8 +170,8 @@ impl From<StoreError> for HeaderSyncError {
     }
 }
 
-impl From<crate::shares::validation::ValidationError> for HeaderSyncError {
-    fn from(error: crate::shares::validation::ValidationError) -> Self {
+impl From<ValidationError> for HeaderSyncError {
+    fn from(error: ValidationError) -> Self {
         HeaderSyncError::Other(error.into())
     }
 }
@@ -174,6 +184,9 @@ impl From<crate::shares::validation::ValidationError> for HeaderSyncError {
 /// Phase 1 -- Validate:
 ///   - Each header meets minimum pool difficulty (uncle count + target floor)
 ///   - Headers form a single chain with uncles correctly interleaved
+///   - Each header's timestamp is after its ancestors' median time past and
+///     at most `MAX_FUTURE_TIME_SECS` ahead of the local clock, the rules
+///     full validation applies
 ///   - Each header's bits matches the ASERT-computed target from its parent
 ///   - Cumulative chain work exceeds minimum threshold
 ///
@@ -341,8 +354,13 @@ fn get_cached_asert_parent(
 ///
 /// Every header's parent must be either already processed in this batch
 /// or present in the store. Every header must pass minimum difficulty,
-/// its coinbase proof against the batch's branch for it, and ASERT target
-/// validation.
+/// its coinbase proof against the batch's branch for it, the timestamp rules
+/// (`ShareValidator::validate_header_timestamp`, against the times of up to
+/// `MTP_WINDOW` ancestors from the batch and the store), and ASERT target
+/// validation. The timestamp check comes before ASERT because each header's
+/// target is computed from its parent's time: blocks below the
+/// full-validation zone never run `validate_timestamp`, so this is the only
+/// place their times are checked.
 ///
 /// Returns the set of all blockhashes in the batch and the cumulative
 /// work across all headers.
@@ -362,6 +380,8 @@ fn validate_dag_connectivity_and_difficulty(
     let mut cumulative_work = Work::from_hex("0x00").unwrap();
     let mut asert_parent_cache: HashMap<BlockHash, AsertParent> =
         HashMap::with_capacity(share_headers.len() + 1);
+    let mut time_links: HashMap<BlockHash, TimeLink> =
+        HashMap::with_capacity(share_headers.len() + MTP_WINDOW);
     let mut blocks_per_height: HashMap<u32, usize> = HashMap::with_capacity(64);
 
     for (position, header) in share_headers.iter().enumerate() {
@@ -378,6 +398,15 @@ fn validate_dag_connectivity_and_difficulty(
                 lowest_anchor_height,
             });
         }
+
+        let ancestor_times =
+            collect_ancestor_times(parent_hash, &mut time_links, chain_store_handle)?;
+        share_validator
+            .validate_header_timestamp(header, &ancestor_times)
+            .map_err(|error| HeaderSyncError::InvalidTimestamp {
+                block_hash: header.block_hash(),
+                error,
+            })?;
 
         let parent =
             get_cached_asert_parent(&parent_hash, &mut asert_parent_cache, chain_store_handle)?;
@@ -399,11 +428,59 @@ fn validate_dag_connectivity_and_difficulty(
             header_hash,
             AsertParent::from_header(header, header_height, parent.time),
         );
+        time_links.insert(
+            header_hash,
+            TimeLink {
+                time: header.time,
+                parent: parent_hash,
+            },
+        );
         known_hashes.insert(header_hash);
         cumulative_work = cumulative_work + header.get_work();
     }
 
     Ok((known_hashes, cumulative_work))
+}
+
+/// A header's time and parent, all the median time past walk reads.
+#[derive(Debug, Clone, Copy)]
+struct TimeLink {
+    time: u32,
+    parent: BlockHash,
+}
+
+/// The times of up to `MTP_WINDOW` ancestors ending at `parent_hash`, newest
+/// first, as `ShareValidator::validate_header_timestamp` takes them.
+///
+/// Headers earlier in the batch are in `time_links` already; ancestors in the
+/// store are read once and cached there, so a batch reads at most
+/// `MTP_WINDOW` headers from the store per anchor. The walk stops at genesis.
+/// An ancestor the store does not hold fails the batch: connectivity has been
+/// checked, so every ancestor is in the batch or the store.
+fn collect_ancestor_times(
+    parent_hash: BlockHash,
+    time_links: &mut HashMap<BlockHash, TimeLink>,
+    chain_store_handle: &ChainStoreHandle,
+) -> Result<Vec<u32>, HeaderSyncError> {
+    let mut ancestor_times = Vec::with_capacity(MTP_WINDOW);
+    let mut current = parent_hash;
+    while ancestor_times.len() < MTP_WINDOW && !is_terminal_blockhash(&current) {
+        let link = match time_links.get(&current) {
+            Some(link) => *link,
+            None => {
+                let header = chain_store_handle.get_share_header(&current)?;
+                let link = TimeLink {
+                    time: header.time,
+                    parent: header.prev_share_blockhash,
+                };
+                time_links.insert(current, link);
+                link
+            }
+        };
+        ancestor_times.push(link.time);
+        current = link.parent;
+    }
+    Ok(ancestor_times)
 }
 
 /// Reject batches where a single height has too many blocks.

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::accounting::OutputPair;
+use crate::accounting::payout::coinbase_budget::{PayoutSplit, append_payout_split};
 use crate::config::StratumConfig;
 #[cfg(test)]
 #[mockall_double::double]
@@ -30,6 +31,11 @@ pub trait PayoutDistribution {
     /// Fill distribution according to the the Payout mechanism.  The
     /// donation and fees amount have already been filled by the trait
     /// common implementation of get_outpoint_distribution
+    ///
+    /// `split` is how the share chain turns weights into outputs: every
+    /// payee on Bitcoin, the coinbase budget on Bitcoin Cash (see
+    /// `coinbase_budget`). Hydrapool's time-window payout is not share-chain
+    /// consensus and pays every payee whatever it is given.
     #[allow(clippy::too_many_arguments)]
     fn fill_distribution_from_shares(
         &mut self,
@@ -40,6 +46,7 @@ pub trait PayoutDistribution {
         total_amount: bitcoin::Amount,
         remaining_total_amount: Amount,
         bootstrap_address: Address,
+        split: PayoutSplit,
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
 
     /// Generate output distribution based on PPLNS shares weighted by difficulty.
@@ -57,6 +64,10 @@ pub trait PayoutDistribution {
     ///   hold `BCH_PPLNS_WINDOW_BLOCKS` blocks' worth of work, and ignores it
     ///   on Bitcoin, where the window is `PPLNS_WINDOW_SHARES` mature shares.
     /// * `total_amount` - Total bitcoin amount to distribute among contributors
+    ///
+    /// On Bitcoin Cash (`config.chain`) the share chain's outputs follow the
+    /// coinbase budget, its tail drawn from `anchor` (see
+    /// `PayoutSplit::for_chain`), as the validator rebuilds them.
     ///
     /// # Returns
     /// Vector of OutputPair containing addresses and their proportional amounts
@@ -91,12 +102,15 @@ pub trait PayoutDistribution {
             total_amount,
             remaining_total_amount,
             config.bootstrap_address().clone(),
+            PayoutSplit::for_chain(config.chain, anchor),
         )?;
         Ok(distribution)
     }
 }
 
-/// Apply donation, operator fee and the exact share-chain difficulty weights.
+/// Apply donation, operator fee and the exact share-chain difficulty weights,
+/// split into outputs by `split` (every payee on Bitcoin, the coinbase budget
+/// on Bitcoin Cash).
 ///
 /// The coinbase outputs payout validation rebuilds from a window's weights;
 /// public so integration tests can check the coinbase a window implies.
@@ -107,6 +121,7 @@ pub fn build_pplns_outputs(
     donation: Option<u16>,
     fee_address: &Option<Address>,
     fee: Option<u16>,
+    split: PayoutSplit,
 ) -> Result<Vec<OutputPair>, Box<dyn Error + Send + Sync>> {
     if weights.is_empty() {
         return Err("Can't build output from empty distribution. There should be at least one payout address".into());
@@ -119,7 +134,7 @@ pub fn build_pplns_outputs(
         donation,
     );
     let remaining = include_address_and_cut(&mut outputs, remaining, fee_address, fee);
-    append_proportional_distribution(weights, remaining, &mut outputs)?;
+    append_payout_split(weights, remaining, split, &mut outputs)?;
     Ok(outputs)
 }
 

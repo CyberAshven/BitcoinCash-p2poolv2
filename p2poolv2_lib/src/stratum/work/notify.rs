@@ -5,6 +5,7 @@
 use super::block_template::BlockTemplate;
 use super::error::WorkError;
 use crate::accounting::OutputPair;
+use crate::accounting::payout::coinbase_budget::PayoutSplit;
 use crate::accounting::payout::payout_distribution::PayoutDistribution;
 use crate::accounting::payout::sharechain_pplns::pplns_window::bitcoin_block_difficulty;
 use crate::config::StratumConfig;
@@ -129,6 +130,7 @@ fn build_prepared_notify(
         clean_jobs,
     )
     .pplns_weights(context.payout.pplns_weights())
+    .payout_split(PayoutSplit::for_chain(context.config.chain, tip))
     .prev_share_blockhash(tip)
     .uncles(uncles)
     .bits(target)

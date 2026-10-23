@@ -38,20 +38,92 @@ pub(crate) fn outpoint_key(txid: &Txid, index: u32) -> String {
     format!("{txid}:{index}")
 }
 
+/// Encoding tag of [`CoinbaseRoot::Height`].
+const COINBASE_ROOT_HEIGHT_TAG: u8 = 0;
+/// Encoding tag of [`CoinbaseRoot::Unknown`].
+const COINBASE_ROOT_UNKNOWN_TAG: u8 = 1;
+
+/// The oldest coinbase in an output's spending chain, as stamped on the
+/// output when it was written.
+///
+/// `Unknown` is recorded when an input the output descends from was not in
+/// the store at write time, so its root could not be computed. The ancestry
+/// gate holds every ancestor body at or above `prune_height`, so a missing
+/// input is either an output that never existed on the block's chain (the
+/// block is invalid, and full validation says so) or one below this node's
+/// `prune_height` that it never fetched. In the second case the true root is
+/// below `prune_height`, so no block this node fully validates may spend the
+/// output, and rejecting `Unknown` gives the verdict every node holding the
+/// true root gives. See `docs/architecture/pruning.md`, "Missing Input at
+/// Write Time".
+///
+/// `Unknown` is the bottom value: a transaction with any `Unknown` input
+/// writes `Unknown` outputs. It stays distinct from `Height(0)`, which genesis
+/// coinbase outputs really have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoinbaseRoot {
+    /// Height of the block that mined the oldest coinbase in the output's
+    /// spending chain.
+    Height(u32),
+    /// An input was missing at write time, so the root is not known.
+    Unknown,
+}
+
+impl CoinbaseRoot {
+    /// The older of two roots, with `Unknown` older than every height.
+    fn oldest(self, other: CoinbaseRoot) -> CoinbaseRoot {
+        match (self, other) {
+            (CoinbaseRoot::Height(first), CoinbaseRoot::Height(second)) => {
+                CoinbaseRoot::Height(first.min(second))
+            }
+            _ => CoinbaseRoot::Unknown,
+        }
+    }
+}
+
+impl Encodable for CoinbaseRoot {
+    fn consensus_encode<W: bitcoin::io::Write + ?Sized>(
+        &self,
+        writer: &mut W,
+    ) -> Result<usize, bitcoin::io::Error> {
+        match self {
+            CoinbaseRoot::Height(height) => {
+                let length = COINBASE_ROOT_HEIGHT_TAG.consensus_encode(writer)?;
+                Ok(length + height.consensus_encode(writer)?)
+            }
+            CoinbaseRoot::Unknown => COINBASE_ROOT_UNKNOWN_TAG.consensus_encode(writer),
+        }
+    }
+}
+
+impl Decodable for CoinbaseRoot {
+    fn consensus_decode<R: bitcoin::io::Read + ?Sized>(
+        reader: &mut R,
+    ) -> Result<Self, bitcoin::consensus::encode::Error> {
+        match u8::consensus_decode(reader)? {
+            COINBASE_ROOT_HEIGHT_TAG => Ok(CoinbaseRoot::Height(u32::consensus_decode(reader)?)),
+            COINBASE_ROOT_UNKNOWN_TAG => Ok(CoinbaseRoot::Unknown),
+            _ => Err(bitcoin::consensus::encode::Error::ParseFailed(
+                "unknown coinbase root tag",
+            )),
+        }
+    }
+}
+
 /// A TxOut stored in the Outputs CF together with a flag indicating
-/// whether it belongs to a coinbase transaction and the height of the
-/// oldest coinbase ancestor in the output's spending chain.
+/// whether it belongs to a coinbase transaction and the oldest coinbase in
+/// the output's spending chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredTxOut {
     pub tx_out: bitcoin::TxOut,
     pub is_coinbase: bool,
-    /// Height of the oldest coinbase in this output's ancestry chain.
-    /// For coinbase outputs, this is the block height where the coinbase
-    /// was mined. For spending tx outputs, this is the minimum
-    /// coinbase_root_height across all inputs. Used to enforce the rule
-    /// that outputs whose coinbase root is deeper than PPLNS_DEPTH from
-    /// tip cannot be spent.
-    pub coinbase_root_height: u32,
+    /// Oldest coinbase in this output's ancestry chain. For coinbase
+    /// outputs, the height of the block that mined the coinbase. For
+    /// spending tx outputs, the oldest root across all inputs, or `Unknown`
+    /// when an input was missing at write time. Used to enforce the rule
+    /// that outputs whose coinbase root is more than `PAYOUT_DEPTH` below the
+    /// spending block cannot be spent.
+    pub coinbase_root: CoinbaseRoot,
 }
 
 impl Encodable for StoredTxOut {
@@ -61,7 +133,7 @@ impl Encodable for StoredTxOut {
     ) -> Result<usize, bitcoin::io::Error> {
         let mut length = self.tx_out.consensus_encode(writer)?;
         length += self.is_coinbase.consensus_encode(writer)?;
-        length += self.coinbase_root_height.consensus_encode(writer)?;
+        length += self.coinbase_root.consensus_encode(writer)?;
         Ok(length)
     }
 }
@@ -72,11 +144,11 @@ impl Decodable for StoredTxOut {
     ) -> Result<Self, bitcoin::consensus::encode::Error> {
         let tx_out = bitcoin::TxOut::consensus_decode(reader)?;
         let is_coinbase = bool::consensus_decode(reader)?;
-        let coinbase_root_height = u32::consensus_decode(reader)?;
+        let coinbase_root = CoinbaseRoot::consensus_decode(reader)?;
         Ok(StoredTxOut {
             tx_out,
             is_coinbase,
-            coinbase_root_height,
+            coinbase_root,
         })
     }
 }
@@ -152,6 +224,9 @@ pub enum PrevoutRejection {
     /// The outpoint has no entry in the `Outputs` column family, so the
     /// output it spends does not exist on this node's view of the chain.
     MissingOutput(OutPoint),
+    /// The output's coinbase root was not known when it was written: an
+    /// input it descends from was missing (see [`CoinbaseRoot::Unknown`]).
+    UnknownCoinbaseRoot(OutPoint),
     /// The output's coinbase root is older than the payout window allows.
     CoinbaseRootTooOld {
         outpoint: OutPoint,
@@ -177,6 +252,11 @@ impl fmt::Display for PrevoutRejection {
                 "Output not found for {}:{}",
                 outpoint.txid, outpoint.vout
             ),
+            PrevoutRejection::UnknownCoinbaseRoot(outpoint) => write!(
+                f,
+                "Output {}:{} has an unknown coinbase root: an input it descends from was missing when it was stored",
+                outpoint.txid, outpoint.vout
+            ),
             PrevoutRejection::CoinbaseRootTooOld {
                 outpoint,
                 coinbase_root_height,
@@ -198,6 +278,17 @@ impl fmt::Display for PrevoutRejection {
             ),
         }
     }
+}
+
+/// What a confirmation check counts a txid as when no stored block includes
+/// it, so this node does not hold it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnheldTxid {
+    /// Not confirmed: the caller must refuse a source it does not know.
+    Unconfirmed,
+    /// Not checked: the caller already took a proof-of-work-only verdict on
+    /// the spender (see `are_held_txids_confirmed_with_overlay`).
+    Unchecked,
 }
 
 /// Outcome of checking a block's prevouts against the `Outputs` column family.
@@ -261,15 +352,15 @@ impl Store {
     /// Batch-read all outpoints from the Outputs CF in a single multi_get and
     /// check every rule that depends only on the spending block itself.
     ///
-    /// Three rejections are possible: the outpoint has no entry, its
-    /// `coinbase_root_height` is below `min_coinbase_root_height`, or it is a
-    /// coinbase output spent less than `coinbase_maturity` blocks after the
-    /// block that mined it. Each is a fact about the block's inputs, not a
+    /// Four rejections are possible: the outpoint has no entry, its coinbase
+    /// root is `Unknown`, its root height is below `min_coinbase_root_height`,
+    /// or it is a coinbase output spent less than `coinbase_maturity` blocks
+    /// after the block that mined it. Each is a fact about the block's inputs, not a
     /// store failure, so it comes back as `Ok(PrevoutCheck::Rejected)` and the
     /// caller can mark the block Invalid. `Err` is reserved for reads that
     /// genuinely failed: a RocksDB error or an undecodable row.
     ///
-    /// Maturity is measured from `StoredTxOut::coinbase_root_height` -- the
+    /// Maturity is measured from `StoredTxOut::coinbase_root` -- the
     /// height of the block that mined the coinbase, stamped on the output when
     /// it was written -- to `spending_height`, the spending block's own height.
     /// Both are properties of blocks, not of this node's confirmed chain, so
@@ -305,20 +396,25 @@ impl Store {
             let stored: StoredTxOut = encode::deserialize(&data).map_err(|_| {
                 StoreError::Serialization("Failed to deserialize output".to_string())
             })?;
-            if stored.coinbase_root_height < min_coinbase_root_height {
+            let CoinbaseRoot::Height(coinbase_root_height) = stored.coinbase_root else {
+                return Ok(PrevoutCheck::Rejected(
+                    PrevoutRejection::UnknownCoinbaseRoot(outpoints[index]),
+                ));
+            };
+            if coinbase_root_height < min_coinbase_root_height {
                 return Ok(PrevoutCheck::Rejected(
                     PrevoutRejection::CoinbaseRootTooOld {
                         outpoint: outpoints[index],
-                        coinbase_root_height: stored.coinbase_root_height,
+                        coinbase_root_height,
                         minimum_height: min_coinbase_root_height,
                     },
                 ));
             }
-            let depth = spending_height.saturating_sub(stored.coinbase_root_height) as usize;
+            let depth = spending_height.saturating_sub(coinbase_root_height) as usize;
             if stored.is_coinbase && depth < coinbase_maturity {
                 return Ok(PrevoutCheck::Rejected(PrevoutRejection::ImmatureCoinbase {
                     outpoint: outpoints[index],
-                    coinbase_root_height: stored.coinbase_root_height,
+                    coinbase_root_height,
                     spending_height,
                     required_depth: coinbase_maturity,
                 }));
@@ -410,6 +506,40 @@ impl Store {
         removed: &HashSet<BlockHash>,
         added: &HashSet<BlockHash>,
     ) -> Result<bool, StoreError> {
+        self.are_txids_confirmed_with_overlay(txids, removed, added, UnheldTxid::Unconfirmed)
+    }
+
+    /// As `are_all_txids_confirmed_with_overlay`, but a txid no stored block
+    /// includes is skipped rather than counted as unconfirmed.
+    ///
+    /// For the confirmation-time prevout re-check only. A block is validated
+    /// in full only when every output it spends is stored (a missing one is a
+    /// consensus failure), so a spender of an output this node never held got
+    /// a proof-of-work-only verdict: its input is below this node's prune
+    /// height, never fetched, and whether its source is confirmed cannot be
+    /// asked here. Pruning deletes a txid's `TxidsBlocks` row and its outputs
+    /// together, and only stored blocks write them, so "no block includes it"
+    /// means "not held". Never use this where an unknown source must be
+    /// refused, such as admitting a transaction to the pool.
+    pub(crate) fn are_held_txids_confirmed_with_overlay(
+        &self,
+        txids: &[Txid],
+        removed: &HashSet<BlockHash>,
+        added: &HashSet<BlockHash>,
+    ) -> Result<bool, StoreError> {
+        self.are_txids_confirmed_with_overlay(txids, removed, added, UnheldTxid::Unchecked)
+    }
+
+    /// Whether every txid is included in a confirmed block, adjusted by the
+    /// batch's `removed` and `added` blocks, with `unheld` saying what a txid
+    /// no stored block includes counts as.
+    fn are_txids_confirmed_with_overlay(
+        &self,
+        txids: &[Txid],
+        removed: &HashSet<BlockHash>,
+        added: &HashSet<BlockHash>,
+        unheld: UnheldTxid,
+    ) -> Result<bool, StoreError> {
         let per_txid_blockhashes = self.get_blockhashes_for_all_txids(txids)?;
 
         let all_blockhashes: Vec<BlockHash> = per_txid_blockhashes
@@ -427,10 +557,11 @@ impl Store {
             .collect();
 
         for blockhashes in &per_txid_blockhashes {
+            let skipped = blockhashes.is_empty() && unheld == UnheldTxid::Unchecked;
             let has_confirmed = blockhashes
                 .iter()
                 .any(|blockhash| confirmed_set.contains(blockhash) || added.contains(blockhash));
-            if !has_confirmed {
+            if !skipped && !has_confirmed {
                 return Ok(false);
             }
         }
@@ -470,9 +601,12 @@ impl Store {
     /// `add_txids_to_blocks_index`, allowing this function to persist
     /// transactions outside of a block context.
     ///
-    /// `block_height` is used to set `coinbase_root_height` on outputs:
-    /// coinbase outputs get the block height directly, spending tx
-    /// outputs get the minimum coinbase_root_height across their inputs.
+    /// `block_height` is used to set `coinbase_root` on outputs: coinbase
+    /// outputs get the block height directly, spending tx outputs get the
+    /// oldest root across their inputs, or `CoinbaseRoot::Unknown` when an
+    /// input is missing. A missing input is never an error here: the store
+    /// cannot tell an output that never existed from one below its prune
+    /// height that it never fetched, so validation gives the verdict.
     pub(crate) fn add_sharechain_txs(
         &self,
         transactions: &[ShareTransaction],
@@ -482,9 +616,9 @@ impl Store {
         let inputs_cf = self.db.cf_handle(&ColumnFamily::Inputs).unwrap();
         let outputs_cf = self.db.cf_handle(&ColumnFamily::Outputs).unwrap();
         let mut txs_metadata = Vec::new();
-        // Track coinbase_root_height for outputs written in this batch
-        // so in-block spending chains can look up earlier outputs.
-        let mut batch_heights: HashMap<String, u32> =
+        // Track the coinbase root of outputs written in this batch so
+        // in-block spending chains can look up earlier outputs.
+        let mut batch_roots: HashMap<String, CoinbaseRoot> =
             HashMap::with_capacity(transactions.len() * 2);
 
         for tx in transactions {
@@ -502,19 +636,19 @@ impl Store {
             }
 
             let is_coinbase = tx.0.is_coinbase();
-            let coinbase_root_height = if is_coinbase {
-                block_height
+            let coinbase_root = if is_coinbase {
+                CoinbaseRoot::Height(block_height)
             } else {
-                self.min_coinbase_root_height_for_inputs(tx, &outputs_cf, &batch_heights)?
+                self.oldest_coinbase_root_for_inputs(tx, &outputs_cf, &batch_roots)?
             };
 
             for (i, output) in tx.output.iter().enumerate() {
                 let output_key = outpoint_key(&txid, i as u32);
-                batch_heights.insert(output_key.clone(), coinbase_root_height);
+                batch_roots.insert(output_key.clone(), coinbase_root);
                 let stored = StoredTxOut {
                     tx_out: output.clone(),
                     is_coinbase,
-                    coinbase_root_height,
+                    coinbase_root,
                 };
                 let serialized = consensus::serialize(&stored);
                 batch.put_cf::<&[u8], Vec<u8>>(&outputs_cf, output_key.as_ref(), serialized);
@@ -523,43 +657,50 @@ impl Store {
         Ok(txs_metadata)
     }
 
-    /// Compute the minimum coinbase_root_height across all inputs of a
-    /// non-coinbase transaction. Checks the in-batch cache first (for
-    /// in-block spending chains), then falls back to the Outputs CF.
-    /// Returns an error if any input's output is missing or cannot be
-    /// deserialized.
-    fn min_coinbase_root_height_for_inputs(
+    /// Compute the oldest coinbase root across all inputs of a non-coinbase
+    /// transaction. Checks the in-batch cache first (for in-block spending
+    /// chains), then falls back to the Outputs CF.
+    ///
+    /// An input whose output is not stored makes the result
+    /// `CoinbaseRoot::Unknown`. Every input is still read, so a read or
+    /// decode failure on any of them propagates as a `StoreError`.
+    fn oldest_coinbase_root_for_inputs(
         &self,
         tx: &ShareTransaction,
         outputs_cf: &impl rocksdb::AsColumnFamilyRef,
-        batch_heights: &HashMap<String, u32>,
-    ) -> Result<u32, StoreError> {
-        let mut min_height = u32::MAX;
+        batch_roots: &HashMap<String, CoinbaseRoot>,
+    ) -> Result<CoinbaseRoot, StoreError> {
+        let mut oldest_root = CoinbaseRoot::Height(u32::MAX);
         for input in &tx.0.input {
             let outpoint_key =
                 outpoint_key(&input.previous_output.txid, input.previous_output.vout);
 
-            let height = if let Some(cached_height) = batch_heights.get(&outpoint_key) {
-                *cached_height
-            } else {
-                let bytes = self
-                    .db
-                    .get_cf(outputs_cf, outpoint_key.as_bytes())?
-                    .ok_or_else(|| {
-                        StoreError::NotFound(format!(
-                            "Input output not found for coinbase_root_height: {outpoint_key}"
-                        ))
-                    })?;
-                let stored_out: StoredTxOut = consensus::deserialize(&bytes).map_err(|_| {
-                    StoreError::Serialization(format!(
-                        "Failed to deserialize output for coinbase_root_height: {outpoint_key}"
-                    ))
-                })?;
-                stored_out.coinbase_root_height
+            let root = match batch_roots.get(&outpoint_key) {
+                Some(cached_root) => *cached_root,
+                None => self.stored_coinbase_root(outputs_cf, &outpoint_key)?,
             };
-            min_height = std::cmp::min(min_height, height);
+            oldest_root = oldest_root.oldest(root);
         }
-        Ok(min_height)
+        Ok(oldest_root)
+    }
+
+    /// The coinbase root stamped on a stored output, or
+    /// `CoinbaseRoot::Unknown` when the output is not stored.
+    fn stored_coinbase_root(
+        &self,
+        outputs_cf: &impl rocksdb::AsColumnFamilyRef,
+        outpoint_key: &str,
+    ) -> Result<CoinbaseRoot, StoreError> {
+        let Some(bytes) = self.db.get_cf(outputs_cf, outpoint_key.as_bytes())? else {
+            debug!("Input {outpoint_key} is not stored, recording an unknown coinbase root");
+            return Ok(CoinbaseRoot::Unknown);
+        };
+        let stored_out: StoredTxOut = consensus::deserialize(&bytes).map_err(|_| {
+            StoreError::Serialization(format!(
+                "Failed to deserialize output for its coinbase root: {outpoint_key}"
+            ))
+        })?;
+        Ok(stored_out.coinbase_root)
     }
 
     /// Marks the transaction as successfully validated, this prevents us validating it again.
@@ -1099,6 +1240,13 @@ impl Store {
     /// check and returns `Ok(true)` (mirrors `put_confirmed_entry`). Coinbase
     /// maturity is not re-checked here: it is made deterministic at ingest
     /// against the block's own height (see `validate_prevouts`).
+    ///
+    /// A source txid this node holds no block for is not asked about: only a
+    /// block validated on proof of work alone can spend one (it spends an
+    /// output below this node's prune height), and refusing it would mark a
+    /// valid block Invalid on this node only (see
+    /// `are_held_txids_confirmed_with_overlay`). Its outpoints are still
+    /// checked for a double spend.
     pub(crate) fn recheck_block_prevouts_with_overlay(
         &self,
         blockhash: &BlockHash,
@@ -1114,7 +1262,7 @@ impl Store {
         } = extract_spending_prevouts(&transactions).map_err(|duplicate| {
             StoreError::Database(format!("Confirming block {blockhash} has {duplicate}"))
         })?;
-        if !self.are_all_txids_confirmed_with_overlay(
+        if !self.are_held_txids_confirmed_with_overlay(
             &external_source_txids,
             &overlay.removed_blockhashes,
             &overlay.confirmed_in_batch,

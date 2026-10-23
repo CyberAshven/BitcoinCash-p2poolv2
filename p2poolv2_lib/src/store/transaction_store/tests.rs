@@ -1,6 +1,6 @@
 use super::*;
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
-use crate::test_utils::TestShareBlockBuilder;
+use crate::test_utils::{TestShareBlockBuilder, test_funding_transaction};
 use bitcoin::hashes::Hash;
 use bitcoin::pow::Work;
 use tempfile::tempdir;
@@ -990,6 +990,88 @@ fn test_recheck_block_prevouts_true_for_missing_body() {
     assert!(
         store
             .recheck_block_prevouts_with_overlay(&header_only, &ConfirmationOverlay::default())
+            .unwrap()
+    );
+}
+
+/// A block spending an output this node never held -- one below its
+/// prune height that it never fetched -- was validated on proof of work
+/// alone, so confirmation cannot ask whether that output's source is
+/// confirmed. Refusing it marked a valid block Invalid on this node only.
+#[test]
+fn test_recheck_accepts_a_spend_of_an_output_this_node_never_held() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+    let spend_of_unheld_output = Transaction {
+        version: bitcoin::transaction::Version(1),
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::new(Txid::from_byte_array([0x42; 32]), 0),
+            ..Default::default()
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1_000),
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        }],
+    };
+    let block = TestShareBlockBuilder::new()
+        .add_transaction(spend_of_unheld_output)
+        .build();
+    let mut batch = Store::get_write_batch();
+    store.add_share_block(&block, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+
+    assert!(
+        store
+            .recheck_block_prevouts_with_overlay(
+                &block.block_hash(),
+                &ConfirmationOverlay::default()
+            )
+            .unwrap()
+    );
+}
+
+/// The exemption covers unheld sources only: an output this node holds
+/// from a block off the confirmed chain still holds the spender back.
+#[test]
+fn test_recheck_still_rejects_a_spend_of_a_held_unconfirmed_output() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+    let source = test_funding_transaction(5_000);
+    let source_txid = source.compute_txid();
+    let source_block = TestShareBlockBuilder::new()
+        .nonce(0xe9695801)
+        .add_transaction(source)
+        .build();
+    let mut batch = Store::get_write_batch();
+    store.add_share_block(&source_block, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+    let spend = Transaction {
+        version: bitcoin::transaction::Version(1),
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::new(source_txid, 0),
+            ..Default::default()
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1_000),
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        }],
+    };
+    let spending_block = TestShareBlockBuilder::new()
+        .nonce(0xe9695802)
+        .add_transaction(spend)
+        .build();
+    let mut batch = Store::get_write_batch();
+    store.add_share_block(&spending_block, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+
+    assert!(
+        !store
+            .recheck_block_prevouts_with_overlay(
+                &spending_block.block_hash(),
+                &ConfirmationOverlay::default()
+            )
             .unwrap()
     );
 }
@@ -2019,34 +2101,48 @@ fn test_min_coinbase_root_height_returns_min_across_inputs() {
     };
 
     let outputs_cf = store.db.cf_handle(&ColumnFamily::Outputs).unwrap();
-    let empty_cache: HashMap<String, u32> = HashMap::new();
+    let empty_cache: HashMap<String, CoinbaseRoot> = HashMap::new();
     let result = store
-        .min_coinbase_root_height_for_inputs(
-            &ShareTransaction(spending_tx),
-            &outputs_cf,
-            &empty_cache,
-        )
+        .oldest_coinbase_root_for_inputs(&ShareTransaction(spending_tx), &outputs_cf, &empty_cache)
         .unwrap();
 
     assert_eq!(
-        result, 100,
-        "Should return the minimum height across inputs"
+        result,
+        CoinbaseRoot::Height(100),
+        "Should return the oldest root across inputs"
     );
 }
 
+/// A missing input is recorded as an unknown root, not an error: the
+/// store cannot tell an output that never existed from one below its
+/// prune height.
 #[test]
-fn test_min_coinbase_root_height_errors_when_input_outputs_missing() {
+fn test_oldest_coinbase_root_is_unknown_when_an_input_is_missing() {
     let temp_dir = tempdir().unwrap();
     let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
 
-    // Spending tx references outputs not in the store
+    let funding_tx = test_funding_transaction(1_000_000);
+    let funding_txid = funding_tx.compute_txid();
+    let mut batch = Store::get_write_batch();
+    store
+        .add_sharechain_txs(&[ShareTransaction(funding_tx)], 100, &mut batch)
+        .unwrap();
+    store.commit_batch(batch).unwrap();
+
+    // One input is stored, the other is not.
     let spending_tx = Transaction {
         version: bitcoin::transaction::Version(1),
         lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: vec![bitcoin::TxIn {
-            previous_output: bitcoin::OutPoint::new(Txid::all_zeros(), 0),
-            ..Default::default()
-        }],
+        input: vec![
+            bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::new(funding_txid, 0),
+                ..Default::default()
+            },
+            bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::new(Txid::all_zeros(), 0),
+                ..Default::default()
+            },
+        ],
         output: vec![bitcoin::TxOut {
             value: bitcoin::Amount::from_sat(1_000_000),
             script_pubkey: bitcoin::ScriptBuf::new(),
@@ -2054,17 +2150,174 @@ fn test_min_coinbase_root_height_errors_when_input_outputs_missing() {
     };
 
     let outputs_cf = store.db.cf_handle(&ColumnFamily::Outputs).unwrap();
-    let empty_cache: HashMap<String, u32> = HashMap::new();
-    let result = store.min_coinbase_root_height_for_inputs(
+    let empty_cache: HashMap<String, CoinbaseRoot> = HashMap::new();
+    let result = store
+        .oldest_coinbase_root_for_inputs(&ShareTransaction(spending_tx), &outputs_cf, &empty_cache)
+        .expect("a missing input is not a store error");
+
+    assert_eq!(result, CoinbaseRoot::Unknown);
+}
+
+/// A stored input that cannot be decoded is corruption, not a missing
+/// input, and still fails the write.
+#[test]
+fn test_oldest_coinbase_root_propagates_an_undecodable_input() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+
+    let corrupt_outpoint = bitcoin::OutPoint::new(Txid::from_byte_array([0x17; 32]), 0);
+    let outputs_cf = store.db.cf_handle(&ColumnFamily::Outputs).unwrap();
+    store
+        .db
+        .put_cf(
+            &outputs_cf,
+            outpoint_key(&corrupt_outpoint.txid, corrupt_outpoint.vout).as_bytes(),
+            [0xff_u8, 0xff],
+        )
+        .unwrap();
+    let spending_tx = Transaction {
+        version: bitcoin::transaction::Version(1),
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: corrupt_outpoint,
+            ..Default::default()
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1_000),
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        }],
+    };
+
+    let empty_cache: HashMap<String, CoinbaseRoot> = HashMap::new();
+    let result = store.oldest_coinbase_root_for_inputs(
         &ShareTransaction(spending_tx),
         &outputs_cf,
         &empty_cache,
     );
 
-    assert!(
-        result.is_err(),
-        "Should return error when input outputs not found in store"
+    assert!(matches!(result, Err(StoreError::Serialization(_))));
+}
+
+/// `Unknown` is the bottom value: an in-block chain spending an output
+/// with an unknown root writes unknown roots all the way down, and
+/// spending any of them is rejected.
+#[test]
+fn test_unknown_coinbase_root_propagates_and_is_rejected() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+
+    let first_spend = Transaction {
+        version: bitcoin::transaction::Version(1),
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::new(Txid::from_byte_array([0x42; 32]), 0),
+            ..Default::default()
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(2_000),
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        }],
+    };
+    let first_txid = first_spend.compute_txid();
+    let second_spend = Transaction {
+        version: bitcoin::transaction::Version(1),
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::new(first_txid, 0),
+            ..Default::default()
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1_000),
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        }],
+    };
+    let second_txid = second_spend.compute_txid();
+
+    let mut batch = Store::get_write_batch();
+    store
+        .add_sharechain_txs(
+            &[
+                ShareTransaction(first_spend),
+                ShareTransaction(second_spend),
+            ],
+            500,
+            &mut batch,
+        )
+        .unwrap();
+    store.commit_batch(batch).unwrap();
+
+    let second_outpoint = bitcoin::OutPoint::new(second_txid, 0);
+    assert_eq!(
+        store.check_prevouts(&[second_outpoint], 600, 0, 0).unwrap(),
+        PrevoutCheck::Rejected(PrevoutRejection::UnknownCoinbaseRoot(second_outpoint))
     );
+    let first_outpoint = bitcoin::OutPoint::new(first_txid, 0);
+    assert_eq!(
+        store.check_prevouts(&[first_outpoint], 600, 0, 0).unwrap(),
+        PrevoutCheck::Rejected(PrevoutRejection::UnknownCoinbaseRoot(first_outpoint))
+    );
+}
+
+/// Genesis coinbase outputs really have root height 0, so `Height(0)` must
+/// stay spendable and distinct from `Unknown`, in the store encoding too.
+#[test]
+fn test_coinbase_root_height_zero_stays_distinct_from_unknown() {
+    let height_zero = StoredTxOut {
+        tx_out: bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1_000),
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        },
+        is_coinbase: true,
+        coinbase_root: CoinbaseRoot::Height(0),
+    };
+    let unknown = StoredTxOut {
+        coinbase_root: CoinbaseRoot::Unknown,
+        ..height_zero.clone()
+    };
+
+    let height_zero_bytes = consensus::serialize(&height_zero);
+    let unknown_bytes = consensus::serialize(&unknown);
+
+    assert_ne!(height_zero_bytes, unknown_bytes);
+    assert_eq!(
+        consensus::deserialize::<StoredTxOut>(&height_zero_bytes).unwrap(),
+        height_zero
+    );
+    assert_eq!(
+        consensus::deserialize::<StoredTxOut>(&unknown_bytes).unwrap(),
+        unknown
+    );
+    // An unknown root costs one byte more than the tx_out and flag; a
+    // height costs five.
+    assert_eq!(height_zero_bytes.len(), unknown_bytes.len() + 4);
+
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+    let genesis_coinbase = test_funding_transaction(1_000);
+    let genesis_coinbase_txid = genesis_coinbase.compute_txid();
+    let mut batch = Store::get_write_batch();
+    store
+        .add_sharechain_txs(&[ShareTransaction(genesis_coinbase)], 0, &mut batch)
+        .unwrap();
+    store.commit_batch(batch).unwrap();
+    assert_eq!(
+        store
+            .check_prevouts(
+                &[bitcoin::OutPoint::new(genesis_coinbase_txid, 0)],
+                100,
+                0,
+                100
+            )
+            .unwrap(),
+        PrevoutCheck::Accepted
+    );
+}
+
+#[test]
+fn test_coinbase_root_rejects_an_unknown_encoding_tag() {
+    let result = consensus::deserialize::<CoinbaseRoot>(&[2_u8]);
+
+    assert!(result.is_err());
 }
 
 #[test]
@@ -2114,7 +2367,7 @@ fn test_coinbase_root_height_propagates_through_spending_chain() {
         .unwrap();
     store.commit_batch(batch).unwrap();
 
-    // Verify the spending tx's output inherited coinbase_root_height = 200
+    // Verify the spending tx's output inherited the root at height 200
     let output_key = outpoint_key(&spending_txid, 0);
     let outputs_cf = store.db.cf_handle(&ColumnFamily::Outputs).unwrap();
     let bytes = store
@@ -2125,7 +2378,8 @@ fn test_coinbase_root_height_propagates_through_spending_chain() {
     let stored_out = consensus::deserialize::<StoredTxOut>(&bytes).unwrap();
 
     assert_eq!(
-        stored_out.coinbase_root_height, 200,
-        "Spending tx output should inherit coinbase_root_height from input"
+        stored_out.coinbase_root,
+        CoinbaseRoot::Height(200),
+        "Spending tx output should inherit its coinbase root from its input"
     );
 }
