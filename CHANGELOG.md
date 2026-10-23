@@ -14,6 +14,12 @@ changes the share chain's rules, not Bitcoin Cash consensus: nodes start
 from a new store, and Bitcoin Cash protocol strings carry `trade-htlc` and
 then `payout-holder`.
 
+A Bitcoin Cash coinbase now fits stock ASIC firmware: at most 11 payout
+outputs in a coinbase of at most 784 bytes, the tail of small payees paid by
+a draw weighted by their PPLNS weight. Another share-chain rule change:
+protocol strings carry `payout-cap11` after `payout-holder`. The share
+transaction pool ranks transactions by the share units they burn per byte.
+
 Synced with upstream P2Poolv2 through `61810c56` (its v0.16.2). The fork
 keeps version `0.0.1-alpha`. The sync itself leaves Bitcoin Cash genesis
 shares, protocol strings, the PPLNS window and maturity, the ASERT parent
@@ -33,7 +39,8 @@ anchor and the donation and fee cap as they were.
 - Bitcoin Cash share transaction pool: a node checks signed share
   transactions against the confirmed share chain under every share-chain
   rule, keeps at most 1,000 of them and 4 MiB (each at most 50 KiB, for 3
-  hours, oldest evicted first, spending only confirmed unspent outputs),
+  hours, lowest priority evicted first, spending only confirmed unspent
+  outputs),
   relays them to its peers as `Transaction` requests (peer transactions
   admitted at most 10 a second, bursts of 100), and mines them in the shares
   it builds, within 99 transactions and 64 KiB a share, with the share
@@ -66,6 +73,29 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
+- Coinbase budget on Bitcoin Cash (share-chain consensus, decision 14): a
+  coinbase pays at most 11 PPLNS payout outputs (`BCH_MAX_COINBASE_PAYOUTS`)
+  holding at most 374 bytes (`BCH_MAX_PAYOUT_OUTPUT_BYTES`), and no payout
+  below BCHN's dust threshold, so stock Antminer firmware, which upstream
+  reports takes "just over a dozen outputs", can mine every job, over
+  Stratum V1 directly or behind a Stratum V2 translator. Payees that fit
+  are paid as before. Past the budget the largest payees (by weight after
+  the payout-holder rule) are paid their exact share and everything else
+  goes to one of the remaining payees, drawn by weight from the payout
+  anchor, so each one's expected income is unchanged and the coinbase sums
+  exactly. The donation, the fee and the 10% cap are untouched. Job builders
+  refuse a coinbase over `BCH_COINBASE_BYTE_BUDGET` (784 bytes; the largest
+  the rule allows is 782). Protocol strings carry `payout-cap11`. Bitcoin and
+  Hydrapool pay every payee. See `docs/architecture/payout-distribution.md`,
+  "Bitcoin Cash coinbase budget".
+- Bitcoin Cash share transaction pool priority (node policy, decision 15):
+  a transaction's priority is the share units it burns (inputs less
+  outputs) per byte, then its arrival. Shares carry the highest first; a
+  full pool evicts the lowest ones only for a transaction that outranks them
+  all, and otherwise refuses it ("the pool is full ..."), instead of
+  evicting the oldest. No validity change: there is still no consensus fee.
+  `p2poolv2_cli bch-trade --fee-rate` sets the bid on the share chain. See
+  `docs/atomic-swap/bch-share-trading.md`, "Priority".
 - Share-chain consensus on Bitcoin Cash: the interpreter also accepts a
   claim or refund of the share-trading contract; every output of a
   non-coinbase share transaction must be P2PKH or P2SH32 at or above BCHN's
