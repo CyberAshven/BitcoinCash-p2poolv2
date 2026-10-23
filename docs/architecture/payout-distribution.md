@@ -42,6 +42,13 @@ through `bitcoin_block_difficulty`).
    "Bitcoin Cash payout rights" below.
 7. **Split:** addresses sorted by string, `amount * weight / total`
    truncated, and the last address gets the remainder.
+8. **Coinbase budget (Bitcoin Cash):** at most `C` = 11 payout outputs
+   (`BCH_MAX_COINBASE_PAYOUTS`) holding at most `B` = 374 bytes
+   (`BCH_MAX_PAYOUT_OUTPUT_BYTES`), no payout below BCHN's dust threshold.
+   Payees that fit are paid by rule 7; past the budget the largest payees
+   are paid their exact share and the rest of the amount goes to one of the
+   other payees, drawn by weight. See "Bitcoin Cash coinbase budget" below.
+   Bitcoin pays every payee.
 
 ## Invariants
 
@@ -59,7 +66,9 @@ through `bitcoin_block_difficulty`).
   reads the bits from its template. They are the bits the share's header
   carries, because a stratum miner cannot change them and a declared job must
   keep them (`validate_custom_job` checks `nbits`). The validator reads them
-  from the header.
+  from the header. Both then split the weights with `build_pplns_outputs`'s
+  `append_payout_split` under `PayoutSplit::for_chain` of the same anchor,
+  so the Bitcoin Cash coinbase budget (rule 8) is applied identically.
 - **Payee is `miner_bitcoin_address`** on Bitcoin, and on Bitcoin Cash for
   every share whose payout right its own miner holds. Never `miner_address`
   as an address: on Bitcoin Cash a transferred right pays the P2PKH address
@@ -164,9 +173,191 @@ pool holding fraction `f` of BCH's hashrate, so pools under about `K / 2016`
   rejects, and changing either constant changes the tag by itself. The
   share difficulty rule follows it as `asert-parent`
   (`docs/difficulty_adjustment/asert.md`), the share transaction rules as
-  `trade-htlc` and the payout to the holder of each share's payout right as
-  `payout-holder` (`docs/atomic-swap/bch-share-trading.md`). Bitcoin's
-  protocol strings are unchanged.
+  `trade-htlc`, the payout to the holder of each share's payout right as
+  `payout-holder` (`docs/atomic-swap/bch-share-trading.md`) and the coinbase
+  budget as `payout-cap11` (below). Bitcoin's protocol strings are
+  unchanged.
+
+## Bitcoin Cash coinbase budget
+
+Rule 8. Upstream's gap: discussion
+[#668](https://github.com/p2poolv2/p2poolv2/discussions/668) and issue
+[#708](https://github.com/p2poolv2/p2poolv2/issues/708) ("Limit coinbase
+size to 25 outputs"); `bch-plan.md` decision 14.
+
+### Why a budget
+
+- **Firmware.** Stock Antminer firmware accepts a coinbase of only "just
+  over a dozen outputs" (#668). The evidence cited there is an OCEAN block
+  mined on that firmware: 16 payouts in a 784-byte coinbase. P2Pool v1
+  warned at 200 payees that "Antminer S9s may crash when this is close to
+  226" (`generate_transaction` in jtoomim's `p2pool/data.py`), so the limit
+  differs by model and firmware version. A device only hashes
+  coinb1, the extranonce and coinb2, so the limit is on bytes, not outputs.
+- **Who sees the coinbase.** Every Stratum V1 device gets coinb1 and coinb2,
+  including SV1 devices behind a Stratum V2 translator such as Pickaxe's
+  adapter. SV2 extended channels and declared jobs carry the coinbase prefix
+  and suffix too. Only SV2 standard (header-only) channels never see it.
+- **Before this rule** a Bitcoin Cash coinbase paid every window payee: a
+  window with 50 miners put 50 outputs, about 1,700 bytes, into every job.
+
+### The rule
+
+Inputs: the payees and their weights after rules 5 and 6 (so a share's
+weight is already credited to the holder of its payout right), the amount
+`A` left after the donation and the fee, and the anchor. Bitcoin Cash only.
+
+1. Each payee `i` has weight `w_i` out of `W`, a pro-rata amount
+   `a_i = floor(A * w_i / W)`, an output of `s_i` bytes (34 for P2PKH, 32
+   for P2SH) and BCHN's dust threshold `d_i` for that output (546 for
+   P2PKH, 540 for P2SH; `bch_script::dust_threshold`).
+2. **Fits.** If there are at most `C` payees, their outputs take at most `B`
+   bytes and every `a_i >= d_i`, rule 7 pays every payee. A small pool, such
+   as the chipnet pool today, sees no change.
+3. **Paid set.** Otherwise rank the payees by weight, largest first, ties by
+   address string. Walking the ranking, a payee is paid its `a_i` when
+   `a_i >= d_i`, the paid set stays within `C - 1` outputs, and their bytes
+   stay within `B - S`, where `S` is the largest output any payee takes. The
+   reserved slot and `S` bytes are for the tail's output. Every other payee
+   is in the tail.
+4. **Tail draw.** The tail's value, `A` less the paid amounts (its pro-rata
+   share plus every rounding remainder), goes to one tail payee drawn by
+   weight. The tail is laid out in address-string order, each payee
+   covering its weight, and the draw picks the payee covering
+   `r mod W_tail`, where `r` is the first 16 bytes, little-endian, of
+   `SHA256("P2Poolv2/bch-payout-tail-draw" || anchor)` and `anchor` is the
+   paying share's `prev_share_blockhash` in its byte order.
+5. **No dust.** If the tail's value is below the drawn payee's dust
+   threshold, it goes to the first payee of the paid set (the largest)
+   instead. If the paid set is empty, the drawn payee takes all of `A`.
+6. **Order.** Outputs follow the donation and the fee, sorted by address
+   string as in rule 7.
+
+So a Bitcoin Cash coinbase has at most `C` payout outputs and `B` bytes of
+them, sums to exactly the coinbase value, and is a pure function of the
+weights, `A` and the anchor, which the producer and every validator share.
+
+### Why a weighted draw
+
+| Option | Verdict |
+|---|---|
+| Leave the tail out, as P2Pool v1 does past its 4,000 largest payees | Loses the tail's value. Rejected. |
+| Spread the tail over the paid set, pro rata | Exact and simple, but every tail payee's expected income is zero: small miners pay large ones. A rich-list Sybil (upstream #647: a large miner splitting into enough addresses to fill the paid set) would capture the tail. Rejected. |
+| Carry the tail to a later coinbase | Needs consensus state of what each address is owed, keyed on blocks the share chain cannot tell apart from BCH orphans; PPLNS already carries a share over about `K` blocks. Rejected. |
+| Draw one tail payee by weight | Upstream's proposal (#708 and its 2026-10-15 meeting notes: sum the tail and send it to one miner chosen at random, weighted by accumulated weight). Every tail payee's expected income equals its pro-rata share and no value is lost. Adopted. |
+
+The cost is variance for tail payees. Share trading (decision 13) lets a
+small miner sell its shares to a holder in the paid set, and the covenant
+payout tree (below) removes the draw. A Sybil that crowds others out of the
+paid set only moves them into the tail, where their expected income is
+unchanged.
+
+### Why the anchor seeds the draw
+
+- Every validator reads the anchor from the share header, and the producer
+  holds it when it builds the job.
+- Nobody knows it until the anchor share is mined, and the payout rights at
+  an anchor are fixed by the anchor's own ancestry. So nobody can move a
+  right to an address placed to cover a known draw point. A seed known in
+  advance, such as the BCH previous block hash, would allow exactly that for
+  the length of a BCH block.
+- **Grinding.** A miner may build on an older anchor to get another draw.
+  It gains only when its own share is a block, its stale shares lose
+  share-chain income (an uncle earns 9/10, an orphan nothing), and each
+  extra anchor adds one draw at its tail weight: with `k` anchors, a tail
+  payee holding fraction `p` of the tail wins about `1 - (1 - p)^k` of its
+  own blocks' tails instead of `p`. For a small miner that is second order
+  (its blocks times its tail fraction).
+- **Withholding.** A finder that loses the draw still gains by publishing:
+  its block is also a share, which enters later windows.
+- **Bias.** `r mod W_tail` with a 128-bit `r` is off by at most
+  `W_tail / 2^128`; window weights stay far below `2^64`.
+
+### Bytes
+
+- `BCH_COINBASE_BYTE_BUDGET` = 784 bytes, the coinbase cited in #668. It is
+  evidence from another pool, not a measurement of this one's devices.
+- The largest coinbase this fork builds, other than its payouts, is 408
+  bytes: 51 bytes of transaction fields (version, input count, outpoint,
+  script length, sequence, output count and locktime), a 100-byte scriptSig
+  (BCH's limit; a declared prefix is at most 88 bytes plus the 12-byte
+  extranonce), the donation (34), a fee output of any address type (at most
+  51, a 40-byte witness program), the merge-mining output (55), the padding
+  output (at most 74) and the commitment output (43). That leaves 376 bytes,
+  11 P2PKH outputs (374): hence `C` = 11 and `B` = 11 * 34, and the largest
+  Bitcoin Cash coinbase is 782 bytes. A compile-time assertion keeps the sum
+  within the budget.
+- **Claimability.** A merge-mining (AuxPoW) claim by a token covenant
+  carries the whole BCH coinbase, the 80-byte header and the coinbase's
+  merkle branch (at most 25 hashes, `MAX_COINBASE_MERKLE_BRANCH_LENGTH`) in
+  its unlocking bytecode. With the budget that is at most
+  784 + 80 + 800 = 1,664 bytes, far under the 2026 P2S standard of about
+  10,000 bytes, which keeps the claim's hashing cost low too.
+- **Output positions.** The bound counts the merge-mining output by size,
+  not position. Where it sits is decided in one place
+  (`place_merge_mining_output` in `stratum/work/coinbase.rs`), today after
+  the payouts; the merge-mining format may move it to output 0 without
+  touching this rule. The padding and share-commitment outputs stay last,
+  the commitment output the very last.
+- `B` is part of the rule, not only `C`, because a share header may name any
+  address type: a witness-program script decodes as an address and takes up
+  to 51 bytes. Honest Bitcoin Cash nodes produce only CashAddr P2PKH and
+  P2SH addresses, so in practice `C` binds.
+- The job builder (the Stratum V1 notify and the Job Declaration
+  preparation) measures each coinbase it hands out and refuses one over the
+  budget. Under the rule that can only happen if BCHN's `coinbaseaux` flags
+  push the scriptSig past BCH's 100 bytes, a block BCH rejects anyway.
+- The validator rebuilds the coinbase exactly, so a share paying more
+  outputs than the rule allows is invalid. It does not check the byte
+  budget itself: beyond the payouts the bytes are the producer's own
+  scriptSig, which only its own miners hash.
+
+### What does not change
+
+- The donation (1.5% by default, to the fixed key), the operator fee and
+  the 10% cap on the two come off before the split, as before, and their
+  outputs do not count towards `C`.
+- CTOR orders a block's transactions. The coinbase stays first and its
+  output order is this rule's, so CTOR is untouched; share transactions are
+  not BCH transactions.
+- Payout holders (rule 6): the ranking is by each address's total weight
+  after the holder rule, so buying rights can lift a holder into the paid
+  set, and a holder's tail weight is the sum of its rights in the tail.
+  Uncles keep their own address.
+- Bitcoin pays every payee, upstream's rule. Hydrapool (`simple_pplns`) is
+  unchanged.
+- The API's `/miner` view reports each address's weight, which is the
+  expected value of its payout; a tail payee is paid by the draw.
+
+### The covenant payout tree (M2) replaces the draw
+
+BCH's introspection opcodes can already check a spending transaction's
+outputs, so a keyless covenant tree can commit to many payouts in one
+P2SH32 output (`bch-plan.md` decision 4). The tail's output would become
+the root of such a tree: each node, spent by anyone, must create its two
+children (or pay a leaf to its address), so every tail payee withdraws
+exactly its `a_i` and the draw goes away. The paid set, `C` and `B` stay as
+they are. Withdrawals then pay BCH fees and a leaf below dust needs
+batching, which is why it is a separate design (gap analysis M2) and not
+built here.
+
+### Activation
+
+A consensus change: a node on the old rule builds another coinbase whenever
+a window has more than 11 payees, more than 374 bytes of payouts or a payee
+below dust. As for decisions 11 to 13 it ships as a flag day on a fresh
+store, and Bitcoin Cash protocol strings carry `payout-cap11` after
+`payout-holder` (`bch_payout_cap_rule_tag`, built from
+`BCH_MAX_COINBASE_PAYOUTS`, so changing the cap changes the tag). Mainnet
+starts with the rule.
+
+### Still to measure
+
+The 784-byte budget needs confirming on a real device: mine on chipnet with
+stock Antminer firmware (S19 and S21 class), over Stratum V1 directly and
+behind an SV2 translator, with coinbases from about 600 to 1,200 bytes, and
+record where jobs start to fail. Raising `C` and the budget together is a
+consensus change with its own tag.
 
 ## Bitcoin Cash payout rights
 
@@ -228,6 +419,7 @@ See `pruning.md` for the two-window retention model.
 | Every miner's credits (API `/miner`, one walk per anchor) | `PplnsWindow::get_window_credits_from_start_hash`, same walk and weights; on BCH the API sizes it from the anchor share's own header |
 | Producer | `Payout::fill_distribution_from_shares` (`sharechain_pplns/payout.rs`), from `build_output_distribution` (`stratum/work/notify.rs`); the window is built by `build_payout_for_mode` (`accounting/payout/mod.rs`) |
 | Cuts and split | `include_address_and_cut`, `append_proportional_distribution` (`accounting/payout/payout_distribution.rs`) |
+| BCH coinbase budget | `PayoutSplit`, `append_payout_split`, `BCH_MAX_COINBASE_PAYOUTS`, `BCH_MAX_PAYOUT_OUTPUT_BYTES`, `bch_payout_cap_rule_tag` (`accounting/payout/coinbase_budget.rs`); `BCH_COINBASE_BYTE_BUDGET`, `check_bch_coinbase_budget`, `place_merge_mining_output` (`stratum/work/coinbase.rs`) |
 | Validator | `validate_bitcoin_payout` (`shares/validation/mod.rs`) |
 
 ## Tests that pin the rules
@@ -255,6 +447,9 @@ test with small values (for example 3 and 2).
 | Output expiry | `test_validate_prevouts_expires_coinbase_roots_below_payout_depth` (`shares/validation/mod.rs`) |
 | BCH: a claim pays the buyer, a refund the seller, a reorg undoes a claim, the holder depends on the anchor only, Bitcoin unchanged | `p2poolv2_tests/src/share_payout_rights_test.rs` |
 | BCH: rights move input `i` to output `i`, freeze, keep the holder through P2SH32, undo, evict, overlay | `payout_rights.rs` tests |
+| BCH budget: fits, paid set, tail draw, dust, bytes, determinism | `coinbase_budget.rs` tests |
+| BCH budget: producer and validator agree past the cap | `test_bch_notifier_and_validator_agree_past_the_coinbase_budget` (`sharechain_pplns/payout.rs`) |
+| BCH budget: largest coinbase fits 784 bytes, a 30-payee one is refused | `test_the_largest_bch_coinbase_fits_the_byte_budget`, `test_a_bch_coinbase_past_the_byte_budget_is_refused` (`stratum/work/coinbase.rs`) |
 | Fixture coinbases match | `test_fixture_coinbase_reconstruction_matches_bitcoin_merkle_root` (`shares/share_block/mod.rs`, mirrors the walk by hand) |
 
 The offline `pplns_compare` binary (`p2poolv2_sim`, `pplns-compare` feature) pays one

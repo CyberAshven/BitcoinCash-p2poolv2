@@ -135,7 +135,7 @@ regtest node upgrades in one release and starts from a new store path.
 Bitcoin Cash protocol strings carry the rule as `asert-parent` after the
 payout rule (`/p2pool/test/<genesis tag>/pplns-k3-m100/asert-parent/1.0.0`,
 `BCH_ASERT_ANCHOR_TAG`; since the share-trading rules, followed by
-`trade-htlc`, then `payout-holder`, then `uncle-once`), so nodes on the old rule fail the handshake
+`trade-htlc`, then `payout-holder`, then `payout-cap11`, then `uncle-once`), so nodes on the old rule fail the handshake
 instead of trading shares the other rejects. Mainnet starts with the rule
 from its first share.
 

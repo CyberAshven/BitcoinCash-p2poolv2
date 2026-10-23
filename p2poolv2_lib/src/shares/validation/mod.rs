@@ -6,6 +6,7 @@ mod bitcoin_block_validation;
 
 use super::share_block::{MAX_POOL_TARGET, ShareHeader};
 use crate::accounting::OutputPair;
+use crate::accounting::payout::coinbase_budget::PayoutSplit;
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
 #[cfg(test)]
 #[mockall_double::double]
@@ -1196,8 +1197,13 @@ impl DefaultShareValidator {
         // divide it as the PPLNS window says.
         let coinbase_value = bitcoin_coinbase_value(&share.bitcoin_coinbase)?;
 
-        let expected_outputs =
-            Self::build_expected_outputs(&share.header, &address_difficulty_map, coinbase_value)?;
+        let split = PayoutSplit::for_chain(self.chain, share.header.prev_share_blockhash);
+        let expected_outputs = Self::build_expected_outputs(
+            &share.header,
+            &address_difficulty_map,
+            coinbase_value,
+            split,
+        )?;
         let expected_commitment_hash = ShareCommitment::from_share_block(share).hash();
 
         // The aux flags, extranonce, nanosecond timestamp, pool signature and
@@ -1280,11 +1286,16 @@ impl DefaultShareValidator {
 
     /// Build the expected payout outputs from share header donation/fee and PPLNS distribution.
     ///
+    /// `split` is the chain's: every payee on Bitcoin, the coinbase budget
+    /// on Bitcoin Cash with its tail drawn from the share's
+    /// `prev_share_blockhash`, as the producer built them.
+    ///
     /// When the PPLNS window is empty (bootstrap phase), returns an error.
     fn build_expected_outputs(
         share_header: &ShareHeader,
         address_difficulty_map: &HashMap<Address, u128>,
         coinbase_value: u64,
+        split: PayoutSplit,
     ) -> Result<Vec<OutputPair>, ValidationError> {
         build_pplns_outputs(
             coinbase_value,
@@ -1293,6 +1304,7 @@ impl DefaultShareValidator {
             share_header.donation,
             &share_header.fee_address,
             share_header.fee,
+            split,
         )
         .map_err(|error| {
             ValidationError::consensus(format!("Failed to compute payout distribution: {error}"))
@@ -4766,8 +4778,12 @@ mod tests {
             .build()
             .header;
         let empty_map = HashMap::new();
-        let result =
-            DefaultShareValidator::build_expected_outputs(&header, &empty_map, 5_000_000_000);
+        let result = DefaultShareValidator::build_expected_outputs(
+            &header,
+            &empty_map,
+            5_000_000_000,
+            PayoutSplit::EveryPayee,
+        );
         assert!(result.is_err());
         assert!(
             result
@@ -4796,9 +4812,13 @@ mod tests {
         difficulty_map.insert(address_b.clone(), 400u128);
 
         let total_amount = 1_000_000_000;
-        let outputs =
-            DefaultShareValidator::build_expected_outputs(&header, &difficulty_map, total_amount)
-                .unwrap();
+        let outputs = DefaultShareValidator::build_expected_outputs(
+            &header,
+            &difficulty_map,
+            total_amount,
+            PayoutSplit::EveryPayee,
+        )
+        .unwrap();
 
         assert_eq!(outputs.len(), 2);
         let total_distributed: Amount = outputs.iter().map(|output| output.amount).sum();
@@ -4840,8 +4860,13 @@ mod tests {
         difficulty_map.insert(address_a.clone(), 1000u128);
 
         let total = 10_000_000_000;
-        let outputs =
-            DefaultShareValidator::build_expected_outputs(&header, &difficulty_map, total).unwrap();
+        let outputs = DefaultShareValidator::build_expected_outputs(
+            &header,
+            &difficulty_map,
+            total,
+            PayoutSplit::EveryPayee,
+        )
+        .unwrap();
 
         // 3 outputs: donation, fee, miner
         assert_eq!(outputs.len(), 3);

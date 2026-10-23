@@ -191,8 +191,17 @@ node has no pool and ignores relayed transactions, as before.
   spends is refused (first seen wins).
 - **Limits.** At most 1,000 transactions and 4 MiB, each at most 50 KiB
   (`MAX_POOL_TRANSACTIONS`, `MAX_POOL_BYTES`, `MAX_POOL_TRANSACTION_SIZE`).
-  When a new transaction does not fit, the oldest ones are evicted. A
-  transaction expires 3 hours after it arrived. New transactions from peers
+  A transaction expires 3 hours after it arrived.
+- **Priority.** A transaction's fee is the share units it burns, its inputs
+  less its outputs (the share coinbase pays a fixed unit, so nobody receives
+  them). Its priority is that fee per byte, compared exactly as a fraction,
+  then its arrival: at equal rates the first seen ranks higher. When a new
+  transaction does not fit, the lowest-priority ones are evicted, lowest
+  first, but only if every one of them ranks below it; otherwise it is
+  refused ("the pool is full ..., burn more units per byte") and the pool is
+  unchanged. A transaction burning nothing still gets in while there is
+  room. This is node policy, not a share-chain rule (see "Why a priority,
+  not a fee rule" below). New transactions from peers
   are admitted at most 10 a second on average, in bursts of up to 100, across
   all peers (copies of one the pool already has are not counted);
   transactions over the API are not limited.
@@ -220,8 +229,9 @@ transaction stays in the pool and is mined anyway.
 
 ### Inclusion
 
-When the notifier builds work it selects pool transactions in arrival order
-that are valid on the mining base (the confirmed tip or a validated share
+When the notifier builds work it selects pool transactions in priority
+order (highest fee per byte first, then arrival) that are valid on the
+mining base (the confirmed tip or a validated share
 above it): inputs not spent on the confirmed chain nor by a share between
 the confirmed tip and the mining base, final and mature at the share's
 height. It skips a transaction that does not fit and stops adding at 99
@@ -252,7 +262,43 @@ curl -u <user>:<password> -H 'Content-Type: application/json' \
 The node answers `{"txid": ..., "status": "accepted"}` (or
 `"already_in_pool"`) and relays it, or answers 400 with the rule the
 transaction breaks. A Bitcoin node answers 503. The endpoint sits behind
-the API login, also on a node whose dashboard is public.
+the API login, also on a node whose dashboard is public. When the pool is
+full the 400 says so; build the transaction again with a higher
+`--fee-rate` (share units per byte, 0 by default on the share chain).
+
+### Why a priority, not a fee rule
+
+Upstream plans share-transaction fees that go to the share's miner
+([transactions.adoc](https://github.com/p2poolv2/docs), "Handling Fees")
+and rise linearly with an output's depth, from 1 unit per byte at depth 1
+to an amount to be decided at depth 120,960
+([#646](https://github.com/p2poolv2/p2poolv2/issues/646)), against a holder
+spamming with outputs about to expire. ([#247](https://github.com/p2poolv2/p2poolv2/issues/247)
+is about weighting shares by the fees of the bitcoin template they mine,
+not share transactions.) On Bitcoin Cash this fork keeps the pool rule as
+policy instead:
+
+- **Units carry no payout here.** A share's BCH income follows its payout
+  right, which is whole and moves input `i` to output `i`; units only pay
+  fees and keep outputs above the 546-unit dust floor. A fee in units
+  therefore costs every holder the same nothing in payouts, whatever its
+  depth, so #646's depth scale would tax honest sellers of older shares
+  without raising an attacker's cost: the attacker can burn fresh units as
+  easily as dying ones.
+- **Paying it to the share's miner** needs a fee output in the canonical
+  share coinbase that keeps its inputs' root height (or fees would turn
+  expiring units into fresh ones), a change to the store's root-height
+  bookkeeping, and it would give miners units with no right attached.
+- **What bounds the attack is priority.** Shares carry the highest fee rate
+  first, so keeping honest trades out costs the attacker more units per
+  byte than the honest trades bid, for every transaction in every share,
+  while a trader can bid up to nearly all of an output's units without
+  losing any payout.
+- **Policy, not consensus.** Admission, eviction and selection are this
+  node's; a share may carry any valid transaction, with or without a fee,
+  so nothing changes for validity and no protocol tag moves. A
+  consensus fee (minimum, depth scale or recipient) can follow if units
+  ever carry value, for instance with partial payout rights.
 
 ## The contract
 
@@ -369,8 +415,9 @@ threshold for that output:
   the smallest practical BCH price is about 850 satoshis.
 
 Lock change below its threshold is added to the fee, as Bitcoin Cash
-wallets do. The share chain has no fee, so sell a whole output or leave at
-least 546 units of change there.
+wallets do. The share chain needs no fee, so sell a whole output or leave at
+least 546 units of change there; pay one (`--fee-rate`, share units per
+byte, burned) only when a node's pool is full.
 
 ## The trade, step by step
 
@@ -592,9 +639,10 @@ or generated. The library side is `shares::bch_htlc` (template),
 - **Partial rights.** A right is whole. Selling part of a share's payout
   needs a proportional rule, which the index above cannot bound (see "Why
   input i to output i").
-- **No fee market.** The pool admits by arrival and evicts the oldest; a
-  holder of many share outputs can keep it full of valid transactions, at
-  the cost of those outputs, until they are mined or expire.
+- **Fee market.** The pool ranks by share units burned per byte and evicts
+  the lowest (see "Priority"). It is local policy: there is no consensus
+  minimum fee, no fee recipient and no depth scale (see "Why a priority,
+  not a fee rule").
 - **Evidence.** Unit tests sign real Bitcoin Cash transactions for every
   path (claim, Schnorr claim, refund at the height, wrong and short secret,
   early refund, final sequence, time lock, wrong key, redirected output,

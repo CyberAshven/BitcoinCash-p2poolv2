@@ -148,9 +148,9 @@ impl TradeKey {
 ///
 /// Output 0 is the contract's P2SH32 output; output 1, when there is one,
 /// returns the change to `change_script`. The fee is `fee_per_byte` times the
-/// signed size (0 on the share chain, which has no fee market). Change below
+/// signed size (0 by default on the share chain, which needs no fee). Change below
 /// its dust threshold is left to the fee, as Bitcoin Cash wallets do; the
-/// share chain has no fee, so pick `amount` to leave no change there.
+/// share chain needs no fee, so pick `amount` to leave no change there.
 pub fn build_lock_transaction(
     coins: &[Coin],
     key: &TradeKey,

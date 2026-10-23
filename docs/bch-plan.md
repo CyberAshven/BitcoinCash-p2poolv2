@@ -18,6 +18,8 @@ Audience: contributors and AI agents starting the BCH port. Read
 | Main/mini share chains and P2P propagation | Implemented; recorded three-node regtest and two-node chipnet share validation. |
 | Large BCH template proofs | Implemented; 25-level BCH branches round-trip through share blocks, storage and compressed header batches. Bitcoin proof validation keeps its 16-level limit. |
 | Pool-issued SV1/SV2 jobs and worker cleanup | Implemented; recorded CPU mining plus channel and socket tests. Independent ASIC firmware remains unverified. |
+| Coinbase fits stock ASIC firmware (decision 14) | Implemented 2026-10-23 as a share-chain consensus change: at most 11 payout outputs and 374 bytes of them, the tail drawn by weight from the payout anchor, no payout below dust; the largest Bitcoin Cash coinbase is 782 bytes against a 784-byte job budget the job builders enforce. Protocol strings carry `payout-cap11`. Unit tests: 200 payees stay within the cap with exact sums, the draw keeps each tail payee's expected share over 4,000 anchors, the producer and validator agree past the cap, the largest declared coinbase fits. The 784-byte limit is evidence from another pool (upstream #668); stock Antminer firmware has not mined through this pool yet. |
+| Share transaction pool priority (decision 15) | Implemented 2026-10-23 as node policy: priority is share units burned per byte, then arrival; shares carry the highest first, and a full pool evicts the lowest only for a transaction that outranks them. No validity change. |
 | CashAddr text in the API | Implemented; P2PKH/P2SH vectors and a chipnet share lookup test. |
 | By-address query for share chain explorers | Implemented as `GET /miner?address=` (see `p2poolv2_api/README.md`): one miner's window shares and uncles, weight, share of the window and fraction of the next PPLNS payout, read from the payout code's own `PplnsWindow`. Takes a CashAddr payout with or without prefix or a `p2pool:`/`tp2pool:`/`rp2pool:` share address; chipnet and signet API tests. On 2026-10-23 `p2poolv2_tui`'s live check read it from chipnet node 1 (218 of 218 window shares for the Avalon's payout address). |
 | Terminal UI (upstream's PDM) | `p2poolv2_tui`, added 2026-10-23: the Bitcoin Cash port of `p2poolv2/pdm` at `83835ae`, AGPL-3.0-or-later as PDM is, so unlike the rest of the workspace. BCHN status over JSON-RPC in place of Bitcoin Core's, the node's status from `/network`, `/chain_info`, `/hashrate`, `/shares`, `/miners`, `/miner`, `/found_blocks`, `/peers` and `/ws`, the config editor on the file itself (comments kept, no environment overrides written, saved only when `p2poolv2_config` accepts it), no Lightning. It reads everything from one node config, whose `bitcoin_cash_network` is the only mainnet/chipnet switch, and warns when BCHN or the API report another network. 164 tests (view snapshots, mock API and BCHN, a local `/ws`); its ignored live check passed against chipnet node 1 and the Start9 BCHN 29.1.0, with a live share over `/ws` within 3 seconds. Not in the release archives yet (`dist = false`). See [p2poolv2_tui/README.md](../p2poolv2_tui/README.md). |
@@ -582,13 +584,17 @@ move most BCH hashrate to the share chain.
      are in the window; then the shares slide out. Nothing is held, kept or
      expired.
    - Dust: each share is worth a slice of a full block reward, far above
-     BCH's dust limit, so nothing accumulates.
+     BCH's dust limit, so nothing accumulates. A payee whose slice would
+     still be dust (a tiny share beside large ones) joins the drawn tail of
+     decision 14 instead of getting a dust output.
    - Small miners' variance: a main and a "mini" share chain with lower
      share difficulty, as Monero's P2Pool has (main, mini, nano), plus uncles
      (P2Poolv2 already has them).
    - Optional later: a keyless covenant payout tree in one coinbase output
      (BCH introspection can check the spending transaction's outputs), only
-     if the number of coinbase outputs becomes a problem.
+     if the number of coinbase outputs becomes a problem. It did for stock
+     ASIC firmware; decision 14 caps the outputs and draws the tail until
+     such a tree pays it exactly.
 5. **Merge mining.** Reserve one coinbase commitment output whose hash covers
    every token the miner chose to merge-mine (AuxPoW-style); each token's
    covenant checks a short proof up to it. The share chain fixes the payouts;
@@ -808,6 +814,71 @@ move most BCH hashrate to the share chain.
       other software, including the maintainer's Avalon ASIC on chipnet, are
       run by the developers, not left to the maintainer.
 
+14. **Coinbase budget (2026-10-23, consensus change).** Upstream reports
+    that stock Antminer firmware takes a coinbase of "just over a dozen
+    outputs" (discussion #668: an OCEAN block with 16 payouts in 784 bytes)
+    and plans 25 outputs with the long tail paid to one miner drawn by
+    weight (#708). Every Stratum V1 device hashes the whole coinbase, also
+    behind an SV2 translator; only SV2 standard channels do not. Before this
+    a Bitcoin Cash coinbase paid every window payee.
+    - **Rule.** At most `C` = 11 PPLNS payout outputs (`BCH_MAX_COINBASE_PAYOUTS`)
+      and `B` = 374 bytes of them, no payout below BCHN's dust threshold.
+      Payees that fit are paid as before. Otherwise the payees ranked by
+      weight (after the payout-holder rule) are paid their exact share while
+      they fit `C - 1` outputs and `B` less the largest payee output, and
+      the rest of the amount goes to one remaining payee drawn by weight
+      from `SHA256(tag || anchor)`. A tail worth less than dust goes to the
+      largest payee. Full rule: `architecture/payout-distribution.md`,
+      "Bitcoin Cash coinbase budget".
+    - **Why a draw.** Upstream's proposal. It keeps every tail payee's
+      expected income and loses nothing, where leaving the tail out (P2Pool
+      v1 past 4,000 payees) loses it, spreading it over the paid set takes it
+      from small miners (and feeds a rich-list Sybil, #647), and carrying it
+      needs state about blocks BCH may orphan.
+    - **Why the anchor.** Unknown until the anchor share exists, after which
+      payout rights at it are fixed, so nobody can move a right to an address
+      placed to win; a seed known in advance (the BCH previous block hash)
+      would allow that. Building on an older anchor buys extra draws only for
+      the grinder's own blocks, at the cost of stale shares.
+    - **Why 11 and 784 bytes.** 784 bytes is the Antminer-mined coinbase
+      upstream cites. The largest coinbase besides payouts is 408 bytes (a
+      100-byte scriptSig, the donation, a fee to any address type, the
+      merge-mining, padding and commitment outputs), leaving 11 P2PKH
+      outputs; the largest coinbase is 782 bytes. With the 80-byte header and
+      a 25-hash merkle branch a merge-mining claim that carries the coinbase
+      stays at most 1,664 bytes, far under the 2026 P2S unlocking limit.
+      `B` bounds payouts even if a share names a witness-program address.
+      The merge-mining output is placed in one function and counted by size,
+      so the merge-mining format can move it; the share commitment output
+      stays last with its padding.
+    - **Unchanged.** Donation, fee and the 10% cap come off first; CTOR is
+      untouched; Bitcoin and Hydrapool pay every payee. The API's `/miner`
+      weight is a tail payee's expected payout, not its next one.
+    - **Later.** The covenant payout tree (decision 4's "optional later",
+      gap analysis M2) turns the drawn output into a tree output each tail
+      payee withdraws exactly, removing the draw. Raising `C` and the byte
+      budget after a measurement on stock Antminer firmware is a new tag.
+    - **Activation.** Flag day on a fresh store; protocol strings carry
+      `payout-cap11` after `payout-holder`. Mainnet starts with the rule.
+
+15. **Share transaction pool priority (2026-10-23, node policy).** The pool
+    admitted by arrival and evicted the oldest, so a holder of many share
+    outputs could keep it full. Now a transaction's fee is the share units it
+    burns (inputs less outputs), its priority is that fee per byte compared
+    exactly, then its arrival; shares carry the highest first, and a full
+    pool evicts the lowest only for a transaction that outranks every one it
+    evicts, otherwise refusing it.
+    - **Not upstream's fee rule.** Upstream plans fees paid to the share's
+      miner (`transactions.adoc`) rising with an output's depth (#646). On
+      Bitcoin Cash units carry no payout (the right does), so a depth scale
+      taxes honest sellers of older shares without raising an attacker's
+      cost, and a fee output in the share coinbase would need root-height
+      inheritance in the store and pay miners units with no right. #247 is
+      about bitcoin template fees, not share transactions.
+    - **Policy.** No validity change and no new protocol tag; a share may
+      still carry any valid transaction. `bch-trade --fee-rate` sets the bid.
+      A consensus fee can follow if units ever carry value (partial rights).
+
 ## BCH porting checklist
 
 Found by reading P2Poolv2's code and docs; each item needs a short design
@@ -859,18 +930,23 @@ check before code.
   ([atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md)).
   Relaying and mining share transactions and paying a share's PPLNS
   payouts to the holder of its output (upstream's marketplace design, what
-  gives a traded share its BCH income) are done on Bitcoin Cash. Still open:
-  an introspection template (a claim anyone can complete, a cancel the buyer
-  alone signs), selling part of a share's payout right (a right is whole),
-  and a fee or priority rule for the share transaction pool.
+  gives a traded share its BCH income) are done on Bitcoin Cash, and the
+  share transaction pool ranks by units burned per byte (decision 15).
+  Still open: an introspection template (a claim anyone can complete, a
+  cancel the buyer alone signs) and selling part of a share's payout right
+  (a right is whole).
 - Merge-mining commitment format and size budget (Stratum V2's
   `CoinbaseOutputConstraints` already declares coinbase space).
 - Binding each miner's payout address to their shares over SV2 (sv2-p2pool
   lists it as open, its ADR 0002). Since 2026-10-15 a `p2p=` option in
   `user_identity` names the share address, as the SV1 password does; a
   signed binding a miner could prove is still open.
-- Whether the covenant payout tree is needed at all; prove it within BCH's VM
-  limits first.
+- The covenant payout tree: decision 14 caps the coinbase at 11 payouts and
+  pays the tail by a draw; the tree would pay the tail exactly. Prove it
+  within BCH's VM limits first.
+- The real coinbase limit of stock Antminer firmware: mine on chipnet over
+  SV1 and through an SV2 translator with coinbases of about 600 to 1,200
+  bytes (decision 14 assumes 784).
 - Pool operators running this software beside the share chain.
 
 ## First steps
