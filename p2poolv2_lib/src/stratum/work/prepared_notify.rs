@@ -17,8 +17,10 @@ use crate::accounting::payout::payout_distribution::build_pplns_outputs;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::{ShareTransaction, encode_optional_address};
 use crate::shares::share_commitment::{
-    ShareCommitment, build_commitment_prefix, build_commitment_suffix, commitment_digest,
+    BCH_JOB_TOKEN_VERSION, ShareCommitment, append_share_version, build_commitment_prefix,
+    build_commitment_suffix, commitment_digest,
 };
+use crate::shares::share_version::ShareVersion;
 use crate::shares::transactions::coinbase::compute_witness_root;
 use crate::shares::validation::BLOCK_TXS_SIZE_LIMIT;
 use crate::shares::witness_commitment::WitnessCommitment;
@@ -159,6 +161,9 @@ pub struct PreparedNotifyParams {
     /// BIP141 witness root of `share_transactions`, committed by every
     /// miner's share commitment.
     share_witness_root: WitnessMerkleNode,
+    /// The rule version and desired version every share on these params
+    /// carries (`shares::share_version`).
+    share_version: ShareVersion,
 }
 
 impl PreparedNotifyParams {
@@ -174,7 +179,7 @@ impl PreparedNotifyParams {
         time: u32,
     ) -> Result<Vec<u8>, WorkError> {
         let mut token = Vec::with_capacity(255);
-        token.push(1);
+        token.push(BCH_JOB_TOKEN_VERSION);
         token.extend_from_slice(&nonce);
         token.extend_from_slice(&self.commitment_prefix);
         time.consensus_encode(&mut token).expect("vector writer");
@@ -186,6 +191,9 @@ impl PreparedNotifyParams {
         encode_optional_address(&self.fee_address, &mut token).expect("vector writer");
         self.fee
             .unwrap_or(0)
+            .consensus_encode(&mut token)
+            .expect("vector writer");
+        self.share_version
             .consensus_encode(&mut token)
             .expect("vector writer");
         if token.len() > 255 {
@@ -337,6 +345,7 @@ pub(crate) struct PreparedNotifyParamsBuilder {
     fee_address: Option<Address>,
     fee: Option<u16>,
     include_merge_mining: bool,
+    share_version: ShareVersion,
     share_transactions: Vec<ShareTransaction>,
 }
 
@@ -363,6 +372,7 @@ impl PreparedNotifyParamsBuilder {
             fee_address: None,
             fee: None,
             include_merge_mining: false,
+            share_version: ShareVersion::CURRENT,
             share_transactions: Vec::new(),
         }
     }
@@ -422,6 +432,14 @@ impl PreparedNotifyParamsBuilder {
 
     pub fn fee(mut self, fee: Option<u16>) -> Self {
         self.fee = fee;
+        self
+    }
+
+    /// The rule version and desired version every share on these params
+    /// carries (`shares::share_version::next_share_version`); this build's
+    /// current version by default.
+    pub fn share_version(mut self, share_version: ShareVersion) -> Self {
+        self.share_version = share_version;
         self
     }
 
@@ -529,13 +547,18 @@ impl PreparedNotifyParamsBuilder {
 
         let commitment_prefix =
             build_commitment_prefix(self.prev_share_blockhash, &self.uncles, self.bits);
-        let commitment_suffix = build_commitment_suffix(
+        let mut commitment_suffix = build_commitment_suffix(
             &self.donation_address,
             self.donation,
             &self.fee_address,
             self.fee,
             share_witness_root,
         );
+        // A Bitcoin Cash commitment digests the share version after the
+        // shared fields, as `ShareCommitment::hash` does for a cash owner.
+        if self.include_merge_mining {
+            append_share_version(&mut commitment_suffix, self.share_version);
+        }
 
         Ok(PreparedNotifyParams {
             pplns_weights: self.pplns_weights,
@@ -563,6 +586,7 @@ impl PreparedNotifyParamsBuilder {
                 .collect(),
             share_transactions: share_transactions.into(),
             share_witness_root,
+            share_version: self.share_version,
         })
     }
 }
@@ -686,6 +710,7 @@ pub(crate) fn insert_miner_job(
             fee_address: prepared.fee_address.clone(),
             fee: prepared.fee,
             bch_coinbase: None,
+            share_version: prepared.share_version,
         }),
         _ => None,
     };

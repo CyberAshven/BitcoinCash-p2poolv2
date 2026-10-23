@@ -6,6 +6,7 @@ use super::address_serde;
 use super::bch_coinbase::BchCoinbase;
 use super::option_address_serde;
 use super::share_block::{ShareBlock, ShareHeader, decode_optional_address, encode_address};
+use super::share_version::ShareVersion;
 use super::transactions::coinbase::compute_witness_root;
 use super::validation::MAX_UNCLES;
 use bitcoin::consensus::encode::VarInt;
@@ -75,6 +76,27 @@ pub struct ShareCommitment {
     /// Declared BCH layout, committed before hashing begins. Legacy jobs omit it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bch_coinbase: Option<BchCoinbase>,
+    /// The share's rule version and desired version
+    /// (`shares::share_version`), committed for Bitcoin Cash share owners.
+    pub share_version: ShareVersion,
+}
+
+/// Tag before the share version in a Bitcoin Cash commitment's suffix.
+const SHARE_VERSION_TAG: u8 = 0x22;
+
+/// Layout version of a Bitcoin Cash Job Declaration token: 2 since the
+/// share version follows the fee (`ShareCommitment::from_mining_job_token`).
+pub const BCH_JOB_TOKEN_VERSION: u8 = 2;
+
+/// Append the share version to a commitment suffix: what a Bitcoin Cash
+/// commitment digests after the shared fields and before a declared
+/// coinbase. The notify path appends it to its pre-built suffix on Bitcoin
+/// Cash; [`ShareCommitment::hash`] appends it for a Bitcoin Cash share owner.
+pub(crate) fn append_share_version(suffix: &mut Vec<u8>, share_version: ShareVersion) {
+    suffix.push(SHARE_VERSION_TAG);
+    share_version
+        .consensus_encode(suffix)
+        .expect("encoding the share version should never fail");
 }
 
 /// Bytes the timestamp contributes to the commitment encoding.
@@ -210,7 +232,7 @@ impl ShareCommitment {
         miner_address: p2poolv2_wallet::share_owner::ShareOwner,
     ) -> Result<Self, bitcoin::consensus::encode::Error> {
         let invalid = bitcoin::consensus::encode::Error::ParseFailed;
-        if token.len() < 33 || token.len() > 255 || token[0] != 1 {
+        if token.len() < 33 || token.len() > 255 || token[0] != BCH_JOB_TOKEN_VERSION {
             return Err(invalid("unknown BCH job token format"));
         }
         let mut reader = &token[33..];
@@ -228,6 +250,7 @@ impl ShareCommitment {
         let donation = u16::consensus_decode(&mut reader)?;
         let fee_address = decode_optional_address(&mut reader)?;
         let fee = u16::consensus_decode(&mut reader)?;
+        let share_version = ShareVersion::consensus_decode(&mut reader)?;
         if !reader.is_empty() {
             return Err(invalid("trailing BCH job token data"));
         }
@@ -244,6 +267,7 @@ impl ShareCommitment {
             fee_address,
             fee: (fee > 0).then_some(fee),
             bch_coinbase: None,
+            share_version,
         })
     }
 
@@ -280,6 +304,12 @@ impl ShareCommitment {
             self.fee,
             self.share_witness_root,
         );
+        if matches!(
+            self.miner_address,
+            p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh(_)
+        ) {
+            append_share_version(&mut suffix, self.share_version);
+        }
         if let Some(coinbase) = &self.bch_coinbase {
             suffix.push(0x21);
             suffix.extend_from_slice(&serialize(coinbase));
@@ -336,6 +366,7 @@ impl ShareCommitment {
             fee_address: header.fee_address.clone(),
             fee: header.fee,
             bch_coinbase: header.bch_coinbase.clone(),
+            share_version: header.share_version,
         }
     }
 }
@@ -372,6 +403,22 @@ mod tests {
     use bitcoin::hashes::Hash;
     use bitcoin::{CompressedPublicKey, Network, ScriptBuf, TxMerkleNode};
     use std::str::FromStr;
+
+    /// A Bitcoin Cash commitment digests the share version; a Bitcoin one,
+    /// whose header carries none, does not.
+    #[test]
+    fn bitcoin_cash_commitment_binds_the_share_version() {
+        let mut cash = create_test_commitment();
+        cash.miner_address = p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
+        let mut voting = cash.clone();
+        voting.share_version.desired_version = 2;
+        assert_ne!(cash.hash(), voting.hash());
+
+        let bitcoin = create_test_commitment();
+        let mut bitcoin_voting = bitcoin.clone();
+        bitcoin_voting.share_version.desired_version = 2;
+        assert_eq!(bitcoin.hash(), bitcoin_voting.hash());
+    }
 
     #[test]
     fn test_hash_produces_valid_sha256() {

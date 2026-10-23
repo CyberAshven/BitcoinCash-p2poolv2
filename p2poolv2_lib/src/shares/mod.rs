@@ -20,6 +20,7 @@ pub mod handle_stratum_share;
 pub mod merge_mining;
 pub mod share_block;
 pub mod share_commitment;
+pub mod share_version;
 pub mod transaction_pool;
 pub mod transactions;
 pub mod validation;

@@ -42,6 +42,10 @@ use crate::shares::share_block::{
     is_terminal_blockhash, share_has_token_commitment,
 };
 use crate::shares::share_commitment::ShareCommitment;
+use crate::shares::share_version::{
+    SHARE_VERSION_VOTE_DEPTH, SHARE_VERSION_VOTE_SPAN, VersionTally, check_share_version,
+    check_share_version_alone,
+};
 use crate::shares::transactions::coinbase::{
     build_sharechain_coinbase_for_witness_root, compute_witness_root,
 };
@@ -340,6 +344,39 @@ pub(crate) fn stored_ancestor_times(
         current = header.prev_share_blockhash;
     }
     Ok(ancestor_times)
+}
+
+/// The share-version votes in the vote span below `parent_hash`: the
+/// `SHARE_VERSION_VOTE_SPAN` shares from `SHARE_VERSION_VOTE_DEPTH -
+/// SHARE_VERSION_VOTE_SPAN` below the parent down, each counted by its work
+/// for the version it desires. Follows each header's own parent pointer, so
+/// the answer holds on a fork too, and stops at genesis.
+///
+/// Thousands of header reads: callers ask for it only when a share switches
+/// version (`check_share_version`, `next_share_version`).
+pub(crate) fn tally_share_version_votes(
+    parent_hash: BlockHash,
+    chain_store_handle: &ChainStoreHandle,
+) -> Result<VersionTally, StoreError> {
+    let mut current = parent_hash;
+    for _ in 0..SHARE_VERSION_VOTE_DEPTH - SHARE_VERSION_VOTE_SPAN {
+        if is_terminal_blockhash(&current) {
+            return Ok(VersionTally::default());
+        }
+        current = chain_store_handle
+            .get_share_header(&current)?
+            .prev_share_blockhash;
+    }
+    let mut tally = VersionTally::default();
+    for _ in 0..SHARE_VERSION_VOTE_SPAN {
+        if is_terminal_blockhash(&current) {
+            break;
+        }
+        let header = chain_store_handle.get_share_header(&current)?;
+        tally.add_share(header.share_version, header.bits);
+        current = header.prev_share_blockhash;
+    }
+    Ok(tally)
 }
 
 /// Total value the bitcoin coinbase pays out, in satoshis.
@@ -710,6 +747,51 @@ impl DefaultShareValidator {
     pub fn with_bitcoin_cash_network(mut self, network: Option<BitcoinCashNetwork>) -> Self {
         self.bch_asert = network.and_then(BchAsert::for_network);
         self
+    }
+
+    /// The share-version vote rule (`shares::share_version`) for a Bitcoin
+    /// Cash share: its version is its parent's, or the next one with 60% of
+    /// the vote span's work behind it. Bitcoin shares carry no version.
+    ///
+    /// A parent header or height that is not stored yet is `Recoverable`;
+    /// any other read failure is `StoreAccess`.
+    fn validate_share_version(
+        &self,
+        share_header: &ShareHeader,
+        chain_store_handle: &ChainStoreHandle,
+    ) -> Result<(), ValidationError> {
+        if self.chain != Chain::BitcoinCash {
+            return Ok(());
+        }
+        let parent_hash = share_header.prev_share_blockhash;
+        let read_error = |error: StoreError| match error {
+            StoreError::NotFound(_) => ValidationError::recoverable(format!(
+                "Share version check cannot read ancestry of {parent_hash}: {error}"
+            )),
+            _ => ValidationError::store_access(format!(
+                "Share version check failed to read ancestry of {parent_hash}: {error}"
+            )),
+        };
+        let parent = chain_store_handle
+            .get_share_header(&parent_hash)
+            .map_err(read_error)?;
+        let parent_height = chain_store_handle
+            .get_block_metadata(&parent_hash)
+            .map_err(read_error)?
+            .expected_height
+            .ok_or_else(|| {
+                ValidationError::recoverable(format!(
+                    "Parent {parent_hash} has no height for the share version check"
+                ))
+            })?;
+        check_share_version(
+            share_header.share_version,
+            parent.share_version.version,
+            parent_height,
+            || tally_share_version_votes(parent_hash, chain_store_handle),
+        )
+        .map_err(read_error)?
+        .map_err(|error| ValidationError::consensus(format!("Invalid share version: {error}")))
     }
 
     /// Refuse a BIP141 witness commitment output in a Bitcoin Cash coinbase
@@ -1750,6 +1832,11 @@ impl ShareValidator for DefaultShareValidator {
             )));
         }
 
+        if self.chain == Chain::BitcoinCash {
+            check_share_version_alone(share_header.share_version).map_err(|error| {
+                ValidationError::consensus(format!("Invalid share version: {error}"))
+            })?;
+        }
         self.validate_token_share_asert(share_header)
     }
 
@@ -1773,6 +1860,7 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_coinbase_proof(&share.header, &share.template_merkle_branches)?;
         self.validate_body_matches_header(share)?;
         self.validate_with_pool_difficulty(&share.header, chain_store_handle)?;
+        self.validate_share_version(&share.header, chain_store_handle)?;
         self.validate_uncles(share, chain_store_handle)?;
         self.validate_uncle_bodies_present(share, chain_store_handle)?;
         self.validate_block_size(share)?;
@@ -1791,6 +1879,7 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_coinbase_proof(&share.header, &share.template_merkle_branches)?;
         self.validate_body_matches_header(share)?;
         self.validate_with_pool_difficulty(&share.header, chain_store_handle)?;
+        self.validate_share_version(&share.header, chain_store_handle)?;
         self.validate_uncles(share, chain_store_handle)?;
         self.validate_block_size(share)?;
         self.validate_transaction_count(share)?;
@@ -2078,6 +2167,62 @@ mod tests {
 
     fn validator_with(pool_difficulty: PoolDifficulty) -> DefaultShareValidator {
         DefaultShareValidator::new(pool_difficulty)
+    }
+
+    /// A Bitcoin Cash share follows its parent's version; a switch needs the
+    /// vote depth below it, and a version this build does not implement is
+    /// refused at the header gate. Bitcoin shares are not checked.
+    #[test]
+    fn bitcoin_cash_share_version_follows_the_vote_rule() {
+        use crate::shares::share_version::{SHARE_VERSION_VOTE_DEPTH, ShareVersion};
+        let parent = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build()
+            .header;
+        let child_of = |parent_version: u32, parent_height: u32| {
+            let mut parent = parent.clone();
+            parent.share_version.version = parent_version;
+            let mut chain_store_handle = ChainStoreHandle::default();
+            chain_store_handle
+                .expect_get_share_header()
+                .returning(move |_| Ok(parent.clone()));
+            chain_store_handle
+                .expect_get_block_metadata()
+                .returning(move |_| Ok(metadata_at_height(parent_height)));
+            chain_store_handle
+        };
+        let mut child = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build()
+            .header;
+        let bch = validator().for_chain(Chain::BitcoinCash);
+
+        bch.validate_share_version(&child, &child_of(1, 10))
+            .unwrap();
+
+        // Version 0 stands in for "the version before this build's": a
+        // switch to version 1 below the vote depth has no history to count.
+        let error = bch
+            .validate_share_version(&child, &child_of(0, SHARE_VERSION_VOTE_DEPTH - 1))
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("vote depth"), "{error}");
+
+        child.share_version = ShareVersion {
+            version: 2,
+            desired_version: 2,
+        };
+        let error = bch
+            .validate_share_version(&child, &child_of(1, 10))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("newer than this node"),
+            "{error}"
+        );
+        // Bitcoin shares carry no version.
+        validator()
+            .validate_share_version(&child, &ChainStoreHandle::default())
+            .unwrap();
     }
 
     /// BCH's SigChecks budget: at most 3,000 in one transaction and 1,452

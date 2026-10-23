@@ -14,6 +14,7 @@ use crate::shares::coinbase_proof::{
 use crate::shares::genesis;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_commitment::ShareCommitment;
+use crate::shares::share_version::ShareVersion;
 use crate::sim_overrides;
 use bitcoin::consensus::encode::Error::ParseFailed;
 use bitcoin::secp256k1::Secp256k1;
@@ -113,6 +114,12 @@ pub struct ShareHeader {
     /// Present only for miner-declared BCH jobs. Legacy headers omit these bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bch_coinbase: Option<BchCoinbase>,
+    /// The share-chain rule version this share follows and the one its node
+    /// desires: the share-version vote (`shares::share_version`). Encoded,
+    /// and committed, for Bitcoin Cash share owners only; Bitcoin shares
+    /// follow upstream's rules and read as the current version.
+    #[serde(default)]
+    pub share_version: ShareVersion,
 }
 
 /// Network class an encoded address is rebuilt for: the part of an
@@ -225,6 +232,7 @@ impl ShareHeader {
             bitcoin_height: height,
             coinbase_proof,
             bch_coinbase: commitment.bch_coinbase,
+            share_version: commitment.share_version,
         }
     }
 
@@ -290,6 +298,9 @@ impl ShareHeader {
             len += DECLARED_BCH_HEADER_TAG.consensus_encode(w)?;
         }
         len += share_owner::consensus_encode(&self.miner_address, w)?;
+        if matches!(self.miner_address, ShareOwner::CashP2pkh(_)) {
+            len += self.share_version.consensus_encode(w)?;
+        }
         len += self.bitcoin_header.version.consensus_encode(w)?;
         len += self.bitcoin_header.prev_blockhash.consensus_encode(w)?;
         if include_bitcoin_merkle_root {
@@ -333,6 +344,11 @@ impl ShareHeader {
             owner
         } else {
             share_owner::consensus_decode_from_tag(owner_tag, r)?
+        };
+        let share_version = if matches!(miner_address, ShareOwner::CashP2pkh(_)) {
+            ShareVersion::consensus_decode(r)?
+        } else {
+            ShareVersion::CURRENT
         };
         let bitcoin_version = bitcoin::block::Version::consensus_decode(r)?;
         let bitcoin_prev_blockhash = BlockHash::consensus_decode(r)?;
@@ -385,6 +401,7 @@ impl ShareHeader {
             bitcoin_height,
             coinbase_proof,
             bch_coinbase,
+            share_version,
         })
     }
 }
@@ -564,6 +581,7 @@ impl ShareBlock {
             // commitment. Genesis is built locally and never verified.
             coinbase_proof: CoinbaseProof::default(),
             bch_coinbase: None,
+            share_version: ShareVersion::CURRENT,
         };
         let bitcoin_coinbase = bitcoin_block
             .txdata
@@ -763,6 +781,36 @@ mod tests {
         assert!(block_share.is_bitcoin_block());
     }
 
+    /// A Bitcoin Cash header carries its share version right after its
+    /// owner, eight bytes, and the proof of work binds it; a Bitcoin header
+    /// carries none.
+    #[test]
+    fn bitcoin_cash_header_carries_and_binds_its_share_version() {
+        let cash = ShareOwner::CashP2pkh([0x22; 20]);
+        let share = TestShareBlockBuilder::new().share_owner(cash).build();
+        CoinbaseProof::verify(&share.header, &share.template_merkle_branches).unwrap();
+        assert_eq!(share.header.share_version, ShareVersion::CURRENT);
+
+        let mut voting = share.header.clone();
+        voting.share_version.desired_version = 2;
+        let decoded: ShareHeader = deserialize(&serialize(&voting)).unwrap();
+        assert_eq!(decoded, voting);
+        assert_ne!(voting.block_hash(), share.header.block_hash());
+        assert_eq!(
+            serialize(&voting).len(),
+            serialize(&share.header).len(),
+            "the version is a fixed eight bytes"
+        );
+        assert!(CoinbaseProof::verify(&voting, &share.template_merkle_branches).is_err());
+
+        let bitcoin = TestShareBlockBuilder::new().build().header;
+        let mut bitcoin_voting = bitcoin.clone();
+        bitcoin_voting.share_version.desired_version = 2;
+        assert_eq!(serialize(&bitcoin_voting), serialize(&bitcoin));
+        let decoded: ShareHeader = deserialize(&serialize(&bitcoin_voting)).unwrap();
+        assert_eq!(decoded.share_version, ShareVersion::CURRENT);
+    }
+
     /// A share is a token share exactly when its commitment is not the
     /// exact empty one: pool-built shares and declared shares with the empty
     /// commitment are no-token shares.
@@ -915,6 +963,7 @@ mod tests {
             fee_address: None,
             fee: None,
             bch_coinbase: None,
+            share_version: ShareVersion::CURRENT,
         };
 
         let cloned = commitment.clone();

@@ -30,8 +30,23 @@ fn bch_job_token_roundtrips_all_terms_within_the_wire_budget() {
     prepared.donation = Some(150);
     prepared.fee_address = Some(payout.clone());
     prepared.fee = Some(50);
+    prepared.share_version = crate::shares::share_version::ShareVersion {
+        version: 1,
+        desired_version: 3,
+    };
     let token = prepared.mining_job_token([9; 32], 1234).unwrap();
     assert!(token.len() <= 255);
+    assert_eq!(token[0], 2, "token layout 2 carries the share version");
+    let mut old_layout = token.clone();
+    old_layout[0] = 1;
+    assert!(
+        ShareCommitment::from_mining_job_token(
+            &old_layout,
+            payout.clone(),
+            ShareOwner::CashP2pkh([0x22; 20])
+        )
+        .is_err()
+    );
     let commitment = ShareCommitment::from_mining_job_token(
         &token,
         payout.clone(),
@@ -49,6 +64,7 @@ fn bch_job_token_roundtrips_all_terms_within_the_wire_budget() {
     assert_eq!(commitment.fee_address, Some(payout.clone()));
     assert_eq!(commitment.donation, Some(150));
     assert_eq!(commitment.fee, Some(50));
+    assert_eq!(commitment.share_version, prepared.share_version);
     let mut trailing = token.clone();
     trailing.push(0);
     assert!(
@@ -319,6 +335,7 @@ async fn test_commitment_hash_matches_struct_hash() {
     // build_notify_from_prepared stored in the tracker.
     let direct_commitment = ShareCommitment {
         bch_coinbase: None,
+        share_version: crate::shares::share_version::ShareVersion::CURRENT,
         prev_share_blockhash: BlockHash::all_zeros(),
         uncles: Vec::new(),
         miner_bitcoin_address: address,
@@ -406,6 +423,7 @@ fn notify_hash_matches_share_commitment_hash() {
 
     let commitment = ShareCommitment {
         bch_coinbase: None,
+        share_version: crate::shares::share_version::ShareVersion::CURRENT,
         prev_share_blockhash: prepared.prev_share_blockhash,
         uncles: prepared.uncles.clone(),
         miner_bitcoin_address: bitcoin_address,

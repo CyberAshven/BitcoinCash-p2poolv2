@@ -153,6 +153,33 @@ no one creates share units from nothing. On Bitcoin Cash:
 See [Share transactions](transactions.md) and
 [Spending share outputs](spending-outputs.md).
 
+## Share versions follow a vote
+
+Every Bitcoin Cash share says which share-chain rule version it follows and
+which version its node desires (the newest it implements). This lets a later
+rule change activate on the live chain by a vote of the miners' work, as P2Pool
+v1 did, instead of a flag day on a fresh chain (lessons V17;
+`shares/share_version.rs`):
+
+- A share's version is its parent's, or one more than its parent's when at
+  least 60% of the work in the vote span desires that version or a newer
+  one. The vote span is the oldest tenth of the 25,920 shares (three days)
+  below the parent: the shares from 23,328 to 25,920 below it. A switch
+  needs a parent at least 25,920 shares high. Work is each share's own,
+  from its share target; uncles are not counted.
+- A version is never lowered, a share may not desire a version older than
+  its own, and a node refuses a share following a version newer than it
+  implements: its operator must upgrade.
+- A node produces the next version only once 95% of the vote span's work
+  desires it (node policy, not a rule), so the switch comes after nearly
+  everyone has upgraded.
+
+The version is part of the share header and of the share commitment, so the
+proof of work binds it, and of the Job Declaration token. Version 1 is the
+rule set of the 2026-10-24 batch, and no node implements another yet, so no
+switch can happen until a later rule change ships one. Bitcoin shares carry no
+version.
+
 ## Mining on the current chain
 
 Upstream adds a rule that a coinbase pays a share only if the Bitcoin Cash

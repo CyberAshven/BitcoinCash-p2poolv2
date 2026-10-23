@@ -15,7 +15,9 @@ use crate::pool_difficulty;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::shares::share_version::{ShareVersion, next_share_version};
 use crate::shares::transaction_pool::ShareTransactionPool;
+use crate::shares::validation::tally_share_version_votes;
 use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
 use std::sync::Arc;
@@ -95,6 +97,26 @@ fn build_prepared_notify(
             message: format!("Failed to read the mining base for ASERT: {error}"),
         })?;
     let target = context.pool_difficulty.calculate_target_clamped(parent);
+    // Bitcoin Cash shares follow the mining base's rule version, or the next
+    // one once 95% of the vote span's work desires it (`next_share_version`).
+    let share_version = if context.config.chain == crate::config::Chain::BitcoinCash {
+        let mining_base_version = context
+            .chain_store_handle
+            .get_share_header(&tip)
+            .map_err(|error| WorkError {
+                message: format!("Failed to read the mining base's share version: {error}"),
+            })?
+            .share_version
+            .version;
+        next_share_version(mining_base_version, parent.height, || {
+            tally_share_version_votes(tip, &context.chain_store_handle)
+        })
+        .map_err(|error| WorkError {
+            message: format!("Failed to tally the share version vote: {error}"),
+        })?
+    } else {
+        ShareVersion::CURRENT
+    };
 
     //* Anchor the payout on the same `tip` we commit as prev_share_blockhash
     //* below, so a confirmed-chain advance between reads cannot make the
@@ -122,6 +144,7 @@ fn build_prepared_notify(
     .fee_address(context.config.fee_address().cloned())
     .fee(context.config.fee)
     .include_merge_mining(context.config.chain == crate::config::Chain::BitcoinCash)
+    .share_version(share_version)
     .share_transactions(share_transactions)
     .build()
 }

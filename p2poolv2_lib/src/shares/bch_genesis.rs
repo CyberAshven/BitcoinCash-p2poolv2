@@ -92,6 +92,7 @@ pub fn build(
         // commitment. Genesis is built locally and never verified.
         coinbase_proof: CoinbaseProof::default(),
         bch_coinbase: None,
+        share_version: crate::shares::share_version::ShareVersion::CURRENT,
     };
     let bitcoin_coinbase = anchor
         .txdata
@@ -254,7 +255,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Mainnet, BchShareChain::Main).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "fcfb781625666857d4e0c29611554f5f4f571a40050c2a40ba8ff11b09864dd7"
+            "fb3cb844455afa62b8971c94af8927f23eb934c37709bdefb3cc2881001c98d5"
         );
     }
 
@@ -263,7 +264,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Mainnet, BchShareChain::Mini).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "a29f2325c28df2fca698226eab445f2714b70b3b0a78fd72f5b869143c15d306"
+            "ab4967c507cc16bb42e6041756690c173ad9227840f8037d1129824e4f533c78"
         );
     }
 
@@ -272,7 +273,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Chipnet, BchShareChain::Main).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "f8f765715e48ea06bd67d6594862f9848ef302c0f1b6d8cd0a5d27855f64022e"
+            "2f2e457b8ef23012e9593db190914b87fda47817220e5e5f1fb7bc031fc663ed"
         );
     }
 
@@ -281,7 +282,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Chipnet, BchShareChain::Mini).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "f7cfe7591c0092417cc1dcaa85d170a8affc40eb613ce26dd0d13609c08aecee"
+            "6d6c2b7c38ee5caf040199adb831e31973d2e941578c0fe2833b3c26f3fe7cd0"
         );
     }
 
@@ -290,7 +291,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Regtest, BchShareChain::Main).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "6e579538ad3102851eb5232046c282b67a3fe13f6bad3f3ae8c1023fa3f1d5f7"
+            "ae37095edfbb29bfca6bff03565945ddb0188ba03761f454088ead6f841fc732"
         );
     }
 
@@ -299,7 +300,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Regtest, BchShareChain::Mini).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "07849a807e07009682212cdd846a03875238b496529311e9b9a1651066680717"
+            "70249f9448079ca55b4842f6efa5dd888db2fcc7b12718ae73a9425d999bcc19"
         );
     }
 

@@ -17,10 +17,14 @@ donation/fee cuts, rounding and script ordering as peer payout validation.
 `PreparedNotifyParams::declared_outputs` and `build_pplns_outputs` implement
 that calculation. The declarator needs the local share-chain snapshot.
 
-The opaque token also exposes the public commitment terms. Its version-1
-layout is: version byte, 32 random bytes, previous share hash, CompactSize
-uncle count and hashes, compact share bits, share time, optional donation
-address, donation basis points, optional fee address, fee basis points.
+The opaque token also exposes the public commitment terms. Its version-2
+layout is: version byte (2), 32 random bytes, previous share hash,
+CompactSize uncle count and hashes, compact share bits, share time, optional
+donation address, donation basis points, optional fee address, fee basis
+points, and the share version and desired version (two `u32`s; see
+[Share validation](sharechain/validation.md#share-versions-follow-a-vote)).
+Version 1, without the share version, is refused since the 2026-10-24 rule
+batch.
 Integers use Bitcoin consensus little endian. Optional addresses use the
 share-header address encoding. `ShareCommitment::from_mining_job_token`
 decodes these terms; parsing alone does not authenticate a token. The pool

@@ -206,6 +206,14 @@ anchor and the donation and fee cap as they were.
   `computed / 8` to `computed × 1.05` or the proof-of-work limit on test
   networks. Tested on all 14,000 lines of the aserti3-2d specification's
   vectors and on real mainnet and chipnet headers.
+- Share-version vote (share-chain rule, lessons V17): every Bitcoin Cash
+  share header carries its rule version and the version its node desires,
+  bound by the proof of work through the share commitment and carried in
+  the Job Declaration token (layout 2). A share follows its parent's
+  version, or the next one once 60% of the work in the oldest tenth of the
+  25,920 shares below its parent desires it; nodes produce the next version
+  at 95%. Version 1 is this batch, so later rule changes can activate on the
+  live chain instead of a fresh one. The idea is P2Pool v1's, reimplemented.
 - Bitcoin Cash depths come from its own 100-share maturity instead of
   Bitcoin's 6,048 (share-chain rule, audit A12): `BCH_PAYOUT_DEPTH` is
   100 + 120,960 + 3 = 121,063 shares (the deepest share a coinbase pays,
