@@ -6,7 +6,7 @@
 
 - [Running P2Poolv2 on Bitcoin Cash](bch-quickstart.md)
 - [Requirements](requirements.md)
-- [Docker and Ansible](deployment.md)
+- [Docker, Ansible and Umbrel](deployment.md)
 - [Miner options](miner-options.md)
 - [Small miners](small-miners.md)
 - [Trading shares for BCH](atomic-swap/bch-share-trading.md)

@@ -53,17 +53,21 @@ const BITCOIN_CASH_NODE_EXPORTS: [(&str, &str); 5] = [
     ("APP_BITCOIN_CASH_NODE_RPC_PASS", "derived-per-umbrel"),
 ];
 
-/// Host ports Umbrel apps that a Bitcoin Cash miner may run beside these
-/// already take:
-/// - Bitcoin Node (`bitcoin/exports.sh`): RPC 8332, P2P 8333, Tor 8334,
-///   whitebind 8335 and ZMQ 28332 to 28336;
-/// - Bitcoin Cash Node (`bitcoin-cash-node`): dashboard 3330, P2P 8335, RPC
-///   8332 and ZMQ 28332;
-/// - P2Poolv2 for Bitcoin (p2poolv2/umbrel-app): Stratum 3333, P2P 6884 and
-///   dashboard 46884;
-/// - Public Pool: Stratum 2018 and dashboard 2019.
-const TAKEN_HOST_PORTS: [u16; 15] = [
-    2018, 2019, 3330, 3333, 6884, 8332, 8333, 8334, 8335, 28332, 28333, 28334, 28335, 28336, 46884,
+/// Ports Umbrel's Bitcoin and mining apps take, which a miner may run beside
+/// these (getumbrel/umbrel-apps at 2026-10-23, and p2poolv2/umbrel-app):
+/// - Bitcoin Node: dashboard 2100, RPC 8332, P2P 8333, Tor 8334, whitebind
+///   8335 and ZMQ 28332 to 28336;
+/// - Bitcoin Knots: dashboard 2105, RPC 9332, P2P 9333, whitebind 9335, Tor
+///   8334 and ZMQ 48332 to 48336;
+/// - Bitcoin Cash Node: dashboard 3330, P2P 8335, RPC 8332 and ZMQ 28332;
+/// - P2Poolv2 for Bitcoin: Stratum 3333, P2P 6884 and dashboard 46884;
+/// - Public Pool: Stratum 2018, dashboard 2019 and its web app 2021;
+/// - DATUM: dashboard 21000 and Stratum 23334;
+/// - Gobrrr Pool: Stratum 21420 and 21422, dashboard 21421.
+const TAKEN_PORTS: [u16; 31] = [
+    2018, 2019, 2021, 2100, 2105, 3330, 3333, 6884, 8332, 8333, 8334, 8335, 9332, 9333, 9335,
+    21000, 21420, 21421, 21422, 23334, 28332, 28333, 28334, 28335, 28336, 46884, 48332, 48333,
+    48334, 48335, 48336,
 ];
 
 /// Umbrel cuts a setting's note at this many characters.
@@ -393,7 +397,7 @@ fn umbrel_app_host_ports_are_free() {
             .chain([dashboard]);
         for port in host_ports {
             assert!(
-                !TAKEN_HOST_PORTS.contains(&port),
+                !TAKEN_PORTS.contains(&port),
                 "{}: port {port} is taken",
                 app.id
             );

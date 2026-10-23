@@ -58,6 +58,15 @@ anchor and the donation and fee cap as they were.
   mainnet and chipnet. Without its default `client` feature the crate is
   the views over plain data, for other ratatui programs. See
   `p2poolv2_tui/README.md`.
+- An Umbrel community app store in `packaging/umbrel`, ported from
+  upstream's `p2poolv2/umbrel-app` (Apache-2.0). `bch-p2pool` depends on
+  the official store's Bitcoin Cash Node app (mainnet) and takes BCHN's RPC
+  login and ZMQ endpoint from its exports; `bch-p2pool-external` mines on a
+  BCHN elsewhere, chipnet by default, set on umbrelOS 2.0's settings page
+  or in the app's `p2pool.toml`. Their ports stay clear of Umbrel's Bitcoin
+  apps and the Bitcoin P2Poolv2 app. `p2poolv2_config/tests/umbrel_apps.rs`
+  loads each app's config rendered from its defaults. See
+  `packaging/umbrel/README.md`.
 - Bitcoin Cash share trading: a miner sells share units for BCH with one
   hash time locked contract behind P2SH32 on each chain and no Lightning.
   The seller locks shares, the buyer locks BCH under the same secret hash,

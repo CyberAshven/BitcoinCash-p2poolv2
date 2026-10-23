@@ -35,7 +35,7 @@ The decisions behind these are in [Plan and decisions](bch-plan.md).
 ## Where to start
 
 - Run a node: [Running P2Poolv2 on Bitcoin Cash](bch-quickstart.md), then
-  [Requirements](requirements.md) and [Docker and Ansible](deployment.md).
+  [Requirements](requirements.md) and [Docker, Ansible and Umbrel](deployment.md).
 - Point a miner at a node: [Miner options](miner-options.md).
 - Understand the risks: [Known attacks and threat model](known-attacks.md).
 - Work on the code: the [Architecture](architecture/README.md) pages and

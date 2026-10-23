@@ -1,9 +1,11 @@
-# Docker and Ansible
+# Docker, Ansible and Umbrel
 
-The repository carries two ways to deploy a node besides the release
-binaries and systemd. Their full guides are AsciiDoc files in the repository:
+The repository carries three ways to deploy a node besides the release
+binaries and systemd. The full guides for the first two are AsciiDoc files in
+the repository:
 [docker/README.adoc](https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/docker/README.adoc)
 and [ansible/README.adoc](https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/ansible/README.adoc).
+The Umbrel apps have theirs beside them, in `packaging/umbrel/README.md`.
 
 ## Docker
 
@@ -53,6 +55,21 @@ The node and the miner use host networking, which Docker supports on Linux.
 Secrets (BCHN's RPC login, the API login, the Stratum V2 authority key and
 Grafana's admin password) live in an ansible-vault file that is never
 committed.
+
+## Umbrel
+
+`packaging/umbrel` is an Umbrel community app store, ported from upstream's
+`p2poolv2/umbrel-app`, with two apps on the published image:
+
+- **P2Pool for Bitcoin Cash** depends on the Bitcoin Cash Node app from
+  Umbrel's own app store and mines on it, on mainnet, with no setup.
+- **P2Pool for Bitcoin Cash (external node)** mines on a BCHN you run
+  elsewhere, on chipnet by default.
+
+Their Stratum, P2P and dashboard ports differ from Umbrel's Bitcoin apps and
+from the Bitcoin P2Poolv2 app. Publishing the store, installing, the BCHN
+options and the ports are in
+[packaging/umbrel/README.md](https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/packaging/umbrel/README.md).
 
 ## Grafana dashboards
 
