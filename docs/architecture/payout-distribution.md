@@ -180,6 +180,10 @@ pool holding fraction `f` of BCH's hashrate, so pools under about `K / 2016`
 
 ## Bitcoin Cash coinbase budget
 
+The owner rejected this budget as a Bitcoin assumption; its proposed
+replacement, not yet implemented, is
+[bch-hybrid-payouts.md](bch-hybrid-payouts.md).
+
 Rule 8. Upstream's gap: discussion
 [#668](https://github.com/p2poolv2/p2poolv2/discussions/668) and issue
 [#708](https://github.com/p2poolv2/p2poolv2/issues/708) ("Limit coinbase

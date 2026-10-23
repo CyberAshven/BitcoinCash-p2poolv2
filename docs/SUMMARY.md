@@ -49,6 +49,7 @@
   - [Store architecture](architecture/store-architecture.md)
   - [Pruning](architecture/pruning.md)
   - [Payout distribution](architecture/payout-distribution.md)
+  - [Hybrid payouts on Bitcoin Cash (proposal)](architecture/bch-hybrid-payouts.md)
   - [Metrics](architecture/metrics.md)
   - [Share chain address format](architecture/address-format.md)
   - [Mine on the current chain](architecture/mine-on-bitcoin-chain.md)
