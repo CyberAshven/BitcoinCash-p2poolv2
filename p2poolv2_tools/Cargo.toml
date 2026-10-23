@@ -1,0 +1,37 @@
+[package]
+name = "p2poolv2_tools"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Developer tooling for P2Poolv2: sim swarm harness, mock bitcoind, log analysis and load-test drivers"
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Developer tooling only: never part of a release.
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+bitcoindrpc = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+glob = "0.3"
+memchr = "2"
+# SVG only: no font or image crates, and already in the tree through criterion.
+plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series", "point_series"] }
+regex = "1"
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
