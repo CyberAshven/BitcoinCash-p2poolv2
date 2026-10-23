@@ -143,7 +143,12 @@ no one creates share units from nothing. On Bitcoin Cash:
   127,008 shares deep (`PAYOUT_DEPTH`);
 - a share holds at most 100 transactions (`TXS_COUNT_LIMIT`), its body (its
   share transactions plus the Bitcoin Cash coinbase it carries) at most
-  200 KiB (`BLOCK_TXS_SIZE_LIMIT`), and at most 80,000 sigops.
+  200 KiB (`BLOCK_TXS_SIZE_LIMIT`);
+- the share transactions execute at most 3,000 SigChecks each
+  (`MAX_TX_SIGCHECKS`, BCH consensus) and 1,452 in all
+  (`BCH_MAX_SHARE_SIGCHECKS`: 200 KiB at BCH's one SigCheck per 141 bytes).
+  Each accepted input runs exactly one signature check; outputs and the
+  coinbase count none. This replaced Bitcoin's BIP141 sigop cost.
 
 See [Share transactions](transactions.md) and
 [Spending share outputs](spending-outputs.md).

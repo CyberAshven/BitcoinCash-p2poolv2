@@ -79,6 +79,28 @@ const UNCOMPRESSED_KEY_LENGTH: usize = 65;
 /// output), so the two must not peer.
 pub const BCH_SHARE_TRADE_RULE_TAG: &str = "trade-htlc";
 
+/// Most SigChecks one transaction may execute: BCHN's `MAX_TX_SIGCHECKS`
+/// (`src/consensus/consensus.h`), BCH consensus since the 2020-05-15
+/// upgrade ([SigChecks](https://upgradespecs.bitcoincashnode.org/2020-05-15-sigchecks/)).
+/// The share chain holds its transactions to the same limit.
+pub const MAX_TX_SIGCHECKS: usize = 3_000;
+
+/// Bytes of block per SigCheck a block may execute: BCHN's
+/// `BLOCK_MAXBYTES_MAXSIGCHECKS_RATIO`, so a block of `n` bytes may execute
+/// `n / 141` SigChecks. The share chain applies the same density to the
+/// share transactions a share carries.
+pub const BYTES_PER_SIGCHECK: usize = 141;
+
+/// The SigChecks a share transaction the share chain accepts executes, as
+/// BCH counts them (the 2020-05-15 SigChecks specification): every accepted
+/// input is a P2PKH spend or a claim or refund of the share-trading
+/// contract, each running exactly one `OP_CHECKSIG` with a non-empty
+/// signature that must verify, which counts one; outputs count none.
+/// Meaningful once [`verify_transaction`] has accepted the transaction.
+pub fn sig_checks(transaction: &Transaction) -> usize {
+    transaction.input.len()
+}
+
 /// BCHN's default `-dustrelayfee`, `DUST_RELAY_TX_FEE` in `policy.h`, in
 /// satoshis per kilobyte.
 pub const DUST_RELAY_FEE_PER_KILOBYTE: u64 = 1_000;

@@ -191,8 +191,52 @@ pub const MTP_WINDOW: usize = 11;
 pub const BLOCK_TXS_SIZE_LIMIT: u32 = 200 * 1024;
 /// Maximum number of transactions allowed in a share block
 pub const TXS_COUNT_LIMIT: u32 = 100;
-/// Maximum total sigop cost allowed in a share block (matches Bitcoin consensus).
+/// Maximum total BIP141 sigop cost allowed in a Bitcoin share block (matches
+/// Bitcoin consensus). Bitcoin Cash shares count SigChecks instead
+/// ([`BCH_MAX_SHARE_SIGCHECKS`]).
 pub const MAX_BLOCK_SIGOPS_COST: usize = 80_000;
+
+/// Bytes of share transactions a Bitcoin Cash share's SigChecks budget is
+/// sized for: the 200 KiB of the share body the owner set aside for share
+/// transactions beside the coinbase (`docs/architecture/bch-hybrid-payouts.md`,
+/// 8.1).
+pub const BCH_SHARE_TRANSACTION_SIGCHECK_BYTES: usize = 200 * 1024;
+
+/// Most SigChecks the share transactions of one Bitcoin Cash share may
+/// execute: BCH's block density, one per `BYTES_PER_SIGCHECK` (141) bytes,
+/// applied to [`BCH_SHARE_TRANSACTION_SIGCHECK_BYTES`]: 1,452. An accepted
+/// input runs one SigCheck and takes at least 148 bytes (a P2PKH spend), so
+/// the share's byte limit binds first; the budget keeps the share chain
+/// within the density BCH allows a block, and replaces Bitcoin's BIP141
+/// sigop cost, which charged P2PKH outputs and missed the contract's
+/// signature check (audit A13).
+pub const BCH_MAX_SHARE_SIGCHECKS: usize =
+    BCH_SHARE_TRANSACTION_SIGCHECK_BYTES / bch_script::BYTES_PER_SIGCHECK;
+
+/// The SigChecks budget of a Bitcoin Cash share's transactions, given each
+/// transaction's id and SigChecks: at most `MAX_TX_SIGCHECKS` (3,000, BCH
+/// consensus) in one transaction, and at most [`BCH_MAX_SHARE_SIGCHECKS`] in
+/// all.
+pub(crate) fn check_bch_sig_checks(
+    per_transaction: &[(bitcoin::Txid, usize)],
+) -> Result<(), ValidationError> {
+    let mut total: usize = 0;
+    for (txid, sig_checks) in per_transaction {
+        if *sig_checks > bch_script::MAX_TX_SIGCHECKS {
+            return Err(ValidationError::consensus(format!(
+                "Transaction {txid} executes {sig_checks} SigChecks, over the {} a transaction may",
+                bch_script::MAX_TX_SIGCHECKS
+            )));
+        }
+        total = total.saturating_add(*sig_checks);
+    }
+    if total > BCH_MAX_SHARE_SIGCHECKS {
+        return Err(ValidationError::consensus(format!(
+            "Share transactions execute {total} SigChecks, over the {BCH_MAX_SHARE_SIGCHECKS} a share may"
+        )));
+    }
+    Ok(())
+}
 
 /// A nephew's recent ancestry, as uncle validation reads it.
 struct RecentAncestry {
@@ -840,29 +884,35 @@ impl DefaultShareValidator {
         Ok(())
     }
 
-    /// Validate scripts, input/output values, and sigop cost for all
-    /// transactions in the share block.
+    /// Validate scripts, input/output values, and the signature-check budget
+    /// for all transactions in the share block.
     ///
     /// Collects spent outputs once per non-coinbase transaction and runs
-    /// script verification, input-vs-output value checks, and sigop cost
-    /// accumulation in a single pass. The coinbase contributes sigop cost
-    /// but is exempt from script and value validation.
+    /// script verification, input-vs-output value checks, and the budget in
+    /// a single pass. The coinbase is exempt from script and value
+    /// validation.
     ///
-    /// Bitcoin scripts are checked by libbitcoinconsensus. Bitcoin Cash
-    /// scripts are checked by [`bch_script::verify_transaction`], because
-    /// Bitcoin rules would reject a `SIGHASH_FORKID` or Schnorr signature
-    /// and accept a Bitcoin one.
+    /// Bitcoin scripts are checked by libbitcoinconsensus and budgeted by
+    /// BIP141 sigop cost, the coinbase included. Bitcoin Cash scripts are
+    /// checked by [`bch_script::verify_transaction`], because Bitcoin rules
+    /// would reject a `SIGHASH_FORKID` or Schnorr signature and accept a
+    /// Bitcoin one, and budgeted by BCH's SigChecks
+    /// ([`check_bch_sig_checks`]), in which the coinbase and every output
+    /// count nothing.
     fn validate_scripts_values_and_sigops(
         &self,
         share: &ShareBlock,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError> {
         let mut total_sigop_cost: usize = 0;
+        let mut sig_checks = Vec::with_capacity(share.transactions.len().saturating_sub(1));
 
         for (index, transaction) in share.transactions.iter().enumerate() {
             if index == 0 {
-                let coinbase_sigop_cost = transaction.0.total_sigop_cost(|_outpoint| None);
-                total_sigop_cost = total_sigop_cost.saturating_add(coinbase_sigop_cost);
+                if self.chain == Chain::Bitcoin {
+                    let coinbase_sigop_cost = transaction.0.total_sigop_cost(|_outpoint| None);
+                    total_sigop_cost = total_sigop_cost.saturating_add(coinbase_sigop_cost);
+                }
             } else {
                 let txid = transaction.compute_txid();
                 let spent_outputs =
@@ -874,24 +924,28 @@ impl DefaultShareValidator {
                             &spent_outputs,
                             &txid,
                         )?;
+                        sig_checks.push((txid, bch_script::sig_checks(&transaction.0)));
                     }
                     Chain::Bitcoin => {
                         Self::validate_scripts_for_tx(transaction, &spent_outputs, &txid)?;
+                        let tx_sigop_cost =
+                            Self::compute_transaction_sigop_cost(transaction, &spent_outputs);
+                        total_sigop_cost = total_sigop_cost.saturating_add(tx_sigop_cost);
                     }
                 }
                 Self::validate_input_output_values(transaction, &spent_outputs, &txid)?;
-                let tx_sigop_cost =
-                    Self::compute_transaction_sigop_cost(transaction, &spent_outputs);
-                total_sigop_cost = total_sigop_cost.saturating_add(tx_sigop_cost);
             }
         }
 
-        if total_sigop_cost > MAX_BLOCK_SIGOPS_COST {
-            return Err(ValidationError::consensus(format!(
-                "Block sigop cost {total_sigop_cost} exceeds maximum {MAX_BLOCK_SIGOPS_COST}"
-            )));
+        match self.chain {
+            Chain::BitcoinCash => check_bch_sig_checks(&sig_checks),
+            Chain::Bitcoin if total_sigop_cost > MAX_BLOCK_SIGOPS_COST => {
+                Err(ValidationError::consensus(format!(
+                    "Block sigop cost {total_sigop_cost} exceeds maximum {MAX_BLOCK_SIGOPS_COST}"
+                )))
+            }
+            Chain::Bitcoin => Ok(()),
         }
-        Ok(())
     }
 
     /// Collect all spent outputs for a transaction from the chain store.
@@ -1906,6 +1960,26 @@ mod tests {
 
     fn validator_with(pool_difficulty: PoolDifficulty) -> DefaultShareValidator {
         DefaultShareValidator::new(pool_difficulty)
+    }
+
+    /// BCH's SigChecks budget: at most 3,000 in one transaction and 1,452
+    /// (200 KiB / 141) in a share's transactions.
+    #[test]
+    fn bitcoin_cash_share_transactions_are_budgeted_by_sig_checks() {
+        let txid = |byte: u8| bitcoin::Txid::from_byte_array([byte; 32]);
+        assert_eq!(BCH_MAX_SHARE_SIGCHECKS, 1_452);
+        check_bch_sig_checks(&[]).unwrap();
+        // 3,000 in one transaction is within BCH's transaction limit but over
+        // the share's density budget, which binds first.
+        let error = check_bch_sig_checks(&[(txid(1), bch_script::MAX_TX_SIGCHECKS)]).unwrap_err();
+        assert!(error.to_string().contains("a share may"), "{error}");
+        let error =
+            check_bch_sig_checks(&[(txid(1), bch_script::MAX_TX_SIGCHECKS + 1)]).unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("a transaction may"), "{error}");
+        check_bch_sig_checks(&[(txid(1), 1_000), (txid(2), 452)]).unwrap();
+        let error = check_bch_sig_checks(&[(txid(1), 1_000), (txid(2), 453)]).unwrap_err();
+        assert!(error.to_string().contains("a share may"), "{error}");
     }
 
     /// A Bitcoin Cash coinbase carrying a BIP141 witness commitment is

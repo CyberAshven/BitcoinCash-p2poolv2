@@ -181,6 +181,13 @@ anchor and the donation and fee cap as they were.
   `computed / 8` to `computed × 1.05` or the proof-of-work limit on test
   networks. Tested on all 14,000 lines of the aserti3-2d specification's
   vectors and on real mainnet and chipnet headers.
+- Bitcoin Cash share transactions are budgeted by BCH's SigChecks instead
+  of Bitcoin's BIP141 sigop cost (share-chain rule, audit A13): at most
+  3,000 in a transaction (`MAX_TX_SIGCHECKS`) and 1,452 in a share's
+  transactions (200 KiB at one per 141 bytes, `BCH_MAX_SHARE_SIGCHECKS`).
+  Each accepted input runs one signature check; outputs and the coinbase
+  count none. The share transaction pool admits and selects by the same
+  count. Bitcoin shares keep the sigop cost.
 - A Bitcoin Cash coinbase that carries a BIP141 witness commitment output
   makes its share invalid (share-chain rule, audit A18). Bitcoin Cash has no
   SegWit and BCHN's templates carry none; the payout rebuild used to copy
