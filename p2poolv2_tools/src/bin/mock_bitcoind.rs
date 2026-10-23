@@ -32,6 +32,7 @@ enum CashNetwork {
     Regtest,
     Chipnet,
     Mainnet,
+    Scalenet,
 }
 
 /// Mock node JSON-RPC 1.0 server: answers getblocktemplate with an
@@ -52,7 +53,7 @@ struct Arguments {
     node: Node,
     /// The Bitcoin Cash network a BCHN mock is on: it picks the built-in
     /// template (bitcoindrpc/test_data/bchn-<network>-template.json; mainnet
-    /// has none) and the CashAddr prefix validateaddress accepts.
+    /// and scalenet have none) and the CashAddr prefix validateaddress accepts.
     #[arg(long, value_enum, default_value_t = CashNetwork::Regtest)]
     network: CashNetwork,
     /// Block template JSON to serve instead of the built-in one. Its bits
@@ -71,6 +72,7 @@ fn node_kind(node: Node, network: CashNetwork) -> NodeKind {
             CashNetwork::Regtest => BitcoinCashNetwork::Regtest,
             CashNetwork::Chipnet => BitcoinCashNetwork::Chipnet,
             CashNetwork::Mainnet => BitcoinCashNetwork::Mainnet,
+            CashNetwork::Scalenet => BitcoinCashNetwork::Scalenet,
         }),
     }
 }

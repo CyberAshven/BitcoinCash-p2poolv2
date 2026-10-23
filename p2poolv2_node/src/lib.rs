@@ -560,9 +560,5 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 }
 
 fn bch_share_network(network: BitcoinCashNetwork) -> BchShareNetwork {
-    match network {
-        BitcoinCashNetwork::Mainnet => BchShareNetwork::Mainnet,
-        BitcoinCashNetwork::Chipnet => BchShareNetwork::Chipnet,
-        BitcoinCashNetwork::Regtest => BchShareNetwork::Regtest,
-    }
+    network.share_network()
 }

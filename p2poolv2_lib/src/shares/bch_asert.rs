@@ -115,7 +115,7 @@ impl BchAsert {
         match network {
             BitcoinCashNetwork::Mainnet => Some(Self::MAINNET),
             BitcoinCashNetwork::Chipnet => Some(Self::CHIPNET),
-            BitcoinCashNetwork::Regtest => None,
+            BitcoinCashNetwork::Regtest | BitcoinCashNetwork::Scalenet => None,
         }
     }
 

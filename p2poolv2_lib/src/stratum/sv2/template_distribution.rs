@@ -414,12 +414,14 @@ impl ProviderSession {
 }
 
 /// The floor of the network's adaptive block size limit (ABLA): 32 MB on
-/// mainnet and regtest, 2 MB on chipnet. The limit never goes below it, so a
-/// block within the floor is never too large.
+/// mainnet and regtest, 2 MB on chipnet, 256 MB on scalenet
+/// (`nDefaultConsensusBlockSize` in BCHN's `src/chainparams.cpp`). The limit
+/// never goes below it, so a block within the floor is never too large.
 fn block_size_floor(network: BitcoinCashNetwork) -> u64 {
     match network {
         BitcoinCashNetwork::Mainnet | BitcoinCashNetwork::Regtest => 32_000_000,
         BitcoinCashNetwork::Chipnet => 2_000_000,
+        BitcoinCashNetwork::Scalenet => 256_000_000,
     }
 }
 

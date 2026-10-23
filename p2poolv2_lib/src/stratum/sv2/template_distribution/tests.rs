@@ -473,6 +473,15 @@ fn the_size_limit_is_the_one_bchn_reports_and_the_floor_only_without_one() {
     );
 }
 
+/// Scalenet's floor is BCHN's 256 MB `nDefaultConsensusBlockSize`.
+#[test]
+fn the_scalenet_floor_is_256_mb() {
+    assert_eq!(
+        template_size_limit(None, BitcoinCashNetwork::Scalenet),
+        256_000_000
+    );
+}
+
 /// The chipnet fixture's template, ready on its parent.
 fn ready_chipnet_template(fixture: &BlockTemplate) -> ReadyTemplate {
     let mut session = ProviderSession::default();

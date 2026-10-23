@@ -9,7 +9,7 @@ A miner needs two addresses, on two different chains:
 - a **payout address**: a CashAddr on the node's Bitcoin Cash network
   (`bitcoincash:`, `bchtest:` on chipnet, `bchreg:` on regtest). Every block
   the pool finds pays it in the coinbase.
-- a **share address**: `p2pool:`, `tp2pool:` or `rp2pool:`. It owns the
+- a **share address**: `p2pool:`, `tp2pool:`, `sp2pool:` or `rp2pool:`. It owns the
   miner's shares on the share chain, which can be sold for BCH
   ([share trading](atomic-swap/bch-share-trading.md)). Make it from a P2PKH
   receiving address of a wallet you control, ideally not the payout address:
@@ -71,7 +71,8 @@ Rules:
   the job. The share difficulty is rounded down to a whole number, so the
   mini chain's lowest share difficulty, 4.55, holds you at 4.
 - `p2p=` must be a share address for the node's network: `p2pool:` on
-  mainnet, `tp2pool:` on chipnet, `rp2pool:` on regtest.
+  mainnet, `tp2pool:` on chipnet, `sp2pool:` on scalenet, `rp2pool:` on
+  regtest.
 - If the node sets `miner_address`, leave `p2p=` out or send that same
   address. A different one is refused: `Share address conflicts with the
   pool's configured address`.

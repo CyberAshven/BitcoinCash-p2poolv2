@@ -88,7 +88,7 @@ zmqpubhashblock = "tcp://127.0.0.1:28332"
 # Block chain for templates and payout scripts. Default "bitcoin".
 # "bitcoin-cash" fetches BCHN templates without SegWit rules and requires
 # CashAddr payout addresses. A configured miner_address on that chain is a
-# CashAddr share address (p2pool, tp2pool, or rp2pool), not a payout address.
+# CashAddr share address (p2pool, tp2pool, sp2pool or rp2pool), not a payout address.
 # chain = "bitcoin"
 # Required with chain = "bitcoin-cash": "mainnet", "chipnet", or "regtest".
 # bitcoin_cash_network = "chipnet"

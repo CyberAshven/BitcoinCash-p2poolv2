@@ -93,7 +93,7 @@ impl Default for NodeKind {
 
 impl NodeKind {
     /// The built-in template for this node, if there is one. BCHN mainnet
-    /// has none: pass one with `--template`.
+    /// and scalenet have none: pass one with `--template`.
     fn built_in_template(self) -> Option<(&'static str, &'static str)> {
         match self {
             NodeKind::Bchn(BitcoinCashNetwork::Regtest) => {
@@ -102,7 +102,7 @@ impl NodeKind {
             NodeKind::Bchn(BitcoinCashNetwork::Chipnet) => {
                 Some(("built-in BCHN chipnet template", BCHN_CHIPNET_TEMPLATE))
             }
-            NodeKind::Bchn(BitcoinCashNetwork::Mainnet) => None,
+            NodeKind::Bchn(BitcoinCashNetwork::Mainnet | BitcoinCashNetwork::Scalenet) => None,
             NodeKind::BitcoinCore => {
                 Some(("built-in Bitcoin signet template", BITCOIN_SIGNET_TEMPLATE))
             }

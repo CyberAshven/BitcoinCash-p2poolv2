@@ -69,7 +69,9 @@ pub const MAX_BITCOIN_CASH_POOL_CUT: u16 = 1_000;
 pub fn bitcoin_cash_donation_cashaddr(network: BitcoinCashNetwork) -> &'static str {
     match network {
         BitcoinCashNetwork::Mainnet => BITCOIN_CASH_DONATION_ADDRESS,
-        BitcoinCashNetwork::Chipnet => "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2",
+        BitcoinCashNetwork::Chipnet | BitcoinCashNetwork::Scalenet => {
+            "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2"
+        }
         BitcoinCashNetwork::Regtest => "bchreg:qze95tc2dqrnltvxfa5yhunwx5952f34fvsm6us7sv",
     }
 }
@@ -188,9 +190,11 @@ pub enum Chain {
 
 /// Bitcoin Cash network selected by the operator.
 ///
-/// Chipnet uses the `bchtest` CashAddr prefix. BCHN uses that same prefix for
-/// its other test networks, so the prefix does not distinguish chipnet from
-/// testnet3 or testnet4. The RPC URL has to point at the network named here.
+/// Chipnet and scalenet use the `bchtest` CashAddr prefix. BCHN uses that
+/// same prefix for its other test networks, so the prefix does not
+/// distinguish chipnet from scalenet, testnet3 or testnet4. The RPC URL has
+/// to point at the network named here; the node checks at start that it does
+/// (`bchn_chain_name`, `bch_only_block`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BitcoinCashNetwork {
@@ -201,6 +205,11 @@ pub enum BitcoinCashNetwork {
     Chipnet,
     /// Bitcoin Cash regtest. CashAddr prefix `bchreg`.
     Regtest,
+    /// Bitcoin Cash scalenet, BCHN's network for testing big blocks: a
+    /// 256 MB block size floor, reorged back to height 10,000 now and then
+    /// (BCHN `doc/test-networks.md`, `CScaleNetParams`). CashAddr prefix
+    /// `bchtest`.
+    Scalenet,
 }
 
 /// Which Bitcoin Cash share chain this node extends.
@@ -223,43 +232,46 @@ impl BitcoinCashNetwork {
     pub fn cashaddr_prefix(self) -> &'static str {
         match self {
             BitcoinCashNetwork::Mainnet => "bitcoincash",
-            BitcoinCashNetwork::Chipnet => "bchtest",
+            BitcoinCashNetwork::Chipnet | BitcoinCashNetwork::Scalenet => "bchtest",
             BitcoinCashNetwork::Regtest => "bchreg",
         }
     }
 
-    /// Share address network (`p2pool`, `tp2pool`, `rp2pool`) for this
-    /// Bitcoin Cash network.
+    /// Share address network (`p2pool`, `tp2pool`, `rp2pool`, `sp2pool`) for
+    /// this Bitcoin Cash network.
     pub fn share_network(self) -> BchShareNetwork {
         match self {
             BitcoinCashNetwork::Mainnet => BchShareNetwork::Mainnet,
             BitcoinCashNetwork::Chipnet => BchShareNetwork::Chipnet,
             BitcoinCashNetwork::Regtest => BchShareNetwork::Regtest,
+            BitcoinCashNetwork::Scalenet => BchShareNetwork::Scalenet,
         }
     }
 
     /// The Bitcoin Cash network a share address network belongs to.
     ///
-    /// Share addresses (`p2pool`, `tp2pool`, `rp2pool`) and payout addresses
-    /// (`bitcoincash`, `bchtest`, `bchreg`) name the same three networks.
+    /// Each share address prefix (`p2pool`, `tp2pool`, `rp2pool`, `sp2pool`)
+    /// names one network. Payout addresses use BCHN's prefixes, where chipnet
+    /// and scalenet share `bchtest`.
     pub fn from_share_network(share_network: BchShareNetwork) -> Self {
         match share_network {
             BchShareNetwork::Mainnet => BitcoinCashNetwork::Mainnet,
             BchShareNetwork::Chipnet => BitcoinCashNetwork::Chipnet,
             BchShareNetwork::Regtest => BitcoinCashNetwork::Regtest,
+            BchShareNetwork::Scalenet => BitcoinCashNetwork::Scalenet,
         }
     }
 
     /// Bitcoin network whose base58 version bytes and proof-of-work limit
-    /// match this Bitcoin Cash network: mainnet `0x1d00ffff`, chipnet
-    /// `0x1d00ffff` (as testnet), regtest `0x207fffff`. It lets
+    /// match this Bitcoin Cash network: mainnet `0x1d00ffff`, chipnet and
+    /// scalenet `0x1d00ffff` (as testnet), regtest `0x207fffff`. It lets
     /// `bitcoin::Address` carry a decoded CashAddr script, and it is the
     /// `stratum.network` a Bitcoin Cash node uses for difficulty and its P2P
     /// protocol id.
     pub fn legacy_network(self) -> Network {
         match self {
             BitcoinCashNetwork::Mainnet => Network::Bitcoin,
-            BitcoinCashNetwork::Chipnet => Network::Testnet,
+            BitcoinCashNetwork::Chipnet | BitcoinCashNetwork::Scalenet => Network::Testnet,
             BitcoinCashNetwork::Regtest => Network::Regtest,
         }
     }
@@ -271,6 +283,7 @@ impl BitcoinCashNetwork {
             BitcoinCashNetwork::Mainnet => "main",
             BitcoinCashNetwork::Chipnet => "chip",
             BitcoinCashNetwork::Regtest => "regtest",
+            BitcoinCashNetwork::Scalenet => "scale",
         }
     }
 
@@ -283,6 +296,8 @@ impl BitcoinCashNetwork {
     ///   upgrade, where eCash (then Bitcoin ABC) split off. It is also after
     ///   the November 2018 split of Bitcoin SV, and Bitcoin never had it.
     /// - Chipnet: block 115,252, where chipnet forked from testnet4.
+    /// - Scalenet: block 10,000, the height scalenet is reorged back to, so
+    ///   it stays in the chain.
     pub fn bch_only_block(self) -> Option<(u64, &'static str)> {
         match self {
             BitcoinCashNetwork::Mainnet => Some((
@@ -292,6 +307,10 @@ impl BitcoinCashNetwork {
             BitcoinCashNetwork::Chipnet => Some((
                 115_252,
                 "00000000040ba9641ba98a37b2e5ceead38e4e2930ac8f145c8094f94c708727",
+            )),
+            BitcoinCashNetwork::Scalenet => Some((
+                10_000,
+                "00000000b711dc753130e5083888d106f99b920b1b8a492eb5ac41d40e482905",
             )),
             BitcoinCashNetwork::Regtest => None,
         }
@@ -1928,6 +1947,62 @@ mod tests {
     #[test]
     fn regtest_has_no_bitcoin_cash_only_block() {
         assert_eq!(BitcoinCashNetwork::Regtest.bch_only_block(), None);
+    }
+
+    /// BCHN `src/chainparams.cpp`, `CScaleNetParams` checkpoint 10,000, the
+    /// height scalenet is reorged back to.
+    #[test]
+    fn the_scalenet_bitcoin_cash_block_is_its_reorg_floor_checkpoint() {
+        assert_eq!(
+            BitcoinCashNetwork::Scalenet.bch_only_block(),
+            Some((
+                10_000,
+                "00000000b711dc753130e5083888d106f99b920b1b8a492eb5ac41d40e482905"
+            ))
+        );
+        assert_eq!(BitcoinCashNetwork::Scalenet.bchn_chain_name(), "scale");
+    }
+
+    /// Scalenet takes BCHN's test network address forms: the `bchtest`
+    /// CashAddr prefix and testnet's base58 versions and proof-of-work limit.
+    #[test]
+    fn scalenet_uses_the_test_network_address_forms() {
+        assert_eq!(BitcoinCashNetwork::Scalenet.cashaddr_prefix(), "bchtest");
+        assert_eq!(
+            BitcoinCashNetwork::Scalenet.legacy_network(),
+            Network::Testnet
+        );
+        assert_eq!(
+            BitcoinCashNetwork::Scalenet.share_network(),
+            BchShareNetwork::Scalenet
+        );
+        assert_eq!(
+            BitcoinCashNetwork::from_share_network(BchShareNetwork::Scalenet),
+            BitcoinCashNetwork::Scalenet
+        );
+    }
+
+    #[test]
+    fn scalenet_is_read_from_the_config() {
+        let config: Config = config::Config::builder()
+            .add_source(config::File::with_name("../config.sample.toml"))
+            .add_source(config::File::from_str(
+                r#"
+                [stratum]
+                chain = "bitcoin-cash"
+                bitcoin_cash_network = "scalenet"
+                "#,
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+
+        assert_eq!(
+            config.stratum.bitcoin_cash_network,
+            Some(BitcoinCashNetwork::Scalenet)
+        );
     }
 
     #[test]

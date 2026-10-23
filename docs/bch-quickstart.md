@@ -40,8 +40,9 @@ p2poolv2_cli bch-share-address --network mainnet bitcoincash:q...
 # p2pool:q...
 ```
 
-Use `--network chipnet` (`bchtest:` to `tp2pool:`) or `--network regtest`
-(`bchreg:` to `rp2pool:`) on the test networks. The command takes no private
+Use `--network chipnet` (`bchtest:` to `tp2pool:`), `--network scalenet`
+(`bchtest:` to `sp2pool:`) or `--network regtest` (`bchreg:` to `rp2pool:`) on
+the test networks. The command takes no private
 key. Keep the wallet that holds this key: it signs if you ever sell shares
 for BCH with `p2poolv2_cli bch-trade`
 ([atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md)).
@@ -52,7 +53,7 @@ Start from `config.sample.toml` and set, under `[stratum]`:
 
 ```toml
 chain = "bitcoin-cash"
-bitcoin_cash_network = "mainnet"   # or "chipnet", "regtest"
+bitcoin_cash_network = "mainnet"   # or "chipnet", "scalenet", "regtest"
 bch_share_chain = "mini"           # "main" for large miners
 miner_address = "p2pool:q..."      # from step 2
 bootstrap_address = "bitcoincash:q..."
@@ -69,14 +70,14 @@ At start the node checks that `[bitcoinrpc]` is BCHN on
 says what it found:
 
 - before waiting for BCHN to sync, `getblockchaininfo` must report BCHN's
-  chain name for the network: `main`, `chip` or `regtest`. A BCHN node on
+  chain name for the network: `main`, `chip`, `scale` or `regtest`. A BCHN node on
   testnet4 (`test4`) has chipnet's genesis and CashAddr prefix, so only the
   name tells them apart;
 - once BCHN has synced, its block at a height only Bitcoin Cash has must be
   BCHN's checkpoint: block 661,648 on mainnet (the first block after the
   November 2020 upgrade, where eCash split off, and after the 2018 Bitcoin
-  SV split) and block 115,252 on chipnet (where chipnet forked from
-  testnet4). A Bitcoin, Bitcoin SV or eCash node also says `main`, but has
+  SV split), block 115,252 on chipnet (where chipnet forked from testnet4)
+  and block 10,000 on scalenet (the height scalenet is reorged back to). A Bitcoin, Bitcoin SV or eCash node also says `main`, but has
   another block there. Regtest blocks are local, so regtest checks the name
   only.
 

@@ -42,6 +42,14 @@ anchor and the donation and fee cap as they were.
 
 ### Added
 
+- Bitcoin Cash scalenet, BCHN's network for testing big blocks (A19 in
+  `docs/bch-btc-assumptions-audit.md`): `bitcoin_cash_network = "scalenet"`,
+  share addresses `sp2pool:`, payouts in `bchtest:` CashAddr, a share
+  genesis anchored on BCHN's scalenet genesis block, a 256 MB template
+  floor, and the start check against chain `scale` and block 10,000. BCHN
+  sets no ASERT anchor on scalenet, so its headers are not checked against
+  one, as on regtest. A new network with its own share chain; the share
+  chains of mainnet, chipnet and regtest are unchanged.
 - Token-aware CashAddr payout addresses (types 2 and 3, `z...` and `r...`,
   from CashTokens) are accepted wherever a payout address is read: the
   Stratum username and SV2 identity, `[stratum]` addresses and

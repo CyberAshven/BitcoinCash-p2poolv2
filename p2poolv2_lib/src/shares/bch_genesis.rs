@@ -37,6 +37,11 @@ pub const MINI_ANCHOR_TARGET: u32 = 0x1c384bd7;
 const CHIPNET_GENESIS_HASH: &str =
     "000000001dd410c49a788668ce26751718cc797474d3152a5fc073dd44fd9f7b";
 
+/// Published BCHN scalenet genesis hash (`CScaleNetParams`).
+#[cfg(test)]
+const SCALENET_GENESIS_HASH: &str =
+    "00000000e6453dc2dfe1ffa19023f86002eb11dbb8e87d0291a4599f0430be52";
+
 /// Build the share genesis for this stratum config.
 ///
 /// Bitcoin keeps [`ShareBlock::build_genesis_for_network`]. Bitcoin Cash uses
@@ -102,13 +107,15 @@ pub fn build(
 }
 
 /// BCHN genesis block for `network`. Mainnet and regtest are the blocks
-/// `bitcoin::constants::genesis_block` already builds. Chipnet uses the
-/// timestamp, nonce, and bits published in BCHN `CChipNetParams`.
+/// `bitcoin::constants::genesis_block` already builds. Chipnet and scalenet
+/// use the timestamp, nonce, and bits published in BCHN `CChipNetParams` and
+/// `CScaleNetParams`.
 pub fn anchor_block(network: BchShareNetwork) -> Block {
     match network {
         BchShareNetwork::Mainnet => genesis_block(Network::Bitcoin),
         BchShareNetwork::Regtest => genesis_block(Network::Regtest),
         BchShareNetwork::Chipnet => chipnet_genesis_block(),
+        BchShareNetwork::Scalenet => scalenet_genesis_block(),
     }
 }
 
@@ -132,6 +139,17 @@ fn chipnet_genesis_block() -> Block {
     block
 }
 
+/// BCHN `CScaleNetParams` genesis: `CreateGenesisBlock(1598282438,
+/// -1567304284, 0x1d00ffff, 1, 50 * COIN)`. The nonce is a `uint32_t`, so
+/// -1,567,304,284 is 2,727,663,012.
+fn scalenet_genesis_block() -> Block {
+    let mut block = genesis_block(Network::Bitcoin);
+    block.header.time = 1_598_282_438;
+    block.header.bits = CompactTarget::from_consensus(0x1d00ffff);
+    block.header.nonce = 2_727_663_012;
+    block
+}
+
 fn anchor_bits(share_chain: BchShareChain) -> CompactTarget {
     match share_chain {
         BchShareChain::Main => sim_overrides::anchor_target(),
@@ -142,7 +160,9 @@ fn anchor_bits(share_chain: BchShareChain) -> CompactTarget {
 fn payout_network(network: BchShareNetwork) -> Network {
     match network {
         BchShareNetwork::Mainnet => Network::Bitcoin,
-        BchShareNetwork::Chipnet | BchShareNetwork::Regtest => Network::Regtest,
+        BchShareNetwork::Chipnet | BchShareNetwork::Regtest | BchShareNetwork::Scalenet => {
+            Network::Regtest
+        }
     }
 }
 
@@ -158,6 +178,7 @@ fn share_network(network: BitcoinCashNetwork) -> BchShareNetwork {
         BitcoinCashNetwork::Mainnet => BchShareNetwork::Mainnet,
         BitcoinCashNetwork::Chipnet => BchShareNetwork::Chipnet,
         BitcoinCashNetwork::Regtest => BchShareNetwork::Regtest,
+        BitcoinCashNetwork::Scalenet => BchShareNetwork::Scalenet,
     }
 }
 
@@ -188,6 +209,21 @@ mod tests {
     fn chipnet_anchor_is_the_published_bchn_genesis_block() {
         let block = anchor_block(BchShareNetwork::Chipnet);
         assert_eq!(block.block_hash().to_string(), CHIPNET_GENESIS_HASH);
+    }
+
+    #[test]
+    fn scalenet_anchor_is_the_published_bchn_genesis_block() {
+        let block = anchor_block(BchShareNetwork::Scalenet);
+        assert_eq!(block.block_hash().to_string(), SCALENET_GENESIS_HASH);
+    }
+
+    /// Scalenet's share chain has its own genesis, so its protocol string
+    /// differs from chipnet's and the two never peer.
+    #[test]
+    fn scalenet_genesis_differs_from_chipnet_genesis() {
+        let scalenet = build(BchShareNetwork::Scalenet, BchShareChain::Main).unwrap();
+        let chipnet = build(BchShareNetwork::Chipnet, BchShareChain::Main).unwrap();
+        assert_ne!(scalenet.block_hash(), chipnet.block_hash());
     }
 
     #[test]

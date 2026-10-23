@@ -38,8 +38,9 @@ pub fn parse_network(value: &str) -> Result<BitcoinCashNetwork, String> {
         "mainnet" | "main" => Ok(BitcoinCashNetwork::Mainnet),
         "chipnet" => Ok(BitcoinCashNetwork::Chipnet),
         "regtest" => Ok(BitcoinCashNetwork::Regtest),
+        "scalenet" => Ok(BitcoinCashNetwork::Scalenet),
         _ => Err(format!(
-            "unknown Bitcoin Cash network '{value}', expected mainnet, chipnet or regtest"
+            "unknown Bitcoin Cash network '{value}', expected mainnet, chipnet, scalenet or regtest"
         )),
     }
 }
@@ -180,6 +181,7 @@ mod tests {
         assert_eq!(parse_network("mainnet"), Ok(BitcoinCashNetwork::Mainnet));
         assert_eq!(parse_network("chipnet"), Ok(BitcoinCashNetwork::Chipnet));
         assert_eq!(parse_network("regtest"), Ok(BitcoinCashNetwork::Regtest));
+        assert_eq!(parse_network("scalenet"), Ok(BitcoinCashNetwork::Scalenet));
         assert!(parse_network("signet").is_err());
     }
 }

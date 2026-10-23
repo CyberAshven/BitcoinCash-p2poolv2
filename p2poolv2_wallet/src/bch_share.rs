@@ -95,6 +95,10 @@ pub enum BchShareNetwork {
     Chipnet,
     /// CashAddr prefix `rp2pool`.
     Regtest,
+    /// CashAddr prefix `sp2pool`. Bitcoin Cash scalenet. The Bitcoin share
+    /// address uses `sp2pool` for signet too, in bech32m (`sp2pool1...`), so
+    /// the two never parse as each other.
+    Scalenet,
 }
 
 impl BchShareNetwork {
@@ -104,6 +108,7 @@ impl BchShareNetwork {
             BchShareNetwork::Mainnet => "p2pool",
             BchShareNetwork::Chipnet => "tp2pool",
             BchShareNetwork::Regtest => "rp2pool",
+            BchShareNetwork::Scalenet => "sp2pool",
         }
     }
 }
@@ -173,7 +178,7 @@ pub fn encode_payout_address(
     hash.copy_from_slice(hash_bytes);
     let prefix = match network {
         BchShareNetwork::Mainnet => "bitcoincash",
-        BchShareNetwork::Chipnet => "bchtest",
+        BchShareNetwork::Chipnet | BchShareNetwork::Scalenet => "bchtest",
         BchShareNetwork::Regtest => "bchreg",
     };
     Ok(encode_cashaddr(prefix, address_type, &hash))
@@ -244,6 +249,7 @@ fn network_for_prefix(prefix: &str) -> Result<BchShareNetwork, BchShareAddressEr
         "p2pool" => Ok(BchShareNetwork::Mainnet),
         "tp2pool" => Ok(BchShareNetwork::Chipnet),
         "rp2pool" => Ok(BchShareNetwork::Regtest),
+        "sp2pool" => Ok(BchShareNetwork::Scalenet),
         "bitcoincash" | "bchtest" | "bchreg" => Err(BchShareAddressError {
             message: "payout CashAddr is not a share address".to_string(),
         }),
@@ -415,6 +421,26 @@ mod tests {
         let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded, address);
         assert!(decoded.script_pubkey().is_p2pkh());
+    }
+
+    #[test]
+    fn scalenet_share_address_round_trips_under_sp2pool() {
+        let address = BchShareAddress::new(BchShareNetwork::Scalenet, [0x44u8; 20]);
+        let encoded = address.encode();
+        assert!(encoded.starts_with("sp2pool:"), "{encoded}");
+        assert_eq!(decode(&encoded).unwrap(), address);
+        assert!(parse(&encoded, BchShareNetwork::Chipnet).is_err());
+    }
+
+    /// Scalenet pays BCHN's test network CashAddr, as chipnet does.
+    #[test]
+    fn scalenet_payout_uses_the_bchtest_prefix() {
+        let payout = Address::p2pkh(
+            PubkeyHash::from_byte_array([0x44u8; 20]),
+            bitcoin::Network::Testnet,
+        );
+        let encoded = encode_payout_address(&payout, BchShareNetwork::Scalenet).unwrap();
+        assert!(encoded.starts_with("bchtest:q"), "{encoded}");
     }
 
     #[test]

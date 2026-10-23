@@ -68,6 +68,7 @@ fn config_name(network: BitcoinCashNetwork) -> &'static str {
         BitcoinCashNetwork::Mainnet => "mainnet",
         BitcoinCashNetwork::Chipnet => "chipnet",
         BitcoinCashNetwork::Regtest => "regtest",
+        BitcoinCashNetwork::Scalenet => "scalenet",
     }
 }
 
@@ -500,6 +501,29 @@ mod tests {
             panic!("a node without block 115252 was not refused: {result:?}");
         };
         assert!(reason.contains("115252"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_bchn_scalenet_node_has_its_reorg_floor_block() {
+        let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "getblockhash",
+                "params": [10000],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": "00000000b711dc753130e5083888d106f99b920b1b8a492eb5ac41d40e482905",
+                "error": null,
+                "id": 0
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let result =
+            verify_bitcoin_cash_block(&bitcoinrpc_config, BitcoinCashNetwork::Scalenet).await;
+
+        assert!(result.is_ok(), "{result:?}");
     }
 
     /// Regtest blocks are local, so there is no Bitcoin Cash only block to

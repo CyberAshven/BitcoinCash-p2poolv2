@@ -63,11 +63,7 @@ pub(crate) async fn prepare(
         .app_config
         .cash_network
         .ok_or_else(|| ApiError::BadRequest("BCH preparation requires a BCH share chain".into()))?;
-    let network = match cash_network {
-        bch_share::BchShareNetwork::Mainnet => BitcoinCashNetwork::Mainnet,
-        bch_share::BchShareNetwork::Chipnet => BitcoinCashNetwork::Chipnet,
-        bch_share::BchShareNetwork::Regtest => BitcoinCashNetwork::Regtest,
-    };
+    let network = BitcoinCashNetwork::from_share_network(cash_network);
     let invalid = |_| ApiError::BadRequest("invalid BCH identity or token".into());
     let payout = parse_payout_address(
         &request.payout,
