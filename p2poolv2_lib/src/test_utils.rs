@@ -1471,6 +1471,7 @@ pub struct TestShareBlockBuilder {
     uncles: Vec<BlockHash>,
     miner_pubkey: Option<String>,
     share_owner: Option<ShareOwner>,
+    payout_address: Option<Address>,
     transactions: Vec<Transaction>,
     work: Option<u32>,
     nonce: Option<u32>,
@@ -1516,6 +1517,14 @@ impl TestShareBlockBuilder {
         self
     }
 
+    /// Pay the share's coinbase slice to `address` instead of the signet
+    /// P2WPKH address derived from the miner pubkey, e.g. a Bitcoin Cash
+    /// P2PKH payout.
+    pub fn payout_address(mut self, address: Address) -> Self {
+        self.payout_address = Some(address);
+        self
+    }
+
     pub fn add_transaction(mut self, transaction: Transaction) -> Self {
         self.transactions.push(transaction);
         self
@@ -1546,7 +1555,9 @@ impl TestShareBlockBuilder {
             "020202020202020202020202020202020202020202020202020202020202020202";
         let pubkey_hex = self.miner_pubkey.as_deref().unwrap_or(default_pubkey_hex);
         let pubkey = CompressedPublicKey::from_str(pubkey_hex).unwrap();
-        let btcaddress = Address::p2wpkh(&pubkey, bitcoin::Network::Signet);
+        let btcaddress = self
+            .payout_address
+            .unwrap_or_else(|| Address::p2wpkh(&pubkey, bitcoin::Network::Signet));
         let secp = Secp256k1::verification_only();
         let share_owner = self.share_owner.unwrap_or_else(|| {
             P2PoolAddress::from_internal_key(
