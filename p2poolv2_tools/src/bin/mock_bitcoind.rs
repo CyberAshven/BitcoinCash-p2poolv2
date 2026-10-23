@@ -2,19 +2,42 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Mock bitcoind JSON-RPC server for stratum load tests.
+//! Mock node JSON-RPC server for stratum load tests.
 
-use clap::Parser;
-use p2poolv2_tools::mock_bitcoind::{DEFAULT_MAX_CONNECTIONS, DEFAULT_PORT, load_template, serve};
+use clap::{Parser, ValueEnum};
+use p2poolv2_config::BitcoinCashNetwork;
+use p2poolv2_tools::mock_bitcoind::{
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_PORT, MockNode, NodeKind, serve,
+};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
-/// Mock bitcoind JSON-RPC 1.0 server: answers getblocktemplate with an
+/// The node to answer as.
+#[derive(Clone, Copy, ValueEnum)]
+enum Node {
+    /// Bitcoin Cash Node: a BCHN template, and validateaddress decodes a
+    /// CashAddr for --network.
+    Bchn,
+    /// Bitcoin Core: the Bitcoin signet template, and validateaddress calls
+    /// every address a valid witness address. For the JMeter comparison with
+    /// CKPool, which mines Bitcoin.
+    BitcoinCore,
+}
+
+/// A Bitcoin Cash network.
+#[derive(Clone, Copy, ValueEnum)]
+enum CashNetwork {
+    Regtest,
+    Chipnet,
+    Mainnet,
+}
+
+/// Mock node JSON-RPC 1.0 server: answers getblocktemplate with an
 /// easy-target template, accepts every submitblock, and answers
 /// getdifficulty, getbestblockhash and validateaddress. Authentication is
-/// ignored.
+/// ignored. By default it answers as BCHN on regtest.
 #[derive(Parser)]
 #[command(name = "mock_bitcoind")]
 struct Arguments {
@@ -24,9 +47,16 @@ struct Arguments {
     /// Address to listen on.
     #[arg(long, default_value = "0.0.0.0")]
     bind: String,
-    /// Block template JSON to serve instead of the built-in one
-    /// (p2poolv2_tests/test_data/validation/stratum/b/template.json). Its
-    /// bits and target are replaced with an easy target either way.
+    /// The node to answer as.
+    #[arg(long, value_enum, default_value_t = Node::Bchn)]
+    node: Node,
+    /// The Bitcoin Cash network a BCHN mock is on: it picks the built-in
+    /// template (bitcoindrpc/test_data/bchn-<network>-template.json; mainnet
+    /// has none) and the CashAddr prefix validateaddress accepts.
+    #[arg(long, value_enum, default_value_t = CashNetwork::Regtest)]
+    network: CashNetwork,
+    /// Block template JSON to serve instead of the built-in one. Its bits
+    /// and target are replaced with an easy target either way.
     #[arg(long)]
     template: Option<PathBuf>,
     /// Connections served at once; more wait to be accepted.
@@ -34,11 +64,23 @@ struct Arguments {
     max_connections: usize,
 }
 
+fn node_kind(node: Node, network: CashNetwork) -> NodeKind {
+    match node {
+        Node::BitcoinCore => NodeKind::BitcoinCore,
+        Node::Bchn => NodeKind::Bchn(match network {
+            CashNetwork::Regtest => BitcoinCashNetwork::Regtest,
+            CashNetwork::Chipnet => BitcoinCashNetwork::Chipnet,
+            CashNetwork::Mainnet => BitcoinCashNetwork::Mainnet,
+        }),
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let arguments = Arguments::parse();
-    let template = match load_template(arguments.template.as_deref()) {
-        Ok(template) => Arc::new(template),
+    let kind = node_kind(arguments.node, arguments.network);
+    let node = match MockNode::load(kind, arguments.template.as_deref()) {
+        Ok(node) => Arc::new(node),
         Err(error) => {
             eprintln!("mock_bitcoind: {error}");
             return ExitCode::FAILURE;
@@ -55,9 +97,9 @@ async fn main() -> ExitCode {
         }
     };
     println!(
-        "Mock bitcoind JSON-RPC server listening on port {}",
+        "Mock node JSON-RPC server ({kind:?}) listening on port {}",
         arguments.port
     );
-    serve(listener, template, arguments.max_connections).await;
+    serve(listener, node, arguments.max_connections).await;
     ExitCode::SUCCESS
 }

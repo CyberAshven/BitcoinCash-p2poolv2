@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! A mock bitcoind JSON-RPC 1.0 server for stratum load tests.
+//! A mock node JSON-RPC 1.0 server for stratum load tests.
 //!
 //! It answers `getblocktemplate` with a fixed template whose target is so
 //! easy that every share a load-test miner submits is a block, so the pool
@@ -10,16 +10,21 @@
 //! `load-tests/jmeter-testing/mock-bitcoind/server.js` and serves the same
 //! responses on the same port.
 //!
-//! The built-in template and the `iswitness` field of `validateaddress` are
-//! Bitcoin's, because the load test they serve is: `config-load-test.toml`
-//! mines Bitcoin signet and the CKPool configs are Bitcoin too. Pass a
-//! Bitcoin Cash template with `--template` to load-test a Bitcoin Cash node.
+//! By default it answers as BCHN, the Bitcoin Cash node this pool mines
+//! against: the built-in template is a BCHN regtest template
+//! (`bitcoindrpc/test_data/bchn-regtest-template.json`) and
+//! `validateaddress` decodes a CashAddr and answers with BCHN's fields.
+//! [`NodeKind::BitcoinCore`] keeps the JavaScript server's Bitcoin signet
+//! template and answers, for the JMeter comparison with CKPool, which still
+//! mines Bitcoin signet (`config-load-test.toml`, the CKPool configs).
 //!
 //! HTTP is handled by hand on a raw TCP socket, as the JavaScript server did:
 //! CKPool reads with LF-only line endings and non-blocking reads, so each
 //! response (headers and body) goes out in one write.
 
 use crate::error::{ToolError, ToolResult};
+use p2poolv2_config::{BitcoinCashNetwork, Chain, parse_payout_address};
+use p2poolv2_wallet::bch_share::encode_payout_address;
 use regex::bytes::Regex;
 use serde::Serialize;
 use serde_json::Value;
@@ -47,8 +52,16 @@ pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 /// sends another request before reading `Connection: close`.
 const LINGER_AFTER_RESPONSE: Duration = Duration::from_millis(50);
 
-/// The template the JavaScript server served, before its overrides.
-const DEFAULT_TEMPLATE: &str =
+/// The BCHN regtest template, the default.
+const BCHN_REGTEST_TEMPLATE: &str =
+    include_str!("../../bitcoindrpc/test_data/bchn-regtest-template.json");
+
+/// A BCHN chipnet template.
+const BCHN_CHIPNET_TEMPLATE: &str =
+    include_str!("../../bitcoindrpc/test_data/bchn-chipnet-template.json");
+
+/// The Bitcoin signet template the JavaScript server served.
+const BITCOIN_SIGNET_TEMPLATE: &str =
     include_str!("../../p2poolv2_tests/test_data/validation/stratum/b/template.json");
 
 /// Overrides that make every share a block, whatever extranonce the stratum
@@ -62,22 +75,85 @@ const BAD_REQUEST: &[u8] =
 static CONTENT_LENGTH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)content-length:\s*(\d+)").expect("valid regex"));
 
-/// The block template to serve: `path` when given, else the built-in one,
-/// with the easy `bits` and `target` overrides applied.
-pub fn load_template(path: Option<&Path>) -> ToolResult<Value> {
-    let text: Cow<'_, str> = match path {
-        Some(path) => Cow::Owned(
-            std::fs::read_to_string(path).map_err(|error| ToolError::io("read", path, error))?,
+/// The node the mock answers as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    /// BCHN on a Bitcoin Cash network, the default on regtest.
+    Bchn(BitcoinCashNetwork),
+    /// Bitcoin Core on signet, as the JavaScript server answered: for the
+    /// JMeter comparison with CKPool, which mines Bitcoin.
+    BitcoinCore,
+}
+
+impl Default for NodeKind {
+    fn default() -> Self {
+        NodeKind::Bchn(BitcoinCashNetwork::Regtest)
+    }
+}
+
+impl NodeKind {
+    /// The built-in template for this node, if there is one. BCHN mainnet
+    /// has none: pass one with `--template`.
+    fn built_in_template(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            NodeKind::Bchn(BitcoinCashNetwork::Regtest) => {
+                Some(("built-in BCHN regtest template", BCHN_REGTEST_TEMPLATE))
+            }
+            NodeKind::Bchn(BitcoinCashNetwork::Chipnet) => {
+                Some(("built-in BCHN chipnet template", BCHN_CHIPNET_TEMPLATE))
+            }
+            NodeKind::Bchn(BitcoinCashNetwork::Mainnet) => None,
+            NodeKind::BitcoinCore => {
+                Some(("built-in Bitcoin signet template", BITCOIN_SIGNET_TEMPLATE))
+            }
+        }
+    }
+}
+
+/// What the mock serves: a block template, answered as one kind of node.
+#[derive(Debug, Clone)]
+pub struct MockNode {
+    kind: NodeKind,
+    template: Value,
+}
+
+impl MockNode {
+    /// The mock for `kind`, serving the template at `path` when given, else
+    /// the node's built-in one, with the easy `bits` and `target` overrides
+    /// applied.
+    pub fn load(kind: NodeKind, path: Option<&Path>) -> ToolResult<Self> {
+        Ok(Self {
+            kind,
+            template: load_template(kind, path)?,
+        })
+    }
+
+    /// The template `getblocktemplate` answers with.
+    pub fn template(&self) -> &Value {
+        &self.template
+    }
+}
+
+/// The block template to serve: `path` when given, else `kind`'s built-in
+/// one, with the easy `bits` and `target` overrides applied.
+pub fn load_template(kind: NodeKind, path: Option<&Path>) -> ToolResult<Value> {
+    let (origin, text): (String, Cow<'_, str>) = match path {
+        Some(path) => (
+            path.display().to_string(),
+            Cow::Owned(
+                std::fs::read_to_string(path)
+                    .map_err(|error| ToolError::io("read", path, error))?,
+            ),
         ),
-        None => Cow::Borrowed(DEFAULT_TEMPLATE),
+        None => {
+            let (origin, text) = kind.built_in_template().ok_or_else(|| {
+                ToolError::message("there is no built-in BCHN mainnet template; pass --template")
+            })?;
+            (origin.to_string(), Cow::Borrowed(text))
+        }
     };
-    let mut template: Value = serde_json::from_str(&text).map_err(|source| ToolError::Json {
-        origin: path.map_or_else(
-            || "built-in template".to_string(),
-            |path| path.display().to_string(),
-        ),
-        source,
-    })?;
+    let mut template: Value =
+        serde_json::from_str(&text).map_err(|source| ToolError::Json { origin, source })?;
     let fields = template
         .as_object_mut()
         .ok_or_else(|| ToolError::message("the block template is not a JSON object"))?;
@@ -88,7 +164,7 @@ pub fn load_template(path: Option<&Path>) -> ToolResult<Value> {
 
 /// Serve JSON-RPC on `listener` until the process ends, at most
 /// `max_connections` connections at a time.
-pub async fn serve(listener: TcpListener, template: Arc<Value>, max_connections: usize) {
+pub async fn serve(listener: TcpListener, node: Arc<MockNode>, max_connections: usize) {
     let slots = Arc::new(Semaphore::new(max_connections.max(1)));
     loop {
         let slot = match slots.clone().acquire_owned().await {
@@ -97,9 +173,9 @@ pub async fn serve(listener: TcpListener, template: Arc<Value>, max_connections:
         };
         match listener.accept().await {
             Ok((stream, _)) => {
-                let template = Arc::clone(&template);
+                let node = Arc::clone(&node);
                 tokio::spawn(async move {
-                    handle_connection(stream, &template).await;
+                    handle_connection(stream, &node).await;
                     drop(slot);
                 });
             }
@@ -126,7 +202,7 @@ enum Framing {
     Complete { body_start: usize, body_end: usize },
 }
 
-async fn handle_connection(mut stream: TcpStream, template: &Value) {
+async fn handle_connection(mut stream: TcpStream, node: &MockNode) {
     // Errors on a socket only end that connection, as in the JavaScript server.
     let _ = stream.set_nodelay(true);
     let mut buffer: Vec<u8> = Vec::with_capacity(4096);
@@ -141,7 +217,7 @@ async fn handle_connection(mut stream: TcpStream, template: &Value) {
                     body_start,
                     body_end,
                 } => {
-                    let reply = reply_to(&buffer[body_start..body_end], template);
+                    let reply = reply_to(&buffer[body_start..body_end], node);
                     buffer.drain(..body_end);
                     match reply {
                         Reply::Rpc(response) => {
@@ -229,9 +305,10 @@ struct RpcError {
     message: String,
 }
 
-/// `validateaddress` result, in the field order the JavaScript server used.
+/// Bitcoin Core's `validateaddress` result, in the field order the
+/// JavaScript server used. It calls every address a valid witness address.
 #[derive(Serialize)]
-struct ValidateAddress<'a> {
+struct CoreValidateAddress<'a> {
     isvalid: bool,
     address: Cow<'a, Value>,
     #[serde(rename = "scriptPubKey")]
@@ -240,8 +317,74 @@ struct ValidateAddress<'a> {
     iswitness: bool,
 }
 
+/// BCHN's `validateaddress` result, in BCHN's field order
+/// (`src/rpc/misc.cpp`): an invalid address answers `isvalid` alone.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct BchnValidateAddress {
+    isvalid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    address: Option<String>,
+    #[serde(rename = "scriptPubKey", skip_serializing_if = "Option::is_none")]
+    script_pub_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    isscript: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    istokenaware: Option<bool>,
+}
+
+impl BchnValidateAddress {
+    fn invalid() -> Self {
+        Self {
+            isvalid: false,
+            address: None,
+            script_pub_key: None,
+            isscript: None,
+            istokenaware: None,
+        }
+    }
+}
+
+/// `validateaddress` as BCHN answers it on `network`.
+///
+/// The address is read with the node's own CashAddr parser, the one it
+/// reads payout addresses with. Like BCHN it takes the address with or
+/// without the network's prefix and answers with the prefixed, lowercase
+/// form, the hex `scriptPubKey` and whether it pays a script. The parser
+/// takes the 20-byte P2PKH and P2SH addresses this node pays, so a
+/// token-aware or P2SH32 address, which BCHN also accepts, and a legacy
+/// base58 one answer `isvalid: false` here.
+fn bchn_validate_address(address: &Value, network: BitcoinCashNetwork) -> BchnValidateAddress {
+    let Some(text) = address.as_str() else {
+        return BchnValidateAddress::invalid();
+    };
+    let prefixed = if text.contains(':') {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(format!("{}:{text}", network.cashaddr_prefix()))
+    };
+    let Ok(parsed) = parse_payout_address(
+        &prefixed,
+        Chain::BitcoinCash,
+        network.legacy_network(),
+        Some(network),
+    ) else {
+        return BchnValidateAddress::invalid();
+    };
+    let Ok(canonical) = encode_payout_address(&parsed, network.share_network()) else {
+        return BchnValidateAddress::invalid();
+    };
+    let script = parsed.script_pubkey();
+    BchnValidateAddress {
+        isvalid: true,
+        address: Some(canonical),
+        script_pub_key: Some(script.to_hex_string()),
+        isscript: Some(script.is_p2sh()),
+        istokenaware: Some(false),
+    }
+}
+
 /// The HTTP response for one request body.
-fn reply_to(body: &[u8], template: &Value) -> Reply {
+fn reply_to(body: &[u8], node: &MockNode) -> Reply {
     let text = String::from_utf8_lossy(body);
     let request: Value = match serde_json::from_str(&text) {
         Ok(request) => request,
@@ -249,6 +392,7 @@ fn reply_to(body: &[u8], template: &Value) -> Reply {
     };
     let method = request.get("method");
     let params = request.get("params");
+    let template = &node.template;
     let result = match method.and_then(Value::as_str) {
         Some("getblocktemplate") => Ok(serialize(template)),
         Some("submitblock") => Ok("null".to_string()),
@@ -256,13 +400,19 @@ fn reply_to(body: &[u8], template: &Value) -> Reply {
         Some("getbestblockhash") => Ok(serialize(
             template.get("previousblockhash").unwrap_or(&Value::Null),
         )),
-        Some("validateaddress") => Ok(serialize(&ValidateAddress {
-            isvalid: true,
-            address: first_param_or_empty(params),
-            script_pub_key: "",
-            isscript: false,
-            iswitness: true,
-        })),
+        Some("validateaddress") => Ok(match node.kind {
+            NodeKind::Bchn(network) => serialize(&bchn_validate_address(
+                &first_param_or_empty(params),
+                network,
+            )),
+            NodeKind::BitcoinCore => serialize(&CoreValidateAddress {
+                isvalid: true,
+                address: first_param_or_empty(params),
+                script_pub_key: "",
+                isscript: false,
+                iswitness: true,
+            }),
+        }),
         _ => Err(RpcError {
             code: -32601,
             message: format!("Method not found: {}", javascript_display(method)),

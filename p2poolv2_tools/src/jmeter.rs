@@ -13,7 +13,7 @@
 use crate::cargo_build::{BuildRequest, build, executable};
 use crate::error::{ToolError, ToolResult};
 use crate::log_file::for_each_line;
-use crate::mock_bitcoind::{DEFAULT_PORT, load_template, serve};
+use crate::mock_bitcoind::{DEFAULT_PORT, MockNode, NodeKind, serve};
 use crate::process::{Signal, find_by_command_line, find_children, find_on_path, send_signal};
 use crate::repo;
 use std::collections::BTreeMap;
@@ -196,9 +196,14 @@ fn run_jmeter(plan: &Path, results: &Path) -> ToolResult<()> {
 
 /// Serve the mock bitcoind in this process on its usual port. The server
 /// runs until the process ends.
+///
+/// It answers as Bitcoin Core on signet: the JMeter plan, the P2Pool config
+/// it drives (`config-load-test.toml`) and the CKPool configs all mine
+/// Bitcoin signet, and CKPool reads `validateaddress` for its payout
+/// address.
 pub async fn start_mock_bitcoind() -> ToolResult<()> {
     log("Starting mock-bitcoind...");
-    let template = Arc::new(load_template(None)?);
+    let node = Arc::new(MockNode::load(NodeKind::BitcoinCore, None)?);
     let listener = TcpListener::bind(("0.0.0.0", DEFAULT_PORT))
         .await
         .map_err(|error| {
@@ -208,7 +213,7 @@ pub async fn start_mock_bitcoind() -> ToolResult<()> {
         })?;
     tokio::spawn(serve(
         listener,
-        template,
+        node,
         crate::mock_bitcoind::DEFAULT_MAX_CONNECTIONS,
     ));
     log(&format!(

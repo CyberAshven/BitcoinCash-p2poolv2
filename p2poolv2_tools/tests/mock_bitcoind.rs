@@ -4,7 +4,7 @@
 
 //! The mock bitcoind over a real socket, as CKPool and the node talk to it.
 
-use p2poolv2_tools::mock_bitcoind::{load_template, serve};
+use p2poolv2_tools::mock_bitcoind::{MockNode, NodeKind, serve};
 use serde_json::Value;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,8 +14,8 @@ use tokio::net::{TcpListener, TcpStream};
 async fn start_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("local address");
-    let template = Arc::new(load_template(None).expect("template"));
-    tokio::spawn(serve(listener, template, 8));
+    let node = Arc::new(MockNode::load(NodeKind::default(), None).expect("BCHN regtest mock"));
+    tokio::spawn(serve(listener, node, 8));
     address
 }
 
@@ -54,7 +54,7 @@ async fn getblocktemplate_serves_the_easy_template() {
     assert_eq!(json["id"], 2);
     assert_eq!(json["error"], Value::Null);
     assert_eq!(json["result"]["bits"], "2100ffff");
-    assert_eq!(json["result"]["height"], 123);
+    assert_eq!(json["result"]["height"], 102);
 }
 
 #[tokio::test]
@@ -95,4 +95,26 @@ async fn invalid_json_gets_400() {
         response,
         "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 12\r\n\r\nInvalid JSON"
     );
+}
+
+#[tokio::test]
+async fn validateaddress_answers_as_bchn() {
+    let address = start_server().await;
+    let payout = p2poolv2_wallet::bch_share::encode_cashaddr(
+        "bchreg",
+        p2poolv2_wallet::bch_share::CashAddrType::PayToPublicKeyHash,
+        &[0x11; 20],
+    );
+    let response = exchange(
+        address,
+        &post(&format!(
+            r#"{{"method":"validateaddress","params":["{payout}"],"id":4}}"#
+        )),
+    )
+    .await;
+    let json = body_json(&response);
+    assert_eq!(json["result"]["isvalid"], true);
+    assert_eq!(json["result"]["address"], payout.as_str());
+    assert_eq!(json["result"]["isscript"], false);
+    assert!(json["result"].get("iswitness").is_none());
 }
