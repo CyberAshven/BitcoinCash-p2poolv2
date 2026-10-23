@@ -14,7 +14,9 @@ mod pruned_serving_test;
 // traded share out of these tests' windows.
 #[cfg(all(test, not(feature = "sim")))]
 mod share_payout_rights_test;
-#[cfg(test)]
+// The sim build shortens PAYOUT_DEPTH to 100 shares, which leaves the
+// 102-share-deep coins these trades spend unspendable.
+#[cfg(all(test, not(feature = "sim")))]
 mod share_trading_test;
 #[cfg(test)]
 mod share_transaction_relay_test;
