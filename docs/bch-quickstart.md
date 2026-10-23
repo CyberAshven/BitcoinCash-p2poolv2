@@ -49,7 +49,9 @@ for BCH with `p2poolv2_cli bch-trade`
 
 ## 3. Configure the node
 
-Start from `config.sample.toml` and set, under `[stratum]`:
+Start from `config.sample.toml`, a Bitcoin Cash chipnet node
+(`config-bitcoin.sample.toml` is upstream's Bitcoin sample). For mainnet,
+set under `[stratum]`:
 
 ```toml
 chain = "bitcoin-cash"
@@ -59,8 +61,9 @@ miner_address = "p2pool:q..."      # from step 2
 bootstrap_address = "bitcoincash:q..."
 ```
 
-`network` is ignored on Bitcoin Cash; the node uses the network
-`bitcoin_cash_network` implies, so all nodes on one network agree.
+A Bitcoin Cash config needs no `network`: the node uses the network
+`bitcoin_cash_network` implies, and ignores a `network` line, so all nodes on
+one network agree.
 
 Point `[bitcoinrpc]` at BCHN's RPC port and `zmqpubhashblock` at its ZMQ
 endpoint.
@@ -192,10 +195,11 @@ It needs a machine that can reach BCH peers on port 48333.
    `wait_for_chain_sync = false` there or its Stratum port never opens.
 3. Point a miner at the first node's Stratum port with a `bchtest:` username.
    A share needs about 2e10 hashes on the mini chain (stratum difficulty
-   about 4.7), so a CPU miner needs `start_difficulty` and
-   `minimum_difficulty` near 1; at the sample's 100000 it would almost never
-   submit. 24 CPU threads (about 150 MH/s) found a share every minute or
-   two; a small ASIC finds them in seconds.
+   about 4.7). A miner's difficulty never goes above the share difficulty
+   of its job (4 here), and the sample's `minimum_difficulty` is 1, so
+   vardiff can bring a CPU miner down to where it submits. 24 CPU threads
+   (about 150 MH/s) found a share every minute or two; a small ASIC finds
+   them in seconds.
 4. Pass: `curl http://<api>/chain_info` on both nodes shows the same
    `chain_tip_height` above 0, and neither log has `Chain-context validation
    failed`. A block found on chipnet appears in BCHN with the 1.5% donation

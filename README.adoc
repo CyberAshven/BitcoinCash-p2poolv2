@@ -79,12 +79,12 @@ p2poolv2_cli bch-share-address --network chipnet bchtest:qq...
 # tp2pool:qq...
 ----
 
-. Start from `config.sample.toml` and set, under `[stratum]`:
+. Copy `config.sample.toml`, a Bitcoin Cash chipnet node, and set under
+`[stratum]` your own addresses (and the network, for mainnet):
 +
 [,toml]
 ----
-chain = "bitcoin-cash"
-bitcoin_cash_network = "chipnet"     # or "mainnet", "regtest"
+bitcoin_cash_network = "chipnet"     # or "mainnet", "scalenet", "regtest"
 bch_share_chain = "mini"             # "main" for large miners
 miner_address = "tp2pool:qq..."      # optional: owns every share this node mines
 bootstrap_address = "bchtest:qq..."
@@ -93,7 +93,8 @@ zmqpubhashblock = "tcp://127.0.0.1:28332"
 +
 Point `[bitcoinrpc]` at BCHN (`http://127.0.0.1:48332` on chipnet, `8332` on
 mainnet) and list share chain peers in `[network] dial_peers`: Bitcoin Cash
-has no P2Poolv2 DNS seeds yet.
+has no P2Poolv2 DNS seeds yet. `config-bitcoin.sample.toml` is upstream's
+Bitcoin sample.
 
 . Run `p2poolv2 --config config.toml` and point miners at port 3333.
 

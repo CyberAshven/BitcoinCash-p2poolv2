@@ -160,6 +160,11 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
+- `config.sample.toml` is a Bitcoin Cash chipnet node, the sample the
+  releases ship (A23 in `docs/bch-btc-assumptions-audit.md`). Upstream's
+  Bitcoin signet sample is `config-bitcoin.sample.toml`. A Bitcoin Cash
+  config may now leave `[stratum] network` out, since it is derived from
+  `bitcoin_cash_network`; a Bitcoin config without it is refused at load.
 - Merge-mining common format v2 (share-chain rule, audit A16 and A15): every
   Bitcoin Cash coinbase carries the 53-byte `OP_RETURN "CTMM" 02 root h salt`
   commitment as output 0, the exact empty commitment (zero root, `h = 0`,

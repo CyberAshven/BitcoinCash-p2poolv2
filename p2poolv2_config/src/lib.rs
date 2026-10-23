@@ -367,11 +367,15 @@ pub struct StratumConfig<State = Raw> {
     /// P2Poolv2 mode only; Hydrapool builds no share commitment.
     pub miner_address: Option<String>,
     /// The network can be "main", "testnet4" or "signet".
-    /// On Bitcoin this is also the share-address prefix. On Bitcoin Cash it is
-    /// ignored: [`Config::load`] and [`StratumConfig::parse`] replace it with
+    /// On Bitcoin this is also the share-address prefix, and [`Config::load`]
+    /// requires it. On Bitcoin Cash it is ignored and may be left out:
+    /// [`Config::load`] and [`StratumConfig::parse`] replace it with
     /// [`StratumConfig::effective_network`], derived from
     /// `bitcoin_cash_network`.
-    #[serde(deserialize_with = "deserialize_network")]
+    #[serde(
+        default = "default_unset_network",
+        deserialize_with = "deserialize_network"
+    )]
     pub network: bitcoin::Network,
     /// Block chain that supplies work templates and payout scripts.
     /// Defaults to Bitcoin so existing configurations keep their behavior.
@@ -1087,6 +1091,14 @@ impl StratumConfig<Raw> {
     }
 }
 
+/// The `network` of a config that leaves it out, as a Bitcoin Cash config
+/// may: Bitcoin Cash derives it from `bitcoin_cash_network`, and
+/// [`Config::load`] refuses a Bitcoin config without one, so this value is
+/// never used to mine.
+fn default_unset_network() -> bitcoin::Network {
+    bitcoin::Network::Bitcoin
+}
+
 /// Helper function to deserialize the network from the config file.
 /// Possible values are: main, test, testnet4, signet, regtest
 fn deserialize_network<'de, D>(deserializer: D) -> Result<bitcoin::Network, D::Error>
@@ -1358,7 +1370,7 @@ impl Config {
     /// On Bitcoin Cash, `network.dns_seed` is also turned off (see
     /// [`Config::with_bitcoin_cash_dns_seed_off`]).
     pub fn load(path: &str) -> Result<Self, config::ConfigError> {
-        let loaded: Self = config::Config::builder()
+        let built = config::Config::builder()
             .add_source(config::File::with_name(path))
             // Nesting uses `__` so that a single `_` stays part of a field name.
             // With a single-underscore separator, P2POOL_STORE_PPLNS_TTL_DAYS
@@ -1369,8 +1381,17 @@ impl Config {
                     .prefix_separator("_")
                     .separator("__"),
             )
-            .build()?
-            .try_deserialize()?;
+            .build()?;
+        let network_given = built.get_string("stratum.network").is_ok();
+        let loaded: Self = built.try_deserialize()?;
+        if loaded.stratum.chain == Chain::Bitcoin && !network_given {
+            return Err(config::ConfigError::Message(
+                "[stratum] network is required with chain = \"bitcoin\": \"main\", \
+                 \"testnet4\" or \"signet\". A Bitcoin Cash node sets chain = \
+                 \"bitcoin-cash\" and bitcoin_cash_network instead."
+                    .to_string(),
+            ));
+        }
         Ok(loaded
             .with_bitcoin_cash_network_derived()
             .with_bitcoin_cash_dns_seed_off())
@@ -1723,7 +1744,7 @@ mod tests {
     /// DNS seeds are on unless the operator turns them off.
     #[test]
     fn dns_seed_defaults_to_true_when_absent() {
-        let config = Config::load("../config.sample.toml").unwrap();
+        let config = Config::load("../config-bitcoin.sample.toml").unwrap();
         assert!(config.network.dns_seed);
     }
 
@@ -1772,7 +1793,7 @@ mod tests {
 
     #[test]
     fn with_bitcoin_cash_dns_seed_off_leaves_bitcoin_seeds_on() {
-        let config = Config::load("../config.sample.toml")
+        let config = Config::load("../config-bitcoin.sample.toml")
             .unwrap()
             .with_bitcoin_cash_dns_seed_off();
         assert_eq!(config.stratum.chain, Chain::Bitcoin);
@@ -2003,6 +2024,58 @@ mod tests {
             config.stratum.bitcoin_cash_network,
             Some(BitcoinCashNetwork::Scalenet)
         );
+    }
+
+    /// The default sample is a Bitcoin Cash chipnet node that names no
+    /// Bitcoin network and parses as shipped.
+    #[test]
+    fn the_default_sample_is_a_bitcoin_cash_chipnet_node() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert_eq!(config.stratum.chain, Chain::BitcoinCash);
+        assert_eq!(
+            config.stratum.bitcoin_cash_network,
+            Some(BitcoinCashNetwork::Chipnet)
+        );
+        assert_eq!(config.stratum.network, Network::Testnet);
+        assert!(!config.network.dns_seed);
+        assert_eq!(config.bitcoinrpc.url, "http://127.0.0.1:48332");
+
+        let parsed = config.stratum.parse().unwrap();
+        assert_eq!(parsed.donation, Some(DEFAULT_BITCOIN_CASH_DONATION));
+        assert!(parsed.bootstrap_address_parsed.is_some());
+    }
+
+    /// Upstream's Bitcoin sample is kept, for Bitcoin mode.
+    #[test]
+    fn the_bitcoin_sample_is_a_bitcoin_signet_node() {
+        let config = Config::load("../config-bitcoin.sample.toml").unwrap();
+        assert_eq!(config.stratum.chain, Chain::Bitcoin);
+        assert_eq!(config.stratum.network, Network::Signet);
+        assert!(config.stratum.parse().is_ok());
+    }
+
+    /// A Bitcoin config must name its network; only Bitcoin Cash derives it.
+    #[test]
+    fn a_bitcoin_config_without_a_network_is_refused() {
+        let sample = std::fs::read_to_string("../config-bitcoin.sample.toml").unwrap();
+        let without_network: String = sample
+            .lines()
+            .filter(|line| !line.starts_with("network = "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let path = std::env::temp_dir().join(format!(
+            "p2poolv2-config-without-network-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, without_network).unwrap();
+
+        let result = Config::load(path.to_str().unwrap());
+        std::fs::remove_file(&path).unwrap();
+
+        let Err(error) = result else {
+            panic!("a Bitcoin config without network loaded");
+        };
+        assert!(error.to_string().contains("network is required"), "{error}");
     }
 
     #[test]
@@ -2257,7 +2330,7 @@ mod tests {
 
     #[test]
     fn absent_chain_stays_on_bitcoin() {
-        let config = Config::load("../config.sample.toml").unwrap();
+        let config = Config::load("../config-bitcoin.sample.toml").unwrap();
         assert_eq!(config.stratum.chain, Chain::Bitcoin);
         assert_eq!(config.stratum.bitcoin_cash_network, None);
     }
