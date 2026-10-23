@@ -60,8 +60,10 @@ const OP_DUP: u8 = 0x76;
 const OP_HASH160: u8 = 0xa9;
 const OP_EQUALVERIFY: u8 = 0x88;
 const OP_CHECKSIG: u8 = 0xac;
+const OP_EQUAL: u8 = 0x87;
 const PUBKEY_HASH_LENGTH: u8 = 20;
 const P2PKH_SCRIPT_LENGTH: usize = 25;
+const P2SH20_SCRIPT_LENGTH: usize = 23;
 /// Largest push a single opcode byte can make. Larger pushes need
 /// `OP_PUSHDATA`, which minimal-push rules forbid for signatures and keys.
 const MAX_DIRECT_PUSH: u8 = 0x4b;
@@ -216,10 +218,20 @@ pub fn verify_outputs(transaction: &Transaction) -> Result<(), BchScriptError> {
 /// (34 + 148 bytes) and 576 for P2SH32 (44 + 148 bytes). The value of an
 /// output at or above the threshold is not dust.
 pub fn dust_threshold(output: &TxOut) -> u64 {
-    let script_length = output.script_pubkey.len();
-    let output_size = 8 + VarInt::from(script_length).size() + script_length;
-    let spend_size = output_size as u64 + DUST_SPENDING_INPUT_SIZE;
+    dust_threshold_for_script_length(output.script_pubkey.len())
+}
+
+/// [`dust_threshold`] for an output whose locking script is
+/// `script_length` bytes: the threshold depends on the output's size alone.
+pub fn dust_threshold_for_script_length(script_length: usize) -> u64 {
+    let spend_size = output_size_for_script_length(script_length) as u64 + DUST_SPENDING_INPUT_SIZE;
     DUST_FEE_MULTIPLE * (spend_size * DUST_RELAY_FEE_PER_KILOBYTE / 1_000)
+}
+
+/// Serialized bytes of an output whose locking script is `script_length`
+/// bytes: the 8-byte value, the CompactSize length and the script.
+pub fn output_size_for_script_length(script_length: usize) -> usize {
+    8 + VarInt::from(script_length).size() + script_length
 }
 
 /// Check that `transaction` is final in a share at `block_height`.
@@ -408,6 +420,34 @@ pub(crate) fn verify_signature(
     } else {
         verify_ecdsa(body, public_key, &digest, input_index)
     }
+}
+
+/// The 20-byte hash of a P2SH20 locking script
+/// (`OP_HASH160 <20 bytes> OP_EQUAL`), or `None` for any other script.
+pub fn p2sh20_hash(script: &[u8]) -> Option<&[u8; 20]> {
+    if script.len() != P2SH20_SCRIPT_LENGTH
+        || script[0] != OP_HASH160
+        || script[1] != PUBKEY_HASH_LENGTH
+        || script[22] != OP_EQUAL
+    {
+        return None;
+    }
+    script[2..22].try_into().ok()
+}
+
+/// Whether `script` is a Bitcoin Cash payout script: P2PKH, P2SH20 or
+/// P2SH32.
+///
+/// A share-chain rule for every address a Bitcoin Cash share header names
+/// (the payee, the donation and the fee). These are the locking scripts
+/// CashAddr encodes (types 0 and 1, 20 and 32 bytes; token-aware types 2 and
+/// 3 lock with the same scripts). A witness program, which a share header
+/// can otherwise carry, is no Bitcoin Cash script: BCH has no SegWit, and
+/// such an output can never be spent (push-only unlocking bytecode leaving
+/// one item, consensus since November 2018), so it would only burn its
+/// payout.
+pub fn is_bch_payout_script(script: &[u8]) -> bool {
+    p2pkh_hash(script).is_some() || p2sh20_hash(script).is_some() || p2sh32_hash(script).is_some()
 }
 
 /// The 20-byte key hash of a P2PKH script, or `None` for any other script.
@@ -2063,6 +2103,36 @@ mod tests {
                 block_height: 4_000_000,
             })
         );
+    }
+
+    #[test]
+    fn p2pkh_p2sh20_and_p2sh32_are_bitcoin_cash_payout_scripts() {
+        let p2pkh = ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::from_byte_array([1; 20]));
+        let p2sh20 = ScriptBuf::new_p2sh(&bitcoin::ScriptHash::from_byte_array([2; 20]));
+        let p2sh32 = p2sh32_script(&[3; 32]);
+        assert!(is_bch_payout_script(p2pkh.as_bytes()));
+        assert!(is_bch_payout_script(p2sh20.as_bytes()));
+        assert!(is_bch_payout_script(p2sh32.as_bytes()));
+    }
+
+    #[test]
+    fn witness_programs_and_data_outputs_are_not_bitcoin_cash_payout_scripts() {
+        let p2wpkh = ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([1; 20]));
+        let p2wsh = ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::from_byte_array([1; 32]));
+        assert!(!is_bch_payout_script(p2wpkh.as_bytes()));
+        assert!(!is_bch_payout_script(p2wsh.as_bytes()));
+        assert!(!is_bch_payout_script(&[0x6a, 0x00]));
+        assert!(!is_bch_payout_script(&[]));
+    }
+
+    #[test]
+    fn dust_thresholds_follow_the_output_size() {
+        assert_eq!(dust_threshold_for_script_length(25), 546);
+        assert_eq!(dust_threshold_for_script_length(23), 540);
+        assert_eq!(dust_threshold_for_script_length(35), 576);
+        assert_eq!(output_size_for_script_length(25), 34);
+        assert_eq!(output_size_for_script_length(23), 32);
+        assert_eq!(output_size_for_script_length(35), 44);
     }
 
     // The same spends run opcode by opcode on `test_utils::bch_vm`, which
