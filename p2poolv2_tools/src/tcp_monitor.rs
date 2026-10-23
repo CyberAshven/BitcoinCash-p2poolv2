@@ -6,9 +6,9 @@
 //! `load-tests/diagnosis/tcp-monitor.sh`.
 //!
 //! On Linux it reads `/proc/net/tcp` and `/proc/net/tcp6` directly and the
-//! kernel limits from `/proc/sys`; elsewhere it falls back to parsing
-//! `netstat -tan`, and the limits show as unavailable. Each sample is shown
-//! on screen (unless quiet) and appended to a CSV log.
+//! kernel limits from `/proc/sys`; elsewhere (macOS, Windows) it parses
+//! `netstat` output, and the limits show as unavailable. Each sample is
+//! shown on screen (unless quiet) and appended to a CSV log.
 
 use crate::ansi::{BLUE, GREEN, RED, RESET, YELLOW};
 use crate::error::{ToolError, ToolResult};
@@ -62,14 +62,14 @@ impl TcpState {
         match name {
             "ESTABLISHED" | "ESTAB" => TcpState::Established,
             "SYN_SENT" | "SYN-SENT" => TcpState::SynSent,
-            "SYN_RECV" | "SYN-RECV" | "SYN_RCVD" => TcpState::SynReceived,
+            "SYN_RECV" | "SYN-RECV" | "SYN_RCVD" | "SYN_RECEIVED" => TcpState::SynReceived,
             "FIN_WAIT1" | "FIN-WAIT-1" | "FIN_WAIT_1" => TcpState::FinWait1,
             "FIN_WAIT2" | "FIN-WAIT-2" | "FIN_WAIT_2" => TcpState::FinWait2,
             "TIME_WAIT" | "TIME-WAIT" => TcpState::TimeWait,
             "CLOSED" | "CLOSE" => TcpState::Close,
             "CLOSE_WAIT" | "CLOSE-WAIT" => TcpState::CloseWait,
             "LAST_ACK" | "LAST-ACK" => TcpState::LastAck,
-            "LISTEN" => TcpState::Listen,
+            "LISTEN" | "LISTENING" => TcpState::Listen,
             "CLOSING" => TcpState::Closing,
             _ => TcpState::Other,
         }
@@ -110,16 +110,26 @@ fn netstat_port(address: &str) -> Option<u16> {
     address[separator + 1..].parse().ok()
 }
 
-/// A socket from one `netstat -tan` line; `None` for anything else.
+/// A socket from one TCP line of `netstat` output; `None` for anything else.
+/// Reads the Linux and BSD layout (`proto recv-q send-q local foreign
+/// state`) and the Windows one (`proto local foreign state`).
 pub fn parse_netstat_line(line: &str) -> Option<Socket> {
     let fields: Vec<&str> = line.split_whitespace().collect();
-    if !fields.first()?.starts_with("tcp") || fields.len() < 6 {
+    if !fields.first()?.to_ascii_lowercase().starts_with("tcp") {
         return None;
     }
+    let queues_shown = fields.len() >= 6 && fields[1].parse::<u64>().is_ok();
+    let (local, foreign, state) = if queues_shown {
+        (fields[3], fields[4], fields[5])
+    } else if fields.len() >= 4 {
+        (fields[1], fields[2], fields[3])
+    } else {
+        return None;
+    };
     Some(Socket {
-        local_port: netstat_port(fields[3]).unwrap_or(0),
-        remote_port: netstat_port(fields[4]).unwrap_or(0),
-        state: TcpState::from_name(fields[fields.len() - 1]),
+        local_port: netstat_port(local).unwrap_or(0),
+        remote_port: netstat_port(foreign).unwrap_or(0),
+        state: TcpState::from_name(state),
         inode: 0,
     })
 }
@@ -145,8 +155,11 @@ pub fn for_each_socket(mut visit: impl FnMut(Socket)) -> ToolResult<()> {
         }
         return Ok(());
     }
+    // Windows netstat has no -t; -an lists TCP and UDP, and only TCP lines
+    // parse.
+    let arguments: &[&str] = if cfg!(windows) { &["-an"] } else { &["-tan"] };
     let output = Command::new("netstat")
-        .arg("-tan")
+        .args(arguments)
         .stderr(Stdio::null())
         .output()
         .map_err(|error| ToolError::message(format!("cannot run netstat: {error}")))?;

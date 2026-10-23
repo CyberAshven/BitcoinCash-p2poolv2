@@ -44,6 +44,24 @@ fn parse_netstat_line_reads_linux_format() {
 }
 
 #[test]
+fn parse_netstat_line_reads_windows_format() {
+    assert_eq!(
+        parse_netstat_line("  TCP    [::]:3333              [::]:0                 LISTENING"),
+        Some(Socket {
+            state: TcpState::Listen,
+            local_port: 3333,
+            remote_port: 0,
+            inode: 0,
+        })
+    );
+}
+
+#[test]
+fn parse_netstat_line_skips_udp() {
+    assert_eq!(parse_netstat_line("  UDP    0.0.0.0:5353   *:*"), None);
+}
+
+#[test]
 fn parse_netstat_line_reads_bsd_format() {
     assert_eq!(
         parse_netstat_line(
