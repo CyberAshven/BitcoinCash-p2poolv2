@@ -8,6 +8,8 @@ logs/*
 logs*/*
 config/
 data/
+# The Umbrel apps ship an empty data/ folder for the node's store and logs.
+!/packaging/umbrel/*/data/
 
 tools/log_dashboard/venv/
 tools/log_dashboard/stats.json*

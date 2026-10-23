@@ -1,0 +1,59 @@
+manifestVersion: 1
+id: bch-p2pool
+name: P2Pool for Bitcoin Cash
+tagline: Peer-to-peer Bitcoin Cash mining pool on your own node
+icon: https://raw.githubusercontent.com/CyberAshven/BitcoinCash-p2poolv2/main/packaging/umbrel/bch-p2pool/icon.png
+category: crypto
+version: "0.0.1-alpha"
+port: 46890
+description: >-
+  P2Poolv2 for Bitcoin Cash is a mining pool with no operator. Nodes keep a
+  share chain together, and every block the pool finds pays each miner
+  directly in its coinbase, by their shares in the PPLNS window.
+
+
+  This app mines on the Bitcoin Cash Node app on this Umbrel (mainnet): it
+  takes block templates from BCHN and hears about new blocks over ZMQ, with
+  no setup. Point your miners at port 3340 of your Umbrel.
+
+
+  Alpha software. The pool runs on chipnet; mainnet has not started. To try
+  it on chipnet, install P2Pool for Bitcoin Cash (external node) instead.
+developer: CyberAshven
+website: https://github.com/CyberAshven/BitcoinCash-p2poolv2
+submitter: CyberAshven
+submission: https://github.com/CyberAshven/BitcoinCash-p2poolv2/tree/main/packaging/umbrel
+repo: https://github.com/CyberAshven/BitcoinCash-p2poolv2
+support: https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues
+gallery: []
+releaseNotes: >-
+  First Umbrel package of the Bitcoin Cash port, version 0.0.1-alpha.
+dependencies:
+  - bitcoin-cash-node
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+storage:
+  dataRoot: data
+backupIgnore:
+  - data/logs
+environment:
+  - name: P2POOL_STRATUM__MINER_ADDRESS
+    services:
+      - p2pool
+    note: "Share address (p2pool:q...) that owns every share this node mines, made with p2poolv2_cli bch-share-address. Leave it unset when each miner sends p2p=<share address> in its Stratum password."
+  - name: P2POOL_NETWORK__EXTERNAL_ADDRESS
+    services:
+      - p2pool
+    note: "The address other P2Pool nodes should dial, /ip4/<public IP>/tcp/6890, when you forward port 6890 on your router."
+  - name: RUST_LOG
+    services:
+      - p2pool
+    default: info
+    options:
+      - error
+      - warn
+      - info
+      - debug
+      - trace
+    note: "How much the node writes to its log."

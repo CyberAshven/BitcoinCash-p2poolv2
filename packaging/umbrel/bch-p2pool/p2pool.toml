@@ -1,0 +1,95 @@
+# P2Poolv2 for Bitcoin Cash on Umbrel, mining on Umbrel's Bitcoin Cash Node
+# app (mainnet).
+#
+# Umbrel copies this file into the app's folder when the app is installed and
+# keeps your edits across app updates. Edit it from Umbrel's terminal or over
+# SSH at ~/umbrel/app-data/bch-p2pool/p2pool.toml, then restart the app.
+#
+# The app's docker-compose.yml sets these keys, so they are not in this file:
+# - stratum.chain and stratum.bitcoin_cash_network: a Bitcoin Cash node on
+#   mainnet, the network the Bitcoin Cash Node app runs;
+# - [bitcoinrpc] and stratum.zmqpubhashblock: the Bitcoin Cash Node app's RPC
+#   login and ZMQ endpoint;
+# - stratum.port, network.listen_address and api.port: the ports the app
+#   publishes.
+# The app's settings page (umbrelOS 2.0 and later) sets miner_address,
+# external_address and the log level.
+
+[network]
+# Share chain peers to dial at startup and keep reconnecting to, as
+# "/ip4/<address>/tcp/<port>". Bitcoin Cash has no DNS seeds yet: without a
+# peer here the node only waits for peers to dial it. If you list one, also
+# set wait_for_chain_sync = true below.
+dial_peers = []
+# The address peers should dial, when you forward port 6890 on your router:
+# "/ip4/<public IP>/tcp/6890". Or set it on the app's settings page.
+# external_address = "/ip4/203.0.113.1/tcp/6890"
+max_pending_incoming = 10
+max_pending_outgoing = 10
+max_established_incoming = 50
+max_established_outgoing = 50
+max_established_per_peer = 2
+max_workbase_per_second = 10
+max_userworkbase_per_second = 10
+max_miningshare_per_second = 100
+max_inventory_per_second = 100
+max_transaction_per_second = 100
+max_requests_per_second = 100
+dial_timeout_secs = 30
+
+[store]
+# Main and mini are different share chains. When you change bch_share_chain,
+# change the folder too (mainnet-main or mainnet-mini): the node refuses a
+# store that holds another share chain.
+path = "/p2poolv2/data/mainnet-mini"
+pplns_ttl_days = 7
+
+[stratum]
+hostname = "0.0.0.0"
+start_difficulty = 10000
+minimum_difficulty = 100
+# "mini" (a share target 256 times easier, for small miners) or "main".
+bch_share_chain = "mini"
+
+# Share address owning every share this node mines: a p2pool: address made
+# from a P2PKH key in your own wallet with `p2poolv2_cli bch-share-address`.
+# Leave it unset when every miner sends its own p2p=<share address> in the
+# Stratum password. There is deliberately no default.
+# miner_address = "p2pool:q..."
+
+# Required to parse, but a share chain node never pays it: only Hydrapool
+# mode does, with the reward of blocks found before the first shares. This is
+# the P2Poolv2 Bitcoin Cash donation address. Put your own bitcoincash:
+# address here before switching to Hydrapool.
+bootstrap_address = "bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k"
+
+# Every Bitcoin Cash node donates 1.5% (150 basis points) of each block it
+# finds to bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k. Set
+# donation to change it, 0 to opt out. Donation plus fee may not exceed 1000
+# basis points (10%).
+# donation = 150
+# fee_address = "bitcoincash:q..."
+# fee = 0
+
+# Ignored on Bitcoin Cash (derived from bitcoin_cash_network) but required.
+network = "main"
+# Version rolling mask offered to miners: the 16 general purpose bits of
+# BIP 320.
+version_mask = "1fffe000"
+# Set true once dial_peers lists a node of a running share chain, so miners
+# connect only after this node has synced it. A new share chain never looks
+# current, so leave it false when you start one.
+wait_for_chain_sync = false
+# Tags the coinbases this node builds. At most 16 bytes.
+pool_signature = "P2Poolv2"
+
+[logging]
+# Umbrel shows the app's logs from the console. RUST_LOG on the app's
+# settings page sets the level.
+console = true
+stats_dir = "/p2poolv2/logs/stats"
+
+[api]
+hostname = "0.0.0.0"
+# Umbrel's app proxy asks for your Umbrel login before it shows the
+# dashboard, so the API has none of its own.
