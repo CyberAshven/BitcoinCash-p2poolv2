@@ -5,11 +5,14 @@
 use super::block_template::{BlockTemplate, parse_flags};
 #[cfg(test)]
 use super::coinbase::build_bitcoin_coinbase_transaction;
-use super::coinbase::{LOCKTIME_LENGTH, build_coinbase, get_timestamp_bytes, split_coinbase};
+use super::coinbase::{
+    LOCKTIME_LENGTH, build_coinbase, check_bch_coinbase_budget, get_timestamp_bytes, split_coinbase,
+};
 use super::error::WorkError;
 use super::gbt::build_merkle_branches_for_template;
 use super::tracker::{JobDetails, JobId, JobTracker};
 use crate::accounting::OutputPair;
+use crate::accounting::payout::coinbase_budget::PayoutSplit;
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
 use crate::shares::share_block::{ShareTransaction, encode_optional_address};
 use crate::shares::share_commitment::{
@@ -106,6 +109,9 @@ fn split_coinbase2(
 pub struct PreparedNotifyParams {
     /// Exact difficulty weights at this job's share-chain anchor.
     pplns_weights: Option<HashMap<Address, u128>>,
+    /// How those weights become outputs: the chain's split, anchored at
+    /// `prev_share_blockhash`.
+    payout_split: PayoutSplit,
     /// Pre-serialized JSON notify string with placeholder job_id and coinbase2
     json_template: String,
     /// Byte offset of the 16-char job_id placeholder in json_template
@@ -190,6 +196,10 @@ impl PreparedNotifyParams {
     }
 
     /// Recompute payouts when a declared transaction set changes fee revenue.
+    ///
+    /// Splits by the same rule as the job's own outputs (on Bitcoin Cash the
+    /// coinbase budget anchored at this job's prev share), so the validator
+    /// rebuilds them for the declared value.
     pub(crate) fn declared_outputs(&self, value: u64) -> Result<Vec<OutputPair>, WorkError> {
         let weights = self.pplns_weights.as_ref().ok_or_else(|| WorkError {
             message: "PPLNS snapshot is unavailable for declared work".into(),
@@ -201,6 +211,7 @@ impl PreparedNotifyParams {
             self.donation,
             &self.fee_address,
             self.fee,
+            self.payout_split,
         )
         .map_err(|error| WorkError {
             message: error.to_string(),
@@ -297,6 +308,7 @@ fn build_json_template(
 /// the coinbase1 for each individual client.
 pub(crate) struct PreparedNotifyParamsBuilder {
     pplns_weights: Option<HashMap<Address, u128>>,
+    payout_split: PayoutSplit,
     template: Arc<BlockTemplate>,
     output_distribution: Vec<OutputPair>,
     pool_signature: Vec<u8>,
@@ -322,6 +334,7 @@ impl PreparedNotifyParamsBuilder {
     ) -> Self {
         Self {
             pplns_weights: None,
+            payout_split: PayoutSplit::EveryPayee,
             template,
             output_distribution,
             pool_signature: pool_signature.to_vec(),
@@ -358,6 +371,14 @@ impl PreparedNotifyParamsBuilder {
         self
     }
 
+    /// How `declared_outputs` turns the weights into outputs: the split the
+    /// job's own outputs were built with (`PayoutSplit::for_chain` at the
+    /// job's prev share). Every payee until set.
+    pub fn payout_split(mut self, payout_split: PayoutSplit) -> Self {
+        self.payout_split = payout_split;
+        self
+    }
+
     pub fn uncles(mut self, uncles: Vec<BlockHash>) -> Self {
         self.uncles = uncles;
         self
@@ -388,8 +409,9 @@ impl PreparedNotifyParamsBuilder {
         self
     }
 
-    /// Append the reserved AuxPoW output and check final BCH block size.
-    /// Only Bitcoin Cash sets this.
+    /// Append the reserved AuxPoW output and check final BCH block size and
+    /// the coinbase byte budget (`BCH_COINBASE_BYTE_BUDGET`). Only Bitcoin
+    /// Cash sets this.
     pub fn include_merge_mining(mut self, include_merge_mining: bool) -> Self {
         self.include_merge_mining = include_merge_mining;
         self
@@ -440,6 +462,7 @@ impl PreparedNotifyParamsBuilder {
 
         if self.include_merge_mining {
             self.template.validate_bch_block_size(&coinbase)?;
+            check_bch_coinbase_budget(&coinbase)?;
         }
 
         let share_transactions = fit_share_transactions(self.share_transactions, &coinbase);
@@ -495,6 +518,7 @@ impl PreparedNotifyParamsBuilder {
 
         Ok(PreparedNotifyParams {
             pplns_weights: self.pplns_weights,
+            payout_split: self.payout_split,
             json_template,
             job_id_offset,
             coinbase2_offset,

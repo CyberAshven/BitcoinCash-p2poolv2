@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+pub mod coinbase_budget;
 pub mod payout_distribution;
 pub mod sharechain_pplns;
 pub mod simple_pplns;

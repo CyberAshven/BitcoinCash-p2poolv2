@@ -9,6 +9,7 @@ use libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response::{Codec, OutboundFailure};
 use std::io;
 
+use crate::accounting::payout::coinbase_budget::bch_payout_cap_rule_tag;
 use crate::accounting::payout::sharechain_pplns::payout_rights::BCH_PAYOUT_HOLDER_RULE_TAG;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
     BCH_COINBASE_MATURITY, BCH_PPLNS_WINDOW_BLOCKS,
@@ -58,14 +59,19 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// finality. A node without them disagrees on shares carrying a contract
 /// spend, a dust output or an `OP_RETURN` output.
 ///
-/// Last comes the payout to the holder of each share's payout right
+/// Then the payout to the holder of each share's payout right
 /// (`BCH_PAYOUT_HOLDER_RULE_TAG`). A node paying `miner_bitcoin_address`
 /// rebuilds another coinbase once any right has moved.
+///
+/// Last comes the coinbase budget (`bch_payout_cap_rule_tag`, built from
+/// `BCH_MAX_COINBASE_PAYOUTS`). A node paying every payee rebuilds another
+/// coinbase whenever a window has more payees than the cap.
 fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
         Chain::BitcoinCash => Some(format!(
-            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}"
+            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}",
+            bch_payout_cap_rule_tag()
         )),
     }
 }
@@ -335,7 +341,7 @@ mod tests {
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-cap11/1.0.0"
             )
         );
     }
@@ -377,6 +383,26 @@ mod tests {
         );
     }
 
+    /// A chipnet node from before the coinbase budget derived
+    /// `/p2pool/test/<genesis tag>/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/1.0.0`.
+    /// It pays every payee, so it builds another coinbase for any window
+    /// past the cap; the new string differs and the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_the_coinbase_budget() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+            .unwrap()
+            .block_hash();
+        let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
+        let before_budget_string = format!(
+            "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/1.0.0"
+        );
+
+        assert_ne!(
+            protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
+            before_budget_string
+        );
+    }
+
     /// The isolation the window rule relies on: a chipnet node from before
     /// the rule derived `/p2pool/test/<genesis tag>/1.0.0` from the same
     /// genesis. The new string differs, so the two cannot negotiate and never
@@ -407,7 +433,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-cap11/kad/1.0.0"
             )
         );
     }
