@@ -302,11 +302,20 @@ coinbase meets (SV2's 65,535-byte coinbase fields, `-percentblockmaxsize`).
 - CashAddr labels on the `coinbase_output` metric (A20).
 - BCH data in the payout-rights test (A21).
 - The documentation fixes listed above.
+- Token-aware CashAddr accepted wherever a payout address is read (A10 a).
+- The unread template transaction cache dropped (A6).
+- Scalenet as a network (A19).
+- A BCH chipnet `config.sample.toml` as the default sample (A23).
+- Schnorr signatures in `bch-trade` (A24).
+- Miner statistics keyed by the decoded script (A26).
+- Prometheus metric names and labels without `bitcoin`/`btc`, with the
+  Grafana dashboards (A27).
+- From [What P2Pool v1 knew about Bitcoin Cash](p2pool-v1-bch-lessons.md):
+  stratum difficulty capped at the share difficulty (V8), found blocks
+  retried and sent to extra BCHN nodes (V9, part of V10), and the start
+  check that the node is BCHN on the configured network (V15).
 
 ### 4. Non-rule fixes that can follow on PR #33 without the owner
 
-Token-aware CashAddr accepted at config and Stratum (A10 a); the unread
-template cache dropped and a `getblocktemplatelight` mode after M3 (A6);
-scalenet (A19); a BCH `config.sample.toml` (A23); Schnorr in `bch-trade`
-(A24); statistics keyed by script (A26); metric names with the dashboards
-(A27).
+A `getblocktemplatelight` mode after M3 (A6); the JSON API field names that
+still say `bitcoin` (A27); found-block relay to share-chain peers (V10).
