@@ -8,7 +8,8 @@
 //! trade transaction passes the real Bitcoin Cash rules before its share is
 //! confirmed, and the payout is the coinbase the notifier and the validator
 //! both build: `PplnsWindow::get_distribution_from_start_hash` for the next
-//! share's anchor, split by `build_pplns_outputs`. The window is Bitcoin
+//! share's anchor, split by `build_pplns_outputs` under the Bitcoin Cash
+//! coinbase budget. The window is Bitcoin
 //! Cash's (`for_chain`), so it pays each window share's weight to whoever
 //! holds the share's payout right (docs/atomic-swap/bch-share-trading.md,
 //! "Payout rights").
@@ -16,6 +17,7 @@
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, BlockHash, NetworkKind, OutPoint, PrivateKey, PubkeyHash};
 use p2poolv2_lib::accounting::OutputPair;
+use p2poolv2_lib::accounting::payout::coinbase_budget::PayoutSplit;
 use p2poolv2_lib::accounting::payout::payout_distribution::build_pplns_outputs;
 use p2poolv2_lib::accounting::payout::sharechain_pplns::PplnsWindow;
 use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::DIFFICULTY_SCALE;
@@ -218,6 +220,7 @@ fn next_coinbase(
         None,
         &None,
         None,
+        PayoutSplit::for_chain(Chain::BitcoinCash, anchor.block_hash()),
     )
     .unwrap()
 }

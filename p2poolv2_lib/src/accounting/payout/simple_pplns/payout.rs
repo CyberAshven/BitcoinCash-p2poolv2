@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::accounting::OutputPair;
+use crate::accounting::payout::coinbase_budget::PayoutSplit;
 use crate::accounting::payout::payout_distribution::{
     PayoutDistribution, append_proportional_distribution,
 };
@@ -45,6 +46,9 @@ impl PayoutDistribution for Payout {
         total_amount: bitcoin::Amount,
         remaining_total_amount: Amount,
         bootstrap_address: Address,
+        // Hydrapool's coinbase is not share-chain consensus and pays every
+        // payee; the share chain's coinbase budget does not apply.
+        _split: PayoutSplit,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Only calculate proportional distribution if there's remaining amount for miners
         // This avoids parsing miner addresses when 100% goes to donation/fee

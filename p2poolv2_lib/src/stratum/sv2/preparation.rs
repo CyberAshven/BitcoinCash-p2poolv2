@@ -7,10 +7,14 @@
 //! This calculation grants no mining authorization: the SV2 listener still
 //! checks its own token registry, payouts, template and submitted proof.
 
+use crate::accounting::payout::coinbase_budget::PayoutSplit;
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+use crate::config::Chain;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::share_commitment::ShareCommitment;
-use crate::stratum::work::coinbase::{EXTRANONCE_SEPARATOR, build_declared_coinbase};
+use crate::stratum::work::coinbase::{
+    EXTRANONCE_SEPARATOR, build_declared_coinbase, check_bch_coinbase_budget,
+};
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount};
@@ -25,6 +29,10 @@ pub struct PreparedCoinbase {
 
 /// The caller obtains exact difficulty weights from the token's share-chain
 /// anchor. Neither an empty window nor unavailable history has a fallback payee.
+///
+/// The payouts follow the Bitcoin Cash coinbase budget anchored at the
+/// token's prev share, as the validator rebuilds them, and the coinbase must
+/// fit `BCH_COINBASE_BYTE_BUDGET`.
 pub fn prepare_coinbase(
     token: &[u8],
     mut commitment: ShareCommitment,
@@ -54,6 +62,7 @@ pub fn prepare_coinbase(
         commitment.donation,
         &commitment.fee_address,
         commitment.fee,
+        PayoutSplit::for_chain(Chain::BitcoinCash, commitment.prev_share_blockhash),
     )
     .map_err(|error| error.to_string())?;
     commitment.bch_coinbase = Some(descriptor.clone());
@@ -65,6 +74,7 @@ pub fn prepare_coinbase(
         &descriptor,
     )
     .map_err(|error| error.to_string())?;
+    check_bch_coinbase_budget(&coinbase).map_err(|error| error.to_string())?;
     let raw = serialize(&coinbase);
     // Version, singleton input count, null outpoint and bounded script length.
     let offset = 4 + 1 + 36 + 1 + descriptor.prefix.len();

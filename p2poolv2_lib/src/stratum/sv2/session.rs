@@ -871,12 +871,16 @@ mod tests {
         let mut payload = response_payload(&allocate[0]);
         let allocated = AllocateMiningJobTokenSuccess::from_bytes(&mut payload).unwrap();
         let outputs: Vec<TxOut> = deserialize(allocated.coinbase_outputs.as_bytes()).unwrap();
-        let expected = test_bch_prepared()
-            .declared_outputs(0)
+        // The token lists the scripts the template's own value pays, at zero
+        // value: under the coinbase budget which payees get an output depends
+        // on the amount, so a value of zero would name other scripts.
+        let prepared = test_bch_prepared();
+        let expected = prepared
+            .declared_outputs(prepared.template().coinbasevalue)
             .unwrap()
             .into_iter()
             .map(|pair| TxOut {
-                value: pair.amount,
+                value: bitcoin::Amount::ZERO,
                 script_pubkey: pair.address.script_pubkey(),
             })
             .collect::<Vec<_>>();
