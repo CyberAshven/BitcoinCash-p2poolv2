@@ -39,6 +39,7 @@
 - [Job Declaration](bch-job-declaration.md)
 - [Auxiliary work proofs](bch-auxpow.md)
 - [Bitcoin assumptions audit](bch-btc-assumptions-audit.md)
+- [Lessons from P2Pool v1 on BCH](p2pool-v1-bch-lessons.md)
 
 # Architecture
 
