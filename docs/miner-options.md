@@ -59,6 +59,14 @@ Rules:
   `maximum_difficulty`. After the first shares, vardiff takes over and aims
   at one share every 3.3 seconds (0.3 shares a second) whatever was asked
   for.
+- Your difficulty never goes above the share difficulty of the job you are
+  mining, whatever `d=`, `th=`, `mining.suggest_difficulty`, vardiff or the
+  node's `minimum_difficulty` say. A miner submits only hashes that meet its
+  difficulty, so a higher one would throw away hashes that are valid shares
+  and you would be paid for fewer hashes than you did. When a new job's share
+  difficulty is below yours, the node sends `mining.set_difficulty` before
+  the job. The share difficulty is rounded down to a whole number, so the
+  mini chain's lowest share difficulty, 4.55, holds you at 4.
 - `p2p=` must be a share address for the node's network: `p2pool:` on
   mainnet, `tp2pool:` on chipnet, `rp2pool:` on regtest.
 - If the node sets `miner_address`, leave `p2p=` out or send that same
@@ -102,7 +110,7 @@ password: x
 | Method | What the node does |
 |---|---|
 | `mining.configure` with `version-rolling` | Answers with the node's `version_mask` (default `1fffe000`, BIP 320's general purpose bits). The node keeps only the submitted version bits inside the mask, so a miner that rolls others submits headers that do not meet its difficulty. |
-| `mining.suggest_difficulty` | Like `d=`: kept within the node's minimum and maximum, then vardiff. |
+| `mining.suggest_difficulty` | Like `d=`: kept within the node's minimum and maximum and at or below the share difficulty, then vardiff. |
 | `mining.extranonce.subscribe` | Acknowledged. The node never changes a session's extranonce. |
 | `mining.authorize` before `mining.subscribe` | Accepted, as some firmware sends it. |
 
@@ -124,7 +132,10 @@ password: x
 - `d=` and `th=` are not used on SV2. A channel starts at the difficulty its
   `nominal_hash_rate` calls for (within the node's minimum and maximum, or
   `start_difficulty` when the rate is 0), capped by the channel's
-  `max_target`; vardiff and `UpdateChannel` move it after that.
+  `max_target`; vardiff and `UpdateChannel` move it after that. As on SV1, a
+  channel's difficulty never goes above the share difficulty of its job: a
+  channel that would open above it opens at it, and a channel above a new
+  job's share difficulty gets a `SetTarget` before the job.
 - A refused channel gets `OpenMiningChannel.Error` with
   `invalid-user-identity` (unreadable payout address),
   `invalid-share-address` (bad or conflicting `p2p=`) or
@@ -146,7 +157,7 @@ Set by the operator under `[stratum]` (see `config.sample.toml`):
 |---|---|
 | `port`, `sv2_port` | Where miners connect. |
 | `start_difficulty` | Difficulty before vardiff has data, when the miner asks for none. |
-| `minimum_difficulty`, `maximum_difficulty` | Bounds for `d=`, `th=`, `mining.suggest_difficulty` and vardiff. Public nodes should set `maximum_difficulty`. |
+| `minimum_difficulty`, `maximum_difficulty` | Bounds for `d=`, `th=`, `mining.suggest_difficulty` and vardiff. Public nodes should set `maximum_difficulty`. The share difficulty caps them both: a `minimum_difficulty` above it is not applied, and the node logs a warning once. |
 | `miner_address` | Owns every share; `p2p=` becomes optional and must match. |
 | `version_mask` | Version bits miners may roll. |
 | `sv2_authority_public_key`, `sv2_authority_secret_key` | Turn on the Noise handshake for SV2. |

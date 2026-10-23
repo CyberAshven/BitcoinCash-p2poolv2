@@ -29,7 +29,7 @@ use super::session::{encode_frame, string_field};
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::config::{BitcoinCashNetwork, Chain, PoolMode};
 use crate::stratum::difficulty_adjuster::{
-    DifficultyAdjuster, DifficultyAdjusterTrait, TARGET_DRR,
+    DifficultyAdjuster, DifficultyAdjusterTrait, TARGET_DRR, share_difficulty_ceiling,
 };
 use crate::stratum::message_handlers::authorize_response::{
     resolve_cash_share, resolve_share_address,
@@ -499,6 +499,13 @@ impl MiningChannels {
         session.share_owner = share_owner;
         session.user_id = Some(user_id);
         session.subscribed = true;
+        // Open at or below the share difficulty of the job about to be sent,
+        // so the first job needs no `SetTarget` (see `job_frames`).
+        if let Some(prepared) = &current {
+            session
+                .difficulty_adjuster
+                .set_share_difficulty_ceiling(self.share_difficulty_ceiling(prepared));
+        }
         let channel_target =
             target_for_difficulty(session.difficulty_adjuster.get_current_difficulty())
                 .min(device_max_target);
@@ -597,17 +604,50 @@ impl MiningChannels {
         }
     }
 
+    /// Share difficulty ceiling of jobs built on `prepared`: the session
+    /// difficulty a channel may have without losing share-chain shares (see
+    /// [`share_difficulty_ceiling`]). `None` in Hydrapool mode, which has no
+    /// share chain.
+    fn share_difficulty_ceiling(&self, prepared: &PreparedNotifyParams) -> Option<u64> {
+        match self.ctx.mode {
+            PoolMode::Hydrapool => None,
+            PoolMode::P2poolv2 => share_difficulty_ceiling(prepared.bits()),
+        }
+    }
+
     /// Insert a tracker job for `channel_id` and build its SV2 frames.
+    ///
+    /// When the channel's difficulty is above the job's share difficulty, it
+    /// comes down to it first and a `SetTarget` precedes the job, so the
+    /// device throws away no hash that is a share-chain share.
     fn job_frames(
         &mut self,
         channel_id: u32,
         prepared: &PreparedNotifyParams,
     ) -> Result<Vec<Vec<u8>>, String> {
         let is_hydrapool = self.ctx.mode == PoolMode::Hydrapool;
+        let ceiling = self.share_difficulty_ceiling(prepared);
         let channel = self
             .channels
             .get_mut(&channel_id)
             .ok_or("job for an unknown channel")?;
+        let mut frames = Vec::with_capacity(3);
+        if let Some(lowered) = channel
+            .session
+            .difficulty_adjuster
+            .set_share_difficulty_ceiling(ceiling)
+        {
+            let target = target_for_difficulty(lowered)
+                .min(channel.max_target)
+                .to_le_bytes();
+            frames.push(encode_frame(
+                SetTarget {
+                    channel_id,
+                    maximum_target: u256(&target)?,
+                },
+                MESSAGE_TYPE_SET_TARGET,
+            )?);
+        }
         let (bitcoin_address, share_owner) = if is_hydrapool {
             (None, None)
         } else {
@@ -644,7 +684,6 @@ impl MiningChannels {
             Sv2Option::new(Some(template.curtime))
         };
 
-        let mut frames = Vec::with_capacity(2);
         match channel.kind {
             ChannelKind::Standard => {
                 let enonce1_hex = channel.session.enonce1_hex.clone();

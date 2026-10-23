@@ -57,6 +57,23 @@ algorithm and waits for enough shares, or enough time, before changing
 difficulty, so it does not overreact to luck. See
 [Difficulty adjustment in CKPool](difficulty_adjustment/ckpool.md).
 
+**Share difficulty cap.** In P2Poolv2 mode a miner's difficulty never goes
+above the share difficulty of the job it mines (`share_difficulty_ceiling`
+in `stratum/difficulty_adjuster/mod.rs`), whatever vardiff, the node's
+`minimum_difficulty`, `d=`, `th=` or `mining.suggest_difficulty` ask for. A
+miner submits only hashes that meet its own difficulty; a difficulty above
+the share difficulty would make it throw away hashes that are shares, and
+it would be paid for fewer hashes than it did. Before each job the node
+lowers a session that is above the job's share difficulty and sends
+`mining.set_difficulty` (SV1) or `SetTarget` (SV2) ahead of the job. The cap
+is the share difficulty rounded down, so its target is never harder than the
+share target. P2Pool v1 did the same (see
+[What P2Pool v1 knew about Bitcoin Cash](p2pool-v1-bch-lessons.md), V8).
+Hydrapool mode has no share chain and no cap. Once the share chain's ASERT
+has settled, vardiff's own choice stays below the share difficulty (an
+estimate: one submission every 3.3 s per connection against one share every
+10 s for the whole pool), so the cap binds mainly on explicit settings.
+
 **Share validator.** Checks every submitted share against the miner's
 current difficulty and rejects duplicates. Then:
 

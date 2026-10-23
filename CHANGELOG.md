@@ -263,6 +263,17 @@ anchor and the donation and fee cap as they were.
   configs that set it still load.
 - The `[sim] coinbase_maturity` option.
 
+### Fixed
+
+- A miner's stratum difficulty never goes above the share difficulty of the
+  job it mines (V8 in `docs/p2pool-v1-bch-lessons.md`). `d=`, `th=`,
+  `mining.suggest_difficulty` or `[stratum] minimum_difficulty` could hold a
+  miner above it, so it threw away hashes that were valid shares and was
+  paid for fewer hashes than it did. Before a job with a lower share
+  difficulty, an SV1 session gets `mining.set_difficulty` and an SV2 channel
+  `SetTarget`; a `minimum_difficulty` above the share difficulty is logged
+  once. Node policy, not a share-chain rule: peers see nothing new.
+
 ### Security
 
 - The buffer of blocks waiting for their parent is bounded: at most 1,024

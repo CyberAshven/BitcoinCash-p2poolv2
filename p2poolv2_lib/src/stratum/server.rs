@@ -14,15 +14,18 @@ use crate::stratum::client_connections::ClientConnectionsHandle;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::stratum::client_connections::ClientConnectionsHandle;
-use crate::stratum::difficulty_adjuster::{DifficultyAdjuster, DifficultyAdjusterTrait};
+use crate::stratum::difficulty_adjuster::{
+    DifficultyAdjuster, DifficultyAdjusterTrait, share_difficulty_ceiling,
+};
 use crate::stratum::emission::EmissionSender;
 use crate::stratum::error::Error;
 use crate::stratum::error::StratumErrorCode;
 use crate::stratum::message_handlers::handle_message;
-use crate::stratum::messages::{Request, Response};
+use crate::stratum::messages::{Message, Request, Response, SetDifficultyNotification};
 use crate::stratum::session::Session;
 use crate::stratum::session_timeout::{self, check_session_timeouts};
 use crate::stratum::sv2::{self, PoolTransactionCache, Sv2Mining};
+use crate::stratum::work::error::WorkError;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_from_prepared};
 use crate::stratum::work::tracker::JobTracker;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
@@ -639,23 +642,10 @@ where
             // Clone inside a block to ensure the watch Ref guard is dropped before await
             let prepared_template = { template_rx.borrow_and_update().clone() };
             if let Some(prepared) = prepared_template {
-                let (commitment_address, share_address) = if is_hydrapool {
-                    (None, None)
-                } else {
-                    (session.parsed_address.as_ref(), session.share_owner)
-                };
-                match build_notify_from_prepared(
-                    &prepared,
-                    commitment_address,
-                    share_address,
-                    &ctx.tracker_handle,
-                ) {
-                    Ok(notify_json) => {
+                match job_lines(session, &prepared, is_hydrapool, &ctx.tracker_handle) {
+                    Ok(job_lines) => {
                         debug!("Sending first notify after authorize");
-                        if let Err(e) = writer
-                            .write_all(format!("{notify_json}\n").as_bytes())
-                            .await
-                        {
+                        if let Err(e) = writer.write_all(job_lines.as_bytes()).await {
                             error!("Failed to write first notify to {addr}: {e}");
                             break;
                         }
@@ -692,15 +682,10 @@ where
                 if session.username.is_none() {
                     // Not yet authorized, skip building notify
                 } else if let Some(prepared) = prepared_template {
-                    let (commitment_address, share_address) = if is_hydrapool {
-                        (None, None)
-                    } else {
-                        (session.parsed_address.as_ref(), session.share_owner)
-                    };
-                    match build_notify_from_prepared(&prepared, commitment_address, share_address, &ctx.tracker_handle) {
-                        Ok(notify_json) => {
+                    match job_lines(session, &prepared, is_hydrapool, &ctx.tracker_handle) {
+                        Ok(job_lines) => {
                             debug!("Send notify in reponse to new template");
-                            if let Err(e) = writer.write_all(format!("{notify_json}\n").as_bytes()).await {
+                            if let Err(e) = writer.write_all(job_lines.as_bytes()).await {
                                 error!("Failed to write notify to {addr}: {e}");
                                 break;
                             }
@@ -764,6 +749,46 @@ where
         )
         .await;
     Ok(())
+}
+
+/// The lines that send `prepared` to an SV1 miner: its `mining.notify`,
+/// preceded by a `mining.set_difficulty` when the session difficulty was
+/// above the job's share difficulty and had to come down to it.
+///
+/// A miner submits only hashes that meet its session difficulty, so a session
+/// above the share difficulty throws away hashes that are valid shares
+/// ([`share_difficulty_ceiling`]). Hydrapool mode has no share chain and
+/// clears the ceiling.
+fn job_lines<D: DifficultyAdjusterTrait>(
+    session: &mut Session<D>,
+    prepared: &PreparedNotifyParams,
+    is_hydrapool: bool,
+    tracker_handle: &JobTracker,
+) -> Result<String, WorkError> {
+    let (commitment_address, share_address, ceiling) = if is_hydrapool {
+        (None, None, None)
+    } else {
+        (
+            session.parsed_address.as_ref(),
+            session.share_owner,
+            share_difficulty_ceiling(prepared.bits()),
+        )
+    };
+    let lowered = session
+        .difficulty_adjuster
+        .set_share_difficulty_ceiling(ceiling);
+    let notify_json =
+        build_notify_from_prepared(prepared, commitment_address, share_address, tracker_handle)?;
+    let Some(difficulty) = lowered else {
+        return Ok(format!("{notify_json}\n"));
+    };
+    let set_difficulty = serde_json::to_string(&Message::SetDifficulty(
+        SetDifficultyNotification::new(difficulty),
+    ))
+    .map_err(|error| WorkError {
+        message: format!("Failed to serialize mining.set_difficulty: {error}"),
+    })?;
+    Ok(format!("{set_difficulty}\n{notify_json}\n"))
 }
 
 async fn process_incoming_message<W, D>(
@@ -2296,5 +2321,67 @@ mod stratum_server_tests {
         drop(first_connection);
         shutdown_tx.send(()).expect("Failed to send shutdown");
         let _ = server_handle.await;
+    }
+
+    /// A session above the job's share difficulty (difficulty 1 here) comes
+    /// down to it, and the miner hears so before it gets the job.
+    #[tokio::test]
+    async fn job_lines_lower_a_session_above_the_share_difficulty_before_the_job() {
+        let tracker_handle = start_tracker_actor();
+        let prepared = create_test_prepared_notify();
+        let mut session = Session::<DifficultyAdjuster>::new(1000, 1, None, DEFAULT_VERSION_MASK);
+
+        let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+
+        let messages: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["method"], "mining.set_difficulty");
+        assert_eq!(messages[0]["params"][0], 1);
+        assert_eq!(messages[1]["method"], "mining.notify");
+        assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 1);
+    }
+
+    #[tokio::test]
+    async fn job_lines_send_only_the_job_to_a_session_at_the_share_difficulty() {
+        let tracker_handle = start_tracker_actor();
+        let prepared = create_test_prepared_notify();
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+
+        let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+
+        assert_eq!(lines.lines().count(), 1);
+        assert!(lines.contains("mining.notify"));
+    }
+
+    /// Hydrapool has no share chain, so its sessions are not capped.
+    #[tokio::test]
+    async fn job_lines_leave_a_hydrapool_session_difficulty_alone() {
+        let tracker_handle = start_tracker_actor();
+        let prepared = create_test_prepared_notify();
+        let mut session = Session::<DifficultyAdjuster>::new(1000, 1, None, DEFAULT_VERSION_MASK);
+
+        let lines = job_lines(&mut session, &prepared, true, &tracker_handle).unwrap();
+
+        assert_eq!(lines.lines().count(), 1);
+        assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 1000);
+    }
+
+    /// A `mining.suggest_difficulty` after a job cannot lift the session
+    /// above that job's share difficulty.
+    #[tokio::test]
+    async fn a_suggested_difficulty_after_a_job_stays_at_the_share_difficulty() {
+        let tracker_handle = start_tracker_actor();
+        let prepared = create_test_prepared_notify();
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+
+        let constrained = session
+            .difficulty_adjuster
+            .apply_difficulty_constraints(5000, Some(5000));
+
+        assert_eq!(constrained, 1);
     }
 }

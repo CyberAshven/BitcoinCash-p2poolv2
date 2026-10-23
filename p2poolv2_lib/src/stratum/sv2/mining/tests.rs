@@ -296,6 +296,122 @@ fn difficulty_two_halves_the_target() {
     assert_eq!(half[5], (full[4] << 7) | (full[5] >> 1));
 }
 
+/// The target of the share difficulty ceiling is never harder than the
+/// share target, so a channel at the ceiling loses no share-chain share.
+#[test]
+fn the_mini_chain_ceiling_target_is_no_harder_than_its_share_target() {
+    let share_bits = CompactTarget::from_consensus(0x1c38_4bd7);
+    let ceiling = share_difficulty_ceiling(share_bits).unwrap();
+
+    assert!(target_for_difficulty(ceiling) >= Target::from_compact(share_bits));
+    assert!(target_for_difficulty(ceiling + 1) < Target::from_compact(share_bits));
+}
+
+#[test]
+fn the_main_chain_ceiling_target_is_no_harder_than_its_share_target() {
+    let share_bits = CompactTarget::from_consensus(0x1b38_4bd7);
+    let ceiling = share_difficulty_ceiling(share_bits).unwrap();
+
+    assert!(target_for_difficulty(ceiling) >= Target::from_compact(share_bits));
+    assert!(target_for_difficulty(ceiling + 1) < Target::from_compact(share_bits));
+}
+
+/// A device declaring 1 PH/s would settle near difficulty 776,000, far
+/// above the share difficulty of the job it is about to get (1 here), so
+/// the channel opens at the share difficulty and needs no `SetTarget`.
+#[tokio::test]
+async fn a_fast_channel_opens_at_the_share_difficulty_of_its_first_job() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    );
+    let identity = encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap();
+    let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
+        request_id: 1,
+        user_identity: identity.as_str().try_into().unwrap(),
+        nominal_hash_rate: 1.0e15,
+        max_target: U256::new(&[0xff; 32]).unwrap(),
+        min_extranonce_size: 8,
+    })
+    .unwrap();
+
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+
+    let mut open_payload = payload(&opened[0]);
+    let success = OpenExtendedMiningChannelSuccess::from_bytes(&mut open_payload).unwrap();
+    assert_eq!(
+        success.target.as_bytes(),
+        &Target::MAX_ATTAINABLE_MAINNET.to_le_bytes()
+    );
+    assert_eq!(frame_type(&opened[1]), MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB);
+    assert_eq!(
+        channels.channels[&1]
+            .session
+            .difficulty_adjuster
+            .get_current_difficulty(),
+        1
+    );
+}
+
+/// A channel above the share difficulty of a new job comes down to it, and
+/// the `SetTarget` saying so goes before the job.
+#[tokio::test]
+async fn a_channel_above_the_share_difficulty_gets_set_target_before_the_job() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    );
+    let identity = encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap();
+    let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
+        request_id: 1,
+        user_identity: identity.as_str().try_into().unwrap(),
+        nominal_hash_rate: 1.0e15,
+        max_target: U256::new(&[0xff; 32]).unwrap(),
+        min_extranonce_size: 8,
+    })
+    .unwrap();
+    channels
+        .handle(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL, &mut open, None)
+        .await
+        .unwrap();
+    assert!(
+        channels.channels[&1]
+            .session
+            .difficulty_adjuster
+            .get_current_difficulty()
+            > 1
+    );
+
+    let frames = channels.on_template(&test_bch_prepared());
+
+    assert_eq!(frame_type(&frames[0]), MESSAGE_TYPE_SET_TARGET);
+    let mut target_payload = payload(&frames[0]);
+    let set_target = SetTarget::from_bytes(&mut target_payload).unwrap();
+    assert_eq!(
+        set_target.maximum_target.as_bytes(),
+        &Target::MAX_ATTAINABLE_MAINNET.to_le_bytes()
+    );
+    assert_eq!(frame_type(&frames[1]), MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB);
+    let channel = &channels.channels[&1];
+    assert_eq!(
+        channel.session.difficulty_adjuster.get_current_difficulty(),
+        1
+    );
+    let job = channel.jobs.values().next().unwrap();
+    assert_eq!(job.target, Target::MAX_ATTAINABLE_MAINNET);
+}
+
 #[tokio::test]
 async fn extended_channel_mines_the_job_it_is_sent_and_its_share_is_emitted() {
     let template: BlockTemplate = serde_json::from_str(include_str!(
@@ -535,13 +651,16 @@ async fn extended_channel_mines_the_job_it_is_sent_and_its_share_is_emitted() {
     );
 
     // Same tip: the next template is an active job with no new prev hash.
+    // The channel was set to difficulty 77 above, over this job's share
+    // difficulty (1), so a `SetTarget` bringing it down comes first.
     let refreshed = channels.on_template(&prepared);
-    assert_eq!(refreshed.len(), 1);
+    assert_eq!(refreshed.len(), 2);
+    assert_eq!(frame_type(&refreshed[0]), MESSAGE_TYPE_SET_TARGET);
     assert_eq!(
-        frame_type(&refreshed[0]),
+        frame_type(&refreshed[1]),
         MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB
     );
-    let mut refreshed_payload = payload(&refreshed[0]);
+    let mut refreshed_payload = payload(&refreshed[1]);
     let refreshed_job = NewExtendedMiningJob::from_bytes(&mut refreshed_payload).unwrap();
     assert_eq!(refreshed_job.min_ntime.into_inner(), Some(template.curtime));
 }
