@@ -4145,6 +4145,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "p2poolv2_netsim"
+version = "0.0.1-alpha"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "p2poolv2_node"
 version = "0.0.1-alpha"
 dependencies = [

@@ -15,6 +15,7 @@ in `.cargo/config.toml`:
 | `cargo jmeter-bench <command>` | `jmeter_bench` | JMeter stratum load test drivers: A/B benchmark, flamegraph, remote load, GUI, results summary |
 | `cargo tcp-monitor` | `tcp_monitor` | TCP connection monitor for a pool's stratum port |
 | `cargo pool-diagnose` | `pool_diagnose` | System and process diagnostics for a pool under load |
+| `cargo netsim <command>` | `netsim` (crate `p2poolv2_netsim`) | Discrete-event simulation of share propagation at scale; see `docs/simulation/network-sim.md` |
 
 The aliases build with `--release`. Every tool takes `--help`. Arguments go
 after the alias, for example `cargo sim run-swarm 20` or

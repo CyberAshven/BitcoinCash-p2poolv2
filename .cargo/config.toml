@@ -1,6 +1,6 @@
-# Short names for the developer tools in p2poolv2_tools; see docs/tooling.md.
-# They only add cargo subcommands and change nothing about how the workspace
-# builds.
+# Short names for the developer tools in p2poolv2_tools and p2poolv2_netsim;
+# see docs/tooling.md. They only add cargo subcommands and change nothing
+# about how the workspace builds.
 [alias]
 sim = "run --release --package p2poolv2_tools --bin sim_harness --"
 mock-bitcoind = "run --release --package p2poolv2_tools --bin mock_bitcoind --"
@@ -9,3 +9,4 @@ share-lifecycle = "run --release --package p2poolv2_tools --bin share_lifecycle 
 jmeter-bench = "run --release --package p2poolv2_tools --bin jmeter_bench --"
 tcp-monitor = "run --release --package p2poolv2_tools --bin tcp_monitor --"
 pool-diagnose = "run --release --package p2poolv2_tools --bin pool_diagnose --"
+netsim = "run --release --package p2poolv2_netsim --bin netsim --"
