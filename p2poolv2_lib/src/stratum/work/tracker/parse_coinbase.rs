@@ -2,16 +2,24 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::address_display::payout_address_string;
 use crate::stratum::work::coinbase::extract_outputs_from_coinbase2;
 use crate::stratum::work::tracker::JobTracker;
 use bitcoin::Amount;
+use p2poolv2_wallet::bch_share::BchShareNetwork;
 use std::sync::Arc;
 
-/// Parse the coinbase in the latest job and return
+/// Parse the coinbase in the latest job and return its paying outputs and
+/// total as metric lines.
+///
+/// `cash_network` is set on a Bitcoin Cash node: its payouts are labelled in
+/// CashAddr under that network's prefix, as operators know them. A Bitcoin
+/// node passes `None` and keeps the address's own form.
 pub fn get_distribution(
     tracker: &Arc<JobTracker>,
     pool_signature_length: usize,
     network: bitcoin::network::Network,
+    cash_network: Option<BchShareNetwork>,
 ) -> Option<String> {
     let job_id = tracker.get_latest_job_id();
     let job_details = tracker.get_job(job_id)?;
@@ -28,6 +36,7 @@ pub fn get_distribution(
                 if tx_out.value != Amount::ZERO {
                     match bitcoin::Address::from_script(&tx_out.script_pubkey, network) {
                         Ok(address) => {
+                            let address = payout_address_string(&address, cash_network);
                             exposition.push_str(&format!(
                                 "coinbase_output{{index=\"{index}\",address=\"{address}\"}} {}\n",
                                 tx_out.value.to_sat()
@@ -55,7 +64,9 @@ mod tests {
     use crate::stratum::work::coinbase::parse_address;
     use crate::stratum::work::tracker::start_tracker_actor;
     use crate::test_utils::TEST_COINBASE_NSECS;
+    use bitcoin::hashes::Hash;
     use bitcoin::{Amount, Network, TxOut};
+    use p2poolv2_wallet::bch_share::encode_payout_address;
     use std::collections::HashMap;
     use std::str::FromStr;
     use std::sync::Arc;
@@ -132,7 +143,7 @@ mod tests {
             job_id,
         );
 
-        let result = get_distribution(&tracker, 8, Network::Signet);
+        let result = get_distribution(&tracker, 8, Network::Signet, None);
 
         assert!(result.is_some());
         let exposition = result.unwrap();
@@ -146,12 +157,53 @@ mod tests {
         assert!(exposition.contains("coinbase_total 5000000000"));
     }
 
+    /// A Bitcoin Cash node holds a regtest payout under the legacy regtest
+    /// network, which prints as Base58. The metric must label it with the
+    /// CashAddr the operator configured.
+    #[tokio::test]
+    async fn test_get_distribution_labels_cash_payouts_as_cashaddr() {
+        let tracker = start_tracker_actor();
+        let payout = bitcoin::Address::p2pkh(
+            bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+            Network::Regtest,
+        );
+        let outputs = vec![TxOut {
+            value: Amount::from_sat(312_500_000),
+            script_pubkey: payout.script_pubkey(),
+        }];
+        let job_id = tracker.get_next_job_id();
+        tracker.insert_job(
+            Arc::new(create_test_template()),
+            "".to_string(),
+            create_valid_coinbase2(b"P2Poolv2", &outputs),
+            None,
+            TEST_COINBASE_NSECS,
+            vec![],
+            job_id,
+        );
+
+        let exposition = get_distribution(
+            &tracker,
+            8,
+            Network::Regtest,
+            Some(BchShareNetwork::Regtest),
+        )
+        .unwrap();
+
+        let cashaddr = encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap();
+        assert!(cashaddr.starts_with("bchreg:"));
+        assert!(exposition.contains(&format!(
+            "coinbase_output{{index=\"0\",address=\"{cashaddr}\"}} 312500000"
+        )));
+        assert!(!exposition.contains(&payout.to_string()));
+    }
+
     #[tokio::test]
     async fn test_get_distribution_no_jobs_returns_none() {
         let tracker = start_tracker_actor();
 
         // Don't insert any jobs
-        let result = get_distribution(&tracker, 8, Network::Signet);
+        let result = get_distribution(&tracker, 8, Network::Signet, None);
 
         assert!(result.is_none());
     }
@@ -172,7 +224,7 @@ mod tests {
             job_id,
         );
 
-        let result = get_distribution(&tracker, 8, Network::Signet);
+        let result = get_distribution(&tracker, 8, Network::Signet, None);
 
         assert!(result.is_none());
     }
@@ -216,7 +268,7 @@ mod tests {
             job_id,
         );
 
-        let result = get_distribution(&tracker, 8, Network::Signet);
+        let result = get_distribution(&tracker, 8, Network::Signet, None);
 
         assert!(result.is_some());
         let exposition = result.unwrap();
@@ -268,7 +320,7 @@ mod tests {
             job_id,
         );
 
-        let result = get_distribution(&tracker, 8, Network::Signet);
+        let result = get_distribution(&tracker, 8, Network::Signet, None);
 
         // Should still return Some, just without the unparseable output
         assert!(result.is_some());
