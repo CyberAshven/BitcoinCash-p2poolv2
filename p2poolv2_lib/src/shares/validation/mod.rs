@@ -10,6 +10,7 @@ use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::bch_split_for_commitment;
 use crate::accounting::payout::coinbase_budget::{BCH_MAX_TX_SIZE, PayoutSplit, split_for_share};
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+use crate::accounting::payout::payout_tree::PayoutTree;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
@@ -22,6 +23,7 @@ use crate::config::{
     BITCOIN_CASH_DONATION_PUBKEY_HASH, BitcoinCashNetwork, Chain, MAX_BASIS_POINTS,
     MAX_BITCOIN_CASH_POOL_CUT,
 };
+use crate::node::payout_tree_executor::PayoutTreeSender;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::pool_difficulty::PoolDifficulty;
@@ -46,6 +48,7 @@ use crate::shares::transactions::coinbase::{
 use crate::sim_overrides;
 use crate::store::block_tx_metadata::{BlockMetadata, Status};
 use crate::store::dag_store::MAX_UNCLES_DEPTH;
+use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::transaction_store::PrevoutCheck;
 use crate::store::writer::StoreError;
 #[cfg(test)]
@@ -619,6 +622,10 @@ pub struct DefaultShareValidator {
     /// a token share's bitcoin header. `None` on Bitcoin and on regtest,
     /// which has no ASERT anchor.
     bch_asert: Option<BchAsert>,
+    /// Where the payout tree of each validated share that is a BCH block
+    /// goes, to be kept and executed (`node::payout_tree_executor`). `None`
+    /// keeps no trees, as in tests and on Bitcoin.
+    payout_tree_sink: Option<PayoutTreeSender>,
 }
 
 impl DefaultShareValidator {
@@ -646,6 +653,54 @@ impl DefaultShareValidator {
             chain: Chain::Bitcoin,
             target_ceiling: CompactTarget::from_consensus(MAX_POOL_TARGET),
             bch_asert: None,
+            payout_tree_sink: None,
+        }
+    }
+
+    /// Send the payout tree of every validated share that is a BCH block to
+    /// `sink`, whatever the share's later status on the share chain: the
+    /// tree is fixed in the block, and someone must execute it after
+    /// maturity.
+    pub fn with_payout_tree_sink(mut self, sink: PayoutTreeSender) -> Self {
+        self.payout_tree_sink = Some(sink);
+        self
+    }
+
+    /// Hand a found block's payout tree to the sink, if the share is a BCH
+    /// block whose coinbase pays some payees through a tree.
+    fn record_payout_tree(
+        &self,
+        share: &ShareBlock,
+        coinbase: &Transaction,
+        tree: Option<&PayoutTree>,
+    ) {
+        let (Some(sink), Some(tree)) = (&self.payout_tree_sink, tree) else {
+            return;
+        };
+        if !share.header.meets_bitcoin_difficulty() {
+            return;
+        }
+        let root_output = tree.root_output();
+        let Some(root_vout) = coinbase
+            .output
+            .iter()
+            .position(|output| *output == root_output)
+        else {
+            return;
+        };
+        let record = StoredPayoutTree::new(
+            tree,
+            coinbase.compute_txid(),
+            u32::try_from(root_vout).expect("a coinbase has far fewer than 2^32 outputs"),
+            share.header.bitcoin_header.block_hash(),
+            share.header.bitcoin_height,
+            share.block_hash(),
+        );
+        if sink.send(record).is_err() {
+            tracing::warn!(
+                "The payout tree executor has stopped; the tree of share {} is not kept",
+                share.block_hash()
+            );
         }
     }
 
@@ -1467,6 +1522,11 @@ impl DefaultShareValidator {
                 "Coinbase and template merkle root don't match merkle root",
             ))
         } else {
+            self.record_payout_tree(
+                share,
+                &reconstructed_coinbase,
+                expected_payouts.tree.as_ref(),
+            );
             Ok(())
         }
     }
@@ -6288,6 +6348,94 @@ mod tests {
         assert_eq!(tree.payees().len(), 43);
         assert!(coinbase.output.contains(&tree.root_output()));
         assert!(coinbase.total_size() <= 3_072);
+    }
+
+    /// A validated token share that is also a BCH block hands its payout
+    /// tree to the executor's sink, with the coinbase txid and the root's
+    /// output index; the same share as a mere share hands over nothing.
+    #[test]
+    fn a_found_block_hands_its_payout_tree_to_the_sink() {
+        let weights: HashMap<Address, u128> = (1..=120u8)
+            .map(|byte| {
+                (
+                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    u128::from(byte) * 1_000,
+                )
+            })
+            .collect();
+        let commitment = MergeMiningCommitment {
+            root: [0x33; 32],
+            height: 2,
+            salt: 7,
+        };
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.bitcoin_height = 702;
+        share.header.bch_coinbase = Some(BchCoinbase {
+            prefix: Builder::new()
+                .push_int(702)
+                .push_slice(b"miner")
+                .into_bytes(),
+            merge_mining: commitment,
+        });
+        let payouts = build_pplns_outputs(
+            312_500_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            bch_split_for_commitment(&commitment),
+        )
+        .unwrap();
+        let coinbase = build_declared_coinbase(
+            &payouts,
+            702,
+            ShareCommitment::from_share_block(&share).hash(),
+            &[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE],
+            share.header.bch_coinbase.as_ref().unwrap(),
+        )
+        .unwrap();
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        share.bitcoin_coinbase = coinbase.clone();
+        // Regtest's easiest target: about every other nonce makes a block.
+        share.header.bitcoin_header.bits = CompactTarget::from_consensus(0x207f_ffff);
+        while !share.header.meets_bitcoin_difficulty() {
+            share.header.bitcoin_header.nonce += 1;
+        }
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(weights.clone()));
+        let window = Arc::new(RwLock::new(window));
+        let (sink, mut found) = crate::node::payout_tree_executor::payout_tree_channel();
+        let validator = validator()
+            .for_chain(Chain::BitcoinCash)
+            .with_payout_tree_sink(sink);
+
+        validator
+            .validate_bitcoin_payout(&share, &ChainStoreHandle::default(), window.clone())
+            .unwrap();
+        let record = found.try_recv().unwrap();
+        let tree = payouts.tree.unwrap();
+        assert_eq!(record.coinbase_txid, coinbase.compute_txid());
+        assert_eq!(
+            coinbase.output[record.root_vout as usize],
+            tree.root_output()
+        );
+        assert_eq!(record.payees, tree.payees());
+        assert_eq!(record.share_blockhash, share.block_hash());
+
+        while share.header.meets_bitcoin_difficulty() {
+            share.header.bitcoin_header.nonce += 1;
+        }
+        validator
+            .validate_bitcoin_payout(&share, &ChainStoreHandle::default(), window)
+            .unwrap();
+        assert!(found.try_recv().is_err());
     }
 
     /// The same token share paying all 120 payees directly, as a no-token

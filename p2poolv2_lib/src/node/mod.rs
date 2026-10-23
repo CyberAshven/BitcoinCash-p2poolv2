@@ -9,6 +9,7 @@ mod dns_seeds;
 pub mod emission_worker;
 pub mod organise_worker;
 pub mod p2p_health;
+pub mod payout_tree_executor;
 pub mod peer_reconnector;
 pub mod request_response_handler;
 pub mod request_sender;

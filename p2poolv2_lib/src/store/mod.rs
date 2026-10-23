@@ -19,6 +19,7 @@ pub mod column_families;
 pub mod dag_store;
 pub mod found_block;
 pub mod organise;
+pub mod payout_tree;
 mod pplns_shares;
 pub mod prune_blocks;
 mod prune_shares;
@@ -195,6 +196,8 @@ impl Store {
             ColumnFamilyDescriptor::new(ColumnFamily::BitcoinCoinbase, RocksDbOptions::default());
         let found_blocks_cf =
             ColumnFamilyDescriptor::new(ColumnFamily::FoundBlocks, RocksDbOptions::default());
+        let payout_trees_cf =
+            ColumnFamilyDescriptor::new(ColumnFamily::PayoutTrees, RocksDbOptions::default());
 
         let cfs = vec![
             block_metadata_cf_descriptor,
@@ -216,6 +219,7 @@ impl Store {
             template_merkle_branches_cf,
             bitcoin_coinbase_cf,
             found_blocks_cf,
+            payout_trees_cf,
         ];
 
         // for the db too, we use default options for now

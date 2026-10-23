@@ -670,3 +670,31 @@ async fn test_found_blocks_route_returns_json_list() {
     assert_eq!(status, http::StatusCode::OK);
     assert!(body.as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_payout_trees_route_returns_json_list() {
+    let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+    let app = build_router(state.clone(), state.app_config.clone());
+
+    let (status, body) = get_json(app, "/payout_trees").await;
+    assert_eq!(status, http::StatusCode::OK);
+    assert!(body.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_payout_tree_route_rejects_a_bad_txid_and_misses_an_unknown_one() {
+    let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+
+    let (status, _) = get_json(
+        build_router(state.clone(), state.app_config.clone()),
+        "/payout_tree?coinbase_txid=nothex",
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::BAD_REQUEST);
+    let (status, _) = get_json(
+        build_router(state.clone(), state.app_config.clone()),
+        &format!("/payout_tree?coinbase_txid={}", "11".repeat(32)),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::NOT_FOUND);
+}

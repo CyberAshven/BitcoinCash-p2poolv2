@@ -40,6 +40,8 @@ token suitable for the config file.
 - [GET /miner](#get-miner) -- One miner's shares and weight in the PPLNS window
 - [GET /hashrate](#get-hashrate) -- Hashrate history as JSON
 - [GET /found_blocks](#get-found_blocks) -- Bitcoin blocks found by the pool
+- [GET /payout_trees](#get-payout_trees) -- Payout trees of found blocks (Bitcoin Cash)
+- [GET /payout_tree](#get-payout_tree) -- One payout tree with its transactions (Bitcoin Cash)
 - [POST /share_transaction](#post-share_transaction) -- Submit a signed share transaction (Bitcoin Cash)
 - [GET /peers](#get-peers) -- Connected peers
 - [GET /pplns_shares](#get-pplns_shares) -- PPLNS accounting data
@@ -334,6 +336,31 @@ exposes as `found_block_time_seconds`.
 ```json
 [{"bitcoin_height":289001,"bitcoin_blockhash":"0000...","share_blockhash":"47fb...",
   "bitcoin_time":1792675942,"miner_bitcoin_address":"bchtest:qr..."}]
+```
+
+### GET /payout_trees
+
+Bitcoin Cash only: the payout trees this node keeps for found blocks whose
+coinbase pays some payees through a tree
+(`docs/architecture/bch-hybrid-payouts.md`), newest block first. Each entry
+has `coinbase_txid`, `root_vout`, `bitcoin_blockhash`, `bitcoin_height`,
+`share_blockhash`, `value` (satoshis the tree holds), `payee_count` and
+`executed` (this node has seen every node transaction settle and stopped
+broadcasting).
+
+### GET /payout_tree
+
+One tree in full, by `coinbase_txid`: the summary fields above,
+`execution_fee_rate` (1 sat/byte, the rate every node executes at),
+`payees` (`address`, or the script in hex for a P2SH32 payee; `script_hex`;
+`amount` before the payee's share of the fee) and `variants`: for each fee
+rate the root accepts (1, 2 and 3 sat/byte), the `total_fee` and the node
+`transactions` (`txid` and raw `hex`, root first, each before its children).
+After the coinbase has 100 confirmations, anyone can broadcast them with
+`sendrawtransaction`; save a copy to pay out without P2Pool.
+
+```sh
+curl -u user:password 'http://127.0.0.1:46884/payout_tree?coinbase_txid=4f1c...'
 ```
 
 ### POST /share_transaction
