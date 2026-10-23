@@ -2,221 +2,633 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Bounded AuxPoW trees and proofs for the BCH coinbase commitment output.
+//! Merge-mining common format v2: token leaves, the aux tree under a
+//! coinbase's output-0 commitment ([`MergeMiningCommitment`]), and
+//! `AuxProof` v2, the proof a token claim carries.
 //!
-//! Token adapters supply the work hash, chain id and target from their own
-//! covenant rules. This verifies committed work, not token emission rules or
-//! acceptance of the parent as a complete BCH block.
+//! The format was agreed between BCH P2Pool and Pickaxe so both build and
+//! check the same bytes; Pickaxe's golden vectors are in this module's
+//! tests. All integers are little-endian, `SHA256` is single SHA-256 and
+//! `HASH256` double SHA-256, and hashes are written as hashed.
+//!
+//! - Slot: `u32le(SHA256(0x02 ‖ salt ‖ category)[0..4]) mod 2^h`.
+//! - Leaf hash: `SHA256(0x00 ‖ preimage)`, the 169-byte preimage of
+//!   [`TokenLeaf::preimage`].
+//! - Node: `SHA256(0x01 ‖ left ‖ right)`; at level `i`, bit `i` of the slot
+//!   set means the current node is the right child.
+//! - An empty leaf slot is 32 zero bytes; internal nodes are always hashed
+//!   from their children.
+//!
+//! The proof never carries output 0 or the leaf: a verifier rebuilds the
+//! leaf from the token's own state and output 0 from the root it folds, so
+//! a proof cannot pick its own token or commitment.
+//!
+//! This checks merge-mined work, not token issuance rules or that the parent
+//! is a complete valid BCH block; BCHN is the authority on that.
 
-use super::coinbase_proof::MAX_COINBASE_MERKLE_BRANCH_LENGTH;
-use super::merge_mining::{AUXPOW_MAGIC, MergeMiningCommitment};
-use crate::stratum::work::gbt::compute_merkle_root_from_branches;
+use super::bch_asert::{BchAsert, bip34_height};
+use super::merge_mining::{
+    MAX_MERGE_MINING_TREE_HEIGHT, MERGE_MINING_OUTPUT_LENGTH, MergeMiningCommitment,
+};
 use bitcoin::block::Header;
-use bitcoin::hashes::{Hash, sha256d};
-use bitcoin::{Target, Transaction, TxMerkleNode};
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use bitcoin::consensus::{deserialize, serialize};
+use bitcoin::hashes::{Hash, sha256, sha256d};
+use bitcoin::{Transaction, TxMerkleNode};
+use std::fmt;
 
-/// Local work-selection budget; the tree itself may be sparse.
-pub const MAX_AUXILIARY_CHAINS: usize = 64;
-/// The commitment's maximum width is 2^30.
-pub const MAX_AUXILIARY_BRANCH_LENGTH: usize = 30;
-/// SV2's 65,535 output bytes plus at most 150 non-output coinbase bytes.
-pub const MAX_AUXPOW_COINBASE_SIZE: usize = 65_685;
+/// At most this many tokens in one coinbase's tree.
+pub const MAX_TOKEN_LEAVES: usize = 16;
 
-/// A token adapter's independently constructed work commitment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuxiliaryWork {
-    pub chain_id: u32,
-    pub hash: sha256d::Hash,
+/// Salts the tree builder tries at each height, `0..65,536`, as Pickaxe's
+/// builder does, so both pick the same layout. A verifier accepts any salt.
+pub const LAYOUT_SALTS: u32 = 1 << 16;
+
+/// Bytes in a token leaf's preimage.
+pub const TOKEN_LEAF_LENGTH: usize = 169;
+
+/// The deepest coinbase branch an `AuxProof` v2 carries: `2^25`
+/// transactions. It belongs to the proof format, agreed with Pickaxe; a BCH
+/// block deeper than that is still a valid share, it just cannot be
+/// token-claimed. P2Pool's own coinbase proofs allow more
+/// (`MAX_COINBASE_MERKLE_BRANCH_LENGTH`).
+pub const MAX_AUX_PROOF_COINBASE_BRANCH_LENGTH: usize = 25;
+
+const LEAF_MAGIC: [u8; 4] = *b"CTML";
+const LEAF_VERSION: u8 = 0x02;
+const PROOF_MAGIC: [u8; 4] = *b"CTMP";
+const PROOF_VERSION: u8 = 0x02;
+
+/// Domain bytes of a leaf, a node and a slot, so none can pose as another.
+const LEAF_PREFIX: u8 = 0x00;
+const NODE_PREFIX: u8 = 0x01;
+const SLOT_PREFIX: u8 = 0x02;
+
+/// A coinbase's bytes 4..41: one input spending the null outpoint.
+const NULL_INPUT: [u8; 37] = {
+    let mut input = [0xff; 37];
+    input[0] = 1;
+    let mut index = 1;
+    while index < 33 {
+        input[index] = 0;
+        index += 1;
+    }
+    input
+};
+
+/// A coinbase scriptSig is at most 100 bytes (BCH consensus, `bad-cb-length`).
+const MAX_COINBASE_SCRIPT_SIG: usize = 100;
+
+/// A proof's bytes besides its branches and coinbase parts: magic, version,
+/// header, `h`, salt, two part lengths and the branch depth.
+const PROOF_FIXED_LENGTH: usize = 4 + 1 + 80 + 1 + 4 + 2 + 2 + 1;
+
+/// Why a tree could not be built or a proof does not verify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuxError {
+    /// More than [`MAX_TOKEN_LEAVES`] tokens.
+    TooManyTokens,
+    /// One token category listed twice: one leaf per category.
+    DuplicateCategory,
+    /// No salt gives every category its own slot up to height 16.
+    NoLayout,
+    /// The bytes are not exactly one canonical v2 proof.
+    Decode,
+    /// The proof's parts do not fit their limits.
+    Shape,
+    /// The tree is taller than the token allows.
+    Height,
+    /// The token's compact target is not canonical.
+    Target,
+    /// The coinbase does not start with the fixed-shape head.
+    CoinbaseHead,
+    /// The coinbase tail has no room for the locktime.
+    CoinbaseTail,
+    /// Output 0 of the coinbase is not the commitment.
+    Commitment,
+    /// The coinbase does not reach the header's merkle root.
+    MerkleRoot,
+    /// The header's hash does not meet the token's target.
+    Work,
+    /// The header's nBits fail the ASERT format check.
+    Asert(String),
 }
 
-/// Siblings, leaf first, at the slot determined by the chain id and nonce.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuxiliaryWorkProof {
-    pub work: AuxiliaryWork,
-    pub branch: Vec<sha256d::Hash>,
+impl fmt::Display for AuxError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooManyTokens => {
+                write!(formatter, "at most {MAX_TOKEN_LEAVES} tokens per coinbase")
+            }
+            Self::DuplicateCategory => write!(formatter, "a token category is listed twice"),
+            Self::NoLayout => write!(formatter, "no salt gives every token its own slot"),
+            Self::Decode => write!(formatter, "not a canonical merge-mining v2 proof"),
+            Self::Shape => write!(formatter, "merge-mining proof parts exceed their limits"),
+            Self::Height => write!(
+                formatter,
+                "merge-mining tree is taller than the token allows"
+            ),
+            Self::Target => write!(formatter, "invalid token target"),
+            Self::CoinbaseHead => write!(formatter, "merge-mining coinbase head is malformed"),
+            Self::CoinbaseTail => write!(formatter, "merge-mining coinbase tail is too short"),
+            Self::Commitment => write!(formatter, "coinbase output 0 is not the commitment"),
+            Self::MerkleRoot => {
+                write!(formatter, "merge-mining coinbase does not reach the header")
+            }
+            Self::Work => write!(formatter, "header does not meet the token target"),
+            Self::Asert(reason) => write!(formatter, "header fails the ASERT check: {reason}"),
+        }
+    }
 }
 
-/// One commitment covering every selected work item, with individual proofs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::error::Error for AuxError {}
+
+/// A token's leaf, as its covenant rebuilds it from introspection.
+///
+/// ```text
+/// off len field
+/// 0   4   "CTML"
+/// 4   1   02
+/// 5   32  category      the token category
+/// 37  32  lock_hash     HASH256(the token baton's locking bytecode)
+/// 69  32  state_hash    token-defined; changes only on a successful claim
+/// 101 32  payout_hash   HASH256(the payout output's locking bytecode)
+/// 133 4   target_bits   the token's compact target, u32 LE
+/// 137 32  ext           token-defined, or 32 zero bytes
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenLeaf {
+    pub category: [u8; 32],
+    pub lock_hash: [u8; 32],
+    pub state_hash: [u8; 32],
+    pub payout_hash: [u8; 32],
+    pub target_bits: u32,
+    pub ext: [u8; 32],
+}
+
+impl TokenLeaf {
+    /// The leaf of a token in state `state_hash` behind a baton locked by
+    /// `baton_locking_bytecode`, paying `payout_locking_bytecode`.
+    pub fn new(
+        category: [u8; 32],
+        baton_locking_bytecode: &[u8],
+        state_hash: [u8; 32],
+        payout_locking_bytecode: &[u8],
+        target_bits: u32,
+        ext: [u8; 32],
+    ) -> Self {
+        Self {
+            category,
+            lock_hash: hash256(baton_locking_bytecode),
+            state_hash,
+            payout_hash: hash256(payout_locking_bytecode),
+            target_bits,
+            ext,
+        }
+    }
+
+    /// The 169-byte preimage.
+    pub fn preimage(&self) -> [u8; TOKEN_LEAF_LENGTH] {
+        let mut bytes = [0; TOKEN_LEAF_LENGTH];
+        bytes[..4].copy_from_slice(&LEAF_MAGIC);
+        bytes[4] = LEAF_VERSION;
+        bytes[5..37].copy_from_slice(&self.category);
+        bytes[37..69].copy_from_slice(&self.lock_hash);
+        bytes[69..101].copy_from_slice(&self.state_hash);
+        bytes[101..133].copy_from_slice(&self.payout_hash);
+        bytes[133..137].copy_from_slice(&self.target_bits.to_le_bytes());
+        bytes[137..].copy_from_slice(&self.ext);
+        bytes
+    }
+
+    /// `SHA256(0x00 ‖ preimage)`.
+    pub fn hash(&self) -> [u8; 32] {
+        let mut engine = sha256::Hash::engine();
+        bitcoin::hashes::HashEngine::input(&mut engine, &[LEAF_PREFIX]);
+        bitcoin::hashes::HashEngine::input(&mut engine, &self.preimage());
+        sha256::Hash::from_engine(engine).to_byte_array()
+    }
+}
+
+/// The token's target from canonical compact bits: `3 <= exp <= 32` and
+/// `0 < mantissa < 0x800000`, stricter than a header's nBits so a covenant
+/// expands it with one shift. Little-endian.
+pub fn expand_token_target(bits: u32) -> Option<[u8; 32]> {
+    let exponent = (bits >> 24) as usize;
+    let mantissa = bits & 0x00ff_ffff;
+    if !(3..=32).contains(&exponent) || mantissa == 0 || mantissa >= 0x0080_0000 {
+        return None;
+    }
+    let mut target = [0; 32];
+    target[exponent - 3..exponent].copy_from_slice(&mantissa.to_le_bytes()[..3]);
+    Some(target)
+}
+
+/// The slot of `category` in a tree of height `height`, at most 16.
+pub fn slot(category: &[u8; 32], salt: u32, height: u8) -> u32 {
+    let mut seed = [0; 37];
+    seed[0] = SLOT_PREFIX;
+    seed[1..5].copy_from_slice(&salt.to_le_bytes());
+    seed[5..].copy_from_slice(category);
+    let digest = sha256::Hash::hash(&seed).to_byte_array();
+    let value = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    value & (1u32 << height.min(MAX_MERGE_MINING_TREE_HEIGHT)).wrapping_sub(1)
+}
+
+/// `SHA256(0x01 ‖ left ‖ right)`.
+pub fn node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut pair = [0; 65];
+    pair[0] = NODE_PREFIX;
+    pair[1..33].copy_from_slice(left);
+    pair[33..].copy_from_slice(right);
+    sha256::Hash::hash(&pair).to_byte_array()
+}
+
+/// Fold a leaf hash at `slot` up its `branch` to the root.
+pub fn fold(leaf: [u8; 32], slot: u32, branch: &[[u8; 32]]) -> [u8; 32] {
+    let mut current = leaf;
+    let mut index = slot;
+    for sibling in branch {
+        current = if index & 1 == 1 {
+            node_hash(sibling, &current)
+        } else {
+            node_hash(&current, sibling)
+        };
+        index >>= 1;
+    }
+    current
+}
+
+/// One token's place in a tree: its slot and the siblings from its leaf up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenBranch {
+    pub category: [u8; 32],
+    pub slot: u32,
+    pub branch: Vec<[u8; 32]>,
+}
+
+/// The commitment for a set of tokens and each token's branch, in the order
+/// the tokens were given.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuxiliaryTree {
     pub commitment: MergeMiningCommitment,
-    pub proofs: Vec<AuxiliaryWorkProof>,
+    pub branches: Vec<TokenBranch>,
 }
 
 impl AuxiliaryTree {
-    /// Build the smallest collision-free tree, using zero hashes in unused slots.
-    /// Sparse levels avoid allocating up to 2^30 leaf slots for just two chains.
-    pub fn build(work: &[AuxiliaryWork], nonce: u32) -> Result<Self, &'static str> {
-        if work.len() > MAX_AUXILIARY_CHAINS {
-            return Err("too many auxiliary chains");
-        }
-        if work.is_empty() {
+    /// Build the tree for `leaves`: the smallest height that holds them,
+    /// the first salt below [`LAYOUT_SALTS`] that gives every category its
+    /// own slot, else the next height, up to 16. No tokens give the exact
+    /// empty commitment.
+    pub fn build(leaves: &[TokenLeaf]) -> Result<Self, AuxError> {
+        if leaves.is_empty() {
             return Ok(Self {
-                commitment: MergeMiningCommitment::reserved(),
-                proofs: Vec::new(),
+                commitment: MergeMiningCommitment::empty(),
+                branches: Vec::new(),
             });
         }
-        let mut identities = HashSet::with_capacity(work.len());
-        if !work.iter().all(|item| identities.insert(item.chain_id)) {
-            return Err("duplicate auxiliary chain id");
+        if leaves.len() > MAX_TOKEN_LEAVES {
+            return Err(AuxError::TooManyTokens);
         }
-        let height = (0..=MAX_AUXILIARY_BRANCH_LENGTH)
-            .find(|height| {
-                let mut slots = HashSet::with_capacity(work.len());
-                work.iter()
-                    .all(|item| slots.insert(auxiliary_slot(item.chain_id, nonce, 1 << height)))
-            })
-            .ok_or("auxiliary chain ids collide at every supported tree width")?;
-        let tree_size = 1 << height;
-        let mut nodes: BTreeMap<u32, sha256d::Hash> = work
-            .iter()
-            .map(|item| (auxiliary_slot(item.chain_id, nonce, tree_size), item.hash))
-            .collect();
-        let mut proofs: Vec<_> = work
-            .iter()
-            .map(|item| AuxiliaryWorkProof {
-                work: *item,
-                branch: Vec::with_capacity(height),
-            })
-            .collect();
-        let mut empty = sha256d::Hash::all_zeros();
-        for level in 0..height {
-            for proof in &mut proofs {
-                let index = auxiliary_slot(proof.work.chain_id, nonce, tree_size) >> level;
-                proof
-                    .branch
-                    .push(*nodes.get(&(index ^ 1)).unwrap_or(&empty));
-            }
-            let mut parents = BTreeMap::new();
-            for index in nodes.keys() {
-                let parent = index / 2;
-                parents.entry(parent).or_insert_with(|| {
-                    hash_pair(
-                        nodes.get(&(parent * 2)).unwrap_or(&empty),
-                        nodes.get(&(parent * 2 + 1)).unwrap_or(&empty),
-                    )
-                });
-            }
-            nodes = parents;
-            empty = hash_pair(&empty, &empty);
+        if leaves.iter().enumerate().any(|(index, leaf)| {
+            leaves[..index]
+                .iter()
+                .any(|other| other.category == leaf.category)
+        }) {
+            return Err(AuxError::DuplicateCategory);
         }
-        let mut merkle_root = nodes[&0].to_byte_array();
-        merkle_root.reverse();
+        let (height, salt, slots) = search_layout(leaves)?;
+        let mut level = vec![[0u8; 32]; 1 << height];
+        for (leaf, slot) in leaves.iter().zip(&slots) {
+            level[*slot as usize] = leaf.hash();
+        }
+        let mut levels = vec![level];
+        while let Some(last) = levels.last().filter(|level| level.len() > 1) {
+            let parents = last
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|[left, right]| node_hash(left, right))
+                .collect();
+            levels.push(parents);
+        }
+        let root = levels.last().expect("at least the leaf level")[0];
+        let branches = leaves
+            .iter()
+            .zip(&slots)
+            .map(|(leaf, slot)| {
+                let mut index = *slot as usize;
+                let branch = levels[..levels.len() - 1]
+                    .iter()
+                    .map(|level| {
+                        let sibling = level[index ^ 1];
+                        index >>= 1;
+                        sibling
+                    })
+                    .collect();
+                TokenBranch {
+                    category: leaf.category,
+                    slot: *slot,
+                    branch,
+                }
+            })
+            .collect();
         Ok(Self {
-            commitment: MergeMiningCommitment {
-                merkle_root,
-                tree_size,
-                nonce,
-            },
-            proofs,
+            commitment: MergeMiningCommitment { root, height, salt },
+            branches,
         })
     }
 }
 
-impl AuxiliaryWorkProof {
-    /// Check identity, exact depth, deterministic slot and root against trusted work.
+/// The first `(height, salt)` that gives each leaf its own slot, and the
+/// slots in leaf order.
+fn search_layout(leaves: &[TokenLeaf]) -> Result<(u8, u32, Vec<u32>), AuxError> {
+    let minimum_height = leaves.len().next_power_of_two().trailing_zeros() as u8;
+    let mut slots = vec![0; leaves.len()];
+    for height in minimum_height..=MAX_MERGE_MINING_TREE_HEIGHT {
+        'salts: for salt in 0..LAYOUT_SALTS {
+            for (index, leaf) in leaves.iter().enumerate() {
+                let placed = slot(&leaf.category, salt, height);
+                if slots[..index].contains(&placed) {
+                    continue 'salts;
+                }
+                slots[index] = placed;
+            }
+            return Ok((height, salt, slots));
+        }
+    }
+    Err(AuxError::NoLayout)
+}
+
+/// `AuxProof` v2: what a token claim hands its covenant.
+///
+/// ```text
+/// 0    4     "CTMP"
+/// 4    1     02
+/// 5    80    header
+/// 85   1     h (at most 16)
+/// 86   4     salt, u32 LE
+/// 90   32h   aux branch, leaf to root
+/// ..   2+n   u16 LE n, coinbase head (47 + L bytes: up to output 0)
+/// ..   2+n   u16 LE n, coinbase tail (outputs 1.. and the locktime)
+/// ..   1     d (at most 25)
+/// ..   32d   coinbase branch, the coinbase at index 0
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuxProof {
+    pub header: Header,
+    pub height: u8,
+    pub salt: u32,
+    pub aux_branch: Vec<[u8; 32]>,
+    pub coinbase_head: Vec<u8>,
+    pub coinbase_tail: Vec<u8>,
+    pub coinbase_branch: Vec<[u8; 32]>,
+}
+
+impl AuxProof {
+    /// The proof of `token`'s win in a block whose coinbase carries
+    /// `commitment` as output 0, under `header` with `coinbase_branch`.
+    pub fn new(
+        header: Header,
+        coinbase: &Transaction,
+        coinbase_branch: &[TxMerkleNode],
+        commitment: MergeMiningCommitment,
+        token: &TokenBranch,
+    ) -> Result<Self, AuxError> {
+        let bytes = serialize(coinbase);
+        let head = coinbase_head_length(&bytes).ok_or(AuxError::CoinbaseHead)?;
+        if serialize(&commitment.output()).as_slice()
+            != bytes
+                .get(head..head + MERGE_MINING_OUTPUT_LENGTH)
+                .ok_or(AuxError::Commitment)?
+        {
+            return Err(AuxError::Commitment);
+        }
+        let proof = Self {
+            header,
+            height: commitment.height,
+            salt: commitment.salt,
+            aux_branch: token.branch.clone(),
+            coinbase_head: bytes[..head].to_vec(),
+            coinbase_tail: bytes[head + MERGE_MINING_OUTPUT_LENGTH..].to_vec(),
+            coinbase_branch: coinbase_branch
+                .iter()
+                .map(|node| node.to_byte_array())
+                .collect(),
+        };
+        proof.check_shape()?;
+        Ok(proof)
+    }
+
+    /// The limits every v2 proof keeps: `h` at most 16 and matching the aux
+    /// branch, a coinbase branch of at most 25, and parts that fit their
+    /// length fields.
+    pub fn check_shape(&self) -> Result<(), AuxError> {
+        if self.height <= MAX_MERGE_MINING_TREE_HEIGHT
+            && self.aux_branch.len() == usize::from(self.height)
+            && self.coinbase_branch.len() <= MAX_AUX_PROOF_COINBASE_BRANCH_LENGTH
+            && self.coinbase_head.len() <= usize::from(u16::MAX)
+            && self.coinbase_tail.len() <= usize::from(u16::MAX)
+        {
+            Ok(())
+        } else {
+            Err(AuxError::Shape)
+        }
+    }
+
+    /// The canonical encoding.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, AuxError> {
+        self.check_shape()?;
+        let mut bytes = Vec::with_capacity(
+            PROOF_FIXED_LENGTH
+                + 32 * (self.aux_branch.len() + self.coinbase_branch.len())
+                + self.coinbase_head.len()
+                + self.coinbase_tail.len(),
+        );
+        bytes.extend_from_slice(&PROOF_MAGIC);
+        bytes.push(PROOF_VERSION);
+        bytes.extend_from_slice(&serialize(&self.header));
+        bytes.push(self.height);
+        bytes.extend_from_slice(&self.salt.to_le_bytes());
+        self.aux_branch
+            .iter()
+            .for_each(|hash| bytes.extend_from_slice(hash));
+        for part in [&self.coinbase_head, &self.coinbase_tail] {
+            bytes.extend_from_slice(&(part.len() as u16).to_le_bytes());
+            bytes.extend_from_slice(part);
+        }
+        bytes.push(self.coinbase_branch.len() as u8);
+        self.coinbase_branch
+            .iter()
+            .for_each(|hash| bytes.extend_from_slice(hash));
+        Ok(bytes)
+    }
+
+    /// Read exactly one canonical v2 proof; anything else, trailing bytes
+    /// included, is refused.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AuxError> {
+        let mut reader = Reader(bytes);
+        if reader.take(4)? != PROOF_MAGIC || reader.byte()? != PROOF_VERSION {
+            return Err(AuxError::Decode);
+        }
+        let header: Header = deserialize(reader.take(80)?).map_err(|_| AuxError::Decode)?;
+        let height = reader.byte()?;
+        if height > MAX_MERGE_MINING_TREE_HEIGHT {
+            return Err(AuxError::Decode);
+        }
+        let salt = u32::from_le_bytes(reader.array()?);
+        let aux_branch = reader.hashes(usize::from(height))?;
+        let coinbase_head = reader.part()?;
+        let coinbase_tail = reader.part()?;
+        let depth = usize::from(reader.byte()?);
+        if depth > MAX_AUX_PROOF_COINBASE_BRANCH_LENGTH {
+            return Err(AuxError::Decode);
+        }
+        let coinbase_branch = reader.hashes(depth)?;
+        if !reader.0.is_empty() {
+            return Err(AuxError::Decode);
+        }
+        Ok(Self {
+            header,
+            height,
+            salt,
+            aux_branch,
+            coinbase_head,
+            coinbase_tail,
+            coinbase_branch,
+        })
+    }
+
+    /// The BIP34 height the coinbase head's scriptSig starts with.
+    pub fn coinbase_height(&self) -> Option<u64> {
+        let length = usize::from(*self.coinbase_head.get(41)?);
+        bip34_height(self.coinbase_head.get(42..42 + length)?)
+    }
+
+    /// Verify this proof for `leaf`, which the token's own rules supply,
+    /// with a tree at most `max_height` tall, as a covenant would:
+    ///
+    /// 1. the shape limits;
+    /// 2. the slot from the category, the salt and `h`;
+    /// 3. the aux branch folds the leaf hash to a root;
+    /// 4. output 0 is rebuilt from that root, `h` and the salt;
+    /// 5. the coinbase head has the fixed shape and the tail holds a
+    ///    locktime;
+    /// 6. the coinbase txid, `HASH256(head ‖ output 0 ‖ tail)`, folds up the
+    ///    coinbase branch at index 0 to the header's merkle root;
+    /// 7. the header's hash meets the token's target (never the header's
+    ///    own nBits).
+    ///
+    /// With `asert`, the header's nBits must also pass the ASERT format
+    /// check at the coinbase's BIP34 height ([`BchAsert::check_header_bits`]);
+    /// regtest and scalenet have no anchor and pass `None`.
     pub fn verify(
         &self,
-        commitment: MergeMiningCommitment,
-        expected: AuxiliaryWork,
-    ) -> Result<(), &'static str> {
-        commitment.validate()?;
-        if self.work != expected {
-            return Err("auxiliary work differs from the requested work");
+        leaf: &TokenLeaf,
+        max_height: u8,
+        asert: Option<BchAsert>,
+    ) -> Result<(), AuxError> {
+        self.check_shape()?;
+        let target = expand_token_target(leaf.target_bits).ok_or(AuxError::Target)?;
+        if self.height > max_height.min(MAX_MERGE_MINING_TREE_HEIGHT) {
+            return Err(AuxError::Height);
         }
-        if commitment.tree_size == 0
-            || self.branch.len() > MAX_AUXILIARY_BRANCH_LENGTH
-            || self.branch.len() != commitment.tree_size.trailing_zeros() as usize
-        {
-            return Err("auxiliary branch does not match the committed tree width");
+        let token_slot = slot(&leaf.category, self.salt, self.height);
+        let root = fold(leaf.hash(), token_slot, &self.aux_branch);
+        let commitment = MergeMiningCommitment {
+            root,
+            height: self.height,
+            salt: self.salt,
+        };
+        check_coinbase_head(&self.coinbase_head).ok_or(AuxError::CoinbaseHead)?;
+        if self.coinbase_tail.len() < 4 {
+            return Err(AuxError::CoinbaseTail);
         }
-        let mut index = auxiliary_slot(expected.chain_id, commitment.nonce, commitment.tree_size);
-        let mut current = expected.hash;
-        for sibling in &self.branch {
-            current = if index & 1 == 0 {
-                hash_pair(&current, sibling)
-            } else {
-                hash_pair(sibling, &current)
-            };
-            index >>= 1;
+        let mut coinbase = Vec::with_capacity(
+            self.coinbase_head.len() + MERGE_MINING_OUTPUT_LENGTH + self.coinbase_tail.len(),
+        );
+        coinbase.extend_from_slice(&self.coinbase_head);
+        coinbase.extend_from_slice(&serialize(&commitment.output()));
+        coinbase.extend_from_slice(&self.coinbase_tail);
+        let mut merkle = hash256(&coinbase);
+        for sibling in &self.coinbase_branch {
+            let mut pair = [0; 64];
+            pair[..32].copy_from_slice(&merkle);
+            pair[32..].copy_from_slice(sibling);
+            merkle = hash256(&pair);
         }
-        let mut root = current.to_byte_array();
-        root.reverse();
-        if root != commitment.merkle_root {
-            return Err("auxiliary branch does not match the committed root");
+        if merkle != self.header.merkle_root.to_byte_array() {
+            return Err(AuxError::MerkleRoot);
         }
-        Ok(())
-    }
-}
-
-/// Full coinbase proof for a token adapter; no SHA256 midstate is trusted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuxPowProof {
-    pub parent_header: Header,
-    pub coinbase: Transaction,
-    pub coinbase_branch: Vec<TxMerkleNode>,
-    pub auxiliary: AuxiliaryWorkProof,
-}
-
-impl AuxPowProof {
-    /// Verify against the work and target supplied by the token's rules.
-    /// The parent's advertised nBits is not an authority for the token's target.
-    pub fn verify(&self, expected: AuxiliaryWork, target: Target) -> Result<(), &'static str> {
-        if target == Target::ZERO {
-            return Err("auxiliary target must be nonzero");
+        let mut hash = self.header.block_hash().to_byte_array();
+        hash.reverse();
+        // Both big-endian now: compare as unsigned numbers.
+        let mut target_big_endian = target;
+        target_big_endian.reverse();
+        if hash > target_big_endian {
+            return Err(AuxError::Work);
         }
-        if self.coinbase_branch.len() > MAX_COINBASE_MERKLE_BRANCH_LENGTH
-            || self.coinbase.total_size() > MAX_AUXPOW_COINBASE_SIZE
-            || !self.coinbase.is_coinbase()
-            || !self.coinbase.input[0].witness.is_empty()
-            || !(2..=100).contains(&self.coinbase.input[0].script_sig.len())
-        {
-            return Err("invalid or oversized auxiliary coinbase proof");
-        }
-        let mut commitment = None;
-        for output in &self.coinbase.output {
-            let script = output.script_pubkey.as_bytes();
-            if script.starts_with(&[0x6a, 44]) && script.get(2..6) == Some(AUXPOW_MAGIC.as_slice())
-            {
-                let decoded = MergeMiningCommitment::from_output(output)?;
-                if commitment.replace(decoded).is_some() {
-                    return Err("multiple auxiliary commitments in coinbase");
-                }
-            }
-        }
-        self.auxiliary.verify(
-            commitment.ok_or("auxiliary commitment missing from coinbase")?,
-            expected,
-        )?;
-        if compute_merkle_root_from_branches(self.coinbase.compute_txid(), &self.coinbase_branch)
-            != self.parent_header.merkle_root
-        {
-            return Err("auxiliary coinbase is not in the parent header");
-        }
-        if !target.is_met_by(self.parent_header.block_hash()) {
-            return Err("parent header does not meet the auxiliary target");
+        if let Some(asert) = asert {
+            let height = self
+                .coinbase_height()
+                .ok_or_else(|| AuxError::Asert("coinbase has no BIP34 height".into()))?;
+            asert
+                .check_header_bits(self.header.bits, self.header.time, height)
+                .map_err(AuxError::Asert)?;
         }
         Ok(())
     }
 }
 
-fn hash_pair(left: &sha256d::Hash, right: &sha256d::Hash) -> sha256d::Hash {
-    let mut pair = [0; 64];
-    pair[..32].copy_from_slice(left.as_byte_array());
-    pair[32..].copy_from_slice(right.as_byte_array());
-    sha256d::Hash::hash(&pair)
+/// The length of a coinbase's fixed-shape head, `47 + L`, when it has one.
+fn coinbase_head_length(coinbase: &[u8]) -> Option<usize> {
+    let length = 47 + usize::from(*coinbase.get(41)?);
+    check_coinbase_head(coinbase.get(..length)?)?;
+    Some(length)
 }
 
-fn auxiliary_slot(chain_id: u32, nonce: u32, tree_size: u32) -> u32 {
-    nonce
-        .wrapping_mul(1_103_515_245)
-        .wrapping_add(12_345)
-        .wrapping_add(chain_id)
-        .wrapping_mul(1_103_515_245)
-        .wrapping_add(12_345)
-        % tree_size
+/// A coinbase head is `version (4) | 01 | 00 x 32 | ffffffff | L | scriptSig
+/// (L, at most 100) | sequence (4) | output count (1, 1..=0xfc)`.
+fn check_coinbase_head(head: &[u8]) -> Option<()> {
+    let length = usize::from(*head.get(41)?);
+    (length <= MAX_COINBASE_SCRIPT_SIG
+        && head.len() == 47 + length
+        && head[4..41] == NULL_INPUT
+        && (1..0xfd).contains(&head[head.len() - 1]))
+    .then_some(())
+}
+
+fn hash256(bytes: &[u8]) -> [u8; 32] {
+    sha256d::Hash::hash(bytes).to_byte_array()
+}
+
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, count: usize) -> Result<&'a [u8], AuxError> {
+        if self.0.len() < count {
+            return Err(AuxError::Decode);
+        }
+        let (taken, rest) = self.0.split_at(count);
+        self.0 = rest;
+        Ok(taken)
+    }
+
+    fn byte(&mut self) -> Result<u8, AuxError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], AuxError> {
+        self.take(N)?.try_into().map_err(|_| AuxError::Decode)
+    }
+
+    fn hashes(&mut self, count: usize) -> Result<Vec<[u8; 32]>, AuxError> {
+        (0..count).map(|_| self.array()).collect()
+    }
+
+    fn part(&mut self) -> Result<Vec<u8>, AuxError> {
+        let length = u16::from_le_bytes(self.array()?);
+        Ok(self.take(usize::from(length))?.to_vec())
+    }
 }
 
 #[cfg(test)]

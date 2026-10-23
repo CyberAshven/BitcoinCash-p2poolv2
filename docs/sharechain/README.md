@@ -76,8 +76,8 @@ itself:
   `coinbaseaux` flags, the extranonce, a nanosecond timestamp and the pool
   signature; a declared job's scriptSig is the miner's own prefix followed by
   the extranonce. Either way it stays within Bitcoin Cash's 100-byte limit.
-  Its outputs carry the donation, the fee, the payouts, the
-  merge-mining output, a padding output and the share commitment. Bitcoin
+  Its outputs carry the merge-mining commitment (output 0), the donation,
+  the fee, the payouts, a padding output and the share commitment. Bitcoin
   Cash has no SegWit, so there is no witness commitment output.
 
 A node checks the body against the header before storing it; see

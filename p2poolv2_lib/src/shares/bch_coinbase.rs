@@ -74,6 +74,7 @@ mod tests {
     use crate::stratum::work::coinbase::build_declared_coinbase;
     use crate::test_utils::{TestShareBlockBuilder, make_test_address};
     use bitcoin::consensus::{deserialize, serialize};
+    use bitcoin::hashes::Hash;
     use bitcoin::{Amount, TxMerkleNode};
     use p2poolv2_wallet::share_owner::ShareOwner;
 
@@ -89,9 +90,9 @@ mod tests {
                 .push_slice(b"miner")
                 .into_bytes(),
             merge_mining: MergeMiningCommitment {
-                merkle_root: [0x33; 32],
-                tree_size: 4,
-                nonce: 7,
+                root: [0x33; 32],
+                height: 2,
+                salt: 7,
             },
         };
         share.header.bch_coinbase = Some(declared.clone());
@@ -132,7 +133,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .merge_mining
-            .nonce += 1;
+            .salt += 1;
         assert!(CoinbaseProof::verify(&share.header, &[]).is_err());
         share
             .header
@@ -140,7 +141,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .merge_mining
-            .nonce -= 1;
+            .salt -= 1;
         share.header.bch_coinbase.as_mut().unwrap().prefix.push(0);
         assert!(CoinbaseProof::verify(&share.header, &[]).is_err());
         share.header.bch_coinbase.as_mut().unwrap().prefix.pop();
@@ -151,7 +152,7 @@ mod tests {
     fn declared_bch_prefix_must_fit_the_scriptsig_and_start_with_height() {
         let mut declared = BchCoinbase {
             prefix: vec![0x51; 88],
-            merge_mining: MergeMiningCommitment::reserved(),
+            merge_mining: MergeMiningCommitment::empty(),
         };
         assert!(declared.validate(1).is_ok());
         assert!(declared.validate(0).is_err());
@@ -169,27 +170,67 @@ mod tests {
         header.prev_share_blockhash = header.bitcoin_header.block_hash();
         header.bch_coinbase = Some(BchCoinbase {
             prefix: vec![0x51],
-            merge_mining: MergeMiningCommitment::reserved(),
+            merge_mining: MergeMiningCommitment::empty(),
         });
         assert!(deserialize::<ShareHeader>(&serialize(&header)).is_err());
         assert!(CoinbaseProof::verify(&header, &[]).is_err());
     }
 
     #[test]
-    fn aux_tree_width_and_empty_tree_are_unambiguous() {
-        let mut commitment = MergeMiningCommitment {
-            merkle_root: [0x33; 32],
-            tree_size: 3,
-            nonce: 7,
+    fn declared_commitment_must_pass_the_format_checks() {
+        let mut declared = BchCoinbase {
+            prefix: Builder::new().push_int(702).into_bytes(),
+            merge_mining: MergeMiningCommitment {
+                root: [0x33; 32],
+                height: 17,
+                salt: 7,
+            },
         };
-        assert!(commitment.validate().is_err());
-        commitment.tree_size = 0;
-        assert!(commitment.validate().is_err());
-        commitment.tree_size = 4;
-        assert!(commitment.validate().is_ok());
+        assert!(declared.validate(702).is_err());
+        assert!(deserialize::<BchCoinbase>(&serialize(&declared)).is_err());
+        declared.merge_mining.height = 16;
+        assert!(declared.validate(702).is_ok());
+        declared.merge_mining.root = [0; 32];
+        assert!(declared.validate(702).is_err());
+        declared.merge_mining = MergeMiningCommitment::empty();
+        assert!(declared.validate(702).is_ok());
         assert_eq!(
-            deserialize::<MergeMiningCommitment>(&serialize(&commitment)).unwrap(),
-            commitment
+            deserialize::<BchCoinbase>(&serialize(&declared)).unwrap(),
+            declared
+        );
+    }
+
+    /// The declared commitment is the coinbase's output 0, before the
+    /// payouts, and the share commitment stays last.
+    #[test]
+    fn declared_coinbase_carries_the_commitment_at_output_0() {
+        let declared = BchCoinbase {
+            prefix: Builder::new().push_int(702).into_bytes(),
+            merge_mining: MergeMiningCommitment {
+                root: [0x44; 32],
+                height: 3,
+                salt: 9,
+            },
+        };
+        let payout = make_test_address(1);
+        let coinbase = build_declared_coinbase(
+            &[OutputPair {
+                address: payout.clone(),
+                amount: Amount::from_sat(100_000_000),
+            }],
+            702,
+            bitcoin::hashes::sha256::Hash::all_zeros(),
+            &[0u8; 12],
+            &declared,
+        )
+        .unwrap();
+        assert_eq!(coinbase.output[0], declared.merge_mining.output());
+        assert_eq!(coinbase.output[1].script_pubkey, payout.script_pubkey());
+        let serialized = serialize(&coinbase);
+        let head = 47 + usize::from(serialized[41]);
+        assert_eq!(
+            &serialized[head..head + 53],
+            serialize(&declared.merge_mining.output()).as_slice()
         );
     }
 }

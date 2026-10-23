@@ -52,7 +52,8 @@ In order:
    been sold, its weight is paid to the right's holder instead
    ([Trading shares for BCH](../atomic-swap/bch-share-trading.md#payout-rights)).
 4. **Merge-mining commitment,** a zero-value output for the tokens the miner
-   merge-mines; empty if none ([Auxiliary work proofs](../bch-auxpow.md)).
+   merge-mines, the exact empty commitment if none. It is output 0, before
+   the donation ([Auxiliary work proofs](../bch-auxpow.md)).
 5. **Padding and share commitment,** zero-value outputs that tie the share to
    this coinbase ([Share commitments](../sharechain/share-commitments.md)).
 

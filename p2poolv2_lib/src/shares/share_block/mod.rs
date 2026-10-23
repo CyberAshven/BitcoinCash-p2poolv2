@@ -12,6 +12,7 @@ use crate::shares::coinbase_proof::{
     CoinbaseProof, MAX_COINBASE_MERKLE_BRANCH_LENGTH, maximum_merkle_branch_length,
 };
 use crate::shares::genesis;
+use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::sim_overrides;
 use bitcoin::consensus::encode::Error::ParseFailed;
@@ -244,6 +245,28 @@ impl ShareHeader {
     pub fn meets_bitcoin_difficulty(&self) -> bool {
         Target::from_compact(self.bitcoin_header.bits).is_met_by(self.bitcoin_header.block_hash())
     }
+
+    /// The merge-mining commitment at output 0 of this share's Bitcoin Cash
+    /// coinbase: the one a Job Declaration miner declared, or the exact empty
+    /// commitment every pool-built job carries. Peers rebuild output 0 from
+    /// it byte for byte. A Bitcoin share has no such output and reads as
+    /// empty.
+    pub fn merge_mining_commitment(&self) -> MergeMiningCommitment {
+        self.bch_coinbase
+            .as_ref()
+            .map_or(MergeMiningCommitment::EMPTY, |coinbase| {
+                coinbase.merge_mining
+            })
+    }
+}
+
+/// True for a token share: one whose merge-mining v2 commitment is anything
+/// but the exact empty one (a zero root, `h = 0` and salt 0). A no-token
+/// share pays every miner directly; a token share keeps its coinbase small
+/// enough for a token claim (`docs/architecture/bch-hybrid-payouts.md`,
+/// 3.1).
+pub fn share_has_token_commitment(header: &ShareHeader) -> bool {
+    !header.merge_mining_commitment().is_empty()
 }
 
 impl ShareHeader {
@@ -738,6 +761,32 @@ mod tests {
         block_share.header.bitcoin_header =
             bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest).header;
         assert!(block_share.is_bitcoin_block());
+    }
+
+    /// A share is a token share exactly when its commitment is not the
+    /// exact empty one: pool-built shares and declared shares with the empty
+    /// commitment are no-token shares.
+    #[test]
+    fn token_share_test_reads_the_exact_empty_commitment() {
+        let mut header = TestShareBlockBuilder::new().build().header;
+        assert!(!share_has_token_commitment(&header));
+        assert_eq!(
+            header.merge_mining_commitment(),
+            MergeMiningCommitment::EMPTY
+        );
+        let mut declared = crate::shares::bch_coinbase::BchCoinbase {
+            prefix: vec![0x51],
+            merge_mining: MergeMiningCommitment::empty(),
+        };
+        header.bch_coinbase = Some(declared.clone());
+        assert!(!share_has_token_commitment(&header));
+        declared.merge_mining = MergeMiningCommitment {
+            root: [0x01; 32],
+            height: 0,
+            salt: 0,
+        };
+        header.bch_coinbase = Some(declared);
+        assert!(share_has_token_commitment(&header));
     }
 
     #[test]

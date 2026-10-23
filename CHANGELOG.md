@@ -30,6 +30,11 @@ chain's rules on Bitcoin Cash and Bitcoin, not Bitcoin Cash consensus:
 Bitcoin Cash protocol strings carry `uncle-once` after `payout-cap11`, and
 the store format changes, so nodes start from a new store.
 
+The approved Bitcoin Cash share-chain rule batch (owner's OK, 2026-10-23),
+one flag day on a fresh share chain. It changes P2Pool's own share-chain
+rules and the coinbase P2Pool builds, not Bitcoin Cash consensus. Builder A's
+part: merge-mining common format v2 with the ASERT header check.
+
 Synced with upstream P2Poolv2 through `61810c56` (its v0.16.2). The fork
 keeps version `0.0.1-alpha`. The sync itself leaves Bitcoin Cash genesis
 shares, protocol strings, the PPLNS window and maturity, the ASERT parent
@@ -132,6 +137,27 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
+- Merge-mining common format v2 (share-chain rule, audit A16 and A15): every
+  Bitcoin Cash coinbase carries the 53-byte `OP_RETURN "CTMM" 02 root h salt`
+  commitment as output 0, the exact empty commitment (zero root, `h = 0`,
+  salt 0) on pool-built jobs. The share header carries a declared job's
+  root, `h` and salt, and peers rebuild output 0 byte for byte. Format
+  checks refuse `h` above 16 and a zero root with any other `h` or salt.
+  `shares::auxpow` builds the salted SHA-256 tree (at most 16 tokens) and
+  encodes and verifies `AuxProof` v2 (coinbase branch `d ≤ 25`). P2Pool
+  matches Pickaxe's golden vectors byte for byte (pickaxe-miner PR #70).
+  `share_has_token_commitment` tells token shares from no-token shares. The
+  old `fabe6d6d` output and Namecoin slots are gone; `p2poolv2_cli
+  bch-auxpow` builds and verifies the new format. The experimental SAFA
+  covenant still verifies v1 proofs and must be ported before issuance.
+- ASERT header check (share-chain rule for token shares): `shares::bch_asert`
+  computes BCH's aserti3-2d exactly as BCHN's `pow.cpp` does, with BCHN's
+  mainnet and chipnet/testnet4 anchors. A token share's bitcoin header, and
+  a proof's parent header, must carry nBits within `computed / 2` to
+  `computed × 1.05` of ASERT's target at its BIP34 height on mainnet, and
+  `computed / 8` to `computed × 1.05` or the proof-of-work limit on test
+  networks. Tested on all 14,000 lines of the aserti3-2d specification's
+  vectors and on real mainnet and chipnet headers.
 - Coinbase budget on Bitcoin Cash (share-chain consensus, decision 14): a
   coinbase pays at most 11 PPLNS payout outputs (`BCH_MAX_COINBASE_PAYOUTS`)
   holding at most 374 bytes (`BCH_MAX_PAYOUT_OUTPUT_BYTES`), and no payout

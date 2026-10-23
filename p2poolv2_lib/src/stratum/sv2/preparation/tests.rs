@@ -26,9 +26,9 @@ fn full_preparation_matches_pplns_with_selected_fee_revenue() {
         .mining_job_token([0x11; 32], prepared.template().curtime)
         .unwrap();
     let aux = MergeMiningCommitment {
-        merkle_root: [0x77; 32],
-        tree_size: 2,
-        nonce: 9,
+        root: [0x77; 32],
+        height: 1,
+        salt: 9,
     };
     let commitment = ShareCommitment::from_mining_job_token(
         &token,
@@ -71,7 +71,7 @@ fn full_preparation_matches_pplns_with_selected_fee_revenue() {
         value
     );
     assert_eq!(
-        MergeMiningCommitment::from_output(&coinbase.output[coinbase.output.len() - 3]).unwrap(),
+        MergeMiningCommitment::from_output(&coinbase.output[0]).unwrap(),
         aux
     );
 }
@@ -95,9 +95,9 @@ fn coinbase_only_preparation_preserves_pplns_and_aux_commitment() {
         .mining_job_token([0x11; 32], prepared.template().curtime)
         .unwrap();
     let aux = MergeMiningCommitment {
-        merkle_root: [0x77; 32],
-        tree_size: 2,
-        nonce: 9,
+        root: [0x77; 32],
+        height: 1,
+        salt: 9,
     };
     let commitment = ShareCommitment::from_mining_job_token(
         &token,
@@ -140,7 +140,7 @@ fn coinbase_only_preparation_preserves_pplns_and_aux_commitment() {
         value
     );
     assert_eq!(
-        MergeMiningCommitment::from_output(&coinbase.output[coinbase.output.len() - 3]).unwrap(),
+        MergeMiningCommitment::from_output(&coinbase.output[0]).unwrap(),
         aux
     );
 }

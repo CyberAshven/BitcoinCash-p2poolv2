@@ -39,8 +39,10 @@ checks BCHN's, and still asks BCHN for the height each template builds on
 
 **Job builder.** Turns each template into a mining job. The coinbase pays
 miners by the PPLNS window over the share chain, after the donation and the
-operator fee. It also carries the merge-mining output, a padding output and
-the share commitment, and every job commits to the current share chain tip
+operator fee. It also carries the merge-mining commitment as output 0 (the
+exact empty one on pool-built jobs; see [Auxiliary work proofs](bch-auxpow.md)),
+a padding output and the share commitment, and every job commits to the
+current share chain tip
 (see [Share commitments](sharechain/share-commitments.md)). Bitcoin Cash
 limits a coinbase scriptSig to 100 bytes (`MAX_COINBASE_SCRIPTSIG_SIZE` in
 BCHN's `src/consensus/consensus.h`). Today the builder also holds every

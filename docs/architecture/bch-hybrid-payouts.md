@@ -144,8 +144,10 @@ coinbase plus the share's own overhead, instead of a fixed 200 KiB.
 ### Format v2 in brief
 
 Agreed between the P2Pool and Pickaxe sessions and approved by the owner on
-2026-10-23. It is not yet in this repository (the current code still emits
-the older `fabe6d6d` output, `shares/merge_mining.rs`).
+2026-10-23. Implemented in `shares/merge_mining.rs` (output 0) and
+`shares/auxpow.rs` (the tree and `AuxProof` v2), with the ASERT header check
+in `shares/bch_asert.rs`; P2Pool matches Pickaxe's golden vectors byte for
+byte. See [Auxiliary work proofs](../bch-auxpow.md).
 
 ```text
 output 0, 53 bytes: value 0 (8) | 2c | 6a 2a | "CTMM" | 02 | root (32) | h (1) | salt (4, LE)

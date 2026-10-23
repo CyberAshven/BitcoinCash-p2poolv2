@@ -5,7 +5,7 @@
 use crate::accounting::OutputPair;
 use crate::accounting::payout::coinbase_budget::{BCH_MAX_PAYOUT_OUTPUT_BYTES, P2PKH_OUTPUT_BYTES};
 use crate::shares::bch_coinbase::BchCoinbase;
-use crate::shares::merge_mining::{AUXPOW_COMMITMENT_LENGTH, MergeMiningCommitment};
+use crate::shares::merge_mining::{MERGE_MINING_OUTPUT_LENGTH, MergeMiningCommitment};
 use crate::shares::transactions::coinbase::BIP141_COMMITMENT_HEADER;
 use crate::shares::witness_commitment::{WITNESS_COMMITMENT_LENGTH, WitnessCommitment};
 use crate::stratum::session::{EXTRANONCE1_SIZE, EXTRANONCE2_SIZE};
@@ -60,7 +60,7 @@ pub(crate) const SHA256_BLOCK_SIZE: usize = 64;
 /// another pool and is still to be measured on this pool's devices; see
 /// `docs/architecture/payout-distribution.md`, "Bitcoin Cash coinbase budget".
 /// `BCH_MAX_COINBASE_PAYOUTS` is sized so the largest coinbase this fork
-/// builds stays within it (782 bytes).
+/// builds stays within it (780 bytes).
 ///
 /// It also keeps a merge-mining claim small: a token covenant that carries
 /// the whole coinbase, the 80-byte header and a merkle branch of at most
@@ -83,9 +83,8 @@ const MAX_COINBASE_SCRIPT_SIG_BYTES: usize = 100;
 /// length and a 42-byte script for a 40-byte witness program.
 const MAX_ADDRESS_OUTPUT_BYTES: usize = 8 + 1 + 2 + 40;
 
-/// The merge-mining output: an 8-byte value, a 1-byte script length, then
-/// `OP_RETURN`, a push opcode and the commitment.
-const MERGE_MINING_OUTPUT_BYTES: usize = 8 + 1 + 2 + AUXPOW_COMMITMENT_LENGTH;
+/// The merge-mining output 0 (`MergeMiningCommitment::output`): 53 bytes.
+const MERGE_MINING_OUTPUT_BYTES: usize = MERGE_MINING_OUTPUT_LENGTH;
 
 /// The largest padding output (`padding_output`): 63 bytes of padding.
 const MAX_PADDING_OUTPUT_BYTES: usize = 8 + 1 + 2 + (SHA256_BLOCK_SIZE - 1);
@@ -96,7 +95,7 @@ const COMMITMENT_OUTPUT_BYTES: usize = COMMITMENT_TAIL_LENGTH - LOCKTIME_LENGTH;
 /// The largest Bitcoin Cash coinbase this fork builds, less its PPLNS payout
 /// outputs: the transaction fields, the largest scriptSig, the donation (a
 /// P2PKH output by consensus), a fee output of any address type, the
-/// merge-mining output, the largest padding and the commitment. 408 bytes.
+/// merge-mining output, the largest padding and the commitment. 406 bytes.
 pub(crate) const MAX_BCH_COINBASE_BYTES_BESIDE_PAYOUTS: usize = COINBASE_TRANSACTION_FIELD_BYTES
     + MAX_COINBASE_SCRIPT_SIG_BYTES
     + P2PKH_OUTPUT_BYTES
@@ -298,28 +297,25 @@ pub(crate) fn build_bitcoin_coinbase_transaction(
     )
 }
 
-/// Put the Bitcoin Cash merge-mining output, if any, among the outputs built
-/// so far: today after the payouts (and before the padding and commitment
-/// outputs `append_commitment_outputs` adds last).
+/// Put the Bitcoin Cash merge-mining commitment, if any, at output 0, before
+/// every payout, as merge-mining format v2 requires: a token covenant finds
+/// it right after the coinbase's fixed-shape head without a search.
 ///
-/// The one place the builder decides where the merge-mining output sits, so
-/// the merge-mining format can move it, to output 0 for instance, without
-/// touching the payouts. The coinbase budget counts it by size
-/// (`MAX_BCH_COINBASE_BYTES_BESIDE_PAYOUTS`), not by position, and the share
-/// commitment output stays last with its padding wherever it goes. Moving
-/// it also moves where `validate_custom_job` reads a declared job's
-/// merge-mining output (third from last today).
+/// The one place the builder decides where the merge-mining output sits.
+/// The share commitment output stays last with its padding
+/// (`append_commitment_outputs`), and `validate_custom_job` reads a declared
+/// job's commitment from output 0.
 fn place_merge_mining_output(
     outputs: &mut Vec<TxOut>,
     merge_mining: Option<MergeMiningCommitment>,
 ) {
     if let Some(commitment) = merge_mining {
-        outputs.push(commitment.output());
+        outputs.insert(0, commitment.output());
     }
 }
 
 /// Build a coinbase, optionally adding the Bitcoin Cash merge-mining output
-/// (`place_merge_mining_output`) before the share-commitment padding.
+/// (`place_merge_mining_output`) at output 0.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_coinbase(
     version: Version,
@@ -1513,7 +1509,7 @@ mod tests {
         prefix.resize(88, 0x42);
         let declared = BchCoinbase {
             prefix,
-            merge_mining: MergeMiningCommitment::reserved(),
+            merge_mining: MergeMiningCommitment::empty(),
         };
 
         let coinbase = build_declared_coinbase(
@@ -1544,7 +1540,7 @@ mod tests {
             Some(sha256::Hash::all_zeros()),
             0,
             None,
-            Some(MergeMiningCommitment::reserved()),
+            Some(MergeMiningCommitment::empty()),
         )
         .unwrap();
 

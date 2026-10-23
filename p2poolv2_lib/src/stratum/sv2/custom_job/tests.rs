@@ -31,15 +31,22 @@ fn full_job_uses_declared_transactions_and_proportional_fee_revenue() {
     let block = block.unwrap();
     assert_eq!(block.txdata[1], selected);
     let outputs = &block.txdata[0].output;
-    assert_eq!(outputs[0].value.to_sat(), 1_250_000_001);
-    assert_eq!(outputs[1].value.to_sat(), 3_750_000_003);
+    // The declared commitment is output 0, before the payouts.
+    assert_eq!(
+        MergeMiningCommitment::from_output(&outputs[0])
+            .unwrap()
+            .root,
+        [0x77; 32]
+    );
+    assert_eq!(outputs[1].value.to_sat(), 1_250_000_001);
+    assert_eq!(outputs[2].value.to_sat(), 3_750_000_003);
     assert_eq!(
         job.share_commitment
             .unwrap()
             .bch_coinbase
             .unwrap()
             .merge_mining
-            .merkle_root,
+            .root,
         [0x77; 32]
     );
 }
@@ -113,8 +120,9 @@ fn private_job_rejects_diverted_pplns_payment() {
         test_bch_custom_job(prepared, token, vec![], false, 5_000_000_000);
     let mut request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
     let mut outputs: Vec<TxOut> = deserialize(request.coinbase_tx_outputs.as_bytes()).unwrap();
-    outputs[0].value += Amount::from_sat(1);
-    outputs[1].value -= Amount::from_sat(1);
+    // Output 0 is the merge-mining commitment; the payouts follow it.
+    outputs[1].value += Amount::from_sat(1);
+    outputs[2].value -= Amount::from_sat(1);
     let changed_outputs = serialize(&outputs);
     request.coinbase_tx_outputs = B064K::new(&changed_outputs).unwrap();
     let payout = Address::p2pkh(

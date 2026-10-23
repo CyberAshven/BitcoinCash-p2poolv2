@@ -141,7 +141,7 @@ a full donation (10,000) still skips miner address validation.
   node adds, against the same limit. BCHN fills templates only to
   `-percentblockmaxsize` of the limit (default 50% on mainnet, 100% on
   chipnet) and always leaves 1,000 bytes for the coinbase, which today's
-  coinbase (at most 782 bytes) fits. A coinbase larger than the room BCHN
+  coinbase (at most 780 bytes) fits. A coinbase larger than the room BCHN
   leaves makes the job fail, and the notifier then stops the node; an
   operator paying many miners in the coinbase on a full mempool should keep
   `-percentblockmaxsize` below 100%. Coinbase maturity (100 blocks) is BCHN's
@@ -319,6 +319,9 @@ Observed:
   window; a zero-value AuxPoW `OP_RETURN` (`fabe6d6d`, zero root, size and
   nonce); the padding `OP_RETURN` that aligns the share commitment to a
   SHA256 block, and the share-commitment `OP_RETURN`. Version 2, 303 bytes.
+  (That was the v1 merge-mining output. Since the share-chain rule batch of
+  2026-10-24 the coinbase carries the 53-byte merge-mining v2 commitment as
+  output 0 instead; see [Auxiliary work proofs](bch-auxpow.md).)
 - The PPLNS remainder went to the genesis share's P2PKH, the NUMS key,
   because the genesis share was the only share in the window and regtest
   block difficulty is far below the mini share target. Upstream Bitcoin
@@ -430,7 +433,7 @@ Stratum V2 were added on 2026-10-15. A node started
 with `chain = "bitcoin-cash"` validates BCHN templates, pays CashAddr
 scripts including the donation and fee, records a P2PKH share owner, starts
 from a main or mini P2PKH genesis, handles both local declaration exchanges,
-commits a reserved AuxPoW output, and on regtest builds blocks BCHN accepts
+commits a merge-mining output, and on regtest builds blocks BCHN accepts
 and shares that three nodes accept and relay, and on chipnet shares two
 nodes accept and relay. It is still not a proven production pool: no
 chipnet block has been found through it, and no real ASIC firmware or

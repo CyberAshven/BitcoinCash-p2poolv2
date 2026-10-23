@@ -59,11 +59,10 @@ pub(crate) fn validate_custom_job(
     }
     let outputs: Vec<TxOut> =
         deserialize(request.coinbase_tx_outputs.as_bytes()).map_err(|error| error.to_string())?;
-    let aux_index = outputs
-        .len()
-        .checked_sub(3)
-        .ok_or("missing-commitment-outputs")?;
-    let merge_mining = MergeMiningCommitment::from_output(&outputs[aux_index])?;
+    // Merge-mining format v2 puts the commitment at output 0; the rebuilt
+    // coinbase below must then match every output byte for byte.
+    let merge_mining =
+        MergeMiningCommitment::from_output(outputs.first().ok_or("missing-commitment-outputs")?)?;
     let value = outputs
         .iter()
         .try_fold(0u64, |total, output| {

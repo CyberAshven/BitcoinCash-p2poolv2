@@ -2,12 +2,16 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Offline construction and verification of public BCH auxiliary work proofs.
+//! Offline building and verification of merge-mining v2 commitments and
+//! proofs (`docs/bch-auxpow.md`). Public data only: no node, wallet, keys or
+//! config.
 
-use bitcoin::Target;
-use bitcoin::hashes::sha256d;
+use super::bch_share_address::parse_network;
 use clap::Subcommand;
-use p2poolv2_lib::shares::auxpow::{AuxPowProof, AuxiliaryTree, AuxiliaryWork};
+use p2poolv2_lib::config::BitcoinCashNetwork;
+use p2poolv2_lib::shares::auxpow::{AuxProof, AuxiliaryTree, TokenLeaf};
+use p2poolv2_lib::shares::bch_asert::BchAsert;
+use p2poolv2_lib::shares::merge_mining::MAX_MERGE_MINING_TREE_HEIGHT;
 use serde::Deserialize;
 use serde_json::json;
 use std::error::Error;
@@ -15,61 +19,113 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 
-const MAX_JSON_BYTES: u64 = 1024 * 1024;
+const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Subcommand)]
 pub enum AuxpowCommand {
-    /// Build one coinbase commitment and proofs from {"nonce":0,"work":[...]} JSON
+    /// Build output 0 and each token's branch from {"tokens":[...]} JSON
     Build { file: PathBuf },
-    /// Verify a proof against independently supplied token work and target
+    /// Verify a hex AuxProof v2 for one token whose leaf JSON is given
+    /// separately, as the token's own rules would supply it
     Verify {
-        file: PathBuf,
-        #[arg(long)]
-        chain_id: u32,
-        /// Work hash in Bitcoin display order
-        #[arg(long)]
-        work_hash: sha256d::Hash,
-        /// Full 256-bit target, 64 hexadecimal digits in big-endian order
-        #[arg(long)]
-        target: String,
+        /// File holding the proof's bytes in hex
+        proof: PathBuf,
+        /// File holding the token's leaf fields as JSON
+        token: PathBuf,
+        /// The tallest tree the token allows
+        #[arg(long, default_value_t = MAX_MERGE_MINING_TREE_HEIGHT)]
+        max_height: u8,
+        /// Check the parent header's nBits against this network's ASERT
+        /// (mainnet or chipnet; regtest has no ASERT anchor and skips it)
+        #[arg(long, value_parser = parse_network)]
+        network: Option<BitcoinCashNetwork>,
     },
 }
 
+/// A token leaf's fields: 32-byte values in hex as hashed, and the compact
+/// target as eight hex digits (`"207fffff"`).
 #[derive(Deserialize)]
-struct WorkSelection {
-    nonce: u32,
-    work: Vec<AuxiliaryWork>,
+#[serde(deny_unknown_fields)]
+struct TokenJson {
+    category: String,
+    lock_hash: String,
+    state_hash: String,
+    payout_hash: String,
+    target_bits: String,
+    ext: String,
 }
 
-/// Run a public-data-only command; no node, wallet, keys or config are needed.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TokenSelection {
+    tokens: Vec<TokenJson>,
+}
+
+impl TokenJson {
+    fn leaf(&self) -> Result<TokenLeaf, Box<dyn Error>> {
+        Ok(TokenLeaf {
+            category: hash32(&self.category, "category")?,
+            lock_hash: hash32(&self.lock_hash, "lock_hash")?,
+            state_hash: hash32(&self.state_hash, "state_hash")?,
+            payout_hash: hash32(&self.payout_hash, "payout_hash")?,
+            target_bits: u32::from_str_radix(&self.target_bits, 16)
+                .map_err(|_| "target_bits must be eight hexadecimal digits")?,
+            ext: hash32(&self.ext, "ext")?,
+        })
+    }
+}
+
+fn hash32(text: &str, name: &str) -> Result<[u8; 32], Box<dyn Error>> {
+    hex::decode(text)?
+        .try_into()
+        .map_err(|_| format!("{name} must be 32 bytes of hex").into())
+}
+
+/// Run a public-data-only command.
 pub fn execute(command: &AuxpowCommand) -> Result<(), Box<dyn Error>> {
-    let file = match command {
-        AuxpowCommand::Build { file } | AuxpowCommand::Verify { file, .. } => file,
-    };
-    let bytes = read_bounded(File::open(file)?)?;
     let output = match command {
-        AuxpowCommand::Build { .. } => {
-            let selection: WorkSelection = serde_json::from_slice(&bytes)?;
-            serde_json::to_value(AuxiliaryTree::build(&selection.work, selection.nonce)?)?
+        AuxpowCommand::Build { file } => {
+            let selection: TokenSelection =
+                serde_json::from_slice(&read_bounded(File::open(file)?)?)?;
+            let leaves = selection
+                .tokens
+                .iter()
+                .map(TokenJson::leaf)
+                .collect::<Result<Vec<_>, _>>()?;
+            let tree = AuxiliaryTree::build(&leaves)?;
+            json!({
+                "commitment": {
+                    "root": hex::encode(tree.commitment.root),
+                    "height": tree.commitment.height,
+                    "salt": tree.commitment.salt,
+                },
+                "output": hex::encode(bitcoin::consensus::serialize(&tree.commitment.output())),
+                "tokens": tree.branches.iter().map(|branch| json!({
+                    "category": hex::encode(branch.category),
+                    "slot": branch.slot,
+                    "branch": branch.branch.iter().map(hex::encode).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            })
         }
         AuxpowCommand::Verify {
-            chain_id,
-            work_hash,
-            target,
-            ..
+            proof,
+            token,
+            max_height,
+            network,
         } => {
-            let proof: AuxPowProof = serde_json::from_slice(&bytes)?;
-            let target: [u8; 32] = hex::decode(target)?
-                .try_into()
-                .map_err(|_| "target must contain exactly 32 bytes")?;
+            let proof_hex = String::from_utf8(read_bounded(File::open(proof)?)?)?;
+            let proof = AuxProof::from_bytes(&hex::decode(proof_hex.trim())?)?;
+            let token: TokenJson = serde_json::from_slice(&read_bounded(File::open(token)?)?)?;
             proof.verify(
-                AuxiliaryWork {
-                    chain_id: *chain_id,
-                    hash: *work_hash,
-                },
-                Target::from_be_bytes(target),
+                &token.leaf()?,
+                *max_height,
+                network.and_then(BchAsert::for_network),
             )?;
-            json!({"valid_auxpow": true, "parent_hash": proof.parent_header.block_hash().to_string()})
+            json!({
+                "valid_aux_proof": true,
+                "parent_hash": proof.header.block_hash().to_string(),
+                "coinbase_height": proof.coinbase_height(),
+            })
         }
     };
     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -78,9 +134,9 @@ pub fn execute(command: &AuxpowCommand) -> Result<(), Box<dyn Error>> {
 
 fn read_bounded(reader: impl Read) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut bytes = Vec::with_capacity(4096);
-    reader.take(MAX_JSON_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_JSON_BYTES {
-        return Err("auxiliary work/proof JSON exceeds 1 MiB".into());
+    reader.take(MAX_INPUT_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_INPUT_BYTES {
+        return Err("merge-mining input exceeds 1 MiB".into());
     }
     Ok(bytes)
 }
@@ -95,7 +151,7 @@ mod tests {
     #[test]
     fn build_command_needs_no_config() {
         let cli =
-            Cli::try_parse_from(["p2poolv2_cli", "bch-auxpow", "build", "work.json"]).unwrap();
+            Cli::try_parse_from(["p2poolv2_cli", "bch-auxpow", "build", "tokens.json"]).unwrap();
         assert!(cli.config.is_none());
         assert!(matches!(
             cli.command,
@@ -106,20 +162,63 @@ mod tests {
     }
 
     #[test]
-    fn verify_command_requires_independent_work_and_target() {
+    fn verify_command_requires_the_token_independently() {
         assert!(
-            Cli::try_parse_from(["p2poolv2_cli", "bch-auxpow", "verify", "proof.json"]).is_err()
+            Cli::try_parse_from(["p2poolv2_cli", "bch-auxpow", "verify", "proof.hex"]).is_err()
         );
+        let cli = Cli::try_parse_from([
+            "p2poolv2_cli",
+            "bch-auxpow",
+            "verify",
+            "proof.hex",
+            "token.json",
+            "--network",
+            "chipnet",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::BchAuxpow {
+                command: AuxpowCommand::Verify {
+                    max_height: 16,
+                    network: Some(BitcoinCashNetwork::Chipnet),
+                    ..
+                }
+            })
+        ));
+    }
+
+    /// Pickaxe's token A from the merge-mining v2 golden vectors.
+    #[test]
+    fn token_json_gives_the_golden_leaf() {
+        let token: TokenJson = serde_json::from_value(json!({
+            "category": "11".repeat(32),
+            "lock_hash": "953ccfa596a6c6d39e5980194539124fdcff116a571455a212baed811f585ee0",
+            "state_hash": "aa".repeat(32),
+            "payout_hash": "22650758a42ebfd7306e771ad24c442cad795ed9e549392233729f647a2b1be5",
+            "target_bits": "207fffff",
+            "ext": "00".repeat(32),
+        }))
+        .unwrap();
+        assert_eq!(
+            hex::encode(token.leaf().unwrap().hash()),
+            "0ab882d24f8c85b880ca7cfb6f60a7773f377222e84ac28afd14f3ce46bf307a"
+        );
+        let short = TokenJson {
+            category: "11".into(),
+            ..token
+        };
+        assert!(short.leaf().is_err());
     }
 
     #[test]
     fn bounded_read_accepts_the_limit_and_rejects_one_more_byte() {
-        let exact = vec![b' '; MAX_JSON_BYTES as usize];
+        let exact = vec![b' '; MAX_INPUT_BYTES as usize];
         assert_eq!(
             read_bounded(Cursor::new(&exact)).unwrap().len(),
             exact.len()
         );
-        let excessive = vec![b' '; MAX_JSON_BYTES as usize + 1];
+        let excessive = vec![b' '; MAX_INPUT_BYTES as usize + 1];
         assert!(read_bounded(Cursor::new(excessive)).is_err());
     }
 }

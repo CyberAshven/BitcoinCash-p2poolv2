@@ -73,7 +73,7 @@ fn test_full_share_headers_response_fits_max_message_size() {
     header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
     header.bch_coinbase = Some(BchCoinbase {
         prefix: vec![0xff; 88],
-        merge_mining: MergeMiningCommitment::reserved(),
+        merge_mining: MergeMiningCommitment::empty(),
     });
 
     let header_count = MAX_SHARE_HEADER_BATCH_LENGTH;
@@ -104,7 +104,7 @@ fn declared_bch_header_batch_round_trips_a_compressed_25_level_proof() {
         prefix: Builder::new()
             .push_int(header.bitcoin_height as i64)
             .into_bytes(),
-        merge_mining: MergeMiningCommitment::reserved(),
+        merge_mining: MergeMiningCommitment::empty(),
     });
     let branch = vec![TxMerkleNode::all_zeros(); 25];
     header.bitcoin_header.merkle_root =

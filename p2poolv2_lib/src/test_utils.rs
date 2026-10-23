@@ -56,7 +56,7 @@ use crate::pool_difficulty::AsertParent;
 #[cfg(test)]
 use crate::pool_difficulty::MockPoolDifficulty;
 #[cfg(test)]
-use crate::shares::auxpow::{AuxPowProof, AuxiliaryTree, AuxiliaryWork};
+use crate::shares::auxpow::{AuxProof, AuxiliaryTree, TokenLeaf};
 #[cfg(test)]
 use crate::shares::bch_coinbase::BchCoinbase;
 #[cfg(test)]
@@ -117,8 +117,6 @@ use binary_sv2::{B064K, B0255, Deserialize, GetSize, Seq0255, Serialize, U256};
 use bitcoin::TxMerkleNode;
 #[cfg(test)]
 use bitcoin::consensus::{deserialize, serialize};
-#[cfg(test)]
-use bitcoin::hashes::sha256d;
 #[cfg(test)]
 use bitcoin::script::Builder;
 #[cfg(any(test, feature = "test-utils"))]
@@ -605,9 +603,9 @@ pub(crate) fn test_bch_custom_job(
         full,
         value,
         MergeMiningCommitment {
-            merkle_root: [0x77; 32],
-            tree_size: 2,
-            nonce: 9,
+            root: [0x77; 32],
+            height: 1,
+            salt: 9,
         },
     )
 }
@@ -707,18 +705,33 @@ pub(crate) fn test_bch_custom_job_with_aux(
     )
 }
 
-/// A mined regtest parent with two selected auxiliary work commitments.
+/// A mined regtest parent of a declared job committing two tokens at output
+/// 0, and the proof of the first token's win, with that token's leaf. The
+/// token's target is regtest's limit, which the solved header meets.
 #[cfg(test)]
-pub fn test_bch_auxpow() -> (AuxPowProof, AuxiliaryWork) {
-    let work = AuxiliaryWork {
-        chain_id: 1,
-        hash: sha256d::Hash::hash(b"token-A"),
-    };
-    let other = AuxiliaryWork {
-        chain_id: 2,
-        hash: sha256d::Hash::hash(b"token-B"),
-    };
-    let tree = AuxiliaryTree::build(&[work, other], 0).unwrap();
+pub fn test_bch_auxpow() -> (AuxProof, TokenLeaf) {
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        bitcoin::Network::Regtest,
+    )
+    .script_pubkey();
+    let leaf = TokenLeaf::new(
+        [0xa1; 32],
+        &[0x51],
+        [0xa2; 32],
+        payout.as_bytes(),
+        0x207f_ffff,
+        [0; 32],
+    );
+    let other = TokenLeaf::new(
+        [0xb1; 32],
+        &[0x52],
+        [0xb2; 32],
+        payout.as_bytes(),
+        0x207f_ffff,
+        [0; 32],
+    );
+    let tree = AuxiliaryTree::build(&[leaf, other]).unwrap();
     let prepared = test_bch_prepared();
     let token = prepared
         .mining_job_token([1; 32], prepared.template().curtime)
@@ -727,15 +740,15 @@ pub fn test_bch_auxpow() -> (AuxPowProof, AuxiliaryWork) {
     let (mut request, _) =
         test_bch_custom_job_with_aux(prepared, token, vec![], false, value, tree.commitment);
     let request = SetCustomMiningJob::from_bytes(&mut request).unwrap();
-    (
-        AuxPowProof {
-            parent_header: test_bch_solve_custom_job(&request, &[1; 4]),
-            coinbase: test_bch_custom_coinbase(&request, &[1; 4]),
-            coinbase_branch: vec![],
-            auxiliary: tree.proofs[0].clone(),
-        },
-        work,
+    let proof = AuxProof::new(
+        test_bch_solve_custom_job(&request, &[1; 4]),
+        &test_bch_custom_coinbase(&request, &[1; 4]),
+        &[],
+        tree.commitment,
+        &tree.branches[0],
     )
+    .unwrap();
+    (proof, leaf)
 }
 
 /// Disposable BCH mining context; keep the returned directories alive until the test ends.

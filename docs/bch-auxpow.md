@@ -1,164 +1,255 @@
 # BCH auxiliary work proofs
 
-`shares::auxpow` builds the tree for a miner's selected work and verifies an
-individual proof through the full BCH coinbase to the parent header. The
-caller supplies the expected work hash, chain id and target independently.
-The proof cannot choose its own authoritative target. Token issuance and
-covenant state transitions still require a token-specific verifier.
+Every Bitcoin Cash coinbase P2Pool builds carries a merge-mining commitment
+as output 0, in the **merge-mining common format v2** agreed with Pickaxe,
+so both build and check the same bytes. `shares::merge_mining` holds the
+commitment, `shares::auxpow` the token leaves, the tree and `AuxProof` v2,
+and `shares::bch_asert` the ASERT header check. Pickaxe's specification is
+[`docs/merge-mining.md`](https://github.com/CyberAshven/pickaxe-miner/blob/feat/merge-mining-v2/docs/merge-mining.md)
+in pickaxe-miner (PR #70); its golden vectors are P2Pool's unit tests, and
+P2Pool matches them byte for byte (the leaf, the two-token root
+`5b61ecfe…1c38d0`, output 0, the empty commitment and the 224-byte proof).
 
-## Commitment and proof
+This replaces the earlier format, a `fabe6d6d` output after the payouts with
+Namecoin's slot scheme and the whole coinbase in each proof (audit items
+A16 and A15). It is a share-chain rule: it changes the coinbase every BCH
+share carries, not BCH consensus.
 
-The existing zero-value coinbase output is exactly:
+All integers are little-endian. `SHA256` is single SHA-256 and `HASH256`
+double SHA-256. Hashes are written as hashed, never byte-reversed.
 
-```text
-6a 2c fabe6d6d <root:32> <tree_size:u32le> <nonce:u32le>
-```
-
-The tree follows the [merged-mining slot and hash convention](https://en.bitcoin.it/wiki/Merged_mining_specification).
-Leaves are raw double-SHA256 hashes. Hash each pair as `SHA256d(left || right)`;
-reverse the final root bytes for the output. Hash strings in the JSON API
-use Bitcoin display order. This BCH format uses an output; existing Namecoin
-proofs that look in the coinbase scriptSig are not interchangeable with it.
-
-For a chain id, use wrapping 32-bit arithmetic:
+## Output 0
 
 ```text
-slot = nonce * 1103515245 + 12345
-slot = slot + chain_id
-slot = slot * 1103515245 + 12345
-slot = slot % tree_size
+off len value
+0   8   00 00 00 00 00 00 00 00   value 0
+8   1   2c                        script length 44
+9   1   6a                        OP_RETURN
+10  1   2a                        push 42
+11  4   43 54 4d 4d               "CTMM"
+15  1   02                        version
+16  32  root
+48  1   h                         tree height, 0 to 16
+49  4   salt                      u32 LE
 ```
 
-The builder starts at one slot and doubles until all selected ids have
-different slots. Changing the nonce cannot resolve a collision at a fixed
-width. Unused leaves are 32 zero bytes; higher empty subtrees are hashes of
-their children. Sparse construction stores only occupied paths. The same
-selection in a different input order produces the same commitment.
+**The exact empty commitment** is the zero root with `h = 0` and salt 0. It
+says the coinbase merge-mines no token. A zero root with any other `h` or
+salt is not a commitment, and `h` above 16 is not either; P2Pool refuses
+both (`MergeMiningCommitment::validate`).
 
-The local selection limit is 64 work items, each with a distinct chain id.
-The maximum tree width is `2^30`, so a branch has at most 30 siblings. Some
-distinct ids collide at every supported width; the builder returns an error.
-An empty selection produces the reserved zero root, zero size and zero nonce.
-It cannot prove any work.
+Pool-built jobs (Stratum V1 and Stratum V2 standard channels) always carry
+the empty commitment. Only a miner that declares its own coinbase through
+[Job Declaration](bch-job-declaration.md) commits token work. The share
+header carries the declared root, `h` and salt (in its `bch_coinbase`), and
+every peer rebuilds output 0 from them byte for byte when it rebuilds the
+coinbase; a pool-built share's output 0 is rebuilt as the empty
+commitment.
 
-`AuxPowProof` carries the parent header, complete coinbase transaction,
-coinbase Merkle siblings and one auxiliary work branch. Verification requires
-one canonical, unpaid aux output, a coinbase scriptSig of 2 to 100 bytes, no
-witness, at most 25 coinbase siblings, and at most 65,685 coinbase bytes. The
-coinbase transaction id is computed from its bytes; no SHA256 midstate is
-trusted. Both branches must reconstruct their committed roots. The parent's
-hash must meet the caller's target, independently of its advertised `nBits`.
-This checks auxiliary work; full parent-block validity requires a BCH node.
+A share is a **token share** when its commitment is anything but the exact
+empty one (`share_has_token_commitment`), and a **no-token share**
+otherwise. The [hybrid payout](architecture/bch-hybrid-payouts.md) treats
+the two differently.
 
-These Rust proof bounds are not an on-chain script-size guarantee. A token
-adapter must enforce its own standard transaction and VM resource budgets.
-The [2026 P2S rules](https://github.com/bitjson/bch-p2s#unlocking-bytecode-length)
-allow 10,000 bytes of standard unlocking bytecode, including the redeem
-script. The 65,685-byte Rust coinbase limit cannot fit that budget in full;
-the covenant adapter must reject proofs that exceed its own complete spend
-budget rather than relying on the shared verifier's larger transport bound.
+A coinbase's head is fixed-shape, so a covenant finds output 0 without a
+search:
+
+```text
+version (4) | 01 | 00 x 32 | ffffffff | L (1, at most 100) | scriptSig (L) | sequence (4) | output count (1, 1..=0xfc)
+```
+
+Output 0 is `cb[47+L .. 100+L]`.
+
+## The tree
+
+- **Slot:** `u32le(SHA256(0x02 ‖ salt_le4 ‖ category32)[0..4]) mod 2^h`.
+- **Leaf hash:** `SHA256(0x00 ‖ preimage)`, the 169-byte preimage below.
+- **Node:** `SHA256(0x01 ‖ left ‖ right)`. At level `i`, bit `i` of the
+  slot set means the current node is the right child.
+- An empty leaf slot is 32 zero bytes; internal nodes are always hashed
+  from their children. One leaf per token category, at most 16 tokens.
+
+The builder (`AuxiliaryTree::build`) starts at the smallest `h` that holds
+the leaves, tries salts 0 to 65,535 at each `h`, then the next `h`, up to
+16, exactly as Pickaxe's builder does, so the same tokens give the same
+commitment in both. No tokens give the empty commitment. A verifier accepts
+any salt.
+
+Leaf preimage (`TokenLeaf::preimage`):
+
+```text
+off len field
+0   4   "CTML"
+4   1   02
+5   32  category      the token category
+37  32  lock_hash     HASH256(the token baton's locking bytecode)
+69  32  state_hash    token-defined; changes only on a successful claim
+101 32  payout_hash   HASH256(the payout output's locking bytecode)
+133 4   target_bits   the token's compact target, u32 LE
+137 32  ext           token-defined, or 32 zero bytes
+```
+
+## `AuxProof` v2
+
+```text
+off  len    field
+0    4      "CTMP"
+4    1      02
+5    80     header
+85   1      h (at most 16)
+86   4      salt, u32 LE
+90   32h    aux branch, leaf to root
+..   2+n    u16 LE n, then the coinbase head (47 + L bytes)
+..   2+n    u16 LE n, then the coinbase tail (outputs 1.. and the locktime)
+..   1      d (at most 25)
+..   32d    coinbase branch, the coinbase at index 0
+```
+
+Output 0 and the leaf are never carried: the verifier rebuilds the leaf from
+the token's own state and output 0 from the root it folds. The encoding is
+canonical: exact lengths, nothing trailing.
+
+The `d ≤ 25` limit (2^25 transactions) belongs to the proof format, as
+agreed with Pickaxe. P2Pool's own coinbase proofs between share-chain nodes
+are not limited by it: a BCH block deeper than 25 levels is still a valid
+share, it just cannot be token-claimed.
+
+`AuxProof::verify` checks, for a leaf the token's rules supply:
+
+1. the shape limits;
+2. the slot from the category, the salt and `h`, with `h` at most the
+   token's own limit;
+3. the aux branch folds the leaf hash to a root;
+4. output 0 rebuilt from that root, `h` and the salt;
+5. the coinbase head has the fixed shape and the tail holds a locktime;
+6. `HASH256(head ‖ output 0 ‖ tail)`, folded up the coinbase branch, is the
+   header's merkle root;
+7. the header's hash meets the token's target, never the header's own
+   nBits; `target_bits` must be canonical compact (`3 ≤ exp ≤ 32`,
+   `0 < mantissa < 0x800000`);
+8. with a network that has an ASERT anchor, the ASERT header check below.
+
+This checks merge-mined work. It does not check token issuance rules or that
+the parent is a complete valid BCH block; BCHN is the authority on that.
+
+## The ASERT header check
+
+A token would otherwise accept any SHA-256 work whose header passes these
+checks. To tie the header's difficulty to Bitcoin Cash's, the header's
+nBits must be what BCH's aserti3-2d gives at the coinbase's BIP34 height,
+within a band (`BchAsert::check_header_bits`):
+
+- mainnet: `computed / 2 ≤ header_target ≤ computed × 1.05`;
+- test networks: `computed / 8 ≤ header_target ≤ computed × 1.05`, or nBits
+  exactly the proof-of-work limit's (`0x1d00ffff`, a minimum-difficulty
+  block).
+
+`computed` is ASERT's target for a parent at `height - 1` dated with the
+header's own time, which stands in for the parent's (a proof has no parent
+header). A header minted hours after its parent is harder than `computed`,
+hence the wide hard side; a header's time can fall before its parent's only
+a little, hence the narrow easy side. The bands were agreed with Pickaxe.
+
+The arithmetic follows `CalculateASERT` and `GetNextASERTWorkRequired` in
+BCHN's `src/pow.cpp` integer for integer: a truncating 64-bit division for
+the exponent, an arithmetic (flooring) shift for its integer part, BCHN's
+cubic for the fraction, then the clamps. The anchors and half-lives are
+BCHN's chain parameters (`src/chainparams.cpp`):
+
+| Network | Anchor height | Anchor nBits | Anchor parent time | Half-life |
+|---|---|---|---|---|
+| Mainnet | 661,647 | `0x1804dafe` | 1,605,447,844 | 172,800 s |
+| Chipnet and testnet4 | 16,844 | `0x1d00ffff` | 1,605,451,779 | 3,600 s |
+| Scalenet and regtest | no anchor | | | the check is skipped |
+
+Tested against:
+
+- every line of the aserti3-2d specification's twelve test vector runs
+  (14,000 lines), from BCHN's QA assets
+  ([`test_vectors/aserti3-2d`](https://gitlab.com/bitcoin-cash-node/bchn-sw/qa-assets/-/tree/master/test_vectors/aserti3-2d),
+  MIT, vendored unchanged beside `shares/bch_asert.rs`);
+- nine real mainnet and nine real chipnet header pairs, fetched from public
+  Fulcrum servers on 2026-10-23, from the first ASERT blocks to the tips
+  (mainnet 974,001, chipnet 329,001), including chipnet's minimum-difficulty
+  block 300,001: each child carries exactly the nBits ASERT gives from its
+  parent, and passes the header check with only its own header.
+
+**Where P2Pool runs it.** On every proof `AuxProof::verify` checks with a
+network, and on every **token share's** bitcoin header, at the header gates
+(`validate_header_minimum_difficulty`), with the node's
+`bitcoin_cash_network`. A token claim's covenant checks the same band, so a
+token share outside it could not be claimed anyway. No-token shares are not
+checked: BCHN alone judges their blocks. On a test network, a parent dated
+more than about four minutes after the share's header time (one-hour
+half-life, 1.05 band) fails the easy side; such a token share is refused.
 
 ## Offline CLI
 
-No node configuration or wallet is required. Given `work.json`:
+No node configuration or wallet is required. Given `tokens.json`:
 
 ```json
-{
-  "nonce": 0,
-  "work": [
-    {"chain_id": 1, "hash": "609a190c7afc006d9f9b2a0850dc9f9ac283e8da1ee87bf75ac6ce2cdea5ced8"},
-    {"chain_id": 2, "hash": "c26264a2eb4829c73215adf97ae22cf8fb9bf322508bf7f61dbdd9b81abbbf4d"}
-  ]
-}
+{"tokens": [{
+  "category": "1111111111111111111111111111111111111111111111111111111111111111",
+  "lock_hash": "953ccfa596a6c6d39e5980194539124fdcff116a571455a212baed811f585ee0",
+  "state_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "payout_hash": "22650758a42ebfd7306e771ad24c442cad795ed9e549392233729f647a2b1be5",
+  "target_bits": "207fffff",
+  "ext": "0000000000000000000000000000000000000000000000000000000000000000"
+}]}
 ```
 
 ```sh
-p2poolv2_cli bch-auxpow build work.json
-p2poolv2_cli bch-auxpow verify proof.json --chain-id 2 --work-hash c26264a2eb4829c73215adf97ae22cf8fb9bf322508bf7f61dbdd9b81abbbf4d --target 7fffff0000000000000000000000000000000000000000000000000000000000
+p2poolv2_cli bch-auxpow build tokens.json
+p2poolv2_cli bch-auxpow verify proof.hex token.json --network chipnet
 ```
 
-The build output includes the commitment and individual work proofs. The
-verify input is a serialized `AuxPowProof`, including the actual parent and
-coinbase. Each input JSON file is limited to 1 MiB. The hashes in this example
-are synthetic work; the example target is for regtest, not a token policy.
+`build` prints the commitment, output 0 in hex and each token's slot and
+branch. `verify` takes the proof's bytes in hex and one token's leaf fields
+as JSON (the same object as above), with `--max-height` for the token's
+tree limit (16 by default) and `--network` for the ASERT check (regtest
+skips it). Each input file is limited to 1 MiB. The token above is
+Pickaxe's synthetic token A, not a real token.
 
-## SAFA integration target
+## The SAFA covenant: still on the v1 format
+
+The experimental [SAFA AuxPoW variant](../tools/safa-auxpow/README.md)
+verifies the older v1 proof (the whole coinbase, the `fabe6d6d` output and
+Namecoin's slots) inside the BCH VM. It passed a real regtest withdrawal on
+2026-10-16 with that format. It must be ported to v2 before any issuance,
+and its separate checks still apply:
 
 SAFA is the first requested token target. Its
 [author's draft and linked Bitauth template](https://bitcoincashresearch.org/t/safas-a-sha256-asic-minable-automated-token-market/2123)
-check `SHA256d(next NFT baton)` against a difficulty target. The template has
-no parent header, coinbase or inclusion branch arguments. Committing its baton
-hash in BCH does not satisfy that mining rule. The experimental
-[SAFA AuxPoW variant](../tools/safa-auxpow/README.md) supplies that new covenant
-and has passed a real regtest withdrawal. It is not a deployed version of
-the author's token or a final SAFA specification.
-
-The variant retains the draft's baton, market and payout binding, and replaces
-the mining hash check with a bounded AuxPoW check:
-
-1. Validate the current mutable NFT category, continuing covenant, age and
-   target adjustment. Derive the target from that state, with unsigned
-   256-bit hash comparison and explicit compact-target range checks.
-2. Validate the next baton and the recipient script under the SAFA rules.
-   Bind the category, covenant identity, previous baton and next baton to a
-   domain-separated work leaf. This must prevent cross-category, cross-thread
-   and cross-contract replay, and reward redirection.
-3. Derive the expected leaf and chain id inside the covenant, then verify its
-   auxiliary branch, canonical coinbase output, coinbase transaction id,
-   parent Merkle path and parent proof of work against the derived target.
-4. Enforce the token and satoshi accounting in the same spend, including the
-   matching reward category. A successful shared proof alone cannot authorize
-   a withdrawal.
-
-The reference leaf serialization, chain-id assignment, precise rounding and
-output accounting are documented with the covenant. Its 839-byte redeem script
-and complete proof pass standard BCH 2026 VM execution. Tests cover payout
-diversion, replay, wrong targets/categories, malformed branches, market
-preservation, composed invocations and resource limits. Maximum-size Rust
-proofs need not fit a standard covenant spend. Independent review, the draft's
-conflicting virtual-reserve multipliers and a final SAFA policy remain open.
+check `SHA256d(next NFT baton)` against a difficulty target, with no parent
+header, coinbase or inclusion branch. Committing its baton hash in BCH does
+not satisfy that mining rule. The variant keeps the draft's baton, market
+and payout binding and replaces the mining hash check with a bounded
+merge-mining check. It is not a deployed version of the author's token or a
+final SAFA specification. Independent review, the draft's conflicting
+virtual-reserve multipliers and a final SAFA policy remain open.
 
 The linked draft's release and swap scenarios both pass in Libauth
 `3.1.0-next.8`'s standard BCH 2026 VM. This is not a security endorsement:
 the release scenario's hash exceeds its unsigned target but passes the
-script's direct `OP_BIN2NUM` comparison. The variant must append a zero sign
+script's direct `OP_BIN2NUM` comparison. A covenant must append a zero sign
 byte before converting a 32-byte hash to an integer, and test the high-bit
-case. A draft scenario passing alone is insufficient validation.
+case.
 
-## Two-node regtest evidence (2026-10-16)
+A token covenant must also enforce its own standard transaction and VM
+budgets: the [2026 P2S rules](https://github.com/bitjson/bch-p2s#unlocking-bytecode-length)
+allow 10,000 bytes of standard unlocking bytecode, including the redeem
+script, and a v2 proof carries the whole coinbase but output 0.
 
-The opt-in JD test passed against two connected BCHN 29.2.0 nodes. Both nodes
-accepted these blocks; each coinbase paid 2,500,000,219 satoshis, including
-219 satoshis in fees:
+## Regtest evidence, v1 format (2026-10-16)
 
-| Declaration | Height | Selected work items | Block hash |
-|---|---|---|---|
-| Full-Template | 207 | 2 | `076b69a0f410cd892e12894c2a6788df9090863c26fe4e6ac53f904b66e7bb9e` |
-| Coinbase-Only | 208 | 1 | `3f97953b75a2644d91ab3fffcf70e877de886ceeb54e88463fdb5e322e4d5bef` |
-
-Both work proofs reconstruct the first block's aux root. The next job selects
-only the second item and changes the root and nonce. Its private transaction
-was absent from both mempools until the client broadcast the complete block.
-Each emitted coinbase proof and full auxiliary proof verifies; BCHN still
-rejects an extra satoshi of coinbase value. The test prints public proof JSON
-for offline verification. These are synthetic auxiliary work hashes, not SAFA
-withdrawals. See [the JD test setup](bch-job-declaration.md#two-node-bchn-regtest-check).
-
-The built offline CLI verified both exported proofs, reproduced the independent
-two-leaf root above, and rejected a wrong chain id and a target of one.
-
-## SAFA covenant withdrawal (2026-10-16)
-
-The same JD test then used work derived from an actual regtest SAFA-variant
-baton. Both nodes accepted Full-Template block 280 with two work items and
-private Coinbase-Only block 281 with just SAFA. Both exported proofs passed
-the existing Rust verifier and the covenant VM.
-
-A mature baton spent using the private proof, continuing its mutable NFT
-with 419,999,000 tokens and paying 1,000 tokens to the committed recipient.
-Both BCHN nodes accepted the withdrawal in block 282. BCHN rejected a copy
-with an altered Merkle sibling. The full transaction, hashes, 1,266-byte
-scriptSig and reproducible setup are in the
-[variant's evidence record](../tools/safa-auxpow/README.md#regtest-evidence-and-reproduction).
-This demonstrates the experimental covenant's regtest issuance path; final
-SAFA compatibility and chipnet issuance remain separate checks.
+Before v2, the opt-in Job Declaration test passed against two connected
+BCHN 29.2.0 nodes with the v1 output. Both nodes accepted Full-Template
+block 207 (`076b69a0…7bb9e`, two work items) and Coinbase-Only block 208
+(`3f97953b…d5bef`, one item); each coinbase paid 2,500,000,219 satoshis,
+including 219 satoshis in fees, and every exported proof verified. A SAFA
+withdrawal using such a proof was accepted by both nodes in block 282; BCHN
+rejected a copy with an altered merkle sibling. See
+[the JD test setup](bch-job-declaration.md#two-node-bchn-regtest-check) and
+the [variant's evidence record](../tools/safa-auxpow/README.md#regtest-evidence-and-reproduction).
+The same opt-in test now builds and verifies v2 proofs; it has not been
+rerun against BCHN since the change.

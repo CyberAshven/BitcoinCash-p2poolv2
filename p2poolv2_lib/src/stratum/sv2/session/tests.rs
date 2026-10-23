@@ -12,7 +12,7 @@ fn registry() -> Arc<Mutex<JobRegistry>> {
     cache.set_prepared(test_bch_prepared());
     Arc::new(Mutex::new(JobRegistry::new(
         cache,
-        Some(MergeMiningCommitment::reserved()),
+        Some(MergeMiningCommitment::empty()),
     )))
 }
 
@@ -442,7 +442,7 @@ fn coinbase_only_keeps_transactions_private_and_rejects_declare() {
     cache.set(pool);
     let shared = Arc::new(Mutex::new(JobRegistry::new(
         cache,
-        Some(MergeMiningCommitment::reserved()),
+        Some(MergeMiningCommitment::empty()),
     )));
 
     let mut declaration = Sv2Connection::new(Arc::clone(&shared));

@@ -30,13 +30,15 @@ Full-Template success rotates the random bytes without changing the terms.
 
 The miner supplies its payout address, BCH share owner and selected template
 revenue when constructing the share commitment. The BCH descriptor binds the
-raw scriptSig prefix and auxiliary root/tree-size/nonce. The prefix begins
+raw scriptSig prefix and the merge-mining v2 commitment (root, tree height
+`h` and salt; see [Auxiliary work proofs](bch-auxpow.md)). The prefix begins
 with the canonical height push and leaves room for the channel's complete
 12-byte extranonce within the 100-byte scriptSig limit. Coinbase version is
 2, sequence is `0xfffffffe`, and locktime is `height - 1`. Output order is
-the exact PPLNS outputs, one zero-value aux commitment, canonical padding,
+the 53-byte merge-mining commitment as output 0 (the exact empty commitment
+when no token is merge-mined), the exact PPLNS outputs, canonical padding,
 then the share commitment. Arbitrary extra outputs and output reordering
-are rejected. Existing legacy jobs retain their original encoding.
+are rejected.
 
 Full-Template clients declare the serialized coinbase prefix and suffix
 around that extranonce, reveal all non-coinbase transactions, then present
@@ -64,11 +66,12 @@ registry, eight pending declarations per connection, 25 Merkle siblings,
 SV2's 65,535-byte coinbase-output field and 16 MiB frame limit. All revealed
 transactions currently arrive in one response; larger declarations require
 transaction-cache negotiation before increasing those limits. The shared
-[auxiliary work verifier](bch-auxpow.md) checks inclusion through the full
-coinbase and parent header. An experimental SAFA covenant now verifies that
-proof and its own issuance rules in a real regtest spend. Other assets need
-their own covenant adapters; choosing an aux root alone cannot authorize
-their issuance.
+[auxiliary work verifier](bch-auxpow.md) checks a merge-mining v2 proof:
+the coinbase around output 0, its branch to the parent header, the token's
+target and the ASERT format check of the parent's nBits. The experimental
+SAFA covenant verified the older v1 proof in a real regtest spend and must
+be ported to v2 before any issuance. Other assets need their own covenant
+adapters; choosing an aux root alone cannot authorize their issuance.
 
 Protocol references: [SV2 Mining Protocol](https://stratumprotocol.org/specification/05-mining-protocol/)
 and [SV2 Job Declaration Protocol](https://stratumprotocol.org/specification/06-job-declaration-protocol/).
@@ -237,7 +240,8 @@ features and warnings denied. Formatting and whitespace checks passed.
 `token` (hex), `payout` (CashAddr), `share_owner` (the independently specified BCH
 share address), `height`, `nbits` (integer compact bits), `previous_hash` (BCH RPC
 display order), `coinbase_value` (satoshis), `script_prefix` (hex), and `auxiliary`
-(`merkle_root` as 32 byte integers, `tree_size`, `nonce`). It receives no RPC
+(`root` as 32 byte integers, `height` and `salt`, the merge-mining v2
+commitment). It receives no RPC
 credentials, private keys or transaction bytes.
 
 The helper requires the current mining-base anchor and BCH template tip, then

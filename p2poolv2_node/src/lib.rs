@@ -407,7 +407,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         port,
         pool_transactions: pool_transactions.clone(),
         merge_mining: match share_chain {
-            Chain::BitcoinCash => Some(MergeMiningCommitment::reserved()),
+            Chain::BitcoinCash => Some(MergeMiningCommitment::empty()),
             Chain::Bitcoin => None,
         },
         authority: stratum_config.sv2_authority(),

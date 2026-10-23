@@ -281,15 +281,15 @@ unchanged.
 
 - `BCH_COINBASE_BYTE_BUDGET` = 784 bytes, the coinbase cited in #668. It is
   evidence from another pool, not a measurement of this one's devices.
-- The largest coinbase this fork builds, other than its payouts, is 408
+- The largest coinbase this fork builds, other than its payouts, is 406
   bytes: 51 bytes of transaction fields (version, input count, outpoint,
   script length, sequence, output count and locktime), a 100-byte scriptSig
   (BCH's limit; a declared prefix is at most 88 bytes plus the 12-byte
   extranonce), the donation (34), a fee output of any address type (at most
-  51, a 40-byte witness program), the merge-mining output (55), the padding
-  output (at most 74) and the commitment output (43). That leaves 376 bytes,
+  51, a 40-byte witness program), the merge-mining output (53), the padding
+  output (at most 74) and the commitment output (43). That leaves 378 bytes,
   11 P2PKH outputs (374): hence `C` = 11 and `B` = 11 * 34, and the largest
-  Bitcoin Cash coinbase is 782 bytes. A compile-time assertion keeps the sum
+  Bitcoin Cash coinbase is 780 bytes. A compile-time assertion keeps the sum
   within the budget.
 - **Claimability.** A merge-mining (AuxPoW) claim by a token covenant
   carries the whole BCH coinbase, the 80-byte header and the coinbase's
@@ -299,10 +299,10 @@ unchanged.
   10,000 bytes, which keeps the claim's hashing cost low too.
 - **Output positions.** The bound counts the merge-mining output by size,
   not position. Where it sits is decided in one place
-  (`place_merge_mining_output` in `stratum/work/coinbase.rs`), today after
-  the payouts; the merge-mining format may move it to output 0 without
-  touching this rule. The padding and share-commitment outputs stay last,
-  the commitment output the very last.
+  (`place_merge_mining_output` in `stratum/work/coinbase.rs`): output 0, as
+  merge-mining format v2 requires ([Auxiliary work proofs](../bch-auxpow.md)).
+  The padding and share-commitment outputs stay last, the commitment output
+  the very last.
 - `B` is part of the rule, not only `C`, because a share header may name any
   address type: a witness-program script decodes as an address and takes up
   to 51 bytes. Honest Bitcoin Cash nodes produce only CashAddr P2PKH and

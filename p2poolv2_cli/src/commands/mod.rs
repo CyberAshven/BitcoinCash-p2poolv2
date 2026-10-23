@@ -157,7 +157,7 @@ pub enum Commands {
         #[arg(short, long, value_parser = commands::bch_share_address::parse_network)]
         network: BitcoinCashNetwork,
     },
-    /// Build or verify BCH auxiliary work proofs offline
+    /// Build or verify BCH merge-mining v2 commitments and proofs offline
     BchAuxpow {
         #[command(subcommand)]
         command: bch_auxpow::AuxpowCommand,

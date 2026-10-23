@@ -443,7 +443,7 @@ impl PreparedNotifyParamsBuilder {
         let dummy_commitment_hash = hashes::sha256::Hash::from_byte_array([0xab_u8; 32]);
 
         let merge_mining = if self.include_merge_mining {
-            Some(crate::shares::merge_mining::MergeMiningCommitment::reserved())
+            Some(crate::shares::merge_mining::MergeMiningCommitment::empty())
         } else {
             None
         };

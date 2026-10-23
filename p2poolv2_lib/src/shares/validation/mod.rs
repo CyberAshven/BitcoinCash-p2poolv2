@@ -17,13 +17,15 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::{
     PAYOUT_DEPTH, WindowError, bitcoin_block_difficulty, coinbase_maturity_for,
 };
 use crate::config::{
-    BITCOIN_CASH_DONATION_PUBKEY_HASH, Chain, MAX_BASIS_POINTS, MAX_BITCOIN_CASH_POOL_CUT,
+    BITCOIN_CASH_DONATION_PUBKEY_HASH, BitcoinCashNetwork, Chain, MAX_BASIS_POINTS,
+    MAX_BITCOIN_CASH_POOL_CUT,
 };
 #[cfg(test)]
 #[mockall_double::double]
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
+use crate::shares::bch_asert::BchAsert;
 use crate::shares::bch_script;
 #[cfg(test)]
 #[mockall_double::double]
@@ -33,7 +35,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::coinbase_proof::CoinbaseProof;
 use crate::shares::share_block::{
     ShareBlock, ShareTransaction, SpendingPrevouts, extract_spending_prevouts,
-    is_terminal_blockhash,
+    is_terminal_blockhash, share_has_token_commitment,
 };
 use crate::shares::share_commitment::ShareCommitment;
 use crate::shares::transactions::coinbase::{
@@ -536,6 +538,10 @@ pub struct DefaultShareValidator {
     /// Bitcoin and the Bitcoin Cash main chain use `MAX_POOL_TARGET`. The mini
     /// chain uses its own easier ceiling so its genesis target is valid.
     target_ceiling: CompactTarget,
+    /// The Bitcoin Cash network's ASERT parameters, for the format check of
+    /// a token share's bitcoin header. `None` on Bitcoin and on regtest,
+    /// which has no ASERT anchor.
+    bch_asert: Option<BchAsert>,
 }
 
 impl DefaultShareValidator {
@@ -562,7 +568,46 @@ impl DefaultShareValidator {
             time_provider,
             chain: Chain::Bitcoin,
             target_ceiling: CompactTarget::from_consensus(MAX_POOL_TARGET),
+            bch_asert: None,
         }
+    }
+
+    /// Select the Bitcoin Cash network whose ASERT parameters check a token
+    /// share's bitcoin header ([`BchAsert::for_network`]). Without one, or
+    /// on regtest, the check is skipped.
+    pub fn with_bitcoin_cash_network(mut self, network: Option<BitcoinCashNetwork>) -> Self {
+        self.bch_asert = network.and_then(BchAsert::for_network);
+        self
+    }
+
+    /// The ASERT format check of a token share's bitcoin header: its nBits
+    /// must be what BCH's aserti3-2d gives at the share's BIP34 height,
+    /// within the band agreed for merge-mining proofs
+    /// ([`BchAsert::check_header_bits`]). A token claim's covenant checks the
+    /// same band, so a token share outside it could not be claimed; the
+    /// share chain refuses it at the header. No-token shares are not
+    /// checked: BCHN alone judges their blocks.
+    fn validate_token_share_asert(
+        &self,
+        share_header: &ShareHeader,
+    ) -> Result<(), ValidationError> {
+        let Some(asert) = self.bch_asert else {
+            return Ok(());
+        };
+        if self.chain != Chain::BitcoinCash || !share_has_token_commitment(share_header) {
+            return Ok(());
+        }
+        asert
+            .check_header_bits(
+                share_header.bitcoin_header.bits,
+                share_header.bitcoin_header.time,
+                share_header.bitcoin_height,
+            )
+            .map_err(|error| {
+                ValidationError::consensus(format!(
+                    "Token share's bitcoin header fails the ASERT format check: {error}"
+                ))
+            })
     }
 
     /// Select the chain whose share owner this validator accepts.
@@ -1247,7 +1292,7 @@ impl DefaultShareValidator {
                     ValidationError::consensus(format!("Malformed bitcoin coinbase: {error}"))
                 })?;
             let merge_mining = (self.chain == Chain::BitcoinCash)
-                .then(crate::shares::merge_mining::MergeMiningCommitment::reserved);
+                .then(crate::shares::merge_mining::MergeMiningCommitment::empty);
             build_coinbase(
                 Version::TWO,
                 &expected_outputs,
@@ -1486,7 +1531,7 @@ impl ShareValidator for DefaultShareValidator {
             )));
         }
 
-        Ok(())
+        self.validate_token_share_asert(share_header)
     }
 
     /// Validations run in parallel that don't require the chain context.
@@ -1811,6 +1856,58 @@ mod tests {
 
     fn validator_with(pool_difficulty: PoolDifficulty) -> DefaultShareValidator {
         DefaultShareValidator::new(pool_difficulty)
+    }
+
+    /// A token share's bitcoin header must pass the ASERT format check on a
+    /// network with an anchor; a no-token share and regtest are not checked.
+    /// The header is real chipnet block 300,002 (bits `0x1c34e28b`).
+    #[test]
+    fn token_share_bitcoin_header_must_pass_the_asert_format_check() {
+        let chipnet_block: bitcoin::block::Header = bitcoin::consensus::deserialize(
+            &hex::decode(concat!(
+                "00000020c5d7d2b0ceec4b1abd7e0959658bf74bce9d1612964b22006ff81557",
+                "00000000d60d4fce09b3478d9d674fb1066d99c43f785fe7227145d792f64c63",
+                "00e9c729f383d1698be2341c38f1a94a"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.bitcoin_header = chipnet_block;
+        header.bitcoin_height = 300_002;
+        header.bch_coinbase = Some(crate::shares::bch_coinbase::BchCoinbase {
+            prefix: Builder::new().push_int(300_002).into_bytes(),
+            merge_mining: MergeMiningCommitment {
+                root: [0x01; 32],
+                height: 0,
+                salt: 0,
+            },
+        });
+        let chipnet = validator()
+            .for_chain(Chain::BitcoinCash)
+            .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Chipnet));
+        chipnet.validate_token_share_asert(&header).unwrap();
+
+        // 256 times harder than ASERT gives is outside the band.
+        let mut hard = header.clone();
+        hard.bitcoin_header.bits = CompactTarget::from_consensus(0x1b34_e28b);
+        let error = chipnet.validate_token_share_asert(&hard).unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("ASERT"), "{error}");
+
+        // The same header as a no-token share, or on regtest, is not checked.
+        let mut no_token = hard.clone();
+        no_token.bch_coinbase.as_mut().unwrap().merge_mining = MergeMiningCommitment::empty();
+        chipnet.validate_token_share_asert(&no_token).unwrap();
+        let regtest = validator()
+            .for_chain(Chain::BitcoinCash)
+            .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Regtest));
+        regtest.validate_token_share_asert(&hard).unwrap();
+        // Mainnet's anchor is above this height: refused.
+        let mainnet = validator()
+            .for_chain(Chain::BitcoinCash)
+            .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Mainnet));
+        assert!(mainnet.validate_token_share_asert(&header).is_err());
     }
 
     #[test]
@@ -5601,7 +5698,7 @@ mod tests {
             Some(commitment_hash),
             TEST_COINBASE_NSECS,
             Some(&[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE]),
-            Some(MergeMiningCommitment::reserved()),
+            Some(MergeMiningCommitment::empty()),
         )
         .unwrap();
         share_block.header.bitcoin_header.merkle_root =
@@ -5645,9 +5742,9 @@ mod tests {
                 .push_slice(b"miner")
                 .into_bytes(),
             merge_mining: MergeMiningCommitment {
-                merkle_root: [0x33; 32],
-                tree_size: 4,
-                nonce: 7,
+                root: [0x33; 32],
+                height: 2,
+                salt: 7,
             },
         });
         let mut coinbase = build_declared_coinbase(

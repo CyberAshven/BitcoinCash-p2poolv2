@@ -462,7 +462,8 @@ impl NodeActor {
         let share_validator: Arc<dyn ShareValidator + Send + Sync> = Arc::new(
             DefaultShareValidator::new(pool_difficulty.clone())
                 .for_chain(chain)
-                .with_target_ceiling(target_ceiling),
+                .with_target_ceiling(target_ceiling)
+                .with_bitcoin_cash_network(config.stratum.bitcoin_cash_network),
         );
 
         let node = Node::new(
