@@ -8,7 +8,7 @@ use super::share_block::{MAX_POOL_TARGET, ShareHeader};
 use crate::accounting::CoinbasePayouts;
 #[cfg(test)]
 use crate::accounting::payout::coinbase_budget::bch_split_for_commitment;
-use crate::accounting::payout::coinbase_budget::{PayoutSplit, split_for_share};
+use crate::accounting::payout::coinbase_budget::{BCH_MAX_TX_SIZE, PayoutSplit, split_for_share};
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
 #[cfg(test)]
 #[mockall_double::double]
@@ -188,10 +188,35 @@ pub const BCH_UNCLE_ONCE_RULE_TAG: &str = "uncle-once";
 pub const MAX_FUTURE_TIME_SECS: u64 = 120;
 /// Number of ancestor share headers used to compute median time past.
 pub const MTP_WINDOW: usize = 11;
-/// Maximum size of a share block's body, limited to 200kB: its share
-/// transactions plus the bitcoin coinbase it carries. The header and the
-/// coinbase merkle branch are bounded by their decoders.
+/// Maximum size of a share block's own transactions (its share coinbase and
+/// share transactions), 200 KiB, a number from upstream.
+///
+/// On Bitcoin, upstream's rule, the bitcoin coinbase the share carries counts
+/// towards it too. On Bitcoin Cash the bitcoin coinbase has its own limit,
+/// `BCH_MAX_TX_SIZE`, so a coinbase that pays every miner directly fits
+/// (`BCH_SHARE_BODY_SIZE_LIMIT`). The header and the coinbase merkle branch
+/// are bounded by their decoders.
 pub const BLOCK_TXS_SIZE_LIMIT: u32 = 200 * 1024;
+
+/// Bitcoin Cash: the largest share body, a full 1,000,000-byte coinbase
+/// (BCH's `MAX_TX_SIZE`; a coinbase is never relayed by BCHN on its own, so
+/// the 100,000-byte relay limit never applies to it) plus 200 KiB of share
+/// transactions: 1,204,800 bytes. A share-chain rule
+/// (`bch-hybrid-payouts.md`, 8.1).
+pub const BCH_SHARE_BODY_SIZE_LIMIT: usize = BCH_MAX_TX_SIZE + BLOCK_TXS_SIZE_LIMIT as usize;
+
+/// Protocol tag segment for the Bitcoin Cash share body rule: the bitcoin
+/// coinbase and the share transactions are limited apart, at BCH's
+/// transaction limit and 200 KiB. A node on the combined 200 KiB rejects a
+/// share this node accepts.
+pub const BCH_SHARE_BODY_RULE_TAG: &str = "body-1000000-204800";
+
+/// Protocol tag segment for the Bitcoin Cash payout script rule
+/// (`validate_payout_scripts`): payee, donation and fee scripts are P2PKH,
+/// P2SH20 or P2SH32.
+pub const BCH_PAYOUT_SCRIPT_RULE_TAG: &str = "payee-p2pkh-p2sh20-p2sh32";
+
+const _: () = assert!(BCH_SHARE_BODY_SIZE_LIMIT == 1_204_800);
 /// Maximum number of transactions allowed in a share block
 pub const TXS_COUNT_LIMIT: u32 = 100;
 /// Maximum total BIP141 sigop cost allowed in a Bitcoin share block (matches
@@ -547,8 +572,11 @@ pub trait ShareValidator {
     /// block: the copy is dropped and the hash stays fetchable.
     fn validate_body_matches_header(&self, share: &ShareBlock) -> Result<(), ValidationError>;
 
-    /// Validate that the total size of the share's transactions and its
-    /// bitcoin coinbase is within `BLOCK_TXS_SIZE_LIMIT`.
+    /// Validate the size of the share's body: on Bitcoin, its transactions
+    /// and its bitcoin coinbase together within `BLOCK_TXS_SIZE_LIMIT`; on
+    /// Bitcoin Cash, its transactions within `BLOCK_TXS_SIZE_LIMIT` and the
+    /// bitcoin coinbase within BCH's `MAX_TX_SIZE`
+    /// (`BCH_SHARE_BODY_SIZE_LIMIT` in all).
     ///
     /// The bitcoin coinbase counts because it is carried and buffered with
     /// the block, and a miner can make it as large as a message allows.
@@ -1563,7 +1591,21 @@ impl ShareValidator for DefaultShareValidator {
 
     fn validate_block_size(&self, share: &ShareBlock) -> Result<(), ValidationError> {
         let transactions_size: usize = share.transactions.iter().map(|tx| tx.total_size()).sum();
-        let total_size = transactions_size + share.bitcoin_coinbase.total_size();
+        let coinbase_size = share.bitcoin_coinbase.total_size();
+        if self.chain == Chain::BitcoinCash {
+            if transactions_size > BLOCK_TXS_SIZE_LIMIT as usize {
+                return Err(ValidationError::consensus(format!(
+                    "Share transactions size {transactions_size} exceeds limit of {BLOCK_TXS_SIZE_LIMIT}"
+                )));
+            }
+            if coinbase_size > BCH_MAX_TX_SIZE {
+                return Err(ValidationError::consensus(format!(
+                    "Bitcoin Cash coinbase size {coinbase_size} exceeds BCH's transaction limit of {BCH_MAX_TX_SIZE}"
+                )));
+            }
+            return Ok(());
+        }
+        let total_size = transactions_size + coinbase_size;
         if total_size > BLOCK_TXS_SIZE_LIMIT as usize {
             return Err(ValidationError::consensus(format!(
                 "Block transactions and bitcoin coinbase size {total_size} exceeds limit of {BLOCK_TXS_SIZE_LIMIT}"
@@ -3923,6 +3965,69 @@ mod tests {
             error.to_string().contains("exceeds limit of"),
             "unexpected error: {error}"
         );
+    }
+
+    /// On Bitcoin Cash the bitcoin coinbase has BCH's own transaction limit:
+    /// a coinbase of about 1,000,000 bytes, which pays every one of some
+    /// 29,000 miners directly, fits beside the share's own transactions.
+    #[test]
+    fn bitcoin_cash_accepts_a_coinbase_up_to_bchs_transaction_limit() {
+        let mut share = TestShareBlockBuilder::new()
+            .miner_pubkey("020202020202020202020202020202020202020202020202020202020202020202")
+            .build();
+        let base = share.bitcoin_coinbase.total_size();
+        let old_script = share.bitcoin_coinbase.output[0].script_pubkey.len();
+        // The script's one-byte length becomes five bytes past 65,535.
+        share.bitcoin_coinbase.output[0].script_pubkey =
+            ScriptBuf::from_bytes(vec![0u8; BCH_MAX_TX_SIZE - base + old_script - 4]);
+        assert_eq!(share.bitcoin_coinbase.total_size(), BCH_MAX_TX_SIZE);
+
+        assert!(
+            validator()
+                .for_chain(Chain::BitcoinCash)
+                .validate_block_size(&share)
+                .is_ok()
+        );
+        assert!(validator().validate_block_size(&share).is_err());
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_coinbase_past_bchs_transaction_limit() {
+        let mut share = TestShareBlockBuilder::new()
+            .miner_pubkey("020202020202020202020202020202020202020202020202020202020202020202")
+            .build();
+        share.bitcoin_coinbase.output[0].script_pubkey =
+            ScriptBuf::from_bytes(vec![0u8; BCH_MAX_TX_SIZE]);
+
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_block_size(&share)
+            .unwrap_err();
+        assert!(error.to_string().contains("transaction limit"), "{error}");
+    }
+
+    /// The share's own transactions keep their 200 KiB on Bitcoin Cash.
+    #[test]
+    fn bitcoin_cash_rejects_share_transactions_past_their_limit() {
+        let large_tx = build_large_transaction(BLOCK_TXS_SIZE_LIMIT as usize);
+        let share = TestShareBlockBuilder::new()
+            .miner_pubkey("020202020202020202020202020202020202020202020202020202020202020202")
+            .add_transaction(large_tx)
+            .build();
+
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_block_size(&share)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("Share transactions size"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_bitcoin_cash_share_body_holds_a_full_coinbase_and_the_share_transactions() {
+        assert_eq!(BCH_SHARE_BODY_SIZE_LIMIT, 1_000_000 + 204_800);
     }
 
     #[test]

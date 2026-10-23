@@ -33,9 +33,13 @@ const BLOCK_RECEIVER_CHANNEL_CAPACITY: usize = 8192;
 pub const MAX_PENDING_BLOCKS: usize = 1_024;
 
 /// Most bytes, by consensus encoding, the pending buffer holds before it
-/// evicts the oldest: 32 MiB, at least 160 blocks of the largest size the
-/// admission gate lets through (`BLOCK_TXS_SIZE_LIMIT`, 200 KiB, plus header
-/// and merkle branches).
+/// evicts the oldest: 32 MiB, at least 160 blocks of the largest Bitcoin
+/// share (`BLOCK_TXS_SIZE_LIMIT`, 200 KiB, plus header and merkle branches)
+/// and at least 26 of the largest Bitcoin Cash share
+/// (`BCH_SHARE_BODY_SIZE_LIMIT`, a 1,000,000-byte coinbase and 200 KiB of
+/// share transactions), more than one peer's 16 requests in flight. Honest
+/// Bitcoin Cash shares are far smaller (about 35 KB at 1,000 payees), and a
+/// block evicted early is fetched again.
 pub const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 
 /// How long a block may wait in the pending buffer for its ancestry. An

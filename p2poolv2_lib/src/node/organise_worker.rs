@@ -43,8 +43,12 @@ use tracing::{debug, error, info, warn};
 /// Channel capacity for shares pending organisation.
 ///
 /// Both this and `PENDING_BLOCKS_CAPACITY` hold whole `ShareBlock`s, which
-/// `handle_share_block` bounds at `BLOCK_TXS_SIZE_LIMIT` (200 KB) each, so the
-/// capacities set the worst-case memory of the organise path. They are kept
+/// `handle_share_block` bounds at `BLOCK_TXS_SIZE_LIMIT` (200 KB) each on
+/// Bitcoin and at `BCH_SHARE_BODY_SIZE_LIMIT` (1.2 MB) on Bitcoin Cash, so the
+/// capacities set the worst-case memory of the organise path: about 620 MB
+/// for this channel full of the largest Bitcoin Cash shares, which have
+/// passed validation and so carry valid proof of work. Bounding it in bytes
+/// as well is a follow-up. They are kept
 /// small deliberately: this channel is pure backpressure between the parallel
 /// validation tasks and the serial organise worker, so a deeper queue buys no
 /// throughput -- the organise worker is the bottleneck either way -- and only

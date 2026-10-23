@@ -482,7 +482,11 @@ impl PreparedNotifyParamsBuilder {
             check_bch_coinbase_limit(&coinbase, self.payout_split)?;
         }
 
-        let share_transactions = fit_share_transactions(self.share_transactions, &coinbase);
+        let share_transactions = fit_share_transactions(
+            self.share_transactions,
+            &coinbase,
+            !self.include_merge_mining,
+        );
         let share_witness_root = compute_witness_root(&share_transactions);
 
         let (coinbase1, coinbase2_full) = split_coinbase(&coinbase)?;
@@ -572,17 +576,22 @@ const BITCOIN_COINBASE_SIZE_ALLOWANCE: usize = 64;
 const SHARE_COINBASE_SIZE_ALLOWANCE: usize = 256;
 
 /// Drop share transactions from the end until they fit
-/// `BLOCK_TXS_SIZE_LIMIT` beside the share coinbase and `bitcoin_coinbase`,
-/// which a share block also carries.
+/// `BLOCK_TXS_SIZE_LIMIT` beside the share coinbase and, when it counts
+/// (`coinbase_counts`, Bitcoin), `bitcoin_coinbase`, which a share block also
+/// carries. On Bitcoin Cash the bitcoin coinbase has its own limit
+/// (`BCH_SHARE_BODY_SIZE_LIMIT`).
 fn fit_share_transactions(
     mut share_transactions: Vec<ShareTransaction>,
     bitcoin_coinbase: &bitcoin::Transaction,
+    coinbase_counts: bool,
 ) -> Vec<ShareTransaction> {
-    let budget = (BLOCK_TXS_SIZE_LIMIT as usize).saturating_sub(
-        bitcoin_coinbase.total_size()
-            + BITCOIN_COINBASE_SIZE_ALLOWANCE
-            + SHARE_COINBASE_SIZE_ALLOWANCE,
-    );
+    let carried_coinbase = if coinbase_counts {
+        bitcoin_coinbase.total_size() + BITCOIN_COINBASE_SIZE_ALLOWANCE
+    } else {
+        0
+    };
+    let budget = (BLOCK_TXS_SIZE_LIMIT as usize)
+        .saturating_sub(carried_coinbase + SHARE_COINBASE_SIZE_ALLOWANCE);
     let mut total: usize = share_transactions
         .iter()
         .map(|transaction| transaction.total_size())

@@ -129,9 +129,34 @@ fn share_transactions_past_the_block_size_limit_are_dropped_from_the_end() {
     let kept = fit_share_transactions(
         vec![first.clone(), second.clone(), third],
         &test_coinbase_transaction(1),
+        true,
     );
 
     assert_eq!(kept, vec![first, second]);
+}
+
+/// On Bitcoin Cash a large bitcoin coinbase does not take the share
+/// transactions' room: it has its own limit.
+#[test]
+fn a_bitcoin_cash_coinbase_leaves_the_share_transactions_their_room() {
+    let first = share_transaction_of_size(1, 90_000);
+    let second = share_transaction_of_size(2, 90_000);
+    let large_coinbase = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: Vec::new(),
+        output: vec![TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(vec![0; 500_000]),
+        }],
+    };
+
+    let bitcoin_cash =
+        fit_share_transactions(vec![first.clone(), second.clone()], &large_coinbase, false);
+    let bitcoin = fit_share_transactions(vec![first.clone(), second], &large_coinbase, true);
+
+    assert_eq!(bitcoin_cash.len(), 2);
+    assert!(bitcoin.is_empty());
 }
 
 #[test]
@@ -142,6 +167,7 @@ fn share_transactions_within_the_block_size_limit_are_all_kept() {
     let kept = fit_share_transactions(
         vec![first.clone(), second.clone()],
         &test_coinbase_transaction(1),
+        true,
     );
 
     assert_eq!(kept, vec![first, second]);

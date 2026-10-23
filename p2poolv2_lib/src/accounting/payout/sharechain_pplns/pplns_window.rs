@@ -273,6 +273,12 @@ enum WindowSizing {
     BlockWork { expected_blocks: u128 },
 }
 
+/// Protocol tag segment for weighing Bitcoin Cash shares by exact work
+/// (`WeightUnit::ExactWork`). A node weighing by rounded-down difficulty
+/// builds another coinbase whenever the window holds shares of different
+/// difficulties.
+pub const BCH_WORK_WEIGHT_RULE_TAG: &str = "weight-work";
+
 /// What a share's base weight, before `DIFFICULTY_SCALE` and the uncle
 /// split, counts.
 ///
