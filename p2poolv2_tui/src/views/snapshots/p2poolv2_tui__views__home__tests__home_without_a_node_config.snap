@@ -1,0 +1,16 @@
+---
+source: p2poolv2_tui/src/views/home.rs
+expression: text
+---
++ Home ------------------------------------------------------------------------+
+|A terminal UI for a Bitcoin Cash P2Poolv2 node and the BCHN it mines on.      |
+|                                                                              |
+|Node config              : not set                                            |
+|Pick the node's config.toml in P2Pool Config or Settings. The API and BCHN are|
+|read from it; its network (mainnet or chipnet) is the only switch.            |
+|                                                                              |
+|Up/Down picks a screen, Left/Right a tab, r refreshes, q quits.               |
+|                                                                              |
+|                                                                              |
+|                                                                              |
++------------------------------------------------------------------------------+

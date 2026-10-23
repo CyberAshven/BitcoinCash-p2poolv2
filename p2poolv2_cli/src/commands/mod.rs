@@ -177,6 +177,10 @@ pub enum Commands {
         username: String,
         /// Password (leave empty to auto-generate, or use "-" to prompt)
         password: Option<String>,
+        /// New file that receives an auto-generated password (owner-only;
+        /// never overwritten)
+        #[arg(long, default_value = "api-password.txt")]
+        password_file: std::path::PathBuf,
     },
 }
 
@@ -244,8 +248,12 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         }) => {
             commands::bch_share_address::execute(cash_address.clone(), *network)?;
         }
-        Some(Commands::GenAuth { username, password }) => {
-            commands::gen_auth::execute(username.clone(), password.clone())?;
+        Some(Commands::GenAuth {
+            username,
+            password,
+            password_file,
+        }) => {
+            commands::gen_auth::execute(username.clone(), password.clone(), password_file)?;
         }
         Some(Commands::BchAuxpow { command }) => {
             commands::bch_auxpow::execute(command)?;

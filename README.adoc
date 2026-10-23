@@ -174,6 +174,22 @@ chains is in link:docs/small-miners.md[docs/small-miners.md].
   network. Run them with `docker compose -f docker/docker-compose.metrics.yml up -d`
   or the Ansible `monitoring_p2poolv2` role.
 
+=== Terminal UI
+
+`p2poolv2_tui` is a terminal UI for a Bitcoin Cash node and the BCHN it
+mines on, ported from upstream's https://github.com/p2poolv2/pdm[PDM]:
+BCHN's chain, peers and mempool, the node's shares, miners, found blocks and
+peers with a live feed, and an editor for the node's `config.toml`. Point it
+at that file and it reads the API, BCHN and the network from it:
+
+[,shell]
+----
+cargo build --release -p p2poolv2_tui
+./target/release/p2poolv2_tui --config config.toml
+----
+
+See link:./p2poolv2_tui/README.md[p2poolv2_tui/README.md].
+
 === Share trading
 
 A share's coinbase output on the share chain carries the right to its PPLNS
@@ -234,3 +250,7 @@ link:docs/bch-plan.md[docs/bch-plan.md].
 Files that come from upstream P2Poolv2 keep their notices: either the
 Apache License, Version 2.0 (link:LICENSE-APACHE[LICENSE-APACHE]) or the MIT
 license (link:LICENSE-MIT[LICENSE-MIT]), at your option.
+
+`p2poolv2_tui`, ported from upstream's PDM, is licensed under AGPL-3.0 or
+later, as PDM is (link:p2poolv2_tui/LICENSE[p2poolv2_tui/LICENSE], which
+holds the AGPL-3.0 text).

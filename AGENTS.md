@@ -94,6 +94,7 @@ Never infer architecture from filenames alone. Read the relevant architecture do
 | `p2poolv2_tests` | Integration tests (multi-node P2P, stratum, API) |
 | `p2poolv2_sim` | No-PoW load-test simulation binary (feature-gated with `sim`) |
 | `bitcoindrpc` | JSON-RPC 1.0 client for Bitcoin Core |
+| `p2poolv2_tui` | Terminal UI for a Bitcoin Cash node and its BCHN, ported from upstream's PDM; AGPL-3.0-or-later, unlike the rest of the workspace |
 
 ## Key entry points in p2poolv2_lib
 
