@@ -1,0 +1,97 @@
+# Stratum server and vardiff
+
+> Ported from upstream P2Poolv2's documentation: `stratum.adoc` and
+> `pool_difficulty_adjustment.adoc` in
+> [p2poolv2/docs](https://github.com/p2poolv2/docs) at commit `623e4c1`,
+> Copyright 2024-2026 P2Poolv2 Developers, MIT or Apache-2.0. Adapted to
+> Bitcoin Cash by this fork; see the [port map](upstream-port-map.md).
+
+Each P2Poolv2 node has its own Stratum server. It turns Bitcoin Cash block
+templates into work for the mining rigs and keeps each rig at a target share
+rate.
+
+The server follows CKPool's parameters: one share about every 3.3 seconds
+per rig, and CKPool's vardiff algorithm, which years of use have tested. It
+is written in Rust in `p2poolv2_lib/src/stratum/`. Stratum V1 is served on
+`[stratum] port`, and Stratum V2 on `sv2_port` when it is set.
+
+## Components
+
+```text
+BCHN or Template Provider --templates----------> Template fetcher --> Job builder
+Share chain ---------------payouts, tip--------> Job builder
+Job builder <--------------difficulty----------> Vardiff
+Job builder ---------------mining.notify-------> Miners
+Miners --------------------new share-----------> Share validator
+Share validator -----------pool shares---------> Share chain
+Share validator -----------blocks--------------> BCHN or Template Provider
+```
+
+**Template fetcher.** Asks BCHN for a block template with
+`getblocktemplate`, without Bitcoin's SegWit rules. It fetches one as soon as
+BCHN announces a new block over ZMQ (`zmqpubhashblock`), right after this node
+submits a block of its own, and otherwise every 10 seconds
+(`GBT_POLL_INTERVAL` in `p2poolv2_node/src/lib.rs`), so that new transactions
+make it into the work. With `template_source = "sv2"` the node takes
+templates from a Stratum V2 Template Provider instead, checks them as it
+checks BCHN's, and still asks BCHN for the height each template builds on
+(`stratum/sv2/template_distribution.rs`).
+
+**Job builder.** Turns each template into a mining job. The coinbase pays
+miners by the PPLNS window over the share chain, after the donation and the
+operator fee. It also carries the merge-mining output, a padding output and
+the share commitment, and every job commits to the current share chain tip
+(see [Share commitments](sharechain/share-commitments.md)). Bitcoin Cash
+limits a coinbase scriptSig to 100 bytes (`MAX_COINBASE_SCRIPTSIG_SIZE` in
+BCHN's `src/consensus/consensus.h`). Today the builder also holds every
+coinbase to an 11-payout, 784-byte budget and refuses a larger one; that
+budget is being redesigned (see [Coinbase payouts](payouts/coinbase.md)).
+Every connected Stratum V1 miner gets the job with `mining.notify`; Stratum
+V2 channels get the equivalent messages.
+
+**Vardiff.** Adjusts each miner's difficulty so that it submits about one
+share every 3.33 seconds (`TARGET_DRR` 0.3 in
+`stratum/difficulty_adjuster/mod.rs`), whatever its hashrate, within the
+node's `minimum_difficulty` and `maximum_difficulty`. It follows CKPool's
+algorithm and waits for enough shares, or enough time, before changing
+difficulty, so it does not overreact to luck. See
+[Difficulty adjustment in CKPool](difficulty_adjustment/ckpool.md).
+
+**Share validator.** Checks every submitted share against the miner's
+current difficulty and rejects duplicates. Then:
+
+- a share that meets the **pool target** goes to the share chain, which
+  stores it and relays it to peers;
+- a share that also meets the **Bitcoin Cash target** is a block, and is
+  submitted straight away: with `submitblock` to BCHN, or back to the
+  Template Provider whose template it used.
+
+Shares below the pool target still count towards the miner's measured
+hashrate and vardiff, but do not enter the share chain.
+
+Version rolling: the node offers the BIP 320 general-purpose bits
+(`version_mask = "1fffe000"`), which ASIC firmware rolls on Bitcoin Cash as
+on Bitcoin.
+
+## The pool difficulty
+
+The share chain's own target is set by ASERT. Upstream chose it after
+simulations of several difficulty algorithms against oscillating hashrate,
+a sudden 90% drop and noisy hashrate
+([methodology](https://github.com/p2poolv2/pool_difficulty_adjustment_analysis/blob/6e6ce1a8ac50e0257a9839a9744fc3e52b0f3ecd/daa_evaluation.md),
+[results](https://github.com/p2poolv2/pool_difficulty_adjustment_analysis/blob/6e6ce1a8ac50e0257a9839a9744fc3e52b0f3ecd/daa_simulation_report.md)),
+with a 10-second target interval, uncles at most 3 deep and PPLNS
+accounting. Upstream says those simulations were run with LLMs; they are
+modelled results, not measurements on a live pool.
+
+ASERT is also Bitcoin Cash's own block difficulty algorithm since November
+2020 ([aserti3-2d](https://upgradespecs.bitcoincashnode.org/2020-11-15-asert/)).
+This fork computes share targets with BCH's integer formula, a 10-second
+interval and a 600-second half-life, anchored at each share's parent rather
+than at genesis. Why, and how it behaved on chipnet, is in
+[Share difficulty: ASERT](difficulty_adjustment/asert.md).
+
+## Miner options
+
+Usernames, the `p2p=`, `d=` and `th=` password options, and Stratum V2
+settings are on [Miner options](miner-options.md).
