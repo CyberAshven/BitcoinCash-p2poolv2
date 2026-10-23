@@ -585,7 +585,7 @@ fn is_strict_der(der: &[u8]) -> bool {
 /// `e = SHA256(r || compressed(P) || m) mod n`; `R = sG - eP`; fail if `R` is
 /// the point at infinity, if `x(R) != r`, or if `y(R)` is not a quadratic
 /// residue modulo `p`.
-fn verify_schnorr(
+pub(crate) fn verify_schnorr(
     signature: &[u8],
     public_key: &[u8],
     digest: &[u8; 32],

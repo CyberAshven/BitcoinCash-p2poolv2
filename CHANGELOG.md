@@ -160,6 +160,12 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
+- `bch-trade` signs with Bitcoin Cash Schnorr instead of ECDSA (A24 in
+  `docs/bch-btc-assumptions-audit.md`): BCHN's algorithm and deterministic
+  RFC6979 nonce (`shares/bch_schnorr.rs`), checked against the Schnorr
+  vectors in BCHN's `src/test/key_tests.cpp`. Signatures are 65 bytes with
+  the sighash byte, so fees are sized for the exact signed size instead of a
+  72-byte ECDSA worst case. BCHN and the share chain already verified both.
 - `config.sample.toml` is a Bitcoin Cash chipnet node, the sample the
   releases ship (A23 in `docs/bch-btc-assumptions-audit.md`). Upstream's
   Bitcoin signet sample is `config-bitcoin.sample.toml`. A Bitcoin Cash

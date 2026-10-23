@@ -365,8 +365,12 @@ Choices, and why:
   so the same unlocking script passes BCHN and the share chain.
 - **Signatures.** `SIGHASH_FORKID` ECDSA (strict DER, low S) or Bitcoin Cash
   Schnorr, over the replay-protected digest with the redeem script as the
-  script code, as for any Bitcoin Cash P2SH spend. The tools sign ECDSA
-  with `SIGHASH_ALL | SIGHASH_FORKID`.
+  script code, as for any Bitcoin Cash P2SH spend. The tools sign Bitcoin
+  Cash Schnorr with `SIGHASH_ALL | SIGHASH_FORKID`, with BCHN's
+  deterministic nonce (RFC6979 with the `Schnorr+SHA256` tag), so the same
+  key and transaction give the signature BCHN's wallet would. A Schnorr
+  signature is always 65 bytes with its sighash byte, so the fee is sized
+  exactly before signing.
 
 ### Covenants and introspection
 
