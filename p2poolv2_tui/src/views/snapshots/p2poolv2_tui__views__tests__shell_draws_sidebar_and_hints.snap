@@ -1,0 +1,12 @@
+---
+source: p2poolv2_tui/src/views/mod.rs
+expression: text
+---
++ P2Pool BCH -----------+
+|Home                   |
+|BCHN Status            |
+|P2Pool Config          |
+|P2Pool Status          |
+|Settings               |
++-----------------------+
+ q  Quit   r  Refresh

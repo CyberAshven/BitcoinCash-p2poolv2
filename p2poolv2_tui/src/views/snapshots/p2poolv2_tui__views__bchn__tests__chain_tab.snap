@@ -1,0 +1,26 @@
+---
+source: p2poolv2_tui/src/views/bchn.rs
+expression: text
+---
++ Info ----------------------------------------------------------------------------------+
+| Chain | Peers | Mempool                                                                |
++----------------------------------------------------------------------------------------+
++ Chain ---------------------------------------------------------------------------------+
+|Network                  : chipnet                                                      |
+|Node                     : /Bitcoin Cash Node:28.0.1(EB32.0)/                           |
+|Blocks                   : 284,512                                                      |
+|Headers                  : 284,512                                                      |
+|State                    : synced                                                       |
+|Best block hash          :                                                              |
+|000000000a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5                        |
+|Difficulty               : 1.23 M                                                       |
+|Network hashrate         : 8.80 TH/s                                                    |
+|Verification progress    : 100.00%                                                      |
+|Initial block download   : no                                                           |
+|Median time              : 2025-10-23 11:50:00 UTC                                      |
+|Size on disk             : 2.35 GB                                                      |
+|Pruned                   : no                                                           |
+|Connections              : 2                                                            |
+|                                                                                        |
+|                                                                                        |
++----------------------------------------------------------------------------------------+
