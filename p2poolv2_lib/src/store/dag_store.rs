@@ -804,7 +804,11 @@ impl Store {
     /// candidate chain entries, this returns every block at each height
     /// regardless of status (Confirmed, Candidate, HeaderValid, etc.).
     pub fn query_dag(&self, from_height: u32, to_height: u32) -> Vec<DagEntry> {
-        let estimated_capacity = ((to_height - from_height + 1) * 2) as usize;
+        // Callers pass the range, so cap the preallocation and let the Vec grow.
+        let estimated_capacity = (to_height.saturating_sub(from_height) as usize)
+            .saturating_add(1)
+            .saturating_mul(2)
+            .min(1024);
         let mut entries = Vec::with_capacity(estimated_capacity);
 
         let mut height = from_height;
