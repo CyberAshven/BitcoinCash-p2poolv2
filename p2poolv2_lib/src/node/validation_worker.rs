@@ -10,7 +10,7 @@
 //! `OrganiseEvent::Block` and `SwarmSend::BroadcastBlock` events. Runs in a dedicated
 //! tokio task, decoupled from the P2P message handler hot path.
 
-use crate::config::Chain;
+use crate::config::{BitcoinCashNetwork, Chain};
 use crate::node::SwarmSend;
 use crate::node::messages::Message;
 use crate::node::organise_worker::{OrganiseEvent, OrganiseSender};
@@ -95,6 +95,8 @@ pub struct ValidationWorker {
     chain: Chain,
     /// Easiest share target the validator accepts. Defaults to the main ceiling.
     target_ceiling: CompactTarget,
+    /// The Bitcoin Cash network whose ASERT checks token shares' headers.
+    bitcoin_cash_network: Option<BitcoinCashNetwork>,
 }
 
 impl ValidationWorker {
@@ -117,7 +119,15 @@ impl ValidationWorker {
             target_ceiling: CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
+            bitcoin_cash_network: None,
         }
+    }
+
+    /// Select the Bitcoin Cash network whose ASERT parameters check a token
+    /// share's bitcoin header (`DefaultShareValidator::with_bitcoin_cash_network`).
+    pub fn with_bitcoin_cash_network(mut self, network: Option<BitcoinCashNetwork>) -> Self {
+        self.bitcoin_cash_network = network;
+        self
     }
 
     /// Select the chain whose share owner this worker's validator accepts.
@@ -142,7 +152,8 @@ impl ValidationWorker {
         let share_validator: Arc<dyn ShareValidator + Send + Sync> = Arc::new(
             DefaultShareValidator::new(self.pool_difficulty)
                 .for_chain(self.chain)
-                .with_target_ceiling(self.target_ceiling),
+                .with_target_ceiling(self.target_ceiling)
+                .with_bitcoin_cash_network(self.bitcoin_cash_network),
         );
 
         while let Some(event) = self.validation_rx.recv().await {
