@@ -514,11 +514,11 @@ impl MiningChannels {
         let user_id = self
             .ctx
             .chain_store_handle
-            .add_user(validated.address_str.to_string())
+            .add_user(validated.user_key.to_string())
             .await
             .map_err(|error| format!("Failed to store user: {error}"))?;
         session.username = Some(username.to_string());
-        session.btcaddress = Some(validated.address_str.to_string());
+        session.btcaddress = Some(validated.user_key.to_string());
         session.workername = validated.worker_name.map(|name| name.to_string());
         session.parsed_address = validated.parsed_address;
         session.share_owner = share_owner;
@@ -586,7 +586,7 @@ impl MiningChannels {
             .ctx
             .metrics
             .increment_worker_count(
-                validated.address_str.to_string(),
+                validated.user_key.to_string(),
                 validated.worker_name.unwrap_or_default().to_string(),
             )
             .await

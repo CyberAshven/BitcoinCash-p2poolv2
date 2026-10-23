@@ -4,6 +4,8 @@
 
 use crate::config::{BitcoinCashNetwork, Chain, parse_payout_address};
 use bitcoin::Address;
+use p2poolv2_wallet::bch_share::encode_payout_address;
+use std::borrow::Cow;
 
 /// Max username includes the dot and the worker name
 /// btcaddress.workername, with btcaddress max at 62 bytes, we get 66 character worker name
@@ -13,8 +15,12 @@ const MAX_USERNAME_LENGTH: usize = 128;
 /// Result of a successful username validation.
 #[derive(Debug)]
 pub struct ValidatedUsername<'a> {
-    /// The address portion of the username as a string slice
-    pub address_str: &'a str,
+    /// The key this miner is stored and counted under: the canonical text of
+    /// the decoded payout script, so every spelling of one address (with or
+    /// without the CashAddr prefix, upper or lower case, token-aware or not)
+    /// is one miner. The address text as typed when addresses are not
+    /// validated.
+    pub user_key: Cow<'a, str>,
     /// Parsed and network-checked bitcoin Address (None when validation is skipped)
     pub parsed_address: Option<Address>,
     /// Optional worker name after the first dot
@@ -66,8 +72,13 @@ pub fn validate(
         None
     };
 
+    // Bitcoin's own spelling of the address: lowercase bech32 or base58.
+    let user_key = match &parsed_address {
+        Some(address) => Cow::Owned(address.to_string()),
+        None => Cow::Borrowed(address_part),
+    };
     Ok(ValidatedUsername {
-        address_str: address_part,
+        user_key,
         parsed_address,
         worker_name,
     })
@@ -78,7 +89,8 @@ pub fn validate(
 /// The address is a 20-byte P2PKH or P2SH CashAddr for `cash_network`. Its
 /// prefix (`bitcoincash:`, `bchtest:`, `bchreg:`) may be left out, as BCH
 /// miners commonly enter it; the network's prefix is then assumed and the
-/// checksum still has to match it. `address_str` keeps the text as typed.
+/// checksum still has to match it. `user_key` is the address as a plain
+/// (not token-aware) CashAddr with its prefix, lowercase.
 pub fn validate_bitcoin_cash(
     username: &str,
     validate_address: bool,
@@ -98,8 +110,13 @@ pub fn validate_bitcoin_cash(
         None
     };
 
+    let user_key = match &parsed_address {
+        Some(address) => encode_payout_address(address, cash_network.share_network())
+            .map_or(Cow::Borrowed(address_part), Cow::Owned),
+        None => Cow::Borrowed(address_part),
+    };
     Ok(ValidatedUsername {
-        address_str: address_part,
+        user_key,
         parsed_address,
         worker_name,
     })
@@ -169,7 +186,7 @@ mod tests {
         let result = validate(testnet_address, true, Network::Testnet);
         assert!(result.is_ok());
         let validated = result.unwrap();
-        assert_eq!(validated.address_str, testnet_address);
+        assert_eq!(validated.user_key, testnet_address);
         assert!(validated.parsed_address.is_some());
         assert_eq!(validated.worker_name, None);
     }
@@ -181,7 +198,7 @@ mod tests {
         assert!(result.is_ok());
         let validated = result.unwrap();
         assert_eq!(
-            validated.address_str,
+            validated.user_key,
             "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
         );
         assert!(validated.parsed_address.is_some());
@@ -238,7 +255,7 @@ mod tests {
         let result = validate(&multiple_dots, true, Network::Bitcoin);
         assert!(result.is_ok());
         let validated = result.unwrap();
-        assert_eq!(validated.address_str, mainnet_address);
+        assert_eq!(validated.user_key, mainnet_address);
         assert!(validated.parsed_address.is_some());
         assert_eq!(validated.worker_name, Some("worker.with.dots"));
     }
@@ -252,7 +269,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            result.address_str,
+            result.user_key,
             "bchreg:qzh5k63rhy4jg6jtyssmzddju5kkng4jzu8ktcypfm"
         );
         assert_eq!(result.worker_name, Some("rig1"));
@@ -268,10 +285,78 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            result.address_str,
-            "qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2"
+            result.user_key,
+            "bitcoincash:qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2"
         );
         assert!(result.parsed_address.unwrap().script_pubkey().is_p2pkh());
+    }
+
+    /// Statistics are keyed by the decoded script, so one address typed
+    /// without its prefix, in upper case or token-aware is one miner.
+    #[test]
+    fn every_spelling_of_one_cashaddr_has_the_same_user_key() {
+        let prefixed = validate_bitcoin_cash(
+            "bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr.a",
+            true,
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        let bare = validate_bitcoin_cash(
+            "qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr.b",
+            true,
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        let upper = validate_bitcoin_cash(
+            "BCHTEST:QR7FZMEP8G7H7YMFXY74LGC0V950J3R295PDNVY3HR.c",
+            true,
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        let token_aware = validate_bitcoin_cash(
+            "bchtest:zr7fzmep8g7h7ymfxy74lgc0v950j3r295x8qj2hgs.d",
+            true,
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+
+        let key = "bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr";
+        assert_eq!(prefixed.user_key, key);
+        assert_eq!(bare.user_key, key);
+        assert_eq!(upper.user_key, key);
+        assert_eq!(token_aware.user_key, key);
+    }
+
+    /// Bitcoin bech32 may be typed in upper case; the key is the lowercase
+    /// spelling.
+    #[test]
+    fn an_uppercase_bech32_address_has_the_lowercase_user_key() {
+        let result = validate(
+            "TB1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KXPJZSX.rig",
+            true,
+            Network::Testnet,
+        )
+        .unwrap();
+        assert_eq!(
+            result.user_key,
+            "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+        );
+    }
+
+    /// Without address validation (a node donating everything) nothing is
+    /// decoded, so the key is the text as typed.
+    #[test]
+    fn an_unvalidated_address_is_keyed_as_typed() {
+        let result = validate_bitcoin_cash(
+            "qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2.rig",
+            false,
+            BitcoinCashNetwork::Mainnet,
+        )
+        .unwrap();
+        assert_eq!(
+            result.user_key,
+            "qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2"
+        );
     }
 
     /// A token-aware CashAddr (type 2, from the CashTokens test vectors) is

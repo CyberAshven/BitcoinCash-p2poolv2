@@ -160,6 +160,13 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
+- Miners are stored and counted under the canonical text of their decoded
+  payout script, not the address as typed (A26 in
+  `docs/bch-btc-assumptions-audit.md`): a CashAddr with or without its
+  prefix, in upper or lower case, or token-aware, is one miner in the store,
+  the dashboard and `/metrics`, keyed as the plain prefixed lowercase
+  CashAddr (Bitcoin addresses as their lowercase spelling). Payouts already
+  grouped by script and are unchanged.
 - `bch-trade` signs with Bitcoin Cash Schnorr instead of ECDSA (A24 in
   `docs/bch-btc-assumptions-audit.md`): BCHN's algorithm and deterministic
   RFC6979 nonce (`shares/bch_schnorr.rs`), checked against the Schnorr

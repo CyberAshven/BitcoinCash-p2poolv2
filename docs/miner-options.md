@@ -39,6 +39,10 @@ A miner needs two addresses, on two different chains:
   `r...`, which CashTokens wallets hand out) is accepted too, and is paid
   with the same P2PKH or P2SH output as its plain `q...` or `p...` form.
   P2SH32 addresses (32-byte hashes) are not accepted yet.
+- The dashboard, `/metrics` and the store know a miner by its address
+  written out in full: prefix, lower case, plain (`q...` or `p...`) form.
+  Every spelling of one address is one miner, whichever way its workers
+  type it.
 - Everything after the first dot is the worker name. It labels the worker
   in the dashboard and metrics and is optional.
 - At most 128 characters in all.

@@ -257,7 +257,7 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
     };
 
     session.username = Some(username.clone());
-    session.btcaddress = Some(parsed_username.address_str.to_string());
+    session.btcaddress = Some(parsed_username.user_key.to_string());
     session.parsed_address = parsed_username.parsed_address;
     session.workername = parsed_username
         .worker_name
@@ -267,7 +267,7 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
     session.share_owner = share_owner;
 
     // Register user in the store
-    register_user(session, parsed_username.address_str, ctx.chain_store_handle).await?;
+    register_user(session, &parsed_username.user_key, ctx.chain_store_handle).await?;
 
     match ctx
         .metrics
