@@ -52,6 +52,10 @@ static PRUNE_INTERVAL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"Sim depths: .*prune interval ([0-9]+) shares").expect("valid regex")
 });
 
+/// What a node logs when it refuses a candidate reorg past the reorg depth
+/// limit (`organise_header.rs`). The fork scenarios count these lines.
+const REORG_REFUSAL: &str = "branch forks more than MAX_REORG_DEPTH below the confirmed tip";
+
 /// The scenario's settings, from the same environment variables
 /// `failures.sh` read.
 #[derive(Debug, Clone)]
@@ -828,7 +832,7 @@ impl Injection<'_> {
         tokio::time::sleep(Duration::from_secs(self.settings.fork_observe_seconds)).await;
 
         let links = self.count_links_between(&[index], &[0]).await;
-        let refusals = self.count_since_reconnect(index, "branch forks below the prune target");
+        let refusals = self.count_since_reconnect(index, REORG_REFUSAL);
         let minority_hash_after = self.api_confirmed_hash(index, check_height).await;
         let minority_tip_after = self.log_tip(index);
         let majority_tip_after = self.log_tip(0);
@@ -911,7 +915,7 @@ impl Injection<'_> {
         tokio::time::sleep(Duration::from_secs(self.settings.fork_observe_seconds)).await;
 
         let links = self.count_links_between(&[index], &[0]).await;
-        let refusals = self.count_since_reconnect(index, "branch forks below the prune target");
+        let refusals = self.count_since_reconnect(index, REORG_REFUSAL);
         let check_height = self.log_tip(0) as i64 - interval;
         let minority_hash = self.api_confirmed_hash(index, check_height).await;
         let majority_hash = self.api_confirmed_hash(0, check_height).await;
