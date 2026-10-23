@@ -124,8 +124,9 @@ check is part of [share validation](validation.md).
   fork drops a template that asks for Bitcoin's SegWit rules
   (`stratum/work/block_template.rs`).
 - **Branch length.** Blocks can grow under ABLA, so the coinbase merkle
-  branch may be longer than on Bitcoin. The decoder accepts up to 25 levels,
-  enough for BCHN's 2 GB maximum block of 65-byte transactions
-  (`MAX_COINBASE_MERKLE_BRANCH_LENGTH`); Bitcoin keeps 16.
+  branch may be longer than on Bitcoin. The decoder accepts up to 32 levels,
+  a block of up to 2^32 transactions, since Bitcoin Cash has no fixed maximum
+  (`MAX_COINBASE_MERKLE_BRANCH_LENGTH`); Bitcoin keeps 16. A merge-mining
+  proof keeps its own 25 ([Auxiliary work proofs](../bch-auxpow.md)).
 - **The merge-mining output** sits inside the prefix, so the midstate covers
   it; see [Auxiliary work proofs](../bch-auxpow.md).

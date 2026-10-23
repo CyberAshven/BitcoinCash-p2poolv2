@@ -62,7 +62,7 @@ Vardiff and `UpdateChannel` change later jobs. Device maximum targets apply
 when each job is assigned; zero maximum targets are rejected.
 
 Limits: 64 outstanding tokens and 64 MiB of declared transaction state per
-registry, eight pending declarations per connection, 25 Merkle siblings,
+registry, eight pending declarations per connection, 32 Merkle siblings,
 SV2's 65,535-byte coinbase-output field and 16 MiB frame limit. All revealed
 transactions currently arrive in one response; larger declarations require
 transaction-cache negotiation before increasing those limits. The shared

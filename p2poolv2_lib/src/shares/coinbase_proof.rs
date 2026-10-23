@@ -33,9 +33,17 @@ use p2poolv2_wallet::share_owner::ShareOwner;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Decoder cap for coinbase branches: 25 levels cover BCHN's 2 GB maximum
-/// with 65-byte transactions. Bitcoin proofs keep their existing 16-level cap.
-pub const MAX_COINBASE_MERKLE_BRANCH_LENGTH: usize = 25;
+/// Decoder cap for Bitcoin Cash coinbase branches between share-chain nodes:
+/// 32 levels, a block of up to 2^32 transactions.
+///
+/// 25 levels covered BCHN's 2 GB block-size guard at 65-byte transactions,
+/// but that guard is temporary: the ABLA CHIP removes it by May 2028, and
+/// Bitcoin Cash sets no fixed maximum (audit A14). 2^32 transactions is
+/// more than 279 GB of 65-byte transactions. Merge-mining proofs keep their
+/// own `d ≤ 25` (`MAX_AUX_PROOF_COINBASE_BRANCH_LENGTH`): a deeper block is
+/// a valid share that cannot be token-claimed. Bitcoin proofs keep their
+/// 16-level cap.
+pub const MAX_COINBASE_MERKLE_BRANCH_LENGTH: usize = 32;
 
 /// Proof limit for the chain identified by the share owner.
 pub(crate) fn maximum_merkle_branch_length(owner: ShareOwner) -> usize {
@@ -443,10 +451,10 @@ mod tests {
     }
 
     #[test]
-    fn bch_coinbase_proof_accepts_25_levels_and_rejects_26() {
+    fn bch_coinbase_proof_accepts_32_levels_and_rejects_33() {
         let mut header = non_genesis_share_header();
         header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
-        let mut branch = vec![TxMerkleNode::all_zeros(); 25];
+        let mut branch = vec![TxMerkleNode::all_zeros(); 32];
         header.bitcoin_header.merkle_root =
             header.coinbase_proof.merkle_root(&header, &branch).unwrap();
         CoinbaseProof::verify(&header, &branch).unwrap();

@@ -293,7 +293,7 @@ unchanged.
   within the budget.
 - **Claimability.** A merge-mining (AuxPoW) claim by a token covenant
   carries the whole BCH coinbase, the 80-byte header and the coinbase's
-  merkle branch (at most 25 hashes, `MAX_COINBASE_MERKLE_BRANCH_LENGTH`) in
+  merkle branch (at most 25 hashes, `MAX_AUX_PROOF_COINBASE_BRANCH_LENGTH`) in
   its unlocking bytecode. With the budget that is at most
   784 + 80 + 800 = 1,664 bytes, far under the 2026 P2S standard of about
   10,000 bytes, which keeps the claim's hashing cost low too.

@@ -167,6 +167,12 @@ anchor and the donation and fee cap as they were.
   `computed / 8` to `computed × 1.05` or the proof-of-work limit on test
   networks. Tested on all 14,000 lines of the aserti3-2d specification's
   vectors and on real mainnet and chipnet headers.
+- Coinbase merkle branches between Bitcoin Cash share-chain nodes may have
+  32 levels, up from 25 (share-chain rule, audit A14): BCHN's 2 GB guard is
+  temporary and Bitcoin Cash has no fixed block size maximum. Merge-mining
+  proofs keep `d ≤ 25`. A `ShareHeaders` response carries at most 600
+  headers, down from 650, so the worst case (1,584 bytes a header) still
+  fits the 1 MiB frame.
 - Coinbase budget on Bitcoin Cash (share-chain consensus, decision 14): a
   coinbase pays at most 11 PPLNS payout outputs (`BCH_MAX_COINBASE_PAYOUTS`)
   holding at most 374 bytes (`BCH_MAX_PAYOUT_OUTPUT_BYTES`), and no payout

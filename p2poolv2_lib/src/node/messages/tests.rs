@@ -97,7 +97,7 @@ fn test_full_share_headers_response_fits_max_message_size() {
 }
 
 #[test]
-fn declared_bch_header_batch_round_trips_a_compressed_25_level_proof() {
+fn declared_bch_header_batch_round_trips_a_compressed_32_level_proof() {
     let mut header = TestShareBlockBuilder::new().build().header;
     header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
     header.bch_coinbase = Some(BchCoinbase {
@@ -106,7 +106,7 @@ fn declared_bch_header_batch_round_trips_a_compressed_25_level_proof() {
             .into_bytes(),
         merge_mining: MergeMiningCommitment::empty(),
     });
-    let branch = vec![TxMerkleNode::all_zeros(); 25];
+    let branch = vec![TxMerkleNode::all_zeros(); 32];
     header.bitcoin_header.merkle_root =
         header.coinbase_proof.merkle_root(&header, &branch).unwrap();
     let batch = ShareHeaderBatch::from_headers_with_branches(vec![(header, branch)]);

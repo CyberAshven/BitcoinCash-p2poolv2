@@ -64,7 +64,7 @@ pub(crate) const SHA256_BLOCK_SIZE: usize = 64;
 ///
 /// It also keeps a merge-mining claim small: a token covenant that carries
 /// the whole coinbase, the 80-byte header and a merkle branch of at most
-/// `MAX_COINBASE_MERKLE_BRANCH_LENGTH` (25) hashes in its unlocking bytecode
+/// `MAX_AUX_PROOF_COINBASE_BRANCH_LENGTH` (25) hashes in its unlocking bytecode
 /// needs at most 784 + 80 + 800 = 1,664 bytes, far under the 2026 P2S
 /// standard unlocking limit of about 10,000 bytes.
 pub const BCH_COINBASE_BYTE_BUDGET: usize = 784;

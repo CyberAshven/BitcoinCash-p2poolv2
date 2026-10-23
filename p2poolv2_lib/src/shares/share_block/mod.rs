@@ -790,10 +790,10 @@ mod tests {
     }
 
     #[test]
-    fn bch_share_block_and_stored_branch_round_trip_25_levels() {
+    fn bch_share_block_and_stored_branch_round_trip_32_levels() {
         let mut share = TestShareBlockBuilder::new().build();
         share.header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
-        share.template_merkle_branches = vec![TxMerkleNode::all_zeros(); 25];
+        share.template_merkle_branches = vec![TxMerkleNode::all_zeros(); 32];
         let decoded: ShareBlock = deserialize(&serialize(&share)).unwrap();
         assert_eq!(decoded, share);
         let stored = MerkleBranches(share.template_merkle_branches);
