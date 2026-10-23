@@ -11,6 +11,7 @@ members = [
     "p2poolv2_sim",
     "p2poolv2_tools",
     "p2poolv2_web",
+    "p2poolv2_tui",
 ]
 resolver = "2"
 

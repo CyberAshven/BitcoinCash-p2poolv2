@@ -1,0 +1,24 @@
+---
+source: p2poolv2_tui/src/views/pool.rs
+expression: text
+---
++ Info --------------------------------------------------------------------------------------------+
+| Overview | Shares | Miners | Blocks | Peers                                                      |
++--------------------------------------------------------------------------------------------------+
++ Miners on this node: 1 online, 1 workers (page 1 of 1) ------------------------------------------+
+|  Payout address                 Workers  Work      Best      Last share    Payout                |
+|                                                                                                  |
+|> bchtest:qze95...2f34fv28vandn2 1/1      512 k     90.0 k    20 s ago      50.00%                |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
++--------------------------------------------------------------------------------------------------+
++ Miner in the PPLNS window -----------------------------------------------------------------------+
+|Address                  : bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2 (payout)            |
+|Window shares            : 450 of 900                                                             |
+|Uncles credited          : 3                                                                      |
+|Share of the window      : 50.00%                                                                 |
+|Next block payout        : 49.70%                                                                 |
+|Window heights           : 205 to 1104 (anchor 1204)                                              |
+|                                                                                                  |
++--------------------------------------------------------------------------------------------------+

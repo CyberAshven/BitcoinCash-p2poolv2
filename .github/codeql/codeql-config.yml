@@ -1,0 +1,12 @@
+name: P2Pool CodeQL config
+
+# Test code never ships in the node, and its fixed nonces, passwords and
+# salts are test fixtures, not secrets. Unit tests live in their own
+# `tests.rs` / `*_tests.rs` files so these paths cover them.
+paths-ignore:
+  - p2poolv2_tests
+  - "**/tests.rs"
+  - "**/*_tests.rs"
+  - "**/test_utils.rs"
+  - "**/benches"
+  - load-tests

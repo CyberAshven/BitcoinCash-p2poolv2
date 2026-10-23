@@ -1,0 +1,16 @@
+---
+source: p2poolv2_tui/src/views/home.rs
+expression: text
+---
++ Home --------------------------------------------------------------------------------------------+
+|A terminal UI for a Bitcoin Cash P2Poolv2 node and the BCHN it mines on.                          |
+|                                                                                                  |
+|Node config              : D:/pool/node1/config.toml                                              |
+|Network                  : chipnet                                                                |
+|P2Pool API               : http://127.0.0.1:46884 (Bitcoin Cash chipnet)                          |
+|BCHN                     : http://127.0.0.1:48332 (block 284,512, synced)                         |
+|Dashboard                : http://127.0.0.1:46884/dashboard                                       |
+|                                                                                                  |
+|Up/Down picks a screen, Left/Right a tab, r refreshes, q quits.                                   |
+|                                                                                                  |
++--------------------------------------------------------------------------------------------------+
