@@ -24,13 +24,17 @@ instead of repeating it.
 - **The window rule matches.** This fork's `K` = 3 is v1's `SPREAD` = 3, sized
   the same way from the paying share's own BCH header. v1 capped the window at
   3 days of shares; this fork caps it at 14 days.
-- **Dust needs a plan before every miner is paid directly.** With the payout
-  cap gone (the owner's decision), the smallest payout is one share's slice of
-  a block: the reward divided by the window cap. That is about 2,583 sat
-  today, but 258 sat if BCH moves to 1-minute blocks, and 323 sat after the
-  2036 halving, both under BCHN's 546-sat dust threshold. v1 avoided dust by
-  letting a small miner's node mine harder shares. A 3-day cap alone keeps
-  today's case and the 1-minute case above dust.
+- **Small payouts need a decision before every miner is paid directly.** With
+  the payout cap gone (the owner's decision), the smallest payout is one
+  share's slice of a block: the reward divided by the window cap. That is
+  about 2,583 sat today. It falls under BCHN's 546-sat dust threshold after
+  the 2036 halving, or now if BCH moves to 1-minute blocks (258 sat). The
+  [hybrid payout proposal](architecture/bch-hybrid-payouts.md) pays such
+  outputs as they are, which BCH consensus allows, and v1 did too. The real
+  limit is value: with 1-minute blocks one share pays less than it costs to
+  spend after the 2028 halving. A 3-day cap keeps one share above dust in
+  both cases at today's subsidy; v1 also let a small miner's node mine harder
+  shares.
 - **Miners can be underpaid today.** Nothing keeps a miner's stratum
   difficulty at or below the share difficulty. If it is above, the miner
   throws away hashes that were valid shares. v1 never set a difficulty above
@@ -91,7 +95,7 @@ Line numbers are jtoomim's at `ece15b0` unless marked "forrestv".
 | BCH transactions in shares | None since share version 34 (2019) | None |
 | Coinbase in shares | Not carried; rebuilt by peers, tied by a SHA-256 midstate (`data.py:24-42`) | Carried whole (`share_block/mod.rs:404-413`); A2 |
 | Payout outputs | Up to 4,000 (`data.py:285-286`) | 11 plus a draw, being removed (A1) |
-| Dust | Small miners' share difficulty raised until one share pays 0.001 BCH a block (`work.py:330-339`); outputs of any size above zero | No payout below BCHN's dust threshold |
+| Dust | Small miners' share difficulty raised until one share pays 0.001 BCH a block (`work.py:330-339`); outputs of any size above zero (`data.py:334-336`) | No payout below BCHN's dust threshold (decision 14); the hybrid payout proposal would pay sub-dust coinbase outputs as they are |
 
 **Is `SPREAD` matched?** Yes. Both size the window as three blocks of work at
 the difficulty in the paying share's own BCH header, which BCH checks when
@@ -128,6 +132,17 @@ less than dust; at the 508 G difficulty the audit uses (about 3.6 EH/s,
 estimated), that is any pool under about 1.1 PH/s, which a new pool is at
 its start.
 
+Below dust is not invalid. A coinbase output may hold any value under BCH
+consensus; dust is relay policy for transactions that create outputs. The
+[hybrid payout proposal](architecture/bch-hybrid-payouts.md) (section 3.5)
+recommends paying sub-dust coinbase outputs as they are, as v1 did
+(`data.py:334-336`); its estimate that this starts around 2036 is the
+10-minute column. What matters for a miner is value: spending a P2PKH output
+takes an input of about 148 bytes (`bch_script.rs:83`), about 148 sat at
+BCHN's default 1 sat/byte. Under 1-minute blocks and the current cap, one
+share pays 258 sat today and 129 sat after the 2028 halving, by when a
+one-share payout is worth less than spending it.
+
 v1's answer (V6) worked on the miner, not the window: a node whose miners
 earned less than 0.001 BCH a block made their shares harder, so each share
 paid at least that much. This fork has one share difficulty per chain, so it
@@ -147,13 +162,13 @@ which needs the owner's agreement. No recommendation changes BCH consensus.
 | V3 | Payouts delayed by exactly one share | `data.py:254`; forrestv `76b297b` | **Differently**: 100 shares, `pplns_window.rs:128` | Keep 100 for reorg safety; correct decision 11's "P2Pool v1 ran with no skip at all" | No | None |
 | V4 | The share crossing the window edge is paid in part | `data.py:666-702` (`WeightsSkipList`) | **Differently**: paid whole | No action now: the overshoot is at most one share, 0.17% of a 600-share window (arithmetic). Revisit with V5 | Yes if adopted | Port: `data.py:666-702` |
 | V5 | Shares weighted by expected hashes | `data.py:672-674` | **Lack**: integer difficulty (A17) | Adopt with A17; V7 needs it | Yes | Idea |
-| V6 | A node raises its miners' share difficulty until one share pays at least the dust threshold (0.001 BCH) per block | `work.py:330-339`; `bitcoin/networks/bitcoincash.py:32`; `data.py:170` | **Lack**: one difficulty per chain (`validation/mod.rs:1443`); dust handled by decision 14's draw, which is being removed | Decide dust inside the direct-payout design with the table above. If v1's way is chosen, derive the floor from BCHN's dust threshold, not a fixed 0.001 BCH | Yes | Port: `work.py:330-339` |
+| V6 | A node raises its miners' share difficulty until one share pays at least the dust threshold (0.001 BCH) per block | `work.py:330-339`; `bitcoin/networks/bitcoincash.py:32`; `data.py:170` | **Lack**: one difficulty per chain (`validation/mod.rs:1443`); dust handled by decision 14's draw, which is being removed | Decide small payouts in the hybrid payout design (its section 3.5 pays sub-dust outputs as they are) with the table above, 1-minute blocks included. If v1's way is chosen, derive the floor from BCHN's dust threshold or the spending cost, not a fixed 0.001 BCH | Yes | Port: `work.py:330-339` |
 | V7 | Heavier shares for big miners: a node makes at most about 1.67% of shares (`work.py:320-326`), miners may ask for harder shares (`work.py:197-202`), and the pool minimum counts shares at minimum work (`data.py:162-170, 888-898`), so heavy shares make the minimum easier for small miners | as cited; README line 125 | **Differently**: one difficulty per chain plus a mini chain (decision 4) | Compare with the mini chain in the BCHN simulation before choosing. One chain with variable difficulty keeps every miner in one window | Yes | Idea |
 | V8 | The node never sets a miner's stratum difficulty above the share difficulty; only a miner's own fixed `+difficulty` can be | `bitcoin/stratum.py:80-86, 148`; `work.py:396-397` | **Lack**: session difficulty is bounded only by 1 and `maximum_difficulty` (2^32); `d=`, `th=`, `mining.suggest_difficulty` and `minimum_difficulty` act as floors (`difficulty_adjuster/mod.rs:354-382`). A hash that meets the share target but not the session difficulty is never submitted, so the miner is credited one share for more work | Cap each job's session difficulty at that job's share difficulty (`share_commitment.bits`) and warn when a configured floor is above it. Once ASERT has settled, vardiff's own choice stays about three times below the share difficulty (estimate: one submission per 3.3 s per connection against one share per 10 s for the whole pool), so the cap binds mainly on explicit settings | No | Idea |
 | V9 | A found block is sent to the node over its P2P port and over RPC, each retried on errors up to 10 times, 10 s apart (`util/deferral.py:28-54`) | `bitcoin/helper.py:143-171`; `work.py:450-455` | **Lack**: one `submitblock` RPC, no retry (`submit.rs:365-385`; `bitcoindrpc/src/lib.rs:375-385`) | Retry transport errors and time-outs (not rejections) for about a minute. For large blocks, `submitblocklight` (A6) | No | Idea |
 | V10 | Every node rebuilt a block found by a peer and submitted it to its own node | `node.py:282-300`; `data.py:629-633`; dropped in share version 34 (`5ba9eba`, merged `473afc4`) | **Lack**, as v1 since 2019: a peer's block-grade share is only counted (`organise_worker.rs:792`); `known-attacks.md`, block withholding | Optional found-block relay: the finder sends the whole block once to its share-chain peers, which submit it to their own BCHN. A node-to-node message, not a share rule. Helps home nodes with slow uplinks | No | Idea |
 | V11 | Shares carry no BCH transactions. v1 forwarded transactions between nodes and raised the limits at each block size step (new transactions per share 50 kB to 1 MB, `643768f`; remembered transactions 2.5 MB to 25 MB, a share-protocol hard fork, `e48be1f`; messages 1 MB to 8 MB to 32 MB, `e8d182a`, `72cbbb2`), then removed it all | forrestv `data.py:74`, forrestv `p2p.py:30, 33`; `p2p.py:30-33, 195-255`; `data.py:123-126` | **Have**: header, coinbase proof and coinbase merkle branch (`share_block/mod.rs:393-414`) | Keep. Never put BCH transactions or the BCH block size in share rules | No | None |
-| V12 | The coinbase itself was never sent: peers rebuilt it from share data, and a SHA-256 midstate tied it to the proof of work | `data.py:24-42, 361-372, 552-557` | **Partly**: the midstate exists (`coinbase_proof.rs`) and validators rebuild the coinbase (`validation/mod.rs:1198-1267`), but the whole coinbase is still carried (A2) | Take A2's compact option: carry only the scriptSig, extranonce and aux fields. v1 ran this way with up to 4,000 payees | Yes | Idea |
+| V12 | The coinbase itself was never sent: peers rebuilt it from share data, and a SHA-256 midstate tied it to the proof of work | `data.py:24-42, 361-372, 552-557` | **Partly**: the midstate exists (`coinbase_proof.rs`) and validators rebuild the coinbase (`validation/mod.rs:1198-1267`), but the whole coinbase is still carried (A2) | Take A2's compact option, which the hybrid payout proposal also lists as a follow-up: carry only the scriptSig, extranonce and aux fields. v1 ran this way with up to 4,000 payees | Yes | Idea |
 | V13 | The 16-level merkle branch limit was removed for BCH | `e2bad3e` | **Differently**: 25 levels (`coinbase_proof.rs:38`) | As A14 | Yes | Idea |
 | V14 | Block size hard-coded per network: each BCH increase needed a v1 release (8 MB to 32 MB, `df7409d`). The template was cut by position to fit | `networks/bitcoincash.py:36-37`; `data.py:200-203` | **Have**: limit from BCHN (A4, A5) | Keep. If a coinbase ever outgrows BCHN's 1,000-byte reserve (A8), never cut a template by position: BCH blocks are in canonical order (CTOR), where a child can sort before its parent, so a cut can keep a child without its parent. This is read from v1's code; it never happened live because BCH blocks were never full | No | None |
 | V15 | At start, the node must have the 2017 BCH fork block and report the right chain | `bitcoin/networks/bitcoincash.py:17-21`; `ee0d7ca` | **Lack**: preflight checks only initial block download (`p2poolv2_node/src/preflight.rs:41-49`); `GetBlockchainInfo` reads one field (`bitcoindrpc/src/lib.rs:100-104`) | Check `getblockchaininfo` `chain` against `bitcoin_cash_network`, and that a BCH-only block after the 2018 BSV and 2020 eCash splits is in the node's chain; refuse to start otherwise | No | Idea |
@@ -180,9 +195,6 @@ which needs the owner's agreement. No recommendation changes BCH consensus.
   fraction of shares to the operator (`work.py:212-213`). This fork pays a fee
   output, capped with the donation at 10%.
 - **Hard-coded block limits and transaction forwarding** (V11, V14).
-- **Outputs of any size.** v1 paid every non-zero amount
-  (`data.py:334-336`), so a payout could be below dust. This fork keeps every
-  payout at or above BCHN's dust threshold.
 
 ## Why P2Pool v1 faded
 
@@ -227,12 +239,12 @@ the mini chain (small miners' variance) address 3 and 4.
 2. **Submit found blocks robustly (V9, then V10).** A block is worth 3.125 BCH
    and one failed RPC call loses it; v1 retried over two paths, and before
    2019 every peer re-sent it. Node policy, Idea.
-3. **Settle dust inside the direct-payout design (V6, V2, V7).** With every
-   miner paid directly, the smallest payout is the reward divided by the
-   window cap, which falls under BCHN's dust threshold with 1-minute blocks or
-   after 2036; the 3-day cap fixes it at today's subsidy in both cases, and
-   v1's harder shares for small miners are the fallback. Share-chain rule, Port
-   possible from `work.py:330-339`.
+3. **Settle small payouts inside the hybrid payout design (V6, V2, V7).**
+   With every miner paid directly, the smallest payout is the reward divided
+   by the window cap; with 1-minute blocks that is 258 sat now and less than
+   its spending cost after 2028. The 3-day cap keeps it at 1,206 sat now, and
+   v1's harder shares for small miners are the fallback. Share-chain rule,
+   Port possible from `work.py:330-339`.
 4. **Add a share-version vote before mainnet (V17).** Every rule change so far
    restarted the chain, which on mainnet would reset the miners' window; v1
    changed rules on a live chain by vote. Share-chain rule, Port possible from
@@ -268,4 +280,5 @@ the merkle branch limit (V13, A14).
   [`76b297b`](https://github.com/p2pool/p2pool/commit/76b297b).
 - This fork: the files cited in the tables, at `0e269f05`;
   [Bitcoin assumptions audit](bch-btc-assumptions-audit.md);
+  [Hybrid payouts on Bitcoin Cash (proposal)](architecture/bch-hybrid-payouts.md);
   [Plan and decisions](bch-plan.md); [Known attacks](known-attacks.md).
