@@ -24,7 +24,8 @@ use crate::store::writer::StoreError;
 use bitcoin::Address;
 use bitcoin::BlockHash;
 use bitcoin::hashes::Hash;
-use bitcoin::{CompactTarget, PubkeyHash, Target, Txid};
+use bitcoin::params::Params;
+use bitcoin::{CompactTarget, PubkeyHash, Target, Txid, Work};
 use p2poolv2_wallet::share_owner::ShareOwner;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
@@ -231,7 +232,8 @@ struct ConfirmedEntry {
     /// `owner_keys`. The payout never reads it; it lets a window be looked
     /// up by either of the two addresses a share header carries.
     owner_key: usize,
-    /// Difficulty of the share
+    /// Base weight of the share (`WeightUnit`): its difficulty on Bitcoin,
+    /// its exact work on Bitcoin Cash.
     difficulty: u128,
     /// Uncle entries, if any, referenced by the share
     uncle_entries: Vec<UncleEntry>,
@@ -271,6 +273,41 @@ enum WindowSizing {
     BlockWork { expected_blocks: u128 },
 }
 
+/// What a share's base weight, before `DIFFICULTY_SCALE` and the uncle
+/// split, counts.
+///
+/// Chosen once from the chain, like `WindowSizing`, so the producer, the
+/// validator and the API weigh shares alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WeightUnit {
+    /// `max_target / target`, rounded down. Bitcoin, unchanged from
+    /// upstream.
+    IntegerDifficulty,
+    /// The share's work, `2^256 / (target + 1)`, as chainwork counts it.
+    /// Bitcoin Cash: share difficulties there are small (the mini chain's
+    /// easiest is 4.55), so rounding them down would weigh shares of
+    /// difficulty 4 to 9 up to about 20% wrong against each other.
+    ExactWork,
+}
+
+/// `work` as a `u128`, saturating. Share and block work stays far below
+/// 2^128 for any target above 2^128.
+fn work_to_u128(work: Work) -> u128 {
+    let bytes = work.to_le_bytes();
+    let (low, high) = bytes.split_at(16);
+    if high.iter().any(|byte| *byte != 0) {
+        return u128::MAX;
+    }
+    u128::from_le_bytes(low.try_into().expect("16 bytes"))
+}
+
+/// The work of one unit of difficulty on `network`: the work at its
+/// proof-of-work limit, `2^256 / (max_target + 1)`. About `2^32` on mainnet,
+/// testnet and chipnet, 2 on regtest.
+fn difficulty_one_work(network: bitcoin::Network) -> u128 {
+    work_to_u128(Params::new(network).max_attainable_target.to_work())
+}
+
 /// Why accumulating the window stopped.
 ///
 /// `WindowFull` is a property of the chain, so every node reaches it at the
@@ -293,7 +330,7 @@ struct UncleEntry {
     internal_key: usize,
     /// Internal key mapping the uncle's share owner in `owner_keys`.
     owner_key: usize,
-    /// Base difficulty of the uncle share before weighting.
+    /// Base weight of the uncle share before weighting (`WeightUnit`).
     difficulty: u128,
 }
 
@@ -354,7 +391,8 @@ struct Credit {
     blockhash: BlockHash,
     /// The share that includes this uncle, or `None` for the share itself.
     nephew: Option<BlockHash>,
-    /// Difficulty of the share or uncle before weighting.
+    /// Base weight of the share or uncle before weighting: its difficulty on
+    /// Bitcoin, its exact work on Bitcoin Cash.
     difficulty: u128,
     /// Scaled weight credited.
     weight: u128,
@@ -371,7 +409,8 @@ pub struct WindowCredit {
     /// The window share that includes this uncle, or `None` when
     /// `blockhash` is itself a window share.
     pub nephew: Option<BlockHash>,
-    /// Difficulty of the share or uncle before weighting.
+    /// Base weight of the share or uncle before weighting: its difficulty on
+    /// Bitcoin, its exact work on Bitcoin Cash.
     pub difficulty: u128,
     /// Weight credited, in the scaled units the distribution sums: a share
     /// earns `DIFFICULTY_SCALE` times its difficulty plus the nephew bonus
@@ -557,6 +596,9 @@ pub struct PplnsWindow {
     /// Rule sizing the window below the maturity skip. `FixedShares` until
     /// `for_chain` selects Bitcoin Cash.
     sizing: WindowSizing,
+    /// What a share's weight counts: integer difficulty on Bitcoin, exact
+    /// work on Bitcoin Cash. Set by `for_chain`.
+    weight_unit: WeightUnit,
     /// Bitcoin Cash: who holds each cached share's payout right, at the
     /// cached tip. `None` on Bitcoin, which pays `miner_bitcoin_address`.
     rights: Option<PayoutRights>,
@@ -578,6 +620,7 @@ impl PplnsWindow {
             max_window_shares: PPLNS_WINDOW_SHARES,
             maturity_skip: COINBASE_MATURITY,
             sizing: WindowSizing::FixedShares,
+            weight_unit: WeightUnit::IntegerDifficulty,
             rights: None,
         }
     }
@@ -589,14 +632,20 @@ impl PplnsWindow {
     /// Bitcoin Cash pays `BCH_PPLNS_WINDOW_BLOCKS` expected blocks' worth of
     /// work, capped at `PPLNS_WINDOW_SHARES` shares, behind
     /// `BCH_COINBASE_MATURITY`, to whoever holds each share's payout right
-    /// (see `payout_rights`). This is consensus: every node on a share chain
-    /// must select the same chain.
+    /// (see `payout_rights`), each share weighted by its exact work rather
+    /// than its rounded-down difficulty (`WeightUnit::ExactWork`). This is a
+    /// share-chain rule: every node on a share chain must select the same
+    /// chain.
     pub fn for_chain(mut self, chain: Chain) -> Self {
         self.sizing = match chain {
             Chain::Bitcoin => WindowSizing::FixedShares,
             Chain::BitcoinCash => WindowSizing::BlockWork {
                 expected_blocks: BCH_PPLNS_WINDOW_BLOCKS,
             },
+        };
+        self.weight_unit = match chain {
+            Chain::Bitcoin => WeightUnit::IntegerDifficulty,
+            Chain::BitcoinCash => WeightUnit::ExactWork,
         };
         self.maturity_skip = coinbase_maturity_for(chain);
         self.rights = match chain {
@@ -902,6 +951,13 @@ impl PplnsWindow {
     ///
     /// `None` on Bitcoin, and on Bitcoin Cash for a paying header at the
     /// network's proof-of-work limit (see `MIN_SIZING_BLOCK_DIFFICULTY`).
+    ///
+    /// In the unit shares are weighed in: with exact work, `expected_blocks`
+    /// times the paying difficulty times the work of one unit of difficulty
+    /// (`difficulty_one_work`). The paying difficulty is the whole number
+    /// `bitcoin_block_difficulty` gives, so the target is within one unit of
+    /// difficulty of the block's exact work: a relative error of about
+    /// 2 * 10^-12 at mainnet's difficulty.
     fn work_target(&self, paying_block_difficulty: u128) -> Option<u128> {
         match self.sizing {
             WindowSizing::FixedShares => None,
@@ -910,9 +966,28 @@ impl PplnsWindow {
             {
                 None
             }
-            WindowSizing::BlockWork { expected_blocks } => {
-                Some(paying_block_difficulty.saturating_mul(expected_blocks))
-            }
+            WindowSizing::BlockWork { expected_blocks } => Some(
+                paying_block_difficulty
+                    .saturating_mul(expected_blocks)
+                    .saturating_mul(self.weight_of_one_difficulty()),
+            ),
+        }
+    }
+
+    /// What one unit of difficulty weighs in this window's unit.
+    fn weight_of_one_difficulty(&self) -> u128 {
+        match self.weight_unit {
+            WeightUnit::IntegerDifficulty => 1,
+            WeightUnit::ExactWork => difficulty_one_work(self.network),
+        }
+    }
+
+    /// A share's base weight: its integer difficulty on Bitcoin, its exact
+    /// work on Bitcoin Cash (see `WeightUnit`).
+    fn base_weight(&self, header: &ShareHeader) -> u128 {
+        match self.weight_unit {
+            WeightUnit::IntegerDifficulty => header.get_difficulty(self.network),
+            WeightUnit::ExactWork => work_to_u128(header.get_work()),
         }
     }
 
@@ -1034,7 +1109,7 @@ impl PplnsWindow {
         let entries = candidate_headers
             .iter()
             .map(|(blockhash, header)| {
-                let difficulty = header.get_difficulty(self.network);
+                let difficulty = self.base_weight(header);
                 let uncle_entries = resolve_uncle_entries(&header.uncles, &uncle_lookup_table);
                 self.build_confirmed_entry(
                     *blockhash,
@@ -1444,7 +1519,7 @@ impl PplnsWindow {
             header,
         } in confirmed_headers.into_iter().rev()
         {
-            let difficulty = header.get_difficulty(self.network);
+            let difficulty = self.base_weight(&header);
             let uncle_entries = resolve_uncle_entries(&header.uncles, &uncle_lookup_table);
             let coinbase_txid = match &mut self.rights {
                 Some(rights) => {
@@ -1572,7 +1647,7 @@ impl PplnsWindow {
         let uncle_headers = chain_store_handle.get_share_headers(uncle_hashes)?;
         let mut uncle_lookup = HashMap::with_capacity(uncle_headers.len());
         for (blockhash, header) in uncle_headers {
-            let difficulty = header.get_difficulty(self.network);
+            let difficulty = self.base_weight(&header);
             let uncle_entry = self.build_uncle_entry(
                 blockhash,
                 header.miner_bitcoin_address,
@@ -1843,7 +1918,7 @@ mod tests {
             height,
             header.miner_bitcoin_address.clone(),
             header.miner_address,
-            header.get_difficulty(TEST_NETWORK),
+            window.base_weight(header),
             Vec::new(),
         )
     }
@@ -1860,7 +1935,7 @@ mod tests {
             height,
             header.miner_bitcoin_address.clone(),
             header.miner_address,
-            header.get_difficulty(TEST_NETWORK),
+            window.base_weight(header),
             uncle_entries,
         )
     }
@@ -1871,7 +1946,7 @@ mod tests {
             header.block_hash(),
             header.miner_bitcoin_address.clone(),
             header.miner_address,
-            header.get_difficulty(TEST_NETWORK),
+            window.base_weight(header),
         )
     }
 
@@ -4308,7 +4383,7 @@ mod tests {
     fn test_bch_window_large_pool_pays_three_blocks_of_work() {
         let miners = [PUBKEY_G, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G];
         let (headers, tip_hash) = build_test_chain(5, &miners);
-        let share_difficulty = headers[0].header.get_difficulty(TEST_NETWORK);
+        let newest_header = headers[0].header.clone();
         let height_four_miner = headers[0].header.miner_bitcoin_address.clone();
         let height_three_miner = headers[1].header.miner_bitcoin_address.clone();
         let height_two_miner = headers[2].header.miner_bitcoin_address.clone();
@@ -4324,11 +4399,16 @@ mod tests {
             .for_chain(Chain::BitcoinCash)
             .with_window_sizes(0, 4);
         window.update(&store).unwrap();
+        //* Weights are exact work. A block of the share's difficulty, in whole
+        //* units of difficulty, holds at most one share's work, so three
+        //* blocks are reached at the third share.
+        let share_weight = window.base_weight(&newest_header);
+        let paying_block_difficulty = share_weight / difficulty_one_work(TEST_NETWORK);
 
         let distribution = window
             .get_distribution_from_start_hash(
                 tip_hash,
-                share_difficulty,
+                paying_block_difficulty,
                 &MockChainStoreHandle::default(),
             )
             .unwrap();
@@ -4336,15 +4416,15 @@ mod tests {
         assert_eq!(distribution.len(), 3);
         assert_eq!(
             distribution[&height_four_miner],
-            share_difficulty * DIFFICULTY_SCALE
+            share_weight * DIFFICULTY_SCALE
         );
         assert_eq!(
             distribution[&height_three_miner],
-            share_difficulty * DIFFICULTY_SCALE
+            share_weight * DIFFICULTY_SCALE
         );
         assert_eq!(
             distribution[&height_two_miner],
-            share_difficulty * DIFFICULTY_SCALE
+            share_weight * DIFFICULTY_SCALE
         );
     }
 
@@ -4552,11 +4632,11 @@ mod tests {
             2,
             vec![uncle.block_hash()],
         );
-        let share_difficulty = header_b.get_difficulty(TEST_NETWORK);
-        let uncle_difficulty = uncle.get_difficulty(TEST_NETWORK);
         let mut window = PplnsWindow::new(TEST_NETWORK)
             .for_chain(Chain::BitcoinCash)
             .with_window_sizes(0, 4);
+        let share_difficulty = window.base_weight(&header_b);
+        let uncle_difficulty = window.base_weight(&uncle);
         let uncle_entry = uncle_entry_from_header(&mut window, &uncle);
         let entry_b = entry_from_header_with_uncles(&mut window, &header_b, 1, vec![uncle_entry]);
         let entry_a = entry_from_header(&mut window, &header_a, 0);
@@ -4566,7 +4646,7 @@ mod tests {
         let distribution = window
             .get_distribution_from_start_hash(
                 header_b.block_hash(),
-                (share_difficulty + uncle_difficulty) / 3,
+                (share_difficulty + uncle_difficulty) / 3 / difficulty_one_work(TEST_NETWORK),
                 &MockChainStoreHandle::default(),
             )
             .unwrap();
@@ -4581,6 +4661,57 @@ mod tests {
             uncle_difficulty * UNCLE_SCALED_WEIGHT
         );
         assert!(!distribution.contains_key(&header_a.miner_bitcoin_address));
+    }
+
+    /// The mini chain's easiest share (`0x1c384bd7`, difficulty 4.55) and a
+    /// difficulty-5 share weigh in the ratio of their work, about 0.91, not
+    /// 4 to 5 as rounded-down difficulty would have it.
+    #[test]
+    fn test_bch_window_weighs_shares_by_exact_work() {
+        let window = PplnsWindow::new(Network::Testnet).for_chain(Chain::BitcoinCash);
+        let mut easiest = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        easiest.bits = CompactTarget::from_consensus(0x1c38_4bd7);
+        let mut harder = easiest.clone();
+        harder.bits = CompactTarget::from_consensus(0x1c33_3300);
+
+        let easiest_weight = window.base_weight(&easiest);
+        let harder_weight = window.base_weight(&harder);
+
+        assert_eq!(easiest.get_difficulty(Network::Testnet), 4);
+        assert_eq!(harder.get_difficulty(Network::Testnet), 5);
+        assert_eq!(
+            easiest_weight,
+            work_to_u128(Target::from_compact(easiest.bits).to_work())
+        );
+        let ratio = easiest_weight as f64 / harder_weight as f64;
+        assert!((0.90..0.92).contains(&ratio), "ratio {ratio}");
+    }
+
+    #[test]
+    fn test_bitcoin_window_weighs_shares_by_integer_difficulty() {
+        let window = PplnsWindow::new(Network::Testnet).for_chain(Chain::Bitcoin);
+        let mut easiest = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        easiest.bits = CompactTarget::from_consensus(0x1c38_4bd7);
+
+        assert_eq!(window.base_weight(&easiest), 4);
+    }
+
+    /// One unit of difficulty weighs the work at the network's limit: about
+    /// 2^32 on mainnet, testnet and chipnet, 2 on regtest.
+    #[test]
+    fn test_difficulty_one_work_per_network() {
+        assert_eq!(difficulty_one_work(Network::Bitcoin), 0x1_0001_0001);
+        assert_eq!(difficulty_one_work(Network::Testnet), 0x1_0001_0001);
+        assert_eq!(difficulty_one_work(Network::Regtest), 2);
+    }
+
+    /// The work target is three blocks in units of difficulty-one work, so a
+    /// window of exact-work shares reaches it as a window of difficulties did.
+    #[test]
+    fn test_bch_work_target_is_in_units_of_work() {
+        let window = PplnsWindow::new(Network::Testnet).for_chain(Chain::BitcoinCash);
+        assert_eq!(window.work_target(1_000), Some(3_000 * 0x1_0001_0001));
+        assert_eq!(window.work_target(1), None);
     }
 
     //* As in test_distribution_refuses_when_skip_and_window_exceed_cache, the

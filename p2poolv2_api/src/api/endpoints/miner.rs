@@ -107,7 +107,8 @@ pub struct MinerShare {
     pub height: u32,
     /// The window share that includes this uncle, or null for a share.
     pub nephew: Option<String>,
-    /// Share difficulty before weighting.
+    /// Base weight before scaling: the share's difficulty on Bitcoin, its
+    /// exact work on Bitcoin Cash.
     pub difficulty: String,
     /// Weight credited.
     pub weight: String,

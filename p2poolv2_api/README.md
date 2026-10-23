@@ -225,11 +225,14 @@ Each `shares` entry has `blockhash`, `height` (an uncle is credited at the
 height of the share that includes it), `nephew` (that share's blockhash, or
 `null` for a window share), `difficulty`, `weight` and `payout_address`.
 
-Weights are difficulty weights in the payout's scaled units: a share earns
-10 times its difficulty plus 1 times the difficulty of each uncle it
-includes, an uncle 9 times its own. Weights and difficulties are decimal
-strings because a window's total exceeds what a JSON number carries
-exactly in most clients.
+Weights are in the payout's scaled units: a share earns 10 times its base
+weight plus 1 times the base weight of each uncle it includes, an uncle 9
+times its own. The base weight, reported as `difficulty`, is the share's
+integer difficulty on Bitcoin and its exact work, `2^256 / (target + 1)`,
+on Bitcoin Cash (about 2^32 times its difficulty), so shares of nearby
+small difficulties are weighed exactly. Weights and difficulties are
+decimal strings because a window's total exceeds what a JSON number
+carries exactly in most clients.
 
 `payout_fraction` is a fraction of the PPLNS payout, which is the coinbase
 less the donation and fee set in the header of the share that finds the

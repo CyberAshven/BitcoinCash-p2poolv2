@@ -15,7 +15,7 @@
 //! "Payout rights").
 
 use bitcoin::hashes::Hash;
-use bitcoin::{Address, Amount, BlockHash, NetworkKind, OutPoint, PrivateKey, PubkeyHash};
+use bitcoin::{Address, Amount, BlockHash, NetworkKind, OutPoint, PrivateKey, PubkeyHash, Target};
 use p2poolv2_lib::accounting::OutputPair;
 use p2poolv2_lib::accounting::payout::coinbase_budget::PayoutSplit;
 use p2poolv2_lib::accounting::payout::payout_distribution::build_pplns_outputs;
@@ -252,9 +252,13 @@ fn bitcoin_cash_window() -> PplnsWindow {
     PplnsWindow::new(NETWORK).for_chain(Chain::BitcoinCash)
 }
 
-/// The weight of the seller's share: its difficulty, scaled.
+/// The weight of the seller's share: its exact work, scaled, as Bitcoin Cash
+/// weighs shares.
 fn seller_share_weight(mined: &ShareBlock) -> u128 {
-    mined.get_difficulty(NETWORK) * DIFFICULTY_SCALE
+    let work = Target::from_compact(mined.header.bits)
+        .to_work()
+        .to_le_bytes();
+    u128::from_le_bytes(work[..16].try_into().unwrap()) * DIFFICULTY_SCALE
 }
 
 /// A claim of the share contract moves the sold share's weight to the
@@ -339,9 +343,10 @@ async fn test_a_bitcoin_window_keeps_paying_the_miner_after_a_claim() {
 
     let after_the_claim = weights(&mut bitcoin_window, &claim_block, &chain_store_handle);
 
+    // Bitcoin weighs shares by integer difficulty, upstream's rule.
     assert_eq!(
         after_the_claim.get(&mined.header.miner_bitcoin_address),
-        Some(&seller_share_weight(&mined))
+        Some(&(mined.get_difficulty(NETWORK) * DIFFICULTY_SCALE))
     );
     assert_eq!(after_the_claim.get(&holder_address(&buyer())), None);
 }
