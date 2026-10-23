@@ -94,7 +94,7 @@ out units with no right attached. The reasoning is in plan decision 15
 
 Upstream builds transactions with `rust-bitcoin` and validates them with
 `bitcoinconsensus`, and plans to move share scripts to `rust-miniscript`.
-Neither validator knows Bitcoin Cash: `bitcoinconsensus` applies Bitcoin's
+Neither is built for Bitcoin Cash: `bitcoinconsensus` applies Bitcoin's
 script rules, so a Bitcoin Cash signature (`SIGHASH_FORKID`, Bitcoin Cash
 Schnorr) would fail there. Bitcoin Cash share transactions are checked by
 this fork's own interpreter (`p2poolv2_lib/src/shares/bch_script.rs`), and the

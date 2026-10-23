@@ -122,7 +122,7 @@ check is part of [share validation](validation.md).
 - **No witness commitment.** Bitcoin coinbases carry a BIP141 witness
   commitment output inside the prefix. BCHN's templates have none, and this
   fork drops a template that asks for Bitcoin's SegWit rules
-  (`stratum/work/gbt.rs`).
+  (`stratum/work/block_template.rs`).
 - **Branch length.** Blocks can grow under ABLA, so the coinbase merkle
   branch may be longer than on Bitcoin. The decoder accepts up to 25 levels,
   enough for BCHN's 2 GB maximum block of 65-byte transactions

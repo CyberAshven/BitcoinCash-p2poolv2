@@ -137,17 +137,21 @@ payout address the miner chose, so a hijacker must swap the whole job.
 
 ### Coinbase size and stock firmware
 
-Every miner in the window gets a coinbase output. Upstream reports that
-stock Antminer firmware accepts only about a dozen outputs. An attacker with
+A coinbase that pays every miner in the window grows with the pool. Upstream
+reports that stock Antminer firmware accepts only about a dozen outputs. An
+attacker with
 many tiny addresses could also push small honest miners out of a capped
 coinbase (the "rich list" attack).
 
-**Open.** Not yet measured on Bitcoin Cash hardware. There is no output cap
-today, so the rich-list attack has nothing to capture, but large windows may
-not fit stock firmware. Stratum V2 standard channels, which hash headers
-only, avoid the limit. A covenant payout tree in one output, which BCH's
-introspection opcodes allow without a fork, is the lasting fix being
-considered.
+**Open.** Not yet measured on Bitcoin Cash hardware. The code today caps a
+coinbase at 11 payouts and pays the rest to one payee drawn by weight (plan
+decision 14), so crowding others out of the paid set only moves them into
+the draw, where their expected income is unchanged. The cap is being
+replaced by a hybrid: direct payouts to every miner, and a covenant payout
+tree, which BCH's introspection opcodes allow without a fork, only for shares
+that merge-mine tokens once their coinbase passes a threshold. Stratum V2
+standard channels, which hash headers only, avoid any firmware limit. See
+[Pool size limits](sharechain/pool-size.md).
 
 ## Bitcoin Cash chain risks
 
@@ -166,9 +170,8 @@ your own BCHN, or a Template Provider you trust, and keep it well connected.
 
 **Partial.** Payouts skip the newest 100 shares, so a block's payout differs
 between share-chain forks only when they split deeper than that. Moving
-payout rights are undone on reorgs. A node can still stall on a valid branch
-that spends an output it never fetched; the rule that rejects such spends at
-write time is planned with the transaction work.
+payout rights are undone on reorgs. Since 2026-10-23 a share spending an
+output the node never fetched is stored instead of stalling the node.
 
 ## For operators
 

@@ -41,6 +41,20 @@ The decisions behind these are in [Plan and decisions](bch-plan.md).
 - Work on the code: the [Architecture](architecture/README.md) pages and
   `AGENTS.md` in the repository.
 
+## How it works
+
+Ported from upstream's documentation site and adapted to Bitcoin Cash (the
+[port map](upstream-port-map.md) lists every page):
+
+- Why: [Why P2Poolv2](why-p2poolv2.md) and
+  [Comparison with SV2 and DATUM](compare-datum-sv2.md).
+- The network and a node: [P2P network of miners](p2p-network.md),
+  [Node components](node-components.md) and
+  [Stratum server and vardiff](stratum.md).
+- The [Share chain](sharechain/README.md): commitments, validation, PPLNS
+  accounting, share transactions and pool size limits.
+- [Payouts](payouts/README.md): in the coinbase, and by selling shares.
+
 ## Status
 
 Alpha. The pool runs on chipnet; mainnet has not started. Releases are on

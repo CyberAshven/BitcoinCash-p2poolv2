@@ -104,6 +104,17 @@ anchor and the donation and fee cap as they were.
 - A docs site built with mdBook from `docs/` (`mdbook build docs`, CI job
   `Docs`), with new pages for requirements, miner options, small-miner
   arithmetic on Bitcoin Cash and known attacks.
+- The pages of upstream's documentation site (`p2poolv2/docs` at `623e4c1`),
+  ported to the docs book and adapted to Bitcoin Cash under "How P2Poolv2
+  works": why P2Poolv2, the comparison with SV2 and DATUM, the P2P network,
+  node components, the Stratum server, the share chain (commitments,
+  validation, mining on the current chain, PPLNS accounting, share
+  transactions, spending share outputs, pool size limits) and payouts
+  (coinbase payouts, selling shares). They keep upstream's credit and MIT or
+  Apache-2.0 notice; `docs/upstream-port-map.md` maps every upstream page and
+  says why the rest were not ported. The coinbase payout cap is marked as an
+  open design question, being redesigned as direct payouts plus a payout tree
+  for shares that merge-mine tokens.
 - Docker: a Bitcoin Cash Node 29.2.0 image from the release tarball, pinned
   by SHA-256, and a regtest stack that mines through the pool with a Rust CPU
   miner (mujina), checked by the `Docker regtest stack` CI job.

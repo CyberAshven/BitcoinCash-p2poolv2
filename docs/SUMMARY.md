@@ -12,6 +12,26 @@
 - [Trading shares for BCH](atomic-swap/bch-share-trading.md)
 - [Known attacks and threat model](known-attacks.md)
 
+# How P2Poolv2 works
+
+- [Why P2Poolv2](why-p2poolv2.md)
+- [Comparison with SV2 and DATUM](compare-datum-sv2.md)
+- [P2P network of miners](p2p-network.md)
+- [Node components](node-components.md)
+- [Stratum server and vardiff](stratum.md)
+- [Share chain](sharechain/README.md)
+  - [Share commitments](sharechain/share-commitments.md)
+  - [Share validation](sharechain/validation.md)
+  - [Mining on the current chain](sharechain/current-chain.md)
+  - [PPLNS accounting](sharechain/pplns-accounting.md)
+  - [Share transactions](sharechain/transactions.md)
+  - [Spending share outputs](sharechain/spending-outputs.md)
+  - [Pool size limits](sharechain/pool-size.md)
+- [Payouts](payouts/README.md)
+  - [Coinbase payouts](payouts/coinbase.md)
+  - [Selling shares](payouts/selling-shares.md)
+- [Upstream port map](upstream-port-map.md)
+
 # Bitcoin Cash design
 
 - [Plan and decisions](bch-plan.md)
