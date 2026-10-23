@@ -44,6 +44,12 @@ ARG BCHN_VERSION=29.2.0
 
 COPY --from=download /opt/bchn/bin/bitcoind /opt/bchn/bin/bitcoin-cli /usr/local/bin/
 
+# The release binaries link libc, libm and libgcc_s, which the base image
+# has, and bitcoind also libatomic.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN useradd --system --home-dir /data --shell /usr/sbin/nologin bchn \
     && mkdir -p /data /etc/bchn \
     && chown bchn:bchn /data
