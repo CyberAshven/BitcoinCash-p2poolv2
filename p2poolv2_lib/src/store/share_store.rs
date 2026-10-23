@@ -1157,6 +1157,44 @@ mod tests {
         assert!(store.share_block_exists(&blockhash));
     }
 
+    /// A block spending an output this node does not hold is stored, not
+    /// refused. The store cannot tell an output that never existed from one
+    /// below its prune height that it never fetched, so it records an unknown
+    /// root and leaves the verdict to validation. Refusing the block left a
+    /// valid block on the best chain unstorable, and confirmation stalled.
+    #[test]
+    fn test_add_share_block_stores_a_block_spending_an_output_it_does_not_hold() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+
+        let spend_of_unknown_output = Transaction {
+            version: bitcoin::transaction::Version::ONE,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::new(
+                    bitcoin::Txid::from_byte_array([0x42; 32]),
+                    0,
+                ),
+                ..Default::default()
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1_000),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        };
+        let block = TestShareBlockBuilder::new()
+            .add_transaction(spend_of_unknown_output)
+            .build();
+
+        let mut batch = Store::get_write_batch();
+        store
+            .add_share_block(&block, &mut batch)
+            .expect("a missing input is recorded, not an error");
+        store.commit_batch(batch).unwrap();
+
+        assert!(store.share_block_exists(&block.block_hash()));
+    }
+
     #[test]
     fn test_add_share_block_stores_header_in_header_cf() {
         let temp_dir = tempdir().unwrap();

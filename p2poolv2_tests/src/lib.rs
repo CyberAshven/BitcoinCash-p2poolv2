@@ -5,6 +5,8 @@
 #[cfg(test)]
 mod common;
 #[cfg(test)]
+mod missing_input_test;
+#[cfg(test)]
 mod node_swarm_test;
 #[cfg(test)]
 mod organise_pipeline_test;

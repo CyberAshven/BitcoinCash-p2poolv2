@@ -520,21 +520,29 @@ affected.
   limiter bounds one connection, not an attacker.
 - **No other penalty.** The only sanction is disconnecting a peer.
 
-### A gap that exists today
+### A gap that existed until 2026-10-23
 
-`BlockReceiver` buffers a share whose parent or uncles are not ready in
+`BlockReceiver` buffered a share whose parent or uncles are not ready in
 `pending`, a `HashMap` with no capacity limit and no expiry
-(`block_receiver.rs`). A share naming a random parent hash passes every
-check at receipt and then waits forever. One 100 TH/s machine can grow
-that map by about 4 MB a second, on every node it connects to. This is
-independent of issue #652 and should be fixed on its own.
+(`block_receiver.rs`). A share naming a random parent hash passed every
+check at receipt and then waited forever. One 100 TH/s machine could grow
+that map by about 4 MB a second, on every node it connects to.
+
+The buffer is now bounded (`PendingLimits`): at most 1,024 blocks and
+32 MiB, the oldest evicted first, and a block older than 10 minutes is
+dropped on the next arrival (`share-processing-pipeline.md`, "BlockReceiver
+ancestry gate"). That is change 2 below, with expiry in place of the
+prune-height drop: a parent below `current_prune_height()` makes the
+ancestry gate release the block, and anything else expires. Change 1 is
+still open: a share naming an unknown parent is still buffered, now inside
+the bounds.
 
 ### Changes
 
 | Change | Required | Stops |
 |---|---|---|
 | 1. Drop a share whose parent or uncle header is unknown, instead of buffering it (recovery is the existing missing-parent header request) | yes, independent of #652 | fabricated-parent floods (today's gap) |
-| 2. Cap the parent-wait buffer, evicting the longest-waiting entry, and drop entries whose parent fell below `current_prune_height()` | yes, independent of #652 | memory exhaustion from withheld bodies |
+| 2. Cap the parent-wait buffer, evicting the longest-waiting entry, and drop entries whose parent fell below `current_prune_height()` (done 2026-10-23, with expiry instead of the prune-height drop) | yes, independent of #652 | memory exhaustion from withheld bodies |
 | 3. Drop shares whose bitcoin prev is unknown, with a bounded, expiring cache of dropped hashes | yes, for #652 | memory cost of fabricated-prev shares, and repeat fetches of them |
 | 4. Cap carried headers per share and per batch in the decoder (about 100), check them locally, stop at the first failure, cache failed hashes | yes, for #652 | message size and header-check load: a fabricated header costs one local check, no RPC |
 | 5. Disconnect a peer whose share still has an unknown bitcoin prev after its carried headers are checked | optional | bandwidth from one connection |

@@ -19,6 +19,17 @@ use std::str::FromStr;
 /// Default version mask for BIP 323 version rolling.
 pub const DEFAULT_VERSION_MASK: i32 = 0x1fffe000;
 
+/// Stratum difficulty cap when `maximum_difficulty` is not configured: 2^32.
+///
+/// A session at this difficulty that submits a share every 3.33 seconds, the
+/// difficulty adjuster's target, hashes at about 5.5 EH/s: more than the whole
+/// Bitcoin Cash network, and a large farm behind one proxy connection on
+/// Bitcoin. It stays far below either network's block difficulty, so a miner
+/// never withholds a block because its share target is harder than the
+/// block's. Without a cap a miner could ask for `d=18446744073709551615` and
+/// drive the adjuster's sums to their limits.
+pub const DEFAULT_MAXIMUM_DIFFICULTY: u64 = 1 << 32;
+
 /// One hundred percent, in basis points.
 pub const MAX_BASIS_POINTS: u16 = 10_000;
 
@@ -273,7 +284,8 @@ pub struct StratumConfig<State = Raw> {
     pub start_difficulty: u64,
     /// The minimum difficulty for the pool
     pub minimum_difficulty: u64,
-    /// The maximum difficulty for the pool, if set to None, it is not enforced
+    /// The maximum difficulty for the pool. Parsing fills an unset value with
+    /// [`DEFAULT_MAXIMUM_DIFFICULTY`], so a parsed config always has one.
     pub maximum_difficulty: Option<u64>,
     /// The address for solo mining payouts
     pub solo_address: Option<String>,
@@ -571,7 +583,10 @@ impl StratumConfig<Raw> {
             port: self.port,
             start_difficulty: self.start_difficulty,
             minimum_difficulty: self.minimum_difficulty,
-            maximum_difficulty: self.maximum_difficulty,
+            maximum_difficulty: Some(
+                self.maximum_difficulty
+                    .unwrap_or(DEFAULT_MAXIMUM_DIFFICULTY),
+            ),
             solo_address: self.solo_address,
             zmqpubhashblock: self.zmqpubhashblock,
             bootstrap_address: self.bootstrap_address,
@@ -1961,6 +1976,24 @@ mod tests {
         let parsed = config.parse().unwrap();
         assert!(parsed.donation_address_parsed.is_none());
         assert!(parsed.fee_address_parsed.is_none());
+    }
+
+    /// An unset maximum difficulty becomes the default cap, so no session can
+    /// ask for an unbounded difficulty.
+    #[test]
+    fn test_parse_fills_an_unset_maximum_difficulty_with_the_default() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.maximum_difficulty = None;
+        let parsed = config.parse().unwrap();
+        assert_eq!(parsed.maximum_difficulty, Some(DEFAULT_MAXIMUM_DIFFICULTY));
+    }
+
+    #[test]
+    fn test_parse_keeps_a_configured_maximum_difficulty() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.maximum_difficulty = Some(u64::MAX);
+        let parsed = config.parse().unwrap();
+        assert_eq!(parsed.maximum_difficulty, Some(u64::MAX));
     }
 
     #[test]

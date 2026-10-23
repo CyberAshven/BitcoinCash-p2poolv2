@@ -171,6 +171,13 @@ fn bitcoin_cash_donation_script() -> ScriptBuf {
 
 /// Maximum uncles in a share block header
 pub const MAX_UNCLES: usize = 3;
+
+/// Protocol tag for the share chain rules a Bitcoin Cash node added after
+/// `payout-holder`: an uncle may have only one nephew on a chain
+/// (`validate_uncle_positions`). A node without it accepts a share naming an
+/// uncle its parent or grandparent already names, and pays that uncle twice,
+/// so the two must not peer.
+pub const BCH_UNCLE_ONCE_RULE_TAG: &str = "uncle-once";
 /// Maximum number of seconds a share timestamp may be ahead of the local clock.
 pub const MAX_FUTURE_TIME_SECS: u64 = 120;
 /// Number of ancestor share headers used to compute median time past.
@@ -183,6 +190,79 @@ pub const BLOCK_TXS_SIZE_LIMIT: u32 = 200 * 1024;
 pub const TXS_COUNT_LIMIT: u32 = 100;
 /// Maximum total sigop cost allowed in a share block (matches Bitcoin consensus).
 pub const MAX_BLOCK_SIGOPS_COST: usize = 80_000;
+
+/// A nephew's recent ancestry, as uncle validation reads it.
+struct RecentAncestry {
+    /// The nephew's ancestors within `MAX_UNCLES_DEPTH`.
+    ancestors: HashSet<BlockHash>,
+    /// Every uncle those ancestors name.
+    uncles_of_ancestors: HashSet<BlockHash>,
+}
+
+/// The future limit every share timestamp follows: at most
+/// `MAX_FUTURE_TIME_SECS` ahead of `current_time`, the local clock in seconds
+/// since the epoch. Shared by full validation and header sync so both apply
+/// the same rule.
+fn check_future_time_limit(share_time: u32, current_time: u64) -> Result<(), ValidationError> {
+    let share_timestamp = u64::from(share_time);
+    if share_timestamp > current_time.saturating_add(MAX_FUTURE_TIME_SECS) {
+        return Err(ValidationError::consensus(format!(
+            "Share timestamp {share_timestamp} is more than {MAX_FUTURE_TIME_SECS} seconds ahead of local time {current_time}"
+        )));
+    }
+    Ok(())
+}
+
+/// The median time past rule every share timestamp follows: strictly greater
+/// than the median of `ancestor_times`, up to `MTP_WINDOW` ancestors ending
+/// at the parent. A share with no ancestor times has nothing to be measured
+/// against and is rejected; callers always pass at least the parent's time.
+/// Shared by full validation and header sync so both apply the same rule.
+fn check_median_time_past(share_time: u32, ancestor_times: &[u32]) -> Result<(), ValidationError> {
+    if ancestor_times.is_empty() {
+        return Err(ValidationError::consensus(format!(
+            "Share timestamp {share_time} has no ancestor times to measure median time past against"
+        )));
+    }
+    let mut sorted_times = ancestor_times.to_vec();
+    sorted_times.sort_unstable();
+    let median = sorted_times[sorted_times.len() / 2];
+    if share_time <= median {
+        return Err(ValidationError::consensus(format!(
+            "Share timestamp {share_time} is not greater than median time past {median}"
+        )));
+    }
+    Ok(())
+}
+
+/// The times of up to `MTP_WINDOW` stored ancestors ending at `parent_hash`,
+/// newest first, following each header's own parent pointer (not the
+/// confirmed index), so the answer holds on a fork too. Stops at genesis.
+///
+/// A missing ancestor header is `Recoverable`: it can still arrive. Any other
+/// read failure is `StoreAccess`.
+pub(crate) fn stored_ancestor_times(
+    parent_hash: BlockHash,
+    chain_store_handle: &ChainStoreHandle,
+) -> Result<Vec<u32>, ValidationError> {
+    let mut ancestor_times = Vec::with_capacity(MTP_WINDOW);
+    let mut current = parent_hash;
+    while ancestor_times.len() < MTP_WINDOW && !is_terminal_blockhash(&current) {
+        let header = chain_store_handle
+            .get_share_header(&current)
+            .map_err(|err| match err {
+                StoreError::NotFound(_) => ValidationError::recoverable(format!(
+                    "Ancestor header {current} for MTP check is not in the store: {err}"
+                )),
+                _ => ValidationError::store_access(format!(
+                    "Failed to fetch ancestor header {current} for MTP check: {err}"
+                )),
+            })?;
+        ancestor_times.push(header.time);
+        current = header.prev_share_blockhash;
+    }
+    Ok(ancestor_times)
+}
 
 /// Total value the bitcoin coinbase pays out, in satoshis.
 ///
@@ -300,7 +380,8 @@ pub trait ShareValidator {
     ) -> Result<(), ValidationError>;
 
     /// Validate uncles as a pure function of chain shape: count within
-    /// MAX_UNCLES, no duplicates, and the structural position rules. Whether an
+    /// MAX_UNCLES, no duplicates, and the structural position rules, which
+    /// include that an uncle may have only one nephew on a chain. Whether an
     /// uncle's block body is stored is checked separately, and only for blocks
     /// inside the PPLNS zone.
     fn validate_uncles(
@@ -321,6 +402,24 @@ pub trait ShareValidator {
         share: &ShareBlock,
         chain_store_handle: &ChainStoreHandle,
         time_provider: &dyn TimeProvider,
+    ) -> Result<(), ValidationError>;
+
+    /// Validate a share header's timestamp before its header is organised, on
+    /// the header-sync and block-receipt paths, with the same two rules as
+    /// `validate_timestamp`: `header.time` must be greater than the median of
+    /// `ancestor_times`, and at most `MAX_FUTURE_TIME_SECS` ahead of this
+    /// validator's clock.
+    ///
+    /// `ancestor_times` are the times of up to `MTP_WINDOW` ancestors ending
+    /// at the parent, which header sync reads from the batch and the store,
+    /// and block receipt from the store (`stored_ancestor_times`).
+    /// Every header needs this check before it is organised: blocks below the
+    /// full-validation zone never run `validate_timestamp`, and each header's
+    /// ASERT target comes from its parent's time.
+    fn validate_header_timestamp(
+        &self,
+        share_header: &ShareHeader,
+        ancestor_times: &[u32],
     ) -> Result<(), ValidationError>;
 
     /// Validate the block's inputs against the rules fixed by the block
@@ -530,15 +629,23 @@ impl DefaultShareValidator {
     }
 
     /// Validate each uncle's position relative to the nephew: strictly below
-    /// the nephew's height, no deeper than `MAX_UNCLES_DEPTH`, and not on the
-    /// nephew's own ancestry.
+    /// the nephew's height, no deeper than `MAX_UNCLES_DEPTH`, not on the
+    /// nephew's own ancestry, and not already an uncle of one of the nephew's
+    /// ancestors.
     ///
     /// The depth bound keeps every valid uncle inside the PPLNS window. The
-    /// ancestry check is what makes it safe to accept an uncle that happens to
-    /// be on the confirmed chain: a block is only ever double-counted in a
-    /// payout window (paid as a chain entry and again as an uncle) when a share
-    /// references its own ancestor. Rejecting ancestor uncles removes that
-    /// double-count structurally -- as a pure function of chain shape
+    /// last two rules stop the window paying a block twice, and both are pure
+    /// functions of chain shape:
+    ///
+    /// - The ancestry check is what makes it safe to accept an uncle that
+    ///   happens to be on the confirmed chain: a block would otherwise be paid
+    ///   as a chain entry and again as an uncle.
+    /// - An uncle may have only one nephew on a chain (upstream's
+    ///   `validation.adoc`). The window credits every uncle reference it
+    ///   walks, so an uncle that the nephew and one of its ancestors both name
+    ///   would be paid twice, with two nephew bonuses. Siblings on different
+    ///   branches may each name it, since only one of them can stay on the
+    ///   chain.
     ///
     /// The nephew's height is derived from its parent (`prev_share_blockhash`),
     /// matching how the other chain-context checks resolve height. Parent and
@@ -581,7 +688,7 @@ impl DefaultShareValidator {
             })?;
         let nephew_height = parent_height + 1;
 
-        let ancestors = self.collect_recent_ancestors(parent_hash, chain_store_handle)?;
+        let ancestry = self.collect_recent_ancestry(parent_hash, chain_store_handle)?;
 
         for uncle in &share.header.uncles {
             let uncle_height = metadata_by_hash
@@ -608,38 +715,55 @@ impl DefaultShareValidator {
                     "Uncle {uncle} at height {uncle_height} is more than {MAX_UNCLES_DEPTH} below nephew height {nephew_height}"
                 )));
             }
-            if ancestors.contains(uncle) {
+            if ancestry.ancestors.contains(uncle) {
                 return Err(ValidationError::consensus(format!(
                     "Uncle {uncle} is an ancestor of the nephew"
+                )));
+            }
+            if ancestry.uncles_of_ancestors.contains(uncle) {
+                return Err(ValidationError::consensus(format!(
+                    "Uncle {uncle} is already an uncle of an ancestor of the nephew"
                 )));
             }
         }
         Ok(())
     }
 
-    /// Collect the nephew's ancestor hashes within `MAX_UNCLES_DEPTH` by
-    /// following parent pointers from `parent_hash` (the nephew's direct
-    /// parent). The walk covers exactly the heights a valid uncle can occupy,
-    /// so an uncle on the nephew's own ancestry is always in the returned set.
-    fn collect_recent_ancestors(
+    /// Collect the nephew's ancestors within `MAX_UNCLES_DEPTH`, and the
+    /// uncles they name, by following parent pointers from `parent_hash` (the
+    /// nephew's direct parent).
+    ///
+    /// The walk covers exactly the heights a valid uncle can occupy, so an
+    /// uncle on the nephew's own ancestry is always among the ancestors. It
+    /// also covers every ancestor that could have named one of the nephew's
+    /// uncles before: such an ancestor sits above the uncle, which is at most
+    /// `MAX_UNCLES_DEPTH` below the nephew. The uncle lists come from the
+    /// headers the walk already reads.
+    fn collect_recent_ancestry(
         &self,
         parent_hash: BlockHash,
         chain_store_handle: &ChainStoreHandle,
-    ) -> Result<HashSet<BlockHash>, ValidationError> {
-        let mut ancestors = HashSet::with_capacity(MAX_UNCLES_DEPTH as usize);
+    ) -> Result<RecentAncestry, ValidationError> {
+        let mut ancestry = RecentAncestry {
+            ancestors: HashSet::with_capacity(MAX_UNCLES_DEPTH as usize),
+            uncles_of_ancestors: HashSet::with_capacity(MAX_UNCLES_DEPTH as usize * MAX_UNCLES),
+        };
         let mut current = parent_hash;
         let mut steps = 0;
         while steps < MAX_UNCLES_DEPTH as usize && !is_terminal_blockhash(&current) {
-            ancestors.insert(current);
+            ancestry.ancestors.insert(current);
             let header = chain_store_handle.get_share_header(&current).map_err(|_| {
                 ValidationError::recoverable(format!(
                     "Ancestor {current} header not found for uncle ancestry check"
                 ))
             })?;
+            ancestry
+                .uncles_of_ancestors
+                .extend(header.uncles.iter().copied());
             current = header.prev_share_blockhash;
             steps += 1;
         }
-        Ok(ancestors)
+        Ok(ancestry)
     }
 
     /// Validate that the total number of transactions does not exceed TXS_COUNT_LIMIT.
@@ -1428,31 +1552,9 @@ impl ShareValidator for DefaultShareValidator {
         chain_store_handle: &ChainStoreHandle,
         time_provider: &dyn TimeProvider,
     ) -> Result<(), ValidationError> {
-        let current_time = time_provider.seconds_since_epoch();
-        let share_timestamp = share.header.time as u64;
-
-        if share_timestamp > current_time + MAX_FUTURE_TIME_SECS {
-            return Err(ValidationError::consensus(format!(
-                "Share timestamp {share_timestamp} is more than {MAX_FUTURE_TIME_SECS} seconds ahead of local time {current_time}"
-            )));
-        }
-        let mut ancestor_times = Vec::with_capacity(MTP_WINDOW);
-        let mut current = share.header.prev_share_blockhash;
-        while ancestor_times.len() < MTP_WINDOW && !is_terminal_blockhash(&current) {
-            let header =
-                chain_store_handle
-                    .get_share_header(&current)
-                    .map_err(|err| match err {
-                        StoreError::NotFound(_) => ValidationError::recoverable(format!(
-                            "Ancestor header {current} for MTP check is not in the store: {err}"
-                        )),
-                        _ => ValidationError::store_access(format!(
-                            "Failed to fetch ancestor header {current} for MTP check: {err}"
-                        )),
-                    })?;
-            ancestor_times.push(header.time);
-            current = header.prev_share_blockhash;
-        }
+        check_future_time_limit(share.header.time, time_provider.seconds_since_epoch())?;
+        let ancestor_times =
+            stored_ancestor_times(share.header.prev_share_blockhash, chain_store_handle)?;
         // The walk is empty only when the loop never ran, which needs a terminal
         // (all-zeros) parent pointer: a share claiming to have no parent. The
         // organise worker drops those before validation, because parent_state()
@@ -1464,14 +1566,16 @@ impl ShareValidator for DefaultShareValidator {
                 share.header.prev_share_blockhash
             )));
         }
-        ancestor_times.sort_unstable();
-        let median = ancestor_times[ancestor_times.len() / 2];
-        if share.header.time <= median {
-            return Err(ValidationError::consensus(format!(
-                "Share timestamp {share_timestamp} is not greater than median time past {median}"
-            )));
-        }
-        Ok(())
+        check_median_time_past(share.header.time, &ancestor_times)
+    }
+
+    fn validate_header_timestamp(
+        &self,
+        share_header: &ShareHeader,
+        ancestor_times: &[u32],
+    ) -> Result<(), ValidationError> {
+        check_future_time_limit(share_header.time, self.time_provider.seconds_since_epoch())?;
+        check_median_time_past(share_header.time, ancestor_times)
     }
 
     /// Validation run before promotion, in sequence, as these need the chain
@@ -1609,6 +1713,12 @@ mockall::mock! {
             share: &ShareBlock,
             chain_store_handle: &ChainStoreHandle,
             time_provider: &dyn TimeProvider,
+        ) -> Result<(), ValidationError>;
+
+        fn validate_header_timestamp(
+            &self,
+            share_header: &ShareHeader,
+            ancestor_times: &[u32],
         ) -> Result<(), ValidationError>;
 
         fn validate_prevouts(
@@ -2293,6 +2403,98 @@ mod tests {
         );
     }
 
+    /// Header sync applies median time past: a header no later than the
+    /// median of its ancestors' times is rejected.
+    #[test]
+    fn test_validate_header_timestamp_rejects_a_time_not_after_median_time_past() {
+        let time_provider = TestTimeProvider::new(SystemTime::now());
+        let validator = DefaultShareValidator::with_time_provider(
+            PoolDifficulty::default(),
+            Arc::new(time_provider),
+        );
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.time = 1_700_000_005;
+        // Median of these eleven times is 1_700_000_005.
+        let ancestor_times = [
+            1_700_000_010,
+            1_700_000_009,
+            1_700_000_008,
+            1_700_000_007,
+            1_700_000_006,
+            1_700_000_005,
+            1_700_000_004,
+            1_700_000_003,
+            1_700_000_002,
+            1_700_000_001,
+            1_700_000_000,
+        ];
+
+        let error = validator
+            .validate_header_timestamp(&header, &ancestor_times)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(
+            error.to_string().contains("median time past"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Header sync applies the future limit with the validator's own clock.
+    #[test]
+    fn test_validate_header_timestamp_rejects_a_time_too_far_ahead() {
+        let mut time_provider = TestTimeProvider::new(SystemTime::now());
+        time_provider.set_since_epoch(1_700_000_000);
+        let validator = DefaultShareValidator::with_time_provider(
+            PoolDifficulty::default(),
+            Arc::new(time_provider),
+        );
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.time = 1_700_000_000 + MAX_FUTURE_TIME_SECS as u32 + 1;
+
+        let error = validator
+            .validate_header_timestamp(&header, &[1_699_999_990])
+            .unwrap_err();
+
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(
+            error.to_string().contains("seconds ahead of local time"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A header after its ancestors' median and within the future limit
+    /// passes; exactly `MAX_FUTURE_TIME_SECS` ahead is still allowed.
+    #[test]
+    fn test_validate_header_timestamp_accepts_a_time_after_median_and_within_the_limit() {
+        let mut time_provider = TestTimeProvider::new(SystemTime::now());
+        time_provider.set_since_epoch(1_700_000_000);
+        let validator = DefaultShareValidator::with_time_provider(
+            PoolDifficulty::default(),
+            Arc::new(time_provider),
+        );
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.time = 1_700_000_000 + MAX_FUTURE_TIME_SECS as u32;
+
+        validator
+            .validate_header_timestamp(&header, &[1_699_999_990, 1_699_999_980])
+            .expect("a time after the median and within the limit is valid");
+    }
+
+    /// A header with no ancestor times has nothing to measure median time
+    /// past against; header sync always passes its parent's time at least.
+    #[test]
+    fn test_validate_header_timestamp_rejects_no_ancestor_times() {
+        let validator = validator();
+        let header = TestShareBlockBuilder::new().build().header;
+
+        let error = validator
+            .validate_header_timestamp(&header, &[])
+            .unwrap_err();
+
+        assert_eq!(error.kind(), FailureKind::Consensus);
+    }
+
     #[tokio::test]
     async fn test_validate_timestamp_should_fail_for_future_timestamp() {
         let share = TestShareBlockBuilder::new()
@@ -2701,6 +2903,187 @@ mod tests {
                 .validate_uncles(&share, &chain_store_handle)
                 .is_ok()
         );
+    }
+
+    /// An uncle may have only one nephew on a chain. Here the nephew's parent
+    /// already names the uncle, so the nephew naming it again would have the
+    /// payout window credit the uncle twice, with two nephew bonuses.
+    #[tokio::test]
+    async fn test_validate_uncles_rejects_uncle_already_named_by_parent() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+
+        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
+        let uncle_hash = uncle.block_hash();
+        let grandparent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
+        let grandparent_hash = grandparent.block_hash();
+        let parent = TestShareBlockBuilder::new()
+            .prev_share_blockhash(grandparent_hash.to_string())
+            .uncles(vec![uncle_hash])
+            .miner_pubkey(PUBKEY_3G)
+            .build();
+        let parent_hash = parent.block_hash();
+
+        // Grandparent and uncle at 19, parent at 20, nephew at 21: the uncle
+        // is two heights below the nephew, within MAX_UNCLES_DEPTH.
+        chain_store_handle
+            .expect_get_block_metadata_batch()
+            .returning(move |hashes| {
+                Ok(hashes
+                    .iter()
+                    .map(|hash| {
+                        let height = if *hash == parent_hash { 20 } else { 19 };
+                        (*hash, metadata_at_height(height))
+                    })
+                    .collect())
+            });
+        // Ancestry walk: parent (names the uncle) -> grandparent -> genesis.
+        let parent_header = parent.header.clone();
+        let grandparent_header = grandparent.header.clone();
+        chain_store_handle
+            .expect_get_share_header()
+            .returning(move |hash| {
+                if *hash == parent_hash {
+                    Ok(parent_header.clone())
+                } else {
+                    Ok(grandparent_header.clone())
+                }
+            });
+
+        let second_nephew = TestShareBlockBuilder::new()
+            .prev_share_blockhash(parent_hash.to_string())
+            .uncles(vec![uncle_hash])
+            .miner_pubkey(PUBKEY_4G)
+            .build();
+
+        let error = validator()
+            .validate_uncles(&second_nephew, &chain_store_handle)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(
+            error
+                .to_string()
+                .contains("is already an uncle of an ancestor"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The rule reaches every ancestor that could have named the uncle: here
+    /// the grandparent names an uncle three heights below the nephew, the
+    /// deepest an uncle may sit.
+    #[tokio::test]
+    async fn test_validate_uncles_rejects_uncle_already_named_by_grandparent() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+
+        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
+        let uncle_hash = uncle.block_hash();
+        let grandparent = TestShareBlockBuilder::new()
+            .uncles(vec![uncle_hash])
+            .miner_pubkey(PUBKEY_2G)
+            .build();
+        let grandparent_hash = grandparent.block_hash();
+        let parent = TestShareBlockBuilder::new()
+            .prev_share_blockhash(grandparent_hash.to_string())
+            .miner_pubkey(PUBKEY_3G)
+            .build();
+        let parent_hash = parent.block_hash();
+
+        // Uncle at 18, grandparent at 19, parent at 20, nephew at 21.
+        chain_store_handle
+            .expect_get_block_metadata_batch()
+            .returning(move |hashes| {
+                Ok(hashes
+                    .iter()
+                    .map(|hash| {
+                        let height = if *hash == parent_hash {
+                            20
+                        } else if *hash == uncle_hash {
+                            18
+                        } else {
+                            19
+                        };
+                        (*hash, metadata_at_height(height))
+                    })
+                    .collect())
+            });
+        let parent_header = parent.header.clone();
+        let grandparent_header = grandparent.header.clone();
+        chain_store_handle
+            .expect_get_share_header()
+            .returning(move |hash| {
+                if *hash == parent_hash {
+                    Ok(parent_header.clone())
+                } else {
+                    Ok(grandparent_header.clone())
+                }
+            });
+
+        let second_nephew = TestShareBlockBuilder::new()
+            .prev_share_blockhash(parent_hash.to_string())
+            .uncles(vec![uncle_hash])
+            .miner_pubkey(PUBKEY_4G)
+            .build();
+
+        let error = validator()
+            .validate_uncles(&second_nephew, &chain_store_handle)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(
+            error
+                .to_string()
+                .contains("is already an uncle of an ancestor"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Siblings may each name the same uncle: only one of them can stay on
+    /// the chain, so the rule looks at the nephew's own ancestry only. Here
+    /// the parent names no uncle, whatever its siblings did.
+    #[tokio::test]
+    async fn test_validate_uncles_allows_uncle_not_named_by_an_ancestor() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+
+        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
+        let uncle_hash = uncle.block_hash();
+        let grandparent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
+        let grandparent_hash = grandparent.block_hash();
+        let parent = TestShareBlockBuilder::new()
+            .prev_share_blockhash(grandparent_hash.to_string())
+            .miner_pubkey(PUBKEY_3G)
+            .build();
+        let parent_hash = parent.block_hash();
+
+        chain_store_handle
+            .expect_get_block_metadata_batch()
+            .returning(move |hashes| {
+                Ok(hashes
+                    .iter()
+                    .map(|hash| {
+                        let height = if *hash == parent_hash { 20 } else { 19 };
+                        (*hash, metadata_at_height(height))
+                    })
+                    .collect())
+            });
+        let parent_header = parent.header.clone();
+        let grandparent_header = grandparent.header.clone();
+        chain_store_handle
+            .expect_get_share_header()
+            .returning(move |hash| {
+                if *hash == parent_hash {
+                    Ok(parent_header.clone())
+                } else {
+                    Ok(grandparent_header.clone())
+                }
+            });
+
+        let nephew = TestShareBlockBuilder::new()
+            .prev_share_blockhash(parent_hash.to_string())
+            .uncles(vec![uncle_hash])
+            .miner_pubkey(PUBKEY_4G)
+            .build();
+
+        validator()
+            .validate_uncles(&nephew, &chain_store_handle)
+            .expect("an uncle no ancestor names is accepted");
     }
 
     #[tokio::test]

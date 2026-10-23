@@ -75,6 +75,14 @@ through `bitcoin_block_difficulty`).
   still needs depth `N` (`check_prevouts`).
 - **Uncles need no maturity rule.** An uncle is at most `MAX_UNCLES_DEPTH`
   below its nephew, so it is never shallower than it.
+- **Each uncle is paid once.** The walk credits every uncle reference it
+  meets, so an uncle named by two nephews on one chain would be paid twice,
+  with two nephew bonuses (`test_window_pays_an_uncle_once_for_each_nephew_naming_it`).
+  Validation keeps that shape off every valid chain: an uncle may have only
+  one nephew on a chain, so `validate_uncles` rejects a share naming an uncle
+  that one of its ancestors already names (see `share-processing-pipeline.md`,
+  "Uncle selection vs uncle acceptance"). This is a share-chain consensus
+  rule on both chains.
 - **A truncated walk is refused.** If the cache runs out before `W` shares
   and the cache does not reach height 0, return `InsufficientEntries`.
   Validation maps it to `Unresolvable`.
