@@ -109,12 +109,17 @@ fn full_template_reorders_revealed_transactions_into_ctor() {
     let allocated = AllocateMiningJobTokenSuccess::from_bytes(&mut payload).unwrap();
     let outputs: Vec<TxOut> = deserialize(allocated.coinbase_outputs.as_bytes()).unwrap();
     // The token lists the scripts the template's own value pays, at zero
-    // value: under the coinbase budget which payees get an output depends
-    // on the amount, so a value of zero would name other scripts.
+    // value, for a declared coinbase with the empty commitment: the
+    // amounts decide which payees fit directly, so a value of zero would
+    // name other scripts.
     let prepared = test_bch_prepared();
     let expected = prepared
-        .declared_outputs(prepared.template().coinbasevalue)
+        .declared_outputs(
+            prepared.template().coinbasevalue,
+            &MergeMiningCommitment::empty(),
+        )
         .unwrap()
+        .outputs
         .into_iter()
         .map(|pair| TxOut {
             value: bitcoin::Amount::ZERO,

@@ -564,7 +564,7 @@ pub fn test_bch_prepared_for_template(template: BlockTemplate) -> Arc<PreparedNo
     );
     let weights = HashMap::from([(first, 1), (second, 3)]);
     let anchor = BlockHash::from_byte_array([0x33; 32]);
-    let payout_split = PayoutSplit::BchBudget { anchor };
+    let payout_split = PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, false);
     let outputs = build_pplns_outputs(
         template.coinbasevalue,
         &weights,
@@ -638,7 +638,7 @@ pub(crate) fn test_bch_custom_job_with_aux(
     };
     commitment.bch_coinbase = Some(descriptor.clone());
     let coinbase = build_declared_coinbase(
-        &prepared.declared_outputs(value).unwrap(),
+        &prepared.declared_outputs(value, &merge_mining).unwrap(),
         u64::from(template.height),
         commitment.hash(),
         &EXTRANONCE_SEPARATOR,

@@ -10,7 +10,9 @@ use crate::shares::coinbase_proof::MAX_COINBASE_MERKLE_BRANCH_LENGTH;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::stratum::work::block_template::TemplateTransaction;
-use crate::stratum::work::coinbase::{EXTRANONCE_SEPARATOR, build_declared_coinbase};
+use crate::stratum::work::coinbase::{
+    EXTRANONCE_SEPARATOR, build_declared_coinbase, check_bch_coinbase_limit,
+};
 use crate::stratum::work::gbt::{
     build_merkle_branches_for_template, compute_merkle_root_from_branches,
 };
@@ -81,7 +83,7 @@ pub(crate) fn validate_custom_job(
     commitment.bch_coinbase = Some(descriptor.clone());
     let distribution = declared
         .prepared
-        .declared_outputs(value)
+        .declared_outputs(value, &merge_mining)
         .map_err(|error| error.to_string())?;
     let coinbase = build_declared_coinbase(
         &distribution,
@@ -94,6 +96,8 @@ pub(crate) fn validate_custom_job(
     if coinbase.output != outputs {
         return Err("invalid-pplns-outputs".into());
     }
+    check_bch_coinbase_limit(&coinbase, declared.prepared.declared_split(&merge_mining))
+        .map_err(|_| "coinbase-too-large")?;
     let serialized = serialize(&coinbase);
     // The bounded scriptSig uses a one-byte length after version, vin count and outpoint.
     let nonce_offset = 4 + 1 + 36 + 1 + descriptor.prefix.len();

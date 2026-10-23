@@ -402,13 +402,24 @@ impl Sv2Connection {
             .clone();
         let (token, coinbase_outputs) = if registry.merge_mining.is_some() {
             let prepared = prepared.as_ref().ok_or("template-unavailable")?;
-            let outputs = prepared
-                .declared_outputs(prepared.template().coinbasevalue)
-                .map_err(|error| error.to_string())?
-                .into_iter()
-                .map(|pair| TxOut {
+            // The payout scripts of a declared job carrying the exact empty
+            // commitment; a token commitment's job may pay more of them
+            // through the payout tree.
+            let payouts = prepared
+                .declared_outputs(
+                    prepared.template().coinbasevalue,
+                    &MergeMiningCommitment::empty(),
+                )
+                .map_err(|error| error.to_string())?;
+            let tree_script = payouts.tree_output().map(|output| output.script_pubkey);
+            let outputs = payouts
+                .outputs
+                .iter()
+                .map(|pair| pair.address.script_pubkey())
+                .chain(tree_script)
+                .map(|script_pubkey| TxOut {
                     value: bitcoin::Amount::ZERO,
-                    script_pubkey: pair.address.script_pubkey(),
+                    script_pubkey,
                 })
                 .collect::<Vec<_>>();
             let token = prepared

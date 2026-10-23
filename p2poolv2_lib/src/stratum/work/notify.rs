@@ -4,7 +4,7 @@
 
 use super::block_template::BlockTemplate;
 use super::error::WorkError;
-use crate::accounting::OutputPair;
+use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::PayoutSplit;
 use crate::accounting::payout::payout_distribution::PayoutDistribution;
 use crate::accounting::payout::sharechain_pplns::pplns_window::bitcoin_block_difficulty;
@@ -53,7 +53,7 @@ fn build_output_distribution(
     template: &BlockTemplate,
     anchor: bitcoin::BlockHash,
     context: &mut NotifyContext,
-) -> Result<Vec<OutputPair>, WorkError> {
+) -> Result<CoinbasePayouts, WorkError> {
     let total_amount = bitcoin::Amount::from_sat(template.coinbasevalue);
 
     let compact_target = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap();
@@ -113,7 +113,7 @@ fn build_prepared_notify(
         clean_jobs,
     )
     .pplns_weights(context.payout.pplns_weights())
-    .payout_split(PayoutSplit::for_chain(context.config.chain, tip))
+    .payout_split(PayoutSplit::for_chain(context.config.chain, false))
     .prev_share_blockhash(tip)
     .uncles(uncles)
     .bits(target)
@@ -247,6 +247,7 @@ pub async fn start_notify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounting::OutputPair;
     use crate::accounting::payout::payout_distribution::MockPayoutDistribution;
     use crate::pool_difficulty::AsertParent;
     use crate::stratum::messages::Notify;
@@ -270,7 +271,7 @@ mod tests {
         mock_payout.expect_pplns_weights().returning(|| None);
         mock_payout
             .expect_get_output_distribution()
-            .return_once(move |_, _, _, _, _| Ok(distribution));
+            .return_once(move |_, _, _, _, _| Ok(CoinbasePayouts::direct(distribution)));
         mock_payout
     }
 
@@ -451,7 +452,7 @@ mod tests {
         mock_payout.expect_pplns_weights().returning(|| None);
         mock_payout
             .expect_get_output_distribution()
-            .returning(move |_, _, _, _, _| Ok(test_distribution.clone()));
+            .returning(move |_, _, _, _, _| Ok(CoinbasePayouts::direct(test_distribution.clone())));
 
         let task_handle = tokio::spawn(async move {
             start_notify(

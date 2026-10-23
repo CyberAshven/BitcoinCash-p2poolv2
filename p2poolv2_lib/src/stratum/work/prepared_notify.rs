@@ -6,14 +6,15 @@ use super::block_template::{BlockTemplate, parse_flags};
 #[cfg(test)]
 use super::coinbase::build_bitcoin_coinbase_transaction;
 use super::coinbase::{
-    LOCKTIME_LENGTH, build_coinbase, check_bch_coinbase_budget, get_timestamp_bytes, split_coinbase,
+    LOCKTIME_LENGTH, build_coinbase, check_bch_coinbase_limit, get_timestamp_bytes, split_coinbase,
 };
 use super::error::WorkError;
 use super::gbt::build_merkle_branches_for_template;
 use super::tracker::{JobDetails, JobId, JobTracker};
-use crate::accounting::OutputPair;
-use crate::accounting::payout::coinbase_budget::PayoutSplit;
+use crate::accounting::CoinbasePayouts;
+use crate::accounting::payout::coinbase_budget::{PayoutSplit, bch_split_for_commitment};
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::{ShareTransaction, encode_optional_address};
 use crate::shares::share_commitment::{
     ShareCommitment, build_commitment_prefix, build_commitment_suffix, commitment_digest,
@@ -197,10 +198,16 @@ impl PreparedNotifyParams {
 
     /// Recompute payouts when a declared transaction set changes fee revenue.
     ///
-    /// Splits by the same rule as the job's own outputs (on Bitcoin Cash the
-    /// coinbase budget anchored at this job's prev share), so the validator
-    /// rebuilds them for the declared value.
-    pub(crate) fn declared_outputs(&self, value: u64) -> Result<Vec<OutputPair>, WorkError> {
+    /// Splits by the rule the validator applies to the declared coinbase: on
+    /// Bitcoin Cash the hybrid payout at the limit `merge_mining` sets (the
+    /// token share's when it names tokens, BCH's transaction limit when it is
+    /// the exact empty commitment), so the validator rebuilds the same
+    /// outputs and tree for the declared value.
+    pub(crate) fn declared_outputs(
+        &self,
+        value: u64,
+        merge_mining: &MergeMiningCommitment,
+    ) -> Result<CoinbasePayouts, WorkError> {
         let weights = self.pplns_weights.as_ref().ok_or_else(|| WorkError {
             message: "PPLNS snapshot is unavailable for declared work".into(),
         })?;
@@ -211,11 +218,20 @@ impl PreparedNotifyParams {
             self.donation,
             &self.fee_address,
             self.fee,
-            self.payout_split,
+            self.declared_split(merge_mining),
         )
         .map_err(|error| WorkError {
             message: error.to_string(),
         })
+    }
+
+    /// The split a declared coinbase carrying `merge_mining` follows: this
+    /// chain's, at the limit the commitment sets.
+    pub(crate) fn declared_split(&self, merge_mining: &MergeMiningCommitment) -> PayoutSplit {
+        match self.payout_split {
+            PayoutSplit::EveryPayee => PayoutSplit::EveryPayee,
+            PayoutSplit::BchHybrid { .. } => bch_split_for_commitment(merge_mining),
+        }
     }
 
     /// The ASERT-computed pool target for shares built on these params.
@@ -310,7 +326,7 @@ pub(crate) struct PreparedNotifyParamsBuilder {
     pplns_weights: Option<HashMap<Address, u128>>,
     payout_split: PayoutSplit,
     template: Arc<BlockTemplate>,
-    output_distribution: Vec<OutputPair>,
+    payouts: CoinbasePayouts,
     pool_signature: Vec<u8>,
     clean_jobs: bool,
     prev_share_blockhash: BlockHash,
@@ -328,7 +344,7 @@ impl PreparedNotifyParamsBuilder {
     /// Create a new builder with required parameters.
     pub fn new(
         template: Arc<BlockTemplate>,
-        output_distribution: Vec<OutputPair>,
+        payouts: impl Into<CoinbasePayouts>,
         pool_signature: &[u8],
         clean_jobs: bool,
     ) -> Self {
@@ -336,7 +352,7 @@ impl PreparedNotifyParamsBuilder {
             pplns_weights: None,
             payout_split: PayoutSplit::EveryPayee,
             template,
-            output_distribution,
+            payouts: payouts.into(),
             pool_signature: pool_signature.to_vec(),
             clean_jobs,
             prev_share_blockhash: BlockHash::all_zeros(),
@@ -371,9 +387,9 @@ impl PreparedNotifyParamsBuilder {
         self
     }
 
-    /// How `declared_outputs` turns the weights into outputs: the split the
-    /// job's own outputs were built with (`PayoutSplit::for_chain` at the
-    /// job's prev share). Every payee until set.
+    /// The split the job's own outputs were built with: every payee on
+    /// Bitcoin, the hybrid payout at the no-token limit on Bitcoin Cash. A
+    /// declared job follows the limit its commitment sets (`declared_split`).
     pub fn payout_split(mut self, payout_split: PayoutSplit) -> Self {
         self.payout_split = payout_split;
         self
@@ -409,9 +425,9 @@ impl PreparedNotifyParamsBuilder {
         self
     }
 
-    /// Append the reserved AuxPoW output and check final BCH block size and
-    /// the coinbase byte budget (`BCH_COINBASE_BYTE_BUDGET`). Only Bitcoin
-    /// Cash sets this.
+    /// Put the exact empty merge-mining commitment at output 0 and check the
+    /// final BCH block size and the share chain's coinbase limit
+    /// (`check_bch_coinbase_limit`). Only Bitcoin Cash sets this.
     pub fn include_merge_mining(mut self, include_merge_mining: bool) -> Self {
         self.include_merge_mining = include_merge_mining;
         self
@@ -443,13 +459,13 @@ impl PreparedNotifyParamsBuilder {
         let dummy_commitment_hash = hashes::sha256::Hash::from_byte_array([0xab_u8; 32]);
 
         let merge_mining = if self.include_merge_mining {
-            Some(crate::shares::merge_mining::MergeMiningCommitment::empty())
+            Some(MergeMiningCommitment::empty())
         } else {
             None
         };
         let coinbase = build_coinbase(
             Version::TWO,
-            self.output_distribution.as_slice(),
+            self.payouts.outputs.as_slice(),
             self.template.height as i64,
             coinbaseaux,
             witness_commitment.as_ref(),
@@ -458,11 +474,12 @@ impl PreparedNotifyParamsBuilder {
             0u64,
             None,
             merge_mining,
+            self.payouts.tree_output().as_ref(),
         )?;
 
         if self.include_merge_mining {
             self.template.validate_bch_block_size(&coinbase)?;
-            check_bch_coinbase_budget(&coinbase)?;
+            check_bch_coinbase_limit(&coinbase, self.payout_split)?;
         }
 
         let share_transactions = fit_share_transactions(self.share_transactions, &coinbase);

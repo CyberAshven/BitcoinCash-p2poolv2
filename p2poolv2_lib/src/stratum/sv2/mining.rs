@@ -84,6 +84,31 @@ pub const EXTRANONCE_SIZE: u16 = 8;
 /// for 15 minutes, far longer than this many templates take to arrive.
 const MAX_CHANNEL_JOBS: usize = 32;
 
+/// The most bytes `NewExtendedMiningJob` carries in its coinbase prefix and
+/// in its suffix: each is a `B0_64K` field in the SV2 specification.
+const MAX_EXTENDED_JOB_COINBASE_PART: usize = 65_535;
+
+/// Refuse a job whose coinbase an extended channel cannot carry.
+///
+/// A Bitcoin Cash coinbase that pays every miner directly may reach BCH's
+/// 1,000,000-byte transaction limit, but an extended job carries the bytes
+/// after the extranonce in one `B0_64K` field, about 1,900 P2PKH payouts.
+/// Such a job is refused for the channel with this error rather than sent
+/// truncated or malformed. Standard channels are header-only and never carry
+/// the coinbase, so they keep working; a share-chain rule is not involved.
+fn check_extended_job_fits(prefix_length: usize, suffix_length: usize) -> Result<(), String> {
+    if prefix_length > MAX_EXTENDED_JOB_COINBASE_PART
+        || suffix_length > MAX_EXTENDED_JOB_COINBASE_PART
+    {
+        return Err(format!(
+            "the coinbase does not fit an SV2 extended job: its prefix is {prefix_length} and its \
+             suffix {suffix_length} bytes, at most {MAX_EXTENDED_JOB_COINBASE_PART} each; a \
+             standard channel can mine it"
+        ));
+    }
+    Ok(())
+}
+
 /// Channels one connection may open. Every template builds a job per
 /// channel, so an unbounded count would let one client make the node do
 /// unbounded work; a proxy aggregating many devices uses extended channels.
@@ -667,6 +692,9 @@ impl MiningChannels {
             .tracker_handle
             .get_job(tracker_job_id)
             .ok_or("tracker lost a job it just inserted")?;
+        if matches!(channel.kind, ChannelKind::Extended) {
+            check_extended_job_fits(job.coinbase1.len() / 2, job.coinbase2.len() / 2)?;
+        }
         let template = &job.blocktemplate;
         let prev_hash =
             BlockHash::from_str(&template.previousblockhash).map_err(|error| error.to_string())?;

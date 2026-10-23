@@ -11,6 +11,7 @@
 use crate::accounting::OutputPair;
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, append_payout_split};
 use crate::accounting::payout::payout_distribution::PayoutDistribution;
+use crate::accounting::payout::payout_tree::PayoutTree;
 use crate::accounting::payout::sharechain_pplns::pplns_window::PplnsWindow;
 #[cfg(test)]
 #[mockall_double::double]
@@ -94,8 +95,8 @@ impl PayoutDistribution for Payout {
     /// header. An empty window is an error.
     ///
     /// `split` turns the weights into outputs: every payee on Bitcoin, the
-    /// coinbase budget on Bitcoin Cash, which the validator applies to the
-    /// same weights and anchor.
+    /// hybrid payout on Bitcoin Cash, which the validator applies to the
+    /// same weights; the payout tree, if any, is returned.
     fn fill_distribution_from_shares(
         &mut self,
         distribution: &mut Vec<OutputPair>,
@@ -106,10 +107,10 @@ impl PayoutDistribution for Payout {
         remaining_total_amount: Amount,
         _bootstrap_address: Address,
         split: PayoutSplit,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    ) -> Result<Option<PayoutTree>, Box<dyn Error + Send + Sync>> {
         self.last_weights = None;
         if remaining_total_amount == Amount::ZERO {
-            return Ok(());
+            return Ok(None);
         }
 
         // expect will stop start_notify task in main
@@ -132,7 +133,7 @@ impl PayoutDistribution for Payout {
             chain_store_handle,
         )?;
 
-        append_payout_split(
+        let tree = append_payout_split(
             &address_difficulty_map,
             remaining_total_amount,
             split,
@@ -140,14 +141,14 @@ impl PayoutDistribution for Payout {
         )?;
         self.last_weights = Some(address_difficulty_map);
 
-        Ok(())
+        Ok(tree)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accounting::payout::coinbase_budget::BCH_MAX_COINBASE_PAYOUTS;
+
     use crate::accounting::payout::payout_distribution::build_pplns_outputs;
     use crate::accounting::payout::sharechain_pplns::pplns_window::{
         DIFFICULTY_SCALE, NEPHEW_SCALED_BONUS, UNCLE_SCALED_WEIGHT, bitcoin_block_difficulty,
@@ -236,7 +237,8 @@ mod tests {
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
             .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].amount, total_amount);
@@ -286,7 +288,8 @@ mod tests {
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
             .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         assert_eq!(result.len(), 2);
         let total_distributed: Amount = result.iter().map(|pair| pair.amount).sum();
@@ -357,7 +360,8 @@ mod tests {
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
             .get_output_distribution(&mock, anchor, u128::MAX, total_amount, &config)
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         // Only header1's miner is paid; header2 (the newer tip) is excluded.
         assert_eq!(result.len(), 1);
@@ -413,7 +417,8 @@ mod tests {
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
             .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         // Uncle gets 9/10 of its difficulty, nephew gets base * 10 + 1/10 of uncle's difficulty.
         let expected_uncle_weight = uncle_difficulty * UNCLE_SCALED_WEIGHT;
@@ -495,7 +500,8 @@ mod tests {
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
             .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         // Nephew gets base * 10 + 1/10 of each uncle's difficulty
         let expected_nephew_weight = nephew_difficulty * DIFFICULTY_SCALE
@@ -579,7 +585,8 @@ mod tests {
                 total_amount,
                 &config,
             )
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         // Only the newest share (header3) should be included
         assert_eq!(result.len(), 1);
@@ -649,7 +656,8 @@ mod tests {
                 total_amount,
                 &config,
             )
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         assert_eq!(result.len(), 2);
         let addresses: HashSet<String> =
@@ -720,7 +728,8 @@ mod tests {
 
         let result = payout
             .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         // Should have 3 addresses: miner A, miner B (uncle), miner C (nephew)
         let addresses: HashSet<String> =
@@ -795,7 +804,8 @@ mod tests {
         let mut payout = Payout::with_window(
             PplnsWindow::new(bitcoin::Network::Testnet).for_chain(Chain::BitcoinCash),
         );
-        let config = make_test_config();
+        let mut config = make_test_config();
+        config.chain = Chain::BitcoinCash;
         let total_amount = Amount::from_sat(100_000_000);
 
         let notifier_outputs = payout
@@ -825,7 +835,7 @@ mod tests {
             config.donation,
             &config.fee_address_parsed,
             config.fee,
-            PayoutSplit::for_chain(Chain::BitcoinCash, paying_header.prev_share_blockhash),
+            PayoutSplit::for_chain(Chain::BitcoinCash, false),
         )
         .unwrap();
 
@@ -891,7 +901,8 @@ mod tests {
         let mut payout = Payout::with_window(
             PplnsWindow::new(bitcoin::Network::Testnet).for_chain(Chain::BitcoinCash),
         );
-        let config = make_test_config();
+        let mut config = make_test_config();
+        config.chain = Chain::BitcoinCash;
         let total_amount = Amount::from_sat(100_000_000);
 
         let notifier_outputs = payout
@@ -921,7 +932,7 @@ mod tests {
             config.donation,
             &config.fee_address_parsed,
             config.fee,
-            PayoutSplit::for_chain(Chain::BitcoinCash, paying_header.prev_share_blockhash),
+            PayoutSplit::for_chain(Chain::BitcoinCash, false),
         )
         .unwrap();
 
@@ -929,11 +940,11 @@ mod tests {
         assert_eq!(validator_weights.len(), 4);
     }
 
-    /// Past the Bitcoin Cash coinbase budget the notifier and the validator
-    /// still build the same outputs: 20 miners with one share each are paid
-    /// in at most `BCH_MAX_COINBASE_PAYOUTS` outputs, summing to the amount.
+    /// The notifier and the validator build the same Bitcoin Cash outputs:
+    /// 20 miners with one share each, all paid directly in canonical order
+    /// (where the old 11-payout cap drew one of nine), summing to the amount.
     #[test]
-    fn test_bch_notifier_and_validator_agree_past_the_coinbase_budget() {
+    fn test_bch_notifier_and_validator_agree_paying_twenty_miners_directly() {
         let headers: Vec<_> = (1..=20u8)
             .scan(BlockHash::all_zeros(), |prev_hash, miner| {
                 let mut header = build_test_header(&prev_hash.to_string(), PUBKEY_G, 2);
@@ -1002,15 +1013,22 @@ mod tests {
             config.donation,
             &config.fee_address_parsed,
             config.fee,
-            PayoutSplit::for_chain(Chain::BitcoinCash, tip_hash),
+            PayoutSplit::for_chain(Chain::BitcoinCash, false),
         )
         .unwrap();
 
         assert_eq!(validator_weights.len(), 20);
         assert_eq!(notifier_outputs, validator_outputs);
-        assert_eq!(notifier_outputs.len(), BCH_MAX_COINBASE_PAYOUTS);
+        assert!(notifier_outputs.tree.is_none());
+        assert!(validator_weights.keys().all(|miner| {
+            notifier_outputs
+                .outputs
+                .iter()
+                .any(|output| &output.address == miner)
+        }));
         assert_eq!(
             notifier_outputs
+                .outputs
                 .iter()
                 .map(|output| output.amount)
                 .sum::<Amount>(),

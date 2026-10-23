@@ -9,7 +9,7 @@
 //! confirmed, and the payout is the coinbase the notifier and the validator
 //! both build: `PplnsWindow::get_distribution_from_start_hash` for the next
 //! share's anchor, split by `build_pplns_outputs` under the Bitcoin Cash
-//! coinbase budget. The window is Bitcoin
+//! hybrid payout. The window is Bitcoin
 //! Cash's (`for_chain`), so it pays each window share's weight to whoever
 //! holds the share's payout right (docs/atomic-swap/bch-share-trading.md,
 //! "Payout rights").
@@ -239,9 +239,10 @@ fn next_coinbase(
         None,
         &None,
         None,
-        PayoutSplit::for_chain(Chain::BitcoinCash, anchor.block_hash()),
+        PayoutSplit::for_chain(Chain::BitcoinCash, false),
     )
     .unwrap()
+    .outputs
 }
 
 fn pays(outputs: &[OutputPair], address: &Address) -> bool {

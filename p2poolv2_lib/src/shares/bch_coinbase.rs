@@ -67,7 +67,7 @@ impl Decodable for BchCoinbase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accounting::OutputPair;
+    use crate::accounting::{CoinbasePayouts, OutputPair};
     use crate::shares::coinbase_proof::CoinbaseProof;
     use crate::shares::share_block::{ShareBlock, ShareHeader};
     use crate::shares::share_commitment::ShareCommitment;
@@ -97,10 +97,10 @@ mod tests {
         };
         share.header.bch_coinbase = Some(declared.clone());
         let coinbase = build_declared_coinbase(
-            &[OutputPair {
+            &CoinbasePayouts::direct(vec![OutputPair {
                 address: make_test_address(1),
                 amount: Amount::from_sat(100_000_000),
-            }],
+            }]),
             702,
             ShareCommitment::from_share_block(&share).hash(),
             &[0u8; 12],
@@ -214,10 +214,10 @@ mod tests {
         };
         let payout = make_test_address(1);
         let coinbase = build_declared_coinbase(
-            &[OutputPair {
+            &CoinbasePayouts::direct(vec![OutputPair {
                 address: payout.clone(),
                 amount: Amount::from_sat(100_000_000),
-            }],
+            }]),
             702,
             bitcoin::hashes::sha256::Hash::all_zeros(),
             &[0u8; 12],

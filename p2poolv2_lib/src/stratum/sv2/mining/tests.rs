@@ -1916,3 +1916,21 @@ async fn close_channel_removes_the_channel() {
     assert!(!channels.ctx.metrics.get_metrics().await.users[address].workers["rig1"].active);
     channels.close_all().await;
 }
+
+/// An extended job carries at most 65,535 bytes of coinbase on each side of
+/// the extranonce.
+#[test]
+fn an_extended_job_carries_a_coinbase_up_to_its_field_limit() {
+    assert!(check_extended_job_fits(100, 65_535).is_ok());
+    assert!(check_extended_job_fits(65_535, 100).is_ok());
+}
+
+/// A coinbase past the extended job's field limit is refused for the
+/// channel with an error that names the limit, instead of being truncated.
+#[test]
+fn a_coinbase_past_the_extended_job_field_limit_is_refused() {
+    let error = check_extended_job_fits(100, 65_536).unwrap_err();
+    assert!(error.contains("65535"), "{error}");
+    assert!(error.contains("standard channel"), "{error}");
+    assert!(check_extended_job_fits(65_536, 100).is_err());
+}

@@ -1,4 +1,5 @@
 use super::*;
+use crate::accounting::OutputPair;
 use crate::shares::validation::MAX_UNCLES;
 use crate::stratum::work::block_template::BlockTemplate;
 use crate::stratum::work::tracker::{JobId, start_tracker_actor};

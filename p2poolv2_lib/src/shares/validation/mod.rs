@@ -5,8 +5,10 @@
 mod bitcoin_block_validation;
 
 use super::share_block::{MAX_POOL_TARGET, ShareHeader};
-use crate::accounting::OutputPair;
-use crate::accounting::payout::coinbase_budget::PayoutSplit;
+use crate::accounting::CoinbasePayouts;
+#[cfg(test)]
+use crate::accounting::payout::coinbase_budget::bch_split_for_commitment;
+use crate::accounting::payout::coinbase_budget::{PayoutSplit, split_for_share};
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
 #[cfg(test)]
 #[mockall_double::double]
@@ -49,7 +51,8 @@ use crate::store::writer::StoreError;
 #[cfg(test)]
 use crate::stratum::work::coinbase::build_bitcoin_coinbase_transaction;
 use crate::stratum::work::coinbase::{
-    CoinbaseFields, build_coinbase, build_declared_coinbase, parse_bitcoin_coinbase_fields,
+    CoinbaseFields, build_coinbase, build_declared_coinbase, check_bch_coinbase_limit,
+    parse_bitcoin_coinbase_fields,
 };
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
@@ -1340,8 +1343,8 @@ impl DefaultShareValidator {
         // divide it as the PPLNS window says.
         let coinbase_value = bitcoin_coinbase_value(&share.bitcoin_coinbase)?;
 
-        let split = PayoutSplit::for_chain(self.chain, share.header.prev_share_blockhash);
-        let expected_outputs = Self::build_expected_outputs(
+        let split = split_for_share(self.chain, &share.header);
+        let expected_payouts = Self::build_expected_outputs(
             &share.header,
             &address_difficulty_map,
             coinbase_value,
@@ -1381,7 +1384,7 @@ impl DefaultShareValidator {
                 ValidationError::consensus("Declared BCH coinbase is shorter than its prefix")
             })?;
             build_declared_coinbase(
-                &expected_outputs,
+                &expected_payouts,
                 share.header.bitcoin_height,
                 expected_commitment_hash,
                 extranonce,
@@ -1397,7 +1400,7 @@ impl DefaultShareValidator {
                 .then(crate::shares::merge_mining::MergeMiningCommitment::empty);
             build_coinbase(
                 Version::TWO,
-                &expected_outputs,
+                &expected_payouts.outputs,
                 share.header.bitcoin_height as i64,
                 fields.aux_flags,
                 fields.witness_commitment.as_ref(),
@@ -1406,6 +1409,7 @@ impl DefaultShareValidator {
                 fields.nsecs,
                 Some(&fields.extranonce),
                 merge_mining,
+                expected_payouts.tree_output().as_ref(),
             )
         }
         .map_err(|error| ValidationError::consensus(format!("Error building coinbase {error}")))?;
@@ -1415,6 +1419,12 @@ impl DefaultShareValidator {
                 "Bitcoin coinbase is not the coinbase the PPLNS window and share fields imply",
             ));
         }
+        // The split keeps room for every other field at its worst case, so
+        // only a scriptSig past BCH's 100 bytes can push a coinbase over its
+        // limit; a token share's coinbase must also keep its one-byte output
+        // count. Both are share-chain rules (`bch-hybrid-payouts.md`, 3.4).
+        check_bch_coinbase_limit(&reconstructed_coinbase, split)
+            .map_err(|error| ValidationError::consensus(error.to_string()))?;
 
         let reconstructed_coinbase_txid = reconstructed_coinbase.compute_txid();
         let recomputed_root = compute_merkle_root_from_branches(
@@ -1433,9 +1443,10 @@ impl DefaultShareValidator {
 
     /// Build the expected payout outputs from share header donation/fee and PPLNS distribution.
     ///
-    /// `split` is the chain's: every payee on Bitcoin, the coinbase budget
-    /// on Bitcoin Cash with its tail drawn from the share's
-    /// `prev_share_blockhash`, as the producer built them.
+    /// `split` is the share's: every payee on Bitcoin, the hybrid payout on
+    /// Bitcoin Cash at the limit its merge-mining commitment sets, as the
+    /// producer built them. Returns the payout tree too, when payees go to
+    /// one.
     ///
     /// When the PPLNS window is empty (bootstrap phase), returns an error.
     fn build_expected_outputs(
@@ -1443,7 +1454,7 @@ impl DefaultShareValidator {
         address_difficulty_map: &HashMap<Address, u128>,
         coinbase_value: u64,
         split: PayoutSplit,
-    ) -> Result<Vec<OutputPair>, ValidationError> {
+    ) -> Result<CoinbasePayouts, ValidationError> {
         build_pplns_outputs(
             coinbase_value,
             address_difficulty_map,
@@ -1917,6 +1928,7 @@ mockall::mock! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounting::OutputPair;
     use crate::accounting::payout::sharechain_pplns::pplns_window::{
         BCH_COINBASE_MATURITY, COINBASE_MATURITY, PPLNS_WINDOW_SHARES,
     };
@@ -2004,6 +2016,7 @@ mod tests {
                 0,
                 Some(&[0u8; 12]),
                 Some(MergeMiningCommitment::empty()),
+                None,
             )
             .unwrap()
         };
@@ -5179,7 +5192,8 @@ mod tests {
             total_amount,
             PayoutSplit::EveryPayee,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
         assert_eq!(outputs.len(), 2);
         let total_distributed: Amount = outputs.iter().map(|output| output.amount).sum();
@@ -5227,7 +5241,8 @@ mod tests {
             total,
             PayoutSplit::EveryPayee,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
         // 3 outputs: donation, fee, miner
         assert_eq!(outputs.len(), 3);
@@ -5963,6 +5978,7 @@ mod tests {
             TEST_COINBASE_NSECS,
             Some(&[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE]),
             Some(MergeMiningCommitment::empty()),
+            None,
         )
         .unwrap();
         share_block.header.bitcoin_header.merkle_root =
@@ -6012,10 +6028,10 @@ mod tests {
             },
         });
         let mut coinbase = build_declared_coinbase(
-            &[OutputPair {
+            &CoinbasePayouts::direct(vec![OutputPair {
                 address: address.clone(),
                 amount: Amount::from_sat(100_000_000),
-            }],
+            }]),
             702,
             ShareCommitment::from_share_block(&share).hash(),
             &[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE],
@@ -6047,6 +6063,208 @@ mod tests {
                 .validate_bitcoin_payout(&share, &ChainStoreHandle::default(), window)
                 .is_err()
         );
+    }
+
+    /// A token share with 120 payees: the producer's coinbase pays 77
+    /// directly and the rest through the payout tree, within T, and the
+    /// validator rebuilds exactly that coinbase from the same weights.
+    #[test]
+    fn a_token_share_past_t_is_rebuilt_with_its_payout_tree() {
+        let weights: HashMap<Address, u128> = (1..=120u8)
+            .map(|byte| {
+                (
+                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    u128::from(byte) * 1_000,
+                )
+            })
+            .collect();
+        let commitment = MergeMiningCommitment {
+            root: [0x33; 32],
+            height: 2,
+            salt: 7,
+        };
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.bitcoin_height = 702;
+        share.header.bch_coinbase = Some(BchCoinbase {
+            prefix: Builder::new()
+                .push_int(702)
+                .push_slice(b"miner")
+                .into_bytes(),
+            merge_mining: commitment,
+        });
+        let producer_payouts = build_pplns_outputs(
+            312_500_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            bch_split_for_commitment(&commitment),
+        )
+        .unwrap();
+        let coinbase = build_declared_coinbase(
+            &producer_payouts,
+            702,
+            ShareCommitment::from_share_block(&share).hash(),
+            &[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE],
+            share.header.bch_coinbase.as_ref().unwrap(),
+        )
+        .unwrap();
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        share.bitcoin_coinbase = coinbase.clone();
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(weights.clone()));
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_bitcoin_payout(
+                &share,
+                &ChainStoreHandle::default(),
+                Arc::new(RwLock::new(window)),
+            );
+
+        assert!(result.is_ok(), "{}", result.unwrap_err());
+        let tree = producer_payouts.tree.as_ref().unwrap();
+        assert_eq!(producer_payouts.outputs.len(), 77);
+        assert_eq!(tree.payees().len(), 43);
+        assert!(coinbase.output.contains(&tree.root_output()));
+        assert!(coinbase.total_size() <= 3_072);
+    }
+
+    /// The same token share paying all 120 payees directly, as a no-token
+    /// share would, is not the coinbase its commitment implies.
+    #[test]
+    fn a_token_share_paying_every_payee_directly_is_rejected() {
+        let weights: HashMap<Address, u128> = (1..=120u8)
+            .map(|byte| {
+                (
+                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    u128::from(byte) * 1_000,
+                )
+            })
+            .collect();
+        let commitment = MergeMiningCommitment {
+            root: [0x33; 32],
+            height: 2,
+            salt: 7,
+        };
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.bitcoin_height = 702;
+        share.header.bch_coinbase = Some(BchCoinbase {
+            prefix: Builder::new()
+                .push_int(702)
+                .push_slice(b"miner")
+                .into_bytes(),
+            merge_mining: commitment,
+        });
+        let every_payee_direct = build_pplns_outputs(
+            312_500_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            bch_split_for_commitment(&MergeMiningCommitment::empty()),
+        )
+        .unwrap();
+        let coinbase = build_declared_coinbase(
+            &every_payee_direct,
+            702,
+            ShareCommitment::from_share_block(&share).hash(),
+            &[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE],
+            share.header.bch_coinbase.as_ref().unwrap(),
+        )
+        .unwrap();
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        share.bitcoin_coinbase = coinbase;
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(weights.clone()));
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_bitcoin_payout(
+                &share,
+                &ChainStoreHandle::default(),
+                Arc::new(RwLock::new(window)),
+            );
+
+        assert!(every_payee_direct.tree.is_none());
+        assert_eq!(result.unwrap_err().kind(), FailureKind::Consensus);
+    }
+
+    /// A no-token share with the same 120 payees pays every one directly,
+    /// and the validator agrees.
+    #[test]
+    fn a_no_token_share_with_the_same_payees_pays_every_one_directly() {
+        let weights: HashMap<Address, u128> = (1..=120u8)
+            .map(|byte| {
+                (
+                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    u128::from(byte) * 1_000,
+                )
+            })
+            .collect();
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.bitcoin_height = 702;
+        share.header.bch_coinbase = Some(BchCoinbase {
+            prefix: Builder::new()
+                .push_int(702)
+                .push_slice(b"miner")
+                .into_bytes(),
+            merge_mining: MergeMiningCommitment::empty(),
+        });
+        let producer_payouts = build_pplns_outputs(
+            312_500_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            bch_split_for_commitment(&MergeMiningCommitment::empty()),
+        )
+        .unwrap();
+        let coinbase = build_declared_coinbase(
+            &producer_payouts,
+            702,
+            ShareCommitment::from_share_block(&share).hash(),
+            &[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE],
+            share.header.bch_coinbase.as_ref().unwrap(),
+        )
+        .unwrap();
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        share.bitcoin_coinbase = coinbase;
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(weights.clone()));
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_bitcoin_payout(
+                &share,
+                &ChainStoreHandle::default(),
+                Arc::new(RwLock::new(window)),
+            );
+
+        assert!(result.is_ok(), "{}", result.unwrap_err());
+        assert_eq!(producer_payouts.outputs.len(), 120);
+        assert!(producer_payouts.tree.is_none());
     }
 
     #[test]
