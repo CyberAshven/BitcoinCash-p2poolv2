@@ -1171,6 +1171,33 @@ impl DefaultShareValidator {
         Ok(())
     }
 
+    /// Bitcoin Cash: every address a share header names must be a P2PKH,
+    /// P2SH20 or P2SH32 script (`bch_script::is_bch_payout_script`).
+    ///
+    /// The payee is checked always, the donation and fee addresses when
+    /// present, whether or not their cut is zero. A share-chain rule; Bitcoin
+    /// headers keep upstream's addresses.
+    fn validate_payout_scripts(&self, share_header: &ShareHeader) -> Result<(), ValidationError> {
+        if self.chain != Chain::BitcoinCash {
+            return Ok(());
+        }
+        let named = [
+            ("payout", Some(&share_header.miner_bitcoin_address)),
+            ("donation", share_header.donation_address.as_ref()),
+            ("fee", share_header.fee_address.as_ref()),
+        ];
+        for (role, address) in named {
+            if let Some(address) = address
+                && !bch_script::is_bch_payout_script(address.script_pubkey().as_bytes())
+            {
+                return Err(ValidationError::consensus(format!(
+                    "Bitcoin Cash share {role} address must be P2PKH, P2SH20 or P2SH32"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate the bitcoin coinbase by reconstructing it from the share header
     /// fields and verifying the merkle root matches the bitcoin header.
     fn validate_bitcoin_coinbase(
@@ -1470,6 +1497,7 @@ impl ShareValidator for DefaultShareValidator {
     ) -> Result<(), ValidationError> {
         self.validate_miner_address(share_header)?;
         self.validate_payout_cuts(share_header)?;
+        self.validate_payout_scripts(share_header)?;
 
         let parent_hash = share_header.prev_share_blockhash;
         let parent = chain_store_handle
@@ -1508,6 +1536,7 @@ impl ShareValidator for DefaultShareValidator {
     ) -> Result<(), ValidationError> {
         self.validate_miner_address(share_header)?;
         self.validate_payout_cuts(share_header)?;
+        self.validate_payout_scripts(share_header)?;
         if share_header.uncles.len() > MAX_UNCLES {
             return Err(ValidationError::consensus(format!(
                 "Too many uncles: {} exceeds maximum of {}",
@@ -1936,6 +1965,105 @@ mod tests {
             .validate_miner_address(&taproot.header)
             .unwrap_err();
         assert!(error.to_string().contains("P2PKH"), "{error}");
+    }
+
+    fn header_paying(script: ScriptBuf) -> ShareHeader {
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.miner_bitcoin_address = Address::from_script(&script, Network::Regtest).unwrap();
+        header
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_p2pkh_payee() {
+        let header = header_paying(ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array([7; 20])));
+        assert!(
+            validator()
+                .for_chain(Chain::BitcoinCash)
+                .validate_payout_scripts(&header)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_p2sh20_payee() {
+        let header = header_paying(ScriptBuf::new_p2sh(&bitcoin::ScriptHash::from_byte_array(
+            [7; 20],
+        )));
+        assert!(
+            validator()
+                .for_chain(Chain::BitcoinCash)
+                .validate_payout_scripts(&header)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_witness_program_payee() {
+        let header = header_paying(ScriptBuf::new_p2wpkh(
+            &bitcoin::WPubkeyHash::from_byte_array([7; 20]),
+        ));
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_payout_scripts(&header)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("payout address"), "{error}");
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_taproot_payee() {
+        let header = header_paying(ScriptBuf::new_witness_program(
+            &bitcoin::WitnessProgram::new(bitcoin::WitnessVersion::V1, &[7; 32]).unwrap(),
+        ));
+        assert!(
+            validator()
+                .for_chain(Chain::BitcoinCash)
+                .validate_payout_scripts(&header)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_witness_program_fee_address() {
+        let mut header = header_paying(ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array([7; 20])));
+        header.fee_address = Some(
+            Address::from_script(
+                &ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::from_byte_array([8; 32])),
+                Network::Regtest,
+            )
+            .unwrap(),
+        );
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_payout_scripts(&header)
+            .unwrap_err();
+        assert!(error.to_string().contains("fee address"), "{error}");
+    }
+
+    /// A header failing the rule fails the minimum-difficulty header check,
+    /// the gate every received header passes.
+    #[test]
+    fn bitcoin_cash_header_gate_rejects_a_witness_program_payee() {
+        let mut header = header_paying(ScriptBuf::new_p2wpkh(
+            &bitcoin::WPubkeyHash::from_byte_array([7; 20]),
+        ));
+        header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_header_minimum_difficulty(&header)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("P2PKH, P2SH20 or P2SH32"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn bitcoin_keeps_witness_program_payees() {
+        let header = header_paying(ScriptBuf::new_p2wpkh(
+            &bitcoin::WPubkeyHash::from_byte_array([7; 20]),
+        ));
+        assert!(validator().validate_payout_scripts(&header).is_ok());
     }
 
     #[test]
