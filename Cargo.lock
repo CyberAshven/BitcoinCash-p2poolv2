@@ -4132,6 +4132,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "p2poolv2_daa"
+version = "0.0.1-alpha"
+dependencies = [
+ "bitcoin",
+ "clap",
+ "p2poolv2_lib",
+ "p2poolv2_tools",
+ "plotters",
+ "tempfile",
+]
+
+[[package]]
 name = "p2poolv2_lib"
 version = "0.0.1-alpha"
 dependencies = [

@@ -18,6 +18,7 @@ in `.cargo/config.toml`:
 | `cargo netsim <command>` | `netsim` (crate `p2poolv2_netsim`) | Discrete-event simulation of share propagation at scale; see `docs/simulation/network-sim.md` |
 | `cargo donate-qr` | `donate_qr` | Writes the landing page's donation QR codes, `website/donate-*.svg`; see `website/README.md` |
 | `cargo safa <command>` | `safa` (crate `p2poolv2_safa`) | The SAFA AuxPoW covenant: its parameters, a miner's leaf, verified claims and an unsigned chipnet genesis; see `p2poolv2_safa/README.md` |
+| `cargo daa-sim <command>` | `daa_sim` (crate `p2poolv2_daa`) | Share difficulty simulator: upstream's difficulty analysis ported from Python, on the share chain's own ASERT code; see [difficulty_adjustment/bch-daa-analysis.md](difficulty_adjustment/bch-daa-analysis.md) |
 
 The aliases build with `--release`, except `donate-qr`, a one-shot
 generator, and `safa`, a quick command line. Every tool takes `--help`. Arguments go
