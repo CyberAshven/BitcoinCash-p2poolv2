@@ -2,52 +2,120 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { binToHex } from '@bitauth/libauth';
+import { binToHex, decodeTransactionBch, hash256, hexToBin } from '@bitauth/libauth';
 import { readJson } from './cli.mjs';
-import { deriveWork, encodeUnlock } from './lib.mjs';
-import { createSafaProof, createSafaSpend, temporaryInput } from './test_utils.mjs';
+import * as safa from './lib.mjs';
+import { CATEGORY, CHIPNET_BLOCK, COVENANT, claimScenario, p2pkh, temporaryInput, utf8, verify } from './test_utils.mjs';
 
 const cli = fileURLToPath(new URL('cli.mjs', import.meta.url));
+const run = (...args) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' });
+const deployment = { network: 'chipnet', threads: 4, virtual_sats: '42000000000', category: binToHex(CATEGORY) };
+const SPLIT_JSON = { donation_bps: 100, donation_script: binToHex(p2pkh('d0')), fee_bps: 100, fee_script: binToHex(p2pkh('fe')) };
+const SPLIT = {
+  donationBps: 100, donationLockingBytecode: p2pkh('d0'), feeBps: 100, feeLockingBytecode: p2pkh('fe'),
+};
 
-test('the work CLI produces the same non-palindromic category work as the VM adapter', context => {
-  const spend = createSafaSpend();
-  const path = temporaryInput(context, JSON.stringify({
-    category: binToHex(spend.category), previous_baton: binToHex(spend.previous),
-    recipient: binToHex(spend.transaction.outputs[1].lockingBytecode),
-    age: spend.age, timestamp: 1792100001, nonce: 2,
-  }));
-  const result = spawnSync(process.execPath, [cli, 'work', path], { encoding: 'utf8' });
+function json(context, value, name) {
+  return temporaryInput(context, JSON.stringify(value), name);
+}
+
+test('params prints the deployment covenant and its fee constant', context => {
+  const result = run('params', json(context, deployment));
   assert.equal(result.status, 0, result.stderr);
   const output = JSON.parse(result.stdout);
-  assert.deepEqual(output.work, deriveWork(spend.category, spend.previous, spend.next));
-  assert.equal(output.next_baton, binToHex(spend.next));
-  assert.equal(output.target, '7fffff' + '00'.repeat(29));
+  assert.equal(output.redeem_script, binToHex(COVENANT.redeemScript));
+  assert.equal(output.fee_k, safa.CLAIM_FIXED_BYTES + 3 + COVENANT.redeemScript.length);
+  assert.match(output.vault_address, /^bchtest:r/);
 });
 
-test('the unlock CLI consumes the Rust AuxPowProof representation', context => {
-  const spend = createSafaSpend();
-  const proof = createSafaProof(spend);
-  const path = temporaryInput(context, JSON.stringify(proof));
-  const result = spawnSync(process.execPath, [cli, 'unlock', path, String(spend.age)], { encoding: 'utf8' });
+test('leaf prints the token JSON p2poolv2_cli bch-auxpow reads, for one height', context => {
+  const scenario = claimScenario({ split: SPLIT });
+  const job = {
+    vault_commitment: binToHex(scenario.vault.commitment), height: CHIPNET_BLOCK.height,
+    payout_script: binToHex(p2pkh('12')), split: SPLIT_JSON,
+  };
+  const result = run('leaf', json(context, deployment, 'deployment.json'), json(context, job, 'job.json'));
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), binToHex(encodeUnlock(spend.age, proof)));
+  const output = JSON.parse(result.stdout);
+  assert.deepEqual(Object.keys(output.token), ['category', 'lock_hash', 'state_hash', 'payout_hash', 'target_bits', 'split']);
+  assert.equal(output.token.category, binToHex(Uint8Array.from(CATEGORY).reverse()));
+  assert.equal(output.token.target_bits, scenario.leafInfo.targetBits.toString(16).padStart(8, '0'));
+  assert.equal(output.leaf_hash, binToHex(scenario.leafInfo.leafHash));
+  assert.deepEqual(output.token.split, SPLIT_JSON);
 });
 
-test('malformed hex and invalid age fail the CLI', context => {
-  const path = temporaryInput(context, '{"previous_baton":"gg"}');
-  const result = spawnSync(process.execPath, [cli, 'work', path], { encoding: 'utf8' });
+test('claim builds, verifies and prints a complete claim transaction', context => {
+  const scenario = claimScenario({ split: SPLIT });
+  const input = {
+    outpoint: { txid: binToHex(hash256(utf8('vault outpoint'))), vout: 0 },
+    vault: {
+      value_sats: scenario.vault.value.toString(), token_amount: scenario.vault.tokenAmount.toString(),
+      commitment: binToHex(scenario.vault.commitment),
+    },
+    payout_script: binToHex(p2pkh('12')), split: SPLIT_JSON, proof: binToHex(scenario.proof), fee_rate: 2,
+  };
+  const deploymentPath = json(context, deployment, 'deployment.json');
+  const result = run('claim', deploymentPath, json(context, input, 'claim.json'));
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  const transaction = decodeTransactionBch(hexToBin(output.hex));
+  assert.notEqual(typeof transaction, 'string');
+  assert.equal(verify({ transaction, sourceOutputs: scenario.claim.sourceOutputs }), true);
+  assert.equal(output.fee_sats, String(2 * output.size_bound));
+  assert.equal(output.reward, '1000000');
+  // The covenant's refusal reaches the user as an error.
+  const refused = run('claim', deploymentPath, json(context, { ...input, fee_rate: 4 }, 'refused.json'));
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /fee_rate/);
+});
+
+test('genesis prepares an unsigned chipnet genesis with one vault per thread and no minting baton', context => {
+  const fundingScript = p2pkh('ab');
+  const input = {
+    network: 'chipnet', threads: 4, virtual_sats: '84000000000', supply_per_thread: '525000000000000',
+    seed_sats: '2000000', start_height: CHIPNET_BLOCK.height, target_bits: '1d00ffff',
+    ref_bits: CHIPNET_BLOCK.bits.toString(16).padStart(8, '0'),
+    funding: { txid: binToHex(hash256(utf8('funding'))), vout: 0, value_sats: '8100000', script: binToHex(fundingScript) },
+    change_script: binToHex(p2pkh('cd')), fee_rate: 1,
+  };
+  const result = run('genesis', json(context, input));
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.deployment.category, input.funding.txid);
+  const transaction = decodeTransactionBch(hexToBin(output.unsigned_genesis));
+  assert.notEqual(typeof transaction, 'string');
+  assert.equal(transaction.outputs.length, 5);
+  const covenant = safa.createCovenant({ network: 'chipnet', threads: 4, virtualSats: 84000000000n });
+  transaction.outputs.slice(0, 4).forEach((vault, thread) => {
+    assert.deepEqual(vault.lockingBytecode, covenant.lockingBytecode);
+    assert.equal(vault.token.nft.capability, 'mutable');
+    assert.deepEqual(safa.decodeState(vault.token.nft.commitment), {
+      thread, height: CHIPNET_BLOCK.height, targetBits: 0x1d00ffff, refBits: CHIPNET_BLOCK.bits,
+    });
+    assert.equal(vault.token.amount, 525000000000000n);
+  });
+  assert.equal(transaction.outputs[4].token, undefined);
+  assert.equal(transaction.outputs[4].valueSatoshis, 8100000n - 4n * 2000000n - BigInt(output.genesis_fee_sats));
+  // The token rules accept the genesis (an anyone-can-spend stand-in for the signed input).
+  assert.equal(verify({ transaction, sourceOutputs: [{ lockingBytecode: Uint8Array.of(0x51), valueSatoshis: 8100000n }] }), true);
+  assert.match(output.sign_with, /^signrawtransactionwithwallet /);
+  const mainnet = run('genesis', json(context, { ...input, network: 'mainnet' }, 'mainnet.json'));
+  assert.notEqual(mainnet.status, 0);
+  assert.match(mainnet.stderr, /chipnet only/);
+  const notFirst = run('genesis', json(context, { ...input, funding: { ...input.funding, vout: 1 } }, 'vout.json'));
+  assert.match(notFirst.stderr, /output 0/);
+});
+
+test('malformed input fails the CLI with a reason', context => {
+  const result = run('leaf', json(context, deployment, 'deployment.json'), json(context, { vault_commitment: 'gg' }, 'job.json'));
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /hexadecimal/);
-  const spend = createSafaSpend();
-  const proofPath = temporaryInput(context, JSON.stringify(createSafaProof(spend)));
-  const invalidAge = spawnSync(process.execPath, [cli, 'unlock', proofPath, 'invalid'], { encoding: 'utf8' });
-  assert.notEqual(invalidAge.status, 0);
-  assert.match(invalidAge.stderr, /block age/);
+  assert.match(run('unknown', 'file').stderr, /usage/);
 });
 
 test('the CLI JSON reader accepts exactly 1 MiB and rejects the next byte', context => {
   const exact = temporaryInput(context, '{}' + ' '.repeat(1024 * 1024 - 2));
   assert.deepEqual(readJson(exact), {});
-  const excessive = temporaryInput(context, '{}' + ' '.repeat(1024 * 1024 - 1));
+  const excessive = temporaryInput(context, '{}' + ' '.repeat(1024 * 1024 - 1), 'large.json');
   assert.throws(() => readJson(excessive), /exceeds 1 MiB/);
 });
