@@ -486,6 +486,32 @@ async fn test_miner_route_with_auth_reaches_the_handler() {
     assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
 }
 
+/// The Admin landing page sits with the node's own routes: 401 with a
+/// Basic challenge without the login, the styled page with it.
+#[tokio::test]
+async fn test_signin_route_is_behind_the_api_login() {
+    use tower::ServiceExt;
+
+    let (state, _temp_dir, base64_credentials) = build_auth_test_state().await;
+    let app = build_router(state.clone(), state.app_config.clone());
+
+    let request = http::Request::builder()
+        .uri("/dashboard/signin")
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+    assert!(response.headers().contains_key("www-authenticate"));
+
+    let request = http::Request::builder()
+        .uri("/dashboard/signin")
+        .header("Authorization", format!("Basic {base64_credentials}"))
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+}
+
 /// Start a real HTTP server on a random port and return (base_url, shutdown_tx).
 ///
 /// WebSocket upgrade tests need a real TCP connection because axum's

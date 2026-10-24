@@ -34,6 +34,9 @@ pub(crate) struct Site {
     pub(crate) network: String,
     /// The short name in the header badge, for example "chipnet".
     pub(crate) badge: String,
+    /// Whether the node has an API login, so the header offers the Admin
+    /// button that leads to `/dashboard/signin`.
+    pub(crate) auth: bool,
 }
 
 /// The menu bar's pages.
@@ -443,6 +446,12 @@ pub(crate) fn layout(
                                     input type="search" name="q" placeholder="Miner address or share hash"
                                         aria-label="Miner address or share hash" required;
                                     button.outline.header-btn type="submit" { "Search" }
+                                }
+                            }
+                            @if site.auth {
+                                li {
+                                    a.outline.header-btn role="button" href="/dashboard/signin"
+                                        title="Sign in to the node's own routes" { "Admin" }
                                 }
                             }
                         }
@@ -921,7 +930,9 @@ pub(crate) fn help(site: &Site) -> Markup {
                     li { code { "/miner?address=" } ": a miner's shares and its part of the next payout" }
                     li { code { "/pplns_shares" } ", " code { "/candidates" } ", " code { "/dag" } ", " code { "/transaction" } }
                     li { code { "/hashrate" } ", " code { "/found_blocks" } ", " code { "/miners" } ", " code { "/network" } }
-                    li { code { "/metrics" } " (Prometheus) and " code { "/peers" } ": always behind the API login" }
+                    li { code { "/metrics" } " (Prometheus), " code { "/peers" } ", " code { "/blocked_ips" }
+                        ", " code { "/jd_prepare" } " and " code { "/share_transaction" }
+                        ": always behind the API login" }
                 }
             }
             div.help-section {
@@ -931,6 +942,17 @@ pub(crate) fn help(site: &Site) -> Markup {
                     "They load no scripts. The design is CashDragon0's."
                 }
             }
+            div.help-section {
+                h3 { "Admin sign in and out" }
+                p {
+                    "The Admin button in the header opens " code { "/dashboard/signin" }
+                    ". Your browser asks for the API login; the page then lists what that login unlocks."
+                }
+                p {
+                    "To sign out, submit any wrong password once at that prompt: the browser replaces the "
+                    "saved login, and the dashboard keeps serving the public pages."
+                }
+            }
         }
     };
     layout(
@@ -938,6 +960,44 @@ pub(crate) fn help(site: &Site) -> Markup {
         "Help",
         Tab::Help,
         &[dashboard_crumb(), Crumb::here("Help")],
+        None,
+        body,
+    )
+}
+
+/// The landing page behind the API login: what the Admin button opens.
+pub(crate) fn signin(site: &Site) -> Markup {
+    let body = html! {
+        div.panel {
+            div.help-section {
+                h3 { "Signed in" }
+                p {
+                    "Your browser holds the node's API login, so the operator routes below answer "
+                    "without another prompt."
+                }
+                ul {
+                    li { code { "/metrics" } ": the Prometheus exposition." }
+                    li { code { "/peers" } ": connected peers as JSON." }
+                    li { code { "/blocked_ips" } ": read, block and unblock peer IPs." }
+                    li { code { "/jd_prepare" } " and " code { "/share_transaction" }
+                        ": the node's own controls, by POST." }
+                }
+            }
+            div.help-section {
+                h3 { "Sign out" }
+                p {
+                    "Submit any wrong password at the next prompt: the browser replaces the saved "
+                    "login, and every visitor is back to the public pages only."
+                }
+            }
+            p { a class="back-link" href="/dashboard" { "Back to the dashboard" } }
+        }
+    };
+    layout(
+        site,
+        "Admin",
+        Tab::None,
+        &[dashboard_crumb(), Crumb::here("Admin")],
         None,
         body,
     )
@@ -971,6 +1031,7 @@ mod tests {
         Site {
             network: "Bitcoin Cash chipnet".to_string(),
             badge: "chipnet".to_string(),
+            auth: true,
         }
     }
 
@@ -1092,7 +1153,47 @@ mod tests {
         ));
         assert!(page.contains("aria-label=\"breadcrumb\""));
         assert!(page.contains("action=\"/dashboard/search\""));
+        assert!(page.contains("href=\"/dashboard/signin\""));
+        assert!(page.contains(">Admin</a>"));
         assert!(page.contains(&assets::href("dashboard.css")));
+    }
+
+    #[test]
+    fn the_admin_button_is_absent_without_an_api_login() {
+        let page = layout(
+            &Site {
+                network: "Bitcoin Cash chipnet".to_string(),
+                badge: "chipnet".to_string(),
+                auth: false,
+            },
+            "Dashboard",
+            Tab::Dashboard,
+            &[],
+            None,
+            html! { p { "hi" } },
+        )
+        .into_string();
+        assert!(!page.contains("/dashboard/signin"));
+        assert!(!page.contains(">Admin</a>"));
+    }
+
+    #[test]
+    fn the_signin_page_lists_the_protected_routes_without_script() {
+        let page = signin(&site()).into_string();
+        assert!(!page.contains("<script"));
+        assert!(page.contains("Sign in"));
+        assert!(page.contains("/metrics"));
+        assert!(page.contains("/jd_prepare"));
+        assert!(page.contains("wrong password"));
+        assert!(page.contains("Back to the dashboard"));
+    }
+
+    #[test]
+    fn the_help_page_explains_signing_in_and_out() {
+        let page = help(&site()).into_string();
+        assert!(!page.contains("<script"));
+        assert!(page.contains("/dashboard/signin"));
+        assert!(page.contains("wrong password"));
     }
 
     #[test]

@@ -59,7 +59,9 @@ pub(crate) struct DashboardState {
 }
 
 /// The dashboard's routes, ready to merge into the API's share chain
-/// routes.
+/// routes. The Admin button's `/dashboard/signin` landing page is not among
+/// them: it opens with the node's login, so [`signin_route`] carries it to
+/// the authenticated side instead.
 pub(crate) fn router(app: Arc<AppState>, history: Arc<HashrateHistory>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/dashboard", get(overview))
@@ -71,6 +73,17 @@ pub(crate) fn router(app: Arc<AppState>, history: Arc<HashrateHistory>) -> Route
         .route("/dashboard/help", get(help))
         .route("/dashboard/search", get(search))
         .route("/dashboard/assets/{name}", get(assets::serve))
+        .with_state(Arc::new(DashboardState { app, history }))
+}
+
+/// The Admin button's `/dashboard/signin` landing page, a route the API
+/// joins to its authenticated routes so it opens with the node's login.
+pub(crate) fn signin_route(
+    app: Arc<AppState>,
+    history: Arc<HashrateHistory>,
+) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/dashboard/signin", get(signin))
         .with_state(Arc::new(DashboardState { app, history }))
 }
 
@@ -86,6 +99,7 @@ pub(crate) fn site(state: &AppState) -> Site {
     Site {
         network,
         badge: badge.to_string(),
+        auth: state.auth_user.is_some(),
     }
 }
 
@@ -522,6 +536,10 @@ async fn help(State(dashboard): State<Arc<DashboardState>>) -> Response {
     html(pages::help(&site(&dashboard.app)))
 }
 
+pub(crate) async fn signin(State(dashboard): State<Arc<DashboardState>>) -> Response {
+    html(pages::signin(&site(&dashboard.app)))
+}
+
 #[derive(Deserialize)]
 struct SearchQuery {
     q: Option<String>,
@@ -607,6 +625,17 @@ mod tests {
             metrics::start_metrics(metrics_dir.path().to_str().unwrap().to_string())
                 .await
                 .unwrap();
+        // The middleware expects the stored token in the salt$hmac form that
+        // config.toml carries; the tests hand over the login password itself.
+        let (auth_user, auth_token) = match auth {
+            Some((user, password)) => {
+                let salt = "dash-test-salt";
+                let hmac =
+                    p2poolv2_lib::auth::password_to_hmac(salt, password).expect("hmac to compute");
+                (Some(user.to_string()), Some(format!("{salt}${hmac}")))
+            }
+            None => (None, None),
+        };
         let state = Arc::new(AppState {
             app_config: AppConfig {
                 pool_signature_length: 0,
@@ -619,8 +648,8 @@ mod tests {
             tracker_handle: start_tracker_actor(),
             node_handle: NodeHandle::new_for_test(),
             monitoring_event_sender: create_monitoring_event_channel().0,
-            auth_user: auth.map(|(user, _)| user.to_string()),
-            auth_token: auth.map(|(_, token)| token.to_string()),
+            auth_user,
+            auth_token,
             pplns_window: None,
         });
         (state, store_dir, metrics_dir)
@@ -635,14 +664,27 @@ mod tests {
         uri: &str,
         web: WebOptions,
     ) -> (StatusCode, String, HeaderMap) {
+        get_with_headers(state, uri, web, &[]).await
+    }
+
+    async fn get_with_headers(
+        state: &Arc<AppState>,
+        uri: &str,
+        web: WebOptions,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String, HeaderMap) {
         let app = build_router_with_history(
             Arc::clone(state),
             state.app_config.clone(),
             Arc::new(HashrateHistory::default()),
             web,
         );
+        let mut builder = Request::builder().uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
         let response = app
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .unwrap();
         let status = response.status();
@@ -741,11 +783,38 @@ mod tests {
         // A bad address is the handler's 400, not the login's 401.
         let (status, _, _) = get_with(&state, "/miner?address=not-an-address", public()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        for own_route in ["/metrics", "/peers", "/blocked_ips", "/jd_prepare"] {
+        for own_route in [
+            "/metrics",
+            "/peers",
+            "/blocked_ips",
+            "/jd_prepare",
+            "/dashboard/signin",
+        ] {
             let (status, _, headers) = get_with(&state, own_route, public()).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{own_route}");
             assert!(headers.contains_key(header::WWW_AUTHENTICATE));
         }
+    }
+
+    #[tokio::test]
+    async fn the_admin_signin_page_answers_the_api_login() {
+        use base64::Engine;
+        let (state, _store, _metrics) = build_state(Some(("operator", "secret-token")), None).await;
+        let (status, _, headers) = get_with(&state, "/dashboard/signin", public()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(headers.contains_key(header::WWW_AUTHENTICATE));
+        let credentials = base64::engine::general_purpose::STANDARD.encode("operator:secret-token");
+        let (status, body, _) = get_with_headers(
+            &state,
+            "/dashboard/signin",
+            public(),
+            &[("authorization", &format!("Basic {credentials}"))],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Signed in"));
+        assert!(body.contains("/metrics"));
+        assert!(!body.contains("<script"));
     }
 
     #[tokio::test]
@@ -908,7 +977,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             body,
-            r#"{"network":"Bitcoin Cash chipnet","badge":"chipnet"}"#
+            r#"{"network":"Bitcoin Cash chipnet","badge":"chipnet","auth":false}"#
         );
     }
 

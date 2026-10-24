@@ -301,6 +301,7 @@ fn site() -> Site {
     Site {
         network: "Bitcoin Cash chipnet".to_string(),
         badge: "chipnet".to_string(),
+        auth: true,
     }
 }
 
@@ -527,6 +528,7 @@ fn every_page() -> String {
         })
         .into_string(),
         pages::help(&site()).into_string(),
+        pages::signin(&site()).into_string(),
         pages::error(&site(), "Not here").into_string(),
     ]
     .concat()

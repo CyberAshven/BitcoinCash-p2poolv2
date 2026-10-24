@@ -174,7 +174,7 @@ pub(crate) fn build_router_with_history(
             app_state.clone(),
             history.clone(),
         ))
-        .merge(dashboard::router(app_state.clone(), history));
+        .merge(dashboard::router(app_state.clone(), history.clone()));
     let share_chain_routes = match web.web_root {
         Some(web_root) => {
             let index = ServeFile::new(web_root.join("index.html"));
@@ -183,7 +183,9 @@ pub(crate) fn build_router_with_history(
         None => share_chain_routes.route("/", get(|| async { Redirect::to("/dashboard") })),
     };
 
-    // The node's own state and controls, always behind the login.
+    // The node's own state and controls, always behind the login. The Admin
+    // button's landing page joins them: it opens with the login too, so a
+    // public dashboard does not hand it out anonymously.
     let mut authenticated_routes = Router::new()
         .route(
             "/jd_prepare",
@@ -199,7 +201,8 @@ pub(crate) fn build_router_with_history(
         .route("/peers", get(peers))
         .route("/blocked_ips", get(get_blocked_ips))
         .route("/blocked_ips", post(block_ip))
-        .route("/blocked_ips", delete(unblock_ip));
+        .route("/blocked_ips", delete(unblock_ip))
+        .merge(dashboard::signin_route(app_state.clone(), history.clone()));
 
     // Routes that handle their own auth: the WebSocket validates credentials
     // via query param in its handler. A public node's share chain routes
