@@ -77,8 +77,7 @@ impl MergeMiningCommitment {
         salt: 0,
     };
 
-    /// The exact empty commitment. Pool-built jobs (Stratum V1 and Stratum V2
-    /// standard channels) always carry it.
+    /// The exact empty commitment for a job that merge-mines no tokens.
     pub const fn empty() -> Self {
         Self::EMPTY
     }

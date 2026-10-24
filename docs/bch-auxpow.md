@@ -44,13 +44,14 @@ says the coinbase merge-mines no token. A zero root with any other `h` or
 salt is not a commitment, and `h` above 16 is not either; P2Pool refuses
 both (`MergeMiningCommitment::validate`).
 
-Pool-built jobs (Stratum V1 and Stratum V2 standard channels) always carry
-the empty commitment. Only a miner that declares its own coinbase through
-[Job Declaration](bch-job-declaration.md) commits token work. The share
-header carries the declared root, `h` and salt (in its `bch_coinbase`), and
-every peer rebuilds output 0 from them byte for byte when it rebuilds the
-coinbase; a pool-built share's output 0 is rebuilt as the empty
-commitment.
+Pool-built jobs carry the empty commitment when the node has no tokens to
+merge-mine. When tokens are configured, the node builds a root from each
+miner's own token leaves. A miner can also declare a token commitment in
+its own coinbase through [Job Declaration](bch-job-declaration.md). The
+share header carries the root, `h` and salt in `pool_merge_mining` for a
+pool-built share or in `bch_coinbase` for a declared share. Every peer
+rebuilds output 0 from that commitment byte for byte when it rebuilds the
+coinbase.
 
 A share is a **token share** when its commitment is anything but the exact
 empty one (`share_has_token_commitment`), and a **no-token share**
