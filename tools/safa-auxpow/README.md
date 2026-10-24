@@ -166,6 +166,12 @@ bytes.
   `S`, a wrong next state, an easier target in the leaf and a fallback
   claim one block early.
 - **Command line** (`cli.test.mjs`).
+- **Against P2Pool's Rust side**, checked once by hand on 2026-10-24: for a
+  claim the covenant accepts (chipnet, three tokens, a split),
+  `p2poolv2_cli bch-auxpow verify --network chipnet` accepts its proof with
+  the `token` JSON `cli.mjs leaf` prints and refuses it with another state
+  hash, and `p2poolv2_cli bch-auxpow build` gives the same root, `h` and
+  salt as `lib.mjs`.
 
 ## Command line
 
