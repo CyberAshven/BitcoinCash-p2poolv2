@@ -34,9 +34,8 @@ export const MIN_SHARE_SATS = 1000n;
 export const EASE_CAP = 288;
 /** Blocks without a claim after which the fallback nBits band applies. */
 export const FALLBACK_DELTA = 4032;
-/** The fallback's hard side doubles every 288 blocks, at most 4 times. */
-export const FALLBACK_STEP = 288;
-export const FALLBACK_CAP = 4;
+/** Claim outputs pay scripts of at most 35 bytes (P2PKH, P2SH20, P2SH32), as K assumes. */
+export const MAX_PAYOUT_SCRIPT_BYTES = 35;
 export const MAX_TREE_HEIGHT = 16;
 export const MAX_COINBASE_BRANCH = 25;
 export const MAX_SPLIT_BPS = 10000;
@@ -327,13 +326,15 @@ export function asertBandOk(network, bits, time, height) {
   return target >= computed / BigInt(parameters.hardDivisor) && target * 100n <= computed * 105n;
 }
 
-/** The DAA-change fallback band: ref >> min(dh / 288, 4) <= target <= ref * 1.1. */
+/**
+ * The DAA-change fallback band, from 4,032 blocks without a claim:
+ * ref >> 4 <= target <= ref * 1.1 (min(dh / 288, 4) is always 4 there).
+ */
 export function fallbackBandOk(bits, refBits, heightDelta) {
   const target = decodeHeaderBits(bits);
   const reference = decodeHeaderBits(refBits);
   if (target === null || reference === null || heightDelta < FALLBACK_DELTA) return false;
-  const doublings = BigInt(Math.min(Math.floor(heightDelta / FALLBACK_STEP), FALLBACK_CAP));
-  return target >= reference >> doublings && target * 10n <= reference * 11n;
+  return target >= reference >> 4n && target * 10n <= reference * 11n;
 }
 
 /** The claim's target bits: the state's target eased by min(dh, 288) / threads. */
@@ -570,6 +571,11 @@ export function claimLeaf(covenant, { vault, payoutLockingBytecode, split = null
   const state = decodeState(vault.commitment);
   if (!Number.isInteger(height) || height >= LOCKTIME_THRESHOLD) throw new Error('the height must be a block height');
   if (state.height >= height) throw new Error('the coinbase is not newer than the thread state');
+  for (const script of [payoutLockingBytecode, split?.donationLockingBytecode, split?.feeLockingBytecode]) {
+    if (script !== undefined && script.length > MAX_PAYOUT_SCRIPT_BYTES) {
+      throw new Error('claim outputs pay scripts of at most 35 bytes: P2PKH, P2SH20 or P2SH32');
+    }
+  }
   const heightDelta = height - state.height;
   const targetBits = claimTargetBits(state.targetBits, heightDelta, covenant.threads);
   const preimage = split === null ? new Uint8Array() : splitPreimage({
@@ -648,7 +654,7 @@ export function buildClaim(covenant, { outpoint, vault, payoutLockingBytecode, s
   const plan = planClaim(covenant, { vault, payoutLockingBytecode, split, proof });
   const fee = BigInt(feeRate * plan.sizeBound);
   const vaultValue = BigInt(vault.value) - fee - OUTPUT_SATS * BigInt(plan.outputs.length);
-  if (vaultValue < 0n) throw new Error('the vault cannot pay the claim fee and outputs');
+  if (vaultValue < OUTPUT_SATS) throw new Error('the vault cannot pay the claim fee and outputs and keep 800 satoshis');
   const lockTime = locktime ?? plan.height;
   if (lockTime < plan.height || lockTime >= LOCKTIME_THRESHOLD) {
     throw new Error('the locktime must be a height at or above the coinbase height');

@@ -85,9 +85,11 @@ cb_branch`, `h ≤ 16`, `d ≤ 25`, nothing trailing). The covenant:
      / 1,605,451,779 / 3,600 s;
    - the DAA-change fallback: once `H − state_height ≥ 4,032`, a header
      that fails the band is also accepted when
-     `ref >> min(⌊(H − state_height) / 288⌋, 4) ≤ target ≤ ref × 1.1`,
-     `ref` being the state's `ref_bits`: at most four doublings on the hard
-     side and ×1.1 on the easy side, as `docs/merge-mining.md` says;
+     `ref >> 4 ≤ target ≤ ref × 1.1`, `ref` being the state's `ref_bits`:
+     four doublings on the hard side and ×1.1 on the easy side, as
+     `docs/merge-mining.md` says. Its `min(⌊Δh / 288⌋, 4)` is always 4 from
+     `Δh = 4,032` (where `⌊Δh / 288⌋` is already 14), so the covenant shifts
+     by a constant 4;
 6. writes the next state: the same thread, `H`, the claim's target bits and
    the header's nBits;
 7. pays the reward `R = ⌊vault tokens / 420,000⌋` (above 0); the vault
@@ -99,8 +101,12 @@ cb_branch`, `h ≤ 16`, `d ≤ 25`, nothing trailing). The covenant:
 8. requires exactly the outputs vault, miner, donation and fee, each of the
    last three only when above 0, each with exactly 800 satoshis of fungible
    tokens of the vault's category (no NFT, amount at least 1) to a script
-   whose `HASH256` is `payout_hash`, `d_hash` or `f_hash`;
-9. lets the vault pay a fee of `S` to `3S` satoshis, `S = K + |proof|`, with
+   of at most 35 bytes (P2PKH, P2SH20 or P2SH32, as K assumes) whose
+   `HASH256` is `payout_hash`, `d_hash` or `f_hash`;
+9. pays the claim's fee from the vault's own cash: `S` to `3S` satoshis
+   (there is no other input), and the vault output keeps at least the
+   800-satoshi token dust, so a claim never leaves a vault that will not
+   relay. `S = K + |proof|`, with
    `K = 580 + redeem script length`: the most bytes the claim has besides
    the proof (version, input, outpoint, a 3-byte unlocking length,
    sequence, output count, the 104-byte vault output, three 87-byte token
@@ -126,15 +132,15 @@ Measured by `claim.test.mjs` in the standard VM (chipnet, 4 threads):
 
 | Claim | Unlocking bytes | Op-cost / limit | Hash iterations / limit |
 |---|---|---|---|
-| `h` 0, `d` 0, no split | 1,597 | 121,146 / 1,310,400 | 40 / 819 |
-| `h` 1, `d` 1, split | 1,731 | 134,630 / 1,417,600 | 53 / 886 |
-| `h` 16, `d` 25, split | 2,979 | 256,635 / 2,416,000 | 153 / 1,510 |
-| `h` 16, `d` 25, split, fallback band | 2,979 | 266,959 / 2,416,000 | 153 / 1,510 |
-| `h` 16, `d` 25, split, 10,000-byte unlock | 10,000 | 369,031 / 8,032,800 | 263 / 5,020 |
+| `h` 0, `d` 0, no split | 1,597 | 121,751 / 1,310,400 | 40 / 819 |
+| `h` 1, `d` 1, split | 1,731 | 136,040 / 1,417,600 | 53 / 886 |
+| `h` 16, `d` 25, split | 2,979 | 257,643 / 2,416,000 | 153 / 1,510 |
+| `h` 16, `d` 25, split, fallback band | 2,979 | 267,253 / 2,416,000 | 153 / 1,510 |
+| `h` 16, `d` 25, split, 10,000-byte unlock | 10,000 | 370,038 / 8,032,800 | 263 / 5,020 |
 
 The redeem script is 1,366 bytes on chipnet and 1,363 on mainnet (with 4
 threads and 42 tBCH or more of virtual cash; it varies by a few bytes with
-the constants), so K is 1,946 and 1,943. The worst case uses 11.0% of the
+the constants), so K is 1,946 and 1,943. The worst case uses 11.1% of the
 operation-cost limit and 10.1% of the hashing limit. The largest coinbase a
 claim can carry is the 10,000-byte unlocking limit less the redeem script,
 the other pushes and the proof's other parts: 7,171 bytes at the deepest
@@ -163,8 +169,9 @@ bytes.
   kind of wrong split, a hidden or rewritten split, Bitcoin nBits, a reused
   or older height, a replayed proof, lock times below `H` or in the time
   domain, a time-domain coinbase height, fee overpay above `3S` or under
-  `S`, a wrong next state, an easier target in the leaf and a fallback
-  claim one block early.
+  `S`, a vault left under 800 satoshis, a 36-byte payout script, a wrong
+  next state, an easier target in the leaf, and a fallback claim one block
+  early or just harder than `ref >> 4`.
 - **Command line** (`cli.test.mjs`).
 - **Against P2Pool's Rust side**, checked once by hand on 2026-10-24: for a
   claim the covenant accepts (chipnet, three tokens, a split),

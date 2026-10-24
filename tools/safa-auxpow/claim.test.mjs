@@ -7,7 +7,7 @@ import { mainnetPairs } from './rust_vectors.mjs';
 import * as safa from './lib.mjs';
 import {
   CATEGORY, CHIPNET_BLOCK, COVENANT, claimScenario, encodeHeightPush, inputMetrics, makeCoinbase, mineHeader,
-  p2pkh, setUnlock, utf8, verify,
+  p2pkh, setUnlock, utf8, verify, verifyNonstandard,
 } from './test_utils.mjs';
 
 const accepts = (spend, why) => assert.equal(verify(spend), true, why);
@@ -194,15 +194,23 @@ test('a Bitcoin header fails the ASERT band even with valid token work', () => {
   accepts(claimScenario({ bits: safa.POW_LIMIT_BITS }).claim, 'chipnet allows a minimum-difficulty block');
 });
 
-test('the DAA-change fallback opens after 4,032 blocks around the stored reference', () => {
-  const easy = 0x1b0404cb;
-  assert.equal(safa.asertBandOk('chipnet', easy, CHIPNET_BLOCK.time, CHIPNET_BLOCK.height), false);
-  const at = (delta, refBits) => claimScenario({
-    bits: easy, state: { height: CHIPNET_BLOCK.height - delta, refBits },
+test('the DAA-change fallback opens at 4,032 blocks, from ref >> 4 to ref x 1.1', () => {
+  // 0x1b0404cb is exactly 0x1b404cb0 >> 4, and both fail the ASERT band here.
+  const reference = 0x1b404cb0;
+  const sixteenth = 0x1b0404cb;
+  for (const bits of [reference, sixteenth, sixteenth - 1]) {
+    assert.equal(safa.asertBandOk('chipnet', bits, CHIPNET_BLOCK.time, CHIPNET_BLOCK.height), false);
+  }
+  const at = (delta, bits, refBits = reference) => claimScenario({
+    bits, state: { height: CHIPNET_BLOCK.height - delta, refBits },
   }).claim;
-  accepts(at(4032, easy), '4,032 blocks without a claim');
-  refuses(at(4031, easy), 'one block too early');
-  refuses(at(4032, CHIPNET_BLOCK.bits), 'far easier than the reference');
+  accepts(at(4032, sixteenth), 'exactly ref >> 4 at 4,032 blocks');
+  accepts(at(4032, reference), 'the reference itself');
+  refuses(at(4031, sixteenth), 'one block too early');
+  refuses(at(4031, reference), 'the reference one block too early');
+  refuses(at(4032, sixteenth - 1), 'just harder than ref >> 4');
+  refuses(at(100000, sixteenth - 1), 'no wider after more blocks');
+  refuses(at(4032, sixteenth, CHIPNET_BLOCK.bits), 'far easier than the reference');
 });
 
 test('the mainnet covenant claims at a real mainnet height and allows no minimum-difficulty nBits', () => {
@@ -260,6 +268,29 @@ test('a coinbase height in the time domain is refused although ASERT alone would
   // At that height ASERT's computed target is 1, so nBits for target 1 pass the band.
   assert.equal(safa.asertBandOk('chipnet', 0x01010000, CHIPNET_BLOCK.time, height), true);
   refuses(rawClaim({ height, bits: 0x01010000, locktime: height }), 'a time-domain coinbase height');
+});
+
+test('a claim cannot leave the vault below the 800-satoshi token dust', () => {
+  const sizing = claimScenario();
+  const exact = sizing.claim.fee + 800n + 800n;
+  const { claim } = claimScenario({ value: exact });
+  assert.equal(claim.transaction.outputs[0].valueSatoshis, 800n);
+  accepts(claim, 'exactly 800 satoshis left');
+  const below = clone(claim);
+  below.transaction.outputs[0].valueSatoshis -= 1n;
+  refuses(below, '799 satoshis left, the fee still within S to 3S');
+  assert.throws(() => claimScenario({ value: exact - 1n }), /keep 800 satoshis/);
+});
+
+test('claim outputs pay scripts of at most 35 bytes, so K bounds the claim', () => {
+  const p2sh32 = flattenBinArray([Uint8Array.of(0xaa, 0x20), new Uint8Array(32).fill(0x42), Uint8Array.of(0x87)]);
+  assert.equal(p2sh32.length, 35);
+  accepts(rawClaim({ payout: p2sh32 }), 'a P2SH32 payout');
+  const long = new Uint8Array(36).fill(0x51);
+  assert.equal(verifyNonstandard(rawClaim({ payout: p2sh32 })), true, 'control in the consensus-only VM');
+  assert.notEqual(verifyNonstandard(rawClaim({ payout: long })), true, 'a 36-byte payout with its own leaf');
+  assert.throws(() => claimScenario({ payout: long }), /at most 35 bytes/);
+  assert.throws(() => claimScenario({ split: { ...SPLIT, donationLockingBytecode: long } }), /at most 35 bytes/);
 });
 
 // ---- fees ----
@@ -391,11 +422,10 @@ function claimAtUnlockingSize(size) {
  * covenant itself refuses what the model would refuse.
  */
 function rawClaim({ stateHeight = CHIPNET_BLOCK.height - 10, height = CHIPNET_BLOCK.height, bits = CHIPNET_BLOCK.bits,
-  locktime = height }) {
+  locktime = height, payout = p2pkh('12') }) {
   const commitment = safa.encodeState({ thread: 1, height: stateHeight, targetBits: 0x2000ffff, refBits: CHIPNET_BLOCK.bits });
   const delta = Math.max(height - stateHeight, 1);
   const targetBits = safa.claimTargetBits(0x2000ffff, delta, COVENANT.threads);
-  const payout = p2pkh('12');
   const leaf = {
     category: Uint8Array.from(CATEGORY).reverse(), lockHash: COVENANT.lockHash, stateHash: hash256(commitment),
     payoutHash: hash256(payout), targetBits, ext: new Uint8Array(32),

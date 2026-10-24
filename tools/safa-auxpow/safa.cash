@@ -134,17 +134,16 @@
     OP_ENDIF
 > <7> OP_DEFINE
 
-// Function 8: the DAA-change fallback band around the state's reference:
-// ref >> min(dh / 288, 4) <= target <= ref * 1.1.
-// [nbits4 ref_bits4 dh] -> [ok]
+// Function 8: the DAA-change fallback band around the state's reference,
+// ref >> 4 <= target <= ref * 1.1. It applies only from dh = 4,032, where
+// min(dh / 288, 4) is always 4.
+// [nbits4 ref_bits4] -> [ok]
 <
-    <288> OP_DIV OP_4 OP_MIN
+    <5> OP_INVOKE
     OP_SWAP <5> OP_INVOKE
-    OP_ROT <5> OP_INVOKE
     OP_2DUP <10> OP_MUL OP_SWAP <11> OP_MUL OP_LESSTHANOREQUAL
-    OP_TOALTSTACK
-    OP_ROT OP_ROT OP_SWAP OP_RSHIFTNUM
-    OP_GREATERTHANOREQUAL OP_FROMALTSTACK OP_BOOLAND
+    OP_ROT OP_4 OP_RSHIFTNUM
+    OP_ROT OP_LESSTHANOREQUAL OP_BOOLAND
 > <8> OP_DEFINE
 
 // Function 9: a category's slot, u32le(SHA256(02 || salt || category)[0..4]) mod 2^h.
@@ -271,12 +270,13 @@
 > <18> OP_DEFINE
 
 // Function 19: output idx pays amount fungible tokens of the vault's category,
-// with no NFT, exactly 800 satoshis, to a script whose HASH256 is hash.
+// with no NFT, exactly 800 satoshis, to a script of at most 35 bytes (P2PKH,
+// P2SH20 or P2SH32, as K assumes) whose HASH256 is hash.
 // [amount hash idx] -> []
 <
     OP_DUP OP_OUTPUTVALUE <800> OP_NUMEQUALVERIFY
     OP_DUP OP_OUTPUTTOKENCATEGORY OP_0 OP_UTXOTOKENCATEGORY <32> OP_SPLIT OP_DROP OP_EQUALVERIFY
-    OP_DUP OP_OUTPUTBYTECODE OP_HASH256 OP_ROT OP_EQUALVERIFY
+    OP_DUP OP_OUTPUTBYTECODE OP_SIZE <36> OP_LESSTHAN OP_VERIFY OP_HASH256 OP_ROT OP_EQUALVERIFY
     OP_OUTPUTTOKENAMOUNT OP_NUMEQUALVERIFY
 > <19> OP_DEFINE
 
@@ -347,7 +347,6 @@ OP_ELSE
         OP_OVER <4032> OP_GREATERTHANOREQUAL OP_VERIFY
         OP_3 OP_PICK <72> OP_SPLIT OP_NIP OP_4 OP_SPLIT OP_DROP
         OP_0 OP_UTXOTOKENCOMMITMENT <12> OP_SPLIT OP_NIP
-        OP_3 OP_PICK
         <8> OP_INVOKE OP_VERIFY
     OP_ENDIF
     OP_NIP
@@ -373,9 +372,11 @@ OP_ELSE
     OP_ROT OP_FROMALTSTACK <20> OP_INVOKE
     OP_SWAP OP_FROMALTSTACK <20> OP_INVOKE
     OP_DUP OP_TXOUTPUTCOUNT OP_NUMEQUALVERIFY
-    // split count: the vault pays S to 3S satoshis, S = K + the proof's size.
+    // split count: the vault pays S to 3S satoshis from its cash, S = K + the
+    // proof's size, and keeps at least the 800-satoshi token dust itself.
     OP_1SUB <800> OP_MUL
-    OP_0 OP_UTXOVALUE OP_SWAP OP_SUB OP_0 OP_OUTPUTVALUE OP_SUB
+    OP_0 OP_UTXOVALUE OP_SWAP OP_SUB
+    OP_0 OP_OUTPUTVALUE OP_DUP <800> OP_GREATERTHANOREQUAL OP_VERIFY OP_SUB
     OP_FROMALTSTACK
     OP_2DUP OP_GREATERTHANOREQUAL OP_VERIFY
     OP_3 OP_MUL OP_LESSTHANOREQUAL OP_VERIFY

@@ -252,10 +252,12 @@ anchor and the donation and fee cap as they were.
   common format v2 in the BCH 2026 VM, with the token rules agreed with
   Pickaxe: one vault input and fixed outputs (vault, miner, donation, fee);
   the per-win split from the leaf's `ext`, with `MIN_SHARE_SATS` 1,000 at
-  the AMM price; a vault-paid fee of 1 to 3 sat/byte of K plus the proof;
-  the coinbase's BIP34 height under `OP_CHECKLOCKTIMEVERIFY`, with
-  `state_height < cb_height`; BCH's aserti3-2d band on the header's nBits,
-  with the fallback after 4,032 blocks; and the SAFA draft's difficulty
+  the AMM price; claim outputs to scripts of at most 35 bytes; a fee of 1
+  to 3 sat/byte of K plus the proof, paid from the vault's own cash, which
+  keeps at least 800 satoshis; the coinbase's BIP34 height under
+  `OP_CHECKLOCKTIMEVERIFY`, with `state_height < cb_height`; BCH's
+  aserti3-2d band on the header's nBits, with the fallback band
+  `ref >> 4` to `ref × 1.1` from 4,032 blocks; and the SAFA draft's difficulty
   adjustment, eased by `min(Δh, 288) / threads`. The Unix-time lock, the CSV
   age and the version-2 rule are gone. Its redeem script is 1,366 bytes on
   chipnet, and the worst claim measured uses 11% of the VM's operation-cost

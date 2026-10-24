@@ -421,7 +421,10 @@ claim's payout and target, and the split's `ext`), folds both branches,
 checks the header's work against the token's target and its nBits against
 ASERT at the coinbase's BIP34 height (the band above, with a fallback after
 4,032 blocks without a claim), binds that height with
-`OP_CHECKLOCKTIMEVERIFY`, and pays the split. Its tests run Pickaxe's
+`OP_CHECKLOCKTIMEVERIFY`, and pays the split to scripts of at most 35
+bytes. The vault is the claim's only input: it pays the fee from its own
+cash, `S` to `3S` satoshis for `S` bytes of claim bound, and keeps at least
+800 satoshis. Its tests run Pickaxe's
 vectors, BCHN's 14,000 aserti3-2d vectors and the real headers from this
 repository's Rust tests in the VM. A chipnet test token (tSAFA) is
 prepared but not deployed. The v1 variant passed a real regtest withdrawal

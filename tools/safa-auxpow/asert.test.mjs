@@ -117,13 +117,13 @@ test('the band agrees with the JavaScript model across times and nBits', () => {
   }
 });
 
-test('the fallback band: ref >> min(dh / 288, 4) up to ref x 1.1, only after 4,032 blocks', () => {
+test('the fallback band: ref >> 4 up to ref x 1.1, only after 4,032 blocks', () => {
   const call = callers.chipnet;
   const reference = 0x1804dafe;
   const referenceTarget = safa.setCompact(reference);
   const at = (target, dh) => {
     const bits = safa.getCompact(target);
-    const result = call(F.fallbackBand, safa.uint32(bits), safa.uint32(reference), BigInt(dh));
+    const result = call(F.fallbackBand, safa.uint32(bits), safa.uint32(reference));
     assert.equal(result.error, undefined, result.error);
     const ok = stackNumber(result.stack[0]) === 1n;
     assert.equal(ok, safa.fallbackBandOk(bits, reference, dh));
@@ -134,6 +134,7 @@ test('the fallback band: ref >> min(dh / 288, 4) up to ref x 1.1, only after 4,0
   assert.equal(at((referenceTarget >> 4n) - (1n << 160n), 4032), false);
   assert.equal(at(referenceTarget * 11n / 10n, 4032), true);
   assert.equal(at(referenceTarget * 12n / 10n, 4032), false);
-  // The hard side widens by a doubling every 288 blocks, at most four.
+  // min(dh / 288, 4) is 4 wherever the band applies, so the shift is a constant.
+  for (const dh of [4032, 4320, 100000]) assert.equal(Math.min(Math.floor(dh / 288), 4), 4);
   assert.equal(safa.fallbackBandOk(safa.getCompact(referenceTarget >> 4n), reference, 4031), false);
 });

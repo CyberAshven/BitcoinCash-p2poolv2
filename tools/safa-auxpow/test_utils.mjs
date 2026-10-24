@@ -137,6 +137,11 @@ export function verify({ transaction, sourceOutputs }) {
   return createVirtualMachineBch2026(true).verify({ transaction, sourceOutputs });
 }
 
+/** Consensus rules only: a claim miners could mine although nodes would not relay it. */
+export function verifyNonstandard({ transaction, sourceOutputs }) {
+  return createVirtualMachineBch2026(false).verify({ transaction, sourceOutputs });
+}
+
 /** The VM's metrics for input 0: operation cost, hash iterations and their limits. */
 export function inputMetrics({ transaction, sourceOutputs }) {
   const state = createVirtualMachineBch2026(true).evaluate({ inputIndex: 0, sourceOutputs, transaction });
