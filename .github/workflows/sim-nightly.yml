@@ -175,14 +175,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: 1.99.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: payout-tree-production
 
       - name: Install latest nextest release
         uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
@@ -219,13 +221,40 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bchn-regtest"
           bitcoind -regtest -daemon -server=1 -listen=0 -disablewallet=1 \
             -datadir="$RUNNER_TEMP/bchn-regtest" -rpcport=18443 \
+            -acceptnonstdtxn=0 \
             -rpcuser=p2pool -rpcpassword=p2pool
-          bitcoin-cli -regtest -datadir="$RUNNER_TEMP/bchn-regtest" -rpcport=18443 \
+          timeout 60s bitcoin-cli -regtest -datadir="$RUNNER_TEMP/bchn-regtest" -rpcport=18443 \
             -rpcuser=p2pool -rpcpassword=p2pool -rpcwait getblockchaininfo
 
+      # Do not enable sim here: this job exercises production payout rules.
+      # Both ignored tests mine on the same node, so nextest must serialize them.
       - name: Run the payout tree tests against BCHN
         env:
           P2POOL_TEST_BCHN_RPC_URL: http://127.0.0.1:18443
           P2POOL_TEST_BCHN_RPC_USER: p2pool
           P2POOL_TEST_BCHN_RPC_PASSWORD: p2pool
-        run: cargo nextest run -p p2poolv2_tests --run-ignored only -E 'test(bchn_regtest)' -j 1
+          RUST_BACKTRACE: '1'
+        run: |
+          set -euo pipefail
+          cargo nextest run --locked -p p2poolv2_tests --no-default-features \
+            --run-ignored only -E 'test(bchn_regtest)' -j 1 \
+            2>&1 | tee "$RUNNER_TEMP/payout-tree-bchn.log"
+
+      - name: Stop BCHN regtest
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/bchn-regtest/regtest/bitcoind.pid" ]; then
+            bitcoin-cli -regtest -datadir="$RUNNER_TEMP/bchn-regtest" -rpcport=18443 \
+              -rpcuser=p2pool -rpcpassword=p2pool stop
+          fi
+
+      - name: Upload payout tree logs on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: payout-tree-bchn-logs
+          path: |
+            ${{ runner.temp }}/bchn-regtest/regtest/debug.log
+            ${{ runner.temp }}/payout-tree-bchn.log
+          if-no-files-found: ignore
+          retention-days: 7
