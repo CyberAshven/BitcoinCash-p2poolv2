@@ -406,6 +406,7 @@ async fn disconnect_releases_the_authorized_worker_and_connection_permit() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let listener = bind("127.0.0.1", 0).await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -473,8 +474,8 @@ async fn disconnect_releases_the_authorized_worker_and_connection_permit() {
                 .decode(&buffer[..count])
                 .unwrap()
                 .iter()
-                .any(|(message_type, _)| {
-                    *message_type == MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS
+                .any(|message| {
+                    message.message_type == MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS
                 });
         }
     })
@@ -496,6 +497,114 @@ fn reading_the_current_template_leaves_it_for_next_template() {
     sender.send(None).unwrap();
     assert!(current_template(Some(&receiver)).is_none());
     assert!(receiver.has_changed().unwrap());
+}
+
+/// A Mining connection, set up, on a registry with no template.
+fn mining_connection() -> Sv2Connection {
+    let registry = Arc::new(Mutex::new(JobRegistry::new(
+        PoolTransactionCache::new(),
+        Some(MergeMiningCommitment::empty()),
+    )));
+    let mut connection = Sv2Connection::new(registry);
+    let mut setup = binary_sv2::to_bytes(test_sv2_setup(Protocol::MiningProtocol, 0)).unwrap();
+    connection
+        .handle_message(
+            common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
+            &mut setup,
+        )
+        .unwrap();
+    connection
+}
+
+/// `RequestExtensions` asking for `0x4D4D` and an unknown extension on a
+/// Mining connection is answered with `0x4D4D` alone, and the connection's
+/// channels then get the merge-mining disclosure.
+#[tokio::test]
+async fn a_mining_connection_is_granted_the_merge_mining_disclosure() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let mut connection = mining_connection();
+    let request = Sv2Message {
+        extension_type: EXTENSIONS_NEGOTIATION,
+        message_type: REQUEST_EXTENSIONS,
+        payload: extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION, 0x0002]),
+    };
+
+    let frames = handle_messages(&mut connection, Some(&mut channels), None, vec![request])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        frames,
+        vec![
+            [
+                &[0x01, 0x00, REQUEST_EXTENSIONS_SUCCESS, 6, 0, 0][..],
+                &extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION])[..],
+            ]
+            .concat()
+        ]
+    );
+}
+
+/// A connection that asks for no extension this node knows, or that has
+/// no mining channels to disclose to, is answered with none.
+#[tokio::test]
+async fn an_unknown_extension_request_is_answered_with_none() {
+    let mut connection = mining_connection();
+    let request = Sv2Message {
+        extension_type: EXTENSIONS_NEGOTIATION,
+        message_type: REQUEST_EXTENSIONS,
+        payload: extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION]),
+    };
+
+    let frames = handle_messages(&mut connection, None, None, vec![request])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        frames,
+        vec![
+            [
+                &[0x01, 0x00, REQUEST_EXTENSIONS_SUCCESS, 4, 0, 0][..],
+                &extensions_payload(9, &[])[..],
+            ]
+            .concat()
+        ]
+    );
+}
+
+/// Extensions are negotiated after `SetupConnection`; a request before it,
+/// or a message of an extension that was not negotiated, closes the
+/// connection.
+#[tokio::test]
+async fn extension_messages_before_setup_or_unknown_close_the_connection() {
+    let registry = Arc::new(Mutex::new(JobRegistry::new(
+        PoolTransactionCache::new(),
+        Some(MergeMiningCommitment::empty()),
+    )));
+    let mut fresh = Sv2Connection::new(registry);
+    let request = Sv2Message {
+        extension_type: EXTENSIONS_NEGOTIATION,
+        message_type: REQUEST_EXTENSIONS,
+        payload: extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION]),
+    };
+    assert!(
+        handle_messages(&mut fresh, None, None, vec![request])
+            .await
+            .is_err()
+    );
+
+    let mut connection = mining_connection();
+    let unknown = Sv2Message {
+        extension_type: 0x0003,
+        message_type: 0x00,
+        payload: Vec::new(),
+    };
+    assert!(
+        handle_messages(&mut connection, None, None, vec![unknown])
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

@@ -25,11 +25,14 @@
 
 use super::custom_job::validate_custom_job;
 use super::session::DeclaredJob;
-use super::session::{encode_frame, string_field};
+use super::session::{encode_extension_frame, encode_frame, string_field};
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::config::{BitcoinCashNetwork, Chain, PoolMode};
 use crate::stratum::difficulty_adjuster::{
     DifficultyAdjuster, DifficultyAdjusterTrait, TARGET_DRR, share_difficulty_ceiling,
+};
+use crate::stratum::merge_disclosure::{
+    JOB_LEAVES, MERGE_DISCLOSURE_EXTENSION, WIN_PROOF, job_leaves_payload, win_proof_payload,
 };
 use crate::stratum::message_handlers::authorize_response::{
     resolve_cash_share, resolve_share_address,
@@ -46,6 +49,7 @@ use crate::stratum::session::Session;
 use crate::stratum::validate_username;
 use crate::stratum::work::difficulty::validate::build_coinbase_from_components;
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
+use crate::stratum::work::merge_tokens::MinerTokenJob;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, insert_miner_job};
 use crate::stratum::work::tracker::{JobDetails, JobId};
 use binary_sv2::{B032, B064K, Deserialize, Seq0255, Sv2Option, U256};
@@ -78,7 +82,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 /// Bytes of extranonce a miner rolls on an extended channel (SV1 enonce2).
 pub const EXTRANONCE_SIZE: u16 = 8;
@@ -191,6 +195,10 @@ pub struct MiningChannels {
     version_mask: i32,
     channels: BTreeMap<u32, Channel>,
     next_channel_id: u32,
+    /// The connection negotiated the merge-mining disclosure extension
+    /// (`0x4D4D`): its channels get each job's token leaves and each win's
+    /// proof (`stratum::merge_disclosure`).
+    merge_disclosure: bool,
 }
 
 impl MiningChannels {
@@ -290,7 +298,86 @@ impl MiningChannels {
             version_mask,
             channels: BTreeMap::new(),
             next_channel_id: 1,
+            merge_disclosure: false,
         }
+    }
+
+    /// The connection negotiated the merge-mining disclosure extension:
+    /// from now on its channels get each job's leaves (`JobLeaves`) and
+    /// each win's proof (`WinProof`).
+    pub(crate) fn grant_merge_disclosure(&mut self) {
+        self.merge_disclosure = true;
+    }
+
+    /// What follows a job that commits a token root: its `JobLeaves` frame
+    /// for a connection that negotiated the disclosure, and on a standard
+    /// channel, whose device never sees its coinbase, a line in the node's
+    /// leaf log.
+    fn disclose_job(
+        &self,
+        channel_id: u32,
+        kind: ChannelKind,
+        job_id: u32,
+        tokens: &MinerTokenJob,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if kind == ChannelKind::Standard
+            && let Some(logs) = &self.ctx.merge_mining_logs
+        {
+            logs.log_standard_job(channel_id, job_id, tokens);
+        }
+        if !self.merge_disclosure {
+            return Ok(Vec::new());
+        }
+        Ok(vec![encode_extension_frame(
+            MERGE_DISCLOSURE_EXTENSION,
+            JOB_LEAVES,
+            true,
+            &job_leaves_payload(channel_id, job_id, tokens),
+        )?])
+    }
+
+    /// The proofs of the tokens a share on job `job_id` of `channel_id`
+    /// wins: each logged with the node's wins, and sent as a `WinProof`
+    /// frame to a connection that negotiated the disclosure. A share wins
+    /// a token when its hash meets the token's target, whatever the
+    /// channel's target.
+    fn token_win_frames(
+        &self,
+        channel_id: u32,
+        job_id: u32,
+        job: &JobDetails,
+        header: &Header,
+        coinbase: &bitcoin::Transaction,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let Some(tokens) = &job.merge_tokens else {
+            return Ok(Vec::new());
+        };
+        let wins = tokens.wins(
+            header,
+            coinbase,
+            &job.template_merkle_branches,
+            self.ctx.token_asert(),
+        );
+        let mut frames = Vec::with_capacity(wins.len());
+        for win in &wins {
+            info!(
+                "Share {} on SV2 channel {channel_id} wins token {}",
+                header.block_hash(),
+                hex::encode(win.category)
+            );
+            if let Some(logs) = &self.ctx.merge_mining_logs {
+                logs.log_sv2_win(channel_id, job_id, tokens, win);
+            }
+            if self.merge_disclosure {
+                frames.push(encode_extension_frame(
+                    MERGE_DISCLOSURE_EXTENSION,
+                    WIN_PROOF,
+                    true,
+                    &win_proof_payload(channel_id, job_id, win),
+                )?);
+            }
+        }
+        Ok(frames)
     }
 
     /// Handle one mining channel message and return the response frames.
@@ -831,6 +918,10 @@ impl MiningChannels {
                 MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
             )?);
         }
+        let kind = channel.kind;
+        if let Some(tokens) = &job.merge_tokens {
+            frames.extend(self.disclose_job(channel_id, kind, channel_job_id, tokens)?);
+        }
         Ok(frames)
     }
 
@@ -980,6 +1071,13 @@ impl MiningChannels {
             "SV2 share on channel {}: meets channel target {meets_channel_target}",
             submission.channel_id
         );
+        frames.extend(self.token_win_frames(
+            submission.channel_id,
+            submission.job_id,
+            &job,
+            &header,
+            &coinbase,
+        )?);
         Ok(frames)
     }
 }

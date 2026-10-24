@@ -39,6 +39,7 @@ use p2poolv2_lib::stratum::work::template_trigger::merge_template_triggers;
 use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
 use p2poolv2_lib::stratum::zmq_listener::{ZmqListener, ZmqListenerTrait};
 use signal::{ShutdownReason, setup_signal_handler};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -470,6 +471,12 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             .share_chain(share_chain)
             .bch_share_network(bch_share_network)
             .cash_share(cash_share)
+            .merge_mining_tokens(
+                stratum_config
+                    .merge_mining_tokens
+                    .as_ref()
+                    .map(PathBuf::from),
+            )
             .sv2(sv2_listener)
             .extra_submit_nodes(extra_submit_nodes);
         let mut stratum_server = match template_refresh_tx {

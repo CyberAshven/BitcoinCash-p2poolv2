@@ -1114,7 +1114,9 @@ pub(crate) fn insert_miner_job(
 /// Build a per-miner notify message from the prepared template.
 ///
 /// Inserts the miner's job with [`insert_miner_job`] and overwrites the
-/// job id and coinbase2 placeholders in the pre-built JSON.
+/// job id and coinbase2 placeholders in the pre-built JSON. The SV1 server
+/// uses [`build_notify_with_job_id`], which also gives the job's id.
+#[cfg(any(test, feature = "sim"))]
 pub(crate) fn build_notify_from_prepared(
     prepared: &PreparedNotifyParams,
     miner_bitcoin_address: Option<&Address>,

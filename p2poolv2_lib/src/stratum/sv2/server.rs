@@ -12,9 +12,15 @@
 
 use super::mining::{MiningChannels, custom_job_error, is_mining_channel_message};
 use super::noise::NoiseTransport;
-use super::session::{JobRegistry, PoolTransactionCache, Sv2Connection};
+use super::session::{
+    JobRegistry, PoolTransactionCache, Sv2Connection, Sv2Message, encode_extension_frame,
+};
 use crate::config::Sv2Authority;
 use crate::shares::merge_mining::MergeMiningCommitment;
+use crate::stratum::merge_disclosure::{
+    EXTENSIONS_NEGOTIATION, MERGE_DISCLOSURE_EXTENSION, REQUEST_EXTENSIONS,
+    REQUEST_EXTENSIONS_SUCCESS, extensions_payload, requested_extensions,
+};
 use crate::stratum::server::StratumContext;
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use binary_sv2::Deserialize;
@@ -214,19 +220,68 @@ async fn handle_connection<ShutdownSignal>(
     }
 }
 
+/// Answer a `RequestExtensions` (`0x0001`, `0x00`): grant the merge-mining
+/// disclosure extension (`0x4D4D`) when asked for on a connection with
+/// mining channels, and leave every other extension out of the answer. A
+/// request before `SetupConnection`, or one that is not exactly one request,
+/// closes the connection.
+fn negotiate_extensions(
+    connection: &Sv2Connection,
+    channels: Option<&mut MiningChannels>,
+    payload: &[u8],
+) -> Result<Vec<Vec<u8>>, String> {
+    if !connection.is_set_up() {
+        return Err("extensions requested before SetupConnection".to_string());
+    }
+    let (request, asked) = requested_extensions(payload).ok_or("malformed RequestExtensions")?;
+    let granted: Vec<u16> = match channels {
+        Some(channels) if asked.contains(&MERGE_DISCLOSURE_EXTENSION) => {
+            channels.grant_merge_disclosure();
+            vec![MERGE_DISCLOSURE_EXTENSION]
+        }
+        _ => Vec::new(),
+    };
+    Ok(vec![encode_extension_frame(
+        EXTENSIONS_NEGOTIATION,
+        REQUEST_EXTENSIONS_SUCCESS,
+        false,
+        &extensions_payload(request, &granted),
+    )?])
+}
+
 /// Answer each complete message.
 ///
 /// Mining channel messages need a connection that set up the Mining Protocol
 /// on a listener with mining enabled; anything else is an error that closes
-/// the connection.
+/// the connection. The only extension message is the extensions
+/// negotiation's request (`negotiate_extensions`); a message of another
+/// extension closes the connection.
 async fn handle_messages(
     connection: &mut Sv2Connection,
     mut channels: Option<&mut MiningChannels>,
     template_rx: Option<&TemplateReceiver>,
-    messages: Vec<(u8, Vec<u8>)>,
+    messages: Vec<Sv2Message>,
 ) -> Result<Vec<Vec<u8>>, String> {
     let mut frames = Vec::with_capacity(messages.len());
-    for (message_type, mut payload) in messages {
+    for message in messages {
+        let Sv2Message {
+            extension_type,
+            message_type,
+            mut payload,
+        } = message;
+        if extension_type == EXTENSIONS_NEGOTIATION && message_type == REQUEST_EXTENSIONS {
+            frames.extend(negotiate_extensions(
+                connection,
+                channels.as_deref_mut(),
+                &payload,
+            )?);
+            continue;
+        }
+        if extension_type != 0 {
+            return Err(format!(
+                "unsupported Stratum V2 extension {extension_type:#06x}"
+            ));
+        }
         let responses = if message_type == MESSAGE_TYPE_SET_CUSTOM_MINING_JOB {
             let request =
                 SetCustomMiningJob::from_bytes(&mut payload).map_err(|error| error.to_string())?;

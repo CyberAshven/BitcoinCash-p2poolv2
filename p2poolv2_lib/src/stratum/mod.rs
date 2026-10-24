@@ -7,6 +7,7 @@ pub mod client_connections;
 pub mod difficulty_adjuster;
 pub mod emission;
 pub mod error;
+pub mod merge_disclosure;
 pub mod message_handlers;
 pub mod messages;
 pub(crate) mod parse_password;

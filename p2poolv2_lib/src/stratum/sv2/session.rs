@@ -29,6 +29,7 @@ use common_messages_sv2::{
 use framing_sv2::framing::MessageFrame;
 #[cfg(test)]
 use framing_sv2::framing::SerializedFrame;
+use framing_sv2::header::Header as FrameHeader;
 use job_declaration_sv2::{
     AllocateMiningJobToken, AllocateMiningJobTokenSuccess, DeclareMiningJob, DeclareMiningJobError,
     DeclareMiningJobSuccess, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
@@ -256,15 +257,24 @@ impl Sv2Connection {
     pub fn accept(&mut self, incoming: &[u8]) -> Result<Vec<Vec<u8>>, String> {
         let messages = self.decode(incoming)?;
         let mut responses = Vec::with_capacity(messages.len());
-        for (message_type, mut payload) in messages {
-            responses.extend(self.handle_message(message_type, &mut payload)?);
+        for mut message in messages {
+            if message.extension_type != 0 {
+                return Err("unsupported Stratum V2 extension".to_string());
+            }
+            responses.extend(self.handle_message(message.message_type, &mut message.payload)?);
         }
         Ok(responses)
     }
 
-    /// Decode `incoming` into complete messages: type and payload.
-    pub fn decode(&mut self, incoming: &[u8]) -> Result<Vec<(u8, Vec<u8>)>, String> {
+    /// Decode `incoming` into complete messages.
+    pub fn decode(&mut self, incoming: &[u8]) -> Result<Vec<Sv2Message>, String> {
         decode_plain_frames(&mut self.decoder, &mut self.inbox, incoming)
+    }
+
+    /// Whether this connection has set up a protocol, as a request for
+    /// extensions needs.
+    pub fn is_set_up(&self) -> bool {
+        self.mining || self.mode.is_some()
     }
 
     /// Whether this connection set up the Mining Protocol.
@@ -688,14 +698,37 @@ impl Sv2Connection {
     }
 }
 
-/// Decode unencrypted `incoming` bytes into complete messages: type and
-/// payload. `inbox` keeps the bytes of a frame that is not complete yet, for
-/// the next call with the same `decoder`.
+/// One complete Stratum V2 message: its extension type with the channel bit
+/// cleared (0 for the base protocol), its message type and its payload.
+/// The extension type tells an extension's message from a base one of the
+/// same type, such as `RequestExtensions` (`0x0001`, `0x00`) from
+/// `SetupConnection` (`0x0000`, `0x00`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sv2Message {
+    pub extension_type: u16,
+    pub message_type: u8,
+    pub payload: Vec<u8>,
+}
+
+impl Sv2Message {
+    /// The message read from a frame's header and payload.
+    pub(crate) fn from_frame(header: &FrameHeader, payload: &[u8]) -> Self {
+        Self {
+            extension_type: header.ext_type_without_channel_msg(),
+            message_type: header.msg_type(),
+            payload: payload.to_vec(),
+        }
+    }
+}
+
+/// Decode unencrypted `incoming` bytes into complete messages. `inbox`
+/// keeps the bytes of a frame that is not complete yet, for the next call
+/// with the same `decoder`.
 pub(crate) fn decode_plain_frames(
     decoder: &mut Decoder,
     inbox: &mut Vec<u8>,
     incoming: &[u8],
-) -> Result<Vec<(u8, Vec<u8>)>, String> {
+) -> Result<Vec<Sv2Message>, String> {
     inbox.extend_from_slice(incoming);
     let mut messages = Vec::new();
     let mut reading = true;
@@ -709,19 +742,43 @@ pub(crate) fn decode_plain_frames(
     Ok(messages)
 }
 
-fn read_plain_frames(decoder: &mut Decoder) -> Result<Vec<(u8, Vec<u8>)>, String> {
+fn read_plain_frames(decoder: &mut Decoder) -> Result<Vec<Sv2Message>, String> {
     let mut messages = Vec::new();
     let mut reading = true;
     while reading {
         match decoder.next_frame().map_err(|error| error.to_string())? {
             Decoded::Incomplete(_) => reading = false,
             Decoded::Frame(mut frame) => {
-                let message_type = frame.header().msg_type();
-                messages.push((message_type, frame.payload().to_vec()));
+                let header = frame.header();
+                messages.push(Sv2Message::from_frame(&header, frame.payload()));
             }
         }
     }
     Ok(messages)
+}
+
+/// Encode one unencrypted frame of extension `extension_type`'s message
+/// `message_type`, with the channel bit when the message is for one channel.
+/// The header is the base protocol's: the extension type (`u16`, the
+/// channel bit its top bit), the message type and the payload length
+/// (`u24`), all little-endian.
+pub(crate) fn encode_extension_frame(
+    extension_type: u16,
+    message_type: u8,
+    channel_message: bool,
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
+    let length = u32::try_from(payload.len())
+        .ok()
+        .filter(|length| *length < 1 << 24)
+        .ok_or("Stratum V2 extension message exceeds the frame size")?;
+    let extension_type = extension_type | if channel_message { 0x8000 } else { 0 };
+    let mut frame = Vec::with_capacity(6 + payload.len());
+    frame.extend_from_slice(&extension_type.to_le_bytes());
+    frame.push(message_type);
+    frame.extend_from_slice(&length.to_le_bytes()[..3]);
+    frame.extend_from_slice(payload);
+    Ok(frame)
 }
 
 /// Whether the specification sets the channel bit on frames of this type.

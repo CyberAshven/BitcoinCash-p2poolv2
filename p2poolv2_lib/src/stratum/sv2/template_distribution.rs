@@ -625,12 +625,28 @@ enum Transport {
 }
 
 impl Transport {
-    /// Complete messages in `incoming`: type and payload.
+    /// Complete Template Distribution messages in `incoming`: type and
+    /// payload. This node negotiates no extension with a provider, so a
+    /// frame of one is left out.
     fn decode(&mut self, incoming: &[u8]) -> Result<Vec<(u8, Vec<u8>)>, String> {
-        match self {
+        let messages = match self {
             Transport::Plain { decoder, inbox } => decode_plain_frames(decoder, inbox, incoming),
             Transport::Noise(noise) => noise.decode(incoming),
-        }
+        }?;
+        Ok(messages
+            .into_iter()
+            .filter(|message| {
+                let base = message.extension_type == 0;
+                if !base {
+                    debug!(
+                        "Ignoring a Template Provider message of extension {:#06x}",
+                        message.extension_type
+                    );
+                }
+                base
+            })
+            .map(|message| (message.message_type, message.payload))
+            .collect())
     }
 
     /// Bytes to write for one unencrypted frame.

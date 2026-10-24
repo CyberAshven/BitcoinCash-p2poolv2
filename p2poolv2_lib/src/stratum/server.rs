@@ -21,17 +21,23 @@ use crate::stratum::difficulty_adjuster::{
 use crate::stratum::emission::EmissionSender;
 use crate::stratum::error::Error;
 use crate::stratum::error::StratumErrorCode;
+use crate::stratum::merge_disclosure::{
+    MergeMiningLogs, SV1_MERGE_LEAVES, sv1_merge_leaves_params,
+};
 use crate::stratum::message_handlers::handle_message;
-use crate::stratum::messages::{Message, Request, Response, SetDifficultyNotification};
+use crate::stratum::messages::{
+    ExtensionNotification, Message, Request, Response, SetDifficultyNotification,
+};
 use crate::stratum::session::Session;
 use crate::stratum::session_timeout::{self, check_session_timeouts};
 use crate::stratum::sv2::{self, PoolTransactionCache, Sv2Mining};
 use crate::stratum::work::error::WorkError;
-use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_from_prepared};
+use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_with_job_id};
 use crate::stratum::work::tracker::JobTracker;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoindrpc::{BitcoinRpcConfig, BitcoindRpcClient};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -73,6 +79,9 @@ pub struct StratumServer {
     template_refresh_tx: Option<mpsc::Sender<()>>,
     /// Extra BCHN nodes from `[[submit_nodes]]` that found blocks also go to.
     extra_submit_nodes: Vec<BitcoinRpcConfig>,
+    /// The logs of the tokens this node merge-mines for its miners, beside
+    /// its token file; `None` when it merge-mines none.
+    merge_mining_logs: Option<MergeMiningLogs>,
 }
 
 /// Local Stratum V2 listener served beside SV1 on the same host name.
@@ -119,9 +128,18 @@ pub struct StratumServerBuilder {
     sv2: Option<Sv2Listener>,
     template_refresh_tx: Option<mpsc::Sender<()>>,
     extra_submit_nodes: Vec<BitcoinRpcConfig>,
+    merge_mining_tokens: Option<PathBuf>,
 }
 
 impl StratumServerBuilder {
+    /// The token file of a node that merge-mines tokens for its miners
+    /// (`[stratum] merge_mining_tokens`): miners may then ask for their
+    /// leaves and wins, and the node logs them beside the file.
+    pub fn merge_mining_tokens(mut self, merge_mining_tokens: Option<PathBuf>) -> Self {
+        self.merge_mining_tokens = merge_mining_tokens;
+        self
+    }
+
     pub fn hostname(mut self, hostname: String) -> Self {
         self.hostname = Some(hostname);
         self
@@ -293,6 +311,10 @@ impl StratumServerBuilder {
             sv2: self.sv2,
             template_refresh_tx: self.template_refresh_tx,
             extra_submit_nodes: self.extra_submit_nodes,
+            merge_mining_logs: self
+                .merge_mining_tokens
+                .as_deref()
+                .map(MergeMiningLogs::start),
         })
     }
 }
@@ -513,6 +535,7 @@ impl StratumServer {
             bch_share_network: self.bch_share_network,
             cash_share: self.cash_share,
             template_refresh_tx: self.template_refresh_tx.clone(),
+            merge_mining_logs: self.merge_mining_logs.clone(),
         }
     }
 }
@@ -632,6 +655,22 @@ pub(crate) struct StratumContext {
     /// Only read on the block submit path, which the `sim` feature compiles out.
     #[cfg_attr(feature = "sim", allow(dead_code))]
     pub template_refresh_tx: Option<mpsc::Sender<()>>,
+    /// Set when the node merge-mines tokens for its miners
+    /// (`merge_mining_tokens`): SV1 and SV2 miners may then ask for their
+    /// leaves and wins (`stratum::merge_disclosure`), and standard-channel
+    /// jobs and every win are logged here.
+    pub merge_mining_logs: Option<MergeMiningLogs>,
+}
+
+impl StratumContext {
+    /// The ASERT check a token win's proof passes before it is handed out:
+    /// this node's Bitcoin Cash network's, none on regtest and scalenet,
+    /// which have no anchor, or on Bitcoin.
+    pub(crate) fn token_asert(&self) -> Option<crate::shares::bch_asert::BchAsert> {
+        self.bch_share_network
+            .map(crate::config::BitcoinCashNetwork::from_share_network)
+            .and_then(crate::shares::bch_asert::BchAsert::for_network)
+    }
 }
 
 /// Handles a single connection to the Stratum server.  This function
@@ -807,6 +846,10 @@ where
 ///
 /// A miner whose login chose their own `donation=` gets the job at that
 /// donation (`PreparedNotifyParams::for_miner_donation`).
+///
+/// A miner who asked for `pickaxe-merge` in `mining.configure` gets each
+/// job's token leaves after its notify (`pickaxe.merge_leaves`), when the
+/// job commits a root.
 fn job_lines<D: DifficultyAdjusterTrait>(
     session: &mut Session<D>,
     prepared: &PreparedNotifyParams,
@@ -827,18 +870,38 @@ fn job_lines<D: DifficultyAdjusterTrait>(
     let lowered = session
         .difficulty_adjuster
         .set_share_difficulty_ceiling(ceiling);
-    let notify_json =
-        build_notify_from_prepared(prepared, commitment_address, share_address, tracker_handle)?;
-    let Some(difficulty) = lowered else {
-        return Ok(format!("{notify_json}\n"));
-    };
-    let set_difficulty = serde_json::to_string(&Message::SetDifficulty(
-        SetDifficultyNotification::new(difficulty),
-    ))
-    .map_err(|error| WorkError {
-        message: format!("Failed to serialize mining.set_difficulty: {error}"),
-    })?;
-    Ok(format!("{set_difficulty}\n{notify_json}\n"))
+    let (notify_json, job_id) =
+        build_notify_with_job_id(prepared, commitment_address, share_address, tracker_handle)?;
+    let mut lines = String::with_capacity(notify_json.len() + 1024);
+    if let Some(difficulty) = lowered {
+        lines.push_str(&serialize_line(&Message::SetDifficulty(
+            SetDifficultyNotification::new(difficulty),
+        ))?);
+    }
+    lines.push_str(&notify_json);
+    lines.push('\n');
+    if session.merge_disclosure
+        && let Some(tokens) = tracker_handle
+            .get_job(job_id)
+            .and_then(|job| job.merge_tokens)
+    {
+        lines.push_str(&serialize_line(&Message::Extension(
+            ExtensionNotification::new(
+                SV1_MERGE_LEAVES,
+                sv1_merge_leaves_params(&format!("{job_id:016x}"), &tokens),
+            ),
+        ))?);
+    }
+    Ok(lines)
+}
+
+/// One message as a line of JSON.
+fn serialize_line(message: &Message<'_>) -> Result<String, WorkError> {
+    serde_json::to_string(message)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| WorkError {
+            message: format!("Failed to serialize a stratum message: {error}"),
+        })
 }
 
 async fn process_incoming_message<W, D>(
@@ -907,6 +970,7 @@ mod stratum_server_tests {
     use crate::test_utils::make_test_share_address;
     use crate::test_utils::{TestShareBlockBuilder, setup_test_chain_store_handle};
     use crate::utils::time_provider::TestTimeProvider;
+    use bitcoin::hashes::Hash;
     use bitcoindrpc::test_utils::setup_mock_bitcoin_rpc;
     use p2poolv2_config::DEFAULT_VERSION_MASK;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -1037,6 +1101,7 @@ mod stratum_server_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         // Run the handler
@@ -1166,6 +1231,7 @@ mod stratum_server_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         // Run the handler
@@ -1256,6 +1322,7 @@ mod stratum_server_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         // Run the handler
@@ -1344,6 +1411,7 @@ mod stratum_server_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         // Run the handler
@@ -1451,6 +1519,7 @@ mod stratum_server_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         // Spawn the handler in a separate task
@@ -1578,6 +1647,7 @@ mod stratum_server_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         // Spawn the handler in a separate task
@@ -1695,6 +1765,7 @@ mod stratum_server_tests {
                 bch_share_network: None,
                 cash_share: None,
                 template_refresh_tx: None,
+                merge_mining_logs: None,
             };
 
             // wait for subscribe/authorize messages
@@ -1784,6 +1855,7 @@ mod stratum_server_tests {
                 bch_share_network: None,
                 cash_share: None,
                 template_refresh_tx: None,
+                merge_mining_logs: None,
             };
 
             let subscribe_message =
@@ -1929,6 +2001,7 @@ mod stratum_server_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         // Pre-load a template before starting handle_connection
@@ -2064,6 +2137,7 @@ mod stratum_server_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         // Start with no template - will send one after authorization
@@ -2209,6 +2283,7 @@ mod stratum_server_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         let (template_tx, template_rx) = watch::channel(None);
@@ -2450,7 +2525,6 @@ mod stratum_server_tests {
     /// and to the node's own without a choice.
     #[tokio::test]
     async fn job_lines_carry_the_sessions_own_donation() {
-        use bitcoin::hashes::Hash;
         let tracker_handle = start_tracker_actor();
         let prepared = crate::test_utils::test_bch_prepared_with_cuts(Some(100), None, None);
         let committed_donation = |donation: Option<u16>| {
@@ -2478,5 +2552,78 @@ mod stratum_server_tests {
         assert_eq!(committed_donation(Some(0)), None);
         assert_eq!(committed_donation(Some(50)), Some(50));
         assert_eq!(committed_donation(Some(1_000)), Some(1_000));
+    }
+
+    /// A miner who asked for `pickaxe-merge` gets each job's leaves after
+    /// its notify: the job id, output 0 as their coinbase carries it, the
+    /// `CTMD` disclosure, which rebuilds that root, and each leaf's branch.
+    #[tokio::test]
+    async fn job_lines_disclose_the_job_s_leaves_to_a_miner_who_asked() {
+        let tracker_handle = start_tracker_actor();
+        let prepared = crate::test_utils::test_bch_prepared_with_tokens(
+            crate::test_utils::test_merge_token_set(),
+            Some(100),
+            None,
+            None,
+        );
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        session.parsed_address = Some(bitcoin::Address::p2pkh(
+            bitcoin::PubkeyHash::from_byte_array([0x12; 20]),
+            bitcoin::Network::Regtest,
+        ));
+        session.share_owner = Some(p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh(
+            [0x22; 20],
+        ));
+        session.merge_disclosure = true;
+
+        let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+
+        let messages: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["method"], "mining.notify");
+        let leaves = &messages[1];
+        assert_eq!(leaves["id"], serde_json::Value::Null);
+        assert_eq!(leaves["method"], "pickaxe.merge_leaves");
+        assert_eq!(leaves["params"][0], messages[0]["params"][0]);
+        let job_id = u64::from_str_radix(messages[0]["params"][0].as_str().unwrap(), 16).unwrap();
+        let tokens = tracker_handle
+            .get_job(crate::stratum::work::tracker::JobId(job_id))
+            .unwrap()
+            .merge_tokens
+            .unwrap();
+        assert_eq!(leaves["params"][1], hex::encode(tokens.output()));
+        let disclosure = crate::shares::auxpow::Disclosure::decode(
+            &hex::decode(leaves["params"][2].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(disclosure.check_root(&tokens.commitment), Ok(()));
+        assert_eq!(leaves["params"][3].as_array().unwrap().len(), 2);
+    }
+
+    /// A miner who did not ask gets the notify alone.
+    #[tokio::test]
+    async fn job_lines_send_no_leaves_to_a_miner_who_did_not_ask() {
+        let tracker_handle = start_tracker_actor();
+        let prepared = crate::test_utils::test_bch_prepared_with_tokens(
+            crate::test_utils::test_merge_token_set(),
+            Some(100),
+            None,
+            None,
+        );
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        session.parsed_address = Some(bitcoin::Address::p2pkh(
+            bitcoin::PubkeyHash::from_byte_array([0x12; 20]),
+            bitcoin::Network::Regtest,
+        ));
+        session.share_owner = Some(p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh(
+            [0x22; 20],
+        ));
+
+        let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+
+        assert_eq!(lines.lines().count(), 1);
     }
 }

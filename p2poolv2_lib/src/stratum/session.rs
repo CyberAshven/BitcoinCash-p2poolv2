@@ -67,6 +67,10 @@ pub struct Session<D: DifficultyAdjusterTrait> {
     pub auth_failed_once: bool,
     /// Set after authorization to trigger the first notify from the watch channel
     pub needs_first_notify: bool,
+    /// The miner asked for `pickaxe-merge` in `mining.configure` and the
+    /// node merge-mines tokens: each job's leaves and each token win's
+    /// proof follow (`stratum::merge_disclosure`).
+    pub merge_disclosure: bool,
 }
 
 impl<D: DifficultyAdjusterTrait> Session<D> {
@@ -102,6 +106,7 @@ impl<D: DifficultyAdjusterTrait> Session<D> {
             last_share_time: None,
             auth_failed_once: false,
             needs_first_notify: false,
+            merge_disclosure: false,
         }
     }
 

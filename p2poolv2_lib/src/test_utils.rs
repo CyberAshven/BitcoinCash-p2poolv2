@@ -90,7 +90,7 @@ use crate::stratum::session::{EXTRANONCE1_SIZE, EXTRANONCE2_SIZE};
 #[cfg(test)]
 use crate::stratum::sv2::{Declaration, DeclaredJob, encode_message};
 #[cfg(test)]
-use crate::stratum::sv2::{NoiseTransport, decode_plain_frames};
+use crate::stratum::sv2::{NoiseTransport, Sv2Message, decode_plain_frames};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::stratum::work::block_template::BlockTemplate;
 #[cfg(test)]
@@ -303,7 +303,7 @@ pub(crate) struct TestSv2Server {
     noise: Option<NoiseTransport>,
     decoder: Decoder,
     inbox: Vec<u8>,
-    received: VecDeque<(u8, Vec<u8>)>,
+    received: VecDeque<Sv2Message>,
 }
 
 #[cfg(test)]
@@ -367,9 +367,13 @@ impl TestSv2Server {
                 };
                 self.received.extend(messages);
             }
-            let (message_type, payload) = self.received.pop_front().unwrap();
-            assert_eq!(message_type, expected_type, "unexpected SV2 message type");
-            payload
+            let message = self.received.pop_front().unwrap();
+            assert_eq!(message.extension_type, 0, "unexpected SV2 extension");
+            assert_eq!(
+                message.message_type, expected_type,
+                "unexpected SV2 message type"
+            );
+            message.payload
         })
         .await
         .expect("SV2 test message timed out")
@@ -940,6 +944,7 @@ pub(crate) async fn test_bch_stratum_context(
         bch_share_network: Some(BchShareNetwork::Regtest),
         cash_share: Some([0x22; 20]),
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     (ctx, emissions_rx, [stats_dir, store_dir])
 }
@@ -1486,6 +1491,61 @@ pub fn build_pool_job_submit(tracker: &JobTracker, enonce1_hex: &str) -> SimpleR
                 .is_ok_and(|result| pool_target.is_met_by(result.header.block_hash()))
         })
         .unwrap()
+}
+
+/// A `mining.submit` of a share that wins a merge-mined token: a job on a
+/// regtest node merge-mining [`test_merge_token_set`] for a miner paid to
+/// P2PKH(12 x 20), with a 1% donation, inserted in `tracker`; the nonce is
+/// ground until the share's hash meets token A's target (about half of all
+/// hashes). Returns the submit and the job's id. `enonce1_hex` must be the
+/// submitting session's extranonce1.
+#[cfg(test)]
+pub fn build_token_win_submit(
+    tracker: &JobTracker,
+    enonce1_hex: &str,
+) -> (SimpleRequest<'static>, crate::stratum::work::tracker::JobId) {
+    let prepared = test_bch_prepared_with_tokens(test_merge_token_set(), Some(100), None, None);
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x12; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let (job_id, _) = crate::stratum::work::prepared_notify::insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        tracker,
+    );
+    let job = tracker.get_job(job_id).unwrap();
+    let tokens = job.merge_tokens.clone().unwrap();
+    let job_id_hex = format!("{:016x}", job_id.0);
+    let ntime_hex = format!("{:08x}", job.blocktemplate.curtime);
+    let submit = (0u32..)
+        .map(|nonce| {
+            SimpleRequest::new_submit(
+                4,
+                "worker".to_string(),
+                job_id_hex.clone(),
+                "0000000000000001".to_string(),
+                ntime_hex.clone(),
+                format!("{nonce:08x}"),
+            )
+        })
+        .find(|submit| {
+            validate_bitcoin_difficulty(&job, submit, enonce1_hex, DEFAULT_VERSION_MASK).is_ok_and(
+                |result| {
+                    !tokens
+                        .wins(
+                            &result.header,
+                            &result.coinbase,
+                            &job.template_merkle_branches,
+                            None,
+                        )
+                        .is_empty()
+                },
+            )
+        })
+        .unwrap();
+    (submit, job_id)
 }
 
 #[cfg(test)]

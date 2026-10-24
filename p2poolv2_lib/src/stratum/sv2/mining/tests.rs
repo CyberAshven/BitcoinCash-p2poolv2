@@ -1,8 +1,11 @@
 use super::*;
 use crate::accounting::OutputPair;
 use crate::accounting::stats::metrics;
+use crate::shares::auxpow::{AuxProof, Disclosure};
 use crate::shares::coinbase_proof::CoinbaseProof;
+use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::stratum::block_submit::FoundBlockSubmitter;
+use crate::stratum::merge_disclosure::{LineLog, MergeMiningLogs};
 use crate::stratum::sv2::session::encode_message;
 use crate::stratum::work::block_template::BlockTemplate;
 use crate::stratum::work::prepared_notify::{
@@ -12,7 +15,8 @@ use crate::stratum::work::tracker::start_tracker_actor;
 use crate::test_utils::{make_test_share_address, setup_test_chain_store_handle};
 use crate::test_utils::{
     test_bch_custom_job, test_bch_prepared, test_bch_prepared_for_template,
-    test_bch_prepared_with_payee_count, test_bch_solve_custom_job, test_bch_stratum_context,
+    test_bch_prepared_with_payee_count, test_bch_prepared_with_tokens, test_bch_solve_custom_job,
+    test_bch_stratum_context, test_merge_token_set,
 };
 use bitcoin::consensus::deserialize;
 use bitcoin::hashes::sha256d;
@@ -466,6 +470,7 @@ async fn extended_channel_mines_the_job_it_is_sent_and_its_share_is_emitted() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
 
@@ -720,6 +725,7 @@ async fn standard_channel_mines_the_merkle_root_it_is_sent() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
 
@@ -849,6 +855,7 @@ async fn a_share_below_the_channel_target_keeps_the_block_submission_policy() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = payload(
@@ -969,6 +976,7 @@ async fn a_hydrapool_share_meeting_the_channel_target_is_queued_at_the_job_diffi
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = payload(
@@ -1100,6 +1108,7 @@ async fn a_hydrapool_share_below_the_channel_target_is_not_queued() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = payload(
@@ -1185,6 +1194,7 @@ async fn a_connection_cannot_open_more_than_the_channel_cap() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let open = encode_message(
@@ -1259,6 +1269,7 @@ async fn channels_are_refused_without_a_share_address_or_a_valid_identity() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
 
@@ -1419,6 +1430,7 @@ async fn a_bitcoin_channel_takes_its_share_address_from_p2p() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let share_address = make_test_share_address(2, Network::Signet);
@@ -1483,6 +1495,7 @@ async fn a_channel_naming_another_share_address_than_the_node_is_refused() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let identity = format!(
@@ -1543,6 +1556,7 @@ async fn a_bitcoin_cash_channel_takes_its_share_hash_from_p2p() {
         bch_share_network: Some(BchShareNetwork::Regtest),
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let share_address = BchShareAddress::new(BchShareNetwork::Regtest, [0x22; 20]).encode();
@@ -1605,6 +1619,7 @@ async fn a_bitcoin_cash_channel_opens_through_a_translator_worker_suffix() {
         bch_share_network: Some(BchShareNetwork::Regtest),
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let share_address = BchShareAddress::new(BchShareNetwork::Regtest, [0x22; 20]).encode();
@@ -1670,6 +1685,7 @@ async fn a_bitcoin_cash_channel_with_a_taproot_share_address_is_refused() {
         bch_share_network: Some(BchShareNetwork::Regtest),
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let identity = format!(
@@ -1728,6 +1744,7 @@ async fn update_channel_answers_with_a_target_capped_by_the_new_maximum() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = payload(
@@ -1814,6 +1831,7 @@ async fn update_channel_for_an_unknown_channel_gets_an_error_reply() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut update = payload(
@@ -1870,6 +1888,7 @@ async fn close_channel_removes_the_channel() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = payload(
@@ -2239,4 +2258,233 @@ async fn a_custom_job_must_carry_the_channels_donation() {
         MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS
     );
     assert_eq!(newest_job_donation(&channels), None);
+}
+
+/// The extension type in a frame's header, with its channel bit.
+fn frame_extension_type(frame: &[u8]) -> u16 {
+    u16::from_le_bytes([frame[0], frame[1]])
+}
+
+/// The coinbase an extended channel's miner hashes for `job`, with the
+/// channel's extranonce prefix and eight zero extranonce bytes.
+fn extended_job_coinbase(job: &NewExtendedMiningJob<'_>, extranonce_prefix: &[u8]) -> Transaction {
+    let mut coinbase_bytes = job.coinbase_tx_prefix.as_bytes().to_vec();
+    coinbase_bytes.extend_from_slice(extranonce_prefix);
+    coinbase_bytes.extend_from_slice(&[0u8; 8]);
+    coinbase_bytes.extend_from_slice(job.coinbase_tx_suffix.as_bytes());
+    deserialize(&coinbase_bytes).unwrap()
+}
+
+/// An extended channel on a connection that negotiated the merge-mining
+/// disclosure gets, after each job, its `JobLeaves` on the channel bit: the
+/// channel and job, output 0 as the job's coinbase carries it, and the
+/// `CTMD` disclosure, which rebuilds that root.
+#[tokio::test]
+async fn an_extended_channel_that_asked_gets_each_job_s_leaves() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    channels.grant_merge_disclosure();
+    let prepared = test_bch_prepared_with_tokens(test_merge_token_set(), Some(100), None, None);
+    let mut open = open_extended_request(&bch_identity());
+
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(prepared),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(opened.len(), 4);
+    let mut success_payload = payload(&opened[0]);
+    let success = OpenExtendedMiningChannelSuccess::from_bytes(&mut success_payload).unwrap();
+    let mut job_payload = payload(&opened[1]);
+    let job = NewExtendedMiningJob::from_bytes(&mut job_payload).unwrap();
+    assert_eq!(frame_extension_type(&opened[3]), 0x8000 | 0x4D4D);
+    assert_eq!(frame_type(&opened[3]), 0x00);
+    let leaves = payload(&opened[3]);
+    assert_eq!(leaves[..4], success.channel_id.to_le_bytes());
+    assert_eq!(leaves[4..8], job.job_id.to_le_bytes());
+    let coinbase = extended_job_coinbase(&job, success.extranonce_prefix.as_bytes());
+    assert_eq!(
+        leaves[8..61],
+        bitcoin::consensus::serialize(&coinbase.output[0])
+    );
+    let commitment = MergeMiningCommitment::from_output(&coinbase.output[0]).unwrap();
+    let length = usize::from(u16::from_le_bytes([leaves[61], leaves[62]]));
+    let disclosure = Disclosure::decode(&leaves[63..63 + length]).unwrap();
+    assert_eq!(disclosure.check_root(&commitment), Ok(()));
+    assert_eq!(
+        disclosure.leaves[0].leaf.payout_hash,
+        sha256d::Hash::hash(
+            Address::p2pkh(
+                bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+                Network::Regtest
+            )
+            .script_pubkey()
+            .as_bytes()
+        )
+        .to_byte_array()
+    );
+}
+
+/// A connection that did not negotiate the disclosure gets its jobs alone.
+#[tokio::test]
+async fn an_extended_channel_that_did_not_ask_gets_no_leaves() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let prepared = test_bch_prepared_with_tokens(test_merge_token_set(), Some(100), None, None);
+    let mut open = open_extended_request(&bch_identity());
+
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(prepared),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(opened.len(), 3);
+}
+
+/// A standard channel's device never sees its coinbase, so each of its
+/// token jobs goes to the node's leaf log: the channel, the job, output 0
+/// and the disclosure.
+#[tokio::test]
+async fn a_standard_channel_s_token_jobs_are_logged() {
+    let (mut ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let log_directory = tempfile::tempdir().unwrap();
+    let (leaves, leaves_writer) = LineLog::start(
+        log_directory.path().join("leaves.jsonl"),
+        crate::stratum::merge_disclosure::MAX_LOG_BYTES,
+    );
+    let (wins, wins_writer) = LineLog::start(
+        log_directory.path().join("wins.jsonl"),
+        crate::stratum::merge_disclosure::MAX_LOG_BYTES,
+    );
+    ctx.merge_mining_logs = Some(MergeMiningLogs::from_logs(leaves, wins));
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let prepared = test_bch_prepared_with_tokens(test_merge_token_set(), Some(100), None, None);
+    let mut open = binary_sv2::to_bytes(OpenStandardMiningChannel {
+        request_id: 1,
+        user_identity: bch_identity().as_str().try_into().unwrap(),
+        nominal_hash_rate: 1.0,
+        max_target: U256::new(&[0xff; 32]).unwrap(),
+    })
+    .unwrap();
+
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+            &mut open,
+            Some(prepared),
+        )
+        .await
+        .unwrap();
+    drop(channels);
+    leaves_writer.join().unwrap();
+    wins_writer.join().unwrap();
+
+    let mut success_payload = payload(&opened[0]);
+    let success = OpenStandardMiningChannelSuccess::from_bytes(&mut success_payload).unwrap();
+    let mut job_payload = payload(&opened[1]);
+    let job = NewMiningJob::from_bytes(&mut job_payload).unwrap();
+    let logged = std::fs::read_to_string(log_directory.path().join("leaves.jsonl")).unwrap();
+    let line: serde_json::Value = serde_json::from_str(logged.trim_end()).unwrap();
+    assert_eq!(line["channel"], success.channel_id);
+    assert_eq!(line["job"], job.job_id);
+    let output: bitcoin::TxOut =
+        deserialize(&hex::decode(line["output0"].as_str().unwrap()).unwrap()).unwrap();
+    let commitment = MergeMiningCommitment::from_output(&output).unwrap();
+    let disclosure =
+        Disclosure::decode(&hex::decode(line["leaves"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(disclosure.check_root(&commitment), Ok(()));
+}
+
+/// A share on an extended channel that meets token A's target wins it: the
+/// connection that negotiated the disclosure gets a `WinProof` after the
+/// acknowledgement, whose proof verifies against the miner's leaf as a
+/// covenant would, with the split the claim reveals.
+#[tokio::test]
+async fn a_winning_share_on_an_extended_channel_gets_its_win_proof() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let tracker = Arc::clone(&ctx.tracker_handle);
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    channels.grant_merge_disclosure();
+    let prepared = test_bch_prepared_with_tokens(test_merge_token_set(), Some(100), None, None);
+    let mut open = open_extended_request(&bch_identity());
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(prepared),
+        )
+        .await
+        .unwrap();
+    let mut success_payload = payload(&opened[0]);
+    let success = OpenExtendedMiningChannelSuccess::from_bytes(&mut success_payload).unwrap();
+    let mut job_payload = payload(&opened[1]);
+    let job = NewExtendedMiningJob::from_bytes(&mut job_payload).unwrap();
+    let mut prev_hash_payload = payload(&opened[2]);
+    let prev_hash = SetNewPrevHash::from_bytes(&mut prev_hash_payload).unwrap();
+    let coinbase = extended_job_coinbase(&job, success.extranonce_prefix.as_bytes());
+    let tracker_job = tracker
+        .get_job(channels.channels[&success.channel_id].jobs[&job.job_id].tracker_job_id)
+        .unwrap();
+    let tokens = tracker_job.merge_tokens.clone().unwrap();
+    let merkle_root = crate::stratum::work::gbt::compute_merkle_root_from_branches(
+        coinbase.compute_txid(),
+        &tracker_job.template_merkle_branches,
+    );
+    let header = (0u32..)
+        .map(|nonce| Header {
+            version: Version::from_consensus(job.version as i32),
+            prev_blockhash: BlockHash::from_byte_array(*prev_hash.prev_hash.as_array()),
+            merkle_root,
+            time: prev_hash.min_ntime,
+            bits: CompactTarget::from_consensus(prev_hash.nbits),
+            nonce,
+        })
+        .find(|header| {
+            !tokens
+                .wins(
+                    header,
+                    &coinbase,
+                    &tracker_job.template_merkle_branches,
+                    None,
+                )
+                .is_empty()
+        })
+        .unwrap();
+    let mut submit = binary_sv2::to_bytes(SubmitSharesExtended {
+        channel_id: success.channel_id,
+        sequence_number: 1,
+        job_id: job.job_id,
+        nonce: header.nonce,
+        ntime: header.time,
+        version: job.version,
+        extranonce: B032::new(&[0u8; 8]).unwrap(),
+    })
+    .unwrap();
+
+    let frames = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut submit, None)
+        .await
+        .unwrap();
+
+    assert_eq!(frame_type(&frames[0]), MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS);
+    let win = frames.last().unwrap();
+    assert_eq!(frame_extension_type(win), 0x8000 | 0x4D4D);
+    assert_eq!(frame_type(win), 0x01);
+    let win = payload(win);
+    assert_eq!(win[..4], success.channel_id.to_le_bytes());
+    assert_eq!(win[4..8], job.job_id.to_le_bytes());
+    assert_eq!(win[8..40], [0x11; 32]);
+    let length = usize::from(u16::from_le_bytes([win[40], win[41]]));
+    let proof = AuxProof::from_bytes(&win[42..42 + length]).unwrap();
+    assert_eq!(proof.verify(&tokens.entries[0].leaf, 16, None), Ok(()));
+    assert_eq!(win[42 + length], 69);
+    assert_eq!(win[43 + length..], tokens.entries[0].split.preimage());
 }

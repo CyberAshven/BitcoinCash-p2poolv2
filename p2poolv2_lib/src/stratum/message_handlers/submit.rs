@@ -11,7 +11,10 @@ use crate::stratum::{
     difficulty_adjuster::DifficultyAdjusterTrait,
     emission::Emission,
     error::{Error, StratumErrorCode},
-    messages::{Message, Response, SetDifficultyNotification, SimpleRequest},
+    merge_disclosure::{SV1_MERGE_PROOF, sv1_merge_proof_params},
+    messages::{
+        ExtensionNotification, Message, Response, SetDifficultyNotification, SimpleRequest,
+    },
     server::StratumContext,
     session::Session,
     work::{
@@ -202,15 +205,63 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
         message.id,
         json!(meets_session_difficulty),
     ))];
-    match new_difficulty {
-        Some(difficulty) => {
-            response.push(Message::SetDifficulty(SetDifficultyNotification::new(
-                difficulty,
-            )));
-            Ok(response)
-        }
-        None => Ok(response),
+    if let Some(difficulty) = new_difficulty {
+        response.push(Message::SetDifficulty(SetDifficultyNotification::new(
+            difficulty,
+        )));
     }
+    response.extend(token_win_messages(
+        &stratum_context,
+        session.merge_disclosure,
+        JobId(job_id),
+        &job,
+        &validation_result.header,
+        &validation_result.coinbase,
+    ));
+    Ok(response)
+}
+
+/// The proofs of the tokens a share wins, after its acknowledgement: each
+/// is logged with the node's wins, and a miner who asked for `pickaxe-merge`
+/// gets it as a `pickaxe.merge_proof`. A share wins a token when its hash
+/// meets the token's target, whether or not it meets the session's
+/// difficulty: the token does not know P2Pool's targets.
+fn token_win_messages<'a>(
+    stratum_context: &StratumContext,
+    merge_disclosure: bool,
+    job_id: JobId,
+    job: &JobDetails,
+    header: &Header,
+    coinbase: &bitcoin::Transaction,
+) -> Vec<Message<'a>> {
+    let Some(tokens) = &job.merge_tokens else {
+        return Vec::new();
+    };
+    let job_id_hex = format!("{job_id:016x}");
+    let wins = tokens.wins(
+        header,
+        coinbase,
+        &job.template_merkle_branches,
+        stratum_context.token_asert(),
+    );
+    let mut messages = Vec::with_capacity(wins.len());
+    for win in &wins {
+        info!(
+            "Share {} on job {job_id_hex} wins token {}",
+            header.block_hash(),
+            hex::encode(win.category)
+        );
+        if let Some(logs) = &stratum_context.merge_mining_logs {
+            logs.log_sv1_win(&job_id_hex, tokens, win);
+        }
+        if merge_disclosure {
+            messages.push(Message::Extension(ExtensionNotification::new(
+                SV1_MERGE_PROOF,
+                sv1_merge_proof_params(&job_id_hex, win),
+            )));
+        }
+    }
+    messages
 }
 
 /// Submit a block whose header met the bitcoin target.

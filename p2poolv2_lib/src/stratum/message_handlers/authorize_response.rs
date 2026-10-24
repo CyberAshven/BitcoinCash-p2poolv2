@@ -394,6 +394,7 @@ mod tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         // Execute
@@ -491,6 +492,7 @@ mod tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         // Execute
@@ -629,6 +631,7 @@ mod tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         // Execute
@@ -732,6 +735,7 @@ mod tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         let messages = handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -796,6 +800,7 @@ mod tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         let messages = handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -862,6 +867,7 @@ mod tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         // Execute
@@ -932,6 +938,7 @@ mod tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         let result = handle_authorize(request, &mut session, ctx).await;
@@ -1011,6 +1018,7 @@ mod p2p_miner_address_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1064,6 +1072,7 @@ mod p2p_miner_address_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1115,6 +1124,7 @@ mod p2p_miner_address_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1170,6 +1180,7 @@ mod p2p_miner_address_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         let messages = handle_authorize(request, &mut session, ctx.clone())
@@ -1269,6 +1280,7 @@ mod p2p_miner_address_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1330,6 +1342,7 @@ mod p2p_miner_address_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         let messages = handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1403,6 +1416,7 @@ mod p2p_miner_address_tests {
             bch_share_network: None,
             cash_share: None,
             template_refresh_tx: None,
+            merge_mining_logs: None,
         };
 
         let first = handle_authorize(

@@ -1,4 +1,5 @@
 use super::*;
+use crate::stratum::sv2::session::Sv2Message;
 use crate::test_utils::{
     TestSv2Server, test_coinbase_transaction, test_sv2_authority, test_tdp_new_template,
     test_tdp_set_new_prev_hash, test_tdp_transaction_data,
@@ -879,7 +880,11 @@ fn a_template_after_its_set_new_prev_hash_takes_the_current_time() {
 fn coinbase_output_constraints_reserve_the_largest_coinbase_submit_solution_carries() {
     let frame = coinbase_output_constraints_frame().unwrap();
     let mut messages = decode_plain_frames(&mut Decoder::new(), &mut Vec::new(), &frame).unwrap();
-    let (message_type, mut payload) = messages.remove(0);
+    let Sv2Message {
+        message_type,
+        mut payload,
+        ..
+    } = messages.remove(0);
     assert_eq!(message_type, MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS);
     let constraints = CoinbaseOutputConstraints::from_bytes(&mut payload).unwrap();
     assert_eq!(constraints.coinbase_output_max_additional_size, 65_382);
@@ -899,7 +904,11 @@ fn setup_connection_asks_for_template_distribution_version_two() {
     };
     let frame = setup_connection_frame(&provider).unwrap();
     let mut messages = decode_plain_frames(&mut Decoder::new(), &mut Vec::new(), &frame).unwrap();
-    let (message_type, mut payload) = messages.remove(0);
+    let Sv2Message {
+        message_type,
+        mut payload,
+        ..
+    } = messages.remove(0);
     assert_eq!(message_type, MESSAGE_TYPE_SETUP_CONNECTION);
     let setup = SetupConnection::from_bytes(&mut payload).unwrap();
     assert_eq!(setup.protocol, Protocol::TemplateDistributionProtocol);
@@ -931,7 +940,11 @@ fn submit_solution_carries_the_header_fields_and_the_coinbase() {
     })
     .unwrap();
     let mut messages = decode_plain_frames(&mut Decoder::new(), &mut Vec::new(), &frame).unwrap();
-    let (message_type, mut payload) = messages.remove(0);
+    let Sv2Message {
+        message_type,
+        mut payload,
+        ..
+    } = messages.remove(0);
     assert_eq!(message_type, MESSAGE_TYPE_SUBMIT_SOLUTION);
     let solution = SubmitSolution::from_bytes(&mut payload).unwrap();
     assert_eq!(solution.template_id, 77);
@@ -1417,11 +1430,11 @@ async fn an_extended_channel_block_on_a_provided_template_returns_as_submit_solu
         .unwrap();
     let mut opened_messages =
         decode_plain_frames(&mut Decoder::new(), &mut Vec::new(), &opened.concat()).unwrap();
-    let (_, mut success_payload) = opened_messages.remove(0);
+    let mut success_payload = opened_messages.remove(0).payload;
     let success = OpenExtendedMiningChannelSuccess::from_bytes(&mut success_payload).unwrap();
-    let (_, mut job_payload) = opened_messages.remove(0);
+    let mut job_payload = opened_messages.remove(0).payload;
     let job = NewExtendedMiningJob::from_bytes(&mut job_payload).unwrap();
-    let (_, mut prev_hash_payload) = opened_messages.remove(0);
+    let mut prev_hash_payload = opened_messages.remove(0).payload;
     let prev_hash = MiningSetNewPrevHash::from_bytes(&mut prev_hash_payload).unwrap();
     let extranonce = [0x11u8; 8];
     let mut coinbase_bytes = job.coinbase_tx_prefix.as_bytes().to_vec();
