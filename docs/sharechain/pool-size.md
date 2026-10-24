@@ -49,12 +49,13 @@ Plan decision 14 ([bch-plan.md](../bch-plan.md)) replaced the earlier cap of
 Cash limit:
 
 - **Shares that merge-mine no tokens** (the exact empty merge-mining
-  commitment, as on every pool-built job) pay every payee directly, within
+  commitment) pay every payee directly, within
   the 1,000,000-byte transaction limit: 29,399 P2PKH payees, or 29,398 beside
   a tree output. Block space is ABLA's concern.
 - **Shares that merge-mine tokens** keep their coinbase within 3,072 bytes
   (77 P2PKH payees, 78 without a tree output), so the token covenant can
-  still hash it in the VM.
+  still hash it in the VM. Either pool-built jobs or Job Declaration can
+  carry a token commitment.
 - **Past a share's limit,** payees are taken smallest first; the payee that
   straddles the limit and every payee after it go to one covenant payout
   tree output, whose keyless transactions of up to 500 outputs pay each of

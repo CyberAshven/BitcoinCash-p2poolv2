@@ -278,7 +278,7 @@ has no witness commitment. The split is the PPLNS distribution,
 proportional to each miner's share contribution in the window.
 
 > Breadth: the number of payees = distinct miners with weight in the PPLNS
-> window, each paid its own output: pool-built jobs merge-mine no tokens, so
+> window, each paid its own output: this swarm configures no tokens, so
 > the hybrid payout pays every payee directly and no payout tree output
 > appears at sim sizes (`docs/architecture/bch-hybrid-payouts.md`). The
 > window starts below the shares not yet mature for the paying share

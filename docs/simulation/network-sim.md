@@ -151,12 +151,13 @@ the model for Bitcoin Cash and for scale:
   to the other nodes.
 - **Coinbase layouts:**
   - `no-tokens`: the hybrid payout rule for a share without token
-    commitments, the normal case for pool-built jobs. Payees are paid
+    commitments. Payees are paid
     directly while their outputs fit the budget `1,000,000 - S`, where
     `S` = 445 bytes is everything else at its worst case; the straddler and
     the rest go to one P2SH32 payout tree output.
   - `tokens-3072`: the same rule with the coinbase limit `T` = 3,072 bytes,
-    for a share that carries token commitments (only declared jobs do).
+    for a share that carries token commitments, whether the job is
+    pool-built or declared.
   - `cap-11`: the earlier share-chain rule (decision 14, `payout-cap11`),
     at most 11 payouts and a weighted draw for the tail, which the owner
     rejected and the hybrid rule replaced on PR #33 and on chipnet; kept

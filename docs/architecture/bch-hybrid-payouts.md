@@ -168,10 +168,12 @@ proof:              header (80) | h | salt | aux branch (32h) | coinbase head (4
 A covenant rebuilds output 0 and the leaf itself; the proof never carries
 them. The coinbase head is everything before output 0 (version, the single
 null input with its scriptSig, the one-byte output count) and the tail is
-everything after it. Pool-built jobs (Stratum V1 and Stratum V2 standard
-channels) carry the empty commitment; only a miner that declares its own
-coinbase through Job Declaration commits token work, and the share header
-carries its root, `h` and salt so every peer rebuilds output 0.
+everything after it. Pool-built jobs carry the empty commitment when the
+node has no tokens to merge-mine. With tokens configured, the node builds
+the root from each miner's own token leaves. A miner can also declare its
+own token commitment through Job Declaration. The share header carries
+the root, `h` and salt in `pool_merge_mining` for a pool-built share or in
+`bch_coinbase` for a declared share, so every peer rebuilds output 0.
 
 ## 2. Facts it rests on
 
@@ -511,7 +513,7 @@ The BCH block carries one more output for the tree: 44 bytes.
 |---|---|---|
 | Fees rise above 1 sat/byte | The default executor keeps the 1 sat/byte variant; a root not already accepted may instead be spent with its 2 or 3 sat/byte variant. Above 3 sat/byte, ordinary relay may wait. | BCH consensus has no minimum fee: a miner may include a tree directly. BCH first-seen policy prevents replacing a root already accepted at another rate. A later share-chain rule can alter the rates for new trees. |
 | Partial execution | Some nodes confirmed, others not | Each node is independent once its parent exists. Anyone can finish later. Nothing expires. |
-| A miner forces the tree (a format-valid token commitment) | Tree payees fund their share of the fee and wait for tree confirmation after maturity | Cannot redirect money. Only declared coinbases can carry a commitment (pool-built jobs carry the empty one). |
+| A miner forces the tree (a format-valid token commitment) | Tree payees fund their share of the fee and wait for tree confirmation after maturity | Cannot redirect money. Both pool-built and declared coinbases can carry token commitments; the payout rule classifies the commitment, not the channel type. |
 | Executor misbehaves | Cannot change outputs, add inputs, attach tokens or vary the transaction | Covenant checks (5.2) |
 | Dust sent to a node's address | A second UTXO with the same script | Spendable only with exactly `V`, so a different value is stuck and harms nothing; an exact copy pays the payees twice, a gift |
 | BCH reorg below 100 blocks | Before maturity the block may be orphaned, as for direct payouts. After execution, reorged node transactions return to the mempool. | Executor rebroadcasts. Txids do not change. |
@@ -820,22 +822,29 @@ decide what works in practice:
 - Executor: maturity timing, idempotent rebroadcast, BCH and share-chain
   reorgs, against `p2poolv2_tools`'s mock bitcoind.
 
-### The sim on BCHN regtest
+### Production rules on BCHN regtest
 
-BCHN is the authority on both consensus and relay policy, so every node
-transaction must pass a real BCHN mempool, not only our stack machine. A new
-RUNBOOK test next to Test E (payout split) and Test G (maturity):
+BCHN is the authority on both BCH consensus and relay policy, so every
+node transaction must pass a real BCHN mempool, not only our stack machine.
+The ignored tests in `p2poolv2_tests/src/payout_tree_bchn_test.rs` run without
+the `sim` feature in the nightly workflow's `payout-tree-bchn` job. The job
+starts BCHN with `-acceptnonstdtxn=0` and serializes the tests on that node.
 
-1. A swarm with more than 77 payees in the window.
-2. One node declares a non-empty commitment through Job Declaration until its
-   share becomes a regtest block.
-3. `generatetoaddress 100`; the executor broadcasts; BCHN accepts every node
-   transaction into its mempool and a block.
-4. Every payee's UTXO matches the expected amount to the satoshi.
-5. Again with the empty commitment and a few thousand payees: BCHN accepts the
-   large coinbase.
+1. Build a token-share payout with 700 payees: 77 direct outputs and a
+   two-level tree for the other 623, then mine its coinbase on BCHN.
+2. Verify that the node's own executor does not spend before maturity,
+   then broadcasts the tree at 1 sat/byte once it is mature. BCHN accepts
+   every tree transaction into its mempool and a block.
+3. Check each tree payee's UTXO against its expected amount to the satoshi,
+   and check that the executor marks the stored tree executed after it
+   settles.
+4. Build a no-token coinbase paying 3,000 miners directly, over 100 KB,
+   and verify that BCHN accepts the block and holds every payee's output.
 
-Regtest does not enforce BIP34, which does not matter here.
+These tests exercise the payout builder and executor against BCHN; they do
+not drive a Stratum miner or a multi-node swarm. The workflow keeps the
+test output and BCHN debug log as artifacts on failure. Chipnet execution
+and device limits remain separate measurements.
 
 ### Chipnet with the owner's Avalon
 

@@ -835,8 +835,8 @@ move most BCH hashrate to the share chain.
     ([architecture/bch-hybrid-payouts.md](architecture/bch-hybrid-payouts.md);
     audit items A1 to A3).
     - **Rule.** Donation and fee, each under its own 10% cap, come off
-      first, as before. A share whose merge-mining commitment is exactly empty (pool-built jobs
-      always are) pays every PPLNS payee directly, within BCH's
+      first, as before. A share whose merge-mining commitment is exactly
+      empty pays every PPLNS payee directly, within BCH's
       1,000,000-byte `MAX_TX_SIZE` (about 29,398 P2PKH payees). A share that
       merge-mines tokens keeps its coinbase within `T` = 3,072 bytes (77
       P2PKH payees), so a token covenant can hash it in the VM. Payees are in
@@ -845,6 +845,9 @@ move most BCH hashrate to the share chain.
       payout tree output after the direct payouts. Nobody is split, the
       rounding remainder goes to the largest payee, and direct payouts below
       dust are paid as they are.
+      Pool-built jobs can carry the miner's own token root when the node
+      has tokens configured; Job Declaration can also carry a token
+      commitment. The commitment decides the payout limit in both cases.
     - **The tree.** Keyless covenant nodes of 500 outputs each, paid from the
       tree's own value: the root accepts the outputs for 1, 2 or 3 sat/byte,
       and at that rate each payee pays for its own output's bytes plus an

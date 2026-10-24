@@ -110,9 +110,10 @@ carries. The rebuild covers:
   behind a 100-share maturity skip and at most 120,960 shares;
 - who is paid: on Bitcoin Cash the holder of each share's payout right
   ([Trading shares for BCH](../atomic-swap/bch-share-trading.md#payout-rights));
-- output 0, the merge-mining v2 commitment: the exact empty one on a
-  pool-built share, the declared root, `h` and salt on a Job Declaration
-  share, rebuilt byte for byte ([Auxiliary work proofs](../bch-auxpow.md));
+- output 0, the merge-mining v2 commitment: the root, `h` and salt from
+  `pool_merge_mining` on a pool-built token share or `bch_coinbase` on a
+  Job Declaration share, and the exact empty commitment otherwise,
+  rebuilt byte for byte ([Auxiliary work proofs](../bch-auxpow.md));
 - no SegWit: a Bitcoin Cash coinbase that carries a BIP141 witness
   commitment output is invalid. BCHN's templates never have one;
 - how the payouts become outputs: the hybrid payout of plan decision 14,
