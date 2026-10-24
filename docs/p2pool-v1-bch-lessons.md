@@ -87,7 +87,7 @@ Line numbers are jtoomim's at `ece15b0` unless marked "forrestv".
 | Weight | Expected hashes, 2^256 / (target + 1) (`data.py:672-674`) | Integer difficulty; A17 |
 | Stale shares | Lost; counted for statistics only | Uncles at 9/10 weight, up to 3 per share |
 | Finder bonus | 0.5% of the block (`data.py:268-270`) | None (decision 11) |
-| Donation and fee | Donation by per-share weight, default 0 since `75b9fdc`; operator fee by crediting a random fraction of shares to the operator (`work.py:212-213`) | 1.5% donation and a fee output, capped together at 10% (decisions 9, 13) |
+| Donation and fee | Donation by per-share weight, default 0 since `75b9fdc`; operator fee by crediting a random fraction of shares to the operator (`work.py:212-213`) | 1.5% donation and a fee output, each capped at 10% (decisions 9, 13) |
 | Share difficulty | Per share, up to 30 times the pool minimum (`data.py:170`); minimum retargeted over 200 shares, at most 10% per share (`data.py:162-168`) | One per chain, ASERT anchored at the parent (decision 12); bits must equal it (`validation/mod.rs:1443`) |
 | Lowest share difficulty | 1 (`MAX_TARGET`, `networks/bitcoincash.py:19`) | Mini chain ceiling 4.55 (`0x1c384bd7`) |
 | Stratum difficulty | Per connection; the node's own choice never above the share difficulty (`bitcoin/stratum.py:86, 136-150`) | ckpool-style vardiff, not capped at the share difficulty (V8) |

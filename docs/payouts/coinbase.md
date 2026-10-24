@@ -45,7 +45,8 @@ In order:
 1. **Donation.** 1.5% of the block by default, to the project's fixed key
    (plan decision 9). An operator can raise, lower or turn it off.
 2. **Operator fee,** if the node sets `fee_address` and `fee`. Donation and
-   fee together are capped at 10% by the share chain.
+   fee are each capped at 10% by the share chain, with no combined cap;
+   the fee is taken from what the donation leaves.
 3. **PPLNS payouts,** smallest weight first, ties by locking script, then
    the payout tree output if some payees do not fit (below). A miner is
    paid at the CashAddr in its Stratum username, P2PKH or P2SH

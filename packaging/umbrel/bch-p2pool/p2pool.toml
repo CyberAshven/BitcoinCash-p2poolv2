@@ -65,8 +65,8 @@ bootstrap_address = "bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k"
 
 # Every Bitcoin Cash node donates 1.5% (150 basis points) of each block it
 # finds to bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k. Set
-# donation to change it, 0 to opt out. Donation plus fee may not exceed 1000
-# basis points (10%).
+# donation to change it, 0 to opt out. The donation and the fee may each be
+# at most 1000 basis points (10%).
 # donation = 150
 # fee_address = "bitcoincash:q..."
 # fee = 0

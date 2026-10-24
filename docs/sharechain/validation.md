@@ -102,8 +102,9 @@ window. The node rebuilds the whole coinbase from its own copy of the window,
 anchored at the share's parent, and compares it with the coinbase the share
 carries. The rebuild covers:
 
-- the donation and the operator fee, each at most 10,000 basis points and
-  together at most 10% (1,000 basis points) on Bitcoin Cash;
+- the donation and the operator fee, each at most 10,000 basis points, and
+  on Bitcoin Cash each at most 10% (1,000 basis points) with no combined
+  cap;
 - the window itself: on Bitcoin Cash the shares holding three Bitcoin Cash
   blocks' worth of work, sized by the difficulty in the share's own header,
   behind a 100-share maturity skip and at most 120,960 shares;

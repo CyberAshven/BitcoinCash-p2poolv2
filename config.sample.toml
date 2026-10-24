@@ -90,8 +90,9 @@ bootstrap_address = "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2"
 # address, because the share chain rejects a Bitcoin Cash donation paid
 # anywhere else.
 # donation = 150
-# A public pool operator's own cut, taken after the donation. Donation plus
-# fee may not exceed 1000 basis points (10%); peers reject shares above that.
+# A public pool operator's own cut, taken after the donation. The donation
+# and the fee may each be at most 1000 basis points (10%); peers reject shares
+# above that.
 # fee_address = "bchtest:q..."
 # In basis points, 1% = 100 basis points. Default 0
 # fee = 0

@@ -78,8 +78,8 @@ the node config, share addresses, the donation and fee, and miner settings.
 Also in this checkpoint:
 
 - Bitcoin Cash donates 1.5% by default to the project address, adjustable
-  by the operator, with an optional operator fee and a 10% consensus cap on
-  the two together (decision 9 below).
+  by the operator, with an optional operator fee, each under its own 10%
+  share-chain cap (decision 9 below; per item since decision 13).
 - Stratum usernames accept CashAddr payouts. Before this no Bitcoin Cash
   miner could authorize.
 - `stratum.network` on a Bitcoin Cash node is derived from
@@ -624,8 +624,9 @@ move most BCH hashrate to the share chain.
    operator changes it: `donation` raises or lowers the basis points and 0
    opts out. The address is fixed in the share chain's rules, so a donation
    cannot be redirected. Public pool operators set their own `fee_address`
-   and `fee`. Donation plus fee is capped at 10% by share-chain consensus so
-   no node can take a block's reward from the miners in its window.
+   and `fee`. The donation and the fee are each capped at 10% by the share
+   chain (per item since decision 13), so no node can take a block's reward
+   from the miners in its window.
 10. **Rust stays the implementation.** Ideas from P2Pool v1, CashStratum and
     other BCH software are reimplemented in Rust here, never ported back as
     Python or C.
@@ -737,7 +738,7 @@ move most BCH hashrate to the share chain.
         six times the loss for a 0.1% miner, little for a large one. It
         costs a new consensus output in the producer, the validator and
         declared jobs, and a rule for how it sits beside the 10% donation
-        and fee cap. Worth it only if withholding shows up; the two chipnet
+        and fee caps. Worth it only if withholding shows up; the two chipnet
         blocks lost at one height need faster template refresh, which a
         bonus would not give.
       - *Share period: keep 10 seconds.* v1 used 60 seconds on BCH, where
@@ -793,9 +794,12 @@ move most BCH hashrate to the share chain.
     - **Mainnet readiness.** Mainnet, chipnet and regtest share one code
       path; only the network setting differs. Work finished and tested on
       chipnet counts as mainnet ready.
-    - **Cap.** 10% stays the share-chain cap on donation plus pool fee,
-      public pool hosts included. With the default 1.5% donation, a host
-      may charge up to 8.5%.
+    - **Cap, per item (reworded 2026-10-24).** The share chain caps the
+      donation and the pool fee at 10% each, public pool hosts included;
+      there is no combined cap. A host may charge up to 10% whatever the
+      donation. The fee is taken from what the donation leaves, so a 10%
+      donation and a 10% fee take 10% and 9% of the coinbase value, 19% in
+      all.
     - **Share trading stays on Bitcoin Cash.** Shares trade through BCH
       covenants, with every share output above the dust limit. No Lightning
       Network. Implemented the same day as a hash time locked contract
@@ -827,8 +831,8 @@ move most BCH hashrate to the share chain.
     Bitcoin assumption, and on PR #33 the hybrid payout replaced it
     ([architecture/bch-hybrid-payouts.md](architecture/bch-hybrid-payouts.md);
     audit items A1 to A3).
-    - **Rule.** Donation, fee and the 10% cap come off first, as before. A
-      share whose merge-mining commitment is exactly empty (pool-built jobs
+    - **Rule.** Donation and fee, each under its own 10% cap, come off
+      first, as before. A share whose merge-mining commitment is exactly empty (pool-built jobs
       always are) pays every PPLNS payee directly, within BCH's
       1,000,000-byte `MAX_TX_SIZE` (about 29,398 P2PKH payees). A share that
       merge-mines tokens keeps its coinbase within `T` = 3,072 bytes (77

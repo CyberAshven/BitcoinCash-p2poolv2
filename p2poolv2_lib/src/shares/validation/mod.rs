@@ -21,7 +21,7 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::{
 };
 use crate::config::{
     BITCOIN_CASH_DONATION_PUBKEY_HASH, BitcoinCashNetwork, Chain, MAX_BASIS_POINTS,
-    MAX_BITCOIN_CASH_POOL_CUT,
+    MAX_BITCOIN_CASH_CUT,
 };
 use crate::node::payout_tree_executor::PayoutTreeSender;
 #[cfg(test)]
@@ -1391,12 +1391,14 @@ impl DefaultShareValidator {
     /// Validate the donation and fee a share takes before the PPLNS split.
     ///
     /// Each is a share of what is left, so each must be at most 100%. On
-    /// Bitcoin Cash the two together must stay within
-    /// [`MAX_BITCOIN_CASH_POOL_CUT`], and a donation must pay the built-in
-    /// P2Poolv2 donation key. Without the cap a node could set a 100% fee to
-    /// itself and keep every block it finds while its shares still earn from
-    /// everyone else's; without the fixed key the donation field would be a
-    /// second, uncapped fee.
+    /// Bitcoin Cash each must also stay within its own cap,
+    /// [`MAX_BITCOIN_CASH_CUT`] (10%); there is no combined cap. The fee is
+    /// taken from what the donation leaves, so it too is at most 10% of the
+    /// coinbase value. A donation must pay the built-in P2Poolv2 donation
+    /// key. Without the cap a node could set a 100% fee to itself and keep
+    /// every block it finds while its shares still earn from everyone
+    /// else's; without the fixed key the donation field would be a second
+    /// fee.
     fn validate_payout_cuts(&self, share_header: &ShareHeader) -> Result<(), ValidationError> {
         let donation = share_header.donation.unwrap_or(0);
         let fee = share_header.fee.unwrap_or(0);
@@ -1408,10 +1410,10 @@ impl DefaultShareValidator {
         if self.chain != Chain::BitcoinCash {
             return Ok(());
         }
-        if u32::from(donation) + u32::from(fee) > u32::from(MAX_BITCOIN_CASH_POOL_CUT) {
+        if donation > MAX_BITCOIN_CASH_CUT || fee > MAX_BITCOIN_CASH_CUT {
             return Err(ValidationError::consensus(format!(
-                "Share donation {donation} plus fee {fee} exceeds the Bitcoin Cash cap of \
-                 {MAX_BITCOIN_CASH_POOL_CUT} basis points"
+                "Share donation {donation} or fee {fee} exceeds the Bitcoin Cash cap of \
+                 {MAX_BITCOIN_CASH_CUT} basis points each"
             )));
         }
         if donation > 0
@@ -2938,34 +2940,57 @@ mod tests {
         assert!(error.to_string().contains("built-in"), "{error}");
     }
 
-    #[test]
-    fn bitcoin_cash_accepts_a_fee_at_the_cap_with_no_donation() {
-        let mut share = TestShareBlockBuilder::new().build();
-        share.header.fee_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array([0x33; 20]),
-            Network::Testnet,
-        ));
-        share.header.fee = Some(MAX_BITCOIN_CASH_POOL_CUT);
-        let bch_validator = validator().for_chain(Chain::BitcoinCash);
-        assert!(bch_validator.validate_payout_cuts(&share.header).is_ok());
-    }
-
-    #[test]
-    fn bitcoin_cash_rejects_a_donation_and_fee_above_the_cap() {
+    /// A Bitcoin Cash share header with the given donation (to the built-in
+    /// key) and fee (to another key), in basis points.
+    fn bitcoin_cash_header_with_cuts(donation: u16, fee: u16) -> ShareHeader {
         let mut share = TestShareBlockBuilder::new().build();
         share.header.donation_address = Some(Address::p2pkh(
             PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
             Network::Testnet,
         ));
-        share.header.donation = Some(150);
+        share.header.donation = Some(donation);
         share.header.fee_address = Some(Address::p2pkh(
             PubkeyHash::from_byte_array([0x33; 20]),
             Network::Testnet,
         ));
-        share.header.fee = Some(MAX_BITCOIN_CASH_POOL_CUT - 149);
+        share.header.fee = Some(fee);
+        share.header
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_fee_at_the_cap_with_no_donation() {
+        let header = bitcoin_cash_header_with_cuts(0, MAX_BITCOIN_CASH_CUT);
+        let bch_validator = validator().for_chain(Chain::BitcoinCash);
+        assert!(bch_validator.validate_payout_cuts(&header).is_ok());
+    }
+
+    /// The donation and the fee each have their own 10% cap, with no
+    /// combined one: a share taking 10% and 10% is valid.
+    #[test]
+    fn bitcoin_cash_accepts_a_ten_percent_donation_and_a_ten_percent_fee() {
+        let header = bitcoin_cash_header_with_cuts(1_000, 1_000);
+        assert_eq!(MAX_BITCOIN_CASH_CUT, 1_000);
+        let bch_validator = validator().for_chain(Chain::BitcoinCash);
+        assert!(bch_validator.validate_payout_cuts(&header).is_ok());
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_an_eleven_percent_donation() {
+        let header = bitcoin_cash_header_with_cuts(1_100, 0);
         let error = validator()
             .for_chain(Chain::BitcoinCash)
-            .validate_payout_cuts(&share.header)
+            .validate_payout_cuts(&header)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("cap"), "{error}");
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_fee_one_basis_point_above_its_cap() {
+        let header = bitcoin_cash_header_with_cuts(0, MAX_BITCOIN_CASH_CUT + 1);
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_payout_cuts(&header)
             .unwrap_err();
         assert_eq!(error.kind(), FailureKind::Consensus);
         assert!(error.to_string().contains("cap"), "{error}");

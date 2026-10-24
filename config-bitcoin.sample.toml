@@ -79,8 +79,8 @@ bootstrap_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
 # donation = 0
 # Any fee amount for node/hydrapool provider to be sent to fee address. Default no fee.
 # This is where a public pool operator takes their own cut. It is taken after
-# the donation. On Bitcoin Cash, donation plus fee may not exceed 1000 basis
-# points (10%); peers reject shares above that.
+# the donation. On Bitcoin Cash, the donation and the fee may each be at most
+# 1000 basis points (10%); peers reject shares above that.
 # fee_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
 # In basis points, 1% = 100 basis points. Default 0
 # fee = 0

@@ -144,8 +144,8 @@ set a single value as `P2POOL_<SECTION>__<KEY>`, but not a list):
   `/p2poolv2/data/<network>-<share chain>`: the node refuses a store that
   holds another share chain.
 - `donation` (default 150 basis points, 1.5%; 0 opts out), and `fee_address`
-  and `fee` for a public pool's own cut. Donation plus fee may not exceed
-  1,000 basis points.
+  and `fee` for a public pool's own cut. The donation and the fee may each
+  be at most 1,000 basis points.
 
 The share chain store and the node's stats live in the app's `data/` folder.
 To start again from an empty store, stop the app, delete

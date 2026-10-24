@@ -101,9 +101,9 @@ By default each block this node finds donates 1.5% (150 basis points) to the
 P2Poolv2 Bitcoin Cash address
 `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`. Change it with
 `donation` (basis points; 0 turns it off). A public pool operator adds their
-own cut with `fee_address` and `fee`. Donation plus fee may not exceed 1,000
-basis points (10%): other nodes reject shares above that. The node logs the
-donation in effect at startup.
+own cut with `fee_address` and `fee`. The donation and the fee may each be
+at most 1,000 basis points (10%), whatever the other is: other nodes reject
+shares above that. The node logs the donation in effect at startup.
 
 ### Stratum V2
 

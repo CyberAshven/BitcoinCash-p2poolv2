@@ -55,13 +55,16 @@ pub const BITCOIN_CASH_DONATION_PUBKEY_HASH: [u8; 20] = [
 /// 1.5%. An operator may raise it, lower it, or set 0 to opt out.
 pub const DEFAULT_BITCOIN_CASH_DONATION: u16 = 150;
 
-/// Most a Bitcoin Cash share may take before the PPLNS split: donation plus
-/// fee, 10%.
+/// Most each of the donation and the operator fee may take of a Bitcoin Cash
+/// coinbase before the PPLNS split: 1,000 basis points, 10%, each on its
+/// own. There is no combined cap. The fee is taken from what the donation
+/// leaves, so at most 10% of the coinbase value too, and the two together at
+/// most 19%.
 ///
 /// The share chain enforces this on every Bitcoin Cash share. Without it a
 /// node could set a 100% fee to itself and keep the whole reward of every
 /// block it finds, while its shares still earn a slice of everyone else's.
-pub const MAX_BITCOIN_CASH_POOL_CUT: u16 = 1_000;
+pub const MAX_BITCOIN_CASH_CUT: u16 = 1_000;
 
 /// [`BITCOIN_CASH_DONATION_ADDRESS`] under a network's CashAddr prefix, for
 /// logs and documentation. Each string decodes to
@@ -1017,9 +1020,9 @@ fn resolve_donation(
 
 /// Reject donation and fee basis points the payout cannot honor.
 ///
-/// Each cut is a share of what is left, so each must be at most 100%. A
-/// Bitcoin Cash node must also stay within [`MAX_BITCOIN_CASH_POOL_CUT`],
-/// which its peers enforce on every share it mines.
+/// Each cut is a share of what is left, so each must be at most 100%. On a
+/// Bitcoin Cash node each must also stay within [`MAX_BITCOIN_CASH_CUT`]
+/// on its own, which its peers enforce on every share it mines.
 fn validate_cuts(chain: Chain, donation: Option<u16>, fee: Option<u16>) -> Result<(), ConfigError> {
     let donation = donation.unwrap_or(0);
     let fee = fee.unwrap_or(0);
@@ -1031,12 +1034,12 @@ fn validate_cuts(chain: Chain, donation: Option<u16>, fee: Option<u16>) -> Resul
         });
     }
     if chain == Chain::BitcoinCash
-        && u32::from(donation) + u32::from(fee) > u32::from(MAX_BITCOIN_CASH_POOL_CUT)
+        && (donation > MAX_BITCOIN_CASH_CUT || fee > MAX_BITCOIN_CASH_CUT)
     {
         return Err(ConfigError {
             message: format!(
-                "donation ({donation}) plus fee ({fee}) on bitcoin-cash must be at most \
-                 {MAX_BITCOIN_CASH_POOL_CUT} basis points; peers reject shares above it"
+                "donation ({donation}) and fee ({fee}) on bitcoin-cash must each be at most \
+                 {MAX_BITCOIN_CASH_CUT} basis points; peers reject shares above it"
             ),
         });
     }
@@ -2650,45 +2653,61 @@ mod bitcoin_cash_donation_tests {
         assert!(parsed.fee_address().is_some());
     }
 
-    #[test]
-    fn bitcoin_cash_accepts_cuts_at_the_share_chain_cap() {
+    fn bitcoin_cash_config_with_cuts(donation: u16, fee: u16) -> StratumConfig<Raw> {
         let mut config = StratumConfig::<Raw>::new_for_test_default();
         config.chain = Chain::BitcoinCash;
         config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
         config.bootstrap_address = CHIPNET_BOOTSTRAP.to_string();
+        config.donation = Some(donation);
         config.fee_address = Some(CHIPNET_BOOTSTRAP.to_string());
-        config.fee = Some(MAX_BITCOIN_CASH_POOL_CUT - DEFAULT_BITCOIN_CASH_DONATION);
-        assert!(config.parse().is_ok());
+        config.fee = Some(fee);
+        config
+    }
+
+    /// The donation and the fee each have their own 10% cap, with no
+    /// combined one: 10% and 10% together are accepted.
+    #[test]
+    fn bitcoin_cash_accepts_each_cut_at_its_own_cap() {
+        let parsed = bitcoin_cash_config_with_cuts(MAX_BITCOIN_CASH_CUT, MAX_BITCOIN_CASH_CUT)
+            .parse()
+            .unwrap();
+        assert_eq!(parsed.donation, Some(MAX_BITCOIN_CASH_CUT));
+        assert_eq!(parsed.fee, Some(MAX_BITCOIN_CASH_CUT));
     }
 
     #[test]
-    fn bitcoin_cash_rejects_cuts_above_the_share_chain_cap() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.chain = Chain::BitcoinCash;
-        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
-        config.bootstrap_address = CHIPNET_BOOTSTRAP.to_string();
-        config.fee_address = Some(CHIPNET_BOOTSTRAP.to_string());
-        config.fee = Some(MAX_BITCOIN_CASH_POOL_CUT - DEFAULT_BITCOIN_CASH_DONATION + 1);
-        let error = config.parse().unwrap_err();
+    fn bitcoin_cash_rejects_a_donation_above_its_cap() {
+        let error = bitcoin_cash_config_with_cuts(1_100, 0).parse().unwrap_err();
         assert!(
-            error.message.contains("must be at most 1000 basis points"),
+            error
+                .message
+                .contains("must each be at most 1000 basis points"),
             "unexpected message: {}",
             error.message
         );
     }
 
     #[test]
-    fn bitcoin_cash_fee_may_use_the_whole_cap_when_the_donation_is_off() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.chain = Chain::BitcoinCash;
-        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
-        config.bootstrap_address = CHIPNET_BOOTSTRAP.to_string();
-        config.donation = Some(0);
-        config.fee_address = Some(CHIPNET_BOOTSTRAP.to_string());
-        config.fee = Some(MAX_BITCOIN_CASH_POOL_CUT);
-        let parsed = config.parse().unwrap();
+    fn bitcoin_cash_rejects_a_fee_above_its_cap() {
+        let error = bitcoin_cash_config_with_cuts(DEFAULT_BITCOIN_CASH_DONATION, 1_001)
+            .parse()
+            .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("must each be at most 1000 basis points"),
+            "unexpected message: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn bitcoin_cash_fee_may_use_its_whole_cap_when_the_donation_is_off() {
+        let parsed = bitcoin_cash_config_with_cuts(0, MAX_BITCOIN_CASH_CUT)
+            .parse()
+            .unwrap();
         assert_eq!(parsed.donation, None);
-        assert_eq!(parsed.fee, Some(MAX_BITCOIN_CASH_POOL_CUT));
+        assert_eq!(parsed.fee, Some(MAX_BITCOIN_CASH_CUT));
     }
 
     #[test]

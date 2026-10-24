@@ -52,8 +52,9 @@ consensus. The tag replaces `payout-cap11` with
 `payout-hybrid-t3072-f500-r1to3-z8-cov1`, and adds
 `body-1000000-204800`, `payee-p2pkh-p2sh20-p2sh32`, `merkle32`,
 `depths-m100`, `sigchecks3000-1452`, `no-segwit`, `weight-work`,
-`mm2-asert` and `version-vote`. Request-response, Kademlia, Identify and
-Noise use the same rule segments. Later rule changes activate by the
+`mm2-asert` and `version-vote`. The donation and fee caps become 10% each
+instead of 10% together, under the same tag. Request-response, Kademlia,
+Identify and Noise use the same rule segments. Later rule changes activate by the
 share-version vote without changing this tag, so old and new versions
 can peer during the vote.
 
@@ -265,6 +266,14 @@ anchor and the donation and fee cap as they were.
   proofs keep `d ≤ 25`. A `ShareHeaders` response carries at most 600
   headers, down from 650, so the worst case (1,584 bytes a header) still
   fits the 1 MiB frame.
+- The Bitcoin Cash donation and operator fee each have their own 10% cap
+  (share-chain rule, the owner's decision of 2026-10-24, plan decision 13):
+  each at most 1,000 basis points (`MAX_BITCOIN_CASH_CUT`, renamed from
+  `MAX_BITCOIN_CASH_POOL_CUT`), with no combined cap, in config validation
+  and in share validation. Before, the two shared one 10% cap. The fee is
+  still taken from what the donation leaves, so a 10% donation and a 10% fee
+  take 10% and 9% of the coinbase value. A share taking 10% and 10% is
+  valid; an 11% donation or fee is not. Part of the batch's protocol tag.
 - Coinbase budget on Bitcoin Cash (share-chain consensus, decision 14): a
   coinbase pays at most 11 PPLNS payout outputs (`BCH_MAX_COINBASE_PAYOUTS`)
   holding at most 374 bytes (`BCH_MAX_PAYOUT_OUTPUT_BYTES`), and no payout

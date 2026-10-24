@@ -171,7 +171,7 @@ Set by the operator under `[stratum]` (see `config.sample.toml`):
 | `sv2_authority_public_key`, `sv2_authority_secret_key` | Turn on the Noise handshake for SV2. |
 | `max_connections` | Concurrent Stratum connections. |
 | `wait_for_chain_sync` | When true, Stratum opens only once the share chain is current. |
-| `donation`, `fee_address`, `fee` | Cut taken from each block before the PPLNS window: 1.5% donation by default, plus any pool fee, 10% at most together. |
+| `donation`, `fee_address`, `fee` | Cut taken from each block before the PPLNS window: 1.5% donation by default, plus any pool fee, each at most 10%. |
 
 Each block's coinbase pays the miners in the PPLNS window directly. The
 outputs can be spent after 100 Bitcoin Cash blocks, as for any coinbase. How

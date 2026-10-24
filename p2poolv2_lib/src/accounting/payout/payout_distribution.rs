@@ -261,6 +261,28 @@ mod tests {
         assert_eq!(distribution[0].amount, bitcoin::Amount::from_sat(100_000));
     }
 
+    /// Bitcoin Cash caps the donation and the fee at 10% each. The fee is
+    /// taken from what the donation leaves, so 10% and 10% take 10% and 9%
+    /// of the coinbase value.
+    #[test]
+    fn a_ten_percent_fee_after_a_ten_percent_donation_takes_nine_percent() {
+        let donation = parse_address_from_string("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq");
+        let fee = parse_address_from_string("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+        let cap = crate::config::MAX_BITCOIN_CASH_CUT;
+        let mut distribution = Vec::with_capacity(2);
+        let remaining = include_address_and_cut(
+            &mut distribution,
+            bitcoin::Amount::from_sat(1_000_000),
+            &Some(donation),
+            Some(cap),
+        );
+        let remaining =
+            include_address_and_cut(&mut distribution, remaining, &Some(fee), Some(cap));
+        assert_eq!(distribution[0].amount, bitcoin::Amount::from_sat(100_000));
+        assert_eq!(distribution[1].amount, bitcoin::Amount::from_sat(90_000));
+        assert_eq!(remaining, bitcoin::Amount::from_sat(810_000));
+    }
+
     #[test]
     fn test_create_proportional_distribution() {
         let mut address_difficulty_map = HashMap::new();

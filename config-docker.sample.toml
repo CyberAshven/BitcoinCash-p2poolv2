@@ -79,8 +79,8 @@ bootstrap_address = "bchreg:qqzldt8u5mafprrw6uljppyqg30uhl97ey890dqm34"
 # finds to bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k (the same key
 # under bchtest: and bchreg:). Set donation to change it, 0 to opt out.
 # donation = 150
-# A public pool's own cut, after the donation. Donation plus fee may not
-# exceed 1000 basis points (10%); peers reject shares above that.
+# A public pool's own cut, after the donation. The donation and the fee may
+# each be at most 1000 basis points (10%); peers reject shares above that.
 # fee_address = "bchreg:q..."
 # fee = 0
 

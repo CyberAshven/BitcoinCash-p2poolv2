@@ -63,7 +63,7 @@ raise or lower it, and a public pool operator can add a fee of their own.
 | `donation_address` | Any payout address; required with `donation` | May be omitted. If set, must be the project address under this network's prefix |
 | `donation` (basis points) | Default none | Default 150 (1.5%). Any value raises or lowers it; 0 turns it off |
 | `fee_address`, `fee` | Operator's cut, both or neither | Same |
-| Limits | Each at most 10,000 | Each at most 10,000, and donation plus fee at most 1,000 (10%) |
+| Limits | Each at most 10,000 | Each at most 1,000 (10%) on its own; no combined cap |
 
 The donation key is the same on every Bitcoin Cash network: hash160
 `b25a2f0a68073fad864f684bf26e350b4526354b`, shown as
@@ -76,11 +76,15 @@ peers rebuild the block coinbase from those fields, donation first, then the
 fee on what is left, then PPLNS. Two consensus rules now bound them on
 Bitcoin Cash:
 
-- Donation plus fee at most `MAX_BITCOIN_CASH_POOL_CUT` (1,000 basis
-  points). Without it a node could set a 100% fee to itself, keep every block
-  it finds, and still earn from everyone else's blocks through its shares in
-  the window. The 10% figure is this change's choice, not a published
-  standard; lowering it later is a share-chain consensus change.
+- The donation and the fee each at most `MAX_BITCOIN_CASH_CUT` (1,000
+  basis points), with no combined cap (the owner's rule, 2026-10-24; before
+  it the two shared one 10% cap). Without it a node could set a 100% fee to
+  itself, keep every block it finds, and still earn from everyone else's
+  blocks through its shares in the window. The fee is taken from what the
+  donation leaves, so it is at most 10% of the coinbase value too, and a
+  10% donation with a 10% fee takes 19% in all. The 10% figure is the
+  project's choice, not a published standard; changing it is a share-chain
+  rule change.
 - A donation output must pay the built-in key. Otherwise the donation field
   would be a second, uncapped fee under another name.
 
