@@ -209,10 +209,10 @@ donation or fee (about 2,000 satoshis) clears the 1,000-satoshi minimum;
 (difficulty 1; the DAA hardens it by up to a factor of 0.625 per claim).
 
 **Funds.** One chipnet UTXO that is **output 0** of its transaction, worth
-at least 8,001,154 satoshis: 4 × 2,000,000 for the vaults, a 608-satoshi
-genesis fee at 1 sat/byte (608 bytes, estimated with a 107-byte P2PKH
-signature) and 546 satoshis of change. 0.081 tBCH (8,100,000 satoshis)
-leaves 99,392 in change. Its txid becomes the token category. Each claim
+at least 8,001,155 satoshis: 4 × 2,000,000 for the vaults, a 609-satoshi
+genesis fee at 1 sat/byte (609 bytes, estimated with the largest P2PKH
+signature, a 73-byte ECDSA one, and its key) and 546 satoshis of change.
+0.081 tBCH (8,100,000 satoshis) leaves 99,391 in change. Its txid becomes the token category. Each claim
 then costs its vault `S` (1,946 plus the proof, so about 5,300 satoshis
 for a 3,000-byte coinbase) plus 800 satoshis per token output:
 about 250 claims per thread before the seed runs out, estimated, unless

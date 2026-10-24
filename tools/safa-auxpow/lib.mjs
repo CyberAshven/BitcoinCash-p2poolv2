@@ -711,8 +711,8 @@ export function buildGenesis(covenant, { funding, changeLockingBytecode, supplyP
     }],
     outputs: [...vaults, change],
   };
-  // A P2PKH input's Schnorr signature and public key add at most 107 bytes.
-  const size = encodeTransactionBch(transaction).length + 107;
+  // A P2PKH input's signature (at most 73 bytes with ECDSA) and key, with their pushes, add 108 bytes.
+  const size = encodeTransactionBch(transaction).length + 108;
   const fee = BigInt(size * feeRate);
   change.valueSatoshis = BigInt(funding.valueSatoshis) - seed * BigInt(covenant.threads) - fee;
   if (change.valueSatoshis < 546n) throw new Error('the funding output cannot pay the vaults, fee and change');
