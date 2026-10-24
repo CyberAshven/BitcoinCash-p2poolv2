@@ -6,7 +6,10 @@ use crate::address::{Address as P2PoolAddress, AddressError};
 use crate::config::PoolMode;
 use crate::config::{BitcoinCashNetwork, Chain};
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
-use crate::stratum::parse_password::extract_string_value;
+use crate::stratum::parse_password::{
+    donation_percent, extract_string_value, join_login_options, log_unknown_options,
+    resolve_miner_donation, split_user_identity,
+};
 use crate::stratum::{
     difficulty_adjuster::DifficultyAdjusterTrait,
     error::{Error, StratumErrorCode},
@@ -98,7 +101,8 @@ fn share_address_text(value: &str) -> &str {
 ///
 /// Same conflict rules as [`resolve_share_address`]: a configured hash owns
 /// every share, and a miner who names a different hash is told so.
-/// `password` is the SV1 password or the options of an SV2 `user_identity`.
+/// `password` is the SV1 login options (those after the username, then the
+/// password) or the options of an SV2 `user_identity`.
 pub(crate) fn resolve_cash_share(
     configured: Option<[u8; 20]>,
     password: Option<&str>,
@@ -190,8 +194,11 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
             )]);
         }
     };
+    // A username may carry options after a comma, as an SV2 identity does:
+    // `bitcoincash:q...rig1,donation=0.5`.
+    let (account, username_options) = split_user_identity(&username);
     let parsed_username = match validate_username::validate_for_chain(
-        &username,
+        account,
         ctx.validate_addresses,
         ctx.network,
         ctx.share_chain,
@@ -214,14 +221,23 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
         }
     };
 
-    // Parse once; the password carries both the difficulty hint and the share
-    // chain address. Resolve the address before authorizing the session so an
-    // invalid address leaves the miner able to correct and retry.
+    // Parse once; the username's options and the password carry the
+    // difficulty hint, the share chain address and the donation. Resolve them
+    // before authorizing the session so an invalid value leaves the miner
+    // able to correct and retry. Keys P2Pool does not read are ignored.
     let password = message
         .params
         .get(1)
         .and_then(|parameter| parameter.clone());
-    let parsed_password = password.as_deref().map(parse_password);
+    let options = join_login_options(username_options, password.as_deref());
+    if let Some(options) = &options {
+        log_unknown_options(options);
+    }
+    let parsed_password = options.as_deref().map(parse_password);
+    let donation = match resolve_miner_donation(options.as_deref(), ctx.share_chain, ctx.mode) {
+        Ok(donation) => donation,
+        Err(reason) => return reject_authorize(session, message.id, reason),
+    };
 
     let (miner_address, share_owner) = match ctx.share_chain {
         Chain::Bitcoin => {
@@ -249,14 +265,20 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
                     );
                 }
             };
-            match resolve_cash_share(ctx.cash_share, password.as_deref(), network, ctx.mode) {
+            match resolve_cash_share(ctx.cash_share, options.as_deref(), network, ctx.mode) {
                 Ok(owner) => (None, owner),
                 Err(reason) => return reject_authorize(session, message.id, reason),
             }
         }
     };
 
-    session.username = Some(username.clone());
+    if let Some(basis_points) = donation {
+        debug!(
+            "{account} mines with a {} P2Pool donation",
+            donation_percent(basis_points)
+        );
+    }
+    session.username = Some(account.to_string());
     session.btcaddress = Some(parsed_username.user_key.to_string());
     session.parsed_address = parsed_username.parsed_address;
     session.workername = parsed_username
@@ -265,6 +287,7 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
     session.password = password;
     session.miner_address = miner_address;
     session.share_owner = share_owner;
+    session.donation = donation;
 
     // Register user in the store
     register_user(session, &parsed_username.user_key, ctx.chain_store_handle).await?;
@@ -1690,3 +1713,6 @@ mod resolve_cash_share_tests {
         assert!(reason.contains("conflicts"), "{reason}");
     }
 }
+
+#[cfg(test)]
+mod donation_tests;

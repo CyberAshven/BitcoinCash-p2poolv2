@@ -65,6 +65,25 @@ anchor and the donation and fee cap as they were.
 
 ### Added
 
+- Each miner chooses their own P2Pool donation on a Bitcoin Cash P2Pool
+  node (owner's decision, 2026-10-24) with `donation=<percent>`, 0 to 10 in
+  steps of 0.5, after a comma in the Stratum V1 username or Stratum V2
+  identity (the form agreed with Pickaxe, such as
+  `bitcoincash:q...rig1,donation=0.5`) or in the SV1 password. The node
+  builds that miner's jobs and shares with it, rebuilding its prepared job
+  once per donation in use and template; its own `donation` is the default
+  for miners who choose none and cannot override a choice. The operator's
+  fee still applies, taken after the donation, and each keeps its own 10%
+  cap. Bad values are refused at login (`invalid-donation` on SV2); keys
+  the node does not read, such as Pickaxe's own `pickaxe-donation=`, are
+  ignored and noted at debug level. Hydrapool mode and Bitcoin nodes refuse
+  the option. A Job Declaration token carries the donation of its
+  `user_identifier`, and a channel that chose another refuses the job with
+  `donation-mismatch`. SV1 usernames now take `p2p=` and the other options
+  after a comma too. Node behavior only: the share header already carried
+  each share's donation, so share-chain rules are unchanged. See
+  `docs/miner-options.md`.
+
 - Bitcoin Cash scalenet, BCHN's network for testing big blocks (A19 in
   `docs/bch-btc-assumptions-audit.md`): `bitcoin_cash_network = "scalenet"`,
   share addresses `sp2pool:`, payouts in `bchtest:` CashAddr, a share

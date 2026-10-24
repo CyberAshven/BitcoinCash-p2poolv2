@@ -804,12 +804,17 @@ where
 /// above the share difficulty throws away hashes that are valid shares
 /// ([`share_difficulty_ceiling`]). Hydrapool mode has no share chain and
 /// clears the ceiling.
+///
+/// A miner whose login chose their own `donation=` gets the job at that
+/// donation (`PreparedNotifyParams::for_miner_donation`).
 fn job_lines<D: DifficultyAdjusterTrait>(
     session: &mut Session<D>,
     prepared: &PreparedNotifyParams,
     is_hydrapool: bool,
     tracker_handle: &JobTracker,
 ) -> Result<String, WorkError> {
+    let miner_prepared = prepared.for_miner_donation(session.donation)?;
+    let prepared = miner_prepared.as_deref().unwrap_or(prepared);
     let (commitment_address, share_address, ceiling) = if is_hydrapool {
         (None, None, None)
     } else {
@@ -2439,5 +2444,39 @@ mod stratum_server_tests {
             .apply_difficulty_constraints(5000, Some(5000));
 
         assert_eq!(constrained, 1);
+    }
+
+    /// The job an SV1 session gets commits to the donation its login chose,
+    /// and to the node's own without a choice.
+    #[tokio::test]
+    async fn job_lines_carry_the_sessions_own_donation() {
+        use bitcoin::hashes::Hash;
+        let tracker_handle = start_tracker_actor();
+        let prepared = crate::test_utils::test_bch_prepared_with_cuts(Some(100), None, None);
+        let committed_donation = |donation: Option<u16>| {
+            let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+            session.parsed_address = Some(bitcoin::Address::p2pkh(
+                bitcoin::PubkeyHash::from_byte_array([1; 20]),
+                bitcoin::Network::Regtest,
+            ));
+            session.share_owner = Some(p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh(
+                [0x22; 20],
+            ));
+            session.donation = donation;
+            let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+            let notify: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
+            let job_id = u64::from_str_radix(notify["params"][0].as_str().unwrap(), 16).unwrap();
+            tracker_handle
+                .get_job(crate::stratum::work::tracker::JobId(job_id))
+                .unwrap()
+                .share_commitment
+                .unwrap()
+                .donation
+        };
+
+        assert_eq!(committed_donation(None), Some(100));
+        assert_eq!(committed_donation(Some(0)), None);
+        assert_eq!(committed_donation(Some(50)), Some(50));
+        assert_eq!(committed_donation(Some(1_000)), Some(1_000));
     }
 }

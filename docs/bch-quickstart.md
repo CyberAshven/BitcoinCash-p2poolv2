@@ -100,12 +100,15 @@ peers to dial it.
 By default each block this node finds donates 1% (100 basis points) to the
 P2Poolv2 Bitcoin Cash address
 `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`. Change it with
-`donation` (basis points; 0 turns it off). A public pool operator adds their
-own cut with `fee_address` and `fee`: 1% (100 basis points) when
-`fee_address` is set without `fee`, taken from what the donation leaves.
-The donation and the fee may each be
-at most 1,000 basis points (10%), whatever the other is: other nodes reject
-shares above that. The node logs the donation in effect at startup.
+`donation` (basis points; 0 turns it off). That is the default for miners
+who choose none: each miner may choose their own donation in their login
+with `donation=<percent>`, 0 to 10 in steps of 0.5, and the node's setting
+never overrides it (see [Miner options](miner-options.md#donation)). A
+public pool operator adds their own cut with `fee_address` and `fee`: 1%
+(100 basis points) when `fee_address` is set without `fee`, taken from what
+the donation leaves. The donation and the fee may each be at most 1,000
+basis points (10%), whatever the other is: other nodes reject shares above
+that. The node logs the donation in effect at startup.
 
 ### Stratum V2
 

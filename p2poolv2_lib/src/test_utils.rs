@@ -568,6 +568,39 @@ pub fn test_bch_prepared_for_template(template: BlockTemplate) -> Arc<PreparedNo
     test_bch_prepared_with_weights(template, weights)
 }
 
+/// The reusable BCH payout snapshot on a node that donates `donation` basis
+/// points to the built-in regtest donation address and takes `fee` basis
+/// points to `fee_address`.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_bch_prepared_with_cuts(
+    donation: Option<u16>,
+    fee_address: Option<Address>,
+    fee: Option<u16>,
+) -> Arc<PreparedNotifyParams> {
+    let template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    let first = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([1; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let second = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([2; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let weights = HashMap::from([(first, 1), (second, 3)]);
+    let donation_address = donation.map(|_| {
+        crate::config::bitcoin_cash_donation_address(crate::config::BitcoinCashNetwork::Regtest)
+    });
+    test_bch_prepared_with_weights_and_cuts(
+        template,
+        weights,
+        (donation_address, donation),
+        (fee_address, fee),
+    )
+}
+
 /// A BCH payout snapshot with `payee_count` distinct, equally weighted P2PKH payees.
 ///
 /// Exercises full coinbases through the same hybrid split and job builder as
@@ -597,15 +630,27 @@ fn test_bch_prepared_with_weights(
     template: BlockTemplate,
     weights: HashMap<Address, u128>,
 ) -> Arc<PreparedNotifyParams> {
+    test_bch_prepared_with_weights_and_cuts(template, weights, (None, None), (None, None))
+}
+
+/// A BCH payout snapshot for `template` and `weights` on a node taking the
+/// given donation and fee, each an address and basis points.
+#[cfg(any(test, feature = "test-utils"))]
+fn test_bch_prepared_with_weights_and_cuts(
+    template: BlockTemplate,
+    weights: HashMap<Address, u128>,
+    (donation_address, donation): (Option<Address>, Option<u16>),
+    (fee_address, fee): (Option<Address>, Option<u16>),
+) -> Arc<PreparedNotifyParams> {
     let anchor = BlockHash::from_byte_array([0x33; 32]);
     let payout_split = PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, false);
     let outputs = build_pplns_outputs(
         template.coinbasevalue,
         &weights,
-        &None,
-        None,
-        &None,
-        None,
+        &donation_address,
+        donation,
+        &fee_address,
+        fee,
         payout_split,
     )
     .unwrap();
@@ -615,7 +660,14 @@ fn test_bch_prepared_with_weights(
             .payout_split(payout_split)
             .prev_share_blockhash(anchor)
             .bits(CompactTarget::from_consensus(0x2100ffff))
+            .donation_address(donation_address)
+            .donation(donation)
+            .fee_address(fee_address)
+            .fee(fee)
             .include_merge_mining(true)
+            .miner_donations(Some(crate::config::bitcoin_cash_donation_address(
+                crate::config::BitcoinCashNetwork::Regtest,
+            )))
             .build()
             .unwrap(),
     )

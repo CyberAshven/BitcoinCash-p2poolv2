@@ -37,7 +37,10 @@ use crate::stratum::message_handlers::authorize_response::{
 use crate::stratum::message_handlers::submit::{
     PoolShare, emit_pool_share, get_true_difficulty, submit_found_block,
 };
-use crate::stratum::parse_password::{extract_string_value, parse_password};
+use crate::stratum::parse_password::{
+    donation_percent, extract_string_value, log_unknown_options, parse_password,
+    resolve_miner_donation, split_user_identity,
+};
 use crate::stratum::server::StratumContext;
 use crate::stratum::session::Session;
 use crate::stratum::validate_username;
@@ -191,7 +194,8 @@ pub struct MiningChannels {
 }
 
 impl MiningChannels {
-    /// Validate and install a declared BCH job before acknowledging reward eligibility.
+    /// Validate and install a declared BCH job before acknowledging reward
+    /// eligibility. Its token must carry the channel's own donation.
     pub(crate) async fn install_custom_job(
         &mut self,
         request: &SetCustomMiningJob<'_>,
@@ -212,6 +216,17 @@ impl MiningChannels {
         };
         if current.template().previousblockhash != declared.prepared.template().previousblockhash {
             return custom_job_error(request, ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP);
+        }
+        // The token's terms carry the donation of the identity that
+        // allocated it; the job must pay what this channel's identity chose,
+        // or the node's donation when it chose none.
+        let chosen = channel.session.donation.or(current.donation()).unwrap_or(0);
+        if declared.prepared.donation().unwrap_or(0) != chosen {
+            debug!(
+                "Rejected SV2 custom job: its token donates {} basis points, the channel {chosen}",
+                declared.prepared.donation().unwrap_or(0)
+            );
+            return custom_job_error(request, "donation-mismatch");
         }
         let payout = channel
             .session
@@ -515,10 +530,31 @@ impl MiningChannels {
                 return open_error(request_id, code);
             }
         };
+        if let Some(options) = options {
+            log_unknown_options(options);
+        }
+        let donation = match resolve_miner_donation(options, self.ctx.share_chain, self.ctx.mode) {
+            Ok(donation) => donation,
+            Err(reason) => {
+                debug!("Refusing SV2 channel for {username}: {reason}");
+                return open_error(request_id, "invalid-donation");
+            }
+        };
         if kind == ChannelKind::Extended
             && let Some(prepared) = &current
         {
-            let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
+            // The coinbase this channel mines carries its own donation.
+            let miner_prepared = match prepared.for_miner_donation(donation) {
+                Ok(miner_prepared) => miner_prepared,
+                Err(reason) => {
+                    error!("Refusing SV2 extended channel for {username}: {reason}");
+                    return open_error(request_id, "invalid-donation");
+                }
+            };
+            let (prefix_length, suffix_length) = miner_prepared
+                .as_deref()
+                .unwrap_or(prepared)
+                .coinbase_part_lengths();
             if let Err(reason) = check_extended_job_fits(prefix_length, suffix_length) {
                 error!("Refusing SV2 extended channel for {username}: {reason}");
                 return open_error(request_id, "coinbase-too-large");
@@ -535,6 +571,13 @@ impl MiningChannels {
         session.workername = validated.worker_name.map(|name| name.to_string());
         session.parsed_address = validated.parsed_address;
         session.share_owner = share_owner;
+        session.donation = donation;
+        if let Some(basis_points) = donation {
+            debug!(
+                "SV2 channel for {username} mines with a {} P2Pool donation",
+                donation_percent(basis_points)
+            );
+        }
         session.user_id = Some(user_id);
         session.subscribed = true;
         // Open at or below the share difficulty of the job about to be sent,
@@ -671,6 +714,11 @@ impl MiningChannels {
             .channels
             .get_mut(&channel_id)
             .ok_or("job for an unknown channel")?;
+        // The channel's own donation, when its identity chose one.
+        let miner_prepared = prepared
+            .for_miner_donation(channel.session.donation)
+            .map_err(|error| error.to_string())?;
+        let prepared = miner_prepared.as_deref().unwrap_or(prepared);
         if channel.kind == ChannelKind::Extended {
             let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
             check_extended_job_fits(prefix_length, suffix_length)?;
@@ -1023,25 +1071,6 @@ fn initial_difficulty(
     };
     let difficulty = difficulty.max(minimum_difficulty);
     maximum_difficulty.map_or(difficulty, |maximum| difficulty.min(maximum))
-}
-
-/// Split a `user_identity` into the SV1-style username and its options.
-///
-/// The options start at the first token, after a comma, space, tab or
-/// semicolon (the separators of the SV1 password options), that holds a
-/// `key=value` pair. Everything before that separator is the username, so a
-/// worker name containing a space keeps it, as before options existed. An
-/// identity without such a token is all username, with no options.
-fn split_user_identity(user_identity: &str) -> (&str, Option<&str>) {
-    const SEPARATORS: [char; 4] = [',', ' ', '\t', ';'];
-    for (separator, _) in user_identity.match_indices(SEPARATORS) {
-        let rest = &user_identity[separator + 1..];
-        let token_end = rest.find(SEPARATORS).unwrap_or(rest.len());
-        if rest[..token_end].contains('=') {
-            return (&user_identity[..separator], Some(rest));
-        }
-    }
-    (user_identity, None)
 }
 
 /// enonce2 the pool fixes for a standard channel. Each channel of a

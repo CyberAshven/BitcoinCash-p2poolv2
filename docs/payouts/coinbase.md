@@ -42,12 +42,15 @@ they are paid is on
 
 In order:
 
-1. **Donation.** 1% of the block by default, to the project's fixed key
-   (plan decision 9). An operator can raise, lower or turn it off.
+1. **Donation.** To the project's fixed key (plan decision 9): the
+   donation the finding miner's login chose with `donation=` (0 to 10% in
+   steps of 0.5%, [Miner options](../miner-options.md#donation)), or the
+   node's `donation`, 1% by default, when it chose none. The share header
+   commits to it, and peers rebuild the coinbase from that.
 2. **Operator fee,** if the node sets `fee_address`: `fee`, or 1% when
-   `fee` is not set. Donation and
-   fee are each capped at 10% by the share chain, with no combined cap;
-   the fee is taken from what the donation leaves.
+   `fee` is not set. Donation and fee are each capped at 10% by the share
+   chain, with no combined cap; the fee is taken from what the donation
+   leaves.
 3. **PPLNS payouts,** smallest weight first, ties by locking script, then
    the payout tree output if some payees do not fit (below). A miner is
    paid at the CashAddr in its Stratum username, P2PKH or P2SH

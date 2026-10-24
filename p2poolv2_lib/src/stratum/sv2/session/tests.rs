@@ -579,8 +579,8 @@ fn allocations_are_unpredictable_and_bounded() {
         setup(0, Protocol::JobDeclarationProtocol),
         MESSAGE_TYPE_SETUP_CONNECTION,
     );
-    let first = connection.on_allocate(1).unwrap();
-    let second = connection.on_allocate(2).unwrap();
+    let first = connection.on_allocate(1, "miner").unwrap();
+    let second = connection.on_allocate(2, "miner").unwrap();
     let mut first_payload = response_payload(&first[0]);
     let mut second_payload = response_payload(&second[0]);
     let first = AllocateMiningJobTokenSuccess::from_bytes(&mut first_payload).unwrap();
@@ -590,10 +590,10 @@ fn allocations_are_unpredictable_and_bounded() {
         second.mining_job_token.as_bytes()
     );
     for request_id in 2..MAX_JOB_TOKENS {
-        connection.on_allocate(request_id as u32).unwrap();
+        connection.on_allocate(request_id as u32, "miner").unwrap();
     }
     assert_eq!(
-        connection.on_allocate(99).unwrap_err(),
+        connection.on_allocate(99, "miner").unwrap_err(),
         "job token limit reached"
     );
 }
@@ -614,4 +614,71 @@ fn custom_job(token: &[u8]) -> SetCustomMiningJob<'_> {
         coinbase_tx_locktime: 0,
         merkle_path: binary_sv2::Seq0255::new(vec![]).unwrap(),
     }
+}
+
+/// The donation the terms of a token allocated for `user_identifier` carry.
+fn allocated_donation(user_identifier: &str) -> Result<Option<u16>, String> {
+    let mut connection = Sv2Connection::new(registry());
+    accept_message(
+        &mut connection,
+        setup(0, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    let allocated = connection.on_allocate(1, user_identifier)?;
+    let mut payload = response_payload(&allocated[0]);
+    let allocated = AllocateMiningJobTokenSuccess::from_bytes(&mut payload).unwrap();
+    let payout = bitcoin::Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let commitment = crate::shares::share_commitment::ShareCommitment::from_mining_job_token(
+        allocated.mining_job_token.as_bytes(),
+        payout,
+        p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]),
+    )
+    .unwrap();
+    Ok(commitment.donation)
+}
+
+/// A token's terms carry the `donation=` of the identifier that allocated
+/// it, the node's own without one; Pickaxe's own key is ignored.
+#[test]
+fn a_token_carries_the_identifiers_donation() {
+    assert_eq!(allocated_donation("miner"), Ok(None));
+    assert_eq!(
+        allocated_donation("miner,pickaxe-donation=0,donation=0.5"),
+        Ok(Some(50))
+    );
+    assert_eq!(allocated_donation("miner,donation=10"), Ok(Some(1_000)));
+    assert!(
+        allocated_donation("miner,donation=0.25")
+            .unwrap_err()
+            .contains("steps of 0.5")
+    );
+}
+
+/// A Bitcoin registry builds no Bitcoin Cash share chain, so it cannot
+/// honour a miner's donation.
+#[test]
+fn a_bitcoin_token_refuses_a_donation() {
+    let mut connection = Sv2Connection::new(Arc::new(Mutex::new(JobRegistry::new(
+        PoolTransactionCache::new(),
+        None,
+    ))));
+    accept_message(
+        &mut connection,
+        setup(0, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    assert!(
+        connection
+            .on_allocate(1, "miner,donation=0")
+            .unwrap_err()
+            .contains("cannot honour")
+    );
+    assert!(
+        connection
+            .on_allocate(2, "miner,pickaxe-donation=0")
+            .is_ok()
+    );
 }

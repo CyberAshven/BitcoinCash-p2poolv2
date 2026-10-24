@@ -24,14 +24,16 @@ use crate::shares::share_version::ShareVersion;
 use crate::shares::transactions::coinbase::compute_witness_root;
 use crate::shares::validation::BLOCK_TXS_SIZE_LIMIT;
 use crate::shares::witness_commitment::WitnessCommitment;
+use crate::stratum::parse_password::MINER_DONATION_STEP;
 use crate::stratum::util::{reverse_four_byte_chunks, to_be_hex};
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::{self, Hash};
 use bitcoin::transaction::Version;
 use bitcoin::{Address, BlockHash, CompactTarget, WitnessMerkleNode};
+use p2poolv2_config::MAX_BITCOIN_CASH_CUT;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Hex characters per byte.
 const HEX_PER_BYTE: usize = 2;
@@ -95,6 +97,27 @@ fn split_coinbase2(
     ))
 }
 
+/// Donations a miner may choose: 0 to [`MAX_BITCOIN_CASH_CUT`] in steps of
+/// [`MINER_DONATION_STEP`], 21 of them.
+const MINER_DONATION_CHOICES: usize = (MAX_BITCOIN_CASH_CUT / MINER_DONATION_STEP) as usize + 1;
+
+/// What a Bitcoin Cash P2Pool job needs to be rebuilt at each donation a
+/// miner may choose with `donation=`, and the params rebuilt so far.
+///
+/// Every miner who chooses one donation on one template shares one rebuild,
+/// so a template is rebuilt at most once per choice in use, however many
+/// miners connect. Rebuilt params carry no `MinerDonations` of their own.
+struct MinerDonations {
+    /// The built-in donation address on this network.
+    address: Address,
+    /// Builder inputs the params do not otherwise keep.
+    pool_signature: Vec<u8>,
+    clean_jobs: bool,
+    include_merge_mining: bool,
+    /// Rebuilt params, by basis points divided by [`MINER_DONATION_STEP`].
+    variants: [OnceLock<Arc<PreparedNotifyParams>>; MINER_DONATION_CHOICES],
+}
+
 /// Pre-serialized notify message with placeholders for per-miner fields.
 ///
 /// coinbase1 is static (same for all miners): [height][aux_flags][EXTRANONCE_SEPARATOR]
@@ -109,9 +132,16 @@ fn split_coinbase2(
 /// The commitment encoding is split into a prefix (fields before time) and a
 /// suffix (fields after time), so that per-share hashing inserts a fresh 4-byte
 /// timestamp between them without rebuilding the whole commitment.
+///
+/// A Bitcoin Cash miner who chose their own donation with `donation=` mines
+/// params rebuilt at that donation instead ([`Self::for_miner_donation`]),
+/// shared by every miner who chose the same.
 pub struct PreparedNotifyParams {
     /// Exact difficulty weights at this job's share-chain anchor.
-    pplns_weights: Option<HashMap<Address, u128>>,
+    pplns_weights: Option<Arc<HashMap<Address, u128>>>,
+    /// Set on a Bitcoin Cash P2Pool node's own params: how to rebuild them
+    /// for a miner's own donation ([`Self::for_miner_donation`]).
+    miner_donations: Option<Box<MinerDonations>>,
     /// How those weights become outputs: the chain's split, anchored at
     /// `prev_share_blockhash`.
     payout_split: PayoutSplit,
@@ -170,6 +200,103 @@ impl PreparedNotifyParams {
     /// Template whose share-chain payout snapshot this job commits to.
     pub(crate) fn template(&self) -> &Arc<BlockTemplate> {
         &self.template
+    }
+
+    /// The donation, in basis points, these params pay and commit to.
+    pub(crate) fn donation(&self) -> Option<u16> {
+        self.donation
+    }
+
+    /// The params a miner mines when their login chose a donation of
+    /// `donation` basis points, a step of 0.5% from 0 to 10%.
+    ///
+    /// `Ok(None)` means these params: no choice (`None`), or the donation
+    /// they already pay. Any other choice gets these params rebuilt at that
+    /// donation to the built-in donation address: the same template, share
+    /// chain anchor, PPLNS weights, payout split, operator fee and share
+    /// transactions, so only the donation output, the amounts after it and
+    /// the committed donation differ. The fee is still taken from what the
+    /// donation leaves. The node's own donation never replaces the miner's
+    /// choice.
+    ///
+    /// Only a Bitcoin Cash P2Pool node's params can be rebuilt; others, and
+    /// params that are themselves a rebuild, refuse any other choice.
+    pub(crate) fn for_miner_donation(
+        &self,
+        donation: Option<u16>,
+    ) -> Result<Option<Arc<PreparedNotifyParams>>, WorkError> {
+        let Some(basis_points) = donation else {
+            return Ok(None);
+        };
+        if basis_points > MAX_BITCOIN_CASH_CUT || !basis_points.is_multiple_of(MINER_DONATION_STEP)
+        {
+            return Err(WorkError {
+                message: format!(
+                    "A miner's donation of {basis_points} basis points is not a step of 0.5% from 0 to 10%"
+                ),
+            });
+        }
+        if basis_points == self.donation.unwrap_or(0) {
+            return Ok(None);
+        }
+        let miner_donations = self.miner_donations.as_deref().ok_or_else(|| WorkError {
+            message: "These jobs cannot carry a miner's own donation".to_string(),
+        })?;
+        let slot = &miner_donations.variants[usize::from(basis_points / MINER_DONATION_STEP)];
+        if let Some(rebuilt) = slot.get() {
+            return Ok(Some(Arc::clone(rebuilt)));
+        }
+        // Two miners choosing a new donation at once may both build; the
+        // first stored is the one every miner gets.
+        let rebuilt = Arc::new(self.rebuild_with_donation(miner_donations, basis_points)?);
+        Ok(Some(Arc::clone(slot.get_or_init(|| rebuilt))))
+    }
+
+    /// These params built again with `basis_points` donated to the built-in
+    /// address (none at 0), through the same builder as the node's own.
+    fn rebuild_with_donation(
+        &self,
+        miner_donations: &MinerDonations,
+        basis_points: u16,
+    ) -> Result<PreparedNotifyParams, WorkError> {
+        let weights = self.pplns_weights.as_ref().ok_or_else(|| WorkError {
+            message: "PPLNS snapshot is unavailable for a miner's donation".into(),
+        })?;
+        let (donation_address, donation) = match basis_points {
+            0 => (None, None),
+            basis_points => (Some(miner_donations.address.clone()), Some(basis_points)),
+        };
+        let payouts = build_pplns_outputs(
+            self.template.coinbasevalue,
+            weights,
+            &donation_address,
+            donation,
+            &self.fee_address,
+            self.fee,
+            self.payout_split,
+        )
+        .map_err(|error| WorkError {
+            message: error.to_string(),
+        })?;
+        let mut builder = PreparedNotifyParamsBuilder::new(
+            Arc::clone(&self.template),
+            payouts,
+            &miner_donations.pool_signature,
+            miner_donations.clean_jobs,
+        )
+        .payout_split(self.payout_split)
+        .prev_share_blockhash(self.prev_share_blockhash)
+        .uncles(self.uncles.clone())
+        .bits(self.bits)
+        .donation_address(donation_address)
+        .donation(donation)
+        .fee_address(self.fee_address.clone())
+        .fee(self.fee)
+        .include_merge_mining(miner_donations.include_merge_mining)
+        .share_version(self.share_version)
+        .share_transactions(self.share_transactions.to_vec());
+        builder.pplns_weights = Some(Arc::clone(weights));
+        builder.build()
     }
 
     /// Versioned BCH job terms, preceded by an unpredictable connection nonce.
@@ -347,7 +474,8 @@ fn build_json_template(
 /// params and use the miner address to build share commitment, thus
 /// the coinbase1 for each individual client.
 pub(crate) struct PreparedNotifyParamsBuilder {
-    pplns_weights: Option<HashMap<Address, u128>>,
+    pplns_weights: Option<Arc<HashMap<Address, u128>>>,
+    miner_donation_address: Option<Address>,
     payout_split: PayoutSplit,
     template: Arc<BlockTemplate>,
     payouts: CoinbasePayouts,
@@ -375,6 +503,7 @@ impl PreparedNotifyParamsBuilder {
     ) -> Self {
         Self {
             pplns_weights: None,
+            miner_donation_address: None,
             payout_split: PayoutSplit::EveryPayee,
             template,
             payouts: payouts.into(),
@@ -409,7 +538,7 @@ impl PreparedNotifyParamsBuilder {
     }
 
     pub fn pplns_weights(mut self, weights: Option<HashMap<Address, u128>>) -> Self {
-        self.pplns_weights = weights;
+        self.pplns_weights = weights.map(Arc::new);
         self
     }
 
@@ -464,6 +593,15 @@ impl PreparedNotifyParamsBuilder {
     /// (`check_bch_coinbase_limit`). Only Bitcoin Cash sets this.
     pub fn include_merge_mining(mut self, include_merge_mining: bool) -> Self {
         self.include_merge_mining = include_merge_mining;
+        self
+    }
+
+    /// Let each miner choose their own donation to `donation_address`, the
+    /// network's built-in one (`PreparedNotifyParams::for_miner_donation`).
+    /// Only a Bitcoin Cash P2Pool node sets this, with the PPLNS weights the
+    /// rebuilds split; `None`, the default, refuses a miner's choice.
+    pub fn miner_donations(mut self, donation_address: Option<Address>) -> Self {
+        self.miner_donation_address = donation_address;
         self
     }
 
@@ -576,8 +714,19 @@ impl PreparedNotifyParamsBuilder {
             append_share_version(&mut commitment_suffix, self.share_version);
         }
 
+        let miner_donations = self.miner_donation_address.map(|address| {
+            Box::new(MinerDonations {
+                address,
+                pool_signature: self.pool_signature,
+                clean_jobs: self.clean_jobs,
+                include_merge_mining: self.include_merge_mining,
+                variants: std::array::from_fn(|_| OnceLock::new()),
+            })
+        });
+
         Ok(PreparedNotifyParams {
             pplns_weights: self.pplns_weights,
+            miner_donations,
             payout_split: self.payout_split,
             json_template,
             job_id_offset,
@@ -802,3 +951,6 @@ pub(crate) fn build_notify_from_prepared(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod donation_tests;

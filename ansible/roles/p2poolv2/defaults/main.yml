@@ -76,8 +76,10 @@ p2poolv2_bootstrap_address: ""
 # p2poolv2_solo_address: ""
 
 # Every Bitcoin Cash node donates 100 basis points (1%) of each block it
-# finds to the project address unless donation is set; 0 opts out. Setting
-# donation_address is optional, and it must be the project address.
+# finds to the project address unless donation is set; 0 opts out. A
+# miner's login may choose its own with donation=<percent>, which this
+# setting never overrides. Setting donation_address is optional, and it must
+# be the project address.
 # p2poolv2_donation: 100
 # p2poolv2_donation_address: "bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k"
 # A public pool's own cut, in basis points, taken after the donation: 100

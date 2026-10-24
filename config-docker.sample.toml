@@ -77,7 +77,9 @@ bootstrap_address = "bchreg:qqzldt8u5mafprrw6uljppyqg30uhl97ey890dqm34"
 
 # Every Bitcoin Cash node donates 1% (100 basis points) of each block it
 # finds to bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k (the same key
-# under bchtest: and bchreg:). Set donation to change it, 0 to opt out.
+# under bchtest: and bchreg:). Set donation to change it, 0 to opt out. A
+# miner's login may choose its own with donation=<percent>, which this
+# setting never overrides (docs/miner-options.md).
 # donation = 100
 # A public pool's own cut, after the donation: 100 basis points (1%) when
 # fee_address is set without fee. The donation and the fee may each be at

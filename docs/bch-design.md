@@ -98,6 +98,28 @@ without panicking.
 Bitcoin behavior is unchanged: no default donation, any donation address, and
 a full donation (10,000) still skips miner address validation.
 
+### Each miner's own donation, decided 2026-10-24
+
+Decided by the owner: each miner on any P2Pool node chooses their own
+P2Pool donation through their login, `donation=<percent>` after a comma in
+the SV1 username or SV2 identity (or in the SV1 password), 0 to 10 in steps
+of 0.5. The key is agreed with Pickaxe, so one login works at both kinds of
+pool; Pickaxe's own donation is a separate key that P2Pool ignores, as it
+ignores every key it does not read. Bad values of the keys P2Pool reads are
+refused at login. Without the option the node's `donation` applies.
+
+This is node behavior, not a share-chain rule: the share header already
+carries each share's donation, and peers already check it against the 10%
+cap and the built-in key, as above, whatever node built it. A Bitcoin Cash
+P2Pool node rebuilds its prepared job for each donation miners choose (at
+most 21, each once per template, shared by every miner choosing it) and
+sends each miner the job at their own donation; the node's `donation`
+cannot override the choice. The fee is still taken from what the donation
+leaves. A Job Declaration token carries the donation of its
+`user_identifier`, and the channel mining it must have chosen the same.
+Hydrapool mode and Bitcoin nodes build no such jobs and refuse the option.
+Miner-facing rules are in [miner-options.md](miner-options.md#donation).
+
 ## Checklist
 
 - **Segwit removal.** On the Bitcoin Cash paths: a template that still

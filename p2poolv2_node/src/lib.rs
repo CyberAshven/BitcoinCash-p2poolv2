@@ -302,12 +302,18 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             "Bitcoin Cash templates, share owners, and {:?} share chain genesis are selected for {:?}.",
             stratum_config.bch_share_chain, stratum_config.bitcoin_cash_network
         );
+        // Only a P2Pool node builds each miner's jobs with their own donation.
+        let miner_choice = if stratum_config.mode == PoolMode::P2poolv2 {
+            " A miner's login may choose its own with donation=<percent>."
+        } else {
+            ""
+        };
         match (stratum_config.donation, stratum_config.bitcoin_cash_network) {
             (Some(basis_points), Some(network)) => info!(
-                "Donating {basis_points} basis points of each block this node finds to {}. Set donation = 0 to opt out.",
+                "Donating {basis_points} basis points of each block this node finds to {}. Set donation = 0 to opt out.{miner_choice}",
                 bitcoin_cash_donation_cashaddr(network)
             ),
-            _ => info!("Bitcoin Cash donation is off (donation = 0)."),
+            _ => info!("Bitcoin Cash donation is off (donation = 0).{miner_choice}"),
         }
     }
 

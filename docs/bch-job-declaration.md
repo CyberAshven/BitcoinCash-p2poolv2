@@ -17,6 +17,14 @@ donation/fee cuts, rounding and script ordering as peer payout validation.
 `PreparedNotifyParams::declared_outputs` and `build_pplns_outputs` implement
 that calculation. The declarator needs the local share-chain snapshot.
 
+The donation in those cuts is the one `AllocateMiningJobToken.user_identifier`
+chooses with `donation=<percent>` after a comma, as a mining channel's
+identity does ([Miner options](miner-options.md#donation)), or the node's
+own without the option. The mining channel that installs the job must have
+chosen the same donation, or it answers `donation-mismatch`. The protocol has
+no error reply to allocation, so a bad `donation=` there closes the
+connection, with the reason in the node's log.
+
 The opaque token also exposes the public commitment terms. Its version-2
 layout is: version byte (2), 32 random bytes, previous share hash,
 CompactSize uncle count and hashes, compact share bits, share time, optional

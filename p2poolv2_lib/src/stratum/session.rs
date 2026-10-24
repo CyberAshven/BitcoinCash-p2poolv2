@@ -42,6 +42,9 @@ pub struct Session<D: DifficultyAdjusterTrait> {
     /// Share owner committed into the work notify. Taproot for Bitcoin, a
     /// 20-byte P2PKH hash for Bitcoin Cash. Set once at authorization.
     pub share_owner: Option<ShareOwner>,
+    /// Bitcoin Cash donation in basis points, resolved from the miner login.
+    /// `Some(0)` is an explicit opt-out; Bitcoin leaves this unset.
+    pub donation: Option<u16>,
     /// Worker name for the mining device
     pub workername: Option<String>,
     /// Optional password of the miner, supplied by the miner, we just store it in session
@@ -88,6 +91,7 @@ impl<D: DifficultyAdjusterTrait> Session<D> {
             parsed_address: None,
             miner_address: None,
             share_owner: None,
+            donation: None,
             password: None,
             user_id: None,
             worker_id: None,
@@ -167,6 +171,7 @@ mod tests {
             )
         );
         assert!(!session.subscribed);
+        assert_eq!(session.donation, None);
     }
 
     #[test]

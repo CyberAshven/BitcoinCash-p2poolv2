@@ -53,7 +53,7 @@ pub const BITCOIN_CASH_DONATION_PUBKEY_HASH: [u8; 20] = [
 
 /// Donation a Bitcoin Cash node makes when `donation` is not configured:
 /// 100 basis points, 1%. An operator may raise it, lower it, or set 0 to opt
-/// out.
+/// out. Each miner may still choose their own at login (`donation=`).
 pub const DEFAULT_BITCOIN_CASH_DONATION: u16 = 100;
 
 /// Operator fee a Bitcoin Cash node takes when `fee_address` is set and `fee`
@@ -363,8 +363,10 @@ pub struct StratumConfig<State = Raw> {
     /// The donation basis points.
     ///
     /// In the Raw state this is what the operator wrote. After parsing it is
-    /// the donation actually paid: on Bitcoin Cash an unset value becomes
+    /// the node's donation: on Bitcoin Cash an unset value becomes
     /// [`DEFAULT_BITCOIN_CASH_DONATION`], and 0 becomes `None` (no donation).
+    /// On a Bitcoin Cash P2Pool node it is the default for miners whose login
+    /// does not choose their own `donation=`, never an override of one.
     pub donation: Option<u16>,
     /// The fee address (string in Raw state). A pool operator's own cut.
     pub fee_address: Option<String>,

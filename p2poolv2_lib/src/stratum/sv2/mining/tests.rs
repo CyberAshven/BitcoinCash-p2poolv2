@@ -2076,3 +2076,167 @@ async fn an_sv1_notify_carries_a_coinbase_an_extended_job_cannot() {
     let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
     assert!(notify.len() > 2 * (prefix_length + suffix_length));
 }
+
+/// Open a regtest extended channel for `identity_options` after the payout
+/// address, with `current` as its first job's params.
+async fn open_with_donation(
+    identity_options: &str,
+    current: Option<Arc<PreparedNotifyParams>>,
+) -> (MiningChannels, Vec<Vec<u8>>, [tempfile::TempDir; 2]) {
+    let (ctx, _emissions, dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    );
+    let identity = format!(
+        "{}.rig1{identity_options}",
+        encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap()
+    );
+    let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
+        request_id: 1,
+        user_identity: identity.as_str().try_into().unwrap(),
+        nominal_hash_rate: 1.0,
+        max_target: U256::new(&[0xff; 32]).unwrap(),
+        min_extranonce_size: 8,
+    })
+    .unwrap();
+    let frames = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            current,
+        )
+        .await
+        .unwrap();
+    (channels, frames, dirs)
+}
+
+/// The donation committed by the newest job of channel 1.
+fn newest_job_donation(channels: &MiningChannels) -> Option<u16> {
+    let job = channels.channels[&1].jobs.values().next_back().unwrap();
+    channels
+        .ctx
+        .tracker_handle
+        .get_job(job.tracker_job_id)
+        .unwrap()
+        .share_commitment
+        .unwrap()
+        .donation
+}
+
+/// The identity's `donation=` is the channel's, on its first job and on every
+/// template after; Pickaxe's own key beside it is ignored.
+#[tokio::test]
+async fn an_identity_donation_is_the_channels_on_every_job() {
+    let node = crate::test_utils::test_bch_prepared_with_cuts(Some(100), None, None);
+    let (mut channels, frames, _dirs) =
+        open_with_donation(",pickaxe-donation=0,donation=0.5", Some(Arc::clone(&node))).await;
+
+    assert_eq!(
+        frame_type(&frames[0]),
+        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS
+    );
+    assert_eq!(channels.channels[&1].session.donation, Some(50));
+    assert_eq!(
+        channels.channels[&1].session.username.as_deref(),
+        Some(
+            format!(
+                "{}.rig1",
+                encode_payout_address(
+                    &Address::p2pkh(
+                        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+                        Network::Regtest
+                    ),
+                    BchShareNetwork::Regtest
+                )
+                .unwrap()
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(newest_job_donation(&channels), Some(50));
+    channels.on_template(&node);
+    assert_eq!(newest_job_donation(&channels), Some(50));
+}
+
+/// Without `donation=` the channel mines the node's own donation.
+#[tokio::test]
+async fn an_identity_without_donation_mines_the_nodes() {
+    let node = crate::test_utils::test_bch_prepared_with_cuts(Some(100), None, None);
+    let (channels, _frames, _dirs) =
+        open_with_donation(",pickaxe-donation=0", Some(Arc::clone(&node))).await;
+    assert_eq!(channels.channels[&1].session.donation, None);
+    assert_eq!(newest_job_donation(&channels), Some(100));
+}
+
+#[tokio::test]
+async fn a_bad_identity_donation_refuses_the_channel() {
+    for options in [
+        ",donation=0.25",
+        ",donation=10.5",
+        ",donation=",
+        ",donation=1,donation=2",
+    ] {
+        let (channels, frames, _dirs) = open_with_donation(options, None).await;
+        let mut response_payload = payload(&frames[0]);
+        let error = OpenMiningChannelError::from_bytes(&mut response_payload).unwrap();
+        assert_eq!(
+            error.error_code.as_utf8_or_hex(),
+            "invalid-donation",
+            "{options}"
+        );
+        assert!(channels.channels.is_empty());
+    }
+}
+
+/// A declared job's token carries the donation of the identity that
+/// allocated it; a channel that chose another donation cannot mine it, so a
+/// job declarator cannot raise a miner's choice.
+#[tokio::test]
+async fn a_custom_job_must_carry_the_channels_donation() {
+    let node = crate::test_utils::test_bch_prepared_with_cuts(Some(100), None, None);
+    let (mut channels, _frames, _dirs) = open_with_donation(",donation=0", None).await;
+
+    let token = node
+        .mining_job_token([1; 32], node.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) = test_bch_custom_job(
+        Arc::clone(&node),
+        token,
+        vec![],
+        false,
+        node.template().coinbasevalue,
+    );
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let frames = channels
+        .install_custom_job(&request, declared, Some(Arc::clone(&node)))
+        .await
+        .unwrap();
+    let mut response_payload = payload(&frames[0]);
+    let error = SetCustomMiningJobError::from_bytes(&mut response_payload).unwrap();
+    assert_eq!(error.error_code.as_utf8_or_hex(), "donation-mismatch");
+    assert!(channels.channels[&1].jobs.is_empty());
+
+    let opted_out = node.for_miner_donation(Some(0)).unwrap().unwrap();
+    let token = opted_out
+        .mining_job_token([2; 32], opted_out.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) = test_bch_custom_job(
+        Arc::clone(&opted_out),
+        token,
+        vec![],
+        false,
+        opted_out.template().coinbasevalue,
+    );
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let frames = channels
+        .install_custom_job(&request, declared, Some(node))
+        .await
+        .unwrap();
+    assert_eq!(
+        frame_type(&frames[0]),
+        MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS
+    );
+    assert_eq!(newest_job_donation(&channels), None);
+}

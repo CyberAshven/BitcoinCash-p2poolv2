@@ -883,6 +883,20 @@ move most BCH hashrate to the share chain.
       still carry any valid transaction. `bch-trade --fee-rate` sets the bid.
       A consensus fee can follow if units ever carry value (partial rights).
 
+16. **Each miner's own donation (2026-10-24, node policy).** Each miner on
+    any P2Pool node chooses their own P2Pool donation through their login:
+    `donation=<percent>`, 0 to 10 in steps of 0.5, after a comma in the SV1
+    username or SV2 identity, as Pickaxe writes its logins, or in the SV1
+    password. P2Pool's donation is independent of Pickaxe's (two
+    independent projects); keys P2Pool does not read, such as
+    `pickaxe-donation=`, are ignored, and only bad values of its own keys are
+    refused. Without the option the node's `donation` (decision 9) applies,
+    and the node cannot override a miner's choice. The fee is still taken
+    after the donation. No share-chain rule changes: the share header
+    already carries each share's donation, checked against its 10% cap and
+    the built-in key. Details in `docs/bch-design.md` and
+    `docs/miner-options.md`.
+
 ## BCH porting checklist
 
 Found by reading P2Poolv2's code and docs; each item needs a short design

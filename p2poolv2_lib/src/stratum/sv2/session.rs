@@ -10,6 +10,9 @@
 
 use super::sort_ctor;
 use crate::shares::merge_mining::MergeMiningCommitment;
+use crate::stratum::parse_password::{
+    log_unknown_options, parse_miner_donation, split_user_identity,
+};
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use binary_sv2::{B064K, B0255, Deserialize, Seq064K, Str0255};
@@ -295,7 +298,10 @@ impl Sv2Connection {
             MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN => {
                 let request = AllocateMiningJobToken::from_bytes(payload)
                     .map_err(|error| error.to_string())?;
-                self.on_allocate(request.request_id)
+                self.on_allocate(
+                    request.request_id,
+                    &request.user_identifier.as_utf8_or_hex(),
+                )
             }
             MESSAGE_TYPE_DECLARE_MINING_JOB => {
                 let request =
@@ -387,19 +393,46 @@ impl Sv2Connection {
         }
     }
 
-    fn on_allocate(&mut self, request_id: u32) -> Result<Vec<Vec<u8>>, String> {
+    /// Allocate a token whose terms carry the donation `user_identifier`
+    /// chooses with `donation=`, as a mining channel's identity does, or the
+    /// node's own without one. The channel that later mines the job must
+    /// choose the same donation (`MiningChannels::install_custom_job`).
+    ///
+    /// The Job Declaration Protocol has no error reply to this message, so a
+    /// bad `donation=` value, or one on a node without a Bitcoin Cash share
+    /// chain, closes the connection with the reason in the node's log.
+    fn on_allocate(
+        &mut self,
+        request_id: u32,
+        user_identifier: &str,
+    ) -> Result<Vec<Vec<u8>>, String> {
         let mode = self.mode.ok_or("job token requested before setup")?;
+        let (_, options) = split_user_identity(user_identifier);
+        if let Some(options) = options {
+            log_unknown_options(options);
+        }
+        let donation = parse_miner_donation(options)?;
         let mut registry = self.registry.lock().expect("job registry lock");
         registry.expire_tokens();
         if registry.tokens.len() >= MAX_JOB_TOKENS {
             return Err("job token limit reached".into());
         }
-        let prepared = registry
+        if donation.is_some() && registry.merge_mining.is_none() {
+            return Err("donation= is a Bitcoin Cash P2Pool option this node cannot honour".into());
+        }
+        let mut prepared = registry
             .cache
             .prepared
             .read()
             .expect("pool prepared template lock")
             .clone();
+        if let Some(template) = &prepared
+            && let Some(miner_prepared) = template
+                .for_miner_donation(donation)
+                .map_err(|error| error.to_string())?
+        {
+            prepared = Some(miner_prepared);
+        }
         let (token, coinbase_outputs) = if registry.merge_mining.is_some() {
             let prepared = prepared.as_ref().ok_or("template-unavailable")?;
             // The payout scripts of a declared job carrying the exact empty

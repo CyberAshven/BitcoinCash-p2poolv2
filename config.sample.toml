@@ -86,9 +86,12 @@ bootstrap_address = "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2"
 # the P2Poolv2 Bitcoin Cash address
 # bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k (the same key under
 # bchtest: and bchreg:). Set donation to raise or lower it, or to 0 to opt
-# out. donation_address may be left out; if set it must be that same
-# address, because the share chain rejects a Bitcoin Cash donation paid
-# anywhere else.
+# out. It is the default for miners whose login does not choose their own:
+# each miner may with donation=<percent>, 0 to 10 in steps of 0.5, in the
+# SV1 username or password or the SV2 identity (docs/miner-options.md), and
+# this setting never overrides that choice. donation_address may be left
+# out; if set it must be that same address, because the share chain rejects
+# a Bitcoin Cash donation paid anywhere else.
 # donation = 100
 # A public pool operator's own cut, taken after the donation. The donation
 # and the fee may each be at most 1000 basis points (10%); peers reject shares

@@ -144,9 +144,25 @@ fn build_prepared_notify(
     .fee_address(context.config.fee_address().cloned())
     .fee(context.config.fee)
     .include_merge_mining(context.config.chain == crate::config::Chain::BitcoinCash)
+    .miner_donations(miner_donation_address(&context.config))
     .share_version(share_version)
     .share_transactions(share_transactions)
     .build()
+}
+
+/// The address a miner's own `donation=` choice pays: the network's built-in
+/// donation address on a Bitcoin Cash node in P2Pool mode, which builds every
+/// miner's jobs and shares itself. `None` elsewhere: a Bitcoin node or
+/// Hydrapool mode mines with the node's donation and refuses the option.
+fn miner_donation_address(
+    config: &StratumConfig<crate::config::Parsed>,
+) -> Option<bitcoin::Address> {
+    match (config.chain, config.mode, config.bitcoin_cash_network) {
+        (crate::config::Chain::BitcoinCash, crate::config::PoolMode::P2poolv2, Some(network)) => {
+            Some(crate::config::bitcoin_cash_donation_address(network))
+        }
+        _ => None,
+    }
 }
 
 /// NotifyCmd is used to send a new block template to the notifier.
