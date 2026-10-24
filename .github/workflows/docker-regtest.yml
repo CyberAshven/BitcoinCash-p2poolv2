@@ -65,7 +65,7 @@ jobs:
       - name: Check the blocks came from P2Poolv2
         working-directory: docker
         run: |
-          docker compose logs p2poolv2 | grep "Block submitted successfully"
+          docker compose logs p2poolv2 | grep -E 'Node [^ ]+ accepted block '
           # P2Poolv2's coinbase pays the 1% donation, here under bchreg:.
           docker compose exec -T bchn sh -c 'bcli getblock "$(bcli getbestblockhash)" 2' \
             | grep bchreg:qze95tc2dqrnltvxfa5yhunwx5952f34fvsm6us7sv
