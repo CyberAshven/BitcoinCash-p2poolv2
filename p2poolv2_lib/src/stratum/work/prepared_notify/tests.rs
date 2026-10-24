@@ -213,6 +213,36 @@ async fn a_job_without_share_transactions_commits_to_the_empty_root() {
     );
 }
 
+/// The lengths a channel checks before it builds a job are the lengths of
+/// every miner's job: only the timestamp and commitment differ, not in size.
+#[tokio::test]
+async fn coinbase_part_lengths_are_the_lengths_of_each_miners_job() {
+    let prepared = test_bch_prepared();
+    let tracker = start_tracker_actor();
+
+    let jobs: Vec<JobDetails> = (1..=3u8)
+        .map(|byte| {
+            let payout = Address::p2pkh(
+                bitcoin::PubkeyHash::from_byte_array([byte; 20]),
+                Network::Regtest,
+            );
+            let (job_id, _) = insert_miner_job(
+                &prepared,
+                Some(&payout),
+                Some(ShareOwner::CashP2pkh([byte; 20])),
+                &tracker,
+            );
+            tracker.get_job(job_id).unwrap()
+        })
+        .collect();
+
+    let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
+    for job in jobs {
+        assert_eq!(job.coinbase1.len() / 2, prefix_length);
+        assert_eq!(job.coinbase2.len() / 2, suffix_length);
+    }
+}
+
 #[test]
 fn test_prepare_notify_params_produces_valid_json() {
     let template = Arc::new(test_template());

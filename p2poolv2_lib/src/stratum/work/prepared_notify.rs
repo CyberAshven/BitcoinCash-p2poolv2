@@ -251,6 +251,22 @@ impl PreparedNotifyParams {
     pub fn share_transactions(&self) -> &[ShareTransaction] {
         &self.share_transactions
     }
+
+    /// Serialized coinbase bytes before and after the miner's extranonce.
+    ///
+    /// The timestamp and commitment vary per miner, but their encoded lengths
+    /// do not. Channels can check their wire limits before allocating a job
+    /// or changing session state.
+    pub(crate) fn coinbase_part_lengths(&self) -> (usize, usize) {
+        (
+            self.coinbase1.len() / HEX_PER_BYTE,
+            (NSECS_PUSH_HEX_LENGTH
+                + self.coinbase2_middle.len()
+                + COMMITMENT_HASH_HEX_LENGTH
+                + self.coinbase2_locktime.len())
+                / HEX_PER_BYTE,
+        )
+    }
 }
 
 /// Serialize the merkle branches array as a JSON array string.

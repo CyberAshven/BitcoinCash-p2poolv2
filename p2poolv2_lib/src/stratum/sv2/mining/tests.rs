@@ -5,12 +5,14 @@ use crate::shares::coinbase_proof::CoinbaseProof;
 use crate::stratum::block_submit::FoundBlockSubmitter;
 use crate::stratum::sv2::session::encode_message;
 use crate::stratum::work::block_template::BlockTemplate;
-use crate::stratum::work::prepared_notify::PreparedNotifyParamsBuilder;
+use crate::stratum::work::prepared_notify::{
+    PreparedNotifyParamsBuilder, build_notify_from_prepared,
+};
 use crate::stratum::work::tracker::start_tracker_actor;
 use crate::test_utils::{make_test_share_address, setup_test_chain_store_handle};
 use crate::test_utils::{
     test_bch_custom_job, test_bch_prepared, test_bch_prepared_for_template,
-    test_bch_solve_custom_job, test_bch_stratum_context,
+    test_bch_prepared_with_payee_count, test_bch_solve_custom_job, test_bch_stratum_context,
 };
 use bitcoin::consensus::deserialize;
 use bitcoin::hashes::sha256d;
@@ -1934,4 +1936,143 @@ fn a_coinbase_past_the_extended_job_field_limit_is_refused() {
     assert!(error.contains("65535"), "{error}");
     assert!(error.contains("standard channel"), "{error}");
     assert!(check_extended_job_fits(65_536, 100).is_err());
+}
+
+/// The identity of a Bitcoin Cash miner paid at a P2PKH address.
+fn bch_identity() -> String {
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    );
+    encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap()
+}
+
+fn open_extended_request(identity: &str) -> Vec<u8> {
+    binary_sv2::to_bytes(OpenExtendedMiningChannel {
+        request_id: 1,
+        user_identity: identity.try_into().unwrap(),
+        nominal_hash_rate: 1.0e15,
+        max_target: U256::new(&[0xff; 32]).unwrap(),
+        min_extranonce_size: 8,
+    })
+    .unwrap()
+}
+
+/// 2,000 payees paid directly make a coinbase of about 68 KB, past the
+/// 65,535 bytes an extended job carries after the extranonce: the extended
+/// channel is refused with a clear error instead of a truncated job.
+#[tokio::test]
+async fn an_extended_channel_is_refused_when_the_coinbase_does_not_fit_its_job() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let prepared = test_bch_prepared_with_payee_count(2_000);
+    let (_, suffix_length) = prepared.coinbase_part_lengths();
+    let mut open = open_extended_request(&bch_identity());
+
+    let refused = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(prepared),
+        )
+        .await
+        .unwrap();
+
+    assert!(suffix_length > 65_535);
+    assert_eq!(refused.len(), 1);
+    assert_eq!(
+        frame_type(&refused[0]),
+        MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR
+    );
+    let mut refused_payload = payload(&refused[0]);
+    let error = OpenMiningChannelError::from_bytes(&mut refused_payload).unwrap();
+    assert_eq!(error.error_code.as_utf8_or_hex(), "coinbase-too-large");
+    assert!(channels.channels.is_empty());
+}
+
+/// A standard channel is header-only, so it mines the same coinbase.
+#[tokio::test]
+async fn a_standard_channel_mines_a_coinbase_an_extended_job_cannot_carry() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let identity = bch_identity();
+    let mut open = binary_sv2::to_bytes(OpenStandardMiningChannel {
+        request_id: 1,
+        user_identity: identity.as_str().try_into().unwrap(),
+        nominal_hash_rate: 1.0e15,
+        max_target: U256::new(&[0xff; 32]).unwrap(),
+    })
+    .unwrap();
+
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared_with_payee_count(2_000)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        frame_type(&opened[0]),
+        MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS
+    );
+    assert!(
+        opened
+            .iter()
+            .any(|frame| frame_type(frame) == MESSAGE_TYPE_NEW_MINING_JOB)
+    );
+}
+
+/// An open extended channel gets no job for a template whose coinbase it
+/// cannot carry, keeps its state, and gets the next template that fits.
+#[tokio::test]
+async fn an_open_extended_channel_skips_a_template_it_cannot_carry() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let mut open = open_extended_request(&bch_identity());
+    channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    let jobs_before = channels.channels[&1].jobs.len();
+
+    let too_large = channels.on_template(&test_bch_prepared_with_payee_count(2_000));
+    let jobs_after_refusal = channels.channels[&1].jobs.len();
+    let fitting = channels.on_template(&test_bch_prepared());
+
+    assert!(too_large.is_empty());
+    assert_eq!(jobs_after_refusal, jobs_before);
+    assert!(
+        fitting
+            .iter()
+            .any(|frame| frame_type(frame) == MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
+    );
+}
+
+/// Stratum V1 has no field limit: a notify carries the whole coinbase, here
+/// over twice 65,535 hex characters of it.
+#[tokio::test]
+async fn an_sv1_notify_carries_a_coinbase_an_extended_job_cannot() {
+    let prepared = test_bch_prepared_with_payee_count(2_000);
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    );
+    let tracker = start_tracker_actor();
+
+    let notify = build_notify_from_prepared(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        &tracker,
+    )
+    .unwrap();
+
+    let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
+    assert!(notify.len() > 2 * (prefix_length + suffix_length));
 }

@@ -565,6 +565,38 @@ pub fn test_bch_prepared_for_template(template: BlockTemplate) -> Arc<PreparedNo
         bitcoin::Network::Regtest,
     );
     let weights = HashMap::from([(first, 1), (second, 3)]);
+    test_bch_prepared_with_weights(template, weights)
+}
+
+/// A BCH payout snapshot with `payee_count` distinct, equally weighted P2PKH payees.
+///
+/// Exercises full coinbases through the same hybrid split and job builder as
+/// smaller fixtures, including channel transport limits below BCH's limit.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_bch_prepared_with_payee_count(payee_count: u32) -> Arc<PreparedNotifyParams> {
+    let template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    let mut weights = HashMap::with_capacity(payee_count as usize);
+    for payee_index in 0..payee_count {
+        let mut key_hash = [0; 20];
+        key_hash[..4].copy_from_slice(&payee_index.to_le_bytes());
+        let address = Address::p2pkh(
+            bitcoin::PubkeyHash::from_byte_array(key_hash),
+            bitcoin::Network::Regtest,
+        );
+        weights.insert(address, 1);
+    }
+    test_bch_prepared_with_weights(template, weights)
+}
+
+/// Build a reusable BCH payout snapshot for the supplied template and weights.
+#[cfg(any(test, feature = "test-utils"))]
+fn test_bch_prepared_with_weights(
+    template: BlockTemplate,
+    weights: HashMap<Address, u128>,
+) -> Arc<PreparedNotifyParams> {
     let anchor = BlockHash::from_byte_array([0x33; 32]);
     let payout_split = PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, false);
     let outputs = build_pplns_outputs(

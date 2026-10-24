@@ -429,6 +429,10 @@ impl MiningChannels {
     }
 
     /// Send every open channel a job for `prepared`.
+    ///
+    /// A coinbase that exceeds an extended channel's wire fields is logged
+    /// and skipped only for that channel. Standard channels still receive
+    /// their header jobs, and a later template can fit the extended channel.
     pub fn on_template(&mut self, prepared: &PreparedNotifyParams) -> Vec<Vec<u8>> {
         let channel_ids: Vec<u32> = self.channels.keys().copied().collect();
         let mut frames = Vec::with_capacity(channel_ids.len() * 2);
@@ -511,6 +515,15 @@ impl MiningChannels {
                 return open_error(request_id, code);
             }
         };
+        if kind == ChannelKind::Extended
+            && let Some(prepared) = &current
+        {
+            let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
+            if let Err(reason) = check_extended_job_fits(prefix_length, suffix_length) {
+                error!("Refusing SV2 extended channel for {username}: {reason}");
+                return open_error(request_id, "coinbase-too-large");
+            }
+        }
         let user_id = self
             .ctx
             .chain_store_handle
@@ -645,6 +658,8 @@ impl MiningChannels {
     /// When the channel's difficulty is above the job's share difficulty, it
     /// comes down to it first and a `SetTarget` precedes the job, so the
     /// device throws away no hash that is a share-chain share.
+    /// Extended coinbase limits are checked before the channel or tracker
+    /// changes; an unrepresentable job leaves the channel ready to retry.
     fn job_frames(
         &mut self,
         channel_id: u32,
@@ -656,6 +671,10 @@ impl MiningChannels {
             .channels
             .get_mut(&channel_id)
             .ok_or("job for an unknown channel")?;
+        if channel.kind == ChannelKind::Extended {
+            let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
+            check_extended_job_fits(prefix_length, suffix_length)?;
+        }
         let mut frames = Vec::with_capacity(3);
         if let Some(lowered) = channel
             .session
@@ -692,9 +711,6 @@ impl MiningChannels {
             .tracker_handle
             .get_job(tracker_job_id)
             .ok_or("tracker lost a job it just inserted")?;
-        if matches!(channel.kind, ChannelKind::Extended) {
-            check_extended_job_fits(job.coinbase1.len() / 2, job.coinbase2.len() / 2)?;
-        }
         let template = &job.blocktemplate;
         let prev_hash =
             BlockHash::from_str(&template.previousblockhash).map_err(|error| error.to_string())?;

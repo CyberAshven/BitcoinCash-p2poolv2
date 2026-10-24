@@ -45,11 +45,30 @@ a padding output and the share commitment, and every job commits to the
 current share chain tip
 (see [Share commitments](sharechain/share-commitments.md)). Bitcoin Cash
 limits a coinbase scriptSig to 100 bytes (`MAX_COINBASE_SCRIPTSIG_SIZE` in
-BCHN's `src/consensus/consensus.h`). Today the builder also holds every
-coinbase to an 11-payout, 784-byte budget and refuses a larger one; that
-budget is being redesigned (see [Coinbase payouts](payouts/coinbase.md)).
-Every connected Stratum V1 miner gets the job with `mining.notify`; Stratum
-V2 channels get the equivalent messages.
+BCHN's `src/consensus/consensus.h`). The coinbase pays every miner directly
+within 1,000,000 bytes, or 3,072 on a job that merge-mines tokens, and the
+rest through a payout tree ([Coinbase payouts](payouts/coinbase.md)).
+Every connected Stratum V1 miner gets the job with `mining.notify`, which
+carries the whole coinbase; Stratum V2 channels get the equivalent messages.
+An [SV2 extended job](https://stratumprotocol.org/specification/05-mining-protocol/)
+carries its coinbase prefix and suffix as separate `B0_64K` fields, each
+limited to 65,535 bytes. The suffix usually binds first, at about 1,919
+P2PKH payouts; the exact count depends on the other outputs and scripts.
+Opening an extended channel whose first job exceeds either field returns
+`OpenMiningChannelError` with `coinbase-too-large`. On a later template,
+the node logs the channel and both lengths and sends that channel no job;
+it can resume when a later coinbase fits. Neither path truncates the
+coinbase or closes other channels on the connection. Standard channels
+receive a merkle root calculated from the complete coinbase and keep
+working. These are transport limits, not P2Pool payout limits. SV1 has no
+equivalent field bound: it sends the whole coinbase, so large jobs cost
+more bandwidth and the miner's firmware must handle them.
+
+[Job Declaration](https://stratumprotocol.org/specification/06-job-declaration-protocol/)
+also carries each coinbase part as `B0_64K`; oversized fields cannot be
+declared. If a found block's full coinbase exceeds Template Distribution's
+`SubmitSolution` field, the node submits the complete block to BCHN over
+RPC instead.
 
 **Vardiff.** Adjusts each miner's difficulty so that it submits about one
 share every 3.33 seconds (`TARGET_DRR` 0.3 in
