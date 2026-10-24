@@ -61,6 +61,21 @@ Alpha. The pool runs on chipnet; mainnet has not started. Releases are on
 the [releases page](https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases)
 and the Docker image is `ghcr.io/cyberashven/bitcoincash-p2poolv2`.
 
+## Sponsor
+
+P2Poolv2 for Bitcoin Cash is free, open-source software. Donations keep its
+development going. Send BCH, or CashTokens, to the project's donation
+address, the one the pool's own donation pays in each block it finds (1% by
+default; see [Miner options](miner-options.md#donation) to choose your own):
+
+- BCH: `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`
+- CashTokens-aware, the same key:
+  `bitcoincash:zze95tc2dqrnltvxfa5yhunwx5952f34fvflmylut9`
+
+The landing page's
+[donate section](https://cyberashven.github.io/BitcoinCash-p2poolv2/#donate)
+shows both with QR codes and Open in wallet links.
+
 ## License
 
 The fork is distributed under AGPL-3.0 (plan decision 13). Files from

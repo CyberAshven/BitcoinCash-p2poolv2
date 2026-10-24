@@ -9,3 +9,8 @@ p2poolv2_lib/src/shares/genesis/*.dat binary
 # the shebang lines and BCHN config values break.
 docker/bchn/** text eol=lf
 docker/regtest/** text eol=lf
+
+# The donation QR codes: written by `cargo run -p p2poolv2_tools --bin
+# donate_qr` and compared byte for byte by its tests, so LF on every
+# checkout, Windows included.
+website/donate-*.svg text eol=lf

@@ -12,6 +12,7 @@
 pub mod ansi;
 pub mod cargo_build;
 pub mod diagnose;
+pub mod donate_qr;
 pub mod env_vars;
 pub mod error;
 pub mod jmeter;

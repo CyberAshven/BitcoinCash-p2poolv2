@@ -1,6 +1,7 @@
 image:https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/rust.yml/badge.svg?branch=alpha[Rust CI, link=https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/rust.yml]
 image:https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/docs.yml/badge.svg?branch=alpha[Docs, link=https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/docs.yml]
 image:https://img.shields.io/badge/license-AGPL--3.0-blue.svg[License: AGPL-3.0, link=#license]
+image:https://img.shields.io/badge/sponsor-BCH-0ac18e.svg[Sponsor with BCH, link=#sponsor]
 
 == P2Poolv2 for Bitcoin Cash
 
@@ -248,6 +249,23 @@ MSRV 1.88, Rust 2024 edition.
   `cargo sim nightly` runs a swarm of nodes with simulated hashrate to check
   P2P sync and the share DAG.
 * link:AGENTS.md[AGENTS.md] for contributors and coding agents.
+
+[#sponsor]
+=== Sponsor
+
+P2Poolv2 for Bitcoin Cash is free, open-source software. Donations keep its
+development going. Send BCH, or CashTokens, to the project's donation
+address, the one the pool's own donation pays in each block it finds (1% by
+default; see link:docs/miner-options.md[miner options] to choose your own):
+
+* BCH: `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`
+* CashTokens-aware, the same key:
+  `bitcoincash:zze95tc2dqrnltvxfa5yhunwx5952f34fvflmylut9`
+
+The landing page's
+https://cyberashven.github.io/BitcoinCash-p2poolv2/#donate[donate section]
+shows both with QR codes and Open in wallet links, and GitHub's Sponsor
+button (link:.github/FUNDING.yml[.github/FUNDING.yml]) links there.
 
 == License
 

@@ -1,0 +1,13 @@
+# P2Pool for Bitcoin Cash Sponsorship
+#
+# GitHub's Sponsor box shows web links only, so it links to the donate
+# section of the project site (website/index.html), which shows both
+# addresses with QR codes and Open in wallet buttons.
+# The QR codes are built from the addresses below by
+# `cargo run -p p2poolv2_tools --bin donate_qr`.
+#
+# "bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k" # BCH
+# "bitcoincash:zze95tc2dqrnltvxfa5yhunwx5952f34fvflmylut9" # CashTokens-aware
+
+custom:
+  - "https://cyberashven.github.io/BitcoinCash-p2poolv2/#donate"

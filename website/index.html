@@ -50,8 +50,10 @@
       <li><a href="#status">Status</a></li>
       <li><a href="docs/">Docs</a></li>
       <li><a href="https://github.com/CyberAshven/BitcoinCash-p2poolv2">Source</a></li>
+      <li><a role="button" class="btn-primary landing-sponsor" href="#donate">Sponsor</a></li>
     </ul>
     <ul class="landing-menu">
+      <li><a role="button" class="btn-primary landing-sponsor" href="#donate">Sponsor</a></li>
       <li>
         <details class="dropdown">
           <summary>Menu</summary>
@@ -454,6 +456,42 @@ dial_peers = ["/ip4/203.0.113.1/tcp/6884"]
       </ul>
     </div>
   </div>
+</section>
+
+<section class="landing-band" id="donate">
+  <h2>Sponsor P2Pool</h2>
+  <p>
+    P2Poolv2 for Bitcoin Cash is free, open-source software. Donations keep
+    its development going. Send BCH, or CashTokens, to the project's
+    donation address.
+  </p>
+  <p>
+    It is the address the pool's own donation pays in each block it finds:
+    1% of the coinbase by default. A node's operator may change that, and a
+    miner may choose their own, from 0 to 10%, with <code>donation=</code>
+    in their login.
+  </p>
+  <div class="donate-grid">
+    <article class="donate-card">
+      <h3>BCH</h3>
+      <p>For Bitcoin Cash.</p>
+      <img class="donate-qr" src="donate-bch.svg" width="41" height="41" alt="QR code for the BCH address">
+      <p><code class="donate-address">bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k</code></p>
+      <a role="button" class="btn-primary" href="bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k">Open in wallet</a>
+    </article>
+    <article class="donate-card">
+      <h3>Tokens</h3>
+      <p>For CashTokens, and BCH too.</p>
+      <img class="donate-qr" src="donate-tokens.svg" width="41" height="41" alt="QR code for the Tokens address">
+      <p><code class="donate-address">bitcoincash:zze95tc2dqrnltvxfa5yhunwx5952f34fvflmylut9</code></p>
+      <a role="button" class="btn-primary" href="bitcoincash:zze95tc2dqrnltvxfa5yhunwx5952f34fvflmylut9">Open in wallet</a>
+    </article>
+  </div>
+  <p>
+    Scan a code with your wallet, tap <strong>Open in wallet</strong>, or
+    select an address to copy it. Both addresses belong to the same key; the
+    second tells your wallet it may send tokens.
+  </p>
 </section>
 
 </main>

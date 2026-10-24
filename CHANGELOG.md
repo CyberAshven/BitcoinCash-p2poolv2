@@ -65,6 +65,21 @@ anchor and the donation and fee cap as they were.
 
 ### Added
 
+- A Sponsor button and donate section. `.github/FUNDING.yml` gives the
+  repository GitHub's Sponsor button, linking the landing page's new
+  `#donate` section, which a Sponsor button in its menu bar also opens. The
+  section shows the P2Pool donation address,
+  `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`, and its
+  CashTokens-aware form, `bitcoincash:zze95tc2dqrnltvxfa5yhunwx5952f34fvflmylut9`,
+  each with a QR code and an Open in wallet link, in HTML and CSS only.
+  The QR codes are static SVGs that `p2poolv2_tools`' new `donate_qr`
+  binary draws with the `qrcode` crate; tests fail when a committed code
+  differs from the generator's or does not scan back (with `rqrr`) as its
+  address, and when either address stops paying the donation key.
+  `p2poolv2_wallet` gains `encode_token_aware_cashaddr`, checked against the
+  CashTokens test vectors. `README.adoc` and the docs introduction gain a
+  Sponsor section. The link resolves once GitHub Pages is switched on.
+
 - Each miner chooses their own P2Pool donation on a Bitcoin Cash P2Pool
   node (owner's decision, 2026-10-24) with `donation=<percent>`, 0 to 10 in
   steps of 0.5, after a comma in the Stratum V1 username or Stratum V2

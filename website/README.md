@@ -3,12 +3,15 @@
 The landing page for P2Poolv2 for Bitcoin Cash: what the pool is, how to
 mine on it (Stratum V2 first, Stratum V1 supported), how to run a node, what
 has been measured so far, and links to the source, the docs, the releases,
-the dashboard and the terminal UI.
+the dashboard and the terminal UI, and a donate section with the project's
+donation addresses.
 
 ```
-index.html    the page: HTML only, no script
-LICENSE-MIT   the upstream website's licence notice, which index.html keeps
-README.md     this file
+index.html         the page: HTML only, no script
+donate-bch.svg     the QR code of the BCH donation address
+donate-tokens.svg  the QR code of its CashTokens-aware form
+LICENSE-MIT        the upstream website's licence notice, which index.html keeps
+README.md          this file
 ```
 
 The page has no stylesheet, font or logo of its own. It links the node
@@ -30,16 +33,35 @@ published site.
 
 Check a change at phone width (390px) as well as on a desktop. Below 768px
 the menu bar's links move into a Pico dropdown, a `<details>` element that
-opens without a script.
+opens without a script, and the Sponsor button sits beside it.
 
 The workspace tests check the page (`p2poolv2_api/src/api/dashboard/style_guard.rs`):
 it loads the three shared stylesheets in the node's order and nothing of its
 own, it has no script, `<style>`, `style=` or event handler attribute, every
 class it names has a selector, and every link is an anchor on the page, an
-`https` URL, the mdBook's front page (`docs/`), or a shared asset that
-exists. They also check that the Pages workflow still copies the assets and
-the book to where the page looks for them. Run
+`https` URL, a `bitcoincash:` wallet link, the mdBook's front page
+(`docs/`), a shared asset that exists, or an SVG beside the page. They also
+check that the Pages workflow still copies the assets, the SVGs and the book
+to where the page looks for them. Run
 `cargo nextest run -p p2poolv2_api style_guard`.
+
+## The donate section
+
+The section shows the P2Pool donation address, `BITCOIN_CASH_DONATION_ADDRESS`
+in `p2poolv2_config`, twice: as a plain CashAddr and in its CashTokens
+token-aware form (`z...`), which names the same key. Each has a QR code and
+an "Open in wallet" link, a `bitcoincash:` URI. GitHub's Sponsor button
+(`.github/FUNDING.yml`) links here, to `#donate`.
+
+The QR codes are static SVGs, so the page still needs no script. Rust draws
+them: `cargo run -p p2poolv2_tools --bin donate_qr` writes both files from
+the address, with the `qrcode` crate. The workspace tests
+(`p2poolv2_tools/src/donate_qr/tests.rs`) fail when a committed SVG differs
+from what the generator draws, when a decoder that shares no code with the
+encoder (`rqrr`) does not read the address back from it, when either
+address stops paying the donation key, or when the page, `FUNDING.yml`,
+`README.adoc` or `docs/introduction.md` stops showing both. Run
+`cargo nextest run -p p2poolv2_tools donate_qr`.
 
 ## Publishing
 
@@ -49,19 +71,20 @@ that touches the docs, this directory or the shared assets. It stages:
 - `index.html`, with the asset prefix rewritten to `assets/`;
 - `assets/`: the shared stylesheets, fonts and logos, with
   `PICO-LICENSE.txt` and `UBUNTU-FONT-LICENCE.txt`;
-- `LICENSE-MIT`;
+- `LICENSE-MIT` and the QR codes, `donate-*.svg`;
 - `docs/`: the mdBook from `docs/`;
 - `404.html`: the mdBook's not-found page, whose links are absolute
   (`site-url` in `docs/book.toml`), so they resolve from the site root.
 
 The step fails if the staged page still links a file outside the site, or
-an `assets/` file it did not copy.
+a relative file (under `assets/`, the book, a QR code) it did not stage.
 
 It publishes to GitHub Pages only on a push to `main`, and only when the
 repository variable `DOCS_PAGES` is `true` and Settings, Pages, Source is
-"GitHub Actions". Until the owner sets both, nothing is published. The site
-is then `https://cyberashven.github.io/BitcoinCash-p2poolv2/`, with the docs
-under `/docs/`.
+"GitHub Actions". Until the owner sets both, nothing is published, and the
+Sponsor button's link does not resolve yet. The site is then
+`https://cyberashven.github.io/BitcoinCash-p2poolv2/`, with the docs under
+`/docs/` and the donate section at `#donate`.
 
 To build the same site locally, run `mdbook build docs` and then the
 workflow's "Stage the site" commands from the repository root; they write
@@ -82,6 +105,7 @@ moves:
 | Share trading tested in-process, not yet through BCHN | `docs/bch-plan.md` |
 | Stratum ports 3333 and 3336, `p2p=`, share address prefixes | `config.sample.toml`, `docs/bch-quickstart.md` |
 | The dated chipnet and regtest results, and the "Not yet" list | `docs/bch-plan.md`, `docs/bch-design.md` |
+| The donation address and its token-aware form; a miner's own donation, 0 to 10%, with `donation=` | `BITCOIN_CASH_DONATION_ADDRESS` in `p2poolv2_config`, `docs/miner-options.md` (the tests check the addresses) |
 
 Keep "Measured" for things that ran, with their dates, and put everything
 else under "Not yet". The page says the code is alpha and runs on chipnet;

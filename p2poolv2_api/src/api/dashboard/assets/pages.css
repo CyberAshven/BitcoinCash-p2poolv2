@@ -233,15 +233,31 @@ tr.uncle-row {
 .landing .landing-links a:focus-visible {
   color: var(--ms-white);
 }
+/* The Sponsor button, at the end of the links on wide screens and beside
+   the menu on phones: a primary button as small as the links. */
+.landing .site-header .landing-sponsor,
+.landing .site-header .landing-sponsor:hover,
+.landing .site-header .landing-sponsor:focus-visible {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+  color: var(--pico-primary-inverse);
+}
 .landing .landing-menu {
   display: none;
 }
+/* On phones the button and the menu share Pico's gap around a menu item,
+   so they fit beside the logo down to a 375px screen. On a narrower one
+   they wrap to a row of their own, on the right. */
 @media (max-width: 767.98px) {
   .landing .landing-links {
     display: none;
   }
   .landing .landing-menu {
     display: flex;
+    margin-left: auto;
+  }
+  .landing .landing-menu > li:first-child {
+    padding-inline: 0;
   }
 }
 
@@ -306,7 +322,9 @@ tr.uncle-row {
 /* White on the dashboard's green is 2.3:1. Its dark ink, at 7:1, clears
    the 4.5:1 that body-size text needs. */
 .landing .landing-actions .btn-primary,
-.landing .landing-actions .btn-primary:hover {
+.landing .landing-actions .btn-primary:hover,
+.landing .donate-card .btn-primary,
+.landing .donate-card .btn-primary:hover {
   --pico-color: var(--pico-primary-inverse);
 }
 
@@ -537,4 +555,45 @@ tr.uncle-row {
 }
 .landing .term-prompt {
   color: var(--ms-green);
+}
+
+/* The donate section: a card for each address. The QR codes are images
+   drawn black on white whatever the theme, as scanners expect;
+   p2poolv2_tools' donate_qr writes them. */
+.landing .donate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1.5rem;
+  max-width: 44rem;
+  margin: 1.5rem 0;
+}
+.landing .donate-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 0;
+  text-align: center;
+}
+.landing .donate-card h3 {
+  margin-bottom: 0.25rem;
+  color: var(--ms-white);
+}
+.landing .donate-card p {
+  width: 100%;
+  margin-bottom: 1rem;
+  color: var(--pico-muted-color);
+}
+.landing .donate-qr {
+  width: 100%;
+  max-width: 14rem;
+  height: auto;
+  margin-bottom: 1rem;
+  border-radius: 0.5rem;
+}
+.landing .donate-address {
+  display: block;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.8rem;
+  word-break: break-all;
+  user-select: all;
 }

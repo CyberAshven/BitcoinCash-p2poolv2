@@ -22,10 +22,10 @@
 //!   pages;
 //! - the landing page (`website/index.html`) carries a script or style of
 //!   its own, names a class with no selector, or links a local file that is
-//!   not one of the shared assets, which the Pages workflow could not
-//!   publish beside it;
+//!   neither one of the shared assets nor an SVG beside it (the donation QR
+//!   codes), which the Pages workflow could not publish with it;
 //! - the Pages workflow (`.github/workflows/docs.yml`) stops copying the
-//!   assets and the book to where the landing page links them.
+//!   assets, the SVGs and the book to where the landing page links them.
 //!
 //! The WASM views spell every class as a literal, `class="..."` or a
 //! `class:name=` toggle, so a scan of their source finds them all; the
@@ -117,17 +117,28 @@ fn event_handlers(html: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Where a wallet link on the landing page points: a Bitcoin Cash mainnet
+/// payment URI, which a wallet opens, not a file.
+const LANDING_WALLET_SCHEME: &str = "bitcoincash:";
+
 /// Whether the landing page may link `link`: an anchor on the page, an
-/// `https` URL, the published docs, or a shared asset that exists.
+/// `https` URL, a Bitcoin Cash wallet link, the published docs, a shared
+/// asset that exists, or an SVG beside the page (the donation QR codes),
+/// which the Pages workflow copies with it.
 fn is_publishable_landing_link(link: &str, ids: &BTreeSet<&str>) -> bool {
     if let Some(id) = link.strip_prefix('#') {
         return ids.contains(id);
     }
-    if link.starts_with("https://") || link == LANDING_DOCS_HREF {
+    if link.starts_with("https://")
+        || link.starts_with(LANDING_WALLET_SCHEME)
+        || link == LANDING_DOCS_HREF
+    {
         return true;
     }
-    link.strip_prefix(WEB_ASSETS_HREF)
-        .is_some_and(|name| assets_dir().join(name).is_file())
+    if let Some(name) = link.strip_prefix(WEB_ASSETS_HREF) {
+        return assets_dir().join(name).is_file();
+    }
+    link.ends_with(".svg") && !link.contains(['/', '\\', ':']) && website_dir().join(link).is_file()
 }
 
 fn read(path: &Path) -> String {
@@ -789,6 +800,7 @@ fn the_landing_page_links_only_what_the_site_publishes() {
     let links = index_links(&page);
     assert!(links.contains(&"../p2poolv2_api/src/api/dashboard/assets/logo-horizontal-wt.svg"));
     assert!(links.contains(&"#run") && links.contains(&LANDING_DOCS_HREF));
+    assert!(links.contains(&"#donate") && links.contains(&"donate-bch.svg"));
     let unpublished: Vec<&str> = links
         .into_iter()
         .filter(|link| !is_publishable_landing_link(link, &ids))
@@ -813,6 +825,17 @@ fn landing_links_are_checked_against_the_page_and_the_assets() {
         &ids
     ));
     assert!(!is_publishable_landing_link("styles.css", &ids));
+    assert!(is_publishable_landing_link(
+        "bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k",
+        &ids
+    ));
+    assert!(!is_publishable_landing_link("bchtest:qq", &ids));
+    assert!(is_publishable_landing_link("donate-bch.svg", &ids));
+    assert!(!is_publishable_landing_link("missing.svg", &ids));
+    assert!(!is_publishable_landing_link(
+        "../website/donate-bch.svg",
+        &ids
+    ));
 }
 
 #[test]
@@ -831,6 +854,7 @@ fn the_pages_workflow_serves_the_assets_where_the_landing_page_looks() {
     assert!(workflow.contains(r#"sed "s#\.\./$assets/#assets/#g" website/index.html"#));
     let docs = LANDING_DOCS_HREF.trim_end_matches('/');
     assert!(workflow.contains(&format!("cp -R target/book \"$site/{docs}\"")));
+    assert!(workflow.contains(r#"cp website/LICENSE-MIT website/*.svg "$site/""#));
     assert!(workflow.contains("- \"website/**\""));
     assert!(workflow.contains("vars.DOCS_PAGES == 'true'"));
 }
