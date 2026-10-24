@@ -237,23 +237,31 @@ is computed: `"split": {"donation_bps": 100, "donation_script": "<hex>",
 input file is limited to 1 MiB. The token above is Pickaxe's synthetic
 token A, not a real token.
 
-## The SAFA covenant: still on the v1 format
+## The SAFA covenant
 
-The experimental [SAFA AuxPoW variant](../tools/safa-auxpow/README.md)
-verifies the older v1 proof (the whole coinbase, the `fabe6d6d` output and
-Namecoin's slots) inside the BCH VM. It passed a real regtest withdrawal on
-2026-10-16 with that format. It must be ported to v2 before any issuance,
-and its separate checks still apply:
+The experimental [SAFA AuxPoW covenant](../tools/safa-auxpow/README.md)
+verifies v2 proofs inside the BCH 2026 VM. It rebuilds the leaf from
+introspection (the vault's category, locking bytecode and state, the
+claim's payout and target, and the split's `ext`), folds both branches,
+checks the header's work against the token's target and its nBits against
+ASERT at the coinbase's BIP34 height (the band above, with a fallback after
+4,032 blocks without a claim), binds that height with
+`OP_CHECKLOCKTIMEVERIFY`, and pays the split. Its tests run Pickaxe's
+vectors, BCHN's 14,000 aserti3-2d vectors and the real headers from this
+repository's Rust tests in the VM. A chipnet test token (tSAFA) is
+prepared but not deployed. The v1 variant passed a real regtest withdrawal
+on 2026-10-16; the v2 covenant has not yet run against BCHN. Its separate
+checks still apply:
 
 SAFA is the first requested token target. Its
 [author's draft and linked Bitauth template](https://bitcoincashresearch.org/t/safas-a-sha256-asic-minable-automated-token-market/2123)
 check `SHA256d(next NFT baton)` against a difficulty target, with no parent
 header, coinbase or inclusion branch. Committing its baton hash in BCH does
-not satisfy that mining rule. The variant keeps the draft's baton, market
-and payout binding and replaces the mining hash check with a bounded
+not satisfy that mining rule. The variant keeps the draft's threads, market
+and difficulty adjustment and replaces the mining hash check with a
 merge-mining check. It is not a deployed version of the author's token or a
-final SAFA specification. Independent review, the draft's conflicting
-virtual-reserve multipliers and a final SAFA policy remain open.
+final SAFA specification. Independent review, the economic parameters (the
+virtual reserve among them) and a final SAFA policy remain open.
 
 The linked draft's release and swap scenarios both pass in Libauth
 `3.1.0-next.8`'s standard BCH 2026 VM. This is not a security endorsement:

@@ -216,6 +216,23 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
+- `tools/safa-auxpow`: the experimental SAFA covenant verifies merge-mining
+  common format v2 in the BCH 2026 VM, with the token rules agreed with
+  Pickaxe: one vault input and fixed outputs (vault, miner, donation, fee);
+  the per-win split from the leaf's `ext`, with `MIN_SHARE_SATS` 1,000 at
+  the AMM price; a vault-paid fee of 1 to 3 sat/byte of K plus the proof;
+  the coinbase's BIP34 height under `OP_CHECKLOCKTIMEVERIFY`, with
+  `state_height < cb_height`; BCH's aserti3-2d band on the header's nBits,
+  with the fallback after 4,032 blocks; and the SAFA draft's difficulty
+  adjustment, eased by `min(Δh, 288) / threads`. The Unix-time lock, the CSV
+  age and the version-2 rule are gone. Its redeem script is 1,366 bytes on
+  chipnet, and the worst claim measured uses 11% of the VM's operation-cost
+  limit and 10% of its hashing limit. The tests run every Pickaxe PR #70
+  vector, BCHN's 14,000 aserti3-2d vectors and the real headers from the Rust
+  tests in the VM, with the attacks that must fail. `cli.mjs` prints leaves
+  for `p2poolv2_cli bch-auxpow`, builds verified claims and prepares an
+  unsigned chipnet tSAFA genesis; nothing is broadcast. These are a token's
+  rules, not P2Pool share-chain rules or BCH consensus.
 - `p2poolv2_netsim` and `docs/simulation/network-sim.md` treat the hybrid
   payout rule as the Bitcoin Cash payout rule, as it is on PR #33 and on
   chipnet, instead of a proposal, and keep the 11-payout cap (`cap-11`) and
@@ -286,7 +303,7 @@ anchor and the donation and fee cap as they were.
   `share_has_token_commitment` tells token shares from no-token shares. The
   old `fabe6d6d` output and Namecoin slots are gone; `p2poolv2_cli
   bch-auxpow` builds and verifies the new format. The experimental SAFA
-  covenant still verifies v1 proofs and must be ported before issuance.
+  covenant verifies v2 proofs too (see Changed).
 - ASERT header check (share-chain rule for token shares): `shares::bch_asert`
   computes BCH's aserti3-2d exactly as BCHN's `pow.cpp` does, with BCHN's
   mainnet and chipnet/testnet4 anchors. A token share's bitcoin header, and
@@ -465,6 +482,9 @@ anchor and the donation and fee cap as they were.
 
 ### Removed
 
+- The v1 SAFA regtest harness (`tools/safa-auxpow/live-regtest.mjs`) and its
+  fixture, which fit only the v1 format. Its evidence stays in
+  `tools/safa-auxpow/README.md` and in the history.
 - The `store.background_task_frequency_hours` option (from upstream). Existing
   configs that set it still load.
 - The `[sim] coinbase_maturity` option.
