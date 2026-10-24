@@ -248,6 +248,19 @@ pub const BCH_SHARE_TRANSACTION_SIGCHECK_BYTES: usize = 200 * 1024;
 pub const BCH_MAX_SHARE_SIGCHECKS: usize =
     BCH_SHARE_TRANSACTION_SIGCHECK_BYTES / bch_script::BYTES_PER_SIGCHECK;
 
+/// Name of the Bitcoin Cash SigChecks budget in protocol strings,
+/// `sigchecks3000-1452`: per transaction and per share.
+pub fn bch_sig_checks_rule_tag() -> String {
+    format!(
+        "sigchecks{}-{BCH_MAX_SHARE_SIGCHECKS}",
+        bch_script::MAX_TX_SIGCHECKS
+    )
+}
+
+/// Name of the rule refusing a SegWit witness commitment in a Bitcoin Cash
+/// coinbase, in protocol strings.
+pub const BCH_NO_SEGWIT_RULE_TAG: &str = "no-segwit";
+
 /// The SigChecks budget of a Bitcoin Cash share's transactions, given each
 /// transaction's id and SigChecks: at most `MAX_TX_SIGCHECKS` (3,000, BCH
 /// consensus) in one transaction, and at most [`BCH_MAX_SHARE_SIGCHECKS`] in

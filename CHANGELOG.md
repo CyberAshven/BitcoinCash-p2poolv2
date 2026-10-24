@@ -30,10 +30,17 @@ chain's rules on Bitcoin Cash and Bitcoin, not Bitcoin Cash consensus:
 Bitcoin Cash protocol strings carry `uncle-once` after `payout-cap11`, and
 the store format changes, so nodes start from a new store.
 
-The approved Bitcoin Cash share-chain rule batch (owner's OK, 2026-10-23),
-one flag day on a fresh share chain. It changes P2Pool's own share-chain
-rules and the coinbase P2Pool builds, not Bitcoin Cash consensus. Builder A's
-part: merge-mining common format v2 with the ASERT header check.
+The approved Bitcoin Cash share-chain rule batch (owner's OK, 2026-10-23)
+ships under one protocol tag on a fresh share chain. It changes P2Pool's
+own share-chain rules and the coinbase P2Pool builds, not Bitcoin Cash
+consensus. The tag replaces `payout-cap11` with
+`payout-hybrid-t3072-f500-r1to3-z8-cov1`, and adds
+`body-1000000-204800`, `payee-p2pkh-p2sh20-p2sh32`, `merkle32`,
+`depths-m100`, `sigchecks3000-1452`, `no-segwit`, `weight-work`,
+`mm2-asert` and `version-vote`. Request-response, Kademlia, Identify and
+Noise use the same rule segments. Later rule changes activate by the
+share-version vote without changing this tag, so old and new versions
+can peer during the vote.
 
 Synced with upstream P2Poolv2 through `61810c56` (its v0.16.2). The fork
 keeps version `0.0.1-alpha`. The sync itself leaves Bitcoin Cash genesis

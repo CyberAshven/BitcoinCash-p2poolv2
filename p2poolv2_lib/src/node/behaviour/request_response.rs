@@ -12,13 +12,19 @@ use std::io;
 use crate::accounting::payout::coinbase_budget::bch_payout_rule_tag;
 use crate::accounting::payout::sharechain_pplns::payout_rights::BCH_PAYOUT_HOLDER_RULE_TAG;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
-    BCH_COINBASE_MATURITY, BCH_PPLNS_WINDOW_BLOCKS,
+    BCH_COINBASE_MATURITY, BCH_PPLNS_WINDOW_BLOCKS, BCH_WORK_WEIGHT_RULE_TAG, bch_depth_rule_tag,
 };
 use crate::config::Chain;
 use crate::node::messages::{MAX_P2P_MESSAGE_SIZE, Message, RawMessage};
 use crate::pool_difficulty::BCH_ASERT_ANCHOR_TAG;
 use crate::shares::bch_script::BCH_SHARE_TRADE_RULE_TAG;
-use crate::shares::validation::BCH_UNCLE_ONCE_RULE_TAG;
+use crate::shares::coinbase_proof::bch_merkle_rule_tag;
+use crate::shares::merge_mining::BCH_MERGE_MINING_RULE_TAG;
+use crate::shares::share_version::BCH_SHARE_VERSION_RULE_TAG;
+use crate::shares::validation::{
+    BCH_NO_SEGWIT_RULE_TAG, BCH_PAYOUT_SCRIPT_RULE_TAG, BCH_SHARE_BODY_RULE_TAG,
+    BCH_UNCLE_ONCE_RULE_TAG, bch_sig_checks_rule_tag,
+};
 use bitcoin::BlockHash;
 
 /// Hex characters of the share chain genesis hash carried in the protocol
@@ -69,15 +75,35 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// and covenant version). A node on other values rebuilds another coinbase
 /// whenever payees go to the tree.
 ///
-/// Last comes the rule that an uncle may have only one nephew on a chain
+/// Then comes the rule that an uncle may have only one nephew on a chain
 /// (`BCH_UNCLE_ONCE_RULE_TAG`). A node without it accepts a share naming an
 /// uncle an ancestor already names, and pays that uncle twice.
+///
+/// Last come the other rules of the 2026-10-24 share-chain rule batch, one
+/// segment each, in the batch's item order: the share body limit
+/// (`BCH_SHARE_BODY_RULE_TAG`, item 2), payout scripts
+/// (`BCH_PAYOUT_SCRIPT_RULE_TAG`, 3), the 32-level merkle branch
+/// (`bch_merkle_rule_tag`, 4), depths from the 100-share maturity
+/// (`bch_depth_rule_tag`, 5), SigChecks (`bch_sig_checks_rule_tag`, 6), no
+/// SegWit commitment (`BCH_NO_SEGWIT_RULE_TAG`, 7), weights by work
+/// (`BCH_WORK_WEIGHT_RULE_TAG`, 8), merge-mining format v2 with the ASERT
+/// check (`BCH_MERGE_MINING_RULE_TAG`, 9) and the share-version vote
+/// (`BCH_SHARE_VERSION_RULE_TAG`, 10). The batch's item 1, the hybrid
+/// payout, took over the payout cap's slot above.
+///
+/// From this batch on, a rule change is a new share version that activates
+/// by a vote of the miners' work (`shares::share_version`). It must not
+/// change this tag: nodes on the old and the new version have to peer for
+/// the vote to see both.
 fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
         Chain::BitcoinCash => Some(format!(
-            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_UNCLE_ONCE_RULE_TAG}",
-            bch_payout_rule_tag()
+            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_UNCLE_ONCE_RULE_TAG}/{BCH_SHARE_BODY_RULE_TAG}/{BCH_PAYOUT_SCRIPT_RULE_TAG}/{}/{}/{}/{BCH_NO_SEGWIT_RULE_TAG}/{BCH_WORK_WEIGHT_RULE_TAG}/{BCH_MERGE_MINING_RULE_TAG}/{BCH_SHARE_VERSION_RULE_TAG}",
+            bch_payout_rule_tag(),
+            bch_merkle_rule_tag(),
+            bch_depth_rule_tag(),
+            bch_sig_checks_rule_tag(),
         )),
     }
 }
@@ -347,7 +373,7 @@ mod tests {
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-asert/version-vote/1.0.0"
             )
         );
     }
@@ -429,6 +455,24 @@ mod tests {
         );
     }
 
+    /// A chipnet node from before the 2026-10-24 rule batch derived
+    /// `.../payout-holder/payout-cap11/uncle-once/1.0.0`. It runs none of
+    /// the batch's rules, so the new string differs and the two cannot
+    /// negotiate; the batch also starts a fresh share chain.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_the_rule_batch() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+            .unwrap()
+            .block_hash();
+        let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
+        let before_batch_string = format!(
+            "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-cap11/uncle-once/1.0.0"
+        );
+        let string = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        assert_ne!(string, before_batch_string);
+        assert!(!string.contains("payout-cap11"));
+    }
+
     /// The isolation the window rule relies on: a chipnet node from before
     /// the rule derived `/p2pool/test/<genesis tag>/1.0.0` from the same
     /// genesis. The new string differs, so the two cannot negotiate and never
@@ -459,7 +503,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-asert/version-vote/kad/1.0.0"
             )
         );
     }

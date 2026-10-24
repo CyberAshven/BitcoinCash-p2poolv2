@@ -175,7 +175,9 @@ pool holding fraction `f` of BCH's hashrate, so pools under about `K / 2016`
   (`docs/difficulty_adjustment/asert.md`), the share transaction rules as
   `trade-htlc`, the payout to the holder of each share's payout right as
   `payout-holder` (`docs/atomic-swap/bch-share-trading.md`) and the coinbase
-  budget as `payout-cap11` (below). Bitcoin's protocol strings are
+  budget as `payout-cap11` until the 2026-10-24 rule batch replaced it with
+  the hybrid payout's segment and added the batch's own (`share_chain_rule_tag`
+  in `node/behaviour/request_response.rs`). Bitcoin's protocol strings are
   unchanged.
 
 ## Bitcoin Cash coinbase budget

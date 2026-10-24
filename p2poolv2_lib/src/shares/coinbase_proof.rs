@@ -40,10 +40,17 @@ use std::fmt;
 /// but that guard is temporary: the ABLA CHIP removes it by May 2028, and
 /// Bitcoin Cash sets no fixed maximum (audit A14). 2^32 transactions is
 /// more than 279 GB of 65-byte transactions. Merge-mining proofs keep their
-/// own `d ≤ 25` (`MAX_AUX_PROOF_COINBASE_BRANCH_LENGTH`): a deeper block is
+/// own `d <= 25` (`MAX_AUX_PROOF_COINBASE_BRANCH_LENGTH`): a deeper block is
 /// a valid share that cannot be token-claimed. Bitcoin proofs keep their
 /// 16-level cap.
 pub const MAX_COINBASE_MERKLE_BRANCH_LENGTH: usize = 32;
+
+/// Name of the Bitcoin Cash coinbase branch limit in protocol strings,
+/// `merkle32`. A node on 25 levels rejects shares in blocks of more than
+/// 2^25 transactions that this node accepts.
+pub fn bch_merkle_rule_tag() -> String {
+    format!("merkle{MAX_COINBASE_MERKLE_BRANCH_LENGTH}")
+}
 
 /// Proof limit for the chain identified by the share owner.
 pub(crate) fn maximum_merkle_branch_length(owner: ShareOwner) -> usize {

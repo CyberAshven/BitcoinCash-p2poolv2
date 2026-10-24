@@ -123,8 +123,8 @@ pub const COINBASE_MATURITY: usize = 20;
 /// share-chain forks only if they split more than 100 shares below the paying
 /// share, far deeper than an uncle (`MAX_UNCLES_DEPTH`).
 ///
-/// The same in the sim build: the sim swarm runs Bitcoin only, and the
-/// Bitcoin Cash protocol strings carry this value.
+/// The same in the sim build: the Bitcoin Cash swarm exercises the full
+/// maturity skip, and the Bitcoin Cash protocol strings carry this value.
 pub const BCH_COINBASE_MATURITY: usize = 100;
 
 /// The coinbase maturity a chain's consensus uses.
@@ -157,6 +157,14 @@ pub const PAYOUT_DEPTH: usize = COINBASE_MATURITY + PPLNS_WINDOW_SHARES;
 /// limit (`MAX_REORG_DEPTH`), and doubled it is `BCH_PRUNE_DEPTH`.
 pub const BCH_PAYOUT_DEPTH: usize =
     BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES + MAX_UNCLES_DEPTH as usize;
+
+/// Name of the Bitcoin Cash depth rule in protocol strings: output expiry,
+/// the full-validation zone and the reorg limit at `BCH_PAYOUT_DEPTH`, from
+/// the 100-share maturity. A node on Bitcoin's 127,008 accepts spends of
+/// outputs this node has expired.
+pub fn bch_depth_rule_tag() -> String {
+    format!("depths-m{BCH_COINBASE_MATURITY}")
+}
 
 /// The depths of one chain's share-chain rules and storage, each derived
 /// from its coinbase maturity and the PPLNS window.
