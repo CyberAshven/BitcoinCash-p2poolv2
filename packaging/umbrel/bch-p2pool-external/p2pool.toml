@@ -73,14 +73,14 @@ zmqpubhashblock = "tcp://bchn.example:28332"
 # address here before switching to Hydrapool.
 bootstrap_address = "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2"
 
-# Every Bitcoin Cash node donates 1.5% (150 basis points) of each block it
+# Every Bitcoin Cash node donates 1% (100 basis points) of each block it
 # finds to the P2Poolv2 Bitcoin Cash donation address, the one above unless
 # you replaced it (the same key on every network). Set donation to change it,
-# 0 to opt out. The donation and the fee may each be at most 1000 basis
-# points (10%).
-# donation = 150
+# 0 to opt out. A fee_address without fee takes 100 basis points (1%). The
+# donation and the fee may each be at most 1000 basis points (10%).
+# donation = 100
 # fee_address = "bchtest:q..."
-# fee = 0
+# fee = 100
 
 # Ignored on Bitcoin Cash (derived from bitcoin_cash_network) but required.
 network = "test"

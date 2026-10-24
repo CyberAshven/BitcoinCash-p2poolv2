@@ -97,11 +97,13 @@ peers to dial it.
 
 ### Donation and pool fee
 
-By default each block this node finds donates 1.5% (150 basis points) to the
+By default each block this node finds donates 1% (100 basis points) to the
 P2Poolv2 Bitcoin Cash address
 `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`. Change it with
 `donation` (basis points; 0 turns it off). A public pool operator adds their
-own cut with `fee_address` and `fee`. The donation and the fee may each be
+own cut with `fee_address` and `fee`: 1% (100 basis points) when
+`fee_address` is set without `fee`, taken from what the donation leaves.
+The donation and the fee may each be
 at most 1,000 basis points (10%), whatever the other is: other nodes reject
 shares above that. The node logs the donation in effect at startup.
 
@@ -202,5 +204,5 @@ It needs a machine that can reach BCH peers on port 48333.
    them in seconds.
 4. Pass: `curl http://<api>/chain_info` on both nodes shows the same
    `chain_tip_height` above 0, and neither log has `Chain-context validation
-   failed`. A block found on chipnet appears in BCHN with the 1.5% donation
+   failed`. A block found on chipnet appears in BCHN with the 1% donation
    output first.

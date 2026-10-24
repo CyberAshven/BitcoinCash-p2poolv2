@@ -82,20 +82,21 @@ minimum_difficulty = 1
 # Replace it with your own bchtest: (chipnet) or bitcoincash: (mainnet)
 # address. This one is the P2Poolv2 donation address on chipnet.
 bootstrap_address = "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2"
-# Each block this node finds donates 150 basis points (1.5%) by default to
+# Each block this node finds donates 100 basis points (1%) by default to
 # the P2Poolv2 Bitcoin Cash address
 # bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k (the same key under
 # bchtest: and bchreg:). Set donation to raise or lower it, or to 0 to opt
 # out. donation_address may be left out; if set it must be that same
 # address, because the share chain rejects a Bitcoin Cash donation paid
 # anywhere else.
-# donation = 150
+# donation = 100
 # A public pool operator's own cut, taken after the donation. The donation
 # and the fee may each be at most 1000 basis points (10%); peers reject shares
 # above that.
 # fee_address = "bchtest:q..."
-# In basis points, 1% = 100 basis points. Default 0
-# fee = 0
+# In basis points, 1% = 100 basis points. Default 100 (1%) when fee_address
+# is set; 0 when it is not.
+# fee = 100
 # BCHN's ZMQ block notifications: start BCHN with
 # -zmqpubhashblock=tcp://127.0.0.1:28332.
 zmqpubhashblock = "tcp://127.0.0.1:28332"

@@ -124,8 +124,8 @@ Each entry of `p2poolv2_instances` takes these keys; the role's
 | `bch_share_chain` | `main`, or `mini` (share target 256 times easier, for small miners). Each has its own store directory.
 | `bootstrap_address` | A CashAddr for the network (`bitcoincash:`, `bchtest:`, `bchreg:`). Required; only Hydrapool mode pays it.
 | `miner_address` | Optional share address (`p2pool:`, `tp2pool:`, `rp2pool:`) owning every share, made with `p2poolv2_cli bch-share-address`. Without it each miner sends `p2p=<share address>`.
-| `donation` | Optional. Basis points to the project's donation address; 150 (1.5%) when unset, 0 opts out.
-| `fee_address`, `fee` | Optional public pool fee, after the donation. The donation and the fee are each capped at 1000 (10%) by the share chain.
+| `donation` | Optional. Basis points to the project's donation address; 100 (1%) when unset, 0 opts out.
+| `fee_address`, `fee` | Optional public pool fee, after the donation; 100 (1%) when `fee_address` is set without `fee`. The donation and the fee are each capped at 1000 (10%) by the share chain.
 | `dial_peers` | Share chain peers, `/ip4/<address>/tcp/<port>`. Bitcoin Cash has no DNS seeds yet, so a node joining a running share chain lists at least one.
 | `wait_for_chain_sync` | `true` to open Stratum only once synced; `false` for the first node of a new share chain.
 | `sv2_port`, `sv2_authority_public_key`, `sv2_authority_secret_key`, `sv2_cert_validity_secs` | Optional Stratum V2. Without the keys frames are unencrypted (localhost or LAN only). Keep the secret key in the vault.

@@ -52,8 +52,14 @@ pub const BITCOIN_CASH_DONATION_PUBKEY_HASH: [u8; 20] = [
 ];
 
 /// Donation a Bitcoin Cash node makes when `donation` is not configured:
-/// 1.5%. An operator may raise it, lower it, or set 0 to opt out.
-pub const DEFAULT_BITCOIN_CASH_DONATION: u16 = 150;
+/// 100 basis points, 1%. An operator may raise it, lower it, or set 0 to opt
+/// out.
+pub const DEFAULT_BITCOIN_CASH_DONATION: u16 = 100;
+
+/// Operator fee a Bitcoin Cash node takes when `fee_address` is set and `fee`
+/// is not: 100 basis points, 1%, of what the donation leaves. An operator may
+/// set `fee` to change it.
+pub const DEFAULT_BITCOIN_CASH_FEE: u16 = 100;
 
 /// Most each of the donation and the operator fee may take of a Bitcoin Cash
 /// coinbase before the PPLNS split: 1,000 basis points, 10%, each on its
@@ -363,6 +369,10 @@ pub struct StratumConfig<State = Raw> {
     /// The fee address (string in Raw state). A pool operator's own cut.
     pub fee_address: Option<String>,
     /// The fee basis points, taken after the donation.
+    ///
+    /// On Bitcoin Cash an unset value with `fee_address` set becomes
+    /// [`DEFAULT_BITCOIN_CASH_FEE`] after parsing. Bitcoin needs both fields
+    /// or neither.
     pub fee: Option<u16>,
     /// Share chain address owning every share this pool mines (string in Raw
     /// state). When set, miners need not send `p2p=` in the stratum password,
@@ -509,7 +519,12 @@ impl StratumConfig<Raw> {
             });
         }
 
-        if self.fee_address.is_some() != self.fee.is_some() {
+        // A Bitcoin Cash fee_address alone takes the default fee; a fee with
+        // nowhere to pay it is an error on both chains.
+        let fee_needs_address = self.fee.is_some() && self.fee_address.is_none();
+        let address_needs_fee =
+            self.chain == Chain::Bitcoin && self.fee_address.is_some() && self.fee.is_none();
+        if fee_needs_address || address_needs_fee {
             return Err(ConfigError {
                 message: "fee_address and fee must both be set or both be unset".to_string(),
             });
@@ -621,7 +636,12 @@ impl StratumConfig<Raw> {
             })
             .transpose()?;
 
-        validate_cuts(self.chain, donation, self.fee)?;
+        let fee = match (self.chain, &self.fee_address, self.fee) {
+            (Chain::BitcoinCash, Some(_), None) => Some(DEFAULT_BITCOIN_CASH_FEE),
+            (_, _, fee) => fee,
+        };
+
+        validate_cuts(self.chain, donation, fee)?;
 
         let sv2_authority = parse_sv2_authority(
             self.sv2_port,
@@ -652,7 +672,7 @@ impl StratumConfig<Raw> {
             donation_address: self.donation_address,
             donation,
             fee_address: self.fee_address,
-            fee: self.fee,
+            fee,
             miner_address: self.miner_address,
             network: self.network,
             chain: self.chain,
@@ -2541,13 +2561,13 @@ mod bitcoin_cash_donation_tests {
     }
 
     #[test]
-    fn bitcoin_cash_donates_one_and_a_half_percent_by_default() {
+    fn bitcoin_cash_donates_one_percent_by_default() {
         let mut config = StratumConfig::<Raw>::new_for_test_default();
         config.chain = Chain::BitcoinCash;
         config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
         config.bootstrap_address = CHIPNET_BOOTSTRAP.to_string();
         let parsed = config.parse().unwrap();
-        assert_eq!(parsed.donation, Some(150));
+        assert_eq!(parsed.donation, Some(100));
         assert_eq!(
             parsed.donation_address(),
             Some(&bitcoin_cash_donation_address(BitcoinCashNetwork::Chipnet))
@@ -2651,6 +2671,36 @@ mod bitcoin_cash_donation_tests {
         assert_eq!(parsed.donation, Some(DEFAULT_BITCOIN_CASH_DONATION));
         assert_eq!(parsed.fee, Some(100));
         assert!(parsed.fee_address().is_some());
+    }
+
+    /// A Bitcoin Cash fee_address without fee takes the default 1% fee.
+    #[test]
+    fn bitcoin_cash_fee_address_alone_takes_the_default_fee() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.chain = Chain::BitcoinCash;
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        config.bootstrap_address = CHIPNET_BOOTSTRAP.to_string();
+        config.fee_address = Some(CHIPNET_BOOTSTRAP.to_string());
+        let parsed = config.parse().unwrap();
+        assert_eq!(DEFAULT_BITCOIN_CASH_FEE, 100);
+        assert_eq!(parsed.fee, Some(DEFAULT_BITCOIN_CASH_FEE));
+        assert!(parsed.fee_address().is_some());
+    }
+
+    /// A Bitcoin Cash fee without fee_address has nowhere to go.
+    #[test]
+    fn bitcoin_cash_rejects_a_fee_without_an_address() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.chain = Chain::BitcoinCash;
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        config.bootstrap_address = CHIPNET_BOOTSTRAP.to_string();
+        config.fee = Some(100);
+        let error = config.parse().unwrap_err();
+        assert!(
+            error.message.contains("fee_address and fee"),
+            "{}",
+            error.message
+        );
     }
 
     fn bitcoin_cash_config_with_cuts(donation: u16, fee: u16) -> StratumConfig<Raw> {

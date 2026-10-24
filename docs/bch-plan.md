@@ -77,8 +77,9 @@ the node config, share addresses, the donation and fee, and miner settings.
 
 Also in this checkpoint:
 
-- Bitcoin Cash donates 1.5% by default to the project address, adjustable
-  by the operator, with an optional operator fee, each under its own 10%
+- Bitcoin Cash donates 1.5% (1% since 2026-10-24) by default to the
+  project address, adjustable by the operator, with an optional operator
+  fee, each under its own 10%
   share-chain cap (decision 9 below; per item since decision 13).
 - Stratum usernames accept CashAddr payouts. Before this no Bitcoin Cash
   miner could authorize.
@@ -618,15 +619,17 @@ move most BCH hashrate to the share chain.
 8. **Not adopted.** DATUM-style designs, where an operator sets the coinbase
    outputs and holds small balances, keep the central infrastructure this
    project wants to remove.
-9. **Donation and pool fee (2026-10-14).** Every Bitcoin Cash node donates
-   1.5% of each block it finds, from the coinbase, to the project address
+9. **Donation and pool fee (2026-10-14, defaults 1% since 2026-10-24).**
+   Every Bitcoin Cash node donates 1% of each block it finds (1.5% until
+   2026-10-24), from the coinbase, to the project address
    `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k` unless its
    operator changes it: `donation` raises or lowers the basis points and 0
    opts out. The address is fixed in the share chain's rules, so a donation
    cannot be redirected. Public pool operators set their own `fee_address`
-   and `fee`. The donation and the fee are each capped at 10% by the share
-   chain (per item since decision 13), so no node can take a block's reward
-   from the miners in its window.
+   and `fee`; a `fee_address` without `fee` takes 1%. The fee is still taken
+   from what the donation leaves. The donation and the fee are each capped
+   at 10% by the share chain (per item since decision 13), so no node can
+   take a block's reward from the miners in its window.
 10. **Rust stays the implementation.** Ideas from P2Pool v1, CashStratum and
     other BCH software are reimplemented in Rust here, never ported back as
     Python or C.

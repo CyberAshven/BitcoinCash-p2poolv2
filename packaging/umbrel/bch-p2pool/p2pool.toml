@@ -63,13 +63,14 @@ bch_share_chain = "mini"
 # address here before switching to Hydrapool.
 bootstrap_address = "bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k"
 
-# Every Bitcoin Cash node donates 1.5% (150 basis points) of each block it
+# Every Bitcoin Cash node donates 1% (100 basis points) of each block it
 # finds to bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k. Set
-# donation to change it, 0 to opt out. The donation and the fee may each be
-# at most 1000 basis points (10%).
-# donation = 150
+# donation to change it, 0 to opt out. A fee_address without fee takes 100
+# basis points (1%). The donation and the fee may each be at most 1000 basis
+# points (10%).
+# donation = 100
 # fee_address = "bitcoincash:q..."
-# fee = 0
+# fee = 100
 
 # Ignored on Bitcoin Cash (derived from bitcoin_cash_network) but required.
 network = "main"

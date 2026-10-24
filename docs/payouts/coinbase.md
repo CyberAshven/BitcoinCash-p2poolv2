@@ -17,17 +17,17 @@ payouts land on the Bitcoin Cash chain, spendable after 100 blocks.
 
 Three miners have found the six shares in a window, all at the same
 difficulty, so each miner's part is its count of shares. The block reward is
-3.125 BCH (fees left out), and the node keeps the default 1.5% donation and
+3.125 BCH (fees left out), and the node keeps the default 1% donation and
 no operator fee:
 
 ```text
 PPLNS window, newest first:  B  A  C  A  B  A
 
 Bitcoin Cash coinbase, 3.125 BCH:
-  donation, 1.5%                      0.046875   BCH
-  Miner C, 1 of 6 shares (16.7%)      0.51302083 BCH
-  Miner B, 2 of 6 shares (33.3%)      1.02604166 BCH
-  Miner A, 3 of 6 shares (50%)        1.53906251 BCH
+  donation, 1%                        0.03125000 BCH
+  Miner C, 1 of 6 shares (16.7%)      0.51562500 BCH
+  Miner B, 2 of 6 shares (33.3%)      1.03125000 BCH
+  Miner A, 3 of 6 shares (50%)        1.54687500 BCH
   merge-mining commitment             0
   padding                             0
   share commitment                    0
@@ -42,9 +42,10 @@ they are paid is on
 
 In order:
 
-1. **Donation.** 1.5% of the block by default, to the project's fixed key
+1. **Donation.** 1% of the block by default, to the project's fixed key
    (plan decision 9). An operator can raise, lower or turn it off.
-2. **Operator fee,** if the node sets `fee_address` and `fee`. Donation and
+2. **Operator fee,** if the node sets `fee_address`: `fee`, or 1% when
+   `fee` is not set. Donation and
    fee are each capped at 10% by the share chain, with no combined cap;
    the fee is taken from what the donation leaves.
 3. **PPLNS payouts,** smallest weight first, ties by locking script, then

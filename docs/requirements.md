@@ -123,7 +123,7 @@ far").
 | Requirement | Status |
 |---|---|
 | Mainnet and chipnet run the same rules; only the network switch differs. | Met. |
-| Fixed 1.5% donation by default, operator fee optional, a 10% cap on each (no combined cap, since 2026-10-24), enforced by the share chain. | Met. |
+| Fixed 1% donation by default, operator fee optional (1% when only its address is set), a 10% cap on each (no combined cap, since 2026-10-24), enforced by the share chain. | Met. |
 | CashAddr payouts, P2PKH share owners, canonical transaction order. | Met. |
 | Stratum V2 first, with Noise encryption, both Job Declaration modes and Template Distribution. | Met; interoperability with independent clients is still being tested. |
 | All code Rust. | Met. |

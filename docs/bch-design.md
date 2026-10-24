@@ -53,16 +53,17 @@ Cash miner could authorize.
 
 ## Donation and pool fee, decided 2026-10-14
 
-Decided by the maintainer: P2Poolv2 for Bitcoin Cash donates 1.5% of each
+Decided by the maintainer: P2Poolv2 for Bitcoin Cash donates 1% of each
 block a node finds to the project address
-`bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`, the operator can
-raise or lower it, and a public pool operator can add a fee of their own.
+`bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k` (1.5% until the
+owner lowered the defaults on 2026-10-24), the operator can raise or lower
+it, and a public pool operator can add a fee of their own, 1% unless set.
 
 | Setting | Bitcoin | Bitcoin Cash |
 |---|---|---|
 | `donation_address` | Any payout address; required with `donation` | May be omitted. If set, must be the project address under this network's prefix |
-| `donation` (basis points) | Default none | Default 150 (1.5%). Any value raises or lowers it; 0 turns it off |
-| `fee_address`, `fee` | Operator's cut, both or neither | Same |
+| `donation` (basis points) | Default none | Default 100 (1%). Any value raises or lowers it; 0 turns it off |
+| `fee_address`, `fee` | Operator's cut, both or neither | `fee_address` alone takes 100 (1%); `fee` without `fee_address` is an error |
 | Limits | Each at most 10,000 | Each at most 1,000 (10%) on its own; no combined cap |
 
 The donation key is the same on every Bitcoin Cash network: hash160

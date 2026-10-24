@@ -182,6 +182,14 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
+- Bitcoin Cash defaults (owner's decision, 2026-10-24): a node donates 1%
+  (100 basis points) of each block it finds instead of 1.5% when `donation`
+  is not set, and a `fee_address` set without `fee` takes a 1% operator fee
+  instead of being refused. The fee is still taken from what the donation
+  leaves, and each keeps its own 10% cap. Node defaults only: share-chain
+  rules are unchanged. The sample configs, Ansible role (which no longer
+  writes `fee = 0` when only a fee address is given), Umbrel apps, terminal
+  UI and docs follow.
 - Prometheus names no longer say Bitcoin (A27 in
   `docs/bch-btc-assumptions-audit.md`): `bitcoin_blocks_found_total` is
   `found_blocks_total`, `bitcoin_block_found_time_seconds` is

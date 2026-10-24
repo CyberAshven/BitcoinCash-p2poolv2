@@ -75,16 +75,16 @@ p2poolv2_bootstrap_address: ""
 # Payout address for solo mining, a CashAddr. Leave unset otherwise.
 # p2poolv2_solo_address: ""
 
-# Every Bitcoin Cash node donates 150 basis points (1.5%) of each block it
+# Every Bitcoin Cash node donates 100 basis points (1%) of each block it
 # finds to the project address unless donation is set; 0 opts out. Setting
 # donation_address is optional, and it must be the project address.
-# p2poolv2_donation: 150
+# p2poolv2_donation: 100
 # p2poolv2_donation_address: "bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k"
-# A public pool's own cut, in basis points, taken after the donation. The
-# donation and the fee may each be at most 1000 (10%): peers reject shares
-# above that.
+# A public pool's own cut, in basis points, taken after the donation: 100
+# (1%) when fee_address is set and fee is not. The donation and the fee may
+# each be at most 1000 (10%): peers reject shares above that.
 # p2poolv2_fee_address: ""
-# p2poolv2_fee: 0
+# p2poolv2_fee: 100
 
 # ZMQ always binds to localhost -- never expose to the network
 p2poolv2_zmq_endpoint: "tcp://127.0.0.1:28332"

@@ -69,20 +69,21 @@ bootstrap_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
 # On Bitcoin the default is no donation, and both fields must be set together.
 # On Bitcoin Cash (chain = "bitcoin-cash") the donation goes to the built-in
 # P2Poolv2 address bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k
-# (same key under bchtest: and bchreg:), and the default is 150 basis points
-# (1.5%) of each block this node finds. Set donation to raise or lower it, or
+# (same key under bchtest: and bchreg:), and the default is 100 basis points
+# (1%) of each block this node finds. Set donation to raise or lower it, or
 # to 0 to opt out. donation_address may be left out there; if set it must be
 # that same address, because the share chain rejects a Bitcoin Cash donation
 # paid anywhere else.
 # donation_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
-# In basis points, 1% = 100 basis points. Default 0 on Bitcoin, 150 on Bitcoin Cash
+# In basis points, 1% = 100 basis points. Default 0 on Bitcoin, 100 on Bitcoin Cash
 # donation = 0
 # Any fee amount for node/hydrapool provider to be sent to fee address. Default no fee.
 # This is where a public pool operator takes their own cut. It is taken after
 # the donation. On Bitcoin Cash, the donation and the fee may each be at most
 # 1000 basis points (10%); peers reject shares above that.
 # fee_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
-# In basis points, 1% = 100 basis points. Default 0
+# In basis points, 1% = 100 basis points. On Bitcoin both fields must be set
+# together; on Bitcoin Cash a fee_address without fee takes 100 (1%).
 # fee = 0
 zmqpubhashblock = "tcp://127.0.0.1:28332"
 # Block chain for templates and payout scripts. Default "bitcoin".

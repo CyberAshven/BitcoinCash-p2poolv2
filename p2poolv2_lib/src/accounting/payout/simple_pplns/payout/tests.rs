@@ -61,8 +61,8 @@ async fn bitcoin_cash_payout_combines_prefixed_and_prefixless_usernames() {
         .unwrap()
         .outputs;
     assert_eq!(distribution.len(), 4);
-    assert_eq!(distribution[0].amount.to_sat(), 1_500_000);
-    assert_eq!(distribution[1].amount.to_sat(), 985_000);
+    assert_eq!(distribution[0].amount.to_sat(), 1_000_000);
+    assert_eq!(distribution[1].amount.to_sat(), 990_000);
     assert_eq!(
         distribution
             .iter()
@@ -74,7 +74,7 @@ async fn bitcoin_cash_payout_combines_prefixed_and_prefixless_usernames() {
         .iter()
         .find(|output| output.address == *config.bootstrap_address())
         .unwrap();
-    assert_eq!(public_key_hash_payout.amount.to_sat(), 73_136_250);
+    assert_eq!(public_key_hash_payout.amount.to_sat(), 73_507_500);
     let script_hash = parse_payout_address(
         "bitcoincash:ppm2qsznhks23z7629mms6s4cwef74vcwvn0h829pq",
         config.chain,
@@ -89,7 +89,7 @@ async fn bitcoin_cash_payout_combines_prefixed_and_prefixless_usernames() {
             .unwrap()
             .amount
             .to_sat(),
-        24_378_750
+        24_502_500
     );
 }
 
@@ -145,14 +145,14 @@ async fn bootstrap_payout_preserves_donation_and_fee() {
         distribution[0].address,
         *config.donation_address_parsed.as_ref().unwrap()
     );
-    assert_eq!(distribution[0].amount.to_sat(), 1_500_000);
+    assert_eq!(distribution[0].amount.to_sat(), 1_000_000);
     assert_eq!(
         distribution[1].address,
         *config.fee_address_parsed.as_ref().unwrap()
     );
-    assert_eq!(distribution[1].amount.to_sat(), 985_000);
+    assert_eq!(distribution[1].amount.to_sat(), 990_000);
     assert_eq!(distribution[2].address, *config.bootstrap_address());
-    assert_eq!(distribution[2].amount.to_sat(), 97_515_000);
+    assert_eq!(distribution[2].amount.to_sat(), 98_010_000);
     assert_eq!(
         distribution
             .iter()

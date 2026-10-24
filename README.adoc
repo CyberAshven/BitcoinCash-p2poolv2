@@ -39,9 +39,9 @@ The full list, with reasons, is in link:docs/bch-plan.md[docs/bch-plan.md],
   easier, for small miners.
 * *Mainnet and chipnet run the same rules;* only the network setting differs.
   Share-chain rules never fork Bitcoin Cash itself.
-* *Donation and fee.* Each node donates 1.5% of the blocks it finds to the
+* *Donation and fee.* Each node donates 1% of the blocks it finds to the
   project by default (`donation`, 0 opts out); a public pool may add its own
-  `fee`. The share chain caps both together at 10%.
+  `fee` (1% unless set). The share chain caps each at 10%.
 * *Bitcoin Cash rules:* CashAddr payouts, P2PKH share owners, canonical
   transaction order, BCH's ASERT anchored at each share's parent for share
   difficulty.

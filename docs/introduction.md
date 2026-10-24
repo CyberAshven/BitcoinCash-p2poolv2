@@ -20,8 +20,8 @@ P2Poolv2 developers.
   easier, for small miners. See [Small miners](small-miners.md).
 - **Mainnet and chipnet run the same rules;** only the network setting
   differs. Regtest is for development.
-- **1.5% donation** to the project by default, an optional operator fee, and
-  at most 10% for both, enforced by the share chain.
+- **1% donation** to the project by default, an optional operator fee (1%
+  unless set), and at most 10% for each, enforced by the share chain.
 - **Stratum V2 first:** Noise encryption, standard and extended channels,
   both Job Declaration modes, and templates from a Template Provider. Stratum
   V1 stays for older firmware. See [Miner options](miner-options.md).
