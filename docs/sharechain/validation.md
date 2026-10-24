@@ -114,9 +114,11 @@ carries. The rebuild covers:
   share, rebuilt byte for byte ([Auxiliary work proofs](../bch-auxpow.md));
 - no SegWit: a Bitcoin Cash coinbase that carries a BIP141 witness
   commitment output is invalid. BCHN's templates never have one;
-- how the payouts become outputs. Today that is the coinbase budget of plan
-  decision 14 (at most 11 payouts, the rest paid by a draw). This is an open
-  design question and the rule is being redesigned; see
+- how the payouts become outputs: the hybrid payout of plan decision 14,
+  every payee paid directly within the share's coinbase limit (1,000,000
+  bytes, or 3,072 for a share that merge-mines tokens) and the rest through
+  one payout tree output, whose tree the node rebuilds too; payee, donation
+  and fee scripts must be P2PKH, P2SH20 or P2SH32; see
   [Coinbase payouts](../payouts/coinbase.md).
 
 A share whose coinbase pays anyone a different amount is invalid. The window
@@ -141,9 +143,10 @@ no one creates share units from nothing. On Bitcoin Cash:
 - a share coinbase output can be spent once it is 100 shares deep, and no
   output can be spent once the coinbase it descends from is more than
   121,063 shares deep (`BCH_PAYOUT_DEPTH`);
-- a share holds at most 100 transactions (`TXS_COUNT_LIMIT`), its body (its
-  share transactions plus the Bitcoin Cash coinbase it carries) at most
-  200 KiB (`BLOCK_TXS_SIZE_LIMIT`);
+- a share holds at most 100 transactions (`TXS_COUNT_LIMIT`) and 200 KiB of
+  share transactions (`BLOCK_TXS_SIZE_LIMIT`), and the Bitcoin Cash coinbase
+  it carries is at most 1,000,000 bytes, BCH's `MAX_TX_SIZE`
+  (`BCH_SHARE_BODY_SIZE_LIMIT`, 1,204,800 bytes in all);
 - the share transactions execute at most 3,000 SigChecks each
   (`MAX_TX_SIGCHECKS`, BCH consensus) and 1,452 in all
   (`BCH_MAX_SHARE_SIGCHECKS`: 200 KiB at BCH's one SigCheck per 141 bytes).

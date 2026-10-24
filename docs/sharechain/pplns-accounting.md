@@ -79,13 +79,15 @@ them as `pplns-k3-m100`, so a node on other values cannot peer.
 
 ## Weights
 
-Each share in the window counts its difficulty. A coinbase splits what is left
+Each share in the window counts its difficulty; on Bitcoin Cash, its exact
+work, 2^256 / (target + 1), not its difficulty rounded down to a whole
+number. A coinbase splits what is left
 after the donation and the operator fee in proportion to those weights. On
 Bitcoin Cash, a share's weight goes to whoever holds the share's payout right
 when the block is found: the miner, or a buyer
 ([Trading shares for BCH](../atomic-swap/bch-share-trading.md#payout-rights)).
 
-How the weights become coinbase outputs is an open design question; see
+How the weights become coinbase outputs is on
 [Coinbase payouts](../payouts/coinbase.md).
 
 ## Uncles

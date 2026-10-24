@@ -26,8 +26,9 @@ with these differences:
 
 1. **Coinbase maturity** is 100 shares (on Bitcoin, upstream uses 6,048
    shares); see [PPLNS accounting](pplns-accounting.md).
-2. **Size.** A share holds at most 100 transactions, and its body (its share
-   transactions plus the Bitcoin Cash coinbase it carries) at most 200 KiB.
+2. **Size.** A share holds at most 100 transactions and 200 KiB of share
+   transactions; the Bitcoin Cash coinbase it carries may take BCH's full
+   1,000,000 bytes beside them.
 3. **The share coinbase** pays a fixed one share unit, with no subsidy and no
    fees.
 4. **Outputs expire** by the height of the coinbase they descend from; see

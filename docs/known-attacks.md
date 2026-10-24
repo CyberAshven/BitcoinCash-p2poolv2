@@ -146,18 +146,19 @@ reports that stock Antminer firmware accepts only about a dozen outputs. An
 attacker with many tiny addresses could also push small honest miners out of
 a capped coinbase (the "rich list" attack).
 
-**Open.** Not yet measured on Bitcoin Cash hardware. The code today caps a
-coinbase at 11 payouts in a 784-byte job and pays the rest to one payee drawn
-by weight (plan decision 14), so crowding others out of the paid set only
-moves them into the draw, where their expected income is unchanged. The 784
-bytes come from one Bitcoin block another pool mined: a lower bound for that
-firmware, not a measured limit, and P2Pool v1 on Bitcoin Cash paid hundreds
-of miners per coinbase. The cap is being replaced by a hybrid: direct payouts
-to every miner, and a covenant payout tree, which BCH's introspection opcodes
-allow without a fork, only for shares that merge-mine tokens once their
-coinbase passes a threshold. Stratum V2 standard channels, which hash headers
-only, avoid any firmware limit, and device limits are to be measured and
-handled per connection. See [Pool size limits](sharechain/pool-size.md) and
+**Open.** Not yet measured on Bitcoin Cash hardware. The code pays every
+miner directly in a coinbase of up to 1,000,000 bytes (plan decision 14), so
+there is no paid set to crowd others out of. Only a share that merge-mines
+tokens keeps its coinbase within 3,072 bytes. Payees are paid smallest
+first, and the larger payees past the limit are paid exactly, less their
+share of the fee at 1 to 3 sat/byte, through a covenant payout tree, which
+BCH's introspection opcodes allow without a fork. Tiny addresses can move
+others into the tree, not out of their income. The old 784-byte cap came
+from one Bitcoin block another pool mined: a lower bound for that firmware,
+not a measured limit, and P2Pool v1 on Bitcoin Cash paid hundreds of miners
+per coinbase. Stratum V2 standard channels, which hash headers only, avoid
+any firmware limit, and device limits are to be measured and handled per
+connection. See [Pool size limits](sharechain/pool-size.md) and
 [the Bitcoin assumptions audit](bch-btc-assumptions-audit.md), A1 and M1.
 
 ## Bitcoin Cash chain risks

@@ -52,13 +52,16 @@ measured hashrate and vardiff.
 2. Runs the share accounting: the PPLNS window over the share chain decides
    how much each miner is paid.
 3. Builds the Bitcoin Cash coinbase from that accounting, after the
-   donation and the operator fee. Today it also applies the coinbase budget,
-   which is being redesigned ([Coinbase payouts](payouts/coinbase.md)).
+   donation and the operator fee, paying payees past the coinbase's limit
+   through a payout tree ([Coinbase payouts](payouts/coinbase.md)).
 4. Gives the Stratum server the current pool difficulty and coinbase.
 5. Validates every share a peer sends: its proof of work against the pool
    difficulty, and its coinbase against the payouts the share chain implies
    ([Share validation](sharechain/validation.md)).
 6. Relays valid shares, and signed share transactions, to its peers.
+7. Keeps the payout tree of each block the pool finds and broadcasts it to
+   BCHN once the coinbase has 100 confirmations
+   (`node/payout_tree_executor.rs`).
 
 ## In the source
 

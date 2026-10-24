@@ -20,9 +20,9 @@ On Bitcoin Cash the premise differs:
 
 - **Covenants exist.** Introspection (May 2022), CashTokens and P2SH32 (May
   2023) let a script check the transaction that spends it, so a covenant
-  payout tree needs no change to Bitcoin Cash. The redesign of coinbase
-  payouts uses one for shares that merge-mine tokens; see
-  [Pool size limits](../sharechain/pool-size.md#open-design-question-the-hybrid-payout).
+  payout tree needs no change to Bitcoin Cash. Coinbase payouts use one for
+  the payees past a share's coinbase limit; see
+  [Pool size limits](../sharechain/pool-size.md#the-hybrid-payout).
 - **Selling is still useful.** A share is paid a little by each block the pool
   finds while it is in the window. A miner who sells gets one payment now,
   and hands the risk of the pool's luck to the buyer.

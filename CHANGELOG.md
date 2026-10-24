@@ -14,11 +14,26 @@ changes the share chain's rules, not Bitcoin Cash consensus: nodes start
 from a new store, and Bitcoin Cash protocol strings carry `trade-htlc` and
 then `payout-holder`.
 
-A Bitcoin Cash coinbase now fits stock ASIC firmware: at most 11 payout
-outputs in a coinbase of at most 784 bytes, the tail of small payees paid by
-a draw weighted by their PPLNS weight. Another share-chain rule change:
-protocol strings carry `payout-cap11` after `payout-holder`. The share
-transaction pool ranks transactions by the share units they burn per byte.
+Bitcoin Cash hybrid payouts replace the 11-payout cap and weighted tail
+draw. An exactly empty merge-mining commitment pays miners directly within
+BCH's 1,000,000-byte transaction limit; token shares use a 3,072-byte
+coinbase budget. Payees are ordered by ascending weight, then script bytes;
+the straddler and remaining payees go to a P2SH32 payout tree with fan-out
+500. Nodes keep and serve found-block trees and execute them after maturity
+at 1 sat/byte; the covenant permits 1 to 3 sat/byte. The BCH share body
+allows that full coinbase beside 200 KiB of share transactions, and BCH
+payout scripts must be P2PKH, P2SH20 or P2SH32. BCH PPLNS shares and uncles
+are weighted by exact target work rather than rounded-down difficulty.
+These are share-chain rule changes, not changes to BCH consensus. The
+share transaction pool ranks transactions by the share units they burn per
+byte.
+
+Stratum V2 extended channels refuse a coinbase prefix or suffix over
+65,535 bytes with a channel-opening error or a per-channel refresh log.
+Standard channels keep mining a merkle root of the complete coinbase on
+the same connection; Stratum V1 sends the whole coinbase. The nightly
+workflow runs both ignored payout-tree BCHN regtest tests serially with
+production rules and standard relay policy, preserving logs on failure.
 
 Share-chain safety fixes from a review against upstream's design documents
 (2026-10-23). An uncle may have only one nephew on a chain, header sync checks
@@ -27,7 +42,7 @@ instead of stalling the node, the reorg depth limit is `PAYOUT_DEPTH`, the
 pending block buffer is bounded and stratum difficulty can no longer
 overflow. The uncle rule and the header timestamp checks change the share
 chain's rules on Bitcoin Cash and Bitcoin, not Bitcoin Cash consensus:
-Bitcoin Cash protocol strings carry `uncle-once` after `payout-cap11`, and
+Bitcoin Cash protocol strings carry `uncle-once` after the payout rule, and
 the store format changes, so nodes start from a new store.
 
 The approved Bitcoin Cash share-chain rule batch (owner's OK, 2026-10-23)
@@ -156,9 +171,8 @@ anchor and the donation and fee cap as they were.
   transactions, spending share outputs, pool size limits) and payouts
   (coinbase payouts, selling shares). They keep upstream's credit and MIT or
   Apache-2.0 notice; `docs/upstream-port-map.md` maps every upstream page and
-  says why the rest were not ported. The coinbase payout cap is marked as an
-  open design question, being redesigned as direct payouts plus a payout tree
-  for shares that merge-mine tokens.
+  says why the rest were not ported. Payout pages describe the hybrid direct
+  payouts and payout tree, replacing the old cap and tail draw.
 - Docker: a Bitcoin Cash Node 29.2.0 image from the release tarball, pinned
   by SHA-256, and a regtest stack that mines through the pool with a Rust CPU
   miner (mujina), checked by the `Docker regtest stack` CI job.

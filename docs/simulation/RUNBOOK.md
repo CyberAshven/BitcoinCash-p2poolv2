@@ -278,17 +278,16 @@ has no witness commitment. The split is the PPLNS distribution,
 proportional to each miner's share contribution in the window.
 
 > Breadth: the number of payees = distinct miners with weight in the PPLNS
-> window, up to `BCH_MAX_COINBASE_PAYOUTS` (11) payout outputs. Past 11
-> payees the largest are paid their exact share and the rest goes to one
-> payee drawn by weight (`docs/architecture/payout-distribution.md`,
-> "Bitcoin Cash coinbase budget"); both are share-chain rules. The window
-> starts below the shares not yet mature for the paying share
+> window, each paid its own output: pool-built jobs merge-mine no tokens, so
+> the hybrid payout pays every payee directly and no payout tree output
+> appears at sim sizes (`docs/architecture/bch-hybrid-payouts.md`). The
+> window starts below the shares not yet mature for the paying share
 > (`BCH_COINBASE_MATURITY`, 100 shares, which the sim build keeps) and is
 > capped at `PPLNS_WINDOW_SHARES` (80 in the sim build); regtest headers
 > always hit that cap. The first 100 shares of the chain are always mature.
-> With 20 nodes a block pays at most 11 payout outputs once the chain is
-> deeper than maturity plus window; with 10 nodes, up to all 10 miners
-> (a small miner may have no share in an 80-share window).
+> With 20 or 10 nodes a block pays up to all their miners once the chain is
+> deeper than maturity plus window (a small miner may have no share in an
+> 80-share window).
 
 Stop everything:
 

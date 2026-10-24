@@ -14,11 +14,10 @@ On Bitcoin Cash:
 - **Every block pays miners in its coinbase.** Nobody holds a balance, and the
   outputs are spendable after 100 blocks. See
   [Coinbase payouts](coinbase.md).
-- **How many payees a coinbase carries is an open design question.** The code
-  today caps a coinbase at 11 payouts and pays the rest by a draw. It is being
-  redesigned as a hybrid: direct payouts to every miner, and a covenant payout
-  tree only for shares that merge-mine tokens once their coinbase passes a
-  threshold. See [Pool size limits](../sharechain/pool-size.md).
+- **A coinbase pays every miner directly,** up to Bitcoin Cash's
+  1,000,000-byte transaction limit. Only a share that merge-mines tokens
+  keeps its coinbase within 3,072 bytes and pays the payees past that through
+  a covenant payout tree. See [Pool size limits](../sharechain/pool-size.md).
 - **A miner can sell a share's payout right for BCH,** with a contract on each
   chain and no Lightning. The buyer is then paid that share's part of each
   block. See [Selling shares](selling-shares.md).

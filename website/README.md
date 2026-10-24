@@ -78,7 +78,7 @@ moves:
 | A share every ten seconds; mini 256 times easier than main | `docs/bch-design.md` |
 | Up to three uncles, paid nine tenths, the nephew one tenth | `docs/architecture/payout-distribution.md`, `MAX_UNCLES` |
 | Donation 1.5% by default; window of three blocks' work, at most 120,960 shares, behind a 100-share maturity | `docs/architecture/payout-distribution.md`, `docs/bch-design.md` |
-| At most 11 coinbase payouts, the tail drawn by weight | decision 14 in `docs/bch-plan.md` |
+| Every miner paid directly in the coinbase; a payout tree past 3,072 bytes for token shares | decision 14 in `docs/bch-plan.md` |
 | Share trading tested in-process, not yet through BCHN | `docs/bch-plan.md` |
 | Stratum ports 3333 and 3336, `p2p=`, share address prefixes | `config.sample.toml`, `docs/bch-quickstart.md` |
 | The dated chipnet and regtest results, and the "Not yet" list | `docs/bch-plan.md`, `docs/bch-design.md` |
@@ -104,7 +104,7 @@ Bitcoin Cash changes are distributed with this fork under AGPL-3.0 (decision
   the Lightning and Ark swap steps, the small-miner probability worked out
   for S19 Pros, and the upstream pool's Grafana, Matrix and X links. In
   their place are the Bitcoin Cash share chain, CashAddr and P2PKH share
-  addresses, Stratum V2 with Job Declaration, the coinbase budget, and the
+  addresses, Stratum V2 with Job Declaration, the hybrid payout, and the
   chipnet status.
 - The social card image (`og.png`) is not carried over; the page has
   Open Graph text only.

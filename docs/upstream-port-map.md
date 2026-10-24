@@ -37,10 +37,10 @@ pages, difficulty, simulation and atomic swap pages).
 | `architecture/pplns_accounting.adoc` | [PPLNS accounting](sharechain/pplns-accounting.md) | Window of three Bitcoin Cash blocks of work behind a 100-share maturity, in place of 120,960 shares behind 6,048. |
 | `architecture/transactions.adoc` | [Share transactions](sharechain/transactions.md) | CashAddr share owners, fees burned as node policy instead of paid to the miner. |
 | `architecture/spending_utxos.adoc` | [Spending share outputs](sharechain/spending-outputs.md) | Earnings follow the payout right, not the root height. |
-| `architecture/pool_scalability_limits.adoc` | [Pool size limits](sharechain/pool-size.md) | Upstream's page is a title only. Written for Bitcoin Cash: the limits that apply, and the open hybrid payout design. |
+| `architecture/pool_scalability_limits.adoc` | [Pool size limits](sharechain/pool-size.md) | Upstream's page is a title only. Written for Bitcoin Cash: the limits that apply, and the hybrid payout. |
 | `architecture/share_flow.adoc` | not ported | A sample page upstream excludes from its site; its diagrams are illustrative. The real flow is [Share processing pipeline](architecture/share-processing-pipeline.md). |
 | `payouts/index.adoc` | [Payouts](payouts/README.md) | |
-| `payouts/coinbase.adoc` | [Coinbase payouts](payouts/coinbase.md) | Bitcoin Cash outputs, donation and fee; the payout cap marked as being redesigned. |
+| `payouts/coinbase.adoc` | [Coinbase payouts](payouts/coinbase.md) | Bitcoin Cash outputs, donation and fee; the hybrid payout and its payout tree. |
 | `payouts/marketplace.adoc` | [Selling shares](payouts/selling-shares.md) | Covenants exist on Bitcoin Cash; the window is three blocks of work, not two weeks. |
 | `payouts/onchain.adoc` | [Selling shares](payouts/selling-shares.md), "On-chain swaps" | Upstream's page is a heading only. Built here: [Trading shares for BCH](atomic-swap/bch-share-trading.md). |
 | `payouts/l2_swaps.adoc` | [Selling shares](payouts/selling-shares.md), "Off-chain swaps" | Upstream's Ark and Lightning swaps are "coming soon". Not planned on Bitcoin Cash (plan decision 13). |

@@ -237,8 +237,9 @@ the confirmed tip and the mining base, final and mature at the share's
 height. It skips a transaction that does not fit and stops adding at 99
 transactions (`TXS_COUNT_LIMIT` less the coinbase), 64 KiB
 (`MAX_SHARE_TRANSACTION_BYTES`) and the SigChecks budget (1,452); the job builder then
-drops transactions from the end until the share's transactions, its share
-coinbase and its bitcoin coinbase fit `BLOCK_TXS_SIZE_LIMIT` (200 KiB).
+drops transactions from the end until the share's transactions and its share
+coinbase fit `BLOCK_TXS_SIZE_LIMIT` (200 KiB); the bitcoin coinbase has its
+own limit, BCH's 1,000,000 bytes.
 
 The chosen set is fixed for the job: its `share_witness_root` goes into the
 share commitment every miner on the job hashes, the job keeps the set, and a

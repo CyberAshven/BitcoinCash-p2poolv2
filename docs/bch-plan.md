@@ -18,7 +18,7 @@ Audience: contributors and AI agents starting the BCH port. Read
 | Main/mini share chains and P2P propagation | Implemented; recorded three-node regtest and two-node chipnet share validation. |
 | Large BCH template proofs | Implemented; 32-level BCH branches (25 before the 2026-10-24 rule batch) round-trip through share blocks, storage and compressed header batches. Bitcoin proof validation keeps its 16-level limit. |
 | Pool-issued SV1/SV2 jobs and worker cleanup | Implemented; recorded CPU mining plus channel and socket tests. Independent ASIC firmware remains unverified. |
-| Coinbase fits stock ASIC firmware (decision 14) | Implemented 2026-10-23 as a share-chain consensus change: at most 11 payout outputs and 374 bytes of them, the tail drawn by weight from the payout anchor, no payout below dust; the largest Bitcoin Cash coinbase is 782 bytes against a 784-byte job budget the job builders enforce. Protocol strings carry `payout-cap11`. Unit tests: 200 payees stay within the cap with exact sums, the draw keeps each tail payee's expected share over 4,000 anchors, the producer and validator agree past the cap, the largest declared coinbase fits. The 784-byte limit is evidence from another pool (upstream #668); stock Antminer firmware has not mined through this pool yet. |
+| Hybrid payouts (decision 14) | Implemented on PR #33 as a share-chain rule change, replacing the 11-payout cap and weighted draw of 2026-10-23 (`payout-cap11`). A share that merge-mines no tokens pays every PPLNS payee directly, bounded only by BCH's 1,000,000-byte transaction limit (about 29,398 P2PKH payees); a token share keeps its coinbase within 3,072 bytes (77 P2PKH payees) and pays the rest through one P2SH32 payout tree output. Every node keeps the tree of each found block, broadcasts it after the coinbase's 100 confirmations and serves it at `/payout_tree`. The share body carries a coinbase of up to 1,000,000 bytes beside 200 KiB of share transactions; payout scripts must be P2PKH, P2SH20 or P2SH32; PPLNS weights are exact work. Protocol strings carry `payout-hybrid-t3072-f500-r1to3-z8-cov1` in place of `payout-cap11`. Tests run the tree in a Rust BCH script machine with the 2025 VM limits, and end to end on BCHN 29.2.0 regtest. Design: [architecture/bch-hybrid-payouts.md](architecture/bch-hybrid-payouts.md). Not yet run on chipnet; stock ASIC firmware limits are not measured. |
 | Share transaction pool priority (decision 15) | Implemented 2026-10-23 as node policy: priority is share units burned per byte, then arrival; shares carry the highest first, and a full pool evicts the lowest only for a transaction that outranks them. No validity change. |
 | CashAddr text in the API | Implemented; P2PKH/P2SH vectors and a chipnet share lookup test. |
 | By-address query for share chain explorers | Implemented as `GET /miner?address=` (see `p2poolv2_api/README.md`): one miner's window shares and uncles, weight, share of the window and fraction of the next PPLNS payout, read from the payout code's own `PplnsWindow`. Takes a CashAddr payout with or without prefix or a `p2pool:`/`tp2pool:`/`rp2pool:` share address; chipnet and signet API tests. On 2026-10-23 `p2poolv2_tui`'s live check read it from chipnet node 1 (218 of 218 window shares for the Avalon's payout address). |
@@ -590,17 +590,16 @@ move most BCH hashrate to the share chain.
      are in the window; then the shares slide out. Nothing is held, kept or
      expired.
    - Dust: each share is worth a slice of a full block reward, far above
-     BCH's dust limit, so nothing accumulates. A payee whose slice would
-     still be dust (a tiny share beside large ones) joins the drawn tail of
-     decision 14 instead of getting a dust output.
+     BCH's dust limit, so nothing accumulates. A direct payout whose slice
+     would still be dust (a tiny share beside large ones) is paid as it is,
+     which BCH consensus allows in a coinbase; a payout tree payee below dust
+     is merged into the largest tree payee (decision 14).
    - Small miners' variance: a main and a "mini" share chain with lower
      share difficulty, as Monero's P2Pool has (main, mini, nano), plus uncles
      (P2Poolv2 already has them).
-   - Optional later: a keyless covenant payout tree in one coinbase output
-     (BCH introspection can check the spending transaction's outputs), only
-     if the number of coinbase outputs becomes a problem. It did for stock
-     ASIC firmware; decision 14 caps the outputs and draws the tail until
-     such a tree pays it exactly.
+   - A keyless covenant payout tree in one coinbase output (BCH
+     introspection can check the spending transaction's outputs) pays the
+     payees that do not fit a share's coinbase limit (decision 14).
 5. **Merge mining.** Reserve one coinbase commitment output whose hash covers
    every token the miner chose to merge-mine (AuxPoW-style); each token's
    covenant checks a short proof up to it. The share chain fixes the payouts;
@@ -820,52 +819,44 @@ move most BCH hashrate to the share chain.
       other software, including the maintainer's Avalon ASIC on chipnet, are
       run by the developers, not left to the maintainer.
 
-14. **Coinbase budget (2026-10-23, consensus change).** Upstream reports
-    that stock Antminer firmware takes a coinbase of "just over a dozen
-    outputs" (discussion #668: an OCEAN block with 16 payouts in 784 bytes)
-    and plans 25 outputs with the long tail paid to one miner drawn by
-    weight (#708). Every Stratum V1 device hashes the whole coinbase, also
-    behind an SV2 translator; only SV2 standard channels do not. Before this
-    a Bitcoin Cash coinbase paid every window payee.
-    - **Rule.** At most `C` = 11 PPLNS payout outputs (`BCH_MAX_COINBASE_PAYOUTS`)
-      and `B` = 374 bytes of them, no payout below BCHN's dust threshold.
-      Payees that fit are paid as before. Otherwise the payees ranked by
-      weight (after the payout-holder rule) are paid their exact share while
-      they fit `C - 1` outputs and `B` less the largest payee output, and
-      the rest of the amount goes to one remaining payee drawn by weight
-      from `SHA256(tag || anchor)`. A tail worth less than dust goes to the
-      largest payee. Full rule: `architecture/payout-distribution.md`,
-      "Bitcoin Cash coinbase budget".
-    - **Why a draw.** Upstream's proposal. It keeps every tail payee's
-      expected income and loses nothing, where leaving the tail out (P2Pool
-      v1 past 4,000 payees) loses it, spreading it over the paid set takes it
-      from small miners (and feeds a rich-list Sybil, #647), and carrying it
-      needs state about blocks BCH may orphan.
-    - **Why the anchor.** Unknown until the anchor share exists, after which
-      payout rights at it are fixed, so nobody can move a right to an address
-      placed to win; a seed known in advance (the BCH previous block hash)
-      would allow that. Building on an older anchor buys extra draws only for
-      the grinder's own blocks, at the cost of stale shares.
-    - **Why 11 and 784 bytes.** 784 bytes is the Antminer-mined coinbase
-      upstream cites. The largest coinbase besides payouts is 408 bytes (a
-      100-byte scriptSig, the donation, a fee to any address type, the
-      merge-mining, padding and commitment outputs), leaving 11 P2PKH
-      outputs; the largest coinbase is 782 bytes. With the 80-byte header and
-      a 25-hash merkle branch a merge-mining claim that carries the coinbase
-      stays at most 1,664 bytes, far under the 2026 P2S unlocking limit.
-      `B` bounds payouts even if a share names a witness-program address.
-      The merge-mining output is placed in one function and counted by size,
-      so the merge-mining format can move it; the share commitment output
-      stays last with its padding.
-    - **Unchanged.** Donation, fee and the 10% cap come off first; CTOR is
-      untouched; Bitcoin and Hydrapool pay every payee. The API's `/miner`
-      weight is a tail payee's expected payout, not its next one.
-    - **Later.** The covenant payout tree (decision 4's "optional later",
-      gap analysis M2) turns the drawn output into a tree output each tail
-      payee withdraws exactly, removing the draw. Raising `C` and the byte
-      budget after a measurement on stock Antminer firmware is a new tag.
+14. **Coinbase payouts: the hybrid payout (share-chain rule).** On
+    2026-10-23 a Bitcoin Cash coinbase was capped at 11 payouts in a 784-byte
+    job, the tail drawn by weight (`payout-cap11`), after upstream's report
+    that stock Antminer firmware takes "just over a dozen outputs"
+    (discussion #668, one OCEAN Bitcoin block). The owner rejected that as a
+    Bitcoin assumption, and on PR #33 the hybrid payout replaced it
+    ([architecture/bch-hybrid-payouts.md](architecture/bch-hybrid-payouts.md);
+    audit items A1 to A3).
+    - **Rule.** Donation, fee and the 10% cap come off first, as before. A
+      share whose merge-mining commitment is exactly empty (pool-built jobs
+      always are) pays every PPLNS payee directly, within BCH's
+      1,000,000-byte `MAX_TX_SIZE` (about 29,398 P2PKH payees). A share that
+      merge-mines tokens keeps its coinbase within `T` = 3,072 bytes (77
+      P2PKH payees), so a token covenant can hash it in the VM. Payees are in
+      canonical order, ascending weight, ties by locking bytecode; the payee
+      that straddles the limit and every payee after it go to one P2SH32
+      payout tree output after the direct payouts. Nobody is split, the
+      rounding remainder goes to the largest payee, and direct payouts below
+      dust are paid as they are.
+    - **The tree.** Keyless covenant nodes of 500 outputs each, paid from the
+      tree's own value: the root accepts the outputs for 1, 2 or 3 sat/byte,
+      and at that rate each payee pays for its own output's bytes plus an
+      equal share of the other bytes. Tree payees below dust at 3 sat/byte
+      are merged into the largest.
+      Every node keeps the tree of each found block, broadcasts it at
+      1 sat/byte after the coinbase's 100 confirmations, and serves it at
+      `/payout_trees` and `/payout_tree?coinbase_txid=`, so payees can
+      broadcast it without P2Pool.
+    - **With it.** The share body carries a coinbase of up to 1,000,000
+      bytes beside 200 KiB of share transactions; payout scripts must be
+      P2PKH, P2SH20 or P2SH32; PPLNS weights are exact work, 2^256 /
+      (target + 1). Bitcoin and Hydrapool pay every payee, as before. An SV2
+      extended job or Job Declaration carries at most 65,535 bytes of
+      coinbase on each side of the extranonce, so a larger coinbase (about
+      1,900 P2PKH payouts) is refused for that channel.
     - **Activation.** Flag day on a fresh store; protocol strings carry
-      `payout-cap11` after `payout-holder`. Mainnet starts with the rule.
+      `payout-hybrid-t3072-f500-r1to3-z8-cov1` in place of `payout-cap11`.
+      Mainnet starts with the rule.
 
 15. **Share transaction pool priority (2026-10-23, node policy).** The pool
     admitted by arrival and evicted the oldest, so a holder of many share
@@ -947,12 +938,13 @@ check before code.
   lists it as open, its ADR 0002). Since 2026-10-15 a `p2p=` option in
   `user_identity` names the share address, as the SV1 password does; a
   signed binding a miner could prove is still open.
-- The covenant payout tree: decision 14 caps the coinbase at 11 payouts and
-  pays the tail by a draw; the tree would pay the tail exactly. Prove it
-  within BCH's VM limits first.
+- The payout tree on chipnet: it has run in a Rust BCH script machine with
+  the 2025 VM limits and end to end on BCHN regtest (decision 14), not yet on
+  chipnet or at scale.
 - The real coinbase limit of stock Antminer firmware: mine on chipnet over
-  SV1 and through an SV2 translator with coinbases of about 600 to 1,200
-  bytes (decision 14 assumes 784).
+  SV1 and through an SV2 translator with coinbases of growing size (audit
+  measurement M1). Device limits are to be handled per connection, never as
+  a share-chain cap.
 - Pool operators running this software beside the share chain.
 
 ## First steps

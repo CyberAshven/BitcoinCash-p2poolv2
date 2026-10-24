@@ -199,13 +199,16 @@
       </dd>
     </div>
     <div>
-      <dt>A coinbase stock firmware can mine</dt>
+      <dt>Every miner paid in the coinbase</dt>
       <dd>
-        A Stratum V1 miner hashes the whole coinbase, and stock ASIC firmware
-        reportedly takes only about a dozen outputs. So a coinbase holds
-        at most 11 payouts. The largest payees are paid their exact share,
-        and the rest goes to one of the others, drawn by weight, so each of
-        them is paid its share on average.
+        The coinbase pays every miner its exact share directly, smallest
+        first, up to Bitcoin Cash's own 1,000,000-byte transaction limit,
+        about 29,400 payouts. A share that merge-mines tokens keeps its
+        coinbase within 3,072 bytes, about 77 payouts. Anyone past the limit
+        is paid through one output locked to a payout tree: keyless
+        transactions that, once the coinbase matures, can only pay those
+        miners their exact amounts less a fee of about one satoshi per byte.
+        Every node broadcasts them.
       </dd>
     </div>
     <div>
@@ -414,7 +417,9 @@ dial_peers = ["/ip4/203.0.113.1/tcp/6884"]
       <ul>
         <li>Share trading: tested inside the node, not yet through BCHN or on
         chipnet.</li>
-        <li>Stock ASIC firmware has not yet mined the 11-payout coinbase.</li>
+        <li>Payout trees: executed on BCHN regtest, not yet on chipnet.</li>
+        <li>How many payouts stock ASIC firmware can mine has not yet been
+        measured on Bitcoin Cash.</li>
         <li>Stratum V2 and Job Declaration clients from other projects have
         not yet been tested against the pool.</li>
         <li>The terminal UI is not yet in the release archives.</li>

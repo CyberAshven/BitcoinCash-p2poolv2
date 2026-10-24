@@ -61,14 +61,12 @@ set, and this fork designs for scale: Bitcoin Cash can scale and will scale.
   ([Trading shares for BCH](atomic-swap/bch-share-trading.md)).
 - **Covenants exist today.** Native introspection (May 2022), CashTokens
   and P2SH32 (May 2023) let a script check the transaction that spends it.
-  This fork uses P2SH32 for share trades, and plans a covenant payout tree
-  for shares that merge-mine tokens.
-- **How the coinbase pays is an open design question.** The code today caps
-  a coinbase at 11 payouts and pays the rest by a draw, from upstream's
-  report that stock ASIC firmware takes only a small coinbase. That cap is
-  being replaced: direct coinbase payouts for every miner, and a payout tree
-  only for shares that merge-mine tokens once their coinbase passes a
-  threshold. See [Pool size limits](sharechain/pool-size.md) and
+  This fork uses P2SH32 for share trades and for a covenant payout tree.
+- **The coinbase pays every miner directly,** up to Bitcoin Cash's
+  1,000,000-byte transaction limit, with no cap taken from Bitcoin's
+  firmware reports. Only a share that merge-mines tokens keeps its coinbase
+  within 3,072 bytes and pays the payees past that through the payout tree.
+  See [Pool size limits](sharechain/pool-size.md) and
   [Coinbase payouts](payouts/coinbase.md).
 
 The [Plan and decisions](bch-plan.md) page lists every Bitcoin Cash decision

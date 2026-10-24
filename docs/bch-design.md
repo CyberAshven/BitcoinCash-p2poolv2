@@ -188,13 +188,15 @@ a full donation (10,000) still skips miner address validation.
   suggests limiting the coinbase transaction to about 2 kB, roughly 60
   P2PKH outputs, and was opposed by a BCHN maintainer for the reason that it
   blocks direct coinbase payouts. BCH consensus limits a coinbase only by the
-  1,000,000-byte transaction size and the 100-byte scriptSig. This node
-  limits it further by share-chain rules: at most 11 payouts in a 784-byte
-  job (decision 14), which the owner has decided to replace with direct
-  payouts to every miner, and the 200 KiB share body that carries the
-  coinbase. See [the Bitcoin assumptions audit](bch-btc-assumptions-audit.md),
-  items A1 and A2. If a BCH coinbase limit is adopted, the covenant payout
-  tree in the plan becomes necessary rather than optional.
+  1,000,000-byte transaction size and the 100-byte scriptSig. This node's
+  share-chain rules use all of it: a share that merge-mines no tokens pays
+  every miner directly in a coinbase of up to 1,000,000 bytes (about 29,400
+  P2PKH payees), which the share body carries. A share that merge-mines
+  tokens keeps its coinbase within 3,072 bytes, and the payees past a
+  share's limit are paid through a covenant payout tree
+  ([Hybrid payouts](architecture/bch-hybrid-payouts.md); audit items A1 and
+  A2). If a BCH coinbase limit is adopted, lowering the no-token limit to it
+  is a new share-chain rule; the tree already pays the rest.
 - **Stratum V2.** A local listener starts when `stratum.sv2_port` is set.
   SV1 stays. Without authority keys, frames are the unencrypted framing the
   Stratum V2 specification allows between local roles; with them, the Noise
