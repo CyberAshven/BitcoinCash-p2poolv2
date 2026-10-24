@@ -483,6 +483,15 @@ impl ShareBlock {
         self.header.block_hash()
     }
 
+    /// Size of the block's consensus encoding, measured without
+    /// allocating. The node's in-memory queues and buffers of share blocks
+    /// are bounded by it. Encoding into a sink cannot fail; if it ever did,
+    /// the block counts as too large for any of them.
+    pub fn encoded_size(&self) -> usize {
+        self.consensus_encode(&mut bitcoin::io::sink())
+            .unwrap_or(usize::MAX)
+    }
+
     /// Merkle root over the block's transactions, coinbase first.
     ///
     /// Computed rather than carried on the header: the header binds the

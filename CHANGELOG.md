@@ -216,6 +216,21 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
+- The organise worker's channel and pending buffer are bounded in bytes as
+  well as by count, now that a Bitcoin Cash share may carry a 1,000,000-byte
+  coinbase: full of the largest shares, the 512-share channel and the
+  1,024-share buffer could have held about 620 MB and 1.2 GB. The channel
+  holds at most 64 MiB of share blocks, by consensus encoding; a validation
+  task whose block would pass that waits until the organise worker takes
+  some off the queue (backpressure), and a block larger than the whole
+  budget passes alone. The buffer holds at most 128 MiB, and past either of
+  its bounds now evicts its oldest blocks instead of refusing the new one,
+  so blocks stuck behind a parent that never validates cannot pin it; an
+  evicted block stays stored and is re-validated when a descendant arrives.
+  Honest shares, about 35 KB at 1,000 payees, still meet the count bounds
+  first. Node behaviour only, not a share-chain rule. Tests cover the
+  backpressure, the count bound, an oversized block, a dropped receiver,
+  oldest-first eviction by count and by bytes, and megabyte shares.
 - Bitcoin Cash defaults (owner's decision, 2026-10-24): a node donates 1%
   (100 basis points) of each block it finds instead of 1.5% when `donation`
   is not set, and a `fee_address` set without `fee` takes a 1% operator fee

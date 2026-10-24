@@ -117,6 +117,11 @@ on different networks.
   32 MiB, each for at most 10 minutes; the oldest go first. Each costs the
   attacker a share's proof of work, but on the mini chain shares are cheap,
   and a flood can push out honest shares that are waiting for a parent.
+- Validated shares on their way to the organise worker wait in a queue of at
+  most 512 shares and 64 MiB, where validation waits for room, and those
+  whose parent is not yet validated in a buffer of at most 1,024 shares and
+  128 MiB, the oldest evicted first. An evicted share stays stored and is
+  re-validated when a share arrives on top of it.
 - The share-transaction pool holds at most 1,000 transactions and 4 MiB.
   Priority is the share units a transaction burns per byte, then arrival
   (decision 15); a full pool evicts the lowest only for a transaction that

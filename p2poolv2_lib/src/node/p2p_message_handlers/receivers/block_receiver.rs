@@ -16,7 +16,6 @@ use crate::store::block_tx_metadata::Status;
 use crate::store::prune_blocks::prune_height_for_tip;
 use crate::store::writer::StoreError;
 use bitcoin::BlockHash;
-use bitcoin::consensus::Encodable;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::error::Error;
 use std::sync::Arc;
@@ -149,12 +148,9 @@ pub struct BlockReceiver {
 }
 
 /// Size of a share block as the pending buffer counts it: its consensus
-/// encoding, measured without allocating. Encoding into a sink cannot fail;
-/// if it ever did, the block is counted as too large to buffer.
+/// encoding (`ShareBlock::encoded_size`).
 fn buffered_size(share_block: &ShareBlock) -> usize {
-    share_block
-        .consensus_encode(&mut bitcoin::io::sink())
-        .unwrap_or(usize::MAX)
+    share_block.encoded_size()
 }
 
 impl BlockReceiver {

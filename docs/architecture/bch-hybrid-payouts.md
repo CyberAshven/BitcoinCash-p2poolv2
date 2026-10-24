@@ -720,10 +720,14 @@ applies to it; only the 1,000,000-byte consensus limit does. Derived sizes
 change with it: `MAX_P2P_MESSAGE_SIZE` is 1.25 MiB, and the block
 receiver's pending buffer, bounded at 32 MiB, holds at least 26 of the
 largest shares. The organise worker's channel (512 shares) and pending
-buffer (1,024 shares) are bounded by count only: full of the largest shares,
-which have passed validation and so carry valid proof of work, they would
-hold about 620 MB and 1.2 GB. Bounding them in bytes too, and measuring
-propagation at the maximum body size, are follow-ups.
+buffer (1,024 shares), bounded by count alone, would hold about 620 MB and
+1.2 GB full of the largest shares, which have passed validation and so
+carry valid proof of work. They are bounded in bytes too: the channel at
+64 MiB, where a validation task waits for room, and the buffer at 128 MiB,
+which evicts its oldest blocks
+([share processing pipeline](share-processing-pipeline.md#channel-configuration)).
+Node behaviour, not a share-chain rule. Measuring propagation at the
+maximum body size is a follow-up.
 
 **Bandwidth and propagation (arithmetic estimates).** P2Pool makes a share
 about every 10 seconds (`IDEAL_BLOCK_TIME`), plus uncles. Each node receives
