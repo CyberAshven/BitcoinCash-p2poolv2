@@ -6,9 +6,15 @@ so both build and check the same bytes. `shares::merge_mining` holds the
 commitment, `shares::auxpow` the token leaves, the tree and `AuxProof` v2,
 and `shares::bch_asert` the ASERT header check. Pickaxe's specification is
 [`docs/merge-mining.md`](https://github.com/CyberAshven/pickaxe-miner/blob/feat/merge-mining-v2/docs/merge-mining.md)
-in pickaxe-miner (PR #70); its golden vectors are P2Pool's unit tests, and
-P2Pool matches them byte for byte (the leaf, the two-token root
-`5b61ecfe…1c38d0`, output 0, the empty commitment and the 224-byte proof).
+in pickaxe-miner (PR #70). P2Pool's unit tests pin those vectors to commit
+[`a1c80a1ba6ad6b1542af54f4af28058d3241c3df`](https://github.com/CyberAshven/pickaxe-miner/commit/a1c80a1ba6ad6b1542af54f4af28058d3241c3df):
+the leaf, the two-token root
+`5b61ecfe96c714397bc35ed813890f49f2b0287a78111e19d156f4eecd1c38d0`,
+the 53-byte output 0, the exact empty commitment, the 224-byte proof and
+the split leaf
+all match byte for byte. `shares::auxpow::tests` checks proof encoding and
+verification, including rejection when the expected state hash changes;
+`shares::merge_mining::tests` checks both commitment outputs.
 
 This replaces the earlier format, a `fabe6d6d` output after the payouts with
 Namecoin's slot scheme and the whole coinbase in each proof (audit items
@@ -86,8 +92,25 @@ off len field
 69  32  state_hash    token-defined; changes only on a successful claim
 101 32  payout_hash   HASH256(the payout output's locking bytecode)
 133 4   target_bits   the token's compact target, u32 LE
-137 32  ext           token-defined, or 32 zero bytes
+137 32  ext           the token's split (below), or 32 zero bytes
 ```
+
+**The split** (`TokenSplit`) shares each win between the miner, a donation
+and a fee, in that order:
+
+```text
+ext = 00 x 32                                                  no split
+ext = SHA256(03 || d_bps u16le || d_hash 32 || f_bps u16le || f_hash 32)
+```
+
+The 69-byte preimage is canonical: each rate is 0 to 10,000 hundredths of a
+percent, a rate of 0 has a zero hash and a rate above 0 a non-zero one, and
+two empty slots are the zero `ext`, never a preimage. A hash is `HASH256` of
+the recipient's locking bytecode, as `payout_hash` is. The claim reveals the
+preimage and the token's covenant pays the shares; how the shares are
+computed is a token rule, not P2Pool's. Pickaxe's split leaf (token A with a
+1% donation to P2PKH(`d0` x 20) and a 1% fee to P2PKH(`fe` x 20): `ext`
+`79f31f39…8faa85`, leaf hash `c4027136…033e41`) matches byte for byte.
 
 ## `AuxProof` v2
 
@@ -207,8 +230,12 @@ p2poolv2_cli bch-auxpow verify proof.hex token.json --network chipnet
 branch. `verify` takes the proof's bytes in hex and one token's leaf fields
 as JSON (the same object as above), with `--max-height` for the token's
 tree limit (16 by default) and `--network` for the ASERT check (regtest
-skips it). Each input file is limited to 1 MiB. The token above is
-Pickaxe's synthetic token A, not a real token.
+skips it). Instead of `ext`, a token may give its split, from which `ext`
+is computed: `"split": {"donation_bps": 100, "donation_script": "<hex>",
+"fee_bps": 100, "fee_script": "<hex>"}`, scripts being locking bytecode
+(left out at a rate of 0); without either, `ext` is 32 zero bytes. Each
+input file is limited to 1 MiB. The token above is Pickaxe's synthetic
+token A, not a real token.
 
 ## The SAFA covenant: still on the v1 format
 

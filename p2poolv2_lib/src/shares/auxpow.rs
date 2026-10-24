@@ -11,10 +11,10 @@
 //! tests. All integers are little-endian, `SHA256` is single SHA-256 and
 //! `HASH256` double SHA-256, and hashes are written as hashed.
 //!
-//! - Slot: `u32le(SHA256(0x02 ‖ salt ‖ category)[0..4]) mod 2^h`.
-//! - Leaf hash: `SHA256(0x00 ‖ preimage)`, the 169-byte preimage of
+//! - Slot: `u32le(SHA256(0x02 || salt || category)[0..4]) mod 2^h`.
+//! - Leaf hash: `SHA256(0x00 || preimage)`, the 169-byte preimage of
 //!   [`TokenLeaf::preimage`].
-//! - Node: `SHA256(0x01 ‖ left ‖ right)`; at level `i`, bit `i` of the slot
+//! - Node: `SHA256(0x01 || left || right)`; at level `i`, bit `i` of the slot
 //!   set means the current node is the right child.
 //! - An empty leaf slot is 32 zero bytes; internal nodes are always hashed
 //!   from their children.
@@ -62,6 +62,16 @@ const PROOF_VERSION: u8 = 0x02;
 const LEAF_PREFIX: u8 = 0x00;
 const NODE_PREFIX: u8 = 0x01;
 const SLOT_PREFIX: u8 = 0x02;
+/// Domain byte of a split preimage, the fourth domain beside the leaf, node
+/// and slot ones.
+const SPLIT_PREFIX: u8 = 0x03;
+
+/// Bytes in a split preimage: the prefix and two slots of a `u16` rate and a
+/// 32-byte script hash.
+pub const TOKEN_SPLIT_PREIMAGE_LENGTH: usize = 1 + 2 * (2 + 32);
+
+/// The largest split rate, in hundredths of a percent: the whole reward.
+pub const MAX_SPLIT_BPS: u16 = 10_000;
 
 /// A coinbase's bytes 4..41: one input spending the null outpoint.
 const NULL_INPUT: [u8; 37] = {
@@ -111,6 +121,8 @@ pub enum AuxError {
     Work,
     /// The header's nBits fail the ASERT format check.
     Asert(String),
+    /// A token split, or its preimage, is not canonical.
+    Split,
 }
 
 impl fmt::Display for AuxError {
@@ -136,6 +148,7 @@ impl fmt::Display for AuxError {
             }
             Self::Work => write!(formatter, "header does not meet the token target"),
             Self::Asert(reason) => write!(formatter, "header fails the ASERT check: {reason}"),
+            Self::Split => write!(formatter, "not a canonical token split"),
         }
     }
 }
@@ -200,12 +213,124 @@ impl TokenLeaf {
         bytes
     }
 
-    /// `SHA256(0x00 ‖ preimage)`.
+    /// `SHA256(0x00 || preimage)`.
     pub fn hash(&self) -> [u8; 32] {
         let mut engine = sha256::Hash::engine();
         bitcoin::hashes::HashEngine::input(&mut engine, &[LEAF_PREFIX]);
         bitcoin::hashes::HashEngine::input(&mut engine, &self.preimage());
         sha256::Hash::from_engine(engine).to_byte_array()
+    }
+}
+
+/// One slot of a token's split: a rate in hundredths of a percent and
+/// `HASH256` of the recipient's locking bytecode, or empty (rate 0, zero
+/// hash).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SplitSlot {
+    bps: u16,
+    script_hash: [u8; 32],
+}
+
+impl SplitSlot {
+    /// No share.
+    pub const EMPTY: Self = Self {
+        bps: 0,
+        script_hash: [0; 32],
+    };
+
+    /// `bps` of what is left to the locking bytecode `script`; empty at 0.
+    pub fn new(bps: u16, script: &[u8]) -> Result<Self, AuxError> {
+        if bps == 0 {
+            return Ok(Self::EMPTY);
+        }
+        Self::from_hash(bps, hash256(script))
+    }
+
+    /// A slot from its rate and script hash, checked canonical: a rate of
+    /// at most 10,000, a zero hash exactly when the rate is 0.
+    pub fn from_hash(bps: u16, script_hash: [u8; 32]) -> Result<Self, AuxError> {
+        if bps > MAX_SPLIT_BPS || (bps == 0) != (script_hash == [0; 32]) {
+            return Err(AuxError::Split);
+        }
+        Ok(Self { bps, script_hash })
+    }
+
+    pub fn bps(&self) -> u16 {
+        self.bps
+    }
+
+    pub fn script_hash(&self) -> &[u8; 32] {
+        &self.script_hash
+    }
+}
+
+/// How each win of a token is shared, which its leaf's `ext` commits to: a
+/// donation slot, then a fee slot.
+///
+/// ```text
+/// ext = 00 x 32                                            no split
+/// ext = SHA256(03 || d_bps u16le || d_hash || f_bps u16le || f_hash)
+/// ```
+///
+/// The 69-byte preimage is canonical (see [`SplitSlot::from_hash`]), and two
+/// empty slots are the zero `ext`, never a preimage. The claim reveals the
+/// preimage and the token's covenant pays it; the shares are token-level
+/// rules, not P2Pool's. Pickaxe's common format v2, "Split".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenSplit {
+    pub donation: SplitSlot,
+    pub fee: SplitSlot,
+}
+
+impl TokenSplit {
+    /// True when neither slot takes a share.
+    pub fn is_none(&self) -> bool {
+        self.donation == SplitSlot::EMPTY && self.fee == SplitSlot::EMPTY
+    }
+
+    /// The 69-byte preimage.
+    pub fn preimage(&self) -> [u8; TOKEN_SPLIT_PREIMAGE_LENGTH] {
+        let mut bytes = [0; TOKEN_SPLIT_PREIMAGE_LENGTH];
+        bytes[0] = SPLIT_PREFIX;
+        bytes[1..3].copy_from_slice(&self.donation.bps.to_le_bytes());
+        bytes[3..35].copy_from_slice(&self.donation.script_hash);
+        bytes[35..37].copy_from_slice(&self.fee.bps.to_le_bytes());
+        bytes[37..].copy_from_slice(&self.fee.script_hash);
+        bytes
+    }
+
+    /// The leaf's `ext`: 32 zero bytes without a split, else the
+    /// preimage's SHA-256.
+    pub fn ext(&self) -> [u8; 32] {
+        if self.is_none() {
+            [0; 32]
+        } else {
+            sha256::Hash::hash(&self.preimage()).to_byte_array()
+        }
+    }
+
+    /// Read a revealed preimage as a covenant does: exactly 69 bytes, the
+    /// prefix, two canonical slots, not both empty.
+    pub fn parse(preimage: &[u8]) -> Result<Self, AuxError> {
+        let bytes: &[u8; TOKEN_SPLIT_PREIMAGE_LENGTH] =
+            preimage.try_into().map_err(|_| AuxError::Split)?;
+        if bytes[0] != SPLIT_PREFIX {
+            return Err(AuxError::Split);
+        }
+        let slot = |at: usize| {
+            SplitSlot::from_hash(
+                u16::from_le_bytes([bytes[at], bytes[at + 1]]),
+                bytes[at + 2..at + 34].try_into().expect("32-byte hash"),
+            )
+        };
+        let split = Self {
+            donation: slot(1)?,
+            fee: slot(35)?,
+        };
+        if split.is_none() {
+            return Err(AuxError::Split);
+        }
+        Ok(split)
     }
 }
 
@@ -234,7 +359,7 @@ pub fn slot(category: &[u8; 32], salt: u32, height: u8) -> u32 {
     value & (1u32 << height.min(MAX_MERGE_MINING_TREE_HEIGHT)).wrapping_sub(1)
 }
 
-/// `SHA256(0x01 ‖ left ‖ right)`.
+/// `SHA256(0x01 || left || right)`.
 pub fn node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut pair = [0; 65];
     pair[0] = NODE_PREFIX;
@@ -513,7 +638,7 @@ impl AuxProof {
     /// 4. output 0 is rebuilt from that root, `h` and the salt;
     /// 5. the coinbase head has the fixed shape and the tail holds a
     ///    locktime;
-    /// 6. the coinbase txid, `HASH256(head ‖ output 0 ‖ tail)`, folds up the
+    /// 6. the coinbase txid, `HASH256(head || output 0 || tail)`, folds up the
     ///    coinbase branch at index 0 to the header's merkle root;
     /// 7. the header's hash meets the token's target (never the header's
     ///    own nBits).

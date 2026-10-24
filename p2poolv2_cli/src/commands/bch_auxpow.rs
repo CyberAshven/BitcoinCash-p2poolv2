@@ -9,7 +9,7 @@
 use super::bch_share_address::parse_network;
 use clap::Subcommand;
 use p2poolv2_lib::config::BitcoinCashNetwork;
-use p2poolv2_lib::shares::auxpow::{AuxProof, AuxiliaryTree, TokenLeaf};
+use p2poolv2_lib::shares::auxpow::{AuxProof, AuxiliaryTree, SplitSlot, TokenLeaf, TokenSplit};
 use p2poolv2_lib::shares::bch_asert::BchAsert;
 use p2poolv2_lib::shares::merge_mining::MAX_MERGE_MINING_TREE_HEIGHT;
 use serde::Deserialize;
@@ -52,7 +52,34 @@ struct TokenJson {
     state_hash: String,
     payout_hash: String,
     target_bits: String,
-    ext: String,
+    /// The leaf's `ext` in hex; omit it, or give `split` instead.
+    #[serde(default)]
+    ext: Option<String>,
+    /// The token's split, from which `ext` is computed.
+    #[serde(default)]
+    split: Option<SplitJson>,
+}
+
+/// A token's split: each slot's rate in hundredths of a percent and the
+/// recipient's locking bytecode in hex; a rate of 0 takes no script.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SplitJson {
+    donation_bps: u16,
+    #[serde(default)]
+    donation_script: String,
+    fee_bps: u16,
+    #[serde(default)]
+    fee_script: String,
+}
+
+impl SplitJson {
+    fn split(&self) -> Result<TokenSplit, Box<dyn Error>> {
+        Ok(TokenSplit {
+            donation: SplitSlot::new(self.donation_bps, &hex::decode(&self.donation_script)?)?,
+            fee: SplitSlot::new(self.fee_bps, &hex::decode(&self.fee_script)?)?,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -70,7 +97,12 @@ impl TokenJson {
             payout_hash: hash32(&self.payout_hash, "payout_hash")?,
             target_bits: u32::from_str_radix(&self.target_bits, 16)
                 .map_err(|_| "target_bits must be eight hexadecimal digits")?,
-            ext: hash32(&self.ext, "ext")?,
+            ext: match (&self.ext, &self.split) {
+                (Some(_), Some(_)) => return Err("give either ext or split, not both".into()),
+                (Some(ext), None) => hash32(ext, "ext")?,
+                (None, Some(split)) => split.split()?.ext(),
+                (None, None) => [0; 32],
+            },
         })
     }
 }
@@ -209,6 +241,34 @@ mod tests {
             ..token
         };
         assert!(short.leaf().is_err());
+    }
+
+    /// Pickaxe's split leaf: token A with a 1% donation and a 1% fee,
+    /// given as a split rather than an `ext`.
+    #[test]
+    fn token_json_split_gives_the_golden_split_leaf() {
+        let p2pkh = |byte: &str| format!("76a914{}88ac", byte.repeat(20));
+        let mut fields = json!({
+            "category": "11".repeat(32),
+            "lock_hash": "953ccfa596a6c6d39e5980194539124fdcff116a571455a212baed811f585ee0",
+            "state_hash": "aa".repeat(32),
+            "payout_hash": "22650758a42ebfd7306e771ad24c442cad795ed9e549392233729f647a2b1be5",
+            "target_bits": "207fffff",
+            "split": {
+                "donation_bps": 100,
+                "donation_script": p2pkh("d0"),
+                "fee_bps": 100,
+                "fee_script": p2pkh("fe"),
+            },
+        });
+        let token: TokenJson = serde_json::from_value(fields.clone()).unwrap();
+        assert_eq!(
+            hex::encode(token.leaf().unwrap().hash()),
+            "c40271368b4287df8fe3430e1bc3f9410b554874de698144fa04fe5df7033e41"
+        );
+        fields["ext"] = json!("00".repeat(32));
+        let both: TokenJson = serde_json::from_value(fields).unwrap();
+        assert!(both.leaf().is_err());
     }
 
     #[test]

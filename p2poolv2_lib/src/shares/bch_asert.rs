@@ -40,7 +40,7 @@ pub use u256::U256;
 pub const BCH_BLOCK_SPACING: i64 = 600;
 
 /// The proof-of-work limit of mainnet, testnet3, testnet4, chipnet and
-/// scalenet: `00000000ffff…ff`, 2^224 - 1. Its compact form is
+/// scalenet: `00000000ffff...ff`, 2^224 - 1. Its compact form is
 /// [`BCH_POW_LIMIT_BITS`].
 pub fn bch_pow_limit() -> U256 {
     (U256::one() << 224) - U256::one()

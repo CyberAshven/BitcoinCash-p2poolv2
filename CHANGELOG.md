@@ -199,8 +199,11 @@ anchor and the donation and fee cap as they were.
   root, `h` and salt, and peers rebuild output 0 byte for byte. Format
   checks refuse `h` above 16 and a zero root with any other `h` or salt.
   `shares::auxpow` builds the salted SHA-256 tree (at most 16 tokens) and
-  encodes and verifies `AuxProof` v2 (coinbase branch `d ≤ 25`). P2Pool
-  matches Pickaxe's golden vectors byte for byte (pickaxe-miner PR #70).
+  encodes and verifies `AuxProof` v2 (coinbase branch `d ≤ 25`), and
+  `TokenSplit` encodes a token's donation and fee split as the leaf's
+  `ext`. P2Pool matches Pickaxe's golden vectors byte for byte
+  (pickaxe-miner PR #70 at `a1c80a1`): the leaf, the two-token root, output
+  0, the empty commitment, the 224-byte proof and the split leaf.
   `share_has_token_commitment` tells token shares from no-token shares. The
   old `fabe6d6d` output and Namecoin slots are gone; `p2poolv2_cli
   bch-auxpow` builds and verifies the new format. The experimental SAFA

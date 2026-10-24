@@ -1,6 +1,10 @@
 use super::*;
 use bitcoin::consensus::{deserialize, serialize};
 
+// Golden vectors are pinned to pickaxe-miner PR #70 at
+// a1c80a1ba6ad6b1542af54f4af28058d3241c3df, docs/merge-mining.md and
+// src/stratum_v2/merge/{commitment,vectors}.rs.
+
 /// Pickaxe's golden vector for the exact empty commitment
 /// (`docs/merge-mining.md`, "The empty commitment"; pickaxe-miner
 /// `src/stratum_v2/merge/vectors.rs`, `the_empty_commitment`).
@@ -10,7 +14,7 @@ const EMPTY_OUTPUT: &str = concat!(
     "0000000000"
 );
 
-/// Pickaxe's two-token output 0: root `5b61ecfe…1c38d0`, `h = 1`, salt 0
+/// Pickaxe's two-token output 0: root `5b61ecfe...1c38d0`, `h = 1`, salt 0
 /// (`vectors.rs`, `a_two_token_tree`).
 const TWO_TOKEN_OUTPUT: &str = concat!(
     "00000000000000002c6a2a43544d4d025b61ecfe96c714397bc35ed813890f49",
@@ -32,6 +36,7 @@ fn two_token_commitment() -> MergeMiningCommitment {
 fn empty_commitment_is_the_golden_53_byte_output() {
     let output = MergeMiningCommitment::empty().output();
     let bytes = serialize(&output);
+    assert_eq!(bytes.len(), 53);
     assert_eq!(bytes.len(), MERGE_MINING_OUTPUT_LENGTH);
     assert_eq!(hex::encode(&bytes), EMPTY_OUTPUT);
     assert!(MergeMiningCommitment::EMPTY.is_empty());
@@ -45,6 +50,7 @@ fn empty_commitment_is_the_golden_53_byte_output() {
 fn two_token_commitment_is_the_golden_output() {
     let commitment = two_token_commitment();
     let bytes = serialize(&commitment.output());
+    assert_eq!(bytes.len(), 53);
     assert_eq!(hex::encode(&bytes), TWO_TOKEN_OUTPUT);
     assert!(!commitment.is_empty());
     assert_eq!(

@@ -1,6 +1,8 @@
 //! Pickaxe's golden vectors for merge-mining v2 (pickaxe-miner PR #70,
-//! branch `feat/merge-mining-v2`: `docs/merge-mining.md` and
-//! `src/stratum_v2/merge/vectors.rs`), then P2Pool's own cases.
+//! commit `a1c80a1ba6ad6b1542af54f4af28058d3241c3df` on
+//! `feat/merge-mining-v2`: `docs/merge-mining.md` and
+//! `src/stratum_v2/merge/{tree,commitment,proof,verify,split,vectors}.rs`), then
+//! P2Pool's own cases.
 
 use super::*;
 use crate::test_utils::test_bch_auxpow;
@@ -99,17 +101,21 @@ fn golden_two_token_tree() {
         vec![0, 1]
     );
     assert_eq!(hex::encode(tree.commitment.root), TWO_TOKEN_ROOT);
+    assert_eq!(serialize(&tree.commitment.output()).len(), 53);
     assert_eq!(
         hex::encode(serialize(&tree.commitment.output())),
         TWO_TOKEN_OUTPUT
     );
-    for (leaf, branch) in [a, b].iter().zip(&tree.branches) {
-        assert_eq!(slot(&leaf.category, 0, 1), branch.slot);
-        assert_eq!(
-            fold(leaf.hash(), branch.slot, &branch.branch),
-            tree.commitment.root
-        );
-    }
+    assert_eq!(slot(&a.category, 0, 1), tree.branches[0].slot);
+    assert_eq!(slot(&b.category, 0, 1), tree.branches[1].slot);
+    assert_eq!(
+        fold(a.hash(), tree.branches[0].slot, &tree.branches[0].branch),
+        tree.commitment.root
+    );
+    assert_eq!(
+        fold(b.hash(), tree.branches[1].slot, &tree.branches[1].branch),
+        tree.commitment.root
+    );
     // The same tokens in the other order give the same commitment.
     assert_eq!(
         AuxiliaryTree::build(&[b, a]).unwrap().commitment,
@@ -136,8 +142,7 @@ fn vector_coinbase(commitment: MergeMiningCommitment) -> Transaction {
 }
 
 /// The one-leaf proof, built here from the same parts, encodes to Pickaxe's
-/// 224 bytes, and Pickaxe's bytes verify for token A and fail for any other
-/// state hash.
+/// 224 bytes, and Pickaxe's bytes verify for token A.
 #[test]
 fn golden_one_leaf_proof_encodes_and_verifies() {
     let leaf = token_a();
@@ -175,7 +180,12 @@ fn golden_one_leaf_proof_encodes_and_verifies() {
     .unwrap();
     let bytes = proof.to_bytes().unwrap();
     let golden = hex::decode(PROOF).unwrap();
-    assert_eq!(first_mismatch(&bytes, &golden), None);
+    assert_eq!(
+        bytes,
+        golden,
+        "first differing proof byte: {:?}",
+        first_mismatch(&bytes, &golden)
+    );
     assert_eq!(bytes.len(), 224);
 
     let decoded = AuxProof::from_bytes(&golden).unwrap();
@@ -184,20 +194,49 @@ fn golden_one_leaf_proof_encodes_and_verifies() {
     decoded
         .verify(&leaf, MAX_MERGE_MINING_TREE_HEIGHT, None)
         .unwrap();
-    let stale = TokenLeaf {
-        state_hash: [0xab; 32],
-        ..leaf
-    };
-    assert_eq!(
-        decoded.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None),
-        Err(AuxError::MerkleRoot)
-    );
     // The header's regtest bits are above BCH's limit: the mainnet ASERT
     // check refuses them.
     assert!(matches!(
         decoded.verify(&leaf, MAX_MERGE_MINING_TREE_HEIGHT, Some(BchAsert::MAINNET)),
         Err(AuxError::Asert(_))
     ));
+}
+
+/// The proof commits to all 32 state bytes; an entirely different state
+/// changes the reconstructed coinbase rather than selecting another claim.
+#[test]
+fn golden_proof_rejects_another_state_hash() {
+    let proof = AuxProof::from_bytes(&hex::decode(PROOF).unwrap()).unwrap();
+    let stale = TokenLeaf {
+        state_hash: [0xab; 32],
+        ..token_a()
+    };
+    assert_eq!(
+        proof.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None),
+        Err(AuxError::MerkleRoot)
+    );
+}
+
+#[test]
+fn golden_proof_rejects_a_changed_first_state_byte() {
+    let proof = AuxProof::from_bytes(&hex::decode(PROOF).unwrap()).unwrap();
+    let mut stale = token_a();
+    stale.state_hash[0] ^= 1;
+    assert_eq!(
+        proof.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None),
+        Err(AuxError::MerkleRoot)
+    );
+}
+
+#[test]
+fn golden_proof_rejects_a_changed_last_state_byte() {
+    let proof = AuxProof::from_bytes(&hex::decode(PROOF).unwrap()).unwrap();
+    let mut stale = token_a();
+    stale.state_hash[31] ^= 1;
+    assert_eq!(
+        proof.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None),
+        Err(AuxError::MerkleRoot)
+    );
 }
 
 #[test]
@@ -313,4 +352,98 @@ fn proof_from_a_p2pool_declared_coinbase_verifies() {
         ..leaf
     };
     assert!(proof.verify(&other, 16, None).is_err());
+}
+
+/// P2PKH to twenty `byte` bytes.
+fn p2pkh(byte: u8) -> Vec<u8> {
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend([byte; 20]);
+    script.extend([0x88, 0xac]);
+    script
+}
+
+const SPLIT_PREIMAGE: &str = concat!(
+    "0364008bc613f574964583c7b08b7925373515b513ed15b372bc727599c16434",
+    "254d1c6400543bb5ec93f33a1c27a5822e4c638e9ab1e90e44c094fd7aaba51e",
+    "fc4e554c50",
+);
+const SPLIT_EXT: &str = "79f31f395015b16c76e12673ec8f58329d81f1884d76a0d210d1f3158a8faa85";
+const SPLIT_LEAF: &str = concat!(
+    "43544d4c02111111111111111111111111111111111111111111111111111111",
+    "1111111111953ccfa596a6c6d39e5980194539124fdcff116a571455a212baed",
+    "811f585ee0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "aaaaaaaaaa22650758a42ebfd7306e771ad24c442cad795ed9e549392233729f",
+    "647a2b1be5ffff7f2079f31f395015b16c76e12673ec8f58329d81f1884d76a0",
+    "d210d1f3158a8faa85",
+);
+const SPLIT_LEAF_HASH: &str = "c40271368b4287df8fe3430e1bc3f9410b554874de698144fa04fe5df7033e41";
+
+/// Pickaxe's whole split leaf (`vectors.rs`, `a_whole_split_leaf_and_its_claim_outputs`):
+/// token A with a 1% donation to P2PKH(d0 x 20) and a 1% fee to
+/// P2PKH(fe x 20). Its 69-byte preimage, `ext`, 169-byte leaf and leaf hash
+/// match byte for byte, and the preimage parses back.
+#[test]
+fn golden_split_leaf() {
+    let split = TokenSplit {
+        donation: SplitSlot::new(100, &p2pkh(0xd0)).unwrap(),
+        fee: SplitSlot::new(100, &p2pkh(0xfe)).unwrap(),
+    };
+    assert_eq!(
+        first_mismatch(&split.preimage(), &hex::decode(SPLIT_PREIMAGE).unwrap()),
+        None
+    );
+    assert_eq!(split.preimage().len(), 69);
+    assert_eq!(hex::encode(split.ext()), SPLIT_EXT);
+    let leaf = TokenLeaf::new(
+        [0x11; 32],
+        &[0x51],
+        [0xaa; 32],
+        &vector_payout(),
+        0x207f_ffff,
+        split.ext(),
+    );
+    assert_eq!(
+        first_mismatch(&leaf.preimage(), &hex::decode(SPLIT_LEAF).unwrap()),
+        None
+    );
+    assert_eq!(hex::encode(leaf.hash()), SPLIT_LEAF_HASH);
+    assert_eq!(TokenSplit::parse(&split.preimage()), Ok(split));
+}
+
+/// The split is canonical: no split is the zero `ext` and never a
+/// preimage; a rate is at most 10,000; a zero hash exactly when the rate is
+/// 0; exactly 69 bytes starting with 0x03.
+#[test]
+fn token_split_is_canonical() {
+    assert_eq!(TokenSplit::default().ext(), [0; 32]);
+    assert_eq!(
+        TokenSplit::parse(&TokenSplit::default().preimage()),
+        Err(AuxError::Split)
+    );
+    assert_eq!(SplitSlot::new(0, &p2pkh(0xd0)), Ok(SplitSlot::EMPTY));
+    assert!(SplitSlot::new(MAX_SPLIT_BPS, &p2pkh(0xd0)).is_ok());
+    assert_eq!(
+        SplitSlot::new(MAX_SPLIT_BPS + 1, &p2pkh(0xd0)),
+        Err(AuxError::Split)
+    );
+    assert_eq!(SplitSlot::from_hash(1, [0; 32]), Err(AuxError::Split));
+    assert_eq!(SplitSlot::from_hash(0, [1; 32]), Err(AuxError::Split));
+    let preimage = hex::decode(SPLIT_PREIMAGE).unwrap();
+    assert_eq!(TokenSplit::parse(&preimage[..68]), Err(AuxError::Split));
+    let mut prefix = preimage.clone();
+    prefix[0] = 0x02;
+    assert_eq!(TokenSplit::parse(&prefix), Err(AuxError::Split));
+    let mut over = preimage;
+    over[1..3].copy_from_slice(&10_001u16.to_le_bytes());
+    assert_eq!(TokenSplit::parse(&over), Err(AuxError::Split));
+    // A donation alone is a split too.
+    let donation_only = TokenSplit {
+        donation: SplitSlot::new(150, &p2pkh(0xd0)).unwrap(),
+        fee: SplitSlot::EMPTY,
+    };
+    assert_ne!(donation_only.ext(), [0; 32]);
+    assert_eq!(
+        TokenSplit::parse(&donation_only.preimage()),
+        Ok(donation_only)
+    );
 }
