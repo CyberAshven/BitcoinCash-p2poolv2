@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { binToHex, decodeTransactionBch, hash256, hexToBin } from '@bitauth/libauth';
@@ -26,6 +27,18 @@ test('params prints the deployment covenant and its fee constant', context => {
   assert.equal(output.redeem_script, binToHex(COVENANT.redeemScript));
   assert.equal(output.fee_k, safa.CLAIM_FIXED_BYTES + 3 + COVENANT.redeemScript.length);
   assert.match(output.vault_address, /^bchtest:r/);
+});
+
+test('the chipnet tSAFA fixture reproduces byte for byte', context => {
+  const fixture = JSON.parse(readFileSync(new URL('test_data/tsafa-chipnet-fixture.json', import.meta.url), 'utf8'));
+  const result = run('params', json(context, fixture.deployment, 'fixture.json'));
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), fixture.params);
+  const covenant = safa.createCovenant({ network: 'chipnet', threads: 4, virtualSats: 84000000000n });
+  assert.equal(fixture.params.redeem_script, binToHex(covenant.redeemScript));
+  assert.equal(fixture.params.locking_bytecode, `aa20${binToHex(hash256(covenant.redeemScript))}87`);
+  assert.equal(fixture.params.lock_hash, binToHex(hash256(hexToBin(fixture.params.locking_bytecode))));
+  assert.equal(fixture.genesis.funding.txid, fixture.deployment.category);
 });
 
 test('leaf prints the token JSON p2poolv2_cli bch-auxpow reads, for one height', context => {

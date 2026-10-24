@@ -221,6 +221,13 @@ donation or fee (about 2,000 satoshis) clears the 1,000-satoshi minimum;
 2,000,000 satoshis seeded per thread; initial target bits `1d00ffff`
 (difficulty 1; the DAA hardens it by up to a factor of 0.625 per claim).
 
+`test_data/tsafa-chipnet-fixture.json` holds what `node cli.mjs params`
+prints for these parameters, with a placeholder funding outpoint (txid
+`11` × 32, output 0, which would be the category), so Pickaxe can check the
+redeem script, K, locking bytecode and `lock_hash` before any funding;
+`cli.test.mjs` checks it reproduces byte for byte. The covenant does not
+depend on the category, so the real funding txid changes only the leaves.
+
 **Funds.** One chipnet UTXO that is **output 0** of its transaction, worth
 at least 8,001,155 satoshis: 4 × 2,000,000 for the vaults, a 609-satoshi
 genesis fee at 1 sat/byte (609 bytes, estimated with the largest P2PKH
