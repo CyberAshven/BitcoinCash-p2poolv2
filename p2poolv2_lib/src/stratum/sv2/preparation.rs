@@ -7,13 +7,12 @@
 //! This calculation grants no mining authorization: the SV2 listener still
 //! checks its own token registry, payouts, template and submitted proof.
 
-use crate::accounting::payout::coinbase_budget::PayoutSplit;
+use crate::accounting::payout::coinbase_budget::bch_split_for_commitment;
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
-use crate::config::Chain;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::stratum::work::coinbase::{
-    EXTRANONCE_SEPARATOR, build_declared_coinbase, check_bch_coinbase_budget,
+    EXTRANONCE_SEPARATOR, build_declared_coinbase, check_bch_coinbase_limit,
 };
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash;
@@ -30,9 +29,13 @@ pub struct PreparedCoinbase {
 /// The caller obtains exact difficulty weights from the token's share-chain
 /// anchor. Neither an empty window nor unavailable history has a fallback payee.
 ///
-/// The payouts follow the Bitcoin Cash coinbase budget anchored at the
-/// token's prev share, as the validator rebuilds them, and the coinbase must
-/// fit `BCH_COINBASE_BYTE_BUDGET`.
+/// The payouts follow the Bitcoin Cash hybrid payout at the limit the
+/// descriptor's merge-mining commitment sets (T for a token commitment,
+/// BCH's transaction limit for the exact empty one), as the validator
+/// rebuilds them, and the coinbase must fit that limit. A Job Declaration
+/// message carries the coinbase prefix and suffix in fields of at most
+/// 65,535 bytes each, so a larger coinbase is refused here with a clear
+/// error rather than sent truncated.
 pub fn prepare_coinbase(
     token: &[u8],
     mut commitment: ShareCommitment,
@@ -55,26 +58,27 @@ pub fn prepare_coinbase(
     descriptor
         .validate(u64::from(height))
         .map_err(str::to_owned)?;
-    let outputs = build_pplns_outputs(
+    let split = bch_split_for_commitment(&descriptor.merge_mining);
+    let payouts = build_pplns_outputs(
         value,
         weights,
         &commitment.donation_address,
         commitment.donation,
         &commitment.fee_address,
         commitment.fee,
-        PayoutSplit::for_chain(Chain::BitcoinCash, commitment.prev_share_blockhash),
+        split,
     )
     .map_err(|error| error.to_string())?;
     commitment.bch_coinbase = Some(descriptor.clone());
     let coinbase = build_declared_coinbase(
-        &outputs,
+        &payouts,
         u64::from(height),
         commitment.hash(),
         &EXTRANONCE_SEPARATOR,
         &descriptor,
     )
     .map_err(|error| error.to_string())?;
-    check_bch_coinbase_budget(&coinbase).map_err(|error| error.to_string())?;
+    check_bch_coinbase_limit(&coinbase, split).map_err(|error| error.to_string())?;
     let raw = serialize(&coinbase);
     // Version, singleton input count, null outpoint and bounded script length.
     let offset = 4 + 1 + 36 + 1 + descriptor.prefix.len();
@@ -85,7 +89,11 @@ pub fn prepare_coinbase(
     let prefix = raw[..offset].to_vec();
     let suffix = raw[end..].to_vec();
     if prefix.len() > 65535 || suffix.len() > 65535 {
-        return Err("declared coinbase exceeds SV2 field limits".into());
+        return Err(format!(
+            "declared coinbase prefix of {} bytes or suffix of {} bytes exceeds the 65,535 bytes a Job Declaration field carries",
+            prefix.len(),
+            suffix.len()
+        ));
     }
     Ok(PreparedCoinbase {
         prefix,

@@ -4,6 +4,7 @@
 
 pub mod coinbase_budget;
 pub mod payout_distribution;
+pub mod payout_tree;
 pub mod sharechain_pplns;
 pub mod simple_pplns;
 

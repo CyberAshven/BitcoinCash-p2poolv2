@@ -61,7 +61,9 @@ donation_address = "{{ p2poolv2_donation_address }}"
 {% endif %}
 {% if p2poolv2_fee_address | default('') | string | length > 0 %}
 fee_address = "{{ p2poolv2_fee_address }}"
-fee = {{ p2poolv2_fee if (p2poolv2_fee | default('') | string | length > 0) else 0 }}
+{% if p2poolv2_fee | default('') | string | length > 0 %}
+fee = {{ p2poolv2_fee }}
+{% endif %}
 {% endif %}
 zmqpubhashblock = "{{ p2poolv2_zmq_endpoint }}"
 version_mask = "{{ p2poolv2_version_mask }}"

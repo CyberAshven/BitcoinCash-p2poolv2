@@ -9,8 +9,10 @@ members = [
     "p2poolv2_api",
     "p2poolv2_tests",
     "p2poolv2_sim",
+    "p2poolv2_tools",
     "p2poolv2_web",
     "p2poolv2_tui",
+    "p2poolv2_netsim",
 ]
 resolver = "2"
 

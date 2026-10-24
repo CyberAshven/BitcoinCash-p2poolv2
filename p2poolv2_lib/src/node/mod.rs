@@ -9,6 +9,7 @@ mod dns_seeds;
 pub mod emission_worker;
 pub mod organise_worker;
 pub mod p2p_health;
+pub mod payout_tree_executor;
 pub mod peer_reconnector;
 pub mod request_response_handler;
 pub mod request_sender;
@@ -771,6 +772,7 @@ mod tests {
                 username: "testuser".to_string(),
                 password: "testpass".to_string(),
             },
+            submit_nodes: vec![],
             store: StoreConfig {
                 path: "test_chain.db".to_string(),
                 pplns_ttl_days: 3,
@@ -888,6 +890,7 @@ mod tests {
                 username: "testuser".to_string(),
                 password: "testpass".to_string(),
             },
+            submit_nodes: vec![],
             store: StoreConfig {
                 path: "test_chain.db".to_string(),
                 pplns_ttl_days: 3,

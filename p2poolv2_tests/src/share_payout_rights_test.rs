@@ -9,13 +9,13 @@
 //! confirmed, and the payout is the coinbase the notifier and the validator
 //! both build: `PplnsWindow::get_distribution_from_start_hash` for the next
 //! share's anchor, split by `build_pplns_outputs` under the Bitcoin Cash
-//! coinbase budget. The window is Bitcoin
+//! hybrid payout. The window is Bitcoin
 //! Cash's (`for_chain`), so it pays each window share's weight to whoever
 //! holds the share's payout right (docs/atomic-swap/bch-share-trading.md,
 //! "Payout rights").
 
 use bitcoin::hashes::Hash;
-use bitcoin::{Address, Amount, BlockHash, NetworkKind, OutPoint, PrivateKey, PubkeyHash};
+use bitcoin::{Address, Amount, BlockHash, NetworkKind, OutPoint, PrivateKey, PubkeyHash, Target};
 use p2poolv2_lib::accounting::OutputPair;
 use p2poolv2_lib::accounting::payout::coinbase_budget::PayoutSplit;
 use p2poolv2_lib::accounting::payout::payout_distribution::build_pplns_outputs;
@@ -32,8 +32,8 @@ use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::shares::share_block::ShareBlock;
 use p2poolv2_lib::shares::validation::{DefaultShareValidator, ShareValidator};
 use p2poolv2_lib::test_utils::{
-    PUBKEY_2G, TRADE_BUYER_SECRET_KEY, TRADE_SECRET, TRADE_SELLER_SECRET_KEY,
-    TestShareBlockBuilder, setup_test_chain_store_handle,
+    TRADE_BUYER_SECRET_KEY, TRADE_SECRET, TRADE_SELLER_SECRET_KEY, TestShareBlockBuilder,
+    setup_test_chain_store_handle,
 };
 use std::collections::HashMap;
 use std::slice;
@@ -42,13 +42,27 @@ use std::slice;
 const FIRST_BLOCK_TIME: u32 = 1_700_000_000;
 /// Share units in one share coinbase output.
 const SHARE_UNITS: u64 = 100_000_000;
-/// Network the test shares' payout addresses are on.
-const NETWORK: bitcoin::Network = bitcoin::Network::Signet;
+/// Network the test shares' difficulty and payout addresses use: Bitcoin
+/// Cash regtest's legacy network, `BitcoinCashNetwork::Regtest.legacy_network()`.
+const NETWORK: bitcoin::Network = bitcoin::Network::Regtest;
+/// Share bits at Bitcoin Cash regtest's proof-of-work limit, difficulty 1.
+const SHARE_BITS: u32 = 0x207f_ffff;
 /// Paying block difficulty at the proof-of-work limit, so the Bitcoin Cash
 /// window pays its share cap: every mature share of this short chain.
 const MINIMUM_PAYING_DIFFICULTY: u128 = 1;
-/// Value the next coinbase pays out.
-const COINBASE_VALUE: u64 = 5_000_000_000;
+/// Value the next coinbase pays out: the Bitcoin Cash block subsidy since
+/// height 840,000, 3.125 BCH.
+const COINBASE_VALUE: u64 = 312_500_000;
+
+/// The P2PKH payout the seller mined its share with.
+fn seller_mining_payout() -> Address {
+    Address::p2pkh(PubkeyHash::from_byte_array([0x5e; 20]), NETWORK)
+}
+
+/// The P2PKH payout every other share pays.
+fn other_miner_payout() -> Address {
+    Address::p2pkh(PubkeyHash::from_byte_array([0x07; 20]), NETWORK)
+}
 
 fn seller() -> TradeKey {
     TradeKey::new(PrivateKey::from_slice(&TRADE_SELLER_SECRET_KEY, NetworkKind::Test).unwrap())
@@ -103,6 +117,8 @@ fn share(
     transactions: &[bitcoin::Transaction],
 ) -> ShareBlock {
     let builder = TestShareBlockBuilder::new()
+        .payout_address(other_miner_payout())
+        .bits(bitcoin::CompactTarget::from_consensus(SHARE_BITS))
         .prev_share_blockhash(parent.block_hash().to_string())
         .nonce(0x6300_0000 + salt * 0x1000 + height)
         .time(FIRST_BLOCK_TIME + salt * 1_000 + height);
@@ -131,13 +147,15 @@ async fn extend(
 }
 
 /// A chain whose share at height 1 the seller mined, paying out to
-/// `PUBKEY_2G`'s address, with every other share paying the builder's
-/// default address, confirmed to height 101 so the seller's share coinbase
-/// is mature. Returns the seller's share and the tip.
+/// `seller_mining_payout`, with every other share paying
+/// `other_miner_payout`, confirmed to height 101 so the seller's share
+/// coinbase is mature. Returns the seller's share and the tip.
 async fn chain_with_a_mature_seller_share(
     chain_store_handle: &ChainStoreHandle,
 ) -> (ShareBlock, ShareBlock) {
     let genesis = TestShareBlockBuilder::new()
+        .payout_address(other_miner_payout())
+        .bits(bitcoin::CompactTarget::from_consensus(SHARE_BITS))
         .nonce(0x6300_0000)
         .time(FIRST_BLOCK_TIME)
         .build();
@@ -146,8 +164,9 @@ async fn chain_with_a_mature_seller_share(
         .await
         .unwrap();
     let mined = TestShareBlockBuilder::new()
+        .payout_address(seller_mining_payout())
+        .bits(bitcoin::CompactTarget::from_consensus(SHARE_BITS))
         .prev_share_blockhash(genesis.block_hash().to_string())
-        .miner_pubkey(PUBKEY_2G)
         .share_owner(ShareOwner::CashP2pkh(seller().pubkey_hash()))
         .nonce(0x6300_0001)
         .time(FIRST_BLOCK_TIME + 1)
@@ -220,9 +239,10 @@ fn next_coinbase(
         None,
         &None,
         None,
-        PayoutSplit::for_chain(Chain::BitcoinCash, anchor.block_hash()),
+        PayoutSplit::for_chain(Chain::BitcoinCash, false),
     )
     .unwrap()
+    .outputs
 }
 
 fn pays(outputs: &[OutputPair], address: &Address) -> bool {
@@ -233,9 +253,13 @@ fn bitcoin_cash_window() -> PplnsWindow {
     PplnsWindow::new(NETWORK).for_chain(Chain::BitcoinCash)
 }
 
-/// The weight of the seller's share: its difficulty, scaled.
+/// The weight of the seller's share: its exact work, scaled, as Bitcoin Cash
+/// weighs shares.
 fn seller_share_weight(mined: &ShareBlock) -> u128 {
-    mined.get_difficulty(NETWORK) * DIFFICULTY_SCALE
+    let work = Target::from_compact(mined.header.bits)
+        .to_work()
+        .to_le_bytes();
+    u128::from_le_bytes(work[..16].try_into().unwrap()) * DIFFICULTY_SCALE
 }
 
 /// A claim of the share contract moves the sold share's weight to the
@@ -320,9 +344,10 @@ async fn test_a_bitcoin_window_keeps_paying_the_miner_after_a_claim() {
 
     let after_the_claim = weights(&mut bitcoin_window, &claim_block, &chain_store_handle);
 
+    // Bitcoin weighs shares by integer difficulty, upstream's rule.
     assert_eq!(
         after_the_claim.get(&mined.header.miner_bitcoin_address),
-        Some(&seller_share_weight(&mined))
+        Some(&(mined.get_difficulty(NETWORK) * DIFFICULTY_SCALE))
     );
     assert_eq!(after_the_claim.get(&holder_address(&buyer())), None);
 }

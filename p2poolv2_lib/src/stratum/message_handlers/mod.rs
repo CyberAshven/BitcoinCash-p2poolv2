@@ -36,7 +36,9 @@ pub(crate) async fn handle_message<'a, D: DifficultyAdjusterTrait>(
     ctx: StratumContext,
 ) -> Result<Vec<Message<'a>>, Error> {
     match message {
-        Request::MiningConfigureRequest(_) => handle_configure(message, session).await,
+        Request::MiningConfigureRequest(_) => {
+            handle_configure(message, session, ctx.merge_mining_logs.is_some()).await
+        }
         Request::SuggestDifficultyRequest(suggest_difficulty_request) => {
             handle_suggest_difficulty(suggest_difficulty_request, session).await
         }

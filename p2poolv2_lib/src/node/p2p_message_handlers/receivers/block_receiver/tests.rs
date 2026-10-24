@@ -1002,6 +1002,8 @@ fn test_default_pending_limits_hold_enough_of_the_largest_blocks() {
     assert_eq!(limits.max_bytes, 32 * 1024 * 1024);
     assert!(limits.max_bytes / BLOCK_TXS_SIZE_LIMIT as usize >= 160);
     assert!(limits.max_blocks >= 160);
+    // A peer has at most 16 block requests in flight.
+    assert!(limits.max_bytes / crate::shares::validation::BCH_SHARE_BODY_SIZE_LIMIT >= 16);
 }
 
 #[tokio::test]

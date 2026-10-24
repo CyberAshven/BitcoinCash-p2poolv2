@@ -13,10 +13,11 @@ use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
 use crate::store::found_block::FoundBlock;
+use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::PruneStats;
 use crate::store::stored_user::StoredUser;
 use crate::store::transaction_store::PrevoutCheck;
-use bitcoin::{BlockHash, TxMerkleNode, Work};
+use bitcoin::{BlockHash, TxMerkleNode, Txid, Work};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -174,6 +175,43 @@ impl StoreHandle {
     /// Get every bitcoin block found by the pool, ordered by bitcoin height.
     pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
         self.store.get_found_blocks()
+    }
+
+    /// Get every kept Bitcoin Cash payout tree, ordered by coinbase txid.
+    pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError> {
+        self.store.get_payout_trees()
+    }
+
+    /// Get the payout tree of a coinbase, if kept.
+    pub fn get_payout_tree(
+        &self,
+        coinbase_txid: &Txid,
+    ) -> Result<Option<StoredPayoutTree>, StoreError> {
+        self.store.get_payout_tree(coinbase_txid)
+    }
+
+    /// Keep a found block's payout tree through the writer thread.
+    pub async fn put_payout_tree(&self, tree: StoredPayoutTree) -> Result<(), StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::PutPayoutTree {
+                tree: Box::new(tree),
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
+    }
+
+    /// Mark a kept payout tree executed through the writer thread.
+    pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::MarkPayoutTreeExecuted {
+                coinbase_txid,
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
     }
 
     /// Get the confirmed blockhash at a specific height.
@@ -428,6 +466,8 @@ mockall::mock! {
         pub fn get_chain_tip(&self) -> Result<BlockHash, StoreError>;
         pub fn get_total_work(&self) -> Result<Work, StoreError>;
         pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
+        pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError>;
+        pub fn get_payout_tree(&self, coinbase_txid: &Txid) -> Result<Option<StoredPayoutTree>, StoreError>;
         pub fn get_confirmed_at_height(&self, height: u32) -> Result<BlockHash, StoreError>;
         pub fn get_pplns_shares(&self) -> Vec<SimplePplnsShare>;
         pub fn get_pplns_shares_filtered(&self, limit: Option<usize>, start_time: Option<u64>, end_time: Option<u64>) -> Vec<SimplePplnsShare>;
@@ -448,6 +488,8 @@ mockall::mock! {
         pub async fn init_chain_state_from_store(&self, genesis_hash: BlockHash) -> Result<(), StoreError>;
         pub async fn add_user(&self, btcaddress: String) -> Result<u64, StoreError>;
         pub async fn add_pplns_share(&self, pplns_share: SimplePplnsShare) -> Result<(), StoreError>;
+        pub async fn put_payout_tree(&self, tree: StoredPayoutTree) -> Result<(), StoreError>;
+        pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError>;
         pub async fn prune_block_bodies_chunk(&self, from: u32, to: u32) -> Result<PruneStats, StoreError>;
 
         // Sync chain state updates

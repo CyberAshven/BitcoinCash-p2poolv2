@@ -19,12 +19,15 @@ use std::fmt::Display;
 /// The codec rejects a larger advertised length before allocating, so this
 /// bounds the memory one peer message can pin -- including responses queued for
 /// the response worker. Sized for P2Pool's own messages rather than bitcoin's
-/// 5 MB block-relay limit: the largest legitimate message is a `ShareHeaders`
-/// batch of `MAX_HEADERS_IN_RESPONSE` plus up to one height of overshoot
-/// (~1 MB of worst-case headers and branches); a `ShareBlock` is bounded by its 200 KB
-/// transaction limit. `test_full_share_headers_response_fits_max_message_size`
-/// guards the margin.
-pub const MAX_P2P_MESSAGE_SIZE: usize = 1024 * 1024;
+/// 5 MB block-relay limit. The largest legitimate messages are a Bitcoin Cash
+/// `ShareBlock`, whose body holds a 1,000,000-byte coinbase and 200 KiB of
+/// share transactions (`BCH_SHARE_BODY_SIZE_LIMIT`, 1,204,800 bytes) beside
+/// its header and coinbase merkle branch, and a `ShareHeaders` batch of
+/// `MAX_HEADERS_IN_RESPONSE` plus up to one height of overshoot (~1 MB of
+/// worst-case headers and branches). 1.25 MiB holds either with about 100 KB
+/// to spare; `test_full_share_headers_response_fits_max_message_size` and
+/// `test_largest_bch_share_block_fits_max_message_size` guard the margin.
+pub const MAX_P2P_MESSAGE_SIZE: usize = 1_280 * 1024;
 
 /// Most headers, and most distinct branches, a `ShareHeaderBatch` may carry:
 /// a full response plus the one dense height the sender completes past it.

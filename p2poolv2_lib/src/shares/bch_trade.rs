@@ -14,20 +14,24 @@
 //! - **refund** spends the contract back after its refund height.
 //!
 //! The share chain and Bitcoin Cash sign the same replay-protected digest
-//! ([`bch_sighash`]), so one builder serves both. Signatures are ECDSA with
-//! `SIGHASH_ALL | SIGHASH_FORKID`, which BCHN and the share chain accept.
+//! ([`bch_sighash`]), so one builder serves both. Signatures are Bitcoin Cash
+//! Schnorr ([`bch_schnorr`], the 2019-05-15 upgrade) with
+//! `SIGHASH_ALL | SIGHASH_FORKID`, which BCHN and the share chain accept:
+//! 65 bytes with the sighash byte, against 71 or 72 for ECDSA, and always the
+//! same length, so the fee is sized exactly before signing.
 //!
 //! Every function takes a key its owner supplies. Nothing here creates a key
 //! or a secret: keys come from the owner's wallet, and the seller picks the
 //! secret.
 
 use crate::shares::bch_htlc::{HtlcContract, SECRET_LENGTH, pubkey_hash, secret_hash};
+use crate::shares::bch_schnorr::{self, SCHNORR_SIGNATURE_LENGTH};
 use crate::shares::bch_script::dust_threshold;
 use crate::shares::bch_sighash::{self, SighashError, SighashType};
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash;
-use bitcoin::secp256k1::{Message, Secp256k1};
+use bitcoin::secp256k1::Secp256k1;
 use bitcoin::transaction::Version;
 use bitcoin::{
     Amount, OutPoint, PrivateKey, PubkeyHash, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
@@ -37,10 +41,10 @@ use bitcoin::{
 /// `SIGHASH_ALL | SIGHASH_FORKID`: the signature commits to every input and
 /// output, as Bitcoin Cash wallets sign by default.
 const SIGHASH_ALL_FORKID: u8 = 0x41;
-/// Longest low-S strict-DER ECDSA signature (71 bytes: a padded 33-byte R and
-/// a 32-byte S) plus its sighash byte. Fees are sized with it before the real
-/// signature exists; libsecp256k1 only produces low-S signatures.
-const MAX_SIGNATURE_LENGTH: usize = 72;
+/// A Bitcoin Cash Schnorr signature and its sighash byte. Fees are sized with
+/// it before the real signature exists; a Schnorr signature always has this
+/// length.
+const SIGNATURE_LENGTH: usize = SCHNORR_SIGNATURE_LENGTH + 1;
 
 /// Why a trade transaction could not be built.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -63,6 +67,9 @@ pub enum TradeError {
     /// Satoshi amounts overflowed.
     #[error("amounts overflow")]
     Overflow,
+    /// The key is zero or not below the curve order, so it cannot sign.
+    #[error("the key cannot sign")]
+    InvalidKey,
     /// The signature digest could not be built.
     #[error("signature digest: {0}")]
     Sighash(#[from] SighashError),
@@ -114,10 +121,11 @@ impl TradeKey {
         ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array(self.pubkey_hash()))
     }
 
-    /// Sign one input with `SIGHASH_ALL | SIGHASH_FORKID`.
+    /// Sign one input with `SIGHASH_ALL | SIGHASH_FORKID`, as a Bitcoin Cash
+    /// Schnorr signature.
     ///
     /// `script_code` is what the signature commits to: the P2PKH script for a
-    /// P2PKH coin, the redeem script for a contract coin. Returns the DER
+    /// P2PKH coin, the redeem script for a contract coin. Returns the 64-byte
     /// signature followed by the sighash byte, ready to push.
     pub fn sign_input(
         &self,
@@ -134,11 +142,10 @@ impl TradeKey {
             value.to_sat(),
             sighash_type,
         )?;
-        let signature = Secp256k1::signing_only()
-            .sign_ecdsa(&Message::from_digest(digest), &self.private_key.inner);
-        let der = signature.serialize_der();
-        let mut bytes = Vec::with_capacity(der.len() + 1);
-        bytes.extend_from_slice(&der);
+        let signature = bch_schnorr::sign(&self.private_key.inner.secret_bytes(), &digest)
+            .ok_or(TradeError::InvalidKey)?;
+        let mut bytes = Vec::with_capacity(SIGNATURE_LENGTH);
+        bytes.extend_from_slice(&signature);
         bytes.push(SIGHASH_ALL_FORKID);
         Ok(bytes)
     }
@@ -187,7 +194,7 @@ pub fn build_lock_transaction(
             },
         ],
     };
-    let dummy_unlock = p2pkh_unlocking_script(&[0u8; MAX_SIGNATURE_LENGTH], key.public_key());
+    let dummy_unlock = p2pkh_unlocking_script(&[0u8; SIGNATURE_LENGTH], key.public_key());
     for input in &mut transaction.input {
         input.script_sig = dummy_unlock.clone();
     }
@@ -257,7 +264,7 @@ pub fn build_claim_transaction(
     }
     let mut transaction = contract_spend(coin, destination, LockTime::ZERO, Sequence::MAX);
     transaction.input[0].script_sig =
-        contract.claim_unlocking_script(&[0u8; MAX_SIGNATURE_LENGTH], key.public_key(), secret);
+        contract.claim_unlocking_script(&[0u8; SIGNATURE_LENGTH], key.public_key(), secret);
     pay_destination_after_fee(&mut transaction, coin.value, fee_per_byte)?;
     let signature = key.sign_input(&transaction, 0, &contract.redeem_script(), coin.value)?;
     transaction.input[0].script_sig =
@@ -288,7 +295,7 @@ pub fn build_refund_transaction(
         Sequence::ENABLE_LOCKTIME_NO_RBF,
     );
     transaction.input[0].script_sig =
-        contract.refund_unlocking_script(&[0u8; MAX_SIGNATURE_LENGTH], key.public_key());
+        contract.refund_unlocking_script(&[0u8; SIGNATURE_LENGTH], key.public_key());
     pay_destination_after_fee(&mut transaction, coin.value, fee_per_byte)?;
     let signature = key.sign_input(&transaction, 0, &contract.redeem_script(), coin.value)?;
     transaction.input[0].script_sig =
@@ -452,9 +459,9 @@ mod tests {
         let fee =
             100_000 - transaction.output[0].value.to_sat() - transaction.output[1].value.to_sat();
         let size = serialize(&transaction).len() as u64;
-        // The fee was sized with a 72-byte signature; low-S DER is 70 or 71 bytes
-        // plus the sighash byte, so it pays for at most two bytes more.
-        assert!(fee >= size && fee <= size + 2, "fee {fee} for size {size}");
+        // A Schnorr signature is always 65 bytes with its sighash byte, so the
+        // fee sized before signing pays for exactly the signed size.
+        assert_eq!(fee, size);
     }
 
     #[test]

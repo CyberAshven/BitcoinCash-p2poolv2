@@ -1,7 +1,9 @@
 use super::*;
+use crate::accounting::payout::coinbase_budget::BCH_MAX_TX_SIZE;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::merge_mining::MergeMiningCommitment;
-use crate::shares::validation::MAX_UNCLES;
+use crate::shares::share_block::ShareTransaction;
+use crate::shares::validation::{BCH_SHARE_BODY_SIZE_LIMIT, BLOCK_TXS_SIZE_LIMIT, MAX_UNCLES};
 use crate::test_utils::TestShareBlockBuilder;
 use bitcoin::consensus::encode;
 use bitcoin::script::Builder;
@@ -73,7 +75,7 @@ fn test_full_share_headers_response_fits_max_message_size() {
     header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
     header.bch_coinbase = Some(BchCoinbase {
         prefix: vec![0xff; 88],
-        merge_mining: MergeMiningCommitment::reserved(),
+        merge_mining: MergeMiningCommitment::empty(),
     });
 
     let header_count = MAX_SHARE_HEADER_BATCH_LENGTH;
@@ -96,17 +98,50 @@ fn test_full_share_headers_response_fits_max_message_size() {
     );
 }
 
+/// The largest Bitcoin Cash share a peer may send -- a 1,000,000-byte
+/// coinbase, 200 KiB of share transactions, a 32-level coinbase branch and a
+/// header with every field at its largest -- fits one message.
 #[test]
-fn declared_bch_header_batch_round_trips_a_compressed_25_level_proof() {
+fn test_largest_bch_share_block_fits_max_message_size() {
+    let mut share = TestShareBlockBuilder::new()
+        .uncles(vec![BlockHash::all_zeros(); MAX_UNCLES])
+        .build();
+    share.header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
+    share.header.bch_coinbase = Some(BchCoinbase {
+        prefix: vec![0xff; 88],
+        merge_mining: MergeMiningCommitment::empty(),
+    });
+    let coinbase_padding = BCH_MAX_TX_SIZE - share.bitcoin_coinbase.total_size();
+    share.bitcoin_coinbase.output[0].script_pubkey =
+        bitcoin::ScriptBuf::from_bytes(vec![0; coinbase_padding]);
+    let mut share_transaction = share.transactions[0].0.clone();
+    share_transaction.output[0].script_pubkey =
+        bitcoin::ScriptBuf::from_bytes(vec![0; BLOCK_TXS_SIZE_LIMIT as usize]);
+    share.transactions = vec![ShareTransaction(share_transaction)];
+    share.template_merkle_branches = vec![TxMerkleNode::all_zeros(); 32];
+
+    let encoded = encode::serialize(&Message::ShareBlock(share));
+
+    assert!(encoded.len() > BCH_SHARE_BODY_SIZE_LIMIT);
+    assert!(
+        encoded.len() < MAX_P2P_MESSAGE_SIZE,
+        "the largest share is {} bytes, over the {} byte cap",
+        encoded.len(),
+        MAX_P2P_MESSAGE_SIZE
+    );
+}
+
+#[test]
+fn declared_bch_header_batch_round_trips_a_compressed_32_level_proof() {
     let mut header = TestShareBlockBuilder::new().build().header;
     header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
     header.bch_coinbase = Some(BchCoinbase {
         prefix: Builder::new()
             .push_int(header.bitcoin_height as i64)
             .into_bytes(),
-        merge_mining: MergeMiningCommitment::reserved(),
+        merge_mining: MergeMiningCommitment::empty(),
     });
-    let branch = vec![TxMerkleNode::all_zeros(); 25];
+    let branch = vec![TxMerkleNode::all_zeros(); 32];
     header.bitcoin_header.merkle_root =
         header.coinbase_proof.merkle_root(&header, &branch).unwrap();
     let batch = ShareHeaderBatch::from_headers_with_branches(vec![(header, branch)]);

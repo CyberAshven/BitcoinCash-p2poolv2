@@ -1,6 +1,7 @@
 image:https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/rust.yml/badge.svg?branch=alpha[Rust CI, link=https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/rust.yml]
 image:https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/docs.yml/badge.svg?branch=alpha[Docs, link=https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/docs.yml]
 image:https://img.shields.io/badge/license-AGPL--3.0-blue.svg[License: AGPL-3.0, link=#license]
+image:https://img.shields.io/badge/sponsor-BCH-0ac18e.svg[Sponsor with BCH, link=#sponsor]
 
 == P2Poolv2 for Bitcoin Cash
 
@@ -39,9 +40,9 @@ The full list, with reasons, is in link:docs/bch-plan.md[docs/bch-plan.md],
   easier, for small miners.
 * *Mainnet and chipnet run the same rules;* only the network setting differs.
   Share-chain rules never fork Bitcoin Cash itself.
-* *Donation and fee.* Each node donates 1.5% of the blocks it finds to the
+* *Donation and fee.* Each node donates 1% of the blocks it finds to the
   project by default (`donation`, 0 opts out); a public pool may add its own
-  `fee`. The share chain caps both together at 10%.
+  `fee` (1% unless set). The share chain caps each at 10%.
 * *Bitcoin Cash rules:* CashAddr payouts, P2PKH share owners, canonical
   transaction order, BCH's ASERT anchored at each share's parent for share
   difficulty.
@@ -79,12 +80,12 @@ p2poolv2_cli bch-share-address --network chipnet bchtest:qq...
 # tp2pool:qq...
 ----
 
-. Start from `config.sample.toml` and set, under `[stratum]`:
+. Copy `config.sample.toml`, a Bitcoin Cash chipnet node, and set under
+`[stratum]` your own addresses (and the network, for mainnet):
 +
 [,toml]
 ----
-chain = "bitcoin-cash"
-bitcoin_cash_network = "chipnet"     # or "mainnet", "regtest"
+bitcoin_cash_network = "chipnet"     # or "mainnet", "scalenet", "regtest"
 bch_share_chain = "mini"             # "main" for large miners
 miner_address = "tp2pool:qq..."      # optional: owns every share this node mines
 bootstrap_address = "bchtest:qq..."
@@ -93,7 +94,8 @@ zmqpubhashblock = "tcp://127.0.0.1:28332"
 +
 Point `[bitcoinrpc]` at BCHN (`http://127.0.0.1:48332` on chipnet, `8332` on
 mainnet) and list share chain peers in `[network] dial_peers`: Bitcoin Cash
-has no P2Poolv2 DNS seeds yet.
+has no P2Poolv2 DNS seeds yet. `config-bitcoin.sample.toml` is upstream's
+Bitcoin sample.
 
 . Run `p2poolv2 --config config.toml` and point miners at port 3333.
 
@@ -229,6 +231,10 @@ MSRV 1.88, Rust 2024 edition.
 
 * The docs site is built with https://rust-lang.github.io/mdBook/[mdBook]
   from link:docs/[docs/]: `mdbook build docs` writes it to `target/book`.
+* link:website/README.md[website/] is the landing page, HTML and CSS only,
+  styled by the dashboard's own stylesheets, fonts and logo. The `Docs`
+  workflow publishes it to GitHub Pages with the book under `docs/`, once
+  the repository variable `DOCS_PAGES` is `true`.
 * link:docs/bch-quickstart.md[Running on Bitcoin Cash],
   link:docs/requirements.md[requirements],
   link:docs/miner-options.md[miner options],
@@ -239,7 +245,27 @@ MSRV 1.88, Rust 2024 edition.
   link:docs/bch-job-declaration.md[Job Declaration],
   link:docs/architecture/[architecture].
 * link:p2poolv2_api/README.md[API] and link:p2poolv2_cli/README.md[CLI].
+* link:docs/tooling.md[Developer tools] and link:docs/simulation/[simulation]:
+  `cargo sim nightly` runs a swarm of nodes with simulated hashrate to check
+  P2P sync and the share DAG.
 * link:AGENTS.md[AGENTS.md] for contributors and coding agents.
+
+[#sponsor]
+=== Sponsor
+
+P2Poolv2 for Bitcoin Cash is free, open-source software. Donations keep its
+development going. Send BCH, or CashTokens, to the project's donation
+address, the one the pool's own donation pays in each block it finds (1% by
+default; see link:docs/miner-options.md[miner options] to choose your own):
+
+* BCH: `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`
+* CashTokens-aware, the same key:
+  `bitcoincash:zze95tc2dqrnltvxfa5yhunwx5952f34fvflmylut9`
+
+The landing page's
+https://cyberashven.github.io/BitcoinCash-p2poolv2/#donate[donate section]
+shows both with QR codes and Open in wallet links, and GitHub's Sponsor
+button (link:.github/FUNDING.yml[.github/FUNDING.yml]) links there.
 
 == License
 

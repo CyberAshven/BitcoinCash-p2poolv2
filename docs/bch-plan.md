@@ -16,9 +16,9 @@ Audience: contributors and AI agents starting the BCH port. Read
 | Share trading for BCH (decision 13) | Implemented 2026-10-22 as a share-chain consensus change; design in [atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md). One hash time locked contract behind P2SH32 on both chains; share outputs must be P2PKH or P2SH32 at or above BCHN's dust threshold (546 or 576); share transactions must be final at their share height; protocol strings carry `trade-htlc`. `p2poolv2_cli bch-trade` builds and signs every leg offline. Unit tests sign every spending path through the share-chain interpreter and a test stack machine that runs the same bytes; in-process tests run a whole trade, a refund and an immature lock through the real store and validator. Not yet run through BCHN. Since the share-trading value change (same day, a payout rule change, protocol strings carry `payout-holder`): nodes keep a bounded pool of share transactions checked against the confirmed share chain (1,000 transactions, 4 MiB, 3 hours), relay them to peers, mine them in their shares within 64 KiB, and take them over `POST /share_transaction` and `p2poolv2_cli transactions submit`; a coinbase pays each window share's weight to the holder of its payout right, which moves input `i` to output `i` and stays with the seller while locked in a contract. In-process tests: a claim moves the payout to the buyer in the next coinbase, a refund keeps it with the seller, a reorg undoes a claim, and a transaction submitted to one node reaches another over P2P. Not yet run on chipnet. |
 | Share-chain safety gaps from the upstream review (2026-10-23) | Implemented 2026-10-23; two items are share-chain consensus changes (protocol strings carry `uncle-once`, nodes start from a new store), none changes BCH consensus. An uncle may have only one nephew on a chain (upstream's documented rule; the window paid such an uncle twice), on Bitcoin Cash and Bitcoin. Header sync and block receipt apply the full-validation timestamp rules (median of 11, 120 s ahead), which the parent-anchored ASERT relies on. A block spending an output the node never fetched is stored with an unknown coinbase root instead of stalling a syncing node, and the reorg depth limit is `PAYOUT_DEPTH` below the confirmed tip ([pruning](architecture/pruning.md#missing-input-at-write-time)). The pending block buffer is capped (1,024 blocks, 32 MiB, 10 minutes). Stratum difficulty sums saturate and `maximum_difficulty` defaults to 2^32, with property tests. Unit and in-process store tests; not yet run on chipnet. Still open from that review: remembering refused deep forks, dropping shares with an unknown parent instead of buffering them, and fuzz targets for the decoders. |
 | Main/mini share chains and P2P propagation | Implemented; recorded three-node regtest and two-node chipnet share validation. |
-| Large BCH template proofs | Implemented; 25-level BCH branches round-trip through share blocks, storage and compressed header batches. Bitcoin proof validation keeps its 16-level limit. |
+| Large BCH template proofs | Implemented; 32-level BCH branches (25 before the 2026-10-24 rule batch) round-trip through share blocks, storage and compressed header batches. Bitcoin proof validation keeps its 16-level limit. |
 | Pool-issued SV1/SV2 jobs and worker cleanup | Implemented; recorded CPU mining plus channel and socket tests. Independent ASIC firmware remains unverified. |
-| Coinbase fits stock ASIC firmware (decision 14) | Implemented 2026-10-23 as a share-chain consensus change: at most 11 payout outputs and 374 bytes of them, the tail drawn by weight from the payout anchor, no payout below dust; the largest Bitcoin Cash coinbase is 782 bytes against a 784-byte job budget the job builders enforce. Protocol strings carry `payout-cap11`. Unit tests: 200 payees stay within the cap with exact sums, the draw keeps each tail payee's expected share over 4,000 anchors, the producer and validator agree past the cap, the largest declared coinbase fits. The 784-byte limit is evidence from another pool (upstream #668); stock Antminer firmware has not mined through this pool yet. |
+| Hybrid payouts (decision 14) | Implemented on PR #33 as a share-chain rule change, replacing the 11-payout cap and weighted draw of 2026-10-23 (`payout-cap11`). A share that merge-mines no tokens pays every PPLNS payee directly, bounded only by BCH's 1,000,000-byte transaction limit (about 29,398 P2PKH payees); a token share keeps its coinbase within 3,072 bytes (77 P2PKH payees) and pays the rest through one P2SH32 payout tree output. Every node keeps the tree of each found block, broadcasts it after the coinbase's 100 confirmations and serves it at `/payout_tree`. The share body carries a coinbase of up to 1,000,000 bytes beside 200 KiB of share transactions; payout scripts must be P2PKH, P2SH20 or P2SH32; PPLNS weights are exact work. Protocol strings carry `payout-hybrid-t3072-f500-r1to3-z8-cov1` in place of `payout-cap11`. Tests run the tree in a Rust BCH script machine with the 2025 VM limits, and end to end on BCHN 29.2.0 regtest. Design: [architecture/bch-hybrid-payouts.md](architecture/bch-hybrid-payouts.md). Not yet run on chipnet; stock ASIC firmware limits are not measured. |
 | Share transaction pool priority (decision 15) | Implemented 2026-10-23 as node policy: priority is share units burned per byte, then arrival; shares carry the highest first, and a full pool evicts the lowest only for a transaction that outranks them. No validity change. |
 | CashAddr text in the API | Implemented; P2PKH/P2SH vectors and a chipnet share lookup test. |
 | By-address query for share chain explorers | Implemented as `GET /miner?address=` (see `p2poolv2_api/README.md`): one miner's window shares and uncles, weight, share of the window and fraction of the next PPLNS payout, read from the payout code's own `PplnsWindow`. Takes a CashAddr payout with or without prefix or a `p2pool:`/`tp2pool:`/`rp2pool:` share address; chipnet and signet API tests. On 2026-10-23 `p2poolv2_tui`'s live check read it from chipnet node 1 (218 of 218 window shares for the Avalon's payout address). |
@@ -26,7 +26,7 @@ Audience: contributors and AI agents starting the BCH port. Read
 | Declared BCH coinbase peer validation | Implemented; bounded header extension, prefix/aux proof tampering, payout diversion, storage and compressed-header tests. |
 | Mineable Job Declaration in both modes | Both the mocked regression and the two-node BCHN regtest use authenticated Noise connections through the actual listener. Both modes mine blocks and emit verifiable proofs. Independent client interoperability remains pending. |
 | Templates from an SV2 Template Provider | Implemented 2026-10-18 (`template_source = "sv2"`, Bitcoin Cash only); see [Template Distribution client](#template-distribution-client-2026-10-18). On BCHN regtest the node mined four blocks from bchn-sv2-bridge, one with five mempool transactions, and each reached BCHN through `SubmitSolution`. Noise against a real provider, Pickaxe's provider and Knuth remain untested. |
-| Miner-selected auxiliary commitments | Bounded shared trees and full coinbase/header proofs are implemented. An experimental SAFA variant verifies the proof inside the BCH VM and paid tokens in a real two-node regtest. Final SAFA policy, independent covenant review and chipnet issuance remain open. See [bch-auxpow.md](bch-auxpow.md). |
+| Miner-selected auxiliary commitments | Bounded shared trees and full coinbase/header proofs are implemented. An experimental SAFA variant verifies the proof inside the BCH VM and paid tokens in a real two-node regtest with the v1 format; since 2026-10-24 it verifies merge-mining v2 proofs, with the ASERT band and the split, and a chipnet test token (tSAFA) is prepared but not deployed. Final SAFA policy, independent covenant review, a v2 run against BCHN and chipnet issuance remain open. See [bch-auxpow.md](bch-auxpow.md). |
 | PPLNS window and maturity; independent ASIC/JD interoperability | PPLNS adopted 2026-10-19 (PR #4, decision 11): on Bitcoin Cash a coinbase pays the shares holding 3 BCH blocks' worth of work (`BCH_PPLNS_WINDOW_BLOCKS`, as P2Pool v1 on BCH), sized by the paying header's own difficulty and capped at 120,960 shares, behind a 100-share maturity (Satoshi's 100, `BCH_COINBASE_MATURITY`). Bitcoin keeps upstream's fixed window and 6,048-share maturity. Running on chipnet since 2026-10-19 13:24 on a fresh store, where every share sat at the mini ceiling, so the window always hit its cap (see the share difficulty row). Independent ASIC and Job Declaration interoperability remains pending. |
 | Share difficulty (ASERT anchor) | Decided 2026-10-22 as decision 12, a consensus change in [PR #6](https://github.com/CyberAshven/BitcoinCash-p2poolv2/pull/6); see decision 12 and [difficulty_adjustment/asert.md](difficulty_adjustment/asert.md). The chipnet mini chain restarted on 2026-10-19 13:24 (build `e8afeee8`) put every share at difficulty 4, the mini ceiling `0x1c384bd7`, where a 4 TH/s ASIC should hold about 9,300, and shares came every 3 seconds instead of 10. The cause is ASERT's genesis anchor: the Bitcoin Cash genesis carries the regtest timestamp of 2026-04-22, so the chain started about 1.55 million shares behind schedule and would stay at the ceiling for about two and a half months. PPLNS then paid by submission count: a CPU miner got 2.4% of chipnet block 328,554 beside the ASIC. On Bitcoin Cash the PR anchors ASERT at each share's parent; unit tests bring a 4 TH/s miner from the mini ceiling to its steady difficulty within eight half-lives (80 minutes) of a late start or a two-day outage, where the genesis anchor stays at the ceiling. Bitcoin keeps the genesis anchor. |
 | Remote CI and chipnet block | Rust tests, linting, Security and BCH Covenant Tests pass on GitHub; Code Coverage fails only at the Codecov upload until the fork has a `CODECOV_TOKEN`. First chipnet block on 2026-10-18: height 328451, `00000000000cb752459c2b08e1955e5f33252b0207b1c7b5b2f069d5254b9025`, found by an Avalon ASIC on Stratum V1 through the two-node chipnet pool, with templates from a remote BCHN 29.1.0 (Start9, over Tailscale). Its coinbase paid 25.00462191 BCH: 1.5% (0.37506932) to the donation address, the PPLNS window to two miners (17.05914219 and 7.50989553), 0.06051487 to the genesis share's NUMS key, then the merge-mining, padding and share-commitment outputs. Two more blocks found within five seconds at the same height lost, because nothing refreshed the template right after a found block. PR #3 fixed that on 2026-10-18: an accepted block now triggers an immediate template fetch, and the pool hears BCHN's ZMQ over Tailscale. After the fix the pool found blocks 328455 and 328456 at real difficulty, each submitted once with no sibling, paying the donation and the window. |
@@ -77,9 +77,10 @@ the node config, share addresses, the donation and fee, and miner settings.
 
 Also in this checkpoint:
 
-- Bitcoin Cash donates 1.5% by default to the project address, adjustable
-  by the operator, with an optional operator fee and a 10% consensus cap on
-  the two together (decision 9 below).
+- Bitcoin Cash donates 1.5% (1% since 2026-10-24) by default to the
+  project address, adjustable by the operator, with an optional operator
+  fee, each under its own 10%
+  share-chain cap (decision 9 below; per item since decision 13).
 - Stratum usernames accept CashAddr payouts. Before this no Bitcoin Cash
   miner could authorize.
 - `stratum.network` on a Bitcoin Cash node is derived from
@@ -430,8 +431,14 @@ provider or a second node can then supply templates. Bitcoin and
   share chain's (2, `0xfffffffe`, height - 1), because peers check them.
   BCHN accepts any, so the provider's own values are only logged. Template
   Distribution carries no block size limit, so templates are checked against
-  the network's default excessive block size, which BCHN 29.2.0 reports as
-  `sizelimit`: 32 MB on mainnet and regtest, 2 MB on chipnet.
+  the limit BCHN reports for their parent: `ablastate.nextblocksizelimit`
+  from the same `getblockheader` call that gives the height: the larger of
+  the node's floor (32 MB on mainnet, 2 MB on chipnet) and its ABLA limit,
+  with no fixed maximum, as `getblocktemplate`'s `sizelimit` is. The
+  successor of
+  a block this node found keeps the last limit BCHN reported, since BCHN may
+  not have that block yet. The network's floor is used only when BCHN has
+  reported no limit, and a warning says so.
 - **Blocks.** A block found on a provided template goes back to its
   connection as `SubmitSolution`. Declared jobs never do, since they carry
   the declarator's transactions. The protocol has no reply, so a block the
@@ -584,17 +591,16 @@ move most BCH hashrate to the share chain.
      are in the window; then the shares slide out. Nothing is held, kept or
      expired.
    - Dust: each share is worth a slice of a full block reward, far above
-     BCH's dust limit, so nothing accumulates. A payee whose slice would
-     still be dust (a tiny share beside large ones) joins the drawn tail of
-     decision 14 instead of getting a dust output.
+     BCH's dust limit, so nothing accumulates. A direct payout whose slice
+     would still be dust (a tiny share beside large ones) is paid as it is,
+     which BCH consensus allows in a coinbase; a payout tree payee below dust
+     is merged into the largest tree payee (decision 14).
    - Small miners' variance: a main and a "mini" share chain with lower
      share difficulty, as Monero's P2Pool has (main, mini, nano), plus uncles
      (P2Poolv2 already has them).
-   - Optional later: a keyless covenant payout tree in one coinbase output
-     (BCH introspection can check the spending transaction's outputs), only
-     if the number of coinbase outputs becomes a problem. It did for stock
-     ASIC firmware; decision 14 caps the outputs and draws the tail until
-     such a tree pays it exactly.
+   - A keyless covenant payout tree in one coinbase output (BCH
+     introspection can check the spending transaction's outputs) pays the
+     payees that do not fit a share's coinbase limit (decision 14).
 5. **Merge mining.** Reserve one coinbase commitment output whose hash covers
    every token the miner chose to merge-mine (AuxPoW-style); each token's
    covenant checks a short proof up to it. The share chain fixes the payouts;
@@ -613,14 +619,17 @@ move most BCH hashrate to the share chain.
 8. **Not adopted.** DATUM-style designs, where an operator sets the coinbase
    outputs and holds small balances, keep the central infrastructure this
    project wants to remove.
-9. **Donation and pool fee (2026-10-14).** Every Bitcoin Cash node donates
-   1.5% of each block it finds, from the coinbase, to the project address
+9. **Donation and pool fee (2026-10-14, defaults 1% since 2026-10-24).**
+   Every Bitcoin Cash node donates 1% of each block it finds (1.5% until
+   2026-10-24), from the coinbase, to the project address
    `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k` unless its
    operator changes it: `donation` raises or lowers the basis points and 0
    opts out. The address is fixed in the share chain's rules, so a donation
    cannot be redirected. Public pool operators set their own `fee_address`
-   and `fee`. Donation plus fee is capped at 10% by share-chain consensus so
-   no node can take a block's reward from the miners in its window.
+   and `fee`; a `fee_address` without `fee` takes 1%. The fee is still taken
+   from what the donation leaves. The donation and the fee are each capped
+   at 10% by the share chain (per item since decision 13), so no node can
+   take a block's reward from the miners in its window.
 10. **Rust stays the implementation.** Ideas from P2Pool v1, CashStratum and
     other BCH software are reimplemented in Rust here, never ported back as
     Python or C.
@@ -732,7 +741,7 @@ move most BCH hashrate to the share chain.
         six times the loss for a 0.1% miner, little for a large one. It
         costs a new consensus output in the producer, the validator and
         declared jobs, and a rule for how it sits beside the 10% donation
-        and fee cap. Worth it only if withholding shows up; the two chipnet
+        and fee caps. Worth it only if withholding shows up; the two chipnet
         blocks lost at one height need faster template refresh, which a
         bonus would not give.
       - *Share period: keep 10 seconds.* v1 used 60 seconds on BCH, where
@@ -788,9 +797,12 @@ move most BCH hashrate to the share chain.
     - **Mainnet readiness.** Mainnet, chipnet and regtest share one code
       path; only the network setting differs. Work finished and tested on
       chipnet counts as mainnet ready.
-    - **Cap.** 10% stays the share-chain cap on donation plus pool fee,
-      public pool hosts included. With the default 1.5% donation, a host
-      may charge up to 8.5%.
+    - **Cap, per item (reworded 2026-10-24).** The share chain caps the
+      donation and the pool fee at 10% each, public pool hosts included;
+      there is no combined cap. A host may charge up to 10% whatever the
+      donation. The fee is taken from what the donation leaves, so a 10%
+      donation and a 10% fee take 10% and 9% of the coinbase value, 19% in
+      all.
     - **Share trading stays on Bitcoin Cash.** Shares trade through BCH
       covenants, with every share output above the dust limit. No Lightning
       Network. Implemented the same day as a hash time locked contract
@@ -814,52 +826,47 @@ move most BCH hashrate to the share chain.
       other software, including the maintainer's Avalon ASIC on chipnet, are
       run by the developers, not left to the maintainer.
 
-14. **Coinbase budget (2026-10-23, consensus change).** Upstream reports
-    that stock Antminer firmware takes a coinbase of "just over a dozen
-    outputs" (discussion #668: an OCEAN block with 16 payouts in 784 bytes)
-    and plans 25 outputs with the long tail paid to one miner drawn by
-    weight (#708). Every Stratum V1 device hashes the whole coinbase, also
-    behind an SV2 translator; only SV2 standard channels do not. Before this
-    a Bitcoin Cash coinbase paid every window payee.
-    - **Rule.** At most `C` = 11 PPLNS payout outputs (`BCH_MAX_COINBASE_PAYOUTS`)
-      and `B` = 374 bytes of them, no payout below BCHN's dust threshold.
-      Payees that fit are paid as before. Otherwise the payees ranked by
-      weight (after the payout-holder rule) are paid their exact share while
-      they fit `C - 1` outputs and `B` less the largest payee output, and
-      the rest of the amount goes to one remaining payee drawn by weight
-      from `SHA256(tag || anchor)`. A tail worth less than dust goes to the
-      largest payee. Full rule: `architecture/payout-distribution.md`,
-      "Bitcoin Cash coinbase budget".
-    - **Why a draw.** Upstream's proposal. It keeps every tail payee's
-      expected income and loses nothing, where leaving the tail out (P2Pool
-      v1 past 4,000 payees) loses it, spreading it over the paid set takes it
-      from small miners (and feeds a rich-list Sybil, #647), and carrying it
-      needs state about blocks BCH may orphan.
-    - **Why the anchor.** Unknown until the anchor share exists, after which
-      payout rights at it are fixed, so nobody can move a right to an address
-      placed to win; a seed known in advance (the BCH previous block hash)
-      would allow that. Building on an older anchor buys extra draws only for
-      the grinder's own blocks, at the cost of stale shares.
-    - **Why 11 and 784 bytes.** 784 bytes is the Antminer-mined coinbase
-      upstream cites. The largest coinbase besides payouts is 408 bytes (a
-      100-byte scriptSig, the donation, a fee to any address type, the
-      merge-mining, padding and commitment outputs), leaving 11 P2PKH
-      outputs; the largest coinbase is 782 bytes. With the 80-byte header and
-      a 25-hash merkle branch a merge-mining claim that carries the coinbase
-      stays at most 1,664 bytes, far under the 2026 P2S unlocking limit.
-      `B` bounds payouts even if a share names a witness-program address.
-      The merge-mining output is placed in one function and counted by size,
-      so the merge-mining format can move it; the share commitment output
-      stays last with its padding.
-    - **Unchanged.** Donation, fee and the 10% cap come off first; CTOR is
-      untouched; Bitcoin and Hydrapool pay every payee. The API's `/miner`
-      weight is a tail payee's expected payout, not its next one.
-    - **Later.** The covenant payout tree (decision 4's "optional later",
-      gap analysis M2) turns the drawn output into a tree output each tail
-      payee withdraws exactly, removing the draw. Raising `C` and the byte
-      budget after a measurement on stock Antminer firmware is a new tag.
+14. **Coinbase payouts: the hybrid payout (share-chain rule).** On
+    2026-10-23 a Bitcoin Cash coinbase was capped at 11 payouts in a 784-byte
+    job, the tail drawn by weight (`payout-cap11`), after upstream's report
+    that stock Antminer firmware takes "just over a dozen outputs"
+    (discussion #668, one OCEAN Bitcoin block). The owner rejected that as a
+    Bitcoin assumption, and on PR #33 the hybrid payout replaced it
+    ([architecture/bch-hybrid-payouts.md](architecture/bch-hybrid-payouts.md);
+    audit items A1 to A3).
+    - **Rule.** Donation and fee, each under its own 10% cap, come off
+      first, as before. A share whose merge-mining commitment is exactly
+      empty pays every PPLNS payee directly, within BCH's
+      1,000,000-byte `MAX_TX_SIZE` (about 29,398 P2PKH payees). A share that
+      merge-mines tokens keeps its coinbase within `T` = 3,072 bytes (77
+      P2PKH payees), so a token covenant can hash it in the VM. Payees are in
+      canonical order, ascending weight, ties by locking bytecode; the payee
+      that straddles the limit and every payee after it go to one P2SH32
+      payout tree output after the direct payouts. Nobody is split, the
+      rounding remainder goes to the largest payee, and direct payouts below
+      dust are paid as they are.
+      Pool-built jobs can carry the miner's own token root when the node
+      has tokens configured; Job Declaration can also carry a token
+      commitment. The commitment decides the payout limit in both cases.
+    - **The tree.** Keyless covenant nodes of 500 outputs each, paid from the
+      tree's own value: the root accepts the outputs for 1, 2 or 3 sat/byte,
+      and at that rate each payee pays for its own output's bytes plus an
+      equal share of the other bytes. Tree payees below dust at 3 sat/byte
+      are merged into the largest.
+      Every node keeps the tree of each found block, broadcasts it at
+      1 sat/byte after the coinbase's 100 confirmations, and serves it at
+      `/payout_trees` and `/payout_tree?coinbase_txid=`, so payees can
+      broadcast it without P2Pool.
+    - **With it.** The share body carries a coinbase of up to 1,000,000
+      bytes beside 200 KiB of share transactions; payout scripts must be
+      P2PKH, P2SH20 or P2SH32; PPLNS weights are exact work, 2^256 /
+      (target + 1). Bitcoin and Hydrapool pay every payee, as before. An SV2
+      extended job or Job Declaration carries at most 65,535 bytes of
+      coinbase on each side of the extranonce, so a larger coinbase (about
+      1,900 P2PKH payouts) is refused for that channel.
     - **Activation.** Flag day on a fresh store; protocol strings carry
-      `payout-cap11` after `payout-holder`. Mainnet starts with the rule.
+      `payout-hybrid-t3072-f500-r1to3-z8-cov1` in place of `payout-cap11`.
+      Mainnet starts with the rule.
 
 15. **Share transaction pool priority (2026-10-23, node policy).** The pool
     admitted by arrival and evicted the oldest, so a holder of many share
@@ -878,6 +885,20 @@ move most BCH hashrate to the share chain.
     - **Policy.** No validity change and no new protocol tag; a share may
       still carry any valid transaction. `bch-trade --fee-rate` sets the bid.
       A consensus fee can follow if units ever carry value (partial rights).
+
+16. **Each miner's own donation (2026-10-24, node policy).** Each miner on
+    any P2Pool node chooses their own P2Pool donation through their login:
+    `donation=<percent>`, 0 to 10 in steps of 0.5, after a comma in the SV1
+    username or SV2 identity, as Pickaxe writes its logins, or in the SV1
+    password. P2Pool's donation is independent of Pickaxe's (two
+    independent projects); keys P2Pool does not read, such as
+    `pickaxe-donation=`, are ignored, and only bad values of its own keys are
+    refused. Without the option the node's `donation` (decision 9) applies,
+    and the node cannot override a miner's choice. The fee is still taken
+    after the donation. No share-chain rule changes: the share header
+    already carries each share's donation, checked against its 10% cap and
+    the built-in key. Details in `docs/bch-design.md` and
+    `docs/miner-options.md`.
 
 ## BCH porting checklist
 
@@ -941,12 +962,13 @@ check before code.
   lists it as open, its ADR 0002). Since 2026-10-15 a `p2p=` option in
   `user_identity` names the share address, as the SV1 password does; a
   signed binding a miner could prove is still open.
-- The covenant payout tree: decision 14 caps the coinbase at 11 payouts and
-  pays the tail by a draw; the tree would pay the tail exactly. Prove it
-  within BCH's VM limits first.
+- The payout tree on chipnet: it has run in a Rust BCH script machine with
+  the 2025 VM limits and end to end on BCHN regtest (decision 14), not yet on
+  chipnet or at scale.
 - The real coinbase limit of stock Antminer firmware: mine on chipnet over
-  SV1 and through an SV2 translator with coinbases of about 600 to 1,200
-  bytes (decision 14 assumes 784).
+  SV1 and through an SV2 translator with coinbases of growing size (audit
+  measurement M1). Device limits are to be handled per connection, never as
+  a share-chain cap.
 - Pool operators running this software beside the share chain.
 
 ## First steps

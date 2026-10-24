@@ -64,7 +64,7 @@ What happens:
 . The miner submits a few candidates a minute (`MUJINA_POOL_FORCED_RATE`).
   They are far below the pool's share difficulty, so the node rejects them as
   shares, but on regtest every hash meets the block target: the node submits
-  each one to BCHN as a block whose coinbase pays the 1.5% donation and the
+  each one to BCHN as a block whose coinbase pays the 1% donation and the
   PPLNS window.
 
 Check it:

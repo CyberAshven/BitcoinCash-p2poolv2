@@ -717,7 +717,7 @@ fn declared_bch_coinbase_metadata_survives_store_reconstruction() {
     share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
     share.header.bch_coinbase = Some(BchCoinbase {
         prefix: vec![0x51],
-        merge_mining: MergeMiningCommitment::reserved(),
+        merge_mining: MergeMiningCommitment::empty(),
     });
     let blockhash = share.block_hash();
     let mut batch = Store::get_write_batch();

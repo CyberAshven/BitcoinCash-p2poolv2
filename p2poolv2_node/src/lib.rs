@@ -39,6 +39,7 @@ use p2poolv2_lib::stratum::work::template_trigger::merge_template_triggers;
 use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
 use p2poolv2_lib::stratum::zmq_listener::{ZmqListener, ZmqListenerTrait};
 use signal::{ShutdownReason, setup_signal_handler};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -174,7 +175,11 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 
     let genesis = p2poolv2_lib::shares::bch_genesis::genesis_for_stratum(&config.stratum)
         .expect("share genesis data is fixed");
-    let store = Arc::new(Store::new(config.store.path.clone(), false).unwrap());
+    let store = Arc::new(
+        Store::new(config.store.path.clone(), false)
+            .unwrap()
+            .with_chain(config.stratum.chain),
+    );
 
     let (write_tx, write_rx) = write_channel();
     let store_writer = StoreWriter::new(store.clone(), write_rx);
@@ -209,6 +214,21 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     };
     info!("Latest tip {} at height {}", tip, height);
 
+    // A Bitcoin Cash node mines only for BCHN on the configured network: the
+    // chain name is checked before waiting for the node to sync, and a block
+    // only Bitcoin Cash has once it has synced.
+    let bitcoin_cash_network = match config.stratum.chain {
+        Chain::BitcoinCash => config.stratum.bitcoin_cash_network,
+        Chain::Bitcoin => None,
+    };
+    if let Some(network) = bitcoin_cash_network
+        && let Err(error) =
+            preflight::verify_bitcoin_cash_chain_name(&config.bitcoinrpc, network).await
+    {
+        error!("Refusing to start: {error}");
+        return Err(ExitCode::FAILURE);
+    }
+
     if let Err(error) = preflight::wait_for_bitcoin_node_synced(
         &config.bitcoinrpc,
         Duration::from_secs(300),
@@ -228,6 +248,13 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         }
     }
 
+    if let Some(network) = bitcoin_cash_network
+        && let Err(error) = preflight::verify_bitcoin_cash_block(&config.bitcoinrpc, network).await
+    {
+        error!("Refusing to start: {error}");
+        return Err(ExitCode::FAILURE);
+    }
+
     background_tasks::start_background_tasks(
         config.stratum.mode,
         store.clone(),
@@ -239,6 +266,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 
     let stratum_config = config.stratum.clone().parse().unwrap();
     let bitcoinrpc_config = config.bitcoinrpc.clone();
+    let extra_submit_nodes = config.submit_nodes.clone();
 
     let (stratum_shutdown_tx, stratum_shutdown_rx) = tokio::sync::oneshot::channel();
     let (notify_tx, notify_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
@@ -275,12 +303,18 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             "Bitcoin Cash templates, share owners, and {:?} share chain genesis are selected for {:?}.",
             stratum_config.bch_share_chain, stratum_config.bitcoin_cash_network
         );
+        // Only a P2Pool node builds each miner's jobs with their own donation.
+        let miner_choice = if stratum_config.mode == PoolMode::P2poolv2 {
+            " A miner's login may choose its own with donation=<percent>."
+        } else {
+            ""
+        };
         match (stratum_config.donation, stratum_config.bitcoin_cash_network) {
             (Some(basis_points), Some(network)) => info!(
-                "Donating {basis_points} basis points of each block this node finds to {}. Set donation = 0 to opt out.",
+                "Donating {basis_points} basis points of each block this node finds to {}. Set donation = 0 to opt out.{miner_choice}",
                 bitcoin_cash_donation_cashaddr(network)
             ),
-            _ => info!("Bitcoin Cash donation is off (donation = 0)."),
+            _ => info!("Bitcoin Cash donation is off (donation = 0).{miner_choice}"),
         }
     }
 
@@ -406,7 +440,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         port,
         pool_transactions: pool_transactions.clone(),
         merge_mining: match share_chain {
-            Chain::BitcoinCash => Some(MergeMiningCommitment::reserved()),
+            Chain::BitcoinCash => Some(MergeMiningCommitment::empty()),
             Chain::Bitcoin => None,
         },
         authority: stratum_config.sv2_authority(),
@@ -437,7 +471,14 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             .share_chain(share_chain)
             .bch_share_network(bch_share_network)
             .cash_share(cash_share)
-            .sv2(sv2_listener);
+            .merge_mining_tokens(
+                stratum_config
+                    .merge_mining_tokens
+                    .as_ref()
+                    .map(PathBuf::from),
+            )
+            .sv2(sv2_listener)
+            .extra_submit_nodes(extra_submit_nodes);
         let mut stratum_server = match template_refresh_tx {
             Some(template_refresh_tx) => {
                 stratum_server_builder.template_refresh_tx(template_refresh_tx)
@@ -536,9 +577,5 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 }
 
 fn bch_share_network(network: BitcoinCashNetwork) -> BchShareNetwork {
-    match network {
-        BitcoinCashNetwork::Mainnet => BchShareNetwork::Mainnet,
-        BitcoinCashNetwork::Chipnet => BchShareNetwork::Chipnet,
-        BitcoinCashNetwork::Regtest => BchShareNetwork::Regtest,
-    }
+    network.share_network()
 }

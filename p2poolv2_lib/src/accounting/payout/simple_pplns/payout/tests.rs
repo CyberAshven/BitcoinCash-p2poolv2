@@ -58,10 +58,11 @@ async fn bitcoin_cash_payout_combines_prefixed_and_prefixless_usernames() {
     let total = Amount::from_sat(100_000_000);
     let distribution = payout
         .get_output_distribution(&store, BlockHash::all_zeros(), 400, total, &config)
-        .unwrap();
+        .unwrap()
+        .outputs;
     assert_eq!(distribution.len(), 4);
-    assert_eq!(distribution[0].amount.to_sat(), 1_500_000);
-    assert_eq!(distribution[1].amount.to_sat(), 985_000);
+    assert_eq!(distribution[0].amount.to_sat(), 1_000_000);
+    assert_eq!(distribution[1].amount.to_sat(), 990_000);
     assert_eq!(
         distribution
             .iter()
@@ -73,7 +74,7 @@ async fn bitcoin_cash_payout_combines_prefixed_and_prefixless_usernames() {
         .iter()
         .find(|output| output.address == *config.bootstrap_address())
         .unwrap();
-    assert_eq!(public_key_hash_payout.amount.to_sat(), 73_136_250);
+    assert_eq!(public_key_hash_payout.amount.to_sat(), 73_507_500);
     let script_hash = parse_payout_address(
         "bitcoincash:ppm2qsznhks23z7629mms6s4cwef74vcwvn0h829pq",
         config.chain,
@@ -88,7 +89,7 @@ async fn bitcoin_cash_payout_combines_prefixed_and_prefixless_usernames() {
             .unwrap()
             .amount
             .to_sat(),
-        24_378_750
+        24_502_500
     );
 }
 
@@ -137,20 +138,21 @@ async fn bootstrap_payout_preserves_donation_and_fee() {
     let total = Amount::from_sat(100_000_000);
     let distribution = payout
         .get_output_distribution(&store, BlockHash::all_zeros(), 400, total, &config)
-        .unwrap();
+        .unwrap()
+        .outputs;
     assert_eq!(distribution.len(), 3);
     assert_eq!(
         distribution[0].address,
         *config.donation_address_parsed.as_ref().unwrap()
     );
-    assert_eq!(distribution[0].amount.to_sat(), 1_500_000);
+    assert_eq!(distribution[0].amount.to_sat(), 1_000_000);
     assert_eq!(
         distribution[1].address,
         *config.fee_address_parsed.as_ref().unwrap()
     );
-    assert_eq!(distribution[1].amount.to_sat(), 985_000);
+    assert_eq!(distribution[1].amount.to_sat(), 990_000);
     assert_eq!(distribution[2].address, *config.bootstrap_address());
-    assert_eq!(distribution[2].amount.to_sat(), 97_515_000);
+    assert_eq!(distribution[2].amount.to_sat(), 98_010_000);
     assert_eq!(
         distribution
             .iter()
@@ -621,7 +623,8 @@ async fn test_get_output_distribution_single_address() {
             total_amount,
             &stratum_config,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].amount, total_amount);
@@ -680,7 +683,8 @@ async fn test_get_output_distribution_multiple_addresses() {
             total_amount,
             &stratum_config,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
     assert_eq!(result.len(), 2);
 
@@ -766,7 +770,8 @@ async fn test_get_output_distribution_same_address_multiple_shares() {
             total_amount,
             &stratum_config,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
     // Should have 2 unique addresses
     assert_eq!(result.len(), 2);
@@ -802,7 +807,8 @@ async fn test_get_output_distribution_empty_shares() {
             total_amount,
             &stratum_config,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].address, *stratum_config.bootstrap_address());
@@ -863,7 +869,8 @@ async fn test_get_output_distribution_with_donation() {
             total_amount,
             &stratum_config,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
     // Should have 3 outputs: donation + 2 miners
     assert_eq!(result.len(), 3);
@@ -955,7 +962,8 @@ async fn test_get_output_distribution_with_fee() {
             total_amount,
             &stratum_config,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
     // Should have 3 outputs: fee + 2 miners
     assert_eq!(result.len(), 3);
@@ -1053,7 +1061,8 @@ async fn test_get_output_distribution_with_donation_and_fee() {
             total_amount,
             &stratum_config,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
     // Should have 4 outputs: donation + fee + 2 miners
     assert_eq!(result.len(), 4);
@@ -1133,7 +1142,8 @@ async fn test_get_output_distribution_with_donation_empty_shares() {
             total_amount,
             &stratum_config,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
     // When no shares, all funds should go to bootstrap address (not donation)
     assert_eq!(result.len(), 1);
@@ -1195,7 +1205,8 @@ async fn test_get_output_distribution_with_zero_donation() {
             total_amount,
             &stratum_config,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
     // Should have only 2 outputs: just the 2 miners (no donation output)
     assert_eq!(result.len(), 2);
@@ -1284,7 +1295,8 @@ async fn test_get_output_distribution_with_zero_fee() {
             total_amount,
             &stratum_config,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
     // Should have only 2 outputs: just the 2 miners (no fee output)
     assert_eq!(result.len(), 2);
@@ -1355,7 +1367,8 @@ async fn test_get_output_distribution_with_full_donation_and_invalid_miner_addre
             total_amount,
             &stratum_config,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
     // Should have only 1 output: donation gets 100%
     assert_eq!(result.len(), 1);

@@ -8,8 +8,13 @@
 //! sessions. The registry is what lets a token allocated on the first be
 //! presented on the second.
 
+use super::custom_job::declared_leaves;
 use super::sort_ctor;
+use crate::shares::auxpow::Disclosure;
 use crate::shares::merge_mining::MergeMiningCommitment;
+use crate::stratum::parse_password::{
+    log_unknown_options, parse_miner_donation, split_user_identity,
+};
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use binary_sv2::{B064K, B0255, Deserialize, Seq064K, Str0255};
@@ -26,6 +31,7 @@ use common_messages_sv2::{
 use framing_sv2::framing::MessageFrame;
 #[cfg(test)]
 use framing_sv2::framing::SerializedFrame;
+use framing_sv2::header::Header as FrameHeader;
 use job_declaration_sv2::{
     AllocateMiningJobToken, AllocateMiningJobTokenSuccess, DeclareMiningJob, DeclareMiningJobError,
     DeclareMiningJobSuccess, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
@@ -50,6 +56,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 const PROTOCOL_VERSION: u16 = 2;
+/// The error a declaration whose coinbase the node refuses gets, as
+/// Pickaxe's pool sends it: here, token leaves that are missing, not
+/// canonical, or do not make output 0's root.
+const INVALID_COINBASE_TX: &str = "invalid-coinbase-tx";
 const WORK_SELECTION_FLAG: u32 = 0b10;
 const MAX_JOB_TOKENS: usize = 64;
 const TOKEN_LIFETIME: Duration = Duration::from_secs(120);
@@ -64,12 +74,13 @@ pub enum JobDeclarationMode {
     FullTemplate,
 }
 
-/// Transactions from the latest block template, kept in CTOR.
+/// The latest prepared template, which Job Declaration tokens are allocated
+/// against. The template's transactions stay in the template; nothing here
+/// decodes them.
 ///
 /// The lock is the only lock this cache takes.
 #[derive(Clone)]
 pub struct PoolTransactionCache {
-    transactions: Arc<RwLock<Vec<Transaction>>>,
     prepared: Arc<RwLock<Option<Arc<PreparedNotifyParams>>>>,
 }
 
@@ -77,18 +88,8 @@ impl PoolTransactionCache {
     /// Empty cache. The notifier replaces it when a template arrives.
     pub fn new() -> Self {
         Self {
-            transactions: Arc::new(RwLock::new(Vec::new())),
             prepared: Arc::new(RwLock::new(None)),
         }
-    }
-
-    /// Store `transactions` in canonical order.
-    pub fn set(&self, mut transactions: Vec<Transaction>) {
-        sort_ctor(&mut transactions);
-        *self
-            .transactions
-            .write()
-            .expect("pool transaction cache lock") = transactions;
     }
 
     /// Publish the immutable payout and template snapshot used by allocated tokens.
@@ -124,6 +125,10 @@ pub(crate) struct Declaration {
     pub version: u32,
     pub prefix: Vec<u8>,
     pub suffix: Vec<u8>,
+    /// The token leaves behind the declared coinbase's output 0, from
+    /// `DeclareMiningJob.excess_data` (`declared_leaves`); none for the
+    /// empty commitment.
+    pub disclosure: Disclosure,
 }
 
 struct JobToken {
@@ -262,15 +267,24 @@ impl Sv2Connection {
     pub fn accept(&mut self, incoming: &[u8]) -> Result<Vec<Vec<u8>>, String> {
         let messages = self.decode(incoming)?;
         let mut responses = Vec::with_capacity(messages.len());
-        for (message_type, mut payload) in messages {
-            responses.extend(self.handle_message(message_type, &mut payload)?);
+        for mut message in messages {
+            if message.extension_type != 0 {
+                return Err("unsupported Stratum V2 extension".to_string());
+            }
+            responses.extend(self.handle_message(message.message_type, &mut message.payload)?);
         }
         Ok(responses)
     }
 
-    /// Decode `incoming` into complete messages: type and payload.
-    pub fn decode(&mut self, incoming: &[u8]) -> Result<Vec<(u8, Vec<u8>)>, String> {
+    /// Decode `incoming` into complete messages.
+    pub fn decode(&mut self, incoming: &[u8]) -> Result<Vec<Sv2Message>, String> {
         decode_plain_frames(&mut self.decoder, &mut self.inbox, incoming)
+    }
+
+    /// Whether this connection has set up a protocol, as a request for
+    /// extensions needs.
+    pub fn is_set_up(&self) -> bool {
+        self.mining || self.mode.is_some()
     }
 
     /// Whether this connection set up the Mining Protocol.
@@ -304,7 +318,10 @@ impl Sv2Connection {
             MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN => {
                 let request = AllocateMiningJobToken::from_bytes(payload)
                     .map_err(|error| error.to_string())?;
-                self.on_allocate(request.request_id)
+                self.on_allocate(
+                    request.request_id,
+                    &request.user_identifier.as_utf8_or_hex(),
+                )
             }
             MESSAGE_TYPE_DECLARE_MINING_JOB => {
                 let request =
@@ -396,28 +413,66 @@ impl Sv2Connection {
         }
     }
 
-    fn on_allocate(&mut self, request_id: u32) -> Result<Vec<Vec<u8>>, String> {
+    /// Allocate a token whose terms carry the donation `user_identifier`
+    /// chooses with `donation=`, as a mining channel's identity does, or the
+    /// node's own without one. The channel that later mines the job must
+    /// choose the same donation (`MiningChannels::install_custom_job`).
+    ///
+    /// The Job Declaration Protocol has no error reply to this message, so a
+    /// bad `donation=` value, or one on a node without a Bitcoin Cash share
+    /// chain, closes the connection with the reason in the node's log.
+    fn on_allocate(
+        &mut self,
+        request_id: u32,
+        user_identifier: &str,
+    ) -> Result<Vec<Vec<u8>>, String> {
         let mode = self.mode.ok_or("job token requested before setup")?;
+        let (_, options) = split_user_identity(user_identifier);
+        if let Some(options) = options {
+            log_unknown_options(options);
+        }
+        let donation = parse_miner_donation(options)?;
         let mut registry = self.registry.lock().expect("job registry lock");
         registry.expire_tokens();
         if registry.tokens.len() >= MAX_JOB_TOKENS {
             return Err("job token limit reached".into());
         }
-        let prepared = registry
+        if donation.is_some() && registry.merge_mining.is_none() {
+            return Err("donation= is a Bitcoin Cash P2Pool option this node cannot honour".into());
+        }
+        let mut prepared = registry
             .cache
             .prepared
             .read()
             .expect("pool prepared template lock")
             .clone();
+        if let Some(template) = &prepared
+            && let Some(miner_prepared) = template
+                .for_miner_donation(donation)
+                .map_err(|error| error.to_string())?
+        {
+            prepared = Some(miner_prepared);
+        }
         let (token, coinbase_outputs) = if registry.merge_mining.is_some() {
             let prepared = prepared.as_ref().ok_or("template-unavailable")?;
-            let outputs = prepared
-                .declared_outputs(prepared.template().coinbasevalue)
-                .map_err(|error| error.to_string())?
-                .into_iter()
-                .map(|pair| TxOut {
+            // The payout scripts of a declared job carrying the exact empty
+            // commitment; a token commitment's job may pay more of them
+            // through the payout tree.
+            let payouts = prepared
+                .declared_outputs(
+                    prepared.template().coinbasevalue,
+                    &MergeMiningCommitment::empty(),
+                )
+                .map_err(|error| error.to_string())?;
+            let tree_script = payouts.tree_output().map(|output| output.script_pubkey);
+            let outputs = payouts
+                .outputs
+                .iter()
+                .map(|pair| pair.address.script_pubkey())
+                .chain(tree_script)
+                .map(|script_pubkey| TxOut {
                     value: bitcoin::Amount::ZERO,
-                    script_pubkey: pair.address.script_pubkey(),
+                    script_pubkey,
                 })
                 .collect::<Vec<_>>();
             let token = prepared
@@ -478,6 +533,27 @@ impl Sv2Connection {
                 ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN,
             );
         }
+        // A Bitcoin Cash declaration discloses the token leaves behind its
+        // output 0 in excess_data, so the node can check, when the job is
+        // installed, that they pay its fee and the miner's donation.
+        let disclosure = if registry.merge_mining.is_some() {
+            match declared_leaves(
+                request.coinbase_tx_suffix.as_bytes(),
+                request.excess_data.as_bytes(),
+            ) {
+                Ok(disclosure) => disclosure,
+                Err(reason) => {
+                    drop(registry);
+                    return self.declare_error_with_details(
+                        request.request_id,
+                        INVALID_COINBASE_TX,
+                        reason.as_bytes(),
+                    );
+                }
+            }
+        } else {
+            Disclosure::default()
+        };
         let wtxids = request
             .wtxid_list
             .iter()
@@ -514,6 +590,7 @@ impl Sv2Connection {
                 version: request.version,
                 prefix: request.coinbase_tx_prefix.as_bytes().to_vec(),
                 suffix: request.coinbase_tx_suffix.as_bytes().to_vec(),
+                disclosure,
             },
         };
         drop(registry);
@@ -635,11 +712,21 @@ impl Sv2Connection {
         request_id: u32,
         error_code: &'static str,
     ) -> Result<Vec<Vec<u8>>, String> {
+        self.declare_error_with_details(request_id, error_code, &[])
+    }
+
+    /// A `DeclareMiningJob.Error` saying why in `details`.
+    fn declare_error_with_details(
+        &mut self,
+        request_id: u32,
+        error_code: &'static str,
+        details: &[u8],
+    ) -> Result<Vec<Vec<u8>>, String> {
         self.respond(
             DeclareMiningJobError {
                 request_id,
                 error_code: string_field(error_code)?,
-                error_details: bytes_field(&[])?,
+                error_details: bytes_field(details)?,
             },
             MESSAGE_TYPE_DECLARE_MINING_JOB_ERROR,
         )
@@ -653,14 +740,37 @@ impl Sv2Connection {
     }
 }
 
-/// Decode unencrypted `incoming` bytes into complete messages: type and
-/// payload. `inbox` keeps the bytes of a frame that is not complete yet, for
-/// the next call with the same `decoder`.
+/// One complete Stratum V2 message: its extension type with the channel bit
+/// cleared (0 for the base protocol), its message type and its payload.
+/// The extension type tells an extension's message from a base one of the
+/// same type, such as `RequestExtensions` (`0x0001`, `0x00`) from
+/// `SetupConnection` (`0x0000`, `0x00`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sv2Message {
+    pub extension_type: u16,
+    pub message_type: u8,
+    pub payload: Vec<u8>,
+}
+
+impl Sv2Message {
+    /// The message read from a frame's header and payload.
+    pub(crate) fn from_frame(header: &FrameHeader, payload: &[u8]) -> Self {
+        Self {
+            extension_type: header.ext_type_without_channel_msg(),
+            message_type: header.msg_type(),
+            payload: payload.to_vec(),
+        }
+    }
+}
+
+/// Decode unencrypted `incoming` bytes into complete messages. `inbox`
+/// keeps the bytes of a frame that is not complete yet, for the next call
+/// with the same `decoder`.
 pub(crate) fn decode_plain_frames(
     decoder: &mut Decoder,
     inbox: &mut Vec<u8>,
     incoming: &[u8],
-) -> Result<Vec<(u8, Vec<u8>)>, String> {
+) -> Result<Vec<Sv2Message>, String> {
     inbox.extend_from_slice(incoming);
     let mut messages = Vec::new();
     let mut reading = true;
@@ -674,19 +784,43 @@ pub(crate) fn decode_plain_frames(
     Ok(messages)
 }
 
-fn read_plain_frames(decoder: &mut Decoder) -> Result<Vec<(u8, Vec<u8>)>, String> {
+fn read_plain_frames(decoder: &mut Decoder) -> Result<Vec<Sv2Message>, String> {
     let mut messages = Vec::new();
     let mut reading = true;
     while reading {
         match decoder.next_frame().map_err(|error| error.to_string())? {
             Decoded::Incomplete(_) => reading = false,
             Decoded::Frame(mut frame) => {
-                let message_type = frame.header().msg_type();
-                messages.push((message_type, frame.payload().to_vec()));
+                let header = frame.header();
+                messages.push(Sv2Message::from_frame(&header, frame.payload()));
             }
         }
     }
     Ok(messages)
+}
+
+/// Encode one unencrypted frame of extension `extension_type`'s message
+/// `message_type`, with the channel bit when the message is for one channel.
+/// The header is the base protocol's: the extension type (`u16`, the
+/// channel bit its top bit), the message type and the payload length
+/// (`u24`), all little-endian.
+pub(crate) fn encode_extension_frame(
+    extension_type: u16,
+    message_type: u8,
+    channel_message: bool,
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
+    let length = u32::try_from(payload.len())
+        .ok()
+        .filter(|length| *length < 1 << 24)
+        .ok_or("Stratum V2 extension message exceeds the frame size")?;
+    let extension_type = extension_type | if channel_message { 0x8000 } else { 0 };
+    let mut frame = Vec::with_capacity(6 + payload.len());
+    frame.extend_from_slice(&extension_type.to_le_bytes());
+    frame.push(message_type);
+    frame.extend_from_slice(&length.to_le_bytes()[..3]);
+    frame.extend_from_slice(payload);
+    Ok(frame)
 }
 
 /// Whether the specification sets the channel bit on frames of this type.

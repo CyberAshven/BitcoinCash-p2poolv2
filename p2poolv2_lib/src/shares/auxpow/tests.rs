@@ -1,216 +1,626 @@
+//! Pickaxe's golden vectors for merge-mining v2 (pickaxe-miner PR #70,
+//! commit `a1c80a1ba6ad6b1542af54f4af28058d3241c3df` on
+//! `feat/merge-mining-v2`: `docs/merge-mining.md` and
+//! `src/stratum_v2/merge/{tree,commitment,proof,verify,split,vectors}.rs`), then
+//! P2Pool's own cases.
+
 use super::*;
 use crate::test_utils::test_bch_auxpow;
-use bitcoin::{Amount, OutPoint, ScriptBuf, Witness};
+use bitcoin::CompactTarget;
+
+/// P2PKH to twenty 0x12 bytes: the vectors' payout.
+fn vector_payout() -> Vec<u8> {
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend([0x12; 20]);
+    script.extend([0x88, 0xac]);
+    script
+}
+
+fn token_a() -> TokenLeaf {
+    TokenLeaf::new(
+        [0x11; 32],
+        &[0x51],
+        [0xaa; 32],
+        &vector_payout(),
+        0x207f_ffff,
+        [0; 32],
+    )
+}
+
+fn token_b() -> TokenLeaf {
+    TokenLeaf::new(
+        [0x22; 32],
+        &[0x52],
+        [0xbb; 32],
+        &vector_payout(),
+        0x1f00_ffff,
+        [0; 32],
+    )
+}
+
+const LEAF_A: &str = concat!(
+    "43544d4c02111111111111111111111111111111111111111111111111111111",
+    "1111111111953ccfa596a6c6d39e5980194539124fdcff116a571455a212baed",
+    "811f585ee0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "aaaaaaaaaa22650758a42ebfd7306e771ad24c442cad795ed9e549392233729f",
+    "647a2b1be5ffff7f200000000000000000000000000000000000000000000000",
+    "000000000000000000",
+);
+const LEAF_A_HASH: &str = "0ab882d24f8c85b880ca7cfb6f60a7773f377222e84ac28afd14f3ce46bf307a";
+const LEAF_B_HASH: &str = "9520e74e37e5dffaef19eb2f61da54e502d296c8f1baa3f5dc7db772711def59";
+const TWO_TOKEN_ROOT: &str = "5b61ecfe96c714397bc35ed813890f49f2b0287a78111e19d156f4eecd1c38d0";
+const TWO_TOKEN_OUTPUT: &str = concat!(
+    "00000000000000002c6a2a43544d4d025b61ecfe96c714397bc35ed813890f49",
+    "f2b0287a78111e19d156f4eecd1c38d00100000000",
+);
+
+/// The 224-byte one-leaf proof: token A alone, `h = 0`, `d = 1`.
+const PROOF: &str = concat!(
+    "43544d5002000000205555555555555555555555555555555555555555555555",
+    "5555555555555555556c933baf900d7d82a08e5689a968f70b77802a116c671c",
+    "63c12b9ed534e67a1d00f15365ffff7f200000000000000000003b0002000000",
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "00ffffffff0c0315f9040707070707070707ffffffff022600205fa012000000",
+    "001976a914121212121212121212121212121212121212121288ac0000000001",
+    "4444444444444444444444444444444444444444444444444444444444444444",
+);
+const PROOF_COINBASE_TXID: &str =
+    "245dbc4c7d02cc87b5a41eb8af9f8aebf36ffa528864177931fb3b3d527f35e9";
+
+/// The first byte where two encodings differ, for a readable failure.
+fn first_mismatch(left: &[u8], right: &[u8]) -> Option<usize> {
+    left.iter()
+        .zip(right)
+        .position(|(a, b)| a != b)
+        .or((left.len() != right.len()).then(|| left.len().min(right.len())))
+}
 
 #[test]
-fn two_chains_match_an_independently_hashed_tree() {
-    let first = AuxiliaryWork {
-        chain_id: 1,
-        hash: sha256d::Hash::hash(b"token-A"),
-    };
-    let second = AuxiliaryWork {
-        chain_id: 2,
-        hash: sha256d::Hash::hash(b"token-B"),
-    };
-    let tree = AuxiliaryTree::build(&[first, second], 0).unwrap();
-    assert_eq!(auxiliary_slot(1, 0, 2), 1);
-    assert_eq!(auxiliary_slot(2, 0, 2), 0);
-    assert_eq!(tree.commitment.tree_size, 2);
+fn golden_leaf_preimage_and_hashes() {
+    let (a, b) = (token_a(), token_b());
     assert_eq!(
-        hex::encode(tree.commitment.merkle_root),
-        "d37b6e24f7874f8e72d5d05f41c80935b2aa0b58bddf767a65848fbc88e576d0"
+        first_mismatch(&a.preimage(), &hex::decode(LEAF_A).unwrap()),
+        None
     );
-    tree.proofs[0].verify(tree.commitment, first).unwrap();
-    tree.proofs[1].verify(tree.commitment, second).unwrap();
+    assert_eq!(hex::encode(a.hash()), LEAF_A_HASH);
+    assert_eq!(hex::encode(b.hash()), LEAF_B_HASH);
+}
+
+#[test]
+fn golden_two_token_tree() {
+    let (a, b) = (token_a(), token_b());
+    let tree = AuxiliaryTree::build(&[a, b]).unwrap();
+    // The smallest height that holds two leaves, and the first salt that
+    // parts them: slots 0 and 1.
+    assert_eq!((tree.commitment.height, tree.commitment.salt), (1, 0));
     assert_eq!(
-        AuxiliaryTree::build(&[second, first], 0)
-            .unwrap()
-            .commitment,
+        tree.branches
+            .iter()
+            .map(|branch| branch.slot)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert_eq!(hex::encode(tree.commitment.root), TWO_TOKEN_ROOT);
+    assert_eq!(serialize(&tree.commitment.output()).len(), 53);
+    assert_eq!(
+        hex::encode(serialize(&tree.commitment.output())),
+        TWO_TOKEN_OUTPUT
+    );
+    assert_eq!(slot(&a.category, 0, 1), tree.branches[0].slot);
+    assert_eq!(slot(&b.category, 0, 1), tree.branches[1].slot);
+    assert_eq!(
+        fold(a.hash(), tree.branches[0].slot, &tree.branches[0].branch),
+        tree.commitment.root
+    );
+    assert_eq!(
+        fold(b.hash(), tree.branches[1].slot, &tree.branches[1].branch),
+        tree.commitment.root
+    );
+    // The same tokens in the other order give the same commitment.
+    assert_eq!(
+        AuxiliaryTree::build(&[b, a]).unwrap().commitment,
         tree.commitment
     );
 }
 
+/// The synthetic coinbase around output 0: head and tail.
+fn vector_coinbase(commitment: MergeMiningCommitment) -> Transaction {
+    let mut bytes = 2u32.to_le_bytes().to_vec();
+    bytes.extend(NULL_INPUT);
+    // L = 12: the BIP34 height 325,909 and eight extranonce bytes.
+    let script: Vec<u8> = [&[0x03, 0x15, 0xf9, 0x04][..], &[0x07; 8]].concat();
+    bytes.push(script.len() as u8);
+    bytes.extend(script);
+    bytes.extend(u32::MAX.to_le_bytes());
+    bytes.push(2);
+    bytes.extend(serialize(&commitment.output()));
+    bytes.extend(312_500_000u64.to_le_bytes());
+    bytes.push(25);
+    bytes.extend(vector_payout());
+    bytes.extend(0u32.to_le_bytes());
+    deserialize(&bytes).unwrap()
+}
+
+/// The one-leaf proof, built here from the same parts, encodes to Pickaxe's
+/// 224 bytes, and Pickaxe's bytes verify for token A.
 #[test]
-fn one_chain_reverses_the_root_and_empty_selection_reserves_the_output() {
-    let work = AuxiliaryWork {
-        chain_id: u32::MAX,
-        hash: sha256d::Hash::hash(b"token-A"),
-    };
-    let tree = AuxiliaryTree::build(&[work], u32::MAX).unwrap();
-    assert_eq!(tree.commitment.tree_size, 1);
+fn golden_one_leaf_proof_encodes_and_verifies() {
+    let leaf = token_a();
+    let tree = AuxiliaryTree::build(&[leaf]).unwrap();
+    assert_eq!((tree.commitment.height, tree.commitment.salt), (0, 0));
+    assert_eq!(tree.commitment.root, leaf.hash());
+    let coinbase = vector_coinbase(tree.commitment);
     assert_eq!(
-        hex::encode(tree.commitment.merkle_root),
-        work.hash.to_string()
+        hex::encode(coinbase.compute_txid().to_byte_array()),
+        PROOF_COINBASE_TXID
     );
-    assert!(tree.proofs[0].branch.is_empty());
-    tree.proofs[0].verify(tree.commitment, work).unwrap();
-    let empty = AuxiliaryTree::build(&[], 99).unwrap();
-    assert_eq!(empty.commitment, MergeMiningCommitment::reserved());
-    assert!(empty.proofs.is_empty());
-}
-
-#[test]
-fn slot_collisions_grow_the_tree_without_nonce_retry() {
-    let first = AuxiliaryWork {
-        chain_id: 1,
-        hash: sha256d::Hash::hash(b"token-A"),
+    let sibling = TxMerkleNode::from_byte_array([0x44; 32]);
+    let merkle_root = TxMerkleNode::from_byte_array(hash256(
+        &[
+            coinbase.compute_txid().to_byte_array(),
+            sibling.to_byte_array(),
+        ]
+        .concat(),
+    ));
+    let header = Header {
+        version: bitcoin::block::Version::from_consensus(0x2000_0000),
+        prev_blockhash: bitcoin::BlockHash::from_byte_array([0x55; 32]),
+        merkle_root,
+        time: 1_700_000_000,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
+        nonce: 0,
     };
-    let second = AuxiliaryWork {
-        chain_id: 3,
-        hash: sha256d::Hash::hash(b"token-B"),
-    };
-    let tree = AuxiliaryTree::build(&[first, second], 9).unwrap();
-    assert_eq!(tree.commitment.tree_size, 4);
-    assert_eq!(tree.proofs[0].branch.len(), 2);
-    tree.proofs[0].verify(tree.commitment, first).unwrap();
-    tree.proofs[1].verify(tree.commitment, second).unwrap();
-}
-
-#[test]
-fn sparse_maximum_width_does_not_allocate_a_billion_leaves() {
-    let first = AuxiliaryWork {
-        chain_id: 0,
-        hash: sha256d::Hash::hash(b"token-A"),
-    };
-    let second = AuxiliaryWork {
-        chain_id: 1 << 29,
-        hash: sha256d::Hash::hash(b"token-B"),
-    };
-    let tree = AuxiliaryTree::build(&[first, second], u32::MAX).unwrap();
-    assert_eq!(tree.commitment.tree_size, 1 << 30);
-    assert_eq!(tree.proofs[0].branch.len(), 30);
-    tree.proofs[0].verify(tree.commitment, first).unwrap();
-    tree.proofs[1].verify(tree.commitment, second).unwrap();
-}
-
-#[test]
-fn duplicate_ids_and_permanent_slot_collisions_are_rejected() {
-    let first = AuxiliaryWork {
-        chain_id: 1,
-        hash: sha256d::Hash::hash(b"token-A"),
-    };
-    let mut second = AuxiliaryWork {
-        chain_id: 1,
-        hash: sha256d::Hash::hash(b"token-B"),
-    };
-    assert!(
-        AuxiliaryTree::build(&[first, second], 0)
-            .unwrap_err()
-            .contains("duplicate")
+    let proof = AuxProof::new(
+        header,
+        &coinbase,
+        &[sibling],
+        tree.commitment,
+        &tree.branches[0],
+    )
+    .unwrap();
+    let bytes = proof.to_bytes().unwrap();
+    let golden = hex::decode(PROOF).unwrap();
+    assert_eq!(
+        bytes,
+        golden,
+        "first differing proof byte: {:?}",
+        first_mismatch(&bytes, &golden)
     );
-    second.chain_id += 1 << 30;
-    assert!(
-        AuxiliaryTree::build(&[first, second], 0)
-            .unwrap_err()
-            .contains("collide")
+    assert_eq!(bytes.len(), 224);
+
+    let decoded = AuxProof::from_bytes(&golden).unwrap();
+    assert_eq!(decoded, proof);
+    assert_eq!(decoded.coinbase_height(), Some(325_909));
+    decoded
+        .verify(&leaf, MAX_MERGE_MINING_TREE_HEIGHT, None)
+        .unwrap();
+    // The header's regtest bits are above BCH's limit: the mainnet ASERT
+    // check refuses them.
+    assert!(matches!(
+        decoded.verify(&leaf, MAX_MERGE_MINING_TREE_HEIGHT, Some(BchAsert::MAINNET)),
+        Err(AuxError::Asert(_))
+    ));
+}
+
+/// The proof commits to all 32 state bytes; an entirely different state
+/// changes the reconstructed coinbase rather than selecting another claim.
+#[test]
+fn golden_proof_rejects_another_state_hash() {
+    let proof = AuxProof::from_bytes(&hex::decode(PROOF).unwrap()).unwrap();
+    let stale = TokenLeaf {
+        state_hash: [0xab; 32],
+        ..token_a()
+    };
+    assert_eq!(
+        proof.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None),
+        Err(AuxError::MerkleRoot)
     );
 }
 
 #[test]
-fn work_selection_budget_is_enforced() {
-    let work: Vec<_> = (0..MAX_AUXILIARY_CHAINS as u32)
-        .map(|chain_id| AuxiliaryWork {
-            chain_id,
-            hash: sha256d::Hash::all_zeros(),
+fn golden_proof_rejects_a_changed_first_state_byte() {
+    let proof = AuxProof::from_bytes(&hex::decode(PROOF).unwrap()).unwrap();
+    let mut stale = token_a();
+    stale.state_hash[0] ^= 1;
+    assert_eq!(
+        proof.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None),
+        Err(AuxError::MerkleRoot)
+    );
+}
+
+#[test]
+fn golden_proof_rejects_a_changed_last_state_byte() {
+    let proof = AuxProof::from_bytes(&hex::decode(PROOF).unwrap()).unwrap();
+    let mut stale = token_a();
+    stale.state_hash[31] ^= 1;
+    assert_eq!(
+        proof.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None),
+        Err(AuxError::MerkleRoot)
+    );
+}
+
+#[test]
+fn proof_decoding_is_canonical() {
+    let golden = hex::decode(PROOF).unwrap();
+    let mut trailing = golden.clone();
+    trailing.push(0);
+    assert_eq!(AuxProof::from_bytes(&trailing), Err(AuxError::Decode));
+    assert_eq!(
+        AuxProof::from_bytes(&golden[..golden.len() - 1]),
+        Err(AuxError::Decode)
+    );
+    for offset in [0, 4] {
+        let mut changed = golden.clone();
+        changed[offset] ^= 1;
+        assert_eq!(AuxProof::from_bytes(&changed), Err(AuxError::Decode));
+    }
+    // h above 16, and a coinbase branch deeper than 25.
+    let mut tall = golden.clone();
+    tall[85] = 17;
+    assert_eq!(AuxProof::from_bytes(&tall), Err(AuxError::Decode));
+    let mut proof = AuxProof::from_bytes(&golden).unwrap();
+    proof.coinbase_branch = vec![[0x44; 32]; MAX_AUX_PROOF_COINBASE_BRANCH_LENGTH + 1];
+    assert_eq!(proof.to_bytes(), Err(AuxError::Shape));
+}
+
+#[test]
+fn verifier_checks_height_target_head_and_tail() {
+    let golden = AuxProof::from_bytes(&hex::decode(PROOF).unwrap()).unwrap();
+    let leaf = token_a();
+    let mut token_limit = leaf;
+    token_limit.target_bits = 0x2080_0000;
+    assert_eq!(golden.verify(&token_limit, 16, None), Err(AuxError::Target));
+    let mut proof = golden.clone();
+    proof.coinbase_head[4] = 2;
+    assert_eq!(proof.verify(&leaf, 16, None), Err(AuxError::CoinbaseHead));
+    let mut proof = golden.clone();
+    proof.coinbase_tail.truncate(3);
+    assert_eq!(proof.verify(&leaf, 16, None), Err(AuxError::CoinbaseTail));
+    // A harder token target than the header's work.
+    let mut hard = leaf;
+    hard.target_bits = 0x0300_0001;
+    let proof = AuxProof {
+        header: golden.header,
+        ..golden.clone()
+    };
+    assert!(proof.verify(&hard, 16, None).is_err());
+    // A two-leaf proof is refused by a token limited to one leaf.
+    let tree = AuxiliaryTree::build(&[token_a(), token_b()]).unwrap();
+    let coinbase = vector_coinbase(tree.commitment);
+    let header = Header {
+        merkle_root: TxMerkleNode::from_byte_array(coinbase.compute_txid().to_byte_array()),
+        ..golden.header
+    };
+    let two = AuxProof::new(header, &coinbase, &[], tree.commitment, &tree.branches[0]).unwrap();
+    assert_eq!(two.verify(&leaf, 0, None), Err(AuxError::Height));
+}
+
+#[test]
+fn builder_limits_tokens_and_categories() {
+    assert_eq!(
+        AuxiliaryTree::build(&[]).unwrap().commitment,
+        MergeMiningCommitment::empty()
+    );
+    assert_eq!(
+        AuxiliaryTree::build(&[token_a(), token_a()]),
+        Err(AuxError::DuplicateCategory)
+    );
+    let many: Vec<TokenLeaf> = (0..=MAX_TOKEN_LEAVES as u8)
+        .map(|index| TokenLeaf {
+            category: [index; 32],
+            ..token_a()
         })
         .collect();
-    assert_eq!(
-        AuxiliaryTree::build(&work, 0).unwrap().proofs.len(),
-        MAX_AUXILIARY_CHAINS
-    );
-    let mut excessive = work;
-    excessive.push(AuxiliaryWork {
-        chain_id: 100,
-        hash: sha256d::Hash::all_zeros(),
-    });
-    assert!(AuxiliaryTree::build(&excessive, 0).is_err());
+    assert_eq!(AuxiliaryTree::build(&many), Err(AuxError::TooManyTokens));
+    let sixteen = AuxiliaryTree::build(&many[..MAX_TOKEN_LEAVES]).unwrap();
+    assert!(sixteen.commitment.height >= 4);
+    for (leaf, branch) in many.iter().zip(&sixteen.branches) {
+        assert_eq!(
+            fold(leaf.hash(), branch.slot, &branch.branch),
+            sixteen.commitment.root
+        );
+    }
 }
 
 #[test]
-fn auxiliary_proof_binds_identity_depth_nonce_and_hash_order() {
-    let (proof, expected) = test_bch_auxpow();
-    let commitment = MergeMiningCommitment::from_output(&proof.coinbase.output[2]).unwrap();
-    proof.auxiliary.verify(commitment, expected).unwrap();
-    let wrong = AuxiliaryWork {
-        chain_id: 9,
-        ..expected
+fn token_targets_must_be_canonical_compact() {
+    assert!(expand_token_target(0x207f_ffff).is_some());
+    assert!(expand_token_target(0x0300_0001).is_some());
+    for invalid in [0x0200_0001, 0x2100_0001, 0x2080_0000, 0x1d00_0000] {
+        assert_eq!(expand_token_target(invalid), None, "{invalid:#x}");
+    }
+    let target = expand_token_target(0x1d00_ffff).unwrap();
+    assert_eq!(&target[26..28], &[0xff, 0xff]);
+    assert!(
+        target[..26]
+            .iter()
+            .chain(&target[28..])
+            .all(|byte| *byte == 0)
+    );
+}
+
+/// A block P2Pool itself builds for a declared Bitcoin Cash job, with a
+/// two-token commitment at output 0, proves either token's win.
+#[test]
+fn proof_from_a_p2pool_declared_coinbase_verifies() {
+    let (proof, leaf) = test_bch_auxpow();
+    proof.verify(&leaf, 16, None).unwrap();
+    let bytes = proof.to_bytes().unwrap();
+    assert_eq!(AuxProof::from_bytes(&bytes).unwrap(), proof);
+    let other = TokenLeaf {
+        category: [0x99; 32],
+        ..leaf
     };
-    assert!(proof.auxiliary.verify(commitment, wrong).is_err());
-    let mut changed = proof.auxiliary.clone();
-    changed.branch[0] = sha256d::Hash::hash(b"wrong sibling");
-    assert!(changed.verify(commitment, expected).is_err());
-    changed = proof.auxiliary.clone();
-    changed.branch.push(sha256d::Hash::all_zeros());
-    assert!(changed.verify(commitment, expected).is_err());
+    assert!(proof.verify(&other, 16, None).is_err());
+}
+
+/// P2PKH to twenty `byte` bytes.
+fn p2pkh(byte: u8) -> Vec<u8> {
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend([byte; 20]);
+    script.extend([0x88, 0xac]);
+    script
+}
+
+const SPLIT_PREIMAGE: &str = concat!(
+    "0364008bc613f574964583c7b08b7925373515b513ed15b372bc727599c16434",
+    "254d1c6400543bb5ec93f33a1c27a5822e4c638e9ab1e90e44c094fd7aaba51e",
+    "fc4e554c50",
+);
+const SPLIT_EXT: &str = "79f31f395015b16c76e12673ec8f58329d81f1884d76a0d210d1f3158a8faa85";
+const SPLIT_LEAF: &str = concat!(
+    "43544d4c02111111111111111111111111111111111111111111111111111111",
+    "1111111111953ccfa596a6c6d39e5980194539124fdcff116a571455a212baed",
+    "811f585ee0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "aaaaaaaaaa22650758a42ebfd7306e771ad24c442cad795ed9e549392233729f",
+    "647a2b1be5ffff7f2079f31f395015b16c76e12673ec8f58329d81f1884d76a0",
+    "d210d1f3158a8faa85",
+);
+const SPLIT_LEAF_HASH: &str = "c40271368b4287df8fe3430e1bc3f9410b554874de698144fa04fe5df7033e41";
+
+/// Pickaxe's whole split leaf (`vectors.rs`, `a_whole_split_leaf_and_its_claim_outputs`):
+/// token A with a 1% donation to P2PKH(d0 x 20) and a 1% fee to
+/// P2PKH(fe x 20). Its 69-byte preimage, `ext`, 169-byte leaf and leaf hash
+/// match byte for byte, and the preimage parses back.
+#[test]
+fn golden_split_leaf() {
+    let split = TokenSplit {
+        donation: SplitSlot::new(100, &p2pkh(0xd0)).unwrap(),
+        fee: SplitSlot::new(100, &p2pkh(0xfe)).unwrap(),
+    };
+    assert_eq!(
+        first_mismatch(&split.preimage(), &hex::decode(SPLIT_PREIMAGE).unwrap()),
+        None
+    );
+    assert_eq!(split.preimage().len(), 69);
+    assert_eq!(hex::encode(split.ext()), SPLIT_EXT);
+    let leaf = TokenLeaf::new(
+        [0x11; 32],
+        &[0x51],
+        [0xaa; 32],
+        &vector_payout(),
+        0x207f_ffff,
+        split.ext(),
+    );
+    assert_eq!(
+        first_mismatch(&leaf.preimage(), &hex::decode(SPLIT_LEAF).unwrap()),
+        None
+    );
+    assert_eq!(hex::encode(leaf.hash()), SPLIT_LEAF_HASH);
+    assert_eq!(TokenSplit::parse(&split.preimage()), Ok(split));
+}
+
+/// The split is canonical: no split is the zero `ext` and never a
+/// preimage; a rate is at most 10,000; a zero hash exactly when the rate is
+/// 0; exactly 69 bytes starting with 0x03.
+#[test]
+fn token_split_is_canonical() {
+    assert_eq!(TokenSplit::default().ext(), [0; 32]);
+    assert_eq!(
+        TokenSplit::parse(&TokenSplit::default().preimage()),
+        Err(AuxError::Split)
+    );
+    assert_eq!(SplitSlot::new(0, &p2pkh(0xd0)), Ok(SplitSlot::EMPTY));
+    assert!(SplitSlot::new(MAX_SPLIT_BPS, &p2pkh(0xd0)).is_ok());
+    assert_eq!(
+        SplitSlot::new(MAX_SPLIT_BPS + 1, &p2pkh(0xd0)),
+        Err(AuxError::Split)
+    );
+    assert_eq!(SplitSlot::from_hash(1, [0; 32]), Err(AuxError::Split));
+    assert_eq!(SplitSlot::from_hash(0, [1; 32]), Err(AuxError::Split));
+    let preimage = hex::decode(SPLIT_PREIMAGE).unwrap();
+    assert_eq!(TokenSplit::parse(&preimage[..68]), Err(AuxError::Split));
+    let mut prefix = preimage.clone();
+    prefix[0] = 0x02;
+    assert_eq!(TokenSplit::parse(&prefix), Err(AuxError::Split));
+    let mut over = preimage;
+    over[1..3].copy_from_slice(&10_001u16.to_le_bytes());
+    assert_eq!(TokenSplit::parse(&over), Err(AuxError::Split));
+    // A donation alone is a split too.
+    let donation_only = TokenSplit {
+        donation: SplitSlot::new(150, &p2pkh(0xd0)).unwrap(),
+        fee: SplitSlot::EMPTY,
+    };
+    assert_ne!(donation_only.ext(), [0; 32]);
+    assert_eq!(
+        TokenSplit::parse(&donation_only.preimage()),
+        Ok(donation_only)
+    );
+}
+
+/// Pickaxe's whole split leaf, disclosed (`CTMD` v2, pickaxe-miner PR #70
+/// at a92fef7, `docs/merge-mining.md`, "Disclosure"): the magic, version
+/// 2, one leaf, its 169-byte preimage, flag 01 and the 69-byte split
+/// preimage. It reads back, and makes the one-leaf root at `h = 0`, salt
+/// 0, which is the leaf hash itself.
+#[test]
+fn the_split_leaf_disclosure_is_its_preimages_in_order() {
+    let split = TokenSplit::parse(&hex::decode(SPLIT_PREIMAGE).unwrap()).unwrap();
+    let leaf = TokenLeaf::from_preimage(&hex::decode(SPLIT_LEAF).unwrap()).unwrap();
+    let disclosure = Disclosure {
+        leaves: vec![DisclosedLeaf { leaf, split }],
+    };
+    let expected = format!("43544d440201{SPLIT_LEAF}01{SPLIT_PREIMAGE}");
+    assert_eq!(hex::encode(disclosure.encode()), expected);
+    assert_eq!(disclosure.encode().len(), 6 + 169 + 1 + 69);
+    assert_eq!(
+        Disclosure::decode(&hex::decode(&expected).unwrap()),
+        Ok(disclosure.clone())
+    );
+    let root: [u8; 32] = hex::decode(SPLIT_LEAF_HASH).unwrap().try_into().unwrap();
+    assert_eq!(
+        disclosure.check_root(&MergeMiningCommitment {
+            root,
+            height: 0,
+            salt: 0,
+        }),
+        Ok(())
+    );
+}
+
+/// The two-token tree's leaves, disclosed without splits, rebuild its
+/// golden root at `h = 1`, salt 0, whichever order they are listed in; a
+/// leaf left out, a changed leaf or another salt gives another root.
+#[test]
+fn a_disclosure_of_the_two_token_tree_rebuilds_its_root() {
+    let (a, b) = (token_a(), token_b());
+    let disclosed = |leaf: TokenLeaf| DisclosedLeaf {
+        leaf,
+        split: TokenSplit::default(),
+    };
+    let root: [u8; 32] = hex::decode(TWO_TOKEN_ROOT).unwrap().try_into().unwrap();
+    let commitment = MergeMiningCommitment {
+        root,
+        height: 1,
+        salt: 0,
+    };
+    let both = Disclosure {
+        leaves: vec![disclosed(a), disclosed(b)],
+    };
+    assert_eq!(both.check_root(&commitment), Ok(()));
+    let bytes = both.encode();
+    assert_eq!(bytes.len(), 6 + 2 * (169 + 1));
+    assert_eq!(bytes[6 + 169], 0x00);
+    assert_eq!(Disclosure::decode(&bytes), Ok(both));
+    let reversed = Disclosure {
+        leaves: vec![disclosed(b), disclosed(a)],
+    };
+    assert_eq!(reversed.check_root(&commitment), Ok(()));
+    let only_a = Disclosure {
+        leaves: vec![disclosed(a)],
+    };
+    assert!(only_a.check_root(&commitment).is_err());
+    let mut changed = token_b();
+    changed.state_hash = [0xbc; 32];
+    let changed = Disclosure {
+        leaves: vec![disclosed(a), disclosed(changed)],
+    };
+    assert!(changed.check_root(&commitment).is_err());
+    let other_salt = MergeMiningCommitment {
+        salt: 1,
+        ..commitment
+    };
     assert!(
-        proof
-            .auxiliary
-            .verify(
-                MergeMiningCommitment {
-                    nonce: 1,
-                    ..commitment
-                },
-                expected
-            )
+        Disclosure {
+            leaves: vec![disclosed(a), disclosed(b)],
+        }
+        .check_root(&other_salt)
+        .is_err()
+    );
+}
+
+/// No leaves disclose the exact empty commitment and nothing else.
+#[test]
+fn an_empty_disclosure_is_the_empty_commitment() {
+    let empty = Disclosure::default();
+    assert_eq!(hex::encode(empty.encode()), "43544d440200");
+    assert_eq!(empty.check_root(&MergeMiningCommitment::EMPTY), Ok(()));
+    let root: [u8; 32] = hex::decode(TWO_TOKEN_ROOT).unwrap().try_into().unwrap();
+    assert!(
+        empty
+            .check_root(&MergeMiningCommitment {
+                root,
+                height: 1,
+                salt: 0,
+            })
             .is_err()
     );
-    let mut reversed = commitment;
-    reversed.merkle_root.reverse();
-    assert!(proof.auxiliary.verify(reversed, expected).is_err());
+    let one = Disclosure {
+        leaves: vec![DisclosedLeaf {
+            leaf: token_a(),
+            split: TokenSplit::default(),
+        }],
+    };
+    assert!(one.check_root(&MergeMiningCommitment::EMPTY).is_err());
 }
 
+/// A disclosure reads only in its canonical form: nothing trailing, the
+/// right magic and version, at most 16 leaves, a known flag, and each
+/// split hashing to its leaf's `ext`.
 #[test]
-fn full_proof_checks_trusted_target_and_parent_merkle_root() {
-    let (mut proof, expected) = test_bch_auxpow();
-    let target = proof.parent_header.target();
-    proof.verify(expected, target).unwrap();
-    assert!(proof.verify(expected, Target::ZERO).is_err());
-    let mut minimum_target = [0; 32];
-    minimum_target[31] = 1;
-    assert!(
-        proof
-            .verify(expected, Target::from_be_bytes(minimum_target))
-            .is_err()
+fn a_disclosure_reads_only_in_its_canonical_form() {
+    let bytes = hex::decode(format!("43544d440201{SPLIT_LEAF}01{SPLIT_PREIMAGE}")).unwrap();
+    assert!(Disclosure::decode(&bytes).is_ok());
+    let trailing = [&bytes[..], &[0x00]].concat();
+    assert!(Disclosure::decode(&trailing).is_err());
+    assert!(Disclosure::decode(&bytes[..bytes.len() - 1]).is_err());
+    let mut magic = bytes.clone();
+    magic[3] = b'P';
+    assert!(Disclosure::decode(&magic).is_err());
+    let mut version = bytes.clone();
+    version[4] = 0x03;
+    assert!(Disclosure::decode(&version).is_err());
+    let mut seventeen = bytes.clone();
+    seventeen[5] = 17;
+    assert_eq!(Disclosure::decode(&seventeen), Err(AuxError::TooManyTokens));
+    let mut flag = bytes.clone();
+    flag[6 + 169] = 0x02;
+    assert!(Disclosure::decode(&flag).is_err());
+    // A split that is not the leaf's: its fee rate changed.
+    let mut other_split = bytes.clone();
+    other_split[6 + 169 + 1 + 35] = 0x65;
+    assert_eq!(
+        Disclosure::decode(&other_split),
+        Err(AuxError::Disclosure(
+            "a disclosed leaf's ext is not its split's"
+        ))
     );
-    proof.parent_header.merkle_root = TxMerkleNode::all_zeros();
-    assert!(
-        proof
-            .verify(expected, target)
-            .unwrap_err()
-            .contains("parent header")
-    );
+    // A split leaf disclosed without its split: the flag says the ext is
+    // zero, and it is not.
+    let mut without = bytes[..6 + 169].to_vec();
+    without.push(0x00);
+    assert!(Disclosure::decode(&without).is_err());
+    // A leaf with another magic is not a leaf.
+    let mut leaf = bytes;
+    leaf[6] = b'X';
+    assert!(Disclosure::decode(&leaf).is_err());
 }
 
+/// The layout a set of categories takes depends only on them, and a token
+/// set searches it once: two tokens sit at `h = 1`, salt 0, slots 0 and 1,
+/// as in the golden tree; a token allowing no taller tree than 0 has no
+/// layout for two; and a reader placing them at a height and salt where
+/// they collide is refused.
 #[test]
-fn full_proof_rejects_duplicate_and_paid_commitments() {
-    let (mut proof, expected) = test_bch_auxpow();
-    let target = proof.parent_header.target();
-    proof.coinbase.output.push(proof.coinbase.output[2].clone());
-    assert!(
-        proof
-            .verify(expected, target)
-            .unwrap_err()
-            .contains("multiple")
+fn a_tree_layout_is_searched_once_for_its_categories() {
+    let categories = [token_a().category, token_b().category];
+    let layout = TreeLayout::search(&categories, MAX_MERGE_MINING_TREE_HEIGHT).unwrap();
+    assert_eq!(
+        layout,
+        TreeLayout {
+            height: 1,
+            salt: 0,
+            slots: vec![0, 1],
+        }
     );
-    proof.coinbase.output.pop();
-    proof.coinbase.output[2].value = Amount::from_sat(1);
-    assert!(proof.verify(expected, target).is_err());
-}
-
-#[test]
-fn full_proof_rejects_non_coinbase_witness_and_resource_overruns() {
-    let (mut proof, expected) = test_bch_auxpow();
-    let target = proof.parent_header.target();
-    proof.coinbase.input[0].previous_output.vout = 0;
-    assert!(proof.verify(expected, target).is_err());
-    proof.coinbase.input[0].previous_output = OutPoint::null();
-    proof.coinbase.input[0].witness = Witness::from_slice(&[b"witness"]);
-    assert!(proof.verify(expected, target).is_err());
-    proof.coinbase.input[0].witness = Witness::new();
-    proof.coinbase_branch = vec![TxMerkleNode::all_zeros(); 26];
-    assert!(proof.verify(expected, target).is_err());
-    proof.coinbase_branch.clear();
-    proof.coinbase.output[0].script_pubkey =
-        ScriptBuf::from_bytes(vec![0; MAX_AUXPOW_COINBASE_SIZE]);
-    assert!(proof.verify(expected, target).is_err());
+    assert_eq!(
+        AuxiliaryTree::build_at(&layout, &[token_a(), token_b()]),
+        AuxiliaryTree::build(&[token_a(), token_b()]).unwrap()
+    );
+    assert_eq!(TreeLayout::search(&categories, 0), Err(AuxError::NoLayout));
+    assert_eq!(
+        TreeLayout::search(&[[0x11; 32], [0x11; 32]], 16),
+        Err(AuxError::DuplicateCategory)
+    );
+    assert_eq!(TreeLayout::at(&categories, 0, 0), Err(AuxError::NoLayout));
 }

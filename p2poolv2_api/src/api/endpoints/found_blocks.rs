@@ -40,7 +40,7 @@ impl FoundBlockResponse {
 }
 
 /// Returns the bitcoin blocks found by the pool, newest first. The same data
-/// `/metrics` exposes as `bitcoin_block_found_time_seconds`, as JSON.
+/// `/metrics` exposes as `found_block_time_seconds`, as JSON.
 pub(crate) async fn found_blocks(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<FoundBlockResponse>>, ApiError> {

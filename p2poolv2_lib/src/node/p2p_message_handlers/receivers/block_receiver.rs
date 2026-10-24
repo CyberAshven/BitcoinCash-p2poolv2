@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::validation_worker::{ValidationEvent, ValidationSender};
 #[cfg(test)]
@@ -15,7 +16,6 @@ use crate::store::block_tx_metadata::Status;
 use crate::store::prune_blocks::prune_height_for_tip;
 use crate::store::writer::StoreError;
 use bitcoin::BlockHash;
-use bitcoin::consensus::Encodable;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::error::Error;
 use std::sync::Arc;
@@ -33,9 +33,13 @@ const BLOCK_RECEIVER_CHANNEL_CAPACITY: usize = 8192;
 pub const MAX_PENDING_BLOCKS: usize = 1_024;
 
 /// Most bytes, by consensus encoding, the pending buffer holds before it
-/// evicts the oldest: 32 MiB, at least 160 blocks of the largest size the
-/// admission gate lets through (`BLOCK_TXS_SIZE_LIMIT`, 200 KiB, plus header
-/// and merkle branches).
+/// evicts the oldest: 32 MiB, at least 160 blocks of the largest Bitcoin
+/// share (`BLOCK_TXS_SIZE_LIMIT`, 200 KiB, plus header and merkle branches)
+/// and at least 26 of the largest Bitcoin Cash share
+/// (`BCH_SHARE_BODY_SIZE_LIMIT`, a 1,000,000-byte coinbase and 200 KiB of
+/// share transactions), more than one peer's 16 requests in flight. Honest
+/// Bitcoin Cash shares are far smaller (about 35 KB at 1,000 payees), and a
+/// block evicted early is fetched again.
 pub const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 
 /// How long a block may wait in the pending buffer for its ancestry. An
@@ -139,15 +143,14 @@ pub struct BlockReceiver {
     /// Prune height from the last successful candidate tip read, used when
     /// the tip cannot be read.
     last_prune_height: u32,
+    /// The chain's depths, which size the prune height.
+    depths: ChainDepths,
 }
 
 /// Size of a share block as the pending buffer counts it: its consensus
-/// encoding, measured without allocating. Encoding into a sink cannot fail;
-/// if it ever did, the block is counted as too large to buffer.
+/// encoding (`ShareBlock::encoded_size`).
 fn buffered_size(share_block: &ShareBlock) -> usize {
-    share_block
-        .consensus_encode(&mut bitcoin::io::sink())
-        .unwrap_or(usize::MAX)
+    share_block.encoded_size()
 }
 
 impl BlockReceiver {
@@ -172,7 +175,15 @@ impl BlockReceiver {
             block_fetcher_handle,
             validation_tx,
             last_prune_height: 0,
+            depths: ChainDepths::BITCOIN,
         }
+    }
+
+    /// Size the prune height by `depths` (`ChainDepths::for_chain`);
+    /// Bitcoin's until set.
+    pub fn with_depths(mut self, depths: ChainDepths) -> Self {
+        self.depths = depths;
+        self
     }
 
     /// Use other bounds on the pending buffer than `PendingLimits::default`.
@@ -320,7 +331,7 @@ impl BlockReceiver {
     fn current_prune_height(&mut self) -> u32 {
         match self.chain_store_handle.get_candidate_tip_height() {
             Ok(Some(tip_height)) => {
-                self.last_prune_height = prune_height_for_tip(tip_height);
+                self.last_prune_height = prune_height_for_tip(self.depths, tip_height);
                 self.last_prune_height
             }
             Ok(None) => 0,

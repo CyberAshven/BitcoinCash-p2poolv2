@@ -518,7 +518,9 @@ fn parse_key(text: &str, network: BitcoinCashNetwork) -> Result<TradeKey, Box<dy
         PrivateKey::from_wif(text.trim()).map_err(|_| "the key is not a WIF private key")?;
     let expected = match network {
         BitcoinCashNetwork::Mainnet => NetworkKind::Main,
-        BitcoinCashNetwork::Chipnet | BitcoinCashNetwork::Regtest => NetworkKind::Test,
+        BitcoinCashNetwork::Chipnet
+        | BitcoinCashNetwork::Regtest
+        | BitcoinCashNetwork::Scalenet => NetworkKind::Test,
     };
     if private_key.network != expected {
         return Err("the WIF key is for another network".into());

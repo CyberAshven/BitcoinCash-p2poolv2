@@ -253,6 +253,7 @@ mod tests {
             users: HashMap::with_capacity(100),
             pool_difficulty: 500000,
             work_since_last_block: 0.0,
+            ..Default::default()
         };
 
         // Save stats
@@ -299,6 +300,7 @@ mod tests {
             users: HashMap::with_capacity(100),
             pool_difficulty: 500000,
             work_since_last_block: 0.0,
+            ..Default::default()
         };
 
         // Save should fail because directory doesn't exist

@@ -75,14 +75,17 @@ bch_share_chain = "mini"
 # bitcoincash: address.
 bootstrap_address = "bchreg:qqzldt8u5mafprrw6uljppyqg30uhl97ey890dqm34"
 
-# Every Bitcoin Cash node donates 1.5% (150 basis points) of each block it
+# Every Bitcoin Cash node donates 1% (100 basis points) of each block it
 # finds to bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k (the same key
-# under bchtest: and bchreg:). Set donation to change it, 0 to opt out.
-# donation = 150
-# A public pool's own cut, after the donation. Donation plus fee may not
-# exceed 1000 basis points (10%); peers reject shares above that.
+# under bchtest: and bchreg:). Set donation to change it, 0 to opt out. A
+# miner's login may choose its own with donation=<percent>, which this
+# setting never overrides (docs/miner-options.md).
+# donation = 100
+# A public pool's own cut, after the donation: 100 basis points (1%) when
+# fee_address is set without fee. The donation and the fee may each be at
+# most 1000 basis points (10%); peers reject shares above that.
 # fee_address = "bchreg:q..."
-# fee = 0
+# fee = 100
 
 # BCHN's ZMQ hashblock endpoint, as docker-compose.yml publishes it.
 zmqpubhashblock = "tcp://127.0.0.1:28332"
@@ -113,6 +116,15 @@ pool_signature = "P2Poolv2"
 url = "http://127.0.0.1:18443"
 username = "p2pool"
 password = "p2pool"
+
+# Extra BCHN nodes a found block also goes to, beside [bitcoinrpc]. Optional.
+# Each gets the block from its own task, sent again after a connection error
+# or time-out for up to two minutes, so a block does not depend on one node.
+# Repeat the table for more nodes.
+# [[submit_nodes]]
+# url = "http://bchn-backup.example:8332"
+# username = "p2pool"
+# password = "p2pool"
 
 [logging]
 file = "/p2poolv2/logs/p2pool.log"

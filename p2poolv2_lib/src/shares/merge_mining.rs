@@ -2,90 +2,155 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! One AuxPoW commitment output in a Bitcoin Cash coinbase.
+//! The merge-mining commitment in a Bitcoin Cash coinbase: output 0 in the
+//! common format v2 that BCH P2Pool and Pickaxe both build and check.
 //!
-//! The payload is the merged-mining commitment from the Bitcoin wiki
-//! specification: magic `fabe6d6d`, a 32-byte aux merkle root, the tree size,
-//! and the nonce. It sits in a single zero-value `OP_RETURN` output. A
-//! reserved commitment (zero root, size 0, nonce 0) holds the output's place
-//! when the miner has not declared an aux chain. Bitcoin coinbases omit it.
+//! ```text
+//! off len value
+//! 0   8   00 00 00 00 00 00 00 00   value 0
+//! 8   1   2c                        script length 44
+//! 9   1   6a                        OP_RETURN
+//! 10  1   2a                        push 42
+//! 11  4   43 54 4d 4d               "CTMM"
+//! 15  1   02                        version
+//! 16  32  root                      as hashed, not reversed
+//! 48  1   h                         tree height, 0..=16
+//! 49  4   salt                      u32 LE
+//! ```
+//!
+//! The exact empty commitment (a zero root with `h = 0` and salt 0) says the
+//! coinbase merge-mines no token. A zero root with any other `h` or salt is
+//! not a commitment. Every Bitcoin Cash coinbase P2Pool builds carries one of
+//! these as output 0; Bitcoin coinbases carry none.
+//!
+//! The tree under the root, the token leaves and the proofs are in
+//! [`super::auxpow`]. See `docs/bch-auxpow.md`.
 
 use bitcoin::consensus::{Decodable, Encodable};
-use bitcoin::script::Builder;
 use bitcoin::{Amount, ScriptBuf, TxOut};
 use serde::{Deserialize, Serialize};
 
-/// Magic that opens an AuxPoW commitment: `0xfa 0xbe 'm' 'm'`.
-pub const AUXPOW_MAGIC: [u8; 4] = [0xfa, 0xbe, 0x6d, 0x6d];
+/// Name of the merge-mining rules in Bitcoin Cash protocol strings: output 0
+/// in common format v2 with its format checks, a pool-built share's token
+/// root in its header (`roots`), and the ASERT header check of token shares.
+/// A node on the old `fabe6d6d` output rebuilds another coinbase for every
+/// share, and one without pool-built roots cannot read their headers.
+pub const BCH_MERGE_MINING_RULE_TAG: &str = "mm2-roots-asert";
 
-/// Bytes in the commitment payload: magic, root, size, nonce.
-pub const AUXPOW_COMMITMENT_LENGTH: usize = 4 + 32 + 4 + 4;
+/// The tag that opens the commitment's data: `"CTMM"`.
+pub const MERGE_MINING_MAGIC: [u8; 4] = *b"CTMM";
 
-/// Aux merkle root, tree size, and nonce committed by one coinbase output.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The format version this commitment carries.
+pub const MERGE_MINING_VERSION: u8 = 0x02;
+
+/// The tallest aux tree: `2^16` slots.
+pub const MAX_MERGE_MINING_TREE_HEIGHT: u8 = 16;
+
+/// Bytes pushed by the commitment's `OP_RETURN`: the magic, the version, the
+/// root, `h` and the salt.
+pub const MERGE_MINING_PAYLOAD_LENGTH: usize = 4 + 1 + 32 + 1 + 4;
+
+/// The commitment's locking script: `OP_RETURN`, a one-byte push of 42 bytes,
+/// then the payload.
+pub const MERGE_MINING_SCRIPT_LENGTH: usize = 2 + MERGE_MINING_PAYLOAD_LENGTH;
+
+/// The serialized output: an 8-byte zero value, a one-byte script length and
+/// the script. 53 bytes.
+pub const MERGE_MINING_OUTPUT_LENGTH: usize = 8 + 1 + MERGE_MINING_SCRIPT_LENGTH;
+
+/// Root, tree height and salt of a coinbase's merge-mining commitment.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MergeMiningCommitment {
-    /// Merkle root of the aux chain hashes, in the byte order AuxPoW stores.
-    pub merkle_root: [u8; 32],
-    /// Number of leaf slots, a power of two; zero reserves an unused tree.
-    pub tree_size: u32,
-    /// Nonce used by AuxPoW chain-id slot selection.
-    pub nonce: u32,
+    /// Root of the aux tree, as hashed (never byte-reversed).
+    pub root: [u8; 32],
+    /// The tree's height `h`: `2^h` leaf slots, at most 16.
+    pub height: u8,
+    /// The salt the slots were placed with.
+    pub salt: u32,
 }
 
 impl MergeMiningCommitment {
-    /// Decode the one canonical zero-value aux commitment output.
-    pub fn from_output(output: &TxOut) -> Result<Self, &'static str> {
-        let script = output.script_pubkey.as_bytes();
-        if output.value != Amount::ZERO
-            || script.len() != 46
-            || script[..2] != [0x6a, 44]
-            || script[2..6] != AUXPOW_MAGIC
-        {
-            return Err("invalid aux commitment output");
-        }
-        let commitment = Self {
-            merkle_root: script[6..38].try_into().expect("32-byte root"),
-            tree_size: u32::from_le_bytes(script[38..42].try_into().expect("4-byte size")),
-            nonce: u32::from_le_bytes(script[42..46].try_into().expect("4-byte nonce")),
-        };
-        commitment.validate()?;
-        Ok(commitment)
+    /// The exact empty commitment: no token is merge-mined.
+    pub const EMPTY: Self = Self {
+        root: [0; 32],
+        height: 0,
+        salt: 0,
+    };
+
+    /// The exact empty commitment for a job that merge-mines no tokens.
+    pub const fn empty() -> Self {
+        Self::EMPTY
     }
 
-    /// Reject ambiguous empty trees and impossible AuxPoW tree widths.
-    pub fn validate(self) -> Result<(), &'static str> {
-        if self.tree_size == 0 {
-            if self != Self::reserved() {
-                return Err("unused aux tree must have a zero root and nonce");
-            }
-        } else if !self.tree_size.is_power_of_two() || self.tree_size > (1 << 30) {
-            return Err("aux tree size must be a power of two no greater than 2^30");
+    /// True for the exact empty commitment and nothing else.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::EMPTY
+    }
+
+    /// The format checks every commitment passes: `h` at most 16, and a zero
+    /// root only as the exact empty commitment.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.height > MAX_MERGE_MINING_TREE_HEIGHT {
+            return Err("merge-mining tree height exceeds 16");
+        }
+        if self.root == [0; 32] && !self.is_empty() {
+            return Err("a zero merge-mining root needs h = 0 and salt 0");
         }
         Ok(())
     }
 
-    /// Commitment that reserves the output and names no aux chain: a zero
-    /// root, tree size and nonce.
-    pub fn reserved() -> Self {
-        Self::default()
-    }
-
-    /// The 44 bytes pushed by the commitment output.
-    pub fn payload(self) -> [u8; AUXPOW_COMMITMENT_LENGTH] {
-        let mut payload = [0u8; AUXPOW_COMMITMENT_LENGTH];
-        payload[..4].copy_from_slice(&AUXPOW_MAGIC);
-        payload[4..36].copy_from_slice(&self.merkle_root);
-        payload[36..40].copy_from_slice(&self.tree_size.to_le_bytes());
-        payload[40..44].copy_from_slice(&self.nonce.to_le_bytes());
+    /// The 42 bytes pushed by the commitment output.
+    pub fn payload(&self) -> [u8; MERGE_MINING_PAYLOAD_LENGTH] {
+        let mut payload = [0; MERGE_MINING_PAYLOAD_LENGTH];
+        payload[..4].copy_from_slice(&MERGE_MINING_MAGIC);
+        payload[4] = MERGE_MINING_VERSION;
+        payload[5..37].copy_from_slice(&self.root);
+        payload[37] = self.height;
+        payload[38..].copy_from_slice(&self.salt.to_le_bytes());
         payload
     }
 
-    /// Zero-value output carrying [`Self::payload`].
-    pub fn output(self) -> TxOut {
+    /// The 44-byte locking script: `OP_RETURN OP_PUSHBYTES_42 <payload>`.
+    pub fn script(&self) -> ScriptBuf {
+        let mut script = Vec::with_capacity(MERGE_MINING_SCRIPT_LENGTH);
+        script.push(bitcoin::opcodes::all::OP_RETURN.to_u8());
+        script.push(MERGE_MINING_PAYLOAD_LENGTH as u8);
+        script.extend_from_slice(&self.payload());
+        ScriptBuf::from_bytes(script)
+    }
+
+    /// The zero-value output a coinbase carries as output 0.
+    pub fn output(&self) -> TxOut {
         TxOut {
             value: Amount::ZERO,
-            script_pubkey: commitment_script(self.payload()),
+            script_pubkey: self.script(),
         }
+    }
+
+    /// Read a commitment output. Anything but a zero value and the exact
+    /// 44-byte script with this magic and version, or a commitment failing
+    /// [`Self::validate`], is not a commitment.
+    pub fn from_output(output: &TxOut) -> Result<Self, &'static str> {
+        let script = output.script_pubkey.as_bytes();
+        if output.value != Amount::ZERO
+            || script.len() != MERGE_MINING_SCRIPT_LENGTH
+            || script[..2]
+                != [
+                    bitcoin::opcodes::all::OP_RETURN.to_u8(),
+                    MERGE_MINING_PAYLOAD_LENGTH as u8,
+                ]
+            || script[2..6] != MERGE_MINING_MAGIC
+            || script[6] != MERGE_MINING_VERSION
+        {
+            return Err("output is not a merge-mining v2 commitment");
+        }
+        let commitment = Self {
+            root: script[7..39].try_into().expect("32-byte root"),
+            height: script[39],
+            salt: u32::from_le_bytes(script[40..44].try_into().expect("4-byte salt")),
+        };
+        commitment.validate()?;
+        Ok(commitment)
     }
 
     /// Output list carrying [`Self::output`], for a Job Declaration token.
@@ -94,8 +159,8 @@ impl MergeMiningCommitment {
     /// `AllocateMiningJobToken.Success.coinbase_tx_outputs` as a
     /// CompactSize-prefixed array of consensus-serialized outputs, so the
     /// bytes are the one-element list, count first.
-    pub fn coinbase_outputs_bytes(self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(64);
+    pub fn coinbase_outputs_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(1 + MERGE_MINING_OUTPUT_LENGTH);
         vec![self.output()]
             .consensus_encode(&mut bytes)
             .expect("a vector writer does not fail");
@@ -103,13 +168,14 @@ impl MergeMiningCommitment {
     }
 }
 
+/// Share header encoding: the root, `h` and the salt (37 bytes).
 impl Encodable for MergeMiningCommitment {
     fn consensus_encode<W: bitcoin::io::Write + ?Sized>(
         &self,
         writer: &mut W,
     ) -> Result<usize, bitcoin::io::Error> {
-        writer.write_all(&self.merkle_root)?;
-        Ok(32 + self.tree_size.consensus_encode(writer)? + self.nonce.consensus_encode(writer)?)
+        writer.write_all(&self.root)?;
+        Ok(32 + self.height.consensus_encode(writer)? + self.salt.consensus_encode(writer)?)
     }
 }
 
@@ -117,25 +183,18 @@ impl Decodable for MergeMiningCommitment {
     fn consensus_decode<R: bitcoin::io::Read + ?Sized>(
         reader: &mut R,
     ) -> Result<Self, bitcoin::consensus::encode::Error> {
-        let mut merkle_root = [0; 32];
-        reader.read_exact(&mut merkle_root)?;
+        let mut root = [0; 32];
+        reader.read_exact(&mut root)?;
         let commitment = Self {
-            merkle_root,
-            tree_size: u32::consensus_decode(reader)?,
-            nonce: u32::consensus_decode(reader)?,
+            root,
+            height: u8::consensus_decode(reader)?,
+            salt: u32::consensus_decode(reader)?,
         };
         commitment
             .validate()
             .map_err(bitcoin::consensus::encode::Error::ParseFailed)?;
         Ok(commitment)
     }
-}
-
-fn commitment_script(payload: [u8; AUXPOW_COMMITMENT_LENGTH]) -> ScriptBuf {
-    Builder::new()
-        .push_opcode(bitcoin::opcodes::all::OP_RETURN)
-        .push_slice(payload)
-        .into_script()
 }
 
 #[cfg(test)]

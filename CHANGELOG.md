@@ -14,11 +14,26 @@ changes the share chain's rules, not Bitcoin Cash consensus: nodes start
 from a new store, and Bitcoin Cash protocol strings carry `trade-htlc` and
 then `payout-holder`.
 
-A Bitcoin Cash coinbase now fits stock ASIC firmware: at most 11 payout
-outputs in a coinbase of at most 784 bytes, the tail of small payees paid by
-a draw weighted by their PPLNS weight. Another share-chain rule change:
-protocol strings carry `payout-cap11` after `payout-holder`. The share
-transaction pool ranks transactions by the share units they burn per byte.
+Bitcoin Cash hybrid payouts replace the 11-payout cap and weighted tail
+draw. An exactly empty merge-mining commitment pays miners directly within
+BCH's 1,000,000-byte transaction limit; token shares use a 3,072-byte
+coinbase budget. Payees are ordered by ascending weight, then script bytes;
+the straddler and remaining payees go to a P2SH32 payout tree with fan-out
+500. Nodes keep and serve found-block trees and execute them after maturity
+at 1 sat/byte; the covenant permits 1 to 3 sat/byte. The BCH share body
+allows that full coinbase beside 200 KiB of share transactions, and BCH
+payout scripts must be P2PKH, P2SH20 or P2SH32. BCH PPLNS shares and uncles
+are weighted by exact target work rather than rounded-down difficulty.
+These are share-chain rule changes, not changes to BCH consensus. The
+share transaction pool ranks transactions by the share units they burn per
+byte.
+
+Stratum V2 extended channels refuse a coinbase prefix or suffix over
+65,535 bytes with a channel-opening error or a per-channel refresh log.
+Standard channels keep mining a merkle root of the complete coinbase on
+the same connection; Stratum V1 sends the whole coinbase. The nightly
+workflow runs both ignored payout-tree BCHN regtest tests serially with
+production rules and standard relay policy, preserving logs on failure.
 
 Share-chain safety fixes from a review against upstream's design documents
 (2026-10-23). An uncle may have only one nephew on a chain, header sync checks
@@ -27,8 +42,21 @@ instead of stalling the node, the reorg depth limit is `PAYOUT_DEPTH`, the
 pending block buffer is bounded and stratum difficulty can no longer
 overflow. The uncle rule and the header timestamp checks change the share
 chain's rules on Bitcoin Cash and Bitcoin, not Bitcoin Cash consensus:
-Bitcoin Cash protocol strings carry `uncle-once` after `payout-cap11`, and
+Bitcoin Cash protocol strings carry `uncle-once` after the payout rule, and
 the store format changes, so nodes start from a new store.
+
+The approved Bitcoin Cash share-chain rule batch (owner's OK, 2026-10-23)
+ships under one protocol tag on a fresh share chain. It changes P2Pool's
+own share-chain rules and the coinbase P2Pool builds, not Bitcoin Cash
+consensus. The tag replaces `payout-cap11` with
+`payout-hybrid-t3072-f500-r1to3-z8-cov1`, and adds
+`body-1000000-204800`, `payee-p2pkh-p2sh20-p2sh32`, `merkle32`,
+`depths-m100`, `sigchecks3000-1452`, `no-segwit`, `weight-work`,
+`mm2-roots-asert` and `version-vote`. The donation and fee caps become 10% each
+instead of 10% together, under the same tag. Request-response, Kademlia,
+Identify and Noise use the same rule segments. Later rule changes activate by the
+share-version vote without changing this tag, so old and new versions
+can peer during the vote.
 
 Synced with upstream P2Poolv2 through `61810c56` (its v0.16.2). The fork
 keeps version `0.0.1-alpha`. The sync itself leaves Bitcoin Cash genesis
@@ -37,6 +65,104 @@ anchor and the donation and fee cap as they were.
 
 ### Added
 
+- Merge-mined tokens on a public node (owner's decision, 2026-10-24): the
+  operator's fee and the P2Pool donation apply to merge-mined tokens as to
+  BCH. `[stratum] merge_mining_tokens` names a JSON file of the tokens a
+  Bitcoin Cash P2Pool node merge-mines (category, baton lock hash, state
+  hash, target, tree limit), read again when it changes so a claim tool
+  can move a token's state. Every pool-built job carries a root of its
+  miner's own leaves at output 0: each binds the miner's payout script,
+  and its `ext` the split of each win, the miner's P2Pool donation (their
+  `donation=`, default 1%) in the donation slot and the node's fee (default
+  1%) in the fee slot, each to the script the coinbase pays it to.
+  Pickaxe's whole split leaf (`c4027136…`) comes out byte for byte. Such
+  shares are token shares (3,072-byte coinbase, ASERT check); share
+  validity never depends on the tokens. The share header carries a
+  pool-built root (`pool_merge_mining`, header tag `0x23`), digested by the
+  share commitment; the rule tag becomes `mm2-roots-asert`.
+- Disclosure of each miner's leaves and wins, in Pickaxe's formats
+  (pickaxe-miner PR #70 at `a92fef7`): the `CTMD` v2 leaf disclosure
+  (`shares::auxpow::Disclosure`); the SV2 extension `0x4D4D` negotiated
+  through `RequestExtensions` (`0x0001`), with `JobLeaves` after each job
+  and `WinProof` after each winning share; the SV1 `mining.configure`
+  extension `pickaxe-merge`, with `pickaxe.merge_leaves` and
+  `pickaxe.merge_proof`; and owner-only JSON line logs beside the token
+  file of standard-channel jobs' leaves and of every win's proof, bounded
+  queues and 8 MiB rotation. Each proof is checked as a covenant would
+  before it goes out. The SV2 decoders now keep a frame's extension type.
+- Job Declaration token leaves: a Full-Template declaration whose output 0
+  is a token root discloses its leaves in `excess_data` (canonical `CTMD`,
+  rebuilding the root at output 0's height and salt; a root without leaves
+  or leaves without a root is refused with `invalid-coinbase-tx`), and each
+  leaf must pay the channel's miner with the job's donation and the node's
+  fee as its split. A Coinbase-only custom job may not carry a token root.
+
+- A Sponsor button and donate section. `.github/FUNDING.yml` gives the
+  repository GitHub's Sponsor button, linking the landing page's new
+  `#donate` section, which a Sponsor button in its menu bar also opens. The
+  section shows the P2Pool donation address,
+  `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`, and its
+  CashTokens-aware form, `bitcoincash:zze95tc2dqrnltvxfa5yhunwx5952f34fvflmylut9`,
+  each with a QR code and an Open in wallet link, in HTML and CSS only.
+  The QR codes are static SVGs that `p2poolv2_tools`' new `donate_qr`
+  binary draws with the `qrcode` crate; tests fail when a committed code
+  differs from the generator's or does not scan back (with `rqrr`) as its
+  address, and when either address stops paying the donation key.
+  `p2poolv2_wallet` gains `encode_token_aware_cashaddr`, checked against the
+  CashTokens test vectors. `README.adoc` and the docs introduction gain a
+  Sponsor section. The link resolves once GitHub Pages is switched on.
+
+- Each miner chooses their own P2Pool donation on a Bitcoin Cash P2Pool
+  node (owner's decision, 2026-10-24) with `donation=<percent>`, 0 to 10 in
+  steps of 0.5, after a comma in the Stratum V1 username or Stratum V2
+  identity (the form agreed with Pickaxe, such as
+  `bitcoincash:q...rig1,donation=0.5`) or in the SV1 password. The node
+  builds that miner's jobs and shares with it, rebuilding its prepared job
+  once per donation in use and template; its own `donation` is the default
+  for miners who choose none and cannot override a choice. The operator's
+  fee still applies, taken after the donation, and each keeps its own 10%
+  cap. Bad values are refused at login (`invalid-donation` on SV2); keys
+  the node does not read, such as Pickaxe's own `pickaxe-donation=`, are
+  ignored and noted at debug level. Hydrapool mode and Bitcoin nodes refuse
+  the option. A Job Declaration token carries the donation of its
+  `user_identifier`, and a channel that chose another refuses the job with
+  `donation-mismatch`. SV1 usernames now take `p2p=` and the other options
+  after a comma too. Node behavior only: the share header already carried
+  each share's donation, so share-chain rules are unchanged. See
+  `docs/miner-options.md`.
+
+- Bitcoin Cash scalenet, BCHN's network for testing big blocks (A19 in
+  `docs/bch-btc-assumptions-audit.md`): `bitcoin_cash_network = "scalenet"`,
+  share addresses `sp2pool:`, payouts in `bchtest:` CashAddr, a share
+  genesis anchored on BCHN's scalenet genesis block, a 256 MB template
+  floor, and the start check against chain `scale` and block 10,000. BCHN
+  sets no ASERT anchor on scalenet, so its headers are not checked against
+  one, as on regtest. A new network with its own share chain; the share
+  chains of mainnet, chipnet and regtest are unchanged.
+- Token-aware CashAddr payout addresses (types 2 and 3, `z...` and `r...`,
+  from CashTokens) are accepted wherever a payout address is read: the
+  Stratum username and SV2 identity, `[stratum]` addresses and
+  `bch-share-address` (A10 a in `docs/bch-btc-assumptions-audit.md`). They
+  lock with the same script as their plain form, so the payout output is
+  unchanged; P2SH32 stays refused.
+- A Bitcoin Cash node refuses to start unless `[bitcoinrpc]` is BCHN on
+  `bitcoin_cash_network` (V15 in `docs/p2pool-v1-bch-lessons.md`). Before
+  waiting for the sync, `getblockchaininfo` must report BCHN's chain name
+  (`main`, `chip`, `regtest`); after it, the node's block at a height only
+  Bitcoin Cash has must be BCHN's checkpoint (661,648 on mainnet, after the
+  Bitcoin SV and eCash splits; 115,252 on chipnet, where it forked from
+  testnet4). A Bitcoin, Bitcoin SV or eCash node, or BCHN on testnet4, is
+  refused with an error saying what was found.
+
+- A landing page in `website/`, ported from upstream's
+  `p2poolv2/website` (MIT, whose notice it keeps): what the pool is, mining
+  over Stratum V2 first with Stratum V1 supported, running a node, the
+  dashboards and terminal UI, and what has been measured on chipnet and
+  regtest. HTML and CSS only: Bootstrap's script is gone and the menu is a
+  `<details>` dropdown. It wears the dashboard's stylesheets, Ubuntu font
+  and Bitcoin Cash logo, now with their licence files beside them, and
+  `style_guard` checks it. The `Docs` workflow stages it with the book under
+  `docs/` and publishes both when `DOCS_PAGES` is `true`.
 - `p2poolv2_tui`, a terminal UI for a Bitcoin Cash node and its BCHN,
   ported from upstream's PDM (`p2poolv2/pdm`, AGPL-3.0-or-later, which this
   crate keeps). BCHN status over JSON-RPC (chain, peers, mempool) replaces
@@ -49,6 +175,15 @@ anchor and the donation and fee cap as they were.
   mainnet and chipnet. Without its default `client` feature the crate is
   the views over plain data, for other ratatui programs. See
   `p2poolv2_tui/README.md`.
+- An Umbrel community app store in `packaging/umbrel`, ported from
+  upstream's `p2poolv2/umbrel-app` (Apache-2.0). `bch-p2pool` depends on
+  the official store's Bitcoin Cash Node app (mainnet) and takes BCHN's RPC
+  login and ZMQ endpoint from its exports; `bch-p2pool-external` mines on a
+  BCHN elsewhere, chipnet by default, set on umbrelOS 2.0's settings page
+  or in the app's `p2pool.toml`. Their ports stay clear of Umbrel's Bitcoin
+  apps and the Bitcoin P2Poolv2 app. `p2poolv2_config/tests/umbrel_apps.rs`
+  loads each app's config rendered from its defaults. See
+  `packaging/umbrel/README.md`.
 - Bitcoin Cash share trading: a miner sells share units for BCH with one
   hash time locked contract behind P2SH32 on each chain and no Lightning.
   The seller locks shares, the buyer locks BCH under the same secret hash,
@@ -95,6 +230,16 @@ anchor and the donation and fee cap as they were.
 - A docs site built with mdBook from `docs/` (`mdbook build docs`, CI job
   `Docs`), with new pages for requirements, miner options, small-miner
   arithmetic on Bitcoin Cash and known attacks.
+- The pages of upstream's documentation site (`p2poolv2/docs` at `623e4c1`),
+  ported to the docs book and adapted to Bitcoin Cash under "How P2Poolv2
+  works": why P2Poolv2, the comparison with SV2 and DATUM, the P2P network,
+  node components, the Stratum server, the share chain (commitments,
+  validation, mining on the current chain, PPLNS accounting, share
+  transactions, spending share outputs, pool size limits) and payouts
+  (coinbase payouts, selling shares). They keep upstream's credit and MIT or
+  Apache-2.0 notice; `docs/upstream-port-map.md` maps every upstream page and
+  says why the rest were not ported. Payout pages describe the hybrid direct
+  payouts and payout tree, replacing the old cap and tail draw.
 - Docker: a Bitcoin Cash Node 29.2.0 image from the release tarball, pinned
   by SHA-256, and a regtest stack that mines through the pool with a Rust CPU
   miner (mujina), checked by the `Docker regtest stack` CI job.
@@ -103,6 +248,147 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
+- `tools/safa-auxpow`: the experimental SAFA covenant verifies merge-mining
+  common format v2 in the BCH 2026 VM, with the token rules agreed with
+  Pickaxe: one vault input and fixed outputs (vault, miner, donation, fee);
+  the per-win split from the leaf's `ext`, with `MIN_SHARE_SATS` 1,000 at
+  the AMM price; claim outputs to scripts of at most 35 bytes; a fee of 1
+  to 3 sat/byte of K plus the proof, paid from the vault's own cash, which
+  keeps at least 800 satoshis; the coinbase's BIP34 height under
+  `OP_CHECKLOCKTIMEVERIFY`, with `state_height < cb_height`; BCH's
+  aserti3-2d band on the header's nBits, with the fallback band
+  `ref >> 4` to `ref × 1.1` from 4,032 blocks; and the SAFA draft's difficulty
+  adjustment, eased by `min(Δh, 288) / threads`. The Unix-time lock, the CSV
+  age and the version-2 rule are gone. Its redeem script is 1,366 bytes on
+  chipnet, and the worst claim measured uses 11% of the VM's operation-cost
+  limit and 10% of its hashing limit. The tests run every Pickaxe PR #70
+  vector, BCHN's 14,000 aserti3-2d vectors and the real headers from the Rust
+  tests in the VM, with the attacks that must fail. `cli.mjs` prints leaves
+  for `p2poolv2_cli bch-auxpow`, builds verified claims and prepares an
+  unsigned chipnet tSAFA genesis; nothing is broadcast. These are a token's
+  rules, not P2Pool share-chain rules or BCH consensus.
+- `p2poolv2_netsim` and `docs/simulation/network-sim.md` treat the hybrid
+  payout rule as the Bitcoin Cash payout rule, as it is on PR #33 and on
+  chipnet, instead of a proposal, and keep the 11-payout cap (`cap-11`) and
+  the 200 KiB share body limit only as historical comparisons, labelled
+  "pre-hybrid". The model's P2P message limit follows the node's 1.25 MiB
+  `MAX_P2P_MESSAGE_SIZE` (38,523 direct payees, from 30,813 at 1 MiB). The
+  sweep results are unchanged apart from those labels.
+- The organise worker's channel and pending buffer are bounded in bytes as
+  well as by count, now that a Bitcoin Cash share may carry a 1,000,000-byte
+  coinbase: full of the largest shares, the 512-share channel and the
+  1,024-share buffer could have held about 620 MB and 1.2 GB. The channel
+  holds at most 64 MiB of share blocks, by consensus encoding; a validation
+  task whose block would pass that waits until the organise worker takes
+  some off the queue (backpressure), and a block larger than the whole
+  budget passes alone. The buffer holds at most 128 MiB, and past either of
+  its bounds now evicts its oldest blocks instead of refusing the new one,
+  so blocks stuck behind a parent that never validates cannot pin it; an
+  evicted block stays stored and is re-validated when a descendant arrives.
+  Honest shares, about 35 KB at 1,000 payees, still meet the count bounds
+  first. Node behaviour only, not a share-chain rule. Tests cover the
+  backpressure, the count bound, an oversized block, a dropped receiver,
+  oldest-first eviction by count and by bytes, and megabyte shares.
+- Bitcoin Cash defaults (owner's decision, 2026-10-24): a node donates 1%
+  (100 basis points) of each block it finds instead of 1.5% when `donation`
+  is not set, and a `fee_address` set without `fee` takes a 1% operator fee
+  instead of being refused. The fee is still taken from what the donation
+  leaves, and each keeps its own 10% cap. Node defaults only: share-chain
+  rules are unchanged. The sample configs, Ansible role (which no longer
+  writes `fee = 0` when only a fee address is given), Umbrel apps, terminal
+  UI and docs follow.
+- Prometheus names no longer say Bitcoin (A27 in
+  `docs/bch-btc-assumptions-audit.md`): `bitcoin_blocks_found_total` is
+  `found_blocks_total`, `bitcoin_block_found_time_seconds` is
+  `found_block_time_seconds`, and the per-user and per-worker series are
+  labelled `payout_address` instead of `btcaddress`. Every Grafana dashboard
+  in `prometheus/grafana/` follows; a dashboard of your own needs the same
+  renames. JSON API field names are unchanged.
+- Miners are stored and counted under the canonical text of their decoded
+  payout script, not the address as typed (A26 in
+  `docs/bch-btc-assumptions-audit.md`): a CashAddr with or without its
+  prefix, in upper or lower case, or token-aware, is one miner in the store,
+  the dashboard and `/metrics`, keyed as the plain prefixed lowercase
+  CashAddr (Bitcoin addresses as their lowercase spelling). Payouts already
+  grouped by script and are unchanged.
+- `bch-trade` signs with Bitcoin Cash Schnorr instead of ECDSA (A24 in
+  `docs/bch-btc-assumptions-audit.md`): BCHN's algorithm and deterministic
+  RFC6979 nonce (`shares/bch_schnorr.rs`), checked against the Schnorr
+  vectors in BCHN's `src/test/key_tests.cpp`. Signatures are 65 bytes with
+  the sighash byte, so fees are sized for the exact signed size instead of a
+  72-byte ECDSA worst case. BCHN and the share chain already verified both.
+- `config.sample.toml` is a Bitcoin Cash chipnet node, the sample the
+  releases ship (A23 in `docs/bch-btc-assumptions-audit.md`). Upstream's
+  Bitcoin signet sample is `config-bitcoin.sample.toml`. A Bitcoin Cash
+  config may now leave `[stratum] network` out, since it is derived from
+  `bitcoin_cash_network`; a Bitcoin config without it is refused at load.
+- Merge-mining common format v2 (share-chain rule, audit A16 and A15): every
+  Bitcoin Cash coinbase carries the 53-byte `OP_RETURN "CTMM" 02 root h salt`
+  commitment as output 0, the exact empty commitment (zero root, `h = 0`,
+  salt 0) on pool-built jobs. The share header carries a declared job's
+  root, `h` and salt, and peers rebuild output 0 byte for byte. Format
+  checks refuse `h` above 16 and a zero root with any other `h` or salt.
+  `shares::auxpow` builds the salted SHA-256 tree (at most 16 tokens) and
+  encodes and verifies `AuxProof` v2 (coinbase branch `d ≤ 25`), and
+  `TokenSplit` encodes a token's donation and fee split as the leaf's
+  `ext`. P2Pool matches Pickaxe's golden vectors byte for byte
+  (pickaxe-miner PR #70 at `a1c80a1`): the leaf, the two-token root, output
+  0, the empty commitment, the 224-byte proof and the split leaf.
+  `share_has_token_commitment` tells token shares from no-token shares. The
+  old `fabe6d6d` output and Namecoin slots are gone; `p2poolv2_cli
+  bch-auxpow` builds and verifies the new format. The experimental SAFA
+  covenant verifies v2 proofs too (see Changed).
+- ASERT header check (share-chain rule for token shares): `shares::bch_asert`
+  computes BCH's aserti3-2d exactly as BCHN's `pow.cpp` does, with BCHN's
+  mainnet and chipnet/testnet4 anchors. A token share's bitcoin header, and
+  a proof's parent header, must carry nBits within `computed / 2` to
+  `computed × 1.05` of ASERT's target at its BIP34 height on mainnet, and
+  `computed / 8` to `computed × 1.05` or the proof-of-work limit on test
+  networks. Tested on all 14,000 lines of the aserti3-2d specification's
+  vectors and on real mainnet and chipnet headers.
+- Share-version vote (share-chain rule, lessons V17): every Bitcoin Cash
+  share header carries its rule version and the version its node desires,
+  bound by the proof of work through the share commitment and carried in
+  the Job Declaration token (layout 2). A share follows its parent's
+  version, or the next one once 60% of the work in the oldest tenth of the
+  25,920 shares below its parent desires it; nodes produce the next version
+  at 95%. Version 1 is this batch, so later rule changes can activate on the
+  live chain instead of a fresh one. The idea is P2Pool v1's, reimplemented.
+- Bitcoin Cash depths come from its own 100-share maturity instead of
+  Bitcoin's 6,048 (share-chain rule, audit A12): `BCH_PAYOUT_DEPTH` is
+  100 + 120,960 + 3 = 121,063 shares (the deepest share a coinbase pays,
+  uncle included), down from 127,008. It sets when share outputs expire, the
+  full-validation zone and the reorg depth limit; the prune depth is twice
+  it, 242,126, down from 254,016. `ChainDepths` holds each chain's depths,
+  and the store, the block receiver, the organise and validation workers,
+  the share transaction pool and `verify_chain` use the node's. Bitcoin
+  keeps upstream's. The Bitcoin Cash sim build now uses its own depths too
+  (183 and 366) instead of Bitcoin's sim 100 and 200.
+- Bitcoin Cash share transactions are budgeted by BCH's SigChecks instead
+  of Bitcoin's BIP141 sigop cost (share-chain rule, audit A13): at most
+  3,000 in a transaction (`MAX_TX_SIGCHECKS`) and 1,452 in a share's
+  transactions (200 KiB at one per 141 bytes, `BCH_MAX_SHARE_SIGCHECKS`).
+  Each accepted input runs one signature check; outputs and the coinbase
+  count none. The share transaction pool admits and selects by the same
+  count. Bitcoin shares keep the sigop cost.
+- A Bitcoin Cash coinbase that carries a BIP141 witness commitment output
+  makes its share invalid (share-chain rule, audit A18). Bitcoin Cash has no
+  SegWit and BCHN's templates carry none; the payout rebuild used to copy
+  one. Bitcoin coinbases keep theirs.
+- Coinbase merkle branches between Bitcoin Cash share-chain nodes may have
+  32 levels, up from 25 (share-chain rule, audit A14): BCHN's 2 GB guard is
+  temporary and Bitcoin Cash has no fixed block size maximum. Merge-mining
+  proofs keep `d ≤ 25`. A `ShareHeaders` response carries at most 600
+  headers, down from 650, so the worst case (1,584 bytes a header) still
+  fits the 1 MiB frame.
+- The Bitcoin Cash donation and operator fee each have their own 10% cap
+  (share-chain rule, the owner's decision of 2026-10-24, plan decision 13):
+  each at most 1,000 basis points (`MAX_BITCOIN_CASH_CUT`, renamed from
+  `MAX_BITCOIN_CASH_POOL_CUT`), with no combined cap, in config validation
+  and in share validation. Before, the two shared one 10% cap. The fee is
+  still taken from what the donation leaves, so a 10% donation and a 10% fee
+  take 10% and 9% of the coinbase value. A share taking 10% and 10% is
+  valid; an 11% donation or fee is not. Part of the batch's protocol tag.
 - Coinbase budget on Bitcoin Cash (share-chain consensus, decision 14): a
   coinbase pays at most 11 PPLNS payout outputs (`BCH_MAX_COINBASE_PAYOUTS`)
   holding at most 374 bytes (`BCH_MAX_PAYOUT_OUTPUT_BYTES`), and no payout
@@ -207,12 +493,61 @@ anchor and the donation and fee cap as they were.
   the only styling source, and tests fail if a stylesheet appears elsewhere
   or a class either dashboard uses has no selector there. It keeps live
   shares over `/ws`, the zoomable hashrate chart and the API login settings.
+- The developer tools are Rust: the `p2poolv2_tools` crate replaces the sim
+  scripts (`cargo sim run-swarm`, `observe`, `metrics`, `failures`,
+  `nightly`, `maturity-check`, `plot-metrics`, `stop-swarm`), the JavaScript
+  mock bitcoind (`cargo mock-bitcoind`), the Python log analysers
+  (`cargo share-lifecycle`, `cargo share-latency`) and the JMeter and
+  diagnosis scripts. The nightly workflow runs `cargo sim nightly`. Same
+  environment variables and run files; `plot-metrics` now writes SVG. See
+  `docs/tooling.md`, which also maps each old script for upstream merges.
+  `tools/safa-auxpow` stays JavaScript until a Rust BCH VM exists.
+- The sim swarm and its nightly run Bitcoin Cash against BCHN instead of
+  Bitcoin against Bitcoin Core. `p2poolv2_sim` reads `chain =
+  "bitcoin-cash"` configs with a `bchreg:` payout address and an
+  `rp2pool:` share address through the node's own parsers; the harness
+  writes such configs, `MINER_ADDRESS` defaults to a `bchreg:` address, and
+  the nightly starts BCHN with `-allowunconnectedmining`. CI installs BCHN
+  29.2.0 from its release tarball, checked against the SHA-256 sums in
+  `docker/bchn/Dockerfile`. Bitcoin Cash keeps its 100-share maturity in
+  the sim build. `cargo mock-bitcoind` answers as BCHN on regtest by
+  default; `--node bitcoin-core` keeps the Bitcoin signet answers the JMeter
+  comparison with CKPool needs.
 
 ### Removed
 
+- The v1 SAFA regtest harness (`tools/safa-auxpow/live-regtest.mjs`) and its
+  fixture, which fit only the v1 format. Its evidence stays in
+  `tools/safa-auxpow/README.md` and in the history.
 - The `store.background_task_frequency_hours` option (from upstream). Existing
   configs that set it still load.
 - The `[sim] coinbase_maturity` option.
+- The decoded copy of every template transaction the notifier kept for
+  Stratum V2, sorted in CTOR on each template and never read (A6 in
+  `docs/bch-btc-assumptions-audit.md`). Job Declaration reads only the
+  prepared template, which stays.
+
+### Fixed
+
+- A miner's stratum difficulty never goes above the share difficulty of the
+  job it mines (V8 in `docs/p2pool-v1-bch-lessons.md`). `d=`, `th=`,
+  `mining.suggest_difficulty` or `[stratum] minimum_difficulty` could hold a
+  miner above it, so it threw away hashes that were valid shares and was
+  paid for fewer hashes than it did. Before a job with a lower share
+  difficulty, an SV1 session gets `mining.set_difficulty` and an SV2 channel
+  `SetTarget`; a `minimum_difficulty` above the share difficulty is logged
+  once. Node policy, not a share-chain rule: peers see nothing new.
+- A found block no longer depends on one RPC call (V9 and V10 in
+  `docs/p2pool-v1-bch-lessons.md`). BCHN gets it again after a connection
+  error, a time-out or a busy node, for up to two minutes; its answer is
+  final and is not sent again. `duplicate` (BCHN already has the valid
+  block) and `inconclusive` (stored without a verdict) now count as BCHN
+  holding the block, and the template refresh follows them too. New
+  optional `[[submit_nodes]]` tables list extra BCHN nodes that every found
+  block also goes to, each from its own task with its own retries. New
+  metrics `found_block_submissions_total{node,outcome}` and
+  `found_block_submit_retries_total{node}`. A JSON-RPC error sent with HTTP
+  500 is now read as the node's RPC error, not as an HTTP failure.
 
 ### Security
 

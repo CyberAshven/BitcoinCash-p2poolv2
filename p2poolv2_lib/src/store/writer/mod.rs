@@ -18,8 +18,9 @@ pub use handle::StoreHandle;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
+use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::PruneStats;
-use bitcoin::{BlockHash, TxMerkleNode};
+use bitcoin::{BlockHash, TxMerkleNode, Txid};
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -130,6 +131,18 @@ pub enum WriteCommand {
     /// Add a PPLNS share
     AddPplnsShare {
         pplns_share: SimplePplnsShare,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+
+    /// Keep a found block's payout tree (idempotent).
+    PutPayoutTree {
+        tree: Box<StoredPayoutTree>,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+
+    /// Mark a kept payout tree executed.
+    MarkPayoutTreeExecuted {
+        coinbase_txid: Txid,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
 
@@ -280,6 +293,20 @@ impl StoreWriter {
             WriteCommand::AddPplnsShare { pplns_share, reply } => {
                 debug!("Adding PPLNS share for user: {}", pplns_share.user_id);
                 let result = self.store.add_pplns_share(pplns_share);
+                let _ = reply.send(result);
+            }
+
+            WriteCommand::PutPayoutTree { tree, reply } => {
+                debug!("Keeping the payout tree of coinbase {}", tree.coinbase_txid);
+                let result = self.store.put_payout_tree(&tree);
+                let _ = reply.send(result);
+            }
+
+            WriteCommand::MarkPayoutTreeExecuted {
+                coinbase_txid,
+                reply,
+            } => {
+                let result = self.store.mark_payout_tree_executed(&coinbase_txid);
                 let _ = reply.send(result);
             }
 

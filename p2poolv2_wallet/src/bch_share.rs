@@ -32,6 +32,9 @@ const P2PKH_VERSION: u8 = 0x00;
 const P2SH_VERSION: u8 = 0x08;
 /// Script hash type with size code 3, a 256-bit hash.
 const P2SH32_VERSION: u8 = P2SH_VERSION | 0x03;
+/// Type bit that makes types 0 and 1 the token-aware types 2 and 3
+/// (CashTokens, "CashAddress Token Support").
+const TOKEN_AWARE_TYPE: u8 = 0x10;
 
 /// Script a 20-byte CashAddr payload pays, named by its version byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +61,19 @@ impl CashAddrType {
 /// how the API and CLI spell a Bitcoin Cash payout.
 pub fn encode_cashaddr(prefix: &str, address_type: CashAddrType, hash: &[u8; 20]) -> String {
     encode_versioned_payload(prefix, address_type.version(), hash)
+}
+
+/// Token-aware CashAddr text for a 20-byte hash under `prefix`: type 2 for
+/// P2PKH (`z...`) and type 3 for P2SH (`r...`), from CashTokens.
+///
+/// It names the same locking script as [`encode_cashaddr`] does for the same
+/// hash; the type only tells a wallet that the receiver can take tokens.
+pub fn encode_token_aware_cashaddr(
+    prefix: &str,
+    address_type: CashAddrType,
+    hash: &[u8; 20],
+) -> String {
+    encode_versioned_payload(prefix, address_type.version() | TOKEN_AWARE_TYPE, hash)
 }
 
 /// CashAddr text for a P2SH32 locking script's 32-byte hash under `prefix`.
@@ -95,6 +111,10 @@ pub enum BchShareNetwork {
     Chipnet,
     /// CashAddr prefix `rp2pool`.
     Regtest,
+    /// CashAddr prefix `sp2pool`. Bitcoin Cash scalenet. The Bitcoin share
+    /// address uses `sp2pool` for signet too, in bech32m (`sp2pool1...`), so
+    /// the two never parse as each other.
+    Scalenet,
 }
 
 impl BchShareNetwork {
@@ -104,6 +124,7 @@ impl BchShareNetwork {
             BchShareNetwork::Mainnet => "p2pool",
             BchShareNetwork::Chipnet => "tp2pool",
             BchShareNetwork::Regtest => "rp2pool",
+            BchShareNetwork::Scalenet => "sp2pool",
         }
     }
 }
@@ -173,7 +194,7 @@ pub fn encode_payout_address(
     hash.copy_from_slice(hash_bytes);
     let prefix = match network {
         BchShareNetwork::Mainnet => "bitcoincash",
-        BchShareNetwork::Chipnet => "bchtest",
+        BchShareNetwork::Chipnet | BchShareNetwork::Scalenet => "bchtest",
         BchShareNetwork::Regtest => "bchreg",
     };
     Ok(encode_cashaddr(prefix, address_type, &hash))
@@ -244,6 +265,7 @@ fn network_for_prefix(prefix: &str) -> Result<BchShareNetwork, BchShareAddressEr
         "p2pool" => Ok(BchShareNetwork::Mainnet),
         "tp2pool" => Ok(BchShareNetwork::Chipnet),
         "rp2pool" => Ok(BchShareNetwork::Regtest),
+        "sp2pool" => Ok(BchShareNetwork::Scalenet),
         "bitcoincash" | "bchtest" | "bchreg" => Err(BchShareAddressError {
             message: "payout CashAddr is not a share address".to_string(),
         }),
@@ -418,6 +440,26 @@ mod tests {
     }
 
     #[test]
+    fn scalenet_share_address_round_trips_under_sp2pool() {
+        let address = BchShareAddress::new(BchShareNetwork::Scalenet, [0x44u8; 20]);
+        let encoded = address.encode();
+        assert!(encoded.starts_with("sp2pool:"), "{encoded}");
+        assert_eq!(decode(&encoded).unwrap(), address);
+        assert!(parse(&encoded, BchShareNetwork::Chipnet).is_err());
+    }
+
+    /// Scalenet pays BCHN's test network CashAddr, as chipnet does.
+    #[test]
+    fn scalenet_payout_uses_the_bchtest_prefix() {
+        let payout = Address::p2pkh(
+            PubkeyHash::from_byte_array([0x44u8; 20]),
+            bitcoin::Network::Testnet,
+        );
+        let encoded = encode_payout_address(&payout, BchShareNetwork::Scalenet).unwrap();
+        assert!(encoded.starts_with("bchtest:q"), "{encoded}");
+    }
+
+    #[test]
     fn changed_character_fails_checksum() {
         let encoded = BchShareAddress::new(BchShareNetwork::Mainnet, [0x11; 20]).encode();
         let mut broken = encoded.into_bytes();
@@ -469,6 +511,56 @@ mod tests {
                 &SPECIFICATION_HASH
             ),
             "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t"
+        );
+    }
+
+    /// The hash of the CashTokens specification's token-aware CashAddr test
+    /// vectors.
+    const TOKEN_VECTOR_HASH: [u8; 20] = [
+        0xfc, 0x91, 0x6f, 0x21, 0x3a, 0x3d, 0x7f, 0x13, 0x69, 0x31, 0x3d, 0x5f, 0xa3, 0x0f, 0x61,
+        0x68, 0xf9, 0x44, 0x6a, 0x2d,
+    ];
+
+    #[test]
+    fn encodes_the_token_aware_public_key_hash_vectors() {
+        let encode = |prefix| {
+            encode_token_aware_cashaddr(
+                prefix,
+                CashAddrType::PayToPublicKeyHash,
+                &TOKEN_VECTOR_HASH,
+            )
+        };
+        assert_eq!(
+            encode("bitcoincash"),
+            "bitcoincash:zr7fzmep8g7h7ymfxy74lgc0v950j3r295z4y4gq0v"
+        );
+        assert_eq!(
+            encode("bchtest"),
+            "bchtest:zr7fzmep8g7h7ymfxy74lgc0v950j3r295x8qj2hgs"
+        );
+        assert_eq!(
+            encode("bchreg"),
+            "bchreg:zr7fzmep8g7h7ymfxy74lgc0v950j3r295umknfytk"
+        );
+        assert_eq!(
+            encode_cashaddr(
+                "bitcoincash",
+                CashAddrType::PayToPublicKeyHash,
+                &TOKEN_VECTOR_HASH
+            ),
+            "bitcoincash:qr7fzmep8g7h7ymfxy74lgc0v950j3r2959lhtxxsl"
+        );
+    }
+
+    #[test]
+    fn encodes_a_token_aware_script_hash() {
+        let hash = [
+            0x7a, 0xe0, 0x4d, 0x57, 0xf5, 0x7b, 0x55, 0xd1, 0xe1, 0xbf, 0x05, 0xd3, 0xd6, 0xcd,
+            0x0c, 0x7c, 0x5a, 0x84, 0x11, 0xc6,
+        ];
+        assert_eq!(
+            encode_token_aware_cashaddr("bitcoincash", CashAddrType::PayToScriptHash, &hash),
+            "bitcoincash:rpawqn2h74a4t50phuza84kdp3794pq3cct3k50p0y"
         );
     }
 

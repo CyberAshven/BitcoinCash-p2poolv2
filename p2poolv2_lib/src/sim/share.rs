@@ -13,7 +13,6 @@
 //! header merkle root matches what the receive-side `validate_bitcoin_payout`
 //! reconstructs. See `docs/simulation/load-test-plan.md`.
 
-use crate::address::Address as P2PoolAddress;
 use crate::address::share_owner::ShareOwner;
 use crate::shares::coinbase_proof::CoinbaseProof;
 use crate::stratum::emission::Emission;
@@ -50,10 +49,13 @@ impl std::error::Error for SimShareError {}
 pub struct SimShareParams<'a> {
     /// Prepared notify parameters for the current template + share-chain tip.
     pub prepared: &'a PreparedNotifyParams,
-    /// This node's payout identity on the bitcoin chain.
+    /// This node's payout address on the chain it mines. On Bitcoin Cash it
+    /// is the decoded CashAddr, carried as a `bitcoin::Address` under the
+    /// matching legacy network.
     pub miner_address: &'a Address,
-    /// This node's share chain identity, owning the share coinbase output.
-    pub share_address: &'a P2PoolAddress,
+    /// This node's share chain identity, owning the share coinbase output:
+    /// a taproot program on Bitcoin, a P2PKH key hash on Bitcoin Cash.
+    pub share_owner: ShareOwner,
     /// Job tracker the per-miner job is inserted into.
     pub tracker: &'a JobTracker,
     /// Pool-assigned extranonce1 (4 bytes) as hex (8 chars).
@@ -77,7 +79,7 @@ pub fn build_sim_emission(params: SimShareParams<'_>) -> Result<BuiltShare, SimS
     build_notify_from_prepared(
         params.prepared,
         Some(params.miner_address),
-        Some(ShareOwner::Taproot(params.share_address.witness_program())),
+        Some(params.share_owner),
         params.tracker,
     )
     .map_err(|e| SimShareError(format!("build notify: {e}")))?;
@@ -149,7 +151,7 @@ mod tests {
     };
     use crate::stratum::work::prepared_notify::PreparedNotifyParamsBuilder;
     use crate::stratum::work::tracker::start_tracker_actor;
-    use crate::test_utils::make_test_share_address;
+    use crate::test_utils::make_test_share_program;
     use bitcoin::transaction::Version;
     use bitcoin::{Amount, CompactTarget, CompressedPublicKey, Network};
 
@@ -202,7 +204,7 @@ mod tests {
         let emission = build_sim_emission(SimShareParams {
             prepared: &prepared,
             miner_address: &address,
-            share_address: &make_test_share_address(1, bitcoin::Network::Regtest),
+            share_owner: ShareOwner::Taproot(make_test_share_program(1)),
             tracker: &tracker,
             enonce1_hex: "deadbeef",
             enonce2_hex: "0000000000000001",
@@ -261,7 +263,7 @@ mod tests {
         let emission = build_sim_emission(SimShareParams {
             prepared: &prepared,
             miner_address: &address,
-            share_address: &make_test_share_address(1, bitcoin::Network::Regtest),
+            share_owner: ShareOwner::Taproot(make_test_share_program(1)),
             tracker: &tracker,
             enonce1_hex: "aabbccdd",
             enonce2_hex: "1122334455667788",
@@ -283,5 +285,79 @@ mod tests {
         );
         assert_eq!(emission.header.nonce, 42);
         assert_eq!(emission.header.time, 1_700_000_600);
+    }
+
+    /// The sim swarm runs Bitcoin Cash: a synthetic share built on a BCHN
+    /// template for a P2PKH payout and a P2PKH share owner is the share a
+    /// Bitcoin Cash miner would find there. It is owned by the cash key hash,
+    /// commits to the payout, and passes the Bitcoin Cash coinbase proof,
+    /// body and block size checks a peer runs.
+    #[tokio::test]
+    async fn bitcoin_cash_emission_passes_bitcoin_cash_share_checks() {
+        use crate::config::Chain;
+        use crate::pool_difficulty::MockPoolDifficulty;
+        use crate::shares::validation::{DefaultShareValidator, ShareValidator};
+        use bitcoin::hashes::Hash as _;
+
+        let template: BlockTemplate = serde_json::from_str(include_str!(
+            "../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+        ))
+        .expect("parse BCHN template");
+        let template = std::sync::Arc::new(template);
+        let payout = Address::p2pkh(
+            bitcoin::PubkeyHash::from_byte_array([0x11; 20]),
+            Network::Regtest,
+        );
+        let owner = ShareOwner::CashP2pkh([0x22; 20]);
+        let prepared = PreparedNotifyParamsBuilder::new(
+            template.clone(),
+            vec![OutputPair {
+                address: payout.clone(),
+                amount: Amount::from_sat(template.coinbasevalue),
+            }],
+            POOL_SIGNATURE,
+            false,
+        )
+        .bits(CompactTarget::from_consensus(0x1d00ffff))
+        .include_merge_mining(true)
+        .build()
+        .expect("prepared build");
+        let tracker = start_tracker_actor();
+
+        let emission = build_sim_emission(SimShareParams {
+            prepared: &prepared,
+            miner_address: &payout,
+            share_owner: owner,
+            tracker: &tracker,
+            enonce1_hex: "01020304",
+            enonce2_hex: "0000000000000007",
+            nonce: 7,
+            ntime: template.curtime,
+        })
+        .expect("build emission")
+        .emission;
+        assert_eq!(emission.share_commitment.miner_address, owner);
+        assert_eq!(emission.share_commitment.miner_bitcoin_address, payout);
+
+        let mut store = ChainStoreHandle::default();
+        store
+            .expect_add_share_block_and_organise_header()
+            .returning(|_| Ok(None));
+        let share_block = handle_stratum_share(emission, &store)
+            .await
+            .expect("handle ok");
+
+        assert_eq!(share_block.header.miner_address, owner);
+        let validator =
+            DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
+        validator
+            .validate_coinbase_proof(&share_block.header, &share_block.template_merkle_branches)
+            .expect("coinbase proof");
+        validator
+            .validate_body_matches_header(&share_block)
+            .expect("body matches header");
+        validator
+            .validate_block_size(&share_block)
+            .expect("block size");
     }
 }

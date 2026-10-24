@@ -87,9 +87,10 @@ timestamps to lower the share difficulty and mint cheap shares.
 ancestors and rejects shares more than 120 seconds in the future. On Bitcoin
 Cash the share chain's ASERT is anchored at each share's parent (decision
 12), so a share's target follows its parent's interval directly, which makes
-timestamp rules matter more. Header sync does not yet check timestamps; it
-checks proof of work and difficulty only. Targets use integer fixed-point
-aserti3, so every node computes the same one.
+timestamp rules matter more. Header sync and block receipt apply the same
+timestamp rules as full validation (after the median of 11 ancestors, at
+most 120 seconds ahead). Targets use integer fixed-point aserti3, so every
+node computes the same one.
 
 ### Stubborn mining, eclipse and partitioning
 
@@ -112,14 +113,22 @@ on different networks.
 **Partial.**
 
 - Message rates are capped per peer (`max_*_per_second`).
-- Shares whose parent is unknown wait in memory; each costs the attacker a
-  share's proof of work, but the map has no size cap or expiry yet. On the
-  mini chain shares are cheap.
-- The share-transaction pool holds at most 1,000 transactions and 4 MiB and
-  evicts the oldest. It has no fee or priority rule yet, so a flood can push
-  out honest transfers.
-- A very large `d=` in the Stratum password can overflow vardiff's
-  accounting. Operators should set `maximum_difficulty`.
+- Shares whose parent is unknown wait in memory, at most 1,024 blocks and
+  32 MiB, each for at most 10 minutes; the oldest go first. Each costs the
+  attacker a share's proof of work, but on the mini chain shares are cheap,
+  and a flood can push out honest shares that are waiting for a parent.
+- Validated shares on their way to the organise worker wait in a queue of at
+  most 512 shares and 64 MiB, where validation waits for room, and those
+  whose parent is not yet validated in a buffer of at most 1,024 shares and
+  128 MiB, the oldest evicted first. An evicted share stays stored and is
+  re-validated when a share arrives on top of it.
+- The share-transaction pool holds at most 1,000 transactions and 4 MiB.
+  Priority is the share units a transaction burns per byte, then arrival
+  (decision 15); a full pool evicts the lowest only for a transaction that
+  outranks it, and a conflicting spend of a pool transaction's input is
+  refused (first seen wins).
+- Vardiff sums saturate, and `maximum_difficulty` defaults to 2^32, so a very
+  large `d=` in the Stratum password no longer overflows its accounting.
 
 ## Attacks on miners
 
@@ -137,17 +146,25 @@ payout address the miner chose, so a hijacker must swap the whole job.
 
 ### Coinbase size and stock firmware
 
-Every miner in the window gets a coinbase output. Upstream reports that
-stock Antminer firmware accepts only about a dozen outputs. An attacker with
-many tiny addresses could also push small honest miners out of a capped
-coinbase (the "rich list" attack).
+A coinbase that pays every miner in the window grows with the pool. Upstream
+reports that stock Antminer firmware accepts only about a dozen outputs. An
+attacker with many tiny addresses could also push small honest miners out of
+a capped coinbase (the "rich list" attack).
 
-**Open.** Not yet measured on Bitcoin Cash hardware. There is no output cap
-today, so the rich-list attack has nothing to capture, but large windows may
-not fit stock firmware. Stratum V2 standard channels, which hash headers
-only, avoid the limit. A covenant payout tree in one output, which BCH's
-introspection opcodes allow without a fork, is the lasting fix being
-considered.
+**Open.** Not yet measured on Bitcoin Cash hardware. The code pays every
+miner directly in a coinbase of up to 1,000,000 bytes (plan decision 14), so
+there is no paid set to crowd others out of. Only a share that merge-mines
+tokens keeps its coinbase within 3,072 bytes. Payees are paid smallest
+first, and the larger payees past the limit are paid exactly, less their
+share of the fee at 1 to 3 sat/byte, through a covenant payout tree, which
+BCH's introspection opcodes allow without a fork. Tiny addresses can move
+others into the tree, not out of their income. The old 784-byte cap came
+from one Bitcoin block another pool mined: a lower bound for that firmware,
+not a measured limit, and P2Pool v1 on Bitcoin Cash paid hundreds of miners
+per coinbase. Stratum V2 standard channels, which hash headers only, avoid
+any firmware limit, and device limits are to be measured and handled per
+connection. See [Pool size limits](sharechain/pool-size.md) and
+[the Bitcoin assumptions audit](bch-btc-assumptions-audit.md), A1 and M1.
 
 ## Bitcoin Cash chain risks
 
@@ -166,9 +183,10 @@ your own BCHN, or a Template Provider you trust, and keep it well connected.
 
 **Partial.** Payouts skip the newest 100 shares, so a block's payout differs
 between share-chain forks only when they split deeper than that. Moving
-payout rights are undone on reorgs. A node can still stall on a valid branch
-that spends an output it never fetched; the rule that rejects such spends at
-write time is planned with the transaction work.
+payout rights are undone on reorgs. Since 2026-10-23 a block spending an
+output the node never fetched is stored with an unknown coinbase root instead
+of stalling a syncing node
+([pruning](architecture/pruning.md#missing-input-at-write-time)).
 
 ## For operators
 

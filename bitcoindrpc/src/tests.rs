@@ -117,10 +117,101 @@ async fn test_getblockchaininfo() {
         info,
         GetBlockchainInfo {
             initial_block_download: true,
+            chain: None,
         }
     );
 }
 
+#[tokio::test]
+async fn getblockchaininfo_reads_the_chain_name() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": {"chain": "chip", "initialblockdownload": false},
+            "error": null,
+            "id": 0
+        })))
+        .mount(&mock_server)
+        .await;
+    let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
+
+    let info = client.getblockchaininfo().await.unwrap();
+
+    assert_eq!(info.chain.as_deref(), Some("chip"));
+}
+
+#[tokio::test]
+async fn getblockhash_reads_the_block_at_a_height() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_json(serde_json::json!({
+            "method": "getblockhash",
+            "params": [115252],
+            "id": 0
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": "00000000040ba9641ba98a37b2e5ceead38e4e2930ac8f145c8094f94c708727",
+            "error": null,
+            "id": 0
+        })))
+        .mount(&mock_server)
+        .await;
+    let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
+
+    let hash = client.get_block_hash(115_252).await.unwrap();
+
+    assert_eq!(
+        hash,
+        "00000000040ba9641ba98a37b2e5ceead38e4e2930ac8f145c8094f94c708727"
+    );
+}
+
+/// BCHN's verbose header carries the ABLA state; the next block's size limit
+/// is read from it, beyond 32 bits.
+#[tokio::test]
+async fn next_block_size_limit_comes_from_the_abla_state() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_json(serde_json::json!({
+            "method": "getblockheader",
+            "params": ["00000000000000000000000000000000000000000000000000000000000000aa", true],
+            "id": 0,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": {
+                "hash": "aa",
+                "height": 900_000,
+                "ablastate": {
+                    "epsilon": 2_500_000_000_u64,
+                    "beta": 2_500_000_000_u64,
+                    "blocksize": 1_000,
+                    "blocksizelimit": 5_000_000_000_u64,
+                    "nextblocksizelimit": 5_000_000_123_u64,
+                },
+            },
+            "error": null,
+            "id": 0,
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
+    let summary = client
+        .get_block_header_summary(
+            "00000000000000000000000000000000000000000000000000000000000000aa",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        summary,
+        BlockHeaderSummary {
+            height: 900_000,
+            next_block_size_limit: Some(5_000_000_123),
+        }
+    );
+}
+
+/// A header without ABLA state still gives its height, and no limit.
 #[tokio::test]
 async fn block_height_comes_from_the_verbose_block_header() {
     let mock_server = MockServer::start().await;
@@ -139,11 +230,19 @@ async fn block_height_comes_from_the_verbose_block_header() {
         .mount(&mock_server)
         .await;
     let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
-    let height = client
-        .get_block_height("00000000000000000000000000000000000000000000000000000000000000aa")
+    let summary = client
+        .get_block_header_summary(
+            "00000000000000000000000000000000000000000000000000000000000000aa",
+        )
         .await
         .unwrap();
-    assert_eq!(height, 1234);
+    assert_eq!(
+        summary,
+        BlockHeaderSummary {
+            height: 1234,
+            next_block_size_limit: None,
+        }
+    );
 }
 
 #[tokio::test]
@@ -159,7 +258,9 @@ async fn an_unknown_block_header_is_an_error() {
         .await;
     let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
     let result = client
-        .get_block_height("00000000000000000000000000000000000000000000000000000000000000aa")
+        .get_block_header_summary(
+            "00000000000000000000000000000000000000000000000000000000000000aa",
+        )
         .await;
     assert!(matches!(
         result,
@@ -393,7 +494,126 @@ async fn test_submit_block() {
     let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
 
     let result = client.submit_block(&block).await.unwrap();
-    assert_eq!(result, "null"); // Successful submission returns null
+    assert_eq!(result, SubmitBlockOutcome::Accepted);
+}
+
+#[test]
+fn submitblock_null_is_accepted() {
+    assert_eq!(
+        SubmitBlockOutcome::from_result(&serde_json::Value::Null),
+        SubmitBlockOutcome::Accepted
+    );
+}
+
+#[test]
+fn submitblock_duplicate_means_the_node_has_the_valid_block() {
+    let outcome = SubmitBlockOutcome::from_result(&serde_json::json!("duplicate"));
+    assert_eq!(outcome, SubmitBlockOutcome::Duplicate);
+    assert!(outcome.node_has_block());
+}
+
+#[test]
+fn submitblock_inconclusive_means_the_node_stored_the_block() {
+    let outcome = SubmitBlockOutcome::from_result(&serde_json::json!("inconclusive"));
+    assert_eq!(outcome, SubmitBlockOutcome::Inconclusive);
+    assert!(outcome.node_has_block());
+}
+
+#[test]
+fn submitblock_duplicate_inconclusive_is_inconclusive() {
+    assert_eq!(
+        SubmitBlockOutcome::from_result(&serde_json::json!("duplicate-inconclusive")),
+        SubmitBlockOutcome::Inconclusive
+    );
+}
+
+#[test]
+fn submitblock_duplicate_invalid_is_a_rejection() {
+    let outcome = SubmitBlockOutcome::from_result(&serde_json::json!("duplicate-invalid"));
+    assert_eq!(
+        outcome,
+        SubmitBlockOutcome::Rejected("duplicate-invalid".to_string())
+    );
+    assert!(!outcome.node_has_block());
+}
+
+#[test]
+fn submitblock_reject_reason_is_kept() {
+    assert_eq!(
+        SubmitBlockOutcome::from_result(&serde_json::json!("high-hash")),
+        SubmitBlockOutcome::Rejected("high-hash".to_string())
+    );
+}
+
+/// JSON-RPC 1.0 sends RPC errors with HTTP 500. The error in the body is
+/// the node's answer, not a failure to reach it.
+#[tokio::test]
+async fn an_rpc_error_sent_with_http_500_is_an_rpc_error() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
+            "result": null,
+            "error": {"code": -22, "message": "Block decode failed"},
+            "id": 0,
+        })))
+        .mount(&mock_server)
+        .await;
+    let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
+    let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+
+    let result = client.submit_block(&block).await;
+
+    assert!(matches!(
+        result,
+        Err(BitcoindRpcError::RpcError { code: -22, ref message }) if message == "Block decode failed"
+    ));
+    assert!(!result.unwrap_err().is_transient());
+}
+
+#[tokio::test]
+async fn an_unreachable_node_is_a_transient_transport_error() {
+    let client = BitcoindRpcClient::new("http://127.0.0.1:1", "p2pool", "p2pool").unwrap();
+    let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+
+    let result = client.submit_block(&block).await;
+
+    assert!(matches!(result, Err(BitcoindRpcError::Transport { .. })));
+    assert!(result.unwrap_err().is_transient());
+}
+
+#[test]
+fn a_busy_node_is_transient() {
+    let error = BitcoindRpcError::HttpError {
+        status_code: 503,
+        message: "Work queue depth exceeded".to_string(),
+    };
+    assert!(error.is_transient());
+}
+
+#[test]
+fn a_refused_login_is_not_transient() {
+    let error = BitcoindRpcError::HttpError {
+        status_code: 401,
+        message: String::new(),
+    };
+    assert!(!error.is_transient());
+}
+
+#[test]
+fn a_node_still_starting_is_transient() {
+    let error = BitcoindRpcError::RpcError {
+        code: -28,
+        message: "Loading block index".to_string(),
+    };
+    assert!(error.is_transient());
+}
+
+#[test]
+fn a_cut_off_answer_is_transient() {
+    let error = BitcoindRpcError::ParseError {
+        message: "EOF".to_string(),
+    };
+    assert!(error.is_transient());
 }
 
 #[tokio::test]

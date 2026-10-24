@@ -2,8 +2,9 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use crate::accounting::OutputPair;
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, append_payout_split};
+use crate::accounting::payout::payout_tree::PayoutTree;
+use crate::accounting::{CoinbasePayouts, OutputPair};
 use crate::config::StratumConfig;
 #[cfg(test)]
 #[mockall_double::double]
@@ -33,9 +34,10 @@ pub trait PayoutDistribution {
     /// common implementation of get_outpoint_distribution
     ///
     /// `split` is how the share chain turns weights into outputs: every
-    /// payee on Bitcoin, the coinbase budget on Bitcoin Cash (see
-    /// `coinbase_budget`). Hydrapool's time-window payout is not share-chain
-    /// consensus and pays every payee whatever it is given.
+    /// payee on Bitcoin, the hybrid payout on Bitcoin Cash (see
+    /// `coinbase_budget`), which returns the payout tree when payees go to
+    /// one. Hydrapool's time-window payout is not a share-chain rule and pays
+    /// every payee whatever it is given.
     #[allow(clippy::too_many_arguments)]
     fn fill_distribution_from_shares(
         &mut self,
@@ -47,7 +49,7 @@ pub trait PayoutDistribution {
         remaining_total_amount: Amount,
         bootstrap_address: Address,
         split: PayoutSplit,
-    ) -> Result<(), Box<dyn Error + Send + Sync>>;
+    ) -> Result<Option<PayoutTree>, Box<dyn Error + Send + Sync>>;
 
     /// Generate output distribution based on PPLNS shares weighted by difficulty.
     ///
@@ -65,12 +67,14 @@ pub trait PayoutDistribution {
     ///   on Bitcoin, where the window is `PPLNS_WINDOW_SHARES` mature shares.
     /// * `total_amount` - Total bitcoin amount to distribute among contributors
     ///
-    /// On Bitcoin Cash (`config.chain`) the share chain's outputs follow the
-    /// coinbase budget, its tail drawn from `anchor` (see
-    /// `PayoutSplit::for_chain`), as the validator rebuilds them.
+    /// These are the payouts of a pool-built job, which always carries the
+    /// exact empty merge-mining commitment: on Bitcoin Cash (`config.chain`)
+    /// they follow the hybrid payout at the no-token limit
+    /// (`PayoutSplit::for_chain`), as the validator rebuilds them.
     ///
     /// # Returns
-    /// Vector of OutputPair containing addresses and their proportional amounts
+    /// The donation, fee and direct payout outputs, and the payout tree if
+    /// some payees go to one.
     fn get_output_distribution(
         &mut self,
         chain_store_handle: &ChainStoreHandle,
@@ -78,7 +82,7 @@ pub trait PayoutDistribution {
         bitcoin_difficulty: u128,
         total_amount: bitcoin::Amount,
         config: &StratumConfig<crate::config::Parsed>,
-    ) -> Result<Vec<OutputPair>, Box<dyn Error + Send + Sync>> {
+    ) -> Result<CoinbasePayouts, Box<dyn Error + Send + Sync>> {
         // Extra two places for potential cuts
         let mut distribution = Vec::<OutputPair>::new();
         let remaining_total_amount = include_address_and_cut(
@@ -94,7 +98,7 @@ pub trait PayoutDistribution {
             config.fee,
         );
 
-        self.fill_distribution_from_shares(
+        let tree = self.fill_distribution_from_shares(
             &mut distribution,
             chain_store_handle,
             anchor,
@@ -102,15 +106,18 @@ pub trait PayoutDistribution {
             total_amount,
             remaining_total_amount,
             config.bootstrap_address().clone(),
-            PayoutSplit::for_chain(config.chain, anchor),
+            PayoutSplit::for_chain(config.chain, false),
         )?;
-        Ok(distribution)
+        Ok(CoinbasePayouts {
+            outputs: distribution,
+            tree,
+        })
     }
 }
 
-/// Apply donation, operator fee and the exact share-chain difficulty weights,
-/// split into outputs by `split` (every payee on Bitcoin, the coinbase budget
-/// on Bitcoin Cash).
+/// Apply donation, operator fee and the exact share-chain weights, split
+/// into outputs by `split` (every payee on Bitcoin, the hybrid payout on
+/// Bitcoin Cash).
 ///
 /// The coinbase outputs payout validation rebuilds from a window's weights;
 /// public so integration tests can check the coinbase a window implies.
@@ -122,7 +129,7 @@ pub fn build_pplns_outputs(
     fee_address: &Option<Address>,
     fee: Option<u16>,
     split: PayoutSplit,
-) -> Result<Vec<OutputPair>, Box<dyn Error + Send + Sync>> {
+) -> Result<CoinbasePayouts, Box<dyn Error + Send + Sync>> {
     if weights.is_empty() {
         return Err("Can't build output from empty distribution. There should be at least one payout address".into());
     }
@@ -134,8 +141,8 @@ pub fn build_pplns_outputs(
         donation,
     );
     let remaining = include_address_and_cut(&mut outputs, remaining, fee_address, fee);
-    append_payout_split(weights, remaining, split, &mut outputs)?;
-    Ok(outputs)
+    let tree = append_payout_split(weights, remaining, split, &mut outputs)?;
+    Ok(CoinbasePayouts { outputs, tree })
 }
 
 /// Appends new output pair to distribution and returns remaining amount.
@@ -252,6 +259,28 @@ mod tests {
         );
         assert_eq!(remaining, bitcoin::Amount::ZERO);
         assert_eq!(distribution[0].amount, bitcoin::Amount::from_sat(100_000));
+    }
+
+    /// Bitcoin Cash caps the donation and the fee at 10% each. The fee is
+    /// taken from what the donation leaves, so 10% and 10% take 10% and 9%
+    /// of the coinbase value.
+    #[test]
+    fn a_ten_percent_fee_after_a_ten_percent_donation_takes_nine_percent() {
+        let donation = parse_address_from_string("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq");
+        let fee = parse_address_from_string("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+        let cap = crate::config::MAX_BITCOIN_CASH_CUT;
+        let mut distribution = Vec::with_capacity(2);
+        let remaining = include_address_and_cut(
+            &mut distribution,
+            bitcoin::Amount::from_sat(1_000_000),
+            &Some(donation),
+            Some(cap),
+        );
+        let remaining =
+            include_address_and_cut(&mut distribution, remaining, &Some(fee), Some(cap));
+        assert_eq!(distribution[0].amount, bitcoin::Amount::from_sat(100_000));
+        assert_eq!(distribution[1].amount, bitcoin::Amount::from_sat(90_000));
+        assert_eq!(remaining, bitcoin::Amount::from_sat(810_000));
     }
 
     #[test]

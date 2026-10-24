@@ -12,8 +12,22 @@ fn registry() -> Arc<Mutex<JobRegistry>> {
     cache.set_prepared(test_bch_prepared());
     Arc::new(Mutex::new(JobRegistry::new(
         cache,
-        Some(MergeMiningCommitment::reserved()),
+        Some(MergeMiningCommitment::empty()),
     )))
+}
+
+/// A declared coinbase's bytes after the extranonce whose only output is
+/// `commitment`: the sequence, the output list and the locktime.
+fn commitment_suffix(commitment: &MergeMiningCommitment) -> Vec<u8> {
+    let mut suffix = 0xffff_fffeu32.to_le_bytes().to_vec();
+    suffix.extend(serialize(&vec![commitment.output()]));
+    suffix.extend([0; 4]);
+    suffix
+}
+
+/// A declared coinbase suffix with the empty commitment at output 0.
+fn empty_commitment_suffix() -> Vec<u8> {
+    commitment_suffix(&MergeMiningCommitment::empty())
 }
 
 fn transaction_with_lock(lock_time: u32) -> Transaction {
@@ -109,12 +123,17 @@ fn full_template_reorders_revealed_transactions_into_ctor() {
     let allocated = AllocateMiningJobTokenSuccess::from_bytes(&mut payload).unwrap();
     let outputs: Vec<TxOut> = deserialize(allocated.coinbase_outputs.as_bytes()).unwrap();
     // The token lists the scripts the template's own value pays, at zero
-    // value: under the coinbase budget which payees get an output depends
-    // on the amount, so a value of zero would name other scripts.
+    // value, for a declared coinbase with the empty commitment: the
+    // amounts decide which payees fit directly, so a value of zero would
+    // name other scripts.
     let prepared = test_bch_prepared();
     let expected = prepared
-        .declared_outputs(prepared.template().coinbasevalue)
+        .declared_outputs(
+            prepared.template().coinbasevalue,
+            &MergeMiningCommitment::empty(),
+        )
         .unwrap()
+        .outputs
         .into_iter()
         .map(|pair| TxOut {
             value: bitcoin::Amount::ZERO,
@@ -146,7 +165,7 @@ fn full_template_reorders_revealed_transactions_into_ctor() {
             mining_job_token: B0255::new(&token).unwrap(),
             version: 1,
             coinbase_tx_prefix: B064K::new(&[]).unwrap(),
-            coinbase_tx_suffix: B064K::new(&[]).unwrap(),
+            coinbase_tx_suffix: B064K::new(&empty_commitment_suffix()).unwrap(),
             wtxid_list: Seq064K::new(wtxids).unwrap(),
             excess_data: B064K::new(&[]).unwrap(),
         },
@@ -257,7 +276,7 @@ fn two_connections_reusing_a_request_id_keep_their_own_transactions() {
             mining_job_token: B0255::new(&first_token).unwrap(),
             version: 1,
             coinbase_tx_prefix: B064K::new(&[]).unwrap(),
-            coinbase_tx_suffix: B064K::new(&[]).unwrap(),
+            coinbase_tx_suffix: B064K::new(&empty_commitment_suffix()).unwrap(),
             wtxid_list: Seq064K::new(vec![U256::new(first_wtxid.as_slice()).unwrap()]).unwrap(),
             excess_data: B064K::new(&[]).unwrap(),
         },
@@ -270,7 +289,7 @@ fn two_connections_reusing_a_request_id_keep_their_own_transactions() {
             mining_job_token: B0255::new(&second_token).unwrap(),
             version: 1,
             coinbase_tx_prefix: B064K::new(&[]).unwrap(),
-            coinbase_tx_suffix: B064K::new(&[]).unwrap(),
+            coinbase_tx_suffix: B064K::new(&empty_commitment_suffix()).unwrap(),
             wtxid_list: Seq064K::new(vec![U256::new(second_wtxid.as_slice()).unwrap()]).unwrap(),
             excess_data: B064K::new(&[]).unwrap(),
         },
@@ -364,7 +383,7 @@ fn a_second_declaration_with_a_pending_request_id_is_rejected() {
             mining_job_token: B0255::new(&first_token).unwrap(),
             version: 1,
             coinbase_tx_prefix: B064K::new(&[]).unwrap(),
-            coinbase_tx_suffix: B064K::new(&[]).unwrap(),
+            coinbase_tx_suffix: B064K::new(&empty_commitment_suffix()).unwrap(),
             wtxid_list: Seq064K::new(vec![]).unwrap(),
             excess_data: B064K::new(&[]).unwrap(),
         },
@@ -377,7 +396,7 @@ fn a_second_declaration_with_a_pending_request_id_is_rejected() {
             mining_job_token: B0255::new(&second_token).unwrap(),
             version: 1,
             coinbase_tx_prefix: B064K::new(&[]).unwrap(),
-            coinbase_tx_suffix: B064K::new(&[]).unwrap(),
+            coinbase_tx_suffix: B064K::new(&empty_commitment_suffix()).unwrap(),
             wtxid_list: Seq064K::new(vec![]).unwrap(),
             excess_data: B064K::new(&[]).unwrap(),
         },
@@ -434,15 +453,9 @@ fn response_payload(frame: &[u8]) -> Vec<u8> {
 fn coinbase_only_keeps_transactions_private_and_rejects_declare() {
     let cache = PoolTransactionCache::new();
     cache.set_prepared(test_bch_prepared());
-    let first = transaction_with_lock(1);
-    let second = transaction_with_lock(2);
-    let mut pool = vec![first.clone(), second.clone()];
-    sort_ctor(&mut pool);
-    pool.reverse();
-    cache.set(pool);
     let shared = Arc::new(Mutex::new(JobRegistry::new(
         cache,
-        Some(MergeMiningCommitment::reserved()),
+        Some(MergeMiningCommitment::empty()),
     )));
 
     let mut declaration = Sv2Connection::new(Arc::clone(&shared));
@@ -471,7 +484,7 @@ fn coinbase_only_keeps_transactions_private_and_rejects_declare() {
             mining_job_token: B0255::new(&token).unwrap(),
             version: 1,
             coinbase_tx_prefix: B064K::new(&[]).unwrap(),
-            coinbase_tx_suffix: B064K::new(&[]).unwrap(),
+            coinbase_tx_suffix: B064K::new(&empty_commitment_suffix()).unwrap(),
             wtxid_list: Seq064K::new(vec![]).unwrap(),
             excess_data: B064K::new(&[]).unwrap(),
         },
@@ -580,8 +593,8 @@ fn allocations_are_unpredictable_and_bounded() {
         setup(0, Protocol::JobDeclarationProtocol),
         MESSAGE_TYPE_SETUP_CONNECTION,
     );
-    let first = connection.on_allocate(1).unwrap();
-    let second = connection.on_allocate(2).unwrap();
+    let first = connection.on_allocate(1, "miner").unwrap();
+    let second = connection.on_allocate(2, "miner").unwrap();
     let mut first_payload = response_payload(&first[0]);
     let mut second_payload = response_payload(&second[0]);
     let first = AllocateMiningJobTokenSuccess::from_bytes(&mut first_payload).unwrap();
@@ -591,10 +604,10 @@ fn allocations_are_unpredictable_and_bounded() {
         second.mining_job_token.as_bytes()
     );
     for request_id in 2..MAX_JOB_TOKENS {
-        connection.on_allocate(request_id as u32).unwrap();
+        connection.on_allocate(request_id as u32, "miner").unwrap();
     }
     assert_eq!(
-        connection.on_allocate(99).unwrap_err(),
+        connection.on_allocate(99, "miner").unwrap_err(),
         "job token limit reached"
     );
 }
@@ -615,4 +628,206 @@ fn custom_job(token: &[u8]) -> SetCustomMiningJob<'_> {
         coinbase_tx_locktime: 0,
         merkle_path: binary_sv2::Seq0255::new(vec![]).unwrap(),
     }
+}
+
+/// The donation the terms of a token allocated for `user_identifier` carry.
+fn allocated_donation(user_identifier: &str) -> Result<Option<u16>, String> {
+    let mut connection = Sv2Connection::new(registry());
+    accept_message(
+        &mut connection,
+        setup(0, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    let allocated = connection.on_allocate(1, user_identifier)?;
+    let mut payload = response_payload(&allocated[0]);
+    let allocated = AllocateMiningJobTokenSuccess::from_bytes(&mut payload).unwrap();
+    let payout = bitcoin::Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let commitment = crate::shares::share_commitment::ShareCommitment::from_mining_job_token(
+        allocated.mining_job_token.as_bytes(),
+        payout,
+        p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]),
+    )
+    .unwrap();
+    Ok(commitment.donation)
+}
+
+/// A token's terms carry the `donation=` of the identifier that allocated
+/// it, the node's own without one; Pickaxe's own key is ignored.
+#[test]
+fn a_token_carries_the_identifiers_donation() {
+    assert_eq!(allocated_donation("miner"), Ok(None));
+    assert_eq!(
+        allocated_donation("miner,pickaxe-donation=0,donation=0.5"),
+        Ok(Some(50))
+    );
+    assert_eq!(allocated_donation("miner,donation=10"), Ok(Some(1_000)));
+    assert!(
+        allocated_donation("miner,donation=0.25")
+            .unwrap_err()
+            .contains("steps of 0.5")
+    );
+}
+
+/// A Bitcoin registry builds no Bitcoin Cash share chain, so it cannot
+/// honour a miner's donation.
+#[test]
+fn a_bitcoin_token_refuses_a_donation() {
+    let mut connection = Sv2Connection::new(Arc::new(Mutex::new(JobRegistry::new(
+        PoolTransactionCache::new(),
+        None,
+    ))));
+    accept_message(
+        &mut connection,
+        setup(0, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    assert!(
+        connection
+            .on_allocate(1, "miner,donation=0")
+            .unwrap_err()
+            .contains("cannot honour")
+    );
+    assert!(
+        connection
+            .on_allocate(2, "miner,pickaxe-donation=0")
+            .is_ok()
+    );
+}
+
+/// Declare a Full-Template job whose coinbase suffix is `suffix` with
+/// `excess_data`, on a new connection, and return the reply's frame.
+fn declare_with_leaves(suffix: &[u8], excess_data: &[u8]) -> Vec<u8> {
+    let mut connection = Sv2Connection::new(registry());
+    accept_message(
+        &mut connection,
+        setup(1, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    let allocate = accept_message(
+        &mut connection,
+        AllocateMiningJobToken {
+            user_identifier: "miner".try_into().unwrap(),
+            request_id: 1,
+        },
+        MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN,
+    );
+    let mut payload = response_payload(&allocate[0]);
+    let token = AllocateMiningJobTokenSuccess::from_bytes(&mut payload)
+        .unwrap()
+        .mining_job_token
+        .as_bytes()
+        .to_vec();
+    let mut reply = accept_message(
+        &mut connection,
+        DeclareMiningJob {
+            request_id: 2,
+            mining_job_token: B0255::new(&token).unwrap(),
+            version: 1,
+            coinbase_tx_prefix: B064K::new(&[]).unwrap(),
+            coinbase_tx_suffix: B064K::new(suffix).unwrap(),
+            wtxid_list: Seq064K::new(vec![]).unwrap(),
+            excess_data: B064K::new(excess_data).unwrap(),
+        },
+        MESSAGE_TYPE_DECLARE_MINING_JOB,
+    );
+    reply.remove(0)
+}
+
+/// The type of a reply frame's message.
+fn reply_type(frame: &[u8]) -> u8 {
+    frame[2]
+}
+
+/// The code and details of a `DeclareMiningJob.Error`.
+fn declare_refusal(frame: &[u8]) -> (String, String) {
+    assert_eq!(reply_type(frame), MESSAGE_TYPE_DECLARE_MINING_JOB_ERROR);
+    let mut payload = response_payload(frame);
+    let error = DeclareMiningJobError::from_bytes(&mut payload).unwrap();
+    (
+        error.error_code.as_utf8_or_hex(),
+        String::from_utf8(error.error_details.as_bytes().to_vec()).unwrap(),
+    )
+}
+
+/// A Full-Template declaration whose output 0 is a token root and whose
+/// `excess_data` discloses the leaves that make it goes on to its
+/// transactions.
+#[test]
+fn a_declared_token_root_with_its_leaves_is_accepted() {
+    let leaves = crate::test_utils::test_bch_declared_leaves(
+        &test_bch_prepared().mining_job_token([1; 32], 0).unwrap(),
+    );
+    let reply = declare_with_leaves(
+        &commitment_suffix(&leaves.commitment),
+        &leaves.disclosure().encode(),
+    );
+    assert_eq!(
+        reply_type(&reply),
+        MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS
+    );
+}
+
+/// A token root with empty `excess_data` is refused with
+/// `invalid-coinbase-tx`, saying why.
+#[test]
+fn a_declared_token_root_without_leaves_is_refused() {
+    let leaves = crate::test_utils::test_bch_declared_leaves(
+        &test_bch_prepared().mining_job_token([1; 32], 0).unwrap(),
+    );
+    let (code, details) = declare_refusal(&declare_with_leaves(
+        &commitment_suffix(&leaves.commitment),
+        &[],
+    ));
+    assert_eq!(code, "invalid-coinbase-tx");
+    assert!(details.contains("excess_data"), "{details}");
+}
+
+/// Leaves beside the empty commitment are refused: empty `excess_data`
+/// means no root.
+#[test]
+fn declared_leaves_without_a_token_root_are_refused() {
+    let leaves = crate::test_utils::test_bch_declared_leaves(
+        &test_bch_prepared().mining_job_token([1; 32], 0).unwrap(),
+    );
+    let (code, details) = declare_refusal(&declare_with_leaves(
+        &empty_commitment_suffix(),
+        &leaves.disclosure().encode(),
+    ));
+    assert_eq!(code, "invalid-coinbase-tx");
+    assert!(details.contains("without a token commitment"), "{details}");
+}
+
+/// Leaves that do not make output 0's root (one left out) are refused.
+#[test]
+fn declared_leaves_that_miss_the_root_are_refused() {
+    let leaves = crate::test_utils::test_bch_declared_leaves(
+        &test_bch_prepared().mining_job_token([1; 32], 0).unwrap(),
+    );
+    let mut disclosure = leaves.disclosure();
+    disclosure.leaves.pop();
+    let (code, details) = declare_refusal(&declare_with_leaves(
+        &commitment_suffix(&leaves.commitment),
+        &disclosure.encode(),
+    ));
+    assert_eq!(code, "invalid-coinbase-tx");
+    assert!(details.contains("root"), "{details}");
+}
+
+/// `excess_data` must be exactly one canonical disclosure: a trailing byte
+/// is refused.
+#[test]
+fn a_declared_disclosure_with_a_trailing_byte_is_refused() {
+    let leaves = crate::test_utils::test_bch_declared_leaves(
+        &test_bch_prepared().mining_job_token([1; 32], 0).unwrap(),
+    );
+    let mut excess_data = leaves.disclosure().encode();
+    excess_data.push(0);
+    let (code, _) = declare_refusal(&declare_with_leaves(
+        &commitment_suffix(&leaves.commitment),
+        &excess_data,
+    ));
+    assert_eq!(code, "invalid-coinbase-tx");
 }

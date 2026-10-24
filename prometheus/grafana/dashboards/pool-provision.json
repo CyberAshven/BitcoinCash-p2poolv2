@@ -408,7 +408,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(bitcoin_blocks_found_total)",
+          "expr": "max(found_blocks_total)",
           "instant": false,
           "legendFormat": "__auto",
           "range": true,
@@ -514,7 +514,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(label_replace(max by (blockhash, height, miner, network) (bitcoin_block_found_time_seconds) * 1000, \"explorer\", \"https://blockchair.com/bitcoin-cash\", \"network\", \"(main|mainnet)\"), \"explorer\", \"https://chipnet.imaginary.cash\", \"network\", \"(test|chipnet)\")",
+          "expr": "label_replace(label_replace(max by (blockhash, height, miner, network) (found_block_time_seconds) * 1000, \"explorer\", \"https://blockchair.com/bitcoin-cash\", \"network\", \"(main|mainnet)\"), \"explorer\", \"https://chipnet.imaginary.cash\", \"network\", \"(test|chipnet)\")",
           "format": "table",
           "instant": true,
           "range": false,

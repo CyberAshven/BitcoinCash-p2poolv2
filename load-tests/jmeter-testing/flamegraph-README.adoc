@@ -1,6 +1,6 @@
 == Flamegraph Profiling
 
-The `flamegraph.sh` script generates a CPU flamegraph of P2Poolv2
+`cargo jmeter-bench flamegraph` generates a CPU flamegraph of P2Poolv2
 while it handles stratum load from jmeter. The flamegraph shows where
 CPU time is spent across all functions, making it easy to identify
 hotspots in the submit, validation, and block submission paths.
@@ -10,19 +10,18 @@ hotspots in the submit, validation, and block submission paths.
 - `perf` -- Linux performance counters tool
 - `cargo-flamegraph` -- install with `cargo install flamegraph`
 - `jmeter` -- load test runner (requires Java 21)
-- `node` / `npm` -- for the mock-bitcoind server
 
 === Usage
 
 [,shell]
 ----
 cd load-tests/jmeter-testing
-JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./flamegraph.sh
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk cargo jmeter-bench flamegraph
 ----
 
-The script:
+The tool:
 
-1. Starts mock-bitcoind on port 48332
+1. Serves the mock bitcoind on port 48332
 2. Builds P2Poolv2 in release mode with debug symbols and frame pointers
 3. Runs P2Poolv2 under `perf record` via `cargo flamegraph`
 4. Waits for the stratum server to start listening on port 3333
@@ -41,7 +40,7 @@ xdg-open ../../flamegraph_loadtest.svg
 
 === Build flags
 
-The script sets these flags to ensure accurate stack traces:
+The tool sets these flags to ensure accurate stack traces:
 
 - `CARGO_PROFILE_RELEASE_DEBUG=true` -- includes debug symbols in the
   release binary
@@ -52,21 +51,21 @@ The script sets these flags to ensure accurate stack traces:
 === Remote load testing
 
 When the P2Poolv2 server is already running on a separate host (for
-example under `perf` or `cargo flamegraph`), use `run_remote_load.sh`
+example under `perf` or `cargo flamegraph`), use `cargo jmeter-bench remote`
 to drive traffic from another machine. No mock-bitcoind or local build
 is needed.
 
 [,shell]
 ----
 cd load-tests/jmeter-testing
-./run_remote_load.sh --host 192.168.1.50
+cargo jmeter-bench remote --host 192.168.1.50
 ----
 
 All parameters can be overridden:
 
 [,shell]
 ----
-./run_remote_load.sh --host 192.168.1.50 --port 3333 \
+cargo jmeter-bench remote --host 192.168.1.50 --port 3333 \
     --threads 5000 --ramp 60 --duration 300 --delay 3000
 ----
 
@@ -85,7 +84,7 @@ Results are saved to `results/remote-<host>-<timestamp>.jtl`.
 
 The jmeter test parameters (thread count, ramp-up, duration) default
 to the values shown above. They can be overridden from the command
-line via `run_remote_load.sh` flags, or by passing `-J` properties
+line via `cargo jmeter-bench remote` flags, or by passing `-J` properties
 directly to jmeter. The defaults are defined in `stratum.jmx` using
 `__P()` functions. More threads and longer duration produce more
 samples and a more representative flamegraph.

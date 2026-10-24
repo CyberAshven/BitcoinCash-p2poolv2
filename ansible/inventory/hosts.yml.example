@@ -53,7 +53,8 @@ all:
               # Share address owning every share, or leave it out and let each
               # miner send p2p=<share address>:
               # miner_address: "p2pool:YOUR_SHARE_ADDRESS"
-              # Public pool fee in basis points, after the 1.5% donation:
+              # Public pool fee in basis points, after the donation; 100 (1%)
+              # when fee_address is set without fee:
               # fee_address: "bitcoincash:YOUR_FEE_ADDRESS"
               # fee: 100
               bitcoin_rpc_url: "http://127.0.0.1:8332"

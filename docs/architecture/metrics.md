@@ -56,8 +56,8 @@ series count bounded:
   `worker_*`, `coinbase_output`, and the planned
   `pplns_hashrate_distribution`) are bounded by the number of pool
   participants. Acceptable, but watch the active worker count.
-- Block hashes are exposed only through `bitcoin_block_found_time_seconds`,
-  one series per bitcoin block the pool has found. Blocks are rare, so
+- Block hashes are exposed only through `found_block_time_seconds`,
+  one series per block the pool has found. Blocks are rare, so
   this stays small while letting Grafana list every block with explorer
   links.
 
@@ -73,10 +73,10 @@ series count bounded:
 | `best_share` / `best_share_ever` | gauge | actor | Highest true difficulty (session / all-time) |
 | `pool_difficulty` | gauge | actor | Current pool difficulty |
 | `start_time_seconds` / `last_update_seconds` | gauge | actor | Unix timestamps |
-| `user_shares_valid_total{btcaddress}` | counter | actor | Per-user valid shares (scaled by 2^32) |
-| `worker_shares_valid_total{btcaddress,workername}` | counter | actor | Per-worker valid shares |
-| `worker_best_share*{btcaddress,workername}` | gauge | actor | Per-worker best difficulty |
-| `worker_last_share_at{btcaddress,workername}` | gauge | actor | Per-worker last submission timestamp |
+| `user_shares_valid_total{payout_address}` | counter | actor | Per-user valid shares (scaled by 2^32) |
+| `worker_shares_valid_total{payout_address,workername}` | counter | actor | Per-worker valid shares |
+| `worker_best_share*{payout_address,workername}` | gauge | actor | Per-worker best difficulty |
+| `worker_last_share_at{payout_address,workername}` | gauge | actor | Per-worker last submission timestamp |
 
 ### Coinbase reward distribution (existing) -- pool item #3
 
@@ -93,12 +93,18 @@ payout distribution for the next block. Compare visually with
 `pplns_hashrate_distribution` (planned) to confirm payouts track
 contributed work.
 
-### Bitcoin blocks found (Release 1) -- pool item #1
+### Blocks found (Release 1) -- pool item #1
 
 | Metric | Type | Source |
 |---|---|---|
-| `bitcoin_blocks_found_total` | counter | live read of `FoundBlocks` CF |
-| `bitcoin_block_found_time_seconds{blockhash,height,miner,network}` | gauge | live read of `FoundBlocks` CF |
+| `found_blocks_total` | counter | live read of `FoundBlocks` CF |
+| `found_block_time_seconds{blockhash,height,miner,network}` | gauge | live read of `FoundBlocks` CF |
+
+Before PR #33 these were `bitcoin_blocks_found_total` and
+`bitcoin_block_found_time_seconds`, and the per-user and per-worker series
+were labelled `btcaddress` instead of `payout_address`. The dashboards in
+`prometheus/grafana/` use the new names; a dashboard of your own needs the
+same renames.
 
 Derived from the share chain and persisted in the store
 (`store/found_block.rs`, see `store-schema.md`). When `confirm_blocks`
@@ -122,13 +128,14 @@ blocks carried by uncles.
 - **Not limited by Prometheus retention.** Every scrape carries the full
   list, so an instant query always shows every found block.
 
-The stratum submit handler still submits the block to bitcoind on a local
-find; it records nothing.
+The stratum submit handler still submits the block to BCHN on a local find;
+what each node answered is counted separately, in
+`found_block_submissions_total` (see "Found block submissions" below).
 
 **Grafana:**
-- *Blocks found*: Stat of `bitcoin_blocks_found_total` (instant).
+- *Blocks found*: Stat of `found_blocks_total` (instant).
 - *Found blocks table*: a Table panel over
-  `bitcoin_block_found_time_seconds * 1000` (Instant query, Format =
+  `found_block_time_seconds * 1000` (Instant query, Format =
   Table, value unit `dateTimeAsIso`). The `network` label is the node's
   `stratum.network` in bitcoin core names; a Bitcoin Cash node derives it
   from `bitcoin_cash_network`: `main` on mainnet, `test` on chipnet,
@@ -221,6 +228,30 @@ real-time confirmed shares count.
 are expected luck; higher means the pool is running "unlucky" on the
 current block.
 
+### Found block submissions
+
+| Metric | Type | Source |
+|---|---|---|
+| `found_block_submissions_total{node,outcome}` | counter | `MetricsActor`, from `stratum/block_submit.rs` |
+| `found_block_submit_retries_total{node}` | counter | `MetricsActor`, from `stratum/block_submit.rs` |
+
+Counted when this node's miners find a block and it goes to a BCHN node with
+`submitblock`. `node` is `primary` for `[bitcoinrpc]` and `extra1`, `extra2`
+and on for the `[[submit_nodes]]` entries in file order; it never carries a
+URL, which may hold credentials. `outcome` is `accepted`, `duplicate` (the
+node already had the valid block), `inconclusive` (stored without a verdict,
+for example after losing a first-seen race at the same height), `rejected`
+(a reject reason) or `failed` (no answer within the two-minute retry window,
+or the request itself refused, such as a wrong password). Retries count the
+attempts sent again after a connection error, time-out or busy node.
+Runtime-only: the counters reset on restart. A block sent to a Template
+Provider is counted only at the extra nodes; the provider's RPC fallback and
+the simulation count nothing.
+
+**Grafana / alerting:**
+- *A found block not taken*: `increase(found_block_submissions_total{node="primary",outcome=~"rejected|failed"}[1h]) > 0`.
+- *A flaky BCHN connection*: `increase(found_block_submit_retries_total[1d]) > 0`.
+
 ### P2P health
 
 | Metric | Type | Source |
@@ -286,7 +317,7 @@ coinbase distribution.
   - Counters (monotonic) end in `_total` as the trailing token
     (`sharechain_work_total`, not `sharechain_total_work`).
   - Use base-unit suffixes: `_seconds` for times/timestamps
-    (`bitcoin_block_found_time_seconds`), `_bytes` for sizes.
+    (`found_block_time_seconds`), `_bytes` for sizes.
   - `_count`, `_sum`, `_bucket` are reserved for histogram/summary
     components -- do not use them on plain counters or gauges.
   - `_info` is for info metrics whose value is always `1` and whose data

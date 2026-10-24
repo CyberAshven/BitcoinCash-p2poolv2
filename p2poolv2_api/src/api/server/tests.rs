@@ -86,13 +86,10 @@ fn test_found_blocks_exposition_lists_each_block() {
 
     let exposition = found_blocks_exposition(&found_blocks, Network::Bitcoin);
 
-    assert!(
-        exposition
-            .contains("# TYPE bitcoin_blocks_found_total counter\nbitcoin_blocks_found_total 1\n")
-    );
-    assert!(exposition.contains("# TYPE bitcoin_block_found_time_seconds gauge\n"));
+    assert!(exposition.contains("# TYPE found_blocks_total counter\nfound_blocks_total 1\n"));
+    assert!(exposition.contains("# TYPE found_block_time_seconds gauge\n"));
     assert!(exposition.contains(
-            "bitcoin_block_found_time_seconds{blockhash=\"0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5\",height=\"840000\",miner=\"bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh\",network=\"main\"} 1713571767\n"
+            "found_block_time_seconds{blockhash=\"0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5\",height=\"840000\",miner=\"bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh\",network=\"main\"} 1713571767\n"
         ));
 }
 
@@ -100,8 +97,8 @@ fn test_found_blocks_exposition_lists_each_block() {
 fn test_found_blocks_exposition_with_no_blocks() {
     let exposition = found_blocks_exposition(&[], Network::Testnet4);
 
-    assert!(exposition.contains("bitcoin_blocks_found_total 0\n"));
-    assert!(!exposition.contains("bitcoin_block_found_time_seconds{"));
+    assert!(exposition.contains("found_blocks_total 0\n"));
+    assert!(!exposition.contains("found_block_time_seconds{"));
 }
 
 #[tokio::test]
@@ -136,9 +133,9 @@ async fn test_metrics_endpoint_exposes_found_blocks() {
 
     let exposition = metrics(State(state)).await;
 
-    assert!(exposition.contains("bitcoin_blocks_found_total 1\n"));
+    assert!(exposition.contains("found_blocks_total 1\n"));
     assert!(exposition.contains(&format!(
-            "bitcoin_block_found_time_seconds{{blockhash=\"{}\",height=\"{}\",miner=\"{}\",network=\"signet\"}} {}\n",
+            "found_block_time_seconds{{blockhash=\"{}\",height=\"{}\",miner=\"{}\",network=\"signet\"}} {}\n",
             share.header.bitcoin_header.block_hash(),
             share.header.bitcoin_height,
             share.header.miner_bitcoin_address,
@@ -672,4 +669,32 @@ async fn test_found_blocks_route_returns_json_list() {
     let (status, body) = get_json(app, "/found_blocks").await;
     assert_eq!(status, http::StatusCode::OK);
     assert!(body.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_payout_trees_route_returns_json_list() {
+    let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+    let app = build_router(state.clone(), state.app_config.clone());
+
+    let (status, body) = get_json(app, "/payout_trees").await;
+    assert_eq!(status, http::StatusCode::OK);
+    assert!(body.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_payout_tree_route_rejects_a_bad_txid_and_misses_an_unknown_one() {
+    let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+
+    let (status, _) = get_json(
+        build_router(state.clone(), state.app_config.clone()),
+        "/payout_tree?coinbase_txid=nothex",
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::BAD_REQUEST);
+    let (status, _) = get_json(
+        build_router(state.clone(), state.app_config.clone()),
+        &format!("/payout_tree?coinbase_txid={}", "11".repeat(32)),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::NOT_FOUND);
 }

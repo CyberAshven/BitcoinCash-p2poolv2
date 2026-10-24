@@ -5,25 +5,31 @@
 mod bitcoin_block_validation;
 
 use super::share_block::{MAX_POOL_TARGET, ShareHeader};
-use crate::accounting::OutputPair;
-use crate::accounting::payout::coinbase_budget::PayoutSplit;
+use crate::accounting::CoinbasePayouts;
+#[cfg(test)]
+use crate::accounting::payout::coinbase_budget::bch_split_for_commitment;
+use crate::accounting::payout::coinbase_budget::{BCH_MAX_TX_SIZE, PayoutSplit, split_for_share};
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+use crate::accounting::payout::payout_tree::PayoutTree;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 #[cfg(not(test))]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
-    PAYOUT_DEPTH, WindowError, bitcoin_block_difficulty, coinbase_maturity_for,
+    ChainDepths, WindowError, bitcoin_block_difficulty,
 };
 use crate::config::{
-    BITCOIN_CASH_DONATION_PUBKEY_HASH, Chain, MAX_BASIS_POINTS, MAX_BITCOIN_CASH_POOL_CUT,
+    BITCOIN_CASH_DONATION_PUBKEY_HASH, BitcoinCashNetwork, Chain, MAX_BASIS_POINTS,
+    MAX_BITCOIN_CASH_CUT,
 };
+use crate::node::payout_tree_executor::PayoutTreeSender;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
+use crate::shares::bch_asert::BchAsert;
 use crate::shares::bch_script;
 #[cfg(test)]
 #[mockall_double::double]
@@ -33,21 +39,27 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::coinbase_proof::CoinbaseProof;
 use crate::shares::share_block::{
     ShareBlock, ShareTransaction, SpendingPrevouts, extract_spending_prevouts,
-    is_terminal_blockhash,
+    is_terminal_blockhash, share_has_token_commitment,
 };
 use crate::shares::share_commitment::ShareCommitment;
+use crate::shares::share_version::{
+    SHARE_VERSION_VOTE_DEPTH, SHARE_VERSION_VOTE_SPAN, VersionTally, check_share_version,
+    check_share_version_alone,
+};
 use crate::shares::transactions::coinbase::{
     build_sharechain_coinbase_for_witness_root, compute_witness_root,
 };
 use crate::sim_overrides;
 use crate::store::block_tx_metadata::{BlockMetadata, Status};
 use crate::store::dag_store::MAX_UNCLES_DEPTH;
+use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::transaction_store::PrevoutCheck;
 use crate::store::writer::StoreError;
 #[cfg(test)]
 use crate::stratum::work::coinbase::build_bitcoin_coinbase_transaction;
 use crate::stratum::work::coinbase::{
-    build_coinbase, build_declared_coinbase, parse_bitcoin_coinbase_fields,
+    CoinbaseFields, build_coinbase, build_declared_coinbase, check_bch_coinbase_limit,
+    parse_bitcoin_coinbase_fields,
 };
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
@@ -183,14 +195,96 @@ pub const BCH_UNCLE_ONCE_RULE_TAG: &str = "uncle-once";
 pub const MAX_FUTURE_TIME_SECS: u64 = 120;
 /// Number of ancestor share headers used to compute median time past.
 pub const MTP_WINDOW: usize = 11;
-/// Maximum size of a share block's body, limited to 200kB: its share
-/// transactions plus the bitcoin coinbase it carries. The header and the
-/// coinbase merkle branch are bounded by their decoders.
+/// Maximum size of a share block's own transactions (its share coinbase and
+/// share transactions), 200 KiB, a number from upstream.
+///
+/// On Bitcoin, upstream's rule, the bitcoin coinbase the share carries counts
+/// towards it too. On Bitcoin Cash the bitcoin coinbase has its own limit,
+/// `BCH_MAX_TX_SIZE`, so a coinbase that pays every miner directly fits
+/// (`BCH_SHARE_BODY_SIZE_LIMIT`). The header and the coinbase merkle branch
+/// are bounded by their decoders.
 pub const BLOCK_TXS_SIZE_LIMIT: u32 = 200 * 1024;
+
+/// Bitcoin Cash: the largest share body, a full 1,000,000-byte coinbase
+/// (BCH's `MAX_TX_SIZE`; a coinbase is never relayed by BCHN on its own, so
+/// the 100,000-byte relay limit never applies to it) plus 200 KiB of share
+/// transactions: 1,204,800 bytes. A share-chain rule
+/// (`bch-hybrid-payouts.md`, 8.1).
+pub const BCH_SHARE_BODY_SIZE_LIMIT: usize = BCH_MAX_TX_SIZE + BLOCK_TXS_SIZE_LIMIT as usize;
+
+/// Protocol tag segment for the Bitcoin Cash share body rule: the bitcoin
+/// coinbase and the share transactions are limited apart, at BCH's
+/// transaction limit and 200 KiB. A node on the combined 200 KiB rejects a
+/// share this node accepts.
+pub const BCH_SHARE_BODY_RULE_TAG: &str = "body-1000000-204800";
+
+/// Protocol tag segment for the Bitcoin Cash payout script rule
+/// (`validate_payout_scripts`): payee, donation and fee scripts are P2PKH,
+/// P2SH20 or P2SH32.
+pub const BCH_PAYOUT_SCRIPT_RULE_TAG: &str = "payee-p2pkh-p2sh20-p2sh32";
+
+const _: () = assert!(BCH_SHARE_BODY_SIZE_LIMIT == 1_204_800);
 /// Maximum number of transactions allowed in a share block
 pub const TXS_COUNT_LIMIT: u32 = 100;
-/// Maximum total sigop cost allowed in a share block (matches Bitcoin consensus).
+/// Maximum total BIP141 sigop cost allowed in a Bitcoin share block (matches
+/// Bitcoin consensus). Bitcoin Cash shares count SigChecks instead
+/// ([`BCH_MAX_SHARE_SIGCHECKS`]).
 pub const MAX_BLOCK_SIGOPS_COST: usize = 80_000;
+
+/// Bytes of share transactions a Bitcoin Cash share's SigChecks budget is
+/// sized for: the 200 KiB of the share body the owner set aside for share
+/// transactions beside the coinbase (`docs/architecture/bch-hybrid-payouts.md`,
+/// 8.1).
+pub const BCH_SHARE_TRANSACTION_SIGCHECK_BYTES: usize = 200 * 1024;
+
+/// Most SigChecks the share transactions of one Bitcoin Cash share may
+/// execute: BCH's block density, one per `BYTES_PER_SIGCHECK` (141) bytes,
+/// applied to [`BCH_SHARE_TRANSACTION_SIGCHECK_BYTES`]: 1,452. An accepted
+/// input runs one SigCheck and takes at least 148 bytes (a P2PKH spend), so
+/// the share's byte limit binds first; the budget keeps the share chain
+/// within the density BCH allows a block, and replaces Bitcoin's BIP141
+/// sigop cost, which charged P2PKH outputs and missed the contract's
+/// signature check (audit A13).
+pub const BCH_MAX_SHARE_SIGCHECKS: usize =
+    BCH_SHARE_TRANSACTION_SIGCHECK_BYTES / bch_script::BYTES_PER_SIGCHECK;
+
+/// Name of the Bitcoin Cash SigChecks budget in protocol strings,
+/// `sigchecks3000-1452`: per transaction and per share.
+pub fn bch_sig_checks_rule_tag() -> String {
+    format!(
+        "sigchecks{}-{BCH_MAX_SHARE_SIGCHECKS}",
+        bch_script::MAX_TX_SIGCHECKS
+    )
+}
+
+/// Name of the rule refusing a SegWit witness commitment in a Bitcoin Cash
+/// coinbase, in protocol strings.
+pub const BCH_NO_SEGWIT_RULE_TAG: &str = "no-segwit";
+
+/// The SigChecks budget of a Bitcoin Cash share's transactions, given each
+/// transaction's id and SigChecks: at most `MAX_TX_SIGCHECKS` (3,000, BCH
+/// consensus) in one transaction, and at most [`BCH_MAX_SHARE_SIGCHECKS`] in
+/// all.
+pub(crate) fn check_bch_sig_checks(
+    per_transaction: &[(bitcoin::Txid, usize)],
+) -> Result<(), ValidationError> {
+    let mut total: usize = 0;
+    for (txid, sig_checks) in per_transaction {
+        if *sig_checks > bch_script::MAX_TX_SIGCHECKS {
+            return Err(ValidationError::consensus(format!(
+                "Transaction {txid} executes {sig_checks} SigChecks, over the {} a transaction may",
+                bch_script::MAX_TX_SIGCHECKS
+            )));
+        }
+        total = total.saturating_add(*sig_checks);
+    }
+    if total > BCH_MAX_SHARE_SIGCHECKS {
+        return Err(ValidationError::consensus(format!(
+            "Share transactions execute {total} SigChecks, over the {BCH_MAX_SHARE_SIGCHECKS} a share may"
+        )));
+    }
+    Ok(())
+}
 
 /// A nephew's recent ancestry, as uncle validation reads it.
 struct RecentAncestry {
@@ -265,6 +359,39 @@ pub(crate) fn stored_ancestor_times(
     Ok(ancestor_times)
 }
 
+/// The share-version votes in the vote span below `parent_hash`: the
+/// `SHARE_VERSION_VOTE_SPAN` shares from `SHARE_VERSION_VOTE_DEPTH -
+/// SHARE_VERSION_VOTE_SPAN` below the parent down, each counted by its work
+/// for the version it desires. Follows each header's own parent pointer, so
+/// the answer holds on a fork too, and stops at genesis.
+///
+/// Thousands of header reads: callers ask for it only when a share switches
+/// version (`check_share_version`, `next_share_version`).
+pub(crate) fn tally_share_version_votes(
+    parent_hash: BlockHash,
+    chain_store_handle: &ChainStoreHandle,
+) -> Result<VersionTally, StoreError> {
+    let mut current = parent_hash;
+    for _ in 0..SHARE_VERSION_VOTE_DEPTH - SHARE_VERSION_VOTE_SPAN {
+        if is_terminal_blockhash(&current) {
+            return Ok(VersionTally::default());
+        }
+        current = chain_store_handle
+            .get_share_header(&current)?
+            .prev_share_blockhash;
+    }
+    let mut tally = VersionTally::default();
+    for _ in 0..SHARE_VERSION_VOTE_SPAN {
+        if is_terminal_blockhash(&current) {
+            break;
+        }
+        let header = chain_store_handle.get_share_header(&current)?;
+        tally.add_share(header.share_version, header.bits);
+        current = header.prev_share_blockhash;
+    }
+    Ok(tally)
+}
+
 /// Total value the bitcoin coinbase pays out, in satoshis.
 ///
 /// This is the value payout validation divides among the PPLNS window. The
@@ -289,13 +416,14 @@ fn bitcoin_coinbase_value(coinbase: &Transaction) -> Result<u64, ValidationError
 /// Check whether a block is in the PPLNS zone (needing full
 /// validation) or the prune zone (PoW-only validation).
 ///
-/// The PPLNS zone spans `PAYOUT_DEPTH`, the maturity depth plus the PPLNS
-/// window, so every share a coinbase near the tip can pay is fully validated.
+/// The PPLNS zone spans the chain's payout depth (`ChainDepths`), the
+/// maturity depth plus the PPLNS window, so every share a coinbase near the
+/// tip can pay is fully validated.
 ///
-/// PPLNS zone: block_height > tip_height - PAYOUT_DEPTH
+/// PPLNS zone: block_height > tip_height - payout depth
 /// Prune zone: everything else below that height
-pub fn is_within_payout_depth(block_height: u32, tip_height: u32) -> bool {
-    block_height > tip_height.saturating_sub(PAYOUT_DEPTH as u32)
+pub fn is_within_payout_depth(depths: ChainDepths, block_height: u32, tip_height: u32) -> bool {
+    depths.is_within_payout_depth(block_height, tip_height)
 }
 
 /// Look up a block's height and the candidate tip height from the store,
@@ -309,6 +437,7 @@ pub fn is_within_payout_depth(block_height: u32, tip_height: u32) -> bool {
 pub fn check_pplns_zone(
     blockhash: &BlockHash,
     chain_store_handle: &ChainStoreHandle,
+    depths: ChainDepths,
 ) -> Result<bool, String> {
     let block_height = match chain_store_handle.get_block_metadata(blockhash) {
         Ok(metadata) => match metadata.expected_height {
@@ -326,7 +455,7 @@ pub fn check_pplns_zone(
         .get_candidate_tip_height()
         .map_err(|error| format!("Failed to get candidate tip height: {error}"))?
         .unwrap_or(0);
-    Ok(is_within_payout_depth(block_height, candidate_tip))
+    Ok(is_within_payout_depth(depths, block_height, candidate_tip))
 }
 
 /// Trait for share validation operations.
@@ -498,8 +627,11 @@ pub trait ShareValidator {
     /// block: the copy is dropped and the hash stays fetchable.
     fn validate_body_matches_header(&self, share: &ShareBlock) -> Result<(), ValidationError>;
 
-    /// Validate that the total size of the share's transactions and its
-    /// bitcoin coinbase is within `BLOCK_TXS_SIZE_LIMIT`.
+    /// Validate the size of the share's body: on Bitcoin, its transactions
+    /// and its bitcoin coinbase together within `BLOCK_TXS_SIZE_LIMIT`; on
+    /// Bitcoin Cash, its transactions within `BLOCK_TXS_SIZE_LIMIT` and the
+    /// bitcoin coinbase within BCH's `MAX_TX_SIZE`
+    /// (`BCH_SHARE_BODY_SIZE_LIMIT` in all).
     ///
     /// The bitcoin coinbase counts because it is carried and buffered with
     /// the block, and a miner can make it as large as a message allows.
@@ -536,6 +668,14 @@ pub struct DefaultShareValidator {
     /// Bitcoin and the Bitcoin Cash main chain use `MAX_POOL_TARGET`. The mini
     /// chain uses its own easier ceiling so its genesis target is valid.
     target_ceiling: CompactTarget,
+    /// The Bitcoin Cash network's ASERT parameters, for the format check of
+    /// a token share's bitcoin header. `None` on Bitcoin and on regtest,
+    /// which has no ASERT anchor.
+    bch_asert: Option<BchAsert>,
+    /// Where the payout tree of each validated share that is a BCH block
+    /// goes, to be kept and executed (`node::payout_tree_executor`). `None`
+    /// keeps no trees, as in tests and on Bitcoin.
+    payout_tree_sink: Option<PayoutTreeSender>,
 }
 
 impl DefaultShareValidator {
@@ -562,7 +702,156 @@ impl DefaultShareValidator {
             time_provider,
             chain: Chain::Bitcoin,
             target_ceiling: CompactTarget::from_consensus(MAX_POOL_TARGET),
+            bch_asert: None,
+            payout_tree_sink: None,
         }
+    }
+
+    /// Send the payout tree of every validated share that is a BCH block to
+    /// `sink`, whatever the share's later status on the share chain: the
+    /// tree is fixed in the block, and someone must execute it after
+    /// maturity.
+    pub fn with_payout_tree_sink(mut self, sink: PayoutTreeSender) -> Self {
+        self.payout_tree_sink = Some(sink);
+        self
+    }
+
+    /// Hand a found block's payout tree to the sink, if the share is a BCH
+    /// block whose coinbase pays some payees through a tree.
+    fn record_payout_tree(
+        &self,
+        share: &ShareBlock,
+        coinbase: &Transaction,
+        tree: Option<&PayoutTree>,
+    ) {
+        let (Some(sink), Some(tree)) = (&self.payout_tree_sink, tree) else {
+            return;
+        };
+        if !share.header.meets_bitcoin_difficulty() {
+            return;
+        }
+        let root_output = tree.root_output();
+        let Some(root_vout) = coinbase
+            .output
+            .iter()
+            .position(|output| *output == root_output)
+        else {
+            return;
+        };
+        let record = StoredPayoutTree::new(
+            tree,
+            coinbase.compute_txid(),
+            u32::try_from(root_vout).expect("a coinbase has far fewer than 2^32 outputs"),
+            share.header.bitcoin_header.block_hash(),
+            share.header.bitcoin_height,
+            share.block_hash(),
+        );
+        if sink.send(record).is_err() {
+            tracing::warn!(
+                "The payout tree executor has stopped; the tree of share {} is not kept",
+                share.block_hash()
+            );
+        }
+    }
+
+    /// Select the Bitcoin Cash network whose ASERT parameters check a token
+    /// share's bitcoin header ([`BchAsert::for_network`]). Without one, or
+    /// on regtest, the check is skipped.
+    pub fn with_bitcoin_cash_network(mut self, network: Option<BitcoinCashNetwork>) -> Self {
+        self.bch_asert = network.and_then(BchAsert::for_network);
+        self
+    }
+
+    /// The share-version vote rule (`shares::share_version`) for a Bitcoin
+    /// Cash share: its version is its parent's, or the next one with 60% of
+    /// the vote span's work behind it. Bitcoin shares carry no version.
+    ///
+    /// A parent header or height that is not stored yet is `Recoverable`;
+    /// any other read failure is `StoreAccess`.
+    fn validate_share_version(
+        &self,
+        share_header: &ShareHeader,
+        chain_store_handle: &ChainStoreHandle,
+    ) -> Result<(), ValidationError> {
+        if self.chain != Chain::BitcoinCash {
+            return Ok(());
+        }
+        let parent_hash = share_header.prev_share_blockhash;
+        let read_error = |error: StoreError| match error {
+            StoreError::NotFound(_) => ValidationError::recoverable(format!(
+                "Share version check cannot read ancestry of {parent_hash}: {error}"
+            )),
+            _ => ValidationError::store_access(format!(
+                "Share version check failed to read ancestry of {parent_hash}: {error}"
+            )),
+        };
+        let parent = chain_store_handle
+            .get_share_header(&parent_hash)
+            .map_err(read_error)?;
+        let parent_height = chain_store_handle
+            .get_block_metadata(&parent_hash)
+            .map_err(read_error)?
+            .expected_height
+            .ok_or_else(|| {
+                ValidationError::recoverable(format!(
+                    "Parent {parent_hash} has no height for the share version check"
+                ))
+            })?;
+        check_share_version(
+            share_header.share_version,
+            parent.share_version.version,
+            parent_height,
+            || tally_share_version_votes(parent_hash, chain_store_handle),
+        )
+        .map_err(read_error)?
+        .map_err(|error| ValidationError::consensus(format!("Invalid share version: {error}")))
+    }
+
+    /// Refuse a BIP141 witness commitment output in a Bitcoin Cash coinbase
+    /// (audit A18). Bitcoin Cash has no SegWit and BCHN's templates carry no
+    /// witness commitment, so an honest builder never adds one; without this
+    /// rule the payout rebuild would copy whatever commitment a share
+    /// carried. Bitcoin coinbases keep theirs.
+    fn validate_no_bch_witness_commitment(
+        &self,
+        fields: &CoinbaseFields,
+    ) -> Result<(), ValidationError> {
+        if self.chain == Chain::BitcoinCash && fields.witness_commitment.is_some() {
+            return Err(ValidationError::consensus(
+                "Bitcoin Cash coinbase carries a SegWit witness commitment",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The ASERT format check of a token share's bitcoin header: its nBits
+    /// must be what BCH's aserti3-2d gives at the share's BIP34 height,
+    /// within the band agreed for merge-mining proofs
+    /// ([`BchAsert::check_header_bits`]). A token claim's covenant checks the
+    /// same band, so a token share outside it could not be claimed; the
+    /// share chain refuses it at the header. No-token shares are not
+    /// checked: BCHN alone judges their blocks.
+    fn validate_token_share_asert(
+        &self,
+        share_header: &ShareHeader,
+    ) -> Result<(), ValidationError> {
+        let Some(asert) = self.bch_asert else {
+            return Ok(());
+        };
+        if self.chain != Chain::BitcoinCash || !share_has_token_commitment(share_header) {
+            return Ok(());
+        }
+        asert
+            .check_header_bits(
+                share_header.bitcoin_header.bits,
+                share_header.bitcoin_header.time,
+                share_header.bitcoin_height,
+            )
+            .map_err(|error| {
+                ValidationError::consensus(format!(
+                    "Token share's bitcoin header fails the ASERT format check: {error}"
+                ))
+            })
     }
 
     /// Select the chain whose share owner this validator accepts.
@@ -778,29 +1067,35 @@ impl DefaultShareValidator {
         Ok(())
     }
 
-    /// Validate scripts, input/output values, and sigop cost for all
-    /// transactions in the share block.
+    /// Validate scripts, input/output values, and the signature-check budget
+    /// for all transactions in the share block.
     ///
     /// Collects spent outputs once per non-coinbase transaction and runs
-    /// script verification, input-vs-output value checks, and sigop cost
-    /// accumulation in a single pass. The coinbase contributes sigop cost
-    /// but is exempt from script and value validation.
+    /// script verification, input-vs-output value checks, and the budget in
+    /// a single pass. The coinbase is exempt from script and value
+    /// validation.
     ///
-    /// Bitcoin scripts are checked by libbitcoinconsensus. Bitcoin Cash
-    /// scripts are checked by [`bch_script::verify_transaction`], because
-    /// Bitcoin rules would reject a `SIGHASH_FORKID` or Schnorr signature
-    /// and accept a Bitcoin one.
+    /// Bitcoin scripts are checked by libbitcoinconsensus and budgeted by
+    /// BIP141 sigop cost, the coinbase included. Bitcoin Cash scripts are
+    /// checked by [`bch_script::verify_transaction`], because Bitcoin rules
+    /// would reject a `SIGHASH_FORKID` or Schnorr signature and accept a
+    /// Bitcoin one, and budgeted by BCH's SigChecks
+    /// ([`check_bch_sig_checks`]), in which the coinbase and every output
+    /// count nothing.
     fn validate_scripts_values_and_sigops(
         &self,
         share: &ShareBlock,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError> {
         let mut total_sigop_cost: usize = 0;
+        let mut sig_checks = Vec::with_capacity(share.transactions.len().saturating_sub(1));
 
         for (index, transaction) in share.transactions.iter().enumerate() {
             if index == 0 {
-                let coinbase_sigop_cost = transaction.0.total_sigop_cost(|_outpoint| None);
-                total_sigop_cost = total_sigop_cost.saturating_add(coinbase_sigop_cost);
+                if self.chain == Chain::Bitcoin {
+                    let coinbase_sigop_cost = transaction.0.total_sigop_cost(|_outpoint| None);
+                    total_sigop_cost = total_sigop_cost.saturating_add(coinbase_sigop_cost);
+                }
             } else {
                 let txid = transaction.compute_txid();
                 let spent_outputs =
@@ -812,24 +1107,28 @@ impl DefaultShareValidator {
                             &spent_outputs,
                             &txid,
                         )?;
+                        sig_checks.push((txid, bch_script::sig_checks(&transaction.0)));
                     }
                     Chain::Bitcoin => {
                         Self::validate_scripts_for_tx(transaction, &spent_outputs, &txid)?;
+                        let tx_sigop_cost =
+                            Self::compute_transaction_sigop_cost(transaction, &spent_outputs);
+                        total_sigop_cost = total_sigop_cost.saturating_add(tx_sigop_cost);
                     }
                 }
                 Self::validate_input_output_values(transaction, &spent_outputs, &txid)?;
-                let tx_sigop_cost =
-                    Self::compute_transaction_sigop_cost(transaction, &spent_outputs);
-                total_sigop_cost = total_sigop_cost.saturating_add(tx_sigop_cost);
             }
         }
 
-        if total_sigop_cost > MAX_BLOCK_SIGOPS_COST {
-            return Err(ValidationError::consensus(format!(
-                "Block sigop cost {total_sigop_cost} exceeds maximum {MAX_BLOCK_SIGOPS_COST}"
-            )));
+        match self.chain {
+            Chain::BitcoinCash => check_bch_sig_checks(&sig_checks),
+            Chain::Bitcoin if total_sigop_cost > MAX_BLOCK_SIGOPS_COST => {
+                Err(ValidationError::consensus(format!(
+                    "Block sigop cost {total_sigop_cost} exceeds maximum {MAX_BLOCK_SIGOPS_COST}"
+                )))
+            }
+            Chain::Bitcoin => Ok(()),
         }
-        Ok(())
     }
 
     /// Collect all spent outputs for a transaction from the chain store.
@@ -1092,12 +1391,14 @@ impl DefaultShareValidator {
     /// Validate the donation and fee a share takes before the PPLNS split.
     ///
     /// Each is a share of what is left, so each must be at most 100%. On
-    /// Bitcoin Cash the two together must stay within
-    /// [`MAX_BITCOIN_CASH_POOL_CUT`], and a donation must pay the built-in
-    /// P2Poolv2 donation key. Without the cap a node could set a 100% fee to
-    /// itself and keep every block it finds while its shares still earn from
-    /// everyone else's; without the fixed key the donation field would be a
-    /// second, uncapped fee.
+    /// Bitcoin Cash each must also stay within its own cap,
+    /// [`MAX_BITCOIN_CASH_CUT`] (10%); there is no combined cap. The fee is
+    /// taken from what the donation leaves, so it too is at most 10% of the
+    /// coinbase value. A donation must pay the built-in P2Poolv2 donation
+    /// key. Without the cap a node could set a 100% fee to itself and keep
+    /// every block it finds while its shares still earn from everyone
+    /// else's; without the fixed key the donation field would be a second
+    /// fee.
     fn validate_payout_cuts(&self, share_header: &ShareHeader) -> Result<(), ValidationError> {
         let donation = share_header.donation.unwrap_or(0);
         let fee = share_header.fee.unwrap_or(0);
@@ -1109,10 +1410,10 @@ impl DefaultShareValidator {
         if self.chain != Chain::BitcoinCash {
             return Ok(());
         }
-        if u32::from(donation) + u32::from(fee) > u32::from(MAX_BITCOIN_CASH_POOL_CUT) {
+        if donation > MAX_BITCOIN_CASH_CUT || fee > MAX_BITCOIN_CASH_CUT {
             return Err(ValidationError::consensus(format!(
-                "Share donation {donation} plus fee {fee} exceeds the Bitcoin Cash cap of \
-                 {MAX_BITCOIN_CASH_POOL_CUT} basis points"
+                "Share donation {donation} or fee {fee} exceeds the Bitcoin Cash cap of \
+                 {MAX_BITCOIN_CASH_CUT} basis points each"
             )));
         }
         if donation > 0
@@ -1122,6 +1423,33 @@ impl DefaultShareValidator {
             return Err(ValidationError::consensus(
                 "Bitcoin Cash share donation must pay the built-in P2Poolv2 donation address",
             ));
+        }
+        Ok(())
+    }
+
+    /// Bitcoin Cash: every address a share header names must be a P2PKH,
+    /// P2SH20 or P2SH32 script (`bch_script::is_bch_payout_script`).
+    ///
+    /// The payee is checked always, the donation and fee addresses when
+    /// present, whether or not their cut is zero. A share-chain rule; Bitcoin
+    /// headers keep upstream's addresses.
+    fn validate_payout_scripts(&self, share_header: &ShareHeader) -> Result<(), ValidationError> {
+        if self.chain != Chain::BitcoinCash {
+            return Ok(());
+        }
+        let named = [
+            ("payout", Some(&share_header.miner_bitcoin_address)),
+            ("donation", share_header.donation_address.as_ref()),
+            ("fee", share_header.fee_address.as_ref()),
+        ];
+        for (role, address) in named {
+            if let Some(address) = address
+                && !bch_script::is_bch_payout_script(address.script_pubkey().as_bytes())
+            {
+                return Err(ValidationError::consensus(format!(
+                    "Bitcoin Cash share {role} address must be P2PKH, P2SH20 or P2SH32"
+                )));
+            }
         }
         Ok(())
     }
@@ -1197,8 +1525,8 @@ impl DefaultShareValidator {
         // divide it as the PPLNS window says.
         let coinbase_value = bitcoin_coinbase_value(&share.bitcoin_coinbase)?;
 
-        let split = PayoutSplit::for_chain(self.chain, share.header.prev_share_blockhash);
-        let expected_outputs = Self::build_expected_outputs(
+        let split = split_for_share(self.chain, &share.header);
+        let expected_payouts = Self::build_expected_outputs(
             &share.header,
             &address_difficulty_map,
             coinbase_value,
@@ -1215,8 +1543,14 @@ impl DefaultShareValidator {
         // a tag, not consensus: nodes configured with different signatures
         // must still agree on validity.
         //
-        // Bitcoin Cash adds the reserved AuxPoW output after the payouts. A
-        // declared Bitcoin Cash coinbase has the declarator's scriptSig
+        // Bitcoin Cash puts the merge-mining commitment at output 0: on a
+        // pool-built share the root its node built for its miner's token
+        // leaves (`pool_merge_mining`) or the exact empty one, the declared
+        // one otherwise, so a peer rebuilds it byte for byte. Only its format
+        // is checked: no peer knows or needs the tokens behind a root, so
+        // share validity never depends on them. A Bitcoin Cash coinbase may
+        // not carry a SegWit witness commitment. A declared Bitcoin Cash
+        // coinbase has the declarator's scriptSig
         // prefix followed by the 12-byte extranonce, so its extranonce is
         // what follows the prefix in the coinbase the miner hashed.
         let reconstructed_coinbase = if let Some(declared) = &share.header.bch_coinbase {
@@ -1235,7 +1569,7 @@ impl DefaultShareValidator {
                 ValidationError::consensus("Declared BCH coinbase is shorter than its prefix")
             })?;
             build_declared_coinbase(
-                &expected_outputs,
+                &expected_payouts,
                 share.header.bitcoin_height,
                 expected_commitment_hash,
                 extranonce,
@@ -1246,11 +1580,21 @@ impl DefaultShareValidator {
                 parse_bitcoin_coinbase_fields(&share.bitcoin_coinbase).map_err(|error| {
                     ValidationError::consensus(format!("Malformed bitcoin coinbase: {error}"))
                 })?;
-            let merge_mining = (self.chain == Chain::BitcoinCash)
-                .then(crate::shares::merge_mining::MergeMiningCommitment::reserved);
+            self.validate_no_bch_witness_commitment(&fields)?;
+            if self.chain != Chain::BitcoinCash && share.header.pool_merge_mining.is_some() {
+                return Err(ValidationError::consensus(
+                    "Pool-built token root on Bitcoin chain",
+                ));
+            }
+            share
+                .header
+                .check_pool_merge_mining()
+                .map_err(ValidationError::consensus)?;
+            let merge_mining =
+                (self.chain == Chain::BitcoinCash).then(|| share.header.merge_mining_commitment());
             build_coinbase(
                 Version::TWO,
-                &expected_outputs,
+                &expected_payouts.outputs,
                 share.header.bitcoin_height as i64,
                 fields.aux_flags,
                 fields.witness_commitment.as_ref(),
@@ -1259,6 +1603,7 @@ impl DefaultShareValidator {
                 fields.nsecs,
                 Some(&fields.extranonce),
                 merge_mining,
+                expected_payouts.tree_output().as_ref(),
             )
         }
         .map_err(|error| ValidationError::consensus(format!("Error building coinbase {error}")))?;
@@ -1268,6 +1613,12 @@ impl DefaultShareValidator {
                 "Bitcoin coinbase is not the coinbase the PPLNS window and share fields imply",
             ));
         }
+        // The split keeps room for every other field at its worst case, so
+        // only a scriptSig past BCH's 100 bytes can push a coinbase over its
+        // limit; a token share's coinbase must also keep its one-byte output
+        // count. Both are share-chain rules (`bch-hybrid-payouts.md`, 3.4).
+        check_bch_coinbase_limit(&reconstructed_coinbase, split)
+            .map_err(|error| ValidationError::consensus(error.to_string()))?;
 
         let reconstructed_coinbase_txid = reconstructed_coinbase.compute_txid();
         let recomputed_root = compute_merkle_root_from_branches(
@@ -1280,15 +1631,21 @@ impl DefaultShareValidator {
                 "Coinbase and template merkle root don't match merkle root",
             ))
         } else {
+            self.record_payout_tree(
+                share,
+                &reconstructed_coinbase,
+                expected_payouts.tree.as_ref(),
+            );
             Ok(())
         }
     }
 
     /// Build the expected payout outputs from share header donation/fee and PPLNS distribution.
     ///
-    /// `split` is the chain's: every payee on Bitcoin, the coinbase budget
-    /// on Bitcoin Cash with its tail drawn from the share's
-    /// `prev_share_blockhash`, as the producer built them.
+    /// `split` is the share's: every payee on Bitcoin, the hybrid payout on
+    /// Bitcoin Cash at the limit its merge-mining commitment sets, as the
+    /// producer built them. Returns the payout tree too, when payees go to
+    /// one.
     ///
     /// When the PPLNS window is empty (bootstrap phase), returns an error.
     fn build_expected_outputs(
@@ -1296,7 +1653,7 @@ impl DefaultShareValidator {
         address_difficulty_map: &HashMap<Address, u128>,
         coinbase_value: u64,
         split: PayoutSplit,
-    ) -> Result<Vec<OutputPair>, ValidationError> {
+    ) -> Result<CoinbasePayouts, ValidationError> {
         build_pplns_outputs(
             coinbase_value,
             address_difficulty_map,
@@ -1405,7 +1762,21 @@ impl ShareValidator for DefaultShareValidator {
 
     fn validate_block_size(&self, share: &ShareBlock) -> Result<(), ValidationError> {
         let transactions_size: usize = share.transactions.iter().map(|tx| tx.total_size()).sum();
-        let total_size = transactions_size + share.bitcoin_coinbase.total_size();
+        let coinbase_size = share.bitcoin_coinbase.total_size();
+        if self.chain == Chain::BitcoinCash {
+            if transactions_size > BLOCK_TXS_SIZE_LIMIT as usize {
+                return Err(ValidationError::consensus(format!(
+                    "Share transactions size {transactions_size} exceeds limit of {BLOCK_TXS_SIZE_LIMIT}"
+                )));
+            }
+            if coinbase_size > BCH_MAX_TX_SIZE {
+                return Err(ValidationError::consensus(format!(
+                    "Bitcoin Cash coinbase size {coinbase_size} exceeds BCH's transaction limit of {BCH_MAX_TX_SIZE}"
+                )));
+            }
+            return Ok(());
+        }
+        let total_size = transactions_size + coinbase_size;
         if total_size > BLOCK_TXS_SIZE_LIMIT as usize {
             return Err(ValidationError::consensus(format!(
                 "Block transactions and bitcoin coinbase size {total_size} exceeds limit of {BLOCK_TXS_SIZE_LIMIT}"
@@ -1425,6 +1796,7 @@ impl ShareValidator for DefaultShareValidator {
     ) -> Result<(), ValidationError> {
         self.validate_miner_address(share_header)?;
         self.validate_payout_cuts(share_header)?;
+        self.validate_payout_scripts(share_header)?;
 
         let parent_hash = share_header.prev_share_blockhash;
         let parent = chain_store_handle
@@ -1463,6 +1835,7 @@ impl ShareValidator for DefaultShareValidator {
     ) -> Result<(), ValidationError> {
         self.validate_miner_address(share_header)?;
         self.validate_payout_cuts(share_header)?;
+        self.validate_payout_scripts(share_header)?;
         if share_header.uncles.len() > MAX_UNCLES {
             return Err(ValidationError::consensus(format!(
                 "Too many uncles: {} exceeds maximum of {}",
@@ -1486,7 +1859,12 @@ impl ShareValidator for DefaultShareValidator {
             )));
         }
 
-        Ok(())
+        if self.chain == Chain::BitcoinCash {
+            check_share_version_alone(share_header.share_version).map_err(|error| {
+                ValidationError::consensus(format!("Invalid share version: {error}"))
+            })?;
+        }
+        self.validate_token_share_asert(share_header)
     }
 
     /// Validations run in parallel that don't require the chain context.
@@ -1509,6 +1887,7 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_coinbase_proof(&share.header, &share.template_merkle_branches)?;
         self.validate_body_matches_header(share)?;
         self.validate_with_pool_difficulty(&share.header, chain_store_handle)?;
+        self.validate_share_version(&share.header, chain_store_handle)?;
         self.validate_uncles(share, chain_store_handle)?;
         self.validate_uncle_bodies_present(share, chain_store_handle)?;
         self.validate_block_size(share)?;
@@ -1527,6 +1906,7 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_coinbase_proof(&share.header, &share.template_merkle_branches)?;
         self.validate_body_matches_header(share)?;
         self.validate_with_pool_difficulty(&share.header, chain_store_handle)?;
+        self.validate_share_version(&share.header, chain_store_handle)?;
         self.validate_uncles(share, chain_store_handle)?;
         self.validate_block_size(share)?;
         self.validate_transaction_count(share)?;
@@ -1612,7 +1992,7 @@ impl ShareValidator for DefaultShareValidator {
     ///
     /// 1. No outpoint is spent by more than one input in this block.
     /// 2. Every outpoint exists in the `Outputs` column family.
-    /// 3. Every outpoint's coinbase root is within `PAYOUT_DEPTH` of this
+    /// 3. Every outpoint's coinbase root is within the chain's payout depth of this
     ///    block, so an output stays spendable for a full PPLNS window after
     ///    it matures.
     /// 4. A coinbase output is mature relative to this block's own height.
@@ -1664,13 +2044,14 @@ impl ShareValidator for DefaultShareValidator {
         if self.chain == Chain::BitcoinCash {
             Self::validate_bitcoin_cash_finality(share, block_height)?;
         }
-        let min_coinbase_root_height = block_height.saturating_sub(PAYOUT_DEPTH as u32);
+        let depths = ChainDepths::for_chain(self.chain);
+        let min_coinbase_root_height = block_height.saturating_sub(depths.payout_depth as u32);
         match chain_store_handle
             .check_prevouts(
                 &all_outpoints,
                 block_height,
                 min_coinbase_root_height,
-                coinbase_maturity_for(self.chain),
+                depths.coinbase_maturity,
             )
             .map_err(|error| {
                 ValidationError::store_access(format!("Prevout check failed: {error}"))
@@ -1768,8 +2149,10 @@ mockall::mock! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounting::OutputPair;
     use crate::accounting::payout::sharechain_pplns::pplns_window::{
-        BCH_COINBASE_MATURITY, COINBASE_MATURITY, PPLNS_WINDOW_SHARES,
+        BCH_COINBASE_MATURITY, BCH_PAYOUT_DEPTH, COINBASE_MATURITY, PAYOUT_DEPTH,
+        PPLNS_WINDOW_SHARES,
     };
     use crate::shares::bch_coinbase::BchCoinbase;
     use crate::shares::bch_htlc::{HtlcContract, secret_hash};
@@ -1813,6 +2196,176 @@ mod tests {
         DefaultShareValidator::new(pool_difficulty)
     }
 
+    /// A Bitcoin Cash share follows its parent's version; a switch needs the
+    /// vote depth below it, and a version this build does not implement is
+    /// refused at the header gate. Bitcoin shares are not checked.
+    #[test]
+    fn bitcoin_cash_share_version_follows_the_vote_rule() {
+        use crate::shares::share_version::{SHARE_VERSION_VOTE_DEPTH, ShareVersion};
+        let parent = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build()
+            .header;
+        let child_of = |parent_version: u32, parent_height: u32| {
+            let mut parent = parent.clone();
+            parent.share_version.version = parent_version;
+            let mut chain_store_handle = ChainStoreHandle::default();
+            chain_store_handle
+                .expect_get_share_header()
+                .returning(move |_| Ok(parent.clone()));
+            chain_store_handle
+                .expect_get_block_metadata()
+                .returning(move |_| Ok(metadata_at_height(parent_height)));
+            chain_store_handle
+        };
+        let mut child = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build()
+            .header;
+        let bch = validator().for_chain(Chain::BitcoinCash);
+
+        bch.validate_share_version(&child, &child_of(1, 10))
+            .unwrap();
+
+        // Version 0 stands in for "the version before this build's": a
+        // switch to version 1 below the vote depth has no history to count.
+        let error = bch
+            .validate_share_version(&child, &child_of(0, SHARE_VERSION_VOTE_DEPTH - 1))
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("vote depth"), "{error}");
+
+        child.share_version = ShareVersion {
+            version: 2,
+            desired_version: 2,
+        };
+        let error = bch
+            .validate_share_version(&child, &child_of(1, 10))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("newer than this node"),
+            "{error}"
+        );
+        // Bitcoin shares carry no version.
+        validator()
+            .validate_share_version(&child, &ChainStoreHandle::default())
+            .unwrap();
+    }
+
+    /// BCH's SigChecks budget: at most 3,000 in one transaction and 1,452
+    /// (200 KiB / 141) in a share's transactions.
+    #[test]
+    fn bitcoin_cash_share_transactions_are_budgeted_by_sig_checks() {
+        let txid = |byte: u8| bitcoin::Txid::from_byte_array([byte; 32]);
+        assert_eq!(BCH_MAX_SHARE_SIGCHECKS, 1_452);
+        check_bch_sig_checks(&[]).unwrap();
+        // 3,000 in one transaction is within BCH's transaction limit but over
+        // the share's density budget, which binds first.
+        let error = check_bch_sig_checks(&[(txid(1), bch_script::MAX_TX_SIGCHECKS)]).unwrap_err();
+        assert!(error.to_string().contains("a share may"), "{error}");
+        let error =
+            check_bch_sig_checks(&[(txid(1), bch_script::MAX_TX_SIGCHECKS + 1)]).unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("a transaction may"), "{error}");
+        check_bch_sig_checks(&[(txid(1), 1_000), (txid(2), 452)]).unwrap();
+        let error = check_bch_sig_checks(&[(txid(1), 1_000), (txid(2), 453)]).unwrap_err();
+        assert!(error.to_string().contains("a share may"), "{error}");
+    }
+
+    /// A Bitcoin Cash coinbase carrying a BIP141 witness commitment is
+    /// refused; the same coinbase is fine on Bitcoin, and a Bitcoin Cash
+    /// coinbase without one passes.
+    #[test]
+    fn bitcoin_cash_coinbase_with_a_witness_commitment_is_refused() {
+        let witness_commitment =
+            WitnessCommitment::from_hex(&format!("6a24aa21a9ed{}", "ab".repeat(32))).unwrap();
+        let build = |witness: Option<&WitnessCommitment>| {
+            build_coinbase(
+                Version::TWO,
+                &[OutputPair {
+                    address: crate::test_utils::make_test_address(1),
+                    amount: Amount::from_sat(312_500_000),
+                }],
+                900_000,
+                PushBytesBuf::new(),
+                witness,
+                b"P2Poolv2",
+                Some(bitcoin::hashes::sha256::Hash::all_zeros()),
+                0,
+                Some(&[0u8; 12]),
+                Some(MergeMiningCommitment::empty()),
+                None,
+            )
+            .unwrap()
+        };
+        let with_commitment =
+            parse_bitcoin_coinbase_fields(&build(Some(&witness_commitment))).unwrap();
+        assert_eq!(with_commitment.witness_commitment, Some(witness_commitment));
+        let bch = validator().for_chain(Chain::BitcoinCash);
+        let error = bch
+            .validate_no_bch_witness_commitment(&with_commitment)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("SegWit"), "{error}");
+        validator()
+            .validate_no_bch_witness_commitment(&with_commitment)
+            .unwrap();
+        let without = parse_bitcoin_coinbase_fields(&build(None)).unwrap();
+        bch.validate_no_bch_witness_commitment(&without).unwrap();
+    }
+
+    /// A token share's bitcoin header must pass the ASERT format check on a
+    /// network with an anchor; a no-token share and regtest are not checked.
+    /// The header is real chipnet block 300,002 (bits `0x1c34e28b`).
+    #[test]
+    fn token_share_bitcoin_header_must_pass_the_asert_format_check() {
+        let chipnet_block: bitcoin::block::Header = bitcoin::consensus::deserialize(
+            &hex::decode(concat!(
+                "00000020c5d7d2b0ceec4b1abd7e0959658bf74bce9d1612964b22006ff81557",
+                "00000000d60d4fce09b3478d9d674fb1066d99c43f785fe7227145d792f64c63",
+                "00e9c729f383d1698be2341c38f1a94a"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.bitcoin_header = chipnet_block;
+        header.bitcoin_height = 300_002;
+        header.bch_coinbase = Some(crate::shares::bch_coinbase::BchCoinbase {
+            prefix: Builder::new().push_int(300_002).into_bytes(),
+            merge_mining: MergeMiningCommitment {
+                root: [0x01; 32],
+                height: 0,
+                salt: 0,
+            },
+        });
+        let chipnet = validator()
+            .for_chain(Chain::BitcoinCash)
+            .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Chipnet));
+        chipnet.validate_token_share_asert(&header).unwrap();
+
+        // 256 times harder than ASERT gives is outside the band.
+        let mut hard = header.clone();
+        hard.bitcoin_header.bits = CompactTarget::from_consensus(0x1b34_e28b);
+        let error = chipnet.validate_token_share_asert(&hard).unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("ASERT"), "{error}");
+
+        // The same header as a no-token share, or on regtest, is not checked.
+        let mut no_token = hard.clone();
+        no_token.bch_coinbase.as_mut().unwrap().merge_mining = MergeMiningCommitment::empty();
+        chipnet.validate_token_share_asert(&no_token).unwrap();
+        let regtest = validator()
+            .for_chain(Chain::BitcoinCash)
+            .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Regtest));
+        regtest.validate_token_share_asert(&hard).unwrap();
+        // Mainnet's anchor is above this height: refused.
+        let mainnet = validator()
+            .for_chain(Chain::BitcoinCash)
+            .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Mainnet));
+        assert!(mainnet.validate_token_share_asert(&header).is_err());
+    }
+
     #[test]
     fn bitcoin_rejects_a_cash_share_owner() {
         let mut share = TestShareBlockBuilder::new().build();
@@ -1839,6 +2392,105 @@ mod tests {
             .validate_miner_address(&taproot.header)
             .unwrap_err();
         assert!(error.to_string().contains("P2PKH"), "{error}");
+    }
+
+    fn header_paying(script: ScriptBuf) -> ShareHeader {
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.miner_bitcoin_address = Address::from_script(&script, Network::Regtest).unwrap();
+        header
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_p2pkh_payee() {
+        let header = header_paying(ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array([7; 20])));
+        assert!(
+            validator()
+                .for_chain(Chain::BitcoinCash)
+                .validate_payout_scripts(&header)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_p2sh20_payee() {
+        let header = header_paying(ScriptBuf::new_p2sh(&bitcoin::ScriptHash::from_byte_array(
+            [7; 20],
+        )));
+        assert!(
+            validator()
+                .for_chain(Chain::BitcoinCash)
+                .validate_payout_scripts(&header)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_witness_program_payee() {
+        let header = header_paying(ScriptBuf::new_p2wpkh(
+            &bitcoin::WPubkeyHash::from_byte_array([7; 20]),
+        ));
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_payout_scripts(&header)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("payout address"), "{error}");
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_taproot_payee() {
+        let header = header_paying(ScriptBuf::new_witness_program(
+            &bitcoin::WitnessProgram::new(bitcoin::WitnessVersion::V1, &[7; 32]).unwrap(),
+        ));
+        assert!(
+            validator()
+                .for_chain(Chain::BitcoinCash)
+                .validate_payout_scripts(&header)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_witness_program_fee_address() {
+        let mut header = header_paying(ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array([7; 20])));
+        header.fee_address = Some(
+            Address::from_script(
+                &ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::from_byte_array([8; 32])),
+                Network::Regtest,
+            )
+            .unwrap(),
+        );
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_payout_scripts(&header)
+            .unwrap_err();
+        assert!(error.to_string().contains("fee address"), "{error}");
+    }
+
+    /// A header failing the rule fails the minimum-difficulty header check,
+    /// the gate every received header passes.
+    #[test]
+    fn bitcoin_cash_header_gate_rejects_a_witness_program_payee() {
+        let mut header = header_paying(ScriptBuf::new_p2wpkh(
+            &bitcoin::WPubkeyHash::from_byte_array([7; 20]),
+        ));
+        header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_header_minimum_difficulty(&header)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("P2PKH, P2SH20 or P2SH32"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn bitcoin_keeps_witness_program_payees() {
+        let header = header_paying(ScriptBuf::new_p2wpkh(
+            &bitcoin::WPubkeyHash::from_byte_array([7; 20]),
+        ));
+        assert!(validator().validate_payout_scripts(&header).is_ok());
     }
 
     #[test]
@@ -2300,34 +2952,57 @@ mod tests {
         assert!(error.to_string().contains("built-in"), "{error}");
     }
 
-    #[test]
-    fn bitcoin_cash_accepts_a_fee_at_the_cap_with_no_donation() {
-        let mut share = TestShareBlockBuilder::new().build();
-        share.header.fee_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array([0x33; 20]),
-            Network::Testnet,
-        ));
-        share.header.fee = Some(MAX_BITCOIN_CASH_POOL_CUT);
-        let bch_validator = validator().for_chain(Chain::BitcoinCash);
-        assert!(bch_validator.validate_payout_cuts(&share.header).is_ok());
-    }
-
-    #[test]
-    fn bitcoin_cash_rejects_a_donation_and_fee_above_the_cap() {
+    /// A Bitcoin Cash share header with the given donation (to the built-in
+    /// key) and fee (to another key), in basis points.
+    fn bitcoin_cash_header_with_cuts(donation: u16, fee: u16) -> ShareHeader {
         let mut share = TestShareBlockBuilder::new().build();
         share.header.donation_address = Some(Address::p2pkh(
             PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
             Network::Testnet,
         ));
-        share.header.donation = Some(150);
+        share.header.donation = Some(donation);
         share.header.fee_address = Some(Address::p2pkh(
             PubkeyHash::from_byte_array([0x33; 20]),
             Network::Testnet,
         ));
-        share.header.fee = Some(MAX_BITCOIN_CASH_POOL_CUT - 149);
+        share.header.fee = Some(fee);
+        share.header
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_a_fee_at_the_cap_with_no_donation() {
+        let header = bitcoin_cash_header_with_cuts(0, MAX_BITCOIN_CASH_CUT);
+        let bch_validator = validator().for_chain(Chain::BitcoinCash);
+        assert!(bch_validator.validate_payout_cuts(&header).is_ok());
+    }
+
+    /// The donation and the fee each have their own 10% cap, with no
+    /// combined one: a share taking 10% and 10% is valid.
+    #[test]
+    fn bitcoin_cash_accepts_a_ten_percent_donation_and_a_ten_percent_fee() {
+        let header = bitcoin_cash_header_with_cuts(1_000, 1_000);
+        assert_eq!(MAX_BITCOIN_CASH_CUT, 1_000);
+        let bch_validator = validator().for_chain(Chain::BitcoinCash);
+        assert!(bch_validator.validate_payout_cuts(&header).is_ok());
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_an_eleven_percent_donation() {
+        let header = bitcoin_cash_header_with_cuts(1_100, 0);
         let error = validator()
             .for_chain(Chain::BitcoinCash)
-            .validate_payout_cuts(&share.header)
+            .validate_payout_cuts(&header)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("cap"), "{error}");
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_fee_one_basis_point_above_its_cap() {
+        let header = bitcoin_cash_header_with_cuts(0, MAX_BITCOIN_CASH_CUT + 1);
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_payout_cuts(&header)
             .unwrap_err();
         assert_eq!(error.kind(), FailureKind::Consensus);
         assert!(error.to_string().contains("cap"), "{error}");
@@ -3551,6 +4226,69 @@ mod tests {
         );
     }
 
+    /// On Bitcoin Cash the bitcoin coinbase has BCH's own transaction limit:
+    /// a coinbase of about 1,000,000 bytes, which pays every one of some
+    /// 29,000 miners directly, fits beside the share's own transactions.
+    #[test]
+    fn bitcoin_cash_accepts_a_coinbase_up_to_bchs_transaction_limit() {
+        let mut share = TestShareBlockBuilder::new()
+            .miner_pubkey("020202020202020202020202020202020202020202020202020202020202020202")
+            .build();
+        let base = share.bitcoin_coinbase.total_size();
+        let old_script = share.bitcoin_coinbase.output[0].script_pubkey.len();
+        // The script's one-byte length becomes five bytes past 65,535.
+        share.bitcoin_coinbase.output[0].script_pubkey =
+            ScriptBuf::from_bytes(vec![0u8; BCH_MAX_TX_SIZE - base + old_script - 4]);
+        assert_eq!(share.bitcoin_coinbase.total_size(), BCH_MAX_TX_SIZE);
+
+        assert!(
+            validator()
+                .for_chain(Chain::BitcoinCash)
+                .validate_block_size(&share)
+                .is_ok()
+        );
+        assert!(validator().validate_block_size(&share).is_err());
+    }
+
+    #[test]
+    fn bitcoin_cash_rejects_a_coinbase_past_bchs_transaction_limit() {
+        let mut share = TestShareBlockBuilder::new()
+            .miner_pubkey("020202020202020202020202020202020202020202020202020202020202020202")
+            .build();
+        share.bitcoin_coinbase.output[0].script_pubkey =
+            ScriptBuf::from_bytes(vec![0u8; BCH_MAX_TX_SIZE]);
+
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_block_size(&share)
+            .unwrap_err();
+        assert!(error.to_string().contains("transaction limit"), "{error}");
+    }
+
+    /// The share's own transactions keep their 200 KiB on Bitcoin Cash.
+    #[test]
+    fn bitcoin_cash_rejects_share_transactions_past_their_limit() {
+        let large_tx = build_large_transaction(BLOCK_TXS_SIZE_LIMIT as usize);
+        let share = TestShareBlockBuilder::new()
+            .miner_pubkey("020202020202020202020202020202020202020202020202020202020202020202")
+            .add_transaction(large_tx)
+            .build();
+
+        let error = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_block_size(&share)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("Share transactions size"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_bitcoin_cash_share_body_holds_a_full_coinbase_and_the_share_transactions() {
+        assert_eq!(BCH_SHARE_BODY_SIZE_LIMIT, 1_000_000 + 204_800);
+    }
+
     #[test]
     fn test_validate_block_size_succeeds_at_exactly_limit() {
         let share = TestShareBlockBuilder::new()
@@ -4771,6 +5509,50 @@ mod tests {
         assert!(result.is_ok(), "got: {result:?}");
     }
 
+    /// On Bitcoin Cash an output expires `BCH_PAYOUT_DEPTH` (121,063) below
+    /// the spending share and matures at 100, Bitcoin Cash's own depths
+    /// rather than Bitcoin's 127,008 and 6,048.
+    #[test]
+    fn bitcoin_cash_outputs_expire_at_its_own_payout_depth() {
+        let parent_height = 200_000u32;
+        let spending_height = parent_height + 1;
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_get_block_metadata()
+            .returning(move |_| Ok(metadata_at_height(parent_height)));
+        chain_store_handle
+            .expect_check_prevouts()
+            .withf(
+                move |_outpoints, _spending_height, min_coinbase_root_height, coinbase_maturity| {
+                    *min_coinbase_root_height == spending_height - BCH_PAYOUT_DEPTH as u32
+                        && *coinbase_maturity == BCH_COINBASE_MATURITY
+                },
+            )
+            .returning(|_, _, _, _| Ok(PrevoutCheck::Accepted));
+        let spending_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::new(bitcoin::Txid::all_zeros(), 0),
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(10_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let share = TestShareBlockBuilder::new()
+            .add_transaction(spending_tx)
+            .build();
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_prevouts(&share, &chain_store_handle);
+        assert!(result.is_ok(), "got: {result:?}");
+    }
+
     #[test]
     fn test_build_expected_outputs_empty_distribution_returns_error() {
         let header = TestShareBlockBuilder::new()
@@ -4818,7 +5600,8 @@ mod tests {
             total_amount,
             PayoutSplit::EveryPayee,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
         assert_eq!(outputs.len(), 2);
         let total_distributed: Amount = outputs.iter().map(|output| output.amount).sum();
@@ -4866,7 +5649,8 @@ mod tests {
             total,
             PayoutSplit::EveryPayee,
         )
-        .unwrap();
+        .unwrap()
+        .outputs;
 
         // 3 outputs: donation, fee, miner
         assert_eq!(outputs.len(), 3);
@@ -5601,7 +6385,8 @@ mod tests {
             Some(commitment_hash),
             TEST_COINBASE_NSECS,
             Some(&[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE]),
-            Some(MergeMiningCommitment::reserved()),
+            Some(MergeMiningCommitment::empty()),
+            None,
         )
         .unwrap();
         share_block.header.bitcoin_header.merkle_root =
@@ -5645,16 +6430,16 @@ mod tests {
                 .push_slice(b"miner")
                 .into_bytes(),
             merge_mining: MergeMiningCommitment {
-                merkle_root: [0x33; 32],
-                tree_size: 4,
-                nonce: 7,
+                root: [0x33; 32],
+                height: 2,
+                salt: 7,
             },
         });
         let mut coinbase = build_declared_coinbase(
-            &[OutputPair {
+            &CoinbasePayouts::direct(vec![OutputPair {
                 address: address.clone(),
                 amount: Amount::from_sat(100_000_000),
-            }],
+            }]),
             702,
             ShareCommitment::from_share_block(&share).hash(),
             &[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE],
@@ -5686,6 +6471,426 @@ mod tests {
                 .validate_bitcoin_payout(&share, &ChainStoreHandle::default(), window)
                 .is_err()
         );
+    }
+
+    /// A token share with 120 payees: the producer's coinbase pays 77
+    /// directly and the rest through the payout tree, within T, and the
+    /// validator rebuilds exactly that coinbase from the same weights.
+    #[test]
+    fn a_token_share_past_t_is_rebuilt_with_its_payout_tree() {
+        let weights: HashMap<Address, u128> = (1..=120u8)
+            .map(|byte| {
+                (
+                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    u128::from(byte) * 1_000,
+                )
+            })
+            .collect();
+        let commitment = MergeMiningCommitment {
+            root: [0x33; 32],
+            height: 2,
+            salt: 7,
+        };
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.bitcoin_height = 702;
+        share.header.bch_coinbase = Some(BchCoinbase {
+            prefix: Builder::new()
+                .push_int(702)
+                .push_slice(b"miner")
+                .into_bytes(),
+            merge_mining: commitment,
+        });
+        let producer_payouts = build_pplns_outputs(
+            312_500_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            bch_split_for_commitment(&commitment),
+        )
+        .unwrap();
+        let coinbase = build_declared_coinbase(
+            &producer_payouts,
+            702,
+            ShareCommitment::from_share_block(&share).hash(),
+            &[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE],
+            share.header.bch_coinbase.as_ref().unwrap(),
+        )
+        .unwrap();
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        share.bitcoin_coinbase = coinbase.clone();
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(weights.clone()));
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_bitcoin_payout(
+                &share,
+                &ChainStoreHandle::default(),
+                Arc::new(RwLock::new(window)),
+            );
+
+        assert!(result.is_ok(), "{}", result.unwrap_err());
+        let tree = producer_payouts.tree.as_ref().unwrap();
+        assert_eq!(producer_payouts.outputs.len(), 77);
+        assert_eq!(tree.payees().len(), 43);
+        assert!(coinbase.output.contains(&tree.root_output()));
+        assert!(coinbase.total_size() <= 3_072);
+    }
+
+    /// A pool-built share whose node merge-mines tokens for its miner: the
+    /// header's token root is output 0 and the coinbase follows the token
+    /// share's limit, 77 payees directly and 43 through the payout tree, and
+    /// a peer rebuilds it from the header alone, knowing nothing of the
+    /// tokens.
+    #[test]
+    fn a_pool_built_token_share_is_rebuilt_from_its_header_root() {
+        let weights: HashMap<Address, u128> = (1..=120u8)
+            .map(|byte| {
+                (
+                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    u128::from(byte) * 1_000,
+                )
+            })
+            .collect();
+        let root = MergeMiningCommitment {
+            root: [0x44; 32],
+            height: 1,
+            salt: 3,
+        };
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.bitcoin_height = 702;
+        share.header.pool_merge_mining = Some(root);
+        let producer_payouts = build_pplns_outputs(
+            312_500_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            bch_split_for_commitment(&root),
+        )
+        .unwrap();
+        let coinbase = build_coinbase(
+            Version::TWO,
+            &producer_payouts.outputs,
+            702,
+            PushBytesBuf::from(&[0u8]),
+            None,
+            b"P2Poolv2",
+            Some(ShareCommitment::from_share_block(&share).hash()),
+            TEST_COINBASE_NSECS,
+            Some(&[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE]),
+            Some(root),
+            producer_payouts.tree_output().as_ref(),
+        )
+        .unwrap();
+        assert_eq!(
+            MergeMiningCommitment::from_output(&coinbase.output[0]),
+            Ok(root)
+        );
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        share.bitcoin_coinbase = coinbase.clone();
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(weights.clone()));
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_bitcoin_payout(
+                &share,
+                &ChainStoreHandle::default(),
+                Arc::new(RwLock::new(window)),
+            );
+
+        assert!(result.is_ok(), "{}", result.unwrap_err());
+        assert_eq!(producer_payouts.outputs.len(), 77);
+        assert!(coinbase.total_size() <= 3_072);
+    }
+
+    /// A pool-built share whose header names another root than its coinbase
+    /// carries is refused: output 0 is rebuilt from the header.
+    #[test]
+    fn a_pool_built_share_whose_coinbase_carries_another_root_is_refused() {
+        let address = make_test_address(1);
+        let carried = MergeMiningCommitment {
+            root: [0x44; 32],
+            height: 1,
+            salt: 3,
+        };
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.bitcoin_height = 702;
+        share.header.pool_merge_mining = Some(MergeMiningCommitment {
+            root: [0x55; 32],
+            ..carried
+        });
+        let coinbase = build_coinbase(
+            Version::TWO,
+            &[OutputPair {
+                address: address.clone(),
+                amount: Amount::from_sat(312_500_000),
+            }],
+            702,
+            PushBytesBuf::from(&[0u8]),
+            None,
+            b"P2Poolv2",
+            Some(ShareCommitment::from_share_block(&share).hash()),
+            TEST_COINBASE_NSECS,
+            Some(&[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE]),
+            Some(carried),
+            None,
+        )
+        .unwrap();
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        share.bitcoin_coinbase = coinbase;
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(HashMap::from([(address.clone(), 1000u128)])));
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_bitcoin_payout(
+                &share,
+                &ChainStoreHandle::default(),
+                Arc::new(RwLock::new(window)),
+            );
+
+        assert!(result.is_err());
+    }
+
+    /// A validated token share that is also a BCH block hands its payout
+    /// tree to the executor's sink, with the coinbase txid and the root's
+    /// output index; the same share as a mere share hands over nothing.
+    #[test]
+    fn a_found_block_hands_its_payout_tree_to_the_sink() {
+        let weights: HashMap<Address, u128> = (1..=120u8)
+            .map(|byte| {
+                (
+                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    u128::from(byte) * 1_000,
+                )
+            })
+            .collect();
+        let commitment = MergeMiningCommitment {
+            root: [0x33; 32],
+            height: 2,
+            salt: 7,
+        };
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.bitcoin_height = 702;
+        share.header.bch_coinbase = Some(BchCoinbase {
+            prefix: Builder::new()
+                .push_int(702)
+                .push_slice(b"miner")
+                .into_bytes(),
+            merge_mining: commitment,
+        });
+        let payouts = build_pplns_outputs(
+            312_500_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            bch_split_for_commitment(&commitment),
+        )
+        .unwrap();
+        let coinbase = build_declared_coinbase(
+            &payouts,
+            702,
+            ShareCommitment::from_share_block(&share).hash(),
+            &[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE],
+            share.header.bch_coinbase.as_ref().unwrap(),
+        )
+        .unwrap();
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        share.bitcoin_coinbase = coinbase.clone();
+        // Regtest's easiest target: about every other nonce makes a block.
+        share.header.bitcoin_header.bits = CompactTarget::from_consensus(0x207f_ffff);
+        while !share.header.meets_bitcoin_difficulty() {
+            share.header.bitcoin_header.nonce += 1;
+        }
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(weights.clone()));
+        let window = Arc::new(RwLock::new(window));
+        let (sink, mut found) = crate::node::payout_tree_executor::payout_tree_channel();
+        let validator = validator()
+            .for_chain(Chain::BitcoinCash)
+            .with_payout_tree_sink(sink);
+
+        validator
+            .validate_bitcoin_payout(&share, &ChainStoreHandle::default(), window.clone())
+            .unwrap();
+        let record = found.try_recv().unwrap();
+        let tree = payouts.tree.unwrap();
+        assert_eq!(record.coinbase_txid, coinbase.compute_txid());
+        assert_eq!(
+            coinbase.output[record.root_vout as usize],
+            tree.root_output()
+        );
+        assert_eq!(record.payees, tree.payees());
+        assert_eq!(record.share_blockhash, share.block_hash());
+
+        while share.header.meets_bitcoin_difficulty() {
+            share.header.bitcoin_header.nonce += 1;
+        }
+        validator
+            .validate_bitcoin_payout(&share, &ChainStoreHandle::default(), window)
+            .unwrap();
+        assert!(found.try_recv().is_err());
+    }
+
+    /// The same token share paying all 120 payees directly, as a no-token
+    /// share would, is not the coinbase its commitment implies.
+    #[test]
+    fn a_token_share_paying_every_payee_directly_is_rejected() {
+        let weights: HashMap<Address, u128> = (1..=120u8)
+            .map(|byte| {
+                (
+                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    u128::from(byte) * 1_000,
+                )
+            })
+            .collect();
+        let commitment = MergeMiningCommitment {
+            root: [0x33; 32],
+            height: 2,
+            salt: 7,
+        };
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.bitcoin_height = 702;
+        share.header.bch_coinbase = Some(BchCoinbase {
+            prefix: Builder::new()
+                .push_int(702)
+                .push_slice(b"miner")
+                .into_bytes(),
+            merge_mining: commitment,
+        });
+        let every_payee_direct = build_pplns_outputs(
+            312_500_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            bch_split_for_commitment(&MergeMiningCommitment::empty()),
+        )
+        .unwrap();
+        let coinbase = build_declared_coinbase(
+            &every_payee_direct,
+            702,
+            ShareCommitment::from_share_block(&share).hash(),
+            &[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE],
+            share.header.bch_coinbase.as_ref().unwrap(),
+        )
+        .unwrap();
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        share.bitcoin_coinbase = coinbase;
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(weights.clone()));
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_bitcoin_payout(
+                &share,
+                &ChainStoreHandle::default(),
+                Arc::new(RwLock::new(window)),
+            );
+
+        assert!(every_payee_direct.tree.is_none());
+        assert_eq!(result.unwrap_err().kind(), FailureKind::Consensus);
+    }
+
+    /// A no-token share with the same 120 payees pays every one directly,
+    /// and the validator agrees.
+    #[test]
+    fn a_no_token_share_with_the_same_payees_pays_every_one_directly() {
+        let weights: HashMap<Address, u128> = (1..=120u8)
+            .map(|byte| {
+                (
+                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    u128::from(byte) * 1_000,
+                )
+            })
+            .collect();
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.bitcoin_height = 702;
+        share.header.bch_coinbase = Some(BchCoinbase {
+            prefix: Builder::new()
+                .push_int(702)
+                .push_slice(b"miner")
+                .into_bytes(),
+            merge_mining: MergeMiningCommitment::empty(),
+        });
+        let producer_payouts = build_pplns_outputs(
+            312_500_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            bch_split_for_commitment(&MergeMiningCommitment::empty()),
+        )
+        .unwrap();
+        let coinbase = build_declared_coinbase(
+            &producer_payouts,
+            702,
+            ShareCommitment::from_share_block(&share).hash(),
+            &[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE],
+            share.header.bch_coinbase.as_ref().unwrap(),
+        )
+        .unwrap();
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        share.bitcoin_coinbase = coinbase;
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(weights.clone()));
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_bitcoin_payout(
+                &share,
+                &ChainStoreHandle::default(),
+                Arc::new(RwLock::new(window)),
+            );
+
+        assert!(result.is_ok(), "{}", result.unwrap_err());
+        assert_eq!(producer_payouts.outputs.len(), 120);
+        assert!(producer_payouts.tree.is_none());
     }
 
     #[test]
@@ -6029,44 +7234,60 @@ mod tests {
     #[test]
     fn test_is_in_pplns_zone_at_tip() {
         // Block at tip height is in PPLNS zone
-        assert!(is_within_payout_depth(300_000, 300_000));
+        assert!(is_within_payout_depth(
+            ChainDepths::BITCOIN,
+            300_000,
+            300_000
+        ));
     }
 
     #[test]
     fn test_is_in_pplns_zone_within_pplns_depth() {
         // Block just inside PPLNS zone
         let tip = 300_000u32;
-        let pplns_boundary = tip - PAYOUT_DEPTH as u32;
-        assert!(is_within_payout_depth(pplns_boundary + 1, tip));
+        let pplns_boundary = tip - ChainDepths::BITCOIN.payout_depth as u32;
+        assert!(is_within_payout_depth(
+            ChainDepths::BITCOIN,
+            pplns_boundary + 1,
+            tip
+        ));
     }
 
     #[test]
     fn test_is_in_pplns_zone_at_boundary_is_prune_zone() {
         // Block exactly at boundary is NOT in PPLNS zone (prune zone)
         let tip = 300_000u32;
-        let pplns_boundary = tip - PAYOUT_DEPTH as u32;
-        assert!(!is_within_payout_depth(pplns_boundary, tip));
+        let pplns_boundary = tip - ChainDepths::BITCOIN.payout_depth as u32;
+        assert!(!is_within_payout_depth(
+            ChainDepths::BITCOIN,
+            pplns_boundary,
+            tip
+        ));
     }
 
     #[test]
     fn test_is_in_pplns_zone_below_boundary_is_prune_zone() {
         let tip = 300_000u32;
-        let pplns_boundary = tip - PAYOUT_DEPTH as u32;
-        assert!(!is_within_payout_depth(pplns_boundary - 1, tip));
+        let pplns_boundary = tip - ChainDepths::BITCOIN.payout_depth as u32;
+        assert!(!is_within_payout_depth(
+            ChainDepths::BITCOIN,
+            pplns_boundary - 1,
+            tip
+        ));
     }
 
     #[test]
     fn test_is_in_pplns_zone_short_chain() {
         // Chain shorter than PPLNS depth: all blocks are in PPLNS zone
-        assert!(is_within_payout_depth(1, 100));
-        assert!(is_within_payout_depth(50, 100));
+        assert!(is_within_payout_depth(ChainDepths::BITCOIN, 1, 100));
+        assert!(is_within_payout_depth(ChainDepths::BITCOIN, 50, 100));
     }
 
     #[test]
     fn test_is_in_pplns_zone_height_zero() {
         // Height 0 with any tip is NOT in PPLNS zone (0 > anything is false)
-        assert!(!is_within_payout_depth(0, 0));
-        assert!(!is_within_payout_depth(0, 300_000));
+        assert!(!is_within_payout_depth(ChainDepths::BITCOIN, 0, 0));
+        assert!(!is_within_payout_depth(ChainDepths::BITCOIN, 0, 300_000));
     }
 
     #[test]
@@ -6080,7 +7301,7 @@ mod tests {
             .returning(|_| Err(StoreError::NotFound("not found".into())));
 
         let blockhash = TestShareBlockBuilder::new().build().block_hash();
-        let result = check_pplns_zone(&blockhash, &chain_store_handle);
+        let result = check_pplns_zone(&blockhash, &chain_store_handle, ChainDepths::BITCOIN);
 
         assert!(result.is_ok());
         assert!(
@@ -6104,7 +7325,7 @@ mod tests {
             });
 
         let blockhash = TestShareBlockBuilder::new().build().block_hash();
-        let result = check_pplns_zone(&blockhash, &chain_store_handle);
+        let result = check_pplns_zone(&blockhash, &chain_store_handle, ChainDepths::BITCOIN);
 
         assert!(result.is_ok());
         assert!(
@@ -6121,7 +7342,7 @@ mod tests {
             .returning(|_| Err(StoreError::Database("disk failure".into())));
 
         let blockhash = TestShareBlockBuilder::new().build().block_hash();
-        let result = check_pplns_zone(&blockhash, &chain_store_handle);
+        let result = check_pplns_zone(&blockhash, &chain_store_handle, ChainDepths::BITCOIN);
 
         assert!(result.is_err());
         assert!(

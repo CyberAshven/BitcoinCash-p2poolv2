@@ -1,0 +1,78 @@
+manifestVersion: 1
+id: bch-p2pool-external
+name: P2Pool for Bitcoin Cash (external node)
+tagline: Peer-to-peer Bitcoin Cash mining pool on a BCHN you run elsewhere
+icon: https://raw.githubusercontent.com/CyberAshven/BitcoinCash-p2poolv2/main/packaging/umbrel/bch-p2pool/icon.png
+category: crypto
+version: "0.0.1-alpha"
+port: 46891
+description: >-
+  P2Poolv2 for Bitcoin Cash is a mining pool with no operator. Nodes keep a
+  share chain together, and every block the pool finds pays each miner
+  directly in its coinbase, by their shares in the PPLNS window.
+
+
+  This app mines on a Bitcoin Cash Node (BCHN) that runs on another computer,
+  on chipnet (the default) or mainnet. Set BCHN's RPC address, login and ZMQ
+  endpoint on the app's settings page or in its p2pool.toml; the store's
+  README lists the bitcoin.conf options BCHN needs. Point your miners at port
+  3341 of your Umbrel.
+
+
+  Alpha software. The pool runs on chipnet; mainnet has not started.
+developer: CyberAshven
+website: https://github.com/CyberAshven/BitcoinCash-p2poolv2
+submitter: CyberAshven
+submission: https://github.com/CyberAshven/BitcoinCash-p2poolv2/tree/main/packaging/umbrel
+repo: https://github.com/CyberAshven/BitcoinCash-p2poolv2
+support: https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues
+gallery: []
+releaseNotes: >-
+  First Umbrel package of the Bitcoin Cash port, version 0.0.1-alpha.
+dependencies: []
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+storage:
+  dataRoot: data
+backupIgnore:
+  - data/logs
+environment:
+  - name: P2POOL_BITCOINRPC__URL
+    services:
+      - p2pool
+    default: http://bchn.example:48332
+    note: "BCHN's JSON-RPC, http://<address>:<port>: port 48332 on chipnet, 8332 on mainnet. BCHN must allow this Umbrel with rpcbind and rpcallowip."
+  - name: P2POOL_BITCOINRPC__USERNAME
+    services:
+      - p2pool
+    default: p2pool
+    note: "rpcuser in BCHN's bitcoin.conf."
+  - name: P2POOL_BITCOINRPC__PASSWORD
+    services:
+      - p2pool
+    note: "rpcpassword in BCHN's bitcoin.conf."
+  - name: P2POOL_STRATUM__ZMQPUBHASHBLOCK
+    services:
+      - p2pool
+    default: tcp://bchn.example:28332
+    note: "BCHN's ZMQ hashblock endpoint, tcp://<address>:<port>, as zmqpubhashblock in its bitcoin.conf publishes it."
+  - name: P2POOL_STRATUM__MINER_ADDRESS
+    services:
+      - p2pool
+    note: "Share address (tp2pool:q... on chipnet, p2pool:q... on mainnet) that owns every share this node mines, made with p2poolv2_cli bch-share-address. Leave it unset when each miner sends p2p=<share address> in its Stratum password."
+  - name: P2POOL_NETWORK__EXTERNAL_ADDRESS
+    services:
+      - p2pool
+    note: "The address other P2Pool nodes should dial, /ip4/<public IP>/tcp/6891, when you forward port 6891 on your router."
+  - name: RUST_LOG
+    services:
+      - p2pool
+    default: info
+    options:
+      - error
+      - warn
+      - info
+      - debug
+      - trace
+    note: "How much the node writes to its log."

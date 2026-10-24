@@ -7,10 +7,11 @@
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 #[cfg(not(test))]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
+use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::accounting::stats::metrics::MetricsHandle;
 use crate::command::Command;
-use crate::config::Config;
+use crate::config::{Chain, Config, PoolMode};
 use crate::monitoring_events::MonitoringEventSender;
 use crate::node::Node;
 use crate::node::SwarmSend;
@@ -24,6 +25,9 @@ use crate::node::p2p_message_handlers::receivers::block_receiver::{
 };
 use crate::node::p2p_message_handlers::senders::build_getheaders_message;
 use crate::node::p2p_message_handlers::senders::send_share_block_broadcast;
+use crate::node::payout_tree_executor::{
+    PayoutTreeExecutor, PayoutTreeSender, payout_tree_channel,
+};
 use crate::node::request_response_handler::block_fetcher::{
     BlockFetcher, create_block_fetcher_channel,
 };
@@ -48,6 +52,7 @@ use crate::shares::validation::{DefaultShareValidator, ShareValidator};
 use crate::stratum::emission::EmissionReceiver;
 use crate::stratum::work::notify::NotifySender;
 use bitcoin::BlockHash;
+use bitcoindrpc::BitcoindRpcClient;
 use libp2p::futures::StreamExt;
 use libp2p::request_response::ResponseChannel;
 use std::collections::HashMap;
@@ -399,6 +404,34 @@ struct NodeActor {
     share_transaction_relay: Option<RelayReceiver>,
 }
 
+/// Start the payout tree executor of a Bitcoin Cash share-chain node and
+/// return the sink the validator hands found trees to (see
+/// `node::payout_tree_executor`). `None` on Bitcoin and in Hydrapool mode,
+/// which build no payout trees, and when no BCHN client can be made.
+fn start_payout_tree_executor(
+    config: &Config,
+    chain_store_handle: &ChainStoreHandle,
+) -> Option<PayoutTreeSender> {
+    if config.stratum.chain != Chain::BitcoinCash || config.stratum.mode != PoolMode::P2poolv2 {
+        return None;
+    }
+    let client = match BitcoindRpcClient::new(
+        &config.bitcoinrpc.url,
+        &config.bitcoinrpc.username,
+        &config.bitcoinrpc.password,
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            error!("No payout tree executor: cannot make a BCHN client: {error}");
+            return None;
+        }
+    };
+    let (sink, found) = payout_tree_channel();
+    let executor = PayoutTreeExecutor::new(client, chain_store_handle.clone(), found);
+    tokio::spawn(executor.run());
+    Some(sink)
+}
+
 /// The next share transaction to relay, or never when there is no relay.
 async fn next_relay_transaction(relay: &mut Option<RelayReceiver>) -> Option<RelayTransaction> {
     match relay {
@@ -445,6 +478,7 @@ impl NodeActor {
         let block_fetcher_tx_for_response = block_fetcher_tx.clone();
         let block_receiver_tx_for_response = block_receiver_tx.clone();
         let chain = config.stratum.chain;
+        let bitcoin_cash_network = config.stratum.bitcoin_cash_network;
         let target_ceiling = crate::shares::bch_genesis::target_ceiling(
             crate::shares::bch_genesis::genesis_for_stratum(&config.stratum)
                 .map_err(|error| -> Box<dyn Error> { error })?
@@ -459,11 +493,14 @@ impl NodeActor {
         // mockall_double swaps in the non-Copy MockPoolDifficulty under cfg(test)
         // and pool_difficulty is used again below.
         #[allow(clippy::clone_on_copy)]
-        let share_validator: Arc<dyn ShareValidator + Send + Sync> = Arc::new(
-            DefaultShareValidator::new(pool_difficulty.clone())
-                .for_chain(chain)
-                .with_target_ceiling(target_ceiling),
-        );
+        let mut validator = DefaultShareValidator::new(pool_difficulty.clone())
+            .for_chain(chain)
+            .with_target_ceiling(target_ceiling)
+            .with_bitcoin_cash_network(bitcoin_cash_network);
+        if let Some(sink) = start_payout_tree_executor(&config, &chain_store_handle) {
+            validator = validator.with_payout_tree_sink(sink);
+        }
+        let share_validator: Arc<dyn ShareValidator + Send + Sync> = Arc::new(validator);
 
         let node = Node::new(
             config,
@@ -487,7 +524,8 @@ impl NodeActor {
             metrics.clone(),
             pplns_window.clone(),
             share_validator.clone(),
-        );
+        )
+        .with_depths(ChainDepths::for_chain(chain));
         let mut workers: JoinSet<Result<(), String>> = JoinSet::new();
         let mut worker_names: HashMap<tokio::task::Id, &'static str> = HashMap::with_capacity(4);
 
@@ -510,7 +548,8 @@ impl NodeActor {
             pool_difficulty,
         )
         .for_chain(chain)
-        .with_target_ceiling(target_ceiling);
+        .with_target_ceiling(target_ceiling)
+        .with_bitcoin_cash_network(bitcoin_cash_network);
         let validation_worker_id = workers
             .spawn(async move {
                 validation_worker
@@ -535,7 +574,8 @@ impl NodeActor {
             chain_store_handle.clone(),
             block_fetcher_tx_for_receiver,
             validation_tx_for_worker.clone(),
-        );
+        )
+        .with_depths(ChainDepths::for_chain(chain));
         let block_receiver_id = workers
             .spawn(async move {
                 block_receiver.run().await;

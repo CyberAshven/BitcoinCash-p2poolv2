@@ -157,7 +157,7 @@ pub enum Commands {
         #[arg(short, long, value_parser = commands::bch_share_address::parse_network)]
         network: BitcoinCashNetwork,
     },
-    /// Build or verify BCH auxiliary work proofs offline
+    /// Build or verify BCH merge-mining v2 commitments and proofs offline
     BchAuxpow {
         #[command(subcommand)]
         command: bch_auxpow::AuxpowCommand,
@@ -430,9 +430,5 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn cash_share_network(network: BitcoinCashNetwork) -> BchShareNetwork {
-    match network {
-        BitcoinCashNetwork::Mainnet => BchShareNetwork::Mainnet,
-        BitcoinCashNetwork::Chipnet => BchShareNetwork::Chipnet,
-        BitcoinCashNetwork::Regtest => BchShareNetwork::Regtest,
-    }
+    network.share_network()
 }

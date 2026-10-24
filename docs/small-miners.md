@@ -18,7 +18,7 @@ Everything below is expectation; real luck varies around it.
 | BCH network hashrate `H` | 3.7 EH/s | Blockchair, 24-hour average, 2026-10-23 (difficulty 508.5 G) |
 | Block interval | 600 s, 144 blocks a day | BCH consensus (aserti3-2d) |
 | Block reward `R` | 3.125 BCH plus fees (fees ignored here) | BCH consensus, since the 2024 halving |
-| Donation | 1.5% of each block, so miners share 98.5% | plan decision 9 |
+| Donation | 1% of each block by default, so miners share 99% | plan decision 9 |
 | Share period | 10 s, 8,640 shares a day on each share chain | share chain ASERT |
 | Window | shares worth `K = 3` blocks of work, at most `W` = 120,960 shares | plan decision 11 |
 | Maturity skip | 100 shares (about 17 minutes) | plan decision 11 |
@@ -44,12 +44,12 @@ a miner with hashrate `m` on it:
   at any moment.
 - **Chance of no share in the window when a block is found:**
   `exp(-window * m / P)`. Such a block pays the miner nothing.
-- **Expected income:** `144 * (m / H) * R * 0.985` BCH a day, on every chain
+- **Expected income:** `144 * (m / H) * R * 0.99` BCH a day, on every chain
   and at every pool size. PPLNS is fair on average: the window size and the
   chain change how lumpy payouts are, not their mean.
-- **Each share's slice of a block:** `R * 0.985 * d / (window work)`, where
-  `d` is the share's difficulty: `R * 0.985 * f / 180` while the window is
-  below the cap, `R * 0.985 / 120,960` at the cap. A share is paid by every
+- **Each share's slice of a block:** `R * 0.99 * d / (window work)`, where
+  `d` is the share's difficulty: `R * 0.99 * f / 180` while the window is
+  below the cap, `R * 0.99 / 120,960` at the cap. A share is paid by every
   block found while it is in the window: 3 blocks on average below the cap
   (a Poisson count: 5% of shares are paid by none), fewer at the cap, where
   the window is shorter than the time between pool blocks.
@@ -60,12 +60,12 @@ a miner with hashrate `m` on it:
 
 | Share chain's part of BCH | Hashrate | Pool blocks | Window | Slice per share per block |
 |---|---|---|---|---|
-| 30% | 1.1 EH/s | 43 a day, one per 33 min | 600 shares, 100 min | 513,000 sat |
-| 10% | 370 PH/s | 14 a day, one per 100 min | 1,800 shares, 5 h | 171,000 sat |
-| 1% | 37 PH/s | 1.4 a day, one per 16.7 h | 18,000 shares, 50 h | 17,100 sat |
-| 0.1% | 3.7 PH/s | one per 6.9 days | 120,960 (cap), 14 days | 2,540 sat |
-| 0.05% | 1.85 PH/s | one per 13.9 days | 120,960 (cap), 14 days | 2,540 sat |
-| 0.01% | 370 TH/s | one per 69 days | 120,960 (cap), 14 days | 2,540 sat |
+| 30% | 1.1 EH/s | 43 a day, one per 33 min | 600 shares, 100 min | 516,000 sat |
+| 10% | 370 PH/s | 14 a day, one per 100 min | 1,800 shares, 5 h | 172,000 sat |
+| 1% | 37 PH/s | 1.4 a day, one per 16.7 h | 18,000 shares, 50 h | 17,200 sat |
+| 0.1% | 3.7 PH/s | one per 6.9 days | 120,960 (cap), 14 days | 2,560 sat |
+| 0.05% | 1.85 PH/s | one per 13.9 days | 120,960 (cap), 14 days | 2,560 sat |
+| 0.01% | 370 TH/s | one per 69 days | 120,960 (cap), 14 days | 2,560 sat |
 
 Every slice is above the 546-satoshi dust limit, and a miner's slices of one
 block add up into one coinbase output.
@@ -87,9 +87,9 @@ How it arrives differs.
 
 | Miner | Shares a day | Shares in the window | No share in the window at a block | Paid per block when in it |
 |---|---|---|---|---|
-| 1.2 TH/s | 0.28 | 0.58 | 56% | about 17,100 sat per share |
-| 100 TH/s | 23 | 49 | never | 0.0083 BCH |
-| 1 PH/s | 234 | 486 | never | 0.083 BCH |
+| 1.2 TH/s | 0.28 | 0.58 | 56% | about 17,200 sat per share |
+| 100 TH/s | 23 | 49 | never | 0.0084 BCH |
+| 1 PH/s | 234 | 486 | never | 0.084 BCH |
 
 The Bitaxe finds a share about every 3.6 days. It is in the window for 44%
 of the pool's blocks, and each share it finds is paid by three blocks on
