@@ -52,7 +52,7 @@ consensus. The tag replaces `payout-cap11` with
 `payout-hybrid-t3072-f500-r1to3-z8-cov1`, and adds
 `body-1000000-204800`, `payee-p2pkh-p2sh20-p2sh32`, `merkle32`,
 `depths-m100`, `sigchecks3000-1452`, `no-segwit`, `weight-work`,
-`mm2-asert` and `version-vote`. The donation and fee caps become 10% each
+`mm2-roots-asert` and `version-vote`. The donation and fee caps become 10% each
 instead of 10% together, under the same tag. Request-response, Kademlia,
 Identify and Noise use the same rule segments. Later rule changes activate by the
 share-version vote without changing this tag, so old and new versions
@@ -64,6 +64,38 @@ shares, protocol strings, the PPLNS window and maturity, the ASERT parent
 anchor and the donation and fee cap as they were.
 
 ### Added
+
+- Merge-mined tokens on a public node (owner's decision, 2026-10-24): the
+  operator's fee and the P2Pool donation apply to merge-mined tokens as to
+  BCH. `[stratum] merge_mining_tokens` names a JSON file of the tokens a
+  Bitcoin Cash P2Pool node merge-mines (category, baton lock hash, state
+  hash, target, tree limit), read again when it changes so a claim tool
+  can move a token's state. Every pool-built job carries a root of its
+  miner's own leaves at output 0: each binds the miner's payout script,
+  and its `ext` the split of each win, the miner's P2Pool donation (their
+  `donation=`, default 1%) in the donation slot and the node's fee (default
+  1%) in the fee slot, each to the script the coinbase pays it to.
+  Pickaxe's whole split leaf (`c4027136…`) comes out byte for byte. Such
+  shares are token shares (3,072-byte coinbase, ASERT check); share
+  validity never depends on the tokens. The share header carries a
+  pool-built root (`pool_merge_mining`, header tag `0x23`), digested by the
+  share commitment; the rule tag becomes `mm2-roots-asert`.
+- Disclosure of each miner's leaves and wins, in Pickaxe's formats
+  (pickaxe-miner PR #70 at `a92fef7`): the `CTMD` v2 leaf disclosure
+  (`shares::auxpow::Disclosure`); the SV2 extension `0x4D4D` negotiated
+  through `RequestExtensions` (`0x0001`), with `JobLeaves` after each job
+  and `WinProof` after each winning share; the SV1 `mining.configure`
+  extension `pickaxe-merge`, with `pickaxe.merge_leaves` and
+  `pickaxe.merge_proof`; and owner-only JSON line logs beside the token
+  file of standard-channel jobs' leaves and of every win's proof, bounded
+  queues and 8 MiB rotation. Each proof is checked as a covenant would
+  before it goes out. The SV2 decoders now keep a frame's extension type.
+- Job Declaration token leaves: a Full-Template declaration whose output 0
+  is a token root discloses its leaves in `excess_data` (canonical `CTMD`,
+  rebuilding the root at output 0's height and salt; a root without leaves
+  or leaves without a root is refused with `invalid-coinbase-tx`), and each
+  leaf must pay the channel's miner with the job's donation and the node's
+  fee as its split. A Coinbase-only custom job may not carry a token root.
 
 - A Sponsor button and donate section. `.github/FUNDING.yml` gives the
   repository GitHub's Sponsor button, linking the landing page's new

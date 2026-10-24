@@ -44,7 +44,10 @@ In order:
 
 1. **Merge-mining commitment,** a zero-value output for the tokens the miner
    merge-mines, the exact empty commitment if none. It is output 0
-   ([Auxiliary work proofs](../bch-auxpow.md)).
+   ([Auxiliary work proofs](../bch-auxpow.md)). On a node that merge-mines
+   tokens it is the root of the miner's own token leaves, whose split
+   carries the miner's donation and the node's fee for each token win as
+   this coinbase carries them for BCH.
 2. **Donation.** To the project's fixed key (plan decision 9): the
    donation the finding miner's login chose with `donation=` (0 to 10% in
    steps of 0.5%, [Miner options](../miner-options.md#donation)), or the

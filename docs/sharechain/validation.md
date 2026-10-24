@@ -113,7 +113,8 @@ carries. The rebuild covers:
 - output 0, the merge-mining v2 commitment: the root, `h` and salt from
   `pool_merge_mining` on a pool-built token share or `bch_coinbase` on a
   Job Declaration share, and the exact empty commitment otherwise,
-  rebuilt byte for byte ([Auxiliary work proofs](../bch-auxpow.md));
+  rebuilt byte for byte; only its format is checked, never the tokens
+  behind it ([Auxiliary work proofs](../bch-auxpow.md));
 - no SegWit: a Bitcoin Cash coinbase that carries a BIP141 witness
   commitment output is invalid. BCHN's templates never have one;
 - how the payouts become outputs: the hybrid payout of plan decision 14,

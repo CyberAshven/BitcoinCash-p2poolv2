@@ -41,7 +41,9 @@ checks BCHN's, and still asks BCHN for the height each template builds on
 miners by the PPLNS window over the share chain, after the donation and the
 operator fee. It also carries the merge-mining commitment as output 0 (the
 miner's own token root when tokens are configured, the exact empty one
-otherwise; see [Auxiliary work proofs](bch-auxpow.md)),
+otherwise; the token root's leaves carry the miner's P2Pool donation and
+the node's fee as each win's split; see
+[Auxiliary work proofs](bch-auxpow.md#merge-mining-tokens-on-a-public-node)),
 a padding output and the share commitment, and every job commits to the
 current share chain tip
 (see [Share commitments](sharechain/share-commitments.md)). Bitcoin Cash

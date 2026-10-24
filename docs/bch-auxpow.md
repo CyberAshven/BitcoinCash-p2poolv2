@@ -14,7 +14,12 @@ the 53-byte output 0, the exact empty commitment, the 224-byte proof and
 the split leaf
 all match byte for byte. `shares::auxpow::tests` checks proof encoding and
 verification, including rejection when the expected state hash changes;
-`shares::merge_mining::tests` checks both commitment outputs.
+`shares::merge_mining::tests` checks both commitment outputs. The leaf
+disclosure, its Stratum V1 and V2 transports and the Job Declaration leaf
+rules follow PR #70 at
+[`a92fef7`](https://github.com/CyberAshven/pickaxe-miner/commit/a92fef7),
+"Disclosure" and "Job Declaration leaves", whose formats are unchanged from
+`a1c80a1`'s vectors.
 
 This replaces the earlier format, a `fabe6d6d` output after the payouts with
 Namecoin's slot scheme and the whole coinbase in each proof (audit items
@@ -46,12 +51,18 @@ both (`MergeMiningCommitment::validate`).
 
 Pool-built jobs carry the empty commitment when the node has no tokens to
 merge-mine. When tokens are configured, the node builds a root from each
-miner's own token leaves. A miner can also declare a token commitment in
-its own coinbase through [Job Declaration](bch-job-declaration.md). The
-share header carries the root, `h` and salt in `pool_merge_mining` for a
-pool-built share or in `bch_coinbase` for a declared share. Every peer
-rebuilds output 0 from that commitment byte for byte when it rebuilds the
-coinbase.
+miner's own token leaves ([Merge-mining tokens on a public
+node](#merge-mining-tokens-on-a-public-node)). A miner can also declare a
+token commitment in its own coinbase through [Job
+Declaration](bch-job-declaration.md). The share header carries the root,
+`h` and salt in `pool_merge_mining` for a pool-built share (under its own
+header tag, `0x23`, and only when the root is not the empty one) or in
+`bch_coinbase` for a declared share, and the share commitment digests it,
+so one proof of work stands behind one root. Every peer rebuilds output 0
+from that commitment byte for byte when it rebuilds the coinbase, and checks
+only its format: no peer knows the tokens behind a root, and share validity
+never depends on them. The rule tag `mm2-roots-asert` names this header
+format.
 
 A share is a **token share** when its commitment is anything but the exact
 empty one (`share_has_token_commitment`), and a **no-token share**
@@ -206,6 +217,169 @@ token share outside it could not be claimed anyway. No-token shares are not
 checked: BCHN alone judges their blocks. On a test network, a parent dated
 more than about four minutes after the share's header time (one-hour
 half-life, 1.05 band) fails the easy side; such a token share is refused.
+
+## Merge-mining tokens on a public node
+
+Owner's decision (2026-10-24): on a public P2Pool node the operator's fee
+and the P2Pool donation apply to merge-mined tokens as they apply to BCH.
+This is node behaviour, not a share-chain rule: peers check only the format
+of a share's root, and share validity never depends on the tokens.
+
+**The token file.** `[stratum] merge_mining_tokens` names a JSON file of
+the tokens the node merge-mines (Bitcoin Cash in P2Pool mode only):
+
+```json
+{"tokens": [{
+  "category": "1111111111111111111111111111111111111111111111111111111111111111",
+  "lock_hash": "953ccfa596a6c6d39e5980194539124fdcff116a571455a212baed811f585ee0",
+  "state_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "target_bits": "207fffff",
+  "max_height": 16
+}]}
+```
+
+Each token is its category, `HASH256` of its baton's locking bytecode, its
+current state hash, its canonical compact target and, optionally, the
+tallest tree its covenant accepts (16 when left out). At most 16 tokens,
+one per category; the set must fit one tree no taller than the lowest
+limit among them, or the file is refused. An empty list merge-mines
+nothing. A node does not start on a file it cannot read or that is not
+valid (at most 1 MiB). It reads the file again whenever its modification
+time changes, so the tool that claims a token can write the new state
+hash; a changed file that is broken keeps the last good tokens and logs
+why. No token is deployed yet, so no file ships with the node.
+
+**Each miner's root.** Every pool-built job (Stratum V1, and Stratum V2
+standard and extended channels) carries a root of its miner's own leaves at
+output 0 (`stratum::work::merge_tokens`):
+
+- each leaf's `payout_hash` is `HASH256` of the miner's registered payout
+  script, the address in their login;
+- its `ext` commits to the split of each win: the **donation slot** is the
+  miner's P2Pool donation (their `donation=` choice, or the node's default
+  of 1%) to the P2Pool donation address, and the **fee slot** is the node's
+  fee (1% by default) to its fee address, both at the rates and to the
+  scripts the coinbase pays them, each with its own 10% cap. A rate of 0
+  leaves its slot empty; with neither, `ext` is zero.
+
+A node mining Pickaxe's token A for a miner with a 1% donation and a 1% fee
+builds Pickaxe's whole split leaf byte for byte (leaf hash
+`c4027136…033e41`). The layout (height, salt and slots) depends only on the
+categories, so it is searched once per file and every miner's tree reuses
+it; miners differ only in their root, which replaces a placeholder in the
+coinbase every miner on a template shares. A job whose miner has no payout
+address carries the empty commitment.
+
+Every such share is a **token share**: its coinbase follows the token
+share's 3,072-byte limit, so with more payees than fit the rest go through
+the payout tree, and its bitcoin header takes the ASERT check above. A
+share wins a token when its hash meets the token's target, whatever its
+miner's own target; P2Pool does not ease a device's difficulty towards the
+easiest token target as Pickaxe does, so a device whose difficulty is above
+a token's target misses some of that token's wins.
+
+## Disclosure to miners
+
+A miner on someone else's pool checks before hashing that their leaves pay
+them, and only the donation and fee they agreed to, and claims their own
+wins. P2Pool discloses both in Pickaxe's formats, so miners and tools work
+at both kinds of pool (`stratum::merge_disclosure`). Disclosure is opt-in:
+firmware that does not ask sees nothing new.
+
+**The leaves (`CTMD` v2),** the same bytes Job Declaration uses
+(`shares::auxpow::Disclosure`):
+
+```text
+off len   field
+0   4     "CTMD"
+4   1     02
+5   1     n, the leaves (0 to 16)
+then n times:
+    169   the leaf preimage
+    1     00: ext is zero; 01: a split follows
+    69    the split preimage (with 01 only)
+```
+
+A reader accepts exactly one disclosure (nothing trailing; each leaf and
+split canonical; each split's SHA-256 equal to its leaf's `ext`), then
+rebuilds the tree from these leaves alone at output 0's `h` and salt and
+requires output 0's root: a leaf left out, added or changed gives another
+root.
+
+**Stratum V2.** A connection asks for extension `0x4D4D` through the
+extensions negotiation (type `0x0001`, `RequestExtensions` `0x00`: `u16
+request_id | u16 n | n x u16`), after `SetupConnection`; the node answers
+`RequestExtensions.Success` (`0x01`) granting `0x4D4D` on a connection with
+mining channels, and no other extension. The connection then gets, on the
+channel bit:
+
+```text
+JobLeaves (0x00):  channel u32 | job u32 | output 0 (53) | u16 n | CTMD (n)
+                   | each leaf's aux branch, in CTMD order (32 x h, leaf to root)
+WinProof  (0x01):  channel u32 | job u32 | category (32) | u16 n | AuxProof v2 (n)
+                   | u8 m (0 or 69) | the split preimage (m)
+```
+
+`JobLeaves` follows each job that commits a root, on standard and extended
+channels; `WinProof` follows the acknowledgement of each share that wins a
+token. A message of any other extension closes the connection.
+
+**Stratum V1.** Firmware asks for `pickaxe-merge` in `mining.configure`
+(beside `version-rolling`); the answer is `true` on a node that merge-mines
+tokens, otherwise `false`. Then, after each `mining.notify`,
+
+```text
+{"id":null,"method":"pickaxe.merge_leaves",
+ "params":["<job id>","<output 0 hex>","<CTMD hex>",["<aux branch hex>", ...]]}
+```
+
+and, after the acknowledgement of a winning `mining.submit`,
+
+```text
+{"id":null,"method":"pickaxe.merge_proof",
+ "params":["<job id>","<category hex>","<AuxProof v2 hex>","<split preimage hex or empty>"]}
+```
+
+**The logs.** A standard channel's device never sees its coinbase, so its
+leaves are a trust assumption that anyone can audit after the fact. Beside
+the token file the node writes, readable by its owner alone (mode 0600 on
+Unix; the directory's permissions elsewhere):
+
+```text
+<token file>.leaves.jsonl, one line per standard-channel job that commits a root:
+{"time":<unix seconds>,"channel":<id>,"job":<id>,"output0":"<hex>","leaves":"<CTMD hex>"}
+<token file>.wins.jsonl, one line per token a share wins:
+{"time":<unix seconds>,"channel":<id>,"job":<id>,"payout_hash":"<hex>","category":"<hex>","proof":"<hex>","split":"<hex or empty>"}
+```
+
+An SV1 win's line names its job by the notify's hex job id and has no
+channel. No line names an address: leaves carry `HASH256` of the payout
+script, which a miner matches against their own. Writer threads take the
+lines through bounded queues, so a connection never waits on the disk, and
+past 8 MiB a log moves to `.jsonl.1` and starts again. The operator may
+publish the leaf log, and hands a miner the lines of their wins.
+
+**The proofs.** Each win's `AuxProof` v2 is built from the job's coinbase
+and branch and checked as a covenant would check it, with the ASERT check
+on mainnet and chipnet, before it is sent or logged; one that fails is
+logged and dropped. A proof needs the block's coinbase branch to be at most
+25 deep, the proof format's limit. P2Pool builds no claim transactions:
+claiming is the miner's, or their tool's, with the token's covenant.
+
+## Job Declaration leaves
+
+A Full-Template client whose declared coinbase's output 0 is a token root
+puts the `CTMD` disclosure of its leaves in `DeclareMiningJob.excess_data`,
+as Pickaxe's client does. The node refuses the declaration with
+`invalid-coinbase-tx`, the reason in its error details, when output 0 is a
+root and `excess_data` is empty, when `excess_data` is not empty without a
+root, or when the disclosure does not decode or its leaves do not make the
+root. When the job is installed, each leaf must pay the channel's miner and
+carry the job's terms as its split (the donation the token chose, then the
+node's fee, each to the script the coinbase pays it to), so the node's fee
+and the miner's P2Pool donation apply to declared tokens too. A
+Coinbase-only custom job sends no declaration, so its output 0 must be the
+empty commitment. See [Job Declaration](bch-job-declaration.md).
 
 ## Offline CLI
 

@@ -61,6 +61,25 @@ Only a null proposal result permits installation. A successful response
 contains the installed channel job id; shares can be submitted immediately.
 The pool can broadcast a complete found block in this mode.
 
+**Declared token leaves.** A Full-Template declaration whose output 0 is a
+token root discloses the leaves behind it in `DeclareMiningJob.excess_data`,
+in Pickaxe's `CTMD` v2 ([Disclosure to
+miners](bch-auxpow.md#disclosure-to-miners); pickaxe-miner PR #70 at
+`a92fef7`, "Job Declaration leaves"): exactly one canonical disclosure,
+nothing trailing, each split hashing to its leaf's `ext`, whose leaves alone
+rebuild output 0's root at its height and salt. Empty `excess_data` means
+no root: a root without leaves, leaves without a root, or leaves that do not
+decode or make the root are refused with `DeclareMiningJob.Error`
+`invalid-coinbase-tx` and the reason in its details. When the job is
+installed, each leaf must pay the channel's miner (its `payout_hash` is
+`HASH256` of the miner's payout script) and carry the job's terms as its
+split: the donation the token chose, then the node's fee, each to the
+script the coinbase pays it to. So the node's fee and the miner's P2Pool
+donation apply to declared tokens as to BCH; a token whose covenant takes
+no split cannot be merge-mined under Job Declaration on a node that takes
+either cut. Otherwise the custom job is refused (`invalid-custom-job`, the
+reason in the node's log).
+
 Coinbase-Only clients do not declare or reveal their transaction list.
 They present the allocated token with their coinbase and private Merkle
 path directly. The pool verifies visible coinbase/header rules, exact
@@ -68,6 +87,8 @@ payments and share PoW. It cannot validate hidden transactions, CTOR, actual
 fees or total hidden block size. The declarator must validate and broadcast
 the complete block; the pool never broadcasts an incomplete substitute.
 This mode retains the protocol's withholding and hidden-invalid-work risk.
+A Coinbase-Only job declares no leaves, so it merge-mines no token: its
+output 0 must be the exact empty commitment.
 
 Once a job is active, its target and credited difficulty remain fixed.
 Vardiff and `UpdateChannel` change later jobs. Device maximum targets apply
@@ -98,9 +119,10 @@ tokens to the mining connection, installs jobs, mines headers and checks both
 emitted coinbase proofs. Reusing a consumed token must fail.
 
 The clients send adjacent setup/allocation frames in one write and split
-other writes after the first byte. A 5,000-byte declaration field forces
-payload decoding across the listener's 4,096-byte reads; TCP decides the
-actual segmentation. The test also checks Full-Template proposal/submission
+other writes after the first byte. The Full-Template declaration discloses
+sixteen token leaves with their splits, a 3,830-byte `excess_data` that
+forces payload decoding across the listener's 4,096-byte reads; TCP decides
+the actual segmentation. The test also checks Full-Template proposal/submission
 calls, Coinbase-Only transaction privacy and connection cleanup. Simulation
 builds retain their existing block-submission suppression.
 
@@ -130,7 +152,11 @@ header submission and client block broadcast. Both nodes must accept each
 block, both emitted coinbase proofs must match, and BCHN must reject an extra
 satoshi of coinbase value. This repository's client uses the published SRI
 transport and messages; independent declarator or ASIC firmware interoperability
-still requires separate validation.
+still requires separate validation. Since the 2026-10-24 token leaf rules,
+the Full-Template declaration discloses its two token leaves in
+`excess_data`, and the Coinbase-Only job mines no token and prints no aux
+proof; the runs recorded below predate that change, and the test has not
+been run against BCHN since.
 
 Use fresh data directories, outside the repository. The first node needs this
 `bitcoin.conf`:

@@ -173,7 +173,8 @@ node has no tokens to merge-mine. With tokens configured, the node builds
 the root from each miner's own token leaves. A miner can also declare its
 own token commitment through Job Declaration. The share header carries
 the root, `h` and salt in `pool_merge_mining` for a pool-built share or in
-`bch_coinbase` for a declared share, so every peer rebuilds output 0.
+`bch_coinbase` for a declared share, so every peer rebuilds output 0
+([Auxiliary work proofs](../bch-auxpow.md#merge-mining-tokens-on-a-public-node)).
 
 ## 2. Facts it rests on
 

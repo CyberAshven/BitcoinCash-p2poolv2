@@ -113,6 +113,13 @@ that part for themselves, on any P2Pool node:
   fee, if the node takes one, still applies and is taken from what the
   donation leaves, then the PPLNS window shares the rest. The donation and
   the fee each have their own 10% cap.
+- On a node that merge-mines tokens, your choice and the operator's fee
+  also apply to each token win: your token leaves carry them as the
+  split's donation and fee slots
+  ([Auxiliary work proofs](bch-auxpow.md#merge-mining-tokens-on-a-public-node)).
+  Firmware that asks for `pickaxe-merge` in `mining.configure`, or an SV2
+  client that negotiates extension `0x4D4D`, is sent its leaves and the
+  proofs of its wins.
 - This is P2Pool's donation. Pickaxe's donation is Pickaxe's own, set with
   its own key, and P2Pool ignores that key.
 - A value off the 0.5 steps, above 10, empty or otherwise unreadable is

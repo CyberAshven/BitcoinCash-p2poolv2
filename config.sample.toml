@@ -100,6 +100,12 @@ bootstrap_address = "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2"
 # In basis points, 1% = 100 basis points. Default 100 (1%) when fee_address
 # is set; 0 when it is not.
 # fee = 100
+# A JSON file of the covenant tokens this node merge-mines for its miners
+# (docs/bch-auxpow.md, "Merge-mining tokens on a public node"). Each miner's
+# jobs then carry a root of their own token leaves, with their donation and
+# the fee above as each win's cut; the node re-reads the file when it
+# changes. No token is deployed yet, so leave it unset.
+# merge_mining_tokens = "merge-tokens.json"
 # BCHN's ZMQ block notifications: start BCHN with
 # -zmqpubhashblock=tcp://127.0.0.1:28332.
 zmqpubhashblock = "tcp://127.0.0.1:28332"
