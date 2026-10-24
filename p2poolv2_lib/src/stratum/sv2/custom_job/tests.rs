@@ -1,5 +1,9 @@
 use super::*;
-use crate::test_utils::{bch_template_transaction, test_bch_custom_job, test_bch_prepared};
+use crate::shares::auxpow::{SplitSlot, TokenSplit};
+use crate::test_utils::{
+    bch_template_transaction, test_bch_custom_job, test_bch_custom_job_with_leaves,
+    test_bch_declared_leaves, test_bch_prepared, test_bch_prepared_with_cuts, test_merge_token_set,
+};
 use binary_sv2::{B064K, Deserialize, Seq0255, U256};
 use bitcoin::Network;
 use p2poolv2_config::DEFAULT_VERSION_MASK;
@@ -12,6 +16,7 @@ fn full_job_uses_declared_transactions_and_proportional_fee_revenue() {
         .unwrap();
     let selected: bitcoin::Transaction =
         deserialize(&hex::decode(bch_template_transaction(1).data).unwrap()).unwrap();
+    let root = test_bch_declared_leaves(&token).commitment.root;
     let (mut request_bytes, declared) =
         test_bch_custom_job(prepared, token, vec![selected.clone()], true, 5_000_000_004);
     let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
@@ -36,7 +41,7 @@ fn full_job_uses_declared_transactions_and_proportional_fee_revenue() {
         MergeMiningCommitment::from_output(&outputs[0])
             .unwrap()
             .root,
-        [0x77; 32]
+        root
     );
     assert_eq!(outputs[1].value.to_sat(), 1_250_000_001);
     assert_eq!(outputs[2].value.to_sat(), 3_750_000_003);
@@ -47,7 +52,7 @@ fn full_job_uses_declared_transactions_and_proportional_fee_revenue() {
             .unwrap()
             .merge_mining
             .root,
-        [0x77; 32]
+        root
     );
 }
 
@@ -167,4 +172,129 @@ fn full_job_rejects_changed_declaration() {
         .unwrap_err(),
         "declaration-mismatch"
     );
+}
+
+/// A P2PKH regtest address paying twenty `byte` bytes.
+fn regtest_payout(byte: u8) -> Address {
+    Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([byte; 20]),
+        Network::Regtest,
+    )
+}
+
+/// Validate the Full-Template job on `prepared` whose declaration
+/// discloses token leaves paying `leaf_payout` with `split`, installed for
+/// the miner paid to P2PKH(22 x 20).
+fn validate_declared_leaves(
+    prepared: Arc<crate::stratum::work::prepared_notify::PreparedNotifyParams>,
+    leaf_payout: &Address,
+    split: TokenSplit,
+) -> Result<(JobDetails, Option<Block>), String> {
+    let token = prepared
+        .mining_job_token([1; 32], prepared.template().curtime)
+        .unwrap();
+    let value = prepared.template().coinbasevalue;
+    let leaves = test_merge_token_set().miner_job(leaf_payout.script_pubkey().as_bytes(), split);
+    let (mut request_bytes, declared) = test_bch_custom_job_with_leaves(
+        prepared,
+        token,
+        vec![],
+        true,
+        value,
+        leaves.commitment,
+        leaves.disclosure(),
+    );
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    validate_custom_job(
+        &request,
+        declared,
+        regtest_payout(0x22),
+        ShareOwner::CashP2pkh([0x22; 20]),
+        DEFAULT_VERSION_MASK,
+    )
+}
+
+/// The node's 1% donation and 1% fee, each to the script the coinbase pays.
+fn node_cuts_split(fee_address: &Address) -> TokenSplit {
+    let donation =
+        crate::config::bitcoin_cash_donation_address(crate::config::BitcoinCashNetwork::Regtest);
+    TokenSplit {
+        donation: SplitSlot::new(100, donation.script_pubkey().as_bytes()).unwrap(),
+        fee: SplitSlot::new(100, fee_address.script_pubkey().as_bytes()).unwrap(),
+    }
+}
+
+/// On a node taking a 1% donation and a 1% fee, a declared job whose leaves
+/// pay the miner with both cuts in their split is installed: the node's fee
+/// reaches the tokens as it reaches BCH.
+#[test]
+fn declared_leaves_carrying_the_node_s_cuts_are_installed() {
+    let fee_address = regtest_payout(0xfe);
+    let prepared = test_bch_prepared_with_cuts(Some(100), Some(fee_address.clone()), Some(100));
+    assert!(
+        validate_declared_leaves(
+            prepared,
+            &regtest_payout(0x22),
+            node_cuts_split(&fee_address)
+        )
+        .is_ok()
+    );
+}
+
+/// A declared job whose leaves leave the node's fee out of their split is
+/// refused.
+#[test]
+fn declared_leaves_without_the_node_s_fee_are_refused() {
+    let fee_address = regtest_payout(0xfe);
+    let prepared = test_bch_prepared_with_cuts(Some(100), Some(fee_address.clone()), Some(100));
+    let without_fee = TokenSplit {
+        fee: SplitSlot::EMPTY,
+        ..node_cuts_split(&fee_address)
+    };
+    let reason =
+        validate_declared_leaves(prepared, &regtest_payout(0x22), without_fee).unwrap_err();
+    assert!(reason.contains("split"), "{reason}");
+}
+
+/// A declared job whose leaves pay someone other than its miner is refused.
+#[test]
+fn declared_leaves_paying_another_miner_are_refused() {
+    let fee_address = regtest_payout(0xfe);
+    let prepared = test_bch_prepared_with_cuts(Some(100), Some(fee_address.clone()), Some(100));
+    let reason = validate_declared_leaves(
+        prepared,
+        &regtest_payout(0x33),
+        node_cuts_split(&fee_address),
+    )
+    .unwrap_err();
+    assert!(reason.contains("does not pay the miner"), "{reason}");
+}
+
+/// A Coinbase-only job declares no leaves, so its output 0 must be the
+/// empty commitment.
+#[test]
+fn a_coinbase_only_job_cannot_carry_a_token_root() {
+    let prepared = test_bch_prepared();
+    let token = prepared
+        .mining_job_token([1; 32], prepared.template().curtime)
+        .unwrap();
+    let root = test_bch_declared_leaves(&token).commitment;
+    let (mut request_bytes, declared) = crate::test_utils::test_bch_custom_job_with_aux(
+        prepared,
+        token,
+        vec![],
+        false,
+        5_000_000_000,
+        root,
+    );
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let reason = validate_custom_job(
+        &request,
+        declared,
+        regtest_payout(0x22),
+        ShareOwner::CashP2pkh([0x22; 20]),
+        DEFAULT_VERSION_MASK,
+    )
+    .unwrap_err();
+    assert!(reason.contains("Coinbase-only"), "{reason}");
 }

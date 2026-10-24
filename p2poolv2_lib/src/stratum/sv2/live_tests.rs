@@ -5,7 +5,9 @@
 //! Explicit opt-in checks against two disposable BCHN regtest nodes.
 
 use super::{PoolTransactionCache, Sv2Mining, bind, serve};
-use crate::shares::auxpow::{AuxProof, AuxiliaryTree, TokenLeaf};
+use crate::shares::auxpow::{
+    AuxProof, AuxiliaryTree, DisclosedLeaf, Disclosure, TokenLeaf, TokenSplit,
+};
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::ShareHeader;
 use crate::stratum::work::block_template::BlockTemplate;
@@ -204,6 +206,20 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
         [0; 32],
     );
     let auxiliary_tree = AuxiliaryTree::build(&[first_work, second_work]).unwrap();
+    // The declaration discloses its leaves, which pay the miner with no
+    // split: this node takes no donation or fee.
+    let disclosure = Disclosure {
+        leaves: vec![
+            DisclosedLeaf {
+                leaf: first_work,
+                split: TokenSplit::default(),
+            },
+            DisclosedLeaf {
+                leaf: second_work,
+                split: TokenSplit::default(),
+            },
+        ],
+    };
     let (mut request_bytes, declared) = test_bch_custom_job_with_aux(
         Arc::clone(&prepared),
         token.clone(),
@@ -229,7 +245,7 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
                         .collect(),
                 )
                 .unwrap(),
-                excess_data: B064K::new(&[]).unwrap(),
+                excess_data: B064K::new(&disclosure.encode()).unwrap(),
             },
         )
         .await;
@@ -404,15 +420,15 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
         .await;
     let allocated = AllocateMiningJobTokenSuccess::from_bytes(&mut allocated_payload).unwrap();
     let token = allocated.mining_job_token.as_bytes().to_vec();
-    let private_tree = AuxiliaryTree::build(&[second_work]).unwrap();
-    assert_ne!(private_tree.commitment.root, auxiliary_tree.commitment.root);
+    // A Coinbase-only job declares no leaves, so it merge-mines no token:
+    // its output 0 is the empty commitment.
     let (mut request_bytes, _) = test_bch_custom_job_with_aux(
         Arc::clone(&prepared),
         token,
         vec![private_transaction.clone()],
         false,
         private_value,
-        private_tree.commitment,
+        MergeMiningCommitment::empty(),
     );
     let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
     let private_header = test_bch_solve_custom_job(&request, &extranonce_prefix);
@@ -502,18 +518,9 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
     })
     .await
     .expect("the pool node did not validate the private block broadcast by the client");
-    let private_auxpow = AuxProof::new(
-        private_header,
-        &private_block.txdata[0],
-        &emission.template_merkle_branches,
-        private_tree.commitment,
-        &private_tree.branches[0],
-    )
-    .unwrap();
-    private_auxpow.verify(&second_work, 16, None).unwrap();
     println!(
         "{}",
-        json!({"mode": "coinbase-only", "height": private_height, "hash": private_header.block_hash().to_string(), "coinbase_value": private_value, "private_fee": private_fee, "transaction": private_txid, "tokens": 1, "aux_proof": hex::encode(private_auxpow.to_bytes().unwrap())})
+        json!({"mode": "coinbase-only", "height": private_height, "hash": private_header.block_hash().to_string(), "coinbase_value": private_value, "private_fee": private_fee, "transaction": private_txid, "tokens": 0})
     );
     drop(mining);
     drop(full_jdc);

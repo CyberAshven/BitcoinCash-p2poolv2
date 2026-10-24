@@ -8,7 +8,9 @@
 //! sessions. The registry is what lets a token allocated on the first be
 //! presented on the second.
 
+use super::custom_job::declared_leaves;
 use super::sort_ctor;
+use crate::shares::auxpow::Disclosure;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::stratum::parse_password::{
     log_unknown_options, parse_miner_donation, split_user_identity,
@@ -54,6 +56,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 const PROTOCOL_VERSION: u16 = 2;
+/// The error a declaration whose coinbase the node refuses gets, as
+/// Pickaxe's pool sends it: here, token leaves that are missing, not
+/// canonical, or do not make output 0's root.
+const INVALID_COINBASE_TX: &str = "invalid-coinbase-tx";
 const WORK_SELECTION_FLAG: u32 = 0b10;
 const MAX_JOB_TOKENS: usize = 64;
 const TOKEN_LIFETIME: Duration = Duration::from_secs(120);
@@ -119,6 +125,10 @@ pub(crate) struct Declaration {
     pub version: u32,
     pub prefix: Vec<u8>,
     pub suffix: Vec<u8>,
+    /// The token leaves behind the declared coinbase's output 0, from
+    /// `DeclareMiningJob.excess_data` (`declared_leaves`); none for the
+    /// empty commitment.
+    pub disclosure: Disclosure,
 }
 
 struct JobToken {
@@ -523,6 +533,27 @@ impl Sv2Connection {
                 ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN,
             );
         }
+        // A Bitcoin Cash declaration discloses the token leaves behind its
+        // output 0 in excess_data, so the node can check, when the job is
+        // installed, that they pay its fee and the miner's donation.
+        let disclosure = if registry.merge_mining.is_some() {
+            match declared_leaves(
+                request.coinbase_tx_suffix.as_bytes(),
+                request.excess_data.as_bytes(),
+            ) {
+                Ok(disclosure) => disclosure,
+                Err(reason) => {
+                    drop(registry);
+                    return self.declare_error_with_details(
+                        request.request_id,
+                        INVALID_COINBASE_TX,
+                        reason.as_bytes(),
+                    );
+                }
+            }
+        } else {
+            Disclosure::default()
+        };
         let wtxids = request
             .wtxid_list
             .iter()
@@ -559,6 +590,7 @@ impl Sv2Connection {
                 version: request.version,
                 prefix: request.coinbase_tx_prefix.as_bytes().to_vec(),
                 suffix: request.coinbase_tx_suffix.as_bytes().to_vec(),
+                disclosure,
             },
         };
         drop(registry);
@@ -680,11 +712,21 @@ impl Sv2Connection {
         request_id: u32,
         error_code: &'static str,
     ) -> Result<Vec<Vec<u8>>, String> {
+        self.declare_error_with_details(request_id, error_code, &[])
+    }
+
+    /// A `DeclareMiningJob.Error` saying why in `details`.
+    fn declare_error_with_details(
+        &mut self,
+        request_id: u32,
+        error_code: &'static str,
+        details: &[u8],
+    ) -> Result<Vec<Vec<u8>>, String> {
         self.respond(
             DeclareMiningJobError {
                 request_id,
                 error_code: string_field(error_code)?,
-                error_details: bytes_field(&[])?,
+                error_details: bytes_field(details)?,
             },
             MESSAGE_TYPE_DECLARE_MINING_JOB_ERROR,
         )

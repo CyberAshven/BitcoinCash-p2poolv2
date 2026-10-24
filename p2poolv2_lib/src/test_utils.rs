@@ -56,7 +56,7 @@ use crate::pool_difficulty::AsertParent;
 #[cfg(test)]
 use crate::pool_difficulty::MockPoolDifficulty;
 #[cfg(test)]
-use crate::shares::auxpow::{AuxProof, AuxiliaryTree, TokenLeaf};
+use crate::shares::auxpow::{AuxProof, AuxiliaryTree, Disclosure, TokenLeaf};
 #[cfg(test)]
 use crate::shares::bch_coinbase::BchCoinbase;
 #[cfg(test)]
@@ -105,6 +105,8 @@ use crate::stratum::work::difficulty::validate::validate_bitcoin_difficulty;
 use crate::stratum::work::gbt::build_merkle_branches_for_template;
 #[cfg(test)]
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
+#[cfg(test)]
+use crate::stratum::work::merge_tokens::MinerTokenJob;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::stratum::work::merge_tokens::{MergeMinedToken, TokenSet};
 #[cfg(test)]
@@ -747,7 +749,36 @@ fn test_bch_prepared_with_weights_and_cuts(
     )
 }
 
-/// Build the client side of a BCH declared job, with miner-chosen aux data.
+/// The token leaves a Full-Template declarator paid to P2PKH(22 x 20)
+/// discloses for a job on `token`: [`test_merge_token_set`]'s tokens, each
+/// paying the declarator, with the token terms' donation and fee as their
+/// split, as the node requires.
+#[cfg(test)]
+pub(crate) fn test_bch_declared_leaves(token: &[u8]) -> MinerTokenJob {
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let terms = ShareCommitment::from_mining_job_token(
+        token,
+        payout.clone(),
+        ShareOwner::CashP2pkh([0x22; 20]),
+    )
+    .unwrap();
+    let split = crate::stratum::work::prepared_notify::token_split(
+        &terms.donation_address,
+        terms.donation,
+        &terms.fee_address,
+        terms.fee,
+    )
+    .unwrap();
+    test_merge_token_set().miner_job(payout.script_pubkey().as_bytes(), split)
+}
+
+/// Build the client side of a BCH declared job. A Full-Template job
+/// merge-mines [`test_bch_declared_leaves`] and discloses them; a
+/// Coinbase-only job, which cannot disclose leaves, carries the empty
+/// commitment.
 #[cfg(test)]
 pub(crate) fn test_bch_custom_job(
     prepared: Arc<PreparedNotifyParams>,
@@ -756,21 +787,25 @@ pub(crate) fn test_bch_custom_job(
     full: bool,
     value: u64,
 ) -> (Vec<u8>, DeclaredJob) {
-    test_bch_custom_job_with_aux(
+    let (merge_mining, disclosure) = if full {
+        let leaves = test_bch_declared_leaves(&token);
+        (leaves.commitment, leaves.disclosure())
+    } else {
+        (MergeMiningCommitment::empty(), Disclosure::default())
+    };
+    test_bch_custom_job_with_leaves(
         prepared,
         token,
         transactions,
         full,
         value,
-        MergeMiningCommitment {
-            root: [0x77; 32],
-            height: 1,
-            salt: 9,
-        },
+        merge_mining,
+        disclosure,
     )
 }
 
-/// A declared job with a caller-selected auxiliary commitment.
+/// A declared job with a caller-selected auxiliary commitment and no
+/// disclosed leaves, for building its bytes and proofs.
 #[cfg(test)]
 pub(crate) fn test_bch_custom_job_with_aux(
     prepared: Arc<PreparedNotifyParams>,
@@ -779,6 +814,29 @@ pub(crate) fn test_bch_custom_job_with_aux(
     full: bool,
     value: u64,
     merge_mining: MergeMiningCommitment,
+) -> (Vec<u8>, DeclaredJob) {
+    test_bch_custom_job_with_leaves(
+        prepared,
+        token,
+        transactions,
+        full,
+        value,
+        merge_mining,
+        Disclosure::default(),
+    )
+}
+
+/// A declared job with a caller-selected auxiliary commitment and the
+/// leaves its declaration discloses.
+#[cfg(test)]
+pub(crate) fn test_bch_custom_job_with_leaves(
+    prepared: Arc<PreparedNotifyParams>,
+    token: Vec<u8>,
+    transactions: Vec<Transaction>,
+    full: bool,
+    value: u64,
+    merge_mining: MergeMiningCommitment,
+    disclosure: Disclosure,
 ) -> (Vec<u8>, DeclaredJob) {
     let template = prepared.template();
     let payout = Address::p2pkh(
@@ -811,6 +869,7 @@ pub(crate) fn test_bch_custom_job_with_aux(
         version: template.version as u32,
         prefix: bytes[..nonce_offset].to_vec(),
         suffix: bytes[nonce_offset + 12..].to_vec(),
+        disclosure,
     };
     let mut selected = template.as_ref().clone();
     selected.transactions = transactions

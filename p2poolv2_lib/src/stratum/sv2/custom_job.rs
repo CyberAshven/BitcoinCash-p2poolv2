@@ -5,6 +5,7 @@
 //! Validate the miner's BCH job before installing it in a mining channel.
 
 use super::session::DeclaredJob;
+use crate::shares::auxpow::Disclosure;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::coinbase_proof::MAX_COINBASE_MERKLE_BRANCH_LENGTH;
 use crate::shares::merge_mining::MergeMiningCommitment;
@@ -16,16 +17,106 @@ use crate::stratum::work::coinbase::{
 use crate::stratum::work::gbt::{
     build_merkle_branches_for_template, compute_merkle_root_from_branches,
 };
+use crate::stratum::work::prepared_notify::token_split;
 use crate::stratum::work::tracker::JobDetails;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoin::block::{Header, Version};
 use bitcoin::consensus::{deserialize, serialize};
-use bitcoin::hashes::Hash;
+use bitcoin::hashes::{Hash, sha256d};
 use bitcoin::{Address, Amount, Block, BlockHash, CompactTarget, TxMerkleNode, TxOut};
 use mining_sv2::SetCustomMiningJob;
 use p2poolv2_wallet::share_owner::ShareOwner;
 use std::str::FromStr;
 use std::sync::Arc;
+
+/// The leaves a Full-Template declaration discloses for its coinbase, read
+/// from `DeclareMiningJob.excess_data` (`CTMD` v2, as Pickaxe's Job
+/// Declaration client sends them): exactly one canonical disclosure whose
+/// leaves rebuild output 0's root at its height and salt.
+///
+/// Empty `excess_data` means no root: a coinbase whose output 0 is a token
+/// root and declares no leaves is refused, and so are leaves beside the
+/// empty commitment. `coinbase_suffix` is the declared coinbase after the
+/// extranonce: the sequence, the outputs and the locktime.
+pub(crate) fn declared_leaves(
+    coinbase_suffix: &[u8],
+    excess_data: &[u8],
+) -> Result<Disclosure, String> {
+    let outputs: Vec<TxOut> = coinbase_suffix
+        .len()
+        .checked_sub(4)
+        .and_then(|end| coinbase_suffix.get(4..end))
+        .and_then(|outputs| deserialize(outputs).ok())
+        .ok_or("the declared coinbase's outputs do not read")?;
+    let merge_mining = outputs
+        .first()
+        .ok_or("the declared coinbase has no output 0")
+        .and_then(MergeMiningCommitment::from_output)?;
+    if merge_mining.is_empty() {
+        return if excess_data.is_empty() {
+            Ok(Disclosure::default())
+        } else {
+            Err("token leaves were declared without a token commitment".into())
+        };
+    }
+    if excess_data.is_empty() {
+        return Err("a token commitment needs its leaves in excess_data".into());
+    }
+    let disclosure = Disclosure::decode(excess_data).map_err(|error| error.to_string())?;
+    disclosure
+        .check_root(&merge_mining)
+        .map_err(|error| error.to_string())?;
+    Ok(disclosure)
+}
+
+/// The token rules of a declared job, so the node's fee and the miner's
+/// P2Pool donation apply to its tokens as to its BCH.
+///
+/// A Coinbase-only job sends no declaration, so the node could never see
+/// its leaves: its output 0 must be the empty commitment. A Full-Template
+/// job's disclosed leaves (`declared_leaves`, checked when it was declared)
+/// must make its root, and each must pay the channel's miner, with the
+/// split of its job's terms: the donation the token carries, then the
+/// node's fee, each to the script the coinbase pays it to.
+fn check_declared_tokens(
+    declared: &DeclaredJob,
+    merge_mining: &MergeMiningCommitment,
+    commitment: &ShareCommitment,
+) -> Result<(), String> {
+    let Some(declaration) = &declared.declaration else {
+        return if merge_mining.is_empty() {
+            Ok(())
+        } else {
+            Err("a Coinbase-only custom job cannot carry a token commitment".into())
+        };
+    };
+    declaration
+        .disclosure
+        .check_root(merge_mining)
+        .map_err(|error| error.to_string())?;
+    let payout_hash =
+        sha256d::Hash::hash(commitment.miner_bitcoin_address.script_pubkey().as_bytes())
+            .to_byte_array();
+    let split = token_split(
+        &commitment.donation_address,
+        commitment.donation,
+        &commitment.fee_address,
+        commitment.fee,
+    )
+    .map_err(|error| error.message)?;
+    for disclosed in &declaration.disclosure.leaves {
+        let category = hex::encode(disclosed.leaf.category);
+        if disclosed.leaf.payout_hash != payout_hash {
+            return Err(format!("token {category}'s leaf does not pay the miner"));
+        }
+        if disclosed.split != split {
+            return Err(format!(
+                "token {category}'s split is not the job's donation and the node's fee"
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Coinbase-only jobs deliberately do not reveal their transaction list.
 /// Their declarator must validate CTOR/consensus and broadcast found blocks.
@@ -81,6 +172,7 @@ pub(crate) fn validate_custom_job(
         ShareCommitment::from_mining_job_token(request.token.as_bytes(), payout, owner)
             .map_err(|error| error.to_string())?;
     commitment.bch_coinbase = Some(descriptor.clone());
+    check_declared_tokens(&declared, &merge_mining, &commitment)?;
     let distribution = declared
         .prepared
         .declared_outputs(value, &merge_mining)

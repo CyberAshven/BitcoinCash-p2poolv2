@@ -896,7 +896,7 @@ impl PreparedNotifyParamsBuilder {
 /// each at the rate the coinbase takes it and to the script the coinbase
 /// pays it to, so each token win is shared as each block is. A rate of 0,
 /// or none, leaves its slot empty; both empty is a zero `ext`.
-fn token_split(
+pub(crate) fn token_split(
     donation_address: &Option<Address>,
     donation: Option<u16>,
     fee_address: &Option<Address>,

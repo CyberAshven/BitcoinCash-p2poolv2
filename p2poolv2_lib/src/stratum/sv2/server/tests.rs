@@ -3,13 +3,17 @@ use crate::accounting::stats::metrics;
 use crate::config::{Chain, DEFAULT_VERSION_MASK, PoolMode};
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::ShareHeader;
+use crate::shares::share_commitment::ShareCommitment;
 use crate::stratum::block_submit::FoundBlockSubmitter;
 use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::sv2::session::encode_message;
+use crate::stratum::work::merge_tokens::{MergeMinedToken, TokenSet};
+use crate::stratum::work::prepared_notify::token_split;
 use crate::stratum::work::tracker::start_tracker_actor;
 use crate::test_utils::{
-    TestSv2Client, bch_template_transaction, test_bch_custom_job, test_bch_prepared,
-    test_bch_solve_custom_job, test_bch_stratum_context, test_sv2_authority, test_sv2_setup,
+    TestSv2Client, bch_template_transaction, test_bch_custom_job, test_bch_custom_job_with_leaves,
+    test_bch_prepared_with_cuts, test_bch_solve_custom_job, test_bch_stratum_context,
+    test_sv2_authority, test_sv2_setup,
 };
 use crate::test_utils::{make_test_share_address, setup_test_chain_store_handle};
 use binary_sv2::U256;
@@ -75,7 +79,13 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
         .expect(if cfg!(feature = "sim") { 0 } else { 1 })
         .mount(&rpc)
         .await;
-    let prepared = test_bch_prepared();
+    // A node taking a 1% donation and a 1% fee, so a declarator's token
+    // leaves carry both in their split.
+    let fee_address = bitcoin::Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0xfe; 20]),
+        Network::Regtest,
+    );
+    let prepared = test_bch_prepared_with_cuts(Some(100), Some(fee_address), Some(100));
     let cache = PoolTransactionCache::new();
     cache.set_prepared(Arc::clone(&prepared));
     let (_template_sender, template_rx) = watch::channel(Some(Arc::clone(&prepared)));
@@ -163,12 +173,45 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
     let token = allocated.mining_job_token.as_bytes().to_vec();
     let selected: bitcoin::Transaction =
         deserialize(&hex::decode(bch_template_transaction(1).data).unwrap()).unwrap();
-    let (mut custom_bytes, declared) = test_bch_custom_job(
+    // Sixteen tokens, the most one tree holds, each leaf paying the miner
+    // with the job's donation and fee: their 3,830-byte disclosure makes
+    // the declaration longer than the listener's 4,096-byte reads.
+    let terms = ShareCommitment::from_mining_job_token(
+        &token,
+        payout.clone(),
+        p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]),
+    )
+    .unwrap();
+    let split = token_split(
+        &terms.donation_address,
+        terms.donation,
+        &terms.fee_address,
+        terms.fee,
+    )
+    .unwrap();
+    let sixteen_tokens = TokenSet::new(
+        (1..=16u8)
+            .map(|category| MergeMinedToken {
+                category: [category; 32],
+                lock_hash: [0x51; 32],
+                state_hash: [category; 32],
+                target_bits: 0x207f_ffff,
+                max_height: 16,
+            })
+            .collect(),
+    )
+    .unwrap();
+    let leaves = sixteen_tokens.miner_job(payout.script_pubkey().as_bytes(), split);
+    let excess_data = leaves.disclosure().encode();
+    assert_eq!(excess_data.len(), 3_830);
+    let (mut custom_bytes, declared) = test_bch_custom_job_with_leaves(
         Arc::clone(&prepared),
         token.clone(),
         vec![selected.clone()],
         true,
         prepared.template().coinbasevalue,
+        leaves.commitment,
+        leaves.disclosure(),
     );
     let declaration = declared.declaration.unwrap();
     let wtxid = selected.compute_wtxid().to_byte_array();
@@ -182,7 +225,7 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
                     coinbase_tx_prefix: B064K::new(&declaration.prefix).unwrap(),
                     coinbase_tx_suffix: B064K::new(&declaration.suffix).unwrap(),
                     wtxid_list: Seq064K::new(vec![U256::new(&wtxid).unwrap()]).unwrap(),
-                    excess_data: B064K::new(&[0; 5000]).unwrap(),
+                    excess_data: B064K::new(&excess_data).unwrap(),
                 },
                 MESSAGE_TYPE_DECLARE_MINING_JOB,
             )
