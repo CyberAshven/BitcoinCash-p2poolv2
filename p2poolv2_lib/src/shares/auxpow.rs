@@ -123,6 +123,9 @@ pub enum AuxError {
     Asert(String),
     /// A token split, or its preimage, is not canonical.
     Split,
+    /// A leaf disclosure (`CTMD`) is not canonical or does not make the
+    /// root it discloses, for the reason given.
+    Disclosure(&'static str),
 }
 
 impl fmt::Display for AuxError {
@@ -149,6 +152,7 @@ impl fmt::Display for AuxError {
             Self::Work => write!(formatter, "header does not meet the token target"),
             Self::Asert(reason) => write!(formatter, "header fails the ASERT check: {reason}"),
             Self::Split => write!(formatter, "not a canonical token split"),
+            Self::Disclosure(reason) => write!(formatter, "{reason}"),
         }
     }
 }
@@ -211,6 +215,31 @@ impl TokenLeaf {
         bytes[133..137].copy_from_slice(&self.target_bits.to_le_bytes());
         bytes[137..].copy_from_slice(&self.ext);
         bytes
+    }
+
+    /// Read a 169-byte preimage with the `CTML` magic and version 2; any
+    /// other bytes are not a leaf. The target and `ext` are read as they
+    /// are: a covenant, not the leaf format, judges them.
+    pub fn from_preimage(bytes: &[u8]) -> Result<Self, AuxError> {
+        let bytes: &[u8; TOKEN_LEAF_LENGTH] = bytes
+            .try_into()
+            .map_err(|_| AuxError::Disclosure("a token leaf is 169 bytes"))?;
+        if bytes[..4] != LEAF_MAGIC || bytes[4] != LEAF_VERSION {
+            return Err(AuxError::Disclosure("not a merge-mining v2 token leaf"));
+        }
+        let hash = |at: usize| -> [u8; 32] {
+            bytes[at..at + 32]
+                .try_into()
+                .expect("32 bytes within the preimage")
+        };
+        Ok(Self {
+            category: hash(5),
+            lock_hash: hash(37),
+            state_hash: hash(69),
+            payout_hash: hash(101),
+            target_bits: u32::from_le_bytes([bytes[133], bytes[134], bytes[135], bytes[136]]),
+            ext: hash(137),
+        })
     }
 
     /// `SHA256(0x00 || preimage)`.
@@ -399,11 +428,69 @@ pub struct AuxiliaryTree {
     pub branches: Vec<TokenBranch>,
 }
 
+/// Where a tree puts its tokens' leaves: its height `h`, its salt and each
+/// category's slot, in the order the categories were given. It depends only
+/// on the categories, so a set of tokens searches it once and every job's
+/// tree, whatever its leaves bind, reuses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeLayout {
+    pub height: u8,
+    pub salt: u32,
+    pub slots: Vec<u32>,
+}
+
+impl TreeLayout {
+    /// The builder's layout for `categories`: the smallest height that
+    /// holds them, the first salt below [`LAYOUT_SALTS`] that gives every
+    /// category its own slot, else the next height, up to `max_height` (at
+    /// most 16), as Pickaxe's builder searches. No categories take height 0
+    /// and salt 0.
+    pub fn search(categories: &[[u8; 32]], max_height: u8) -> Result<Self, AuxError> {
+        if categories.len() > MAX_TOKEN_LEAVES {
+            return Err(AuxError::TooManyTokens);
+        }
+        if categories
+            .iter()
+            .enumerate()
+            .any(|(index, category)| categories[..index].contains(category))
+        {
+            return Err(AuxError::DuplicateCategory);
+        }
+        let minimum_height = categories.len().next_power_of_two().trailing_zeros() as u8;
+        for height in minimum_height..=max_height.min(MAX_MERGE_MINING_TREE_HEIGHT) {
+            for salt in 0..LAYOUT_SALTS {
+                if let Ok(layout) = Self::at(categories, height, salt) {
+                    return Ok(layout);
+                }
+            }
+        }
+        Err(AuxError::NoLayout)
+    }
+
+    /// The layout `categories` take at `height` and `salt`, as a reader of
+    /// someone else's tree places them; an error when two share a slot.
+    pub fn at(categories: &[[u8; 32]], height: u8, salt: u32) -> Result<Self, AuxError> {
+        let mut slots = Vec::with_capacity(categories.len());
+        for category in categories {
+            let placed = slot(category, salt, height);
+            if slots.contains(&placed) {
+                return Err(AuxError::NoLayout);
+            }
+            slots.push(placed);
+        }
+        Ok(Self {
+            height,
+            salt,
+            slots,
+        })
+    }
+}
+
 impl AuxiliaryTree {
     /// Build the tree for `leaves`: the smallest height that holds them,
     /// the first salt below [`LAYOUT_SALTS`] that gives every category its
-    /// own slot, else the next height, up to 16. No tokens give the exact
-    /// empty commitment.
+    /// own slot, else the next height, up to 16 ([`TreeLayout::search`]).
+    /// No tokens give the exact empty commitment.
     pub fn build(leaves: &[TokenLeaf]) -> Result<Self, AuxError> {
         if leaves.is_empty() {
             return Ok(Self {
@@ -411,19 +498,30 @@ impl AuxiliaryTree {
                 branches: Vec::new(),
             });
         }
-        if leaves.len() > MAX_TOKEN_LEAVES {
-            return Err(AuxError::TooManyTokens);
+        let categories: Vec<[u8; 32]> = leaves.iter().map(|leaf| leaf.category).collect();
+        let layout = TreeLayout::search(&categories, MAX_MERGE_MINING_TREE_HEIGHT)?;
+        Ok(Self::build_at(&layout, leaves))
+    }
+
+    /// The tree of `leaves` placed by `layout`, which holds one slot for
+    /// each of them, in order: each leaf hash in its slot, every other slot
+    /// empty. No leaves give the exact empty commitment.
+    pub fn build_at(layout: &TreeLayout, leaves: &[TokenLeaf]) -> Self {
+        debug_assert_eq!(layout.slots.len(), leaves.len());
+        if leaves.is_empty() {
+            return Self {
+                commitment: MergeMiningCommitment::empty(),
+                branches: Vec::new(),
+            };
         }
-        if leaves.iter().enumerate().any(|(index, leaf)| {
-            leaves[..index]
-                .iter()
-                .any(|other| other.category == leaf.category)
-        }) {
-            return Err(AuxError::DuplicateCategory);
-        }
-        let (height, salt, slots) = search_layout(leaves)?;
+        let TreeLayout {
+            height,
+            salt,
+            slots,
+        } = layout;
+        let (height, salt) = (*height, *salt);
         let mut level = vec![[0u8; 32]; 1 << height];
-        for (leaf, slot) in leaves.iter().zip(&slots) {
+        for (leaf, slot) in leaves.iter().zip(slots) {
             level[*slot as usize] = leaf.hash();
         }
         let mut levels = vec![level];
@@ -439,7 +537,7 @@ impl AuxiliaryTree {
         let root = levels.last().expect("at least the leaf level")[0];
         let branches = leaves
             .iter()
-            .zip(&slots)
+            .zip(slots)
             .map(|(leaf, slot)| {
                 let mut index = *slot as usize;
                 let branch = levels[..levels.len() - 1]
@@ -457,31 +555,146 @@ impl AuxiliaryTree {
                 }
             })
             .collect();
-        Ok(Self {
+        Self {
             commitment: MergeMiningCommitment { root, height, salt },
             branches,
-        })
+        }
     }
 }
 
-/// The first `(height, salt)` that gives each leaf its own slot, and the
-/// slots in leaf order.
-fn search_layout(leaves: &[TokenLeaf]) -> Result<(u8, u32, Vec<u32>), AuxError> {
-    let minimum_height = leaves.len().next_power_of_two().trailing_zeros() as u8;
-    let mut slots = vec![0; leaves.len()];
-    for height in minimum_height..=MAX_MERGE_MINING_TREE_HEIGHT {
-        'salts: for salt in 0..LAYOUT_SALTS {
-            for (index, leaf) in leaves.iter().enumerate() {
-                let placed = slot(&leaf.category, salt, height);
-                if slots[..index].contains(&placed) {
-                    continue 'salts;
-                }
-                slots[index] = placed;
+/// The magic a leaf disclosure starts with: `"CTMD"`.
+const DISCLOSURE_MAGIC: [u8; 4] = *b"CTMD";
+const DISCLOSURE_VERSION: u8 = 0x02;
+
+/// The flag before a disclosed leaf's split: none, its `ext` is zero.
+const DISCLOSED_WITHOUT_SPLIT: u8 = 0x00;
+/// The flag before a disclosed leaf's split: its 69-byte preimage follows.
+const DISCLOSED_WITH_SPLIT: u8 = 0x01;
+
+/// One disclosed leaf and the split its `ext` commits to (none for a zero
+/// `ext`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisclosedLeaf {
+    pub leaf: TokenLeaf,
+    pub split: TokenSplit,
+}
+
+/// The leaves behind one output 0 (`CTMD` v2), in the format agreed with
+/// Pickaxe (its `docs/merge-mining.md`, "Disclosure"): what a Job
+/// Declaration client puts in `DeclareMiningJob.excess_data`, and what a
+/// pool shows a miner who asks for their leaves.
+///
+/// ```text
+/// off len   field
+/// 0   4     "CTMD"
+/// 4   1     02
+/// 5   1     n, the leaves (0 to 16)
+/// then n times:
+///     169   the leaf preimage
+///     1     00: ext is zero; 01: a split follows
+///     69    the split preimage (with 01 only)
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Disclosure {
+    pub leaves: Vec<DisclosedLeaf>,
+}
+
+impl Disclosure {
+    /// The canonical bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(
+            DISCLOSURE_MAGIC.len()
+                + 2
+                + self.leaves.len() * (TOKEN_LEAF_LENGTH + 1 + TOKEN_SPLIT_PREIMAGE_LENGTH),
+        );
+        bytes.extend_from_slice(&DISCLOSURE_MAGIC);
+        bytes.push(DISCLOSURE_VERSION);
+        bytes.push(self.leaves.len() as u8);
+        for disclosed in &self.leaves {
+            bytes.extend_from_slice(&disclosed.leaf.preimage());
+            if disclosed.split.is_none() {
+                bytes.push(DISCLOSED_WITHOUT_SPLIT);
+            } else {
+                bytes.push(DISCLOSED_WITH_SPLIT);
+                bytes.extend_from_slice(&disclosed.split.preimage());
             }
-            return Ok((height, salt, slots));
         }
+        bytes
     }
-    Err(AuxError::NoLayout)
+
+    /// Read exactly one disclosure: the magic and version, at most 16
+    /// leaves, each a `CTML` v2 leaf whose split is canonical and hashes to
+    /// its `ext` (a zero `ext` without one), and nothing trailing.
+    pub fn decode(bytes: &[u8]) -> Result<Self, AuxError> {
+        let malformed = AuxError::Disclosure("not a canonical merge-mining leaf disclosure");
+        let mut reader = Reader(bytes);
+        if reader.take(4).map_err(|_| malformed.clone())? != DISCLOSURE_MAGIC
+            || reader.byte().map_err(|_| malformed.clone())? != DISCLOSURE_VERSION
+        {
+            return Err(malformed);
+        }
+        let count = usize::from(reader.byte().map_err(|_| malformed.clone())?);
+        if count > MAX_TOKEN_LEAVES {
+            return Err(AuxError::TooManyTokens);
+        }
+        let mut leaves = Vec::with_capacity(count);
+        for _ in 0..count {
+            let leaf = TokenLeaf::from_preimage(
+                reader
+                    .take(TOKEN_LEAF_LENGTH)
+                    .map_err(|_| malformed.clone())?,
+            )?;
+            let split = match reader.byte().map_err(|_| malformed.clone())? {
+                DISCLOSED_WITHOUT_SPLIT => TokenSplit::default(),
+                DISCLOSED_WITH_SPLIT => TokenSplit::parse(
+                    reader
+                        .take(TOKEN_SPLIT_PREIMAGE_LENGTH)
+                        .map_err(|_| malformed.clone())?,
+                )?,
+                _ => return Err(malformed),
+            };
+            if split.ext() != leaf.ext {
+                return Err(AuxError::Disclosure(
+                    "a disclosed leaf's ext is not its split's",
+                ));
+            }
+            leaves.push(DisclosedLeaf { leaf, split });
+        }
+        if !reader.0.is_empty() {
+            return Err(malformed);
+        }
+        Ok(Self { leaves })
+    }
+
+    /// Whether these leaves, and no others, make `commitment`'s root: placed
+    /// at its height and salt, each in its own slot and every other slot
+    /// empty. A leaf left out, added or changed gives another root. No
+    /// leaves disclose only the exact empty commitment.
+    pub fn check_root(&self, commitment: &MergeMiningCommitment) -> Result<(), AuxError> {
+        if self.leaves.is_empty() {
+            return if commitment.is_empty() {
+                Ok(())
+            } else {
+                Err(AuxError::Disclosure(
+                    "the disclosure names no leaf for a non-empty root",
+                ))
+            };
+        }
+        let categories: Vec<[u8; 32]> = self
+            .leaves
+            .iter()
+            .map(|disclosed| disclosed.leaf.category)
+            .collect();
+        let layout = TreeLayout::at(&categories, commitment.height, commitment.salt)
+            .map_err(|_| AuxError::Disclosure("two disclosed leaves share a slot"))?;
+        let leaves: Vec<TokenLeaf> = self.leaves.iter().map(|disclosed| disclosed.leaf).collect();
+        if AuxiliaryTree::build_at(&layout, &leaves).commitment != *commitment {
+            return Err(AuxError::Disclosure(
+                "the disclosed leaves do not make output 0's root",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// `AuxProof` v2: what a token claim hands its covenant.

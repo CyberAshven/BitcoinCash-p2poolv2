@@ -447,3 +447,180 @@ fn token_split_is_canonical() {
         Ok(donation_only)
     );
 }
+
+/// Pickaxe's whole split leaf, disclosed (`CTMD` v2, pickaxe-miner PR #70
+/// at a92fef7, `docs/merge-mining.md`, "Disclosure"): the magic, version
+/// 2, one leaf, its 169-byte preimage, flag 01 and the 69-byte split
+/// preimage. It reads back, and makes the one-leaf root at `h = 0`, salt
+/// 0, which is the leaf hash itself.
+#[test]
+fn the_split_leaf_disclosure_is_its_preimages_in_order() {
+    let split = TokenSplit::parse(&hex::decode(SPLIT_PREIMAGE).unwrap()).unwrap();
+    let leaf = TokenLeaf::from_preimage(&hex::decode(SPLIT_LEAF).unwrap()).unwrap();
+    let disclosure = Disclosure {
+        leaves: vec![DisclosedLeaf { leaf, split }],
+    };
+    let expected = format!("43544d440201{SPLIT_LEAF}01{SPLIT_PREIMAGE}");
+    assert_eq!(hex::encode(disclosure.encode()), expected);
+    assert_eq!(disclosure.encode().len(), 6 + 169 + 1 + 69);
+    assert_eq!(
+        Disclosure::decode(&hex::decode(&expected).unwrap()),
+        Ok(disclosure.clone())
+    );
+    let root: [u8; 32] = hex::decode(SPLIT_LEAF_HASH).unwrap().try_into().unwrap();
+    assert_eq!(
+        disclosure.check_root(&MergeMiningCommitment {
+            root,
+            height: 0,
+            salt: 0,
+        }),
+        Ok(())
+    );
+}
+
+/// The two-token tree's leaves, disclosed without splits, rebuild its
+/// golden root at `h = 1`, salt 0, whichever order they are listed in; a
+/// leaf left out, a changed leaf or another salt gives another root.
+#[test]
+fn a_disclosure_of_the_two_token_tree_rebuilds_its_root() {
+    let (a, b) = (token_a(), token_b());
+    let disclosed = |leaf: TokenLeaf| DisclosedLeaf {
+        leaf,
+        split: TokenSplit::default(),
+    };
+    let root: [u8; 32] = hex::decode(TWO_TOKEN_ROOT).unwrap().try_into().unwrap();
+    let commitment = MergeMiningCommitment {
+        root,
+        height: 1,
+        salt: 0,
+    };
+    let both = Disclosure {
+        leaves: vec![disclosed(a), disclosed(b)],
+    };
+    assert_eq!(both.check_root(&commitment), Ok(()));
+    let bytes = both.encode();
+    assert_eq!(bytes.len(), 6 + 2 * (169 + 1));
+    assert_eq!(bytes[6 + 169], 0x00);
+    assert_eq!(Disclosure::decode(&bytes), Ok(both));
+    let reversed = Disclosure {
+        leaves: vec![disclosed(b), disclosed(a)],
+    };
+    assert_eq!(reversed.check_root(&commitment), Ok(()));
+    let only_a = Disclosure {
+        leaves: vec![disclosed(a)],
+    };
+    assert!(only_a.check_root(&commitment).is_err());
+    let mut changed = token_b();
+    changed.state_hash = [0xbc; 32];
+    let changed = Disclosure {
+        leaves: vec![disclosed(a), disclosed(changed)],
+    };
+    assert!(changed.check_root(&commitment).is_err());
+    let other_salt = MergeMiningCommitment {
+        salt: 1,
+        ..commitment
+    };
+    assert!(
+        Disclosure {
+            leaves: vec![disclosed(a), disclosed(b)],
+        }
+        .check_root(&other_salt)
+        .is_err()
+    );
+}
+
+/// No leaves disclose the exact empty commitment and nothing else.
+#[test]
+fn an_empty_disclosure_is_the_empty_commitment() {
+    let empty = Disclosure::default();
+    assert_eq!(hex::encode(empty.encode()), "43544d440200");
+    assert_eq!(empty.check_root(&MergeMiningCommitment::EMPTY), Ok(()));
+    let root: [u8; 32] = hex::decode(TWO_TOKEN_ROOT).unwrap().try_into().unwrap();
+    assert!(
+        empty
+            .check_root(&MergeMiningCommitment {
+                root,
+                height: 1,
+                salt: 0,
+            })
+            .is_err()
+    );
+    let one = Disclosure {
+        leaves: vec![DisclosedLeaf {
+            leaf: token_a(),
+            split: TokenSplit::default(),
+        }],
+    };
+    assert!(one.check_root(&MergeMiningCommitment::EMPTY).is_err());
+}
+
+/// A disclosure reads only in its canonical form: nothing trailing, the
+/// right magic and version, at most 16 leaves, a known flag, and each
+/// split hashing to its leaf's `ext`.
+#[test]
+fn a_disclosure_reads_only_in_its_canonical_form() {
+    let bytes = hex::decode(format!("43544d440201{SPLIT_LEAF}01{SPLIT_PREIMAGE}")).unwrap();
+    assert!(Disclosure::decode(&bytes).is_ok());
+    let trailing = [&bytes[..], &[0x00]].concat();
+    assert!(Disclosure::decode(&trailing).is_err());
+    assert!(Disclosure::decode(&bytes[..bytes.len() - 1]).is_err());
+    let mut magic = bytes.clone();
+    magic[3] = b'P';
+    assert!(Disclosure::decode(&magic).is_err());
+    let mut version = bytes.clone();
+    version[4] = 0x03;
+    assert!(Disclosure::decode(&version).is_err());
+    let mut seventeen = bytes.clone();
+    seventeen[5] = 17;
+    assert_eq!(Disclosure::decode(&seventeen), Err(AuxError::TooManyTokens));
+    let mut flag = bytes.clone();
+    flag[6 + 169] = 0x02;
+    assert!(Disclosure::decode(&flag).is_err());
+    // A split that is not the leaf's: its fee rate changed.
+    let mut other_split = bytes.clone();
+    other_split[6 + 169 + 1 + 35] = 0x65;
+    assert_eq!(
+        Disclosure::decode(&other_split),
+        Err(AuxError::Disclosure(
+            "a disclosed leaf's ext is not its split's"
+        ))
+    );
+    // A split leaf disclosed without its split: the flag says the ext is
+    // zero, and it is not.
+    let mut without = bytes[..6 + 169].to_vec();
+    without.push(0x00);
+    assert!(Disclosure::decode(&without).is_err());
+    // A leaf with another magic is not a leaf.
+    let mut leaf = bytes;
+    leaf[6] = b'X';
+    assert!(Disclosure::decode(&leaf).is_err());
+}
+
+/// The layout a set of categories takes depends only on them, and a token
+/// set searches it once: two tokens sit at `h = 1`, salt 0, slots 0 and 1,
+/// as in the golden tree; a token allowing no taller tree than 0 has no
+/// layout for two; and a reader placing them at a height and salt where
+/// they collide is refused.
+#[test]
+fn a_tree_layout_is_searched_once_for_its_categories() {
+    let categories = [token_a().category, token_b().category];
+    let layout = TreeLayout::search(&categories, MAX_MERGE_MINING_TREE_HEIGHT).unwrap();
+    assert_eq!(
+        layout,
+        TreeLayout {
+            height: 1,
+            salt: 0,
+            slots: vec![0, 1],
+        }
+    );
+    assert_eq!(
+        AuxiliaryTree::build_at(&layout, &[token_a(), token_b()]),
+        AuxiliaryTree::build(&[token_a(), token_b()]).unwrap()
+    );
+    assert_eq!(TreeLayout::search(&categories, 0), Err(AuxError::NoLayout));
+    assert_eq!(
+        TreeLayout::search(&[[0x11; 32], [0x11; 32]], 16),
+        Err(AuxError::DuplicateCategory)
+    );
+    assert_eq!(TreeLayout::at(&categories, 0, 0), Err(AuxError::NoLayout));
+}
