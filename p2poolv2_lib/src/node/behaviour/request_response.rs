@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-asert/version-vote/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert/version-vote/1.0.0"
             )
         );
     }
@@ -503,7 +503,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-asert/version-vote/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert/version-vote/kad/1.0.0"
             )
         );
     }

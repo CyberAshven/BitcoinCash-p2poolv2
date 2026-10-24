@@ -1543,9 +1543,12 @@ impl DefaultShareValidator {
         // a tag, not consensus: nodes configured with different signatures
         // must still agree on validity.
         //
-        // Bitcoin Cash puts the merge-mining commitment at output 0: the
-        // exact empty one on a pool-built share, the declared one otherwise,
-        // so a peer rebuilds it byte for byte. A Bitcoin Cash coinbase may
+        // Bitcoin Cash puts the merge-mining commitment at output 0: on a
+        // pool-built share the root its node built for its miner's token
+        // leaves (`pool_merge_mining`) or the exact empty one, the declared
+        // one otherwise, so a peer rebuilds it byte for byte. Only its format
+        // is checked: no peer knows or needs the tokens behind a root, so
+        // share validity never depends on them. A Bitcoin Cash coinbase may
         // not carry a SegWit witness commitment. A declared Bitcoin Cash
         // coinbase has the declarator's scriptSig
         // prefix followed by the 12-byte extranonce, so its extranonce is
@@ -1578,8 +1581,17 @@ impl DefaultShareValidator {
                     ValidationError::consensus(format!("Malformed bitcoin coinbase: {error}"))
                 })?;
             self.validate_no_bch_witness_commitment(&fields)?;
-            let merge_mining = (self.chain == Chain::BitcoinCash)
-                .then(crate::shares::merge_mining::MergeMiningCommitment::empty);
+            if self.chain != Chain::BitcoinCash && share.header.pool_merge_mining.is_some() {
+                return Err(ValidationError::consensus(
+                    "Pool-built token root on Bitcoin chain",
+                ));
+            }
+            share
+                .header
+                .check_pool_merge_mining()
+                .map_err(ValidationError::consensus)?;
+            let merge_mining =
+                (self.chain == Chain::BitcoinCash).then(|| share.header.merge_mining_commitment());
             build_coinbase(
                 Version::TWO,
                 &expected_payouts.outputs,
@@ -6531,6 +6543,136 @@ mod tests {
         assert_eq!(tree.payees().len(), 43);
         assert!(coinbase.output.contains(&tree.root_output()));
         assert!(coinbase.total_size() <= 3_072);
+    }
+
+    /// A pool-built share whose node merge-mines tokens for its miner: the
+    /// header's token root is output 0 and the coinbase follows the token
+    /// share's limit, 77 payees directly and 43 through the payout tree, and
+    /// a peer rebuilds it from the header alone, knowing nothing of the
+    /// tokens.
+    #[test]
+    fn a_pool_built_token_share_is_rebuilt_from_its_header_root() {
+        let weights: HashMap<Address, u128> = (1..=120u8)
+            .map(|byte| {
+                (
+                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    u128::from(byte) * 1_000,
+                )
+            })
+            .collect();
+        let root = MergeMiningCommitment {
+            root: [0x44; 32],
+            height: 1,
+            salt: 3,
+        };
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.bitcoin_height = 702;
+        share.header.pool_merge_mining = Some(root);
+        let producer_payouts = build_pplns_outputs(
+            312_500_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            bch_split_for_commitment(&root),
+        )
+        .unwrap();
+        let coinbase = build_coinbase(
+            Version::TWO,
+            &producer_payouts.outputs,
+            702,
+            PushBytesBuf::from(&[0u8]),
+            None,
+            b"P2Poolv2",
+            Some(ShareCommitment::from_share_block(&share).hash()),
+            TEST_COINBASE_NSECS,
+            Some(&[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE]),
+            Some(root),
+            producer_payouts.tree_output().as_ref(),
+        )
+        .unwrap();
+        assert_eq!(
+            MergeMiningCommitment::from_output(&coinbase.output[0]),
+            Ok(root)
+        );
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        share.bitcoin_coinbase = coinbase.clone();
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(weights.clone()));
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_bitcoin_payout(
+                &share,
+                &ChainStoreHandle::default(),
+                Arc::new(RwLock::new(window)),
+            );
+
+        assert!(result.is_ok(), "{}", result.unwrap_err());
+        assert_eq!(producer_payouts.outputs.len(), 77);
+        assert!(coinbase.total_size() <= 3_072);
+    }
+
+    /// A pool-built share whose header names another root than its coinbase
+    /// carries is refused: output 0 is rebuilt from the header.
+    #[test]
+    fn a_pool_built_share_whose_coinbase_carries_another_root_is_refused() {
+        let address = make_test_address(1);
+        let carried = MergeMiningCommitment {
+            root: [0x44; 32],
+            height: 1,
+            salt: 3,
+        };
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.bitcoin_height = 702;
+        share.header.pool_merge_mining = Some(MergeMiningCommitment {
+            root: [0x55; 32],
+            ..carried
+        });
+        let coinbase = build_coinbase(
+            Version::TWO,
+            &[OutputPair {
+                address: address.clone(),
+                amount: Amount::from_sat(312_500_000),
+            }],
+            702,
+            PushBytesBuf::from(&[0u8]),
+            None,
+            b"P2Poolv2",
+            Some(ShareCommitment::from_share_block(&share).hash()),
+            TEST_COINBASE_NSECS,
+            Some(&[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE]),
+            Some(carried),
+            None,
+        )
+        .unwrap();
+        share.template_merkle_branches.clear();
+        share.header.bitcoin_header.merkle_root =
+            TxMerkleNode::from_raw_hash(coinbase.compute_txid().to_raw_hash());
+        share.bitcoin_coinbase = coinbase;
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_distribution_from_start_hash()
+            .returning(move |_, _, _| Ok(HashMap::from([(address.clone(), 1000u128)])));
+
+        let result = validator()
+            .for_chain(Chain::BitcoinCash)
+            .validate_bitcoin_payout(
+                &share,
+                &ChainStoreHandle::default(),
+                Arc::new(RwLock::new(window)),
+            );
+
+        assert!(result.is_err());
     }
 
     /// A validated token share that is also a BCH block hands its payout

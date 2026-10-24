@@ -1332,6 +1332,7 @@ pub fn create_test_commitment() -> ShareCommitment {
         fee_address: None,
         fee: None,
         bch_coinbase: None,
+        pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
     }
 }
@@ -1488,6 +1489,7 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         fee_address: None,
         fee: None,
         bch_coinbase: None,
+        pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
     };
     let commitment_hash = share_commitment.hash();
@@ -1549,6 +1551,7 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         bitcoin_height: template.height as u64,
         coinbase_proof,
         bch_coinbase: None,
+        pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
     };
 
@@ -1802,6 +1805,7 @@ fn test_share_block(
                 fee_address: None,
                 fee: None,
                 bch_coinbase: None,
+                pool_merge_mining: None,
                 share_version: crate::shares::share_version::ShareVersion::CURRENT,
             };
 
@@ -1875,6 +1879,7 @@ fn test_share_block(
         bitcoin_height: 1,
         coinbase_proof,
         bch_coinbase: None,
+        pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
     };
 
@@ -1960,6 +1965,7 @@ impl TestShareHeaderBuilder {
             bitcoin_height: 1,
             coinbase_proof: CoinbaseProof::default(),
             bch_coinbase: None,
+            pool_merge_mining: None,
             share_version: crate::shares::share_version::ShareVersion::CURRENT,
         }
     }

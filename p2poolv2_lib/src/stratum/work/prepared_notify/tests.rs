@@ -365,6 +365,7 @@ async fn test_commitment_hash_matches_struct_hash() {
     // build_notify_from_prepared stored in the tracker.
     let direct_commitment = ShareCommitment {
         bch_coinbase: None,
+        pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
         prev_share_blockhash: BlockHash::all_zeros(),
         uncles: Vec::new(),
@@ -453,6 +454,7 @@ fn notify_hash_matches_share_commitment_hash() {
 
     let commitment = ShareCommitment {
         bch_coinbase: None,
+        pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
         prev_share_blockhash: prepared.prev_share_blockhash,
         uncles: prepared.uncles.clone(),

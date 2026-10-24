@@ -31,10 +31,11 @@ use bitcoin::{Amount, ScriptBuf, TxOut};
 use serde::{Deserialize, Serialize};
 
 /// Name of the merge-mining rules in Bitcoin Cash protocol strings: output 0
-/// in common format v2 with its format checks, and the ASERT header check of
-/// token shares. A node on the old `fabe6d6d` output rebuilds another
-/// coinbase for every share.
-pub const BCH_MERGE_MINING_RULE_TAG: &str = "mm2-asert";
+/// in common format v2 with its format checks, a pool-built share's token
+/// root in its header (`roots`), and the ASERT header check of token shares.
+/// A node on the old `fabe6d6d` output rebuilds another coinbase for every
+/// share, and one without pool-built roots cannot read their headers.
+pub const BCH_MERGE_MINING_RULE_TAG: &str = "mm2-roots-asert";
 
 /// The tag that opens the commitment's data: `"CTMM"`.
 pub const MERGE_MINING_MAGIC: [u8; 4] = *b"CTMM";

@@ -875,6 +875,7 @@ pub(crate) fn insert_miner_job(
             fee_address: prepared.fee_address.clone(),
             fee: prepared.fee,
             bch_coinbase: None,
+            pool_merge_mining: None,
             share_version: prepared.share_version,
         }),
         _ => None,

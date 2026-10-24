@@ -174,6 +174,9 @@ impl CoinbaseProof {
                 .validate(header.bitcoin_height)
                 .map_err(|error| CoinbaseProofError(error.into()))?;
         }
+        header
+            .check_pool_merge_mining()
+            .map_err(|error| CoinbaseProofError(error.into()))?;
         let maximum_length = maximum_merkle_branch_length(header.miner_address);
         if branch.len() > maximum_length {
             return Err(CoinbaseProofError(format!(

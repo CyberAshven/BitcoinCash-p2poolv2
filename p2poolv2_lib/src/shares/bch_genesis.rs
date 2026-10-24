@@ -92,6 +92,7 @@ pub fn build(
         // commitment. Genesis is built locally and never verified.
         coinbase_proof: CoinbaseProof::default(),
         bch_coinbase: None,
+        pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
     };
     let bitcoin_coinbase = anchor

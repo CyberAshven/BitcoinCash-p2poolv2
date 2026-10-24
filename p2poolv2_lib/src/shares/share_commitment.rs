@@ -4,6 +4,7 @@
 
 use super::address_serde;
 use super::bch_coinbase::BchCoinbase;
+use super::merge_mining::MergeMiningCommitment;
 use super::option_address_serde;
 use super::share_block::{ShareBlock, ShareHeader, decode_optional_address, encode_address};
 use super::share_version::ShareVersion;
@@ -76,6 +77,11 @@ pub struct ShareCommitment {
     /// Declared BCH layout, committed before hashing begins. Legacy jobs omit it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bch_coinbase: Option<BchCoinbase>,
+    /// A pool-built BCH job's token root (`ShareHeader::pool_merge_mining`):
+    /// the commitment at output 0 when the node merge-mines tokens for this
+    /// miner. `None` for the exact empty commitment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_merge_mining: Option<MergeMiningCommitment>,
     /// The share's rule version and desired version
     /// (`shares::share_version`), committed for Bitcoin Cash share owners.
     pub share_version: ShareVersion,
@@ -83,6 +89,22 @@ pub struct ShareCommitment {
 
 /// Tag before the share version in a Bitcoin Cash commitment's suffix.
 const SHARE_VERSION_TAG: u8 = 0x22;
+
+/// Tag before a pool-built job's token root in a Bitcoin Cash commitment's
+/// suffix, after the share version.
+const POOL_MERGE_MINING_TAG: u8 = 0x23;
+
+/// Append a pool-built job's token root to a commitment suffix, after the
+/// share version: what [`ShareCommitment::hash`] digests for a share whose
+/// node merge-mines tokens for its miner, and what the notify path appends
+/// per miner to its pre-built suffix. The root differs per miner, so it
+/// cannot be part of the suffix shared by every miner on a template.
+pub(crate) fn append_pool_merge_mining(suffix: &mut Vec<u8>, commitment: &MergeMiningCommitment) {
+    suffix.push(POOL_MERGE_MINING_TAG);
+    commitment
+        .consensus_encode(suffix)
+        .expect("encoding the merge-mining commitment should never fail");
+}
 
 /// Layout version of a Bitcoin Cash Job Declaration token: 2 since the
 /// share version follows the fee (`ShareCommitment::from_mining_job_token`).
@@ -267,6 +289,7 @@ impl ShareCommitment {
             fee_address,
             fee: (fee > 0).then_some(fee),
             bch_coinbase: None,
+            pool_merge_mining: None,
             share_version,
         })
     }
@@ -313,6 +336,9 @@ impl ShareCommitment {
         if let Some(coinbase) = &self.bch_coinbase {
             suffix.push(0x21);
             suffix.extend_from_slice(&serialize(coinbase));
+        }
+        if let Some(commitment) = &self.pool_merge_mining {
+            append_pool_merge_mining(&mut suffix, commitment);
         }
         commitment_digest(
             &prefix,
@@ -366,6 +392,7 @@ impl ShareCommitment {
             fee_address: header.fee_address.clone(),
             fee: header.fee,
             bch_coinbase: header.bch_coinbase.clone(),
+            pool_merge_mining: header.pool_merge_mining,
             share_version: header.share_version,
         }
     }
@@ -418,6 +445,49 @@ mod tests {
         let mut bitcoin_voting = bitcoin.clone();
         bitcoin_voting.share_version.desired_version = 2;
         assert_eq!(bitcoin.hash(), bitcoin_voting.hash());
+    }
+
+    /// A pool-built job's token root is digested, so one proof of work
+    /// stands behind one root; and the notify path, which appends it per
+    /// miner to the template's pre-built suffix, digests the same bytes as
+    /// `hash`.
+    #[test]
+    fn bitcoin_cash_commitment_binds_a_pool_built_token_root() {
+        let mut cash = create_test_commitment();
+        cash.miner_address = p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
+        let mut rooted = cash.clone();
+        let root = MergeMiningCommitment {
+            root: [0x44; 32],
+            height: 1,
+            salt: 3,
+        };
+        rooted.pool_merge_mining = Some(root);
+        assert_ne!(cash.hash(), rooted.hash());
+        let mut other = rooted.clone();
+        other.pool_merge_mining = Some(MergeMiningCommitment { salt: 4, ..root });
+        assert_ne!(rooted.hash(), other.hash());
+
+        let prefix =
+            build_commitment_prefix(rooted.prev_share_blockhash, &rooted.uncles, rooted.bits);
+        let mut suffix = build_commitment_suffix(
+            &rooted.donation_address,
+            rooted.donation,
+            &rooted.fee_address,
+            rooted.fee,
+            rooted.share_witness_root,
+        );
+        append_share_version(&mut suffix, rooted.share_version);
+        append_pool_merge_mining(&mut suffix, &root);
+        assert_eq!(
+            commitment_digest(
+                &prefix,
+                rooted.time,
+                &suffix,
+                Some(&rooted.miner_bitcoin_address),
+                Some(rooted.miner_address),
+            ),
+            rooted.hash()
+        );
     }
 
     #[test]
