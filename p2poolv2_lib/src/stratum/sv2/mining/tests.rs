@@ -1987,6 +1987,8 @@ async fn an_extended_channel_is_refused_when_the_coinbase_does_not_fit_its_job()
     let prepared = test_bch_prepared_with_payee_count(2_000);
     let (_, suffix_length) = prepared.coinbase_part_lengths();
     let mut open = open_extended_request(&bch_identity());
+    let next_channel_before = channels.next_channel_id;
+    let tracker_job_before = channels.ctx.tracker_handle.get_latest_job_id();
 
     let refused = channels
         .handle(
@@ -2007,6 +2009,11 @@ async fn an_extended_channel_is_refused_when_the_coinbase_does_not_fit_its_job()
     let error = OpenMiningChannelError::from_bytes(&mut refused_payload).unwrap();
     assert_eq!(error.error_code.as_utf8_or_hex(), "coinbase-too-large");
     assert!(channels.channels.is_empty());
+    assert_eq!(channels.next_channel_id, next_channel_before);
+    assert_eq!(
+        channels.ctx.tracker_handle.get_latest_job_id(),
+        tracker_job_before
+    );
 }
 
 /// A standard channel is header-only, so it mines the same coinbase.
@@ -2059,13 +2066,22 @@ async fn an_open_extended_channel_skips_a_template_it_cannot_carry() {
         .await
         .unwrap();
     let jobs_before = channels.channels[&1].jobs.len();
+    let next_job_before = channels.channels[&1].next_job_id;
+    let tip_before = channels.channels[&1].last_tip;
+    let tracker_job_before = channels.ctx.tracker_handle.get_latest_job_id();
 
     let too_large = channels.on_template(&test_bch_prepared_with_payee_count(2_000));
-    let jobs_after_refusal = channels.channels[&1].jobs.len();
-    let fitting = channels.on_template(&test_bch_prepared());
 
     assert!(too_large.is_empty());
-    assert_eq!(jobs_after_refusal, jobs_before);
+    assert_eq!(channels.channels[&1].jobs.len(), jobs_before);
+    assert_eq!(channels.channels[&1].next_job_id, next_job_before);
+    assert_eq!(channels.channels[&1].last_tip, tip_before);
+    assert_eq!(
+        channels.ctx.tracker_handle.get_latest_job_id(),
+        tracker_job_before
+    );
+
+    let fitting = channels.on_template(&test_bch_prepared());
     assert!(
         fitting
             .iter()
@@ -2073,8 +2089,66 @@ async fn an_open_extended_channel_skips_a_template_it_cannot_carry() {
     );
 }
 
-/// Stratum V1 has no field limit: a notify carries the whole coinbase, here
-/// over twice 65,535 hex characters of it.
+/// An extended channel's refusal does not prevent a standard channel on
+/// the same connection from receiving a complete header job.
+#[tokio::test]
+async fn a_standard_channel_gets_templates_an_open_extended_channel_cannot_carry() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let identity = bch_identity();
+    let mut extended_open = open_extended_request(&identity);
+    channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut extended_open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    let mut standard_open = binary_sv2::to_bytes(OpenStandardMiningChannel {
+        request_id: 2,
+        user_identity: identity.as_str().try_into().unwrap(),
+        nominal_hash_rate: 1.0e15,
+        max_target: U256::new(&[0xff; 32]).unwrap(),
+    })
+    .unwrap();
+    channels
+        .handle(
+            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+            &mut standard_open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    let extended_next_job = channels.channels[&1].next_job_id;
+    let standard_next_job = channels.channels[&2].next_job_id;
+
+    let frames = channels.on_template(&test_bch_prepared_with_payee_count(2_000));
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frame_type(&frames[0]), MESSAGE_TYPE_NEW_MINING_JOB);
+    let mut job_payload = payload(&frames[0]);
+    let job = NewMiningJob::from_bytes(&mut job_payload).unwrap();
+    assert_eq!(job.channel_id, 2);
+    assert_eq!(job.job_id, standard_next_job);
+    assert_eq!(channels.channels[&1].next_job_id, extended_next_job);
+    let channel = &channels.channels[&2];
+    let tracker_job = channels
+        .ctx
+        .tracker_handle
+        .get_job(channel.jobs[&job.job_id].tracker_job_id)
+        .unwrap();
+    let merkle_root = standard_merkle_root(
+        &tracker_job,
+        &channel.session.enonce1_hex,
+        &channel.standard_enonce2,
+    )
+    .unwrap();
+    assert_eq!(job.merkle_root.as_bytes(), merkle_root.as_byte_array());
+}
+
+/// Stratum V1 has no 64 KiB field limit: both coinbase parts match the
+/// tracked job byte for byte and decode with all 2,000 direct payouts.
 #[tokio::test]
 async fn an_sv1_notify_carries_a_coinbase_an_extended_job_cannot() {
     let prepared = test_bch_prepared_with_payee_count(2_000);
@@ -2092,8 +2166,33 @@ async fn an_sv1_notify_carries_a_coinbase_an_extended_job_cannot() {
     )
     .unwrap();
 
-    let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
-    assert!(notify.len() > 2 * (prefix_length + suffix_length));
+    let parsed: serde_json::Value = serde_json::from_str(&notify).unwrap();
+    let params = parsed["params"].as_array().unwrap();
+    let job_id = JobId(u64::from_str_radix(params[0].as_str().unwrap(), 16).unwrap());
+    let job = tracker.get_job(job_id).unwrap();
+    let prefix = params[2].as_str().unwrap();
+    let suffix = params[3].as_str().unwrap();
+    assert_eq!(prefix, job.coinbase1);
+    assert_eq!(suffix, job.coinbase2);
+    assert!(suffix.len() / 2 > MAX_EXTENDED_JOB_COINBASE_PART);
+    let coinbase_bytes = hex::decode(format!("{prefix}000000000000000000000000{suffix}")).unwrap();
+    let coinbase: Transaction = deserialize(&coinbase_bytes).unwrap();
+    assert_eq!(
+        coinbase
+            .output
+            .iter()
+            .filter(|output| output.script_pubkey.is_p2pkh())
+            .count(),
+        2_000
+    );
+    assert_eq!(
+        coinbase
+            .output
+            .iter()
+            .map(|output| output.value.to_sat())
+            .sum::<u64>(),
+        job.blocktemplate.coinbasevalue
+    );
 }
 
 /// Open a regtest extended channel for `identity_options` after the payout
