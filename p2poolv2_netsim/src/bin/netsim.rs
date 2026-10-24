@@ -73,11 +73,12 @@ enum Format {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum PayoutRule {
-    /// The hybrid payout proposal: payees direct up to BCH's 1 MB
-    /// transaction limit without tokens, up to the token threshold with
-    /// them, the rest through a payout tree.
+    /// The hybrid payout rule, on PR #33 and on chipnet: payees direct up to
+    /// BCH's 1 MB transaction limit without tokens, up to the token
+    /// threshold with them, the rest through a payout tree.
     Hybrid,
-    /// Alpha's current rule: at most 11 payouts and a weighted tail draw.
+    /// The earlier rule it replaced, as a historical comparison: at most 11
+    /// payouts and a weighted tail draw.
     Cap11,
     /// Every payee direct with no limit (upstream's Bitcoin rule).
     Uncapped,
@@ -139,7 +140,8 @@ struct ScenarioArgs {
     /// Share transaction bytes beyond the share's own coinbase.
     #[arg(long)]
     extra_share_bytes: Option<u64>,
-    /// How shares travel: `full` (today) or `without-payouts` (proposed).
+    /// How shares travel: `full` (as nodes send them) or `without-payouts`
+    /// (suggested by the hybrid payout design, not built).
     #[arg(long, value_parser = ShareRelay::parse)]
     relay: Option<ShareRelay>,
     /// Node upload in Mbit/s: `50`, `uniform:10:100` or `lognormal:50:0.8`.
@@ -179,7 +181,7 @@ impl ScenarioArgs {
         let defaults = Scenario::default();
         let layout = match self.payout.unwrap_or(PayoutRule::Hybrid) {
             PayoutRule::Hybrid => CoinbaseLayout::hybrid(self.tokens, self.token_threshold),
-            PayoutRule::Cap11 => CoinbaseLayout::alpha_cap(),
+            PayoutRule::Cap11 => CoinbaseLayout::cap_11(),
             PayoutRule::Uncapped => CoinbaseLayout::Uncapped,
         };
         Scenario {
@@ -265,17 +267,16 @@ fn print_limits() {
     };
     let check = |sizes: &ShareSizes| sizes.limit_check(CoinbaseLayout::Uncapped);
     limit(
-        "Today's 200 KiB share body (P2Pool share-chain rule)",
-        &|sizes| check(sizes).share_body_within_today_limit,
+        "200 KiB share body before the hybrid rule (P2Pool share-chain rule, historical)",
+        &|sizes| check(sizes).share_body_within_pre_hybrid_limit,
     );
     limit(
-        "Proposed 1,204,800-byte share body (P2Pool share-chain rule)",
-        &|sizes| check(sizes).share_body_within_proposed_limit,
+        "1,204,800-byte share body of the hybrid rule (P2Pool share-chain rule)",
+        &|sizes| check(sizes).share_body_within_hybrid_limit,
     );
-    limit(
-        "Today's 1 MiB P2P message (node implementation)",
-        &|sizes| check(sizes).message_within_today_p2p_limit,
-    );
+    limit("1.25 MiB P2P message (node implementation)", &|sizes| {
+        check(sizes).message_within_p2p_limit
+    });
     limit("1,000,000-byte transaction (BCH consensus)", &|sizes| {
         check(sizes).coinbase_within_bch_transaction_limit
     });
@@ -312,19 +313,19 @@ fn print_limits() {
         );
     };
     hybrid(
-        "Hybrid proposal without tokens (C = 1,000,000)",
+        "Hybrid rule without tokens (C = 1,000,000)",
         CoinbaseLayout::no_tokens(),
     );
     hybrid(
         &format!(
-            "Hybrid proposal with tokens (T = {})",
+            "Hybrid rule with tokens (T = {})",
             group_thousands(TOKEN_COINBASE_THRESHOLD_BYTES)
         ),
         CoinbaseLayout::with_tokens(),
     );
-    let capped = split_payees(CoinbaseLayout::alpha_cap(), u64::from(u32::MAX));
+    let capped = split_payees(CoinbaseLayout::cap_11(), u64::from(u32::MAX));
     println!(
-        "Alpha's cap of {BCH_MAX_COINBASE_PAYOUTS} payouts (current rule): a {}-byte coinbase",
+        "The earlier cap of {BCH_MAX_COINBASE_PAYOUTS} payouts (historical, replaced by the hybrid rule): a {}-byte coinbase",
         capped.coinbase_bytes
     );
 }

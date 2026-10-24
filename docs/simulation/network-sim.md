@@ -4,24 +4,30 @@
 a Bitcoin Cash P2Poolv2 network. It answers one question with numbers: as
 the pool grows, what limits it first, the share chain, the coinbase or
 bandwidth? It also measures what the
-[hybrid payout proposal](../architecture/bch-hybrid-payouts.md) asks the
+[hybrid payout design](../architecture/bch-hybrid-payouts.md) asks the
 network sim for in its section 8.1: propagation delay and stale rate against
 coinbase size from 1 KB to 1 MB.
+
+The hybrid payout rule is the Bitcoin Cash payout rule on PR #33 and on
+chipnet. The earlier rule it replaced, at most 11 payouts and a weighted
+draw for the tail (decision 14, `payout-cap11`), appears below only as a
+historical comparison (`cap-11`), and so does the 200 KiB share body limit
+that came with it.
 
 ## The short answer
 
 - **The coinbase limits P2Pool first, as a bandwidth cost.** Every payee
   paid directly puts 34 bytes into every share and into every Stratum job.
-  Under the hybrid payout proposal a share without tokens pays payees
+  Under the hybrid payout rule a share without tokens pays payees
   directly up to BCH's 1,000,000-byte transaction limit (29,399 P2PKH
   payees) and the rest through a payout tree, so BCH never rejects a block
-  for its coinbase. But with whole shares on the wire, as nodes send them
-  today, stale shares climb with the direct payees on the assumed mix of
+  for its coinbase. But with whole shares on the wire, as nodes send them,
+  stale shares climb with the direct payees on the assumed mix of
   home and data-centre links: 3% at 1,000 payees, 8% at 6,008, 11% at
   10,000 and 25% at 29,399 (a 1 MB coinbase; 1% orphaned). With 1 MB shares
   only data-centre links keep it near 4%.
 - **Sending shares without their payouts removes that cost.** Every node
-  rebuilds the payouts to validate a share anyway, as the proposal points
+  rebuilds the payouts to validate a share anyway, as the design points
   out. Without them a share is about 1.5 KB whatever the payee count, and
   stale shares at 29,399 payees fall from 25% to 2.7%.
 - **For miners the coinbase stays a per-job cost.** A Stratum V1 job carries
@@ -37,7 +43,7 @@ coinbase size from 1 KB to 1 MB.
   small miners reach the 1 MB limit and the tree.
 - **With merge-mined tokens the 3,072-byte threshold keeps the coinbase at
   3,061 bytes** for any number of payees (77 direct, the rest in the tree),
-  and stale shares at about 2%, like alpha's current 11-payout cap.
+  and stale shares at about 2%, like the old 11-payout cap.
 - **The share chain itself is not the limit at 10-second shares.** With
   small shares 2 to 3% of shares go stale, nearly all named as uncles (paid
   9/10), and a share reaches 90% of 100 nodes in 0.2 to 0.3 s. It grows
@@ -61,7 +67,7 @@ each sweep showed.
 Nothing here is measured on a running pool.
 
 - **Counted exactly:** share, coinbase and message sizes, from this
-  repository's encoders and the proposal's byte counts (P2PKH payees, every
+  repository's encoders and the hybrid rule's byte counts (P2PKH payees, every
   other coinbase field at its largest), and the payee counts at which each
   limit is reached.
 - **Simulated:** stale, uncle and orphan rates, propagation times and
@@ -115,7 +121,7 @@ the model for Bitcoin Cash and for scale:
   has a share once it sent it to or received it from that peer, so most
   nodes receive several copies (about 6.9 copies per share per node at 8
   peers). With `--relay without-payouts` the share travels without the
-  payout outputs, as the proposal suggests; the receiver still spends the
+  payout outputs, as the design suggests; the receiver still spends the
   time to rebuild and check them.
 - **Acceptance:** a share waits at a node until its parent and its uncles
   are accepted there, then takes the validation time (5 ms plus 20 ms per MB
@@ -144,20 +150,21 @@ the model for Bitcoin Cash and for scale:
   cannot keep up with BCH: it still relays shares, but its miners are moved
   to the other nodes.
 - **Coinbase layouts:**
-  - `no-tokens`: the hybrid payout proposal for a share without token
+  - `no-tokens`: the hybrid payout rule for a share without token
     commitments, the normal case for pool-built jobs. Payees are paid
     directly while their outputs fit the budget `1,000,000 - S`, where
     `S` = 445 bytes is everything else at its worst case; the straddler and
     the rest go to one P2SH32 payout tree output.
   - `tokens-3072`: the same rule with the coinbase limit `T` = 3,072 bytes,
     for a share that carries token commitments (only declared jobs do).
-  - `cap-11`: alpha's current share-chain rule (decision 14, `payout-cap11`),
+  - `cap-11`: the earlier share-chain rule (decision 14, `payout-cap11`),
     at most 11 payouts and a weighted draw for the tail, which the owner
-    rejected; for comparison.
+    rejected and the hybrid rule replaced on PR #33 and on chipnet; kept
+    only as a historical comparison.
   - `uncapped`: every payee direct with no limit, upstream's Bitcoin rule;
     for comparison.
 
-  The proposal pays the smallest payees directly and the largest through
+  The hybrid rule pays the smallest payees directly and the largest through
   the tree. With every payee on P2PKH that changes who is in the tree, not
   the sizes, so the model does not need the order.
 - **Payees** are the miners expected to hold a share in the window, for a
@@ -181,7 +188,7 @@ network itself beyond its traffic.
 | Share interval | `--share-interval` | 10 s |
 | BCH block size, average transaction | `--block-bytes`, `--transaction-bytes` | 32 MB (mainnet's ABLA floor), 226 bytes |
 | Payout rule, tokens, threshold | `--payout`, `--tokens`, `--token-threshold` | hybrid, no tokens, 3,072 bytes |
-| How shares travel | `--relay` | `full` (today) |
+| How shares travel | `--relay` | `full` (as nodes send them) |
 | Upload, download (Mbit/s) | `--upload-mbps`, `--download-mbps` | `lognormal:50:0.8`, `lognormal:200:0.8` |
 | One-way latency (ms) | `--latency-ms` | `lognormal:50:0.5` |
 | Validation, job switch | `--validation-seconds`, `--validation-seconds-per-megabyte`, `--work-switch-seconds` | 5 ms + 20 ms/MB, 50 ms |
@@ -202,19 +209,19 @@ directly under each limit, with every other field at its largest.
 
 | Limit | Whose | Direct payees at most |
 |---|---|---:|
-| 200 KiB share body today (`BLOCK_TXS_SIZE_LIMIT`) | P2Pool share-chain rule | 6,008 |
-| 1,204,800-byte share body (proposal, section 8.1) | P2Pool share-chain rule, proposed | 35,420 |
-| 1 MiB P2P message today (`MAX_P2P_MESSAGE_SIZE`) | this node's implementation | 30,813 |
+| 200 KiB share body (`BLOCK_TXS_SIZE_LIMIT`), before the hybrid rule | P2Pool share-chain rule, historical on Bitcoin Cash | 6,008 |
+| 1,204,800-byte share body (`BCH_SHARE_BODY_SIZE_LIMIT`, design section 8.1) | P2Pool share-chain rule, hybrid | 35,420 |
+| 1.25 MiB P2P message (`MAX_P2P_MESSAGE_SIZE`, 1 MiB before the hybrid rule) | this node's implementation | 38,523 |
 | 1,000,000-byte transaction (`MAX_TX_SIZE`, BCHN `src/consensus/tx_check.cpp`) | BCH consensus | 29,399 |
 | 65,535-byte coinbase field of a Stratum V2 extended or declared job | Stratum V2 | 1,919 |
 | 10,000-byte VM stack element, for a token claim hashing the coinbase (CHIP-2021-05) | BCH consensus | 282 |
 | 784-byte OCEAN block on stock Antminer firmware (upstream #668) | evidence from another pool | 11 |
 | DATUM gateway's per-device coinbase sizes: 755 bytes (older stock S19), 2,250 (stock S21), 6,500 (Whatsminer, Bitaxe), 16,000 (ePIC, vnish) | evidence from another pool's software | 10, 54, 179, 458 |
 
-Under the proposal a share without tokens pays up to 29,399 payees directly
+Under the hybrid rule a share without tokens pays up to 29,399 payees directly
 and, past that, 29,398 directly beside the tree output, a 999,977-byte
 coinbase. A share with tokens pays up to 78 directly and, past that, 77 beside
-the tree, a 3,061-byte coinbase, well inside one VM stack element. Alpha's
+the tree, a 3,061-byte coinbase, well inside one VM stack element. The old
 11-payout cap gives a 782-byte coinbase. ABLA sets the block size limit
 (32 MB floor on mainnet, 256 MB to start on scalenet, 2 GB guard in BCHN) and
 never raises the transaction limit.
@@ -229,7 +236,10 @@ each share ("never" when some node had not got some share a day after
 mining stopped); P2Pool's share-chain upload per node per second of mining,
 mean and busiest node; BCHN's transaction relay each way; full template
 JSON from BCHN; Stratum V1 job bytes per miner; and the rule and protocol
-limits broken (device evidence is left out of that column).
+limits broken (device evidence is left out of that column). The
+"pre-hybrid 200 KiB share body" there is the limit before the hybrid rule,
+listed for comparison; the hybrid rule's own share body limit is 1,204,800
+bytes.
 
 ### Payees and the coinbase layout
 
@@ -239,25 +249,25 @@ limits broken (device evidence is left out of that column).
 | no-tokens, 100 payees | 100 | 3,799 | 5,025 | 2.08% | 0.00% | 0.19 | 0.22 | 0.028 / 0.045 | 0.766 | 76.0 | 14.9 | none |
 | no-tokens, 1,000 payees | 1,000 | 34,401 | 36,467 | 3.09% | 0.01% | 0.33 | 0.38 | 0.203 / 0.320 | 0.766 | 76.0 | 116 | none |
 | no-tokens, 6,008 payees | 6,008 | 204,673 | 211,379 | 7.81% | 0.02% | 0.98 | 1.12 | 1.18 / 1.86 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 10,000 payees | 10,000 | 340,401 | 350,827 | 10.92% | 0.06% | 1.51 | 1.72 | 1.96 / 3.08 | 0.766 | 76.0 | 1,131 | today's 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 29,399 payees | 29,399 | 999,967 | 1,028,473 | 24.51% | 1.11% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | today's 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 100,000 payees | 100,000 | 999,977 | 1,028,483 | 24.51% | 1.10% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | today's 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 1,000,000 payees | 1,000,000 | 999,977 | 1,028,483 | 24.51% | 1.10% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | today's 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 10,000 payees | 10,000 | 340,401 | 350,827 | 10.92% | 0.06% | 1.51 | 1.72 | 1.96 / 3.08 | 0.766 | 76.0 | 1,131 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,399 payees | 29,399 | 999,967 | 1,028,473 | 24.51% | 1.11% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 100,000 payees | 100,000 | 999,977 | 1,028,483 | 24.51% | 1.10% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 1,000,000 payees | 1,000,000 | 999,977 | 1,028,483 | 24.51% | 1.10% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
 | tokens-3072, 100 payees | 100 | 3,061 | 4,247 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
 | tokens-3072, 10,000 payees | 10,000 | 3,061 | 4,247 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
 | tokens-3072, 1,000,000 payees | 1,000,000 | 3,061 | 4,247 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
 | cap-11, 1,000,000 payees | 1,000,000 | 782 | 1,928 | 2.00% | 0.00% | 0.17 | 0.20 | 0.011 / 0.018 | 0.766 | 76.0 | 4.95 | none |
-| uncapped, 100,000 payees | 100,000 | 3,400,403 | 3,494,669 | 51.69% | 16.62% | never | never | 19.5 / 30.7 | 0.766 | 76.0 | 11,275 | BCH 1 MB transaction, proposed share body, today's 1 MiB P2P message, today's 200 KiB share body, SV2 extended 64 KiB field |
+| uncapped, 100,000 payees | 100,000 | 3,400,403 | 3,494,669 | 51.69% | 16.62% | never | never | 19.5 / 30.7 | 0.766 | 76.0 | 11,275 | BCH 1 MB transaction, hybrid 1,204,800-byte share body, 1.25 MiB P2P message, pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
 
 Each payee paid directly adds 34 bytes to every share, and pushing whole
 shares to every peer multiplies that: at 6,008 payees the busiest node
 uploads 1.9 Mbit/s and 7.8% of shares go stale; at 29,399 (a 1 MB coinbase)
-a quarter do and 1% are orphaned. Past 29,399 the proposal's tree keeps the
+a quarter do and 1% are orphaned. Past 29,399 the hybrid rule's tree keeps the
 coinbase under 1 MB, so 100,000 and a million payees cost the same as
 29,399. Without that limit (`uncapped`) a 100,000-payee coinbase is 3.4 MB:
 BCH rejects the block, and on these links a share takes longer to cross the
 network than the share interval, so 52% go stale. With tokens, or under
-alpha's cap, the coinbase is fixed and nothing grows with the payees.
+the old cap, the coinbase is fixed and nothing grows with the payees.
 
 ### Sending shares without their payouts
 
@@ -268,10 +278,10 @@ peer rebuilds:
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | no-tokens, 1,000 payees, full relay | 1,000 | 34,401 | 36,467 | 3.09% | 0.01% | 0.33 | 0.38 | 0.203 / 0.320 | 0.766 | 76.0 | 116 | none |
 | no-tokens, 6,008 payees, full relay | 6,008 | 204,673 | 211,379 | 7.81% | 0.02% | 0.98 | 1.12 | 1.18 / 1.86 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 29,399 payees, full relay | 29,399 | 999,967 | 1,028,473 | 24.51% | 1.11% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | today's 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,399 payees, full relay | 29,399 | 999,967 | 1,028,473 | 24.51% | 1.11% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
 | no-tokens, 1,000 payees, without-payouts relay | 1,000 | 34,401 | 1,547 | 1.98% | 0.00% | 0.17 | 0.20 | 9.1e-3 / 0.014 | 0.766 | 76.0 | 116 | none |
 | no-tokens, 6,008 payees, without-payouts relay | 6,008 | 204,673 | 1,547 | 2.10% | 0.00% | 0.19 | 0.22 | 8.9e-3 / 0.014 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 29,399 payees, without-payouts relay | 29,399 | 999,967 | 1,547 | 2.65% | 0.01% | 0.26 | 0.30 | 8.4e-3 / 0.014 | 0.766 | 76.0 | 3,317 | today's 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,399 payees, without-payouts relay | 29,399 | 999,967 | 1,547 | 2.65% | 0.01% | 0.26 | 0.30 | 8.4e-3 / 0.014 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
 
 Without the payouts a share is about 1.5 KB at any payee count, and stale
 shares stay between 2.0% and 2.7%: the share chain no longer cares how many
@@ -285,9 +295,9 @@ A million equally sized miners, for pools from 0.1% to 30% of BCH:
 
 | Scenario | Payees | Coinbase bytes | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | BCHN relay (Mbit/s) | Templates (Mbit/s) | Stratum per miner (kbit/s) | Limits broken |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| no-tokens, pool 0.1% of BCH | 113,931 | 999,977 | 1,028,483 | 24.51% | 1.10% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | today's 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, pool 0.3% of BCH | 58,235 | 999,977 | 1,028,483 | 24.51% | 1.10% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | today's 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, pool 1% of BCH | 17,839 | 606,927 | 624,673 | 16.89% | 0.27% | 2.58 | 2.93 | 3.49 / 5.50 | 0.766 | 76.0 | 2,014 | today's 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, pool 0.1% of BCH | 113,931 | 999,977 | 1,028,483 | 24.51% | 1.10% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, pool 0.3% of BCH | 58,235 | 999,977 | 1,028,483 | 24.51% | 1.10% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, pool 1% of BCH | 17,839 | 606,927 | 624,673 | 16.89% | 0.27% | 2.58 | 2.93 | 3.49 / 5.50 | 0.766 | 76.0 | 2,014 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
 | no-tokens, pool 3% of BCH | 5,982 | 203,789 | 210,495 | 7.77% | 0.03% | 0.98 | 1.12 | 1.18 / 1.85 | 0.766 | 76.0 | 678 | SV2 extended 64 KiB field |
 | no-tokens, pool 10% of BCH | 1,798 | 61,533 | 64,319 | 3.77% | 0.00% | 0.44 | 0.50 | 0.358 / 0.562 | 0.766 | 76.0 | 206 | none |
 | no-tokens, pool 30% of BCH | 600 | 20,801 | 22,467 | 2.65% | 0.01% | 0.27 | 0.31 | 0.125 / 0.198 | 0.766 | 76.0 | 71.3 | none |
@@ -362,11 +372,11 @@ for a 3 KB coinbase (tokens), a 200 KiB one (6,008 payees) and a 1 MB one
 | no-tokens, 6,008 payees, upload 50 Mbit/s | 6,008 | 204,673 | 211,379 | 7.81% | 0.02% | 0.98 | 1.12 | 1.18 / 1.86 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
 | no-tokens, 6,008 payees, upload 200 Mbit/s | 6,008 | 204,673 | 211,379 | 3.54% | 0.03% | 0.40 | 0.46 | 1.17 / 1.84 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
 | no-tokens, 6,008 payees, upload 1000 Mbit/s | 6,008 | 204,673 | 211,379 | 2.45% | 0.01% | 0.23 | 0.27 | 1.15 / 1.84 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 29,399 payees, upload 5 Mbit/s | 29,399 | 999,967 | 1,028,473 | 78.49% | 58.21% | never | never | 5.21 / 8.23 | 0.766 | 76.0 | 3,317 | today's 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 29,399 payees, upload 20 Mbit/s | 29,399 | 999,967 | 1,028,473 | 44.65% | 12.33% | never | never | 5.77 / 9.06 | 0.766 | 76.0 | 3,317 | today's 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 29,399 payees, upload 50 Mbit/s | 29,399 | 999,967 | 1,028,473 | 24.51% | 1.11% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | today's 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 29,399 payees, upload 200 Mbit/s | 29,399 | 999,967 | 1,028,473 | 9.40% | 0.06% | 1.21 | 1.38 | 5.68 / 8.98 | 0.766 | 76.0 | 3,317 | today's 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 29,399 payees, upload 1000 Mbit/s | 29,399 | 999,967 | 1,028,473 | 4.00% | 0.02% | 0.47 | 0.53 | 5.52 / 8.83 | 0.766 | 76.0 | 3,317 | today's 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,399 payees, upload 5 Mbit/s | 29,399 | 999,967 | 1,028,473 | 78.49% | 58.21% | never | never | 5.21 / 8.23 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,399 payees, upload 20 Mbit/s | 29,399 | 999,967 | 1,028,473 | 44.65% | 12.33% | never | never | 5.77 / 9.06 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,399 payees, upload 50 Mbit/s | 29,399 | 999,967 | 1,028,473 | 24.51% | 1.11% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,399 payees, upload 200 Mbit/s | 29,399 | 999,967 | 1,028,473 | 9.40% | 0.06% | 1.21 | 1.38 | 5.68 / 8.98 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,399 payees, upload 1000 Mbit/s | 29,399 | 999,967 | 1,028,473 | 4.00% | 0.02% | 0.47 | 0.53 | 5.52 / 8.83 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
 
 Small shares go stale 4% of the time even when the median node has 5 Mbit/s
 up. A 200 KiB coinbase needs about 50 Mbit/s for stale shares to stay under
@@ -469,21 +479,21 @@ being orphaned on BCH. Small next to the costs above.
 
 ## What this means
 
-1. **Under the hybrid proposal the coinbase never makes a block invalid; its
+1. **Under the hybrid rule the coinbase never makes a block invalid; its
    cost is bandwidth.** A share without tokens pays up to 29,399 payees
-   directly, which needs today's 200 KiB share limit raised as the proposal
-   says (it binds from 6,008 payees) and the 1 MiB message limit re-derived
-   from it. Sent whole, such shares make 8% of shares stale at 6,000 payees
-   and 25% at 29,399 on the assumed links.
+   directly. The rule raised the 200 KiB share limit (it bound from 6,008
+   payees) to 1,204,800 bytes and the P2P message limit to 1.25 MiB to
+   carry such shares. Sent whole, they make 8% of shares stale at 6,000
+   payees and 25% at 29,399 on the assumed links.
 2. **Sending shares without their payouts is what makes direct payouts
    cheap for the share chain**: 2.0 to 2.7% stale from 1,000 to 29,399
    payees. It is a change to how shares travel, with its own protocol tag
-   as the proposal says, not a payout rule change, and nothing here builds
+   as the design says, not a payout rule change, and nothing here builds
    it.
 3. **For miners, a large coinbase stays expensive.** Stratum V1 sends it to
    every miner about every 5 seconds; Stratum V2 extended and declared jobs
    cannot carry more than 1,919 payees; and stock firmware is reported to
-   take between 10 and 458. The chipnet test with real devices (proposal,
+   take between 10 and 458. The chipnet test with real devices (design,
    section 8.2; audit M2) has to settle what pool-built jobs can carry, and
    Stratum V2 standard channels avoid the question.
 4. **The window keeps most pools far from the limits.** Above 3% of BCH a

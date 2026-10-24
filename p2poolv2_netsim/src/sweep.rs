@@ -119,7 +119,7 @@ fn payees_scenarios(base: &Scenario) -> Vec<Scenario> {
         .map(|payees| with_payees(base, CoinbaseLayout::no_tokens(), payees));
     let tokens = [100, 10_000, 1_000_000]
         .map(|payees| with_payees(base, CoinbaseLayout::with_tokens(), payees));
-    let capped = [1_000_000].map(|payees| with_payees(base, CoinbaseLayout::alpha_cap(), payees));
+    let capped = [1_000_000].map(|payees| with_payees(base, CoinbaseLayout::cap_11(), payees));
     let uncapped = [100_000].map(|payees| with_payees(base, CoinbaseLayout::Uncapped, payees));
     no_tokens
         .into_iter()

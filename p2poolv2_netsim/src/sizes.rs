@@ -5,7 +5,7 @@
 //! Bytes on the wire: coinbase layouts, share sizes and the limits they meet.
 //!
 //! The share and message sizes are counted from the encoders in
-//! `p2poolv2_lib` and from the hybrid payout proposal
+//! `p2poolv2_lib` and from the hybrid payout rule's byte counts
 //! (`docs/architecture/bch-hybrid-payouts.md`), not measured from a running
 //! node. Every payee is taken to be paid to P2PKH. The framing overhead is an
 //! estimate.
@@ -14,8 +14,8 @@ use crate::constants::{
     ASIC_COINBASE_EVIDENCE_BYTES, BCH_MAX_COINBASE_PAYOUTS, BCH_MAX_TRANSACTION_BYTES,
     BCH_VM_STACK_ELEMENT_BYTES, COINBASE_FIXED_BYTES, COINBASE_FIXED_OUTPUTS,
     COINBASE_PREFIX_BYTES, HYBRID_COINBASE_BYTES_BESIDE_PAYOUTS, HYBRID_COINBASE_FIXED_BYTES,
-    MAX_P2P_MESSAGE_BYTES, MAX_UNCLES, NO_TOKEN_COINBASE_LIMIT_BYTES, P2PKH_OUTPUT_BYTES,
-    P2SH32_OUTPUT_BYTES, PROPOSED_SHARE_BODY_LIMIT_BYTES, SHARE_BODY_LIMIT_BYTES,
+    HYBRID_SHARE_BODY_LIMIT_BYTES, MAX_P2P_MESSAGE_BYTES, MAX_UNCLES,
+    NO_TOKEN_COINBASE_LIMIT_BYTES, P2PKH_OUTPUT_BYTES, P2SH32_OUTPUT_BYTES, SHARE_BODY_LIMIT_BYTES,
     SHARE_COINBASE_BYTES, SHARE_HEADER_BASE_BYTES, SHARE_HEADER_BYTES_PER_UNCLE,
     SV2_COINBASE_FIELD_BYTES, TOKEN_COINBASE_THRESHOLD_BYTES,
 };
@@ -38,9 +38,9 @@ const SEGMENT_PAYLOAD_BYTES: u64 = 1_460;
 /// How a found block's coinbase pays the PPLNS window's payees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum CoinbaseLayout {
-    /// The hybrid payout proposal (`bch-hybrid-payouts.md`, section 3, after
-    /// the owner's decision of 2026-10-23; proposed, not built). Payees are
-    /// paid directly while their outputs fit the payout budget
+    /// The hybrid payout rule (`bch-hybrid-payouts.md`, section 3, after
+    /// the owner's decision of 2026-10-23), on PR #33 and on chipnet.
+    /// Payees are paid directly while their outputs fit the payout budget
     /// `limit_bytes - S`; the payee that straddles it and every later one
     /// are paid through one P2SH32 payout tree output. The limit is BCH's
     /// 1,000,000-byte `MAX_TX_SIZE` for a share without token commitments
@@ -55,9 +55,9 @@ pub enum CoinbaseLayout {
     /// rule, for comparison. Past about 29,400 payees BCH rejects the block.
     Uncapped,
     /// At most `max_payouts` payout outputs, the long tail paid by one
-    /// draw weighted by PPLNS weight: alpha's current share-chain rule
-    /// (decision 14, `payout-cap11`), which the owner rejected, kept for
-    /// comparison.
+    /// draw weighted by PPLNS weight: the earlier share-chain rule
+    /// (decision 14, `payout-cap11`), which the owner rejected and the
+    /// hybrid payout rule replaced; kept only as a historical comparison.
     CappedDraw {
         /// Most payout outputs.
         max_payouts: u64,
@@ -65,7 +65,7 @@ pub enum CoinbaseLayout {
 }
 
 impl CoinbaseLayout {
-    /// The hybrid payout proposal for a share with or without merge-mined
+    /// The hybrid payout rule for a share with or without merge-mined
     /// tokens; `token_threshold_bytes` is `T`.
     pub fn hybrid(tokens_merge_mined: bool, token_threshold_bytes: u64) -> Self {
         CoinbaseLayout::Hybrid {
@@ -78,18 +78,18 @@ impl CoinbaseLayout {
         }
     }
 
-    /// The hybrid proposal for a share without tokens.
+    /// The hybrid rule for a share without tokens.
     pub fn no_tokens() -> Self {
         CoinbaseLayout::hybrid(false, TOKEN_COINBASE_THRESHOLD_BYTES)
     }
 
-    /// The hybrid proposal for a share with tokens, at the recommended `T`.
+    /// The hybrid rule for a share with tokens, at the rule's `T`.
     pub fn with_tokens() -> Self {
         CoinbaseLayout::hybrid(true, TOKEN_COINBASE_THRESHOLD_BYTES)
     }
 
-    /// Alpha's current rule.
-    pub fn alpha_cap() -> Self {
+    /// The earlier 11-payout cap, as a historical comparison.
+    pub fn cap_11() -> Self {
         CoinbaseLayout::CappedDraw {
             max_payouts: BCH_MAX_COINBASE_PAYOUTS,
         }
@@ -142,7 +142,7 @@ pub struct PayoutSplit {
     pub direct_outputs: u64,
     /// Payees paid through the payout tree.
     pub tree_payees: u64,
-    /// Payees paid only through the weighted tail draw (alpha's rule).
+    /// Payees paid only through the weighted tail draw (the cap-11 rule).
     pub drawn_payees: u64,
     /// Bytes of the coinbase.
     pub coinbase_bytes: u64,
@@ -152,7 +152,7 @@ pub struct PayoutSplit {
     pub payout_bytes: u64,
 }
 
-/// Bytes of a proposal coinbase with `direct_outputs` P2PKH payouts and,
+/// Bytes of a hybrid coinbase with `direct_outputs` P2PKH payouts and,
 /// when `tree` is set, one P2SH32 payout tree output, at the largest size of
 /// everything else.
 pub fn hybrid_coinbase_bytes(direct_outputs: u64, tree: bool) -> u64 {
@@ -166,13 +166,13 @@ pub fn hybrid_coinbase_bytes(direct_outputs: u64, tree: bool) -> u64 {
         + extra_count_bytes
 }
 
-/// Bytes of an alpha coinbase with `payouts` P2PKH payouts.
-pub fn alpha_coinbase_bytes(payouts: u64) -> u64 {
+/// Bytes of a cap-11 coinbase with `payouts` P2PKH payouts.
+pub fn cap_11_coinbase_bytes(payouts: u64) -> u64 {
     let extra_count_bytes = compact_size_bytes(payouts + COINBASE_FIXED_OUTPUTS) - 1;
     COINBASE_FIXED_BYTES + P2PKH_OUTPUT_BYTES * payouts + extra_count_bytes
 }
 
-/// The proposal's straddle rule (`bch-hybrid-payouts.md`, section 3.4) for
+/// The hybrid rule's straddle rule (`bch-hybrid-payouts.md`, section 3.4) for
 /// `payees` P2PKH payees under a coinbase limit of `limit_bytes`: with the
 /// payout budget `P = limit_bytes - S`, everyone is paid directly if their
 /// outputs fit `P` plus the unused tree output; otherwise payees are paid
@@ -224,7 +224,7 @@ pub fn split_payees(layout: CoinbaseLayout, payees: u64) -> PayoutSplit {
                 direct_outputs: outputs,
                 tree_payees: 0,
                 drawn_payees: drawn,
-                coinbase_bytes: alpha_coinbase_bytes(outputs),
+                coinbase_bytes: cap_11_coinbase_bytes(outputs),
                 payout_bytes: P2PKH_OUTPUT_BYTES * outputs,
             }
         }
@@ -314,7 +314,7 @@ impl ShareSizes {
     }
 
     /// Payload bytes of a share sent without the payout outputs every peer
-    /// can rebuild, as the hybrid payout proposal suggests
+    /// can rebuild, as the hybrid payout design suggests
     /// (`bch-hybrid-payouts.md`, section 8.1). An estimate: the format is
     /// not designed yet.
     pub fn message_payload_bytes_without_payouts(&self, uncles: usize) -> u64 {
@@ -327,9 +327,9 @@ impl ShareSizes {
         let share_body = SHARE_COINBASE_BYTES + self.extra_transaction_bytes + coinbase;
         LimitCheck {
             coinbase_within_bch_transaction_limit: coinbase <= BCH_MAX_TRANSACTION_BYTES,
-            share_body_within_today_limit: share_body <= SHARE_BODY_LIMIT_BYTES,
-            share_body_within_proposed_limit: share_body <= PROPOSED_SHARE_BODY_LIMIT_BYTES,
-            message_within_today_p2p_limit: self.message_payload_bytes(MAX_UNCLES)
+            share_body_within_pre_hybrid_limit: share_body <= SHARE_BODY_LIMIT_BYTES,
+            share_body_within_hybrid_limit: share_body <= HYBRID_SHARE_BODY_LIMIT_BYTES,
+            message_within_p2p_limit: self.message_payload_bytes(MAX_UNCLES)
                 <= MAX_P2P_MESSAGE_BYTES,
             coinbase_within_sv2_extended_fields: coinbase.saturating_sub(COINBASE_PREFIX_BYTES)
                 <= SV2_COINBASE_FIELD_BYTES,
@@ -347,16 +347,19 @@ pub struct LimitCheck {
     /// The coinbase fits BCH's 1,000,000-byte transaction limit, a Bitcoin
     /// Cash consensus rule: a larger coinbase makes the block invalid.
     pub coinbase_within_bch_transaction_limit: bool,
-    /// The share's transactions and bitcoin coinbase fit today's
-    /// `BLOCK_TXS_SIZE_LIMIT` (200 KiB), a P2Pool share-chain rule: peers
+    /// The share's transactions and bitcoin coinbase fit
+    /// `BLOCK_TXS_SIZE_LIMIT` (200 KiB), the share-chain rule before the
+    /// hybrid payout rule and still Bitcoin's; a historical comparison on
+    /// Bitcoin Cash.
+    pub share_body_within_pre_hybrid_limit: bool,
+    /// They fit the 1,204,800 bytes the hybrid payout rule sets instead
+    /// (`BCH_SHARE_BODY_SIZE_LIMIT`), a P2Pool share-chain rule: peers
     /// reject a larger share.
-    pub share_body_within_today_limit: bool,
-    /// They fit the 1,204,800 bytes the hybrid payout proposal sets instead.
-    pub share_body_within_proposed_limit: bool,
-    /// The `ShareBlock` message, with three uncles, fits today's 1 MiB P2P
+    pub share_body_within_hybrid_limit: bool,
+    /// The `ShareBlock` message, with three uncles, fits the 1.25 MiB P2P
     /// message limit, an implementation limit of this node: a larger share
     /// cannot be relayed at all.
-    pub message_within_today_p2p_limit: bool,
+    pub message_within_p2p_limit: bool,
     /// The coinbase after the extranonce fits one 65,535-byte field of a
     /// Stratum V2 extended job or declared job.
     pub coinbase_within_sv2_extended_fields: bool,
@@ -377,14 +380,14 @@ impl LimitCheck {
         if !self.coinbase_within_bch_transaction_limit {
             broken.push("BCH 1 MB transaction");
         }
-        if !self.share_body_within_proposed_limit {
-            broken.push("proposed share body");
+        if !self.share_body_within_hybrid_limit {
+            broken.push("hybrid 1,204,800-byte share body");
         }
-        if !self.message_within_today_p2p_limit {
-            broken.push("today's 1 MiB P2P message");
+        if !self.message_within_p2p_limit {
+            broken.push("1.25 MiB P2P message");
         }
-        if !self.share_body_within_today_limit {
-            broken.push("today's 200 KiB share body");
+        if !self.share_body_within_pre_hybrid_limit {
+            broken.push("pre-hybrid 200 KiB share body");
         }
         if self.token_claim_within_vm_element == Some(false) {
             broken.push("VM 10,000-byte element");

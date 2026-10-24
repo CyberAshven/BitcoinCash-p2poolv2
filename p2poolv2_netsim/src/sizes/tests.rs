@@ -5,7 +5,7 @@
 use super::*;
 
 #[test]
-fn a_proposal_coinbase_without_payouts_is_399_bytes() {
+fn a_hybrid_coinbase_without_payouts_is_399_bytes() {
     // S = 445 less the tree output (44) and the two extra count bytes.
     assert_eq!(hybrid_coinbase_bytes(0, false), 399);
     assert_eq!(hybrid_coinbase_bytes(0, true), 443);
@@ -87,17 +87,17 @@ fn a_limit_below_the_fixed_outputs_pays_everyone_through_the_tree() {
 }
 
 #[test]
-fn alpha_capped_coinbase_is_782_bytes_for_a_million_payees() {
+fn cap_11_coinbase_is_782_bytes_for_a_million_payees() {
     // payout-distribution.md: "the largest Bitcoin Cash coinbase is 782 bytes".
-    let split = split_payees(CoinbaseLayout::alpha_cap(), 1_000_000);
+    let split = split_payees(CoinbaseLayout::cap_11(), 1_000_000);
     assert_eq!(split.coinbase_bytes, 782);
     assert_eq!(split.direct_outputs, 11);
     assert_eq!(split.drawn_payees, 999_990);
 }
 
 #[test]
-fn alpha_capped_coinbase_below_the_cap_pays_every_payee() {
-    let split = split_payees(CoinbaseLayout::alpha_cap(), 5);
+fn cap_11_coinbase_below_the_cap_pays_every_payee() {
+    let split = split_payees(CoinbaseLayout::cap_11(), 5);
     assert_eq!(split.direct_outputs, 5);
     assert_eq!(split.drawn_payees, 0);
     assert_eq!(split.coinbase_bytes, 408 + 5 * 34);
@@ -132,7 +132,7 @@ fn the_hybrid_constructor_picks_the_limit_by_tokens() {
 fn layout_names_say_the_rule() {
     assert_eq!(CoinbaseLayout::no_tokens().name(), "no-tokens");
     assert_eq!(CoinbaseLayout::with_tokens().name(), "tokens-3072");
-    assert_eq!(CoinbaseLayout::alpha_cap().name(), "cap-11");
+    assert_eq!(CoinbaseLayout::cap_11().name(), "cap-11");
     assert_eq!(CoinbaseLayout::Uncapped.name(), "uncapped");
 }
 
@@ -163,8 +163,8 @@ fn a_two_gigabyte_block_of_typical_transfers_has_a_24_hash_branch() {
 }
 
 #[test]
-fn a_share_on_a_one_megabyte_template_with_alpha_capped_coinbase() {
-    let sizes = ShareSizes::new(CoinbaseLayout::alpha_cap(), 1_000, 1_000_000, 226, 0);
+fn a_share_on_a_one_megabyte_template_with_a_cap_11_coinbase() {
+    let sizes = ShareSizes::new(CoinbaseLayout::cap_11(), 1_000, 1_000_000, 226, 0);
     // 4,424 transactions: a 13-hash branch.
     assert_eq!(sizes.merkle_branch_hashes, 13);
     assert_eq!(sizes.split.direct_outputs, 11);
@@ -175,14 +175,14 @@ fn a_share_on_a_one_megabyte_template_with_alpha_capped_coinbase() {
 
 #[test]
 fn share_transactions_add_to_the_body() {
-    let without = ShareSizes::new(CoinbaseLayout::alpha_cap(), 10, 1, 1, 0);
-    let with = ShareSizes::new(CoinbaseLayout::alpha_cap(), 10, 1, 1, 500);
+    let without = ShareSizes::new(CoinbaseLayout::cap_11(), 10, 1, 1, 0);
+    let with = ShareSizes::new(CoinbaseLayout::cap_11(), 10, 1, 1, 500);
     assert_eq!(with.body_bytes, without.body_bytes + 500);
 }
 
 #[test]
 fn uncles_add_a_hash_each_to_the_body() {
-    let sizes = ShareSizes::new(CoinbaseLayout::alpha_cap(), 10, 1, 1, 0);
+    let sizes = ShareSizes::new(CoinbaseLayout::cap_11(), 10, 1, 1, 0);
     assert_eq!(sizes.body_bytes_with_uncles(3), sizes.body_bytes + 96);
     assert_eq!(sizes.message_payload_bytes(3), sizes.body_bytes + 97);
 }
@@ -198,16 +198,16 @@ fn a_share_without_payouts_is_a_few_hundred_bytes_whatever_the_payees() {
 }
 
 #[test]
-fn a_no_token_coinbase_breaks_only_todays_share_limit_and_sv2_fields() {
+fn a_no_token_coinbase_breaks_only_the_pre_hybrid_share_limit_and_sv2_fields() {
     let layout = CoinbaseLayout::no_tokens();
     let check = ShareSizes::new(layout, 1_000_000, 1, 1, 0).limit_check(layout);
     assert!(check.coinbase_within_bch_transaction_limit);
-    assert!(check.share_body_within_proposed_limit);
-    assert!(check.message_within_today_p2p_limit);
+    assert!(check.share_body_within_hybrid_limit);
+    assert!(check.message_within_p2p_limit);
     assert_eq!(check.token_claim_within_vm_element, None);
     assert_eq!(
         check.broken(),
-        vec!["today's 200 KiB share body", "SV2 extended 64 KiB field"]
+        vec!["pre-hybrid 200 KiB share body", "SV2 extended 64 KiB field"]
     );
 }
 
@@ -221,8 +221,8 @@ fn a_token_coinbase_breaks_no_rule() {
 }
 
 #[test]
-fn alpha_capped_coinbase_meets_every_limit_and_the_asic_evidence() {
-    let layout = CoinbaseLayout::alpha_cap();
+fn cap_11_coinbase_meets_every_limit_and_the_asic_evidence() {
+    let layout = CoinbaseLayout::cap_11();
     let check = ShareSizes::new(layout, 1_000_000, 1, 1, 0).limit_check(layout);
     assert!(check.coinbase_within_asic_evidence);
     assert!(check.broken().is_empty());
@@ -236,30 +236,30 @@ fn an_uncapped_coinbase_for_a_million_payees_breaks_bch_consensus() {
         check.broken(),
         vec![
             "BCH 1 MB transaction",
-            "proposed share body",
-            "today's 1 MiB P2P message",
-            "today's 200 KiB share body",
+            "hybrid 1,204,800-byte share body",
+            "1.25 MiB P2P message",
+            "pre-hybrid 200 KiB share body",
             "SV2 extended 64 KiB field"
         ]
     );
 }
 
 #[test]
-fn todays_share_body_limit_allows_6008_direct_payees() {
+fn the_pre_hybrid_share_body_limit_allows_6008_direct_payees() {
     let largest = largest_direct_payee_count(|sizes| {
         sizes
             .limit_check(CoinbaseLayout::Uncapped)
-            .share_body_within_today_limit
+            .share_body_within_pre_hybrid_limit
     });
     assert_eq!(largest, 6_008);
 }
 
 #[test]
-fn the_proposed_share_body_limit_allows_35420_direct_payees() {
+fn the_hybrid_share_body_limit_allows_35420_direct_payees() {
     let largest = largest_direct_payee_count(|sizes| {
         sizes
             .limit_check(CoinbaseLayout::Uncapped)
-            .share_body_within_proposed_limit
+            .share_body_within_hybrid_limit
     });
     assert_eq!(largest, 35_420);
 }
@@ -275,13 +275,13 @@ fn bch_transaction_limit_allows_29399_direct_payees() {
 }
 
 #[test]
-fn todays_p2p_message_limit_allows_30813_direct_payees() {
+fn the_p2p_message_limit_allows_38523_direct_payees() {
     let largest = largest_direct_payee_count(|sizes| {
         sizes
             .limit_check(CoinbaseLayout::Uncapped)
-            .message_within_today_p2p_limit
+            .message_within_p2p_limit
     });
-    assert_eq!(largest, 30_813);
+    assert_eq!(largest, 38_523);
 }
 
 #[test]

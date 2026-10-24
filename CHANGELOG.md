@@ -216,6 +216,13 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
+- `p2poolv2_netsim` and `docs/simulation/network-sim.md` treat the hybrid
+  payout rule as the Bitcoin Cash payout rule, as it is on PR #33 and on
+  chipnet, instead of a proposal, and keep the 11-payout cap (`cap-11`) and
+  the 200 KiB share body limit only as historical comparisons, labelled
+  "pre-hybrid". The model's P2P message limit follows the node's 1.25 MiB
+  `MAX_P2P_MESSAGE_SIZE` (38,523 direct payees, from 30,813 at 1 MiB). The
+  sweep results are unchanged apart from those labels.
 - The organise worker's channel and pending buffer are bounded in bytes as
   well as by count, now that a Bitcoin Cash share may carry a 1,000,000-byte
   coinbase: full of the largest shares, the 512-share channel and the

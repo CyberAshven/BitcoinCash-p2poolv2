@@ -7,7 +7,7 @@
 //! Defaults are assumptions, not measurements: a hundred nodes on mixed
 //! home and data-centre links, a thousand miners, a pool with 1% of BCH's
 //! hashrate, 32 MB blocks (mainnet's ABLA floor), 10-second shares, the
-//! hybrid payout proposal for a share without merge-mined tokens, whole
+//! hybrid payout rule for a share without merge-mined tokens, whole
 //! shares on the wire as today, and a day of mining (8,640 shares).
 
 use crate::constants::{
@@ -140,7 +140,7 @@ pub enum ShareRelay {
     Full,
     /// Without the payout outputs, which every peer rebuilds from its own
     /// window to validate the share anyway: the compact share the hybrid
-    /// payout proposal suggests (`bch-hybrid-payouts.md`, section 8.1).
+    /// payout design suggests (`bch-hybrid-payouts.md`, section 8.1).
     /// Not built; its size here is an estimate.
     WithoutPayouts,
 }

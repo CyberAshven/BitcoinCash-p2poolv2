@@ -119,63 +119,70 @@ pub const MAX_UNCLES_DEPTH: usize = 3;
 /// `DIFFICULTY_SCALE` in `pplns_window.rs`. The nephew gets the other tenth.
 pub const UNCLE_PAID_FRACTION: f64 = 0.9;
 
-/// Largest share body a node accepts today, its share transactions plus the
-/// bitcoin coinbase: `BLOCK_TXS_SIZE_LIMIT` (200 KiB) in
-/// `p2poolv2_lib/src/shares/validation/mod.rs`. A P2Pool share-chain rule,
-/// taken from upstream, a Bitcoin pool.
+/// Largest share body a node accepted before the hybrid payout rule, its
+/// share transactions plus the bitcoin coinbase: `BLOCK_TXS_SIZE_LIMIT`
+/// (200 KiB) in `p2poolv2_lib/src/shares/validation/mod.rs`, still the limit
+/// on Bitcoin. A P2Pool share-chain rule, taken from upstream, a Bitcoin
+/// pool. Kept as a historical comparison.
 pub const SHARE_BODY_LIMIT_BYTES: u64 = 200 * 1024;
 
-/// The share body limit the hybrid payout proposal sets in its place: a full
-/// 1,000,000-byte coinbase (BCH's `MAX_TX_SIZE`) plus 200 KiB of share
-/// transactions (`docs/architecture/bch-hybrid-payouts.md`, section 8.1).
-/// Proposed, not built.
-pub const PROPOSED_SHARE_BODY_LIMIT_BYTES: u64 = BCH_MAX_TRANSACTION_BYTES + 200 * 1024;
+/// The share body limit the hybrid payout rule sets in its place on Bitcoin
+/// Cash: a full 1,000,000-byte coinbase (BCH's `MAX_TX_SIZE`) plus 200 KiB
+/// of share transactions (`docs/architecture/bch-hybrid-payouts.md`,
+/// section 8.1): `BCH_SHARE_BODY_SIZE_LIMIT` in
+/// `p2poolv2_lib/src/shares/validation/mod.rs`, on PR #33 and on chipnet.
+pub const HYBRID_SHARE_BODY_LIMIT_BYTES: u64 = BCH_MAX_TRANSACTION_BYTES + 200 * 1024;
 
-/// Largest P2P message a node decodes today: `MAX_P2P_MESSAGE_SIZE` (1 MiB)
-/// in `p2poolv2_lib/src/node/messages.rs`. An implementation limit of this
-/// node, not a share-chain rule: a larger share cannot be relayed at all. The
-/// hybrid payout proposal re-derives it from the share body limit.
-pub const MAX_P2P_MESSAGE_BYTES: u64 = 1024 * 1024;
+/// Largest P2P message a node decodes: `MAX_P2P_MESSAGE_SIZE` (1.25 MiB) in
+/// `p2poolv2_lib/src/node/messages.rs`, raised from 1 MiB with the hybrid
+/// payout rule to hold the largest share. An implementation limit of this
+/// node, not a share-chain rule: a larger share cannot be relayed at all.
+pub const MAX_P2P_MESSAGE_BYTES: u64 = 1_280 * 1024;
 
-/// Payout outputs a Bitcoin Cash coinbase may hold under alpha's current
+/// Payout outputs a Bitcoin Cash coinbase could hold under the earlier
 /// share-chain rule (decision 14, `payout-cap11`): `BCH_MAX_COINBASE_PAYOUTS`
-/// in `p2poolv2_lib/src/accounting/payout/coinbase_budget.rs`. The owner
-/// rejected it on 2026-10-23; the model keeps it for comparison.
+/// in `p2poolv2_lib/src/accounting/payout/coinbase_budget.rs` as it was. The
+/// owner rejected it on 2026-10-23 and the hybrid payout rule replaced it,
+/// on PR #33 and on chipnet; the model keeps it only as a historical
+/// comparison.
 pub const BCH_MAX_COINBASE_PAYOUTS: u64 = 11;
 
-/// The largest Bitcoin Cash coinbase alpha builds today apart from its
-/// payouts: 51 bytes of transaction fields, a 100-byte scriptSig, the
-/// donation (34), the fee (at most 51), the merge-mining output (55), the
-/// padding output (at most 74) and the commitment output (43).
+/// The largest Bitcoin Cash coinbase built under that 11-payout cap apart
+/// from its payouts: 51 bytes of transaction fields, a 100-byte scriptSig,
+/// the donation (34), the fee (at most 51), the merge-mining output (55),
+/// the padding output (at most 74) and the commitment output (43).
 /// `MAX_BCH_COINBASE_BYTES_BESIDE_PAYOUTS` in
-/// `p2poolv2_lib/src/stratum/work/coinbase.rs`. Used for alpha's rule.
+/// `p2poolv2_lib/src/stratum/work/coinbase.rs` as it was. Used only for the
+/// cap-11 comparison.
 pub const COINBASE_FIXED_BYTES: u64 = 408;
 
-/// Coinbase outputs other than the payouts, today and in the proposal:
-/// merge-mining commitment, donation, fee, padding and share commitment.
+/// Coinbase outputs other than the payouts, under both rules: merge-mining
+/// commitment, donation, fee, padding and share commitment.
 pub const COINBASE_FIXED_OUTPUTS: u64 = 5;
 
-/// The hybrid payout proposal's coinbase limit for a share without token
+/// The hybrid payout rule's coinbase limit for a share without token
 /// commitments: BCH's own `MAX_TX_SIZE`. Payees past it go to the payout
 /// tree (`bch-hybrid-payouts.md`, section 3.3).
 pub const NO_TOKEN_COINBASE_LIMIT_BYTES: u64 = BCH_MAX_TRANSACTION_BYTES;
 
-/// The hybrid payout proposal's coinbase limit `T` for a share that carries
+/// The hybrid payout rule's coinbase limit `T` for a share that carries
 /// token commitments, so that its token claim can hash the coinbase in the
-/// VM: the auditor's recommendation, 3,072 bytes, still to be confirmed by
-/// the owner. Payees past it are paid through a payout tree.
+/// VM: 3,072 bytes, `BCH_TOKEN_SHARE_COINBASE_LIMIT` in
+/// `p2poolv2_lib/src/accounting/payout/coinbase_budget.rs`. Payees past it
+/// are paid through a payout tree.
 pub const TOKEN_COINBASE_THRESHOLD_BYTES: u64 = 3_072;
 
-/// `S` in the hybrid payout proposal: the most a coinbase takes besides its
+/// `S` in the hybrid payout rule: the most a coinbase takes besides its
 /// PPLNS payouts, every field at its worst case: 51 bytes of transaction
 /// fields, a 100-byte scriptSig, 2 more bytes of output count, the 53-byte
 /// CTMM commitment, the donation (34), the fee (at most 44, P2SH32), the
 /// tree output (44), the padding (at most 74) and the share commitment (43)
-/// (`bch-hybrid-payouts.md`, section 3.3). The payout budget is `C - S`.
+/// (`bch-hybrid-payouts.md`, section 3.3; `BCH_COINBASE_BYTES_BESIDE_PAYOUTS`
+/// in `coinbase_budget.rs`). The payout budget is `C - S`.
 pub const HYBRID_COINBASE_BYTES_BESIDE_PAYOUTS: u64 = 445;
 
 /// The same coinbase without the tree output and with a one-byte output
-/// count: the part of a proposal coinbase that does not depend on payees.
+/// count: the part of a hybrid coinbase that does not depend on payees.
 pub const HYBRID_COINBASE_FIXED_BYTES: u64 =
     HYBRID_COINBASE_BYTES_BESIDE_PAYOUTS - P2SH32_OUTPUT_BYTES - 2;
 
@@ -197,9 +204,9 @@ pub const EXTRANONCE_BYTES: u64 = 12;
 
 /// A coinbase size seen to work on stock Antminer firmware (784 bytes, an
 /// OCEAN block cited in upstream discussion #668): `BCH_COINBASE_BYTE_BUDGET`
-/// in `p2poolv2_lib/src/stratum/work/coinbase.rs`. Evidence from another
-/// pool, not a measurement on this pool's devices; the hybrid payout
-/// proposal drops the check. Reported so a reader can see how far a coinbase
+/// in `p2poolv2_lib/src/stratum/work/coinbase.rs` as it was. Evidence from
+/// another pool, not a measurement on this pool's devices; the hybrid payout
+/// rule dropped the check. Reported so a reader can see how far a coinbase
 /// is from what such firmware is known to take.
 pub const ASIC_COINBASE_EVIDENCE_BYTES: u64 = 784;
 
