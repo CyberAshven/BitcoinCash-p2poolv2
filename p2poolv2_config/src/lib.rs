@@ -455,6 +455,15 @@ pub struct StratumConfig<State = Raw> {
     /// Pool operating mode. Defaults to P2Poolv2 when not specified.
     #[serde(default)]
     pub mode: PoolMode,
+    /// A JSON file listing the tokens a Bitcoin Cash P2Pool node
+    /// merge-mines for its miners (`docs/bch-auxpow.md`, "Merge-mining
+    /// tokens on a public node"). Every miner's jobs then carry a root of
+    /// their own token leaves at output 0, with their P2Pool donation and
+    /// the node's fee as per-win cuts. The node reads it again whenever it
+    /// changes, so the tool that claims a token can move its state. Unset,
+    /// the node merge-mines nothing. Bitcoin Cash in P2Pool mode only.
+    #[serde(default)]
+    pub merge_mining_tokens: Option<String>,
 
     // Parsed addresses - only available when State = Parsed
     #[serde(skip)]
@@ -557,6 +566,17 @@ impl StratumConfig<Raw> {
                 });
             }
             (Chain::Bitcoin, None) | (Chain::BitcoinCash, Some(_)) => {}
+        }
+
+        // Tokens are merge-mined through the Bitcoin Cash coinbase P2Pool
+        // builds for each miner; Bitcoin and Hydrapool build none.
+        if self.merge_mining_tokens.is_some()
+            && (self.chain != Chain::BitcoinCash || self.mode != PoolMode::P2poolv2)
+        {
+            return Err(ConfigError {
+                message: "merge_mining_tokens needs chain = bitcoin-cash in p2poolv2 mode"
+                    .to_string(),
+            });
         }
 
         if self.chain == Chain::Bitcoin && self.bch_share_chain == BchShareChain::Mini {
@@ -693,6 +713,7 @@ impl StratumConfig<Raw> {
             max_connections: self.max_connections,
             wait_for_chain_sync: self.wait_for_chain_sync,
             mode: self.mode,
+            merge_mining_tokens: self.merge_mining_tokens,
             bootstrap_address_parsed: Some(bootstrap_address_parsed),
             donation_address_parsed,
             fee_address_parsed,
@@ -1104,6 +1125,7 @@ impl StratumConfig<Raw> {
             max_connections: None,
             wait_for_chain_sync: true,
             mode: PoolMode::default(),
+            merge_mining_tokens: None,
             bootstrap_address_parsed: None,
             donation_address_parsed: None,
             fee_address_parsed: None,
@@ -3258,5 +3280,46 @@ mod miner_address_tests {
         config.mode = PoolMode::P2poolv2;
 
         assert!(config.parse().is_ok());
+    }
+
+    /// A Bitcoin Cash P2Pool node may merge-mine tokens for its miners.
+    #[test]
+    fn a_bitcoin_cash_p2pool_node_takes_a_token_file() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.chain = Chain::BitcoinCash;
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        config.bootstrap_address = "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t".to_string();
+        config.merge_mining_tokens = Some("merge-tokens.json".to_string());
+
+        let parsed = config.parse().unwrap();
+
+        assert_eq!(
+            parsed.merge_mining_tokens.as_deref(),
+            Some("merge-tokens.json")
+        );
+    }
+
+    /// Only the Bitcoin Cash coinbase a P2Pool node builds for each miner
+    /// carries their tokens: Bitcoin and Hydrapool refuse a token file.
+    #[test]
+    fn a_token_file_needs_a_bitcoin_cash_p2pool_node() {
+        let mut bitcoin = StratumConfig::<Raw>::new_for_test_default();
+        bitcoin.merge_mining_tokens = Some("merge-tokens.json".to_string());
+        assert!(
+            bitcoin
+                .parse()
+                .unwrap_err()
+                .message
+                .contains("merge_mining_tokens")
+        );
+
+        let mut hydrapool = StratumConfig::<Raw>::new_for_test_default();
+        hydrapool.chain = Chain::BitcoinCash;
+        hydrapool.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        hydrapool.bootstrap_address =
+            "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t".to_string();
+        hydrapool.mode = PoolMode::Hydrapool;
+        hydrapool.merge_mining_tokens = Some("merge-tokens.json".to_string());
+        assert!(hydrapool.parse().is_err());
     }
 }

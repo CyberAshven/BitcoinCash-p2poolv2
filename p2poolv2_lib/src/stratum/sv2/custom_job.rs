@@ -200,6 +200,7 @@ pub(crate) fn validate_custom_job(
             // A declared job's terms travel in a 255-byte token that has no
             // room for share transactions, so its share carries none.
             share_transactions: Arc::from([]),
+            merge_tokens: None,
         },
         proposal,
     ))

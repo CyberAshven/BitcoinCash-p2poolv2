@@ -105,6 +105,8 @@ use crate::stratum::work::difficulty::validate::validate_bitcoin_difficulty;
 use crate::stratum::work::gbt::build_merkle_branches_for_template;
 #[cfg(test)]
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::stratum::work::merge_tokens::{MergeMinedToken, TokenSet};
 #[cfg(test)]
 use crate::stratum::work::prepared_notify::build_notify_from_prepared;
 #[cfg(any(test, feature = "test-utils"))]
@@ -598,6 +600,70 @@ pub fn test_bch_prepared_with_cuts(
         weights,
         (donation_address, donation),
         (fee_address, fee),
+        None,
+    )
+}
+
+/// Two synthetic tokens with Pickaxe's token A and B fields (PR #70,
+/// `docs/merge-mining.md`): categories 11 and 22 x 32, batons `51` and `52`,
+/// states aa and bb x 32. A's target `0x207fffff` is met by about half of
+/// all hashes, B's `0x1f00ffff` by about one in 2^24.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_merge_token_set() -> Arc<TokenSet> {
+    use bitcoin::hashes::sha256d;
+    Arc::new(
+        TokenSet::new(vec![
+            MergeMinedToken {
+                category: [0x11; 32],
+                lock_hash: sha256d::Hash::hash(&[0x51]).to_byte_array(),
+                state_hash: [0xaa; 32],
+                target_bits: 0x207f_ffff,
+                max_height: 16,
+            },
+            MergeMinedToken {
+                category: [0x22; 32],
+                lock_hash: sha256d::Hash::hash(&[0x52]).to_byte_array(),
+                state_hash: [0xbb; 32],
+                target_bits: 0x1f00_ffff,
+                max_height: 16,
+            },
+        ])
+        .unwrap(),
+    )
+}
+
+/// The BCH payout snapshot of [`test_bch_prepared_with_cuts`] on a node
+/// that merge-mines `tokens` for every miner: its payouts follow the token
+/// share's limit and each miner's job carries their own root.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_bch_prepared_with_tokens(
+    tokens: Arc<TokenSet>,
+    donation: Option<u16>,
+    fee_address: Option<Address>,
+    fee: Option<u16>,
+) -> Arc<PreparedNotifyParams> {
+    let template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    let first = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([1; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let second = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([2; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let weights = HashMap::from([(first, 1), (second, 3)]);
+    let donation_address = donation.map(|_| {
+        crate::config::bitcoin_cash_donation_address(crate::config::BitcoinCashNetwork::Regtest)
+    });
+    test_bch_prepared_with_weights_and_cuts(
+        template,
+        weights,
+        (donation_address, donation),
+        (fee_address, fee),
+        Some(tokens),
     )
 }
 
@@ -630,20 +696,23 @@ fn test_bch_prepared_with_weights(
     template: BlockTemplate,
     weights: HashMap<Address, u128>,
 ) -> Arc<PreparedNotifyParams> {
-    test_bch_prepared_with_weights_and_cuts(template, weights, (None, None), (None, None))
+    test_bch_prepared_with_weights_and_cuts(template, weights, (None, None), (None, None), None)
 }
 
 /// A BCH payout snapshot for `template` and `weights` on a node taking the
-/// given donation and fee, each an address and basis points.
+/// given donation and fee, each an address and basis points, and
+/// merge-mining `merge_tokens` for every miner when given.
 #[cfg(any(test, feature = "test-utils"))]
 fn test_bch_prepared_with_weights_and_cuts(
     template: BlockTemplate,
     weights: HashMap<Address, u128>,
     (donation_address, donation): (Option<Address>, Option<u16>),
     (fee_address, fee): (Option<Address>, Option<u16>),
+    merge_tokens: Option<Arc<TokenSet>>,
 ) -> Arc<PreparedNotifyParams> {
     let anchor = BlockHash::from_byte_array([0x33; 32]);
-    let payout_split = PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, false);
+    let payout_split =
+        PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, merge_tokens.is_some());
     let outputs = build_pplns_outputs(
         template.coinbasevalue,
         &weights,
@@ -665,6 +734,7 @@ fn test_bch_prepared_with_weights_and_cuts(
             .fee_address(fee_address)
             .fee(fee)
             .include_merge_mining(true)
+            .merge_tokens(merge_tokens)
             .miner_donations(Some(crate::config::bitcoin_cash_donation_address(
                 crate::config::BitcoinCashNetwork::Regtest,
             )))

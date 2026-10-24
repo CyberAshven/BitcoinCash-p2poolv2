@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::block_template::BlockTemplate;
+use super::merge_tokens::MinerTokenJob;
 use crate::shares::share_block::ShareTransaction;
 use crate::shares::share_commitment::ShareCommitment;
 use bitcoin::BlockHash;
@@ -55,6 +56,11 @@ pub struct JobDetails {
     /// found on this job is built with them. Shared by every job on one
     /// notify; empty for declared jobs.
     pub share_transactions: Arc<[ShareTransaction]>,
+    /// The miner's token leaves behind output 0, when the node merge-mines
+    /// tokens for them: for their disclosure and the proofs of their wins.
+    /// `None` for the empty commitment and for declared jobs, whose
+    /// declarator holds its own leaves.
+    pub merge_tokens: Option<Arc<MinerTokenJob>>,
 }
 
 /// Lock-free job tracker using DashMap for concurrent access.
@@ -109,6 +115,7 @@ impl JobTracker {
                 coinbase_nsecs,
                 template_merkle_branches,
                 share_transactions: Arc::from([]),
+                merge_tokens: None,
             },
         );
         job_id

@@ -10,15 +10,17 @@ use super::coinbase::{
 };
 use super::error::WorkError;
 use super::gbt::build_merkle_branches_for_template;
+use super::merge_tokens::{MinerTokenJob, TokenSet};
 use super::tracker::{JobDetails, JobId, JobTracker};
 use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, bch_split_for_commitment};
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+use crate::shares::auxpow::{SplitSlot, TokenSplit};
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::{ShareTransaction, encode_optional_address};
 use crate::shares::share_commitment::{
-    BCH_JOB_TOKEN_VERSION, ShareCommitment, append_share_version, build_commitment_prefix,
-    build_commitment_suffix, commitment_digest,
+    BCH_JOB_TOKEN_VERSION, ShareCommitment, append_pool_merge_mining, append_share_version,
+    build_commitment_prefix, build_commitment_suffix, commitment_digest,
 };
 use crate::shares::share_version::ShareVersion;
 use crate::shares::transactions::coinbase::compute_witness_root;
@@ -55,6 +57,71 @@ const COMMITMENT_HASH_HEX_LENGTH: usize = HEX_PER_BYTE * 32;
 /// Hex length of the 4-byte locktime ending coinbase2, which follows the
 /// commitment hash.
 const LOCKTIME_HEX_LENGTH: usize = HEX_PER_BYTE * LOCKTIME_LENGTH;
+
+/// Bytes of a merge-mining output before its root: the 8-byte value, the
+/// script length, `OP_RETURN`, the push, `"CTMM"` and the version.
+const MERGE_MINING_ROOT_OFFSET: usize = 8 + 1 + 1 + 1 + 4 + 1;
+
+/// The bytes each miner's token root changes in output 0: the root, `h`
+/// and the salt.
+const MERGE_MINING_ROOT_FIELDS_LENGTH: usize = 32 + 1 + 4;
+
+/// A coinbase's bytes before its scriptSig: version, the input count, the
+/// null outpoint and the one-byte scriptSig length. The fixed-shape head of
+/// merge-mining v2 is these, the scriptSig, the sequence and a one-byte
+/// output count, so output 0 starts 47 bytes past the scriptSig's length.
+const COINBASE_BYTES_BEFORE_SCRIPT_SIG: usize = 4 + 1 + 36 + 1;
+
+/// The bytes of a commitment's root, `h` and salt, as output 0 carries them.
+fn merge_mining_root_fields(commitment: &MergeMiningCommitment) -> String {
+    let mut fields = Vec::with_capacity(MERGE_MINING_ROOT_FIELDS_LENGTH);
+    fields.extend_from_slice(&commitment.root);
+    fields.push(commitment.height);
+    fields.extend_from_slice(&commitment.salt.to_le_bytes());
+    hex::encode(fields)
+}
+
+/// Where a miner's token root goes in coinbase2's static middle: the hex
+/// offset of the root, `h` and salt of output 0, which the coinbase was
+/// built with as `placeholder`.
+///
+/// Output 0 follows the coinbase's fixed-shape head
+/// (`COINBASE_BYTES_BEFORE_SCRIPT_SIG`, the scriptSig, the sequence and a
+/// one-byte output count). coinbase1 ends before the 12-byte extranonce,
+/// and the middle starts after the nsecs push. The placeholder must sit at
+/// the offset found, or every miner's root would land in the wrong bytes.
+fn merge_mining_root_offset(
+    coinbase: &bitcoin::Transaction,
+    coinbase1: &str,
+    coinbase2_middle: &str,
+    placeholder: &MergeMiningCommitment,
+) -> Result<usize, WorkError> {
+    let script_sig_length = coinbase
+        .input
+        .first()
+        .map(|input| input.script_sig.len())
+        .unwrap_or_default();
+    let root =
+        COINBASE_BYTES_BEFORE_SCRIPT_SIG + script_sig_length + 4 + 1 + MERGE_MINING_ROOT_OFFSET;
+    let middle_start = coinbase1.len() / HEX_PER_BYTE
+        + super::coinbase::EXTRANONCE_SEPARATOR.len()
+        + NSECS_PUSH_HEX_LENGTH / HEX_PER_BYTE;
+    let offset = root
+        .checked_sub(middle_start)
+        .map(|bytes| bytes * HEX_PER_BYTE)
+        .ok_or_else(|| WorkError {
+            message: "the merge-mining output is not in coinbase2".to_string(),
+        })?;
+    let expected = merge_mining_root_fields(placeholder);
+    if coinbase2_middle.get(offset..offset + expected.len()) != Some(expected.as_str()) {
+        return Err(WorkError {
+            message:
+                "coinbase2 does not carry the merge-mining output where each miner's root goes"
+                    .to_string(),
+        });
+    }
+    Ok(offset)
+}
 
 /// Split coinbase2 around its per-miner parts -- the nsecs push at the front
 /// and the commitment hash before the locktime -- into the static middle and
@@ -194,6 +261,18 @@ pub struct PreparedNotifyParams {
     /// The rule version and desired version every share on these params
     /// carries (`shares::share_version`).
     share_version: ShareVersion,
+    /// The tokens a Bitcoin Cash P2Pool node merge-mines for its miners:
+    /// each miner's job carries a root of their own leaves at output 0.
+    /// `None` puts the exact empty commitment in every job.
+    merge_tokens: Option<Arc<TokenSet>>,
+    /// The split every miner's leaves on these params commit to: their
+    /// donation, then the node's fee, each to the script the coinbase pays
+    /// it to.
+    merge_token_split: TokenSplit,
+    /// Hex offset in `coinbase2_middle` of output 0's root, `h` and salt,
+    /// which each miner's job replaces with their own. Set with
+    /// `merge_tokens`.
+    merge_mining_offset: Option<usize>,
 }
 
 impl PreparedNotifyParams {
@@ -293,10 +372,23 @@ impl PreparedNotifyParams {
         .fee_address(self.fee_address.clone())
         .fee(self.fee)
         .include_merge_mining(miner_donations.include_merge_mining)
+        .merge_tokens(self.merge_tokens.clone())
         .share_version(self.share_version)
         .share_transactions(self.share_transactions.to_vec());
         builder.pplns_weights = Some(Arc::clone(weights));
         builder.build()
+    }
+
+    /// The leaves of the miner paid to `miner_bitcoin_address` on these
+    /// params: each binds their payout script, with these params' donation
+    /// and fee in its split. `None` without tokens or without a payout.
+    pub(crate) fn miner_token_job(
+        &self,
+        miner_bitcoin_address: Option<&Address>,
+    ) -> Option<MinerTokenJob> {
+        let tokens = self.merge_tokens.as_ref()?;
+        let address = miner_bitcoin_address?;
+        Some(tokens.miner_job(address.script_pubkey().as_bytes(), self.merge_token_split))
     }
 
     /// Versioned BCH job terms, preceded by an unpredictable connection nonce.
@@ -489,6 +581,7 @@ pub(crate) struct PreparedNotifyParamsBuilder {
     fee_address: Option<Address>,
     fee: Option<u16>,
     include_merge_mining: bool,
+    merge_tokens: Option<Arc<TokenSet>>,
     share_version: ShareVersion,
     share_transactions: Vec<ShareTransaction>,
 }
@@ -517,6 +610,7 @@ impl PreparedNotifyParamsBuilder {
             fee_address: None,
             fee: None,
             include_merge_mining: false,
+            merge_tokens: None,
             share_version: ShareVersion::CURRENT,
             share_transactions: Vec::new(),
         }
@@ -596,6 +690,16 @@ impl PreparedNotifyParamsBuilder {
         self
     }
 
+    /// Merge-mine `merge_tokens` for every miner: each miner's job carries a
+    /// root of their own leaves at output 0 instead of the empty commitment
+    /// (`TokenSet::miner_job`). Needs `include_merge_mining`, and payouts
+    /// and a `payout_split` at the token share's limit, which every such
+    /// job's share follows.
+    pub fn merge_tokens(mut self, merge_tokens: Option<Arc<TokenSet>>) -> Self {
+        self.merge_tokens = merge_tokens;
+        self
+    }
+
     /// Let each miner choose their own donation to `donation_address`, the
     /// network's built-in one (`PreparedNotifyParams::for_miner_donation`).
     /// Only a Bitcoin Cash P2Pool node sets this, with the PPLNS weights the
@@ -630,11 +734,25 @@ impl PreparedNotifyParamsBuilder {
         // [commitment_hash][locktime].
         let dummy_commitment_hash = hashes::sha256::Hash::from_byte_array([0xab_u8; 32]);
 
-        let merge_mining = if self.include_merge_mining {
-            Some(MergeMiningCommitment::empty())
-        } else {
-            None
-        };
+        // Output 0: the empty commitment, or, when the node merge-mines
+        // tokens, their layout with a placeholder root each miner's own
+        // replaces. Every miner's coinbase is then the same size.
+        let merge_tokens = self.merge_tokens.filter(|_| self.include_merge_mining);
+        let merge_mining = self.include_merge_mining.then(|| {
+            merge_tokens
+                .as_ref()
+                .map_or(MergeMiningCommitment::empty(), |tokens| {
+                    tokens.placeholder_commitment()
+                })
+        });
+        if merge_tokens.is_some()
+            && self.payout_split != PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, true)
+        {
+            return Err(WorkError {
+                message: "jobs merge-mining tokens need payouts at the token share's limit"
+                    .to_string(),
+            });
+        }
         let coinbase = build_coinbase(
             Version::TWO,
             self.payouts.outputs.as_slice(),
@@ -666,6 +784,21 @@ impl PreparedNotifyParamsBuilder {
         let (coinbase2_middle, coinbase2_locktime) = split_coinbase2(
             &coinbase2_full,
             &hex::encode(dummy_commitment_hash.as_byte_array()),
+        )?;
+        let merge_mining_offset = match (&merge_tokens, &merge_mining) {
+            (Some(_), Some(placeholder)) => Some(merge_mining_root_offset(
+                &coinbase,
+                &coinbase1,
+                &coinbase2_middle,
+                placeholder,
+            )?),
+            _ => None,
+        };
+        let merge_token_split = token_split(
+            &self.donation_address,
+            self.donation,
+            &self.fee_address,
+            self.fee,
         )?;
 
         // Pre-compute merkle branches
@@ -752,8 +885,36 @@ impl PreparedNotifyParamsBuilder {
             share_transactions: share_transactions.into(),
             share_witness_root,
             share_version: self.share_version,
+            merge_tokens,
+            merge_token_split,
+            merge_mining_offset,
         })
     }
+}
+
+/// The split a miner's token leaves commit to: the donation, then the fee,
+/// each at the rate the coinbase takes it and to the script the coinbase
+/// pays it to, so each token win is shared as each block is. A rate of 0,
+/// or none, leaves its slot empty; both empty is a zero `ext`.
+fn token_split(
+    donation_address: &Option<Address>,
+    donation: Option<u16>,
+    fee_address: &Option<Address>,
+    fee: Option<u16>,
+) -> Result<TokenSplit, WorkError> {
+    let slot = |address: &Option<Address>, rate: Option<u16>| {
+        match (address, rate) {
+            (Some(address), Some(rate)) => SplitSlot::new(rate, address.script_pubkey().as_bytes()),
+            _ => Ok(SplitSlot::EMPTY),
+        }
+        .map_err(|error| WorkError {
+            message: format!("A token split cannot carry a cut of {rate:?} basis points: {error}"),
+        })
+    };
+    Ok(TokenSplit {
+        donation: slot(donation_address, donation)?,
+        fee: slot(fee_address, fee)?,
+    })
 }
 
 /// Bytes a miner's bitcoin coinbase may add to the one `build` sizes: the
@@ -849,6 +1010,12 @@ fn build_per_miner_coinbase2(
 /// When either address is None (solo or Hydrapool mode), a commitment hash is
 /// still computed from whatever is available, but no `ShareCommitment` is
 /// built: a share needs both a bitcoin payout identity and a share chain owner.
+///
+/// On params that merge-mine tokens, output 0 carries the root of this
+/// miner's own token leaves (`PreparedNotifyParams::miner_token_job`), the
+/// share commitment digests it, and the job keeps the leaves for the
+/// miner's disclosure and wins. A job without a payout address carries the
+/// empty commitment.
 pub(crate) fn insert_miner_job(
     prepared: &PreparedNotifyParams,
     miner_bitcoin_address: Option<&Address>,
@@ -858,6 +1025,11 @@ pub(crate) fn insert_miner_job(
     let fresh_time = SystemTimeProvider.seconds_since_epoch() as u32;
 
     let nsecs = get_timestamp_bytes(&SystemTimeProvider);
+
+    let merge_tokens = prepared
+        .miner_token_job(miner_bitcoin_address)
+        .map(Arc::new);
+    let pool_merge_mining = merge_tokens.as_ref().map(|job| job.commitment);
 
     // Build ShareCommitment only when both addresses are available: the share
     // chain coinbase needs an owner and the bitcoin coinbase needs a payee.
@@ -875,7 +1047,7 @@ pub(crate) fn insert_miner_job(
             fee_address: prepared.fee_address.clone(),
             fee: prepared.fee,
             bch_coinbase: None,
-            pool_merge_mining: None,
+            pool_merge_mining,
             share_version: prepared.share_version,
         }),
         _ => None,
@@ -883,20 +1055,40 @@ pub(crate) fn insert_miner_job(
 
     // The hash the miner embeds in its bitcoin coinbase must be the hash of the
     // commitment we store, so derive one from the other rather than building
-    // the same digest twice.
+    // the same digest twice. A miner's token root follows the shared suffix,
+    // as `ShareCommitment::hash` digests it.
+    let miner_suffix = pool_merge_mining.map(|commitment| {
+        let mut suffix = prepared.commitment_suffix.clone();
+        append_pool_merge_mining(&mut suffix, &commitment);
+        suffix
+    });
     let commitment_hash_hex = get_commitment_hex(
         &prepared.commitment_prefix,
         fresh_time,
-        &prepared.commitment_suffix,
+        miner_suffix
+            .as_deref()
+            .unwrap_or(&prepared.commitment_suffix),
         miner_bitcoin_address,
         miner_address,
     );
+
+    // Output 0 carries this miner's root, or the empty commitment without a
+    // payout to bind their leaves to.
+    let miner_middle = prepared.merge_mining_offset.map(|offset| {
+        let mut middle = prepared.coinbase2_middle.clone();
+        let fields =
+            merge_mining_root_fields(&pool_merge_mining.unwrap_or(MergeMiningCommitment::EMPTY));
+        middle.replace_range(offset..offset + fields.len(), &fields);
+        middle
+    });
 
     // Build per-miner coinbase2
     let coinbase2 = build_per_miner_coinbase2(
         &commitment_hash_hex,
         nsecs,
-        &prepared.coinbase2_middle,
+        miner_middle
+            .as_deref()
+            .unwrap_or(&prepared.coinbase2_middle),
         &prepared.coinbase2_locktime,
     );
 
@@ -913,6 +1105,7 @@ pub(crate) fn insert_miner_job(
             coinbase_nsecs: nsecs,
             template_merkle_branches: prepared.merkle_branches.clone(),
             share_transactions: Arc::clone(&prepared.share_transactions),
+            merge_tokens,
         },
     );
     (job_id, coinbase2)
@@ -928,6 +1121,23 @@ pub(crate) fn build_notify_from_prepared(
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
     tracker_handle: &JobTracker,
 ) -> Result<String, WorkError> {
+    build_notify_with_job_id(
+        prepared,
+        miner_bitcoin_address,
+        miner_address,
+        tracker_handle,
+    )
+    .map(|(notify_json, _job_id)| notify_json)
+}
+
+/// [`build_notify_from_prepared`], also returning the id of the job it
+/// inserted, for what follows the notify (a miner's token leaves).
+pub(crate) fn build_notify_with_job_id(
+    prepared: &PreparedNotifyParams,
+    miner_bitcoin_address: Option<&Address>,
+    miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
+    tracker_handle: &JobTracker,
+) -> Result<(String, JobId), WorkError> {
     let (job_id, coinbase2) = insert_miner_job(
         prepared,
         miner_bitcoin_address,
@@ -947,7 +1157,7 @@ pub(crate) fn build_notify_from_prepared(
         &coinbase2,
     );
 
-    Ok(notify_json)
+    Ok((notify_json, job_id))
 }
 
 #[cfg(test)]

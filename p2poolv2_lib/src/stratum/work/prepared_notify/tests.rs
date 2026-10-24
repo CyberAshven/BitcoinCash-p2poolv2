@@ -651,3 +651,211 @@ fn test_split_coinbase2_rejects_short_coinbase2() {
     let result = split_coinbase2("08", &hex::encode([0xab_u8; 32]));
     assert!(result.unwrap_err().message.contains("too short"));
 }
+
+/// A P2PKH regtest payout to twenty `byte` bytes.
+fn regtest_payout(byte: u8) -> Address {
+    Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([byte; 20]),
+        Network::Regtest,
+    )
+}
+
+/// The coinbase a miner hashes for a job, with zero extranonce bytes.
+fn job_coinbase(job: &JobDetails) -> Transaction {
+    crate::stratum::work::difficulty::validate::build_coinbase_from_components(
+        &job.coinbase1,
+        "00000000",
+        "0000000000000000",
+        &job.coinbase2,
+    )
+    .unwrap()
+}
+
+/// Two miners on a node that merge-mines tokens hash coinbases that differ
+/// in output 0: each carries the root of the miner's own leaves. The job's
+/// share commitment names that root and its hash is the one the coinbase
+/// commits to; the job keeps the leaves, which pay the miner, with the
+/// node's donation and fee as the split's slots.
+#[tokio::test]
+async fn each_miner_s_job_carries_the_root_of_their_own_leaves() {
+    let fee_address = regtest_payout(0xfe);
+    let prepared = crate::test_utils::test_bch_prepared_with_tokens(
+        crate::test_utils::test_merge_token_set(),
+        Some(100),
+        Some(fee_address.clone()),
+        Some(100),
+    );
+    let tracker_handle = start_tracker_actor();
+    let owner = ShareOwner::CashP2pkh([0x22; 20]);
+    let first = regtest_payout(0x12);
+    let second = regtest_payout(0x34);
+    let (first_id, _) = insert_miner_job(&prepared, Some(&first), Some(owner), &tracker_handle);
+    let (second_id, _) = insert_miner_job(&prepared, Some(&second), Some(owner), &tracker_handle);
+    let first_job = tracker_handle.get_job(first_id).unwrap();
+    let second_job = tracker_handle.get_job(second_id).unwrap();
+
+    let first_tokens = first_job.merge_tokens.as_ref().unwrap();
+    let first_coinbase = job_coinbase(&first_job);
+    assert_eq!(
+        MergeMiningCommitment::from_output(&first_coinbase.output[0]),
+        Ok(first_tokens.commitment)
+    );
+    let commitment = first_job.share_commitment.as_ref().unwrap();
+    assert_eq!(commitment.pool_merge_mining, Some(first_tokens.commitment));
+    assert_eq!(
+        first_coinbase
+            .output
+            .last()
+            .unwrap()
+            .script_pubkey
+            .as_bytes()[2..],
+        commitment.hash().to_byte_array()
+    );
+    assert_eq!(
+        first_tokens.entries[0].leaf.payout_hash,
+        hashes::sha256d::Hash::hash(first.script_pubkey().as_bytes()).to_byte_array()
+    );
+    let donation_script =
+        crate::config::bitcoin_cash_donation_address(crate::config::BitcoinCashNetwork::Regtest)
+            .script_pubkey();
+    assert_eq!(
+        first_tokens.entries[0].split,
+        TokenSplit {
+            donation: SplitSlot::new(100, donation_script.as_bytes()).unwrap(),
+            fee: SplitSlot::new(100, fee_address.script_pubkey().as_bytes()).unwrap(),
+        }
+    );
+
+    let second_coinbase = job_coinbase(&second_job);
+    let second_root = MergeMiningCommitment::from_output(&second_coinbase.output[0]).unwrap();
+    assert_ne!(second_root.root, first_tokens.commitment.root);
+    assert_eq!(
+        (second_root.height, second_root.salt),
+        (first_tokens.commitment.height, first_tokens.commitment.salt)
+    );
+    assert_eq!(first_coinbase.total_size(), second_coinbase.total_size());
+}
+
+/// The coinbase a miner hashes is the one a validator rebuilds from the
+/// share's header: output 0 from its root, the payouts at the token share's
+/// limit, and the rest from the coinbase's own fields.
+#[tokio::test]
+async fn a_miner_s_token_coinbase_is_the_one_a_validator_rebuilds() {
+    let prepared = crate::test_utils::test_bch_prepared_with_tokens(
+        crate::test_utils::test_merge_token_set(),
+        Some(100),
+        None,
+        None,
+    );
+    let tracker_handle = start_tracker_actor();
+    let payout = regtest_payout(0x12);
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        &tracker_handle,
+    );
+    let job = tracker_handle.get_job(job_id).unwrap();
+    let coinbase = job_coinbase(&job);
+    let commitment = job.share_commitment.as_ref().unwrap();
+    let root = commitment.pool_merge_mining.unwrap();
+    let payouts = prepared
+        .declared_outputs(prepared.template().coinbasevalue, &root)
+        .unwrap();
+    let fields = crate::stratum::work::coinbase::parse_bitcoin_coinbase_fields(&coinbase).unwrap();
+
+    let rebuilt = build_coinbase(
+        Version::TWO,
+        &payouts.outputs,
+        prepared.template().height as i64,
+        fields.aux_flags,
+        None,
+        b"P2Poolv2",
+        Some(commitment.hash()),
+        fields.nsecs,
+        Some(&fields.extranonce),
+        Some(root),
+        payouts.tree_output().as_ref(),
+    )
+    .unwrap();
+
+    assert_eq!(rebuilt, coinbase);
+    check_bch_coinbase_limit(&coinbase, bch_split_for_commitment(&root)).unwrap();
+}
+
+/// A miner who chose no donation still mines the node's tokens: the rebuilt
+/// params keep them, and the miner's leaves carry the fee alone.
+#[tokio::test]
+async fn a_miner_s_own_donation_changes_their_split() {
+    let fee_address = regtest_payout(0xfe);
+    let prepared = crate::test_utils::test_bch_prepared_with_tokens(
+        crate::test_utils::test_merge_token_set(),
+        Some(100),
+        Some(fee_address.clone()),
+        Some(100),
+    );
+    let opted_out = prepared.for_miner_donation(Some(0)).unwrap().unwrap();
+    let job = opted_out
+        .miner_token_job(Some(&regtest_payout(0x12)))
+        .unwrap();
+    assert_eq!(job.entries[0].split.donation, SplitSlot::EMPTY);
+    assert_eq!(
+        job.entries[0].split.fee,
+        SplitSlot::new(100, fee_address.script_pubkey().as_bytes()).unwrap()
+    );
+    let node_default = prepared
+        .miner_token_job(Some(&regtest_payout(0x12)))
+        .unwrap();
+    assert_ne!(job.commitment.root, node_default.commitment.root);
+}
+
+/// Without a payout to bind leaves to, a job on token params carries the
+/// empty commitment and no leaves.
+#[tokio::test]
+async fn a_job_without_a_payout_carries_the_empty_commitment() {
+    let prepared = crate::test_utils::test_bch_prepared_with_tokens(
+        crate::test_utils::test_merge_token_set(),
+        None,
+        None,
+        None,
+    );
+    let tracker_handle = start_tracker_actor();
+    let (job_id, _) = insert_miner_job(&prepared, None, None, &tracker_handle);
+    let job = tracker_handle.get_job(job_id).unwrap();
+    assert!(job.merge_tokens.is_none());
+    assert_eq!(
+        MergeMiningCommitment::from_output(&job_coinbase(&job).output[0]),
+        Ok(MergeMiningCommitment::EMPTY)
+    );
+}
+
+/// Jobs that merge-mine tokens make token shares, so their payouts must
+/// follow the token share's limit; params split for a no-token share are
+/// refused.
+#[test]
+fn token_jobs_need_the_token_share_split() {
+    let template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    let distribution = vec![OutputPair {
+        address: regtest_payout(0x01),
+        amount: bitcoin::Amount::from_sat(template.coinbasevalue),
+    }];
+    let result =
+        PreparedNotifyParamsBuilder::new(Arc::new(template), distribution, b"P2Poolv2", true)
+            .payout_split(PayoutSplit::for_chain(
+                crate::config::Chain::BitcoinCash,
+                false,
+            ))
+            .include_merge_mining(true)
+            .merge_tokens(Some(crate::test_utils::test_merge_token_set()))
+            .build();
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .message
+            .contains("token share's limit")
+    );
+}
