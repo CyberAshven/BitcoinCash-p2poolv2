@@ -7,6 +7,7 @@
 //! A view over the same [`HashrateHistory`] the server-rendered dashboard
 //! draws, so both show the same numbers. No sampling happens here.
 
+use crate::api::dashboard::connected_miners;
 use crate::api::dashboard::history::{self, HashrateHistory, Sample};
 use crate::api::error::ApiError;
 use crate::api::server::AppState;
@@ -16,6 +17,7 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Default and maximum window, in seconds. The history holds one day.
@@ -98,16 +100,27 @@ async fn hashrate(
     let current = match samples.last() {
         Some(newest) => HashratePoint::from(newest),
         None => {
-            // Before the first sample: read pool and network now. The store
-            // read is synchronous, so keep it off the async workers.
+            // Before the first sample: read pool, local and network now. The
+            // store read is synchronous, so keep it off the async workers.
             let app = Arc::clone(&state.app);
-            let pool = tokio::task::spawn_blocking(move || history::pool_hashrate(&app))
-                .await
-                .unwrap_or_default();
+            let connected: HashSet<String> = connected_miners(&app).await;
+            let (pool, local) = tokio::task::spawn_blocking(move || {
+                let shares = history::newest_shares(&app, history::POOL_HASHRATE_SHARES);
+                let points: Vec<(u32, bitcoin::CompactTarget)> = shares
+                    .iter()
+                    .map(|share| (share.timestamp, share.bits))
+                    .collect();
+                (
+                    history::share_chain_hashrate(&points),
+                    history::local_chain_hashrate(&app, &shares, &connected),
+                )
+            })
+            .await
+            .unwrap_or_default();
             HashratePoint {
                 time: 0,
                 pool_hashrate: pool,
-                local_hashrate: None,
+                local_hashrate: local,
                 network_hashrate: state
                     .app
                     .tracker_handle

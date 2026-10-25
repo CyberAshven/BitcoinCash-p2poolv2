@@ -312,7 +312,9 @@ second, `null` where unknown at that time.
 
 - `pool_hashrate`: share chain work of the newest confirmed shares over
   their time span; the same on every node.
-- `local_hashrate`: this node's accepted stratum difficulty between samples.
+- `local_hashrate`: share chain work of shares from miners connected to
+  this node, over the same span; the difference from `pool_hashrate` is
+  other nodes' miners.
 - `network_hashrate`: template difficulty × 2^32 / 600.
 
 The top-level values are the newest sample (read live before the first one).

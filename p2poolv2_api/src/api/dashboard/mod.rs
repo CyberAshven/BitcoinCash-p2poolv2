@@ -41,6 +41,7 @@ use pages::{
     Paging, ShareRow, ShareView, Site, WorkerRow,
 };
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -275,6 +276,22 @@ pub(crate) async fn local_miners(state: &AppState) -> Vec<MinerRow> {
     miners
 }
 
+/// The payout addresses of miners on this node with at least one active
+/// worker, as [`local_miners`] lists them. Unlike [`local_miners`], a miner
+/// whose workers have all gone inactive (or expired) is left out: it may
+/// still show a historical row on the miners page (grace periods), but it
+/// is not connected now and its share-chain work should not count toward
+/// the local hashrate.
+pub(crate) async fn connected_miners(state: &AppState) -> HashSet<String> {
+    let metrics = state.metrics_handle.get_metrics().await;
+    metrics
+        .users
+        .iter()
+        .filter(|(_, user)| user.any_active_workers())
+        .map(|(address, _)| address.clone())
+        .collect()
+}
+
 /// How many of `miners` have a worker online, and how many workers are
 /// online in all.
 pub(crate) fn online_counts(miners: &[MinerRow]) -> (usize, usize) {
@@ -335,7 +352,8 @@ async fn overview(
         Ok(chain) => chain,
         Err(error) => return error_page(state, error),
     };
-    let (miners_online, workers_online) = online_counts(&local_miners(state).await);
+    let miners = local_miners(state).await;
+    let (miners_online, workers_online) = online_counts(&miners);
     let network_difficulty = state.tracker_handle.get_network_difficulty();
     let samples = dashboard.history.samples();
     let local_hashrate = samples.iter().rev().find_map(|sample| sample.local);
@@ -608,6 +626,7 @@ mod tests {
     use crate::api::server::{AppConfig, WebOptions, build_router_with_history};
     use axum::body::Body;
     use axum::http::{HeaderMap, Request, header};
+    use p2poolv2_lib::accounting::payout::simple_pplns::SimplePplnsShare;
     use p2poolv2_lib::accounting::stats::metrics;
     use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
     use p2poolv2_lib::node::actor::NodeHandle;
@@ -1087,6 +1106,50 @@ mod tests {
             "bchtest:qpayout",
             Some("bchtest:qpayout")
         ));
+    }
+
+    #[tokio::test]
+    async fn connected_miners_lists_a_miner_with_an_active_worker() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        state
+            .metrics_handle
+            .increment_worker_count("bchtest:qrx".to_string(), "rig".to_string())
+            .await
+            .expect("authorize worker");
+        let share = SimplePplnsShare {
+            user_id: 1,
+            difficulty: 100,
+            btcaddress: Some("bchtest:qrx".to_string()),
+            workername: Some("rig".to_string()),
+            n_time: 1_000,
+            job_id: "job".to_string(),
+            extranonce2: "extra".to_string(),
+            nonce: "nonce".to_string(),
+        };
+        state
+            .metrics_handle
+            .record_share_accepted(share, 110)
+            .await
+            .expect("record share");
+        let connected = connected_miners(&state).await;
+        assert!(connected.contains("bchtest:qrx"));
+    }
+
+    #[tokio::test]
+    async fn connected_miners_leaves_out_a_miner_without_an_active_worker() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        state
+            .metrics_handle
+            .increment_worker_count("bchtest:qrl".to_string(), "rig".to_string())
+            .await
+            .expect("authorize worker");
+        state
+            .metrics_handle
+            .decrement_worker_count(Some("bchtest:qrl".to_string()), "rig".to_string())
+            .await
+            .expect("disconnect worker");
+        let connected = connected_miners(&state).await;
+        assert!(!connected.contains("bchtest:qrl"));
     }
 
     #[tokio::test]
