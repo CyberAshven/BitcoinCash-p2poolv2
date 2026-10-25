@@ -17,6 +17,7 @@ tools/log_dashboard/last_processed.txt
 config.toml
 config-dev.toml
 config-*-copy.toml
+config-node2.toml
 
 
 spec/**/*pdf
@@ -49,3 +50,4 @@ load-tests/sim/__pycache__/
 # Local node run logs
 node-start.log
 node-start.log.prev
+node2-start.log
