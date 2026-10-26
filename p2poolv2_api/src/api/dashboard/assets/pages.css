@@ -116,6 +116,49 @@ tr.uncle-row {
   content: "\2212";
 }
 
+/* Hashrate chart time-range buttons (Hour/Day/Week/Month): plain links, no script. */
+.hashrate-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0.3rem;
+}
+.range-group {
+  display: inline-flex;
+  gap: 0.32rem;
+  font-size: 0.72rem;
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: normal;
+  /* Inside .panel h2, Pico's h1..h6 --pico-font-weight:700 would make the
+     outline buttons bold; the header nav buttons are regular 400. */
+  --pico-font-weight: 400;
+}
+/* The box (border included) must stay compact so Month fits in the card.
+   Beats Pico's [role=button] padding, which reads --pico-form-element-spacing-
+   horizontal: 2rem when the group has role="group". */
+.panel h2 .range-group .header-btn {
+  padding: 0.15rem 0.18rem;
+  font-size: 0.68rem;
+  letter-spacing: normal;
+  white-space: nowrap;
+}
+
+/* Keep the title and range buttons on one line. The buttons carry their own
+   font-size; this keeps the title at .panel h2's 0.95rem, not Pico's h2 size. */
+.panel h2.hashrate-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0.4rem;
+  min-width: 0;
+  font-size: 0.95rem;
+}
+.panel h2.hashrate-head .range-group {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 /* The hashrate chart, drawn as SVG on the server. */
 .chart-wrap figure {
   margin: 0;
@@ -129,7 +172,7 @@ tr.uncle-row {
 }
 .chart-wrap .axis {
   fill: var(--pico-muted-color);
-  font-size: 11px;
+  font-size: 8px;
   font-family: var(--pico-font-family-monospace);
 }
 .chart-wrap .line {

@@ -24,6 +24,24 @@ const PAD_BOTTOM: f64 = 26.0;
 const GRID_LINES: u32 = 4;
 /// Horizontal width of one hit zone, in viewBox units.
 const STEP_PX: f64 = 8.0;
+/// Intermediate x-axis ticks between the start/end edge labels.
+const X_TICK_COUNT: u32 = 4;
+/// Horizontal room each edge label claims, in viewBox units; a tick closer
+/// to an edge than this is skipped so labels never collide.
+const TICK_LABEL_WIDTH: f64 = 90.0;
+
+/// Round an x-axis span (seconds) to a clean time step, 10 min .. 1 week,
+/// aiming for at most [`X_TICK_COUNT`] intermediate ticks.
+fn nice_time_step(span: f64) -> u64 {
+    const STEPS: [u64; 11] = [
+        600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 604800,
+    ];
+    STEPS
+        .iter()
+        .find(|step| span / (**step as f64) <= f64::from(X_TICK_COUNT))
+        .copied()
+        .unwrap_or(STEPS[STEPS.len() - 1])
+}
 
 /// Fill colour under a series' line, keyed by the series' CSS class.
 fn area_color(class: &str) -> &'static str {
@@ -71,13 +89,17 @@ pub(crate) fn downsample(points: &[(u64, f64)], max: usize) -> Vec<(u64, f64)> {
 /// A line chart of `series` over their common time range, values from zero.
 ///
 /// `format_value` labels the value axis and tooltips; `format_time` labels
-/// the time axis and tooltips. With no points at all it shows a note
-/// instead of an empty frame.
+/// tooltips; `format_tick` labels intermediate x-axis ticks; `format_edge`
+/// labels the start/end of the x axis. With no points at all it shows a
+/// note instead of an empty frame.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn line_chart(
     title: &str,
     series: &[Series],
     format_value: fn(f64) -> String,
     format_time: fn(u64) -> String,
+    format_tick: fn(u64) -> String,
+    format_edge: fn(u64) -> String,
 ) -> Markup {
     let drawn: Vec<(&Series, Vec<(u64, f64)>)> = series
         .iter()
@@ -203,8 +225,20 @@ pub(crate) fn line_chart(
                         (format_value(value))
                     }
                 }
-                text.axis x=(PAD_LEFT) y=(HEIGHT - 6.0) text-anchor="start" { (format_time(start)) }
-                text.axis x=(WIDTH - PAD_RIGHT) y=(HEIGHT - 6.0) text-anchor="end" { (format_time(end)) }
+                text.axis x=(PAD_LEFT) y=(HEIGHT - 6.0) text-anchor="start" { (format_edge(start)) }
+                text.axis x=(WIDTH - PAD_RIGHT) y=(HEIGHT - 6.0) text-anchor="end" { (format_edge(end)) }
+                @let tick_step = nice_time_step(span);
+                @let first_tick = (start / tick_step + 1) * tick_step;
+                @for tick in (first_tick..end).step_by(tick_step as usize) {
+                    @let tick_x = x(tick);
+                    @let in_middle = tick_x - PAD_LEFT >= TICK_LABEL_WIDTH
+                        && WIDTH - PAD_RIGHT - tick_x >= TICK_LABEL_WIDTH;
+                    @if in_middle {
+                        text.axis x=(format!("{:.1}", tick_x)) y=(HEIGHT - 6.0) text-anchor="middle" {
+                            (format_tick(tick))
+                        }
+                    }
+                }
                 @for series in &series_markup {
                     (series.polyline.clone())
                     @for dot in &series.dots {
@@ -319,9 +353,17 @@ mod tests {
 
     #[test]
     fn an_empty_chart_shows_a_note() {
-        let markup = line_chart("Hashrate", &[], value, time).into_string();
+        let markup = line_chart("Hashrate", &[], value, time, time, time).into_string();
         assert!(markup.contains("Collecting data"));
         assert!(!markup.contains("<svg"));
+    }
+
+    #[test]
+    fn nice_time_steps_pick_a_clean_division_of_the_span() {
+        assert_eq!(nice_time_step(3_600.0), 900);
+        assert_eq!(nice_time_step(86_400.0), 21_600);
+        assert_eq!(nice_time_step(2_592_000.0), 604_800);
+        assert_eq!(nice_time_step(604_801.0), 172_800);
     }
 
     #[test]
@@ -334,6 +376,8 @@ mod tests {
                 points: vec![(100, 10.0), (160, 20.0)],
             }],
             value,
+            time,
+            time,
             time,
         )
         .into_string();
@@ -353,6 +397,8 @@ mod tests {
                 points: vec![(100, 10.0), (160, 20.0)],
             }],
             value,
+            time,
+            time,
             time,
         )
         .into_string();
@@ -380,6 +426,8 @@ mod tests {
             ],
             value,
             time,
+            time,
+            time,
         )
         .into_string();
         assert!(markup.contains("<title>Pool: 10 at t100</title>"));
@@ -398,6 +446,8 @@ mod tests {
                 points: vec![(100, 1.0)],
             }],
             |_| "<x".to_string(),
+            time,
+            time,
             time,
         )
         .into_string();

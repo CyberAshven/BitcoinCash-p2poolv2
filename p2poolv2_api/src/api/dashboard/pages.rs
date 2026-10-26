@@ -24,10 +24,29 @@ use serde::Serialize;
 /// Seconds between refreshes of the overview page while auto is on.
 pub(crate) const OVERVIEW_REFRESH_SECONDS: u32 = 30;
 
-/// The overview chart's own bound: newest 1440 samples (one day at one a
-/// minute), sliced from the 30-day ring so the "last day" title stays
-/// truthful. The 30-day surface is `/hashrate?window=2592000`.
-const OVERVIEW_CHART_SAMPLES: usize = 1440;
+/// Hashrate chart time ranges, keyed by the `?range=` query value.
+/// `(query key, button label, newest samples kept, period word for titles)`.
+/// The node reads its full 30-day ring and count-slices it, so no window
+/// seconds are needed here (unlike the replica, which fetches `/hashrate`).
+const RANGES: [(&str, &str, usize, &str); 4] = [
+    ("1h", "Hour", 60, "hour"),
+    ("24h", "Day", 1440, "day"),
+    ("1w", "Week", 10080, "week"),
+    ("1m", "Month", 43200, "month"),
+];
+
+/// The range shown when `?range=` is missing or names no known range.
+const DEFAULT_RANGE: &str = "24h";
+
+/// `value` if it names a range in [`RANGES`], otherwise [`DEFAULT_RANGE`].
+/// Returns a key from the static table, so the lifetime is `'static`.
+pub(crate) fn normalize_range(value: Option<&str>) -> &'static str {
+    RANGES
+        .iter()
+        .find(|(key, ..)| Some(*key) == value)
+        .map(|(key, ..)| *key)
+        .unwrap_or(DEFAULT_RANGE)
+}
 
 /// The overview's stateless auto-refresh toggle, read from `?auto=`:
 /// `?auto=on` (the default) or `?auto=off`. On page 1 with `Auto::On` the
@@ -182,6 +201,9 @@ pub(crate) struct Overview {
     pub(crate) shares_paging: Paging,
     /// The overview's stateless auto-refresh toggle, from `?auto=`.
     pub(crate) auto: Auto,
+    /// The normalized `?range=` key selecting the chart window, from
+    /// [`normalize_range`].
+    pub(crate) range_key: &'static str,
 }
 
 /// The found blocks page.
@@ -312,6 +334,21 @@ pub(crate) fn fmt_day_time(unix: u64) -> String {
         .unwrap_or_else(|| unix.to_string())
 }
 
+/// Time only, no date: the x-axis edge labels of a range-sliced chart.
+pub(crate) fn fmt_hour_edge(unix: u64) -> String {
+    i64::try_from(unix)
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .map(|time| time.format("%H:%M").to_string())
+        .unwrap_or_else(|| unix.to_string())
+}
+
+/// Intermediate x-axis labels: hour of day, with minutes when the tick step
+/// is finer than an hour (the 1h view uses 10-15 min ticks).
+pub(crate) fn fmt_hour_tick(unix: u64) -> String {
+    fmt_hour_edge(unix)
+}
+
 pub(crate) fn fmt_ago(now: u64, then: u64) -> String {
     let seconds = now.saturating_sub(then);
     match seconds {
@@ -412,6 +449,26 @@ fn stat(key: &str, value: Markup) -> Markup {
     html! { div.stat-item { div.k { (key) } div.v { (value) } } }
 }
 
+/// The hashrate chart's Hour/Day/Week/Month buttons, plain links with no
+/// script. The active range carries `active-nav` and `aria-current`. When
+/// auto-refresh is off the links keep `?auto=off`.
+fn range_buttons(range_key: &str, auto: Auto) -> Markup {
+    let auto_query = if matches!(auto, Auto::Off) {
+        "&auto=off"
+    } else {
+        ""
+    };
+    html! {
+        span.range-group aria-label="Chart time range" {
+            @for (key, label, _, _) in RANGES {
+                a.outline.header-btn.active-nav[key == range_key] role="button"
+                    href=(format!("/dashboard?range={key}{auto_query}"))
+                    aria-current=[(key == range_key).then_some("true")] { (label) }
+            }
+        }
+    }
+}
+
 /// Previous and next links for a long table. `base` is the page's URL
 /// without its `page` parameter.
 pub(crate) fn pager(base: &str, paging: Paging) -> Markup {
@@ -434,6 +491,7 @@ pub(crate) fn pager(base: &str, paging: Paging) -> Markup {
 }
 
 /// The page frame: head, menu bar, search, trail and footer around `body`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn layout(
     site: &Site,
     title: &str,
@@ -441,8 +499,10 @@ pub(crate) fn layout(
     trail: &[Crumb],
     refresh: Option<u32>,
     auto: Option<Auto>,
+    range_key: Option<&str>,
     body: Markup,
 ) -> Markup {
+    let range_query = range_key.map_or(String::new(), |key| format!("&range={key}"));
     html! {
         (DOCTYPE)
         html lang="en" data-theme="dark" {
@@ -486,14 +546,14 @@ pub(crate) fn layout(
                                 Some(Auto::On) => {
                                     li {
                                         a.outline.header-btn.refresh-main.auto-on role="button"
-                                            href="/dashboard?auto=off"
+                                            href=(format!("/dashboard?auto=off{range_query}"))
                                             title="Turn off 30s auto-refresh" { "Auto on" }
                                     }
                                 }
                                 Some(Auto::Off) => {
                                     li {
                                         a.outline.header-btn.refresh-main.auto-paused role="button"
-                                            href="/dashboard?auto=on"
+                                            href=(format!("/dashboard?auto=on{range_query}"))
                                             title="Turn on 30s auto-refresh" { "Auto off" }
                                     }
                                 }
@@ -594,16 +654,20 @@ fn blocks_table(now: u64, blocks: &[FoundBlockRow]) -> Markup {
 }
 
 pub(crate) fn overview(view: &Overview) -> Markup {
+    let (_, _, max_samples, period) = *RANGES
+        .iter()
+        .find(|(key, ..)| *key == view.range_key)
+        .unwrap_or(&RANGES[1]);
     let samples: Vec<Sample> = view
         .samples
         .iter()
         .rev()
-        .take(OVERVIEW_CHART_SAMPLES)
+        .take(max_samples)
         .rev()
         .copied()
         .collect();
     let chart = line_chart(
-        "Hashrate over the last day",
+        &format!("Hashrate over the last {period}"),
         &[
             Series {
                 label: "Pool",
@@ -618,6 +682,8 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         ],
         fmt_hashrate,
         fmt_day_time,
+        fmt_hour_tick,
+        fmt_hour_edge,
     );
     let last_block = view.blocks.first().map(|block| block.time);
     let body = html! {
@@ -638,7 +704,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                     .unwrap_or_else(|| "None yet".to_string())]))
         }
         div.panel {
-            h2 { "Hashrate" span.panel-note { "one sample a minute, the last 30 days" } }
+            h2.hashrate-head { "Hashrate" (range_buttons(view.range_key, view.auto)) }
             div.chart-wrap { (chart) }
         }
         div.panel {
@@ -685,7 +751,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                         }
                     }
                 }
-                (pager("/dashboard", view.shares_paging))
+                (pager(&format!("/dashboard?range={}", view.range_key), view.shares_paging))
             }
         }
     };
@@ -698,6 +764,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         &[],
         refresh,
         Some(view.auto),
+        Some(view.range_key),
         body,
     )
 }
@@ -719,6 +786,7 @@ pub(crate) fn blocks(view: &BlocksView) -> Markup {
         "Blocks",
         Tab::Blocks,
         &[dashboard_crumb(), Crumb::here("Blocks")],
+        None,
         None,
         None,
         body,
@@ -757,6 +825,7 @@ pub(crate) fn block(view: &BlockView) -> Markup {
             Crumb::link("Blocks", "/dashboard/blocks"),
             Crumb::here(format!("Block {}", block.height)),
         ],
+        None,
         None,
         None,
         body,
@@ -827,6 +896,7 @@ pub(crate) fn miners(view: &MinersView) -> Markup {
         "Miners",
         Tab::Miners,
         &[dashboard_crumb(), Crumb::here("Miners")],
+        None,
         None,
         None,
         body,
@@ -910,6 +980,7 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
         ],
         None,
         None,
+        None,
         body,
     )
 }
@@ -972,6 +1043,7 @@ pub(crate) fn share(view: &ShareView) -> Markup {
             Crumb::link(short(owner), miner_href(owner)),
             Crumb::here(format!("Share {}", short(&share.blockhash))),
         ],
+        None,
         None,
         None,
         body,
@@ -1045,6 +1117,7 @@ pub(crate) fn help(site: &Site) -> Markup {
         &[dashboard_crumb(), Crumb::here("Help")],
         None,
         None,
+        None,
         body,
     )
 }
@@ -1084,6 +1157,7 @@ pub(crate) fn signin(site: &Site) -> Markup {
         &[dashboard_crumb(), Crumb::here("Admin")],
         None,
         None,
+        None,
         body,
     )
 }
@@ -1103,6 +1177,7 @@ pub(crate) fn error(site: &Site, message: &str) -> Markup {
         "Not available",
         Tab::None,
         &[dashboard_crumb(), Crumb::here("Not available")],
+        None,
         None,
         None,
         body,
@@ -1140,6 +1215,7 @@ mod tests {
             shares: Vec::new(),
             shares_paging: Paging::of(None, 0),
             auto: Auto::On,
+            range_key: normalize_range(None),
         }
     }
 
@@ -1175,6 +1251,26 @@ mod tests {
     fn difficulties_print_negative_zero_as_zero() {
         assert_eq!(fmt_difficulty(-0.0), "0.00");
         assert_eq!(fmt_difficulty(-0.001), "0.00");
+    }
+
+    #[test]
+    fn ranges_normalize_to_their_table_or_the_default() {
+        assert_eq!(normalize_range(None), "24h");
+        assert_eq!(normalize_range(Some("1h")), "1h");
+        assert_eq!(normalize_range(Some("bogus")), "24h");
+    }
+
+    #[test]
+    fn the_range_buttons_mark_the_active_range_without_script() {
+        let markup = range_buttons("1h", Auto::On).into_string();
+        assert!(markup.contains("aria-label=\"Chart time range\""));
+        assert!(markup.contains(
+            "class=\"outline header-btn active-nav\" role=\"button\" href=\"/dashboard?range=1h\" aria-current=\"true\">Hour</a>"
+        ));
+        assert!(markup.contains("href=\"/dashboard?range=24h\">Day</a>"));
+        assert!(!markup.contains("auto="));
+        let paused = range_buttons("24h", Auto::Off).into_string();
+        assert!(paused.contains("href=\"/dashboard?range=1h&amp;auto=off\""));
     }
 
     #[test]
@@ -1252,6 +1348,7 @@ mod tests {
             &[dashboard_crumb(), Crumb::here("Blocks")],
             None,
             None,
+            None,
             html! { p { "hi" } },
         )
         .into_string();
@@ -1279,6 +1376,7 @@ mod tests {
             "Dashboard",
             Tab::Dashboard,
             &[],
+            None,
             None,
             None,
             html! { p { "hi" } },
