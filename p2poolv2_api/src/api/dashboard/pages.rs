@@ -36,9 +36,8 @@ pub(crate) enum Auto {
 }
 
 impl Auto {
-    /// A missing `?auto=` parameter or `?auto=on` selects `Auto::On`,
-    /// matching the replica's default; `?auto=off` (or any other value)
-    /// selects `Auto::Off`.
+    /// A missing `?auto=` parameter or any value other than `off` selects
+    /// `Auto::On`; only `?auto=off` selects `Auto::Off`.
     pub(crate) fn from_query(auto: Option<&str>) -> Auto {
         match auto {
             Some("off") => Auto::Off,
@@ -164,6 +163,10 @@ pub(crate) struct Overview {
     pub(crate) network_difficulty: Option<f64>,
     pub(crate) miners_online: usize,
     pub(crate) workers_online: usize,
+    /// Shares the pool accepted since the node started, node-wide.
+    pub(crate) accepted_shares_total: u64,
+    /// Shares the pool rejected since the node started, node-wide.
+    pub(crate) rejected_shares_total: u64,
     pub(crate) samples: Vec<Sample>,
     /// Blocks the pool found in all.
     pub(crate) blocks_found: usize,
@@ -607,12 +610,13 @@ pub(crate) fn overview(view: &Overview) -> Markup {
     let body = html! {
         div.kpi-grid {
             (kpi_card("Pool hashrate", optional(view.pool_hashrate, fmt_hashrate), "kpi-value-green", None,
-                &["From the newest shares on the share chain".to_string()]))
+                &["Confirmed shares, last hour".to_string()]))
             (kpi_card("This node", optional(view.local_hashrate, fmt_hashrate), "kpi-value-local", Some("/dashboard/miners"),
-                &[format!("{} miners, {} workers online", view.miners_online, view.workers_online)]))
+                &[format!("{} miners, {} workers online", view.miners_online, view.workers_online),
+                  format!("{} rejected of {} shares", view.rejected_shares_total, view.accepted_shares_total)]))
             (kpi_card("Network hashrate (BCH)", optional(view.network_hashrate, fmt_hashrate), "kpi-value-net", None,
                 &[format!("Difficulty {}", optional(view.network_difficulty, fmt_difficulty)),
-                  "Estimated from difficulty, 10-minute blocks".to_string()]))
+                  "Est. from diff. 10-min blocks".to_string()]))
             (kpi_card("Share chain height",
                 view.tip_height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string()), "", None, &[]))
             (kpi_card("Blocks found", view.blocks_found.to_string(), "", Some("/dashboard/blocks"),
@@ -1115,6 +1119,8 @@ mod tests {
             network_difficulty: None,
             miners_online: 0,
             workers_online: 0,
+            accepted_shares_total: 0,
+            rejected_shares_total: 0,
             samples: Vec::new(),
             blocks_found: 0,
             blocks: Vec::new(),
@@ -1322,5 +1328,20 @@ mod tests {
         let page = help(&site()).into_string();
         assert!(page.contains("p2p=&lt;share chain address&gt;"));
         assert!(page.contains("CashDragon0"));
+    }
+
+    #[test]
+    fn the_this_node_card_notes_the_rejected_shares() {
+        let mut view = empty_overview();
+        view.accepted_shares_total = 10;
+        view.rejected_shares_total = 3;
+        let page = overview(&view).into_string();
+        let pool_card = page.split("kpi-label\">Pool hashrate").nth(1).unwrap();
+        let pool_card = pool_card.split("kpi-card").next().unwrap();
+        assert!(!pool_card.contains("rejected of"));
+        assert!(pool_card.contains("Confirmed shares, last hour"));
+        let node_card = page.split("kpi-label\">This node").nth(1).unwrap();
+        let node_card = node_card.split("kpi-card").next().unwrap();
+        assert!(node_card.contains("3 rejected of 10 shares"));
     }
 }

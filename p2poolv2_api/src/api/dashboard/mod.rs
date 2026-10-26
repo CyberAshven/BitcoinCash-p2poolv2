@@ -173,7 +173,7 @@ fn share_page(state: &AppState, page: Option<usize>) -> (Option<u32>, Paging, Ve
         .query_shares(oldest, newest)
         .unwrap_or_default();
     let mut rows = Vec::with_capacity(shares.len());
-    for share in shares.iter().rev() {
+    for share in shares.iter() {
         let display = ShareInfoDisplay::from_share_info(
             share,
             Some(state.app_config.network),
@@ -360,6 +360,7 @@ async fn overview(
     let samples = dashboard.history.samples();
     let local_hashrate = samples.iter().rev().find_map(|sample| sample.local);
     let blocks_found = blocks.len();
+    let metrics = state.metrics_handle.get_metrics().await;
 
     html(pages::overview(&Overview {
         site: site(state),
@@ -371,6 +372,8 @@ async fn overview(
         network_difficulty,
         miners_online,
         workers_online,
+        accepted_shares_total: metrics.accepted_total,
+        rejected_shares_total: metrics.rejected_total,
         samples,
         blocks_found,
         blocks: blocks.into_iter().take(RECENT_BLOCKS).collect(),
@@ -634,7 +637,9 @@ mod tests {
     use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
     use p2poolv2_lib::node::actor::NodeHandle;
     use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
-    use p2poolv2_lib::test_utils::{genesis_for_tests, setup_test_chain_store_handle};
+    use p2poolv2_lib::test_utils::{
+        PUBKEY_G, TestShareBlockBuilder, genesis_for_tests, setup_test_chain_store_handle,
+    };
     use tower::ServiceExt;
 
     async fn build_state(
@@ -679,6 +684,41 @@ mod tests {
 
     async fn get(state: &Arc<AppState>, uri: &str) -> (StatusCode, String, HeaderMap) {
         get_with(state, uri, WebOptions::default()).await
+    }
+
+    /// Confirm `share` on top of the chain, as the organise worker would.
+    async fn confirm_share(
+        state: &AppState,
+        share: &p2poolv2_lib::shares::share_block::ShareBlock,
+    ) {
+        state
+            .chain_store_handle
+            .add_share_block_and_organise_header(share.clone())
+            .await
+            .unwrap();
+        state
+            .chain_store_handle
+            .mark_block_valid(share.block_hash())
+            .await
+            .unwrap();
+        state.chain_store_handle.organise_block().await.unwrap();
+    }
+
+    fn recent_share_row_heights(body: &str) -> Vec<u32> {
+        let table = body
+            .split_once("<h2>Recent shares")
+            .and_then(|(_, rest)| rest.split_once("</table>"))
+            .map(|(table, _)| table)
+            .expect("overview has a Recent shares table");
+        table
+            .split("<tr")
+            .skip(1)
+            .filter_map(|row| {
+                let cell = row.split_once("<td>").map(|(_, cell)| cell)?;
+                let height = cell.split_once("</td>").map(|(height, _)| height)?;
+                height.parse::<u32>().ok()
+            })
+            .collect()
     }
 
     async fn get_with(
@@ -745,6 +785,25 @@ mod tests {
         assert!(body.contains("Bitcoin Cash chipnet"));
         assert!(body.contains("Share chain height"));
         assert!(!body.contains("<script"));
+    }
+
+    #[tokio::test]
+    async fn the_overview_lists_the_recent_shares_newest_first() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        let genesis_block = genesis_for_tests();
+        state
+            .chain_store_handle
+            .init_or_setup_genesis(genesis_block.clone())
+            .await
+            .unwrap();
+        let share = TestShareBlockBuilder::new()
+            .prev_share_blockhash(genesis_block.block_hash().to_string())
+            .miner_pubkey(PUBKEY_G)
+            .build();
+        confirm_share(&state, &share).await;
+        let (status, body, _) = get(&state, "/dashboard").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(recent_share_row_heights(&body), vec![1, 0]);
     }
 
     #[tokio::test]
@@ -1015,7 +1074,44 @@ mod tests {
         assert_eq!(miners["page"], 1);
         assert_eq!(miners["pages"], 1);
         assert_eq!(miners["page_size"], PAGE_SIZE);
+        assert_eq!(miners["accepted_shares_total"], 0);
+        assert_eq!(miners["rejected_shares_total"], 0);
         assert_eq!(miners["miners"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn the_miners_json_carries_the_pools_share_totals() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        state
+            .metrics_handle
+            .increment_worker_count("bchtest:qrt".to_string(), "rig".to_string())
+            .await
+            .expect("authorize worker");
+        let share = SimplePplnsShare {
+            user_id: 1,
+            difficulty: 100,
+            btcaddress: Some("bchtest:qrt".to_string()),
+            workername: Some("rig".to_string()),
+            n_time: 1_000,
+            job_id: "job".to_string(),
+            extranonce2: "extra".to_string(),
+            nonce: "nonce".to_string(),
+        };
+        state
+            .metrics_handle
+            .record_share_accepted(share, 110)
+            .await
+            .expect("record share");
+        state
+            .metrics_handle
+            .record_share_rejected()
+            .await
+            .expect("record rejection");
+        let (status, body, _) = get(&state, "/miners").await;
+        assert_eq!(status, StatusCode::OK);
+        let miners: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(miners["accepted_shares_total"], 1);
+        assert_eq!(miners["rejected_shares_total"], 1);
     }
 
     #[tokio::test]

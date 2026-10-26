@@ -258,13 +258,33 @@ pub struct LocalMiner {
 
 /// `/miners?page=` or `/miners?address=`.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Miners {
     pub miners_online: usize,
     pub workers_online: usize,
     pub page: usize,
     pub pages: usize,
     pub page_size: usize,
+    /// Shares the pool accepted since the node started, node-wide.
+    pub accepted_shares_total: u64,
+    /// Shares the pool rejected since the node started, node-wide.
+    pub rejected_shares_total: u64,
     pub miners: Vec<LocalMiner>,
+}
+
+impl Default for Miners {
+    fn default() -> Self {
+        Self {
+            miners_online: 0,
+            workers_online: 0,
+            page: 1,
+            pages: 1,
+            page_size: 0,
+            accepted_shares_total: 0,
+            rejected_shares_total: 0,
+            miners: Vec::new(),
+        }
+    }
 }
 
 /// A `/ws` frame: `{"topic":"Share","data":{...}}`.
@@ -360,11 +380,24 @@ mod tests {
     #[test]
     fn test_miners_page_parses() {
         let body = r#"{"miners_online":1,"workers_online":2,"total":1,"page":1,"pages":1,
-            "page_size":25,"miners":[{"address":"bchtest:q","workers":[{"name":"rig",
+            "page_size":25,"accepted_shares_total":3,"rejected_shares_total":1,
+            "miners":[{"address":"bchtest:q","workers":[{"name":"rig",
             "active":true,"accepted_work":10,"best_share":5,"last_share_at":9}],
             "accepted_work":10,"best_share":5,"last_share_at":9,"payout_fraction":null}]}"#;
         let miners: Miners = serde_json::from_str(body).unwrap();
+        assert_eq!(miners.accepted_shares_total, 3);
+        assert_eq!(miners.rejected_shares_total, 1);
         assert_eq!(miners.miners[0].workers[0].name, "rig");
         assert_eq!(miners.miners[0].payout_fraction, None);
+    }
+
+    #[test]
+    fn test_miners_page_parses_without_the_share_totals() {
+        // A node older than these fields still answers the WASM app.
+        let body = r#"{"miners_online":1,"workers_online":2,"total":1,"page":1,"pages":1,
+            "page_size":25,"miners":[]}"#;
+        let miners: Miners = serde_json::from_str(body).unwrap();
+        assert_eq!(miners.accepted_shares_total, 0);
+        assert_eq!(miners.rejected_shares_total, 0);
     }
 }

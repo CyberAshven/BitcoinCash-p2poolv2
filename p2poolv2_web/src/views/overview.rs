@@ -253,6 +253,12 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
     });
 
     let local_note = Signal::derive(move || {
+        let totals = loaded(&miners, |miners| {
+            format!(
+                "{} rejected of {} shares",
+                miners.rejected_shares_total, miners.accepted_shares_total
+            )
+        });
         vec![
             loaded(&miners, |miners| {
                 format!(
@@ -261,6 +267,7 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
                 )
             })
             .unwrap_or_else(|| format!("{UNKNOWN} miners, {UNKNOWN} workers online")),
+            totals.unwrap_or_else(|| format!("{UNKNOWN} rejected of {UNKNOWN} shares")),
         ]
     });
     // The node's overview shows the newest sample that has this node's rate.
@@ -286,9 +293,10 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         .flatten();
         vec![
             format!("Difficulty {}", optional(difficulty, fmt_difficulty)),
-            "Estimated from difficulty, 10-minute blocks".to_string(),
+            "Est. from diff. 10-min blocks".to_string(),
         ]
     });
+    let pool_notes = Signal::derive(move || vec!["Confirmed shares, last hour".to_string()]);
     let height = Signal::derive(move || {
         tip.get()
             .map_or_else(|| UNKNOWN.to_string(), |tip| tip.to_string())
@@ -405,7 +413,7 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
                 label="Pool hashrate"
                 value=rate(|hashrate| hashrate.pool_hashrate)
                 tone=Tone::Green
-                notes=vec!["From the newest shares on the share chain".to_string()]
+                notes=pool_notes
             />
             <KpiCard
                 label="This node"

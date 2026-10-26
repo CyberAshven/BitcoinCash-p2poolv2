@@ -349,6 +349,8 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         network_difficulty: Some(1e5),
         miners_online: 1,
         workers_online: 1,
+        accepted_shares_total: 10,
+        rejected_shares_total: 3,
         samples,
         blocks_found: blocks.len(),
         blocks,
