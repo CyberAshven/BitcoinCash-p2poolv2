@@ -8,8 +8,9 @@
 //! here without a script: every page has the same menu bar, a search box and
 //! a trail back to the overview, its pop-ups are pages of their own, long
 //! tables are split into pages with links, and a miner's workers open with
-//! an HTML `<details>`. The overview refreshes itself with a meta refresh and
-//! chart tooltips are SVG titles. Every value is escaped by maud.
+//! an HTML `<details>`. The overview reloads every 30 seconds unless `?auto=off`
+//! pauses it, and chart tooltips are hit zones with styled tips plus SVG titles.
+//! Every value is escaped by maud.
 
 use super::assets;
 use super::chart::{Series, line_chart};
@@ -20,8 +21,31 @@ use bitcoin::BlockHash;
 use maud::{DOCTYPE, Markup, html};
 use serde::Serialize;
 
-/// Seconds between refreshes of the overview page.
+/// Seconds between refreshes of the overview page while auto is on.
 pub(crate) const OVERVIEW_REFRESH_SECONDS: u32 = 30;
+
+/// The overview's stateless auto-refresh toggle, read from `?auto=`:
+/// `?auto=on` (the default) or `?auto=off`. On page 1 with `Auto::On` the
+/// overview's head carries a 30 second meta refresh; the header shows the
+/// matching button, or a hidden same-width slot when this page is not the
+/// overview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Auto {
+    On,
+    Off,
+}
+
+impl Auto {
+    /// A missing `?auto=` parameter or `?auto=on` selects `Auto::On`,
+    /// matching the replica's default; `?auto=off` (or any other value)
+    /// selects `Auto::Off`.
+    pub(crate) fn from_query(auto: Option<&str>) -> Auto {
+        match auto {
+            Some("off") => Auto::Off,
+            _ => Auto::On,
+        }
+    }
+}
 
 /// Rows on one page of a long table.
 pub(crate) const PAGE_SIZE: usize = 25;
@@ -148,6 +172,8 @@ pub(crate) struct Overview {
     /// This page of the share chain, newest first.
     pub(crate) shares: Vec<ShareRow>,
     pub(crate) shares_paging: Paging,
+    /// The overview's stateless auto-refresh toggle, from `?auto=`.
+    pub(crate) auto: Auto,
 }
 
 /// The found blocks page.
@@ -224,7 +250,7 @@ const UNITS: [&str; 7] = ["", "k", "M", "G", "T", "P", "E"];
 
 /// `value` scaled to a unit prefix, three significant digits.
 fn with_prefix(value: f64) -> (f64, &'static str) {
-    let mut scaled = value;
+    let mut scaled = if value == 0.0 { 0.0 } else { value };
     let mut unit = 0;
     while scaled.abs() >= 1000.0 && unit + 1 < UNITS.len() {
         scaled /= 1000.0;
@@ -233,7 +259,13 @@ fn with_prefix(value: f64) -> (f64, &'static str) {
     (scaled, UNITS[unit])
 }
 
+/// Three significant digits, never printing a negative zero.
 fn three_digits(value: f64) -> String {
+    let value = if value < 0.0 && value.abs() < 0.005 {
+        0.0
+    } else {
+        value
+    };
     if value.abs() >= 100.0 {
         format!("{value:.0}")
     } else if value.abs() >= 10.0 {
@@ -400,6 +432,7 @@ pub(crate) fn layout(
     tab: Tab,
     trail: &[Crumb],
     refresh: Option<u32>,
+    auto: Option<Auto>,
     body: Markup,
 ) -> Markup {
     html! {
@@ -441,6 +474,25 @@ pub(crate) fn layout(
                             }
                         }
                         ul.header-right {
+                            @match auto {
+                                Some(Auto::On) => {
+                                    li {
+                                        a.outline.header-btn.refresh-main.auto-on role="button"
+                                            href="/dashboard?auto=off"
+                                            title="Turn off 30s auto-refresh" { "Auto on" }
+                                    }
+                                }
+                                Some(Auto::Off) => {
+                                    li {
+                                        a.outline.header-btn.refresh-main.auto-paused role="button"
+                                            href="/dashboard?auto=on"
+                                            title="Turn on 30s auto-refresh" { "Auto off" }
+                                    }
+                                }
+                                None => {
+                                    li.auto-slot aria-hidden="true" {}
+                                }
+                            }
                             li {
                                 form.header-search action="/dashboard/search" method="get" role="search" {
                                     input type="search" name="q" placeholder="Miner address or share hash"
@@ -620,8 +672,17 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             }
         }
     };
-    let refresh = (view.shares_paging.page == 1).then_some(OVERVIEW_REFRESH_SECONDS);
-    layout(&view.site, "Dashboard", Tab::Dashboard, &[], refresh, body)
+    let refresh = (view.shares_paging.page == 1 && matches!(view.auto, Auto::On))
+        .then_some(OVERVIEW_REFRESH_SECONDS);
+    layout(
+        &view.site,
+        "Dashboard",
+        Tab::Dashboard,
+        &[],
+        refresh,
+        Some(view.auto),
+        body,
+    )
 }
 
 pub(crate) fn blocks(view: &BlocksView) -> Markup {
@@ -641,6 +702,7 @@ pub(crate) fn blocks(view: &BlocksView) -> Markup {
         "Blocks",
         Tab::Blocks,
         &[dashboard_crumb(), Crumb::here("Blocks")],
+        None,
         None,
         body,
     )
@@ -678,6 +740,7 @@ pub(crate) fn block(view: &BlockView) -> Markup {
             Crumb::link("Blocks", "/dashboard/blocks"),
             Crumb::here(format!("Block {}", block.height)),
         ],
+        None,
         None,
         body,
     )
@@ -747,6 +810,7 @@ pub(crate) fn miners(view: &MinersView) -> Markup {
         "Miners",
         Tab::Miners,
         &[dashboard_crumb(), Crumb::here("Miners")],
+        None,
         None,
         body,
     )
@@ -828,6 +892,7 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
             Crumb::here(short(&report.address)),
         ],
         None,
+        None,
         body,
     )
 }
@@ -890,6 +955,7 @@ pub(crate) fn share(view: &ShareView) -> Markup {
             Crumb::link(short(owner), miner_href(owner)),
             Crumb::here(format!("Share {}", short(&share.blockhash))),
         ],
+        None,
         None,
         body,
     )
@@ -961,6 +1027,7 @@ pub(crate) fn help(site: &Site) -> Markup {
         Tab::Help,
         &[dashboard_crumb(), Crumb::here("Help")],
         None,
+        None,
         body,
     )
 }
@@ -999,6 +1066,7 @@ pub(crate) fn signin(site: &Site) -> Markup {
         Tab::None,
         &[dashboard_crumb(), Crumb::here("Admin")],
         None,
+        None,
         body,
     )
 }
@@ -1018,6 +1086,7 @@ pub(crate) fn error(site: &Site, message: &str) -> Markup {
         "Not available",
         Tab::None,
         &[dashboard_crumb(), Crumb::here("Not available")],
+        None,
         None,
         body,
     )
@@ -1051,6 +1120,7 @@ mod tests {
             blocks: Vec::new(),
             shares: Vec::new(),
             shares_paging: Paging::of(None, 0),
+            auto: Auto::On,
         }
     }
 
@@ -1063,9 +1133,29 @@ mod tests {
     }
 
     #[test]
+    fn auto_defaults_to_on_without_a_query_parameter() {
+        assert_eq!(Auto::from_query(None), Auto::On);
+        assert_eq!(Auto::from_query(Some("on")), Auto::On);
+        assert_eq!(Auto::from_query(Some("off")), Auto::Off);
+        assert_eq!(Auto::from_query(Some("bogus")), Auto::On);
+    }
+
+    #[test]
+    fn hashrates_print_negative_zero_as_zero() {
+        assert_eq!(fmt_hashrate(-0.0), "0.00 H/s");
+        assert_eq!(fmt_hashrate(-0.001), "0.00 H/s");
+    }
+
+    #[test]
     fn difficulties_use_unit_prefixes() {
         assert_eq!(fmt_difficulty(665_151.95), "665k");
         assert_eq!(fmt_difficulty(4.5), "4.50");
+    }
+
+    #[test]
+    fn difficulties_print_negative_zero_as_zero() {
+        assert_eq!(fmt_difficulty(-0.0), "0.00");
+        assert_eq!(fmt_difficulty(-0.001), "0.00");
     }
 
     #[test]
@@ -1141,13 +1231,14 @@ mod tests {
             "<b>x</b>",
             Tab::Blocks,
             &[dashboard_crumb(), Crumb::here("Blocks")],
-            Some(30),
+            None,
+            None,
             html! { p { "hi" } },
         )
         .into_string();
         assert!(!page.contains("<script"));
+        assert!(!page.contains("http-equiv"));
         assert!(page.contains("&lt;b&gt;x&lt;/b&gt;"));
-        assert!(page.contains("http-equiv=\"refresh\""));
         assert!(page.contains(
             "class=\"outline header-btn active-nav\" role=\"button\" href=\"/dashboard/blocks\" aria-current=\"page\""
         ));
@@ -1169,6 +1260,7 @@ mod tests {
             "Dashboard",
             Tab::Dashboard,
             &[],
+            None,
             None,
             html! { p { "hi" } },
         )

@@ -156,6 +156,45 @@ fn polyline_points(points: &[(u64, f64)], frame: &Frame) -> String {
         .join(" ")
 }
 
+/// Fill colour under a series' line, keyed by the series' CSS class.
+fn area_color(class: &str) -> &'static str {
+    match class {
+        "local" => "#22d3ee",
+        _ => "#0ac18e",
+    }
+}
+
+/// Closed path along `points` down to the baseline, for the area fill.
+fn area_path(points: &[(u64, f64)], frame: &Frame) -> String {
+    let baseline = PAD_TOP + (HEIGHT - PAD_TOP - PAD_BOTTOM);
+    let coords = polyline_points(points, frame);
+    let first_x = frame.x(points.first().map(|(time, _)| *time as f64).unwrap_or(0.0));
+    let last_x = frame.x(points.last().map(|(time, _)| *time as f64).unwrap_or(0.0));
+    format!("M {coords} {last_x:.1},{baseline:.1} {first_x:.1},{baseline:.1} Z")
+}
+
+/// Gradient definition for one series' area fill.
+fn area_gradient(class: &str, frame: &Frame) -> impl IntoView {
+    let id = format!("fill-{class}");
+    let color = area_color(class);
+    let baseline = frame.y(0.0);
+    view! {
+        <defs>
+            <linearGradient
+                id=id
+                gradientUnits="userSpaceOnUse"
+                x1="0"
+                y1=PAD_TOP
+                x2="0"
+                y2=baseline
+            >
+                <stop offset="0" stop-color=color stop-opacity="0.35" />
+                <stop offset="1" stop-color=color stop-opacity="0" />
+            </linearGradient>
+        </defs>
+    }
+}
+
 /// Horizontal fraction of a mouse event across the element it is bound to.
 fn event_fraction(event: &web_sys::MouseEvent) -> Option<f64> {
     let element = event
@@ -183,24 +222,36 @@ fn dot_positions(points: &[(u64, f64)], frame: &Frame) -> Vec<(String, String)> 
 }
 
 /// The pool's line and dots.
-fn pool_view(points: &[(u64, f64)], frame: &Frame) -> impl IntoView + use<> {
+fn pool_view<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView + use<'a> {
     let dots = dot_positions(points, frame)
         .into_iter()
         .map(|(x, y)| view! { <circle class="dot pool" cx=x cy=y r="3" /> })
         .collect_view();
+    let gradient = area_gradient("pool", frame);
+    let area = (!points.is_empty()).then(|| {
+        view! { <path class="area pool" d=area_path(points, frame) fill="url(#fill-pool)" /> }
+    });
     view! {
+        {gradient}
+        {area}
         <polyline class="line pool" points=polyline_points(points, frame) />
         {dots}
     }
 }
 
 /// This node's line and dots.
-fn local_view(points: &[(u64, f64)], frame: &Frame) -> impl IntoView + use<> {
+fn local_view<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView + use<'a> {
     let dots = dot_positions(points, frame)
         .into_iter()
         .map(|(x, y)| view! { <circle class="dot local" cx=x cy=y r="3" /> })
         .collect_view();
+    let gradient = area_gradient("local", frame);
+    let area = (!points.is_empty()).then(|| {
+        view! { <path class="area local" d=area_path(points, frame) fill="url(#fill-local)" /> }
+    });
     view! {
+        {gradient}
+        {area}
         <polyline class="line local" points=polyline_points(points, frame) />
         {dots}
     }
@@ -353,6 +404,14 @@ pub fn HashrateChart(
         let (start, end) = (frame.start as u64, frame.end as u64);
         let has_pool = !pool.is_empty();
         let has_local = !local.is_empty();
+        let axes = view! {
+            <text class="axis" x=PAD_LEFT y=HEIGHT - 6.0 text-anchor="start">
+                {fmt_day_time(start)}
+            </text>
+            <text class="axis" x=WIDTH - PAD_RIGHT y=HEIGHT - 6.0 text-anchor="end">
+                {fmt_day_time(end)}
+            </text>
+        };
         view! {
             <figure class="chart">
                 <svg
@@ -367,15 +426,10 @@ pub fn HashrateChart(
                     on:mouseleave=on_leave
                     on:dblclick=move |_| range.set(None)
                 >
-                    {grid}
-                    <text class="axis" x=PAD_LEFT y=HEIGHT - 6.0 text-anchor="start">
-                        {fmt_day_time(start)}
-                    </text>
-                    <text class="axis" x=WIDTH - PAD_RIGHT y=HEIGHT - 6.0 text-anchor="end">
-                        {fmt_day_time(end)}
-                    </text>
                     {pool_view(&pool, &frame)}
                     {local_view(&local, &frame)}
+                    {grid}
+                    {axes}
                     {selection}
                     {crosshair}
                 </svg>

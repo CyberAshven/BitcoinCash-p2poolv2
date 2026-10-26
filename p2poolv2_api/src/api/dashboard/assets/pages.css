@@ -22,6 +22,12 @@ header.site-header .header-search input[type="search"] {
 header.site-header .tabs li a[aria-current="page"] {
   text-decoration: none;
 }
+/* Hidden slot that keeps the overview auto-refresh button's width on every
+   other page, so Search and Admin never shift when you navigate. */
+header .header-right .auto-slot {
+  min-width: 6.75rem;
+  visibility: hidden;
+}
 /* When the menu bar's items do not fit on one line, it wraps instead of
    scrolling the page sideways, as it does on phones. The WASM dashboard's
    bar carries a live status and its settings too. */
@@ -128,7 +134,10 @@ tr.uncle-row {
 }
 .chart-wrap .line {
   fill: none;
-  stroke-width: 2;
+  stroke-width: 1;
+}
+.chart-wrap .area {
+  stroke: none;
 }
 .chart-wrap .dot {
   stroke: none;
@@ -174,12 +183,10 @@ tr.uncle-row {
   margin: 0;
 }
 
-/* The hashrate chart of the Rust/WASM dashboard (p2poolv2_web), which loads
-   these same stylesheets: zooming, a crosshair on the nearest point, and
-   CashDragon0's .chart-tip on the side away from it. The node's own pages
-   never render these classes. */
+/* The hashrate chart: zoomable via SVG, and the node's own pages (plus the
+   WASM dashboard) use .chart-hit strips with .chart-tip on hover -- CSS only,
+   no script anywhere. */
 .chart-wrap svg.zoomable {
-  cursor: crosshair;
   user-select: none;
 }
 .chart-wrap .crosshair {
@@ -190,9 +197,150 @@ tr.uncle-row {
   fill: var(--ms-green);
   opacity: 0.15;
 }
-.chart-wrap .chart-tip.at-left {
-  left: 11%;
+/* Positioning: the box is pinned upper-right; per-span left/right (or
+   at-left/at-right) only feed the content swap and are overridden. */
+.chart-wrap {
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
 }
-.chart-wrap .chart-tip.at-right {
-  right: 2%;
+.chart-wrap .chart-hit {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* 8px of the 720-unit viewBox = 1/90 of the wrap width. Size zones in %
+     (not a fixed 8px) so they stay exactly adjacent at any responsive width.
+     A fixed 8px left a gap whenever the wrap was wider than 720px, so the
+     cursor left the zone, :hover dropped, and the tip flickered. */
+  width: 1.111111%;
+  margin-left: -0.555556%;
+  visibility: visible;
+  /* Must NOT be opacity:0 here -- parent opacity multiplies with the child
+     tip, so the tip could never paint. The span itself paints nothing (it
+     has no background); only the tip below is gated on hover. */
+  z-index: 10;
+  pointer-events: auto;
 }
+.chart-wrap .chart-hit .chart-tip {
+  position: absolute;
+  z-index: 1;
+  opacity: 0;
+   /* Fixed spot: upper-right of the chart-wrap. The at-left/at-right class
+      (and any inline left/right the WASM tip once carried) only feeds the
+      content swap and is overridden, so every zone's tip lands in the same
+      box -- only the hovered zone's tip paints, so the content swaps under
+      the cursor but the box never moves (no cursor-follow, no flicker). */
+  top: 8px !important;
+  right: 8px !important;
+  left: auto !important;
+}
+/* Only the tip of the zone actually under the cursor paints. Zones tile the
+   plot exactly (width 1.111111% = 8/720, margin-left -0.555556% = -4/720,
+   step 1.111% of left%) so they are always adjacent at any width -- no gaps
+   for the cursor to fall through, so the tip never blinks between zones.
+   Each zone's left comes from its nth-child position, one per 8px step of
+   the 720-unit viewBox, so no page ever carries a style=" attribute. */
+.chart-wrap .chart-hit:nth-child(1) { left: 10.555556%; }
+.chart-wrap .chart-hit:nth-child(2) { left: 11.666667%; }
+.chart-wrap .chart-hit:nth-child(3) { left: 12.777778%; }
+.chart-wrap .chart-hit:nth-child(4) { left: 13.888889%; }
+.chart-wrap .chart-hit:nth-child(5) { left: 15.000000%; }
+.chart-wrap .chart-hit:nth-child(6) { left: 16.111111%; }
+.chart-wrap .chart-hit:nth-child(7) { left: 17.222222%; }
+.chart-wrap .chart-hit:nth-child(8) { left: 18.333333%; }
+.chart-wrap .chart-hit:nth-child(9) { left: 19.444444%; }
+.chart-wrap .chart-hit:nth-child(10) { left: 20.555556%; }
+.chart-wrap .chart-hit:nth-child(11) { left: 21.666667%; }
+.chart-wrap .chart-hit:nth-child(12) { left: 22.777778%; }
+.chart-wrap .chart-hit:nth-child(13) { left: 23.888889%; }
+.chart-wrap .chart-hit:nth-child(14) { left: 25.000000%; }
+.chart-wrap .chart-hit:nth-child(15) { left: 26.111111%; }
+.chart-wrap .chart-hit:nth-child(16) { left: 27.222222%; }
+.chart-wrap .chart-hit:nth-child(17) { left: 28.333333%; }
+.chart-wrap .chart-hit:nth-child(18) { left: 29.444444%; }
+.chart-wrap .chart-hit:nth-child(19) { left: 30.555556%; }
+.chart-wrap .chart-hit:nth-child(20) { left: 31.666667%; }
+.chart-wrap .chart-hit:nth-child(21) { left: 32.777778%; }
+.chart-wrap .chart-hit:nth-child(22) { left: 33.888889%; }
+.chart-wrap .chart-hit:nth-child(23) { left: 35.000000%; }
+.chart-wrap .chart-hit:nth-child(24) { left: 36.111111%; }
+.chart-wrap .chart-hit:nth-child(25) { left: 37.222222%; }
+.chart-wrap .chart-hit:nth-child(26) { left: 38.333333%; }
+.chart-wrap .chart-hit:nth-child(27) { left: 39.444444%; }
+.chart-wrap .chart-hit:nth-child(28) { left: 40.555556%; }
+.chart-wrap .chart-hit:nth-child(29) { left: 41.666667%; }
+.chart-wrap .chart-hit:nth-child(30) { left: 42.777778%; }
+.chart-wrap .chart-hit:nth-child(31) { left: 43.888889%; }
+.chart-wrap .chart-hit:nth-child(32) { left: 45.000000%; }
+.chart-wrap .chart-hit:nth-child(33) { left: 46.111111%; }
+.chart-wrap .chart-hit:nth-child(34) { left: 47.222222%; }
+.chart-wrap .chart-hit:nth-child(35) { left: 48.333333%; }
+.chart-wrap .chart-hit:nth-child(36) { left: 49.444444%; }
+.chart-wrap .chart-hit:nth-child(37) { left: 50.555556%; }
+.chart-wrap .chart-hit:nth-child(38) { left: 51.666667%; }
+.chart-wrap .chart-hit:nth-child(39) { left: 52.777778%; }
+.chart-wrap .chart-hit:nth-child(40) { left: 53.888889%; }
+.chart-wrap .chart-hit:nth-child(41) { left: 55.000000%; }
+.chart-wrap .chart-hit:nth-child(42) { left: 56.111111%; }
+.chart-wrap .chart-hit:nth-child(43) { left: 57.222222%; }
+.chart-wrap .chart-hit:nth-child(44) { left: 58.333333%; }
+.chart-wrap .chart-hit:nth-child(45) { left: 59.444444%; }
+.chart-wrap .chart-hit:nth-child(46) { left: 60.555556%; }
+.chart-wrap .chart-hit:nth-child(47) { left: 61.666667%; }
+.chart-wrap .chart-hit:nth-child(48) { left: 62.777778%; }
+.chart-wrap .chart-hit:nth-child(49) { left: 63.888889%; }
+.chart-wrap .chart-hit:nth-child(50) { left: 65.000000%; }
+.chart-wrap .chart-hit:nth-child(51) { left: 66.111111%; }
+.chart-wrap .chart-hit:nth-child(52) { left: 67.222222%; }
+.chart-wrap .chart-hit:nth-child(53) { left: 68.333333%; }
+.chart-wrap .chart-hit:nth-child(54) { left: 69.444444%; }
+.chart-wrap .chart-hit:nth-child(55) { left: 70.555556%; }
+.chart-wrap .chart-hit:nth-child(56) { left: 71.666667%; }
+.chart-wrap .chart-hit:nth-child(57) { left: 72.777778%; }
+.chart-wrap .chart-hit:nth-child(58) { left: 73.888889%; }
+.chart-wrap .chart-hit:nth-child(59) { left: 75.000000%; }
+.chart-wrap .chart-hit:nth-child(60) { left: 76.111111%; }
+.chart-wrap .chart-hit:nth-child(61) { left: 77.222222%; }
+.chart-wrap .chart-hit:nth-child(62) { left: 78.333333%; }
+.chart-wrap .chart-hit:nth-child(63) { left: 79.444444%; }
+.chart-wrap .chart-hit:nth-child(64) { left: 80.555556%; }
+.chart-wrap .chart-hit:nth-child(65) { left: 81.666667%; }
+.chart-wrap .chart-hit:nth-child(66) { left: 82.777778%; }
+.chart-wrap .chart-hit:nth-child(67) { left: 83.888889%; }
+.chart-wrap .chart-hit:nth-child(68) { left: 85.000000%; }
+.chart-wrap .chart-hit:nth-child(69) { left: 86.111111%; }
+.chart-wrap .chart-hit:nth-child(70) { left: 87.222222%; }
+.chart-wrap .chart-hit:nth-child(71) { left: 88.333333%; }
+.chart-wrap .chart-hit:nth-child(72) { left: 89.444444%; }
+.chart-wrap .chart-hit:nth-child(73) { left: 90.555556%; }
+.chart-wrap .chart-hit:nth-child(74) { left: 91.666667%; }
+.chart-wrap .chart-hit:nth-child(75) { left: 92.777778%; }
+.chart-wrap .chart-hit:nth-child(76) { left: 93.888889%; }
+.chart-wrap .chart-hit:nth-child(77) { left: 95.000000%; }
+.chart-wrap .chart-hit:nth-child(78) { left: 96.111111%; }
+.chart-wrap .chart-hit:nth-child(79) { left: 97.222222%; }
+.chart-wrap .chart-hit:nth-child(80) { left: 98.333333%; }
+.chart-wrap .chart-hit:hover .chart-tip {
+  opacity: 1;
+}
+/* WASM chart (p2poolv2_web/src/chart.rs) emits a bare .chart-tip (not inside
+   .chart-hit). Pin it to the same fixed upper-right spot; !important beats any
+   JS-set inline left so it does not follow the cursor either. The at-left /
+   at-right classes are kept for the style_guard selector check but neutralized
+   here so they cannot move the box. */
+.chart-tip.at-left {
+  top: 8px !important;
+  left: auto !important;
+  right: 8px !important;
+}
+.chart-tip.at-right {
+  top: 8px !important;
+  left: auto !important;
+  right: 8px !important;
+}
+.chart-wrap > .chart-tip {
+  top: 8px !important;
+  right: 8px !important;
+  left: auto !important;
+}
+

@@ -26,7 +26,7 @@ pub const UNKNOWN: &str = "\u{2014}";
 
 /// `value` scaled to a unit prefix.
 fn with_prefix(value: f64) -> (f64, &'static str) {
-    let mut scaled = value;
+    let mut scaled = if value == 0.0 { 0.0 } else { value };
     let mut unit = 0;
     while scaled.abs() >= 1000.0 && unit + 1 < UNITS.len() {
         scaled /= 1000.0;
@@ -35,8 +35,13 @@ fn with_prefix(value: f64) -> (f64, &'static str) {
     (scaled, UNITS[unit])
 }
 
-/// Three significant digits.
+/// Three significant digits, never printing a negative zero.
 fn three_digits(value: f64) -> String {
+    let value = if value < 0.0 && value.abs() < 0.005 {
+        0.0
+    } else {
+        value
+    };
     if value.abs() >= 100.0 {
         format!("{value:.0}")
     } else if value.abs() >= 10.0 {
@@ -211,9 +216,21 @@ mod tests {
     }
 
     #[test]
+    fn test_hashrates_print_negative_zero_as_zero() {
+        assert_eq!(fmt_hashrate(-0.0), "0.00 H/s");
+        assert_eq!(fmt_hashrate(-0.001), "0.00 H/s");
+    }
+
+    #[test]
     fn test_difficulties_use_unit_prefixes() {
         assert_eq!(fmt_difficulty(665_151.95), "665k");
         assert_eq!(fmt_difficulty(4.5), "4.50");
+    }
+
+    #[test]
+    fn test_difficulties_print_negative_zero_as_zero() {
+        assert_eq!(fmt_difficulty(-0.0), "0.00");
+        assert_eq!(fmt_difficulty(-0.001), "0.00");
     }
 
     #[test]

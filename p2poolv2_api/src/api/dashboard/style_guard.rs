@@ -354,6 +354,7 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         blocks,
         shares,
         shares_paging: Paging { page: 1, pages: 2 },
+        auto: pages::Auto::On,
     })
     .into_string()
 }

@@ -4,7 +4,7 @@
 
 //! The overview, as `/dashboard` shows it: KPI cards, the hashrate chart,
 //! the newest found blocks and a page of the share chain. Its first page of
-//! shares is live, from `/ws`; the rest refreshes on the node's 30 seconds.
+//! shares is live, from `/ws`; the rest polls on the timer.
 
 use super::blocks::{NO_BLOCKS_YET, blocks_table};
 use crate::api::{ChainInfo, FoundBlock, Hashrate, HashratePoint, Miners, Share, Shares};

@@ -137,10 +137,11 @@ fn error_page(state: &AppState, error: ApiError) -> Response {
     (status, html(pages::error(&site(state), &message))).into_response()
 }
 
-/// A `?page=` query, counted from 1.
+/// A `?page=` query, counted from 1, plus the overview's `?auto=` toggle.
 #[derive(Deserialize)]
 struct PageQuery {
     page: Option<usize>,
+    auto: Option<String>,
 }
 
 /// Whether the share `blockhash` met its own Bitcoin Cash block target.
@@ -340,6 +341,7 @@ async fn overview(
     Query(query): Query<PageQuery>,
 ) -> Response {
     let state = &dashboard.app;
+    let auto = pages::Auto::from_query(query.auto.as_deref());
     let chain = read_store(state, move |state| {
         (
             share_page(state, query.page),
@@ -374,6 +376,7 @@ async fn overview(
         blocks: blocks.into_iter().take(RECENT_BLOCKS).collect(),
         shares,
         shares_paging,
+        auto,
     }))
 }
 

@@ -20,8 +20,8 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::cmp::Reverse;
 
-/// Milliseconds between polls of the REST endpoints, as often as the node's
-/// overview refreshes itself.
+/// Milliseconds between polls of the REST endpoints; its own interval, not
+/// the node's (which no longer meta-refreshes).
 const REFRESH_MS: u32 = 30_000;
 
 /// Milliseconds before the live feed reconnects.
