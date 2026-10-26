@@ -5,14 +5,16 @@
 //! Hashrate history the node keeps for its dashboard.
 //!
 //! A sampler task records the pool's, this node's and the network's hashrate
-//! once a minute into a bounded ring. The dashboard therefore draws from the
-//! node, not from a browser that forgets on reload. The ring is bounded, so
-//! the history cannot grow without limit.
+//! once a minute into a bounded ring, and queues the same sample to the
+//! store's `HashrateSamples` column family so a restart reloads the
+//! history instead of starting empty. The ring is bounded to the store's
+//! 30-day retention, so the in-memory history cannot grow without limit.
 
 use crate::api::server::AppState;
 use bitcoin::{CompactTarget, Target};
 use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::store::dag_store::ShareInfo;
+use p2poolv2_lib::store::hashrate_samples::{HashrateSample, RETENTION_SECS};
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -22,8 +24,8 @@ use tracing::warn;
 /// How often the sampler records a sample.
 pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Samples kept: one day at one a minute.
-pub(crate) const MAX_SAMPLES: usize = 24 * 60;
+/// Samples kept: the store's 30-day retention at one a minute.
+pub(crate) const MAX_SAMPLES: usize = (RETENTION_SECS / SAMPLE_INTERVAL.as_secs()) as usize;
 
 /// Shares the pool hashrate is estimated from: the newest this many
 /// confirmed shares.
@@ -43,19 +45,10 @@ const HASHES_PER_DIFFICULTY: f64 = 4_294_967_296.0;
 
 /// One sample of the hashrates the dashboard charts, in hashes per second.
 /// `None` where the value could not be known at that time.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Sample {
-    /// Unix seconds.
-    pub(crate) time: u64,
-    /// The whole pool, from the share chain.
-    pub(crate) pool: Option<f64>,
-    /// This node's miners, from the share chain work of shares submitted
-    /// by miners connected to this node (at least one active worker), in
-    /// the same window as the pool.
-    pub(crate) local: Option<f64>,
-    /// The Bitcoin Cash network, from the block template's difficulty.
-    pub(crate) network: Option<f64>,
-}
+///
+/// The same shape the store persists (`p2poolv2_lib`'s `HashrateSample`),
+/// re-exported so the API never field-renames on the write-through path.
+pub(crate) type Sample = HashrateSample;
 
 #[derive(Default)]
 struct Inner {
@@ -87,6 +80,22 @@ impl HashrateHistory {
             inner.samples.pop_front();
         }
         inner.samples.push_back(sample);
+    }
+
+    /// Replace the ring with `samples`, oldest first, as the server does
+    /// once at startup after loading the store. Newest beyond the ring's
+    /// bound are kept.
+    pub(crate) fn load(&self, samples: Vec<Sample>) {
+        let mut inner = self.lock();
+        let kept: VecDeque<Sample> = if samples.len() > MAX_SAMPLES {
+            samples[samples.len() - MAX_SAMPLES..]
+                .iter()
+                .copied()
+                .collect()
+        } else {
+            samples.into_iter().collect()
+        };
+        inner.samples = kept;
     }
 }
 
@@ -233,26 +242,85 @@ async fn tick(state: &Arc<AppState>, history: &Arc<HashrateHistory>) {
         }
     };
 
-    history.push_sample(Sample {
+    let sample = Sample {
         time,
         pool,
         local,
         network,
-    });
+    };
+    history.push_sample(sample);
+    // Queue the same sample to the store, off the hot path: the channel is
+    // unbounded, so this never blocks the sampler's async worker.
+    state
+        .chain_store_handle
+        .store_handle()
+        .add_hashrate_sample(sample);
+}
+
+/// Evict store samples older than the retention window and reload the
+/// store's samples into `history`, oldest first. The blocking half of
+/// [`reload_persisted`], for callers already on a blocking thread
+/// (the startup load in `server.rs`).
+pub(crate) fn reload_persisted_blocking(state: &AppState, history: &HashrateHistory) {
+    let store = state.chain_store_handle.store_handle().store();
+    let oldest = unix_now().saturating_sub(RETENTION_SECS);
+    if let Err(error) = store.evict_hashrate_samples_before(oldest) {
+        warn!("hashrate sample eviction failed: {error}");
+    }
+    history.load(store.load_hashrate_samples(oldest));
+}
+
+/// Evict store samples older than the retention window and reload the
+/// store's samples into `history`, oldest first.
+///
+/// Returns how many samples were loaded. The sampler calls it every
+/// [`run_sampler`]'s eviction interval so a clock jump or a long downtime
+/// leaves disk and ring in agreement.
+pub(crate) async fn reload_persisted(state: Arc<AppState>, history: Arc<HashrateHistory>) -> usize {
+    let store = Arc::clone(state.chain_store_handle.store_handle().store());
+    let oldest = unix_now().saturating_sub(RETENTION_SECS);
+    let loaded = tokio::task::spawn_blocking(move || {
+        if let Err(error) = store.evict_hashrate_samples_before(oldest) {
+            warn!("hashrate sample eviction failed: {error}");
+        }
+        store.load_hashrate_samples(oldest)
+    })
+    .await;
+    match loaded {
+        Ok(samples) => {
+            let count = samples.len();
+            history.load(samples);
+            count
+        }
+        Err(error) => {
+            warn!("Could not reload hashrate history from the store: {error}");
+            0
+        }
+    }
 }
 
 /// Sample once a minute until the history is dropped with the API server.
 ///
-/// Holds the history only weakly, so it never keeps it alive.
+/// Holds the history only weakly, so it never keeps it alive. Every
+/// EVICTION_INTERVAL samples it drops store rows past the retention
+/// window and reloads what remains, so disk and ring agree after a
+/// clock jump or a long downtime.
 pub(crate) async fn run_sampler(state: Arc<AppState>, history: Weak<HashrateHistory>) {
+    const EVICTION_INTERVAL: u32 = 60;
     let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut since_eviction: u32 = EVICTION_INTERVAL;
     loop {
         interval.tick().await;
         let Some(history) = history.upgrade() else {
             return;
         };
         tick(&state, &history).await;
+        since_eviction = since_eviction.saturating_add(1);
+        if since_eviction >= EVICTION_INTERVAL {
+            since_eviction = 0;
+            reload_persisted(Arc::clone(&state), Arc::clone(&history)).await;
+        }
     }
 }
 
@@ -456,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn samples_are_capped_at_one_day() {
+    fn samples_are_capped_at_the_retention_window() {
         let history = HashrateHistory::default();
         for time in 0..(MAX_SAMPLES as u64 + 10) {
             history.push_sample(Sample {
@@ -469,6 +537,23 @@ mod tests {
         let samples = history.samples();
         assert_eq!(samples.len(), MAX_SAMPLES);
         assert_eq!(samples.first().unwrap().time, 10);
+    }
+
+    #[test]
+    fn load_replaces_the_ring_with_the_newest_bound_samples() {
+        let history = HashrateHistory::default();
+        let loaded: Vec<Sample> = (0..(MAX_SAMPLES as u64 + 5))
+            .map(|time| Sample {
+                time,
+                pool: None,
+                local: None,
+                network: None,
+            })
+            .collect();
+        history.load(loaded);
+        let samples = history.samples();
+        assert_eq!(samples.len(), MAX_SAMPLES);
+        assert_eq!(samples.first().unwrap().time, 5);
     }
 
     #[test]

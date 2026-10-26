@@ -16,13 +16,15 @@ use axum::{
     extract::{Query, State},
     routing::get,
 };
+use p2poolv2_lib::store::hashrate_samples::RETENTION_SECS;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// Default and maximum window, in seconds. The history holds one day.
+/// Default window: one hour. Maximum: the store's 30-day retention, from
+/// which the ring's bound is derived too.
 const DEFAULT_WINDOW_SECS: u64 = 3600;
-const MAX_WINDOW_SECS: u64 = 86_400;
+const MAX_WINDOW_SECS: u64 = RETENTION_SECS;
 
 #[derive(Deserialize)]
 pub struct HashrateQuery {
@@ -86,6 +88,13 @@ fn in_window(samples: &[Sample], window: u64) -> Vec<HashratePoint> {
         .collect()
 }
 
+/// GET /hashrate: the dashboard's hashrate history as JSON.
+///
+/// `window` is seconds of history ending at the newest sample, clamped
+/// to `[60, MAX_WINDOW_SECS]` and validated out of range as 400 rather
+/// than silently clamped. `MAX_WINDOW_SECS` is the store's 30-day
+/// retention, the 30-day surface; the overview chart stays at 1440
+/// points so its "last day" title remains truthful.
 async fn hashrate(
     State(state): State<Arc<HashrateState>>,
     Query(query): Query<HashrateQuery>,
@@ -163,5 +172,30 @@ mod tests {
         assert_eq!(points[0].pool_hashrate, Some(1.0));
         assert_eq!(points[0].local_hashrate, None);
         assert!(in_window(&[], 60).is_empty());
+    }
+
+    #[test]
+    fn a_full_retention_window_is_accepted() {
+        assert_eq!(MAX_WINDOW_SECS, RETENTION_SECS);
+        assert_eq!(RETENTION_SECS, 2_592_000);
+    }
+
+    #[test]
+    fn a_window_above_retention_is_rejected() {
+        assert!(!(60..=MAX_WINDOW_SECS).contains(&(RETENTION_SECS + 1)));
+    }
+
+    #[test]
+    fn in_window_keeps_the_newest_full_retention_span() {
+        let samples = [
+            sample(0),
+            sample(RETENTION_SECS - 60),
+            sample(RETENTION_SECS),
+        ];
+        let points = in_window(&samples, RETENTION_SECS);
+        assert_eq!(
+            points.iter().map(|point| point.time).collect::<Vec<_>>(),
+            vec![0, RETENTION_SECS - 60, RETENTION_SECS]
+        );
     }
 }

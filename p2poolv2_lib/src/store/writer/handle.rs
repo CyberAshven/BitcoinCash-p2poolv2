@@ -13,6 +13,7 @@ use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
 use crate::store::found_block::FoundBlock;
+use crate::store::hashrate_samples::HashrateSample;
 use crate::store::prune_blocks::PruneStats;
 use crate::store::stored_user::StoredUser;
 use crate::store::transaction_store::PrevoutCheck;
@@ -394,6 +395,34 @@ impl StoreHandle {
             })
             .map_err(|_| StoreError::ChannelClosed)?;
         reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
+    }
+
+    // ========================================================================
+    // FIRE-AND-FORGET WRITES - The sampler never waits; a full channel or a
+    // closed writer drops the sample (warned by the caller) instead of
+    // blocking the async worker it runs on.
+    // ========================================================================
+
+    /// Queue one hashrate sample for persistence, without waiting.
+    pub fn add_hashrate_sample(&self, sample: HashrateSample) {
+        if self
+            .write_tx
+            .send(WriteCommand::AddHashrateSample { sample })
+            .is_err()
+        {
+            tracing::warn!("Store writer is gone; hashrate sample dropped");
+        }
+    }
+
+    /// Queue deletion of hashrate samples before `before_secs`, without waiting.
+    pub fn evict_hashrate_samples_before(&self, before_secs: u64) {
+        if self
+            .write_tx
+            .send(WriteCommand::EvictHashrateSamplesBefore { before_secs })
+            .is_err()
+        {
+            tracing::warn!("Store writer is gone; hashrate sample eviction dropped");
+        }
     }
 
     // ========================================================================

@@ -303,12 +303,13 @@ same shape with `"address_type": "share"`, and each share's
 ### GET /hashrate
 
 The node's hashrate history as JSON: the same once-a-minute samples (kept
-for one day) the server-rendered `/dashboard` draws. Values are hashes per
-second, `null` where unknown at that time.
+for 30 days, and persisted in the store across restarts) the
+server-rendered `/dashboard` draws. Values are hashes per second, `null`
+where unknown at that time.
 
 | Parameter | Default | Range | Meaning |
 |---|---|---|---|
-| `window` | 3600 | 60..=86400 | Seconds of history, ending at the newest sample |
+| `window` | 3600 | 60..=2592000 | Seconds of history, ending at the newest sample |
 
 - `pool_hashrate`: share chain work of the newest confirmed shares over
   their time span; the same on every node.

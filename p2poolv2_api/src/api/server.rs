@@ -275,6 +275,20 @@ pub async fn start_api_server(
     // The dashboard's history, filled once a minute. The sampler holds it
     // weakly and is aborted when the server stops, so neither outlives it.
     let history = Arc::new(dashboard::history::HashrateHistory::default());
+    // Load what the store kept across restarts before the sampler's first
+    // tick: `interval` fires immediately, so anything queued after this
+    // spawn could land behind the load and be overwritten. The load runs
+    // off the async workers; a store failure only leaves the history empty,
+    // which the sampler then fills as usual.
+    let load_state = app_state.clone();
+    let load_history = Arc::clone(&history);
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        dashboard::history::reload_persisted_blocking(&load_state, &load_history);
+    })
+    .await
+    {
+        warn!("Hashrate history load task failed: {error}");
+    }
     let sampler = tokio::spawn(dashboard::history::run_sampler(
         app_state.clone(),
         Arc::downgrade(&history),

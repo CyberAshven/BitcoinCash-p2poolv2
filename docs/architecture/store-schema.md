@@ -315,6 +315,42 @@ rewrites identical bytes. Never pruned. Read by the `/metrics` handler.
 
 ---
 
+### 15. `HashrateSamples` - Dashboard Hashrate History
+
+One entry per dashboard hashrate sample, written by the API server's
+sampler so a restart reloads the chart instead of starting empty.
+Retention is hardcoded 30 days (`RETENTION_SECS` in
+`store/hashrate_samples.rs`): the writer never keeps samples older than
+that, and eviction is a range delete of the prefix below the cutoff.
+
+Only a read-write open registers this column family. `verify_chain`,
+`db_query` and other read-only tools never request it, so old binaries
+reading a store a new binary has written still open it (RocksDB ignores
+column families a client does not ask for) and a rollback starts from an
+empty chart rather than failing. `create_missing_column_families` creates
+it on the first read-write open.
+
+| Key                          | Value                                             | Notes                                        |
+|------------------------------|---------------------------------------------------|----------------------------------------------|
+| `time` (8 bytes BE)          | consensus-encoded `HashrateSample`                | One sample per minute; same time overwrites  |
+
+**HashrateSample Structure:**
+```rust
+pub struct HashrateSample {
+    pub time: u64,            // Unix seconds the sample was taken
+    pub pool: Option<f64>,     // Whole pool, hashes per second
+    pub local: Option<f64>,    // This node's miners, hashes per second
+    pub network: Option<f64>,  // Bitcoin Cash network, hashes per second
+}
+```
+
+Each `Option<f64>` is a tag byte (`1` = value, `0` = `None`, anything
+else is a decode error) followed by the `f64` in little endian when
+present. Loading skips a corrupt, key-mismatched or future-dated row
+with a warning instead of failing startup.
+
+---
+
 ## Key Constants
 
 ```rust

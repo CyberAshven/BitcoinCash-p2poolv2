@@ -24,6 +24,11 @@ use serde::Serialize;
 /// Seconds between refreshes of the overview page while auto is on.
 pub(crate) const OVERVIEW_REFRESH_SECONDS: u32 = 30;
 
+/// The overview chart's own bound: newest 1440 samples (one day at one a
+/// minute), sliced from the 30-day ring so the "last day" title stays
+/// truthful. The 30-day surface is `/hashrate?window=2592000`.
+const OVERVIEW_CHART_SAMPLES: usize = 1440;
+
 /// The overview's stateless auto-refresh toggle, read from `?auto=`:
 /// `?auto=on` (the default) or `?auto=off`. On page 1 with `Auto::On` the
 /// overview's head carries a 30 second meta refresh; the header shows the
@@ -589,18 +594,26 @@ fn blocks_table(now: u64, blocks: &[FoundBlockRow]) -> Markup {
 }
 
 pub(crate) fn overview(view: &Overview) -> Markup {
+    let samples: Vec<Sample> = view
+        .samples
+        .iter()
+        .rev()
+        .take(OVERVIEW_CHART_SAMPLES)
+        .rev()
+        .copied()
+        .collect();
     let chart = line_chart(
         "Hashrate over the last day",
         &[
             Series {
                 label: "Pool",
                 class: "pool",
-                points: series(&view.samples, |sample| sample.pool),
+                points: series(&samples, |sample| sample.pool),
             },
             Series {
                 label: "This node",
                 class: "local",
-                points: series(&view.samples, |sample| sample.local),
+                points: series(&samples, |sample| sample.local),
             },
         ],
         fmt_hashrate,
@@ -625,7 +638,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                     .unwrap_or_else(|| "None yet".to_string())]))
         }
         div.panel {
-            h2 { "Hashrate" span.panel-note { "one sample a minute, the last day" } }
+            h2 { "Hashrate" span.panel-note { "one sample a minute, the last 30 days" } }
             div.chart-wrap { (chart) }
         }
         div.panel {

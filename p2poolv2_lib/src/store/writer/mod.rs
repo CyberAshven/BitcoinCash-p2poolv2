@@ -18,6 +18,7 @@ pub use handle::StoreHandle;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
+use crate::store::hashrate_samples::HashrateSample;
 use crate::store::prune_blocks::PruneStats;
 use bitcoin::{BlockHash, TxMerkleNode};
 use std::error::Error;
@@ -135,6 +136,13 @@ pub enum WriteCommand {
 
     /// Set genesis block hash (fire-and-forget)
     SetGenesisBlockHash { hash: BlockHash },
+
+    /// Record one hashrate sample (fire-and-forget; the sampler never waits).
+    AddHashrateSample { sample: HashrateSample },
+
+    /// Delete hashrate samples with timestamps before `before_secs`
+    /// (fire-and-forget).
+    EvictHashrateSamplesBefore { before_secs: u64 },
 
     /// Organise a header into the candidate chain.
     /// Returns the new candidate height.
@@ -286,6 +294,21 @@ impl StoreWriter {
             // Fire-and-forget commands (in-memory state updates)
             WriteCommand::SetGenesisBlockHash { hash } => {
                 self.store.set_genesis_blockhash(hash);
+            }
+
+            WriteCommand::AddHashrateSample { sample } => {
+                if let Err(error) = self.store.add_hashrate_sample(&sample) {
+                    debug!(
+                        "Failed to record hashrate sample at {}: {error}",
+                        sample.time
+                    );
+                }
+            }
+
+            WriteCommand::EvictHashrateSamplesBefore { before_secs } => {
+                if let Err(error) = self.store.evict_hashrate_samples_before(before_secs) {
+                    debug!("Failed to evict hashrate samples before {before_secs}: {error}");
+                }
             }
 
             WriteCommand::OrganiseHeader { header, reply } => {

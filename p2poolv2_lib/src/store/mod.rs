@@ -6,17 +6,21 @@ use crate::shares::share_block::ShareBlock;
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::store::column_families::ColumnFamily;
 use crate::store::dag_store::{MAX_BLOCKS_PER_HEIGHT, MAX_UNCLES_DEPTH};
-use bitcoin::consensus::{Encodable, encode};
+use crate::store::hashrate_samples::HashrateSample;
+use bitcoin::consensus::Encodable;
+use bitcoin::consensus::encode;
 use bitcoin::{BlockHash, Work};
 use rocksdb::{BlockBasedOptions, ColumnFamilyDescriptor, DB, Options as RocksDbOptions};
 use std::sync::{Arc, RwLock};
-use tracing::debug;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{debug, warn};
 use writer::StoreError;
 
 pub mod block_tx_metadata;
 pub mod column_families;
 pub mod dag_store;
 pub mod found_block;
+pub mod hashrate_samples;
 pub mod organise;
 mod pplns_shares;
 pub mod prune_blocks;
@@ -191,6 +195,8 @@ impl Store {
             ColumnFamilyDescriptor::new(ColumnFamily::BitcoinCoinbase, RocksDbOptions::default());
         let found_blocks_cf =
             ColumnFamilyDescriptor::new(ColumnFamily::FoundBlocks, RocksDbOptions::default());
+        let hashrate_samples_cf =
+            ColumnFamilyDescriptor::new(ColumnFamily::HashrateSamples, RocksDbOptions::default());
 
         let cfs = vec![
             block_metadata_cf_descriptor,
@@ -212,6 +218,7 @@ impl Store {
             template_merkle_branches_cf,
             bitcoin_coinbase_cf,
             found_blocks_cf,
+            hashrate_samples_cf,
         ];
 
         // for the db too, we use default options for now
@@ -219,7 +226,17 @@ impl Store {
         db_options.create_missing_column_families(true);
         db_options.create_if_missing(true);
         let db = if read_only {
-            DB::open_cf_descriptors_read_only(&db_options, path.clone(), cfs, false)?
+            // Rebuild a descriptor list for the filtered set: the sample
+            // family is write-only on this open so `verify_chain`,
+            // `db_query` and other read-only tools never request it.
+            let read_only_cfs: Vec<ColumnFamilyDescriptor> = cfs
+                .iter()
+                .filter(|descriptor| descriptor.name() != ColumnFamily::HashrateSamples.as_str())
+                .map(|descriptor| {
+                    ColumnFamilyDescriptor::new(descriptor.name(), RocksDbOptions::default())
+                })
+                .collect();
+            DB::open_cf_descriptors_read_only(&db_options, path.clone(), read_only_cfs, false)?
         } else {
             DB::open_cf_descriptors(&db_options, path.clone(), cfs)?
         };
@@ -381,6 +398,79 @@ impl Store {
             self.get_total_work()?,
         );
         Ok(())
+    }
+
+    /// Record one hashrate sample under its big-endian timestamp key.
+    ///
+    /// Same timestamp overwrites: the ring carries at most one sample per
+    /// minute and a replayed timestamp must not duplicate.
+    pub(crate) fn add_hashrate_sample(&self, sample: &HashrateSample) -> Result<(), StoreError> {
+        let column_family = self
+            .db
+            .cf_handle(&ColumnFamily::HashrateSamples)
+            .expect("hashrate_samples CF registered on read-write open");
+        self.db
+            .put_cf(&column_family, sample.key(), encode::serialize(sample))?;
+        Ok(())
+    }
+
+    /// Delete every hashrate sample with a timestamp strictly before
+    /// `before_secs`, one range delete.
+    pub fn evict_hashrate_samples_before(&self, before_secs: u64) -> Result<(), StoreError> {
+        let column_family = self
+            .db
+            .cf_handle(&ColumnFamily::HashrateSamples)
+            .expect("hashrate_samples CF registered on read-write open");
+        let start = HashrateSample::key_at(0);
+        let end = HashrateSample::key_at(before_secs);
+        self.db.delete_range_cf(&column_family, start, end)?;
+        Ok(())
+    }
+
+    /// Load hashrate samples with timestamps at or after `since_secs`,
+    /// oldest first. A corrupt or future-dated entry is skipped with a
+    /// warning rather than failing startup: one bad row must not take the
+    /// dashboard down.
+    pub fn load_hashrate_samples(&self, since_secs: u64) -> Vec<HashrateSample> {
+        let Some(column_family) = self.db.cf_handle(&ColumnFamily::HashrateSamples) else {
+            warn!("hashrate_samples CF absent; dashboard history starts empty");
+            return Vec::new();
+        };
+        let mut read_opts = rocksdb::ReadOptions::default();
+        read_opts.fill_cache(false);
+        read_opts.set_iterate_lower_bound(HashrateSample::key_at(since_secs));
+        let mode =
+            rocksdb::IteratorMode::From(&HashrateSample::key_at(0), rocksdb::Direction::Forward);
+        let mut samples = Vec::with_capacity(43_200);
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        // Two sample intervals of clock skew: a sample stamped further into
+        // the future is bogus and is dropped instead of pinning the chart.
+        let future_cutoff = now_secs.saturating_add(120);
+        for item in self.db.iterator_cf_opt(&column_family, read_opts, mode) {
+            let Ok((key, value)) = item else {
+                warn!("Unreadable hashrate sample entry; skipping it");
+                continue;
+            };
+            match encode::deserialize::<HashrateSample>(&value) {
+                Ok(sample) => {
+                    if sample.time > future_cutoff {
+                        warn!("Dropping future-dated hashrate sample at {}", sample.time);
+                    } else if u64::from_be_bytes([
+                        key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
+                    ]) != sample.time
+                    {
+                        warn!("Hashrate sample key/value timestamp mismatch; skipping it");
+                    } else {
+                        samples.push(sample);
+                    }
+                }
+                Err(error) => warn!("Corrupt hashrate sample at {key:?}: {error}; skipping it"),
+            }
+        }
+        samples
     }
 }
 
@@ -568,6 +658,86 @@ mod tests {
                 + multiplied_compact_target_as_work(0x01e0377ae, 2)
                 + multiplied_compact_target_as_work(0x01e0377ae, 3)
         );
+    }
+
+    #[test]
+    fn a_sample_round_trips_through_the_store() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let original = HashrateSample {
+            time: 1_792_672_402,
+            pool: Some(1.5),
+            local: None,
+            network: Some(2.5),
+        };
+        store.add_hashrate_sample(&original).unwrap();
+        let loaded = store.load_hashrate_samples(original.time);
+        assert_eq!(loaded, vec![original]);
+    }
+
+    #[test]
+    fn eviction_drops_only_older_samples() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        store
+            .add_hashrate_sample(&HashrateSample {
+                time: 1_000,
+                pool: Some(1.0),
+                local: None,
+                network: None,
+            })
+            .unwrap();
+        store
+            .add_hashrate_sample(&HashrateSample {
+                time: 2_000,
+                pool: Some(2.0),
+                local: None,
+                network: None,
+            })
+            .unwrap();
+        store.evict_hashrate_samples_before(2_000).unwrap();
+        let loaded = store.load_hashrate_samples(0);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].time, 2_000);
+    }
+
+    #[test]
+    fn history_survives_a_store_reopen() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        let sample = HashrateSample {
+            time: 1_792_672_402,
+            pool: Some(1.0),
+            local: None,
+            network: Some(2.0),
+        };
+        {
+            let store = Store::new(path.clone(), false).unwrap();
+            store.add_hashrate_sample(&sample).unwrap();
+        }
+        let reopened = Store::new(path, false).unwrap();
+        assert_eq!(reopened.load_hashrate_samples(0), vec![sample]);
+    }
+
+    #[test]
+    fn a_read_only_open_sees_the_persisted_history() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        let sample = HashrateSample {
+            time: 1_792_672_402,
+            pool: Some(1.0),
+            local: None,
+            network: Some(2.0),
+        };
+        {
+            let store = Store::new(path.clone(), false).unwrap();
+            store.add_hashrate_sample(&sample).unwrap();
+        }
+        // The read-only descriptor list does not request the column
+        // family, so `load_hashrate_samples` finds no handle and starts
+        // empty instead of failing the open.
+        let read_only = Store::new(path, true).unwrap();
+        assert!(read_only.load_hashrate_samples(0).is_empty());
     }
 
     #[test]
