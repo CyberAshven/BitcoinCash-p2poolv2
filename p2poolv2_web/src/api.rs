@@ -21,9 +21,11 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Base64 `user:password`, or `None` when no user is set.
+    /// Base64 `user:password`, or `None` when either half is missing. A
+    /// leftover user with no password (the password is session-only) must
+    /// not become a half-empty token the node would refuse.
     pub fn credentials(&self) -> Option<String> {
-        if self.user.is_empty() {
+        if self.user.is_empty() || self.password.is_empty() {
             return None;
         }
         Some(
@@ -52,6 +54,7 @@ impl Connection {
     /// message to show, as the node's own pages would word it.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
         let mut request = gloo_net::http::Request::get(&format!("{}{path}", self.base));
+        request = request.header("X-Requested-With", "XMLHttpRequest");
         if let Some(token) = self.credentials() {
             request = request.header("Authorization", &format!("Basic {token}"));
         }
@@ -61,6 +64,25 @@ impl Connection {
             return Err(error_message(response.status(), &body, path));
         }
         decode(&body, path)
+    }
+
+    /// True when the node still answers 401 on `path` with these credentials:
+    /// the login is wrong or missing, not the socket. The marker header keeps
+    /// the challenge off this probe, so no browser login dialog opens over
+    /// the feed's own `unauthorized` state.
+    pub async fn refused(&self, path: &str) -> bool {
+        if self.credentials().is_none() {
+            return false;
+        }
+        let mut request = gloo_net::http::Request::get(&format!("{}{path}", self.base));
+        request = request.header("X-Requested-With", "XMLHttpRequest");
+        if let Some(token) = self.credentials() {
+            request = request.header("Authorization", &format!("Basic {token}"));
+        }
+        match request.send().await {
+            Ok(response) => response.status() == 401,
+            Err(_) => false,
+        }
     }
 }
 
@@ -317,6 +339,17 @@ mod tests {
             user: String::new(),
             password: "pw".into(),
         };
+        assert_eq!(connection.websocket_url(), "ws://127.0.0.1:46884/ws");
+    }
+
+    #[test]
+    fn test_websocket_url_without_a_password_is_bare() {
+        let connection = Connection {
+            base: "http://127.0.0.1:46884".into(),
+            user: "admin".into(),
+            password: String::new(),
+        };
+        assert_eq!(connection.credentials(), None);
         assert_eq!(connection.websocket_url(), "ws://127.0.0.1:46884/ws");
     }
 

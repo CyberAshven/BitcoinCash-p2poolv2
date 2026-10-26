@@ -33,6 +33,8 @@ pub enum Feed {
     Connecting,
     Live,
     Offline,
+    /// The node refused the credentials; the socket never opened.
+    Unauthorized,
 }
 
 /// What every view reads.
@@ -88,7 +90,9 @@ fn store(storage: Option<web_sys::Storage>, key: &str, value: &str) {
 
 /// Initial connection: `?api=` in the page URL, then the saved base, then the
 /// page's own origin (the node serving the app from `web_root`). The
-/// password lives only in session storage, so it is gone when the tab closes.
+/// password lives only in session storage, so it is gone when the tab closes;
+/// a user left in local storage without that password is dropped too, so the
+/// next visit opens `/ws` bare instead of sending an empty password.
 fn initial_connection() -> Connection {
     let location = window().location();
     let origin = location.origin().unwrap_or_default();
@@ -101,10 +105,16 @@ fn initial_connection() -> Connection {
     let base = from_query
         .or_else(|| stored(local_storage(), "p2pool.api"))
         .unwrap_or(origin);
+    let password = stored(session_storage(), "p2pool.password").unwrap_or_default();
+    let user = if password.is_empty() {
+        String::new()
+    } else {
+        stored(local_storage(), "p2pool.user").unwrap_or_default()
+    };
     Connection {
         base: base.trim_end_matches('/').to_string(),
-        user: stored(local_storage(), "p2pool.user").unwrap_or_default(),
-        password: stored(session_storage(), "p2pool.password").unwrap_or_default(),
+        user,
+        password,
     }
 }
 
@@ -250,6 +260,16 @@ pub fn push_live_share(shares: &mut Vec<Share>, share: Share) {
     shares.truncate(PAGE_SIZE);
 }
 
+/// Why the feed is down: the node still refuses these credentials on an
+/// authenticated route, or the socket failed for another reason. Skipped
+/// when there is no password to refuse (a public node then opens `/ws` bare).
+async fn feed_outage(connection: &Connection) -> Feed {
+    if connection.refused("/metrics").await {
+        return Feed::Unauthorized;
+    }
+    Feed::Offline
+}
+
 /// Keep `recent` filled: seed it from `/shares`, then add `/ws` share
 /// events. Reconnects after a delay, and starts over when the connection
 /// changes.
@@ -299,7 +319,7 @@ fn start_live_feed(ctx: Ctx) {
                         }
                     }
                 }
-                live.set(Feed::Offline);
+                live.set(feed_outage(&current).await);
                 gloo_timers::future::TimeoutFuture::new(RECONNECT_MS).await;
             }
         });

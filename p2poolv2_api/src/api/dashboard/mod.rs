@@ -11,7 +11,8 @@
 //! link to each other, search is a plain form, and long tables have pages.
 //! The routes sit behind the API's authentication unless
 //! `[api] public_dashboard` opens them: a node with `auth_user` set answers
-//! with a Basic challenge, which browsers turn into their own login prompt.
+//! a 401 that already carried credentials with a Basic challenge, which
+//! browsers turn into their own login prompt.
 
 pub(crate) mod assets;
 pub(crate) mod chart;
@@ -851,12 +852,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_node_with_credentials_challenges_the_browser() {
+    async fn a_first_visit_gets_a_bare_401() {
         let (state, _store, _metrics) = build_state(Some(("operator", "secret-token")), None).await;
         let (status, _, headers) = get(&state, "/dashboard").await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(!headers.contains_key(header::WWW_AUTHENTICATE));
+    }
+
+    #[tokio::test]
+    async fn a_wrong_login_gets_a_basic_challenge() {
+        let (state, _store, _metrics) = build_state(Some(("operator", "secret-token")), None).await;
+        let (status, _, headers) = get_with_headers(
+            &state,
+            "/dashboard",
+            WebOptions::default(),
+            &[("authorization", "Basic b3BlcmF0b3I6d3JvbmctcGFzc3dvcmQ=")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
         let challenge = headers.get(header::WWW_AUTHENTICATE).unwrap();
         assert!(challenge.to_str().unwrap().starts_with("Basic"));
+    }
+
+    #[tokio::test]
+    async fn the_wasm_apps_marked_probe_gets_no_challenge() {
+        let (state, _store, _metrics) = build_state(Some(("operator", "secret-token")), None).await;
+        let (status, _, headers) = get_with_headers(
+            &state,
+            "/metrics",
+            WebOptions::default(),
+            &[
+                ("authorization", "Basic b3BlcmF0b3I6d3JvbmctcGFzc3dvcmQ="),
+                ("x-requested-with", "XMLHttpRequest"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(!headers.contains_key(header::WWW_AUTHENTICATE));
     }
 
     #[tokio::test]
@@ -868,16 +900,21 @@ mod tests {
         // A bad address is the handler's 400, not the login's 401.
         let (status, _, _) = get_with(&state, "/miner?address=not-an-address", public()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        // The peer list opens beside the share chain, not with the node's own routes.
+        let (status, _, _) = get_with(&state, "/peers", public()).await;
+        assert_eq!(status, StatusCode::OK);
         for own_route in [
             "/metrics",
-            "/peers",
             "/blocked_ips",
             "/jd_prepare",
             "/dashboard/signin",
         ] {
             let (status, _, headers) = get_with(&state, own_route, public()).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{own_route}");
-            assert!(headers.contains_key(header::WWW_AUTHENTICATE));
+            assert!(
+                !headers.contains_key(header::WWW_AUTHENTICATE),
+                "{own_route}"
+            );
         }
     }
 
@@ -887,7 +924,7 @@ mod tests {
         let (state, _store, _metrics) = build_state(Some(("operator", "secret-token")), None).await;
         let (status, _, headers) = get_with(&state, "/dashboard/signin", public()).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(headers.contains_key(header::WWW_AUTHENTICATE));
+        assert!(!headers.contains_key(header::WWW_AUTHENTICATE));
         let credentials = base64::engine::general_purpose::STANDARD.encode("operator:secret-token");
         let (status, body, _) = get_with_headers(
             &state,
@@ -948,7 +985,7 @@ mod tests {
         };
         let (status, _, headers) = get_with(&state, "/", web(false)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(headers.contains_key(header::WWW_AUTHENTICATE));
+        assert!(!headers.contains_key(header::WWW_AUTHENTICATE));
         let (status, body, _) = get_with(&state, "/", web(true)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "<p>frontend</p>");

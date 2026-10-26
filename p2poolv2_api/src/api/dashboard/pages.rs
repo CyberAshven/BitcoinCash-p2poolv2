@@ -1084,8 +1084,9 @@ pub(crate) fn help(site: &Site) -> Markup {
                     li { code { "/chain_info" } ", " code { "/shares" } ", " code { "/share?hash=" } ", " code { "/share_headers" } }
                     li { code { "/miner?address=" } ": a miner's shares and its part of the next payout" }
                     li { code { "/pplns_shares" } ", " code { "/candidates" } ", " code { "/dag" } ", " code { "/transaction" } }
-                    li { code { "/hashrate" } ", " code { "/found_blocks" } ", " code { "/miners" } ", " code { "/network" } }
-                    li { code { "/metrics" } " (Prometheus), " code { "/peers" } ", " code { "/blocked_ips" }
+                    li { code { "/hashrate" } ", " code { "/found_blocks" } ", " code { "/miners" } ", " code { "/network" }
+                        ", " code { "/peers" } }
+                    li { code { "/metrics" } " (Prometheus), " code { "/blocked_ips" }
                         ", " code { "/jd_prepare" } " and " code { "/share_transaction" }
                         ": always behind the API login" }
                 }
@@ -1134,7 +1135,6 @@ pub(crate) fn signin(site: &Site) -> Markup {
                 }
                 ul {
                     li { code { "/metrics" } ": the Prometheus exposition." }
-                    li { code { "/peers" } ": connected peers as JSON." }
                     li { code { "/blocked_ips" } ": read, block and unblock peer IPs." }
                     li { code { "/jd_prepare" } " and " code { "/share_transaction" }
                         ": the node's own controls, by POST." }

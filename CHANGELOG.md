@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`public_dashboard` now also opens `GET /peers` and a tokenless `/ws`
+connection (a bad `/ws` token is still 401); `/metrics`, `/blocked_ips`
+and `/jd_prepare` keep the API login. The peer list moved from the node's
+own routes to the share chain routes, and `/ws` no longer needs a token
+on a public node. The WASM dashboard no longer sends a half-empty
+`?token=` when only the session password is gone, and its header feed
+says `unauthorized` when the node refuses the login. A 401 carries the
+browser's Basic challenge only when the request already sent credentials,
+so the WASM app's probes fail silently to that indicator instead of
+raising the login dialog.
+
 Share trading for Bitcoin Cash (decision 13), and a trade now carries
 value: nodes relay and mine share transactions, and a coinbase pays each
 window share's weight to whoever holds the share's payout right. This
