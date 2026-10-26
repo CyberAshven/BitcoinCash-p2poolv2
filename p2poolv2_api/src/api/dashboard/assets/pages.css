@@ -366,6 +366,109 @@ tr.uncle-row {
 .chart-wrap .chart-hit:hover .chart-tip {
   opacity: 1;
 }
+/* Tracer dots: chart.py draws hidden circles inside the svg, one per data
+   series per hit zone, at that zone's nearest sample vertex. The zone's strip
+   sits after the svg, so only a :has() on the figure can reach back into the
+   svg; hovering a strip reveals its circles, so a dot snaps along each data
+   line under the cursor -- still no script. data-zone and nth-child share the
+   strip's real position among the figure's children (the svg is child 1, so
+   strips start at 2), which is also what positions the strips above. */
+.chart-wrap .tracer {
+  opacity: 0;
+  stroke-width: 1;
+}
+.chart-wrap .tracer.pool {
+  fill: var(--ms-green);
+  stroke: var(--ms-green);
+  /* Two stacked drop-shadows: a tight core plus a soft halo, so the dot
+     reads as glowing against the dark chart. */
+  filter: drop-shadow(0 0 1px var(--ms-green)) drop-shadow(0 0 3px var(--ms-green));
+}
+.chart-wrap .tracer.local {
+  fill: #22d3ee;
+  stroke: #22d3ee;
+  filter: drop-shadow(0 0 1px #22d3ee) drop-shadow(0 0 3px #22d3ee);
+}
+.chart-wrap figure:has(.chart-hit:nth-child(2):hover) .tracer[data-zone="2"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(3):hover) .tracer[data-zone="3"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(4):hover) .tracer[data-zone="4"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(5):hover) .tracer[data-zone="5"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(6):hover) .tracer[data-zone="6"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(7):hover) .tracer[data-zone="7"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(8):hover) .tracer[data-zone="8"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(9):hover) .tracer[data-zone="9"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(10):hover) .tracer[data-zone="10"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(11):hover) .tracer[data-zone="11"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(12):hover) .tracer[data-zone="12"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(13):hover) .tracer[data-zone="13"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(14):hover) .tracer[data-zone="14"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(15):hover) .tracer[data-zone="15"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(16):hover) .tracer[data-zone="16"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(17):hover) .tracer[data-zone="17"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(18):hover) .tracer[data-zone="18"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(19):hover) .tracer[data-zone="19"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(20):hover) .tracer[data-zone="20"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(21):hover) .tracer[data-zone="21"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(22):hover) .tracer[data-zone="22"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(23):hover) .tracer[data-zone="23"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(24):hover) .tracer[data-zone="24"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(25):hover) .tracer[data-zone="25"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(26):hover) .tracer[data-zone="26"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(27):hover) .tracer[data-zone="27"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(28):hover) .tracer[data-zone="28"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(29):hover) .tracer[data-zone="29"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(30):hover) .tracer[data-zone="30"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(31):hover) .tracer[data-zone="31"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(32):hover) .tracer[data-zone="32"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(33):hover) .tracer[data-zone="33"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(34):hover) .tracer[data-zone="34"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(35):hover) .tracer[data-zone="35"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(36):hover) .tracer[data-zone="36"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(37):hover) .tracer[data-zone="37"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(38):hover) .tracer[data-zone="38"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(39):hover) .tracer[data-zone="39"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(40):hover) .tracer[data-zone="40"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(41):hover) .tracer[data-zone="41"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(42):hover) .tracer[data-zone="42"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(43):hover) .tracer[data-zone="43"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(44):hover) .tracer[data-zone="44"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(45):hover) .tracer[data-zone="45"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(46):hover) .tracer[data-zone="46"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(47):hover) .tracer[data-zone="47"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(48):hover) .tracer[data-zone="48"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(49):hover) .tracer[data-zone="49"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(50):hover) .tracer[data-zone="50"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(51):hover) .tracer[data-zone="51"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(52):hover) .tracer[data-zone="52"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(53):hover) .tracer[data-zone="53"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(54):hover) .tracer[data-zone="54"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(55):hover) .tracer[data-zone="55"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(56):hover) .tracer[data-zone="56"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(57):hover) .tracer[data-zone="57"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(58):hover) .tracer[data-zone="58"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(59):hover) .tracer[data-zone="59"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(60):hover) .tracer[data-zone="60"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(61):hover) .tracer[data-zone="61"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(62):hover) .tracer[data-zone="62"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(63):hover) .tracer[data-zone="63"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(64):hover) .tracer[data-zone="64"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(65):hover) .tracer[data-zone="65"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(66):hover) .tracer[data-zone="66"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(67):hover) .tracer[data-zone="67"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(68):hover) .tracer[data-zone="68"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(69):hover) .tracer[data-zone="69"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(70):hover) .tracer[data-zone="70"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(71):hover) .tracer[data-zone="71"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(72):hover) .tracer[data-zone="72"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(73):hover) .tracer[data-zone="73"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(74):hover) .tracer[data-zone="74"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(75):hover) .tracer[data-zone="75"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(76):hover) .tracer[data-zone="76"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(77):hover) .tracer[data-zone="77"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(78):hover) .tracer[data-zone="78"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(79):hover) .tracer[data-zone="79"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(80):hover) .tracer[data-zone="80"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(81):hover) .tracer[data-zone="81"] { opacity: 1; }
 /* WASM chart (p2poolv2_web/src/chart.rs) emits a bare .chart-tip (not inside
    .chart-hit). Pin it to the same fixed upper-right spot; !important beats any
    JS-set inline left so it does not follow the cursor either. The at-left /

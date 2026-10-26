@@ -6,9 +6,11 @@
 //!
 //! Every point carries an SVG `<title>`, which browsers show as a tooltip,
 //! and the figure carries CSS-only hit zones (`.chart-hit`) whose styled tip
-//! names the nearest sample, so hovering needs no script. Series are averaged
-//! down to a bounded number of points, so a page stays small however long
-//! the history is.
+//! names the nearest sample, so hovering needs no script. Each zone also has
+//! a hidden tracer circle (`.tracer`) inside the SVG at that zone's nearest
+//! sample vertex, revealed by the same hover, so a dot snaps along each line
+//! under the cursor. Series are averaged down to a bounded number of points,
+//! so a page stays small however long the history is.
 
 use maud::{Markup, PreEscaped, html};
 
@@ -199,7 +201,7 @@ pub(crate) fn line_chart(
         .find(|(line, _)| line.class == "local")
         .map(|(_, points)| points.as_slice())
         .unwrap_or(&[]);
-    let hit_zones = hit_zones(
+    let zones = hit_zones(
         pool_points,
         local_points,
         start,
@@ -209,6 +211,21 @@ pub(crate) fn line_chart(
         format_value,
         format_time,
     );
+    // Tracer circles live inside the svg, after the series, keyed to each
+    // zone's nth-child index so pages.css can reveal them per hover.
+    let tracers: Vec<Markup> = zones
+        .iter()
+        .flat_map(|zone| {
+            let mut circles = Vec::with_capacity(2);
+            if let Some((time, value)) = zone.pool_nearest {
+                circles.push(tracer_circle("pool", zone.zone, x(time), y(value)));
+            }
+            if let Some((time, value)) = zone.local_nearest {
+                circles.push(tracer_circle("local", zone.zone, x(time), y(value)));
+            }
+            circles
+        })
+        .collect();
 
     html! {
         figure.chart {
@@ -245,11 +262,13 @@ pub(crate) fn line_chart(
                         (dot.clone())
                     }
                 }
+                @for tracer in &tracers {
+                    (tracer.clone())
+                }
             }
-            (hit_zones)
-            figcaption {
-                @for (line, _) in &drawn {
-                    span class=(format!("key {}", line.class)) { (line.label) }
+            @for zone in &zones {
+                span class="chart-hit" data-left=(format!("{:.6}%", zone.left)) {
+                    span class=(format!("chart-tip {}", zone.at_class)) { (zone.tip.clone()) }
                 }
             }
         }
@@ -268,10 +287,16 @@ fn nearest_point(points: &[(u64, f64)], target: f64) -> Option<(u64, f64)> {
 /// One `.chart-hit` zone: a strip of the plot whose `.chart-tip` names the
 /// nearest sample of each series. `left` is a percentage of the figure width
 /// (emitted without inline styles; `pages.css` pins each nth-child).
+/// `zone` is the strip's `nth-child` among the figure's children (the svg is
+/// child 1, so the first strip is 2); its tracer circles carry that number
+/// as `data-zone`, and `pages.css` reveals them off the same index.
 struct HitZone {
     left: f64,
     at_class: &'static str,
     tip: Markup,
+    zone: usize,
+    pool_nearest: Option<(u64, f64)>,
+    local_nearest: Option<(u64, f64)>,
 }
 
 /// The hit zones tiling the plot, one per `STEP_PX` step of `fx`.
@@ -285,9 +310,9 @@ fn hit_zones(
     plot_width: f64,
     format_value: fn(f64) -> String,
     format_time: fn(u64) -> String,
-) -> Markup {
+) -> Vec<HitZone> {
     let count = (plot_width / STEP_PX).floor() as usize + 1;
-    let zones: Vec<HitZone> = (0..count)
+    (0..count)
         .map(|index| {
             let fx = (PAD_LEFT + index as f64 * STEP_PX).min(WIDTH - PAD_RIGHT);
             let time_at = start as f64 + ((fx - PAD_LEFT) / plot_width) * span;
@@ -309,7 +334,7 @@ fn hit_zones(
             }
             if let Some((_, value)) = local_nearest {
                 tip.push_str(&format!(
-                    "<span class=\"key local\">This node</span> <b>{}</b>",
+                    "<span class=\"key local\">Node</span> <b>{}</b>",
                     format_value(value)
                 ));
             }
@@ -317,15 +342,20 @@ fn hit_zones(
                 left: fx / WIDTH * 100.0,
                 at_class,
                 tip: PreEscaped(tip),
+                zone: index + 2,
+                pool_nearest,
+                local_nearest,
             }
         })
-        .collect();
+        .collect()
+}
+
+/// A hidden tracer circle for `zone`, drawn at a series' nearest sample;
+/// `pages.css` reveals it when that zone's hit strip is hovered.
+fn tracer_circle(class: &str, zone: usize, cx: f64, cy: f64) -> Markup {
     html! {
-        @for zone in &zones {
-            span class="chart-hit" data-left=(format!("{:.6}%", zone.left)) {
-                span class=(format!("chart-tip {}", zone.at_class)) { (zone.tip.clone()) }
-            }
-        }
+        circle class=(format!("tracer {class}")) data-zone=(zone) cx=(format!("{cx:.1}"))
+            cy=(format!("{cy:.1}")) r="1.5" {}
     }
 }
 
@@ -409,6 +439,79 @@ mod tests {
     }
 
     #[test]
+    fn a_chart_draws_one_tracer_per_zone_per_series_inside_the_svg() {
+        let markup = line_chart(
+            "Hashrate",
+            &[
+                Series {
+                    label: "Pool",
+                    class: "pool",
+                    points: vec![(100, 10.0), (160, 20.0)],
+                },
+                Series {
+                    label: "This node",
+                    class: "local",
+                    points: vec![(100, 5.0)],
+                },
+            ],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        assert_eq!(markup.matches("class=\"tracer pool\"").count(), 80);
+        assert_eq!(markup.matches("class=\"tracer local\"").count(), 80);
+        assert!(!markup.contains(" style="));
+        let svg_end = markup.find("</svg>").expect("chart draws an svg");
+        assert!(
+            markup.contains("class=\"tracer pool\""),
+            "tracers are emitted"
+        );
+        assert!(
+            markup[..svg_end].contains("class=\"tracer pool\""),
+            "tracer circles sit inside the svg"
+        );
+        assert!(
+            !markup[..svg_end].contains("class=\"chart-hit\""),
+            "hit zones follow the svg"
+        );
+        assert!(
+            markup[svg_end..].contains("class=\"chart-hit\""),
+            "hit zones follow the svg"
+        );
+    }
+
+    #[test]
+    fn tracer_zones_run_from_two_to_eighty_one_with_radius_one_point_five() {
+        let markup = line_chart(
+            "Hashrate",
+            &[Series {
+                label: "Pool",
+                class: "pool",
+                points: vec![(100, 10.0), (160, 20.0)],
+            }],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        let zones: Vec<usize> = markup
+            .split("data-zone=\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next()?.parse().ok())
+            .collect();
+        assert_eq!(zones.len(), 80);
+        assert_eq!(zones.first().copied(), Some(2));
+        assert_eq!(zones.last().copied(), Some(81));
+        assert!(
+            markup.contains("data-zone=\"2\" cx=\"76.0\" cy=\"122.2\" r=\"1.5\""),
+            "tracer sits at the nearest vertex with radius 1.5"
+        );
+    }
+
+    #[test]
     fn a_chart_keeps_its_svg_titles_beside_the_hit_zones() {
         let markup = line_chart(
             "Hashrate",
@@ -432,6 +535,7 @@ mod tests {
         .into_string();
         assert!(markup.contains("<title>Pool: 10 at t100</title>"));
         assert!(markup.contains("<title>This node: 5 at t100</title>"));
+        assert!(markup.contains("<span class=\"key local\">Node</span>"));
         assert!(markup.matches("class=\"chart-hit\"").count() == 80);
         assert!(!markup.contains("<script"));
     }

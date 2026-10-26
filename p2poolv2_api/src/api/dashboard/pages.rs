@@ -690,10 +690,10 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         div.kpi-grid {
             (kpi_card("Pool hashrate", optional(view.pool_hashrate, fmt_hashrate), "kpi-value-green", None,
                 &["Confirmed shares, last hour".to_string()]))
-            (kpi_card("This node", optional(view.local_hashrate, fmt_hashrate), "kpi-value-local", Some("/dashboard/miners"),
+            (kpi_card("Node hashrate", optional(view.local_hashrate, fmt_hashrate), "kpi-value-local", Some("/dashboard/miners"),
                 &[format!("{} miners, {} workers online", view.miners_online, view.workers_online),
                   format!("{} rejected of {} shares", view.rejected_shares_total, view.accepted_shares_total)]))
-            (kpi_card("Network hashrate (BCH)", optional(view.network_hashrate, fmt_hashrate), "kpi-value-net", None,
+            (kpi_card("network hashrate", optional(view.network_hashrate, fmt_hashrate), "kpi-value-net", None,
                 &[format!("Difficulty {}", optional(view.network_difficulty, fmt_difficulty)),
                   "Est. from diff. 10-min blocks".to_string()]))
             (kpi_card("Share chain height",
@@ -1451,7 +1451,7 @@ mod tests {
         let pool_card = pool_card.split("kpi-card").next().unwrap();
         assert!(!pool_card.contains("rejected of"));
         assert!(pool_card.contains("Confirmed shares, last hour"));
-        let node_card = page.split("kpi-label\">This node").nth(1).unwrap();
+        let node_card = page.split("kpi-label\">Node hashrate").nth(1).unwrap();
         let node_card = node_card.split("kpi-card").next().unwrap();
         assert!(node_card.contains("3 rejected of 10 shares"));
     }
