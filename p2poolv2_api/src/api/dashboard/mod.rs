@@ -363,9 +363,15 @@ async fn overview(
     let network_difficulty = state.tracker_handle.get_network_difficulty();
     let samples = dashboard.history.samples();
     let local_hashrate = samples.iter().rev().find_map(|sample| sample.local);
+    // Harmonize with the pool KPI: fall back to the newest non-null sample
+    // when the live recompute has too few shares to form a span, so both
+    // cards show a value (or both show the dash) together.
+    let pool_hashrate =
+        pool_hashrate.or_else(|| samples.iter().rev().find_map(|sample| sample.pool));
+    let local_hashrate =
+        local_hashrate.or_else(|| samples.iter().rev().find_map(|sample| sample.local));
     let blocks_found = blocks.len();
     let metrics = state.metrics_handle.get_metrics().await;
-
     html(pages::overview(&Overview {
         site: site(state),
         now: unix_now(),

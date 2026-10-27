@@ -34,7 +34,10 @@ pub(crate) const POOL_HASHRATE_SHARES: u32 = 120;
 /// Shares whose timestamp sits at least this far before the newest share in
 /// the window are left out of the hashrate span. A seed share (e.g. the
 /// genesis share at a fixed past time) would otherwise stretch the span and
-/// collapse the reported hashrate by orders of magnitude.
+/// collapse the reported hashrate by orders of magnitude. When that filter
+/// would leave fewer than two shares -- a gap longer than this between
+/// confirmed shares -- the two newest shares are used instead, so the span
+/// never collapses to zero and both rates stay known together.
 pub(crate) const MAX_SHARE_GAP_SECS: u32 = 3600;
 
 /// Expected seconds between Bitcoin Cash blocks, for network hashrate.
@@ -108,15 +111,24 @@ pub(crate) fn work_from_bits(bits: CompactTarget) -> f64 {
 ///
 /// Shares older than [`MAX_SHARE_GAP_SECS`] before the newest are dropped so
 /// a seed share (e.g. the genesis share at a fixed past time) cannot inflate
-/// the span. The oldest share only opens the time span: its work was done
+/// the span. When that filter would leave fewer than two shares -- a gap
+/// longer than [`MAX_SHARE_GAP_SECS`] between confirmed shares -- the two
+/// newest shares are used instead, so the span never collapses to zero.
+/// The oldest share only opens the time span: its work was done
 /// before it, outside the span. `None` with fewer than two shares or no time
 /// between the oldest and the newest.
 pub(crate) fn share_chain_hashrate(shares: &[(u32, CompactTarget)]) -> Option<f64> {
     let newest = shares.iter().max_by_key(|(time, _)| *time)?;
-    let kept: Vec<&(u32, CompactTarget)> = shares
+    let mut kept: Vec<&(u32, CompactTarget)> = shares
         .iter()
         .filter(|(time, _)| newest.0.saturating_sub(*time) <= MAX_SHARE_GAP_SECS)
         .collect();
+    if kept.len() < 2 {
+        let mut window: Vec<&(u32, CompactTarget)> = shares.iter().collect();
+        window.sort_unstable_by_key(|left| std::cmp::Reverse(left.0));
+        window.truncate(2);
+        kept = window;
+    }
     let oldest = kept.iter().min_by_key(|(time, _)| *time)?;
     let span = newest.0.checked_sub(oldest.0).filter(|span| *span > 0)?;
     let total: f64 = kept.iter().map(|(_, bits)| work_from_bits(*bits)).sum();
@@ -171,7 +183,9 @@ pub(crate) fn pool_hashrate(state: &AppState) -> Option<f64> {
 /// `connected` holds the payout and share chain addresses of those miners,
 /// as [`crate::api::dashboard::connected_miners`] spells them. Shares older
 /// than [`MAX_SHARE_GAP_SECS`] before the newest share are dropped (as in
-/// [`share_chain_hashrate`]) so both rates share one span. The oldest share
+/// [`share_chain_hashrate`]) so both rates share one span; when that filter
+/// would leave fewer than two shares, the two newest shares are used
+/// instead, so both rates stay known together. The oldest share
 /// of the kept window only opens the span; its work is never counted, even
 /// when it belongs to a connected miner. `None` with fewer than two shares
 /// or no time between the oldest and the newest.
@@ -181,10 +195,16 @@ pub(crate) fn local_chain_hashrate(
     connected: &HashSet<String>,
 ) -> Option<f64> {
     let newest = shares.iter().max_by_key(|share| share.timestamp)?;
-    let kept: Vec<&ShareInfo> = shares
+    let mut kept: Vec<&ShareInfo> = shares
         .iter()
         .filter(|share| newest.timestamp.saturating_sub(share.timestamp) <= MAX_SHARE_GAP_SECS)
         .collect();
+    if kept.len() < 2 {
+        let mut window: Vec<&ShareInfo> = shares.iter().collect();
+        window.sort_unstable_by_key(|left| std::cmp::Reverse(left.timestamp));
+        window.truncate(2);
+        kept = window;
+    }
     let oldest = kept.iter().min_by_key(|share| share.timestamp)?;
     let span = newest
         .timestamp
@@ -444,6 +464,19 @@ mod tests {
     }
 
     #[test]
+    fn share_chain_hashrate_uses_the_two_newest_when_the_gap_filter_would_leave_one() {
+        // The newest share sits more than MAX_SHARE_GAP_SECS after the
+        // previous one, so the filter would keep only the newest and the
+        // span would collapse to zero. The two newest are used instead:
+        // the previous share opens the span, the newest contributes its
+        // work over the gap between them.
+        let gap = MAX_SHARE_GAP_SECS + 3750;
+        let shares = [(1_000, difficulty_one()), (1_000 + gap, difficulty_one())];
+        let rate = share_chain_hashrate(&shares).unwrap();
+        assert!((rate - HASHES_PER_DIFFICULTY / f64::from(gap)).abs() < 1.0);
+    }
+
+    #[test]
     fn network_hashrate_spreads_difficulty_over_ten_minutes() {
         assert!((network_hashrate(600.0) - HASHES_PER_DIFFICULTY).abs() < 1.0);
     }
@@ -500,6 +533,18 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn local_chain_hashrate_uses_the_two_newest_when_the_gap_filter_would_leave_one() {
+        let connected: HashSet<String> = [CONNECTED_PAYOUT.to_string()].into_iter().collect();
+        // The newest share sits more than MAX_SHARE_GAP_SECS after the
+        // previous one, so the filter would keep only the newest and the
+        // span would collapse to zero. The two newest are used instead.
+        let gap = MAX_SHARE_GAP_SECS + 3750;
+        let shares = [share_at(1_000), share_at(1_000 + gap)];
+        let rate = local_chain_hashrate(&state().await, &shares, &connected).unwrap();
+        assert!((rate - HASHES_PER_DIFFICULTY / f64::from(gap)).abs() < 1.0);
     }
 
     #[tokio::test]

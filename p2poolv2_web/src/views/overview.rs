@@ -237,12 +237,22 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         })
         .unwrap_or_default()
     });
-    let rate = move |pick: fn(&Hashrate) -> Option<f64>| {
-        Signal::derive(move || {
-            loaded(&hashrate, |hashrate| optional(pick(hashrate), fmt_hashrate))
-                .unwrap_or_else(|| UNKNOWN.to_string())
+    // Harmonize the KPI cards: fall back to the newest non-null history
+    // sample when the live read is unknown, so all three cards show a value
+    // (or all show the dash) together.
+    let pool_rate = Signal::derive(move || {
+        loaded(&hashrate, |hashrate| {
+            let newest = hashrate.pool_hashrate.or_else(|| {
+                hashrate
+                    .history
+                    .iter()
+                    .rev()
+                    .find_map(|point| point.pool_hashrate)
+            });
+            optional(newest, fmt_hashrate)
         })
-    };
+        .unwrap_or_else(|| UNKNOWN.to_string())
+    });
     let error = Signal::derive(move || {
         first_error([
             failure(&hashrate),
@@ -279,6 +289,19 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
                     .iter()
                     .rev()
                     .find_map(|point| point.local_hashrate)
+            });
+            optional(newest, fmt_hashrate)
+        })
+        .unwrap_or_else(|| UNKNOWN.to_string())
+    });
+    let network_rate = Signal::derive(move || {
+        loaded(&hashrate, |hashrate| {
+            let newest = hashrate.network_hashrate.or_else(|| {
+                hashrate
+                    .history
+                    .iter()
+                    .rev()
+                    .find_map(|point| point.network_hashrate)
             });
             optional(newest, fmt_hashrate)
         })
@@ -411,7 +434,7 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         <div class="kpi-grid">
             <KpiCard
                 label="Pool hashrate"
-                value=rate(|hashrate| hashrate.pool_hashrate)
+                value=pool_rate
                 tone=Tone::Green
                 notes=pool_notes
             />
@@ -424,7 +447,7 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
             />
             <KpiCard
                 label="Network hashrate (BCH)"
-                value=rate(|hashrate| hashrate.network_hashrate)
+                value=network_rate
                 tone=Tone::Net
                 notes=network_notes
             />
@@ -505,6 +528,7 @@ mod tests {
                 time: minute,
                 pool_hashrate: None,
                 local_hashrate: None,
+                network_hashrate: None,
             })
             .collect();
         let capped = capped_history(history);

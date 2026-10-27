@@ -144,6 +144,7 @@ pub struct HashratePoint {
     pub time: u64,
     pub pool_hashrate: Option<f64>,
     pub local_hashrate: Option<f64>,
+    pub network_hashrate: Option<f64>,
 }
 
 /// `/hashrate?window=`.

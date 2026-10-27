@@ -468,6 +468,7 @@ mod tests {
             time,
             pool_hashrate: Some(pool),
             local_hashrate: local,
+            network_hashrate: None,
         }
     }
 
