@@ -21,31 +21,37 @@ use std::cmp::Reverse;
 use std::collections::HashSet;
 
 /// Chart windows offered: seconds, button, what the panel note calls it and
-/// the chart's name. The first is the node's chart, the last day.
-const WINDOWS: [(u64, &str, &str, &str); 3] = [
+/// the chart's name.
+const WINDOWS: [(u64, &str, &str, &str); 4] = [
+    (
+        3_600,
+        "Hour",
+        "one sample a minute, the last hour",
+        "Hashrate over the last hour",
+    ),
     (
         86_400,
-        "24h",
+        "Day",
         "one sample a minute, the last day",
         "Hashrate over the last day",
     ),
     (
-        21_600,
-        "6h",
-        "one sample a minute, the last 6 hours",
-        "Hashrate over the last 6 hours",
+        604_800,
+        "Week",
+        "one sample a minute, the last week",
+        "Hashrate over the last week",
     ),
     (
-        3_600,
-        "1h",
-        "one sample a minute, the last hour",
-        "Hashrate over the last hour",
+        2_592_000,
+        "Month",
+        "one sample a minute, the last month",
+        "Hashrate over the last month",
     ),
 ];
 
-/// Most hashrate samples kept for the chart: a day at one a minute, the most
-/// the node's history holds.
-pub const MAX_HISTORY_POINTS: usize = 1_440;
+/// Most hashrate samples kept for the chart: the store's 30-day retention
+/// at one sample a minute, the most the node's history holds.
+pub const MAX_HISTORY_POINTS: usize = 2_592_000 / 60;
 
 /// Found blocks the overview lists; the blocks page has them all.
 const RECENT_BLOCKS: usize = 5;
@@ -180,7 +186,16 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         ..
     } = context;
 
-    let window = RwSignal::new(WINDOWS[0].0);
+    let stored_window = crate::app::stored(crate::app::local_storage(), "p2pool.range")
+        .and_then(|stored| stored.parse::<u64>().ok())
+        .and_then(|seconds| {
+            WINDOWS
+                .iter()
+                .any(|(window, ..)| *window == seconds)
+                .then_some(seconds)
+        })
+        .unwrap_or(WINDOWS[1].0);
+    let window = RwSignal::new(stored_window);
     let hashrate = polled::<Hashrate>(move || format!("/hashrate?window={}", window.get()));
     let chain = polled::<ChainInfo>(|| "/chain_info".into());
     let blocks = polled::<Vec<FoundBlock>>(|| "/found_blocks".into());
@@ -308,14 +323,25 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         .unwrap_or_else(|| UNKNOWN.to_string())
     });
     let network_notes = Signal::derive(move || {
-        let difficulty = loaded(&hashrate, |hashrate| {
+        let network_difficulty = loaded(&hashrate, |hashrate| {
             hashrate
                 .network_hashrate
                 .map(difficulty_from_network_hashrate)
+                .or_else(|| {
+                    hashrate
+                        .history
+                        .iter()
+                        .rev()
+                        .find_map(|point| point.network_hashrate)
+                        .map(difficulty_from_network_hashrate)
+                })
         })
         .flatten();
         vec![
-            format!("Difficulty {}", optional(difficulty, fmt_difficulty)),
+            format!(
+                "Difficulty {}",
+                optional(network_difficulty, fmt_difficulty)
+            ),
             "Est. from diff. 10-min blocks".to_string(),
         ]
     });
@@ -338,21 +364,24 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         ]
     });
 
-    let window_note = move || {
-        WINDOWS
-            .iter()
-            .find(|(seconds, ..)| *seconds == window.get())
-            .map_or(WINDOWS[0].2, |(_, _, note, _)| note)
-    };
     let range_buttons = WINDOWS
         .iter()
         .map(|&(seconds, label, _, _)| {
+            let selected = move || window.get() == seconds;
+            let on_click = move |_| {
+                window.set(seconds);
+                crate::app::store(
+                    crate::app::local_storage(),
+                    "p2pool.range",
+                    &seconds.to_string(),
+                );
+            };
             view! {
                 <button
                     class="range-btn"
-                    class:active=move || window.get() == seconds
+                    class:active=selected
                     type="button"
-                    on:click=move |_| window.set(seconds)
+                    on:click=on_click
                 >
                     {label}
                 </button>
@@ -439,14 +468,14 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
                 notes=pool_notes
             />
             <KpiCard
-                label="This node"
+                label="Node hashrate"
                 value=local_rate
                 tone=Tone::Local
                 href="#/miners"
                 notes=local_note
             />
             <KpiCard
-                label="Network hashrate (BCH)"
+                label="network hashrate"
                 value=network_rate
                 tone=Tone::Net
                 notes=network_notes
@@ -455,9 +484,8 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
             <KpiCard label="Blocks found" value=blocks_found href="#/blocks" notes=blocks_note />
         </div>
         <div class="panel">
-            <h2>
+            <h2 class="hashrate-head">
                 "Hashrate"
-                <span class="panel-note">{window_note}</span>
                 <span class="range-btns">{range_buttons}</span>
             </h2>
             <div class="chart-wrap">{chart}</div>
@@ -522,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn test_history_keeps_the_newest_day() {
+    fn test_history_keeps_the_newest_month() {
         let history: Vec<HashratePoint> = (0..MAX_HISTORY_POINTS as u64 + 5)
             .map(|minute| HashratePoint {
                 time: minute,

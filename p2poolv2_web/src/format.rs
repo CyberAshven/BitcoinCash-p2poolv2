@@ -86,7 +86,7 @@ fn civil_from_days(days: i64) -> (i64, usize, u32) {
 }
 
 /// (year, month 1-12, day, hour, minute) of a unix time, in UTC.
-fn civil_time(unix: u64) -> (i64, usize, u32, u64, u64) {
+pub(crate) fn civil_time(unix: u64) -> (i64, usize, u32, u64, u64) {
     let days = i64::try_from(unix / 86_400).unwrap_or(i64::MAX / 2);
     let (year, month, day) = civil_from_days(days);
     let seconds = unix % 86_400;

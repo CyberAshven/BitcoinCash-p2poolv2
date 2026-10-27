@@ -68,19 +68,24 @@ fn unix_now() -> u64 {
     (milliseconds / 1000.0) as u64
 }
 
-fn local_storage() -> Option<web_sys::Storage> {
+/// The browser's local storage, when it is available.
+pub fn local_storage() -> Option<web_sys::Storage> {
     window().local_storage().ok()?
 }
 
-fn session_storage() -> Option<web_sys::Storage> {
+/// The browser's session storage, when it is available.
+pub fn session_storage() -> Option<web_sys::Storage> {
     window().session_storage().ok()?
 }
 
-fn stored(storage: Option<web_sys::Storage>, key: &str) -> Option<String> {
+/// `key`'s stored value, or `None` when it was never stored (or storage is
+/// unavailable).
+pub fn stored(storage: Option<web_sys::Storage>, key: &str) -> Option<String> {
     storage?.get_item(key).ok()?
 }
 
-fn store(storage: Option<web_sys::Storage>, key: &str, value: &str) {
+/// Save `value` under `key`; a refused write is logged, not fatal.
+pub fn store(storage: Option<web_sys::Storage>, key: &str, value: &str) {
     if let Some(storage) = storage
         && storage.set_item(key, value).is_err()
     {

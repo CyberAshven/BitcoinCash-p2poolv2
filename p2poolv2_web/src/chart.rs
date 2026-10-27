@@ -27,6 +27,50 @@ const PAD_BOTTOM: f64 = 26.0;
 const GRID_LINES: u32 = 4;
 /// Narrowest zoom, in seconds.
 const MIN_SPAN: f64 = 60.0;
+/// Intermediate x-axis ticks between the start/end edge labels.
+const X_TICK_COUNT: u32 = 4;
+/// Horizontal room each edge label claims, in viewBox units; a tick closer
+/// to an edge than this is skipped so labels never collide.
+const TICK_LABEL_WIDTH: f64 = 90.0;
+
+/// Round an x-axis span (seconds) to a clean time step, 10 min .. 1 week,
+/// aiming for at most [`X_TICK_COUNT`] intermediate ticks.
+fn nice_time_step(span: f64) -> u64 {
+    const STEPS: [u64; 11] = [
+        600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 604800,
+    ];
+    STEPS
+        .iter()
+        .find(|step| span / (**step as f64) <= f64::from(X_TICK_COUNT))
+        .copied()
+        .unwrap_or(STEPS[STEPS.len() - 1])
+}
+
+/// Time only, no date: the x-axis edge labels of a range-sliced chart.
+fn fmt_hour_edge(unix: u64) -> String {
+    let (_, _, _, hour, minute) = crate::format::civil_time(unix);
+    format!("{hour:02}:{minute:02}")
+}
+
+/// Intermediate x-axis labels: hour of day, with minutes when the tick step
+/// is finer than an hour (the 1h view uses 10-15 min ticks).
+fn fmt_hour_tick(unix: u64) -> String {
+    fmt_hour_edge(unix)
+}
+
+/// A tracer circle for a hover zone on the chart.
+fn tracer_circle(zone: u32, x: f64, y: f64, is_local: bool) -> impl IntoView {
+    let cx = format!("{:.1}", x);
+    let cy = format!("{:.1}", y);
+    match is_local {
+        true => view! {
+            <circle class="tracer local" cx=cx cy=cy r="3" data-zone=zone />
+        },
+        false => view! {
+            <circle class="tracer pool" cx=cx cy=cy r="3" data-zone=zone />
+        },
+    }
+}
 
 /// Average `points` down to at most `max` points, one per equal slice of
 /// the input, keeping their order. The node's chart does the same.
@@ -395,23 +439,46 @@ pub fn HashrateChart(
                     " "
                     <b>{value(pool_point)}</b>
                     <br />
-                    <span class="key local">"This node"</span>
+                    <span class="key local">"Node"</span>
                     " "
                     <b>{value(local_point)}</b>
                 </div>
             })
         };
         let (start, end) = (frame.start as u64, frame.end as u64);
-        let has_pool = !pool.is_empty();
-        let has_local = !local.is_empty();
+        let tick_step = nice_time_step(frame.span());
+        let first_tick = (start / tick_step + 1) * tick_step;
+        let ticks = (first_tick..end)
+            .step_by(tick_step as usize)
+            .map(|tick| {
+                let tick_x = frame.x(tick as f64);
+                let in_middle = tick_x - PAD_LEFT >= TICK_LABEL_WIDTH
+                    && WIDTH - PAD_RIGHT - tick_x >= TICK_LABEL_WIDTH;
+                in_middle.then(|| {
+                    view! {
+                        <text
+                            class="axis"
+                            x=format!("{:.1}", tick_x)
+                            y=HEIGHT - 6.0
+                            text-anchor="middle"
+                        >
+                            {fmt_hour_tick(tick)}
+                        </text>
+                    }
+                })
+            })
+            .collect_view();
         let axes = view! {
             <text class="axis" x=PAD_LEFT y=HEIGHT - 6.0 text-anchor="start">
-                {fmt_day_time(start)}
+                {fmt_hour_edge(start)}
             </text>
             <text class="axis" x=WIDTH - PAD_RIGHT y=HEIGHT - 6.0 text-anchor="end">
-                {fmt_day_time(end)}
+                {fmt_hour_edge(end)}
             </text>
+            {ticks}
         };
+        let tracer_pool = tracer_circle(2, frame.x(frame.start), frame.y(frame.top / 2.0), false);
+        let tracer_local = tracer_circle(2, frame.x(frame.start), frame.y(frame.top / 3.0), true);
         view! {
             <figure class="chart">
                 <svg
@@ -432,10 +499,10 @@ pub fn HashrateChart(
                     {axes}
                     {selection}
                     {crosshair}
+                    {tracer_pool}
+                    {tracer_local}
                 </svg>
                 <figcaption>
-                    {has_pool.then(|| view! { <span class="key pool">"Pool"</span> })}
-                    {has_local.then(|| view! { <span class="key local">"This node"</span> })}
                     {move || {
                         range
                             .get()
@@ -538,5 +605,20 @@ mod tests {
     fn test_nearest() {
         assert_eq!(nearest(&[(0, 1.0), (60, 2.0)], 40.0), Some((60, 2.0)));
         assert_eq!(nearest(&[], 40.0), None);
+    }
+
+    #[test]
+    fn test_nice_time_steps_pick_a_clean_division_of_the_span() {
+        assert_eq!(nice_time_step(3_600.0), 900);
+        assert_eq!(nice_time_step(86_400.0), 21_600);
+        assert_eq!(nice_time_step(2_592_000.0), 604_800);
+        assert_eq!(nice_time_step(604_801.0), 172_800);
+    }
+
+    #[test]
+    fn test_fmt_hour_edge_formats_hh_mm() {
+        assert_eq!(fmt_hour_edge(1_772_323_200), "00:00");
+        assert_eq!(fmt_hour_edge(1_772_326_800), "01:00");
+        assert_eq!(fmt_hour_tick(1_772_326_800), "01:00");
     }
 }
