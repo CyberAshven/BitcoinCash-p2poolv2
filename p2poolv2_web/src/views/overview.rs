@@ -196,6 +196,9 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         })
         .unwrap_or(WINDOWS[1].0);
     let window = RwSignal::new(stored_window);
+    // The chart's zoomed window; `None` shows everything. The header's
+    // reset button clears it while a zoom is active.
+    let zoom = RwSignal::new(None::<(f64, f64)>);
     let hashrate = polled::<Hashrate>(move || format!("/hashrate?window={}", window.get()));
     let chain = polled::<ChainInfo>(|| "/chain_info".into());
     let blocks = polled::<Vec<FoundBlock>>(|| "/found_blocks".into());
@@ -378,8 +381,9 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
             };
             view! {
                 <button
-                    class="range-btn"
-                    class:active=selected
+                    class="outline header-btn"
+                    class:active-nav=selected
+                    aria-current=move || selected().then_some("true")
                     type="button"
                     on:click=on_click
                 >
@@ -394,7 +398,20 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
             .iter()
             .find(|(window_seconds, ..)| *window_seconds == seconds)
             .map_or(WINDOWS[0].3, |(.., label)| label);
-        view! { <HashrateChart history=history label=label /> }
+        view! { <HashrateChart history=history range=zoom label=label /> }
+    };
+    let reset_zoom = move || {
+        zoom.get().map(|_| {
+            view! {
+                <button
+                    class="legend-chip legend-reset reset-zoom"
+                    type="button"
+                    on:click=move |_| zoom.set(None)
+                >
+                    "Reset zoom"
+                </button>
+            }
+        })
     };
 
     let blocks_panel = move || {
@@ -486,7 +503,10 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         <div class="panel">
             <h2 class="hashrate-head">
                 "Hashrate"
-                <span class="range-btns">{range_buttons}</span>
+                <span class="range-group" aria-label="Chart time range">
+                    {reset_zoom}
+                    {range_buttons}
+                </span>
             </h2>
             <div class="chart-wrap">{chart}</div>
         </div>

@@ -5,14 +5,18 @@
 //! The hashrate chart, drawn as SVG by Leptos.
 //!
 //! It draws what the node's own chart (`p2poolv2_api/.../dashboard/chart.rs`)
-//! draws, with the same size, margins, classes and averaging, and adds what a
-//! page with a script can do: the wheel zooms around the cursor, dragging
-//! selects a range to zoom into, double-click resets, and hovering shows the
-//! nearest values in CashDragon0's `.chart-tip`. The geometry is pure and unit
-//! tested; the component only wires events.
+//! draws, with the same size, margins, classes and averaging: every point
+//! carries an SVG `<title>` a browser shows as a native tooltip, and the
+//! figure carries CSS-only hit zones (`.chart-hit`) whose styled tip names
+//! the nearest sample. Each zone also hides tracer circles (`.tracer`) at
+//! that nearest sample, which `pages.css` reveals while the zone's strip is
+//! hovered, as the node's chart does. The geometry is pure and unit tested;
+//! the component wires the events a page with a script can add: the wheel
+//! zooms around the cursor, dragging selects a range to zoom into, and
+//! double-click resets.
 
 use crate::api::HashratePoint;
-use crate::format::{UNKNOWN, fmt_day_time, fmt_hashrate};
+use crate::format::{fmt_day_time, fmt_hashrate};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -25,8 +29,12 @@ const PAD_RIGHT: f64 = 12.0;
 const PAD_TOP: f64 = 12.0;
 const PAD_BOTTOM: f64 = 26.0;
 const GRID_LINES: u32 = 4;
-/// Narrowest zoom, in seconds.
-const MIN_SPAN: f64 = 60.0;
+/// Horizontal width of one hit zone, in viewBox units.
+const STEP_PX: f64 = 8.0;
+/// Narrowest zoom, in seconds: samples land once a minute, and a window
+/// of three keeps at least two in view so the lines always draw (a
+/// polyline of one point paints nothing).
+const MIN_SPAN: f64 = 180.0;
 /// Intermediate x-axis ticks between the start/end edge labels.
 const X_TICK_COUNT: u32 = 4;
 /// Horizontal room each edge label claims, in viewBox units; a tick closer
@@ -56,20 +64,6 @@ fn fmt_hour_edge(unix: u64) -> String {
 /// is finer than an hour (the 1h view uses 10-15 min ticks).
 fn fmt_hour_tick(unix: u64) -> String {
     fmt_hour_edge(unix)
-}
-
-/// A tracer circle for a hover zone on the chart.
-fn tracer_circle(zone: u32, x: f64, y: f64, is_local: bool) -> impl IntoView {
-    let cx = format!("{:.1}", x);
-    let cy = format!("{:.1}", y);
-    match is_local {
-        true => view! {
-            <circle class="tracer local" cx=cx cy=cy r="3" data-zone=zone />
-        },
-        false => view! {
-            <circle class="tracer pool" cx=cx cy=cy r="3" data-zone=zone />
-        },
-    }
 }
 
 /// Average `points` down to at most `max` points, one per equal slice of
@@ -239,13 +233,17 @@ fn area_gradient(class: &str, frame: &Frame) -> impl IntoView {
     }
 }
 
-/// Horizontal fraction of a mouse event across the element it is bound to.
+/// Horizontal fraction of a mouse event across the chart plot area (the SVG).
+/// Handlers are bound on `<figure>` (so events reach them even when a
+/// `.chart-hit` strip overlays the SVG), but the plot rect must be used for
+/// coordinate math: the figure also includes the caption below the plot.
 fn event_fraction(event: &web_sys::MouseEvent) -> Option<f64> {
-    let element = event
+    let figure = event
         .current_target()?
         .dyn_into::<web_sys::Element>()
         .ok()?;
-    let rect = element.get_bounding_client_rect();
+    let plot = figure.query_selector("svg.zoomable").ok().flatten()?;
+    let rect = plot.get_bounding_client_rect();
     if rect.width() <= 0.0 {
         return None;
     }
@@ -265,11 +263,20 @@ fn dot_positions(points: &[(u64, f64)], frame: &Frame) -> Vec<(String, String)> 
         .collect()
 }
 
-/// The pool's line and dots.
+/// A native `<title>` tooltip for one plotted dot.
+fn dot_title(label: &str, value: f64, time: u64) -> String {
+    format!("{label}: {} at {}", fmt_hashrate(value), fmt_day_time(time))
+}
+
+/// A pool's line and dots.
 fn pool_view<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView + use<'a> {
-    let dots = dot_positions(points, frame)
-        .into_iter()
-        .map(|(x, y)| view! { <circle class="dot pool" cx=x cy=y r="3" /> })
+    let dots = points
+        .iter()
+        .zip(dot_positions(points, frame))
+        .map(|((time, value), (x, y))| {
+            let title = dot_title("Pool", *value, *time);
+            view! { <circle class="dot pool" cx=x cy=y r="0.5">{title}</circle> }
+        })
         .collect_view();
     let gradient = area_gradient("pool", frame);
     let area = (!points.is_empty()).then(|| {
@@ -285,9 +292,13 @@ fn pool_view<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView + 
 
 /// This node's line and dots.
 fn local_view<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView + use<'a> {
-    let dots = dot_positions(points, frame)
-        .into_iter()
-        .map(|(x, y)| view! { <circle class="dot local" cx=x cy=y r="3" /> })
+    let dots = points
+        .iter()
+        .zip(dot_positions(points, frame))
+        .map(|((time, value), (x, y))| {
+            let title = dot_title("This node", *value, *time);
+            view! { <circle class="dot local" cx=x cy=y r="0.5">{title}</circle> }
+        })
         .collect_view();
     let gradient = area_gradient("local", frame);
     let area = (!points.is_empty()).then(|| {
@@ -301,15 +312,53 @@ fn local_view<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView +
     }
 }
 
+/// One `.chart-hit` zone: a strip of the plot whose `.chart-tip` names the
+/// nearest sample of each series. `zone` is the strip's `nth-child` among the
+/// figure's children (the svg is child 1, so the first strip is 2); its tracer
+/// circles carry that number as `data-zone`, and `pages.css` reveals them off
+/// the same index.
+struct HitZone {
+    at_class: &'static str,
+    zone: usize,
+    pool_nearest: Option<(u64, f64)>,
+    local_nearest: Option<(u64, f64)>,
+}
+
+/// The hit zones tiling the plot, one per `STEP_PX` step of `fx`.
+fn hit_zones(pool: &[(u64, f64)], local: &[(u64, f64)], frame: &Frame) -> Vec<HitZone> {
+    let plot_width = WIDTH - PAD_LEFT - PAD_RIGHT;
+    let count = (plot_width / STEP_PX).floor() as usize + 1;
+    let mut zones = Vec::with_capacity(count);
+    for index in 0..count {
+        let fx = (PAD_LEFT + index as f64 * STEP_PX).min(WIDTH - PAD_RIGHT);
+        let time_at = frame.start + ((fx - PAD_LEFT) / plot_width) * frame.span();
+        let pool_nearest = nearest(pool, time_at);
+        let local_nearest = nearest(local, time_at);
+        let at_class = if fx > WIDTH / 2.0 {
+            "at-left"
+        } else {
+            "at-right"
+        };
+        zones.push(HitZone {
+            at_class,
+            zone: index + 2,
+            pool_nearest,
+            local_nearest,
+        });
+    }
+    zones
+}
+
 /// The hashrate chart over `history`, oldest first. `label` names it for
-/// screen readers, as the node's chart does.
+/// screen readers, as the node's chart does. `range` is the zoomed window
+/// the chart draws; `None` shows everything, and the page's reset button
+/// in the header clears it.
 #[component]
 pub fn HashrateChart(
     #[prop(into)] history: Signal<Vec<HashratePoint>>,
+    range: RwSignal<Option<(f64, f64)>>,
     label: &'static str,
 ) -> impl IntoView {
-    // Visible time range; `None` shows everything.
-    let range = RwSignal::new(None::<(f64, f64)>);
     let hover = RwSignal::new(None::<f64>);
     let drag_start = RwSignal::new(None::<f64>);
 
@@ -394,57 +443,6 @@ pub fn HashrateChart(
                 />
             })
         };
-        let hovered_pool = pool.clone();
-        let hovered_local = local.clone();
-        let crosshair = move || {
-            let time = hover.get()?;
-            let pool_point = nearest(&hovered_pool, time);
-            let local_point = nearest(&hovered_local, time);
-            let (anchor_time, _) = pool_point.or(local_point)?;
-            let x = format!("{:.1}", frame.x(anchor_time as f64));
-            let position = |(point_time, value): (u64, f64)| {
-                (
-                    format!("{:.1}", frame.x(point_time as f64)),
-                    format!("{:.1}", frame.y(value)),
-                )
-            };
-            let hot_pool = pool_point
-                .map(position)
-                .map(|(x, y)| view! { <circle class="dot pool" cx=x cy=y r="5" /> });
-            let hot_local = local_point
-                .map(position)
-                .map(|(x, y)| view! { <circle class="dot local" cx=x cy=y r="5" /> });
-            Some(view! {
-                <line class="crosshair" x1=x.clone() x2=x y1=PAD_TOP y2=HEIGHT - PAD_BOTTOM />
-                {hot_pool}
-                {hot_local}
-            })
-        };
-        let tip_pool = pool.clone();
-        let tip_local = local.clone();
-        let tip = move || {
-            let time = hover.get()?;
-            let pool_point = nearest(&tip_pool, time);
-            let local_point = nearest(&tip_local, time);
-            let (anchor_time, _) = pool_point.or(local_point)?;
-            let on_right = frame.x(anchor_time as f64) > WIDTH / 2.0;
-            let value = |point: Option<(u64, f64)>| {
-                point.map_or_else(|| UNKNOWN.to_string(), |(_, value)| fmt_hashrate(value))
-            };
-            Some(view! {
-                <div class="chart-tip" class:at-left=on_right class:at-right=!on_right>
-                    <b>{fmt_day_time(anchor_time)}</b>
-                    <br />
-                    <span class="key pool">"Pool"</span>
-                    " "
-                    <b>{value(pool_point)}</b>
-                    <br />
-                    <span class="key local">"Node"</span>
-                    " "
-                    <b>{value(local_point)}</b>
-                </div>
-            })
-        };
         let (start, end) = (frame.start as u64, frame.end as u64);
         let tick_step = nice_time_step(frame.span());
         let first_tick = (start / tick_step + 1) * tick_step;
@@ -477,50 +475,100 @@ pub fn HashrateChart(
             </text>
             {ticks}
         };
-        let tracer_pool = tracer_circle(2, frame.x(frame.start), frame.y(frame.top / 2.0), false);
-        let tracer_local = tracer_circle(2, frame.x(frame.start), frame.y(frame.top / 3.0), true);
+        let zones = hit_zones(&pool, &local, &frame);
         view! {
-            <figure class="chart">
+            <figure
+                class="chart"
+                on:wheel=on_wheel
+                on:mousedown=on_down
+                on:mousemove=on_move
+                on:mouseup=on_up
+                on:mouseleave=on_leave
+                on:dblclick=move |_| range.set(None)
+            >
                 <svg
                     class="zoomable"
                     viewBox=format!("0 0 {WIDTH} {HEIGHT}")
                     role="img"
                     aria-label=label
-                    on:wheel=on_wheel
-                    on:mousedown=on_down
-                    on:mousemove=on_move
-                    on:mouseup=on_up
-                    on:mouseleave=on_leave
-                    on:dblclick=move |_| range.set(None)
                 >
                     {pool_view(&pool, &frame)}
                     {local_view(&local, &frame)}
                     {grid}
                     {axes}
                     {selection}
-                    {crosshair}
-                    {tracer_pool}
-                    {tracer_local}
-                </svg>
-                <figcaption>
-                    {move || {
-                        range
-                            .get()
-                            .map(|_| {
+                    {zones
+                        .iter()
+                        .map(|zone| {
+                            let pool_tracer = zone.pool_nearest.map(|(time, value)| {
+                                let x = frame.x(time as f64);
+                                let y = frame.y(value);
                                 view! {
-                                    <button
-                                        class="legend-chip legend-reset"
-                                        type="button"
-                                        on:click=move |_| range.set(None)
-                                    >
-                                        "Reset zoom"
-                                    </button>
+                                    <circle
+                                        class="tracer pool"
+                                        data-zone=zone.zone
+                                        cx=format!("{x:.1}")
+                                        cy=format!("{y:.1}")
+                                        r="1.5"
+                                    />
                                 }
-                            })
-                    }}
-                </figcaption>
+                            });
+                            let local_tracer = zone.local_nearest.map(|(time, value)| {
+                                let x = frame.x(time as f64);
+                                let y = frame.y(value);
+                                view! {
+                                    <circle
+                                        class="tracer local"
+                                        data-zone=zone.zone
+                                        cx=format!("{x:.1}")
+                                        cy=format!("{y:.1}")
+                                        r="1.5"
+                                    />
+                                }
+                            });
+                            view! { {pool_tracer} {local_tracer} }
+                        })
+                        .collect_view()}
+                </svg>
+                {zones
+                    .iter()
+                    .map(|zone| {
+                        let header = fmt_day_time(
+                            zone.pool_nearest
+                                .map_or(frame.start as u64, |(time, _)| time),
+                        );
+                        let pool_line = zone.pool_nearest.map(|(_, value)| view! {
+                            <span class="key pool">"Pool"</span>
+                            <b>{fmt_hashrate(value)}</b>
+                            <br />
+                        });
+                        let local_line = zone.local_nearest.map(|(_, value)| view! {
+                            <span class="key local">"Node"</span> <b>{fmt_hashrate(value)}</b>
+                        });
+                        let tip = view! {
+                            <b>{header}</b>
+                            <br />
+                            {pool_line}
+                            {local_line}
+                        };
+                        if zone.at_class == "at-right" {
+                            view! {
+                                <span class="chart-hit">
+                                    <span class="chart-tip at-right">{tip}</span>
+                                </span>
+                            }
+                            .into_any()
+                        } else {
+                            view! {
+                                <span class="chart-hit">
+                                    <span class="chart-tip at-left">{tip}</span>
+                                </span>
+                            }
+                            .into_any()
+                        }
+                    })
+                    .collect_view()}
             </figure>
-            {tip}
         }
         .into_any()
     }
@@ -590,6 +638,17 @@ mod tests {
     }
 
     #[test]
+    fn test_the_narrowest_zoom_keeps_two_samples_of_each_series_in_view() {
+        let history: Vec<HashratePoint> = (0..10)
+            .map(|minute| point(minute * 60, 2.0, Some(1.0)))
+            .collect();
+        // Worst-case alignment: the window starts just after a sample.
+        let drawn = draw(&history, Some((5.0, 5.0 + MIN_SPAN))).unwrap();
+        assert!(drawn.pool.len() >= 2, "pool line has two points to draw");
+        assert!(drawn.local.len() >= 2, "node line has two points to draw");
+    }
+
+    #[test]
     fn test_time_at_fraction_clamps_to_the_plot() {
         let frame = Frame {
             start: 0.0,
@@ -620,5 +679,55 @@ mod tests {
         assert_eq!(fmt_hour_edge(1_772_323_200), "00:00");
         assert_eq!(fmt_hour_edge(1_772_326_800), "01:00");
         assert_eq!(fmt_hour_tick(1_772_326_800), "01:00");
+    }
+
+    #[test]
+    fn test_hit_zones_count_eighty_strips_with_zone_numbers_two_to_eighty_one() {
+        let pool = vec![(100, 10.0), (160, 20.0)];
+        let local = vec![(100, 5.0)];
+        let frame = Frame {
+            start: 100.0,
+            end: 160.0,
+            top: 22.0,
+        };
+        let zones = hit_zones(&pool, &local, &frame);
+        assert_eq!(zones.len(), 80);
+        assert_eq!(zones.first().map(|zone| zone.zone), Some(2));
+        assert_eq!(zones.last().map(|zone| zone.zone), Some(81));
+        assert!(zones[0].pool_nearest.is_some());
+        assert!(zones[0].local_nearest.is_some());
+    }
+
+    #[test]
+    fn test_hit_zone_tip_data_names_the_nearest_sample_values() {
+        let pool = vec![(100, 10.0)];
+        let local = vec![(100, 5.0)];
+        let frame = Frame {
+            start: 100.0,
+            end: 160.0,
+            top: 11.0,
+        };
+        let zones = hit_zones(&pool, &local, &frame);
+        assert_eq!(zones[0].pool_nearest, Some((100, 10.0)));
+        assert_eq!(zones[0].local_nearest, Some((100, 5.0)));
+        assert_eq!(zones[0].at_class, "at-right");
+        assert_eq!(zones[79].at_class, "at-left");
+    }
+
+    #[test]
+    fn test_hit_zones_keep_the_nearest_sample_of_each_series_for_tracers() {
+        let pool = vec![(100, 10.0), (160, 20.0)];
+        let local = vec![(100, 5.0)];
+        let frame = Frame {
+            start: 100.0,
+            end: 160.0,
+            top: 22.0,
+        };
+        let zones = hit_zones(&pool, &local, &frame);
+        assert_eq!(zones[0].pool_nearest, Some((100, 10.0)));
+        assert_eq!(zones[0].local_nearest, Some((100, 5.0)));
+        assert_eq!(zones[79].pool_nearest, Some((160, 20.0)));
+        assert_eq!(zones[79].local_nearest, Some((100, 5.0)));
+        assert_eq!(zones[0].zone, 2);
     }
 }

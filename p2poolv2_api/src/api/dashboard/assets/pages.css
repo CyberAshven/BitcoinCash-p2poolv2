@@ -143,6 +143,12 @@ tr.uncle-row {
   letter-spacing: normal;
   white-space: nowrap;
 }
+/* The wasm header's Reset zoom button sits at the start of the group,
+   left of the Hour/Day/Week/Month buttons; the wider margin keeps it
+   from crowding them. */
+.panel h2 .range-group .reset-zoom {
+  margin-right: 0.75rem;
+}
 
 /* Keep the title and range buttons on one line. The buttons carry their own
    font-size; this keeps the title at .panel h2's 0.95rem, not Pico's h2 size. */
