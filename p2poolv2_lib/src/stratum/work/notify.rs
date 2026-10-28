@@ -18,6 +18,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
+use crate::stratum::work::tracker::JobTracker;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error};
@@ -36,6 +37,9 @@ pub(crate) struct NotifyContext {
     /// Bitcoin Cash: the share transactions waiting for a share. `None` on
     /// Bitcoin, whose shares carry their coinbase alone.
     pub share_transaction_pool: Option<ShareTransactionPool>,
+    /// Records each prepared template's `bits` so the network difficulty
+    /// stays readable when no miner is connected to receive a job.
+    pub tracker: Arc<JobTracker>,
 }
 
 /// Build the output distribution for the coinbase transaction using
@@ -176,6 +180,9 @@ fn publish_prepared_notify(
     context
         .pool_transactions
         .set_prepared(Arc::clone(&prepared));
+    if let Ok(compact_target) = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits) {
+        context.tracker.set_network_bits(compact_target);
+    }
     template_tx.send(Some(prepared)).map_err(|_| WorkError {
         message: "All template receivers dropped".to_string(),
     })
@@ -208,6 +215,7 @@ pub async fn start_notify(
     pool_difficulty: pool_difficulty::PoolDifficulty,
     pool_transactions: PoolTransactionCache,
     share_transaction_pool: Option<ShareTransactionPool>,
+    tracker: Arc<JobTracker>,
 ) {
     let pool_signature = match config.pool_signature {
         Some(ref sig) => sig.as_bytes().to_vec(),
@@ -222,6 +230,7 @@ pub async fn start_notify(
         payout,
         pool_transactions,
         share_transaction_pool,
+        tracker,
     };
 
     let mut latest_template: Option<Arc<BlockTemplate>> = None;
@@ -397,6 +406,7 @@ mod tests {
                 pool_difficulty,
                 PoolTransactionCache::new(),
                 None,
+                start_tracker_actor(),
             )
             .await;
         });
@@ -480,6 +490,7 @@ mod tests {
                 pool_difficulty,
                 PoolTransactionCache::new(),
                 None,
+                start_tracker_actor(),
             )
             .await;
         });
@@ -586,6 +597,7 @@ mod tests {
             payout: Box::new(mock_payout),
             pool_transactions: PoolTransactionCache::new(),
             share_transaction_pool: None,
+            tracker: start_tracker_actor(),
         };
 
         // Build prepared notify
