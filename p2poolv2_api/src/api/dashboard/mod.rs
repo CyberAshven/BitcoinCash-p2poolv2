@@ -138,13 +138,16 @@ fn error_page(state: &AppState, error: ApiError) -> Response {
     (status, html(pages::error(&site(state), &message))).into_response()
 }
 
-/// A `?page=` query, counted from 1, plus the overview's `?auto=` toggle
-/// and `?range=` chart window.
+/// A `?page=` query, counted from 1, plus the overview's `?auto=` toggle,
+/// `?range=` chart window and the `?pool=`/`?node=` chart series toggles
+/// (a series is hidden when its parameter is `0`).
 #[derive(Deserialize)]
 struct PageQuery {
     page: Option<usize>,
     auto: Option<String>,
     range: Option<String>,
+    pool: Option<String>,
+    node: Option<String>,
 }
 
 /// Whether the share `blockhash` met its own Bitcoin Cash block target.
@@ -346,6 +349,8 @@ async fn overview(
     let state = &dashboard.app;
     let auto = pages::Auto::from_query(query.auto.as_deref());
     let range_key = pages::normalize_range(query.range.as_deref());
+    let pool_on = pages::series_on(query.pool.as_deref());
+    let node_on = pages::series_on(query.node.as_deref());
     let now = unix_now();
     let chain = read_store(state, move |state| {
         (
@@ -401,6 +406,8 @@ async fn overview(
         shares_paging,
         auto,
         range_key,
+        pool_on,
+        node_on,
     }))
 }
 
@@ -1314,5 +1321,18 @@ mod tests {
         let (status, body, _) = get(&state, "/dashboard?page=999").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("No confirmed shares yet."));
+    }
+
+    #[tokio::test]
+    async fn the_series_toggles_read_their_query_parameters() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        let (status, body, _) = get(&state, "/dashboard?pool=0").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("class=\"legend-chip off\""));
+        assert!(body.contains("aria-pressed=\"false\""));
+        // The pool chip is off: its link turns it back on by omitting the
+        // parameter, the node chip still flips node.
+        assert!(body.contains("/dashboard?range=24h\">"));
+        assert!(body.contains("/dashboard?range=24h&amp;pool=0&amp;node=0\""));
     }
 }

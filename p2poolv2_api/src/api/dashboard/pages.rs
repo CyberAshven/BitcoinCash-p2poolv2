@@ -73,6 +73,27 @@ impl Auto {
 /// Rows on one page of a long table.
 pub(crate) const PAGE_SIZE: usize = 25;
 
+/// A chart series toggle from its query parameter: only `?pool=0`/`?node=0`
+/// hides the series, anything else (including a missing parameter) shows it.
+pub(crate) fn series_on(value: Option<&str>) -> bool {
+    value != Some("0")
+}
+
+/// The query fragment carrying the two chart series toggles, with the hidden
+/// state only: `""` when both series show, `&pool=0`, `&node=0` or both when
+/// a series is off. The links that must survive a click (range buttons, the
+/// auto-refresh toggle, the pager) append it to keep the state.
+pub(crate) fn series_q(pool_on: bool, node_on: bool) -> String {
+    let mut query = String::new();
+    if !pool_on {
+        query.push_str("&pool=0");
+    }
+    if !node_on {
+        query.push_str("&node=0");
+    }
+    query
+}
+
 /// What every page shows about the node it is served by. `/network` serves
 /// it as JSON for frontends such as `p2poolv2_web`.
 #[derive(Serialize)]
@@ -204,6 +225,10 @@ pub(crate) struct Overview {
     /// The normalized `?range=` key selecting the chart window, from
     /// [`normalize_range`].
     pub(crate) range_key: &'static str,
+    /// Whether the pool line shows, from `?pool=0`.
+    pub(crate) pool_on: bool,
+    /// Whether this node's line shows, from `?node=0`.
+    pub(crate) node_on: bool,
 }
 
 /// The found blocks page.
@@ -451,8 +476,9 @@ fn stat(key: &str, value: Markup) -> Markup {
 
 /// The hashrate chart's Hour/Day/Week/Month buttons, plain links with no
 /// script. The active range carries `active-nav` and `aria-current`. When
-/// auto-refresh is off the links keep `?auto=off`.
-fn range_buttons(range_key: &str, auto: Auto) -> Markup {
+/// auto-refresh is off the links keep `?auto=off`, and `series_arg` keeps the
+/// chart series toggles.
+fn range_buttons(range_key: &str, auto: Auto, series_arg: &str) -> Markup {
     let auto_query = if matches!(auto, Auto::Off) {
         "&auto=off"
     } else {
@@ -462,8 +488,34 @@ fn range_buttons(range_key: &str, auto: Auto) -> Markup {
         span.range-group aria-label="Chart time range" {
             @for (key, label, _, _) in RANGES {
                 a.outline.header-btn.active-nav[key == range_key] role="button"
-                    href=(format!("/dashboard?range={key}{auto_query}"))
+                    href=(format!("/dashboard?range={key}{auto_query}{series_arg}"))
                     aria-current=[(key == range_key).then_some("true")] { (label) }
+            }
+        }
+    }
+}
+
+/// The Pool/Node chart series toggles: their own row under the hashrate
+/// heading, stateless links that flip `?pool=0`/`?node=0` while keeping the
+/// range and auto-refresh parameters. A hidden series shows `off`; the dot
+/// carries the line's colour, the only difference between the two chips.
+fn series_toggles(pool_on: bool, node_on: bool, range_key: &str, auto: Auto) -> Markup {
+    let auto_query = if matches!(auto, Auto::Off) {
+        "&auto=off"
+    } else {
+        ""
+    };
+    html! {
+        span.series-toggles role="group" aria-label="Chart series" {
+            a.legend-chip.off[!pool_on] role="button" aria-pressed=(pool_on.to_string())
+                href=(format!("/dashboard?range={range_key}{auto_query}{}",
+                    series_q(!pool_on, node_on))) {
+                span.legend-dot.pool {} "Pool"
+            }
+            a.legend-chip.off[!node_on] role="button" aria-pressed=(node_on.to_string())
+                href=(format!("/dashboard?range={range_key}{auto_query}{}",
+                    series_q(pool_on, !node_on))) {
+                span.legend-dot.local {} "Node"
             }
         }
     }
@@ -491,6 +543,8 @@ pub(crate) fn pager(base: &str, paging: Paging) -> Markup {
 }
 
 /// The page frame: head, menu bar, search, trail and footer around `body`.
+/// `series_arg` is [`series_q`] for the overview, so the auto-refresh links
+/// keep the chart series toggles; empty elsewhere.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn layout(
     site: &Site,
@@ -500,6 +554,7 @@ pub(crate) fn layout(
     refresh: Option<u32>,
     auto: Option<Auto>,
     range_key: Option<&str>,
+    series_arg: &str,
     body: Markup,
 ) -> Markup {
     let range_query = range_key.map_or(String::new(), |key| format!("&range={key}"));
@@ -546,14 +601,14 @@ pub(crate) fn layout(
                                 Some(Auto::On) => {
                                     li {
                                         a.outline.header-btn.refresh-main.auto-on role="button"
-                                            href=(format!("/dashboard?auto=off{range_query}"))
+                                            href=(format!("/dashboard?auto=off{range_query}{series_arg}"))
                                             title="Turn off 30s auto-refresh" { "Auto on" }
                                     }
                                 }
                                 Some(Auto::Off) => {
                                     li {
                                         a.outline.header-btn.refresh-main.auto-paused role="button"
-                                            href=(format!("/dashboard?auto=on{range_query}"))
+                                            href=(format!("/dashboard?auto=on{range_query}{series_arg}"))
                                             title="Turn on 30s auto-refresh" { "Auto off" }
                                     }
                                 }
@@ -666,25 +721,38 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         .rev()
         .copied()
         .collect();
-    let chart = line_chart(
-        &format!("Hashrate over the last {period}"),
-        &[
-            Series {
-                label: "Pool",
-                class: "pool",
-                points: series(&samples, |sample| sample.pool),
-            },
-            Series {
-                label: "This node",
-                class: "local",
-                points: series(&samples, |sample| sample.local),
-            },
-        ],
-        fmt_hashrate,
-        fmt_day_time,
-        fmt_hour_tick,
-        fmt_hour_edge,
-    );
+    let mut shown = Vec::with_capacity(2);
+    if view.pool_on {
+        shown.push(Series {
+            label: "Pool",
+            class: "pool",
+            points: series(&samples, |sample| sample.pool),
+        });
+    }
+    if view.node_on {
+        shown.push(Series {
+            label: "This node",
+            class: "local",
+            points: series(&samples, |sample| sample.local),
+        });
+    }
+    // Both toggles off: a note about the toggles, not the "first points"
+    // note the chart shows before any sample arrives.
+    let chart = if shown.is_empty() {
+        html! {
+            p.empty { "All series hidden. Click a legend chip to show one." }
+        }
+    } else {
+        line_chart(
+            &format!("Hashrate over the last {period}"),
+            &shown,
+            fmt_hashrate,
+            fmt_day_time,
+            fmt_hour_tick,
+            fmt_hour_edge,
+        )
+    };
+    let series_arg = series_q(view.pool_on, view.node_on);
     let last_block = view.blocks.first().map(|block| block.time);
     let body = html! {
         div.kpi-grid {
@@ -704,7 +772,8 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                     .unwrap_or_else(|| "None yet".to_string())]))
         }
         div.panel {
-            h2.hashrate-head { "Hashrate" (range_buttons(view.range_key, view.auto)) }
+            h2.hashrate-head { "Hashrate" (range_buttons(view.range_key, view.auto, &series_arg)) }
+            (series_toggles(view.pool_on, view.node_on, view.range_key, view.auto))
             div.chart-wrap { (chart) }
         }
         div.panel {
@@ -751,7 +820,10 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                         }
                     }
                 }
-                (pager(&format!("/dashboard?range={}", view.range_key), view.shares_paging))
+                (pager(&format!(
+                    "/dashboard?range={}{series_arg}",
+                    view.range_key
+                ), view.shares_paging))
             }
         }
     };
@@ -765,6 +837,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         refresh,
         Some(view.auto),
         Some(view.range_key),
+        &series_arg,
         body,
     )
 }
@@ -789,6 +862,7 @@ pub(crate) fn blocks(view: &BlocksView) -> Markup {
         None,
         None,
         None,
+        "",
         body,
     )
 }
@@ -828,6 +902,7 @@ pub(crate) fn block(view: &BlockView) -> Markup {
         None,
         None,
         None,
+        "",
         body,
     )
 }
@@ -899,6 +974,7 @@ pub(crate) fn miners(view: &MinersView) -> Markup {
         None,
         None,
         None,
+        "",
         body,
     )
 }
@@ -981,6 +1057,7 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
         None,
         None,
         None,
+        "",
         body,
     )
 }
@@ -1046,6 +1123,7 @@ pub(crate) fn share(view: &ShareView) -> Markup {
         None,
         None,
         None,
+        "",
         body,
     )
 }
@@ -1119,6 +1197,7 @@ pub(crate) fn help(site: &Site) -> Markup {
         None,
         None,
         None,
+        "",
         body,
     )
 }
@@ -1158,6 +1237,7 @@ pub(crate) fn signin(site: &Site) -> Markup {
         None,
         None,
         None,
+        "",
         body,
     )
 }
@@ -1180,6 +1260,7 @@ pub(crate) fn error(site: &Site, message: &str) -> Markup {
         None,
         None,
         None,
+        "",
         body,
     )
 }
@@ -1216,6 +1297,8 @@ mod tests {
             shares_paging: Paging::of(None, 0),
             auto: Auto::On,
             range_key: normalize_range(None),
+            pool_on: true,
+            node_on: true,
         }
     }
 
@@ -1262,15 +1345,56 @@ mod tests {
 
     #[test]
     fn the_range_buttons_mark_the_active_range_without_script() {
-        let markup = range_buttons("1h", Auto::On).into_string();
+        let markup = range_buttons("1h", Auto::On, "").into_string();
         assert!(markup.contains("aria-label=\"Chart time range\""));
         assert!(markup.contains(
             "class=\"outline header-btn active-nav\" role=\"button\" href=\"/dashboard?range=1h\" aria-current=\"true\">Hour</a>"
         ));
         assert!(markup.contains("href=\"/dashboard?range=24h\">Day</a>"));
         assert!(!markup.contains("auto="));
-        let paused = range_buttons("24h", Auto::Off).into_string();
+        let paused = range_buttons("24h", Auto::Off, "").into_string();
         assert!(paused.contains("href=\"/dashboard?range=1h&amp;auto=off\""));
+        let toggled = range_buttons("24h", Auto::On, "&pool=0").into_string();
+        assert!(toggled.contains("href=\"/dashboard?range=1h&amp;pool=0\""));
+    }
+
+    #[test]
+    fn a_series_is_off_only_when_its_parameter_says_so() {
+        assert!(series_on(None));
+        assert!(series_on(Some("1")));
+        assert!(series_on(Some("bogus")));
+        assert!(!series_on(Some("0")));
+    }
+
+    #[test]
+    fn the_series_query_lists_only_the_hidden_series() {
+        assert_eq!(series_q(true, true), "");
+        assert_eq!(series_q(false, true), "&pool=0");
+        assert_eq!(series_q(true, false), "&node=0");
+        assert_eq!(series_q(false, false), "&pool=0&node=0");
+    }
+
+    #[test]
+    fn the_series_toggles_link_both_states_without_script() {
+        let both_on = series_toggles(true, true, "24h", Auto::On).into_string();
+        assert!(both_on.contains("aria-label=\"Chart series\""));
+        assert!(both_on.contains("class=\"legend-chip\" role=\"button\" aria-pressed=\"true\""));
+        assert!(both_on.contains("span class=\"legend-dot pool\""));
+        assert!(both_on.contains("span class=\"legend-dot local\""));
+        assert!(both_on.contains("/dashboard?range=24h&amp;pool=0"));
+        assert!(both_on.contains("/dashboard?range=24h&amp;node=0"));
+        // Each chip flips only its own series, keeping the other's state.
+        let pool_hidden = series_toggles(false, true, "1h", Auto::Off).into_string();
+        assert!(
+            pool_hidden
+                .contains("class=\"legend-chip off\" role=\"button\" aria-pressed=\"false\"")
+        );
+        assert!(pool_hidden.contains("/dashboard?range=1h&amp;auto=off\""));
+        assert!(pool_hidden.contains("/dashboard?range=1h&amp;auto=off&amp;pool=0&amp;node=0"));
+        assert!(!pool_hidden.contains("pool=0\""));
+        let both_hidden = series_toggles(false, false, "24h", Auto::On).into_string();
+        assert!(both_hidden.contains("legend-chip off"));
+        assert!(both_hidden.contains("aria-pressed=\"false\""));
     }
 
     #[test]
@@ -1349,6 +1473,7 @@ mod tests {
             None,
             None,
             None,
+            "",
             html! { p { "hi" } },
         )
         .into_string();
@@ -1379,6 +1504,7 @@ mod tests {
             None,
             None,
             None,
+            "",
             html! { p { "hi" } },
         )
         .into_string();
@@ -1412,6 +1538,56 @@ mod tests {
         assert!(page.contains("Collecting data"));
         assert!(page.contains("has not found a Bitcoin Cash block yet"));
         assert!(!page.contains("<script"));
+    }
+
+    #[test]
+    fn the_overview_lists_both_series_toggles_by_default() {
+        let page = overview(&empty_overview()).into_string();
+        assert!(page.contains("series-toggles"));
+        assert!(page.contains("legend-dot pool"));
+        assert!(page.contains("legend-dot local"));
+        assert!(!page.contains("legend-chip off"));
+        assert!(page.contains("href=\"/dashboard?range=24h&amp;pool=0\""));
+        assert!(page.contains("href=\"/dashboard?range=24h&amp;node=0\""));
+    }
+
+    #[test]
+    fn hiding_a_series_drops_it_from_the_chart() {
+        let mut view = empty_overview();
+        view.samples = vec![
+            Sample {
+                time: 1_000,
+                pool: Some(100.0),
+                local: Some(50.0),
+                network: None,
+            },
+            Sample {
+                time: 1_060,
+                pool: Some(200.0),
+                local: Some(60.0),
+                network: None,
+            },
+        ];
+        view.pool_on = false;
+        let page = overview(&view).into_string();
+        assert!(page.contains("polyline class=\"line local\""));
+        assert!(!page.contains("polyline class=\"line pool\""));
+        assert!(!page.contains("class=\"area pool\""));
+        assert!(!page.contains("tracer pool"));
+        assert!(page.contains("class=\"legend-chip off\""));
+        assert!(page.contains("href=\"/dashboard?range=24h\""));
+        assert!(!page.contains("Collecting data"));
+    }
+
+    #[test]
+    fn hiding_both_series_shows_the_legend_note() {
+        let mut view = empty_overview();
+        view.pool_on = false;
+        view.node_on = false;
+        let page = overview(&view).into_string();
+        assert!(page.contains("All series hidden. Click a legend chip to show one."));
+        assert!(!page.contains("<svg"));
+        assert!(!page.contains("Collecting data"));
     }
 
     #[test]

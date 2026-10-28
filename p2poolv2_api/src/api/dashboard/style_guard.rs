@@ -358,6 +358,8 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         shares_paging: Paging { page: 1, pages: 2 },
         auto: pages::Auto::On,
         range_key: pages::normalize_range(None),
+        pool_on: true,
+        node_on: false,
     })
     .into_string()
 }

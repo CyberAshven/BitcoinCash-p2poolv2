@@ -199,6 +199,18 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
     // The chart's zoomed window; `None` shows everything. The header's
     // reset button clears it while a zoom is active.
     let zoom = RwSignal::new(None::<(f64, f64)>);
+    // The two chart series, persisted like the range so a reload keeps them.
+    let pool_visible = RwSignal::new(crate::app::stored_flag("p2pool.pool-visible"));
+    let local_visible = RwSignal::new(crate::app::stored_flag("p2pool.local-visible"));
+    // The chips write the flip back so the next visit keeps it.
+    let flip = |signal: RwSignal<bool>, key: &'static str| {
+        move |_| {
+            let next = !signal.get_untracked();
+            signal.set(next);
+            let stored = if next { "" } else { "0" };
+            crate::app::store(crate::app::local_storage(), key, stored);
+        }
+    };
     let hashrate = polled::<Hashrate>(move || format!("/hashrate?window={}", window.get()));
     let chain = polled::<ChainInfo>(|| "/chain_info".into());
     let blocks = polled::<Vec<FoundBlock>>(|| "/found_blocks".into());
@@ -398,7 +410,41 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
             .iter()
             .find(|(window_seconds, ..)| *window_seconds == seconds)
             .map_or(WINDOWS[0].3, |(.., label)| label);
-        view! { <HashrateChart history=history range=zoom label=label /> }
+        view! {
+            <HashrateChart
+                history=history
+                range=zoom
+                label=label
+                pool_visible=pool_visible
+                local_visible=local_visible
+            />
+        }
+    };
+    let series_toggles = move || {
+        view! {
+            <span class="series-toggles" role="group" aria-label="Chart series">
+                <button
+                    class="legend-chip"
+                    class:off=move || !pool_visible.get()
+                    type="button"
+                    aria-pressed=move || pool_visible.get().to_string()
+                    on:click=flip(pool_visible, "p2pool.pool-visible")
+                >
+                    <span class="legend-dot pool"></span>
+                    "Pool"
+                </button>
+                <button
+                    class="legend-chip"
+                    class:off=move || !local_visible.get()
+                    type="button"
+                    aria-pressed=move || local_visible.get().to_string()
+                    on:click=flip(local_visible, "p2pool.local-visible")
+                >
+                    <span class="legend-dot local"></span>
+                    "Node"
+                </button>
+            </span>
+        }
     };
     let reset_zoom = move || {
         zoom.get().map(|_| {
@@ -508,6 +554,7 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
                     {range_buttons}
                 </span>
             </h2>
+            {series_toggles}
             <div class="chart-wrap">{chart}</div>
         </div>
         <div class="panel">

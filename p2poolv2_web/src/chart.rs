@@ -143,10 +143,24 @@ fn series(
 
 /// The chart for `history` zoomed to `range`, or `None` when there is
 /// nothing to draw. Values start at zero and the top is 10% above the
-/// highest, as on the node's chart.
-pub fn draw(history: &[HashratePoint], range: Option<(f64, f64)>) -> Option<Drawn> {
-    let pool = series(history, range, |point| point.pool_hashrate);
-    let local = series(history, range, |point| point.local_hashrate);
+/// highest, as on the node's chart. A series turned off contributes no
+/// points, so the frame rescales to what is actually shown.
+pub fn draw(
+    history: &[HashratePoint],
+    range: Option<(f64, f64)>,
+    pool_on: bool,
+    local_on: bool,
+) -> Option<Drawn> {
+    let pool = if pool_on {
+        series(history, range, |point| point.pool_hashrate)
+    } else {
+        Vec::new()
+    };
+    let local = if local_on {
+        series(history, range, |point| point.local_hashrate)
+    } else {
+        Vec::new()
+    };
     let all = || pool.iter().chain(local.iter());
     let first = all().map(|(time, _)| *time).min()?;
     let last = all().map(|(time, _)| *time).max()?;
@@ -374,11 +388,16 @@ pub fn HashrateChart(
     #[prop(into)] history: Signal<Vec<HashratePoint>>,
     range: RwSignal<Option<(f64, f64)>>,
     label: &'static str,
+    #[prop(into)] pool_visible: Signal<bool>,
+    #[prop(into)] local_visible: Signal<bool>,
 ) -> impl IntoView {
     let hover = RwSignal::new(None::<f64>);
     let drag_start = RwSignal::new(None::<f64>);
 
-    let drawn = Memo::new(move |_| history.with(|points| draw(points, range.get())));
+    let drawn = Memo::new(move |_| {
+        let (pool_on, local_on) = (pool_visible.get(), local_visible.get());
+        history.with(|points| draw(points, range.get(), pool_on, local_on))
+    });
     let bounds = move || {
         history.with_untracked(|points| match (points.first(), points.last()) {
             (Some(first), Some(last)) => Some((first.time as f64, last.time as f64)),
@@ -414,6 +433,18 @@ pub fn HashrateChart(
     };
 
     move || {
+        // Both read unconditionally so a toggle always re-renders, even
+        // while the history is still empty.
+        let (pool_shown, local_shown) = (pool_visible.get(), local_visible.get());
+        // Both toggles off: name the toggles, not the "first points" note.
+        if !pool_shown && !local_shown {
+            return view! {
+                <p class="empty">
+                    "All series hidden. Click a legend chip to show one."
+                </p>
+            }
+            .into_any();
+        }
         let Some(Drawn { frame, pool, local }) = drawn.get() else {
             return view! {
                 <p class="empty">
@@ -492,6 +523,7 @@ pub fn HashrateChart(
             {ticks}
         };
         let zones = hit_zones(&pool, &local, &frame);
+        // A hidden series has no points, but skip its gradient too.
         view! {
             <figure
                 class="chart"
@@ -508,12 +540,12 @@ pub fn HashrateChart(
                     role="img"
                     aria-label=label
                 >
-                    {pool_area(&pool, &frame)}
-                    {local_area(&local, &frame)}
+                    {pool_shown.then(|| pool_area(&pool, &frame))}
+                    {local_shown.then(|| local_area(&local, &frame))}
                     {grid}
                     {axes}
-                    {pool_line(&pool, &frame)}
-                    {local_line(&local, &frame)}
+                    {pool_shown.then(|| pool_line(&pool, &frame))}
+                    {local_shown.then(|| local_line(&local, &frame))}
                     {selection}
                     {zones
                         .iter()
@@ -553,6 +585,7 @@ pub fn HashrateChart(
                     .map(|zone| {
                         let header = fmt_day_time(
                             zone.pool_nearest
+                                .or(zone.local_nearest)
                                 .map_or(frame.start as u64, |(time, _)| time),
                         );
                         let pool_line = zone.pool_nearest.map(|(_, value)| view! {
@@ -622,13 +655,33 @@ mod tests {
             point(100, 50.0, Some(80.0)),
             point(200, 20.0, None),
         ];
-        let drawn = draw(&history, None).unwrap();
+        let drawn = draw(&history, None, true, true).unwrap();
         assert_eq!((drawn.frame.start, drawn.frame.end), (0.0, 200.0));
         assert!((drawn.frame.top - 88.0).abs() < 1e-9);
         assert_eq!(drawn.local, vec![(100, 80.0)]);
-        let zoomed = draw(&history, Some((150.0, 200.0))).unwrap();
+        let zoomed = draw(&history, Some((150.0, 200.0)), true, true).unwrap();
         assert!((zoomed.frame.top - 22.0).abs() < 1e-9);
-        assert!(draw(&[], None).is_none());
+        assert!(draw(&[], None, true, true).is_none());
+    }
+
+    #[test]
+    fn test_draw_leaves_a_hidden_series_out_of_the_frame() {
+        let history = [
+            point(0, 10.0, None),
+            point(100, 50.0, Some(80.0)),
+            point(200, 20.0, None),
+        ];
+        let pool_only = draw(&history, None, true, false).unwrap();
+        // The node's 80.0 no longer sets the top; the pool's 50.0 does.
+        assert!((pool_only.frame.top - 55.0).abs() < 1e-9);
+        assert!(pool_only.local.is_empty());
+        let node_only = draw(&history, None, false, true).unwrap();
+        assert!(node_only.pool.is_empty());
+        assert_eq!(node_only.local, vec![(100, 80.0)]);
+        assert!((node_only.frame.top - 88.0).abs() < 1e-9);
+        // Both off: nothing to draw, which the component turns into its
+        // "All series hidden" note.
+        assert!(draw(&history, None, false, false).is_none());
     }
 
     #[test]
@@ -636,7 +689,7 @@ mod tests {
         let day: Vec<HashratePoint> = (0..1440)
             .map(|minute| point(minute * 60, 1.0, None))
             .collect();
-        assert_eq!(draw(&day, None).unwrap().pool.len(), MAX_POINTS);
+        assert_eq!(draw(&day, None, true, true).unwrap().pool.len(), MAX_POINTS);
     }
 
     #[test]
@@ -661,7 +714,7 @@ mod tests {
             .map(|minute| point(minute * 60, 2.0, Some(1.0)))
             .collect();
         // Worst-case alignment: the window starts just after a sample.
-        let drawn = draw(&history, Some((5.0, 5.0 + MIN_SPAN))).unwrap();
+        let drawn = draw(&history, Some((5.0, 5.0 + MIN_SPAN)), true, true).unwrap();
         assert!(drawn.pool.len() >= 2, "pool line has two points to draw");
         assert!(drawn.local.len() >= 2, "node line has two points to draw");
     }

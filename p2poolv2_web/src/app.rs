@@ -93,6 +93,12 @@ pub fn store(storage: Option<web_sys::Storage>, key: &str, value: &str) {
     }
 }
 
+/// A stored on/off flag under `key`: only the exact string `"0"` reads as
+/// off, so a missing key (the first visit) shows the value.
+pub fn stored_flag(key: &str) -> bool {
+    stored(local_storage(), key).as_deref() != Some("0")
+}
+
 /// Initial connection: `?api=` in the page URL, then the saved base, then the
 /// page's own origin (the node serving the app from `web_root`). The
 /// password lives only in session storage, so it is gone when the tab closes;

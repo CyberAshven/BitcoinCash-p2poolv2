@@ -324,7 +324,12 @@ fn hit_zones(
                 "at-right"
             };
             let mut tip = String::from("<b>");
-            tip.push_str(&format_time(pool_nearest.map_or(start, |(time, _)| time)));
+            // The time header follows whichever series is drawn; pool first,
+            // so it still reads right with the pool line toggled off.
+            let header_time = pool_nearest
+                .or(local_nearest)
+                .map_or(start, |(time, _)| time);
+            tip.push_str(&format_time(header_time));
             tip.push_str("</b><br>");
             if let Some((_, value)) = pool_nearest {
                 tip.push_str(&format!(

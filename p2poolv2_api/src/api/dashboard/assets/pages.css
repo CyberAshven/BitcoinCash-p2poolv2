@@ -165,6 +165,55 @@ tr.uncle-row {
   flex-shrink: 0;
 }
 
+/* Pool/Node series toggles: their own row under the hashrate heading, so the
+   stateless links can flip ?pool=0/?node=0 (server) or toggle the signals
+   (wasm) without a script. */
+.series-toggles {
+  display: flex;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0 0 0.4rem;
+  /* Pico styles [role=group] width:100% with children flex:1 1 auto, which
+     stretched the pills across the row; it also paints a green box-shadow on
+     the whole group when any chip is focused (click). Undo both. */
+  width: auto;
+  box-shadow: none;
+}
+/* Pico's a[role=button]{display:inline-block} outranks .legend-chip's
+   inline-flex (0,1,1 vs 0,1,0), so the dot/label gap needs this higher
+   specificity; the compact size matches the range buttons beside it. */
+.series-toggles .legend-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.1rem 0.3rem;
+  gap: 0.4rem;
+  font-size: 0.68rem;
+  font-weight: 400;
+  line-height: 1.1;
+  flex: none;
+  cursor: pointer;
+}
+.series-toggles .legend-chip:focus {
+  box-shadow: none;
+}
+.series-toggles .legend-chip:focus-visible {
+  box-shadow: 0 0 0 var(--pico-outline-width) var(--pico-primary-focus);
+}
+.series-toggles .legend-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+}
+.series-toggles .legend-dot.pool {
+  background: var(--ms-green);
+}
+.series-toggles .legend-dot.local {
+  background: #22d3ee;
+}
+.series-toggles .legend-chip.off {
+  opacity: 0.45;
+}
+
 /* The hashrate chart, drawn as SVG on the server. */
 .chart-wrap figure {
   margin: 0;
