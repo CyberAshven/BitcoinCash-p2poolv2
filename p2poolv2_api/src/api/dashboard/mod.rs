@@ -346,10 +346,11 @@ async fn overview(
     let state = &dashboard.app;
     let auto = pages::Auto::from_query(query.auto.as_deref());
     let range_key = pages::normalize_range(query.range.as_deref());
+    let now = unix_now();
     let chain = read_store(state, move |state| {
         (
             share_page(state, query.page),
-            pool_hashrate(state),
+            pool_hashrate(state, now),
             found_blocks(state),
         )
     })
@@ -374,7 +375,7 @@ async fn overview(
     let metrics = state.metrics_handle.get_metrics().await;
     html(pages::overview(&Overview {
         site: site(state),
-        now: unix_now(),
+        now,
         tip_height,
         pool_hashrate,
         local_hashrate,

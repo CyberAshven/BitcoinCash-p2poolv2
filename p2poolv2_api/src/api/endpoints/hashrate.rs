@@ -112,6 +112,7 @@ async fn hashrate(
             // Before the first sample: read pool, local and network now. The
             // store read is synchronous, so keep it off the async workers.
             let app = Arc::clone(&state.app);
+            let now = history::unix_now();
             let connected: HashSet<String> = connected_miners(&app).await;
             let (pool, local) = tokio::task::spawn_blocking(move || {
                 let shares = history::newest_shares(&app, history::POOL_HASHRATE_SHARES);
@@ -120,7 +121,7 @@ async fn hashrate(
                     .map(|share| (share.timestamp, share.bits))
                     .collect();
                 (
-                    history::share_chain_hashrate(&points),
+                    history::share_chain_hashrate(&points, now),
                     history::local_chain_hashrate(&app, &shares, &connected),
                 )
             })
@@ -128,8 +129,8 @@ async fn hashrate(
             .unwrap_or_default();
             HashratePoint {
                 time: 0,
-                pool_hashrate: pool,
-                local_hashrate: local,
+                pool_hashrate: history::normalize_rate(pool),
+                local_hashrate: history::normalize_rate(local),
                 network_hashrate: state
                     .app
                     .tracker_handle

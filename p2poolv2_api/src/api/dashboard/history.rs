@@ -87,16 +87,24 @@ impl HashrateHistory {
 
     /// Replace the ring with `samples`, oldest first, as the server does
     /// once at startup after loading the store. Newest beyond the ring's
-    /// bound are kept.
+    /// bound are kept. Samples persisted before rates were normalized
+    /// (a negative zero local value) are corrected on the way in.
     pub(crate) fn load(&self, samples: Vec<Sample>) {
         let mut inner = self.lock();
+        let normalize = |sample: Sample| Sample {
+            pool: normalize_rate(sample.pool),
+            local: normalize_rate(sample.local),
+            network: normalize_rate(sample.network),
+            ..sample
+        };
         let kept: VecDeque<Sample> = if samples.len() > MAX_SAMPLES {
             samples[samples.len() - MAX_SAMPLES..]
                 .iter()
                 .copied()
+                .map(normalize)
                 .collect()
         } else {
-            samples.into_iter().collect()
+            samples.into_iter().map(normalize).collect()
         };
         inner.samples = kept;
     }
@@ -107,17 +115,45 @@ pub(crate) fn work_from_bits(bits: CompactTarget) -> f64 {
     Target::from_compact(bits).difficulty_float() * HASHES_PER_DIFFICULTY
 }
 
-/// Hashrate behind a run of shares, from their bits and timestamps.
+/// Staleness decay for the pool hashrate, in `[0.0, 1.0]`.
+///
+/// Full value while the newest confirmed share is at most
+/// [`MAX_SHARE_GAP_SECS`] old -- normal mining cadence never sees less than
+/// one. Beyond that the value ramps linearly down to zero over the next
+/// [`MAX_SHARE_GAP_SECS`], reaching zero once the newest share is twice the
+/// gap old, so a stalled share chain fades out instead of pinning a
+/// historical estimate forever. A `now` before the newest share (clock
+/// skew) counts as age zero.
+pub(crate) fn staleness_decay(newest_share_time: u32, now: u64) -> f64 {
+    let gap = u64::from(MAX_SHARE_GAP_SECS);
+    let age = now.saturating_sub(u64::from(newest_share_time));
+    if age <= gap {
+        1.0
+    } else if age >= 2 * gap {
+        0.0
+    } else {
+        1.0 - (age - gap) as f64 / f64::from(MAX_SHARE_GAP_SECS)
+    }
+}
+
+/// A rate must never read as negative zero in JSON or on the chart:
+/// `-0.0` and `0.0` compare equal, but only `0.0` serializes as `0.0`.
+pub(crate) fn normalize_rate(rate: Option<f64>) -> Option<f64> {
+    rate.map(|value| if value == 0.0 { 0.0 } else { value })
+}
+
+/// Hashrate behind a run of shares, from their bits and timestamps,
+/// decayed by [`staleness_decay`] against `now`.
 ///
 /// Shares older than [`MAX_SHARE_GAP_SECS`] before the newest are dropped so
 /// a seed share (e.g. the genesis share at a fixed past time) cannot inflate
 /// the span. When that filter would leave fewer than two shares -- a gap
 /// longer than [`MAX_SHARE_GAP_SECS`] between confirmed shares -- the two
-/// newest shares are used instead, so the span never collapses to zero.
-/// The oldest share only opens the time span: its work was done
+/// newest shares are used instead, so the span never collapses to zero. The
+/// oldest share only opens the time span: its work was done
 /// before it, outside the span. `None` with fewer than two shares or no time
 /// between the oldest and the newest.
-pub(crate) fn share_chain_hashrate(shares: &[(u32, CompactTarget)]) -> Option<f64> {
+pub(crate) fn share_chain_hashrate(shares: &[(u32, CompactTarget)], now: u64) -> Option<f64> {
     let newest = shares.iter().max_by_key(|(time, _)| *time)?;
     let mut kept: Vec<&(u32, CompactTarget)> = shares
         .iter()
@@ -132,7 +168,8 @@ pub(crate) fn share_chain_hashrate(shares: &[(u32, CompactTarget)]) -> Option<f6
     let oldest = kept.iter().min_by_key(|(time, _)| *time)?;
     let span = newest.0.checked_sub(oldest.0).filter(|span| *span > 0)?;
     let total: f64 = kept.iter().map(|(_, bits)| work_from_bits(*bits)).sum();
-    Some((total - work_from_bits(oldest.1)) / f64::from(span))
+    let rate = (total - work_from_bits(oldest.1)) / f64::from(span);
+    Some(rate * staleness_decay(newest.0, now))
 }
 
 /// Network hashrate implied by a block difficulty.
@@ -145,7 +182,7 @@ pub(crate) fn is_block(header: &bitcoin::block::Header) -> bool {
     header.validate_pow(header.target()).is_ok()
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -166,14 +203,15 @@ pub(crate) fn newest_shares(state: &AppState, count: u32) -> Vec<ShareInfo> {
         .unwrap_or_default()
 }
 
-/// The pool hashrate from the newest confirmed shares.
-pub(crate) fn pool_hashrate(state: &AppState) -> Option<f64> {
+/// The pool hashrate from the newest confirmed shares, decayed against
+/// `now` once the newest share ages past [`MAX_SHARE_GAP_SECS`].
+pub(crate) fn pool_hashrate(state: &AppState, now: u64) -> Option<f64> {
     let shares = newest_shares(state, POOL_HASHRATE_SHARES);
     let points: Vec<(u32, CompactTarget)> = shares
         .iter()
         .map(|share| (share.timestamp, share.bits))
         .collect();
-    share_chain_hashrate(&points)
+    share_chain_hashrate(&points, now)
 }
 
 /// This node's hashrate: the work of shares in the newest confirmed window
@@ -249,7 +287,7 @@ async fn tick(state: &Arc<AppState>, history: &Arc<HashrateHistory>) {
             .map(|share| (share.timestamp, share.bits))
             .collect();
         (
-            share_chain_hashrate(&points),
+            share_chain_hashrate(&points, time),
             local_chain_hashrate(&blocking_state, &shares, &blocking_connected),
         )
     })
@@ -264,8 +302,8 @@ async fn tick(state: &Arc<AppState>, history: &Arc<HashrateHistory>) {
 
     let sample = Sample {
         time,
-        pool,
-        local,
+        pool: normalize_rate(pool),
+        local: normalize_rate(local),
         network,
     };
     history.push_sample(sample);
@@ -423,7 +461,7 @@ mod tests {
             (1_010, difficulty_one()),
             (1_020, difficulty_one()),
         ];
-        let rate = share_chain_hashrate(&shares).unwrap();
+        let rate = share_chain_hashrate(&shares, 1_020).unwrap();
         assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 20.0).abs() < 1.0);
     }
 
@@ -432,17 +470,23 @@ mod tests {
         let ordered = [(1_000, difficulty_one()), (1_030, difficulty_one())];
         let reversed = [(1_030, difficulty_one()), (1_000, difficulty_one())];
         assert_eq!(
-            share_chain_hashrate(&ordered),
-            share_chain_hashrate(&reversed)
+            share_chain_hashrate(&ordered, 1_030),
+            share_chain_hashrate(&reversed, 1_030)
         );
     }
 
     #[test]
     fn share_chain_hashrate_needs_two_shares_and_a_span() {
-        assert_eq!(share_chain_hashrate(&[]), None);
-        assert_eq!(share_chain_hashrate(&[(1_000, difficulty_one())]), None);
+        assert_eq!(share_chain_hashrate(&[], 1_000), None);
         assert_eq!(
-            share_chain_hashrate(&[(1_000, difficulty_one()), (1_000, difficulty_one())]),
+            share_chain_hashrate(&[(1_000, difficulty_one())], 1_000),
+            None
+        );
+        assert_eq!(
+            share_chain_hashrate(
+                &[(1_000, difficulty_one()), (1_000, difficulty_one())],
+                1_000
+            ),
             None
         );
     }
@@ -459,7 +503,8 @@ mod tests {
             (1_000 + MAX_SHARE_GAP_SECS + 6, difficulty_one()),
             (1_000 + MAX_SHARE_GAP_SECS + 11, difficulty_one()),
         ];
-        let rate = share_chain_hashrate(&shares).unwrap();
+        let rate =
+            share_chain_hashrate(&shares, 1_000 + u64::from(MAX_SHARE_GAP_SECS) + 11).unwrap();
         assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 10.0).abs() < 1.0);
     }
 
@@ -472,8 +517,74 @@ mod tests {
         // work over the gap between them.
         let gap = MAX_SHARE_GAP_SECS + 3750;
         let shares = [(1_000, difficulty_one()), (1_000 + gap, difficulty_one())];
-        let rate = share_chain_hashrate(&shares).unwrap();
+        let rate = share_chain_hashrate(&shares, 1_000 + u64::from(gap)).unwrap();
         assert!((rate - HASHES_PER_DIFFICULTY / f64::from(gap)).abs() < 1.0);
+    }
+
+    #[test]
+    fn the_pool_rate_is_fully_kept_while_the_newest_share_is_fresh() {
+        let shares = [(1_000, difficulty_one()), (1_010, difficulty_one())];
+        assert_eq!(
+            staleness_decay(1_000, 1_000 + u64::from(MAX_SHARE_GAP_SECS)),
+            1.0
+        );
+        assert_eq!(
+            share_chain_hashrate(&shares, 1_010).unwrap(),
+            share_chain_hashrate(&shares, 1_010 + u64::from(MAX_SHARE_GAP_SECS)).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_pool_rate_ramps_down_over_the_second_gap() {
+        // Halfway between the first gap and twice the gap: half the rate.
+        assert_eq!(
+            staleness_decay(1_000, 1_000 + 3 * u64::from(MAX_SHARE_GAP_SECS) / 2),
+            0.5
+        );
+    }
+
+    #[test]
+    fn the_pool_rate_reaches_zero_when_the_newest_share_is_twice_the_gap_old() {
+        assert_eq!(
+            staleness_decay(1_000, 1_000 + 2 * u64::from(MAX_SHARE_GAP_SECS)),
+            0.0
+        );
+        assert_eq!(
+            staleness_decay(1_000, 1_000 + 2 * u64::from(MAX_SHARE_GAP_SECS) + 60),
+            0.0
+        );
+    }
+
+    #[test]
+    fn a_clock_older_than_the_newest_share_counts_as_fresh() {
+        assert_eq!(staleness_decay(5_000, 1_000), 1.0);
+    }
+
+    #[test]
+    fn a_negative_zero_rate_normalizes_to_plain_zero() {
+        assert_eq!(normalize_rate(Some(-0.0)), Some(0.0));
+        assert!(
+            !normalize_rate(Some(-0.0))
+                .expect("value")
+                .is_sign_negative()
+        );
+        assert_eq!(normalize_rate(Some(0.0)), Some(0.0));
+        assert_eq!(normalize_rate(None), None);
+        assert_eq!(normalize_rate(Some(1.0)), Some(1.0));
+    }
+
+    #[test]
+    fn loading_rewrites_a_persisted_negative_zero_rate() {
+        let history = HashrateHistory::default();
+        history.load(vec![Sample {
+            time: 10,
+            pool: Some(5.0),
+            local: Some(-0.0),
+            network: None,
+        }]);
+        let sample = history.samples().remove(0);
+        assert!(!sample.local.expect("value").is_sign_negative());
+        assert_eq!(sample.pool, Some(5.0));
     }
 
     #[test]
