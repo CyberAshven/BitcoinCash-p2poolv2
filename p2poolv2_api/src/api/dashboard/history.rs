@@ -177,6 +177,13 @@ pub(crate) fn network_hashrate(difficulty: f64) -> f64 {
     difficulty * HASHES_PER_DIFFICULTY / BLOCK_INTERVAL_SECONDS
 }
 
+/// Block difficulty implied by a network hashrate, the inverse of
+/// [`network_hashrate`], so a hashrate-only fallback sample can still
+/// show a difficulty the way the wasm dashboard does.
+pub(crate) fn difficulty_from_network_hashrate(hashes_per_second: f64) -> f64 {
+    hashes_per_second * BLOCK_INTERVAL_SECONDS / HASHES_PER_DIFFICULTY
+}
+
 /// Whether a share's Bitcoin Cash header met its own block target.
 pub(crate) fn is_block(header: &bitcoin::block::Header) -> bool {
     header.validate_pow(header.target()).is_ok()
@@ -590,6 +597,12 @@ mod tests {
     #[test]
     fn network_hashrate_spreads_difficulty_over_ten_minutes() {
         assert!((network_hashrate(600.0) - HASHES_PER_DIFFICULTY).abs() < 1.0);
+    }
+
+    #[test]
+    fn difficulty_from_network_hashrate_inverts_the_rate_estimate() {
+        let rate = network_hashrate(600.0);
+        assert!((difficulty_from_network_hashrate(rate) - 600.0).abs() < 1e-9);
     }
 
     #[tokio::test]

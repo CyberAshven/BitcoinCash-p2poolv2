@@ -361,8 +361,17 @@ async fn overview(
     };
     let miners = local_miners(state).await;
     let (miners_online, workers_online) = online_counts(&miners);
-    let network_difficulty = state.tracker_handle.get_network_difficulty();
     let samples = dashboard.history.samples();
+    let live_network_difficulty = state.tracker_handle.get_network_difficulty();
+    // Mirror the wasm dashboard: when the live template feed has not
+    // produced a difficulty yet, fall back to the newest sampled network
+    // hashrate and invert it back to a difficulty, so the card never goes
+    // blank while samples still carry a value.
+    let network_hashrate = live_network_difficulty
+        .map(history::network_hashrate)
+        .or_else(|| samples.iter().rev().find_map(|sample| sample.network));
+    let network_difficulty = live_network_difficulty
+        .or_else(|| network_hashrate.map(history::difficulty_from_network_hashrate));
     let local_hashrate = samples.iter().rev().find_map(|sample| sample.local);
     // Harmonize with the pool KPI: fall back to the newest non-null sample
     // when the live recompute has too few shares to form a span, so both
@@ -379,7 +388,7 @@ async fn overview(
         tip_height,
         pool_hashrate,
         local_hashrate,
-        network_hashrate: network_difficulty.map(history::network_hashrate),
+        network_hashrate,
         network_difficulty,
         miners_online,
         workers_online,
