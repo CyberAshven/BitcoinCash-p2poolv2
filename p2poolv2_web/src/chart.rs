@@ -268,8 +268,23 @@ fn dot_title(label: &str, value: f64, time: u64) -> String {
     format!("{label}: {} at {}", fmt_hashrate(value), fmt_day_time(time))
 }
 
-/// A pool's line and dots.
-fn pool_view<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView + use<'a> {
+/// A pool's gradient and area fill, drawn under the grid as on the node's
+/// chart: the grid lines show through the translucent fill.
+fn pool_area<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView + use<'a> {
+    let gradient = area_gradient("pool", frame);
+    let area = (!points.is_empty()).then(|| {
+        view! { <path class="area pool" d=area_path(points, frame) fill="url(#fill-pool)" /> }
+    });
+    view! {
+        {gradient}
+        {area}
+    }
+}
+
+/// A pool's line and dots, drawn over the grid as on the node's chart:
+/// the zero line coincides with the baseline grid row, and a grid drawn
+/// over it would hide the line exactly at zero.
+fn pool_line<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView + use<'a> {
     let dots = points
         .iter()
         .zip(dot_positions(points, frame))
@@ -278,20 +293,27 @@ fn pool_view<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView + 
             view! { <circle class="dot pool" cx=x cy=y r="0.5">{title}</circle> }
         })
         .collect_view();
-    let gradient = area_gradient("pool", frame);
-    let area = (!points.is_empty()).then(|| {
-        view! { <path class="area pool" d=area_path(points, frame) fill="url(#fill-pool)" /> }
-    });
     view! {
-        {gradient}
-        {area}
         <polyline class="line pool" points=polyline_points(points, frame) />
         {dots}
     }
 }
 
-/// This node's line and dots.
-fn local_view<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView + use<'a> {
+/// This node's gradient and area fill, drawn under the grid.
+fn local_area<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView + use<'a> {
+    let gradient = area_gradient("local", frame);
+    let area = (!points.is_empty()).then(|| {
+        view! { <path class="area local" d=area_path(points, frame) fill="url(#fill-local)" /> }
+    });
+    view! {
+        {gradient}
+        {area}
+    }
+}
+
+/// This node's line and dots, drawn over the grid as on the node's chart,
+/// so the zero line stays visible on the baseline grid row.
+fn local_line<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView + use<'a> {
     let dots = points
         .iter()
         .zip(dot_positions(points, frame))
@@ -300,13 +322,7 @@ fn local_view<'a>(points: &'a [(u64, f64)], frame: &'a Frame) -> impl IntoView +
             view! { <circle class="dot local" cx=x cy=y r="0.5">{title}</circle> }
         })
         .collect_view();
-    let gradient = area_gradient("local", frame);
-    let area = (!points.is_empty()).then(|| {
-        view! { <path class="area local" d=area_path(points, frame) fill="url(#fill-local)" /> }
-    });
     view! {
-        {gradient}
-        {area}
         <polyline class="line local" points=polyline_points(points, frame) />
         {dots}
     }
@@ -492,10 +508,12 @@ pub fn HashrateChart(
                     role="img"
                     aria-label=label
                 >
-                    {pool_view(&pool, &frame)}
-                    {local_view(&local, &frame)}
+                    {pool_area(&pool, &frame)}
+                    {local_area(&local, &frame)}
                     {grid}
                     {axes}
+                    {pool_line(&pool, &frame)}
+                    {local_line(&local, &frame)}
                     {selection}
                     {zones
                         .iter()
