@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 mod bitcoin_block_validation;
+#[cfg(test)]
+mod version_vote_tests;
 
 use super::share_block::{MAX_POOL_TARGET, ShareHeader};
 use crate::accounting::CoinbasePayouts;
@@ -371,21 +373,31 @@ pub(crate) fn tally_share_version_votes(
     parent_hash: BlockHash,
     chain_store_handle: &ChainStoreHandle,
 ) -> Result<VersionTally, StoreError> {
+    tally_share_version_votes_from_headers(parent_hash, |blockhash| {
+        chain_store_handle.get_share_header(blockhash)
+    })
+}
+
+/// Walk the vote span using the caller's header reader. Keeping the walk
+/// independent of the handle lets real-store tests exercise the same traversal
+/// when validation's other unit tests replace the handle with a mock.
+fn tally_share_version_votes_from_headers(
+    parent_hash: BlockHash,
+    mut get_share_header: impl FnMut(&BlockHash) -> Result<ShareHeader, StoreError>,
+) -> Result<VersionTally, StoreError> {
     let mut current = parent_hash;
     for _ in 0..SHARE_VERSION_VOTE_DEPTH - SHARE_VERSION_VOTE_SPAN {
         if is_terminal_blockhash(&current) {
             return Ok(VersionTally::default());
         }
-        current = chain_store_handle
-            .get_share_header(&current)?
-            .prev_share_blockhash;
+        current = get_share_header(&current)?.prev_share_blockhash;
     }
     let mut tally = VersionTally::default();
     for _ in 0..SHARE_VERSION_VOTE_SPAN {
         if is_terminal_blockhash(&current) {
             break;
         }
-        let header = chain_store_handle.get_share_header(&current)?;
+        let header = get_share_header(&current)?;
         tally.add_share(header.share_version, header.bits);
         current = header.prev_share_blockhash;
     }
@@ -2256,138 +2268,6 @@ mod tests {
         validator()
             .validate_share_version(&child, &ChainStoreHandle::default())
             .unwrap();
-    }
-
-    /// A store holding a chain of `length` share headers: `hashes[0]` is
-    /// the parent a tally starts from, each header's parent is the next, and
-    /// the last one's parent is the all-zeros terminal (genesis's parent).
-    /// Share `i` desires `desired(i)`, all at the same target.
-    fn store_of_chain(
-        length: u32,
-        desired: impl Fn(u32) -> u32,
-    ) -> (Vec<BlockHash>, ChainStoreHandle) {
-        let template = TestShareBlockBuilder::new()
-            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
-            .build()
-            .header;
-        let hash_of = |index: u32| {
-            let mut bytes = [0xab; 32];
-            bytes[..4].copy_from_slice(&index.to_le_bytes());
-            BlockHash::from_byte_array(bytes)
-        };
-        let hashes: Vec<BlockHash> = (0..length).map(hash_of).collect();
-        let mut headers = HashMap::with_capacity(length as usize);
-        for index in 0..length {
-            let mut header = template.clone();
-            header.share_version.desired_version = desired(index);
-            header.prev_share_blockhash = if index + 1 == length {
-                BlockHash::all_zeros()
-            } else {
-                hash_of(index + 1)
-            };
-            headers.insert(hash_of(index), header);
-        }
-        let mut chain_store_handle = ChainStoreHandle::default();
-        chain_store_handle
-            .expect_get_share_header()
-            .returning(move |hash| {
-                headers
-                    .get(hash)
-                    .cloned()
-                    .ok_or_else(|| StoreError::NotFound(hash.to_string()))
-            });
-        (hashes, chain_store_handle)
-    }
-
-    /// The tally of `count` shares at the test template's target desiring
-    /// `version`.
-    fn tally_of(version: u32, count: u32) -> VersionTally {
-        let bits = TestShareBlockBuilder::new().build().header.bits;
-        let mut tally = VersionTally::default();
-        for _ in 0..count {
-            tally.add_share(
-                crate::shares::share_version::ShareVersion {
-                    version: 1,
-                    desired_version: version,
-                },
-                bits,
-            );
-        }
-        tally
-    }
-
-    /// The tally counts exactly the shares from `SHARE_VERSION_VOTE_DEPTH -
-    /// SHARE_VERSION_VOTE_SPAN` to `SHARE_VERSION_VOTE_DEPTH - 1` below the
-    /// parent (the parent itself is 0): the last share skipped and the
-    /// first share past the span desire version 3 and are not counted; the
-    /// span's first and last desire 2 and are.
-    #[test]
-    fn share_version_tally_counts_exactly_the_vote_span() {
-        let first = SHARE_VERSION_VOTE_DEPTH - SHARE_VERSION_VOTE_SPAN;
-        let last = SHARE_VERSION_VOTE_DEPTH - 1;
-        let (hashes, chain_store_handle) = store_of_chain(SHARE_VERSION_VOTE_DEPTH + 10, |index| {
-            if (first..=last).contains(&index) {
-                2
-            } else {
-                3
-            }
-        });
-        let tally = tally_share_version_votes(hashes[0], &chain_store_handle).unwrap();
-        assert_eq!(tally, tally_of(2, SHARE_VERSION_VOTE_SPAN));
-        assert!(tally.supports(2, 100));
-        assert!(!tally.supports(3, 1));
-
-        // One share deeper, the span moves by one: share `first` drops out
-        // and the first share past the old span, desiring 3, comes in.
-        let tally = tally_share_version_votes(hashes[1], &chain_store_handle).unwrap();
-        let mut expected = tally_of(2, SHARE_VERSION_VOTE_SPAN - 1);
-        let bits = TestShareBlockBuilder::new().build().header.bits;
-        expected.add_share(
-            crate::shares::share_version::ShareVersion {
-                version: 1,
-                desired_version: 3,
-            },
-            bits,
-        );
-        assert_eq!(tally, expected);
-    }
-
-    /// A chain that reaches genesis before the span has no votes; one that
-    /// reaches it inside the span counts only the shares it has.
-    #[test]
-    fn share_version_tally_stops_at_genesis() {
-        let first = SHARE_VERSION_VOTE_DEPTH - SHARE_VERSION_VOTE_SPAN;
-        // Genesis is the last share skipped: nothing is left to count.
-        let (hashes, chain_store_handle) = store_of_chain(first, |_| 2);
-        let tally = tally_share_version_votes(hashes[0], &chain_store_handle).unwrap();
-        assert_eq!(tally, VersionTally::default());
-        assert!(!tally.supports(1, 0));
-
-        // Genesis 100 shares into the span.
-        let (hashes, chain_store_handle) = store_of_chain(first + 100, |_| 2);
-        let tally = tally_share_version_votes(hashes[0], &chain_store_handle).unwrap();
-        assert_eq!(tally, tally_of(2, 100));
-
-        // Genesis exactly the span's last share.
-        let (hashes, chain_store_handle) = store_of_chain(SHARE_VERSION_VOTE_DEPTH, |_| 2);
-        let tally = tally_share_version_votes(hashes[0], &chain_store_handle).unwrap();
-        assert_eq!(tally, tally_of(2, SHARE_VERSION_VOTE_SPAN));
-
-        // Starting from the terminal hash itself, there is nothing.
-        assert_eq!(
-            tally_share_version_votes(BlockHash::all_zeros(), &chain_store_handle).unwrap(),
-            VersionTally::default()
-        );
-    }
-
-    /// A header missing from the store is an error, not a smaller tally.
-    #[test]
-    fn share_version_tally_fails_on_a_missing_header() {
-        let (_, chain_store_handle) = store_of_chain(3, |_| 2);
-        assert!(matches!(
-            tally_share_version_votes(BlockHash::from_byte_array([0x01; 32]), &chain_store_handle),
-            Err(StoreError::NotFound(_))
-        ));
     }
 
     /// BCH's SigChecks budget: at most 3,000 in one transaction and 1,452

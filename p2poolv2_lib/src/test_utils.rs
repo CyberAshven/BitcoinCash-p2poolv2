@@ -1134,6 +1134,34 @@ pub async fn setup_test_chain_store_handle(start_writer: bool) -> (ChainStoreHan
     (chain_handle, temp_dir)
 }
 
+/// Persist a linear chain of headers in one batch, without block bodies or
+/// height indexes. The returned hashes run from newest to genesis, and
+/// `decorate` receives that same depth for each header before it is hashed.
+/// Useful for testing ancestry readers independently of chain organisation.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn store_test_header_chain(
+    chain_store_handle: &ChainStoreHandle,
+    template: &ShareHeader,
+    length: u32,
+    mut decorate: impl FnMut(u32, &mut ShareHeader),
+) -> Vec<BlockHash> {
+    let store = chain_store_handle.store_handle().store();
+    let mut batch = Store::get_write_batch();
+    let mut parent_hash = BlockHash::all_zeros();
+    let mut hashes = Vec::with_capacity(length as usize);
+    for depth in (0..length).rev() {
+        let mut header = template.clone();
+        decorate(depth, &mut header);
+        header.prev_share_blockhash = parent_hash;
+        parent_hash = header.block_hash();
+        store.add_share_header(&header, &mut batch).unwrap();
+        hashes.push(parent_hash);
+    }
+    store.commit_batch(batch).unwrap();
+    hashes.reverse();
+    hashes
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 pub fn genesis_for_tests() -> ShareBlock {
     TestShareBlockBuilder::new().build()
