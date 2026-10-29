@@ -890,6 +890,134 @@ mod tests {
         );
     }
 
+    /// A store holding `headers` as one confirmed chain, oldest first, its tip
+    /// the last; returns the store and the tip.
+    fn confirmed_chain_store(
+        headers: &[crate::shares::share_block::ShareHeader],
+    ) -> (MockChainStoreHandle, BlockHash) {
+        let rows: Vec<ConfirmedHeaderResult> = headers
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(height, header)| ConfirmedHeaderResult {
+                height: height as u32,
+                blockhash: header.block_hash(),
+                header: header.clone(),
+            })
+            .collect();
+        let tip = rows[0].blockhash;
+        let tip_height = rows[0].height;
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip));
+        store.expect_get_block_metadata().returning(move |_| {
+            Ok(BlockMetadata {
+                expected_height: Some(tip_height),
+                chain_work: Work::from_le_bytes([0; 32]),
+                status: Status::BlockValid,
+                chain: ChainMembership::Confirmed,
+            })
+        });
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(rows.clone()));
+        (store, tip)
+    }
+
+    /// Shares built at a node's defaults each commit 1% to the built-in
+    /// donation key, so a coinbase paying a window of them pays the key 1% of
+    /// its value as a payee, whatever the finding node's own settings. A
+    /// validator with its own window over the same chain rebuilds the same
+    /// coinbase from the paying share's header.
+    #[test]
+    fn test_bch_default_donation_is_paid_from_each_window_share() {
+        let donation_address = bitcoin_cash_donation_address(BitcoinCashNetwork::Regtest);
+        let mut headers = Vec::with_capacity(3);
+        let mut prev = BlockHash::all_zeros();
+        for pubkey in [PUBKEY_G, PUBKEY_2G, PUBKEY_G] {
+            let mut header = build_test_header(&prev.to_string(), pubkey, 2);
+            header.donation_address = Some(donation_address.clone());
+            header.donation = Some(100);
+            header.fee_address = None;
+            header.fee = None;
+            prev = header.block_hash();
+            headers.push(header);
+        }
+        let first_miner = headers[0].miner_bitcoin_address.clone();
+        let second_miner = headers[1].miner_bitcoin_address.clone();
+        let value = 5_000_000_000;
+        let (store, anchor) = confirmed_chain_store(&headers);
+        let mut payout = Payout::with_window(
+            PplnsWindow::new(bitcoin::Network::Testnet).for_chain(Chain::BitcoinCash),
+        );
+        let mut finder = make_test_config();
+        finder.chain = Chain::BitcoinCash;
+        finder.donation = Some(0);
+
+        let produced = payout
+            .get_output_distribution(&store, anchor, 1, Amount::from_sat(value), &finder)
+            .unwrap();
+
+        let paid = |address: &Address| {
+            produced
+                .outputs
+                .iter()
+                .find(|output| output.address.script_pubkey() == address.script_pubkey())
+                .map(|output| output.amount.to_sat())
+        };
+        assert_eq!(paid(&donation_address), Some(value / 100));
+        assert_eq!(paid(&first_miner), Some(value * 99 / 100 * 2 / 3));
+        assert_eq!(paid(&second_miner), Some(value * 99 / 100 / 3));
+        assert_eq!(produced.outputs.len(), 3);
+
+        let (validator_store, _) = confirmed_chain_store(&headers);
+        let mut validator_window =
+            PplnsWindow::new(bitcoin::Network::Testnet).for_chain(Chain::BitcoinCash);
+        validator_window.update(&validator_store).unwrap();
+        let paying = &headers[2];
+        let validated = build_pplns_outputs(
+            value,
+            &validator_window
+                .get_distribution_from_start_hash(anchor, 1, &validator_store)
+                .unwrap(),
+            &paying.donation_address,
+            paying.donation,
+            &paying.fee_address,
+            paying.fee,
+            PayoutSplit::for_chain(Chain::BitcoinCash, false),
+        )
+        .unwrap();
+        assert_eq!(produced, validated);
+    }
+
+    /// The case the regtest stack meets first: a block found before any
+    /// share-chain share, whose window holds only the genesis share. Genesis
+    /// commits no donation, so the coinbase pays its payee everything and
+    /// the donation key nothing, though the finding node donates 1%.
+    #[test]
+    fn test_bch_window_of_only_genesis_pays_no_donation() {
+        let mut genesis = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        genesis.donation_address = None;
+        genesis.donation = None;
+        genesis.fee_address = None;
+        genesis.fee = None;
+        let payee = genesis.miner_bitcoin_address.clone();
+        let (store, anchor) = confirmed_chain_store(std::slice::from_ref(&genesis));
+        let mut payout = Payout::with_window(
+            PplnsWindow::new(bitcoin::Network::Testnet).for_chain(Chain::BitcoinCash),
+        );
+        let mut finder = make_test_config();
+        finder.chain = Chain::BitcoinCash;
+        finder.donation = Some(100);
+
+        let produced = payout
+            .get_output_distribution(&store, anchor, 1, Amount::from_sat(1_000_000), &finder)
+            .unwrap();
+
+        assert_eq!(produced.outputs.len(), 1);
+        assert_eq!(produced.outputs[0].address, payee);
+        assert_eq!(produced.outputs[0].amount.to_sat(), 1_000_000);
+    }
+
     /// The notifier and the validator size a Bitcoin Cash window through the
     /// same `get_distribution_from_start_hash` on the same window, from the
     /// same bits: the notifier from its template, the validator from the

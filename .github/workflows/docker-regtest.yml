@@ -66,9 +66,13 @@ jobs:
         working-directory: docker
         run: |
           docker compose logs p2poolv2 | grep -E 'Node [^ ]+ accepted block '
-          # P2Poolv2's coinbase pays the 1% donation, here under bchreg:.
+          # The coinbase carries the pool signature, "P2Poolv2" in
+          # config-docker.sample.toml. It is not checked for the 1% donation:
+          # each share's donation comes off its own weight (cuts-per-share),
+          # and these first blocks pay a window holding only the genesis
+          # share, which donates nothing.
           docker compose exec -T bchn sh -c 'bcli getblock "$(bcli getbestblockhash)" 2' \
-            | grep bchreg:qze95tc2dqrnltvxfa5yhunwx5952f34fvsm6us7sv
+            | grep '"coinbase": "[0-9a-f]*5032506f6f6c7632'
           curl -sf http://127.0.0.1:46884/chain_info
 
       - name: Start a second node
