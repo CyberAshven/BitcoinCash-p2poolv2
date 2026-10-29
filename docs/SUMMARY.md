@@ -51,6 +51,7 @@
   - [Pruning](architecture/pruning.md)
   - [Payout distribution](architecture/payout-distribution.md)
   - [Hybrid payouts on Bitcoin Cash](architecture/bch-hybrid-payouts.md)
+  - [Proposal: a decentralized PHOTON GPU pool](architecture/photon-pool.md)
   - [Metrics](architecture/metrics.md)
   - [Share chain address format](architecture/address-format.md)
   - [Mine on the current chain](architecture/mine-on-bitcoin-chain.md)
