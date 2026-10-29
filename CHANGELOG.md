@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Stratum V2 declared token jobs now pass the token-share ASERT band before
+the node asks BCHN to validate a proposal or installs the job. A refusal
+returns `invalid-token-asert` and preserves the channel's existing work.
+The exact empty commitment still follows the no-token path. Vote-span and
+genesis-stop regressions now traverse real stored headers rather than a
+mocked chain. SAFA claim targets reject thread counts outside 1 to 63 and
+have named historical target vectors and repeated-job coverage.
+
 Bitcoin Cash donation and operator fee are taken per share, as P2Pool v1
 took its donation (the owner's decision, 2026-10-29). Each window share's
 own donation, then its fee from what the donation leaves, come off that
