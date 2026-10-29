@@ -38,9 +38,17 @@ being merge-mined) or it names token work.
    gives at least 32 MB and grows, and BCHN decides it.
 2. **Tokens.** A token claim has to re-hash the whole coinbase inside the
    BCH script machine, which takes at most 10,000 bytes per input. So a token
-   share keeps its coinbase within **T = 3,072 bytes**. That fits about 77
+   share keeps its coinbase within **T = 3,072 bytes**. That fits about 79
    miners paid directly. Everyone past that point is paid through a
    **payout tree**.
+
+**Donation and fee.** Each share records its own donation to the P2Pool
+project and the fee of the node that built it. They come off that share's
+own part of each block that pays it, the fee after the donation, as in
+P2Pool v1: the miner who finds a block cannot make the whole window pay its
+donation or a fee to itself. The donation key and the fee addresses are paid
+like any miner, in the same ordering, so there is no separate donation or
+fee output.
 
 **Who is paid directly.** Payees are lined up from the **smallest** payout to
 the **largest**. They are paid directly in that order until the next one
@@ -234,6 +242,15 @@ zero root unless both `h` and salt are zero.
 
 ### 3.2 Payees and their order
 
+Each share's donation and fee apply only to that share's own window weight,
+with the fee taken after its donation. The donation key and each share's
+fee address become ordinary payees alongside the share payee. Aggregate all
+credits by locking bytecode before ordering or splitting; a script shared
+by a miner and a fee recipient gets one combined payment. The finding
+share never applies its cuts to the whole window. Exact basis-point
+numerators avoid intermediate rounding; see
+[per-share cuts](payout-distribution.md#bitcoin-cash-per-share-cuts).
+
 After rules 5 to 7, each payee `i` has a locking bytecode, a weight `w_i`,
 an amount `a_i = floor(A * w_i / W)` and an output of `s_i` bytes: 34 for
 P2PKH, 32 for P2SH20, 44 for P2SH32. On BCH a payee must be one of these
@@ -258,7 +275,7 @@ Why smallest first:
 | No-token share | `D` = 1,000,000 bytes | BCH consensus `MAX_TX_SIZE`. Not a P2Pool number. |
 | Token share | `T` = 3,072 bytes | The token claim must hash the coinbase in the VM (section 4). |
 
-`S` = 445 bytes is the most a P2Pool coinbase can take besides its PPLNS
+`S` = 367 bytes is the most a P2Pool coinbase can take besides its PPLNS
 payouts. It uses the worst case of every field, so `C - S` is always safe:
 
 | Part | Bytes |
@@ -267,15 +284,18 @@ payouts. It uses the worst case of every field, so `C - S` is always safe:
 | scriptSig (BCH's maximum) | 100 |
 | Output count taking 3 bytes from 253 outputs | 2 |
 | Output 0, the CTMM commitment | 53 |
-| Donation (P2PKH) | 34 |
-| Operator fee (largest BCH output, P2SH32) | 44 |
 | Tree output (P2SH32) | 44 |
 | Padding before the share commitment (at most 63 bytes of padding) | 74 |
 | Share commitment output | 43 |
-| **Total** | **445** |
+| **Total** | **367** |
 
-The payout budget is `P = C - S`: 2,627 bytes for a token share (77 P2PKH
-payees) and 999,555 bytes for a no-token share (29,398 P2PKH payees).
+There is no donation or fee output: each window share's donation and fee are
+payees like any other (section 3.2), so their outputs are among the PPLNS
+payouts. Outputs a coinbase carries before the split, as Hydrapool's donation
+and fee do, take their own bytes from `C`.
+
+The payout budget is `P = C - S`: 2,705 bytes for a token share (79 P2PKH
+payees) and 999,633 bytes for a no-token share (29,400 P2PKH payees).
 
 ### 3.4 The straddle rule (exact)
 
@@ -294,7 +314,7 @@ Walk the payees in canonical order.
    bytes stay unused.
 4. **Token shares** also need fewer than 253 coinbase outputs, so the output
    count is one byte where the covenant expects it. With `T` = 3,072 a coinbase
-   has at most 88 outputs (83 P2SH20 payouts and 5 others, or 82 and 6 with
+   has at most 88 outputs (85 P2SH20 payouts and 3 others, or 84 and 4 with
    the tree output), so this always holds; validators check it anyway.
 
 So the coinbase never exceeds `C`, and which payees are direct is a pure
@@ -318,11 +338,16 @@ function of the weights, the amount and the payees' scripts.
   removed from the tree and its `a_i` is added to the last payee. Repeat
   until no leaf is below dust; the count only falls, so this ends. Since tree
   payees are the largest, this needs every payee below about 700 satoshis.
+  If the final merged payee still cannot fund its fee at 3 sat/byte and its
+  dust threshold, the whole merged tail is paid directly to that payee, in
+  the tree output's place: the same value, and never a zero-value or
+  below-dust tree output. Only a tiny coinbase can do this, such as one
+  many halvings from now.
 
 ### 3.6 Coinbase layout
 
-Output 0: the CTMM commitment. Then the donation, the operator fee, the
-direct payouts in canonical order, the tree output if any, the padding and
+Output 0: the CTMM commitment. Then the direct payees in canonical order
+(the donation key and fee addresses among them), the tree output if any, the padding and
 the share commitment last, as today. BCH sets no rule on output order inside
 a transaction (CTOR orders transactions, not outputs), so this order is the
 share chain's own choice.
@@ -476,14 +501,29 @@ opcodes already do it.
   money. It asks BCHN for its tip every 30 seconds; on each new tip it
   broadcasts the 1 sat/byte transactions of every tree whose coinbase has
   100 confirmations, root first, finishes the children of a 2 or 3 sat/byte
-  root someone else broadcast, and rebroadcasts until the tree has looked
-  settled for 6 tips in a row. All nodes produce identical transactions, so
-  duplicates are harmless.
-- **Data.** When a node accepts a share that is a BCH block, it stores that
-  block's tree payees and the block's coinbase txid, root output, height and
-  hash, independent of the share's later share-chain status, and rebuilds
-  the node transactions from them. It keeps the data after execution too
-  and never prunes it. The data is about 50 bytes per tree payee.
+  root someone else broadcast, and rebroadcasts until every transaction of
+  one root variant has confirmation evidence for 6 tips in a row. A spent
+  root alone proves nothing about its children. Rejected transactions,
+  transport errors, mempool acceptance and missing inputs keep descendants
+  pending. Confirmed descendants also prove their root was confirmed. All
+  nodes produce identical transactions, so duplicates are harmless.
+- **Data.** Before a found block goes to BCHN, a Template Provider or a
+  declarator, over Stratum V1, V2 or Job Declaration, the node that found it
+  stores the job's tree payees with the coinbase txid, root output, block
+  height and hash. If that write fails the block still goes out, since its
+  whole reward is at stake. Every node also stores the tree when it
+  validates the share. A rejected share, a node stopping before validation
+  or a later share-chain reorg does not lose a found block's tree. The node
+  rebuilds the transactions from that record and keeps it after execution
+  too, about 50 bytes per tree payee.
+- **Unknown blocks.** On a test network a share can claim a found block
+  with a minimum-difficulty header that no BCHN accepts. A record whose
+  block BCHN does not know is removed after 6 distinct new BCH tips that
+  report it unknown, counted only while BCHN is out of initial block
+  download, when it knows every block it has. The count and last tip
+  persist across restarts, and a duplicate record does not reset them.
+  Known immature blocks, off-chain blocks BCHN still knows, and RPC errors
+  do not age records.
 - **API.** The node serves each tree's transactions, so a payee or a wallet
   can save them and broadcast them without P2Pool.
 
@@ -513,7 +553,8 @@ The BCH block carries one more output for the tree: 44 bytes.
 | Case | What happens | Mitigation |
 |---|---|---|
 | Fees rise above 1 sat/byte | The default executor keeps the 1 sat/byte variant; a root not already accepted may instead be spent with its 2 or 3 sat/byte variant. Above 3 sat/byte, ordinary relay may wait. | BCH consensus has no minimum fee: a miner may include a tree directly. BCH first-seen policy prevents replacing a root already accepted at another rate. A later share-chain rule can alter the rates for new trees. |
-| Partial execution | Some nodes confirmed, others not | Each node is independent once its parent exists. Anyone can finish later. Nothing expires. |
+| Partial execution | Some transactions confirmed, others not | The executor keeps the tree pending until every transaction of one root variant is confirmed. Rejections and errors are retried. Anyone can finish later; known-block tree data does not expire. |
+| Unknown purported found block | BCHN never received or accepted the block | Expire the record after 6 distinct BCH tips reporting it unknown; persist the count so restarts and repeated share validation cannot refresh it. |
 | A miner forces the tree (a format-valid token commitment) | Tree payees fund their share of the fee and wait for tree confirmation after maturity | Cannot redirect money. Both pool-built and declared coinbases can carry token commitments; the payout rule classifies the commitment, not the channel type. |
 | Executor misbehaves | Cannot change outputs, add inputs, attach tokens or vary the transaction | Covenant checks (5.2) |
 | Dust sent to a node's address | A second UTXO with the same script | Spendable only with exactly `V`, so a different value is stuck and harms nothing; an exact copy pays the payees twice, a gift |
@@ -741,7 +782,7 @@ each share once and uploads it to every peer that asks for it.
 | 100 | about 4 KB | 0.4 KB/s | 3 ms | 0.3 ms |
 | 1,000 | about 35 KB | 3.5 KB/s | 28 ms | 3 ms |
 | 6,000 (the former limit) | about 205 KB | 20 KB/s | 0.16 s | 16 ms |
-| 29,398 (BCH's limit) | about 1 MB | 100 KB/s (0.8 Mbit/s, about 260 GB a month) | 0.8 s | 80 ms |
+| 29,402 (BCH's limit) | about 1 MB | 100 KB/s (0.8 Mbit/s, about 260 GB a month) | 0.8 s | 80 ms |
 
 A node that sends a 1 MB share to 8 peers over one 10 Mbit/s uplink needs
 6.4 seconds for the last peer (0.64 s at 100 Mbit/s), and a share crosses
@@ -750,7 +791,7 @@ for those seconds, so about `1 - e^(-t/10)` more shares go stale: 1 second
 costs about 10%, 6.4 seconds about 47%. Stale shares become uncles (9/10 of
 their weight) or orphans, which hurts small miners on slow links most.
 Storage grows the same way: shares are kept for `BCH_PRUNE_DEPTH` (242,126
-shares), about 8 GB of coinbases at 1,000 payees and 242 GB at 29,398. These
+shares), about 8 GB of coinbases at 1,000 payees and 242 GB at 29,402. These
 are estimates from sizes and link speeds; the network sim being built in
 parallel should measure propagation delay and stale rate against coinbase
 size from 1 KB to 1 MB.
@@ -831,8 +872,8 @@ The ignored tests in `p2poolv2_tests/src/payout_tree_bchn_test.rs` run without
 the `sim` feature in the nightly workflow's `payout-tree-bchn` job. The job
 starts BCHN with `-acceptnonstdtxn=0` and serializes the tests on that node.
 
-1. Build a token-share payout with 700 payees: 77 direct outputs and a
-   two-level tree for the other 623, then mine its coinbase on BCHN.
+1. Build a token-share payout with 700 payees: 79 direct outputs and a
+   two-level tree for the other 621, then mine its coinbase on BCHN.
 2. Verify that the node's own executor does not spend before maturity,
    then broadcasts the tree at 1 sat/byte once it is mature. BCHN accepts
    every tree transaction into its mempool and a block.

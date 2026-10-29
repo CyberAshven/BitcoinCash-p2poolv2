@@ -193,11 +193,11 @@
       <dt>PPLNS, paid from the coinbase</dt>
       <dd>
         When a share also meets the Bitcoin Cash target, it is a block. Its
-        coinbase pays the project donation (1% by default), any operator fee,
-        and then
-        the shares that hold the last three blocks' worth of work, at most
-        120,960 of them, leaving out the newest 100. Every node rebuilds that
-        coinbase and rejects a share whose coinbase pays differently.
+        coinbase pays the shares that hold the last three blocks' worth of
+        work, at most 120,960 of them, leaving out the newest 100. Each of
+        those shares gives its own project donation (1% by default) and its
+        node's operator fee, if any, out of its own part. Every node rebuilds
+        that coinbase and rejects a share whose coinbase pays differently.
       </dd>
     </div>
     <div>
@@ -206,7 +206,7 @@
         The coinbase pays every miner its exact share directly, smallest
         first, up to Bitcoin Cash's own 1,000,000-byte transaction limit,
         about 29,400 payouts. A share that merge-mines tokens keeps its
-        coinbase within 3,072 bytes, about 77 payouts. Anyone past the limit
+        coinbase within 3,072 bytes, about 79 payouts. Anyone past the limit
         is paid through one output locked to a payout tree: keyless
         transactions that, once the coinbase matures, can only pay those
         miners their exact amounts less a fee of about one satoshi per byte.
@@ -467,9 +467,9 @@ dial_peers = ["/ip4/203.0.113.1/tcp/6884"]
   </p>
   <p>
     It is the address the pool's own donation pays in each block it finds:
-    1% of the coinbase by default. A node's operator may change that, and a
-    miner may choose their own, from 0 to 10%, with <code>donation=</code>
-    in their login.
+    1% of each share's part by default. A node's operator may change that,
+    and a miner may choose their own, from 0 to 10%, with
+    <code>donation=</code> in their login.
   </p>
   <div class="donate-grid">
     <article class="donate-card">

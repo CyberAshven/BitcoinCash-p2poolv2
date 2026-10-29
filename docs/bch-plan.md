@@ -18,7 +18,7 @@ Audience: contributors and AI agents starting the BCH port. Read
 | Main/mini share chains and P2P propagation | Implemented; recorded three-node regtest and two-node chipnet share validation. |
 | Large BCH template proofs | Implemented; 32-level BCH branches (25 before the 2026-10-24 rule batch) round-trip through share blocks, storage and compressed header batches. Bitcoin proof validation keeps its 16-level limit. |
 | Pool-issued SV1/SV2 jobs and worker cleanup | Implemented; recorded CPU mining plus channel and socket tests. Independent ASIC firmware remains unverified. |
-| Hybrid payouts (decision 14) | Implemented on PR #33 as a share-chain rule change, replacing the 11-payout cap and weighted draw of 2026-10-23 (`payout-cap11`). A share that merge-mines no tokens pays every PPLNS payee directly, bounded only by BCH's 1,000,000-byte transaction limit (about 29,398 P2PKH payees); a token share keeps its coinbase within 3,072 bytes (77 P2PKH payees) and pays the rest through one P2SH32 payout tree output. Every node keeps the tree of each found block, broadcasts it after the coinbase's 100 confirmations and serves it at `/payout_tree`. The share body carries a coinbase of up to 1,000,000 bytes beside 200 KiB of share transactions; payout scripts must be P2PKH, P2SH20 or P2SH32; PPLNS weights are exact work. Protocol strings carry `payout-hybrid-t3072-f500-r1to3-z8-cov1` in place of `payout-cap11`. Tests run the tree in a Rust BCH script machine with the 2025 VM limits, and end to end on BCHN 29.2.0 regtest. Design: [architecture/bch-hybrid-payouts.md](architecture/bch-hybrid-payouts.md). Not yet run on chipnet; stock ASIC firmware limits are not measured. |
+| Hybrid payouts (decision 14) | Implemented on PR #33 as a share-chain rule change, replacing the 11-payout cap and weighted draw of 2026-10-23 (`payout-cap11`). A share that merge-mines no tokens pays every PPLNS payee directly, bounded only by BCH's 1,000,000-byte transaction limit (about 29,400 P2PKH payees); a token share keeps its coinbase within 3,072 bytes (79 P2PKH payees) and pays the rest through one P2SH32 payout tree output. Every node keeps the tree of each found block, broadcasts it after the coinbase's 100 confirmations and serves it at `/payout_tree`. The share body carries a coinbase of up to 1,000,000 bytes beside 200 KiB of share transactions; payout scripts must be P2PKH, P2SH20 or P2SH32; PPLNS weights are exact work; each window share's own donation and fee come off its own weight, their recipients paid as payees. Protocol strings carry `payout-hybrid-t3072-f500-r1to3-z8-cov1` in place of `payout-cap11`. Tests run the tree in a Rust BCH script machine with the 2025 VM limits, and end to end on BCHN 29.2.0 regtest. Design: [architecture/bch-hybrid-payouts.md](architecture/bch-hybrid-payouts.md). Not yet run on chipnet; stock ASIC firmware limits are not measured. |
 | Share transaction pool priority (decision 15) | Implemented 2026-10-23 as node policy: priority is share units burned per byte, then arrival; shares carry the highest first, and a full pool evicts the lowest only for a transaction that outranks them. No validity change. |
 | CashAddr text in the API | Implemented; P2PKH/P2SH vectors and a chipnet share lookup test. |
 | By-address query for share chain explorers | Implemented as `GET /miner?address=` (see `p2poolv2_api/README.md`): one miner's window shares and uncles, weight, share of the window and fraction of the next PPLNS payout, read from the payout code's own `PplnsWindow`. Takes a CashAddr payout with or without prefix or a `p2pool:`/`tp2pool:`/`rp2pool:` share address; chipnet and signet API tests. On 2026-10-23 `p2poolv2_tui`'s live check read it from chipnet node 1 (218 of 218 window shares for the Avalon's payout address). |
@@ -835,11 +835,15 @@ move most BCH hashrate to the share chain.
     Bitcoin assumption, and on PR #33 the hybrid payout replaced it
     ([architecture/bch-hybrid-payouts.md](architecture/bch-hybrid-payouts.md);
     audit items A1 to A3).
-    - **Rule.** Donation and fee, each under its own 10% cap, come off
-      first, as before. A share whose merge-mining commitment is exactly
+    - **Rule.** Each window share's own donation and fee, each under its
+      own 10% cap, come off that share's own weight, the fee after the
+      donation (the owner's decision of 2026-10-29, as P2Pool v1 did it);
+      the donation key and fee addresses are payees like any other, so the
+      share that finds the block cannot charge its cuts to the whole window.
+      A share whose merge-mining commitment is exactly
       empty pays every PPLNS payee directly, within BCH's
-      1,000,000-byte `MAX_TX_SIZE` (about 29,398 P2PKH payees). A share that
-      merge-mines tokens keeps its coinbase within `T` = 3,072 bytes (77
+      1,000,000-byte `MAX_TX_SIZE` (about 29,400 P2PKH payees). A share that
+      merge-mines tokens keeps its coinbase within `T` = 3,072 bytes (79
       P2PKH payees), so a token covenant can hash it in the VM. Payees are in
       canonical order, ascending weight, ties by locking bytecode; the payee
       that straddles the limit and every payee after it go to one P2SH32

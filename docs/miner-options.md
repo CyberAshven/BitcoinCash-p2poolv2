@@ -99,20 +99,25 @@ Rules:
 
 ### Donation
 
-Each block a P2Pool node finds donates part of its reward to the P2Pool
-project's fixed Bitcoin Cash address. With `donation=` each miner chooses
-that part for themselves, on any P2Pool node:
+Each share you earn records what fraction of its future BCH payouts goes
+to the P2Pool project's fixed Bitcoin Cash address. With `donation=` each
+miner chooses that fraction for themselves, on any P2Pool node:
 
 - The value is a percentage from 0 to 10 in steps of 0.5: `0`, `0.5`, `1`,
   `1.5` ... `10`, with at most two decimals (`1.50` is 1.5) and no `%`
   sign. `donation=0` donates nothing.
-- The node builds every job and share for you with your choice, and a block
-  your worker finds pays it. The node's own `donation` is only the default
+- The node builds every job and share for you with your choice. Every pool
+  block that pays your share applies that share's recorded choice only to
+  its own part of the reward. Finding a block does not charge your donation
+  to other miners. The node's own `donation` is only the default
   for miners who choose none: it cannot raise, or lower, your choice.
-- The donation is taken from the block's coinbase first. The operator's
-  fee, if the node takes one, still applies and is taken from what the
-  donation leaves, then the PPLNS window shares the rest. The donation and
-  the fee each have their own 10% cap.
+- For each share, the donation is taken from its weighted entitlement
+  first. The operator's fee recorded on that share, if any, is taken from
+  what its donation leaves and paid to that share's fee address; the rest
+  goes to its payout-right holder. The donation and fee each have their own
+  10% cap. Donation and fee recipients are combined by payout script with
+  all other payees and follow the same direct or payout-tree rules. Integer
+  rounding remainders go to the largest payee.
 - On a node that merge-mines tokens, your choice and the operator's fee
   also apply to each token win: your token leaves carry them as the
   split's donation and fee slots

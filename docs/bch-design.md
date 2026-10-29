@@ -79,15 +79,19 @@ Bitcoin Cash:
 
 - The donation and the fee each at most `MAX_BITCOIN_CASH_CUT` (1,000
   basis points), with no combined cap (the owner's rule, 2026-10-24; before
-  it the two shared one 10% cap). Without it a node could set a 100% fee to
-  itself, keep every block it finds, and still earn from everyone else's
-  blocks through its shares in the window. The fee is taken from what the
-  donation leaves, so it is at most 10% of the coinbase value too, and a
-  10% donation with a 10% fee takes 19% in all. The 10% figure is the
-  project's choice, not a published standard; changing it is a share-chain
-  rule change.
-- A donation output must pay the built-in key. Otherwise the donation field
-  would be a second, uncapped fee under another name.
+  it the two shared one 10% cap). The fee is taken from what the donation
+  leaves, so a 10% donation with a 10% fee takes 19% in all. The 10% figure
+  is the project's choice, not a published standard; changing it is a
+  share-chain rule change.
+- Both come off the share's own weight in each window that pays it, not
+  off the whole coinbase (`cuts-per-share`, the owner's decision of
+  2026-10-29, as P2Pool v1 did it): the donation key and fee addresses are
+  payees like any miner. Before it the share that found a block took its
+  own donation and fee off the whole coinbase, so a miner choosing a 10%
+  donation made the whole window donate, and a miner running its own node
+  could take a 10% fee of every block it found.
+- A donation must pay the built-in key. Otherwise the donation field would
+  be a second, uncapped fee under another name.
 
 On every chain a cut above 10,000 basis points is rejected, at config parse
 and in share validation. Before this, a peer could send a header with

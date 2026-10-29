@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Bitcoin Cash donation and operator fee are taken per share, as P2Pool v1
+took its donation (the owner's decision, 2026-10-29). Each window share's
+own donation, then its fee from what the donation leaves, come off that
+share's own weight, and an uncle's off the uncle's; the share that finds a
+block no longer takes its donation and fee off the whole coinbase, so a 10%
+donation or a self-hosted 10% fee costs only that miner's own work. The
+donation key and fee addresses are payees like any miner, summed by script,
+ordered and split by the hybrid payout, so the coinbase has no separate
+donation or fee output and its reserve beside the payouts drops from 445 to
+367 bytes: a token share pays 79 P2PKH payees directly beside a tree output
+(80 without one), a no-token share 29,400 (29,402). The split is exact in
+integers, with the remainder to the largest payee. A sold payout right
+keeps the share's own cuts. A share-chain rule, not a change to BCH
+consensus; its protocol tag segment is `cuts-per-share`.
+
+A payout tree's money can no longer be frozen by its bookkeeping. The node
+that finds a block keeps the block's payout tree before it submits the
+block, over SV1, SV2 and Job Declaration, so the tree is executed even if
+the share is later rejected or the node stops first; peers still keep it
+when they validate the share. The executor keeps a tree open until every
+transaction of one fee variant has been confirmed for six tips, so a child
+BCHN refuses is broadcast again rather than the tree marked done once its
+root is spent. A kept tree whose block BCHN still does not know after six
+new tips, counted only outside initial block download, is dropped, so
+minimum-difficulty claims on test networks cannot pile up. A tree tail too
+small to pay its own fee and stay above dust is paid directly to its
+largest payee instead of becoming a zero-value tree output.
+
 Share trading for Bitcoin Cash (decision 13), and a trade now carries
 value: nodes relay and mine share transactions, and a coinbase pays each
 window share's weight to whoever holds the share's payout right. This

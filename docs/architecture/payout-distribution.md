@@ -17,8 +17,11 @@ coinbase maturity; `W` = `PPLNS_WINDOW_SHARES` (120,960),
 difficulty of the paying share's own bitcoin header (`bitcoin_header.bits`,
 through `bitcoin_block_difficulty`).
 
-1. **Outputs:** donation cut, then fee cut, then the remainder split over
-   the window by weighted work on BCH, difficulty on Bitcoin.
+1. **Outputs:** on BCH each window share's own donation and fee divide
+   only its weighted work. The donation recipient, that share's fee
+   recipient and its payee are ordinary payees, aggregated by locking
+   bytecode before the hybrid split. Bitcoin retains the finding share's
+   donation and fee cuts on the whole coinbase before the window split.
 2. **Anchor:** the window is walked from the paying share's
    `prev_share_blockhash`, never from a node's tip.
 3. **Maturity:** a share at height `h` is paid only if `h < N` or
@@ -55,6 +58,42 @@ through `bitcoin_block_difficulty`).
    not fit and every later payee go to a P2SH32 payout tree. Direct outputs
    below dust are allowed; tree leaves are checked after fees at 3 sat/byte
    and merged into the largest tree payee when needed. See below.
+
+### Bitcoin Cash per-share cuts
+
+For a share or uncle with gross credited weight `w`, donation fraction `d`
+and fee fraction `f`, the weights are:
+
+- `d * w` to the built-in P2Pool donation key;
+- `f * (1 - d) * w` to that share's own fee address;
+- `(1 - f) * (1 - d) * w` to its payee.
+
+The fee follows the donation. Each cut keeps its separate 10% cap. A
+nephew bonus uses the nephew's cuts; an uncle's 9/10 credit uses the
+uncle's cuts. Selling a payout right moves only the remaining payee credit;
+the share's donation and fee terms stay those it originally committed.
+The finding share's settings affect its own later window credit only.
+
+Why (the owner's decision, as P2Pool v1 did it): with the finding share's
+donation and fee taken off the whole coinbase, a miner choosing a 10%
+donation made the whole window donate 10% of that block, and a miner running
+its own node could set a 10% fee to itself and take 10% of every block it
+found. Per share, each miner's terms cost only that miner's own work.
+
+With basis-point integers `D`, `F` and `B = 10,000`, the exact numerators
+are `w * D * B`, `w * F * (B - D)` and
+`w * (B - D) * (B - F)`, all over `B * B`. No per-share satoshi rounding
+occurs: first sum these integer weights by locking bytecode, including
+scripts shared by a miner, donation or fee recipient. Then split the whole
+coinbase by the resulting weights. Round each amount down and add every
+remaining satoshi to the largest payee in canonical order. Donation and
+fee payees follow the same direct/tree and dust rules as any miner.
+
+The API's share and uncle credit listing reports gross earned work before
+these cuts. The exact payout weight snapshot used for job preparation
+includes the cuts. A share-chain rule: its protocol tag segment is
+`cuts-per-share` (`BCH_PER_SHARE_CUTS_RULE_TAG`), set into the rule batch's
+tag with the others.
 
 ## Invariants
 
@@ -205,25 +244,28 @@ owner's approval.
    format validation independently rejects malformed commitments.
 2. **Amounts and order.** Apply rule 7 after aggregating payout rights.
    Payout, donation and fee scripts on BCH must be P2PKH, P2SH20 or P2SH32.
-3. **Reserve.** Allow 445 bytes beside PPLNS outputs, including the
-   44-byte tree output, the 53-byte CTMM output, donation, fee, padding,
-   commitment and worst-case transaction fields.
+3. **Reserve.** Allow 367 bytes beside PPLNS outputs: the 44-byte tree
+   output, the 53-byte CTMM output, padding, commitment and worst-case
+   transaction fields. Donation and fee are PPLNS payees (rule 1), so they
+   need no reserve.
 4. **Everyone fits.** If all payout outputs fit the budget without the
-   tree output, pay every payee directly. That is 78 P2PKH payees for a
-   token share or 29,399 for a no-token share, using the conservative
+   tree output, pay every payee directly. That is 80 P2PKH payees for a
+   token share or 29,402 for a no-token share, using the conservative
    reserve above.
 5. **Straddle.** Otherwise take the longest canonical prefix that fits
-   with the tree output reserved: 77 or 29,398 P2PKH payees respectively.
+   with the tree output reserved: 79 or 29,400 P2PKH payees respectively.
    The first payee that does not fit and every later payee go to the tree.
    Never split a payee or back-fill with a later smaller output.
 6. **Dust.** Direct payouts below dust are paid as they are, which BCH
    consensus permits in coinbases. Tree payees below their dust threshold
    after fees at the highest allowed rate are merged into the last tree
-   payee. Recompute until no removable leaf is below dust.
+   payee. Recompute until no removable leaf is below dust. If that last
+   payee cannot pay its own fee and stay above dust, the merged tail is
+   paid to it directly in the tree output's place.
 
-The output order is CTMM at output 0, donation, fee, direct payouts, the
-tree root if needed, padding and the share commitment last. Validators
-check the complete rebuilt coinbase and the applicable size limit.
+The output order is CTMM at output 0, direct payouts, the tree root if
+needed, padding and the share commitment last. Validators check the
+complete rebuilt coinbase and the applicable size limit.
 
 ### The payout tree
 
@@ -239,12 +281,17 @@ variant's rate times its size; the root also pays the rounding excess.
 The executor pays nothing and receives nothing. BCH first-seen policy
 means a root already accepted at one rate cannot be replaced by another.
 
-Every P2Pool node stores each validated found block's tree by coinbase
-txid, independently of later share-chain status. After the block has 100
-confirmations it broadcasts the 1 sat/byte variant, root first, and
-finishes descendants of any higher-rate variant someone else started.
-It rebroadcasts on new BCH tips until settlement. Tree data is retained
-even after execution; `/payout_trees` and
+The node that finds a block stores its tree by coinbase txid before it
+submits the block, and every P2Pool node stores it again when it validates
+the share, independently of later share-chain status. After the block has
+100 confirmations each node broadcasts the 1 sat/byte variant, root first,
+and finishes descendants of any higher-rate variant someone else started.
+It rebroadcasts on new BCH tips until every transaction of one variant has
+been confirmed for six tips in a row; a refused or missing child keeps the
+tree open. A tree whose block BCHN still does not know after six new tips,
+counted while BCHN is out of initial block download, is dropped: on a test
+network a share can claim a block with a minimum-difficulty header that no
+BCHN accepts. Tree data is retained after execution; `/payout_trees` and
 `/payout_tree?coinbase_txid=` serve the payees and raw transactions for
 every permitted rate.
 
@@ -271,9 +318,9 @@ device limits are documented in [Stratum](../stratum.md).
 
 This share-chain rule batch starts on a fresh store. The hybrid tag segment
 is `payout-hybrid-t3072-f500-r1to3-z8-cov1`, replacing `payout-cap11`;
-`body-1000000-204800`, `payee-p2pkh-p2sh20-p2sh32` and `weight-work` name
-the share body, payout script and exact-weight rules. None of them changes
-BCH consensus.
+`body-1000000-204800`, `payee-p2pkh-p2sh20-p2sh32`, `weight-work` and
+`cuts-per-share` name the share body, payout script, exact-weight and
+per-share cut rules. None of them changes BCH consensus.
 
 Firmware limits still need measurement on real ASICs over SV1 directly
 and behind an SV2 translator. Firmware evidence from other pools does not
@@ -343,7 +390,7 @@ See `pruning.md` for the two-window retention model.
 | Entry point | `PplnsWindow::get_distribution_from_start_hash` |
 | Every miner's credits (API `/miner`, one walk per anchor) | `PplnsWindow::get_window_credits_from_start_hash`, same walk and weights; on BCH the API sizes it from the anchor share's own header |
 | Producer | `Payout::fill_distribution_from_shares` (`sharechain_pplns/payout.rs`), from `build_output_distribution` (`stratum/work/notify.rs`); the window is built by `build_payout_for_mode` (`accounting/payout/mod.rs`) |
-| Cuts and split | `include_address_and_cut`, `append_proportional_distribution` (`accounting/payout/payout_distribution.rs`) |
+| Cuts and split | `ShareCuts`, `distribution_for_resolved` (`sharechain_pplns/pplns_window.rs`); Bitcoin/Hydrapool cuts in `include_address_and_cut` (`accounting/payout/payout_distribution.rs`) |
 | BCH hybrid payout | `PayoutSplit`, `append_payout_split`, `direct_payee_count`, `bch_payout_rule_tag` (`accounting/payout/coinbase_budget.rs`); `check_bch_coinbase_limit`, `place_merge_mining_output` (`stratum/work/coinbase.rs`) |
 | Tree building and covenant | `accounting/payout/payout_tree.rs`, `shares/bch_payout_covenant.rs` |
 | Tree storage, execution and API | `store/payout_tree.rs`, `node/payout_tree_executor.rs`, `p2poolv2_api/src/api/endpoints/payout_trees.rs` |
@@ -375,10 +422,12 @@ test with small values (for example 3 and 2).
 | BCH: a claim pays the buyer, a refund the seller, a reorg undoes a claim, the holder depends on the anchor only, Bitcoin unchanged | `p2poolv2_tests/src/share_payout_rights_test.rs` |
 | BCH: rights move input `i` to output `i`, freeze, keep the holder through P2SH32, undo, evict, overlay | `payout_rights.rs` tests |
 | BCH exact-work share and uncle weights | `test_bch_window_weighs_shares_by_exact_work` and adjacent tests (`pplns_window.rs`) |
+| BCH per-share donation and fee, kept through a sold right and on uncles; cut payees summed by script; producer and validator agree | `test_bch_transferred_share_and_uncle_keep_their_own_cuts`, `test_bch_cut_payees_aggregate_by_script` (`pplns_window.rs`), `test_bch_per_share_cuts_producer_and_validator_agree` (`sharechain_pplns/payout.rs`), `prepared_notify/donation_tests.rs` |
 | BCH hybrid: both budgets, exact straddler, canonical order, dust, bytes, determinism | `coinbase_budget/tests.rs` |
 | BCH hybrid: producer and validator agree beyond the former cap | `test_bch_notifier_and_validator_agree_paying_twenty_miners_directly` (`sharechain_pplns/payout.rs`) |
 | Tree shapes, fee variants, dust, covenant execution | `payout_tree/tests.rs`, `bch_payout_covenant/tests.rs` |
-| Maturity, rebroadcast and settlement | `node/payout_tree_executor/tests.rs` |
+| Maturity, rebroadcast and settlement; a refused child keeps a tree open; unknown blocks expire, never during initial block download | `node/payout_tree_executor/tests.rs`, `store/payout_tree.rs` |
+| A found block's tree is kept before submission, over SV1, SV2 and declared jobs, and the block goes out even if the store fails | `stratum/message_handlers/submit/handle_submit_tests.rs`, `stratum/sv2/mining/tests.rs`, `stratum/sv2/custom_job/tests.rs` |
 | BCHN relay and end-to-end payout execution | `p2poolv2_tests/src/payout_tree_bchn_test.rs` |
 | Fixture coinbases match | `test_fixture_coinbase_reconstruction_matches_bitcoin_merkle_root` (`shares/share_block/mod.rs`, mirrors the walk by hand) |
 

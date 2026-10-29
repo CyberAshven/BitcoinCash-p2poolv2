@@ -17,20 +17,21 @@ payouts land on the Bitcoin Cash chain, spendable after 100 blocks.
 
 Three miners have found the six shares in a window, all at the same
 difficulty, so each miner's part is its count of shares. The block reward is
-3.125 BCH (fees left out), and the node keeps the default 1% donation and
-no operator fee:
+3.125 BCH (fees left out). Miners B and C keep the default 1% donation, miner
+A chose `donation=0`, and no node takes an operator fee. Each share's
+donation comes off that share's own part, whoever finds the block:
 
 ```text
 PPLNS window, newest first:  B  A  C  A  B  A
 
 Bitcoin Cash coinbase, 3.125 BCH:
-  donation, 1%                        0.03125000 BCH
-  Miner C, 1 of 6 shares (16.7%)      0.51562500 BCH
-  Miner B, 2 of 6 shares (33.3%)      1.03125000 BCH
-  Miner A, 3 of 6 shares (50%)        1.54687500 BCH
-  merge-mining commitment             0
-  padding                             0
-  share commitment                    0
+  merge-mining commitment                 0
+  donation, 1% of B's and C's shares      0.01562500 BCH
+  Miner C, 1 of 6 shares, less 1%         0.51562500 BCH
+  Miner B, 2 of 6 shares, less 1%         1.03125000 BCH
+  Miner A, 3 of 6 shares                  1.56250000 BCH
+  padding                                 0
+  share commitment                        0
 ```
 
 Amounts are split in whole satoshis: each payee's part is rounded down and the
@@ -46,24 +47,28 @@ In order:
    merge-mines, the exact empty commitment if none. It is output 0
    ([Auxiliary work proofs](../bch-auxpow.md)). On a node that merge-mines
    tokens it is the root of the miner's own token leaves, whose split
-   carries the miner's donation and the node's fee for each token win as
-   this coinbase carries them for BCH.
-2. **Donation.** To the project's fixed key (plan decision 9): the
-   donation the finding miner's login chose with `donation=` (0 to 10% in
-   steps of 0.5%, [Miner options](../miner-options.md#donation)), or the
-   node's `donation`, 1% by default, when it chose none. The share header
-   commits to it, and peers rebuild the coinbase from that.
-3. **Operator fee,** if the node sets `fee_address`: `fee`, or 1% when
-   `fee` is not set. Donation and fee are each capped at 10% by the share
-   chain, with no combined cap; the fee is taken from what the donation
-   leaves.
-4. **PPLNS payouts,** smallest weight first, ties by locking script, then
+   carries the miner's donation and the node's fee for each token win.
+2. **PPLNS payouts,** smallest weight first, ties by locking script, then
    the payout tree output if some payees do not fit (below). A miner is
    paid at the CashAddr in its Stratum username, P2PKH or P2SH
    ([Miner options](../miner-options.md)). If the share's payout right has
    been sold, its weight is paid to the right's holder instead
    ([Trading shares for BCH](../atomic-swap/bch-share-trading.md#payout-rights)).
-5. **Padding and share commitment,** zero-value outputs that tie the share to
+   The project's donation key and node operators' fee addresses are payees
+   like any miner:
+   - **Donation.** Each share records the donation its miner chose with
+     `donation=` (0 to 10% in steps of 0.5%,
+     [Miner options](../miner-options.md#donation)), or its node's
+     `donation`, 1% by default, when the miner chose none. That part of the
+     share's own weight is paid to the project's fixed key (plan decision 9).
+   - **Operator fee.** Each share records the fee of the node that built
+     it, if that node sets `fee_address`: `fee`, or 1% when `fee` is not
+     set, taken from what the share's donation leaves and paid to that
+     node's fee address.
+   Donation and fee are each capped at 10% by the share chain, with no
+   combined cap. They come off each share's own weight only: the share that
+   finds the block cannot charge them to the rest of the window.
+3. **Padding and share commitment,** zero-value outputs that tie the share to
    this coinbase ([Share commitments](../sharechain/share-commitments.md)).
 
 There is no SegWit witness commitment on Bitcoin Cash.
@@ -76,7 +81,7 @@ payee directly: only Bitcoin Cash's
 payouts. Pool-built jobs can merge-mine tokens using each miner's own
 leaves, and Job Declaration can carry a token commitment too. A share
 that merge-mines tokens keeps its coinbase within 3,072
-bytes (77 P2PKH payouts), so a token covenant can hash it. The payee whose
+bytes (79 P2PKH payouts), so a token covenant can hash it. The payee whose
 output would pass the limit and every payee after it are paid through one
 payout tree output: keyless covenant transactions of up to 500 outputs each
 that anyone can broadcast once the coinbase is mature, paying each payee
