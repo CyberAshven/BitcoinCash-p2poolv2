@@ -1,9 +1,12 @@
 # Proposal: a decentralized pool for PHOTON GPU miners
 
 **Status: proposal, 2026-10-29. No implementation is authorized by this
-document.** The Pickaxe session and an independent covenant auditor must
-review it before code. Parameter choices below are proposed PHOTON
-share-chain rules. They change neither BCH consensus nor PHOTON v3.2.
+document.** Parameter choices below are proposed PHOTON share-chain rules.
+They change neither BCH consensus nor PHOTON v3.2. The independent
+re-review of revision `4ecec7aa` clears only an isolated, test-only
+payout-covenant prototype. Share-chain and node work stay blocked until
+its findings F1 and F2 are fixed and re-reviewed (section 10). The owner
+still decides whether any prototype starts.
 
 ## 1. Goal and scope
 
@@ -39,12 +42,16 @@ deployment. The owner's requirement is the existing v3.2 token.
 
 The inspected Pickaxe files are the v3.2 template and redeem script,
 `src/protocol.rs`, `docs/protocol-profile.md`, `docs/architecture.md`, and
-`src/reward.rs`. Additional transaction and tail-loop sources resolve the
-layout and hashing questions [P1-P10]. The original review inspected revision
-`2f7cbb0493f2a46ef89d4f04c941074311a09ba0`; this revision checks Pickaxe dev
-`640e9d24b04f5cc2ce72bedc871f3e3f28422a92`. The template, redeem hex and
-protocol constants are unchanged between those revisions. This is source verification,
-not a fresh query of mainnet or chipnet UTXOs.
+`src/reward.rs`. Additional transaction, key-rotation, signing and
+tail-loop sources resolve the layout and hashing questions [P1-P10].
+Links P1 to P10 pin revision `2f7cbb0493f2a46ef89d4f04c941074311a09ba0`,
+which this document inspected. The Pickaxe review checked dev
+`640e9d24b04f5cc2ce72bedc871f3e3f28422a92`. The template, redeem hex,
+protocol constants, signer and CUDA tail loop are unchanged between those
+revisions. Serialization, T2 and search code differ; the key rotation and
+winner count cited as P9 are present at both [git diff of the two
+revisions]. This is source verification, not a fresh query of mainnet or
+chipnet UTXOs.
 
 The decoded redeem script is 273 bytes. Its HASH256 is
 `0ab476a6dab00ba11118a11c078f871c5060a66e18140368425202772d0e80c2`.
@@ -243,7 +250,7 @@ is a format proposal; golden byte vectors must precede implementation.
 | Domain | Wire version, 2 bytes; chain identifier, 32 bytes; BCH network identifier, 4 bytes; category, 32 bytes; vault lock hash, 32 bytes |
 | DAG metadata | Parent share identifier, 32 bytes; height, 8 bytes; timestamp in Unix seconds, 8 bytes; ordered uncle identifiers, each 32 bytes |
 | Work and ownership | Share target, 32 bytes; miner's token payout locking bytecode with length; authenticated per-share fee policy, if approved |
-| Baton anchor | Actual spent txid, 32 bytes; output index, 4 bytes; source value in satoshis, 8 bytes; source token amount in raw units, 8 bytes; source commitment, 100 bytes; authenticated BCH block hash, 32 bytes; ordered vault-transition path and dependency evidence |
+| Baton anchor | Actual spent txid, 32 bytes; output index, 4 bytes; source value in satoshis, 8 bytes; source token amount in raw units, 8 bytes; source commitment, 100 bytes; source confirmation height in BCH blocks, 4 bytes, `0xffffffff` while unconfirmed; context BCH height, 4 bytes; vault-lineage digest, 32 bytes; transition count, 8 bytes; bounded path delta from the parent |
 | Distribution | Canonical parent-window weights root, 32 bytes; total integer weight; tree parameters and covenant version |
 | Proof | Compressed public key, 33 bytes; nonce, 4 bytes; datasig, 64 bytes; tail decrement in raw units, 2 bytes; age in BCH blocks, 2 bytes |
 
@@ -287,23 +294,26 @@ change does not alter the prefix. Key changes do alter the prefix [P7].
 1. Bound lengths and queue work before expensive processing. Check domain,
    version, category, canonical encoding and duplicate share identifier.
 2. Resolve the parent and uncles. Check height, time rules, uncle eligibility
-   and the required share target. Rebuild the prior-window weights.
+   and the required share target. Reject the share if any referenced uncle
+   is ineligible. Rebuild the prior-window weights.
 3. Authenticate the spent baton against a validated BCH source transaction
    and its ancestry. Check lock, category, value, mutable capability,
    commitment and token amount. Apply the lineage/context eligibility rule
    below; an authentic historical source or a peer announcement is insufficient.
-4. Check the claimed age against that source's authenticated BCH anchor,
-   then derive the PHOTON target. The pool profile sets sequence equal to
-   the claimed age. Validate old shares against their committed historical
-   context, not the current tip's age. For unconfirmed chaining, validate the
-   entire predecessor claim path and use age 0 BCH blocks.
+4. Check the claimed age against the source's committed confirmation
+   height and the committed context height, then derive the PHOTON target.
+   The pool profile sets sequence equal to the claimed age. Validate old
+   shares against their committed historical context, not the current
+   tip's age. For unconfirmed chaining, validate the entire predecessor
+   claim path and use age 0 BCH blocks.
 5. Verify the datasig, bind the complete proof seed in `R` as in section 4,
    then reconstruct the exact claim using the prescribed tail and expected
    reward lock. Check amount encoding, exact BCH values/fee, dust, and
    the selected tail profile's conservation or exact-burn rule. Check the
    signed positive target predicate. Verify one
    datasig and one HASH256. Reject altered templates.
-6. If the hash meets the share target, credit one chain share. If it also
+6. If the hash meets the share target and its claim digest is not already
+   credited on the selected ancestry, credit one chain share. If it also
    meets the contract target, immediately broadcast the claim. An eligible
    contract win must be forwarded even if it misses a harder share target.
    Record it separately; it does not acquire unearned share-chain credit.
@@ -316,51 +326,133 @@ BCHN transaction acceptance. These are distinct checks.
 ### Authenticated baton context and eligibility
 
 This proposed rule starts at a designated deployment vault outpoint,
-not any output with the same category and lock. Each share commits a BCH
-block context and the complete validated claim/oracle transition path
-from that outpoint to its selected baton. Authenticate block inclusion,
-source data and intervening spends using a validated BCH chain/UTXO view;
-a header or transaction Merkle proof alone does not prove unspentness.
-Carry or fetch the evidence needed for reproducible historical validation.
+not any output with the same category and lock. Each share commits a vault
+lineage: the ordered claim and oracle transitions from that outpoint to its
+selected baton. Authenticate block inclusion, source data and intervening
+spends using a validated BCH chain/UTXO view; a header or transaction
+Merkle proof alone does not prove unspentness.
 
-A child context must extend its parent's BCH branch and selected vault
-path. Allowable backward block lag and spent-baton lag are both zero in
-that committed context: the source must be the path's current unspent tip.
-A BCH block advance must incorporate every confirmed transition on the
-designated lineage, including oracle moves. New live jobs and credited
-tip selection use the latest fully validated BCH block context, with
-zero-block lag; missing context pauses them. Historical shares are checked
-against their own committed contexts, never today's age or local first-seen
-time. Reorganization selects/rebuilds a compatible share branch rather
-than rewriting old proofs [proposed profile; compare B8's payout-validity rule].
+The lineage digest is a hash chain. It starts as SHA256 of a lineage domain
+tag and the deployment outpoint. Each transition replaces it with SHA256 of
+the tag, the previous digest and the new vault outpoint (36 bytes). The
+share also commits the transition count, so lineages compare by length
+and digest. Confirmation heights are not in the digest, so a transaction
+that confirms, or returns to the mempool, keeps the same lineage.
 
-Unconfirmed predecessors are permitted only on an explicit selected path.
-Validate every predecessor claim or oracle transaction, its funding-input
-prevouts, dependency spends, token rules and finality. Use claimed age
-0 BCH blocks for an unconfirmed source [P1]. Distinct conflicting paths
-remain distinct; local mempool first-seen order is not a share-chain rule.
-Once a parent selects a successor, descendants cannot revert to its spent
-predecessor. Confirmation selects the actual BCH path. A funding conflict
-or BCH reorg rolls back the dependent speculative branch and jobs, then
-recomputes live credit on a compatible branch. Historical storage does
-not imply current credit or successful settlement.
+Carry the path incrementally, as a delta from the parent [re-review F5].
+For each transition after the parent's lineage tip, in order, the delta
+holds the new vault outpoint and its confirmation height (40 bytes), or,
+for an unconfirmed claim, the full transaction. Nodes check confirmed
+entries against their own validated BCH view; the entries make that check
+a lookup. Proposed bound: at most 256 confirmed entries and at most 8
+unconfirmed claims of at most 1,000 bytes each, above every claim layout
+in section 2, so at most 18,240 bytes of path evidence per share
+[proposed profile; arithmetic]. A parent more than 256 transitions behind,
+about 43 hours of claims at one per 600 seconds, cannot be extended.
+Restarting after such an outage needs the bootstrap rule in section 10.
+A cold peer recomputes the lineage from the deployment outpoint with its
+own BCH view and fetches carried claims.
+
+A child's lineage must extend its parent's, and its context height must be
+at least its parent's. Spent-baton lag is zero: in the committed context the
+source must be the lineage's current unspent tip. A context must include
+every transition confirmed at or below its context height, including oracle
+moves. After those it may hold only single-input claims not confirmed at
+or below that height (below). The claimed age must satisfy
+`age <= context_height + 1 - source_confirmation_height`, in BCH blocks:
+the claim could enter the next block [P1; proposed profile]. A context
+height above the validating node's best
+validated BCH height waits, within the peer queue bound, until that node
+catches up. New live jobs and credited tip selection use the latest fully
+validated BCH height; missing context pauses them. Historical shares are
+checked against their own committed contexts, never today's age or local
+first-seen time. Reorganization selects/rebuilds a compatible share branch
+rather than rewriting old proofs [proposed profile; compare B8's
+payout-validity rule].
+
+Share compatibility is defined on vault lineage and anchor heights, not on
+an exact BCH block hash [re-review F5]. Two contexts are compatible when
+one lineage extends the other and each share's committed source
+confirmation height matches the validating node's BCH view. A share
+claiming age 0 BCH blocks needs only its source to be the lineage tip,
+confirmed or not. Under the previous revision, which committed and
+extended the exact block hash, every BCH orphan or brief tip disagreement
+would fork the share chain. The losing side would roll back about 60
+honest shares (600 seconds of BCH block interval at the 10-second share
+interval) even when the vault lineage is unchanged [arithmetic]. Lineage
+and heights are the only BCH data that PHOTON validation reads: which
+baton is current and how much age it has. An orphan that leaves both
+unchanged now moves no credit. One that changes them still rolls back the
+dependent shares, as it must.
+
+### Unconfirmed transitions
+
+Speculative selection is limited to single-input claim successors
+[re-review F1]. A node may select an unconfirmed transition only if it is
+a claim with exactly one input, the vault, and every earlier unconfirmed
+transition on the selected path is also such a claim. Validate each one's
+token rules, finality and complete predecessor claim path. Use claimed age
+0 BCH blocks for an unconfirmed source [P1]. No funding conflict can
+invalidate such a claim: it spends nothing but the vault. Only a
+conflicting claim can displace it, and that needs a real contract win,
+not a fee.
+
+Never select, mine on, or cancel jobs because of an unconfirmed oracle
+transition, or any other unconfirmed transition with an input other than
+the vault. Keep mining the current baton `V` until such a transition `O`
+confirms; it then enters the lineage through the height rule above. A pool
+contract win on `V` found while `O` is pending can lose to `O` at
+confirmation. That risks the wins of about one BCH block interval, not
+share credit. Price oracle disruption at the confirmed deposit: at least
+8,000 satoshis plus fees (section 6).
+
+The counterexample behind this rule comes from the re-review of
+`4ecec7aa`. That revision let nodes cancel `V` jobs on any unconfirmed
+oracle spend and select the spend speculatively:
+
+1. The attacker broadcasts oracle `O`, spending `V` and a funding input
+   `F`, and gets a conflicting spend of `F` mined. This needs no
+   8,000-satoshi deposit.
+2. Honest nodes stop mining `V`, mining `O`'s output speculatively or
+   pausing, while the attacker privately mines `V` shares.
+3. The `F` conflict confirms. `O` becomes invalid, and every share that
+   selected it is dead.
+4. The only compatible branch with work is the attacker's `V` branch, which
+   becomes the mainline. Honest work is beyond the 6-share uncle depth, and
+   cannot be an uncle anyway: uncles need the includer's baton.
+
+The attacker then takes all window credit for up to about one BCH block,
+about 60 shares, per success. It pays one conflicting transaction's fee,
+or 8,000 satoshis if `O` confirms, and can repeat this every BCH block.
+Ignoring unconfirmed oracle transitions removes step 2.
+
+Distinct conflicting paths remain distinct; local mempool first-seen order
+is not a share-chain rule. Once a parent selects a claim successor,
+descendants cannot revert to its spent predecessor. Confirmation selects
+the actual BCH path. A conflicting confirmed claim or a BCH reorg rolls
+back the dependent speculative branch and jobs, then recomputes live
+credit on a compatible branch. Historical storage does not imply current
+credit or successful settlement.
+
+### Credit eligibility
 
 For a paying share, mainline PPLNS work must have been eligible in its
-own context and be compatible with the paying BCH branch and ordered
-vault lineage. Pre-transition work can remain in the window. An uncle
-must additionally use the includer's selected baton and compatible context;
-both uncle credit and the includer bonus fail together otherwise. No
-uncle may introduce old-baton work after a selected transition. Apply
-these checks before assigning any credit, as well as at share acceptance.
+own context and be compatible with the paying share's vault lineage and
+anchor heights. Pre-transition work can remain in the window. An uncle
+must additionally use the includer's selected baton and compatible context.
+A share that references an uncle failing these checks is invalid; the
+uncle is not accepted at zero weight [re-review F5]. No uncle may introduce
+old-baton work after a selected transition. Apply these checks before
+assigning any credit, as well as at share acceptance.
 
-For the review's counterexample, if oracle transaction `O` spends `V`,
-a current-parent share whose context contains `O` cannot mine against `V`:
-its source is not the selected tip. Neither a new timestamp nor authentic
-ancestry of `V` repairs that. If `O` is unconfirmed and not yet selected,
-competing speculative contexts remain possible until resolved. A private
-old-context proof does not reveal its wall-clock creation time. Depth
-rules and compatible-context payout filtering bound its credit opportunity;
-they do not prove a deadline. Model these cases before profile activation.
+If confirmed oracle transaction `O` spends `V`, a share whose context
+contains `O` cannot mine against `V`: its source is not the lineage tip.
+Neither a new timestamp nor authentic ancestry of `V` repairs that. An
+unconfirmed `O` creates no competing context, because nodes ignore it.
+A private old-context proof does not reveal its wall-clock creation time.
+Depth rules and compatible-context payout filtering bound its credit
+opportunity; they do not prove a deadline. Model these cases, including
+the counterexample above, before profile activation.
 
 ### Targets, PPLNS and uncles
 
@@ -404,23 +496,48 @@ These are depth rules, not v3.2 limits or seconds [proposed profile]. Use
 greatest cumulative valid mainline work, breaking ties by ascending raw
 share identifier. Keep the existing ancestor-off-chain uncle meaning [B2].
 An uncle already canonical or already included anywhere on the selected
-ancestry cannot earn credit again. Deduplicate normalized claim proof
-and tail, not merely share identifiers or actual locktime variants; keep
+ancestry cannot earn credit again. Deduplicate by the reconstructed claim
+digest: the HASH256 of the claim reconstruction with locktime 0, which
+includes `HASH160(R)` in output 1 [P1; re-review F6]. That digest already
+covers actual locktime variants. Do not key on the proof seed and tail
+alone: the same seed and tail legitimately recur under a different `R`
+after a timestamp or parent change, and each is a fresh PoW trial. Keep
 a reorg-aware index so moving outside the window cannot renew credit.
 
 Window arithmetic is exact and ordered. Walk mainline entries newest
 first; consume each entry's own raw work, then its eligible-position
-uncles in ascending normalized proof identifier. For each unique work
-item set `clipped = min(work, remaining_budget)` and subtract it from the
-raw budget. Own work earns `10 * clipped` weight. An eligible uncle earns
+uncles in ascending claim digest. For each unique work item set
+`clipped = min(work, remaining_budget)` and subtract it from the raw
+budget. Own work earns `10 * clipped` weight. An eligible uncle earns
 `9 * clipped` for its beneficiary and `clipped` for the eligible includer.
 Thus each paid item conserves `10 * clipped` integer weight; never round
 90 percent and 10 percent independently [B2; proposed clipping order].
-The boundary is ordered, not proportional. Context-ineligible items
-consume their raw budget position but receive zero weight, including zero
-uncle bonus; do not walk farther to replace them. Check positional validity
-and deduplication before this walk. Aggregate the resulting weights by
-payout script. An all-zero non-bootstrap window cannot build a job.
+The boundary is ordered, not proportional. Context-ineligible mainline
+items consume their raw budget position but receive zero weight; do not
+walk farther to replace them. Ineligible uncles never reach this walk:
+their includer is invalid (above). Check positional validity and
+deduplication before this walk.
+
+The walk also caps distinct payout scripts at section 5's 4,096 leaves
+[re-review F2]. A script is admitted when an item first gives it positive
+weight. Stop the walk before the first item that would admit a 4,097th
+script: that item and every older item get zero weight and consume no
+budget. The window then credits less than its full budget, and the
+manifest shows where the walk stopped. Without this rule, a minority miner
+using one fresh script per share, or ordinary growth, can push a window
+past 4,096 scripts. The window holds up to 4,320 items when every item
+carries at least bootstrap work, and more if the share-target ceiling
+allows easier shares. Every manifest would then be rejected, no child job
+could be built, and the window would never slide. An alternative is a
+share-target ceiling that keeps the window at most 4,096 items: every
+credited item, uncles included, must then carry at least
+`4,320 / 4,096`, about 1.055, times bootstrap work [arithmetic]. This
+proposal prefers the cap rule because it holds whatever the ceiling is.
+Golden vectors must cover the stop point, ties and uncles.
+
+Aggregate the resulting weights by payout script and drop scripts whose
+total is zero; section 5 rejects any manifest with a zero-weight leaf.
+An all-zero non-bootstrap window cannot build a job.
 
 Timestamps must exceed the median of the preceding 11 share timestamps;
 a proposed future allowance is 15 seconds. Both are proposed PHOTON
@@ -521,20 +638,62 @@ of one honest `(R, seed)` candidate over its bounded tail range:
 `candidate_count * (contract_target - 1) / 2^256` when small, under
 independent digests. This is per seed, not per accepted share.
 
-**Use the square-root bound, not `2^80 / p`.** A single large generic
+**Use the square-root estimate, not `2^80 / p`.** A single large generic
 search yields many collisions, and the attacker needs only one whose honest
 side wins. The cheap per-element variable is the attacker's own metadata,
 for example its payout script, with the seed fixed. Each change gives a new
 `R` and HASH160, hence a fresh trial of the tail range. With `n1` honest and
 `n2` malicious candidates, success needs about `n1 * n2 * p = 2^160`. Total
 HASH160 work is minimized near `2 * 2^80 / sqrt(p)`. Testing the tails of
-the roughly `1 / p` collided honest seeds adds about one PHOTON win's work.
-Bounded-memory distinguished-point (golden-collision) search costs more,
-so `2 * 2^80 / sqrt(p)` is the conservative generic bound [Pickaxe review
-of 5373473b; S2]. For scale only, at `p = 6.5 * 10^-9` (one PHOTON win per
-about `10^13` candidates, 65,536 tails per seed), that is about
-`1.9 * 10^11` GPU-years per stolen reward at the assumed rate, against
-`1.2 * 10^15` under the superseded `2^80 / p` model.
+the roughly `1 / p` collided honest seeds adds about one PHOTON win's work
+[Pickaxe review of 5373473b; S2].
+
+**This is an attainable estimate, not a conservative bound** [re-review F3].
+The previous revision called it conservative because bounded-memory
+golden-collision search costs more. That does not apply. A golden-collision
+search needs one particular collision; here any cross collision whose
+honest side wins will do, so the attacker needs about `1 / p` of them.
+Parallel collision search finds `m` collisions in a range of `n` values
+with about `sqrt(n * m)` evaluations and memory for about `m`
+distinguished points [S8]. About half of all collisions pair an honest and
+a malicious script. With `m` about `2 / p`, about `3 * 10^8` points or
+roughly 10 GB at `p = 6.5 * 10^-9`, it reaches about
+`2^80 / sqrt(p)` HASH160 evaluations with modest memory [re-review F3;
+arithmetic].
+
+**Price `p` at the attacker's best case.** Age easing can raise the
+contract target toward `2^255 - 1`, so `p` can approach 1 [P1; section 2].
+The floor is then about `2 * 2^80`, or `2.4 * 10^24` HASH160 evaluations
+per stolen reward. That is about `1.5 * 10^7` GPU-years at the assumed
+`5 * 10^9` HASH160 evaluations per second per GPU, or about 40 minutes for
+a hypothetical ASIC fleet computing `10^21` HASH160 evaluations per second
+[arithmetic]. At `p = 6.5 * 10^-9` (one PHOTON win per about `10^13`
+candidates, 65,536 tails per seed), the same fleet needs about 1 year and
+GPUs about `1.9 * 10^11` GPU-years, against `1.2 * 10^15` GPU-years under
+the superseded `2^80 / p` model. No HASH160 ASIC fleet is known to this
+document; the `10^21` rate is a stress assumption, not a measurement.
+
+Weigh the `p -> 1` floor against the value of one PHOTON reward: at most
+`floor(balance / 420,000)` raw units, for example about
+`4.97 * 10^9` raw units in section 2's carry example [P1; arithmetic].
+This document has no market price for PHOTON. The owner must compare that
+value with about `1.5 * 10^7` GPU-years, and with the stress fleet's
+40 minutes.
+
+Two margins are not counted above. First, the honest `R` keeps its
+variable 32-byte proof-seed/context digest at `R` offsets 43 to 74
+(section 5 state layout), starting in the first SHA-256 block. No midstate
+can be shared between honest candidates. Each honest HASH160 of a
+4,435-byte `R` costs about 70 SHA-256 compressions, against about 2 for a
+short malicious script. At the unequal-cost optimum the attack then costs
+roughly `sqrt(70 * 2) / 2`, about 6, times more compression work than
+equal-cost HASH160 counting [re-review F3; arithmetic]. Keep the digest
+early in `R`: moving it to the end would allow midstate reuse and lose this
+margin. Second, the search must finish within one job or baton lifetime:
+the honest `R` binds the parent share and the spent baton, neither known
+in advance. When `p` approaches 1 the contract target is so easy that the
+baton moves quickly. The cost figures rely on neither margin, and P2SH20
+security still uses no wall-clock window.
 
 **Winner prefiltering cannot happen in the dangerous order.** Output 1
 is `OP_HASH160 <HASH160(R)> OP_EQUAL`, and those 20 bytes are inside the
@@ -547,14 +706,15 @@ multi-target second preimage costing about `2^160 / |W|`. Each element of
 `|W|` stays tiny and the cost exceeds `2^120` [Pickaxe review; serialization
 in section 2].
 
-These figures are conditional, not a proved attack lower bound. The
-auditor must still check unequal search populations, time/memory
-tradeoffs and restricted script families. Binding removes reuse across
-seeds; it does not control the attacker's own search strategy.
+These figures are estimates, not a proved attack lower bound. Binding
+removes reuse across seeds; it does not control the attacker's own search
+strategy. The re-review's check of other strategies is summarized below.
 
 A precomputed malicious table of `2^50` entries leaves order `2^110`
 online trials to hit it in a 160-bit range under the random-function
-model. Grinding a
+model. Each hit is a collision whose honest side wins with probability
+`p`, so the cost per stolen reward is about `2^110 / p` trials
+[re-review F3]. Grinding a
 payout address in advance does not predict future parent-bound roots.
 These statements assume sound SHA-256/RIPEMD-160 composition and no
 special attack on the restricted script family; they are not proofs of it.
@@ -571,12 +731,52 @@ rules regardless: they govern fair credit even if collisions are costly.
 After confirmation the output may wait indefinitely. That does not extend
 a chosen-pair search against a new honest script: its hash is already
 fixed. It does require second-preimage security and permanent data
-availability. The auditor must re-review this complete-binding/cost
-argument. P2SH32 remains the fallback. Its estimated kernel costs are
+availability. P2SH32 remains the fallback. Its estimated kernel costs are
 about 3.8 to 4.8 compressions for conserved tails and 1.9 to 2.9 for
 burning tails (section 2); actual costs under both profiles must be
 measured before the owner chooses. No P2SH20 deployment approval or
 measured P2SH32 result is supplied by this document.
+
+### Re-review verdict on P2SH20
+
+The independent re-review of `4ecec7aa` found the binding sound. The
+covenant hashes only its reconstruction. It copies version, outpoint,
+unlocking bytecode, sequence, values, categories, commitment, amounts and
+output-1 bytecode from the transaction; bitfields, commitment length and
+locktime 0 are constants; the proof is compared with the next target
+[P1, lock script lines 128 to 176]. So one `R` admits exactly one seed with
+at most 65,536 tails. The re-review found no cheaper generic route than
+section 4's estimate:
+
+- Honest-side multicollisions on one seed share one hash, so they add no
+  independent trials.
+- A lookup table of `M` entries costs about `2^160 / (M * p)` per reward.
+- Honest scripts differ in a free 32-byte digest, so their fixed
+  structure offers no known shortcut.
+- RIPEMD-160's input is a SHA-256 digest, so differential RIPEMD-160
+  attacks do not transfer.
+- Uncles and forks add honest candidates, not more `p` per `R`.
+- A bootstrap `R` pays the finding miner alone; there is nothing to steal.
+
+Its verdict: **acceptable with changes for an audit-gated P2SH20
+profile**, under five conditions:
+
+1. The section 4 cost text is corrected as above (F3).
+2. `R` is byte-exact and canonical, with golden vectors for `R` and
+   `HASH160(R)`. Nodes reject any non-canonical `R`.
+3. Credit is deduplicated by claim digest (section 3, F6).
+4. The profile is versioned and carries a tripwire. Any on-chain spend of a
+   pool root by a redeem script other than its canonical `R` is a public
+   HASH160 collision. Once such a confirmed spend is in a share's context,
+   that share and its descendants must use P2SH32 roots. The tripwire does
+   not prevent the first theft; it stops new P2SH20 roots once one is public.
+5. A measured P2SH32 fallback is kept ready.
+
+The re-review does not require P2SH32. It estimates that P2SH32 would cost
+about 21 to 34 percent of candidate rate, section 2's conserved and burning
+kernel models, and in its view that would remove the pool's
+competitiveness. Those percentages are unmeasured models. The auditor's
+sign-off on the final `R` bytes and the owner's choice remain open.
 
 ## 5. A funded fungible-token payout covenant
 
@@ -590,14 +790,41 @@ Do not inherit the BCH tree's 500-output fan-out.
 
 Aggregate duplicate scripts and sort by locking bytecode. Each beneficiary
 has a positive integer weight and a cumulative interval `[lower, upper)`.
+Exclude scripts whose aggregated weight is zero, for example those whose
+only window items were context-ineligible, before building the tree. Nodes
+reject any manifest that contains a zero-weight leaf: its interval would
+have `lower = upper`, which the `lower < upper` bound below forbids, and
+its whole bucket could never be spent [re-review F4].
+
 Proposed leaf hashes are SHA256 of a leaf-domain byte, canonical script
 length and script, and its 64-byte weight. Internal hashes are SHA256 of
-a distinct node-domain byte, left hash and weight, then right hash and
-weight. Hashes are 32 bytes; weights are 64-byte little-endian integers.
-Use domain byte `0x00` for leaves and `0x01` for internal nodes. Terminal
-buckets reveal their individual leaves and the deterministic subtree
-needed to recompute the committed hash. Split the sorted leaf list at
-its midpoint, with the larger half on the right for odd leaf counts.
+a distinct node-domain byte, then the left child's hash, weight and leaf
+count, then the right child's. Hashes are 32 bytes; weights are 64-byte
+little-endian integers; leaf counts are 2-byte little-endian integers from
+1 through 4,096. Use domain byte `0x00` for leaves and `0x01` for internal
+nodes. Split the sorted leaf list at its midpoint: `floor(m / 2)` leaves on
+the left and `ceil(m / 2)` on the right for a node of `m` leaves.
+
+A node is terminal exactly when its leaf count is at most 8. A terminal
+spend reveals the node's leaves and the deterministic subtree needed to
+recompute the committed hash, so its leaf count is revealed and
+hash-verified. An internal spend reveals both children's hashes, weights,
+intervals and leaf counts; the covenant recomputes the committed hash, so
+the node's leaf count `m` is hash-verified too. It requires `m > 8`, the
+midpoint child counts, and remaining depth at least 1, and gives each child
+remaining depth one less.
+
+The root's remaining depth is exactly `ceil(log2(ceil(n / 8)))` for `n`
+leaves: 0 for 1 to 8 leaves, so the root acts as a terminal bucket, and 9
+for 4,096 leaves. A node with `m` leaves and remaining depth `d` then
+always satisfies `m <= 8 * 2^d`. The root does by this choice, and a
+midpoint split keeps `ceil(m / 2) <= 8 * 2^(d - 1)`. So every node with
+more than 8 leaves has remaining depth at least 1, and no bucket can be
+stranded at depth 0. A terminal node may have remaining depth above 0, for
+example the 8-leaf left child of a 17-leaf root at depth 2. Nodes reject an
+`R` or manifest whose root depth differs from this formula [re-review F4;
+arithmetic]. Golden vectors cover 1, 8, 9, 16, 17 and 4,096 leaves.
+
 The initial limits below are fixed proposal parameters, not measurements
 of an executable covenant. A larger profile requires a new version.
 Let `total_weight` be the root weight and `reward` the actual root token
@@ -620,13 +847,18 @@ their locks are outside the mining preimage and incur no PHOTON kernel
 size penalty. Terminal buckets pay token-aware P2PKH, P2SH20 or P2SH32
 addresses supplied by members.
 
-Each internal spend reveals child subtree hashes, weights and intervals.
-The covenant recomputes the committed Merkle-sum node and verifies exact
-partitioning. Proposed redeem encoding is a minimal push of canonical
-immutable state followed by a fixed program. The program uses
+Each internal spend reveals child subtree hashes, weights, intervals and
+leaf counts. The covenant recomputes the committed Merkle-sum node and
+verifies exact partitioning. Proposed redeem encoding is a minimal push of
+canonical immutable state followed by a fixed program. The program uses
 `OP_ACTIVEBYTECODE` to extract its own exact program suffix, constructs
 the canonical child state, appends that same suffix, then hashes the child
-redeem to form its P2SH32 lock. No `OP_CODESEPARATOR` is permitted. Root
+redeem to form its P2SH32 lock. Read `OP_ACTIVEBYTECODE` only in the
+top-level redeem script, never inside an `OP_INVOKE`d function: there it
+returns the function body from its last code separator, not the redeem
+script [S9, OP_INVOKE clarification 3.3; S7]. No `OP_CODESEPARATOR` is
+permitted anywhere, including function bodies defined with `OP_DEFINE`
+[re-review F4]. Root
 state reads the reward dynamically; child state fixes it. This avoids
 embedding a program recursively inside itself. It must not trust
 witness-supplied child locks or program bytes. The proposed encoding and
@@ -637,15 +869,17 @@ enforcement still need VM proof. No executable covenant is supplied here.
 
 All values in this table are proposed profile bounds. BCH limits in the
 following table are separately sourced. Reject excess rather than truncate.
+The window walk's script cap (section 3) is part of the credit rule, not
+truncation of a finished manifest.
 
 | Item | Initial profile bound |
 |---|---|
-| Beneficiaries after script aggregation | At most 4,096 leaves |
-| Tree | Binary midpoint split; at most 12 Merkle edges from root to leaf; at most 9 distribution splits before a bucket of at most 8 leaves |
+| Beneficiaries after script aggregation | At most 4,096 leaves, each with positive weight; the section 3 walk stops before a 4,097th script, so an honest window never exceeds this; reject any manifest that does |
+| Tree | Binary midpoint split; terminal exactly at 8 or fewer leaves; root depth `ceil(log2(ceil(n / 8)))`; at most 12 Merkle edges from root to leaf; at most 9 distribution splits before a bucket of at most 8 leaves |
 | Additional funding inputs | At least 1 and at most 4; at most 5 total inputs including distribution input 0 |
 | Beneficiary script | Exactly standard P2PKH, P2SH20 or P2SH32, at most 35 bytes |
 | State | Exactly 336 bytes, layout below; minimal `OP_PUSHDATA2` push followed by fixed program |
-| Program | At most 4,096 bytes; no `OP_CODESEPARATOR`; version identifies exact audited program hash |
+| Program | At most 4,096 bytes; no `OP_CODESEPARATOR` in the program or any function body; `OP_ACTIVEBYTECODE` only at top level; version identifies exact audited program hash |
 | Redeem bytecode | At most 4,435 bytes: 3-byte push header + 336-byte state + program |
 | Unlocking bytecode | At most 10,000 bytes for every input; complete input-0 witness must fit this bound |
 | Work/weights/intervals | Checked unsigned 512-bit integers, serialized in 64 little-endian bytes; positive total and `0 <= lower < upper <= total` |
@@ -664,9 +898,10 @@ the positive original reward. Root interval is `[0, total)`; child intervals
 partition it. Remaining depth decrements exactly; depth 0 permits only a
 terminal bucket. State version and mode select the exact field semantics;
 unknown values fail. The context digest includes all section 4 commitments.
-`OP_ACTIVEBYTECODE` returns the executing bytecode; with no separator the
-program removes the fixed 339-byte state-push prefix to obtain the suffix.
-It must verify the version's program hash before reconstructing children.
+At top level `OP_ACTIVEBYTECODE` returns the executing redeem script; with
+no separator the program removes the fixed 339-byte state-push prefix to
+obtain the suffix. It must verify the version's program hash before
+reconstructing children.
 
 For `window_budget = 4,320 * bootstrap_work`, scaled total payout weight
 is at most `10 * window_budget < 2^272` weight units, even at target 2
@@ -675,7 +910,7 @@ is at most `10 * window_budget < 2^272` weight units, even at target 2
 Enforce the tighter window bound when accepting manifests. Funding BCH
 values and their sums must pass BCH MoneyRange and checked arithmetic,
 never wrap or default. Enforce exact tree counts, intervals and terminal
-leaf lengths rather than trusting witness-supplied counts.
+leaf lengths rather than trusting unverified witness-supplied counts.
 
 Under BCHN v29.2.0, let `L` be the active input's unlocking length in bytes
 [S4, S5]. These are BCH VM/admission limits, not extra funding capacity:
@@ -692,8 +927,9 @@ Under BCHN v29.2.0, let `L` be the active input's unlocking length in bytes
 
 Inspecting funding inputs spends input 0's budget; those inputs do not
 increase it. With the specified maximum scripts, a leaf preimage is at
-most 101 bytes and an internal preimage 193 bytes, requiring respectively
-2 and 4 SHA-256 iterations. An eight-leaf bucket costs
+most 101 bytes and an internal preimage 197 bytes, including the two
+2-byte leaf counts, requiring respectively 2 and 4 SHA-256 iterations
+[S4, `CalcHashIters`]. An eight-leaf bucket costs
 `8 * 2 + 7 * 4 = 44` iterations for its tree alone [state/hash layout;
 SHA-256 padding arithmetic]. Program verification, child-script hashing,
 arithmetic, token introspection and all other execution are additional.
@@ -702,6 +938,32 @@ script sizes, zero allocations, all rounding boundaries and the maximum
 tree under standardness and BCH consensus budgets. Old 520-byte item
 or 1,650-byte standard unlocking objections do not apply after these
 upgrades. Constructibility remains **plausible, not demonstrated**.
+
+### Re-review constructibility estimates
+
+The re-review projected these figures from the frozen bounds. They are
+**estimates, not measurements**; section 10's phase 2 must measure them.
+
+| Spend | Unlocking length `L` | Hash iterations | Standard hash limit `floor((41 + L) / 2)` | Operation-cost limit `800 * (41 + L)` |
+|---|---|---|---|---|
+| Internal | About 4,650 bytes | About 211: program hash 65, node 4, two child P2SH32 locks 71 each | 2,345 iterations | 3,752,800 cost units |
+| Terminal, 8 leaves | About 5,330 bytes | About 109: program hash 65, bucket 44 | 2,685 iterations | 4,296,800 cost units |
+
+The limits follow from `L` by BCHN's formulas [S4; arithmetic]. Hashing
+is not binding: 211 iterations at 192 cost units each at standard relay
+are 40,512 cost units, about 1 percent of the internal budget. The
+575-bit arithmetic fits natively: BCH numbers may hold up to 10,000 bytes
+since the May 2025 upgrade [S7]. A 4,435-byte child redeem script is
+under the 10,000-byte item limit, and BCHN v29.2.0 relays unlocking
+bytecode up to 10,000 bytes after the May 2026 upgrade [S5].
+
+The re-review found no way to burn, misroute or double-count tokens or to
+inject an NFT. The empty-category funding check excludes every token,
+because `OP_UTXOTOKENCATEGORY` pushes an empty item only for a token-free
+input [S7]. Tokens can be stranded only through the tree-rule gaps closed
+above, or as unrelated UTXOs donated to a payout address, which no
+covenant path spends. Funder griefing is limited to first-seen races and
+cost inflation.
 
 ### Enforced transaction boundary
 
@@ -788,6 +1050,15 @@ plus all tree transaction fees; exact cost depends on amount encodings,
 script sizes, inherited BCH and tree shape. Do not quote a fixed fee
 without constructing the transactions.
 
+The re-review's estimates, not constructed transactions, give the scale.
+Each spend is about 5 KB, so about 5,000 satoshis at 1 satoshi per byte,
+because its redeem script alone can reach 4,435 bytes. A full 4,096-leaf
+tree needs 1,023 spends (511 internal, 512 terminal): about 5.3 million
+satoshis of fees plus about 2.8 million satoshis of leaf dust, about
+0.08 BCH in total. One beneficiary funding only its own path, 9 internal
+spends and 1 terminal spend, pays about 60,000 satoshis [re-review
+constructibility; arithmetic].
+
 Default executors use local BCHN relay policy and construct a signed
 funding transaction only within an operator-approved BCH budget. A node
 operator may sponsor it. A beneficiary may fund the branches leading to
@@ -833,12 +1104,14 @@ winner election. BCH inclusion and subsequent reorgs determine settlement.
 The pool cannot reserve the baton or prevent solo miners winning it.
 
 Age 0 BCH blocks permits an unconfirmed successor to be mined. Several
-claims can form a mempool chain and land in one BCH block [P1, P4]. On
-every successor or oracle spend, cancel old jobs immediately. Nodes may
-speculatively mine a validated unconfirmed successor, but must label and
-track its dependencies. Reorgs or replaced ancestors cancel the whole
-dependent branch. A child referring to one txid variant does not spend
-another variant's output.
+claims can form a mempool chain and land in one BCH block [P1, P4]. On a
+validated single-input claim successor, cancel old jobs immediately. Nodes
+may speculatively mine on it, but must label and track its dependencies.
+On an unconfirmed oracle spend, or any transition with an input other than
+the vault, keep mining the current baton; cancel only when it confirms
+(section 3, F1). Reorgs or replaced ancestors cancel the whole dependent
+branch. A child referring to one txid variant does not spend another
+variant's output.
 
 Anyone holding the public key, age, commitment and transaction bytes can
 broadcast a win. No recipient signature is needed. Nodes validate and
@@ -856,29 +1129,34 @@ are bound by the reconstruction; changing them generally needs new PoW.
 Pool shares require canonical minimal pushes and locktime 0, but tracking
 must recognize valid on-chain variants that do not meet that pool policy.
 
-Track conflicts first by the baton outpoint spent, then by normalized
-proof and outputs. One spent outpoint can have several distinct valid
-winning proofs as well as locktime variants. Do not collapse their payout
-manifests into one. Select the actual accepted transaction before building
+Track conflicts first by the baton outpoint spent, then by reconstructed
+claim digest, which covers the outputs. One spent outpoint can have
+several distinct valid winning proofs as well as locktime variants. Do
+not collapse their payout manifests into one. Select the actual accepted transaction before building
 a payout spend, whose input must name its real output-index-1 outpoint.
 Share-chain reorganization after a win cannot rewrite its locked payout.
 
 Each **confirmed** oracle move adds at least 8,000 satoshis to the vault,
-plus fees paid by its funder [P1]. An unconfirmed announcement can disrupt
-speculative mining without that guaranteed deposit: oracle `O` spends
-baton `V` and funding input `F`, but a conflicting spend of `F` alone can
-confirm elsewhere, invalidating `O` while leaving `V` unspent. No local
-BCHN replacement of `O` is required. Such disruption can cost only the
-conflicting transaction's fee, with no 8,000-satoshi vault deposit. Do not
-price every announcement as a confirmed oracle move.
+plus fees paid by its funder [P1]. An unconfirmed announcement carries no
+such deposit: oracle `O` spends baton `V` and funding input `F`, but a
+conflicting spend of `F` alone can confirm elsewhere, invalidating `O`
+while leaving `V` unspent. No local BCHN replacement of `O` is required,
+and the attempt costs only the conflicting transaction's fee. Section 3
+therefore never selects or acts on an unconfirmed oracle transition, so
+such an announcement moves no jobs and no credit (F1). The only way to
+disrupt pool jobs through the oracle path is a confirmed move. Price
+oracle disruption at that confirmed deposit: at least 8,000 satoshis plus
+fees. An unconfirmed `O` can still make a pool win on `V` lose to `O`
+when `O` confirms.
 
 An oracle move preserves commitment/target but resets the age origin to
-the new output's confirmation context (or age 0 while unconfirmed).
-Repeated confirmed moves can suppress age-based target easing [P1].
-Follow validated transitions, apply section 3's credit rules, roll back
-funding conflicts and rate-limit peer processing without ignoring real
-chain changes. These risks affect solo and pool miners. The pool cannot
-ban the oracle path or infer an attacker's budget from observed messages.
+the new output's confirmation height (age 0 while unconfirmed, a state
+the pool does not mine on). Repeated confirmed moves can suppress
+age-based target easing [P1]. Follow validated transitions,
+apply section 3's credit rules, roll back conflicting claims and BCH
+reorgs, and rate-limit peer processing without ignoring real chain
+changes. These risks affect solo and pool miners. The pool cannot ban the
+oracle path or infer an attacker's budget from observed messages.
 
 ## 7. Sister node and reuse plan
 
@@ -934,10 +1212,10 @@ The protocol needs these operations:
 - Open a PHOTON channel with chain/deployment identifier, worker label,
   payout script, supported layouts and covenant versions. No withdrawal
   key or wallet seed is sent.
-- Deliver a job identifier and generation, complete baton anchor and
-  source evidence, parent and uncle context, PPLNS manifest/root, canonical
-  metadata, the `R` constructor, age, amounts, fee/value policy, layout, and the
-  contract, chain and vardiff targets. Include enough data for the client
+- Deliver a job identifier and generation, complete baton anchor, lineage
+  digest and path delta, parent and uncle context, PPLNS manifest/root,
+  canonical metadata, the `R` constructor, age, amounts, fee/value
+  policy, layout, and the contract, chain and vardiff targets. Include enough data for the client
   to rebuild the template and check its beneficiary vector. The miner
   supplies its own transient key, nonce and datasig before constructing
   final `R` and midstates; the server cannot send the final complete template.
@@ -950,9 +1228,10 @@ The protocol needs these operations:
   and any explicitly negotiated reconstruction fields. Return accepted
   statistical work, accepted chain share, stale, duplicate or invalid
   with a precise reason. A claimed hashrate earns nothing.
-- Deliver immediate job cancellation on baton movement and new work on
-  share-tip changes. Support parent/manifest fetch, win announcements,
-  payout status and recovery-manifest export.
+- Deliver immediate job cancellation on selected baton movement (a
+  confirmed transition or a validated single-input claim successor) and
+  new work on share-tip changes. Support parent/manifest fetch, win
+  announcements, payout status and recovery-manifest export.
 
 Pickaxe already passes a comparison target separately from transaction
 bytes [P8]. Share mode must use the easier (numerically greater) of the
@@ -998,62 +1277,92 @@ share's authenticated credit policy, not the finding miner's whole window.
 | Attack | Answer and remaining limitation |
 |---|---|
 | Withhold a full win while submitting easier shares | A node reconstructs every submitted share and broadcasts any win itself. A miner can still discard winning candidates before submission. Public shares do not prove that all candidates were reported; simulation must quantify withholding incentives. |
-| P2SH20 chosen-pair collision | Complete seed binding limits a colliding pair to at most one settled reward from at most 65,536 tails. Section 4 gives a conditional cost model, not a deadline or proved economic lower bound. Auditor re-review and owner choice remain required; measure P2SH32 under both tail profiles. |
-| Oracle griefing or ordinary solo claims | Confirmed oracle moves deposit at least 8,000 satoshis plus funder fees. Unconfirmed moves may disrupt and then lose to a funding-input conflict without any deposit. Oracle moves reset the age origin and suppress target easing. Follow authenticated paths and roll back dependencies. |
+| P2SH20 chosen-pair collision | Complete seed binding limits a colliding pair to at most one settled reward from at most 65,536 tails. Section 4's square-root figure is an attainable estimate, with a floor of about `2.4 * 10^24` HASH160 evaluations per stolen reward as `p` approaches 1, not a deadline or proved lower bound. A public collision on a pool root trips the switch to P2SH32. Auditor sign-off on the final `R` and owner choice remain required; measure P2SH32 under both tail profiles. |
+| Oracle griefing or ordinary solo claims | Confirmed oracle moves deposit at least 8,000 satoshis plus funder fees. Nodes never select or act on an unconfirmed oracle transition, or any transition with a non-vault input, so an announcement later killed by a funding-input conflict moves no credit (section 3, F1). A pool win on `V` can still lose to a pending `O`. Oracle moves reset the age origin and suppress target easing. Follow authenticated paths and roll back dependencies. |
+| Unconfirmed-oracle credit capture | The F1 counterexample in section 3: honest nodes leave `V` for a doomed `O` while the attacker mines `V` privately. Prevented by mining `V` until `O` confirms; simulate it in phase 3. |
+| Payout-script spam in the window | The newest-first walk stops before a 4,097th script; older work gets zero weight and consumes no budget, so a job can always be built (section 3, F2). |
+| BCH orphans and tip disagreement | Compatibility uses vault lineage and anchor heights, not an exact BCH block hash, so an orphan that moves no vault transition changes no credit (section 3, F5). |
 | Share spam and forged state | Size bounds, per-peer budgets, dependency deduplication, cheap checks before crypto, deterministic chain difficulty, and authenticated baton sources. Weak vardiff work stays local. |
 | Selfish share mining, timestamp grinding, stale-parent replay | Greatest cumulative valid work, complete metadata/seed binding, unique proof credit and depth-bounded uncles. Authenticated context forbids reverting to a spent predecessor. Old private context does not prove creation time; delayed-sync and fork incentives still need simulation. |
-| Historical baton after oracle spend | Authentic `V` is insufficient when selected context includes `O` spending it. Reject that share and any later old-baton uncle or includer bonus; filter PPLNS by paying lineage. Speculative conflicting contexts remain a risk until BCH resolves them. |
+| Historical baton after oracle spend | Authentic `V` is insufficient when the context includes confirmed `O` spending it. Reject that share and any share that references an old-baton uncle; filter PPLNS by paying lineage. An unconfirmed `O` creates no competing context. Conflicting single-input claims remain a risk until BCH resolves them; each needs a real contract win. |
 | A pool miner broadcasts a win to its own address | Changing output index 1 changes the checked HASH256. Reusing the same datasig does not preserve the PoW. A miner can mine a separate solo template, but that proof fails the pool's expected-`R` check and earns no pool credit. |
 | Duplicate payout inputs or reused output obligations | Exactly one distribution input at index 0; all funding inputs token-free. Check every input and output, not just the active input. |
 | Token burn, fake child lock or altered rounding | Distribution always conserves its actual input reward using exact sums and intervals. Claim-tail burning is a separate owner-selected profile with an exact bounded loss. Funding category must equal the empty vector; token amount zero cannot exclude NFTs. |
 | Cached schedule carry or result-buffer overflow | Retain the conserved-tail carry guard or recompute block 8. Compare at the easier statistical/contract target, detect total hits above capacity, and rescan/subdivide at contract target until every win is recovered. |
-| Work overflow or uncle rounding/replay | Checked 512-bit work and weights, bounded wider products, raw-work clipping before conserved 9/1 uncle accounting, and ancestry-wide proof deduplication. Existing saturating u128 PPLNS cannot be inherited. |
+| Work overflow or uncle rounding/replay | Checked 512-bit work and weights, bounded wider products, raw-work clipping before conserved 9/1 uncle accounting, and ancestry-wide deduplication by claim digest. Existing saturating u128 PPLNS cannot be inherited. |
 | Redirect inherited BCH excess | Proposed beneficiaries have token entitlements and minimum BCH only. Aggregate excess can be assigned among them arbitrarily; funder signatures bind actual outputs. Owner must approve or require deterministic BCH allocation. |
 | Funding fee griefing | No inherited payout BCH can go to change or fees. Funders sign complete transactions and fund all fees. Never assume child-pays-for-parent will rescue a low-fee claim. No free public funding wallet. Competing funded spends may delay each other under local first-seen policy. |
 | Nobody sponsors distribution | Tokens wait with no deadline. Settlement liveness depends on a willing funder and retained manifests. Small entitlements may not justify their BCH cost. |
 | Missing payout data or eclipse | Require data before credit, replicate and export winning manifests, retain them beyond DAG pruning, use independent peers. Hashes alone cannot recover missing scripts. |
-| Reorg or locktime malleability | Persist conflict sets by spent baton and proof, resolve actual txids, roll back dependent work and payout tracking. Never treat RPC acceptance as confirmation. |
+| Reorg or locktime malleability | Persist conflict sets by spent baton and claim digest, resolve actual txids, roll back dependent work and payout tracking. Never treat RPC acceptance as confirmation. |
 
 ## 10. Open decisions and phases
 
 The owner must decide the following before a profile is approved:
 
 - Share/PPLNS parameters, depth-based uncle policy, bootstrap beneficiary
-  rule, authenticated-context lag policy, optional per-share fees, sponsor
+  rule and restart after an outage longer than the path-delta bound,
+  authenticated-context lag policy, optional per-share fees, sponsor
   budget and who is expected to fund small payouts.
 - Conserved tail or bounded tail burning. Burning trades token supply
   for a possible SHA-bound candidate-rate gain in solo and pool mining;
   it is not assumed merely because BCHN permits implicit burns.
-- P2SH20 with the complete-binding/cost argument after auditor re-review,
-  or P2SH32 after measurements under both tail profiles.
+- P2SH20 under the re-review's five conditions (section 4), or P2SH32
+  after measurements under both tail profiles.
 - Initial age range through 32,767 BCH blocks, or separately validated
   layouts/vectors through 65,534 BCH blocks. The latter still fits ten
   first-pass blocks with P2SH20.
 - The proposed aggregate-only BCH excess rule, or a deterministic
-  individual BCH allocation enforced by a revised covenant.
+  individual BCH allocation enforced by a revised covenant. The prototype
+  freezes the aggregate-only rule as its default; this decision stays
+  pending.
 
 The initial tree/state/funding/arithmetic caps in section 5 are fixed
 prototype bounds; changes require explicit profile revision and new
 measurements. No sponsor reimbursement from PHOTON is assumed.
 
+### Gate status
+
+The independent re-review of `4ecec7aa` sets these gates:
+
+- **GO** for an isolated, test-only payout-covenant feasibility prototype:
+  no node integration and no chipnet spending. It builds on section 5 with
+  the F4 gaps closed (zero-weight exclusion, leaf-count terminal rule, root
+  depth, top-level `OP_ACTIVEBYTECODE`), which this revision does. The
+  aggregate-only BCH excess rule is its frozen default; the owner's
+  decision on that rule stays pending. The root lock is a parameter,
+  P2SH20 or P2SH32.
+- **NO-GO** for share-chain or node work until F1 and F2 are fixed. This
+  revision proposes fixes for both in section 3; they need re-review
+  before the gate opens.
+
+The GO is a review gate, not an authorization; the owner decides whether
+the prototype starts.
+
 Review and implementation gates, in order:
 
-1. **Design review only.** Pickaxe reviews actual template and kernel
-   implications under both tail profiles. The independent auditor re-reviews
-   complete proof binding, collision cost and winning-seed prefiltering,
-   private forks, context eligibility, freshness/sync rules, no-NFT state,
-   funding isolation, BCH excess and child-script construction. Confirm
-   the frozen bounds, zero allocations and exact integer window policy.
-2. **Covenant feasibility, after approval.** Build a Rust-only prototype
-   in the existing BCH 2026 VM harness. Measure bytecode, unlocking length,
-   hash/operation budgets and token-aware dust for the largest supported
-   tree. Mutate token amounts, templates, multiple input groups, funding
-   order, change, NFTs, burns and all rounding boundaries. Validate whole
-   transactions with BCHN, not only individual script invocations.
-3. **Protocol and simulation.** Publish golden share/job/payout vectors.
-   Simulate honest latency, hash changes, partitions, private forks,
-   withholding, oracle moves, long outages and startup. Freeze a separate
-   profile and tag only when those results support the chosen parameters.
+1. **Design review only.** Done for `4ecec7aa` by Pickaxe and the
+   independent re-review. The auditor must re-review this revision's
+   F1 to F7 changes, the final `R` bytes, private forks, context
+   eligibility, freshness/sync rules, no-NFT state, funding isolation,
+   BCH excess and child-script construction before share-chain work.
+2. **Covenant feasibility, after approval.** Build a Rust-only prototype.
+   Use libauth-rs at the workspace's pinned revision `be3ed16` with its
+   BCH 2026 virtual machine, as `p2poolv2_safa` already does, together with
+   BCHN regtest `testmempoolaccept` as the authority. The local test VM in
+   `p2poolv2_lib/src/test_utils/bch_vm.rs` has loops and token
+   introspection but only P2SH32 helpers, no `OP_DEFINE` or `OP_INVOKE`,
+   and numbers of at most 16 bytes, below the 575-bit intermediates.
+   Extend it or do not rely on it. Validate whole transactions with BCHN,
+   not only individual script invocations. The checklist below is the
+   re-review's acceptance tests.
+3. **Protocol and simulation.** Publish golden share/job/payout vectors,
+   including the window walk's script-cap stop point. Simulate honest
+   latency, hash changes, partitions, private forks, withholding, oracle
+   moves, the F1 unconfirmed-oracle counterexample, BCH orphans with an
+   unchanged lineage, script spam against the cap, long outages and
+   startup. Freeze a separate profile and tag only when those results
+   support the chosen parameters.
 4. **Sister node and independent clients.** Extract the minimum shared
    interfaces. Implement DAG/store/proof/manifest paths and Pickaxe layouts.
    Require another client to submit shares and independently reconstruct
@@ -1063,6 +1372,74 @@ Review and implementation gates, in order:
    execution, sponsor refusal, restart and BCH reorg recovery. Use separate
    authorization for any spending. Mainnet needs the owner's approval
    after the audit and measured results.
+
+### Phase 2 acceptance checklist
+
+These are the re-review's acceptance tests. Every positive case must pass,
+and every mutation must fail, in the standard and non-standard libauth-rs
+VMs and in BCHN regtest.
+
+**A. Positive cases.**
+
+1. Root spend, P2SH20 and P2SH32, internal mode with 2 children, 4 funding
+   inputs and change.
+2. Internal spend at every remaining depth from 9 down to 1.
+3. A terminal bucket of 8 leaves, all 35-byte P2SH32 scripts with 9-byte
+   amounts, total weight near `2^272`, and 4 funding inputs.
+4. Terminal buckets of 1 leaf, and a root acting as a terminal bucket.
+5. Full 4,096-leaf execution: 1,023 spends, with token conservation
+   checked at every step.
+6. Rewards of 1, `2^32` and `2^63 - 1` raw units.
+7. A zero-allocation child, a zero-allocation leaf, and all allocations
+   but one zero.
+8. Exact-integer and off-by-one rounding boundaries, plus at least `10^5`
+   random manifests checked against a Rust reference for exact
+   telescoping.
+
+**B. Mutations.**
+
+- Amounts and tokens: any output amount changed by 1 raw unit either way;
+  a burn; token change; an extra token output; a wrong category; tokens of
+  a new genesis category on change.
+- Funding inputs: one carrying an immutable NFT with an empty commitment,
+  a mutable NFT, a minting NFT, PHOTON fungible tokens or another
+  category's fungible tokens; a second payout node as an input.
+- Transaction shape: active input not at index 0; 1 or 6 inputs in total;
+  extra outputs; change not last; two change outputs; version 1; nonzero
+  locktime; a non-final sequence.
+- BCH values: an output below its committed BCH minimum; inherited BCH
+  peeled to change or fee.
+- State and tree: a witness-supplied child lock; each of the 12 state
+  fields mutated; a wrong depth decrement; an internal spend at depth 0;
+  a 9-leaf terminal; a leaf/internal domain swap;
+  `wl + wr != upper - lower`; an odd split with the larger half on the
+  left; a zero-weight leaf.
+- Program: one program bit flipped; `OP_CODESEPARATOR` inserted;
+  `OP_ACTIVEBYTECODE` read inside `OP_INVOKE`.
+- Addresses: a wrong-category or BCH-only UTXO at a root address; an
+  amount other than the prescribed one at a child address.
+- Added for this revision's leaf-count rule: a child leaf count other than
+  the midpoint split; an internal spend of a node with at most 8 leaves.
+
+**C. Claim side, with the unmodified v3.2 covenant.**
+
+- P2SH20 pool claims at ages 0, 17, 128 and 32,767 BCH blocks pass.
+- Locktime variants keep the same proof.
+- Mutating any byte of `R`, or the key, nonce, datasig (through `k`), age,
+  sequence or BCH values, changes the digest or causes rejection.
+- Golden vectors for `R` and `HASH160(R)`.
+
+**D. Numbers to record per spend type.**
+
+- `L`, redeem length and program length.
+- Operation cost against its limit; hash iterations against the standard
+  `floor((41 + L) / 2)` and consensus `floor(7 * (41 + L) / 2)` limits.
+- Peak stack plus altstack plus function-table count, peak control depth
+  and maximum stack item size.
+- Transaction size and fee at 1 satoshi per byte, and dust per output.
+- Total BCH to execute trees of 2, 8, 9, 64, 512 and 4,096 leaves, and the
+  cost for one beneficiary to fund its own path.
+- `HASH160(R)` cost per seed on CPU and GPU.
 
 Source checks contradicted or qualified these parts of the initial brief:
 the two-compression conserved tail model and its P2SH32 slowdown estimate;
@@ -1084,20 +1461,45 @@ network-rate claim or live-chain compatibility is established by this doc.
   comparison/overflow recovery. Depth plus cumulative work replaces the
   clock premise. The claimed collision economics remain conditional and
   need independent re-review; an unmeasured kernel model is not throughput.
-- **2026-10-29 independent review**, against `85a8afec`: addressed all
-  nine findings with complete seed/datasig binding, authenticated baton
-  contexts, frozen execution bounds/VM budgets, widened work and conserved
-  clipping, confirmed versus speculative oracle cost, explicit BCH excess
-  policy, cached-block carry guard and the initial age cap. Funding inputs
-  must have exactly empty category introspection. The 60-second argument
-  is withdrawn. Its 575-bit product and 44-iteration bucket estimates are
-  confirmed by the bounded encoding; full covenant feasibility is unmeasured.
+- **2026-10-29 independent review**, against `85a8afec`: revisions
+  `5373473b` and `4ecec7aa` responded to all nine findings with complete
+  seed/datasig binding, authenticated baton contexts, frozen execution
+  bounds/VM budgets, widened work and conserved clipping, confirmed versus
+  speculative oracle cost, explicit BCH excess policy, cached-block carry
+  guard and the initial age cap. Funding inputs must have exactly empty
+  category introspection. The 60-second argument is withdrawn. Its 575-bit
+  product and 44-iteration bucket estimates are confirmed by the bounded
+  encoding; full covenant feasibility is unmeasured. Not every finding was
+  fully resolved. The re-review below judged findings 1, 2, 5, 8 and 9
+  resolved; finding 4 resolved as a specification only, unmeasured, with
+  residual gaps F2 and F4; finding 6 resolved in text, with its credit
+  consequence left as F1; finding 7 resolved as explicit policy, pending
+  the owner; and finding 3, the historical baton, only partly resolved,
+  with F1 and a one-share race after BCH block propagation left open.
+- **2026-10-29 independent re-review**, against `4ecec7aa`: found the
+  earlier blocker resolved and proof-seed binding complete, and P2SH20
+  acceptable with changes. Two new major share-chain findings block node
+  work: an unconfirmed oracle transition let an attacker capture window
+  credit for one conflicting fee (F1), and the 4,096-leaf cap could halt
+  job building (F2). This revision folds in confirmed-only oracle
+  selection; a deterministic script cap in the window walk; the corrected
+  collision wording, `p -> 1` floor and uncounted margins (F3);
+  zero-weight exclusion, the leaf-count terminal rule, root depth
+  `ceil(log2(ceil(n / 8)))` and top-level-only `OP_ACTIVEBYTECODE` (F4);
+  lineage-and-height compatibility, bounded incremental path evidence and
+  rejection of ineligible uncles (F5); claim-digest deduplication (F6);
+  and source and history corrections (F7). It also records the P2SH20
+  verdict, the constructibility and funder-cost estimates, the gate status
+  and the phase 2 checklist. The re-review's claims checked here against
+  BCHN v29.2.0, the functions CHIP and Pickaxe sources held; none was
+  rejected. These changes are not yet re-reviewed.
 
 ## Sources
 
 PHOTON sources were inspected read-only in `D:/pickaxe-electric`. Links
-pin the inspected revision; byte offsets above are derived from its
-serializer, not from comments in the template.
+P1 to P10 pin revision `2f7cbb0`, which this document inspected; the
+Pickaxe review checked dev `640e9d2` (section 2). Byte offsets above are
+derived from its serializer, not from comments in the template.
 
 - **P1:** [v3.2 template](https://github.com/CyberAshven/pickaxe-miner/blob/2f7cbb0493f2a46ef89d4f04c941074311a09ba0/reference/photon_v32_template.json), `scripts.lock.script`; opcode source is authoritative where comments disagree.
 - **P2:** [v3.2 redeem hex](https://github.com/CyberAshven/pickaxe-miner/blob/2f7cbb0493f2a46ef89d4f04c941074311a09ba0/reference/photon_v32_redeem.hex); decoded length and HASH256 checked against P3.
@@ -1107,6 +1509,8 @@ serializer, not from comments in the template.
 - **P6:** [reward handling](https://github.com/CyberAshven/pickaxe-miner/blob/2f7cbb0493f2a46ef89d4f04c941074311a09ba0/src/reward.rs), `TOKEN_OUTPUT_SATS`, retired-v0 constants and settlement paths.
 - **P7:** [transaction serialization](https://github.com/CyberAshven/pickaxe-miner/blob/2f7cbb0493f2a46ef89d4f04c941074311a09ba0/src/tx.rs), `PhotonLayout`, conserved T2 amount updates and encoding guards.
 - **P8:** [Rust T2](https://github.com/CyberAshven/pickaxe-miner/blob/2f7cbb0493f2a46ef89d4f04c941074311a09ba0/rust-engine/src/t2.rs) and [CUDA tail loop](https://github.com/CyberAshven/pickaxe-miner/blob/2f7cbb0493f2a46ef89d4f04c941074311a09ba0/cuda/photon_t2_tail.cu), block preparation and conserved tail hashing.
+- **P9:** [search worker](https://github.com/CyberAshven/pickaxe-miner/blob/2f7cbb0493f2a46ef89d4f04c941074311a09ba0/src/search.rs), `rotate_search_identity`: a fresh random datasig key on job installation and after a job's 2^32 nonces run out; and [CUDA T2 host](https://github.com/CyberAshven/pickaxe-miner/blob/2f7cbb0493f2a46ef89d4f04c941074311a09ba0/src/cuda_t2.rs), `T2Batch::total_winners` and `total_winners.min(winner_cap)` returned hits.
+- **P10:** [BCH Schnorr signer](https://github.com/CyberAshven/pickaxe-miner/blob/2f7cbb0493f2a46ef89d4f04c941074311a09ba0/src/crypto.rs), `bch_schnorr_sign` with an RFC6979 nonce and `bch_schnorr_sign_search_candidate` with a caller-chosen `k`.
 - **B1:** [ASERT design](../difficulty_adjustment/asert.md) and [integer target implementation](https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/044391e3966539f26d6b471d64334cbe600f602b/p2poolv2_lib/src/pool_difficulty.rs).
 - **B2:** [Payout distribution](payout-distribution.md) and [PPLNS implementation](https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/044391e3966539f26d6b471d64334cbe600f602b/p2poolv2_lib/src/accounting/payout/sharechain_pplns/pplns_window.rs).
 - **B3:** [Hybrid BCH payout design](bch-hybrid-payouts.md).
@@ -1119,3 +1523,9 @@ serializer, not from comments in the template.
 - **S1:** [CashTokens specification](https://cashtokens.org/docs/spec/chip/), prefix serialization, introspection and token-validation rules.
 - **S2:** [BCHN P2SH security bulletin](https://bitcoincashnode.org/en/newsroom/bchn-technical-bulletin-2022-06-09), script-hash collision and second-preimage distinction. The time/memory calculations here are explicitly conditional design analysis.
 - **S3:** [BCHN dust and standardness policy](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/master/src/policy/policy.cpp), `GetDustThreshold` and `IsStandardTx`, and [default rates](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/master/src/policy/policy.h); checked 2026-10-29. Deployment must recheck the target node's policy.
+- **S4:** [BCHN v29.2.0 VM limits](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/v29.2.0/src/script/vm_limits.h): `MAX_SCRIPT_SIZE`, `MAX_STACK_SIZE`, `MAX_CONTROL_STACK_DEPTH`, `GetInputOpCostLimit`, `GetInputHashItersLimit`, `GetHashIterOpCostFactor` and `CalcHashIters`.
+- **S5:** [BCHN v29.2.0 standardness](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/v29.2.0/src/policy/policy.cpp), `IsStandardTx`: unlocking bytecode up to `MAX_SCRIPT_SIZE`, 10,000 bytes, once the May 2026 upgrade is active, instead of 1,650 bytes; and [`MAX_STANDARD_TX_SIZE`](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/v29.2.0/src/policy/policy.h), 100,000 bytes.
+- **S6:** [BCHN v29.2.0 token validation](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/v29.2.0/src/consensus/tokens.cpp), `CheckTxTokens`: outputs above inputs fail with `bad-txns-token-in-belowout`; a positive unused balance is not rejected. The [mempool path](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/v29.2.0/src/validation.cpp) calls only `CheckTxTokens` for tokens, and S5's policy file adds no implicit-burn rule.
+- **S7:** [BCHN v29.2.0 interpreter](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/v29.2.0/src/script/interpreter.cpp): `OP_UTXOTOKENCATEGORY` pushes an empty item only for a token-free input, otherwise the 32-byte category plus a capability byte for mutable or minting NFTs; `OP_ACTIVEBYTECODE` and `OP_CODESEPARATOR` act on the current `OP_INVOKE` frame; and [script numbers](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/v29.2.0/src/script/script.h), `MAXIMUM_ELEMENT_SIZE_BIG_INT` of 10,000 bytes.
+- **S8:** P. C. van Oorschot and M. J. Wiener, [Parallel Collision Search with Cryptanalytic Applications](https://doi.org/10.1007/PL00003816), Journal of Cryptology 12(1), 1999, pages 1 to 28: distinguished-point search for many collisions and the separate golden-collision case.
+- **S9:** [CHIP-2025-05 Functions](https://github.com/bitjson/bch-functions/blob/e36e9bd99dc8efb6417bf645aa9d5f37fb9824c7/readme.md), version 2.0.2, scheduled for the May 2026 upgrade (2026-05-15 on mainnet) and implemented in BCHN v29.2.0: OP_INVOKE clarifications 3.2 and 3.3, code separators and `OP_ACTIVEBYTECODE` inside an invoked function.
