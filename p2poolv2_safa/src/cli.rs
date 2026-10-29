@@ -18,7 +18,7 @@ use crate::{
     verify_transaction,
 };
 
-pub const USAGE: &str = "usage: safa params deployment.json | leaf deployment.json job.json | work deployment.json job.json | unlock deployment.json claim.json | claim deployment.json claim.json | genesis genesis.json | verify deployment.json claim.json";
+pub const USAGE: &str = "usage: safa params deployment.json | leaf deployment.json job.json | work deployment.json job.json | unlock deployment.json claim.json | claim deployment.json claim.json | genesis genesis.json | verify deployment.json claim.json | claimer claimer.json [--once] [--dry-run]";
 const MAX_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
 
@@ -119,7 +119,7 @@ fn fee_rate(input: &Value) -> Result<u32, String> {
     }
 }
 
-fn covenant_of(deployment: &Value) -> Result<Covenant, String> {
+pub(crate) fn covenant_of(deployment: &Value) -> Result<Covenant, String> {
     let network = deployment["network"]
         .as_str()
         .ok_or("network must be mainnet or chipnet")?;

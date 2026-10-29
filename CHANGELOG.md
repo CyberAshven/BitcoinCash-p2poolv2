@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`cargo safa claimer claimer.json` follows an operator-selected SAFA vault,
+resolves pool wins' payout and split scripts by HASH256, and verifies every
+claim in the BCH 2026 VM before broadcasting. Its atomic journal resumes
+log offsets, delays and pending sends; atomic token-file updates preserve
+all other fields. It follows external claims and AMM moves, drops stale
+proofs, and supports `--once` and `--dry-run`. An unchanged public tSAFA
+pool win is covered by offline VM tests. Mainnet uses the same code with a
+different deployment and configuration.
+
 The tSAFA test token is deployed on chipnet (genesis
 `8c5ecd6d…c471`, category `1e642d4e…00fe`, 4 threads), with PHOTON's
 emission of 1/420,000 of a vault's remaining tokens per claim. Its

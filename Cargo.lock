@@ -4234,11 +4234,15 @@ dependencies = [
 name = "p2poolv2_safa"
 version = "0.0.1-alpha"
 dependencies = [
+ "bitcoindrpc",
+ "config",
  "hex",
  "libauth",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

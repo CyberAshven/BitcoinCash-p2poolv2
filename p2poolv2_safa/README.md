@@ -5,7 +5,7 @@ a token whose threads are mined by any SHA-256 work that meets the token's
 target, proved with the merge-mining common format v2 that BCH P2Pool and
 Pickaxe agreed (Pickaxe PR #70, `docs/merge-mining.md`, and
 [`docs/bch-auxpow.md`](../docs/bch-auxpow.md)). It is a reference
-covenant, not the author's token, and has not been deployed. A focused
+covenant, not the author's token; tSAFA is deployed on chipnet below. A focused
 independent review found the ASERT-band and thread-count issues fixed
 below; a complete independent review remains open.
 
@@ -28,7 +28,8 @@ cargo safa params deployment.json
 | `src/targets.rs` | Token targets, BCHN's compact nBits and aserti3-2d, the bands and the DAA |
 | `src/codec.rs` | Thread state, leaves, slots, trees, output 0, splits and `AuxProof` v2 |
 | `src/transaction.rs` | Leaves, claims and the genesis as transactions, and the VM check |
-| `src/cli.rs`, `src/main.rs` | The `safa` command line (public data only; it never signs or broadcasts) |
+| `src/cli.rs`, `src/main.rs` | The `safa` command line; it never signs |
+| `src/claimer/` | Operator-side chain following, win journal and verified claim broadcasts |
 | `tests/` | The tests, all in libauth-rs's standard BCH 2026 VM |
 | `test_data/` | The tSAFA fixtures and the recorded parity cases |
 
@@ -215,6 +216,7 @@ cargo safa claim   deployment.json claim.json # a verified, complete claim trans
 cargo safa unlock  deployment.json claim.json # only that claim's unlocking bytecode
 cargo safa verify  deployment.json claim.json # checks that claim in the VM
 cargo safa genesis genesis.json               # an unsigned chipnet genesis
+cargo safa claimer claimer.json               # follow a vault and claim pool wins
 ```
 
 `deployment.json` is what `genesis` prints as `deployment`:
@@ -230,6 +232,126 @@ leaf of the height it mines.
 (`fee_rate` 1 to 3, default 1; `locktime` defaults to the coinbase
 height). It refuses a claim the covenant would refuse. The transaction needs
 no signature; whoever broadcasts it decides when.
+
+## Claimer
+
+`cargo safa claimer claimer.json` runs separately from P2Pool. It follows
+one vault, reads the pool's public wins log, resolves the recipients, and
+uses the same claim builder and complete BCH 2026 VM verification as
+`safa claim` before sending anything. It needs no signing key. The pool
+and its miners can keep running their existing software.
+
+```json
+{
+  "deployment": "deployment.json",
+  "vault": {
+    "txid": "8c5ecd6d4ce039490c233c9399cc1e591720218fd9712dc8c00edc172a06c471",
+    "vout": 3
+  },
+  "token_file": "merge-tokens.json",
+  "wins_log": "merge-tokens.wins.jsonl",
+  "payout_scripts": ["76a914c40a24bf5b3cfe561cf36afea1b59fe61383e80688ac"],
+  "split_scripts": ["76a914b25a2f0a68073fad864f684bf26e350b4526354b88ac"],
+  "p2pool_config": "config.toml",
+  "fee_rate": 1,
+  "delay_seconds": [10, 120],
+  "poll_seconds": 5,
+  "journal": "claimer-journal.json"
+}
+```
+
+The example selects tSAFA thread 3. All paths are relative to
+`claimer.json`. Configurations and token files are limited to 1 MiB.
+`deployment.json` supplies the network, thread count, virtual satoshis and
+category in **display order**, as in the deployment section below. The
+pool's token file and wins log use **hashed (wire) order** for categories;
+the claimer reverses the deployment category when matching them.
+
+Use exactly one RPC source. `p2pool_config` reads only `[bitcoinrpc]`
+`url`, `username` and `password` from the existing P2Pool TOML. Alternatively,
+replace it with:
+
+```json
+"rpc": {
+  "url": "http://127.0.0.1:48332",
+  "username": "operator",
+  "password_file": "rpc-password.txt"
+}
+```
+
+The password file contains one line; a trailing newline is allowed.
+Passwords are never printed or stored in the journal. RPC URLs cannot
+contain embedded credentials. The RPC node's network must match the
+deployment. Use a node with historical block data and `txindex` when
+starting from an already-spent vault: BCHN's
+[`getrawtransaction`](https://docs.bitcoincashnode.org/doc/json-rpc/getrawtransaction/)
+needs that index for a historical transaction without its block hash.
+
+`payout_scripts` lists miners' locking bytecodes, matched by `HASH256`
+against each win's `payout_hash`. `split_scripts` lists the donation and
+operator fee locking bytecodes named by the 69-byte split preimage. A
+zero-rate split slot needs no script. Unknown recipients are logged and
+skipped permanently; add all intended scripts before running. Other token
+categories and malformed lines are ignored, with malformed lines logged.
+
+Each pass checks `gettxout(txid, vout, true)`, including mempool spends.
+Every vault must have the deployment's category, a mutable NFT, the exact
+covenant locking bytecode and the same thread (the commitment's first
+four bytes, little endian). A spent vault is followed through mempool
+transactions or blocks since the saved scan height, always to output 0.
+This follows Pickaxe's claims and AMM trades too; an AMM trade can move the
+outpoint without changing the commitment. An unseen spender is polled
+again. The mempool and block scan is practical for chipnet; scanning the
+larger mainnet mempool and blocks costs more.
+
+Only proof coinbase heights `H` above the current state height and at or
+below the chain tip are considered, oldest height first. The leaf binds
+`HASH256` of the exact 16-byte commitment. A proof for another state fails
+the builder or VM and is journaled as dropped, never retried. Wins made
+obsolete by a newer state are dropped too. A win's random delay is chosen
+once, measured from its logged Unix time and saved across restarts. An
+older valid win keeps its place until its delay expires. Defaults are
+10 to 120 seconds, a 5-second poll and 1 sat/byte; fee rates must be 1 to 3.
+A vault that temporarily lacks cash defers its win until an AMM trade or
+other valid move adds enough cash; this does not drop a same-state proof.
+
+The claimer saves a prepared transaction before `sendrawtransaction`.
+Success immediately moves its vault to the claim's output 0 and atomically
+updates only the matching token entry's `safa.state`, without waiting for
+confirmation. Every externally observed commitment change also updates
+that state. Other tokens and fields are preserved. Writes use a flushed
+temporary file in the same directory and atomic replacement, so P2Pool's
+mtime reload never reads a partial file. A stable token-file sidecar lock
+serializes updates from claimers for different categories. A rejection triggers chain
+following on the next pass. An uncertain send is looked up after restart;
+any retry is the same locally verified transaction, never another claim
+against that pending input.
+
+The atomic journal stores the current vault and commitment, pinned thread,
+block scan cursor, wins byte offset, queued wins and delays, claimed and
+dropped identities, and pending transaction IDs and raw transactions. It
+is bound to the deployment and configured starting vault. One broadcaster
+can hold its journal lock at a time. Complete log lines advance the offset;
+a shrinking log resets it to zero after rotation, and win identities
+prevent duplicate claims. Each pass reads up to 8 MiB, draining an oversized
+malformed line to its next newline if needed; the journal has a
+64 MiB safety limit. Keep the journal across ordinary restarts. A changed
+block scan anchor stops claims until the operator reviews the reorg and
+starts a fresh journal from a verified current vault.
+
+Every event is one JSON line on stdout: vault following, state writes,
+skipped/dropped wins, built claims, broadcasts and rejections. Built claim
+events include the verified transaction. `--once` makes one pass and sends
+at most one claim, useful for scheduled runs. `--dry-run` prints verified
+claims without broadcasting or changing the token file or journal; it
+still reads the configured node to follow the actual vault. Combine both
+flags for an inspection pass.
+
+Mainnet uses the same command and code. Supply a mainnet `deployment.json`
+and corresponding vault, token file, recipients, node and fresh journal
+in the config; no chipnet deployment or outpoint is built into the claimer.
+The unchanged public live-win fixture `test_data/tsafa-live-win.jsonl`
+is exercised offline against the deployed tSAFA parameters in nextest.
 
 ## Chipnet tSAFA deployment
 
@@ -345,9 +467,9 @@ over the vaults beyond the covenant's rules.
    `cargo safa leaf` for each height they mine, and claim with
    `cargo safa claim`.
 
-Still needed before tSAFA is mined end to end: the token's row in P2Pool's
-and Pickaxe's registries, and a claim broadcaster on either side (both
-build and verify v2 proofs today, and Pickaxe journals them).
+Operators can use the claimer above for pool wins. Its real-win test is an
+offline BCH 2026 VM check; a live run and claim broadcast are separate
+operator steps.
 
 ## Changes from the v1 variant
 

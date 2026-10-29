@@ -402,7 +402,9 @@ and branch and checked as a covenant would check it, with the ASERT check
 on mainnet and chipnet, before it is sent or logged; one that fails is
 logged and dropped. A proof needs the block's coinbase branch to be at most
 25 deep, the proof format's limit. P2Pool builds no claim transactions:
-claiming is the miner's, or their tool's, with the token's covenant.
+claiming is the miner's, or their tool's, with the token's covenant. An
+operator can run [`safa claimer`](../p2poolv2_safa/README.md#claimer) separately
+to follow one SAFA vault, verify pool wins and broadcast the claims.
 
 ## Job Declaration leaves
 

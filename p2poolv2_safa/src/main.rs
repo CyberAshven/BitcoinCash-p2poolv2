@@ -2,17 +2,20 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Public-data SAFA command line. It never signs or broadcasts transactions.
+//! SAFA command line; only the operator's claimer can broadcast claims.
 
 use std::env;
 use std::process::ExitCode;
 
+use p2poolv2_safa::claimer::{Options, run_claimer};
 use p2poolv2_safa::cli::{USAGE, read_json, run};
 
 fn main() -> ExitCode {
     match execute() {
         Ok(output) => {
-            println!("{output}");
+            if !output.is_empty() {
+                println!("{output}");
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -25,6 +28,13 @@ fn main() -> ExitCode {
 fn execute() -> Result<String, String> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     let command = arguments.first().ok_or(USAGE)?;
+    if command == "claimer" {
+        let options = Options::parse(&arguments[1..])?;
+        tokio::runtime::Runtime::new()
+            .map_err(|_| "could not start the claimer runtime")?
+            .block_on(run_claimer(options))?;
+        return Ok(String::new());
+    }
     let expected = match command.as_str() {
         "params" | "genesis" => 1,
         "leaf" | "work" | "unlock" | "claim" | "verify" => 2,

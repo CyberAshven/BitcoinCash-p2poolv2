@@ -13,6 +13,7 @@ mod covenant;
 mod targets;
 mod transaction;
 
+pub mod claimer;
 pub mod cli;
 
 pub use codec::*;
