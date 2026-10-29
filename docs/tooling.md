@@ -40,10 +40,8 @@ Before the Node tool was removed, both printed the same bytes for every
 command over the fixtures (the port's commit message lists the runs).
 CI runs it as the `BCH Covenant Tests` job in `.github/workflows/rust.yml`.
 
-libauth-rs has no licence file yet. Its author told the owner it is MIT or
-AGPL, so `deny.toml` clarifies it as `MIT OR AGPL-3.0-or-later` (per the
-author via the owner, 2026-10-29). Remove that clarification once upstream
-publishes its licence file.
+libauth-rs is MIT licensed: its `Cargo.toml` declares `license = "MIT"`, as
+its author confirmed, so `cargo deny` reads the licence from the crate itself.
 
 ## Shell that remains
 
