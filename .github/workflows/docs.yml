@@ -1,20 +1,33 @@
 name: Docs
 
-# Builds the mdBook site from docs/ (docs/book.toml, docs/SUMMARY.md) and
-# uploads it as the github-pages artifact. Publishing is off unless the
-# repository variable DOCS_PAGES is "true" and Settings > Pages > Source is
-# "GitHub Actions"; it then publishes main's book.
+# Builds the project site and uploads it as the github-pages artifact:
+#
+#   index.html, LICENSE-MIT  the landing page from website/
+#   donate-*.svg             its donation QR codes, from website/
+#   assets/                 the dashboard's shared stylesheets, fonts and
+#                            logos it links, with their licence files
+#   docs/                    the mdBook from docs/ (docs/book.toml,
+#                            docs/SUMMARY.md)
+#   404.html                 the mdBook's not-found page
+#
+# Publishing is off unless the repository variable DOCS_PAGES is "true" and
+# Settings > Pages > Source is "GitHub Actions"; it then publishes main's
+# site. website/README.md describes the landing page.
 
 on:
   push:
     branches: ["main", "alpha"]
     paths:
       - "docs/**"
+      - "website/**"
+      - "p2poolv2_api/src/api/dashboard/assets/**"
       - ".github/workflows/docs.yml"
   pull_request:
     branches: ["main", "alpha"]
     paths:
       - "docs/**"
+      - "website/**"
+      - "p2poolv2_api/src/api/dashboard/assets/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -38,10 +51,36 @@ jobs:
       - name: Build the book
         run: mdbook build docs
 
+      # The landing page links the shared assets where they sit in the
+      # repository, so it renders from a checkout; the site serves them from
+      # assets/ beside it. The workspace tests (style_guard.rs) check that
+      # the page links nothing else outside itself.
+      - name: Stage the site
+        run: |
+          set -euo pipefail
+          assets=p2poolv2_api/src/api/dashboard/assets
+          site=target/site
+          rm -rf "$site"
+          mkdir -p "$site/assets"
+          sed "s#\.\./$assets/#assets/#g" website/index.html > "$site/index.html"
+          cp website/LICENSE-MIT website/*.svg "$site/"
+          cp "$assets"/*.css "$assets"/*.woff2 "$assets"/*.svg "$assets"/*.txt "$site/assets/"
+          cp -R target/book "$site/docs"
+          cp target/book/404.html "$site/404.html"
+          if grep -n '\.\./' "$site/index.html"; then
+            echo "::error file=website/index.html::the page links a file outside the published site"
+            exit 1
+          fi
+          # Every relative href and src: assets/, docs/ and the QR codes.
+          grep -o -E '(href|src)="[^"#:]+"' "$site/index.html" | cut -d'"' -f2 | sort -u |
+            while read -r file; do
+              test -e "$site/$file" || { echo "::error file=website/index.html::$file is not published"; exit 1; }
+            done
+
       - name: Upload the site
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: target/book
+          path: target/site
 
   pages:
     name: Publish to GitHub Pages

@@ -56,7 +56,7 @@ use crate::pool_difficulty::AsertParent;
 #[cfg(test)]
 use crate::pool_difficulty::MockPoolDifficulty;
 #[cfg(test)]
-use crate::shares::auxpow::{AuxPowProof, AuxiliaryTree, AuxiliaryWork};
+use crate::shares::auxpow::{AuxProof, AuxiliaryTree, Disclosure, TokenLeaf};
 #[cfg(test)]
 use crate::shares::bch_coinbase::BchCoinbase;
 #[cfg(test)]
@@ -74,6 +74,8 @@ use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 #[cfg(test)]
 use crate::stratum;
 #[cfg(test)]
+use crate::stratum::block_submit::FoundBlockSubmitter;
+#[cfg(test)]
 use crate::stratum::emission::EmissionReceiver;
 #[cfg(test)]
 use crate::stratum::messages::Notify;
@@ -88,7 +90,7 @@ use crate::stratum::session::{EXTRANONCE1_SIZE, EXTRANONCE2_SIZE};
 #[cfg(test)]
 use crate::stratum::sv2::{Declaration, DeclaredJob, encode_message};
 #[cfg(test)]
-use crate::stratum::sv2::{NoiseTransport, decode_plain_frames};
+use crate::stratum::sv2::{NoiseTransport, Sv2Message, decode_plain_frames};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::stratum::work::block_template::BlockTemplate;
 #[cfg(test)]
@@ -104,6 +106,10 @@ use crate::stratum::work::gbt::build_merkle_branches_for_template;
 #[cfg(test)]
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
 #[cfg(test)]
+use crate::stratum::work::merge_tokens::MinerTokenJob;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::stratum::work::merge_tokens::{MergeMinedToken, TokenSet};
+#[cfg(test)]
 use crate::stratum::work::prepared_notify::build_notify_from_prepared;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
@@ -112,13 +118,13 @@ use crate::stratum::work::tracker::JobTracker;
 #[cfg(test)]
 use crate::stratum::work::tracker::start_tracker_actor;
 #[cfg(test)]
+use crate::stratum::work::tracker::{JobDetails, JobId};
+#[cfg(test)]
 use binary_sv2::{B064K, B0255, Deserialize, GetSize, Seq0255, Serialize, U256};
 #[cfg(any(test, feature = "test-utils"))]
 use bitcoin::TxMerkleNode;
 #[cfg(test)]
 use bitcoin::consensus::{deserialize, serialize};
-#[cfg(test)]
-use bitcoin::hashes::sha256d;
 #[cfg(test)]
 use bitcoin::script::Builder;
 #[cfg(any(test, feature = "test-utils"))]
@@ -301,7 +307,7 @@ pub(crate) struct TestSv2Server {
     noise: Option<NoiseTransport>,
     decoder: Decoder,
     inbox: Vec<u8>,
-    received: VecDeque<(u8, Vec<u8>)>,
+    received: VecDeque<Sv2Message>,
 }
 
 #[cfg(test)]
@@ -365,9 +371,13 @@ impl TestSv2Server {
                 };
                 self.received.extend(messages);
             }
-            let (message_type, payload) = self.received.pop_front().unwrap();
-            assert_eq!(message_type, expected_type, "unexpected SV2 message type");
-            payload
+            let message = self.received.pop_front().unwrap();
+            assert_eq!(message.extension_type, 0, "unexpected SV2 extension");
+            assert_eq!(
+                message.message_type, expected_type,
+                "unexpected SV2 message type"
+            );
+            message.payload
         })
         .await
         .expect("SV2 test message timed out")
@@ -565,15 +575,184 @@ pub fn test_bch_prepared_for_template(template: BlockTemplate) -> Arc<PreparedNo
         bitcoin::Network::Regtest,
     );
     let weights = HashMap::from([(first, 1), (second, 3)]);
+    test_bch_prepared_with_weights(template, weights)
+}
+
+/// The reusable BCH payout snapshot on a node that donates `donation` basis
+/// points to the built-in regtest donation address and takes `fee` basis
+/// points to `fee_address`.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_bch_prepared_with_cuts(
+    donation: Option<u16>,
+    fee_address: Option<Address>,
+    fee: Option<u16>,
+) -> Arc<PreparedNotifyParams> {
+    let template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    let first = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([1; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let second = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([2; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let weights = HashMap::from([(first, 1), (second, 3)]);
+    let donation_address = donation.map(|_| {
+        crate::config::bitcoin_cash_donation_address(crate::config::BitcoinCashNetwork::Regtest)
+    });
+    test_bch_prepared_with_weights_and_cuts(
+        template,
+        weights,
+        (donation_address, donation),
+        (fee_address, fee),
+        None,
+    )
+}
+
+/// Two synthetic tokens with Pickaxe's token A and B fields (PR #70,
+/// `docs/merge-mining.md`): categories 11 and 22 x 32, batons `51` and `52`,
+/// states aa and bb x 32. A's target `0x207fffff` is met by about half of
+/// all hashes, B's `0x1f00ffff` by about one in 2^24.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_merge_token_set() -> Arc<TokenSet> {
+    use bitcoin::hashes::sha256d;
+    Arc::new(
+        TokenSet::new(vec![
+            MergeMinedToken {
+                category: [0x11; 32],
+                lock_hash: sha256d::Hash::hash(&[0x51]).to_byte_array(),
+                state_hash: [0xaa; 32],
+                target_bits: 0x207f_ffff,
+                max_height: 16,
+                safa: None,
+            },
+            MergeMinedToken {
+                category: [0x22; 32],
+                lock_hash: sha256d::Hash::hash(&[0x52]).to_byte_array(),
+                state_hash: [0xbb; 32],
+                target_bits: 0x1f00_ffff,
+                max_height: 16,
+                safa: None,
+            },
+        ])
+        .unwrap(),
+    )
+}
+
+/// The BCH payout snapshot of [`test_bch_prepared_with_cuts`] on a node
+/// that merge-mines `tokens` for every miner: its payouts follow the token
+/// share's limit and each miner's job carries their own root.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_bch_prepared_with_tokens(
+    tokens: Arc<TokenSet>,
+    donation: Option<u16>,
+    fee_address: Option<Address>,
+    fee: Option<u16>,
+) -> Arc<PreparedNotifyParams> {
+    let template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    let first = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([1; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let second = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([2; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let weights = HashMap::from([(first, 1), (second, 3)]);
+    let donation_address = donation.map(|_| {
+        crate::config::bitcoin_cash_donation_address(crate::config::BitcoinCashNetwork::Regtest)
+    });
+    test_bch_prepared_with_weights_and_cuts(
+        template,
+        weights,
+        (donation_address, donation),
+        (fee_address, fee),
+        Some(tokens),
+    )
+}
+
+/// A BCH payout snapshot with `payee_count` distinct, equally weighted P2PKH payees.
+///
+/// Exercises full coinbases through the same hybrid split and job builder as
+/// smaller fixtures, including channel transport limits below BCH's limit.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_bch_prepared_with_payee_count(payee_count: u32) -> Arc<PreparedNotifyParams> {
+    let template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    test_bch_prepared_with_weights(template, test_bch_payee_weights(payee_count))
+}
+
+/// A token-share payout snapshot with enough payees to exercise a payout
+/// tree through both Stratum protocols and Job Declaration.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_bch_prepared_with_tree_payees(payee_count: u32) -> Arc<PreparedNotifyParams> {
+    let template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    test_bch_prepared_with_weights_and_cuts(
+        template,
+        test_bch_payee_weights(payee_count),
+        (None, None),
+        (None, None),
+        Some(test_merge_token_set()),
+    )
+}
+
+/// Distinct equal-weight payees for coinbase size and tree fixtures.
+#[cfg(any(test, feature = "test-utils"))]
+fn test_bch_payee_weights(payee_count: u32) -> HashMap<Address, u128> {
+    let mut weights = HashMap::with_capacity(payee_count as usize);
+    for payee_index in 0..payee_count {
+        let mut key_hash = [0; 20];
+        key_hash[..4].copy_from_slice(&payee_index.to_le_bytes());
+        let address = Address::p2pkh(
+            bitcoin::PubkeyHash::from_byte_array(key_hash),
+            bitcoin::Network::Regtest,
+        );
+        weights.insert(address, 1);
+    }
+    weights
+}
+
+/// Build a reusable BCH payout snapshot for the supplied template and weights.
+#[cfg(any(test, feature = "test-utils"))]
+fn test_bch_prepared_with_weights(
+    template: BlockTemplate,
+    weights: HashMap<Address, u128>,
+) -> Arc<PreparedNotifyParams> {
+    test_bch_prepared_with_weights_and_cuts(template, weights, (None, None), (None, None), None)
+}
+
+/// A BCH payout snapshot for `template` and `weights` on a node taking the
+/// given donation and fee, each an address and basis points, and
+/// merge-mining `merge_tokens` for every miner when given.
+#[cfg(any(test, feature = "test-utils"))]
+fn test_bch_prepared_with_weights_and_cuts(
+    template: BlockTemplate,
+    weights: HashMap<Address, u128>,
+    (donation_address, donation): (Option<Address>, Option<u16>),
+    (fee_address, fee): (Option<Address>, Option<u16>),
+    merge_tokens: Option<Arc<TokenSet>>,
+) -> Arc<PreparedNotifyParams> {
     let anchor = BlockHash::from_byte_array([0x33; 32]);
-    let payout_split = PayoutSplit::BchBudget { anchor };
+    let payout_split =
+        PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, merge_tokens.is_some());
     let outputs = build_pplns_outputs(
         template.coinbasevalue,
         &weights,
-        &None,
-        None,
-        &None,
-        None,
+        &donation_address,
+        donation,
+        &fee_address,
+        fee,
         payout_split,
     )
     .unwrap();
@@ -583,13 +762,50 @@ pub fn test_bch_prepared_for_template(template: BlockTemplate) -> Arc<PreparedNo
             .payout_split(payout_split)
             .prev_share_blockhash(anchor)
             .bits(CompactTarget::from_consensus(0x2100ffff))
+            .donation_address(donation_address)
+            .donation(donation)
+            .fee_address(fee_address)
+            .fee(fee)
             .include_merge_mining(true)
+            .merge_tokens(merge_tokens)
+            .miner_donations(Some(crate::config::bitcoin_cash_donation_address(
+                crate::config::BitcoinCashNetwork::Regtest,
+            )))
             .build()
             .unwrap(),
     )
 }
 
-/// Build the client side of a BCH declared job, with miner-chosen aux data.
+/// The token leaves a Full-Template declarator paid to P2PKH(22 x 20)
+/// discloses for a job on `token`: [`test_merge_token_set`]'s tokens, each
+/// paying the declarator, with the token terms' donation and fee as their
+/// split, as the node requires.
+#[cfg(test)]
+pub(crate) fn test_bch_declared_leaves(token: &[u8]) -> MinerTokenJob {
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let terms = ShareCommitment::from_mining_job_token(
+        token,
+        payout.clone(),
+        ShareOwner::CashP2pkh([0x22; 20]),
+    )
+    .unwrap();
+    let split = crate::stratum::work::prepared_notify::token_split(
+        &terms.donation_address,
+        terms.donation,
+        &terms.fee_address,
+        terms.fee,
+    )
+    .unwrap();
+    test_merge_token_set().miner_job(payout.script_pubkey().as_bytes(), split)
+}
+
+/// Build the client side of a BCH declared job. A Full-Template job
+/// merge-mines [`test_bch_declared_leaves`] and discloses them; a
+/// Coinbase-only job, which cannot disclose leaves, carries the empty
+/// commitment.
 #[cfg(test)]
 pub(crate) fn test_bch_custom_job(
     prepared: Arc<PreparedNotifyParams>,
@@ -598,21 +814,25 @@ pub(crate) fn test_bch_custom_job(
     full: bool,
     value: u64,
 ) -> (Vec<u8>, DeclaredJob) {
-    test_bch_custom_job_with_aux(
+    let (merge_mining, disclosure) = if full {
+        let leaves = test_bch_declared_leaves(&token);
+        (leaves.commitment, leaves.disclosure())
+    } else {
+        (MergeMiningCommitment::empty(), Disclosure::default())
+    };
+    test_bch_custom_job_with_leaves(
         prepared,
         token,
         transactions,
         full,
         value,
-        MergeMiningCommitment {
-            merkle_root: [0x77; 32],
-            tree_size: 2,
-            nonce: 9,
-        },
+        merge_mining,
+        disclosure,
     )
 }
 
-/// A declared job with a caller-selected auxiliary commitment.
+/// A declared job with a caller-selected auxiliary commitment and no
+/// disclosed leaves, for building its bytes and proofs.
 #[cfg(test)]
 pub(crate) fn test_bch_custom_job_with_aux(
     prepared: Arc<PreparedNotifyParams>,
@@ -621,6 +841,29 @@ pub(crate) fn test_bch_custom_job_with_aux(
     full: bool,
     value: u64,
     merge_mining: MergeMiningCommitment,
+) -> (Vec<u8>, DeclaredJob) {
+    test_bch_custom_job_with_leaves(
+        prepared,
+        token,
+        transactions,
+        full,
+        value,
+        merge_mining,
+        Disclosure::default(),
+    )
+}
+
+/// A declared job with a caller-selected auxiliary commitment and the
+/// leaves its declaration discloses.
+#[cfg(test)]
+pub(crate) fn test_bch_custom_job_with_leaves(
+    prepared: Arc<PreparedNotifyParams>,
+    token: Vec<u8>,
+    transactions: Vec<Transaction>,
+    full: bool,
+    value: u64,
+    merge_mining: MergeMiningCommitment,
+    disclosure: Disclosure,
 ) -> (Vec<u8>, DeclaredJob) {
     let template = prepared.template();
     let payout = Address::p2pkh(
@@ -640,7 +883,7 @@ pub(crate) fn test_bch_custom_job_with_aux(
     };
     commitment.bch_coinbase = Some(descriptor.clone());
     let coinbase = build_declared_coinbase(
-        &prepared.declared_outputs(value).unwrap(),
+        &prepared.declared_outputs(value, &merge_mining).unwrap(),
         u64::from(template.height),
         commitment.hash(),
         &EXTRANONCE_SEPARATOR,
@@ -653,6 +896,7 @@ pub(crate) fn test_bch_custom_job_with_aux(
         version: template.version as u32,
         prefix: bytes[..nonce_offset].to_vec(),
         suffix: bytes[nonce_offset + 12..].to_vec(),
+        disclosure,
     };
     let mut selected = template.as_ref().clone();
     selected.transactions = transactions
@@ -707,18 +951,33 @@ pub(crate) fn test_bch_custom_job_with_aux(
     )
 }
 
-/// A mined regtest parent with two selected auxiliary work commitments.
+/// A mined regtest parent of a declared job committing two tokens at output
+/// 0, and the proof of the first token's win, with that token's leaf. The
+/// token's target is regtest's limit, which the solved header meets.
 #[cfg(test)]
-pub fn test_bch_auxpow() -> (AuxPowProof, AuxiliaryWork) {
-    let work = AuxiliaryWork {
-        chain_id: 1,
-        hash: sha256d::Hash::hash(b"token-A"),
-    };
-    let other = AuxiliaryWork {
-        chain_id: 2,
-        hash: sha256d::Hash::hash(b"token-B"),
-    };
-    let tree = AuxiliaryTree::build(&[work, other], 0).unwrap();
+pub fn test_bch_auxpow() -> (AuxProof, TokenLeaf) {
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        bitcoin::Network::Regtest,
+    )
+    .script_pubkey();
+    let leaf = TokenLeaf::new(
+        [0xa1; 32],
+        &[0x51],
+        [0xa2; 32],
+        payout.as_bytes(),
+        0x207f_ffff,
+        [0; 32],
+    );
+    let other = TokenLeaf::new(
+        [0xb1; 32],
+        &[0x52],
+        [0xb2; 32],
+        payout.as_bytes(),
+        0x207f_ffff,
+        [0; 32],
+    );
+    let tree = AuxiliaryTree::build(&[leaf, other]).unwrap();
     let prepared = test_bch_prepared();
     let token = prepared
         .mining_job_token([1; 32], prepared.template().curtime)
@@ -727,15 +986,15 @@ pub fn test_bch_auxpow() -> (AuxPowProof, AuxiliaryWork) {
     let (mut request, _) =
         test_bch_custom_job_with_aux(prepared, token, vec![], false, value, tree.commitment);
     let request = SetCustomMiningJob::from_bytes(&mut request).unwrap();
-    (
-        AuxPowProof {
-            parent_header: test_bch_solve_custom_job(&request, &[1; 4]),
-            coinbase: test_bch_custom_coinbase(&request, &[1; 4]),
-            coinbase_branch: vec![],
-            auxiliary: tree.proofs[0].clone(),
-        },
-        work,
+    let proof = AuxProof::new(
+        test_bch_solve_custom_job(&request, &[1; 4]),
+        &test_bch_custom_coinbase(&request, &[1; 4]),
+        &[],
+        tree.commitment,
+        &tree.branches[0],
     )
+    .unwrap();
+    (proof, leaf)
 }
 
 /// Disposable BCH mining context; keep the returned directories alive until the test ends.
@@ -752,6 +1011,7 @@ pub(crate) async fn test_bch_stratum_context(
         .unwrap();
     let (chain_store_handle, store_dir) = setup_test_chain_store_handle(true).await;
     let ctx = StratumContext {
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new(rpc_url, "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -770,6 +1030,7 @@ pub(crate) async fn test_bch_stratum_context(
         bch_share_network: Some(BchShareNetwork::Regtest),
         cash_share: Some([0x22; 20]),
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     (ctx, emissions_rx, [stats_dir, store_dir])
 }
@@ -1223,8 +1484,6 @@ pub fn create_test_commitment() -> ShareCommitment {
         miner_address: make_test_share_program(1).into(),
         share_witness_root: compute_witness_root(&[]),
         // Use signet-easy target so test bitcoin headers can meet pool difficulty.
-        // In production, calculate_target_clamped ensures pool target is never
-        // harder than bitcoin difficulty.
         bits: CompactTarget::from_consensus(0x1e0377ae),
         time: 1700000000,
         donation_address: None,
@@ -1232,6 +1491,8 @@ pub fn create_test_commitment() -> ShareCommitment {
         fee_address: None,
         fee: None,
         bch_coinbase: None,
+        pool_merge_mining: None,
+        share_version: crate::shares::share_version::ShareVersion::CURRENT,
     }
 }
 
@@ -1253,6 +1514,35 @@ pub fn random_hex_string(length: usize, leading_zeroes: usize) -> String {
 /// maximum, so a share meets it within a few nonces.
 #[cfg(test)]
 pub const EASY_POOL_BITS: u32 = 0x207fffff;
+
+/// Solve a tracked regtest job to its template's network target, using the
+/// submitting session's extranonces.
+#[cfg(test)]
+pub fn solve_job_submit(
+    job_id: JobId,
+    job: &JobDetails,
+    enonce1_hex: &str,
+    enonce2_hex: &str,
+) -> SimpleRequest<'static> {
+    let job_id_hex = format!("{:016x}", job_id.0);
+    let ntime_hex = format!("{:08x}", job.blocktemplate.curtime);
+    (0u32..)
+        .map(|nonce| {
+            SimpleRequest::new_submit(
+                4,
+                "worker".to_string(),
+                job_id_hex.clone(),
+                enonce2_hex.to_string(),
+                ntime_hex.clone(),
+                format!("{nonce:08x}"),
+            )
+        })
+        .find(|submit| {
+            validate_bitcoin_difficulty(job, submit, enonce1_hex, DEFAULT_VERSION_MASK)
+                .is_ok_and(|result| result.meets_bitcoin_difficulty)
+        })
+        .unwrap()
+}
 
 /// Insert a job built by the pool's own notify path into `tracker` and return
 /// a submit message for it whose share hash meets the job's pool target.
@@ -1314,6 +1604,61 @@ pub fn build_pool_job_submit(tracker: &JobTracker, enonce1_hex: &str) -> SimpleR
                 .is_ok_and(|result| pool_target.is_met_by(result.header.block_hash()))
         })
         .unwrap()
+}
+
+/// A `mining.submit` of a share that wins a merge-mined token: a job on a
+/// regtest node merge-mining [`test_merge_token_set`] for a miner paid to
+/// P2PKH(12 x 20), with a 1% donation, inserted in `tracker`; the nonce is
+/// ground until the share's hash meets token A's target (about half of all
+/// hashes). Returns the submit and the job's id. `enonce1_hex` must be the
+/// submitting session's extranonce1.
+#[cfg(test)]
+pub fn build_token_win_submit(
+    tracker: &JobTracker,
+    enonce1_hex: &str,
+) -> (SimpleRequest<'static>, crate::stratum::work::tracker::JobId) {
+    let prepared = test_bch_prepared_with_tokens(test_merge_token_set(), Some(100), None, None);
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x12; 20]),
+        bitcoin::Network::Regtest,
+    );
+    let (job_id, _) = crate::stratum::work::prepared_notify::insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        tracker,
+    );
+    let job = tracker.get_job(job_id).unwrap();
+    let tokens = job.merge_tokens.clone().unwrap();
+    let job_id_hex = format!("{:016x}", job_id.0);
+    let ntime_hex = format!("{:08x}", job.blocktemplate.curtime);
+    let submit = (0u32..)
+        .map(|nonce| {
+            SimpleRequest::new_submit(
+                4,
+                "worker".to_string(),
+                job_id_hex.clone(),
+                "0000000000000001".to_string(),
+                ntime_hex.clone(),
+                format!("{nonce:08x}"),
+            )
+        })
+        .find(|submit| {
+            validate_bitcoin_difficulty(&job, submit, enonce1_hex, DEFAULT_VERSION_MASK).is_ok_and(
+                |result| {
+                    !tokens
+                        .wins(
+                            &result.header,
+                            &result.coinbase,
+                            &job.template_merkle_branches,
+                            None,
+                        )
+                        .is_empty()
+                },
+            )
+        })
+        .unwrap();
+    (submit, job_id)
 }
 
 #[cfg(test)]
@@ -1387,6 +1732,8 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         fee_address: None,
         fee: None,
         bch_coinbase: None,
+        pool_merge_mining: None,
+        share_version: crate::shares::share_version::ShareVersion::CURRENT,
     };
     let commitment_hash = share_commitment.hash();
 
@@ -1447,6 +1794,8 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         bitcoin_height: template.height as u64,
         coinbase_proof,
         bch_coinbase: None,
+        pool_merge_mining: None,
+        share_version: crate::shares::share_version::ShareVersion::CURRENT,
     };
 
     let template_merkle_branches = build_merkle_branches_for_template(&template)
@@ -1471,6 +1820,7 @@ pub struct TestShareBlockBuilder {
     uncles: Vec<BlockHash>,
     miner_pubkey: Option<String>,
     share_owner: Option<ShareOwner>,
+    payout_address: Option<Address>,
     transactions: Vec<Transaction>,
     work: Option<u32>,
     nonce: Option<u32>,
@@ -1516,6 +1866,14 @@ impl TestShareBlockBuilder {
         self
     }
 
+    /// Pay the share's coinbase slice to `address` instead of the signet
+    /// P2WPKH address derived from the miner pubkey, e.g. a Bitcoin Cash
+    /// P2PKH payout.
+    pub fn payout_address(mut self, address: Address) -> Self {
+        self.payout_address = Some(address);
+        self
+    }
+
     pub fn add_transaction(mut self, transaction: Transaction) -> Self {
         self.transactions.push(transaction);
         self
@@ -1546,7 +1904,9 @@ impl TestShareBlockBuilder {
             "020202020202020202020202020202020202020202020202020202020202020202";
         let pubkey_hex = self.miner_pubkey.as_deref().unwrap_or(default_pubkey_hex);
         let pubkey = CompressedPublicKey::from_str(pubkey_hex).unwrap();
-        let btcaddress = Address::p2wpkh(&pubkey, bitcoin::Network::Signet);
+        let btcaddress = self
+            .payout_address
+            .unwrap_or_else(|| Address::p2wpkh(&pubkey, bitcoin::Network::Signet));
         let secp = Secp256k1::verification_only();
         let share_owner = self.share_owner.unwrap_or_else(|| {
             P2PoolAddress::from_internal_key(
@@ -1688,6 +2048,8 @@ fn test_share_block(
                 fee_address: None,
                 fee: None,
                 bch_coinbase: None,
+                pool_merge_mining: None,
+                share_version: crate::shares::share_version::ShareVersion::CURRENT,
             };
 
             let bitcoin_coinbase = build_bitcoin_coinbase_transaction(
@@ -1760,6 +2122,8 @@ fn test_share_block(
         bitcoin_height: 1,
         coinbase_proof,
         bch_coinbase: None,
+        pool_merge_mining: None,
+        share_version: crate::shares::share_version::ShareVersion::CURRENT,
     };
 
     ShareBlock {
@@ -1844,6 +2208,8 @@ impl TestShareHeaderBuilder {
             bitcoin_height: 1,
             coinbase_proof: CoinbaseProof::default(),
             bch_coinbase: None,
+            pool_merge_mining: None,
+            share_version: crate::shares::share_version::ShareVersion::CURRENT,
         }
     }
 }
@@ -1877,300 +2243,7 @@ pub const TRADE_BUYER_SECRET_KEY: [u8; 32] = [0xb7; 32];
 /// The secret whose SHA256 locks both legs of a trade.
 pub const TRADE_SECRET: [u8; 32] = [0x42; 32];
 
-/// A small Bitcoin Cash script machine for the opcodes the share-trading
-/// contract uses, run opcode by opcode over the actual bytes.
-///
-/// The share-chain interpreter (`shares::bch_script`) matches the contract
-/// as a template and reads its parameters at fixed offsets. No BCHN runs in
-/// the test suite, so this machine executes the same bytes as a stack
-/// machine instead, as BCHN would, and tests check that both agree. It
-/// follows BCHN's rules for these opcodes: a push-only unlocking script,
-/// minimal pushes, minimal-if, BIP65 lock time, null-fail, clean stack and
-/// P2SH32 evaluation of the redeem script. Any other opcode is an error.
+/// A Bitcoin Cash script machine run opcode by opcode over the actual bytes;
+/// see the module documentation.
 #[cfg(test)]
-pub mod bch_vm {
-    use crate::shares::bch_htlc::{encode_script_number, p2sh32_hash};
-    use crate::shares::bch_script::verify_signature;
-    use bitcoin::hashes::{Hash, hash160, sha256, sha256d};
-    use bitcoin::{Sequence, Transaction, TxOut};
-
-    const OP_PUSHDATA1: u8 = 0x4c;
-    const OP_PUSHDATA2: u8 = 0x4d;
-    const OP_1NEGATE: u8 = 0x4f;
-    const OP_RESERVED: u8 = 0x50;
-    const OP_1: u8 = 0x51;
-    const OP_16: u8 = 0x60;
-    const OP_IF: u8 = 0x63;
-    const OP_ELSE: u8 = 0x67;
-    const OP_ENDIF: u8 = 0x68;
-    const OP_DROP: u8 = 0x75;
-    const OP_DUP: u8 = 0x76;
-    const OP_SIZE: u8 = 0x82;
-    const OP_EQUAL: u8 = 0x87;
-    const OP_EQUALVERIFY: u8 = 0x88;
-    const OP_SHA256: u8 = 0xa8;
-    const OP_HASH160: u8 = 0xa9;
-    const OP_HASH256: u8 = 0xaa;
-    const OP_CHECKSIG: u8 = 0xac;
-    const OP_CHECKLOCKTIMEVERIFY: u8 = 0xb1;
-    const LOCKTIME_THRESHOLD: u64 = 500_000_000;
-
-    /// What the machine needs from the spending transaction.
-    #[derive(Clone, Copy)]
-    struct Context<'a> {
-        transaction: &'a Transaction,
-        input_index: usize,
-        amount: u64,
-        script_code: &'a [u8],
-    }
-
-    /// Run input `input_index` of `transaction` against the P2SH32 output it
-    /// spends. `Ok` means BCHN's interpreter would accept the spend.
-    pub fn run_p2sh32_spend(
-        transaction: &Transaction,
-        input_index: usize,
-        spent_output: &TxOut,
-    ) -> Result<(), String> {
-        let input = transaction
-            .input
-            .get(input_index)
-            .ok_or("input out of range")?;
-        let locking_script = spent_output.script_pubkey.as_bytes();
-        if p2sh32_hash(locking_script).is_none() {
-            return Err("the spent output is not P2SH32".to_string());
-        }
-        let unlocking_script = input.script_sig.as_bytes();
-        let mut stack: Vec<Vec<u8>> = Vec::with_capacity(8);
-        let unlocking_context = Context {
-            transaction,
-            input_index,
-            amount: spent_output.value.to_sat(),
-            script_code: unlocking_script,
-        };
-        execute(unlocking_script, &mut stack, unlocking_context, true)?;
-        let mut redeem_stack = stack.clone();
-        let locking_context = Context {
-            script_code: locking_script,
-            ..unlocking_context
-        };
-        execute(locking_script, &mut stack, locking_context, false)?;
-        if !stack.last().is_some_and(|top| cast_to_bool(top)) {
-            return Err("the P2SH32 hash does not match".to_string());
-        }
-        let redeem_script = redeem_stack.pop().ok_or("no redeem script")?;
-        let redeem_context = Context {
-            script_code: &redeem_script,
-            ..locking_context
-        };
-        execute(&redeem_script, &mut redeem_stack, redeem_context, false)?;
-        if redeem_stack.len() != 1 || !cast_to_bool(&redeem_stack[0]) {
-            return Err(format!(
-                "the redeem script left {} items, not one true item",
-                redeem_stack.len()
-            ));
-        }
-        Ok(())
-    }
-
-    fn execute(
-        script: &[u8],
-        stack: &mut Vec<Vec<u8>>,
-        context: Context,
-        push_only: bool,
-    ) -> Result<(), String> {
-        let mut branches: Vec<bool> = Vec::with_capacity(2);
-        let mut position = 0;
-        while position < script.len() {
-            let opcode = script[position];
-            position += 1;
-            let executing = branches.iter().all(|branch| *branch);
-            if opcode <= OP_16 && opcode != OP_1NEGATE && opcode != OP_RESERVED {
-                let data = read_push(script, opcode, &mut position)?;
-                if executing {
-                    stack.push(data);
-                }
-            } else if push_only {
-                return Err(format!("opcode {opcode:#04x} in a push-only script"));
-            } else {
-                execute_opcode(opcode, executing, stack, &mut branches, context)?;
-            }
-        }
-        if branches.is_empty() {
-            Ok(())
-        } else {
-            Err("unbalanced OP_IF".to_string())
-        }
-    }
-
-    /// Read the data a push opcode pushes, enforcing minimal encoding.
-    fn read_push(script: &[u8], opcode: u8, position: &mut usize) -> Result<Vec<u8>, String> {
-        if (OP_1..=OP_16).contains(&opcode) {
-            return Ok(vec![opcode - OP_1 + 1]);
-        }
-        let length = match opcode {
-            OP_PUSHDATA1 => {
-                let length = usize::from(*script.get(*position).ok_or("truncated push")?);
-                *position += 1;
-                if length <= 0x4b {
-                    return Err("OP_PUSHDATA1 for a short push".to_string());
-                }
-                length
-            }
-            OP_PUSHDATA2 | 0x4e => {
-                return Err("OP_PUSHDATA2 or OP_PUSHDATA4 for a push this short".to_string());
-            }
-            _ => usize::from(opcode),
-        };
-        let data = script
-            .get(*position..*position + length)
-            .ok_or("truncated push")?
-            .to_vec();
-        *position += length;
-        if data.len() == 1 && ((1..=16).contains(&data[0]) || data[0] == 0x81) {
-            return Err("a small number pushed as data".to_string());
-        }
-        Ok(data)
-    }
-
-    fn execute_opcode(
-        opcode: u8,
-        executing: bool,
-        stack: &mut Vec<Vec<u8>>,
-        branches: &mut Vec<bool>,
-        context: Context,
-    ) -> Result<(), String> {
-        match opcode {
-            OP_IF => {
-                let branch = if executing {
-                    let condition = pop(stack)?;
-                    if !(condition.is_empty() || condition == [1]) {
-                        return Err("OP_IF argument is not minimal".to_string());
-                    }
-                    cast_to_bool(&condition)
-                } else {
-                    false
-                };
-                branches.push(branch);
-                Ok(())
-            }
-            OP_ELSE => {
-                let top = branches.last_mut().ok_or("OP_ELSE without OP_IF")?;
-                *top = !*top;
-                Ok(())
-            }
-            OP_ENDIF => branches
-                .pop()
-                .map(|_| ())
-                .ok_or_else(|| "OP_ENDIF without OP_IF".to_string()),
-            _ if !executing => Ok(()),
-            OP_DROP => pop(stack).map(|_| ()),
-            OP_DUP => {
-                let top = stack.last().ok_or("empty stack")?.clone();
-                stack.push(top);
-                Ok(())
-            }
-            OP_SIZE => {
-                let length = stack.last().ok_or("empty stack")?.len();
-                stack.push(encode_script_number(length as u32));
-                Ok(())
-            }
-            OP_EQUAL => {
-                let right = pop(stack)?;
-                let left = pop(stack)?;
-                stack.push(if left == right { vec![1] } else { Vec::new() });
-                Ok(())
-            }
-            OP_EQUALVERIFY => {
-                let right = pop(stack)?;
-                let left = pop(stack)?;
-                if left == right {
-                    Ok(())
-                } else {
-                    Err("OP_EQUALVERIFY failed".to_string())
-                }
-            }
-            OP_SHA256 => {
-                let data = pop(stack)?;
-                stack.push(sha256::Hash::hash(&data).to_byte_array().to_vec());
-                Ok(())
-            }
-            OP_HASH160 => {
-                let data = pop(stack)?;
-                stack.push(hash160::Hash::hash(&data).to_byte_array().to_vec());
-                Ok(())
-            }
-            OP_HASH256 => {
-                let data = pop(stack)?;
-                stack.push(sha256d::Hash::hash(&data).to_byte_array().to_vec());
-                Ok(())
-            }
-            OP_CHECKSIG => check_signature(stack, context),
-            OP_CHECKLOCKTIMEVERIFY => check_lock_time(stack, context),
-            other => Err(format!("unsupported opcode {other:#04x}")),
-        }
-    }
-
-    /// `OP_CHECKSIG` with null-fail: a failing non-empty signature is an
-    /// error rather than a false result.
-    fn check_signature(stack: &mut Vec<Vec<u8>>, context: Context) -> Result<(), String> {
-        let public_key = pop(stack)?;
-        let signature = pop(stack)?;
-        let valid = !signature.is_empty()
-            && verify_signature(
-                context.transaction,
-                context.input_index,
-                context.script_code,
-                context.amount,
-                &signature,
-                &public_key,
-            )
-            .is_ok();
-        if !valid && !signature.is_empty() {
-            return Err("OP_CHECKSIG failed with a non-empty signature".to_string());
-        }
-        stack.push(if valid { vec![1] } else { Vec::new() });
-        Ok(())
-    }
-
-    /// BIP65: the top item is a non-negative, minimally encoded number of at
-    /// most five bytes, of the same kind (height or time) as the
-    /// transaction's lock time and no greater than it, and the input's
-    /// sequence is not final.
-    fn check_lock_time(stack: &[Vec<u8>], context: Context) -> Result<(), String> {
-        let top = stack.last().ok_or("empty stack")?;
-        if top.len() > 5 || top.last().is_some_and(|byte| byte & 0x80 != 0) {
-            return Err("lock time is not a non-negative five-byte number".to_string());
-        }
-        let required = top
-            .iter()
-            .rev()
-            .fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
-        if top.last() == Some(&0) && (top.len() == 1 || top[top.len() - 2] & 0x80 == 0) {
-            return Err("lock time is not minimally encoded".to_string());
-        }
-        let lock_time = u64::from(context.transaction.lock_time.to_consensus_u32());
-        if (required < LOCKTIME_THRESHOLD) != (lock_time < LOCKTIME_THRESHOLD) {
-            return Err("lock time kinds differ".to_string());
-        }
-        if required > lock_time {
-            return Err("lock time not reached".to_string());
-        }
-        if context.transaction.input[context.input_index].sequence == Sequence::MAX {
-            return Err("final sequence".to_string());
-        }
-        Ok(())
-    }
-
-    fn pop(stack: &mut Vec<Vec<u8>>) -> Result<Vec<u8>, String> {
-        stack.pop().ok_or_else(|| "empty stack".to_string())
-    }
-
-    /// Script truth: any non-zero byte, except a lone sign bit in the last
-    /// byte (negative zero).
-    fn cast_to_bool(value: &[u8]) -> bool {
-        match value.split_last() {
-            None => false,
-            Some((last, rest)) => rest.iter().any(|byte| *byte != 0) || (*last & 0x7f) != 0,
-        }
-    }
-}
+pub mod bch_vm;

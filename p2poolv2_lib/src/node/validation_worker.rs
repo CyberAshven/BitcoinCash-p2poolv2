@@ -10,7 +10,8 @@
 //! `OrganiseEvent::Block` and `SwarmSend::BroadcastBlock` events. Runs in a dedicated
 //! tokio task, decoupled from the P2P message handler hot path.
 
-use crate::config::Chain;
+use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
+use crate::config::{BitcoinCashNetwork, Chain};
 use crate::node::SwarmSend;
 use crate::node::messages::Message;
 use crate::node::organise_worker::{OrganiseEvent, OrganiseSender};
@@ -95,6 +96,8 @@ pub struct ValidationWorker {
     chain: Chain,
     /// Easiest share target the validator accepts. Defaults to the main ceiling.
     target_ceiling: CompactTarget,
+    /// The Bitcoin Cash network whose ASERT checks token shares' headers.
+    bitcoin_cash_network: Option<BitcoinCashNetwork>,
 }
 
 impl ValidationWorker {
@@ -117,7 +120,15 @@ impl ValidationWorker {
             target_ceiling: CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
+            bitcoin_cash_network: None,
         }
+    }
+
+    /// Select the Bitcoin Cash network whose ASERT parameters check a token
+    /// share's bitcoin header (`DefaultShareValidator::with_bitcoin_cash_network`).
+    pub fn with_bitcoin_cash_network(mut self, network: Option<BitcoinCashNetwork>) -> Self {
+        self.bitcoin_cash_network = network;
+        self
     }
 
     /// Select the chain whose share owner this worker's validator accepts.
@@ -138,11 +149,13 @@ impl ValidationWorker {
     /// Returns `Err(ValidationWorkerError)` on fatal failure.
     pub async fn run(mut self) -> Result<(), ValidationWorkerError> {
         info!("Validation worker started");
+        let depths = ChainDepths::for_chain(self.chain);
 
         let share_validator: Arc<dyn ShareValidator + Send + Sync> = Arc::new(
             DefaultShareValidator::new(self.pool_difficulty)
                 .for_chain(self.chain)
-                .with_target_ceiling(self.target_ceiling),
+                .with_target_ceiling(self.target_ceiling)
+                .with_bitcoin_cash_network(self.bitcoin_cash_network),
         );
 
         while let Some(event) = self.validation_rx.recv().await {
@@ -176,6 +189,7 @@ impl ValidationWorker {
                     chain_store_handle,
                     organise_tx,
                     swarm_tx,
+                    depths,
                 )
                 .await;
             });
@@ -206,6 +220,7 @@ async fn validate_and_emit(
     chain_store_handle: ChainStoreHandle,
     organise_tx: OrganiseSender,
     swarm_tx: mpsc::Sender<SwarmSend<ResponseChannel<Message>>>,
+    depths: ChainDepths,
 ) {
     let locally_mined = prefetched_block.is_some();
     let share_block = match prefetched_block {
@@ -219,7 +234,7 @@ async fn validate_and_emit(
         },
     };
 
-    let in_pplns_zone = match check_pplns_zone(&block_hash, &chain_store_handle) {
+    let in_pplns_zone = match check_pplns_zone(&block_hash, &chain_store_handle, depths) {
         Ok(result) => result,
         Err(error_message) => {
             error!("Error checking for pplns zone: {error_message}");
@@ -642,6 +657,7 @@ mod tests {
             mock_chain_handle,
             organise_tx,
             swarm_tx,
+            ChainDepths::BITCOIN,
         )
         .await;
 
@@ -683,6 +699,7 @@ mod tests {
             mock_chain_handle,
             organise_tx,
             swarm_tx,
+            ChainDepths::BITCOIN,
         )
         .await;
 

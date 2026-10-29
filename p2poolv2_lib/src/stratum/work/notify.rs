@@ -4,23 +4,27 @@
 
 use super::block_template::BlockTemplate;
 use super::error::WorkError;
-use crate::accounting::OutputPair;
+use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::PayoutSplit;
-use crate::accounting::payout::payout_distribution::PayoutDistribution;
+use crate::accounting::payout::payout_distribution::{PayoutDistribution, build_pplns_outputs};
 use crate::accounting::payout::sharechain_pplns::pplns_window::bitcoin_block_difficulty;
 use crate::config::StratumConfig;
 use crate::pool_difficulty;
+use crate::shares::bch_asert::BchAsert;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::shares::share_version::{ShareVersion, next_share_version};
 use crate::shares::transaction_pool::ShareTransactionPool;
+use crate::shares::validation::tally_share_version_votes;
 use crate::stratum::sv2::PoolTransactionCache;
+use crate::stratum::work::merge_tokens::{TokenFile, TokenSet};
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 /// Session-level context for building notify messages.
 ///
@@ -31,11 +35,14 @@ pub(crate) struct NotifyContext {
     pub pool_signature: Vec<u8>,
     pub pool_difficulty: pool_difficulty::PoolDifficulty,
     pub payout: Box<dyn PayoutDistribution + Send>,
-    /// Latest template transactions, in CTOR, for Stratum V2 coinbase-only jobs.
+    /// Latest prepared template, for Stratum V2 Job Declaration tokens.
     pub pool_transactions: PoolTransactionCache,
     /// Bitcoin Cash: the share transactions waiting for a share. `None` on
     /// Bitcoin, whose shares carry their coinbase alone.
     pub share_transaction_pool: Option<ShareTransactionPool>,
+    /// The tokens a Bitcoin Cash P2Pool node merge-mines for its miners
+    /// (`[stratum] merge_mining_tokens`), read again when the file changes.
+    pub merge_tokens: Option<TokenFile>,
 }
 
 /// Build the output distribution for the coinbase transaction using
@@ -53,7 +60,7 @@ fn build_output_distribution(
     template: &BlockTemplate,
     anchor: bitcoin::BlockHash,
     context: &mut NotifyContext,
-) -> Result<Vec<OutputPair>, WorkError> {
+) -> Result<CoinbasePayouts, WorkError> {
     let total_amount = bitcoin::Amount::from_sat(template.coinbasevalue);
 
     let compact_target = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap();
@@ -71,22 +78,6 @@ fn build_output_distribution(
         .map_err(|error| WorkError {
             message: format!("Payout distribution failed: {error}"),
         })
-}
-
-fn cache_template_transactions(
-    template: &BlockTemplate,
-    cache: &PoolTransactionCache,
-) -> Result<(), WorkError> {
-    let mut transactions = Vec::with_capacity(template.transactions.len());
-    for template_transaction in &template.transactions {
-        let transaction =
-            bitcoin::Transaction::try_from(template_transaction).map_err(|error| WorkError {
-                message: format!("template transaction: {error}"),
-            })?;
-        transactions.push(transaction);
-    }
-    cache.set(transactions);
-    Ok(())
 }
 
 /// Build a PreparedNotifyParams from a template using the notify context.
@@ -111,12 +102,40 @@ fn build_prepared_notify(
             message: format!("Failed to read the mining base for ASERT: {error}"),
         })?;
     let target = context.pool_difficulty.calculate_target_clamped(parent);
+    // Bitcoin Cash shares follow the mining base's rule version, or the next
+    // one once 95% of the vote span's work desires it (`next_share_version`).
+    let share_version = if context.config.chain == crate::config::Chain::BitcoinCash {
+        let mining_base_version = context
+            .chain_store_handle
+            .get_share_header(&tip)
+            .map_err(|error| WorkError {
+                message: format!("Failed to read the mining base's share version: {error}"),
+            })?
+            .share_version
+            .version;
+        next_share_version(mining_base_version, parent.height, || {
+            tally_share_version_votes(tip, &context.chain_store_handle)
+        })
+        .map_err(|error| WorkError {
+            message: format!("Failed to tally the share version vote: {error}"),
+        })?
+    } else {
+        ShareVersion::CURRENT
+    };
 
     //* Anchor the payout on the same `tip` we commit as prev_share_blockhash
     //* below, so a confirmed-chain advance between reads cannot make the
     //* coinbase pay a window inconsistent with its declared prev.
     let output_distribution = build_output_distribution(template, tip, context)?;
-    cache_template_transactions(template, &context.pool_transactions)?;
+    let weights = context.payout.pplns_weights();
+    let merge_tokens = context.merge_tokens.as_mut().and_then(TokenFile::current);
+    let (output_distribution, merge_tokens) = merge_token_payouts(
+        template,
+        output_distribution,
+        weights.as_ref(),
+        merge_tokens,
+        context,
+    )?;
     let share_transactions = context
         .share_transaction_pool
         .as_ref()
@@ -129,8 +148,12 @@ fn build_prepared_notify(
         &context.pool_signature,
         clean_jobs,
     )
-    .pplns_weights(context.payout.pplns_weights())
-    .payout_split(PayoutSplit::for_chain(context.config.chain, tip))
+    .pplns_weights(weights)
+    .payout_split(PayoutSplit::for_chain(
+        context.config.chain,
+        merge_tokens.is_some(),
+    ))
+    .merge_tokens(merge_tokens)
     .prev_share_blockhash(tip)
     .uncles(uncles)
     .bits(target)
@@ -139,8 +162,95 @@ fn build_prepared_notify(
     .fee_address(context.config.fee_address().cloned())
     .fee(context.config.fee)
     .include_merge_mining(context.config.chain == crate::config::Chain::BitcoinCash)
+    .miner_donations(miner_donation_address(&context.config))
+    .share_version(share_version)
     .share_transactions(share_transactions)
     .build()
+}
+
+/// The payouts of jobs that merge-mine `merge_tokens` for every miner, and
+/// the tokens they carry.
+///
+/// Every such job's share is a token share, so its coinbase follows the
+/// token share's limit (`PayoutSplit::for_chain`): the same weights, cuts
+/// and amounts, split again at that limit, as each validator rebuilds them.
+/// Without the window's weights (a node that has not built one yet) the
+/// split cannot be redone, and the template is mined without tokens.
+fn merge_token_payouts(
+    template: &BlockTemplate,
+    output_distribution: CoinbasePayouts,
+    weights: Option<&std::collections::HashMap<bitcoin::Address, u128>>,
+    merge_tokens: Option<Arc<TokenSet>>,
+    context: &NotifyContext,
+) -> Result<(CoinbasePayouts, Option<Arc<TokenSet>>), WorkError> {
+    let Some(merge_tokens) = merge_tokens else {
+        return Ok((output_distribution, None));
+    };
+    if let Err(reason) = template_meets_token_asert(template, &context.config) {
+        warn!(
+            "Template at height {} fails the ASERT band token shares must meet ({reason}); it is mined without merge-mined tokens",
+            template.height
+        );
+        return Ok((output_distribution, None));
+    }
+    let merge_tokens = match merge_tokens.at_height(template.height) {
+        Ok(merge_tokens) => merge_tokens,
+        Err(reason) => {
+            warn!(
+                "Template at height {} is mined without merge-mined tokens: {reason}",
+                template.height
+            );
+            return Ok((output_distribution, None));
+        }
+    };
+    let Some(weights) = weights else {
+        warn!("No PPLNS weights for this template yet; it is mined without merge-mined tokens");
+        return Ok((output_distribution, None));
+    };
+    let payouts = build_pplns_outputs(
+        template.coinbasevalue,
+        weights,
+        &context.config.donation_address().cloned(),
+        context.config.donation,
+        &context.config.fee_address().cloned(),
+        context.config.fee,
+        PayoutSplit::for_chain(context.config.chain, true),
+    )
+    .map_err(|error| WorkError {
+        message: format!("Token share payouts failed: {error}"),
+    })?;
+    Ok((payouts, Some(merge_tokens)))
+}
+
+/// Whether a token share mined on `template` would pass the ASERT check
+/// peers run on token shares (`validate_token_share_asert`): its nBits at
+/// its height, with its `curtime` standing in for the header's time. A
+/// network without an ASERT anchor (regtest, scalenet) always passes.
+fn template_meets_token_asert(
+    template: &BlockTemplate,
+    config: &StratumConfig<crate::config::Parsed>,
+) -> Result<(), String> {
+    let Some(asert) = config.bitcoin_cash_network.and_then(BchAsert::for_network) else {
+        return Ok(());
+    };
+    let bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits)
+        .map_err(|error| format!("template bits {}: {error}", template.bits))?;
+    asert.check_header_bits(bits, template.curtime, u64::from(template.height))
+}
+
+/// The address a miner's own `donation=` choice pays: the network's built-in
+/// donation address on a Bitcoin Cash node in P2Pool mode, which builds every
+/// miner's jobs and shares itself. `None` elsewhere: a Bitcoin node or
+/// Hydrapool mode mines with the node's donation and refuses the option.
+fn miner_donation_address(
+    config: &StratumConfig<crate::config::Parsed>,
+) -> Option<bitcoin::Address> {
+    match (config.chain, config.mode, config.bitcoin_cash_network) {
+        (crate::config::Chain::BitcoinCash, crate::config::PoolMode::P2poolv2, Some(network)) => {
+            Some(crate::config::bitcoin_cash_donation_address(network))
+        }
+        _ => None,
+    }
 }
 
 /// NotifyCmd is used to send a new block template to the notifier.
@@ -198,6 +308,10 @@ fn publish_prepared_notify(
 ///
 /// On Bitcoin Cash `share_transaction_pool` supplies the share transactions
 /// each notify's shares carry; Bitcoin passes `None`.
+///
+/// A token file (`merge_mining_tokens`) that cannot be read or is not valid
+/// returns at once too, so a node never starts mining without the tokens it
+/// was told to merge-mine.
 #[allow(clippy::too_many_arguments)] // wiring constructor: each parameter is a distinct collaborator, a params struct would only move the list
 pub async fn start_notify(
     mut notifier_rx: mpsc::Receiver<NotifyCmd>,
@@ -213,6 +327,18 @@ pub async fn start_notify(
         Some(ref sig) => sig.as_bytes().to_vec(),
         None => Vec::new(),
     };
+    let merge_tokens = match config
+        .merge_mining_tokens
+        .as_deref()
+        .map(TokenFile::open)
+        .transpose()
+    {
+        Ok(merge_tokens) => merge_tokens,
+        Err(reason) => {
+            error!("Cannot merge-mine the tokens in merge_mining_tokens, shutting down: {reason}");
+            return;
+        }
+    };
 
     let mut notify_context = NotifyContext {
         chain_store_handle,
@@ -222,6 +348,7 @@ pub async fn start_notify(
         payout,
         pool_transactions,
         share_transaction_pool,
+        merge_tokens,
     };
 
     let mut latest_template: Option<Arc<BlockTemplate>> = None;
@@ -264,6 +391,7 @@ pub async fn start_notify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounting::OutputPair;
     use crate::accounting::payout::payout_distribution::MockPayoutDistribution;
     use crate::pool_difficulty::AsertParent;
     use crate::stratum::messages::Notify;
@@ -287,7 +415,7 @@ mod tests {
         mock_payout.expect_pplns_weights().returning(|| None);
         mock_payout
             .expect_get_output_distribution()
-            .return_once(move |_, _, _, _, _| Ok(distribution));
+            .return_once(move |_, _, _, _, _| Ok(CoinbasePayouts::direct(distribution)));
         mock_payout
     }
 
@@ -468,7 +596,7 @@ mod tests {
         mock_payout.expect_pplns_weights().returning(|| None);
         mock_payout
             .expect_get_output_distribution()
-            .returning(move |_, _, _, _, _| Ok(test_distribution.clone()));
+            .returning(move |_, _, _, _, _| Ok(CoinbasePayouts::direct(test_distribution.clone())));
 
         let task_handle = tokio::spawn(async move {
             start_notify(
@@ -586,6 +714,7 @@ mod tests {
             payout: Box::new(mock_payout),
             pool_transactions: PoolTransactionCache::new(),
             share_transaction_pool: None,
+            merge_tokens: None,
         };
 
         // Build prepared notify
@@ -732,5 +861,39 @@ mod tests {
         assert_eq!(extracted_txouts[2], expected_txout_3);
         assert_eq!(extracted_txouts[3].value, Amount::ZERO);
         assert_eq!(extracted_txouts[4].value, Amount::ZERO);
+    }
+
+    /// A template whose nBits fail the token ASERT band gets no tokens: its
+    /// token shares would be refused by every peer. Regtest has no anchor.
+    #[test]
+    fn token_jobs_need_a_template_inside_the_asert_band() {
+        use crate::config::BitcoinCashNetwork;
+        use crate::shares::bch_asert::{U256, get_compact};
+        let data = include_str!(
+            "../../../../p2poolv2_tests/test_data/gbt/regtest/ckpool/one-txn/gbt.json"
+        );
+        let mut template: BlockTemplate = serde_json::from_str(data).unwrap();
+        let chipnet = BchAsert::CHIPNET;
+        template.height = chipnet.anchor_height + 1 + 120;
+        template.curtime = (chipnet.anchor_parent_time + 600) as u32;
+        let computed = chipnet
+            .next_target(template.height - 1, template.curtime)
+            .unwrap();
+        let mut config = StratumConfig::new_for_test_default().parse().unwrap();
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+
+        template.bits = format!("{:08x}", get_compact(computed).to_consensus());
+        template_meets_token_asert(&template, &config).unwrap();
+        template.bits = format!(
+            "{:08x}",
+            get_compact(computed / U256::from(16)).to_consensus()
+        );
+        assert!(
+            template_meets_token_asert(&template, &config)
+                .unwrap_err()
+                .contains("harder")
+        );
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Regtest);
+        template_meets_token_asert(&template, &config).unwrap();
     }
 }

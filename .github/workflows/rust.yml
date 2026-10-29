@@ -147,21 +147,30 @@ jobs:
           name: p2poolv2_web
           path: p2poolv2_web/dist
 
+  # The SAFA covenant in libauth-rs's BCH 2026 VM (p2poolv2_safa). The test
+  # job runs it too; this job keeps the covenant's result visible on its own.
   covenants:
     name: BCH Covenant Tests
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: tools/safa-auxpow
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          node-version: 24
-      - run: npm ci --ignore-scripts
-      - run: npm test
+          toolchain: 1.99.0
+
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: nextest
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Run the covenant tests
+        run: cargo nextest run -p p2poolv2_safa
 
   coverage:
     name: Code Coverage

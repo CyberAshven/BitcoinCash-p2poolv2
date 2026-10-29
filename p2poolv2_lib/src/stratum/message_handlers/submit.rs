@@ -5,11 +5,18 @@
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::config::PoolMode;
 use crate::shares::coinbase_proof::CoinbaseProof;
+use crate::shares::share_block::ShareHeader;
+use crate::store::payout_tree::StoredPayoutTree;
+#[cfg(not(feature = "sim"))]
+use crate::stratum::block_submit::{spawn_extra_node_submissions, submit_to_primary_node};
 use crate::stratum::{
     difficulty_adjuster::DifficultyAdjusterTrait,
     emission::Emission,
     error::{Error, StratumErrorCode},
-    messages::{Message, Response, SetDifficultyNotification, SimpleRequest},
+    merge_disclosure::{SV1_MERGE_PROOF, sv1_merge_proof_params},
+    messages::{
+        ExtensionNotification, Message, Response, SetDifficultyNotification, SimpleRequest,
+    },
     server::StratumContext,
     session::Session,
     work::{
@@ -20,11 +27,10 @@ use crate::stratum::{
     },
 };
 use bitcoin::{BlockHash, block::Header, blockdata::block::Block, hashes::Hash};
-use bitcoindrpc::BitcoindRpcClient;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::SystemTime;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Handle the "mining.submit" message
 /// This function is called when a miner submits a share to the Stratum server.
@@ -201,15 +207,63 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
         message.id,
         json!(meets_session_difficulty),
     ))];
-    match new_difficulty {
-        Some(difficulty) => {
-            response.push(Message::SetDifficulty(SetDifficultyNotification::new(
-                difficulty,
-            )));
-            Ok(response)
-        }
-        None => Ok(response),
+    if let Some(difficulty) = new_difficulty {
+        response.push(Message::SetDifficulty(SetDifficultyNotification::new(
+            difficulty,
+        )));
     }
+    response.extend(token_win_messages(
+        &stratum_context,
+        session.merge_disclosure,
+        JobId(job_id),
+        &job,
+        &validation_result.header,
+        &validation_result.coinbase,
+    ));
+    Ok(response)
+}
+
+/// The proofs of the tokens a share wins, after its acknowledgement: each
+/// is logged with the node's wins, and a miner who asked for `pickaxe-merge`
+/// gets it as a `pickaxe.merge_proof`. A share wins a token when its hash
+/// meets the token's target, whether or not it meets the session's
+/// difficulty: the token does not know P2Pool's targets.
+fn token_win_messages<'a>(
+    stratum_context: &StratumContext,
+    merge_disclosure: bool,
+    job_id: JobId,
+    job: &JobDetails,
+    header: &Header,
+    coinbase: &bitcoin::Transaction,
+) -> Vec<Message<'a>> {
+    let Some(tokens) = &job.merge_tokens else {
+        return Vec::new();
+    };
+    let job_id_hex = format!("{job_id:016x}");
+    let wins = tokens.wins(
+        header,
+        coinbase,
+        &job.template_merkle_branches,
+        stratum_context.token_asert(),
+    );
+    let mut messages = Vec::with_capacity(wins.len());
+    for win in &wins {
+        info!(
+            "Share {} on job {job_id_hex} wins token {}",
+            header.block_hash(),
+            hex::encode(win.category)
+        );
+        if let Some(logs) = &stratum_context.merge_mining_logs {
+            logs.log_sv1_win(&job_id_hex, tokens, win);
+        }
+        if merge_disclosure {
+            messages.push(Message::Extension(ExtensionNotification::new(
+                SV1_MERGE_PROOF,
+                sv1_merge_proof_params(&job_id_hex, win),
+            )));
+        }
+    }
+    messages
 }
 
 /// Submit a block whose header met the bitcoin target.
@@ -222,13 +276,24 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
 ///
 /// A block on a template from a Stratum V2 Template Provider goes back to
 /// that provider; when the provider's connection cannot take it, it goes to
-/// the node over RPC like every other block.
+/// the node over RPC like every other block. Over RPC the node gets it again
+/// after a connection error or time-out, for up to two minutes on a running
+/// node ([`crate::stratum::block_submit::FOUND_BLOCK_RETRY_POLICY`]). Every
+/// node in `[[submit_nodes]]` gets it too, provider or not, from background
+/// tasks.
+///
+/// Before the block goes anywhere, the job's payout tree is kept with the
+/// coinbase's txid and root output (`record_found_payout_tree`), so this node
+/// executes it even if the share is later rejected or the node stops before
+/// validating it. SV1, SV2 standard and extended channels, Template
+/// Provider templates and declared jobs all submit through here.
 pub(crate) async fn submit_found_block(
     stratum_context: &StratumContext,
     header: Header,
     coinbase: bitcoin::Transaction,
     job: &JobDetails,
 ) -> Result<(), Error> {
+    record_found_payout_tree(stratum_context, header, &coinbase, job).await;
     if !job.block_available {
         info!(
             "Private declared block {} must be broadcast by its declarator",
@@ -239,14 +304,31 @@ pub(crate) async fn submit_found_block(
     #[cfg(not(feature = "sim"))]
     {
         // Decode the template transactions only for this rare case.
-        let block = build_full_block(header, coinbase, &job.blocktemplate)
-            .map_err(|error| Error::SubmitFailure(error.to_string()))?;
+        let block = Arc::new(
+            build_full_block(header, coinbase, &job.blocktemplate)
+                .map_err(|error| Error::SubmitFailure(error.to_string()))?,
+        );
+        info!("Found block {}", block.block_hash());
+        let submitter = &stratum_context.found_block_submitter;
+        spawn_extra_node_submissions(
+            &block,
+            &submitter.extra_nodes,
+            &stratum_context.metrics,
+            submitter.retry,
+        );
         let unsent = match &job.blocktemplate.provided {
-            Some(provided) => provided.submit(block).err(),
-            None => Some(block),
+            Some(provided) => provided.submit(Arc::unwrap_or_clone(block)).err(),
+            None => Some(Arc::unwrap_or_clone(block)),
         };
         if let Some(block) = unsent
-            && submit_block(&block, &stratum_context.bitcoindrpc_client).await
+            && submit_to_primary_node(
+                &block,
+                &stratum_context.bitcoindrpc_client,
+                &stratum_context.metrics,
+                &submitter.retry,
+            )
+            .await
+            .node_has_block()
         {
             request_template_refresh(stratum_context);
         }
@@ -256,6 +338,70 @@ pub(crate) async fn submit_found_block(
         let _ = (stratum_context, header, coinbase, job);
     }
     Ok(())
+}
+
+/// Keep the payout tree of a block this node found before the block goes to
+/// BCHN, the Template Provider or the declarator: the tree from the job, the
+/// coinbase's txid and the index of its root output.
+///
+/// The validator keeps it again when the share comes back through
+/// validation, and every peer keeps it when it validates the share; this is
+/// the copy that survives the share being rejected or this node stopping
+/// first. A failure is logged and the block still goes out: holding back a
+/// found block over a local store error would lose the whole reward, while
+/// the tree is fixed in the block and peers keep their own copies.
+async fn record_found_payout_tree(
+    stratum_context: &StratumContext,
+    header: Header,
+    coinbase: &bitcoin::Transaction,
+    job: &JobDetails,
+) {
+    let Some(tree) = &job.payout_tree else {
+        return;
+    };
+    let blockhash = header.block_hash();
+    let root_output = tree.root_output();
+    let Some(root_vout) = coinbase
+        .output
+        .iter()
+        .position(|output| *output == root_output)
+    else {
+        error!("The payout tree root of found block {blockhash} is missing from its coinbase");
+        return;
+    };
+    let share_blockhash = match &job.share_commitment {
+        Some(commitment) => {
+            match CoinbaseProof::from_coinbase(coinbase, commitment.share_witness_root) {
+                Ok(coinbase_proof) => ShareHeader::from_commitment_and_header(
+                    commitment.clone(),
+                    header,
+                    u64::from(job.blocktemplate.height),
+                    coinbase_proof,
+                )
+                .block_hash(),
+                Err(error) => {
+                    error!("Cannot name the share of found block {blockhash}: {error}");
+                    BlockHash::all_zeros()
+                }
+            }
+        }
+        None => BlockHash::all_zeros(),
+    };
+    let record = StoredPayoutTree::new(
+        tree,
+        coinbase.compute_txid(),
+        u32::try_from(root_vout).expect("a coinbase has far fewer than 2^32 outputs"),
+        blockhash,
+        u64::from(job.blocktemplate.height),
+        share_blockhash,
+    );
+    if let Err(error) = stratum_context
+        .chain_store_handle
+        .put_payout_tree(record)
+        .await
+    {
+        error!("Failed to keep the payout tree of found block {blockhash}: {error}");
+    }
 }
 
 /// A share rebuilt from a tracker job, ready for the share chain or the
@@ -357,32 +503,6 @@ async fn emit_share_chain_share(
         .await
         .map_err(|e| Error::SubmitFailure(format!("Failed to send share to store: {e}")))?;
     Ok(true)
-}
-
-/// Submit block to bitcoind using the shared RPC client.
-///
-/// Returns whether bitcoind accepted the submission.
-pub async fn submit_block(block: &Block, bitcoindrpc_client: &BitcoindRpcClient) -> bool {
-    tracing::info!(
-        "Submitting block to bitcoind: {:?}",
-        block.header.block_hash()
-    );
-    match bitcoindrpc_client.submit_block(block).await {
-        // submitblock answers null when it accepts the block, and a reason
-        // such as "duplicate" or "high-hash" when it does not.
-        Ok(result) if result == "null" => {
-            info!("Block submitted successfully");
-            true
-        }
-        Ok(reason) => {
-            warn!("bitcoind did not accept the block: {reason}");
-            false
-        }
-        Err(e) => {
-            error!("Failed to submit block: {}", e);
-            false
-        }
-    }
 }
 
 /// Ask the template task for a new template now, so miners move off the

@@ -107,7 +107,8 @@ pub struct MinerShare {
     pub height: u32,
     /// The window share that includes this uncle, or null for a share.
     pub nephew: Option<String>,
-    /// Share difficulty before weighting.
+    /// Base weight before scaling: the share's difficulty on Bitcoin, its
+    /// exact work on Bitcoin Cash.
     pub difficulty: String,
     /// Weight credited.
     pub weight: String,
@@ -700,7 +701,7 @@ mod tests {
         let mut body = serde_json::json!({"version":1,"token":hex::encode(&token),"payout":payout,
             "share_owner":owner,"height":template.height,"nbits":u32::from_str_radix(&template.bits,16).unwrap(),
             "previous_hash":template.previousblockhash,"coinbase_value":template.coinbasevalue,"script_prefix":hex::encode(&prefix),
-            "auxiliary":{"merkle_root":vec![0u8;32],"tree_size":0,"nonce":0}});
+            "auxiliary":{"root":vec![0u8;32],"height":0,"salt":0}});
         let response = super::super::jd_prepare::prepare(
             State(Arc::clone(&state)),
             Json(serde_json::from_value(body.clone()).unwrap()),
@@ -730,7 +731,7 @@ mod tests {
             template.height,
             BchCoinbase {
                 prefix,
-                merge_mining: MergeMiningCommitment::reserved(),
+                merge_mining: MergeMiningCommitment::empty(),
             },
         )
         .unwrap();

@@ -333,21 +333,45 @@ witness root bound, it follows from the header. See
 | emissions_rx | tokio mpsc | 1000 | Stratum server -> EmissionWorker (P2Poolv2 mode) |
 | pplns_shares_rx | tokio mpsc | 1000 | Stratum server -> PplnsShareWorker (Hydrapool mode) |
 | validation_tx/rx | tokio mpsc | 8192 | Share handlers -> ValidationWorker |
-| organise_tx/rx | tokio mpsc | 512 | ValidationWorker/EmissionWorker -> OrganiseWorker |
+| organise_tx/rx | tokio mpsc with a byte budget | 512 events, 64 MiB | ValidationWorker/EmissionWorker -> OrganiseWorker |
 | swarm_tx/rx | tokio mpsc | 100 | ValidationWorker/EmissionWorker -> NodeActor |
 | block_fetcher_tx/rx | tokio mpsc | 8192 | Share handlers -> BlockFetcher |
 | write_tx/rx | std::sync mpsc | unbounded | StoreHandle -> StoreWriter (serialized writes) |
 
 The organise channel and the organise worker's `pending_blocks` buffer both
-hold whole `ShareBlock`s, each bounded at `BLOCK_TXS_SIZE_LIMIT` (200 KB, the
-share transactions and the bitcoin coinbase together) by `handle_share_block`, so their capacities set the worst-case memory of the
-organise path -- 512 + 1024 entries, rather than the 8192 + 16384 they held
-before, which allowed several GB of bodies in flight. The channel is pure
-backpressure between the parallel validation tasks and the serial organise
-worker, so a deeper queue buys no throughput and only widens the zone-tiering
-window. `PENDING_BLOCKS_CAPACITY` is sized at twice the channel because a child
-can sit a full channel ahead of its parent, and overflow there drops a block
-that is already stored and will not be re-fetched.
+hold whole `ShareBlock`s, each bounded by `handle_share_block` at
+`BLOCK_TXS_SIZE_LIMIT` (200 KB, the share transactions and the bitcoin
+coinbase together) on Bitcoin and at `BCH_SHARE_BODY_SIZE_LIMIT` (a
+1,000,000-byte coinbase plus 200 KiB of share transactions) on Bitcoin Cash.
+Both are bounded by count and by bytes, the bytes counted by each block's
+consensus encoding (`ShareBlock::encoded_size`):
+
+| | Count | Bytes | Past a bound |
+|---|---|---|---|
+| Organise channel | 512 events (`ORGANISE_CHANNEL_CAPACITY`) | 64 MiB (`ORGANISE_CHANNEL_BYTES`) | the validation task waits (backpressure) |
+| `pending_blocks` | 1,024 blocks (`PENDING_BLOCKS_CAPACITY`) | 128 MiB (`PENDING_BLOCKS_BYTES`) | the oldest blocks are evicted |
+
+By count alone, full of the largest Bitcoin Cash shares, they would hold
+about 620 MB and 1.2 GB; with the byte bounds the organise path holds at
+most 192 MiB of bodies. Honest shares are far smaller (about 35 KB at 1,000
+payees), so they meet the count bounds first. The counts were already cut
+from 8192 + 16384, which allowed several GB of bodies in flight.
+
+The channel is pure backpressure between the parallel validation tasks and
+the serial organise worker, so a deeper queue buys no throughput and only
+widens the zone-tiering window. A sender takes as many permits of a
+semaphore as its block has bytes before queuing it and hands them back when
+the worker receives it (`organise_worker/channel.rs`); a block larger than
+the whole budget takes all of it and passes once the queue is empty.
+`InvalidBlock` events carry a hash and take no bytes.
+
+`PENDING_BLOCKS_CAPACITY` and `PENDING_BLOCKS_BYTES` are twice the channel's
+because a child can sit a full channel ahead of its parent. Past either
+bound the oldest arrivals are evicted (`organise_worker/pending_buffer.rs`),
+so blocks stuck behind a parent that never validates cannot pin the buffer.
+An evicted block is already stored with its body; it is not fetched again
+but stays `HeaderValid`, so the worker re-validates it as a stranded parent
+when a descendant arrives (`redrive_stranded_parent`), or at the next start.
 
 ## BlockHeight Column Family Key Schema
 

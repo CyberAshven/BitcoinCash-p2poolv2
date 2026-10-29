@@ -11,6 +11,7 @@
 use crate::accounting::OutputPair;
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, append_payout_split};
 use crate::accounting::payout::payout_distribution::PayoutDistribution;
+use crate::accounting::payout::payout_tree::PayoutTree;
 use crate::accounting::payout::sharechain_pplns::pplns_window::PplnsWindow;
 #[cfg(test)]
 #[mockall_double::double]
@@ -79,6 +80,13 @@ impl Payout {
 }
 
 impl PayoutDistribution for Payout {
+    fn has_per_share_cuts(&self) -> bool {
+        self.pplns_window
+            .read()
+            .expect("PPLNS window lock poisoned on read")
+            .has_per_share_cuts()
+    }
+
     fn pplns_weights(&self) -> Option<HashMap<Address, u128>> {
         self.last_weights.clone()
     }
@@ -94,8 +102,8 @@ impl PayoutDistribution for Payout {
     /// header. An empty window is an error.
     ///
     /// `split` turns the weights into outputs: every payee on Bitcoin, the
-    /// coinbase budget on Bitcoin Cash, which the validator applies to the
-    /// same weights and anchor.
+    /// hybrid payout on Bitcoin Cash, which the validator applies to the
+    /// same weights; the payout tree, if any, is returned.
     fn fill_distribution_from_shares(
         &mut self,
         distribution: &mut Vec<OutputPair>,
@@ -106,10 +114,10 @@ impl PayoutDistribution for Payout {
         remaining_total_amount: Amount,
         _bootstrap_address: Address,
         split: PayoutSplit,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    ) -> Result<Option<PayoutTree>, Box<dyn Error + Send + Sync>> {
         self.last_weights = None;
         if remaining_total_amount == Amount::ZERO {
-            return Ok(());
+            return Ok(None);
         }
 
         // expect will stop start_notify task in main
@@ -132,7 +140,7 @@ impl PayoutDistribution for Payout {
             chain_store_handle,
         )?;
 
-        append_payout_split(
+        let tree = append_payout_split(
             &address_difficulty_map,
             remaining_total_amount,
             split,
@@ -140,19 +148,20 @@ impl PayoutDistribution for Payout {
         )?;
         self.last_weights = Some(address_difficulty_map);
 
-        Ok(())
+        Ok(tree)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accounting::payout::coinbase_budget::BCH_MAX_COINBASE_PAYOUTS;
+
     use crate::accounting::payout::payout_distribution::build_pplns_outputs;
     use crate::accounting::payout::sharechain_pplns::pplns_window::{
         DIFFICULTY_SCALE, NEPHEW_SCALED_BONUS, UNCLE_SCALED_WEIGHT, bitcoin_block_difficulty,
     };
     use crate::config::Chain;
+    use crate::config::{BitcoinCashNetwork, bitcoin_cash_donation_address};
     use crate::shares::chain::chain_store_handle::ConfirmedHeaderResult;
     use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
     use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
@@ -236,7 +245,8 @@ mod tests {
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
             .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].amount, total_amount);
@@ -286,7 +296,8 @@ mod tests {
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
             .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         assert_eq!(result.len(), 2);
         let total_distributed: Amount = result.iter().map(|pair| pair.amount).sum();
@@ -357,7 +368,8 @@ mod tests {
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
             .get_output_distribution(&mock, anchor, u128::MAX, total_amount, &config)
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         // Only header1's miner is paid; header2 (the newer tip) is excluded.
         assert_eq!(result.len(), 1);
@@ -413,7 +425,8 @@ mod tests {
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
             .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         // Uncle gets 9/10 of its difficulty, nephew gets base * 10 + 1/10 of uncle's difficulty.
         let expected_uncle_weight = uncle_difficulty * UNCLE_SCALED_WEIGHT;
@@ -495,7 +508,8 @@ mod tests {
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
             .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         // Nephew gets base * 10 + 1/10 of each uncle's difficulty
         let expected_nephew_weight = nephew_difficulty * DIFFICULTY_SCALE
@@ -579,7 +593,8 @@ mod tests {
                 total_amount,
                 &config,
             )
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         // Only the newest share (header3) should be included
         assert_eq!(result.len(), 1);
@@ -649,7 +664,8 @@ mod tests {
                 total_amount,
                 &config,
             )
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         assert_eq!(result.len(), 2);
         let addresses: HashSet<String> =
@@ -720,7 +736,8 @@ mod tests {
 
         let result = payout
             .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
-            .unwrap();
+            .unwrap()
+            .outputs;
 
         // Should have 3 addresses: miner A, miner B (uncle), miner C (nephew)
         let addresses: HashSet<String> =
@@ -732,6 +749,273 @@ mod tests {
 
         let total_distributed: Amount = result.iter().map(|pair| pair.amount).sum();
         assert_eq!(total_distributed, total_amount);
+    }
+
+    /// The finding share cannot levy its cuts on another miner's work.
+    /// The producer and validator use the same per-share cut weights.
+    #[test]
+    fn test_bch_per_share_cuts_producer_and_validator_agree() {
+        let mut contributing = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        let donation_address = bitcoin_cash_donation_address(BitcoinCashNetwork::Chipnet);
+        let fee_address = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_3G, 2)
+            .miner_bitcoin_address;
+        contributing.donation_address = Some(donation_address.clone());
+        contributing.donation = Some(1_000);
+        contributing.fee_address = Some(fee_address.clone());
+        contributing.fee = Some(1_000);
+        let mut independent =
+            build_test_header(&contributing.block_hash().to_string(), PUBKEY_2G, 2);
+        independent.donation_address = None;
+        independent.donation = None;
+        independent.fee_address = None;
+        independent.fee = None;
+        let contributing_address = contributing.miner_bitcoin_address.clone();
+        let independent_address = independent.miner_bitcoin_address.clone();
+        let anchor = independent.block_hash();
+        let rows = vec![
+            ConfirmedHeaderResult {
+                height: 1,
+                blockhash: anchor,
+                header: independent,
+            },
+            ConfirmedHeaderResult {
+                height: 0,
+                blockhash: contributing.block_hash(),
+                header: contributing,
+            },
+        ];
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(anchor));
+        store.expect_get_block_metadata().returning(|_| {
+            Ok(BlockMetadata {
+                expected_height: Some(1),
+                chain_work: Work::from_le_bytes([0; 32]),
+                status: Status::BlockValid,
+                chain: ChainMembership::Confirmed,
+            })
+        });
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(rows.clone()));
+        let mut payout = Payout::with_window(
+            PplnsWindow::new(bitcoin::Network::Testnet).for_chain(Chain::BitcoinCash),
+        );
+        let mut finder = make_test_config();
+        finder.chain = Chain::BitcoinCash;
+        finder.donation = Some(1_000);
+        finder.fee = Some(1_000);
+        let produced = payout
+            .get_output_distribution(&store, anchor, 1, Amount::from_sat(1_000_000), &finder)
+            .unwrap();
+        let validator_weights = payout.pplns_weights().unwrap();
+        let validated = build_pplns_outputs(
+            1_000_000,
+            &validator_weights,
+            &None,
+            None,
+            &None,
+            None,
+            PayoutSplit::for_chain(Chain::BitcoinCash, false),
+        )
+        .unwrap();
+        assert_eq!(produced, validated);
+        assert_eq!(produced.outputs.len(), 4);
+        assert_eq!(
+            produced
+                .outputs
+                .iter()
+                .find(|output| output.address == donation_address)
+                .unwrap()
+                .amount
+                .to_sat(),
+            50_000
+        );
+        assert_eq!(
+            produced
+                .outputs
+                .iter()
+                .find(|output| output.address == fee_address)
+                .unwrap()
+                .amount
+                .to_sat(),
+            45_000
+        );
+        assert_eq!(
+            produced
+                .outputs
+                .iter()
+                .find(|output| output.address == contributing_address)
+                .unwrap()
+                .amount
+                .to_sat(),
+            405_000
+        );
+        assert_eq!(
+            produced
+                .outputs
+                .iter()
+                .find(|output| output.address == independent_address)
+                .unwrap()
+                .amount
+                .to_sat(),
+            500_000
+        );
+        let rounded = build_pplns_outputs(
+            101,
+            &validator_weights,
+            &None,
+            None,
+            &None,
+            None,
+            PayoutSplit::for_chain(Chain::BitcoinCash, false),
+        )
+        .unwrap();
+        assert_eq!(
+            rounded
+                .outputs
+                .iter()
+                .find(|output| output.address == independent_address)
+                .unwrap()
+                .amount
+                .to_sat(),
+            52
+        );
+        assert_eq!(
+            rounded
+                .outputs
+                .iter()
+                .map(|output| output.amount.to_sat())
+                .sum::<u64>(),
+            101
+        );
+    }
+
+    /// A store holding `headers` as one confirmed chain, oldest first, its tip
+    /// the last; returns the store and the tip.
+    fn confirmed_chain_store(
+        headers: &[crate::shares::share_block::ShareHeader],
+    ) -> (MockChainStoreHandle, BlockHash) {
+        let rows: Vec<ConfirmedHeaderResult> = headers
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(height, header)| ConfirmedHeaderResult {
+                height: height as u32,
+                blockhash: header.block_hash(),
+                header: header.clone(),
+            })
+            .collect();
+        let tip = rows[0].blockhash;
+        let tip_height = rows[0].height;
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(tip));
+        store.expect_get_block_metadata().returning(move |_| {
+            Ok(BlockMetadata {
+                expected_height: Some(tip_height),
+                chain_work: Work::from_le_bytes([0; 32]),
+                status: Status::BlockValid,
+                chain: ChainMembership::Confirmed,
+            })
+        });
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(rows.clone()));
+        (store, tip)
+    }
+
+    /// Shares built at a node's defaults each commit 1% to the built-in
+    /// donation key, so a coinbase paying a window of them pays the key 1% of
+    /// its value as a payee, whatever the finding node's own settings. A
+    /// validator with its own window over the same chain rebuilds the same
+    /// coinbase from the paying share's header.
+    #[test]
+    fn test_bch_default_donation_is_paid_from_each_window_share() {
+        let donation_address = bitcoin_cash_donation_address(BitcoinCashNetwork::Regtest);
+        let mut headers = Vec::with_capacity(3);
+        let mut prev = BlockHash::all_zeros();
+        for pubkey in [PUBKEY_G, PUBKEY_2G, PUBKEY_G] {
+            let mut header = build_test_header(&prev.to_string(), pubkey, 2);
+            header.donation_address = Some(donation_address.clone());
+            header.donation = Some(100);
+            header.fee_address = None;
+            header.fee = None;
+            prev = header.block_hash();
+            headers.push(header);
+        }
+        let first_miner = headers[0].miner_bitcoin_address.clone();
+        let second_miner = headers[1].miner_bitcoin_address.clone();
+        let value = 5_000_000_000;
+        let (store, anchor) = confirmed_chain_store(&headers);
+        let mut payout = Payout::with_window(
+            PplnsWindow::new(bitcoin::Network::Testnet).for_chain(Chain::BitcoinCash),
+        );
+        let mut finder = make_test_config();
+        finder.chain = Chain::BitcoinCash;
+        finder.donation = Some(0);
+
+        let produced = payout
+            .get_output_distribution(&store, anchor, 1, Amount::from_sat(value), &finder)
+            .unwrap();
+
+        let paid = |address: &Address| {
+            produced
+                .outputs
+                .iter()
+                .find(|output| output.address.script_pubkey() == address.script_pubkey())
+                .map(|output| output.amount.to_sat())
+        };
+        assert_eq!(paid(&donation_address), Some(value / 100));
+        assert_eq!(paid(&first_miner), Some(value * 99 / 100 * 2 / 3));
+        assert_eq!(paid(&second_miner), Some(value * 99 / 100 / 3));
+        assert_eq!(produced.outputs.len(), 3);
+
+        let (validator_store, _) = confirmed_chain_store(&headers);
+        let mut validator_window =
+            PplnsWindow::new(bitcoin::Network::Testnet).for_chain(Chain::BitcoinCash);
+        validator_window.update(&validator_store).unwrap();
+        let paying = &headers[2];
+        let validated = build_pplns_outputs(
+            value,
+            &validator_window
+                .get_distribution_from_start_hash(anchor, 1, &validator_store)
+                .unwrap(),
+            &paying.donation_address,
+            paying.donation,
+            &paying.fee_address,
+            paying.fee,
+            PayoutSplit::for_chain(Chain::BitcoinCash, false),
+        )
+        .unwrap();
+        assert_eq!(produced, validated);
+    }
+
+    /// The case the regtest stack meets first: a block found before any
+    /// share-chain share, whose window holds only the genesis share. Genesis
+    /// commits no donation, so the coinbase pays its payee everything and
+    /// the donation key nothing, though the finding node donates 1%.
+    #[test]
+    fn test_bch_window_of_only_genesis_pays_no_donation() {
+        let mut genesis = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        genesis.donation_address = None;
+        genesis.donation = None;
+        genesis.fee_address = None;
+        genesis.fee = None;
+        let payee = genesis.miner_bitcoin_address.clone();
+        let (store, anchor) = confirmed_chain_store(std::slice::from_ref(&genesis));
+        let mut payout = Payout::with_window(
+            PplnsWindow::new(bitcoin::Network::Testnet).for_chain(Chain::BitcoinCash),
+        );
+        let mut finder = make_test_config();
+        finder.chain = Chain::BitcoinCash;
+        finder.donation = Some(100);
+
+        let produced = payout
+            .get_output_distribution(&store, anchor, 1, Amount::from_sat(1_000_000), &finder)
+            .unwrap();
+
+        assert_eq!(produced.outputs.len(), 1);
+        assert_eq!(produced.outputs[0].address, payee);
+        assert_eq!(produced.outputs[0].amount.to_sat(), 1_000_000);
     }
 
     /// The notifier and the validator size a Bitcoin Cash window through the
@@ -795,7 +1079,8 @@ mod tests {
         let mut payout = Payout::with_window(
             PplnsWindow::new(bitcoin::Network::Testnet).for_chain(Chain::BitcoinCash),
         );
-        let config = make_test_config();
+        let mut config = make_test_config();
+        config.chain = Chain::BitcoinCash;
         let total_amount = Amount::from_sat(100_000_000);
 
         let notifier_outputs = payout
@@ -825,7 +1110,7 @@ mod tests {
             config.donation,
             &config.fee_address_parsed,
             config.fee,
-            PayoutSplit::for_chain(Chain::BitcoinCash, paying_header.prev_share_blockhash),
+            PayoutSplit::for_chain(Chain::BitcoinCash, false),
         )
         .unwrap();
 
@@ -891,7 +1176,8 @@ mod tests {
         let mut payout = Payout::with_window(
             PplnsWindow::new(bitcoin::Network::Testnet).for_chain(Chain::BitcoinCash),
         );
-        let config = make_test_config();
+        let mut config = make_test_config();
+        config.chain = Chain::BitcoinCash;
         let total_amount = Amount::from_sat(100_000_000);
 
         let notifier_outputs = payout
@@ -921,7 +1207,7 @@ mod tests {
             config.donation,
             &config.fee_address_parsed,
             config.fee,
-            PayoutSplit::for_chain(Chain::BitcoinCash, paying_header.prev_share_blockhash),
+            PayoutSplit::for_chain(Chain::BitcoinCash, false),
         )
         .unwrap();
 
@@ -929,11 +1215,11 @@ mod tests {
         assert_eq!(validator_weights.len(), 4);
     }
 
-    /// Past the Bitcoin Cash coinbase budget the notifier and the validator
-    /// still build the same outputs: 20 miners with one share each are paid
-    /// in at most `BCH_MAX_COINBASE_PAYOUTS` outputs, summing to the amount.
+    /// The notifier and the validator build the same Bitcoin Cash outputs:
+    /// 20 miners with one share each, all paid directly in canonical order
+    /// (where the old 11-payout cap drew one of nine), summing to the amount.
     #[test]
-    fn test_bch_notifier_and_validator_agree_past_the_coinbase_budget() {
+    fn test_bch_notifier_and_validator_agree_paying_twenty_miners_directly() {
         let headers: Vec<_> = (1..=20u8)
             .scan(BlockHash::all_zeros(), |prev_hash, miner| {
                 let mut header = build_test_header(&prev_hash.to_string(), PUBKEY_G, 2);
@@ -1002,15 +1288,22 @@ mod tests {
             config.donation,
             &config.fee_address_parsed,
             config.fee,
-            PayoutSplit::for_chain(Chain::BitcoinCash, tip_hash),
+            PayoutSplit::for_chain(Chain::BitcoinCash, false),
         )
         .unwrap();
 
         assert_eq!(validator_weights.len(), 20);
         assert_eq!(notifier_outputs, validator_outputs);
-        assert_eq!(notifier_outputs.len(), BCH_MAX_COINBASE_PAYOUTS);
+        assert!(notifier_outputs.tree.is_none());
+        assert!(validator_weights.keys().all(|miner| {
+            notifier_outputs
+                .outputs
+                .iter()
+                .any(|output| &output.address == miner)
+        }));
         assert_eq!(
             notifier_outputs
+                .outputs
                 .iter()
                 .map(|output| output.amount)
                 .sum::<Amount>(),

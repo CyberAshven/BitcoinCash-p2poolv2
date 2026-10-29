@@ -53,17 +53,18 @@ Cash miner could authorize.
 
 ## Donation and pool fee, decided 2026-10-14
 
-Decided by the maintainer: P2Poolv2 for Bitcoin Cash donates 1.5% of each
+Decided by the maintainer: P2Poolv2 for Bitcoin Cash donates 1% of each
 block a node finds to the project address
-`bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`, the operator can
-raise or lower it, and a public pool operator can add a fee of their own.
+`bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k` (1.5% until the
+owner lowered the defaults on 2026-10-24), the operator can raise or lower
+it, and a public pool operator can add a fee of their own, 1% unless set.
 
 | Setting | Bitcoin | Bitcoin Cash |
 |---|---|---|
 | `donation_address` | Any payout address; required with `donation` | May be omitted. If set, must be the project address under this network's prefix |
-| `donation` (basis points) | Default none | Default 150 (1.5%). Any value raises or lowers it; 0 turns it off |
-| `fee_address`, `fee` | Operator's cut, both or neither | Same |
-| Limits | Each at most 10,000 | Each at most 10,000, and donation plus fee at most 1,000 (10%) |
+| `donation` (basis points) | Default none | Default 100 (1%). Any value raises or lowers it; 0 turns it off |
+| `fee_address`, `fee` | Operator's cut, both or neither | `fee_address` alone takes 100 (1%); `fee` without `fee_address` is an error |
+| Limits | Each at most 10,000 | Each at most 1,000 (10%) on its own; no combined cap |
 
 The donation key is the same on every Bitcoin Cash network: hash160
 `b25a2f0a68073fad864f684bf26e350b4526354b`, shown as
@@ -76,13 +77,21 @@ peers rebuild the block coinbase from those fields, donation first, then the
 fee on what is left, then PPLNS. Two consensus rules now bound them on
 Bitcoin Cash:
 
-- Donation plus fee at most `MAX_BITCOIN_CASH_POOL_CUT` (1,000 basis
-  points). Without it a node could set a 100% fee to itself, keep every block
-  it finds, and still earn from everyone else's blocks through its shares in
-  the window. The 10% figure is this change's choice, not a published
-  standard; lowering it later is a share-chain consensus change.
-- A donation output must pay the built-in key. Otherwise the donation field
-  would be a second, uncapped fee under another name.
+- The donation and the fee each at most `MAX_BITCOIN_CASH_CUT` (1,000
+  basis points), with no combined cap (the owner's rule, 2026-10-24; before
+  it the two shared one 10% cap). The fee is taken from what the donation
+  leaves, so a 10% donation with a 10% fee takes 19% in all. The 10% figure
+  is the project's choice, not a published standard; changing it is a
+  share-chain rule change.
+- Both come off the share's own weight in each window that pays it, not
+  off the whole coinbase (`cuts-per-share`, the owner's decision of
+  2026-10-29, as P2Pool v1 did it): the donation key and fee addresses are
+  payees like any miner. Before it the share that found a block took its
+  own donation and fee off the whole coinbase, so a miner choosing a 10%
+  donation made the whole window donate, and a miner running its own node
+  could take a 10% fee of every block it found.
+- A donation must pay the built-in key. Otherwise the donation field would
+  be a second, uncapped fee under another name.
 
 On every chain a cut above 10,000 basis points is rejected, at config parse
 and in share validation. Before this, a peer could send a header with
@@ -92,6 +101,28 @@ without panicking.
 
 Bitcoin behavior is unchanged: no default donation, any donation address, and
 a full donation (10,000) still skips miner address validation.
+
+### Each miner's own donation, decided 2026-10-24
+
+Decided by the owner: each miner on any P2Pool node chooses their own
+P2Pool donation through their login, `donation=<percent>` after a comma in
+the SV1 username or SV2 identity (or in the SV1 password), 0 to 10 in steps
+of 0.5. The key is agreed with Pickaxe, so one login works at both kinds of
+pool; Pickaxe's own donation is a separate key that P2Pool ignores, as it
+ignores every key it does not read. Bad values of the keys P2Pool reads are
+refused at login. Without the option the node's `donation` applies.
+
+This is node behavior, not a share-chain rule: the share header already
+carries each share's donation, and peers already check it against the 10%
+cap and the built-in key, as above, whatever node built it. A Bitcoin Cash
+P2Pool node rebuilds its prepared job for each donation miners choose (at
+most 21, each once per template, shared by every miner choosing it) and
+sends each miner the job at their own donation; the node's `donation`
+cannot override the choice. The fee is still taken from what the donation
+leaves. A Job Declaration token carries the donation of its
+`user_identifier`, and the channel mining it must have chosen the same.
+Hydrapool mode and Bitcoin nodes build no such jobs and refuse the option.
+Miner-facing rules are in [miner-options.md](miner-options.md#donation).
 
 ## Checklist
 
@@ -135,13 +166,18 @@ a full donation (10,000) still skips miner address validation.
   coinbase starts with the BIP34 height push, and BCHN 29.2.0 accepted blocks
   built this way on regtest (see below). ABLA is tracked by BCHN, which
   reports the current limit as the template's `sizelimit`; this node does not
-  keep ABLA state of its own. The template check counts template
-  transactions, not the coinbase this node adds. BCHN fills templates only to
+  keep ABLA state of its own. A Template Provider's templates are checked
+  against the limit BCHN reports for their parent (`getblockheader`,
+  `ablastate.nextblocksizelimit`). Each job is checked with the coinbase this
+  node adds, against the same limit. BCHN fills templates only to
   `-percentblockmaxsize` of the limit (default 50% on mainnet, 100% on
-  chipnet), which leaves room for a long PPLNS coinbase; an operator who sets
-  100% on a full mempool risks a found block over the limit. Coinbase
-  maturity (100 blocks) is BCHN's rule on the payout outputs; the share chain
-  keeps its own `COINBASE_MATURITY` for share outputs.
+  chipnet) and always leaves 1,000 bytes for the coinbase, which today's
+  coinbase (at most 780 bytes) fits. A coinbase larger than the room BCHN
+  leaves makes the job fail, and the notifier then stops the node; an
+  operator paying many miners in the coinbase on a full mempool should keep
+  `-percentblockmaxsize` below 100%. Coinbase maturity (100 blocks) is BCHN's
+  rule on the payout outputs; the share chain keeps its own maturity for
+  share outputs, `BCH_COINBASE_MATURITY` (100 shares) on Bitcoin Cash.
 - **Node RPC.** BCHN `getblocktemplate` is selected at startup when
   `chain = "bitcoin-cash"`. `getblocktemplatelight` stays optional and is
   not called. ZMQ `hashblock` still wakes the same template task.
@@ -152,11 +188,16 @@ a full donation (10,000) still skips miner address validation.
 - **Share window and difficulty.** The 10 second share interval is
   unchanged. Bitcoin Cash main and mini now have separate genesis shares.
   Mini is easier by the compact exponent above; it is not a retune of the
-  PPLNS window. Since the 2026-10-18 upstream sync the window is a share
-  count, not work: a coinbase pays `PPLNS_WINDOW_SHARES` (120,960) shares.
-  They start `COINBASE_MATURITY` (6,048) shares below the share that found
-  the block. Past the chain's first 6,048 shares, a new share is first paid
-  about 17 hours after it is mined. `difficulty_multiplier` is gone. The
+  PPLNS window. On Bitcoin Cash the window is work, not a share count
+  (decision 11): a coinbase pays the shares holding 3 BCH blocks' worth of
+  work, sized from the paying share's own BCH header bits
+  (`BCH_PPLNS_WINDOW_BLOCKS`) and capped at `PPLNS_WINDOW_SHARES` (120,960,
+  upstream's two weeks of 10-second shares). The window starts
+  `BCH_COINBASE_MATURITY` (100) shares below the share that found the block,
+  so a new share can be paid by blocks found from about 17 minutes after it
+  is mined. Bitcoin
+  keeps upstream's fixed 120,960-share window behind 6,048 shares.
+  `difficulty_multiplier` is gone. The
   only 10 and 600 second constants (`IDEAL_BLOCK_TIME`, `HALFLIFE` in
   `sim_overrides.rs`) are the share chain's own ASERT, not the Bitcoin Cash
   block interval. On Bitcoin Cash that ASERT is anchored at each share's
@@ -167,8 +208,9 @@ a full donation (10,000) still skips miner address validation.
   1-minute blocks, gathering statements for the 2027 upgrade (lock-in
   2026-11-15, activation 2027-05-15 per the research forum thread). It is
   not activated. If it activates, block difficulty falls about tenfold. The
-  share-count window does not follow it, so the window then spans about ten
-  times as many blocks, unless the BCH constants are retuned. The 10 second
+  work-sized window follows it: it still spans 3 blocks, now about ten times
+  shorter, except for pools small enough to sit at the 120,960-share cap,
+  whose window then spans more blocks. The 10 second
   share interval stays below the block interval. Templates change about ten
   times as often, which the ZMQ `hashblock` path already handles. The CHIP's
   tick-based heights and any change to coinbase maturity are BCHN's to
@@ -176,9 +218,16 @@ a full donation (10,000) still skips miner address validation.
 - **Coinbase size.** An RFC on the research forum (2025-06, not a CHIP)
   suggests limiting the coinbase transaction to about 2 kB, roughly 60
   P2PKH outputs, and was opposed by a BCHN maintainer for the reason that it
-  blocks direct coinbase payouts. Nothing limits the coinbase today beyond
-  block size. If such a limit is adopted, the covenant payout tree in the
-  plan becomes necessary rather than optional.
+  blocks direct coinbase payouts. BCH consensus limits a coinbase only by the
+  1,000,000-byte transaction size and the 100-byte scriptSig. This node's
+  share-chain rules use all of it: a share that merge-mines no tokens pays
+  every miner directly in a coinbase of up to 1,000,000 bytes (about 29,400
+  P2PKH payees), which the share body carries. A share that merge-mines
+  tokens keeps its coinbase within 3,072 bytes, and the payees past a
+  share's limit are paid through a covenant payout tree
+  ([Hybrid payouts](architecture/bch-hybrid-payouts.md); audit items A1 and
+  A2). If a BCH coinbase limit is adopted, lowering the no-token limit to it
+  is a new share-chain rule; the tree already pays the rest.
 - **Stratum V2.** A local listener starts when `stratum.sv2_port` is set.
   SV1 stays. Without authority keys, frames are the unencrypted framing the
   Stratum V2 specification allows between local roles; with them, the Noise
@@ -275,7 +324,9 @@ a full donation (10,000) still skips miner address validation.
   merkle root, a little-endian tree size, and a little-endian nonce (44
   bytes). With no aux chain declared, the root, size, and nonce are zero.
   The share coinbase stays one P2PKH output. Bitcoin block coinbases omit
-  the output. A per-share aux choice is not stored in the share header.
+  the output. Jobs the pool builds carry the empty commitment; a declared
+  job's aux choice is stored in its share header (`bch_coinbase`, with the
+  declared scriptSig prefix) so peers can rebuild the coinbase.
 
 ## Live regtest run, 2026-10-14
 
@@ -301,6 +352,9 @@ Observed:
   window; a zero-value AuxPoW `OP_RETURN` (`fabe6d6d`, zero root, size and
   nonce); the padding `OP_RETURN` that aligns the share commitment to a
   SHA256 block, and the share-commitment `OP_RETURN`. Version 2, 303 bytes.
+  (That was the v1 merge-mining output. Since the share-chain rule batch of
+  2026-10-24 the coinbase carries the 53-byte merge-mining v2 commitment as
+  output 0 instead; see [Auxiliary work proofs](bch-auxpow.md).)
 - The PPLNS remainder went to the genesis share's P2PKH, the NUMS key,
   because the genesis share was the only share in the window and regtest
   block difficulty is far below the mini share target. Upstream Bitcoin
@@ -412,7 +466,7 @@ Stratum V2 were added on 2026-10-15. A node started
 with `chain = "bitcoin-cash"` validates BCHN templates, pays CashAddr
 scripts including the donation and fee, records a P2PKH share owner, starts
 from a main or mini P2PKH genesis, handles both local declaration exchanges,
-commits a reserved AuxPoW output, and on regtest builds blocks BCHN accepts
+commits a merge-mining output, and on regtest builds blocks BCHN accepts
 and shares that three nodes accept and relay, and on chipnet shares two
 nodes accept and relay. It is still not a proven production pool: no
 chipnet block has been found through it, and no real ASIC firmware or

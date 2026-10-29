@@ -67,8 +67,12 @@ mining_sv2 = "12.0.0"
 template_distribution_sv2 = "7.0.0"
 
 [dev-dependencies]
+libauth.workspace = true
 bitcoindrpc = { path = "../bitcoindrpc", features = ["test-utils"] }
 p2poolv2_config = { path = "../p2poolv2_config", features = ["test-utils"] }
+# Tests only: the node's SAFA leaf targets and ASERT bands are checked
+# against the SAFA tool's.
+p2poolv2_safa = { path = "../p2poolv2_safa" }
 tempfile.workspace = true
 test-log = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }

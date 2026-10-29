@@ -6,8 +6,12 @@
 //!
 //! The checksum and version byte follow the CashAddr specification. Only
 //! 20-byte pay-to-public-key-hash and pay-to-script-hash payloads are
-//! accepted. Token-aware addresses and longer hashes are rejected so a
-//! payout cannot be aimed at a script this node does not construct.
+//! accepted, so a payout cannot be aimed at a script this node does not
+//! construct. Token-aware addresses (CashAddr types 2 and 3, from the
+//! CashTokens upgrade of 2023-05-15) are accepted: a wallet uses them to
+//! say it can hold tokens, and they lock with the same script as types 0
+//! and 1, so the payout is the same P2PKH or P2SH output. Longer hashes
+//! (P2SH32) are rejected until share headers can carry them.
 
 use super::BitcoinCashNetwork;
 use bitcoin::hashes::Hash;
@@ -63,7 +67,7 @@ impl std::fmt::Display for CashAddrError {
             CashAddrError::Checksum => "invalid CashAddr checksum",
             CashAddrError::Payload => "invalid CashAddr payload",
             CashAddrError::UnsupportedVersion => {
-                "only 20-byte P2PKH and P2SH CashAddr payouts are accepted"
+                "only 20-byte P2PKH and P2SH CashAddr payouts, token-aware or not, are accepted"
             }
         };
         write!(formatter, "{message}")
@@ -206,9 +210,11 @@ fn decode_version(network: BitcoinCashNetwork, payload: &[u8]) -> Result<CashAdd
     if hash.len() != HASH_SIZE_BYTES[size_index] || hash.len() != PUBLIC_KEY_HASH_SIZE {
         return Err(CashAddrError::UnsupportedVersion);
     }
+    // Types 2 and 3 are the token-aware forms of 0 and 1 (CashTokens,
+    // "CashAddress Token Support"): same hash, same locking script.
     let kind = match kind_bits {
-        0 => CashAddrKind::PayToPublicKeyHash,
-        1 => CashAddrKind::PayToScriptHash,
+        0 | 2 => CashAddrKind::PayToPublicKeyHash,
+        1 | 3 => CashAddrKind::PayToScriptHash,
         _ => return Err(CashAddrError::UnsupportedVersion),
     };
     let mut hash_bytes = [0_u8; PUBLIC_KEY_HASH_SIZE];
@@ -274,6 +280,92 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, CashAddrError::PrefixMismatch);
+    }
+
+    /// P2PKH script of `fc916f213a3d7f1369313d5fa30f6168f9446a2d`, the
+    /// payload of the CashTokens token-aware CashAddr test vectors.
+    const VECTOR_P2PKH_SCRIPT: [u8; 25] = [
+        0x76, 0xa9, 0x14, 0xfc, 0x91, 0x6f, 0x21, 0x3a, 0x3d, 0x7f, 0x13, 0x69, 0x31, 0x3d, 0x5f,
+        0xa3, 0x0f, 0x61, 0x68, 0xf9, 0x44, 0x6a, 0x2d, 0x88, 0xac,
+    ];
+
+    #[test]
+    fn a_token_aware_mainnet_p2pkh_pays_the_same_script_as_its_plain_form() {
+        let token_aware = decode(
+            "bitcoincash:zr7fzmep8g7h7ymfxy74lgc0v950j3r295z4y4gq0v",
+            BitcoinCashNetwork::Mainnet,
+        )
+        .unwrap();
+        let plain = decode(
+            "bitcoincash:qr7fzmep8g7h7ymfxy74lgc0v950j3r2959lhtxxsl",
+            BitcoinCashNetwork::Mainnet,
+        )
+        .unwrap();
+        assert_eq!(
+            token_aware.to_address().script_pubkey().as_bytes(),
+            VECTOR_P2PKH_SCRIPT
+        );
+        assert_eq!(token_aware.to_address(), plain.to_address());
+    }
+
+    #[test]
+    fn a_token_aware_chipnet_p2pkh_pays_p2pkh() {
+        let decoded = decode(
+            "bchtest:zr7fzmep8g7h7ymfxy74lgc0v950j3r295x8qj2hgs",
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.to_address().script_pubkey().as_bytes(),
+            VECTOR_P2PKH_SCRIPT
+        );
+    }
+
+    #[test]
+    fn a_token_aware_regtest_p2pkh_pays_p2pkh() {
+        let decoded = decode(
+            "bchreg:zr7fzmep8g7h7ymfxy74lgc0v950j3r295umknfytk",
+            BitcoinCashNetwork::Regtest,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.to_address().script_pubkey().as_bytes(),
+            VECTOR_P2PKH_SCRIPT
+        );
+    }
+
+    #[test]
+    fn a_token_aware_p2sh_pays_the_same_script_as_its_plain_form() {
+        let token_aware = decode(
+            "bitcoincash:rpawqn2h74a4t50phuza84kdp3794pq3cct3k50p0y",
+            BitcoinCashNetwork::Mainnet,
+        )
+        .unwrap();
+        let plain = decode(
+            "bitcoincash:ppawqn2h74a4t50phuza84kdp3794pq3ccvm92p8sh",
+            BitcoinCashNetwork::Mainnet,
+        )
+        .unwrap();
+        assert_eq!(
+            token_aware.to_address().script_pubkey().as_bytes(),
+            [
+                0xa9, 0x14, 0x7a, 0xe0, 0x4d, 0x57, 0xf5, 0x7b, 0x55, 0xd1, 0xe1, 0xbf, 0x05, 0xd3,
+                0xd6, 0xcd, 0x0c, 0x7c, 0x5a, 0x84, 0x11, 0xc6, 0x87,
+            ]
+        );
+        assert_eq!(token_aware.to_address(), plain.to_address());
+    }
+
+    /// P2SH32 needs a share header that can carry a 32-byte hash, a
+    /// share-chain rule change, so its token-aware form stays refused too.
+    #[test]
+    fn a_token_aware_p2sh32_is_still_refused() {
+        let error = decode(
+            "bitcoincash:rvqqqqqqqqqqqqqqqqqqqqqqzg69v7ysqqqqqqqqqqqqqqqqqqqqqn9alsp2y",
+            BitcoinCashNetwork::Mainnet,
+        )
+        .unwrap_err();
+        assert_eq!(error, CashAddrError::UnsupportedVersion);
     }
 
     #[test]

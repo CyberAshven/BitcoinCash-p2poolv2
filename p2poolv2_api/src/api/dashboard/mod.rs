@@ -81,6 +81,7 @@ pub(crate) fn site(state: &AppState) -> Site {
         Some(BchShareNetwork::Mainnet) => ("Bitcoin Cash mainnet".to_string(), "mainnet"),
         Some(BchShareNetwork::Chipnet) => ("Bitcoin Cash chipnet".to_string(), "chipnet"),
         Some(BchShareNetwork::Regtest) => ("Bitcoin Cash regtest".to_string(), "regtest"),
+        Some(BchShareNetwork::Scalenet) => ("Bitcoin Cash scalenet".to_string(), "scalenet"),
         None => (format!("Bitcoin {}", state.app_config.network), "bitcoin"),
     };
     Site {

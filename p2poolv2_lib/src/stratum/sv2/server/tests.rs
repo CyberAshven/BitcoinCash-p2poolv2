@@ -3,12 +3,17 @@ use crate::accounting::stats::metrics;
 use crate::config::{Chain, DEFAULT_VERSION_MASK, PoolMode};
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::ShareHeader;
+use crate::shares::share_commitment::ShareCommitment;
+use crate::stratum::block_submit::FoundBlockSubmitter;
 use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::sv2::session::encode_message;
+use crate::stratum::work::merge_tokens::{MergeMinedToken, TokenSet};
+use crate::stratum::work::prepared_notify::token_split;
 use crate::stratum::work::tracker::start_tracker_actor;
 use crate::test_utils::{
-    TestSv2Client, bch_template_transaction, test_bch_custom_job, test_bch_prepared,
-    test_bch_solve_custom_job, test_bch_stratum_context, test_sv2_authority, test_sv2_setup,
+    TestSv2Client, bch_template_transaction, test_bch_custom_job, test_bch_custom_job_with_leaves,
+    test_bch_prepared_with_cuts, test_bch_solve_custom_job, test_bch_stratum_context,
+    test_sv2_authority, test_sv2_setup,
 };
 use crate::test_utils::{make_test_share_address, setup_test_chain_store_handle};
 use binary_sv2::U256;
@@ -74,7 +79,13 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
         .expect(if cfg!(feature = "sim") { 0 } else { 1 })
         .mount(&rpc)
         .await;
-    let prepared = test_bch_prepared();
+    // A node taking a 1% donation and a 1% fee, so a declarator's token
+    // leaves carry both in their split.
+    let fee_address = bitcoin::Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0xfe; 20]),
+        Network::Regtest,
+    );
+    let prepared = test_bch_prepared_with_cuts(Some(100), Some(fee_address), Some(100));
     let cache = PoolTransactionCache::new();
     cache.set_prepared(Arc::clone(&prepared));
     let (_template_sender, template_rx) = watch::channel(Some(Arc::clone(&prepared)));
@@ -88,7 +99,7 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
         listener,
         Arc::clone(&connection_limit),
         cache,
-        Some(MergeMiningCommitment::reserved()),
+        Some(MergeMiningCommitment::empty()),
         Some(Sv2Mining {
             ctx,
             version_mask: DEFAULT_VERSION_MASK,
@@ -162,12 +173,46 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
     let token = allocated.mining_job_token.as_bytes().to_vec();
     let selected: bitcoin::Transaction =
         deserialize(&hex::decode(bch_template_transaction(1).data).unwrap()).unwrap();
-    let (mut custom_bytes, declared) = test_bch_custom_job(
+    // Sixteen tokens, the most one tree holds, each leaf paying the miner
+    // with the job's donation and fee: their 3,830-byte disclosure makes
+    // the declaration longer than the listener's 4,096-byte reads.
+    let terms = ShareCommitment::from_mining_job_token(
+        &token,
+        payout.clone(),
+        p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]),
+    )
+    .unwrap();
+    let split = token_split(
+        &terms.donation_address,
+        terms.donation,
+        &terms.fee_address,
+        terms.fee,
+    )
+    .unwrap();
+    let sixteen_tokens = TokenSet::new(
+        (1..=16u8)
+            .map(|category| MergeMinedToken {
+                category: [category; 32],
+                lock_hash: [0x51; 32],
+                state_hash: [category; 32],
+                target_bits: 0x207f_ffff,
+                max_height: 16,
+                safa: None,
+            })
+            .collect(),
+    )
+    .unwrap();
+    let leaves = sixteen_tokens.miner_job(payout.script_pubkey().as_bytes(), split);
+    let excess_data = leaves.disclosure().encode();
+    assert_eq!(excess_data.len(), 3_830);
+    let (mut custom_bytes, declared) = test_bch_custom_job_with_leaves(
         Arc::clone(&prepared),
         token.clone(),
         vec![selected.clone()],
         true,
         prepared.template().coinbasevalue,
+        leaves.commitment,
+        leaves.disclosure(),
     );
     let declaration = declared.declaration.unwrap();
     let wtxid = selected.compute_wtxid().to_byte_array();
@@ -181,7 +226,7 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
                     coinbase_tx_prefix: B064K::new(&declaration.prefix).unwrap(),
                     coinbase_tx_suffix: B064K::new(&declaration.suffix).unwrap(),
                     wtxid_list: Seq064K::new(vec![U256::new(&wtxid).unwrap()]).unwrap(),
-                    excess_data: B064K::new(&[0; 5000]).unwrap(),
+                    excess_data: B064K::new(&excess_data).unwrap(),
                 },
                 MESSAGE_TYPE_DECLARE_MINING_JOB,
             )
@@ -385,6 +430,7 @@ async fn disconnect_releases_the_authorized_worker_and_connection_permit() {
     let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(true).await;
     let (emissions_tx, _emissions_rx) = mpsc::channel(10);
     let ctx = StratumContext {
+        found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: start_tracker_actor(),
         bitcoindrpc_client: BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
         start_difficulty: 1,
@@ -404,6 +450,7 @@ async fn disconnect_releases_the_authorized_worker_and_connection_permit() {
         bch_share_network: None,
         cash_share: None,
         template_refresh_tx: None,
+        merge_mining_logs: None,
     };
     let listener = bind("127.0.0.1", 0).await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -471,8 +518,8 @@ async fn disconnect_releases_the_authorized_worker_and_connection_permit() {
                 .decode(&buffer[..count])
                 .unwrap()
                 .iter()
-                .any(|(message_type, _)| {
-                    *message_type == MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS
+                .any(|message| {
+                    message.message_type == MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS
                 });
         }
     })
@@ -494,6 +541,114 @@ fn reading_the_current_template_leaves_it_for_next_template() {
     sender.send(None).unwrap();
     assert!(current_template(Some(&receiver)).is_none());
     assert!(receiver.has_changed().unwrap());
+}
+
+/// A Mining connection, set up, on a registry with no template.
+fn mining_connection() -> Sv2Connection {
+    let registry = Arc::new(Mutex::new(JobRegistry::new(
+        PoolTransactionCache::new(),
+        Some(MergeMiningCommitment::empty()),
+    )));
+    let mut connection = Sv2Connection::new(registry);
+    let mut setup = binary_sv2::to_bytes(test_sv2_setup(Protocol::MiningProtocol, 0)).unwrap();
+    connection
+        .handle_message(
+            common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
+            &mut setup,
+        )
+        .unwrap();
+    connection
+}
+
+/// `RequestExtensions` asking for `0x4D4D` and an unknown extension on a
+/// Mining connection is answered with `0x4D4D` alone, and the connection's
+/// channels then get the merge-mining disclosure.
+#[tokio::test]
+async fn a_mining_connection_is_granted_the_merge_mining_disclosure() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let mut connection = mining_connection();
+    let request = Sv2Message {
+        extension_type: EXTENSIONS_NEGOTIATION,
+        message_type: REQUEST_EXTENSIONS,
+        payload: extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION, 0x0002]),
+    };
+
+    let frames = handle_messages(&mut connection, Some(&mut channels), None, vec![request])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        frames,
+        vec![
+            [
+                &[0x01, 0x00, REQUEST_EXTENSIONS_SUCCESS, 6, 0, 0][..],
+                &extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION])[..],
+            ]
+            .concat()
+        ]
+    );
+}
+
+/// A connection that asks for no extension this node knows, or that has
+/// no mining channels to disclose to, is answered with none.
+#[tokio::test]
+async fn an_unknown_extension_request_is_answered_with_none() {
+    let mut connection = mining_connection();
+    let request = Sv2Message {
+        extension_type: EXTENSIONS_NEGOTIATION,
+        message_type: REQUEST_EXTENSIONS,
+        payload: extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION]),
+    };
+
+    let frames = handle_messages(&mut connection, None, None, vec![request])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        frames,
+        vec![
+            [
+                &[0x01, 0x00, REQUEST_EXTENSIONS_SUCCESS, 4, 0, 0][..],
+                &extensions_payload(9, &[])[..],
+            ]
+            .concat()
+        ]
+    );
+}
+
+/// Extensions are negotiated after `SetupConnection`; a request before it,
+/// or a message of an extension that was not negotiated, closes the
+/// connection.
+#[tokio::test]
+async fn extension_messages_before_setup_or_unknown_close_the_connection() {
+    let registry = Arc::new(Mutex::new(JobRegistry::new(
+        PoolTransactionCache::new(),
+        Some(MergeMiningCommitment::empty()),
+    )));
+    let mut fresh = Sv2Connection::new(registry);
+    let request = Sv2Message {
+        extension_type: EXTENSIONS_NEGOTIATION,
+        message_type: REQUEST_EXTENSIONS,
+        payload: extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION]),
+    };
+    assert!(
+        handle_messages(&mut fresh, None, None, vec![request])
+            .await
+            .is_err()
+    );
+
+    let mut connection = mining_connection();
+    let unknown = Sv2Message {
+        extension_type: 0x0003,
+        message_type: 0x00,
+        payload: Vec::new(),
+    };
+    assert!(
+        handle_messages(&mut connection, None, None, vec![unknown])
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -583,7 +738,7 @@ async fn served_listener_answers_setup_connection() {
         listener,
         Arc::new(Semaphore::new(8)),
         PoolTransactionCache::new(),
-        Some(MergeMiningCommitment::reserved()),
+        Some(MergeMiningCommitment::empty()),
         None,
         None,
         shutdown_receiver,
@@ -629,7 +784,7 @@ async fn a_connection_over_the_shared_limit_is_closed() {
         listener,
         Arc::new(Semaphore::new(0)),
         PoolTransactionCache::new(),
-        Some(MergeMiningCommitment::reserved()),
+        Some(MergeMiningCommitment::empty()),
         None,
         None,
         shutdown_receiver,

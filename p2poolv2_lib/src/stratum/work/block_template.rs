@@ -48,8 +48,13 @@ pub struct BlockTemplate<T = TemplateTransaction> {
     pub mintime: u32,
     pub mutable: Vec<String>,
     pub noncerange: String,
-    pub sigoplimit: u32,
-    pub sizelimit: u32,
+    /// The block's SigChecks limit, which BCHN reports as `sigoplimit`
+    /// (`sizelimit / 141`). Bitcoin Core reports its sigop cost limit here.
+    pub sigoplimit: u64,
+    /// The size limit of the block the template builds, in bytes. On Bitcoin
+    /// Cash it is BCHN's next-block limit: a 32 MB floor that ABLA raises with
+    /// no fixed maximum, so it is held in 64 bits.
+    pub sizelimit: u64,
     #[serde(default)]
     pub weightlimit: u32,
     pub curtime: u32,
@@ -175,7 +180,7 @@ impl BlockTemplate {
                 .ok_or_else(|| invalid("transaction size overflow"))?;
             previous_txid = Some(txid);
         }
-        if transaction_bytes.saturating_add(81) > self.sizelimit as usize {
+        if (transaction_bytes as u64).saturating_add(81) > self.sizelimit {
             return Err(invalid("transactions exceed node block size limit"));
         }
         Ok(())
@@ -192,7 +197,7 @@ impl BlockTemplate {
             .try_fold(prefix_size, |size, transaction| {
                 size.checked_add(transaction.data.len() / 2)
             });
-        if block_size.is_none_or(|size| size > self.sizelimit as usize) {
+        if block_size.is_none_or(|size| size as u64 > self.sizelimit) {
             return Err(WorkError {
                 message: "BCH block including coinbase exceeds node block size limit".to_string(),
             });
@@ -233,6 +238,22 @@ mod tests {
         template.validate_bch().unwrap();
         assert_eq!(template.sizelimit, 32_000_000);
         assert_eq!(template.weightlimit, 0);
+    }
+
+    /// ABLA has no fixed maximum, so a limit past 32 bits must parse and hold.
+    #[test]
+    fn bchn_size_limit_above_four_gigabytes_is_kept() {
+        let mut json: serde_json::Value = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        let size_limit: u64 = 8_000_000_000;
+        json["sizelimit"] = size_limit.into();
+        json["sigoplimit"] = (size_limit / 141).into();
+        let template: BlockTemplate = serde_json::from_value(json).unwrap();
+        template.validate_bch().unwrap();
+        assert_eq!(template.sizelimit, size_limit);
+        assert_eq!(template.sigoplimit, size_limit / 141);
+        template
+            .validate_bch_block_size(&test_coinbase_transaction(1))
+            .unwrap();
     }
 
     #[test]
@@ -361,7 +382,7 @@ mod tests {
             coinbase.clone(),
             Transaction::try_from(&template.transactions[0]).unwrap(),
         ];
-        template.sizelimit = (Header::SIZE + serialize(&transactions).len()) as u32;
+        template.sizelimit = (Header::SIZE + serialize(&transactions).len()) as u64;
         template.validate_bch().unwrap();
         template.validate_bch_block_size(&coinbase).unwrap();
         template.sizelimit -= 1;
@@ -377,7 +398,7 @@ mod tests {
         let coinbase = test_coinbase_transaction(1);
         let mut transactions = vec![decoded; 253];
         transactions[0] = coinbase.clone();
-        template.sizelimit = (Header::SIZE + serialize(&transactions).len()) as u32;
+        template.sizelimit = (Header::SIZE + serialize(&transactions).len()) as u64;
         template.validate_bch_block_size(&coinbase).unwrap();
         template.sizelimit -= 1;
         assert!(template.validate_bch_block_size(&coinbase).is_err());

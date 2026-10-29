@@ -52,16 +52,25 @@ pub const BITCOIN_CASH_DONATION_PUBKEY_HASH: [u8; 20] = [
 ];
 
 /// Donation a Bitcoin Cash node makes when `donation` is not configured:
-/// 1.5%. An operator may raise it, lower it, or set 0 to opt out.
-pub const DEFAULT_BITCOIN_CASH_DONATION: u16 = 150;
+/// 100 basis points, 1%. An operator may raise it, lower it, or set 0 to opt
+/// out. Each miner may still choose their own at login (`donation=`).
+pub const DEFAULT_BITCOIN_CASH_DONATION: u16 = 100;
 
-/// Most a Bitcoin Cash share may take before the PPLNS split: donation plus
-/// fee, 10%.
+/// Operator fee a Bitcoin Cash node takes when `fee_address` is set and `fee`
+/// is not: 100 basis points, 1%, of what the donation leaves. An operator may
+/// set `fee` to change it.
+pub const DEFAULT_BITCOIN_CASH_FEE: u16 = 100;
+
+/// Most each of the donation and the operator fee may take of a Bitcoin Cash
+/// coinbase before the PPLNS split: 1,000 basis points, 10%, each on its
+/// own. There is no combined cap. The fee is taken from what the donation
+/// leaves, so at most 10% of the coinbase value too, and the two together at
+/// most 19%.
 ///
 /// The share chain enforces this on every Bitcoin Cash share. Without it a
 /// node could set a 100% fee to itself and keep the whole reward of every
 /// block it finds, while its shares still earn a slice of everyone else's.
-pub const MAX_BITCOIN_CASH_POOL_CUT: u16 = 1_000;
+pub const MAX_BITCOIN_CASH_CUT: u16 = 1_000;
 
 /// [`BITCOIN_CASH_DONATION_ADDRESS`] under a network's CashAddr prefix, for
 /// logs and documentation. Each string decodes to
@@ -69,7 +78,9 @@ pub const MAX_BITCOIN_CASH_POOL_CUT: u16 = 1_000;
 pub fn bitcoin_cash_donation_cashaddr(network: BitcoinCashNetwork) -> &'static str {
     match network {
         BitcoinCashNetwork::Mainnet => BITCOIN_CASH_DONATION_ADDRESS,
-        BitcoinCashNetwork::Chipnet => "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2",
+        BitcoinCashNetwork::Chipnet | BitcoinCashNetwork::Scalenet => {
+            "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2"
+        }
         BitcoinCashNetwork::Regtest => "bchreg:qze95tc2dqrnltvxfa5yhunwx5952f34fvsm6us7sv",
     }
 }
@@ -188,9 +199,11 @@ pub enum Chain {
 
 /// Bitcoin Cash network selected by the operator.
 ///
-/// Chipnet uses the `bchtest` CashAddr prefix. BCHN uses that same prefix for
-/// its other test networks, so the prefix does not distinguish chipnet from
-/// testnet3 or testnet4. The RPC URL has to point at the network named here.
+/// Chipnet and scalenet use the `bchtest` CashAddr prefix. BCHN uses that
+/// same prefix for its other test networks, so the prefix does not
+/// distinguish chipnet from scalenet, testnet3 or testnet4. The RPC URL has
+/// to point at the network named here; the node checks at start that it does
+/// (`bchn_chain_name`, `bch_only_block`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BitcoinCashNetwork {
@@ -201,6 +214,11 @@ pub enum BitcoinCashNetwork {
     Chipnet,
     /// Bitcoin Cash regtest. CashAddr prefix `bchreg`.
     Regtest,
+    /// Bitcoin Cash scalenet, BCHN's network for testing big blocks: a
+    /// 256 MB block size floor, reorged back to height 10,000 now and then
+    /// (BCHN `doc/test-networks.md`, `CScaleNetParams`). CashAddr prefix
+    /// `bchtest`.
+    Scalenet,
 }
 
 /// Which Bitcoin Cash share chain this node extends.
@@ -223,44 +241,87 @@ impl BitcoinCashNetwork {
     pub fn cashaddr_prefix(self) -> &'static str {
         match self {
             BitcoinCashNetwork::Mainnet => "bitcoincash",
-            BitcoinCashNetwork::Chipnet => "bchtest",
+            BitcoinCashNetwork::Chipnet | BitcoinCashNetwork::Scalenet => "bchtest",
             BitcoinCashNetwork::Regtest => "bchreg",
         }
     }
 
-    /// Share address network (`p2pool`, `tp2pool`, `rp2pool`) for this
-    /// Bitcoin Cash network.
+    /// Share address network (`p2pool`, `tp2pool`, `rp2pool`, `sp2pool`) for
+    /// this Bitcoin Cash network.
     pub fn share_network(self) -> BchShareNetwork {
         match self {
             BitcoinCashNetwork::Mainnet => BchShareNetwork::Mainnet,
             BitcoinCashNetwork::Chipnet => BchShareNetwork::Chipnet,
             BitcoinCashNetwork::Regtest => BchShareNetwork::Regtest,
+            BitcoinCashNetwork::Scalenet => BchShareNetwork::Scalenet,
         }
     }
 
     /// The Bitcoin Cash network a share address network belongs to.
     ///
-    /// Share addresses (`p2pool`, `tp2pool`, `rp2pool`) and payout addresses
-    /// (`bitcoincash`, `bchtest`, `bchreg`) name the same three networks.
+    /// Each share address prefix (`p2pool`, `tp2pool`, `rp2pool`, `sp2pool`)
+    /// names one network. Payout addresses use BCHN's prefixes, where chipnet
+    /// and scalenet share `bchtest`.
     pub fn from_share_network(share_network: BchShareNetwork) -> Self {
         match share_network {
             BchShareNetwork::Mainnet => BitcoinCashNetwork::Mainnet,
             BchShareNetwork::Chipnet => BitcoinCashNetwork::Chipnet,
             BchShareNetwork::Regtest => BitcoinCashNetwork::Regtest,
+            BchShareNetwork::Scalenet => BitcoinCashNetwork::Scalenet,
         }
     }
 
     /// Bitcoin network whose base58 version bytes and proof-of-work limit
-    /// match this Bitcoin Cash network: mainnet `0x1d00ffff`, chipnet
-    /// `0x1d00ffff` (as testnet), regtest `0x207fffff`. It lets
+    /// match this Bitcoin Cash network: mainnet `0x1d00ffff`, chipnet and
+    /// scalenet `0x1d00ffff` (as testnet), regtest `0x207fffff`. It lets
     /// `bitcoin::Address` carry a decoded CashAddr script, and it is the
     /// `stratum.network` a Bitcoin Cash node uses for difficulty and its P2P
     /// protocol id.
     pub fn legacy_network(self) -> Network {
         match self {
             BitcoinCashNetwork::Mainnet => Network::Bitcoin,
-            BitcoinCashNetwork::Chipnet => Network::Testnet,
+            BitcoinCashNetwork::Chipnet | BitcoinCashNetwork::Scalenet => Network::Testnet,
             BitcoinCashNetwork::Regtest => Network::Regtest,
+        }
+    }
+
+    /// The `chain` BCHN's `getblockchaininfo` reports on this network:
+    /// `CBaseChainParams` in BCHN's `src/chainparamsbase.cpp`.
+    pub fn bchn_chain_name(self) -> &'static str {
+        match self {
+            BitcoinCashNetwork::Mainnet => "main",
+            BitcoinCashNetwork::Chipnet => "chip",
+            BitcoinCashNetwork::Regtest => "regtest",
+            BitcoinCashNetwork::Scalenet => "scale",
+        }
+    }
+
+    /// A block only Bitcoin Cash on this network has, as (height, hash): a
+    /// checkpoint from BCHN's `src/chainparams.cpp`. A node whose block at
+    /// that height differs follows another chain. `None` on regtest, whose
+    /// blocks are local.
+    ///
+    /// - Mainnet: block 661,648, the first block after the November 2020
+    ///   upgrade, where eCash (then Bitcoin ABC) split off. It is also after
+    ///   the November 2018 split of Bitcoin SV, and Bitcoin never had it.
+    /// - Chipnet: block 115,252, where chipnet forked from testnet4.
+    /// - Scalenet: block 10,000, the height scalenet is reorged back to, so
+    ///   it stays in the chain.
+    pub fn bch_only_block(self) -> Option<(u64, &'static str)> {
+        match self {
+            BitcoinCashNetwork::Mainnet => Some((
+                661_648,
+                "0000000000000000029e471c41818d24b8b74c911071c4ef0b4a0509f9b5a8ce",
+            )),
+            BitcoinCashNetwork::Chipnet => Some((
+                115_252,
+                "00000000040ba9641ba98a37b2e5ceead38e4e2930ac8f145c8094f94c708727",
+            )),
+            BitcoinCashNetwork::Scalenet => Some((
+                10_000,
+                "00000000b711dc753130e5083888d106f99b920b1b8a492eb5ac41d40e482905",
+            )),
+            BitcoinCashNetwork::Regtest => None,
         }
     }
 }
@@ -302,12 +363,18 @@ pub struct StratumConfig<State = Raw> {
     /// The donation basis points.
     ///
     /// In the Raw state this is what the operator wrote. After parsing it is
-    /// the donation actually paid: on Bitcoin Cash an unset value becomes
+    /// the node's donation: on Bitcoin Cash an unset value becomes
     /// [`DEFAULT_BITCOIN_CASH_DONATION`], and 0 becomes `None` (no donation).
+    /// On a Bitcoin Cash P2Pool node it is the default for miners whose login
+    /// does not choose their own `donation=`, never an override of one.
     pub donation: Option<u16>,
     /// The fee address (string in Raw state). A pool operator's own cut.
     pub fee_address: Option<String>,
     /// The fee basis points, taken after the donation.
+    ///
+    /// On Bitcoin Cash an unset value with `fee_address` set becomes
+    /// [`DEFAULT_BITCOIN_CASH_FEE`] after parsing. Bitcoin needs both fields
+    /// or neither.
     pub fee: Option<u16>,
     /// Share chain address owning every share this pool mines (string in Raw
     /// state). When set, miners need not send `p2p=` in the stratum password,
@@ -315,11 +382,15 @@ pub struct StratumConfig<State = Raw> {
     /// P2Poolv2 mode only; Hydrapool builds no share commitment.
     pub miner_address: Option<String>,
     /// The network can be "main", "testnet4" or "signet".
-    /// On Bitcoin this is also the share-address prefix. On Bitcoin Cash it is
-    /// ignored: [`Config::load`] and [`StratumConfig::parse`] replace it with
+    /// On Bitcoin this is also the share-address prefix, and [`Config::load`]
+    /// requires it. On Bitcoin Cash it is ignored and may be left out:
+    /// [`Config::load`] and [`StratumConfig::parse`] replace it with
     /// [`StratumConfig::effective_network`], derived from
     /// `bitcoin_cash_network`.
-    #[serde(deserialize_with = "deserialize_network")]
+    #[serde(
+        default = "default_unset_network",
+        deserialize_with = "deserialize_network"
+    )]
     pub network: bitcoin::Network,
     /// Block chain that supplies work templates and payout scripts.
     /// Defaults to Bitcoin so existing configurations keep their behavior.
@@ -384,6 +455,15 @@ pub struct StratumConfig<State = Raw> {
     /// Pool operating mode. Defaults to P2Poolv2 when not specified.
     #[serde(default)]
     pub mode: PoolMode,
+    /// A JSON file listing the tokens a Bitcoin Cash P2Pool node
+    /// merge-mines for its miners (`docs/bch-auxpow.md`, "Merge-mining
+    /// tokens on a public node"). Every miner's jobs then carry a root of
+    /// their own token leaves at output 0, with their P2Pool donation and
+    /// the node's fee as per-win cuts. The node reads it again whenever it
+    /// changes, so the tool that claims a token can move its state. Unset,
+    /// the node merge-mines nothing. Bitcoin Cash in P2Pool mode only.
+    #[serde(default)]
+    pub merge_mining_tokens: Option<String>,
 
     // Parsed addresses - only available when State = Parsed
     #[serde(skip)]
@@ -450,7 +530,12 @@ impl StratumConfig<Raw> {
             });
         }
 
-        if self.fee_address.is_some() != self.fee.is_some() {
+        // A Bitcoin Cash fee_address alone takes the default fee; a fee with
+        // nowhere to pay it is an error on both chains.
+        let fee_needs_address = self.fee.is_some() && self.fee_address.is_none();
+        let address_needs_fee =
+            self.chain == Chain::Bitcoin && self.fee_address.is_some() && self.fee.is_none();
+        if fee_needs_address || address_needs_fee {
             return Err(ConfigError {
                 message: "fee_address and fee must both be set or both be unset".to_string(),
             });
@@ -481,6 +566,17 @@ impl StratumConfig<Raw> {
                 });
             }
             (Chain::Bitcoin, None) | (Chain::BitcoinCash, Some(_)) => {}
+        }
+
+        // Tokens are merge-mined through the Bitcoin Cash coinbase P2Pool
+        // builds for each miner; Bitcoin and Hydrapool build none.
+        if self.merge_mining_tokens.is_some()
+            && (self.chain != Chain::BitcoinCash || self.mode != PoolMode::P2poolv2)
+        {
+            return Err(ConfigError {
+                message: "merge_mining_tokens needs chain = bitcoin-cash in p2poolv2 mode"
+                    .to_string(),
+            });
         }
 
         if self.chain == Chain::Bitcoin && self.bch_share_chain == BchShareChain::Mini {
@@ -562,7 +658,12 @@ impl StratumConfig<Raw> {
             })
             .transpose()?;
 
-        validate_cuts(self.chain, donation, self.fee)?;
+        let fee = match (self.chain, &self.fee_address, self.fee) {
+            (Chain::BitcoinCash, Some(_), None) => Some(DEFAULT_BITCOIN_CASH_FEE),
+            (_, _, fee) => fee,
+        };
+
+        validate_cuts(self.chain, donation, fee)?;
 
         let sv2_authority = parse_sv2_authority(
             self.sv2_port,
@@ -593,7 +694,7 @@ impl StratumConfig<Raw> {
             donation_address: self.donation_address,
             donation,
             fee_address: self.fee_address,
-            fee: self.fee,
+            fee,
             miner_address: self.miner_address,
             network: self.network,
             chain: self.chain,
@@ -612,6 +713,7 @@ impl StratumConfig<Raw> {
             max_connections: self.max_connections,
             wait_for_chain_sync: self.wait_for_chain_sync,
             mode: self.mode,
+            merge_mining_tokens: self.merge_mining_tokens,
             bootstrap_address_parsed: Some(bootstrap_address_parsed),
             donation_address_parsed,
             fee_address_parsed,
@@ -961,9 +1063,9 @@ fn resolve_donation(
 
 /// Reject donation and fee basis points the payout cannot honor.
 ///
-/// Each cut is a share of what is left, so each must be at most 100%. A
-/// Bitcoin Cash node must also stay within [`MAX_BITCOIN_CASH_POOL_CUT`],
-/// which its peers enforce on every share it mines.
+/// Each cut is a share of what is left, so each must be at most 100%. On a
+/// Bitcoin Cash node each must also stay within [`MAX_BITCOIN_CASH_CUT`]
+/// on its own, which its peers enforce on every share it mines.
 fn validate_cuts(chain: Chain, donation: Option<u16>, fee: Option<u16>) -> Result<(), ConfigError> {
     let donation = donation.unwrap_or(0);
     let fee = fee.unwrap_or(0);
@@ -975,12 +1077,12 @@ fn validate_cuts(chain: Chain, donation: Option<u16>, fee: Option<u16>) -> Resul
         });
     }
     if chain == Chain::BitcoinCash
-        && u32::from(donation) + u32::from(fee) > u32::from(MAX_BITCOIN_CASH_POOL_CUT)
+        && (donation > MAX_BITCOIN_CASH_CUT || fee > MAX_BITCOIN_CASH_CUT)
     {
         return Err(ConfigError {
             message: format!(
-                "donation ({donation}) plus fee ({fee}) on bitcoin-cash must be at most \
-                 {MAX_BITCOIN_CASH_POOL_CUT} basis points; peers reject shares above it"
+                "donation ({donation}) and fee ({fee}) on bitcoin-cash must each be at most \
+                 {MAX_BITCOIN_CASH_CUT} basis points; peers reject shares above it"
             ),
         });
     }
@@ -1023,6 +1125,7 @@ impl StratumConfig<Raw> {
             max_connections: None,
             wait_for_chain_sync: true,
             mode: PoolMode::default(),
+            merge_mining_tokens: None,
             bootstrap_address_parsed: None,
             donation_address_parsed: None,
             fee_address_parsed: None,
@@ -1033,6 +1136,14 @@ impl StratumConfig<Raw> {
             _state: PhantomData,
         }
     }
+}
+
+/// The `network` of a config that leaves it out, as a Bitcoin Cash config
+/// may: Bitcoin Cash derives it from `bitcoin_cash_network`, and
+/// [`Config::load`] refuses a Bitcoin config without one, so this value is
+/// never used to mine.
+fn default_unset_network() -> bitcoin::Network {
+    bitcoin::Network::Bitcoin
 }
 
 /// Helper function to deserialize the network from the config file.
@@ -1282,6 +1393,12 @@ pub struct Config {
     pub store: StoreConfig,
     pub stratum: StratumConfig,
     pub bitcoinrpc: BitcoinRpcConfig,
+    /// Extra BCHN nodes every found block also goes to, beside the node in
+    /// `[bitcoinrpc]`, each as a `[[submit_nodes]]` table with `url`,
+    /// `username` and `password`. Optional and empty by default. A block
+    /// then does not depend on one node or one connection.
+    #[serde(default)]
+    pub submit_nodes: Vec<BitcoinRpcConfig>,
     pub logging: LoggingConfig,
     pub api: ApiConfig,
 }
@@ -1300,7 +1417,7 @@ impl Config {
     /// On Bitcoin Cash, `network.dns_seed` is also turned off (see
     /// [`Config::with_bitcoin_cash_dns_seed_off`]).
     pub fn load(path: &str) -> Result<Self, config::ConfigError> {
-        let loaded: Self = config::Config::builder()
+        let built = config::Config::builder()
             .add_source(config::File::with_name(path))
             // Nesting uses `__` so that a single `_` stays part of a field name.
             // With a single-underscore separator, P2POOL_STORE_PPLNS_TTL_DAYS
@@ -1311,8 +1428,17 @@ impl Config {
                     .prefix_separator("_")
                     .separator("__"),
             )
-            .build()?
-            .try_deserialize()?;
+            .build()?;
+        let network_given = built.get_string("stratum.network").is_ok();
+        let loaded: Self = built.try_deserialize()?;
+        if loaded.stratum.chain == Chain::Bitcoin && !network_given {
+            return Err(config::ConfigError::Message(
+                "[stratum] network is required with chain = \"bitcoin\": \"main\", \
+                 \"testnet4\" or \"signet\". A Bitcoin Cash node sets chain = \
+                 \"bitcoin-cash\" and bitcoin_cash_network instead."
+                    .to_string(),
+            ));
+        }
         Ok(loaded
             .with_bitcoin_cash_network_derived()
             .with_bitcoin_cash_dns_seed_off())
@@ -1665,7 +1791,7 @@ mod tests {
     /// DNS seeds are on unless the operator turns them off.
     #[test]
     fn dns_seed_defaults_to_true_when_absent() {
-        let config = Config::load("../config.sample.toml").unwrap();
+        let config = Config::load("../config-bitcoin.sample.toml").unwrap();
         assert!(config.network.dns_seed);
     }
 
@@ -1714,7 +1840,7 @@ mod tests {
 
     #[test]
     fn with_bitcoin_cash_dns_seed_off_leaves_bitcoin_seeds_on() {
-        let config = Config::load("../config.sample.toml")
+        let config = Config::load("../config-bitcoin.sample.toml")
             .unwrap()
             .with_bitcoin_cash_dns_seed_off();
         assert_eq!(config.stratum.chain, Chain::Bitcoin);
@@ -1829,6 +1955,72 @@ mod tests {
         assert!(sets_chain, "compose should set chain = bitcoin-cash");
     }
 
+    /// Chipnet and mainnet BCHN never ship a known RPC password:
+    /// docker/bchn/entrypoint.sh adds one at start. Only regtest keeps the
+    /// public throwaway login, which config-docker.sample.toml uses.
+    #[test]
+    fn docker_bchn_ships_an_rpc_password_only_for_regtest() {
+        let sets_password = |conf: &str| {
+            conf.lines()
+                .any(|line| line.trim_start().starts_with("rpcpassword"))
+        };
+        assert!(!sets_password(include_str!(
+            "../../docker/bchn/bitcoin-chipnet.conf"
+        )));
+        assert!(!sets_password(include_str!(
+            "../../docker/bchn/bitcoin-mainnet.conf"
+        )));
+        assert!(
+            include_str!("../../docker/bchn/bitcoin-regtest.conf")
+                .lines()
+                .any(|line| line.trim() == "rpcpassword=p2pool")
+        );
+        with_var("P2POOL_BITCOINRPC__PASSWORD", None::<&str>, || {
+            let config = Config::load("../config-docker.sample.toml").unwrap();
+            assert_eq!(config.bitcoinrpc.password, "p2pool");
+        });
+    }
+
+    /// The node gets BCHN's password from the volume BCHN writes it to,
+    /// mounted read-only, as the existing P2POOL_BITCOINRPC__PASSWORD
+    /// override, under the file name entrypoint.sh uses.
+    #[test]
+    fn docker_compose_hands_the_bchn_rpc_password_to_the_node() {
+        let compose = include_str!("../../docker/docker-compose.p2poolv2.yml");
+        assert!(
+            compose
+                .lines()
+                .any(|line| line.trim() == "- bchn_rpc:/run/bchn-rpc:ro")
+        );
+        assert!(compose.contains(
+            "secret=\"/run/bchn-rpc/password-$${P2POOL_STRATUM__BITCOIN_CASH_NETWORK}\""
+        ));
+        assert!(compose.contains("export P2POOL_BITCOINRPC__PASSWORD"));
+        let entrypoint = include_str!("../../docker/bchn/entrypoint.sh");
+        assert!(entrypoint.contains("RPC_SECRET_DIR=${RPC_SECRET_DIR:-/run/bchn-rpc}"));
+        assert!(entrypoint.contains("secret=\"$RPC_SECRET_DIR/password-$NETWORK\""));
+        let compose = include_str!("../../docker/docker-compose.yml");
+        assert!(
+            compose
+                .lines()
+                .any(|line| line.trim() == "- bchn_rpc:/run/bchn-rpc")
+        );
+    }
+
+    /// The override the compose stack sets replaces the sample's regtest
+    /// password.
+    #[test]
+    fn env_override_replaces_the_docker_sample_rpc_password() {
+        with_var(
+            "P2POOL_BITCOINRPC__PASSWORD",
+            Some("4f1c0a9e7d2b6c38"),
+            || {
+                let config = Config::load("../config-docker.sample.toml").unwrap();
+                assert_eq!(config.bitcoinrpc.password, "4f1c0a9e7d2b6c38");
+            },
+        );
+    }
+
     /// config-docker.sample.toml is the image's default config and the
     /// compose stack's default mount: a Bitcoin Cash regtest node.
     #[test]
@@ -1851,6 +2043,187 @@ mod tests {
         let parsed = config.stratum.parse().unwrap();
         assert_eq!(parsed.network, Network::Regtest);
         assert_eq!(parsed.version_mask, DEFAULT_VERSION_MASK);
+    }
+
+    #[test]
+    fn bchn_chain_names_match_chainparamsbase() {
+        assert_eq!(BitcoinCashNetwork::Mainnet.bchn_chain_name(), "main");
+        assert_eq!(BitcoinCashNetwork::Chipnet.bchn_chain_name(), "chip");
+        assert_eq!(BitcoinCashNetwork::Regtest.bchn_chain_name(), "regtest");
+    }
+
+    /// BCHN `src/chainparams.cpp`, `CMainParams` checkpoint "Axion
+    /// activation", the first block after eCash split off.
+    #[test]
+    fn the_mainnet_bitcoin_cash_block_is_bchn_axion_checkpoint() {
+        assert_eq!(
+            BitcoinCashNetwork::Mainnet.bch_only_block(),
+            Some((
+                661_648,
+                "0000000000000000029e471c41818d24b8b74c911071c4ef0b4a0509f9b5a8ce"
+            ))
+        );
+    }
+
+    /// BCHN `src/chainparams.cpp`, `CChipNetParams` checkpoint "Fork block
+    /// for chipnet", which testnet4 does not have.
+    #[test]
+    fn the_chipnet_bitcoin_cash_block_is_the_chipnet_fork_block() {
+        assert_eq!(
+            BitcoinCashNetwork::Chipnet.bch_only_block(),
+            Some((
+                115_252,
+                "00000000040ba9641ba98a37b2e5ceead38e4e2930ac8f145c8094f94c708727"
+            ))
+        );
+    }
+
+    #[test]
+    fn regtest_has_no_bitcoin_cash_only_block() {
+        assert_eq!(BitcoinCashNetwork::Regtest.bch_only_block(), None);
+    }
+
+    /// BCHN `src/chainparams.cpp`, `CScaleNetParams` checkpoint 10,000, the
+    /// height scalenet is reorged back to.
+    #[test]
+    fn the_scalenet_bitcoin_cash_block_is_its_reorg_floor_checkpoint() {
+        assert_eq!(
+            BitcoinCashNetwork::Scalenet.bch_only_block(),
+            Some((
+                10_000,
+                "00000000b711dc753130e5083888d106f99b920b1b8a492eb5ac41d40e482905"
+            ))
+        );
+        assert_eq!(BitcoinCashNetwork::Scalenet.bchn_chain_name(), "scale");
+    }
+
+    /// Scalenet takes BCHN's test network address forms: the `bchtest`
+    /// CashAddr prefix and testnet's base58 versions and proof-of-work limit.
+    #[test]
+    fn scalenet_uses_the_test_network_address_forms() {
+        assert_eq!(BitcoinCashNetwork::Scalenet.cashaddr_prefix(), "bchtest");
+        assert_eq!(
+            BitcoinCashNetwork::Scalenet.legacy_network(),
+            Network::Testnet
+        );
+        assert_eq!(
+            BitcoinCashNetwork::Scalenet.share_network(),
+            BchShareNetwork::Scalenet
+        );
+        assert_eq!(
+            BitcoinCashNetwork::from_share_network(BchShareNetwork::Scalenet),
+            BitcoinCashNetwork::Scalenet
+        );
+    }
+
+    #[test]
+    fn scalenet_is_read_from_the_config() {
+        let config: Config = config::Config::builder()
+            .add_source(config::File::with_name("../config.sample.toml"))
+            .add_source(config::File::from_str(
+                r#"
+                [stratum]
+                chain = "bitcoin-cash"
+                bitcoin_cash_network = "scalenet"
+                "#,
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+
+        assert_eq!(
+            config.stratum.bitcoin_cash_network,
+            Some(BitcoinCashNetwork::Scalenet)
+        );
+    }
+
+    /// The default sample is a Bitcoin Cash chipnet node that names no
+    /// Bitcoin network and parses as shipped.
+    #[test]
+    fn the_default_sample_is_a_bitcoin_cash_chipnet_node() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert_eq!(config.stratum.chain, Chain::BitcoinCash);
+        assert_eq!(
+            config.stratum.bitcoin_cash_network,
+            Some(BitcoinCashNetwork::Chipnet)
+        );
+        assert_eq!(config.stratum.network, Network::Testnet);
+        assert!(!config.network.dns_seed);
+        assert_eq!(config.bitcoinrpc.url, "http://127.0.0.1:48332");
+
+        let parsed = config.stratum.parse().unwrap();
+        assert_eq!(parsed.donation, Some(DEFAULT_BITCOIN_CASH_DONATION));
+        assert!(parsed.bootstrap_address_parsed.is_some());
+    }
+
+    /// Upstream's Bitcoin sample is kept, for Bitcoin mode.
+    #[test]
+    fn the_bitcoin_sample_is_a_bitcoin_signet_node() {
+        let config = Config::load("../config-bitcoin.sample.toml").unwrap();
+        assert_eq!(config.stratum.chain, Chain::Bitcoin);
+        assert_eq!(config.stratum.network, Network::Signet);
+        assert!(config.stratum.parse().is_ok());
+    }
+
+    /// A Bitcoin config must name its network; only Bitcoin Cash derives it.
+    #[test]
+    fn a_bitcoin_config_without_a_network_is_refused() {
+        let sample = std::fs::read_to_string("../config-bitcoin.sample.toml").unwrap();
+        let without_network: String = sample
+            .lines()
+            .filter(|line| !line.starts_with("network = "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let path = std::env::temp_dir().join(format!(
+            "p2poolv2-config-without-network-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, without_network).unwrap();
+
+        let result = Config::load(path.to_str().unwrap());
+        std::fs::remove_file(&path).unwrap();
+
+        let Err(error) = result else {
+            panic!("a Bitcoin config without network loaded");
+        };
+        assert!(error.to_string().contains("network is required"), "{error}");
+    }
+
+    #[test]
+    fn a_config_without_submit_nodes_has_no_extra_nodes() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(config.submit_nodes.is_empty());
+    }
+
+    #[test]
+    fn submit_nodes_are_read_in_file_order() {
+        let config: Config = config::Config::builder()
+            .add_source(config::File::with_name("../config.sample.toml"))
+            .add_source(config::File::from_str(
+                r#"
+                [[submit_nodes]]
+                url = "http://bchn-a.example:8332"
+                username = "a"
+                password = "secret-a"
+
+                [[submit_nodes]]
+                url = "http://bchn-b.example:8332"
+                username = "b"
+                password = "secret-b"
+                "#,
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+
+        assert_eq!(config.submit_nodes.len(), 2);
+        assert_eq!(config.submit_nodes[0].url, "http://bchn-a.example:8332");
+        assert_eq!(config.submit_nodes[1].username, "b");
+        assert_eq!(config.submit_nodes[1].password, "secret-b");
     }
 
     /// Both samples offer miners the code's default version rolling mask,
@@ -2070,7 +2443,7 @@ mod tests {
 
     #[test]
     fn absent_chain_stays_on_bitcoin() {
-        let config = Config::load("../config.sample.toml").unwrap();
+        let config = Config::load("../config-bitcoin.sample.toml").unwrap();
         assert_eq!(config.stratum.chain, Chain::Bitcoin);
         assert_eq!(config.stratum.bitcoin_cash_network, None);
     }
@@ -2278,13 +2651,13 @@ mod bitcoin_cash_donation_tests {
     }
 
     #[test]
-    fn bitcoin_cash_donates_one_and_a_half_percent_by_default() {
+    fn bitcoin_cash_donates_one_percent_by_default() {
         let mut config = StratumConfig::<Raw>::new_for_test_default();
         config.chain = Chain::BitcoinCash;
         config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
         config.bootstrap_address = CHIPNET_BOOTSTRAP.to_string();
         let parsed = config.parse().unwrap();
-        assert_eq!(parsed.donation, Some(150));
+        assert_eq!(parsed.donation, Some(100));
         assert_eq!(
             parsed.donation_address(),
             Some(&bitcoin_cash_donation_address(BitcoinCashNetwork::Chipnet))
@@ -2390,45 +2763,91 @@ mod bitcoin_cash_donation_tests {
         assert!(parsed.fee_address().is_some());
     }
 
+    /// A Bitcoin Cash fee_address without fee takes the default 1% fee.
     #[test]
-    fn bitcoin_cash_accepts_cuts_at_the_share_chain_cap() {
+    fn bitcoin_cash_fee_address_alone_takes_the_default_fee() {
         let mut config = StratumConfig::<Raw>::new_for_test_default();
         config.chain = Chain::BitcoinCash;
         config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
         config.bootstrap_address = CHIPNET_BOOTSTRAP.to_string();
         config.fee_address = Some(CHIPNET_BOOTSTRAP.to_string());
-        config.fee = Some(MAX_BITCOIN_CASH_POOL_CUT - DEFAULT_BITCOIN_CASH_DONATION);
-        assert!(config.parse().is_ok());
+        let parsed = config.parse().unwrap();
+        assert_eq!(DEFAULT_BITCOIN_CASH_FEE, 100);
+        assert_eq!(parsed.fee, Some(DEFAULT_BITCOIN_CASH_FEE));
+        assert!(parsed.fee_address().is_some());
+    }
+
+    /// A Bitcoin Cash fee without fee_address has nowhere to go.
+    #[test]
+    fn bitcoin_cash_rejects_a_fee_without_an_address() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.chain = Chain::BitcoinCash;
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        config.bootstrap_address = CHIPNET_BOOTSTRAP.to_string();
+        config.fee = Some(100);
+        let error = config.parse().unwrap_err();
+        assert!(
+            error.message.contains("fee_address and fee"),
+            "{}",
+            error.message
+        );
+    }
+
+    fn bitcoin_cash_config_with_cuts(donation: u16, fee: u16) -> StratumConfig<Raw> {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.chain = Chain::BitcoinCash;
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        config.bootstrap_address = CHIPNET_BOOTSTRAP.to_string();
+        config.donation = Some(donation);
+        config.fee_address = Some(CHIPNET_BOOTSTRAP.to_string());
+        config.fee = Some(fee);
+        config
+    }
+
+    /// The donation and the fee each have their own 10% cap, with no
+    /// combined one: 10% and 10% together are accepted.
+    #[test]
+    fn bitcoin_cash_accepts_each_cut_at_its_own_cap() {
+        let parsed = bitcoin_cash_config_with_cuts(MAX_BITCOIN_CASH_CUT, MAX_BITCOIN_CASH_CUT)
+            .parse()
+            .unwrap();
+        assert_eq!(parsed.donation, Some(MAX_BITCOIN_CASH_CUT));
+        assert_eq!(parsed.fee, Some(MAX_BITCOIN_CASH_CUT));
     }
 
     #[test]
-    fn bitcoin_cash_rejects_cuts_above_the_share_chain_cap() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.chain = Chain::BitcoinCash;
-        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
-        config.bootstrap_address = CHIPNET_BOOTSTRAP.to_string();
-        config.fee_address = Some(CHIPNET_BOOTSTRAP.to_string());
-        config.fee = Some(MAX_BITCOIN_CASH_POOL_CUT - DEFAULT_BITCOIN_CASH_DONATION + 1);
-        let error = config.parse().unwrap_err();
+    fn bitcoin_cash_rejects_a_donation_above_its_cap() {
+        let error = bitcoin_cash_config_with_cuts(1_100, 0).parse().unwrap_err();
         assert!(
-            error.message.contains("must be at most 1000 basis points"),
+            error
+                .message
+                .contains("must each be at most 1000 basis points"),
             "unexpected message: {}",
             error.message
         );
     }
 
     #[test]
-    fn bitcoin_cash_fee_may_use_the_whole_cap_when_the_donation_is_off() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.chain = Chain::BitcoinCash;
-        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
-        config.bootstrap_address = CHIPNET_BOOTSTRAP.to_string();
-        config.donation = Some(0);
-        config.fee_address = Some(CHIPNET_BOOTSTRAP.to_string());
-        config.fee = Some(MAX_BITCOIN_CASH_POOL_CUT);
-        let parsed = config.parse().unwrap();
+    fn bitcoin_cash_rejects_a_fee_above_its_cap() {
+        let error = bitcoin_cash_config_with_cuts(DEFAULT_BITCOIN_CASH_DONATION, 1_001)
+            .parse()
+            .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("must each be at most 1000 basis points"),
+            "unexpected message: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn bitcoin_cash_fee_may_use_its_whole_cap_when_the_donation_is_off() {
+        let parsed = bitcoin_cash_config_with_cuts(0, MAX_BITCOIN_CASH_CUT)
+            .parse()
+            .unwrap();
         assert_eq!(parsed.donation, None);
-        assert_eq!(parsed.fee, Some(MAX_BITCOIN_CASH_POOL_CUT));
+        assert_eq!(parsed.fee, Some(MAX_BITCOIN_CASH_CUT));
     }
 
     #[test]
@@ -2927,5 +3346,46 @@ mod miner_address_tests {
         config.mode = PoolMode::P2poolv2;
 
         assert!(config.parse().is_ok());
+    }
+
+    /// A Bitcoin Cash P2Pool node may merge-mine tokens for its miners.
+    #[test]
+    fn a_bitcoin_cash_p2pool_node_takes_a_token_file() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.chain = Chain::BitcoinCash;
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        config.bootstrap_address = "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t".to_string();
+        config.merge_mining_tokens = Some("merge-tokens.json".to_string());
+
+        let parsed = config.parse().unwrap();
+
+        assert_eq!(
+            parsed.merge_mining_tokens.as_deref(),
+            Some("merge-tokens.json")
+        );
+    }
+
+    /// Only the Bitcoin Cash coinbase a P2Pool node builds for each miner
+    /// carries their tokens: Bitcoin and Hydrapool refuse a token file.
+    #[test]
+    fn a_token_file_needs_a_bitcoin_cash_p2pool_node() {
+        let mut bitcoin = StratumConfig::<Raw>::new_for_test_default();
+        bitcoin.merge_mining_tokens = Some("merge-tokens.json".to_string());
+        assert!(
+            bitcoin
+                .parse()
+                .unwrap_err()
+                .message
+                .contains("merge_mining_tokens")
+        );
+
+        let mut hydrapool = StratumConfig::<Raw>::new_for_test_default();
+        hydrapool.chain = Chain::BitcoinCash;
+        hydrapool.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        hydrapool.bootstrap_address =
+            "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t".to_string();
+        hydrapool.mode = PoolMode::Hydrapool;
+        hydrapool.merge_mining_tokens = Some("merge-tokens.json".to_string());
+        assert!(hydrapool.parse().is_err());
     }
 }

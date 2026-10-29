@@ -12,8 +12,8 @@ What are we testing? **ASERT** pool-difficulty and **re-notify on tip/confirmati
 
 - Replace the continuous physical process (competitive mining) with a
   **timed emitter**.
-- Replace the rare physical event (a Bitcoin block) with a **per-node statistical
-  block-find** that submits a real (trivially-valid) regtest block carrying the
+- Replace the rare physical event (a Bitcoin Cash block) with a **per-node statistical
+  block-find** that submits a real (trivially-valid) BCHN regtest block carrying the
   real PPLNS coinbase.
 - Keep **every other code path as real as possible** (validation structure, propagation,
   organise/reorg, PPLNS, payout, confirmation).
@@ -41,7 +41,7 @@ There are doubtless a number of "vectors of artificiality" here but the goal is 
      +-- per-share Bernoulli block-find: p = 1/block_to_share_ratio
      |     on hit -> build PPLNS coinbase + assemble regtest block + submitblock
      +-- PoW is_met_by checks + auto-submit cfg-gated off (sim)
-   shared regtest bitcoind (rpcport 19443, ZMQ 28332) -- executes payouts
+   shared BCHN regtest node (rpcport 19443, ZMQ 28332) -- executes payouts
    harness: launches N nodes + topology, scrapes metrics
    real clock; density now bounded by store/p2p/CPU-of-real-code, not hashing
 ```
@@ -62,13 +62,12 @@ or no-ops in production builds (zero overhead). Key overrides:
   genesis time sets only the interval the second share is measured from,
   so a launch-time anchor still starts the chain regulated
   (`docs/difficulty_adjustment/asert.md`).
-- **PPLNS window**: on Bitcoin the window is `PPLNS_WINDOW_SHARES` shares on
-  every network (80 in the sim build, below). On Bitcoin Cash it is sized
-  by the paying header's difficulty, but every regtest header is at the
-  proof-of-work limit, which falls back to `PPLNS_WINDOW_SHARES` shares, so
-  the swarm pays the same fixed window either way. The offline
-  `pplns_compare` binary below exercises the sized window with production
-  depths.
+- **PPLNS window**: the swarm runs Bitcoin Cash, whose window is sized by
+  the paying header's difficulty. Every regtest header is at the
+  proof-of-work limit, which falls back to the cap of `PPLNS_WINDOW_SHARES`
+  shares (80 in the sim build, below), so the swarm pays a fixed 80-share
+  window. The offline `pplns_compare` binary below exercises the sized
+  window with production depths.
 - **Short depths**: the sim build compiles shorter consensus depths under
   `cfg(feature = "sim")` in `pplns_window.rs`, so the fast sim chain exercises
   payout maturity, output expiry, the full-validation boundary and block body
@@ -76,10 +75,13 @@ or no-ops in production builds (zero overhead). Key overrides:
 
   | Constant | Production | Sim |
   |---|---|---|
-  | `COINBASE_MATURITY` | 6,048 | 20 |
+  | `COINBASE_MATURITY` (Bitcoin) | 6,048 | 20 |
+  | `BCH_COINBASE_MATURITY` (Bitcoin Cash) | 100 | 100 |
   | `PPLNS_WINDOW_SHARES` | 120,960 | 80 |
-  | `PAYOUT_DEPTH` | 127,008 | 100 |
-  | `PRUNE_DEPTH` | 254,016 | 200 |
+  | `PAYOUT_DEPTH` (Bitcoin) | 127,008 | 100 |
+  | `PRUNE_DEPTH` (Bitcoin) | 254,016 | 200 |
+  | `BCH_PAYOUT_DEPTH` (Bitcoin Cash) | 121,063 | 183 |
+  | `BCH_PRUNE_DEPTH` (Bitcoin Cash) | 242,126 | 366 |
   | `PRUNE_INTERVAL` | 360 | 20 |
   | window eviction buffer | 1,210 | 20 |
   | `BACKGROUND_TASK_INTERVAL` (node) | 6 h | 30 s |
@@ -87,21 +89,28 @@ or no-ops in production builds (zero overhead). Key overrides:
   They are constants, not config, so every node built from one binary agrees
   on them. The eviction buffer is raised to a quarter of the window (1% of 80
   would be one entry, and shares built behind the tip under propagation delay
-  would be dropped). The reorg depth limit sits at the prune target, 220
-  shares below the tip, which keeps it well above the forks the failure
-  scenarios create (a 90s partition is 18 shares at 5s blocks). The cost is
-  that sim no longer runs a production-size PPLNS window; `cargo bench --bench
-  pplns_window` covers its compute cost.
+  would be dropped). The reorg depth limit is one payout depth below the
+  confirmed tip (183 shares on Bitcoin Cash), which keeps it well above the
+  forks the failure scenarios create (a 90s partition is 18 shares at 5s
+  blocks). The cost is that sim no longer runs a production-size PPLNS
+  window; `cargo bench --bench pplns_window` covers its compute cost.
 
   These replace the old `[sim] coinbase_maturity` option. Bitcoin Cash's
-  maturity, `BCH_COINBASE_MATURITY` (100), is not shortened: the swarm runs
-  Bitcoin only, and Bitcoin Cash protocol strings carry the value. Production
-  builds assert at compile time that Bitcoin Cash's maturity plus the window
-  fits inside `PAYOUT_DEPTH`.
+  maturity, `BCH_COINBASE_MATURITY` (100), is not shortened: it is a
+  share-chain rule, which the sim build does not change, and the Bitcoin
+  Cash protocol strings carry it. The swarm runs Bitcoin Cash, so a share
+  is paid only 100 shares deep, and a payout walk reaches 100 + 80 shares
+  below the paying share, plus at most 3 for an uncle: the sim
+  `BCH_PAYOUT_DEPTH`, 183, from which Bitcoin Cash's output expiry,
+  full-validation zone, reorg limit and prune depth (366) follow, as in
+  production (since the share-chain rule batch of 2026-10-24; before it the
+  Bitcoin Cash sim used Bitcoin's 100 and 200). The node logs the depths it
+  uses (`Sim depths: ...`), and the prune scenarios read them from there.
+  The `late-miner` scenario waits for twice the maturity, a 200-share tip.
 - **Propagation delay**: `sim_overrides::spawn_delayed_broadcast()` models
   network latency with per-broadcast jitter.
-- **Auto-submit**: disabled under sim (regtest headers meet bitcoin target ~50%
-  of the time, which would spam spurious block submissions).
+- **Auto-submit**: disabled under sim (a header meets the regtest target
+  about half the time, which would spam spurious block submissions).
 
 All sim nodes must be built with `--features sim` (a synthetic share rejected by
 a non-sim receiver would never propagate).
@@ -116,32 +125,45 @@ The harness models a heterogeneous, regulated network:
 - **Heterogeneous + jittered latency** (`LATENCY_DIST=spread` + per-broadcast
   ±50% jitter): uncles arise from propagation *variance*, per-node.
 - **Regulated rate** (`ASERT_ANCHOR`): ASERT holds ~the 10s target (above).
-- **Metrics** (`metrics.sh` + per-node `sim stats` log): emission-vs-hashrate,
+- **Metrics** (`metrics` + per-node `sim stats` log): emission-vs-hashrate,
   ASERT difficulty trajectory, main-chain rate vs target.
 
 ### Running a single sim node (Phase 1)
 
-Needs a local regtest `bitcoind` (rpc + `zmqpubhashblock`) with some blocks
-mined. Build and run with the `sim` feature and a `[sim]` config section:
+Needs a local BCHN regtest node (rpc + `zmqpubhashblock`, started with
+`-allowunconnectedmining`, see RUNBOOK step 1) with some blocks mined. Build
+and run with the `sim` feature, a Bitcoin Cash regtest `[stratum]` section
+and a `[sim]` section. `cargo sim run-swarm 1` writes a complete one at
+`/tmp/p2pool-sim/node-0.toml`; the parts that matter here:
 
 ```toml
+[stratum]
+chain = "bitcoin-cash"
+bitcoin_cash_network = "regtest"
+network = "regtest"             # required; Bitcoin Cash derives it anyway
+bootstrap_address = "bchreg:q..."
+
 [sim]
 enabled = true
-miner_address = "bcrt1q..."   # this node's payout identity (regtest address)
-share_address = "rp2pool1..." # this node's share chain identity; REQUIRED, and
-                              # not derivable from miner_address -- different
-                              # chain, different key. Without it the emitter
-                              # refuses to start and the node emits nothing.
-hashrate = 1.0e12             # modeled Hᵢ; sets emission rate (≈ D·2³²/H per share)
-block_to_share_ratio = 10000  # 1-in-N shares is a (future) block-find
-seed = 1                      # per-node; differ per node in multi-node runs
+miner_address = "bchreg:q..."   # this node's payout address (regtest CashAddr)
+share_address = "rp2pool:q..."  # this node's share chain identity; REQUIRED, and
+                                # not derivable from miner_address -- different
+                                # chain, different key. Without it the emitter
+                                # refuses to start and the node emits nothing.
+hashrate = 1.0e12               # modeled Hᵢ; sets emission rate (≈ D·2³²/H per share)
+block_to_share_ratio = 10000    # 1-in-N shares is a (future) block-find
+seed = 1                        # per-node; differ per node in multi-node runs
 ```
+
+`p2poolv2_sim` reads both addresses with the node's own parsers for the
+configured chain. A Bitcoin config (no `chain`) still runs, with a Bitcoin
+payout address and a taproot share address, but nothing tests it.
 
 ```sh
 cargo build -p p2poolv2_sim --features sim
 # fresh store via env override so existing dev data is untouched:
 P2POOL_STORE__PATH=/tmp/store-sim-test.db \
-  ./target/debug/p2poolv2_sim --config config-dev.toml
+  ./target/debug/p2poolv2_sim --config /path/to/your-sim-config.toml
 ```
 
 Watch the log for `Promoted block … to confirmed height N` climbing.
@@ -150,24 +172,26 @@ Watch the log for `Promoted block … to confirmed height N` climbing.
 
 See the associated RUNBOOK.md for detailed instructions. Here's a simple overview:
 
-`load-tests/sim/` drives a multi-process swarm against the same regtest
-bitcoind. Each node gets its own config (distinct ports, distinct seed, fresh
-store) and a `dial_peers` topology (each dials `DIAL_FANOUT` earlier nodes).
+`cargo sim` (the `sim_harness` binary in `p2poolv2_tools`, see
+`docs/tooling.md`) drives a multi-process swarm against the same BCHN
+regtest node. Each node gets its own config (distinct ports, distinct seed,
+its own share address, fresh store) and a `dial_peers` topology (each dials
+`DIAL_FANOUT` earlier nodes).
 
 ```sh
-load-tests/sim/run-swarm.sh 20     # build (release) + launch 20 nodes
-load-tests/sim/observe.sh          # LIVE snapshot: tip/convergence (logs), peer count (API)
-load-tests/sim/metrics.sh          # authoritative LOG-based summary: convergence, rate,
-                                   # difficulty, emission∝hashrate, uncles, block-finds
-load-tests/sim/plot-metrics.sh     # PNG time-series (share rate, difficulty, uncle rate,
-                                   # block-finds, hashrate bars) → RUN_DIR/metrics.png
-load-tests/sim/failures.sh S       # inject failure scenario S into the running swarm
-load-tests/sim/stop-swarm.sh       # stop all (incl. orphans matching this RUN_DIR)
+cargo sim run-swarm 20     # build (release) + launch 20 nodes
+cargo sim observe          # LIVE snapshot: tip/convergence (logs), peer count (API)
+cargo sim metrics          # authoritative LOG-based summary: convergence, rate,
+                           # difficulty, emission∝hashrate, uncles, block-finds
+cargo sim plot-metrics     # SVG time-series (share rate, difficulty, uncle rate,
+                           # block-finds, hashrate bars) → RUN_DIR/metrics.svg
+cargo sim failures S       # inject failure scenario S into the running swarm
+cargo sim stop-swarm       # stop all (incl. orphans matching this RUN_DIR)
 ```
 
 Configs/stores/logs land in `RUN_DIR` (default `/tmp/p2pool-sim`). Tunables via
 env: `RUN_DIR`, `BASE_P2P`/`BASE_STRATUM`/`BASE_API`, `RPC_*`, `ZMQ`,
-`MINER_ADDRESS`, `HASHRATE` + `HASHRATE_DIST`(equal|zipf) + `ZIPF_ALPHA`,
+`MINER_ADDRESS` (a `bchreg:` CashAddr), `HASHRATE` + `HASHRATE_DIST`(equal|zipf) + `ZIPF_ALPHA`,
 `SHARES_PER_BLOCK`, `LATENCY_MS` + `LATENCY_DIST`(equal|spread),
 `ASERT_ANCHOR` (shared anchor, default launch time), `NETWORK_HASHRATE` (shared,
 default `N*HASHRATE`; anchors genesis at the steady-state difficulty so there's
@@ -176,8 +200,8 @@ more blocks/min for faster data, auto-scales `LATENCY_MS`), `DIST_SEED`, `DISTIN
 `POOL_SIGNATURE_PREFIX` (node `i` signs as prefix + `i`; signatures differ per
 node because they are not consensus), `DIAL_FANOUT`, `PROFILE`. Convergence
 shows as `distinct tips: 1` (a snapshot may straddle the latest 1–2 heights while
-the frontier propagates). Run release; always `stop-swarm.sh` before relaunching
-(orphans hold ports — `run-swarm.sh` now also clears its RUN_DIR's leftovers).
+the frontier propagates). Run release; always `stop-swarm` before relaunching
+(orphans hold ports — `run-swarm` now also clears its RUN_DIR's leftovers).
 
 ### Offline PPLNS window comparison
 
@@ -205,10 +229,10 @@ cargo run --release -p p2poolv2_sim --features pplns-compare --bin pplns_compare
 
 ### Failure scenarios (Phase 4)
 
-`failures.sh` injects one named failure mode into a running swarm, kills nodes
+`failures` injects one named failure mode into a running swarm, kills nodes
 with `SIGKILL`, brings them back against the *same* config and store, and
-verifies each one rejoins and catches up to the rest of the swarm. `nightly.sh`
-takes the same scenario name (`nightly.sh restart-delayed`, or `SCENARIO=...`),
+verifies each one rejoins and catches up to the rest of the swarm. `nightly`
+takes the same scenario name (`nightly restart-delayed`, or `SCENARIO=...`),
 and the nightly workflow runs it once per scenario so a failing night names the
 failure mode that caused it.
 
@@ -218,9 +242,9 @@ failure mode that caused it.
 | `restart-fast` | a node fails and comes back immediately |
 | `restart-delayed` | a node fails and comes back after `FAILURE_SLOW_DOWN` (default 330s). That crosses the 300s `MAX_TIP_AGE_SECS` threshold, so the node rejoins *not* current: inv gossip is ignored and it must bulk-sync via `getheaders` and block fetch |
 | `partition` | `DIAL_FANOUT` consecutive nodes fail at once, cutting the dial chain, then all come back |
-| `late-miner` | payout maturity: node `LATE_MINER` starts with its emitter off and starts mining once the chain is two maturity depths deep; `maturity_check.py` checks against the regtest coinbases that it is paid only once its shares are mature. Needs `LATE_MINER`; not part of `all` (RUNBOOK Test G) |
+| `late-miner` | payout maturity: node `LATE_MINER` starts with its emitter off and starts mining once the chain is two maturity depths deep (a 200-share tip: Bitcoin Cash keeps its 100-share maturity in the sim build); `maturity-check` checks against the BCHN regtest coinbases that it is paid only once its shares are mature. Needs `LATE_MINER`; not part of `all` (RUNBOOK Test G) |
 | `pruned-join` | block body pruning: once the swarm is past the sim prune target and every node has pruned, one node's store is wiped and it rejoins as a fresh node. It must catch up, agree with node 0 on confirmed hashes below and above its prune height, never get a not-found reply (it never asks for a body its peers deleted), and never fail to store a block. Runs time-compressed; not part of `all` (RUNBOOK Test H) |
-| `deep-fork-refused` | reorg depth limit: the swarm is launched split (`FORK_GROUP_FROM`), so the chain forks at genesis. Once every node has pruned, the first minority node reconnects to node 0. The majority chain has more work, but its fork point is more than `MAX_REORG_DEPTH` (the sim `PAYOUT_DEPTH`, 100 shares) below the minority's confirmed tip, and below its prune target, so the node must log the refusal, keep its confirmed chain and keep confirming, while the majority keeps advancing. The nightly convergence check is skipped: two chains are the expected outcome. Not part of `all` (RUNBOOK Test I) |
+| `deep-fork-refused` | reorg depth limit: the swarm is launched split (`FORK_GROUP_FROM`), so the chain forks at genesis. Once every node has pruned, the first minority node reconnects to node 0. The majority chain has more work, but its fork point is more than `MAX_REORG_DEPTH` (the sim `BCH_PAYOUT_DEPTH`, 183 shares) below the minority's confirmed tip, and below its prune target, so the node must log the refusal, keep its confirmed chain and keep confirming, while the majority keeps advancing. The nightly convergence check is skipped: two chains are the expected outcome. Not part of `all` (RUNBOOK Test I) |
 | `shallow-fork-reorged` | control for `deep-fork-refused`: the same split, but the reconnect happens at height 60, before any node prunes and within the 100-share reorg floor, and the minority must reorg onto the majority (the convergence check applies). Not part of `all` (RUNBOOK Test I) |
 | `all` | the three failure scenarios in sequence (local use) |
 
@@ -237,6 +261,6 @@ really was a partition). Second, a restarted node comes back with a **new
 PeerId** — the libp2p keypair is generated per process start, not persisted — so
 rejoining looks to its peers like a new node arriving.
 
-Node 0 is never a target: `metrics.sh` derives the share rate and uncle rate
+Node 0 is never a target: `metrics` derives the share rate and uncle rate
 from `node-0.log` alone, so killing it would corrupt the run's own metrics.
 

@@ -16,6 +16,7 @@
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 #[cfg(not(test))]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
+use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::accounting::stats::metrics::MetricsHandle;
 use crate::monitoring_events::{MonitoringEvent, MonitoringEventSender};
 use crate::node::validation_worker::{ValidationEvent, ValidationSender};
@@ -33,25 +34,47 @@ use crate::store::dag_store::ShareInfo;
 use crate::store::writer::StoreError;
 use crate::stratum::work::notify::{NotifyCmd, NotifySender};
 use bitcoin::BlockHash;
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, error, info, warn};
 
-/// Channel capacity for shares pending organisation.
+mod channel;
+mod pending_buffer;
+
+pub use channel::{OrganiseReceiver, OrganiseSender};
+use pending_buffer::{BufferLimits, BufferOutcome, PendingBuffer};
+
+/// Channel capacity for shares pending organisation, in events.
 ///
-/// Both this and `PENDING_BLOCKS_CAPACITY` hold whole `ShareBlock`s, which
-/// `handle_share_block` bounds at `BLOCK_TXS_SIZE_LIMIT` (200 KB) each, so the
-/// capacities set the worst-case memory of the organise path. They are kept
-/// small deliberately: this channel is pure backpressure between the parallel
-/// validation tasks and the serial organise worker, so a deeper queue buys no
-/// throughput -- the organise worker is the bottleneck either way -- and only
-/// adds latency between a block's two `check_pplns_zone` reads, which is the
-/// window in which its validation tier can flip (see the PPLNS zone tiering
-/// notes in docs/architecture/share-processing-pipeline.md).
+/// Both this channel and the pending buffer hold whole `ShareBlock`s, which
+/// `handle_share_block` bounds at `BLOCK_TXS_SIZE_LIMIT` (200 KB) each on
+/// Bitcoin and at `BCH_SHARE_BODY_SIZE_LIMIT` (1.2 MB) on Bitcoin Cash. By
+/// count alone, 512 of the largest Bitcoin Cash shares, which have passed
+/// validation and so carry valid proof of work, would be about 620 MB, so
+/// the channel is bounded in bytes too (`ORGANISE_CHANNEL_BYTES`).
+///
+/// Both bounds are kept small deliberately: this channel is pure
+/// backpressure between the parallel validation tasks and the serial
+/// organise worker, so a deeper queue buys no throughput -- the organise
+/// worker is the bottleneck either way -- and only adds latency between a
+/// block's two `check_pplns_zone` reads, which is the window in which its
+/// validation tier can flip (see the PPLNS zone tiering notes in
+/// docs/architecture/share-processing-pipeline.md).
 const ORGANISE_CHANNEL_CAPACITY: usize = 512;
+
+/// Most bytes of share blocks, by consensus encoding, the organise channel
+/// queues: 64 MiB. A validation task whose block would pass it waits
+/// (backpressure), holding its validation permit.
+///
+/// Honest shares meet the count bound first: 512 shares of up to 128 KiB
+/// fit, and a Bitcoin Cash share paying 1,000 miners directly is about
+/// 35 KB. The budget still holds at least 51 of the largest shares a peer
+/// can send (`MAX_P2P_MESSAGE_SIZE`, 1.25 MiB, above the 1,204,800-byte
+/// Bitcoin Cash body limit) and over 300 of the largest Bitcoin ones
+/// (200 KiB), more than one round of the parallel validation tasks on an
+/// ordinary machine. The worst case falls from about 620 MB to 64 MiB.
+pub const ORGANISE_CHANNEL_BYTES: usize = 64 * 1024 * 1024;
 
 /// Maximum number of blocks buffered while waiting for ancestor
 /// confirmation during sync.
@@ -59,16 +82,25 @@ const ORGANISE_CHANNEL_CAPACITY: usize = 512;
 /// Sized against the channel rather than picked independently: a block is
 /// buffered when its parent is not yet `BlockValid`, and a child can sit at
 /// most a full channel ahead of its parent, so the buffer must be able to hold
-/// a channel's worth of out-of-order arrivals. The headroom matters because
-/// overflow drops a block that is already stored, which nothing re-fetches.
+/// a channel's worth of out-of-order arrivals. Past it, the oldest block is
+/// evicted (see `pending_buffer`); it stays stored and is re-validated when a
+/// descendant arrives.
 const PENDING_BLOCKS_CAPACITY: usize = 2 * ORGANISE_CHANNEL_CAPACITY;
+
+/// Most bytes, by consensus encoding, the pending buffer holds: 128 MiB,
+/// twice the channel's budget for the same reason the count is twice the
+/// channel's. It holds at least 102 of the largest shares a peer can send;
+/// by count alone, 1,024 of the largest Bitcoin Cash shares would be about
+/// 1.2 GB.
+pub const PENDING_BLOCKS_BYTES: usize = 2 * ORGANISE_CHANNEL_BYTES;
 
 /// Upper bound on how many stranded blocks the startup re-validation seed
 /// emits at once.
 ///
-/// Kept below `PENDING_BLOCKS_CAPACITY` so the seed alone cannot overflow the
-/// pending buffer; the inline re-drive (`redrive_stranded_parent`) carries any
-/// blocks beyond the window as promotion advances.
+/// Kept below `PENDING_BLOCKS_CAPACITY` so the seed alone cannot pass the
+/// pending buffer's count bound; the inline re-drive (`redrive_stranded_parent`)
+/// carries any blocks beyond the window as promotion advances, including any
+/// that a run of very large shares pushes out past the byte bound.
 const REVALIDATION_WINDOW: usize = 512;
 
 /// Events for the organise worker.
@@ -95,23 +127,19 @@ pub enum OrganiseEvent {
     InvalidBlock(BlockHash),
 }
 
-/// Sender half of the organise channel.
-pub type OrganiseSender = mpsc::Sender<OrganiseEvent>;
-/// Receiver half of the organise channel.
-pub type OrganiseReceiver = mpsc::Receiver<OrganiseEvent>;
-
-/// Create an organise channel with bounded capacity.
+/// Create an organise channel bounded at `ORGANISE_CHANNEL_CAPACITY` events
+/// and `ORGANISE_CHANNEL_BYTES` bytes.
 pub fn create_organise_channel() -> (OrganiseSender, OrganiseReceiver) {
-    mpsc::channel(ORGANISE_CHANNEL_CAPACITY)
+    channel::organise_channel(ORGANISE_CHANNEL_CAPACITY, ORGANISE_CHANNEL_BYTES)
 }
 
-/// A block waiting for its parent, with the validation tier stage 1 gave it.
-struct BufferedBlock {
-    /// Carried rather than recomputed: `buffer_block` compares it against every
-    /// entry already at the height
-    block_hash: BlockHash,
-    share_block: ShareBlock,
-    content_validated: bool,
+impl Default for BufferLimits {
+    fn default() -> Self {
+        Self {
+            max_blocks: PENDING_BLOCKS_CAPACITY,
+            max_bytes: PENDING_BLOCKS_BYTES,
+        }
+    }
 }
 
 /// Fatal error from the organise worker.
@@ -153,8 +181,11 @@ pub struct OrganiseWorker {
     /// Blocks deferred because their parent is not yet validated, keyed by the
     /// parent's expected height. Multiple blocks may share the same parent
     /// height during forks or rapid sync. Drained when the parent becomes
-    /// BlockValid or confirmed.
-    pending_blocks: BTreeMap<u32, Vec<BufferedBlock>>,
+    /// BlockValid or confirmed. Bounded by `BufferLimits`, oldest evicted
+    /// first.
+    pending_blocks: PendingBuffer,
+    /// The chain's depths, which size the full-validation (PPLNS) zone.
+    depths: ChainDepths,
 }
 
 /// Validation state of a block's parent, deciding how the block is handled.
@@ -224,8 +255,16 @@ impl OrganiseWorker {
             pplns_window,
             share_validator,
             metrics,
-            pending_blocks: BTreeMap::new(),
+            pending_blocks: PendingBuffer::new(BufferLimits::default()),
+            depths: ChainDepths::BITCOIN,
         }
+    }
+
+    /// Size the full-validation zone by `depths` (`ChainDepths::for_chain`);
+    /// Bitcoin's until set.
+    pub fn with_depths(mut self, depths: ChainDepths) -> Self {
+        self.depths = depths;
+        self
     }
 
     /// Runs the organise worker until the channel closes or a fatal error occurs.
@@ -535,14 +574,15 @@ impl OrganiseWorker {
         let blockhash = share_block.block_hash();
         debug!("Organising block: {blockhash:?}");
 
-        let in_pplns_zone = match check_pplns_zone(&blockhash, &self.chain_store_handle) {
-            Ok(result) => result,
-            Err(error_message) => {
-                error!("Error checking for zone, will retry {blockhash}: {error_message}");
-                self.buffer_block(parent_height, share_block, content_validated);
-                return Ok(ProcessOutcome::NotAdvanced);
-            }
-        };
+        let in_pplns_zone =
+            match check_pplns_zone(&blockhash, &self.chain_store_handle, self.depths) {
+                Ok(result) => result,
+                Err(error_message) => {
+                    error!("Error checking for zone, will retry {blockhash}: {error_message}");
+                    self.buffer_block(parent_height, share_block, content_validated);
+                    return Ok(ProcessOutcome::NotAdvanced);
+                }
+            };
 
         let validation_result = if !in_pplns_zone {
             Ok(())
@@ -799,12 +839,14 @@ impl OrganiseWorker {
 
     /// Insert a block into the pending buffer, keyed by its parent height.
     ///
-    /// A block already buffered at that height is not added again.
+    /// A block already buffered at that height is not added again, and a
+    /// duplicate never evicts anything.
     ///
-    /// The check runs before the capacity check so a duplicate cannot trip it.
-    ///
-    /// Drops the block with an error log if the buffer is at capacity.
-    /// The capacity check counts total blocks across all heights.
+    /// The buffer is bounded by block count and bytes across all heights.
+    /// Past either bound the oldest blocks are evicted to make room; they
+    /// stay stored and are re-validated when a descendant arrives
+    /// (`redrive_stranded_parent`). A block larger than the whole byte bound
+    /// is dropped the same way.
     fn buffer_block(
         &mut self,
         parent_height: u32,
@@ -812,31 +854,34 @@ impl OrganiseWorker {
         content_validated: bool,
     ) {
         let block_hash = share_block.block_hash();
-        if let Some(buffered) = self.pending_blocks.get(&parent_height)
-            && buffered.iter().any(|entry| entry.block_hash == block_hash)
+        match self
+            .pending_blocks
+            .insert(parent_height, share_block, content_validated)
         {
-            debug!("Block {block_hash} is already buffered at parent height {parent_height}");
-            return;
+            BufferOutcome::Duplicate => {
+                debug!("Block {block_hash} is already buffered at parent height {parent_height}");
+            }
+            BufferOutcome::TooLarge { size } => {
+                warn!(
+                    "Block {block_hash} ({size} bytes) is larger than the pending buffer's {} bytes, dropping it",
+                    self.pending_blocks.limits().max_bytes
+                );
+            }
+            BufferOutcome::Buffered { evicted } => {
+                for evicted_hash in evicted {
+                    let limits = self.pending_blocks.limits();
+                    warn!(
+                        "Pending block buffer full ({} blocks, {} bytes), evicted the oldest, {evicted_hash}; it is re-validated when a descendant arrives",
+                        limits.max_blocks, limits.max_bytes
+                    );
+                }
+                debug!(
+                    "Buffering block {block_hash} at parent height {parent_height} (confirmed tip not yet reached); {} blocks, {} bytes buffered",
+                    self.pending_blocks.len(),
+                    self.pending_blocks.bytes()
+                );
+            }
         }
-
-        let total_blocks: usize = self.pending_blocks.values().map(|v| v.len()).sum();
-        if total_blocks >= PENDING_BLOCKS_CAPACITY {
-            error!(
-                "Pending block buffer full ({PENDING_BLOCKS_CAPACITY}), dropping block {block_hash}"
-            );
-            return;
-        }
-        debug!(
-            "Buffering block {block_hash} at parent height {parent_height} (confirmed tip not yet reached)"
-        );
-        self.pending_blocks
-            .entry(parent_height)
-            .or_insert_with(|| Vec::with_capacity(2))
-            .push(BufferedBlock {
-                block_hash,
-                share_block,
-                content_validated,
-            });
     }
 
     /// Re-attempt buffered blocks whose parent just became valid, from

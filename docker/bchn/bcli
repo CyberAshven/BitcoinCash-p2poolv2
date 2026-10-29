@@ -1,4 +1,12 @@
 #!/bin/sh
 # bitcoin-cli against this container's BCHN, on the network NETWORK names.
 # Example: docker compose exec bchn bcli getblockchaininfo
-exec bitcoin-cli -datadir=/data -conf="/etc/bchn/bitcoin-${NETWORK:-regtest}.conf" "$@"
+#
+# Regtest's login is in its config file. On chipnet and mainnet the password
+# is in the config file entrypoint.sh writes to the data directory at start.
+NETWORK=${NETWORK:-regtest}
+case "$NETWORK" in
+  regtest) conf=/etc/bchn/bitcoin-regtest.conf ;;
+  *) conf="/data/bchn-$NETWORK.conf" ;;
+esac
+exec bitcoin-cli -datadir=/data -conf="$conf" "$@"

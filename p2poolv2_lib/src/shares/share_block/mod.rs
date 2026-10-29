@@ -12,7 +12,9 @@ use crate::shares::coinbase_proof::{
     CoinbaseProof, MAX_COINBASE_MERKLE_BRANCH_LENGTH, maximum_merkle_branch_length,
 };
 use crate::shares::genesis;
+use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_commitment::ShareCommitment;
+use crate::shares::share_version::ShareVersion;
 use crate::sim_overrides;
 use bitcoin::consensus::encode::Error::ParseFailed;
 use bitcoin::secp256k1::Secp256k1;
@@ -40,6 +42,12 @@ pub const MIN_CUMULATIVE_CHAIN_WORK_MULTIPLIER: u64 = 1;
 
 /// Header format with a declared BCH coinbase; legacy owner tags stay intact.
 const DECLARED_BCH_HEADER_TAG: u8 = 0x21;
+
+/// Header format of a pool-built BCH share whose output 0 commits to token
+/// leaves (`ShareHeader::pool_merge_mining`). Written where the owner tag
+/// would be, like the declared tag; the commitment follows the coinbase
+/// proof.
+const POOL_TOKEN_ROOT_BCH_HEADER_TAG: u8 = 0x23;
 
 /// True when a blockhash is the terminal marker of a share's parent chain --
 /// the all-zeros value the genesis share stores as its `prev_share_blockhash`
@@ -112,6 +120,21 @@ pub struct ShareHeader {
     /// Present only for miner-declared BCH jobs. Legacy headers omit these bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bch_coinbase: Option<BchCoinbase>,
+    /// The merge-mining commitment at output 0 of a pool-built Bitcoin Cash
+    /// job whose node merge-mines tokens for this share's miner: the root of
+    /// that miner's own token leaves. `None` is the exact empty commitment,
+    /// and is the only way to write it. A declared job's commitment is in
+    /// `bch_coinbase` instead, so at most one of the two is set. Peers check
+    /// only its format and rebuild output 0 from it byte for byte: share
+    /// validity never depends on the tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_merge_mining: Option<MergeMiningCommitment>,
+    /// The share-chain rule version this share follows and the one its node
+    /// desires: the share-version vote (`shares::share_version`). Encoded,
+    /// and committed, for Bitcoin Cash share owners only; Bitcoin shares
+    /// follow upstream's rules and read as the current version.
+    #[serde(default)]
+    pub share_version: ShareVersion,
 }
 
 /// Network class an encoded address is rebuilt for: the part of an
@@ -224,6 +247,8 @@ impl ShareHeader {
             bitcoin_height: height,
             coinbase_proof,
             bch_coinbase: commitment.bch_coinbase,
+            pool_merge_mining: commitment.pool_merge_mining,
+            share_version: commitment.share_version,
         }
     }
 
@@ -244,6 +269,49 @@ impl ShareHeader {
     pub fn meets_bitcoin_difficulty(&self) -> bool {
         Target::from_compact(self.bitcoin_header.bits).is_met_by(self.bitcoin_header.block_hash())
     }
+
+    /// The merge-mining commitment at output 0 of this share's Bitcoin Cash
+    /// coinbase: the one a Job Declaration miner declared, the root a
+    /// pool-built job's node built for its miner's token leaves
+    /// (`pool_merge_mining`), or else the exact empty commitment. Peers
+    /// rebuild output 0 from it byte for byte. A Bitcoin share has no such
+    /// output and reads as empty.
+    pub fn merge_mining_commitment(&self) -> MergeMiningCommitment {
+        match (&self.bch_coinbase, self.pool_merge_mining) {
+            (Some(coinbase), _) => coinbase.merge_mining,
+            (None, Some(commitment)) => commitment,
+            (None, None) => MergeMiningCommitment::EMPTY,
+        }
+    }
+
+    /// The format checks of a pool-built share's token root: a Bitcoin Cash
+    /// share owner, no declared coinbase beside it, and a commitment that
+    /// passes `MergeMiningCommitment::validate` and is not the exact empty
+    /// one, which only `None` writes.
+    pub fn check_pool_merge_mining(&self) -> Result<(), &'static str> {
+        let Some(commitment) = &self.pool_merge_mining else {
+            return Ok(());
+        };
+        if !matches!(self.miner_address, ShareOwner::CashP2pkh(_)) {
+            return Err("a pool-built token root needs a Bitcoin Cash share owner");
+        }
+        if self.bch_coinbase.is_some() {
+            return Err("a declared BCH share carries its commitment in its declared coinbase");
+        }
+        if commitment.is_empty() {
+            return Err("a pool-built share writes the empty commitment by leaving it out");
+        }
+        commitment.validate()
+    }
+}
+
+/// True for a token share: one whose merge-mining v2 commitment is anything
+/// but the exact empty one (a zero root, `h = 0` and salt 0). A no-token
+/// share pays every miner directly; a token share keeps its coinbase small
+/// enough for a token claim (`docs/architecture/bch-hybrid-payouts.md`,
+/// 3.1).
+pub fn share_has_token_commitment(header: &ShareHeader) -> bool {
+    !header.merge_mining_commitment().is_empty()
 }
 
 impl ShareHeader {
@@ -265,8 +333,13 @@ impl ShareHeader {
         len += encode_address(&self.miner_bitcoin_address, w)?;
         if self.bch_coinbase.is_some() {
             len += DECLARED_BCH_HEADER_TAG.consensus_encode(w)?;
+        } else if self.pool_merge_mining.is_some() {
+            len += POOL_TOKEN_ROOT_BCH_HEADER_TAG.consensus_encode(w)?;
         }
         len += share_owner::consensus_encode(&self.miner_address, w)?;
+        if matches!(self.miner_address, ShareOwner::CashP2pkh(_)) {
+            len += self.share_version.consensus_encode(w)?;
+        }
         len += self.bitcoin_header.version.consensus_encode(w)?;
         len += self.bitcoin_header.prev_blockhash.consensus_encode(w)?;
         if include_bitcoin_merkle_root {
@@ -285,6 +358,8 @@ impl ShareHeader {
         len += self.coinbase_proof.consensus_encode(w)?;
         if let Some(coinbase) = &self.bch_coinbase {
             len += coinbase.consensus_encode(w)?;
+        } else if let Some(commitment) = &self.pool_merge_mining {
+            len += commitment.consensus_encode(w)?;
         }
         Ok(len)
     }
@@ -300,16 +375,22 @@ impl ShareHeader {
         let miner_bitcoin_address = decode_address(r)?;
         let owner_tag = u8::consensus_decode(r)?;
         let declared_bch = owner_tag == DECLARED_BCH_HEADER_TAG;
-        let miner_address = if declared_bch {
+        let pool_token_root = owner_tag == POOL_TOKEN_ROOT_BCH_HEADER_TAG;
+        let miner_address = if declared_bch || pool_token_root {
             let owner = share_owner::consensus_decode(r)?;
             if !matches!(owner, ShareOwner::CashP2pkh(_)) {
                 return Err(ParseFailed(
-                    "declared BCH header requires a cash share owner",
+                    "declared or token-root BCH header requires a cash share owner",
                 ));
             }
             owner
         } else {
             share_owner::consensus_decode_from_tag(owner_tag, r)?
+        };
+        let share_version = if matches!(miner_address, ShareOwner::CashP2pkh(_)) {
+            ShareVersion::consensus_decode(r)?
+        } else {
+            ShareVersion::CURRENT
         };
         let bitcoin_version = bitcoin::block::Version::consensus_decode(r)?;
         let bitcoin_prev_blockhash = BlockHash::consensus_decode(r)?;
@@ -346,6 +427,20 @@ impl ShareHeader {
         } else {
             None
         };
+        // `MergeMiningCommitment`'s decoder applies its format checks; the
+        // empty commitment is written by leaving the field out, never this
+        // way, so one share has one encoding.
+        let pool_merge_mining = if pool_token_root {
+            let commitment = MergeMiningCommitment::consensus_decode(r)?;
+            if commitment.is_empty() {
+                return Err(ParseFailed(
+                    "a pool-built BCH header writes the empty commitment by leaving it out",
+                ));
+            }
+            Some(commitment)
+        } else {
+            None
+        };
 
         Ok(ShareHeader {
             prev_share_blockhash,
@@ -362,6 +457,8 @@ impl ShareHeader {
             bitcoin_height,
             coinbase_proof,
             bch_coinbase,
+            pool_merge_mining,
+            share_version,
         })
     }
 }
@@ -441,6 +538,15 @@ impl ShareBlock {
     /// Compute and return the block hash for this share block
     pub fn block_hash(&self) -> BlockHash {
         self.header.block_hash()
+    }
+
+    /// Size of the block's consensus encoding, measured without
+    /// allocating. The node's in-memory queues and buffers of share blocks
+    /// are bounded by it. Encoding into a sink cannot fail; if it ever did,
+    /// the block counts as too large for any of them.
+    pub fn encoded_size(&self) -> usize {
+        self.consensus_encode(&mut bitcoin::io::sink())
+            .unwrap_or(usize::MAX)
     }
 
     /// Merkle root over the block's transactions, coinbase first.
@@ -541,6 +647,8 @@ impl ShareBlock {
             // commitment. Genesis is built locally and never verified.
             coinbase_proof: CoinbaseProof::default(),
             bch_coinbase: None,
+            pool_merge_mining: None,
+            share_version: ShareVersion::CURRENT,
         };
         let bitcoin_coinbase = bitcoin_block
             .txdata
@@ -740,11 +848,128 @@ mod tests {
         assert!(block_share.is_bitcoin_block());
     }
 
+    /// A Bitcoin Cash header carries its share version right after its
+    /// owner, eight bytes, and the proof of work binds it; a Bitcoin header
+    /// carries none.
     #[test]
-    fn bch_share_block_and_stored_branch_round_trip_25_levels() {
+    fn bitcoin_cash_header_carries_and_binds_its_share_version() {
+        let cash = ShareOwner::CashP2pkh([0x22; 20]);
+        let share = TestShareBlockBuilder::new().share_owner(cash).build();
+        CoinbaseProof::verify(&share.header, &share.template_merkle_branches).unwrap();
+        assert_eq!(share.header.share_version, ShareVersion::CURRENT);
+
+        let mut voting = share.header.clone();
+        voting.share_version.desired_version = 2;
+        let decoded: ShareHeader = deserialize(&serialize(&voting)).unwrap();
+        assert_eq!(decoded, voting);
+        assert_ne!(voting.block_hash(), share.header.block_hash());
+        assert_eq!(
+            serialize(&voting).len(),
+            serialize(&share.header).len(),
+            "the version is a fixed eight bytes"
+        );
+        assert!(CoinbaseProof::verify(&voting, &share.template_merkle_branches).is_err());
+
+        let bitcoin = TestShareBlockBuilder::new().build().header;
+        let mut bitcoin_voting = bitcoin.clone();
+        bitcoin_voting.share_version.desired_version = 2;
+        assert_eq!(serialize(&bitcoin_voting), serialize(&bitcoin));
+        let decoded: ShareHeader = deserialize(&serialize(&bitcoin_voting)).unwrap();
+        assert_eq!(decoded.share_version, ShareVersion::CURRENT);
+    }
+
+    /// A share is a token share exactly when its commitment is not the
+    /// exact empty one: pool-built shares and declared shares with the empty
+    /// commitment are no-token shares.
+    #[test]
+    fn token_share_test_reads_the_exact_empty_commitment() {
+        let mut header = TestShareBlockBuilder::new().build().header;
+        assert!(!share_has_token_commitment(&header));
+        assert_eq!(
+            header.merge_mining_commitment(),
+            MergeMiningCommitment::EMPTY
+        );
+        let mut declared = crate::shares::bch_coinbase::BchCoinbase {
+            prefix: vec![0x51],
+            merge_mining: MergeMiningCommitment::empty(),
+        };
+        header.bch_coinbase = Some(declared.clone());
+        assert!(!share_has_token_commitment(&header));
+        declared.merge_mining = MergeMiningCommitment {
+            root: [0x01; 32],
+            height: 0,
+            salt: 0,
+        };
+        header.bch_coinbase = Some(declared);
+        assert!(share_has_token_commitment(&header));
+    }
+
+    /// A pool-built share whose node merge-mines tokens for its miner is a
+    /// token share, and reads its root from `pool_merge_mining`.
+    #[test]
+    fn a_pool_built_token_root_makes_a_token_share() {
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        let root = MergeMiningCommitment {
+            root: [0x44; 32],
+            height: 1,
+            salt: 3,
+        };
+        header.pool_merge_mining = Some(root);
+        assert!(share_has_token_commitment(&header));
+        assert_eq!(header.merge_mining_commitment(), root);
+        assert_eq!(header.check_pool_merge_mining(), Ok(()));
+    }
+
+    /// A pool-built token root travels in the header: it round-trips, it
+    /// changes the share hash, and it is decoded only in its canonical
+    /// form, beside a Bitcoin Cash owner and never as the empty commitment.
+    #[test]
+    fn a_pool_built_token_root_round_trips_in_its_canonical_form() {
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        let without = header.block_hash();
+        header.pool_merge_mining = Some(MergeMiningCommitment {
+            root: [0x44; 32],
+            height: 1,
+            salt: 3,
+        });
+        let encoded = serialize(&header);
+        assert_eq!(deserialize::<ShareHeader>(&encoded).unwrap(), header);
+        assert_ne!(header.block_hash(), without);
+
+        let mut empty = header.clone();
+        empty.pool_merge_mining = Some(MergeMiningCommitment::EMPTY);
+        assert!(deserialize::<ShareHeader>(&serialize(&empty)).is_err());
+        assert!(empty.check_pool_merge_mining().is_err());
+
+        let mut tall = header.clone();
+        tall.pool_merge_mining = Some(MergeMiningCommitment {
+            root: [0x44; 32],
+            height: 17,
+            salt: 3,
+        });
+        assert!(deserialize::<ShareHeader>(&serialize(&tall)).is_err());
+        assert!(tall.check_pool_merge_mining().is_err());
+
+        let mut bitcoin = header.clone();
+        bitcoin.miner_address = make_test_share_program(1).into();
+        assert!(deserialize::<ShareHeader>(&serialize(&bitcoin)).is_err());
+        assert!(bitcoin.check_pool_merge_mining().is_err());
+
+        let mut both = header;
+        both.bch_coinbase = Some(crate::shares::bch_coinbase::BchCoinbase {
+            prefix: vec![0x51],
+            merge_mining: MergeMiningCommitment::empty(),
+        });
+        assert!(both.check_pool_merge_mining().is_err());
+    }
+
+    #[test]
+    fn bch_share_block_and_stored_branch_round_trip_32_levels() {
         let mut share = TestShareBlockBuilder::new().build();
         share.header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
-        share.template_merkle_branches = vec![TxMerkleNode::all_zeros(); 25];
+        share.template_merkle_branches = vec![TxMerkleNode::all_zeros(); 32];
         let decoded: ShareBlock = deserialize(&serialize(&share)).unwrap();
         assert_eq!(decoded, share);
         let stored = MerkleBranches(share.template_merkle_branches);
@@ -866,6 +1091,8 @@ mod tests {
             fee_address: None,
             fee: None,
             bch_coinbase: None,
+            pool_merge_mining: None,
+            share_version: ShareVersion::CURRENT,
         };
 
         let cloned = commitment.clone();

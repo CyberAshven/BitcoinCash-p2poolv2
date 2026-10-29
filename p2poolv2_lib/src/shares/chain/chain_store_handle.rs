@@ -17,10 +17,11 @@ use crate::shares::share_block::{
 use crate::store::block_tx_metadata::{BlockMetadata, Status};
 use crate::store::dag_store::{BlockValidSearch, ShareDag, UncleInfo};
 use crate::store::found_block::FoundBlock;
+use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::{PruneStats, get_range_to_prune};
 use crate::store::transaction_store::PrevoutCheck;
 use crate::store::writer::{StoreError, StoreHandle};
-use bitcoin::{BlockHash, TxMerkleNode, Work};
+use bitcoin::{BlockHash, TxMerkleNode, Txid, Work};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
@@ -413,6 +414,43 @@ impl ChainStoreHandle {
     /// Get every bitcoin block found by the pool, ordered by bitcoin height.
     pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
         self.store_handle.get_found_blocks()
+    }
+
+    /// Get every kept Bitcoin Cash payout tree, ordered by coinbase txid.
+    pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError> {
+        self.store_handle.get_payout_trees()
+    }
+
+    /// Get the payout tree of a coinbase, if kept.
+    pub fn get_payout_tree(
+        &self,
+        coinbase_txid: &Txid,
+    ) -> Result<Option<StoredPayoutTree>, StoreError> {
+        self.store_handle.get_payout_tree(coinbase_txid)
+    }
+
+    /// Keep a found block's payout tree.
+    pub async fn put_payout_tree(&self, tree: StoredPayoutTree) -> Result<(), StoreError> {
+        self.store_handle.put_payout_tree(tree).await
+    }
+
+    /// Count a new tip at which BCHN does not know a kept payout tree's
+    /// block, removing it at the unknown-tip limit. Return whether removed.
+    pub async fn record_unknown_payout_tree_tip(
+        &self,
+        coinbase_txid: Txid,
+        bitcoin_tip: BlockHash,
+    ) -> Result<bool, StoreError> {
+        self.store_handle
+            .record_unknown_payout_tree_tip(coinbase_txid, bitcoin_tip)
+            .await
+    }
+
+    /// Mark a kept payout tree executed.
+    pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError> {
+        self.store_handle
+            .mark_payout_tree_executed(coinbase_txid)
+            .await
     }
 
     /// Get the confirmed blockhash at the height
@@ -1030,6 +1068,8 @@ mockall::mock! {
         pub fn get_share_headers(&self, share_hashes: &[BlockHash]) -> Result<Vec<(BlockHash, ShareHeader)>, StoreError>;
         pub fn get_share_header(&self, share_hash: &BlockHash) -> Result<ShareHeader, StoreError>;
         pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
+        pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError>;
+        pub fn get_payout_tree(&self, coinbase_txid: &Txid) -> Result<Option<StoredPayoutTree>, StoreError>;
         pub fn get_headers_for_locator(&self, block_hashes: &[BlockHash], stop_block_hash: &BlockHash, limit: usize) -> Result<Vec<ShareHeader>, StoreError>;
         pub fn get_blockhashes_for_locator(&self, locator: &[BlockHash], stop_block_hash: &BlockHash, max_blockhashes: usize) -> Result<Vec<BlockHash>, StoreError>;
         pub fn get_tip_height(&self) -> Result<Option<u32>, StoreError>;
@@ -1074,6 +1114,9 @@ mockall::mock! {
         pub async fn add_share_block(&self, share: ShareBlock) -> Result<(), StoreError>;
         pub async fn add_share_block_and_organise_header(&self, share: ShareBlock) -> Result<Option<u32>, StoreError>;
         pub async fn add_pplns_share(&self, pplns_share: SimplePplnsShare) -> Result<(), StoreError>;
+        pub async fn put_payout_tree(&self, tree: StoredPayoutTree) -> Result<(), StoreError>;
+        pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError>;
+        pub async fn record_unknown_payout_tree_tip(&self, coinbase_txid: Txid, bitcoin_tip: BlockHash) -> Result<bool, StoreError>;
         pub async fn add_user(&self, btcaddress: String) -> Result<u64, StoreError>;
     }
 

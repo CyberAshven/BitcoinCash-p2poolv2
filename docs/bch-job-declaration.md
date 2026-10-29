@@ -17,10 +17,22 @@ donation/fee cuts, rounding and script ordering as peer payout validation.
 `PreparedNotifyParams::declared_outputs` and `build_pplns_outputs` implement
 that calculation. The declarator needs the local share-chain snapshot.
 
-The opaque token also exposes the public commitment terms. Its version-1
-layout is: version byte, 32 random bytes, previous share hash, CompactSize
-uncle count and hashes, compact share bits, share time, optional donation
-address, donation basis points, optional fee address, fee basis points.
+The donation in those cuts is the one `AllocateMiningJobToken.user_identifier`
+chooses with `donation=<percent>` after a comma, as a mining channel's
+identity does ([Miner options](miner-options.md#donation)), or the node's
+own without the option. The mining channel that installs the job must have
+chosen the same donation, or it answers `donation-mismatch`. The protocol has
+no error reply to allocation, so a bad `donation=` there closes the
+connection, with the reason in the node's log.
+
+The opaque token also exposes the public commitment terms. Its version-2
+layout is: version byte (2), 32 random bytes, previous share hash,
+CompactSize uncle count and hashes, compact share bits, share time, optional
+donation address, donation basis points, optional fee address, fee basis
+points, and the share version and desired version (two `u32`s; see
+[Share validation](sharechain/validation.md#share-versions-follow-a-vote)).
+Version 1, without the share version, is refused since the 2026-10-24 rule
+batch.
 Integers use Bitcoin consensus little endian. Optional addresses use the
 share-header address encoding. `ShareCommitment::from_mining_job_token`
 decodes these terms; parsing alone does not authenticate a token. The pool
@@ -30,13 +42,15 @@ Full-Template success rotates the random bytes without changing the terms.
 
 The miner supplies its payout address, BCH share owner and selected template
 revenue when constructing the share commitment. The BCH descriptor binds the
-raw scriptSig prefix and auxiliary root/tree-size/nonce. The prefix begins
+raw scriptSig prefix and the merge-mining v2 commitment (root, tree height
+`h` and salt; see [Auxiliary work proofs](bch-auxpow.md)). The prefix begins
 with the canonical height push and leaves room for the channel's complete
 12-byte extranonce within the 100-byte scriptSig limit. Coinbase version is
 2, sequence is `0xfffffffe`, and locktime is `height - 1`. Output order is
-the exact PPLNS outputs, one zero-value aux commitment, canonical padding,
+the 53-byte merge-mining commitment as output 0 (the exact empty commitment
+when no token is merge-mined), the exact PPLNS outputs, canonical padding,
 then the share commitment. Arbitrary extra outputs and output reordering
-are rejected. Existing legacy jobs retain their original encoding.
+are rejected.
 
 Full-Template clients declare the serialized coinbase prefix and suffix
 around that extranonce, reveal all non-coinbase transactions, then present
@@ -47,6 +61,25 @@ Only a null proposal result permits installation. A successful response
 contains the installed channel job id; shares can be submitted immediately.
 The pool can broadcast a complete found block in this mode.
 
+**Declared token leaves.** A Full-Template declaration whose output 0 is a
+token root discloses the leaves behind it in `DeclareMiningJob.excess_data`,
+in Pickaxe's `CTMD` v2 ([Disclosure to
+miners](bch-auxpow.md#disclosure-to-miners); pickaxe-miner PR #70 at
+`a92fef7`, "Job Declaration leaves"): exactly one canonical disclosure,
+nothing trailing, each split hashing to its leaf's `ext`, whose leaves alone
+rebuild output 0's root at its height and salt. Empty `excess_data` means
+no root: a root without leaves, leaves without a root, or leaves that do not
+decode or make the root are refused with `DeclareMiningJob.Error`
+`invalid-coinbase-tx` and the reason in its details. When the job is
+installed, each leaf must pay the channel's miner (its `payout_hash` is
+`HASH256` of the miner's payout script) and carry the job's terms as its
+split: the donation the token chose, then the node's fee, each to the
+script the coinbase pays it to. So the node's fee and the miner's P2Pool
+donation apply to declared tokens as to BCH; a token whose covenant takes
+no split cannot be merge-mined under Job Declaration on a node that takes
+either cut. Otherwise the custom job is refused (`invalid-custom-job`, the
+reason in the node's log).
+
 Coinbase-Only clients do not declare or reveal their transaction list.
 They present the allocated token with their coinbase and private Merkle
 path directly. The pool verifies visible coinbase/header rules, exact
@@ -54,21 +87,24 @@ payments and share PoW. It cannot validate hidden transactions, CTOR, actual
 fees or total hidden block size. The declarator must validate and broadcast
 the complete block; the pool never broadcasts an incomplete substitute.
 This mode retains the protocol's withholding and hidden-invalid-work risk.
+A Coinbase-Only job declares no leaves, so it merge-mines no token: its
+output 0 must be the exact empty commitment.
 
 Once a job is active, its target and credited difficulty remain fixed.
 Vardiff and `UpdateChannel` change later jobs. Device maximum targets apply
 when each job is assigned; zero maximum targets are rejected.
 
 Limits: 64 outstanding tokens and 64 MiB of declared transaction state per
-registry, eight pending declarations per connection, 25 Merkle siblings,
+registry, eight pending declarations per connection, 32 Merkle siblings,
 SV2's 65,535-byte coinbase-output field and 16 MiB frame limit. All revealed
 transactions currently arrive in one response; larger declarations require
 transaction-cache negotiation before increasing those limits. The shared
-[auxiliary work verifier](bch-auxpow.md) checks inclusion through the full
-coinbase and parent header. An experimental SAFA covenant now verifies that
-proof and its own issuance rules in a real regtest spend. Other assets need
-their own covenant adapters; choosing an aux root alone cannot authorize
-their issuance.
+[auxiliary work verifier](bch-auxpow.md) checks a merge-mining v2 proof:
+the coinbase around output 0, its branch to the parent header, the token's
+target and the ASERT format check of the parent's nBits. The experimental
+SAFA covenant verified the older v1 proof in a real regtest spend and must
+be ported to v2 before any issuance. Other assets need their own covenant
+adapters; choosing an aux root alone cannot authorize their issuance.
 
 Protocol references: [SV2 Mining Protocol](https://stratumprotocol.org/specification/05-mining-protocol/)
 and [SV2 Job Declaration Protocol](https://stratumprotocol.org/specification/06-job-declaration-protocol/).
@@ -83,9 +119,10 @@ tokens to the mining connection, installs jobs, mines headers and checks both
 emitted coinbase proofs. Reusing a consumed token must fail.
 
 The clients send adjacent setup/allocation frames in one write and split
-other writes after the first byte. A 5,000-byte declaration field forces
-payload decoding across the listener's 4,096-byte reads; TCP decides the
-actual segmentation. The test also checks Full-Template proposal/submission
+other writes after the first byte. The Full-Template declaration discloses
+sixteen token leaves with their splits, a 3,830-byte `excess_data` that
+forces payload decoding across the listener's 4,096-byte reads; TCP decides
+the actual segmentation. The test also checks Full-Template proposal/submission
 calls, Coinbase-Only transaction privacy and connection cleanup. Simulation
 builds retain their existing block-submission suppression.
 
@@ -115,7 +152,11 @@ header submission and client block broadcast. Both nodes must accept each
 block, both emitted coinbase proofs must match, and BCHN must reject an extra
 satoshi of coinbase value. This repository's client uses the published SRI
 transport and messages; independent declarator or ASIC firmware interoperability
-still requires separate validation.
+still requires separate validation. Since the 2026-10-24 token leaf rules,
+the Full-Template declaration discloses its two token leaves in
+`excess_data`, and the Coinbase-Only job mines no token and prints no aux
+proof; the runs recorded below predate that change, and the test has not
+been run against BCHN since.
 
 Use fresh data directories, outside the repository. The first node needs this
 `bitcoin.conf`:
@@ -186,7 +227,7 @@ The test passed in 6.459 seconds. These proofs then authorized a real token
 withdrawal. BCHN rejected that identical signed transaction one block before
 its 74-block relative age matured, then accepted it after one more block.
 The withdrawal, public vectors and reproduction commands are in
-[the SAFA evidence record](../tools/safa-auxpow/README.md#regtest-evidence-and-reproduction).
+[the SAFA evidence record](../p2poolv2_safa/README.md#regtest-evidence-and-reproduction).
 
 ## Encrypted BCHN and SAFA check (2026-10-17)
 
@@ -220,7 +261,7 @@ passed the mempool check and the withdrawal confirmed at 252. The harness
 retains both results, separating VM sequence checks from actual chain maturity.
 
 Reproduce the token preparation and withdrawal using
-[the SAFA harness](../tools/safa-auxpow/README.md#regtest-evidence-and-reproduction)
+[the SAFA harness](../p2poolv2_safa/README.md#regtest-evidence-and-reproduction)
 around this opt-in test. An initial synthetic-work run also passed at heights
 102 and 103. The disposable nodes were stopped after validation, with their
 public proof and transaction evidence retained locally. Independent clients,
@@ -237,7 +278,8 @@ features and warnings denied. Formatting and whitespace checks passed.
 `token` (hex), `payout` (CashAddr), `share_owner` (the independently specified BCH
 share address), `height`, `nbits` (integer compact bits), `previous_hash` (BCH RPC
 display order), `coinbase_value` (satoshis), `script_prefix` (hex), and `auxiliary`
-(`merkle_root` as 32 byte integers, `tree_size`, `nonce`). It receives no RPC
+(`root` as 32 byte integers, `height` and `salt`, the merge-mining v2
+commitment). It receives no RPC
 credentials, private keys or transaction bytes.
 
 The helper requires the current mining-base anchor and BCH template tip, then

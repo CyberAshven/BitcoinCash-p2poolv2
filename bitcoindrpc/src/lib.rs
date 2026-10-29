@@ -58,13 +58,48 @@ impl std::fmt::Debug for BitcoinRpcConfig {
     }
 }
 
+/// `RPC_IN_WARMUP`: the node is starting and does not answer yet.
+const RPC_IN_WARMUP: i32 = -28;
+
 /// Error type for the BitcoindRpcClient
 #[derive(Debug)]
 pub enum BitcoindRpcError {
-    HttpError { status_code: u16, message: String },
-    ParseError { message: String },
-    RpcError { code: i32, message: String },
+    /// The node answered with an HTTP error status and no JSON-RPC error.
+    HttpError {
+        status_code: u16,
+        message: String,
+    },
+    ParseError {
+        message: String,
+    },
+    /// The node answered with a JSON-RPC error, with HTTP 200 or with the
+    /// HTTP 500 that JSON-RPC 1.0 errors come with.
+    RpcError {
+        code: i32,
+        message: String,
+    },
+    /// The request never got an answer: the connection was refused, reset or
+    /// timed out.
+    Transport {
+        message: String,
+    },
     Other(String),
+}
+
+impl BitcoindRpcError {
+    /// Whether sending the same request again may succeed: the node was not
+    /// reached, its answer was cut off, it is busy (HTTP 5xx without an RPC
+    /// error, such as BCHN's 503 when its work queue is full) or it is still
+    /// starting (`RPC_IN_WARMUP`). An RPC error, or an HTTP 4xx such as a
+    /// refused login, is the node's answer and comes back the same.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            BitcoindRpcError::Transport { .. } | BitcoindRpcError::ParseError { .. } => true,
+            BitcoindRpcError::HttpError { status_code, .. } => *status_code >= 500,
+            BitcoindRpcError::RpcError { code, .. } => *code == RPC_IN_WARMUP,
+            BitcoindRpcError::Other(_) => false,
+        }
+    }
 }
 
 impl Error for BitcoindRpcError {
@@ -73,6 +108,7 @@ impl Error for BitcoindRpcError {
             BitcoindRpcError::HttpError { message, .. } => message,
             BitcoindRpcError::ParseError { message } => message,
             BitcoindRpcError::RpcError { message, .. } => message,
+            BitcoindRpcError::Transport { message } => message,
             BitcoindRpcError::Other(msg) => msg,
         }
     }
@@ -92,8 +128,54 @@ impl fmt::Display for BitcoindRpcError {
             BitcoindRpcError::RpcError { code, message } => {
                 write!(f, "RPC error {code}: {message}")
             }
+            BitcoindRpcError::Transport { message } => {
+                write!(f, "HTTP request failed: {message}")
+            }
             BitcoindRpcError::Other(msg) => write!(f, "{msg}"),
         }
+    }
+}
+
+/// What BCHN's `submitblock` said about a block.
+///
+/// BCHN answers `null` for a block it accepted, `"duplicate"` for one it
+/// already has and has validated, `"inconclusive"` for one it stored without
+/// a verdict (for example a block that does not become its best chain,
+/// because another block at that height arrived first), and a reject reason
+/// such as `"high-hash"` or `"duplicate-invalid"` otherwise
+/// (`submitblockcommon` in BCHN's `src/rpc/mining.cpp`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitBlockOutcome {
+    /// `null`: the node accepted the block.
+    Accepted,
+    /// `"duplicate"`: the node already has the block and found it valid, for
+    /// example from an earlier attempt whose answer was lost.
+    Duplicate,
+    /// `"inconclusive"` or `"duplicate-inconclusive"`: the node stored the
+    /// block but has no verdict on it yet. Sending it again does not help.
+    Inconclusive,
+    /// Any other answer: the node's reject reason.
+    Rejected(String),
+}
+
+impl SubmitBlockOutcome {
+    /// Read a `submitblock` result.
+    pub fn from_result(result: &serde_json::Value) -> Self {
+        match result {
+            serde_json::Value::Null => SubmitBlockOutcome::Accepted,
+            serde_json::Value::String(reason) => match reason.as_str() {
+                "duplicate" => SubmitBlockOutcome::Duplicate,
+                "inconclusive" | "duplicate-inconclusive" => SubmitBlockOutcome::Inconclusive,
+                _ => SubmitBlockOutcome::Rejected(reason.clone()),
+            },
+            other => SubmitBlockOutcome::Rejected(other.to_string()),
+        }
+    }
+
+    /// Whether the node now holds the block: accepted, a duplicate of a
+    /// valid block, or stored without a verdict.
+    pub fn node_has_block(&self) -> bool {
+        !matches!(self, SubmitBlockOutcome::Rejected(_))
     }
 }
 
@@ -101,12 +183,37 @@ impl fmt::Display for BitcoindRpcError {
 pub struct GetBlockchainInfo {
     #[serde(rename = "initialblockdownload")]
     pub initial_block_download: bool,
+    /// The node's chain name: `main`, `test`, `test4`, `chip`, `scale` or
+    /// `regtest` on BCHN. `None` when the node does not report one.
+    #[serde(default)]
+    pub chain: Option<String>,
 }
 
-/// The one field of a verbose `getblockheader` result that is read.
+/// The fields of a verbose `getblockheader` result that are read.
 #[derive(Debug, Deserialize)]
-struct BlockHeaderHeight {
+struct VerboseBlockHeader {
     height: u64,
+    /// BCHN's adaptive block size limit (ABLA) state of the block. Absent
+    /// from Bitcoin Core, and from BCHN for a block it keeps no state for.
+    #[serde(default)]
+    ablastate: Option<AblaState>,
+}
+
+/// The field of BCHN's `ablastate` that is read.
+#[derive(Debug, Deserialize)]
+struct AblaState {
+    nextblocksizelimit: u64,
+}
+
+/// What a verbose `getblockheader` says about a block a template builds on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockHeaderSummary {
+    /// Height of the block.
+    pub height: u64,
+    /// Size limit, in bytes, of a block built on this one: BCHN's
+    /// `ablastate.nextblocksizelimit`, the larger of the node's floor and its
+    /// ABLA limit. `None` when the node reports no ABLA state for the block.
+    pub next_block_size_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,19 +270,32 @@ impl BitcoindRpcClient {
                     "HTTP request failed to bitcoin node: status={:?}, error={}",
                     status_code, e
                 );
-                return Err(BitcoindRpcError::Other(format!("HTTP request failed: {e}")));
+                return Err(BitcoindRpcError::Transport {
+                    message: e.to_string(),
+                });
             }
         };
 
         let status = response.status();
 
-        // Check for non-success HTTP status codes
+        // Check for non-success HTTP status codes. JSON-RPC 1.0 sends an RPC
+        // error with HTTP 500 and the error in the body, so read it from there
+        // when it is one.
         if !status.is_success() {
             let status_code = status.as_u16();
             let error_body = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Failed to read error body".to_string());
+            if let Ok(JsonRpcResponse {
+                error: Some(error), ..
+            }) = serde_json::from_str::<JsonRpcResponse>(&error_body)
+            {
+                return Err(BitcoindRpcError::RpcError {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
             error!(
                 "Error reaching bitcoin node with status={:?}. Message={:?}",
                 status_code, error_body
@@ -219,18 +339,32 @@ impl BitcoindRpcClient {
         self.request("getblockchaininfo", vec![]).await
     }
 
-    /// Height of the block with `block_hash`, from `getblockheader`.
+    /// Hash, as hex, of the block at `height` on the node's best chain. An
+    /// RPC error when the node's chain is shorter.
+    pub async fn get_block_hash(&self, height: u64) -> Result<String, BitcoindRpcError> {
+        self.request("getblockhash", vec![serde_json::json!(height)])
+            .await
+    }
+
+    /// Height of the block with `block_hash`, and the size limit BCHN applies
+    /// to a block built on it, from a verbose `getblockheader`.
     ///
     /// An error means the node does not know the block, so a template
     /// building on it is not on this node's chain.
-    pub async fn get_block_height(&self, block_hash: &str) -> Result<u64, BitcoindRpcError> {
-        let header: BlockHeaderHeight = self
+    pub async fn get_block_header_summary(
+        &self,
+        block_hash: &str,
+    ) -> Result<BlockHeaderSummary, BitcoindRpcError> {
+        let header: VerboseBlockHeader = self
             .request(
                 "getblockheader",
                 vec![serde_json::json!(block_hash), serde_json::json!(true)],
             )
             .await?;
-        Ok(header.height)
+        Ok(BlockHeaderSummary {
+            height: header.height,
+            next_block_size_limit: header.ablastate.map(|state| state.nextblocksizelimit),
+        })
     }
 
     /// Fetch a Bitcoin template, negotiating SegWit and Signet when required.
@@ -372,16 +506,16 @@ impl BitcoindRpcClient {
         }
     }
 
-    pub async fn submit_block(&self, block: &bitcoin::Block) -> Result<String, BitcoindRpcError> {
-        // Serialize the block to hex string
-        let block_hex = serialize_hex(block);
-
-        // Prepare params for the RPC call
-        let params = vec![serde_json::Value::String(block_hex)];
-
-        // Make the RPC request - submitblock returns null on success, or error string on failure
+    /// Send `block` with `submitblock` and read the node's answer. An error
+    /// means the node gave no answer about the block (see
+    /// [`BitcoindRpcError::is_transient`] for whether to send it again).
+    pub async fn submit_block(
+        &self,
+        block: &bitcoin::Block,
+    ) -> Result<SubmitBlockOutcome, BitcoindRpcError> {
+        let params = vec![serde_json::Value::String(serialize_hex(block))];
         let result: serde_json::Value = self.request("submitblock", params).await?;
-        Ok(result.to_string())
+        Ok(SubmitBlockOutcome::from_result(&result))
     }
 }
 

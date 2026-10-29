@@ -6,7 +6,7 @@ use crate::accounting::stats::pool_local_stats::load_pool_local_stats;
 use crate::accounting::stats::user::User;
 use crate::accounting::{payout::simple_pplns::SimplePplnsShare, stats::pool_local_stats};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::SystemTime;
 use tokio::sync::{mpsc, oneshot};
 use tracing::error;
@@ -42,6 +42,16 @@ pub struct PoolMetrics {
     /// hashrate is derived separately from confirmed-chain total work.
     #[serde(default)]
     pub work_since_last_block: f64,
+    /// Found blocks sent to BCHN nodes since the node started, by node label
+    /// (`primary` for `[bitcoinrpc]`, `extra1` and on for `[[submit_nodes]]`)
+    /// and outcome label (`accepted`, `duplicate`, `inconclusive`,
+    /// `rejected`, `failed`). Runtime only, not persisted.
+    #[serde(skip)]
+    pub found_block_submissions: BTreeMap<(String, String), u64>,
+    /// Times a found block was sent again to a node after a connection
+    /// error, a time-out or a busy node, by node label. Runtime only.
+    #[serde(skip)]
+    pub found_block_submit_retries: BTreeMap<String, u64>,
 }
 
 impl Default for PoolMetrics {
@@ -60,6 +70,8 @@ impl Default for PoolMetrics {
             users: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
             pool_difficulty: 0,
             work_since_last_block: 0.0,
+            found_block_submissions: BTreeMap::new(),
+            found_block_submit_retries: BTreeMap::new(),
         }
     }
 }
@@ -116,6 +128,12 @@ pub enum MetricsMessage {
     },
     SetLastUpdate {
         lastupdate: u64,
+        response: oneshot::Sender<()>,
+    },
+    RecordBlockSubmission {
+        node: String,
+        outcome: &'static str,
+        retries: u32,
         response: oneshot::Sender<()>,
     },
 }
@@ -214,7 +232,31 @@ impl MetricsActor {
                 self.set_last_update(lastupdate);
                 let _ = response.send(());
             }
+            MetricsMessage::RecordBlockSubmission {
+                node,
+                outcome,
+                retries,
+                response,
+            } => {
+                self.record_block_submission(node, outcome, retries);
+                let _ = response.send(());
+            }
         }
+    }
+
+    /// Count one found block sent to `node` with `outcome`, and the times it
+    /// was sent again.
+    fn record_block_submission(&mut self, node: String, outcome: &'static str, retries: u32) {
+        *self
+            .metrics
+            .found_block_submit_retries
+            .entry(node.clone())
+            .or_insert(0) += u64::from(retries);
+        *self
+            .metrics
+            .found_block_submissions
+            .entry((node, outcome.to_string()))
+            .or_insert(0) += 1;
     }
 
     /// Update metrics from accepted share
@@ -450,6 +492,31 @@ impl MetricsHandle {
             .await
             .expect("Error getting metrics");
         response_rx.await.expect("Error getting metrics")
+    }
+
+    /// Count a found block sent to the BCHN node labelled `node` with
+    /// `outcome` (a [`crate::stratum::block_submit::BlockSubmission`] label)
+    /// after `retries` attempts that got no answer. A stopped actor is an
+    /// error, not a panic: a found block is never lost to a metric.
+    pub async fn record_block_submission(
+        &self,
+        node: String,
+        outcome: &'static str,
+        retries: u32,
+    ) -> Result<(), tokio::sync::oneshot::error::RecvError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        // A send to a stopped actor drops the message with its response
+        // sender, which `response_rx` reports as an error.
+        let _ = self
+            .sender
+            .send(MetricsMessage::RecordBlockSubmission {
+                node,
+                outcome,
+                retries,
+                response: response_tx,
+            })
+            .await;
+        response_rx.await
     }
 
     /// Set last update time. Largely used for testing.

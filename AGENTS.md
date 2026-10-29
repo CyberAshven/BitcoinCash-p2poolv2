@@ -15,7 +15,14 @@ rust-version 1.88.
 All code is Rust. CSS and HTML are allowed for styling only: the
 dashboard's pages are rendered by Rust and load no script, and the WASM
 dashboard's only JavaScript is the loader `wasm-bindgen` generates. Don't
-add hand-written JavaScript, TypeScript or Python.
+add hand-written JavaScript, TypeScript, Python or shell tools. Developer
+tools (sim harness, mock bitcoind, log analysers, load-test drivers) are
+binaries in `p2poolv2_tools`; see `docs/tooling.md`. Shell is allowed only
+as glue: CI `run:` steps, the Docker workflow's helper scripts and the
+bitcoind image's entrypoint.
+
+There is no exception: the SAFA covenant tool, once Node and Libauth, is
+the Rust crate `p2poolv2_safa` on libauth-rs's Bitcoin Cash 2026 VM.
 
 ## Branches and releases (Bitcoin Cash fork)
 
@@ -93,8 +100,10 @@ Never infer architecture from filenames alone. Read the relevant architecture do
 | `p2poolv2_wallet` | Share chain address type: bech32m over a witness v1 (P2TR) output key, HRP `p2pool`/`tp2pool`/`sp2pool`/`rp2pool` |
 | `p2poolv2_tests` | Integration tests (multi-node P2P, stratum, API) |
 | `p2poolv2_sim` | No-PoW load-test simulation binary (feature-gated with `sim`) |
+| `p2poolv2_tools` | Developer tools: sim swarm harness (`cargo sim`), mock bitcoind, log analysers, JMeter drivers; see `docs/tooling.md` |
 | `bitcoindrpc` | JSON-RPC 1.0 client for Bitcoin Core |
 | `p2poolv2_tui` | Terminal UI for a Bitcoin Cash node and its BCHN, ported from upstream's PDM; AGPL-3.0-or-later, unlike the rest of the workspace |
+| `p2poolv2_safa` | SAFA AuxPoW covenant tool (`cargo safa`): compiles the covenant and checks claims in libauth-rs's BCH 2026 VM; AGPL-3.0-or-later; see `p2poolv2_safa/README.md` |
 
 ## Key entry points in p2poolv2_lib
 

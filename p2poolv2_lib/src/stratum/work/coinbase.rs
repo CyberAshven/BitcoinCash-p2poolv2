@@ -2,10 +2,13 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use crate::accounting::OutputPair;
-use crate::accounting::payout::coinbase_budget::{BCH_MAX_PAYOUT_OUTPUT_BYTES, P2PKH_OUTPUT_BYTES};
+use crate::accounting::payout::coinbase_budget::{
+    BCH_COINBASE_BYTES_BESIDE_PAYOUTS, BCH_TOKEN_SHARE_COINBASE_LIMIT,
+    MAX_TOKEN_SHARE_COINBASE_OUTPUTS, PayoutSplit, TREE_OUTPUT_BYTES,
+};
+use crate::accounting::{CoinbasePayouts, OutputPair};
 use crate::shares::bch_coinbase::BchCoinbase;
-use crate::shares::merge_mining::{AUXPOW_COMMITMENT_LENGTH, MergeMiningCommitment};
+use crate::shares::merge_mining::{MERGE_MINING_OUTPUT_LENGTH, MergeMiningCommitment};
 use crate::shares::transactions::coinbase::BIP141_COMMITMENT_HEADER;
 use crate::shares::witness_commitment::{WITNESS_COMMITMENT_LENGTH, WitnessCommitment};
 use crate::stratum::session::{EXTRANONCE1_SIZE, EXTRANONCE2_SIZE};
@@ -51,24 +54,6 @@ pub(crate) const COMMITMENT_TAIL_LENGTH: usize = 8 + 1 + COMMITMENT_SCRIPT_LENGT
 /// midstate covers the whole prefix and no prefix bytes trail into the tail.
 pub(crate) const SHA256_BLOCK_SIZE: usize = 64;
 
-/// Bitcoin Cash: the most bytes a coinbase handed to miners may take.
-///
-/// 784 bytes is the coinbase of the OCEAN block mined on stock Antminer
-/// firmware that upstream discussion #668 cites, where that firmware is
-/// reported to take "just over a dozen outputs". A device hashes coinb1, the
-/// extranonce and coinb2, so its limit is on bytes. The evidence comes from
-/// another pool and is still to be measured on this pool's devices; see
-/// `docs/architecture/payout-distribution.md`, "Bitcoin Cash coinbase budget".
-/// `BCH_MAX_COINBASE_PAYOUTS` is sized so the largest coinbase this fork
-/// builds stays within it (782 bytes).
-///
-/// It also keeps a merge-mining claim small: a token covenant that carries
-/// the whole coinbase, the 80-byte header and a merkle branch of at most
-/// `MAX_COINBASE_MERKLE_BRANCH_LENGTH` (25) hashes in its unlocking bytecode
-/// needs at most 784 + 80 + 800 = 1,664 bytes, far under the 2026 P2S
-/// standard unlocking limit of about 10,000 bytes.
-pub const BCH_COINBASE_BYTE_BUDGET: usize = 784;
-
 /// Coinbase transaction fields around the input's scriptSig and the outputs:
 /// version, input count, outpoint, scriptSig length, sequence, output count
 /// (one byte below 253 outputs) and locktime.
@@ -79,13 +64,12 @@ const COINBASE_TRANSACTION_FIELD_BYTES: usize =
 /// prefix is at most 88 bytes, plus the 12-byte extranonce.
 const MAX_COINBASE_SCRIPT_SIG_BYTES: usize = 100;
 
-/// The largest output an address takes: an 8-byte value, a 1-byte script
-/// length and a 42-byte script for a 40-byte witness program.
-const MAX_ADDRESS_OUTPUT_BYTES: usize = 8 + 1 + 2 + 40;
+/// Extra bytes the output count takes from 253 outputs on (a three-byte
+/// CompactSize instead of one).
+const LARGE_OUTPUT_COUNT_EXTRA_BYTES: usize = 2;
 
-/// The merge-mining output: an 8-byte value, a 1-byte script length, then
-/// `OP_RETURN`, a push opcode and the commitment.
-const MERGE_MINING_OUTPUT_BYTES: usize = 8 + 1 + 2 + AUXPOW_COMMITMENT_LENGTH;
+/// The merge-mining output 0 (`MergeMiningCommitment::output`): 53 bytes.
+const MERGE_MINING_OUTPUT_BYTES: usize = MERGE_MINING_OUTPUT_LENGTH;
 
 /// The largest padding output (`padding_output`): 63 bytes of padding.
 const MAX_PADDING_OUTPUT_BYTES: usize = 8 + 1 + 2 + (SHA256_BLOCK_SIZE - 1);
@@ -93,37 +77,55 @@ const MAX_PADDING_OUTPUT_BYTES: usize = 8 + 1 + 2 + (SHA256_BLOCK_SIZE - 1);
 /// The commitment output (`commitment_output`).
 const COMMITMENT_OUTPUT_BYTES: usize = COMMITMENT_TAIL_LENGTH - LOCKTIME_LENGTH;
 
-/// The largest Bitcoin Cash coinbase this fork builds, less its PPLNS payout
-/// outputs: the transaction fields, the largest scriptSig, the donation (a
-/// P2PKH output by consensus), a fee output of any address type, the
-/// merge-mining output, the largest padding and the commitment. 408 bytes.
-pub(crate) const MAX_BCH_COINBASE_BYTES_BESIDE_PAYOUTS: usize = COINBASE_TRANSACTION_FIELD_BYTES
-    + MAX_COINBASE_SCRIPT_SIG_BYTES
-    + P2PKH_OUTPUT_BYTES
-    + MAX_ADDRESS_OUTPUT_BYTES
-    + MERGE_MINING_OUTPUT_BYTES
-    + MAX_PADDING_OUTPUT_BYTES
-    + COMMITMENT_OUTPUT_BYTES;
-
-// The coinbase budget's payout bytes, beside everything else a Bitcoin Cash
-// coinbase can carry, fit the byte budget a job is held to.
+// The coinbase this builder lays out, besides its PPLNS payouts and at the
+// worst case of every field (the transaction fields, the largest scriptSig, a
+// three-byte output count, output 0, the tree output, the largest padding and
+// the commitment), is exactly what the hybrid payout keeps room for, so a
+// coinbase it splits never exceeds its limit. A Bitcoin Cash share chain's
+// donation and fee are payees; outputs placed before the split, as
+// Hydrapool's donation and fee are, take their bytes from the limit
+// (`append_payout_split`).
 const _: () = assert!(
-    MAX_BCH_COINBASE_BYTES_BESIDE_PAYOUTS + BCH_MAX_PAYOUT_OUTPUT_BYTES <= BCH_COINBASE_BYTE_BUDGET
+    COINBASE_TRANSACTION_FIELD_BYTES
+        + MAX_COINBASE_SCRIPT_SIG_BYTES
+        + LARGE_OUTPUT_COUNT_EXTRA_BYTES
+        + MERGE_MINING_OUTPUT_BYTES
+        + TREE_OUTPUT_BYTES
+        + MAX_PADDING_OUTPUT_BYTES
+        + COMMITMENT_OUTPUT_BYTES
+        == BCH_COINBASE_BYTES_BESIDE_PAYOUTS
 );
 
-/// Refuse a Bitcoin Cash coinbase larger than `BCH_COINBASE_BYTE_BUDGET`.
+/// Refuse a Bitcoin Cash coinbase the share chain would refuse: larger than
+/// `split`'s coinbase limit, or, for a token share, with 253 outputs or more.
 ///
-/// The job builders call it on every coinbase they hand out. Under the
-/// coinbase budget's payout rule only a scriptSig past Bitcoin Cash's 100
-/// bytes, such as one swollen by a template's `coinbaseaux` flags, can
-/// exceed it, and Bitcoin Cash rejects that block anyway.
-pub(crate) fn check_bch_coinbase_budget(coinbase: &Transaction) -> Result<(), WorkError> {
+/// The job builders call it on every coinbase they hand out. The hybrid
+/// payout keeps room for every other field at its worst case, so only a
+/// scriptSig past Bitcoin Cash's 100 bytes, such as one swollen by a
+/// template's `coinbaseaux` flags, can exceed the limit, and Bitcoin Cash
+/// rejects that block anyway.
+pub(crate) fn check_bch_coinbase_limit(
+    coinbase: &Transaction,
+    split: PayoutSplit,
+) -> Result<(), WorkError> {
+    let Some(limit) = split.coinbase_limit() else {
+        return Ok(());
+    };
     let size = coinbase.total_size();
-    if size > BCH_COINBASE_BYTE_BUDGET {
+    if size > limit {
         return Err(WorkError {
             message: format!(
-                "Bitcoin Cash coinbase of {size} bytes exceeds the {BCH_COINBASE_BYTE_BUDGET}-byte \
-                 budget ASIC firmware accepts"
+                "Bitcoin Cash coinbase of {size} bytes exceeds the share chain's {limit}-byte limit"
+            ),
+        });
+    }
+    if limit == BCH_TOKEN_SHARE_COINBASE_LIMIT
+        && coinbase.output.len() >= MAX_TOKEN_SHARE_COINBASE_OUTPUTS
+    {
+        return Err(WorkError {
+            message: format!(
+                "Bitcoin Cash token share coinbase has {} outputs, at least {MAX_TOKEN_SHARE_COINBASE_OUTPUTS}",
+                coinbase.output.len()
             ),
         });
     }
@@ -295,31 +297,35 @@ pub(crate) fn build_bitcoin_coinbase_transaction(
         nsecs,
         extranonce,
         None,
+        None,
     )
 }
 
-/// Put the Bitcoin Cash merge-mining output, if any, among the outputs built
-/// so far: today after the payouts (and before the padding and commitment
-/// outputs `append_commitment_outputs` adds last).
+/// Put the Bitcoin Cash merge-mining commitment, if any, at output 0, before
+/// every payout, as merge-mining format v2 requires: a token covenant finds
+/// it right after the coinbase's fixed-shape head without a search.
 ///
-/// The one place the builder decides where the merge-mining output sits, so
-/// the merge-mining format can move it, to output 0 for instance, without
-/// touching the payouts. The coinbase budget counts it by size
-/// (`MAX_BCH_COINBASE_BYTES_BESIDE_PAYOUTS`), not by position, and the share
-/// commitment output stays last with its padding wherever it goes. Moving
-/// it also moves where `validate_custom_job` reads a declared job's
-/// merge-mining output (third from last today).
+/// The one place the builder decides where the merge-mining output sits.
+/// The share commitment output stays last with its padding
+/// (`append_commitment_outputs`), and `validate_custom_job` reads a declared
+/// job's commitment from output 0.
 fn place_merge_mining_output(
     outputs: &mut Vec<TxOut>,
     merge_mining: Option<MergeMiningCommitment>,
 ) {
     if let Some(commitment) = merge_mining {
-        outputs.push(commitment.output());
+        outputs.insert(0, commitment.output());
     }
 }
 
 /// Build a coinbase, optionally adding the Bitcoin Cash merge-mining output
-/// (`place_merge_mining_output`) before the share-commitment padding.
+/// (`place_merge_mining_output`) at output 0 and the payout tree's root
+/// output (`tree_output`) right after the direct payouts.
+///
+/// The outputs are output 0, the donation, the fee, the direct payouts in
+/// canonical order, the tree output, then the padding and the share
+/// commitment last (`bch-hybrid-payouts.md`, 3.6). BCH sets no rule on
+/// output order inside a transaction, so this order is the share chain's.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_coinbase(
     version: Version,
@@ -332,6 +338,7 @@ pub(crate) fn build_coinbase(
     nsecs: u64,
     extranonce: Option<&[u8]>,
     merge_mining: Option<MergeMiningCommitment>,
+    tree_output: Option<&TxOut>,
 ) -> Result<Transaction, WorkError> {
     if output_data.is_empty() {
         return Err(WorkError {
@@ -358,6 +365,7 @@ pub(crate) fn build_coinbase(
         .into_script();
 
     let mut outputs = build_outputs(output_data);
+    outputs.extend(tree_output.cloned());
     append_default_witness_commitment(&mut outputs, default_witness_commitment);
     place_merge_mining_output(&mut outputs, merge_mining);
     let lock_time = LockTime::from_height(height as u32 - 1).map_err(|_| WorkError {
@@ -384,9 +392,11 @@ pub(crate) fn build_coinbase(
     Ok(coinbase_tx)
 }
 
-/// Reconstruct a declared BCH coinbase with the same canonical payout tail.
+/// Reconstruct a declared BCH coinbase with the same canonical payout tail:
+/// `payouts`' direct outputs and tree output, which the caller split at the
+/// declared commitment's limit.
 pub(crate) fn build_declared_coinbase(
-    output_data: &[OutputPair],
+    payouts: &CoinbasePayouts,
     height: u64,
     commitment_hash: sha256::Hash,
     extranonce: &[u8],
@@ -402,7 +412,7 @@ pub(crate) fn build_declared_coinbase(
     }
     let mut coinbase = build_coinbase(
         Version::TWO,
-        output_data,
+        &payouts.outputs,
         height as i64,
         PushBytesBuf::new(),
         None,
@@ -411,6 +421,7 @@ pub(crate) fn build_declared_coinbase(
         0,
         Some(extranonce),
         Some(declared.merge_mining),
+        payouts.tree_output().as_ref(),
     )?;
     let mut script = Vec::with_capacity(declared.prefix.len() + extranonce.len());
     script.extend_from_slice(&declared.prefix);
@@ -607,12 +618,13 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
-    use crate::accounting::payout::coinbase_budget::BCH_MAX_COINBASE_PAYOUTS;
+    use crate::accounting::payout::payout_distribution::build_pplns_outputs;
     use crate::{
         stratum::work::block_template::BlockTemplate,
         test_utils::{create_test_commitment, genesis_for_tests},
     };
-    use bitcoin::{PubkeyHash, WitnessProgram, WitnessVersion};
+    use bitcoin::PubkeyHash;
+    use std::collections::HashMap;
 
     #[test]
     fn test_parse_address_valid_mainnet() {
@@ -1485,26 +1497,40 @@ mod tests {
         }
     }
 
-    /// The donation, a fee to the largest address type and `payouts` P2PKH
-    /// payouts: the most a Bitcoin Cash coinbase's outputs take.
-    fn largest_bch_outputs(payouts: u8) -> Vec<OutputPair> {
-        let fee_program = WitnessProgram::new(WitnessVersion::V2, &[0xfe; 40]).unwrap();
-        let mut outputs = vec![
-            bch_payout(0xd0, 4_687_500),
-            OutputPair {
-                address: Address::from_witness_program(fee_program, Network::Regtest),
-                amount: Amount::from_sat(26_562_500),
-            },
-        ];
-        outputs.extend((1..=payouts).map(|byte| bch_payout(byte, 25_000_000)));
-        outputs
+    /// `count` P2PKH payees weighing their number: the canonical order is by
+    /// number.
+    fn bch_weights(count: u8) -> HashMap<Address, u128> {
+        (1..=count)
+            .map(|byte| {
+                (
+                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    u128::from(byte),
+                )
+            })
+            .collect()
     }
 
-    /// The largest coinbase the coinbase budget allows: a declared 88-byte
-    /// prefix, the 12-byte extranonce, a fee to a 40-byte witness program and
-    /// `BCH_MAX_COINBASE_PAYOUTS` payouts, fits `BCH_COINBASE_BYTE_BUDGET`.
+    /// The payouts of a token share with `count` payees, split at the token
+    /// share's limit. Donation and fee are payees in the window's weights on
+    /// Bitcoin Cash, so the share's own cuts add no output.
+    fn token_share_payouts(count: u8) -> CoinbasePayouts {
+        build_pplns_outputs(
+            312_500_000,
+            &bch_weights(count),
+            &Some(bch_payout(0xd0, 0).address),
+            Some(150),
+            &Some(bch_payout(0xd1, 0).address),
+            Some(100),
+            PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, true),
+        )
+        .unwrap()
+    }
+
+    /// The largest coinbase a token share builds, a declared 88-byte prefix,
+    /// the 12-byte extranonce, a token commitment, 79 direct payouts and the
+    /// tree output, stays within T.
     #[test]
-    fn test_the_largest_bch_coinbase_fits_the_byte_budget() {
+    fn test_the_largest_token_share_coinbase_fits_its_limit() {
         let height = 900_000u64;
         let mut prefix = Builder::new()
             .push_int(height as i64)
@@ -1513,11 +1539,16 @@ mod tests {
         prefix.resize(88, 0x42);
         let declared = BchCoinbase {
             prefix,
-            merge_mining: MergeMiningCommitment::reserved(),
+            merge_mining: MergeMiningCommitment {
+                root: [0x33; 32],
+                height: 16,
+                salt: 7,
+            },
         };
+        let payouts = token_share_payouts(200);
 
         let coinbase = build_declared_coinbase(
-            &largest_bch_outputs(BCH_MAX_COINBASE_PAYOUTS as u8),
+            &payouts,
             height,
             sha256::Hash::all_zeros(),
             &EXTRANONCE_SEPARATOR,
@@ -1526,17 +1557,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(coinbase.input[0].script_sig.len(), 100);
-        assert!(coinbase.total_size() <= BCH_COINBASE_BYTE_BUDGET);
-        assert!(check_bch_coinbase_budget(&coinbase).is_ok());
+        assert_eq!(payouts.outputs.len(), 79);
+        assert!(payouts.tree.is_some());
+        assert!(coinbase.total_size() <= BCH_TOKEN_SHARE_COINBASE_LIMIT);
+        assert!(
+            check_bch_coinbase_limit(
+                &coinbase,
+                PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, true)
+            )
+            .is_ok()
+        );
     }
 
-    /// A coinbase paying every one of 30 payees, as Bitcoin Cash did before
-    /// the coinbase budget, is refused by the job builders.
+    /// The tree output follows the direct payouts, after output 0 and before
+    /// the padding and the share commitment.
     #[test]
-    fn test_a_bch_coinbase_past_the_byte_budget_is_refused() {
+    fn test_the_tree_output_follows_the_direct_payouts() {
+        let payouts = token_share_payouts(100);
+        let tree_output = payouts.tree_output().unwrap();
+
         let coinbase = build_coinbase(
             Version::TWO,
-            &largest_bch_outputs(30),
+            &payouts.outputs,
             900_000,
             PushBytesBuf::new(),
             None,
@@ -1544,11 +1586,101 @@ mod tests {
             Some(sha256::Hash::all_zeros()),
             0,
             None,
-            Some(MergeMiningCommitment::reserved()),
+            Some(MergeMiningCommitment::empty()),
+            Some(&tree_output),
         )
         .unwrap();
 
-        assert!(coinbase.total_size() > BCH_COINBASE_BYTE_BUDGET);
-        assert!(check_bch_coinbase_budget(&coinbase).is_err());
+        let tree_index = 1 + payouts.outputs.len();
+        assert_eq!(coinbase.output[tree_index], tree_output);
+        assert_eq!(coinbase.output.len(), tree_index + 3);
+    }
+
+    /// Ninety direct payouts, more than a token share's split ever makes, are
+    /// refused at the token share's limit and accepted at the no-token one.
+    #[test]
+    fn test_a_coinbase_past_the_token_limit_is_refused() {
+        let outputs: Vec<OutputPair> = (1..=90u8)
+            .map(|byte| bch_payout(byte, 25_000_000))
+            .collect();
+        let coinbase = build_coinbase(
+            Version::TWO,
+            &outputs,
+            900_000,
+            PushBytesBuf::new(),
+            None,
+            b"P2Poolv2",
+            Some(sha256::Hash::all_zeros()),
+            0,
+            None,
+            Some(MergeMiningCommitment::empty()),
+            None,
+        )
+        .unwrap();
+
+        assert!(coinbase.total_size() > BCH_TOKEN_SHARE_COINBASE_LIMIT);
+        assert!(
+            check_bch_coinbase_limit(
+                &coinbase,
+                PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, true)
+            )
+            .is_err()
+        );
+        assert!(
+            check_bch_coinbase_limit(
+                &coinbase,
+                PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, false)
+            )
+            .is_ok()
+        );
+    }
+
+    /// A token share's coinbase must have fewer than 253 outputs, so its
+    /// output count is the one byte a token covenant expects. Real payouts
+    /// reach the byte limit first; this coinbase of empty outputs does not.
+    #[test]
+    fn test_a_token_coinbase_of_253_outputs_is_refused() {
+        let coinbase = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![
+                TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: bitcoin::ScriptBuf::new(),
+                };
+                253
+            ],
+        };
+
+        assert!(coinbase.total_size() < BCH_TOKEN_SHARE_COINBASE_LIMIT);
+        assert!(
+            check_bch_coinbase_limit(
+                &coinbase,
+                PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, true)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_bitcoin_coinbases_have_no_share_chain_size_limit() {
+        let outputs: Vec<OutputPair> = (1..=90u8)
+            .map(|byte| bch_payout(byte, 25_000_000))
+            .collect();
+        let coinbase = build_bitcoin_coinbase_transaction(
+            Version::TWO,
+            &outputs,
+            900_000,
+            PushBytesBuf::new(),
+            None,
+            b"P2Poolv2",
+            Some(sha256::Hash::all_zeros()),
+            0,
+            None,
+        )
+        .unwrap();
+
+        assert!(check_bch_coinbase_limit(&coinbase, PayoutSplit::EveryPayee).is_ok());
     }
 }

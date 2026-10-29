@@ -37,6 +37,15 @@ confidence-threshold = 0.93
 # future relicence of the workspace itself.
 private = { ignore = true }
 
+[[licenses.clarify]]
+name = "libauth"
+version = "=3.1.0-next.8"
+expression = "MIT OR AGPL-3.0-or-later"
+# per the author via the owner, 2026-10-29; licence file pending upstream.
+# Remove this clarification once upstream publishes its licence file.
+# The git source is pinned to be3ed16396c9eb9c0e57343474d36079a37c8dae.
+license-files = []
+
 [bans]
 # Duplicate majors cannot be denied outright while bitcoin 0.32 pins rand 0.8.
 # Cargo only hard-errors on duplicate `links` crates, so this check is the only
@@ -51,6 +60,7 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/mainnet-pat/libauth-rs"]
 
 [advisories]
 # TRIAGE PROCEDURE
@@ -78,6 +88,15 @@ ignore = [
     # Remove both when libp2p moves to hickory 0.26.
     "RUSTSEC-2026-0118",  # hickory-proto 0.25.2, no fix published
     "RUSTSEC-2026-0119",  # hickory-proto 0.25.2, fixed in >=0.26.1
+
+    # Reachable, blocked upstream. crypto-bigint 0.5.5 comes from k256 0.13
+    # (our script and Schnorr code, and libp2p-identity 0.2 via libp2p 0.56).
+    # The fix is only in 0.7.6, which needs k256 0.14 and libp2p 0.57. The
+    # fixed defects are in 0.7-only code (the borrowing_sub workaround,
+    # UintRef, BoxedMontyForm, ctz, div_rem, Montgomery mul). k256 0.13 calls
+    # none of that; it uses 0.5's mask-based add/sub on secret scalars.
+    # Remove when k256 moves to 0.14 and libp2p to 0.57.
+    "RUSTSEC-2026-0387",  # crypto-bigint 0.5.5, fixed only in >=0.7.6
 
     # Unmaintained proc macro, build-time only, reached through
     # libp2p-tcp -> if-watch -> netlink-packet-core. Remove when that chain

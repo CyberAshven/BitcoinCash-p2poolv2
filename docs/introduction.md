@@ -20,8 +20,8 @@ P2Poolv2 developers.
   easier, for small miners. See [Small miners](small-miners.md).
 - **Mainnet and chipnet run the same rules;** only the network setting
   differs. Regtest is for development.
-- **1.5% donation** to the project by default, an optional operator fee, and
-  at most 10% for both, enforced by the share chain.
+- **1% donation** to the project by default, an optional operator fee (1%
+  unless set), and at most 10% for each, enforced by the share chain.
 - **Stratum V2 first:** Noise encryption, standard and extended channels,
   both Job Declaration modes, and templates from a Template Provider. Stratum
   V1 stays for older firmware. See [Miner options](miner-options.md).
@@ -35,17 +35,46 @@ The decisions behind these are in [Plan and decisions](bch-plan.md).
 ## Where to start
 
 - Run a node: [Running P2Poolv2 on Bitcoin Cash](bch-quickstart.md), then
-  [Requirements](requirements.md) and [Docker and Ansible](deployment.md).
+  [Requirements](requirements.md) and [Docker, Ansible and Umbrel](deployment.md).
 - Point a miner at a node: [Miner options](miner-options.md).
 - Understand the risks: [Known attacks and threat model](known-attacks.md).
 - Work on the code: the [Architecture](architecture/README.md) pages and
   `AGENTS.md` in the repository.
+
+## How it works
+
+Ported from upstream's documentation site and adapted to Bitcoin Cash (the
+[port map](upstream-port-map.md) lists every page):
+
+- Why: [Why P2Poolv2](why-p2poolv2.md) and
+  [Comparison with SV2 and DATUM](compare-datum-sv2.md).
+- The network and a node: [P2P network of miners](p2p-network.md),
+  [Node components](node-components.md) and
+  [Stratum server and vardiff](stratum.md).
+- The [Share chain](sharechain/README.md): commitments, validation, PPLNS
+  accounting, share transactions and pool size limits.
+- [Payouts](payouts/README.md): in the coinbase, and by selling shares.
 
 ## Status
 
 Alpha. The pool runs on chipnet; mainnet has not started. Releases are on
 the [releases page](https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases)
 and the Docker image is `ghcr.io/cyberashven/bitcoincash-p2poolv2`.
+
+## Sponsor
+
+P2Poolv2 for Bitcoin Cash is free, open-source software. Donations keep its
+development going. Send BCH, or CashTokens, to the project's donation
+address, the one the pool's own donation pays in each block it finds (1% by
+default; see [Miner options](miner-options.md#donation) to choose your own):
+
+- BCH: `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`
+- CashTokens-aware, the same key:
+  `bitcoincash:zze95tc2dqrnltvxfa5yhunwx5952f34fvflmylut9`
+
+The landing page's
+[donate section](https://cyberashven.github.io/BitcoinCash-p2poolv2/#donate)
+shows both with QR codes and Open in wallet links.
 
 ## License
 

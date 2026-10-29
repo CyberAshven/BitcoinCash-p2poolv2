@@ -15,7 +15,7 @@
 //!
 //! Only compiled under the `sim` feature. See docs/simulation/load-test-plan.md.
 
-use crate::address::Address as P2PoolAddress;
+use crate::address::share_owner::ShareOwner;
 use crate::config::SimConfig;
 use crate::sim::blockfind::submit_sim_block;
 use crate::sim::share::{SimShareParams, build_sim_emission};
@@ -40,7 +40,7 @@ pub struct SimEmitter {
     emissions_tx: EmissionSender,
     template_rx: watch::Receiver<Option<Arc<PreparedNotifyParams>>>,
     miner_address: Address,
-    share_address: P2PoolAddress,
+    share_owner: ShareOwner,
     config: SimConfig,
     /// RPC client used to submit a real regtest block on a statistical block-find.
     bitcoindrpc: BitcoindRpcClient,
@@ -51,11 +51,15 @@ pub struct SimEmitter {
 
 impl SimEmitter {
     /// Create a new emitter.
+    ///
+    /// `miner_address` is the payout address the share commits to and
+    /// `share_owner` the share chain identity owning the share coinbase:
+    /// a taproot program on Bitcoin, a P2PKH key hash on Bitcoin Cash.
     pub fn new(
         emissions_tx: EmissionSender,
         template_rx: watch::Receiver<Option<Arc<PreparedNotifyParams>>>,
         miner_address: Address,
-        share_address: P2PoolAddress,
+        share_owner: ShareOwner,
         config: SimConfig,
         bitcoindrpc: BitcoindRpcClient,
     ) -> Self {
@@ -63,7 +67,7 @@ impl SimEmitter {
             emissions_tx,
             template_rx,
             miner_address,
-            share_address,
+            share_owner,
             config,
             bitcoindrpc,
             tracker: start_tracker_actor(),
@@ -84,9 +88,11 @@ impl SimEmitter {
         let mut last_stats = std::time::Instant::now();
         const STATS_INTERVAL: Duration = Duration::from_secs(15);
 
+        // The configured spelling: on Bitcoin Cash the parsed address would
+        // print in Bitcoin's base58 form rather than as the CashAddr.
         info!(
             "Sim emitter started: address={}, hashrate={} h/s, block:share=1:{}, seed={}",
-            self.miner_address, self.config.hashrate, self.config.block_to_share_ratio, seed
+            self.config.miner_address, self.config.hashrate, self.config.block_to_share_ratio, seed
         );
 
         loop {
@@ -131,7 +137,7 @@ impl SimEmitter {
             let params = SimShareParams {
                 prepared: &prepared,
                 miner_address: &self.miner_address,
-                share_address: &self.share_address,
+                share_owner: self.share_owner,
                 tracker: &self.tracker,
                 enonce1_hex: &enonce1_hex,
                 enonce2_hex: &enonce2_hex,

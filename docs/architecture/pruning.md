@@ -53,35 +53,45 @@ Defined in `accounting/payout/sharechain_pplns/pplns_window.rs`.
 
 ### Bitcoin Cash
 
-The Bitcoin Cash fork keeps these constants. Its own payout rules sit inside
-them:
+The constants above are Bitcoin's (upstream's). Since the share-chain rule
+batch of 2026-10-24 (audit A12), Bitcoin Cash derives its own from its
+100-share maturity instead of Bitcoin's 6,048 (`ChainDepths::BITCOIN_CASH`):
 
-| Depth below the paying share | Shares | Covered by |
+| Constant | Value | Derivation |
 |---|---|---|
-| `BCH_COINBASE_MATURITY` skip | 100 | |
-| + window, sized by the paying header's difficulty, capped at `PPLNS_WINDOW_SHARES` | at most 121,060 | |
-| + uncles of the deepest window share (`MAX_UNCLES_DEPTH`) | at most 121,063 | `PAYOUT_DEPTH` (127,008) |
-| Block bodies kept (`PRUNE_DEPTH + PRUNE_INTERVAL` below the confirmed tip) | 254,376 | |
+| `BCH_COINBASE_MATURITY` | 100 | BCH's coinbase maturity, counted in shares |
+| `PPLNS_WINDOW_SHARES` | 120,960 | the window cap, unchanged |
+| `MAX_UNCLES_DEPTH` | 3 | an uncle of the deepest window share |
+| `BCH_PAYOUT_DEPTH` | 121,063 | 100 + 120,960 + 3: the deepest share a coinbase pays |
+| `BCH_PRUNE_DEPTH` | 242,126 | 2 x `BCH_PAYOUT_DEPTH` |
+| `PRUNE_INTERVAL` | 360 | unchanged |
+| Block bodies kept below the confirmed tip | 242,486 | `BCH_PRUNE_DEPTH + PRUNE_INTERVAL` |
 
+- `BCH_PAYOUT_DEPTH` is a share-chain rule: a Bitcoin Cash share coinbase
+  output can be spent from depth 100 and expires 121,063 shares below the
+  spending share. It also sizes the full-validation zone, so every share a
+  coinbase near the tip pays is fully validated, and the reorg depth limit
+  ("Reorg Depth Limit"), 121,063 shares below the confirmed tip.
+- Doubled, it is the prune depth, for the same reason as on Bitcoin: a
+  spend at the bottom of the zone may use outputs down to two payout depths
+  below the tip, exactly the prune height.
 - The window walk reads headers only (`PplnsWindow` caches confirmed headers
-  and their uncles), and headers are never pruned. So pruning cannot remove
-  anything a Bitcoin Cash payout needs, at any depth. The full-validation
-  zone still covers every share a coinbase near the tip pays.
-- A Bitcoin Cash share coinbase output can be spent from depth 100 and
-  expires at `PAYOUT_DEPTH`, the same expiry as Bitcoin, so the body an
-  in-zone spend needs is kept as on Bitcoin.
-- Production builds assert at compile time that
-  `BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES + MAX_UNCLES_DEPTH <=
-  PAYOUT_DEPTH`. The sim build shortens Bitcoin's maturity and the window
-  only; Bitcoin Cash's maturity stays 100 there, and the sim swarm runs
-  Bitcoin.
+  and their uncles), and headers are never pruned, so pruning cannot remove
+  anything a payout needs at any depth.
+- Every chain's depths are asserted at compile time: the walk plus its
+  uncles fits the payout depth, and the deepest followed fork with its
+  uncles stays above the prune target. The store, the block receiver, the
+  organise and validation workers and the share transaction pool all read
+  the node's chain's depths (`Store::with_chain`, `ChainDepths::for_chain`).
+- The sim build shortens the window to 80 shares; Bitcoin Cash's maturity
+  stays 100 there, so the sim's `BCH_PAYOUT_DEPTH` is 183 and its prune
+  depth 366.
 - Bitcoin Cash nodes relay share transactions and mine them in their shares
   (since 2026-10-22, `shares/transaction_pool.rs`, `handle_stratum_share.rs`),
   so a block may spend an output this node never fetched. Both rules that
   makes necessary are in place, on Bitcoin Cash and Bitcoin alike: the
   missing-input marker ("Missing Input at Write Time") and the reorg depth
-  limit at `PAYOUT_DEPTH` (127,008 shares) below the confirmed tip ("Reorg
-  Depth Limit").
+  limit at one payout depth below the confirmed tip ("Reorg Depth Limit").
 
 ## Model: Rules for Validity, Boundaries for Storage
 

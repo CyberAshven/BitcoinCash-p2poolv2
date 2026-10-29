@@ -1,0 +1,34 @@
+[package]
+name = "p2poolv2_safa"
+version.workspace = true
+edition.workspace = true
+# New code for the Bitcoin Cash fork, which is distributed under AGPL-3.0
+# (docs/bch-plan.md, decision 13). It ports tools/safa-auxpow, the fork's own
+# Node tool, which it replaces.
+license = "AGPL-3.0-or-later"
+homepage.workspace = true
+repository.workspace = true
+publish.workspace = true
+# The pinned BCH 2026 compiler and VM require Rust 1.90.
+rust-version = "1.90"
+description = "SAFA AuxPoW covenant compiler, transaction builder and BCH 2026 VM verifier"
+
+# Developer tooling only: never part of a release.
+[package.metadata.dist]
+dist = false
+
+[[bin]]
+name = "safa"
+path = "src/main.rs"
+
+[features]
+test-utils = []
+
+[dependencies]
+libauth.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+
+[dev-dependencies]
+tempfile.workspace = true

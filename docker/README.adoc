@@ -64,7 +64,7 @@ What happens:
 . The miner submits a few candidates a minute (`MUJINA_POOL_FORCED_RATE`).
   They are far below the pool's share difficulty, so the node rejects them as
   shares, but on regtest every hash meets the block target: the node submits
-  each one to BCHN as a block whose coinbase pays the 1.5% donation and the
+  each one to BCHN as a block whose coinbase pays the 1% donation and the
   PPLNS window.
 
 Check it:
@@ -114,10 +114,32 @@ docker compose up -d
 ----
 
 BCHN prunes to 2 GB on chipnet and 10 GB on mainnet (`bchn/bitcoin-*.conf`);
-P2Poolv2 needs templates, not an archive. The RPC login in those files is the
-stack's default and only reachable from the host: change it there and in
-`config.toml` before running on a shared host. See
+P2Poolv2 needs templates, not an archive. See
 link:../docs/requirements.md[requirements] for ports and disk.
+
+=== BCHN's RPC password
+
+The chipnet and mainnet configs ship no RPC password. On first start,
+BCHN's `entrypoint.sh` makes a random one (32 random bytes, 64 hex digits)
+and keeps it in the `bchn_rpc` volume as `password-chipnet` or
+`password-mainnet`, readable only by BCHN's user. Later starts reuse it. The
+`p2poolv2` service mounts that volume read-only and passes the password to
+the node as `P2POOL_BITCOINRPC__PASSWORD`, which overrides `password` in
+`config.toml`. bitcoind gets it from a config file in its data directory,
+never on the command line, and no log line prints it. The username stays
+`p2pool`.
+
+* To choose the password yourself, set `BCHN_RPC_PASSWORD` in `.env` (no
+  `#`). It replaces the stored one at the next start.
+* To read the one in use, for `bitcoin-cli` on the host or another tool:
+  `docker compose exec bchn cat /run/bchn-rpc/password-mainnet`.
+* To make a new random one, empty `BCHN_RPC_PASSWORD`, then run
+  `docker compose down`, `docker volume rm p2poolv2_bchn_rpc` and
+  `docker compose up -d`.
+
+Regtest keeps the public throwaway login `p2pool` / `p2pool` in
+`bchn/bitcoin-regtest.conf` and `config-docker.sample.toml`. Both ports stay
+on the host's loopback interface on every network.
 
 == Running multiple P2Poolv2 nodes
 
@@ -138,8 +160,12 @@ cp .env.node2.sample .env.node2
 docker compose -f docker-compose.node.yml -p node2 --env-file .env.node2 up -d
 ----
 
-Both nodes should show the same `chain_tip_height` on `/chain_info`. To stop
-an additional node:
+Both nodes should show the same `chain_tip_height` on `/chain_info`. Extra
+nodes mount the first stack's `p2poolv2_bchn_rpc` volume, so on chipnet and
+mainnet they use BCHN's password with no setup. Start the first stack before
+them. To use another BCHN instead, set `P2POOL_BITCOINRPC__URL` and
+`P2POOL_BITCOINRPC__PASSWORD` in the node's `.env`. To stop an additional
+node:
 
 [,shell]
 ----

@@ -7,6 +7,7 @@ use crate::accounting::payout::coinbase_budget::PayoutSplit;
 use crate::accounting::payout::payout_distribution::{
     PayoutDistribution, append_proportional_distribution,
 };
+use crate::accounting::payout::payout_tree::PayoutTree;
 use crate::config::BitcoinCashNetwork;
 #[cfg(test)]
 #[mockall_double::double]
@@ -46,10 +47,10 @@ impl PayoutDistribution for Payout {
         total_amount: bitcoin::Amount,
         remaining_total_amount: Amount,
         bootstrap_address: Address,
-        // Hydrapool's coinbase is not share-chain consensus and pays every
-        // payee; the share chain's coinbase budget does not apply.
+        // Hydrapool's coinbase is not a share-chain rule and pays every
+        // payee; the share chain's hybrid payout does not apply.
         _split: PayoutSplit,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    ) -> Result<Option<PayoutTree>, Box<dyn Error + Send + Sync>> {
         // Only calculate proportional distribution if there's remaining amount for miners
         // This avoids parsing miner addresses when 100% goes to donation/fee
         // This also avoids running PPLNS share look ups when we don't need to use that data
@@ -81,7 +82,7 @@ impl PayoutDistribution for Payout {
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 }
 

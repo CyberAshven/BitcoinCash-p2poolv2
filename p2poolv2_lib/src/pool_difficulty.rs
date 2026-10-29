@@ -116,7 +116,11 @@ pub(crate) fn asert_calculate_target(
 /// The genesis anchor derives its clamp from the anchor target, which is a
 /// chain constant. The Bitcoin Cash parent anchor cannot: its anchor target
 /// is the parent's bits, so it passes the chain's ceiling instead.
-fn asert_target_with_easy_clamp(
+///
+/// Public so the difficulty simulator (`p2poolv2_daa`) can run the share
+/// chain's own integer arithmetic with other half-lives. Consensus code goes
+/// through [`PoolDifficulty`], which passes the production constants.
+pub fn asert_target_with_easy_clamp(
     anchor_target: CompactTarget,
     time_delta: i64,
     height_delta: i64,
@@ -391,11 +395,19 @@ impl PoolDifficulty {
 
     /// Calculate the pool target clamped to stay within valid bounds.
     ///
-    /// The returned target is clamped in two directions:
-    /// 1. Never harder than bitcoin difficulty (floor) -- ASERT can produce a
-    ///    target smaller than the bitcoin target.
-    /// 2. Never easier than the chain ceiling. Bitcoin and the Bitcoin Cash
-    ///    main chain use MAX_POOL_TARGET. The mini chain uses its own anchor.
+    /// The returned target is never easier than the chain ceiling. Bitcoin
+    /// and the Bitcoin Cash main chain use MAX_POOL_TARGET. The mini chain
+    /// uses its own anchor.
+    ///
+    /// There is no floor at the block's own target: the share target can be
+    /// harder than a block, as on chipnet when BCHN offers a
+    /// minimum-difficulty block. Such a block is still submitted and pays
+    /// the PPLNS window, but it is not a share. A floor would have to take
+    /// the block target from the share's own header, whose nBits, time and
+    /// height its miner chooses; the ASERT band cannot pin them, because the
+    /// header's time stands in for its parent's and the proof-of-work limit
+    /// is always allowed on test networks. Anyone could then claim an easy
+    /// block target and mine shares at it.
     pub fn calculate_target_clamped(&self, parent: AsertParent) -> CompactTarget {
         let asert_target = self.calculate_target(parent);
 
@@ -1116,6 +1128,42 @@ mod tests {
         });
 
         assert_eq!(next, CompactTarget::from_consensus(MINI_ANCHOR_TARGET));
+    }
+
+    /// `asert_target_with_easy_clamp` is public for the difficulty simulator.
+    /// Given the parent's bits and interval, the production half-life and
+    /// interval, and the chain's ceiling, it is the Bitcoin Cash rule.
+    #[test]
+    fn public_asert_with_production_constants_is_the_parent_anchor_rule() {
+        for anchor in [bch_genesis::MAIN_ANCHOR_TARGET, MINI_ANCHOR_TARGET] {
+            let pool_difficulty =
+                PoolDifficulty::new(CompactTarget::from_consensus(anchor), 1_700_000_000, 0)
+                    .for_chain(Chain::BitcoinCash);
+            for (bits, interval) in [
+                (0x1a4188f5, 10),
+                (0x1a4188f5, 0),
+                (0x1a4188f5, 3_600),
+                (0x1b4188f5, 1),
+                (0x1c2a0000, 4_000),
+                (0x1c2a0000, -120),
+            ] {
+                let parent = AsertParent {
+                    height: 500,
+                    time: (1_700_005_000 + interval) as u32,
+                    bits: CompactTarget::from_consensus(bits),
+                    previous_time: 1_700_005_000,
+                };
+                let public = asert_target_with_easy_clamp(
+                    parent.bits,
+                    interval,
+                    0,
+                    sim_overrides::half_life(),
+                    sim_overrides::ideal_block_time(),
+                    pool_difficulty.target_ceiling(),
+                );
+                assert_eq!(public, pool_difficulty.calculate_target(parent));
+            }
+        }
     }
 
     /// The live chipnet case: the mini chain restarted 180 days after its
