@@ -4231,6 +4231,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "p2poolv2_photon_payout"
+version = "0.0.1-alpha"
+dependencies = [
+ "hex",
+ "libauth",
+]
+
+[[package]]
 name = "p2poolv2_safa"
 version = "0.0.1-alpha"
 dependencies = [

@@ -1,5 +1,5 @@
 # Short names for the developer tools in p2poolv2_tools, p2poolv2_netsim,
-# p2poolv2_daa and p2poolv2_safa; see docs/tooling.md. They only add cargo
+# p2poolv2_daa, p2poolv2_safa and p2poolv2_photon_payout; see docs/tooling.md. They only add cargo
 # subcommands and change nothing about how the workspace builds.
 [alias]
 sim = "run --release --package p2poolv2_tools --bin sim_harness --"
@@ -13,4 +13,5 @@ netsim = "run --release --package p2poolv2_netsim --bin netsim --"
 # A one-shot generator, so a debug build is enough.
 donate-qr = "run --package p2poolv2_tools --bin donate_qr --"
 safa = "run --package p2poolv2_safa --bin safa --"
+photon-payout-measure = "run --release --package p2poolv2_photon_payout --bin photon-payout-measure --"
 daa-sim = "run --release --package p2poolv2_daa --bin daa_sim --"

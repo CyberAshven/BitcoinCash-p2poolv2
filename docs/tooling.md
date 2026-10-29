@@ -18,6 +18,7 @@ in `.cargo/config.toml`:
 | `cargo netsim <command>` | `netsim` (crate `p2poolv2_netsim`) | Discrete-event simulation of share propagation at scale; see `docs/simulation/network-sim.md` |
 | `cargo donate-qr` | `donate_qr` | Writes the landing page's donation QR codes, `website/donate-*.svg`; see `website/README.md` |
 | `cargo safa <command>` | `safa` (crate `p2poolv2_safa`) | The SAFA AuxPoW covenant: its parameters, a miner's leaf, verified claims and an unsigned chipnet genesis; see `p2poolv2_safa/README.md` |
+| `cargo photon-payout-measure` | `photon-payout-measure` (crate `p2poolv2_photon_payout`) | Offline funded PHOTON payout covenant VM counters, transaction costs and tree execution; see `p2poolv2_photon_payout/README.md` |
 | `cargo daa-sim <command>` | `daa_sim` (crate `p2poolv2_daa`) | Share difficulty simulator: upstream's difficulty analysis ported from Python, on the share chain's own ASERT code; see [difficulty_adjustment/bch-daa-analysis.md](difficulty_adjustment/bch-daa-analysis.md) |
 
 The aliases build with `--release`, except `donate-qr`, a one-shot
@@ -62,6 +63,18 @@ input in libauth-rs's standard BCH 2026 VM, requiring agreement with the
 existing test machine. They decode the actual serialized transaction and
 source outputs, including CashTokens prefixes. This is a script check;
 transaction admission and relay still belong to BCHN.
+
+## PHOTON payout feasibility: `p2poolv2_photon_payout`
+
+This test-only phase 2a prototype compiles annotated BCH Script, constructs
+Merkle-sum manifests and funded payout transactions, and verifies them using
+the same pinned libauth-rs BCH 2026 VM in both standard and non-standard modes.
+`cargo photon-payout-measure` prints the measured resource and BCH cost tables;
+`--spends-only` omits full-tree execution and host hashing timing. The tool
+uses public synthetic funding fixtures, contacts no network and broadcasts
+nothing. Its README describes the ignored full-tree and seeded stress tests.
+BCHN acceptance and the unmodified PHOTON v3.2 claim-side tests remain separate
+gates. This crate is unpublished and excluded from release distribution.
 
 ## Shell that remains
 
