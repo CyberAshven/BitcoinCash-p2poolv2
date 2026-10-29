@@ -478,6 +478,15 @@ at a full window, or `1 / candidate_count` per candidate. That evaluation
 hashes the full redeem script, not one SHA-256 compression; benchmark
 its actual length and cost. It does not lengthen the 23-byte output.
 
+Pickaxe has no RIPEMD-160 on the GPU today; it exists only on the host,
+in wallet and retired-v0 reward code [Pickaxe review of 5373473b]. Seed
+binding therefore needs either a new SHA-256-of-`R` plus RIPEMD-160 seed
+path in the Rust, CUDA, HIP and wgpu engines, or a GPU-to-host-to-GPU round
+trip per batch. At about 1.6 GH/s per device, the host path is about
+24,000 HASH160 of `R` per second (about 48,000 under tail burning): cheap
+for a CPU, but an extra pipeline stage before each tail window. Measure
+both options; the tail cost itself is unchanged.
+
 `R` commits weights, not final token amounts. The root reads the actual
 reward amount when spent. Different miners on the same parent therefore
 commit the same beneficiary weights, but generally different redeem
@@ -505,25 +514,43 @@ attack on full-length root scripts has been measured. Memory, hardware,
 energy and search constants are omitted; Bitcoin SHA256d ASIC rates are
 not HASH160 evidence.
 
-Each found pair is worth at most one PHOTON reward, and only if its seed
-also contains a contract-winning tail. For a random accepted share,
-`probability = min(1, (contract_target - 1) / (share_target - 1))`.
-The familiar `contract_target / share_target` approximation applies when
-the contract target is harder and both targets are large [section 3;
-uniform-digest arithmetic]. Under an independent repeated-search model
-yielding one random accepted share per collision, expected cost per
-stolen reward is approximately `2^80 / probability` HASH160 evaluations,
-or `7.66 million / probability` GPU-years under the supplied rate.
+Each found pair is worth at most one PHOTON reward, and only if its honest
+side also contains a contract-winning tail. Let `p` be the win probability
+of one honest `(R, seed)` candidate over its bounded tail range:
+`p = 1 - (1 - (contract_target - 1) / 2^256)^candidate_count`, about
+`candidate_count * (contract_target - 1) / 2^256` when small, under
+independent digests. This is per seed, not per accepted share.
 
-That multiplier is conditional, not a proved attack lower bound. A seed
-with `candidate_count` tails has win probability
-`1 - (1 - (contract_target - 1) / 2^256)^candidate_count` under independent
-digests; it is not itself a single accepted share. An attacker can test
-tails before selecting seed scripts for its collision search. The auditor
-must analyze winner prefiltering, unequal search populations, time/memory
-tradeoffs and restricted script families before accepting the economic
-argument. Binding removes reuse across seeds; it does not enforce the
-attacker's order of computation.
+**Use the square-root bound, not `2^80 / p`.** A single large generic
+search yields many collisions, and the attacker needs only one whose honest
+side wins. The cheap per-element variable is the attacker's own metadata,
+for example its payout script, with the seed fixed. Each change gives a new
+`R` and HASH160, hence a fresh trial of the tail range. With `n1` honest and
+`n2` malicious candidates, success needs about `n1 * n2 * p = 2^160`. Total
+HASH160 work is minimized near `2 * 2^80 / sqrt(p)`. Testing the tails of
+the roughly `1 / p` collided honest seeds adds about one PHOTON win's work.
+Bounded-memory distinguished-point (golden-collision) search costs more,
+so `2 * 2^80 / sqrt(p)` is the conservative generic bound [Pickaxe review
+of 5373473b; S2]. For scale only, at `p = 6.5 * 10^-9` (one PHOTON win per
+about `10^13` candidates, 65,536 tails per seed), that is about
+`1.9 * 10^11` GPU-years per stolen reward at the assumed rate, against
+`1.2 * 10^15` under the superseded `2^80 / p` model.
+
+**Winner prefiltering cannot happen in the dangerous order.** Output 1
+is `OP_HASH160 <HASH160(R)> OP_EQUAL`, and those 20 bytes are inside the
+hashed claim (block 9, offsets 600 to 622). A tail can be tested only after
+`R`, and so its HASH160, is fixed. If the attacker first finds a winning
+`(seed, R1)`, a malicious `R2` must match an already fixed hash: a second
+preimage. Prefiltering to a set `W` of known winners turns this into a
+multi-target second preimage costing about `2^160 / |W|`. Each element of
+`W` costs a real PHOTON win that the attacker could simply keep solo, so
+`|W|` stays tiny and the cost exceeds `2^120` [Pickaxe review; serialization
+in section 2].
+
+These figures are conditional, not a proved attack lower bound. The
+auditor must still check unequal search populations, time/memory
+tradeoffs and restricted script families. Binding removes reuse across
+seeds; it does not control the attacker's own search strategy.
 
 A precomputed malicious table of `2^50` entries leaves order `2^110`
 online trials to hit it in a 160-bit range under the random-function
