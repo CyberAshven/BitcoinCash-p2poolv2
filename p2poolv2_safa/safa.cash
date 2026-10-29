@@ -1,0 +1,390 @@
+// SPDX-FileCopyrightText: 2026 P2Poolv2 Developers (see AUTHORS)
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// SAFA AuxPoW covenant for merge-mining common format v2, based on the SAFA
+// design by 2qx. One P2SH32 vault per thread holds the thread's fungible
+// tokens and a mutable NFT whose 16-byte commitment is the thread's state:
+//
+//   thread (u32 LE) | state_height (u32 LE) | target_bits (u32 LE) | ref_bits (u32 LE)
+//
+// Double-brace placeholders are deployment parameters that lib.mjs fills in
+// before compiling: the network's ASERT anchor and band, the thread count,
+// the AMM's virtual satoshis and the fee constant K.
+//
+// The functions are the covenant's building blocks; the tests run each one
+// alone against the format's golden vectors. Stack effects are written
+// bottom to top: [inputs] -> [outputs].
+
+// Function 1: parse one canonical AuxProof v2.
+// [proof] -> [header h salt aux head tail branch]
+<
+    <5> OP_SPLIT OP_SWAP <0x43544d5002> OP_EQUALVERIFY
+    <80> OP_SPLIT
+    OP_1 OP_SPLIT OP_SWAP <0x00> OP_CAT OP_BIN2NUM
+    OP_DUP <17> OP_LESSTHAN OP_VERIFY
+    OP_SWAP OP_4 OP_SPLIT
+    OP_2 OP_PICK <32> OP_MUL OP_SPLIT
+    OP_2 OP_SPLIT OP_SWAP <0x00> OP_CAT OP_BIN2NUM OP_SPLIT
+    OP_2 OP_SPLIT OP_SWAP <0x00> OP_CAT OP_BIN2NUM OP_SPLIT
+    OP_1 OP_SPLIT OP_SWAP <0x00> OP_CAT OP_BIN2NUM
+    OP_DUP <26> OP_LESSTHAN OP_VERIFY
+    <32> OP_MUL OP_OVER OP_SIZE OP_NIP OP_NUMEQUALVERIFY
+> <1> OP_DEFINE
+
+// Function 2: check the fixed-shape coinbase head and read its BIP34 height.
+// version | 01 | 00 x 32 | ffffffff | L <= 100 | scriptSig | sequence | count 1..0xfc
+// The height is a minimal, positive push of 1 to 5 bytes.
+// [head] -> [height]
+<
+    OP_SIZE OP_OVER <41> OP_SPLIT OP_NIP OP_1 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
+    OP_DUP <101> OP_LESSTHAN OP_VERIFY
+    <47> OP_ADD OP_NUMEQUALVERIFY
+    OP_4 OP_SPLIT OP_NIP <37> OP_SPLIT OP_SWAP
+    <0x010000000000000000000000000000000000000000000000000000000000000000ffffffff>
+    OP_EQUALVERIFY
+    OP_1 OP_SPLIT OP_NIP
+    OP_SIZE OP_1SUB OP_SPLIT
+    <0x00> OP_CAT OP_BIN2NUM OP_1 <253> OP_WITHIN OP_VERIFY
+    OP_SIZE OP_4 OP_SUB OP_SPLIT OP_DROP
+    OP_1 OP_SPLIT OP_SWAP <0x00> OP_CAT OP_BIN2NUM
+    OP_DUP OP_1 OP_6 OP_WITHIN OP_VERIFY
+    OP_SPLIT OP_DROP
+    OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY
+> <2> OP_DEFINE
+
+// Function 3: expand a canonical token target: 3 <= exp <= 32, 0 < mant < 0x800000.
+// [bits4] -> [target]
+<
+    OP_3 OP_SPLIT <0x00> OP_CAT OP_BIN2NUM
+    OP_DUP OP_3 <33> OP_WITHIN OP_VERIFY
+    OP_3 OP_SUB <8> OP_MUL
+    OP_SWAP <0x00> OP_CAT OP_BIN2NUM
+    OP_DUP OP_1 <8388608> OP_WITHIN OP_VERIFY
+    OP_SWAP OP_LSHIFTNUM
+> <3> OP_DEFINE
+
+// Function 4: encode a target (1 to 0x7fffff << 232) as canonical token bits,
+// rounding down to the compact precision.
+// [target] -> [bits4]
+<
+    OP_SIZE OP_3 OP_MAX
+    OP_TUCK OP_3 OP_SUB <8> OP_MUL OP_RSHIFTNUM
+    OP_3 OP_NUM2BIN OP_SWAP OP_1 OP_NUM2BIN OP_CAT
+> <4> OP_DEFINE
+
+// Function 5: a header's nBits as BCHN's SetCompact reads it, refusing a
+// negative, zero or above-the-limit target.
+// [bits4] -> [target]
+<
+    OP_3 OP_SPLIT <0x00> OP_CAT OP_BIN2NUM
+    OP_SWAP <0x00> OP_CAT OP_BIN2NUM
+    OP_DUP <8388608> OP_LESSTHAN OP_VERIFY
+    OP_SWAP OP_3 OP_SUB <8> OP_MUL
+    OP_DUP OP_0 OP_LESSTHAN OP_IF
+        OP_NEGATE OP_RSHIFTNUM
+    OP_ELSE
+        OP_LSHIFTNUM
+    OP_ENDIF
+    OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY
+    OP_DUP <{{POW_LIMIT}}> OP_LESSTHANOREQUAL OP_VERIFY
+> <5> OP_DEFINE
+
+// Function 6: BCHN's CalculateASERT, integer for integer: a truncating
+// division for the exponent, a flooring shift for its integer part, the
+// cubic for the fraction, then the clamps to [1, powLimit].
+// [reference time_diff height_diff half_life] -> [target]
+<
+    OP_TOALTSTACK
+    <600> OP_MUL OP_SUB
+    <600> OP_SUB <65536> OP_MUL
+    OP_FROMALTSTACK OP_DIV
+    OP_DUP <16> OP_RSHIFTNUM
+    OP_TUCK <65536> OP_MUL OP_SUB
+    OP_DUP OP_DUP OP_MUL
+    OP_2DUP OP_MUL <5127> OP_MUL
+    OP_SWAP <971821376> OP_MUL OP_ADD
+    OP_SWAP <195766423245049> OP_MUL OP_ADD <140737488355328> OP_ADD
+    <48> OP_RSHIFTNUM <65536> OP_ADD
+    OP_ROT OP_MUL
+    OP_SWAP <16> OP_SUB
+    OP_DUP OP_0 OP_LESSTHANOREQUAL OP_IF
+        OP_NEGATE <256> OP_MIN OP_RSHIFTNUM
+    OP_ELSE
+        <256> OP_MIN OP_LSHIFTNUM
+    OP_ENDIF
+    OP_1 OP_MAX <{{POW_LIMIT}}> OP_MIN
+> <6> OP_DEFINE
+
+// Function 7: the ASERT band of a header at the coinbase height, its own time
+// standing in for its parent's: computed / HARD_DIVISOR <= target <=
+// computed * EASY_NUMERATOR / EASY_DENOMINATOR: mainnet /2 to x1.05,
+// test networks /8 to x8, or (test networks) nBits exactly powLimit's.
+// [nbits4 time4 height] -> [ok]
+<
+    OP_ROT
+    OP_DUP <0xffff001d> OP_EQUAL <{{ALLOW_POW_LIMIT}}> OP_BOOLAND
+    OP_SWAP <5> OP_INVOKE
+    OP_SWAP OP_IF
+        OP_DROP OP_2DROP OP_1
+    OP_ELSE
+        OP_ROT OP_ROT
+        OP_1SUB <{{ANCHOR_HEIGHT}}> OP_SUB
+        OP_DUP OP_0 OP_GREATERTHANOREQUAL OP_VERIFY
+        OP_SWAP <0x00> OP_CAT OP_BIN2NUM <{{ANCHOR_PARENT_TIME}}> OP_SUB
+        <{{ANCHOR_TARGET}}> OP_SWAP OP_ROT <{{HALF_LIFE}}>
+        <6> OP_INVOKE
+        OP_2DUP <{{HARD_DIVISOR}}> OP_DIV OP_GREATERTHANOREQUAL
+        OP_ROT <{{EASY_DENOMINATOR}}> OP_MUL OP_ROT <{{EASY_NUMERATOR}}> OP_MUL OP_LESSTHANOREQUAL OP_BOOLAND
+    OP_ENDIF
+> <7> OP_DEFINE
+
+// Function 8: the DAA-change fallback band around the state's reference,
+// ref >> 4 <= target <= ref * 1.1. It applies only from dh = 4,032, where
+// min(dh / 288, 4) is always 4.
+// [nbits4 ref_bits4] -> [ok]
+<
+    <5> OP_INVOKE
+    OP_SWAP <5> OP_INVOKE
+    OP_2DUP <10> OP_MUL OP_SWAP <11> OP_MUL OP_LESSTHANOREQUAL
+    OP_ROT OP_4 OP_RSHIFTNUM
+    OP_ROT OP_LESSTHANOREQUAL OP_BOOLAND
+> <8> OP_DEFINE
+
+// Function 9: a category's slot, u32le(SHA256(02 || salt || category)[0..4]) mod 2^h.
+// [category salt h] -> [slot]
+<
+    OP_ROT OP_ROT
+    OP_SWAP OP_CAT <0x02> OP_SWAP OP_CAT
+    OP_SHA256 OP_4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
+    OP_SWAP OP_1 OP_SWAP OP_LSHIFTNUM OP_MOD
+> <9> OP_DEFINE
+
+// Function 10: fold a leaf hash up the aux branch: at level i, bit i of the
+// slot set makes the current node the right child of SHA256(01 || l || r).
+// [leaf slot aux] -> [root]
+<
+    OP_SIZE OP_IF
+        OP_BEGIN
+            <32> OP_SPLIT OP_TOALTSTACK
+            OP_SWAP OP_DUP OP_2 OP_MOD OP_SWAP OP_2 OP_DIV OP_TOALTSTACK
+            OP_IF OP_SWAP OP_ENDIF
+            OP_CAT <0x01> OP_SWAP OP_CAT OP_SHA256
+            OP_FROMALTSTACK OP_FROMALTSTACK
+            OP_SIZE OP_NOT
+        OP_UNTIL
+    OP_ENDIF
+    OP_2DROP
+> <10> OP_DEFINE
+
+// Function 11: the 53-byte coinbase output 0, OP_RETURN "CTMM" 02 root h salt.
+// [root h salt] -> [output0]
+<
+    OP_SWAP OP_1 OP_NUM2BIN OP_SWAP OP_CAT OP_CAT
+    <0x00000000000000002c6a2a43544d4d02> OP_SWAP OP_CAT
+> <11> OP_DEFINE
+
+// Function 12: the coinbase txid, HASH256(head || output0 || tail), folded
+// up the coinbase branch at index 0.
+// [head output0 tail branch] -> [merkle_root]
+<
+    OP_TOALTSTACK
+    OP_SIZE OP_4 OP_GREATERTHANOREQUAL OP_VERIFY
+    OP_CAT OP_CAT OP_HASH256
+    OP_FROMALTSTACK
+    OP_SIZE OP_IF
+        OP_BEGIN
+            <32> OP_SPLIT OP_TOALTSTACK OP_CAT OP_HASH256 OP_FROMALTSTACK
+            OP_SIZE OP_NOT
+        OP_UNTIL
+    OP_ENDIF
+    OP_DROP
+> <12> OP_DEFINE
+
+// Function 13: HASH256(header), as an unsigned little-endian number, meets the target.
+// [header target] -> []
+<
+    OP_SWAP OP_HASH256 <0x00> OP_CAT OP_BIN2NUM
+    OP_GREATERTHANOREQUAL OP_VERIFY
+> <13> OP_DEFINE
+
+// Function 14: the leaf hash, SHA256(00 || "CTML" 02 || the 164 field bytes).
+// [category lock_hash state_hash payout_hash bits4 ext] -> [leaf]
+<
+    OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT
+    <0x0043544d4c02> OP_SWAP OP_CAT OP_SHA256
+> <14> OP_DEFINE
+
+// Function 15: read a revealed split preimage, 03 || d_bps || d_hash || f_bps
+// || f_hash, checked canonical and not all-empty; an empty push is no split.
+// [preimage] -> [ext d_bps d_hash f_bps f_hash]
+<
+    OP_SIZE OP_IF
+        OP_SIZE <69> OP_NUMEQUALVERIFY
+        OP_DUP OP_SHA256 OP_SWAP
+        OP_1 OP_SPLIT OP_SWAP <0x03> OP_EQUALVERIFY
+        OP_2 OP_SPLIT OP_SWAP <0x00> OP_CAT OP_BIN2NUM
+        OP_SWAP <32> OP_SPLIT
+        OP_2 OP_SPLIT OP_SWAP <0x00> OP_CAT OP_BIN2NUM
+        OP_SWAP
+        <16> OP_INVOKE
+        OP_2SWAP <16> OP_INVOKE OP_2SWAP
+        OP_3 OP_PICK OP_2 OP_PICK OP_ADD OP_0 OP_GREATERTHAN OP_VERIFY
+    OP_ELSE
+        OP_DROP <0x0000000000000000000000000000000000000000000000000000000000000000>
+        OP_0 OP_0 OP_0 OP_0
+    OP_ENDIF
+> <15> OP_DEFINE
+
+// Function 16: one canonical split slot: a rate of at most 10,000 and a zero
+// hash exactly when the rate is 0.
+// [bps hash] -> [bps hash]
+<
+    OP_OVER <10001> OP_LESSTHAN OP_VERIFY
+    OP_2DUP <0x0000000000000000000000000000000000000000000000000000000000000000> OP_EQUAL
+    OP_SWAP OP_0 OP_NUMEQUAL OP_EQUALVERIFY
+> <16> OP_DEFINE
+
+// Function 17: the shares of a reward R: d = R * d_bps / 10000, then
+// f = (R - d) * f_bps / 10000; a share worth under 1,000 satoshis at the AMM
+// price goes to the miner, and dropping it never changes the other.
+// [R d_bps f_bps num tokens] -> [miner donation fee], num = cash + virtual
+<
+    OP_TOALTSTACK OP_TOALTSTACK
+    OP_2 OP_PICK OP_ROT OP_MUL <10000> OP_DIV
+    OP_2 OP_PICK OP_OVER OP_SUB
+    OP_ROT OP_MUL <10000> OP_DIV
+    OP_FROMALTSTACK OP_FROMALTSTACK
+    OP_2DUP OP_TOALTSTACK OP_TOALTSTACK
+    <18> OP_INVOKE
+    OP_SWAP OP_FROMALTSTACK OP_FROMALTSTACK
+    <18> OP_INVOKE OP_SWAP
+    OP_ROT OP_2 OP_PICK OP_SUB OP_OVER OP_SUB
+    OP_ROT OP_ROT
+> <17> OP_DEFINE
+
+// Function 18: keep a share worth at least 1,000 satoshis, x * num / tokens;
+// an AMM holding no tokens prices nothing.
+// [x num tokens] -> [x or 0]
+<
+    OP_ROT OP_DUP OP_TOALTSTACK
+    OP_ROT OP_MUL OP_SWAP
+    OP_DUP OP_IF OP_DIV OP_ELSE OP_2DROP OP_0 OP_ENDIF
+    <1000> OP_GREATERTHANOREQUAL
+    OP_FROMALTSTACK OP_SWAP OP_NOTIF OP_DROP OP_0 OP_ENDIF
+> <18> OP_DEFINE
+
+// Function 19: output idx pays amount fungible tokens of the vault's category,
+// with no NFT, exactly 800 satoshis, to a script of at most 35 bytes (P2PKH,
+// P2SH20 or P2SH32, as K assumes) whose HASH256 is hash.
+// [amount hash idx] -> []
+<
+    OP_DUP OP_OUTPUTVALUE <800> OP_NUMEQUALVERIFY
+    OP_DUP OP_OUTPUTTOKENCATEGORY OP_0 OP_UTXOTOKENCATEGORY <32> OP_SPLIT OP_DROP OP_EQUALVERIFY
+    OP_DUP OP_OUTPUTBYTECODE OP_SIZE <36> OP_LESSTHAN OP_VERIFY OP_HASH256 OP_ROT OP_EQUALVERIFY
+    OP_OUTPUTTOKENAMOUNT OP_NUMEQUALVERIFY
+> <19> OP_DEFINE
+
+// Function 20: the next claim output, present only when its amount is above 0.
+// [idx amount hash] -> [next_idx]
+<
+    OP_OVER OP_IF
+        OP_2 OP_PICK <19> OP_INVOKE OP_1ADD
+    OP_ELSE
+        OP_2DROP
+    OP_ENDIF
+> <20> OP_DEFINE
+
+// == main ==
+// Every spend returns the vault: the same locking bytecode, category and
+// mutable NFT at the input's own output index, with a 16-byte state.
+OP_INPUTINDEX OP_OUTPUTBYTECODE OP_INPUTINDEX OP_UTXOBYTECODE OP_EQUALVERIFY
+OP_INPUTINDEX OP_UTXOTOKENCATEGORY
+OP_DUP OP_INPUTINDEX OP_OUTPUTTOKENCATEGORY OP_EQUALVERIFY
+<32> OP_SPLIT <0x01> OP_EQUALVERIFY OP_SIZE <32> OP_NUMEQUALVERIFY OP_DROP
+OP_INPUTINDEX OP_UTXOTOKENCOMMITMENT OP_SIZE <16> OP_NUMEQUALVERIFY
+OP_INPUTINDEX OP_OUTPUTTOKENCOMMITMENT OP_EQUAL
+OP_IF
+    // Market: the state is unchanged and the virtual constant product holds.
+    OP_INPUTINDEX OP_OUTPUTVALUE <{{VIRTUAL_SATS}}> OP_ADD OP_INPUTINDEX OP_OUTPUTTOKENAMOUNT OP_MUL
+    OP_INPUTINDEX OP_UTXOVALUE <{{VIRTUAL_SATS}}> OP_ADD OP_INPUTINDEX OP_UTXOTOKENAMOUNT OP_MUL
+    OP_GREATERTHANOREQUAL OP_VERIFY
+OP_ELSE
+    // Claim. Unlocking arguments: split preimage (69 bytes or empty),
+    // payout_hash, AuxProof v2. The vault is the only input, so index 0.
+    OP_TXINPUTCOUNT OP_1 OP_NUMEQUALVERIFY
+    OP_SIZE <{{FEE_K}}> OP_ADD OP_TOALTSTACK
+    <1> OP_INVOKE
+    // split payout header h salt aux head tail branch
+    OP_2 OP_PICK <2> OP_INVOKE
+    OP_DUP <500000000> OP_LESSTHAN OP_VERIFY
+    OP_CHECKLOCKTIMEVERIFY
+    OP_0 OP_UTXOTOKENCOMMITMENT <4> OP_SPLIT OP_NIP <4> OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
+    OP_OVER OP_SWAP OP_SUB
+    OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY
+    // ... H dh: the claim target eases by min(dh, 288) / threads.
+    OP_DUP <288> OP_MIN <5000> OP_MUL <{{THREADS}}> OP_DIV <5000> OP_ADD
+    OP_0 OP_UTXOTOKENCOMMITMENT <8> OP_SPLIT OP_NIP <4> OP_SPLIT OP_DROP <3> OP_INVOKE
+    OP_MUL <10000> OP_DIV OP_1 OP_MAX <{{MAX_TOKEN_TARGET}}> OP_MIN
+    <4> OP_INVOKE
+    // ... H dh bits: rebuild the leaf from introspection.
+    <11> OP_PICK <15> OP_INVOKE OP_2DROP OP_2DROP
+    OP_0 OP_UTXOTOKENCATEGORY <32> OP_SPLIT OP_DROP
+    OP_0 OP_UTXOBYTECODE OP_HASH256
+    OP_0 OP_UTXOTOKENCOMMITMENT OP_HASH256
+    <14> OP_PICK <5> OP_PICK <5> OP_ROLL
+    <14> OP_INVOKE
+    // ... bits leaf: slot, root, output 0, coinbase, merkle root.
+    OP_0 OP_UTXOTOKENCATEGORY <32> OP_SPLIT OP_DROP
+    <9> OP_PICK <11> OP_PICK <9> OP_INVOKE
+    <8> OP_ROLL <10> OP_INVOKE
+    <8> OP_ROLL <8> OP_ROLL <11> OP_INVOKE
+    <6> OP_ROLL OP_SWAP <6> OP_ROLL <6> OP_ROLL <12> OP_INVOKE
+    // split payout header H dh bits merkle
+    <4> OP_PICK <36> OP_SPLIT OP_NIP <32> OP_SPLIT OP_DROP OP_EQUALVERIFY
+    OP_3 OP_PICK OP_OVER <3> OP_INVOKE <13> OP_INVOKE
+    // BCH only: the header's nBits in the ASERT band, or the fallback band.
+    OP_3 OP_PICK <72> OP_SPLIT OP_NIP OP_4 OP_SPLIT OP_DROP
+    <4> OP_PICK <68> OP_SPLIT OP_NIP OP_4 OP_SPLIT OP_DROP
+    <4> OP_PICK
+    <7> OP_INVOKE
+    OP_NOTIF
+        OP_OVER <4032> OP_GREATERTHANOREQUAL OP_VERIFY
+        OP_3 OP_PICK <72> OP_SPLIT OP_NIP OP_4 OP_SPLIT OP_DROP
+        OP_0 OP_UTXOTOKENCOMMITMENT <12> OP_SPLIT OP_NIP
+        <8> OP_INVOKE OP_VERIFY
+    OP_ENDIF
+    OP_NIP
+    // split payout header H bits: the next state.
+    OP_0 OP_UTXOTOKENCOMMITMENT <4> OP_SPLIT OP_DROP
+    OP_2 OP_PICK <4> OP_NUM2BIN OP_CAT
+    OP_OVER OP_CAT
+    OP_3 OP_PICK <72> OP_SPLIT OP_NIP OP_4 OP_SPLIT OP_DROP OP_CAT
+    OP_0 OP_OUTPUTTOKENCOMMITMENT OP_EQUALVERIFY
+    OP_2DROP OP_DROP
+    // split payout: the reward and the vault's remainder.
+    OP_0 OP_UTXOTOKENAMOUNT <420000> OP_DIV
+    OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY
+    OP_0 OP_UTXOTOKENAMOUNT OP_OVER OP_SUB OP_0 OP_OUTPUTTOKENAMOUNT OP_NUMEQUALVERIFY
+    OP_2 OP_PICK <15> OP_INVOKE
+    OP_TOALTSTACK OP_SWAP OP_TOALTSTACK
+    OP_ROT OP_DROP
+    OP_0 OP_UTXOVALUE <{{VIRTUAL_SATS}}> OP_ADD OP_0 OP_UTXOTOKENAMOUNT
+    <17> OP_INVOKE
+    // split payout miner donation fee: outputs 1.. in that order.
+    OP_1
+    OP_3 OP_ROLL OP_4 OP_ROLL <20> OP_INVOKE
+    OP_ROT OP_FROMALTSTACK <20> OP_INVOKE
+    OP_SWAP OP_FROMALTSTACK <20> OP_INVOKE
+    OP_DUP OP_TXOUTPUTCOUNT OP_NUMEQUALVERIFY
+    // split count: the vault pays S to 3S satoshis from its cash, S = K + the
+    // proof's size, and keeps at least the 800-satoshi token dust itself.
+    OP_1SUB <800> OP_MUL
+    OP_0 OP_UTXOVALUE OP_SWAP OP_SUB
+    OP_0 OP_OUTPUTVALUE OP_DUP <800> OP_GREATERTHANOREQUAL OP_VERIFY OP_SUB
+    OP_FROMALTSTACK
+    OP_2DUP OP_GREATERTHANOREQUAL OP_VERIFY
+    OP_3 OP_MUL OP_LESSTHANOREQUAL OP_VERIFY
+    OP_DROP
+OP_ENDIF
+OP_1

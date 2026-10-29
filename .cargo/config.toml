@@ -12,3 +12,4 @@ pool-diagnose = "run --release --package p2poolv2_tools --bin pool_diagnose --"
 netsim = "run --release --package p2poolv2_netsim --bin netsim --"
 # A one-shot generator, so a debug build is enough.
 donate-qr = "run --package p2poolv2_tools --bin donate_qr --"
+safa = "run --package p2poolv2_safa --bin safa --"

@@ -13,6 +13,7 @@ members = [
     "p2poolv2_web",
     "p2poolv2_tui",
     "p2poolv2_netsim",
+    "p2poolv2_safa",
 ]
 resolver = "2"
 
@@ -45,6 +46,7 @@ debug = true
 inherits = "release"
 
 [workspace.dependencies]
+libauth = { git = "https://github.com/mainnet-pat/libauth-rs", rev = "be3ed16396c9eb9c0e57343474d36079a37c8dae" }
 libp2p = { version = "0.56", features = [
     "tcp",
     "dns",
