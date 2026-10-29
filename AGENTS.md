@@ -21,10 +21,8 @@ binaries in `p2poolv2_tools`; see `docs/tooling.md`. Shell is allowed only
 as glue: CI `run:` steps, the Docker workflow's helper scripts and the
 bitcoind image's entrypoint.
 
-The one exception is `tools/safa-auxpow` (Node and Libauth): it runs the
-SAFA covenant in the Bitcoin Cash VM, which no Rust crate in this
-repository provides yet. It is temporary; port it once Rust SAFA code and a
-Rust BCH VM exist. Don't add to it.
+There is no exception: the SAFA covenant tool, once Node and Libauth, is
+the Rust crate `p2poolv2_safa` on libauth-rs's Bitcoin Cash 2026 VM.
 
 ## Branches and releases (Bitcoin Cash fork)
 
@@ -105,6 +103,7 @@ Never infer architecture from filenames alone. Read the relevant architecture do
 | `p2poolv2_tools` | Developer tools: sim swarm harness (`cargo sim`), mock bitcoind, log analysers, JMeter drivers; see `docs/tooling.md` |
 | `bitcoindrpc` | JSON-RPC 1.0 client for Bitcoin Core |
 | `p2poolv2_tui` | Terminal UI for a Bitcoin Cash node and its BCHN, ported from upstream's PDM; AGPL-3.0-or-later, unlike the rest of the workspace |
+| `p2poolv2_safa` | SAFA AuxPoW covenant tool (`cargo safa`): compiles the covenant and checks claims in libauth-rs's BCH 2026 VM; AGPL-3.0-or-later; see `p2poolv2_safa/README.md` |
 
 ## Key entry points in p2poolv2_lib
 

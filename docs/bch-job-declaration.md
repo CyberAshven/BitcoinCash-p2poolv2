@@ -227,7 +227,7 @@ The test passed in 6.459 seconds. These proofs then authorized a real token
 withdrawal. BCHN rejected that identical signed transaction one block before
 its 74-block relative age matured, then accepted it after one more block.
 The withdrawal, public vectors and reproduction commands are in
-[the SAFA evidence record](../tools/safa-auxpow/README.md#regtest-evidence-and-reproduction).
+[the SAFA evidence record](../p2poolv2_safa/README.md#regtest-evidence-and-reproduction).
 
 ## Encrypted BCHN and SAFA check (2026-10-17)
 
@@ -261,7 +261,7 @@ passed the mempool check and the withdrawal confirmed at 252. The harness
 retains both results, separating VM sequence checks from actual chain maturity.
 
 Reproduce the token preparation and withdrawal using
-[the SAFA harness](../tools/safa-auxpow/README.md#regtest-evidence-and-reproduction)
+[the SAFA harness](../p2poolv2_safa/README.md#regtest-evidence-and-reproduction)
 around this opt-in test. An initial synthetic-work run also passed at heights
 102 and 103. The disposable nodes were stopped after validation, with their
 public proof and transaction evidence retained locally. Independent clients,

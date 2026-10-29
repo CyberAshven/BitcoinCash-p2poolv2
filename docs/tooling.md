@@ -17,25 +17,33 @@ in `.cargo/config.toml`:
 | `cargo pool-diagnose` | `pool_diagnose` | System and process diagnostics for a pool under load |
 | `cargo netsim <command>` | `netsim` (crate `p2poolv2_netsim`) | Discrete-event simulation of share propagation at scale; see `docs/simulation/network-sim.md` |
 | `cargo donate-qr` | `donate_qr` | Writes the landing page's donation QR codes, `website/donate-*.svg`; see `website/README.md` |
+| `cargo safa <command>` | `safa` (crate `p2poolv2_safa`) | The SAFA AuxPoW covenant: its parameters, a miner's leaf, verified claims and an unsigned chipnet genesis; see `p2poolv2_safa/README.md` |
 
 The aliases build with `--release`, except `donate-qr`, a one-shot
-generator. Every tool takes `--help`. Arguments go
+generator, and `safa`, a quick command line. Every tool takes `--help`. Arguments go
 after the alias, for example `cargo sim run-swarm 20` or
 `cargo share-latency --include-uncles 'logs/node-*.log'`.
 
 `verify_chain` (in `p2poolv2_node`, feature `debug-tools`) is unchanged:
 `just verify_chain /path/to/store.db`.
 
-## The one exception: `tools/safa-auxpow`
+## The SAFA covenant tool: `p2poolv2_safa`
 
-`tools/safa-auxpow` stays JavaScript (Node and Libauth). It is the test
-harness for the SAFA AuxPoW covenant: it compiles `safa.cash` with pinned
-Libauth and runs the covenant in the Bitcoin Cash 2026 VM, which only Libauth
-provides. There is no Rust Bitcoin Cash VM in this repository yet, so it
-cannot be ported. It is temporary: when Rust SAFA code and a Rust BCH VM
-land, port it and remove this exception. CI runs it as the `BCH Covenant
-Tests` job in `.github/workflows/rust.yml`, and CodeQL scans it as the
-repository's only JavaScript.
+The SAFA AuxPoW covenant tool was the last JavaScript in the repository
+(`tools/safa-auxpow`, Node and Libauth). It is now the Rust crate
+`p2poolv2_safa` (2026-10-29). It compiles `safa.cash` and runs the
+covenant in the Bitcoin Cash 2026 VM of
+[libauth-rs](https://github.com/mainnet-pat/libauth-rs), a Rust port of
+`@bitauth/libauth` 3.1.0-next.8, the version the Node tool pinned. It is a
+git dependency pinned to commit `be3ed16396c9eb9c0e57343474d36079a37c8dae`.
+Before the Node tool was removed, both printed the same bytes for every
+command over the fixtures (the port's commit message lists the runs).
+CI runs it as the `BCH Covenant Tests` job in `.github/workflows/rust.yml`.
+
+libauth-rs has no licence file yet. Its author told the owner it is MIT or
+AGPL, so `deny.toml` clarifies it as `MIT OR AGPL-3.0-or-later` (per the
+author via the owner, 2026-10-29). Remove that clarification once upstream
+publishes its licence file.
 
 ## Shell that remains
 

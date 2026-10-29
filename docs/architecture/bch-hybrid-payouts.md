@@ -358,7 +358,7 @@ coinbase branch 75, the aux branch 32, the leaf, header and state hashes about
 18. The standard limit is `(41 + 5,554) / 2` = 2,797. The claim transaction
 is about 6 KB, about 6,000 satoshis at 1 sat/byte. For scale, the SAFA
 variant's regtest withdrawal had a 1,266-byte scriptSig and passed BCHN 29.2.0
-(`tools/safa-auxpow/README.md`).
+(`p2poolv2_safa/README.md`).
 
 A deployed token covenant cannot change. **T must never exceed what the
 deployed token covenants can claim.** That is why any raise is a new protocol
@@ -901,4 +901,4 @@ Other:
 - [BIP119](https://github.com/bitcoin/bips/blob/master/bip-0119.mediawiki): congestion control trees (the idea; BCH needs no new opcode)
 - [0zkbrewer BCH-FRI-STARK-Verifier](https://github.com/0zkbrewer/BCH-FRI-STARK-Verifier): multi-input verifier topology and its binding audits
 - [OCEAN DATUM gateway](https://github.com/OCEAN-xyz/datum_gateway): per-device coinbase sizes (`src/datum_coinbaser.c`, `src/datum_stratum.c`)
-- In this repository: `accounting/payout/coinbase_budget.rs`, `stratum/work/coinbase.rs`, `shares/validation/mod.rs`, `shares/coinbase_proof.rs`, `tools/safa-auxpow/README.md`, `docs/bch-auxpow.md`
+- In this repository: `accounting/payout/coinbase_budget.rs`, `stratum/work/coinbase.rs`, `shares/validation/mod.rs`, `shares/coinbase_proof.rs`, `p2poolv2_safa/README.md`, `docs/bch-auxpow.md`

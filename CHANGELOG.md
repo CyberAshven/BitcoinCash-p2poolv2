@@ -248,7 +248,19 @@ anchor and the donation and fee cap as they were.
 
 ### Changed
 
-- `tools/safa-auxpow`: the experimental SAFA covenant verifies merge-mining
+- The SAFA covenant tool is Rust: the crate `p2poolv2_safa` (`cargo safa`)
+  replaces the Node tool `tools/safa-auxpow`, the repository's last
+  JavaScript. It compiles `safa.cash` and runs the covenant in the BCH 2026
+  VM of libauth-rs, a Rust port of `@bitauth/libauth` 3.1.0-next.8, pinned to
+  commit `be3ed16396c9`; `deny.toml` clarifies libauth-rs as `MIT OR
+  AGPL-3.0-or-later` until its licence file lands. Its `params`, `leaf`,
+  `claim` and `genesis` print the same bytes as the Node tool did (25 runs
+  over the fixtures, refusals included), and it adds `work`, `unlock` and
+  `verify`. All 63 Node tests are 225 Rust tests, which also pin the VM's
+  op-cost and hash iterations to the values the Node tool measured. The
+  `BCH Covenant Tests` CI job runs cargo, and CodeQL has no JavaScript left
+  to scan.
+- The SAFA covenant (now `p2poolv2_safa`) verifies merge-mining
   common format v2 in the BCH 2026 VM, with the token rules agreed with
   Pickaxe: one vault input and fixed outputs (vault, miner, donation, fee);
   the per-win split from the leaf's `ext`, with `MIN_SHARE_SATS` 1,000 at
@@ -263,8 +275,8 @@ anchor and the donation and fee cap as they were.
   chipnet, and the worst claim measured uses 11% of the VM's operation-cost
   limit and 10% of its hashing limit. The tests run every Pickaxe PR #70
   vector, BCHN's 14,000 aserti3-2d vectors and the real headers from the Rust
-  tests in the VM, with the attacks that must fail. `cli.mjs` prints leaves
-  for `p2poolv2_cli bch-auxpow`, builds verified claims and prepares an
+  tests in the VM, with the attacks that must fail. Its command line prints
+  leaves for `p2poolv2_cli bch-auxpow`, builds verified claims and prepares an
   unsigned chipnet tSAFA genesis; nothing is broadcast. These are a token's
   rules, not P2Pool share-chain rules or BCH consensus.
 - `p2poolv2_netsim` and `docs/simulation/network-sim.md` treat the hybrid
@@ -501,7 +513,8 @@ anchor and the donation and fee cap as they were.
   diagnosis scripts. The nightly workflow runs `cargo sim nightly`. Same
   environment variables and run files; `plot-metrics` now writes SVG. See
   `docs/tooling.md`, which also maps each old script for upstream merges.
-  `tools/safa-auxpow` stays JavaScript until a Rust BCH VM exists.
+  `tools/safa-auxpow` stayed JavaScript until a Rust BCH VM existed (now
+  `p2poolv2_safa`, above).
 - The sim swarm and its nightly run Bitcoin Cash against BCHN instead of
   Bitcoin against Bitcoin Core. `p2poolv2_sim` reads `chain =
   "bitcoin-cash"` configs with a `bchreg:` payout address and an
@@ -516,9 +529,11 @@ anchor and the donation and fee cap as they were.
 
 ### Removed
 
+- The Node SAFA tool `tools/safa-auxpow` (`package.json`, its lockfile and
+  the `.mjs` files), replaced by `p2poolv2_safa` after byte-for-byte parity.
 - The v1 SAFA regtest harness (`tools/safa-auxpow/live-regtest.mjs`) and its
   fixture, which fit only the v1 format. Its evidence stays in
-  `tools/safa-auxpow/README.md` and in the history.
+  `p2poolv2_safa/README.md` and in the history.
 - The `store.background_task_frequency_hours` option (from upstream). Existing
   configs that set it still load.
 - The `[sim] coinbase_maturity` option.

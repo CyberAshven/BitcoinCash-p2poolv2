@@ -315,7 +315,8 @@ VM also accepts both maximum Merkle depths and the exact 10,000-byte budget.
 Public genesis/withdrawal/proof vectors are replayed in the offline suite.
 
 This is an experimental SAFA variant, with its full rules and reproduction
-steps in [tools/safa-auxpow](../tools/safa-auxpow/README.md). The published
+steps in [p2poolv2_safa](../p2poolv2_safa/README.md) (then the Node tool
+`tools/safa-auxpow`). The published
 draft's conflicting virtual-reserve multipliers need agreement before any
 real issuance. Independent covenant review, chipnet issuance, independent
 ASIC/JD interoperability and remote CI remain open. The Rust CI definition
@@ -347,7 +348,7 @@ Both emitted proofs verify. The real SAFA withdrawal was rejected with
 `non-BIP68-final` at tip 174, accepted unchanged at tip 175, then mined in
 block 176. The sponsor input is locked against wallet selection while JD
 payments are prepared. Both proofs and the signed withdrawal are replayed
-from the public fixture. See [the evidence record](../tools/safa-auxpow/README.md#regtest-evidence-and-reproduction).
+from the public fixture. See [the evidence record](../p2poolv2_safa/README.md#regtest-evidence-and-reproduction).
 
 Local validation passed: 1,719 default workspace tests (two skipped), 1,727
 all-features tests (one skipped), Clippy in both configurations with warnings
@@ -818,7 +819,7 @@ move most BCH hashrate to the share chain.
       upstream's payee.
     - **SAFA.** Experimental and not deployed. Its SHA-256 merge-mining
       covenant is tested with a small test token in the BCH VM only
-      (`tools/safa-auxpow`).
+      (`p2poolv2_safa`).
     - **License.** The maintainer holds P2Pool v1's code under AGPL-3.0, so
       copying it is allowed. The fork is distributed under AGPL-3.0, and
       upstream P2Poolv2 files keep their MIT/Apache-2.0 notices.

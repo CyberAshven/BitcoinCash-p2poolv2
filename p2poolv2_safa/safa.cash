@@ -8,7 +8,7 @@
 //
 //   thread (u32 LE) | state_height (u32 LE) | target_bits (u32 LE) | ref_bits (u32 LE)
 //
-// Double-brace placeholders are deployment parameters that lib.mjs fills in
+// Double-brace placeholders are deployment parameters that covenant.rs fills in
 // before compiling: the network's ASERT anchor and band, the thread count,
 // the AMM's virtual satoshis and the fee constant K.
 //

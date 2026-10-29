@@ -823,6 +823,9 @@ fn full_10000_byte_unlock_passes() {
             .len(),
         10000
     );
+    // The largest coinbase a claim carries at the deepest branches.
+    let proof = safa::decode_proof(&scenario.proof).unwrap();
+    assert_eq!(proof.head.len() + 53 + proof.tail.len(), 7173);
     accepts(&scenario.claim);
 }
 #[test]

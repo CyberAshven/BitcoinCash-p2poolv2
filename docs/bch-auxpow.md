@@ -421,8 +421,10 @@ token A, not a real token.
 
 ## The SAFA covenant
 
-The experimental [SAFA AuxPoW covenant](../tools/safa-auxpow/README.md)
-verifies v2 proofs inside the BCH 2026 VM. It rebuilds the leaf from
+The experimental [SAFA AuxPoW covenant](../p2poolv2_safa/README.md)
+verifies v2 proofs inside the BCH 2026 VM (`p2poolv2_safa`, on
+libauth-rs; it replaced the Node tool `tools/safa-auxpow` with
+byte-for-byte parity on 2026-10-29). It rebuilds the leaf from
 introspection (the vault's category, locking bytecode and state, the
 claim's payout and target, and the split's `ext`), folds both branches,
 checks the header's work against the token's target and its nBits against
@@ -447,7 +449,7 @@ requires new leaves and newly mined proofs; old proofs cannot claim it.
 The regression checks chipnet block 329,001's nBits with a header timestamp
 two hours before its real parent's time and rejects a target one unit
 above the x8 edge. The mainnet edges are unchanged. The
-[rebuilt Pickaxe claim](../tools/safa-auxpow/README.md#chipnet-tsafa-deployment)
+[rebuilt Pickaxe claim](../p2poolv2_safa/README.md#chipnet-tsafa-deployment)
 passes the standard BCH 2026 VM offline; this is not a BCHN deployment or
 broadcast.
 
@@ -483,6 +485,6 @@ including 219 satoshis in fees, and every exported proof verified. A SAFA
 withdrawal using such a proof was accepted by both nodes in block 282; BCHN
 rejected a copy with an altered merkle sibling. See
 [the JD test setup](bch-job-declaration.md#two-node-bchn-regtest-check) and
-the [variant's evidence record](../tools/safa-auxpow/README.md#regtest-evidence-and-reproduction).
+the [variant's evidence record](../p2poolv2_safa/README.md#regtest-evidence-and-reproduction).
 The same opt-in test now builds and verifies v2 proofs; it has not been
 rerun against BCHN since the change.

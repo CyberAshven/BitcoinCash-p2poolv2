@@ -26,10 +26,8 @@ jobs:
         include:
           - language: actions
             sarif: actions
-          # JavaScript is tools/safa-auxpow, the one non-Rust tool
-          # (docs/tooling.md). The repository has no Python left to scan.
-          - language: javascript-typescript
-            sarif: javascript
+          # All code is Rust: the SAFA tool, the last JavaScript, is now
+          # p2poolv2_safa, and no Python is left (docs/tooling.md).
           - language: rust
             sarif: rust
     steps:

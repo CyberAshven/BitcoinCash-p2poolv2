@@ -109,7 +109,7 @@ changed:
   from OCEAN's code, not a measurement. It is kept as measurement M1.
 - **SAFA's claim bound** was 7.3 KB in the sweep's arithmetic for the v1
   covenant. The v2 covenant's tests measure 7,171 bytes of coinbase at the
-  deepest branches (`tools/safa-auxpow/README.md`).
+  deepest branches (`p2poolv2_safa/README.md`).
 - **Hydrapool shutdown** was confirmed by reading the code path, not by
   running it.
 

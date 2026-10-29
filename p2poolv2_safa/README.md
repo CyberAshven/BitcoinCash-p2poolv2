@@ -4,27 +4,33 @@ This is a merge-mined variant of [2qx's SAFA draft](https://bitcoincashresearch.
 a token whose threads are mined by any SHA-256 work that meets the token's
 target, proved with the merge-mining common format v2 that BCH P2Pool and
 Pickaxe agreed (Pickaxe PR #70, `docs/merge-mining.md`, and
-[`docs/bch-auxpow.md`](../../docs/bch-auxpow.md)). It is a reference
+[`docs/bch-auxpow.md`](../docs/bch-auxpow.md)). It is a reference
 covenant, not the author's token, and has not been deployed. A focused
 independent review found the ASERT-band and thread-count issues fixed
 below; a complete independent review remains open.
 
-It is the repository's one documented exception to the Rust-only rule
-([`docs/tooling.md`](../../docs/tooling.md)): the covenant runs in the
-Bitcoin Cash 2026 VM, which only Libauth provides.
+The crate compiles the covenant and runs it in the Bitcoin Cash 2026 VM of
+[libauth-rs](https://github.com/mainnet-pat/libauth-rs), a Rust port of
+`@bitauth/libauth` 3.1.0-next.8, pinned to commit `be3ed16396c9`. It
+replaced the Node tool `tools/safa-auxpow` on 2026-10-29, after both printed
+the same bytes for every command over the fixtures
+([`docs/tooling.md`](../docs/tooling.md)).
 
 ```sh
-npm ci --ignore-scripts
-npm test
+cargo nextest run -p p2poolv2_safa
+cargo safa params deployment.json
 ```
 
 | File | What it is |
 |---|---|
 | `safa.cash` | The covenant in CashASM, with per-deployment placeholders |
-| `lib.mjs` | Compiles a deployment, models every rule in JavaScript, builds leaves, claims and the genesis |
-| `cli.mjs` | The command line (public data only; it never signs or broadcasts) |
-| `rust_vectors.mjs` | Reads the golden vectors from P2Pool's Rust tests, so both sides check the same bytes |
-| `*.test.mjs` | The tests, all in Libauth `3.1.0-next.8`'s standard BCH 2026 VM |
+| `src/covenant.rs` | Network parameters; compiles a deployment and finds its fee constant K |
+| `src/targets.rs` | Token targets, BCHN's compact nBits and aserti3-2d, the bands and the DAA |
+| `src/codec.rs` | Thread state, leaves, slots, trees, output 0, splits and `AuxProof` v2 |
+| `src/transaction.rs` | Leaves, claims and the genesis as transactions, and the VM check |
+| `src/cli.rs`, `src/main.rs` | The `safa` command line (public data only; it never signs or broadcasts) |
+| `tests/` | The tests, all in libauth-rs's standard BCH 2026 VM |
+| `test_data/` | The tSAFA fixtures and the recorded parity cases |
 
 ## Threads and their state
 
@@ -32,9 +38,9 @@ A deployment has 1 to 63 `threads` vaults. Compilation and the genesis
 command reject 64 or more. With 288 threads the capped easing factor never
 exceeds 1, so a hardened vault cannot recover; the stricter 63-thread
 maximum leaves room for recovery before the 288-block cap. Each vault is
-a P2SH32 output of the covenant
-holding fungible tokens, satoshis, and one mutable NFT of the token
-category whose 16-byte commitment is the thread's state:
+a P2SH32 output of the covenant holding fungible tokens, satoshis, and one
+mutable NFT of the token category whose 16-byte commitment is the thread's
+state:
 
 ```text
 off len field
@@ -135,7 +141,9 @@ mined for that state still claims afterwards.
 
 ## Measured size and cost
 
-Measured by `claim.test.mjs` in the standard VM (chipnet, 4 threads):
+Measured by `tests/claims.rs` in the standard VM (chipnet, 4 threads); the
+Node tool measured the same values with JavaScript Libauth, and the tests
+pin them:
 
 | Claim | Unlocking bytes | Op-cost / limit | Hash iterations / limit |
 |---|---|---|---|
@@ -147,31 +155,30 @@ Measured by `claim.test.mjs` in the standard VM (chipnet, 4 threads):
 
 The redeem script is 1,364 bytes on chipnet and 1,363 on mainnet (with 4
 threads and 84,000,000,000 virtual satoshis; it varies by a few bytes with
-the constants), so K is 1,944 and 1,943. Mainnet's redeem script is unchanged
-byte for byte. The worst case uses 11.1% of the
+the constants), so K is 1,944 and 1,943. The worst case uses 11.1% of the
 operation-cost limit and 10.1% of the hashing limit. The largest coinbase a
 claim can carry is the 10,000-byte unlocking limit less the redeem script,
 the other pushes and the proof's other parts: 7,173 bytes at the deepest
-branches (`h` 16, `d` 25), measured. P2Pool's token shares keep the coinbase within 3,072
-bytes.
+branches (`h` 16, `d` 25), measured. P2Pool's token shares keep the
+coinbase within 3,072 bytes.
 
 ## What the tests check
 
-- **Golden vectors** (`vectors.test.mjs`), read from P2Pool's Rust tests
-  (Pickaxe PR #70): leaf A and B, the two-token root `5b61ecfe…1c38d0`,
-  output 0 and the empty commitment, the 224-byte proof (its BIP34 height
-  325,909, its coinbase txid, and that it verifies for token A and for no
-  other state hash), the split preimage, `ext` and leaf `c4027136…033e41`,
-  every split share in the table, `MIN_SHARE_SATS` and the 1,000,000-reward
-  claim (980,100 / 10,000 / 9,900). Each runs in the covenant's own VM
-  functions.
-- **ASERT** (`asert.test.mjs`): all 14,000 aserti3-2d specification vectors
+- **Golden vectors** (`tests/vectors.rs`), the ones `p2poolv2_lib` checks
+  (Pickaxe PR #70; a test pins them to its test sources): leaf A and B, the
+  two-token root `5b61ecfe…1c38d0`, output 0 and the empty commitment, the
+  224-byte proof (its BIP34 height 325,909, its coinbase txid, and that it
+  verifies for token A and for no other state hash), the split preimage,
+  `ext` and leaf `c4027136…033e41`, every split share in the table,
+  `MIN_SHARE_SATS` and the 1,000,000-reward claim (980,100 / 10,000 /
+  9,900). Each runs in the covenant's own VM functions.
+- **ASERT** (`tests/asert.rs`): all 14,000 aserti3-2d specification vectors
   (BCHN's QA runs vendored in `p2poolv2_lib`), the 9 mainnet and 9 chipnet
   real header pairs, chipnet block 329,001's nBits with a timestamp two
   hours before its parent, the exact x8 and x8 + 1 boundaries, unchanged
   mainnet edges, invalid nBits, heights below the anchor, Bitcoin nBits
   and the fallback band.
-- **Claims and attacks** (`claim.test.mjs`): whole claims with and without
+- **Claims and attacks** (`tests/claims.rs`): whole claims with and without
   a split, a whole donation, a dropped donation, the deepest proof and a
   10,000-byte unlock, on chipnet and mainnet. Refused: redirected payouts
   (with or without a matching `payout_hash`), extra tokens, satoshis,
@@ -181,27 +188,31 @@ bytes.
   domain, a time-domain coinbase height, fee overpay above `3S` or under
   `S`, a vault left under 800 satoshis, a 36-byte payout script, a wrong
   next state, an easier target in the leaf, and a fallback claim one block
-  early or just harder than `ref >> 4`.
-- **Command line** (`cli.test.mjs`), including rejection of genesis thread
-  counts at or above 64 and byte-for-byte fixture reproduction.
+  early or just harder than `ref >> 4`; and the VM cost above.
+- **Command line** (`tests/cli.rs`, `tests/fixture.rs`): every command,
+  the recorded parity cases (`test_data/parity/cases.json`, what the Node
+  tool printed), thread-count refusals and byte-for-byte fixture
+  reproduction.
 - **Against P2Pool's Rust side**, checked once by hand on 2026-10-24: for a
   claim the covenant accepts (chipnet, three tokens, a split),
   `p2poolv2_cli bch-auxpow verify --network chipnet` accepts its proof with
-  the `token` JSON `cli.mjs leaf` prints and refuses it with another state
-  hash, and `p2poolv2_cli bch-auxpow build` gives the same root, `h` and
-  salt as `lib.mjs`.
+  the `token` JSON `leaf` prints and refuses it with another state hash,
+  and `p2poolv2_cli bch-auxpow build` gives the same root, `h` and salt.
 
 ## Command line
 
 Every command reads JSON files of at most 1 MiB and prints JSON. Amounts
 are whole numbers (strings for large values), scripts and hashes are hex,
 txids and the category are in display order, and bits are eight hex digits.
+`cargo safa` runs the `safa` binary.
 
 ```sh
-node cli.mjs params  deployment.json            # the covenant, K and the vault address
-node cli.mjs leaf    deployment.json job.json   # a miner's leaf at one height
-node cli.mjs claim   deployment.json claim.json # a verified, complete claim transaction
-node cli.mjs genesis genesis.json               # an unsigned chipnet genesis
+cargo safa params  deployment.json            # the covenant, K and the vault address
+cargo safa leaf    deployment.json job.json   # a miner's leaf at one height (also: work)
+cargo safa claim   deployment.json claim.json # a verified, complete claim transaction
+cargo safa unlock  deployment.json claim.json # only that claim's unlocking bytecode
+cargo safa verify  deployment.json claim.json # checks that claim in the VM
+cargo safa genesis genesis.json               # an unsigned chipnet genesis
 ```
 
 `deployment.json` is what `genesis` prints as `deployment`:
@@ -232,14 +243,14 @@ donation or fee (about 2,000 satoshis) clears the 1,000-satoshi minimum;
 2,000,000 satoshis seeded per thread; initial target bits `1d00ffff`
 (difficulty 1; the DAA hardens it by up to a factor of 0.625 per claim).
 
-`test_data/tsafa-chipnet-fixture.json` holds what `node cli.mjs params`
+`test_data/tsafa-chipnet-fixture.json` holds what `cargo safa params`
 prints for these parameters, with a placeholder funding outpoint (txid
 `11` × 32, output 0, which would be the category), so Pickaxe can check the
-redeem script, K, locking bytecode and `lock_hash` before any funding;
-`cli.test.mjs` checks it reproduces byte for byte. The covenant does not
-depend on the category, so the real funding txid changes only the leaves.
+redeem script, K, locking bytecode and `lock_hash` before any funding; the
+tests check it reproduces byte for byte. The covenant does not depend on
+the category, so the real funding txid changes only the leaves.
 
-The corrected ASERT band changes the chipnet redeem script, locking
+The corrected ASERT band changed the chipnet redeem script, locking
 bytecode, `lock_hash` and address. Use the regenerated fixture before any
 genesis: a deployed covenant cannot be replaced. Proofs built for the old
 `lock_hash` must be rebuilt and mined again, because the leaf, root,
@@ -254,10 +265,10 @@ records the original proof and rebuilt leaf, root and transaction. Copy
 the fixture's `deployment` object to `deployment.json`, then run:
 
 ```sh
-node cli.mjs claim deployment.json test_data/tsafa-chipnet-claim.json
+cargo safa claim deployment.json p2poolv2_safa/test_data/tsafa-chipnet-claim.json
 ```
 
-The CLI verifies the complete transaction in the standard BCH 2026 VM:
+The command verifies the complete transaction in the standard BCH 2026 VM:
 txid `89771ec35e517ee27478de8a4639c8847dffbcff5a44db0c5156d180e1274c09`,
 2,105 bytes, a 2,200-satoshi fee within a 2,200-byte size bound, height
 329,001 and target `2001bffe`. Its 1,250,000,000-unit reward pays
@@ -269,11 +280,11 @@ accepted by BCHN.
 at least 8,001,155 satoshis: 4 × 2,000,000 for the vaults, a 609-satoshi
 genesis fee at 1 sat/byte (609 bytes, estimated with the largest P2PKH
 signature, a 73-byte ECDSA one, and its key) and 546 satoshis of change.
-0.081 tBCH (8,100,000 satoshis) leaves 99,391 in change. Its txid becomes the token category. Each claim
-then costs its vault `S` (1,944 plus the proof, so about 5,300 satoshis
-for a 3,000-byte coinbase) plus 800 satoshis per token output:
-about 250 claims per thread before the seed runs out, estimated, unless
-buyers add cash through the market.
+0.081 tBCH (8,100,000 satoshis) leaves 99,391 in change. Its txid becomes
+the token category. Each claim then costs its vault `S` (1,944 plus the
+proof, so about 5,300 satoshis for a 3,000-byte coinbase) plus 800
+satoshis per token output: about 250 claims per thread before the seed
+runs out, estimated, unless buyers add cash through the market.
 
 **Keys.** Only the owner's own chipnet wallet key for that one UTXO, used
 once to sign the genesis input in the owner's BCHN wallet. The covenant has
@@ -302,14 +313,14 @@ over the vaults beyond the covenant's rules.
    ```
 
    with `start_height` the tip height and `ref_bits` the tip's nBits.
-3. `node cli.mjs genesis genesis.json` prints the unsigned genesis, the
-   vault address, each thread's state and the `signrawtransactionwithwallet`
-   call (with the funding output as `prevtxs`). Review the outputs.
+3. `cargo safa genesis genesis.json` prints the unsigned genesis, the vault
+   address, each thread's state and the `signrawtransactionwithwallet` call
+   (with the funding output as `prevtxs`). Review the outputs.
 4. Sign with that call. Broadcasting it with `sendrawtransaction` is the
    owner's decision.
 5. Publish the printed `deployment` object. Miners and pools then ask
-   `node cli.mjs leaf` for each height they mine, and claim with
-   `node cli.mjs claim`.
+   `cargo safa leaf` for each height they mine, and claim with
+   `cargo safa claim`.
 
 Still needed before tSAFA is mined end to end: the token's row in P2Pool's
 and Pickaxe's registries, and a claim broadcaster on either side (both
@@ -317,7 +328,7 @@ build and verify v2 proofs today, and Pickaxe journals them).
 
 ## Changes from the v1 variant
 
-The v1 variant (in this directory's history, up to commit `34deb329`)
+The v1 variant (in `tools/safa-auxpow`'s history, up to commit `34deb329`)
 verified the whole coinbase with the `fabe6d6d` output and Namecoin slots,
 kept an 80-byte baton with a recipient hash, timestamp and nonce, bound the
 claim to a Unix-time lock and a CSV block age on a version-2 transaction,
@@ -346,5 +357,5 @@ v1 SAFA work, and a v1 withdrawal
 `4aa8b6848906eba9df5d8293e08e00a047812f43b1003c569a3fdafbeda46d2e`) was
 rejected one block before its relative age matured and accepted after it;
 BCHN rejected a changed merkle sibling. The harness (`live-regtest.mjs`)
-and its fixture are in the history at `34deb329`. The v2 covenant has not
-yet been run against BCHN.
+and its fixture are in `tools/safa-auxpow`'s history at `34deb329`. The v2
+covenant has not yet been run against BCHN.
