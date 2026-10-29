@@ -7,9 +7,12 @@ mod test_utils;
 use std::fs;
 use std::process::Command;
 
-use libauth::{decode_transaction_bch, encode_data_push};
+use libauth::{Output, decode_transaction_bch, encode_data_push};
 use p2poolv2_safa::cli::{read_json, run};
-use p2poolv2_safa::{CLAIM_FIXED_BYTES, create_covenant, decode_state, hash256};
+use p2poolv2_safa::{
+    CLAIM_FIXED_BYTES, Vault, create_covenant, decode_state, hash256, vault_source_output,
+    verify_transaction,
+};
 use serde_json::{Value, json};
 use tempfile::tempdir;
 
@@ -198,7 +201,7 @@ fn claim_verifies_transaction_with_selected_fee_rate() {
     input["fee_rate"] = json!(2);
     let output = successful_json(run_cli_json(
         "claim",
-        &[expected["deployment"].clone(), input],
+        &[expected["deployment"].clone(), input.clone()],
     ));
     assert_eq!(
         output["fee_sats"],
@@ -208,6 +211,22 @@ fn claim_verifies_transaction_with_selected_fee_rate() {
     let transaction =
         decode_transaction_bch(&hex::decode(output["hex"].as_str().unwrap()).unwrap()).unwrap();
     assert_eq!(transaction.outputs.len(), 4);
+    let covenant = create_covenant("chipnet", 4, 84_000_000_000).unwrap();
+    let vault = Vault {
+        category: hex::decode(expected["deployment"]["category"].as_str().unwrap()).unwrap(),
+        value: input["vault"]["value_sats"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+        token_amount: input["vault"]["token_amount"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+        commitment: hex::decode(input["vault"]["commitment"].as_str().unwrap()).unwrap(),
+    };
+    verify_transaction(&transaction, &[vault_source_output(&covenant, &vault)]).unwrap();
 }
 
 #[test]
@@ -318,6 +337,15 @@ fn genesis_prepares_one_unsigned_vault_per_thread_without_minting_baton() {
             .unwrap()
             .starts_with("signrawtransactionwithwallet ")
     );
+    verify_transaction(
+        &transaction,
+        &[Output {
+            locking_bytecode: vec![0x51],
+            value_satoshis: 8_100_000,
+            token: None,
+        }],
+    )
+    .unwrap();
 }
 
 #[test]
@@ -354,6 +382,34 @@ fn genesis_accepts_63_threads_and_creates_last_thread() {
         decode_transaction_bch(&hex::decode(output["unsigned_genesis"].as_str().unwrap()).unwrap())
             .unwrap();
     assert_eq!(transaction.outputs.len(), 64);
+    verify_transaction(
+        &transaction,
+        &[Output {
+            locking_bytecode: vec![0x51],
+            value_satoshis: 1_000_000,
+            token: None,
+        }],
+    )
+    .unwrap();
+}
+
+#[test]
+fn genesis_rejects_funding_outpoint_other_than_zero() {
+    let input = json!({
+        "network": "chipnet", "threads": 4, "virtual_sats": "84000000000",
+        "supply_per_thread": "525000000000000", "seed_sats": "2000000",
+        "start_height": 329001, "target_bits": "1d00ffff", "ref_bits": "1a3106ee",
+        "funding": { "txid": "11".repeat(32), "vout": 1, "value_sats": "8100000", "script": "51" },
+        "change_script": "51", "fee_rate": 1,
+    });
+    let output = run_cli_json("genesis", &[input]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("output 0")
+    );
+    assert!(output.stdout.is_empty());
 }
 
 #[test]

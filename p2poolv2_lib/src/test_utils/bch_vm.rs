@@ -35,8 +35,15 @@
 
 use crate::shares::bch_htlc::p2sh32_hash;
 use crate::shares::bch_script::verify_signature;
+#[cfg(test)]
+use bitcoin::consensus::serialize;
 use bitcoin::hashes::{Hash, hash160, sha256, sha256d};
 use bitcoin::{Sequence, Transaction, TxOut};
+#[cfg(test)]
+use libauth::{
+    AuthenticationProgramCommon, create_virtual_machine_bch_2026, decode_transaction_bch,
+    decode_transaction_outputs,
+};
 
 const OP_0: u8 = 0x00;
 const OP_PUSHDATA1: u8 = 0x4c;
@@ -234,6 +241,54 @@ pub fn run_p2sh32_spend_with_utxos(
         ));
     }
     Ok(machine.metrics)
+}
+
+/// Check one input in both this test machine and libauth-rs's standard BCH
+/// 2026 VM, requiring their acceptance decisions to agree. Preserve this
+/// machine's metrics and error messages for the calling tests.
+///
+/// # Panics
+///
+/// Panics if the two machines disagree about whether the input is valid.
+#[cfg(test)]
+pub fn run_p2sh32_spend_with_both_vms(
+    transaction: &Transaction,
+    input_index: usize,
+    spent_outputs: &[TxOut],
+) -> Result<SpendMetrics, String> {
+    let local = run_p2sh32_spend_with_utxos(transaction, input_index, spent_outputs);
+    let independent = evaluate_with_libauth(transaction, input_index, spent_outputs);
+    assert_eq!(
+        local.is_ok(),
+        independent.is_ok(),
+        "BCH 2026 input {input_index}: local machine {local:?}; libauth-rs {independent:?}"
+    );
+    local
+}
+
+/// Decode the actual serialized transaction and UTXOs, including CashTokens
+/// prefixes, before evaluating the selected input independently in libauth-rs.
+#[cfg(test)]
+fn evaluate_with_libauth(
+    transaction: &Transaction,
+    input_index: usize,
+    spent_outputs: &[TxOut],
+) -> Result<(), String> {
+    if spent_outputs.len() != transaction.input.len() || input_index >= transaction.input.len() {
+        return Err("one spent output per input and an in-range input index are required".into());
+    }
+    let transaction = decode_transaction_bch(&serialize(transaction))?;
+    let source_outputs = decode_transaction_outputs(&serialize(&spent_outputs.to_vec()))?;
+    let machine = create_virtual_machine_bch_2026(Some(true));
+    let state = machine.evaluate(
+        &AuthenticationProgramCommon {
+            input_index,
+            transaction,
+            source_outputs,
+        },
+        None,
+    );
+    machine.state_success(&state)
 }
 
 impl Machine<'_> {

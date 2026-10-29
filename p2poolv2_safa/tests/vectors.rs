@@ -204,6 +204,28 @@ fn stale_state_hash_fails() {
     ));
 }
 #[test]
+fn single_byte_state_hash_change_fails() {
+    let mut state_hash = vec![0xaa; 32];
+    state_hash[0] ^= 1;
+    let leaf = Leaf {
+        category: vec![0x11; 32],
+        lock_hash: safa::hash256(&[0x51]),
+        state_hash,
+        payout_hash: safa::hash256(&p2pkh(0x12)),
+        target_bits: 0x207f_ffff,
+        ext: vec![0; 32],
+    };
+    fails(run_functions(
+        "chipnet",
+        &proof_body(
+            &hex::decode(PROOF).unwrap(),
+            &safa::leaf_hash(&leaf).unwrap(),
+            &[0x11; 32],
+            0x207f_ffff,
+        ),
+    ));
+}
+#[test]
 fn work_above_harder_token_target_fails() {
     fails(run_functions(
         "chipnet",

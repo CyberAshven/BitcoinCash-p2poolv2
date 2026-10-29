@@ -301,10 +301,13 @@ anchor and the donation and fee cap as they were.
   AGPL-3.0-or-later` until its licence file lands. Its `params`, `leaf`,
   `claim` and `genesis` print the same bytes as the Node tool did (25 runs
   over the fixtures, refusals included), and it adds `work`, `unlock` and
-  `verify`. All 63 Node tests are 225 Rust tests, which also pin the VM's
+  `verify`. All 63 Node tests are covered by 227 Rust tests, which also pin the VM's
   op-cost and hash iterations to the values the Node tool measured. The
   `BCH Covenant Tests` CI job runs cargo, and CodeQL has no JavaScript left
   to scan.
+- The payout tree and payout covenant tests cross-check input acceptance
+  in libauth-rs's standard BCH 2026 VM against the existing test machine,
+  using the actual serialized transactions and CashTokens source outputs.
 - The SAFA covenant (now `p2poolv2_safa`) verifies merge-mining
   common format v2 in the BCH 2026 VM, with the token rules agreed with
   Pickaxe: one vault input and fixed outputs (vault, miner, donation, fee);

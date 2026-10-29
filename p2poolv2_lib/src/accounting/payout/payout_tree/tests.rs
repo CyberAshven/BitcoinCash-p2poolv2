@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::shares::bch_htlc::p2sh32_script;
-use crate::test_utils::bch_vm::run_p2sh32_spend_with_utxos;
+use crate::test_utils::bch_vm::run_p2sh32_spend_with_both_vms;
 use bitcoin::hashes::Hash;
 use bitcoin::{PubkeyHash, Txid};
 
@@ -81,15 +81,15 @@ fn spent_outputs(tree: &PayoutTree, transactions: &[Transaction]) -> Vec<TxOut> 
         .collect()
 }
 
-/// Run every node transaction in the script machine against the output it
-/// spends.
+/// Run every node transaction in both script machines against the output it
+/// spends, checking that their acceptance decisions agree.
 fn vm_verdicts(tree: &PayoutTree, transactions: &[Transaction]) -> Vec<Result<(), String>> {
     let spent = spent_outputs(tree, transactions);
     transactions
         .iter()
         .zip(spent)
         .map(|(transaction, spent)| {
-            run_p2sh32_spend_with_utxos(transaction, 0, &[spent]).map(|_| ())
+            run_p2sh32_spend_with_both_vms(transaction, 0, &[spent]).map(|_| ())
         })
         .collect()
 }
@@ -338,7 +338,7 @@ fn a_child_of_another_rate_cannot_spend_a_node() {
     let mut mixed = at_two[1].clone();
     mixed.input[0].previous_output = OutPoint::new(at_one[0].compute_txid(), 0);
 
-    assert!(run_p2sh32_spend_with_utxos(&mixed, 0, &[at_one[0].output[0].clone()]).is_err());
+    assert!(run_p2sh32_spend_with_both_vms(&mixed, 0, &[at_one[0].output[0].clone()]).is_err());
 }
 
 /// A thief builds, from scratch and with the same builder, the tree for a
@@ -355,8 +355,8 @@ fn a_tree_built_for_other_payees_cannot_spend_the_root() {
     let forged = forged_tree.node_transactions(1, root_outpoint()).unwrap();
 
     assert_eq!(forged_tree.value(), honest_tree.value());
-    assert!(run_p2sh32_spend_with_utxos(&forged[0], 0, &[forged_tree.root_output()]).is_ok());
-    assert!(run_p2sh32_spend_with_utxos(&forged[0], 0, &[honest_tree.root_output()]).is_err());
+    assert!(run_p2sh32_spend_with_both_vms(&forged[0], 0, &[forged_tree.root_output()]).is_ok());
+    assert!(run_p2sh32_spend_with_both_vms(&forged[0], 0, &[honest_tree.root_output()]).is_err());
 }
 
 /// The same thief keeps the honest root's unlocking bytecode and only
@@ -378,7 +378,7 @@ fn forged_outputs_under_the_honest_covenant_are_refused() {
         .remove(0)
         .output;
 
-    assert!(run_p2sh32_spend_with_utxos(&transaction, 0, &[honest_tree.root_output()]).is_err());
+    assert!(run_p2sh32_spend_with_both_vms(&transaction, 0, &[honest_tree.root_output()]).is_err());
 }
 
 /// Node transactions are a function of the payees and the root outpoint

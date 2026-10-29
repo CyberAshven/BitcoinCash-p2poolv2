@@ -47,6 +47,22 @@ has not published a licence file. Per the author via the owner, 2026-10-29,
 file pending upstream. Remove the clarification once upstream publishes
 its licence file.
 
+The parity check was repeated against the fixed Node tool at `a79ad23f`
+(including the band and thread fixes at `88b696e8`): 26 cases, no differences
+in stdout, stderr or exit status. This covers five parameter sets, leaves
+with and without a split, three claims, two genesis transactions and eleven
+refusals. The added `work` command matches Node's `leaf`; `unlock` matches
+the unlocking bytes decoded from Node's claim, and `verify` accepts that
+same VM-checked claim. The rebuilt Pickaxe claim's transaction identifier is
+`89771ec35e517ee27478de8a4639c8847dffbcff5a44db0c5156d180e1274c09`.
+The checked cases remain in `p2poolv2_safa/test_data/parity/cases.json`.
+
+P2Pool's payout tree and payout covenant tests also evaluate each tested
+input in libauth-rs's standard BCH 2026 VM, requiring agreement with the
+existing test machine. They decode the actual serialized transaction and
+source outputs, including CashTokens prefixes. This is a script check;
+transaction admission and relay still belong to BCHN.
+
 ## Shell that remains
 
 Only glue is left in shell, and none of it is a tool:

@@ -192,7 +192,9 @@ coinbase within 3,072 bytes.
 - **Command line** (`tests/cli.rs`, `tests/fixture.rs`): every command,
   the recorded parity cases (`test_data/parity/cases.json`, what the Node
   tool printed), thread-count refusals and byte-for-byte fixture
-  reproduction.
+  reproduction. The printed claim and both four-thread and 63-thread
+  genesis transactions are decoded and checked in the standard VM. Genesis
+  uses an `OP_1` funding-script stand-in for the owner's signed input.
 - **Against P2Pool's Rust side**, checked once by hand on 2026-10-24: for a
   claim the covenant accepts (chipnet, three tokens, a split),
   `p2poolv2_cli bch-auxpow verify --network chipnet` accepts its proof with

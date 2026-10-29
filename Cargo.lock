@@ -4165,6 +4165,7 @@ dependencies = [
  "hmac",
  "job_declaration_sv2",
  "k256",
+ "libauth",
  "libp2p",
  "mining_sv2",
  "mockall",

@@ -3,13 +3,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The node covenant run in the Bitcoin Cash script machine
-//! (`test_utils::bch_vm`): honest spends pass within the 2025 VM limits at
-//! relay, and every way to take money from a node fails. The theft cases are
-//! built as complete transactions, not only by breaking one byte of an
-//! honest spend.
+//! (`test_utils::bch_vm`) and libauth-rs's BCH 2026 VM: honest spends pass
+//! within the 2025 VM limits at relay, and every way to take money from a
+//! node fails. The theft cases are built as complete transactions, not only
+//! by breaking one byte of an honest spend.
 
 use super::*;
-use crate::test_utils::bch_vm::{PREFIX_TOKEN, SpendMetrics, run_p2sh32_spend_with_utxos};
+use crate::test_utils::bch_vm::{PREFIX_TOKEN, SpendMetrics, run_p2sh32_spend_with_both_vms};
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::transaction::Version;
@@ -63,7 +63,7 @@ fn spend(node: &NodeCovenant, outputs: &[TxOut]) -> Transaction {
 }
 
 fn run(transaction: &Transaction, node: &NodeCovenant) -> Result<SpendMetrics, String> {
-    run_p2sh32_spend_with_utxos(transaction, 0, &[node.output()])
+    run_p2sh32_spend_with_both_vms(transaction, 0, &[node.output()])
 }
 
 // Honest spends.
@@ -247,7 +247,7 @@ fn a_second_input_is_refused() {
         script_pubkey: node.locking_script(),
     };
 
-    assert!(run_p2sh32_spend_with_utxos(&transaction, 0, &[node.output(), own_coin]).is_err());
+    assert!(run_p2sh32_spend_with_both_vms(&transaction, 0, &[node.output(), own_coin]).is_err());
 }
 
 /// A node that spends output 0 of its parent is a token genesis input, so an
@@ -340,7 +340,7 @@ fn a_look_alike_coin_of_another_value_cannot_be_spent() {
         script_pubkey: node.locking_script(),
     };
 
-    assert!(run_p2sh32_spend_with_utxos(&spend(&node, &outputs), 0, &[look_alike]).is_err());
+    assert!(run_p2sh32_spend_with_both_vms(&spend(&node, &outputs), 0, &[look_alike]).is_err());
 }
 
 // False statements built from scratch.
