@@ -132,6 +132,9 @@ pub struct NodeCovenant {
     value: u64,
     output_count: usize,
     output_hashes: Vec<[u8; 32]>,
+    /// `FILLER_BYTES_PER_OUTPUT`; zero only in the test that shows what the
+    /// filler buys.
+    filler_bytes_per_output: usize,
 }
 
 impl NodeCovenant {
@@ -155,7 +158,17 @@ impl NodeCovenant {
             value,
             output_count,
             output_hashes,
+            filler_bytes_per_output: FILLER_BYTES_PER_OUTPUT,
         }
+    }
+
+    /// The same covenant with no filler (`Z = 0`), committed in its redeem
+    /// script and left out of its unlocking bytecode, to show the budget the
+    /// filler buys.
+    #[cfg(test)]
+    pub(crate) fn without_filler(mut self) -> Self {
+        self.filler_bytes_per_output = 0;
+        self
     }
 
     /// Satoshis the node holds.
@@ -175,7 +188,7 @@ impl NodeCovenant {
 
     /// Zero bytes the unlocking bytecode carries before the redeem script.
     pub fn filler_length(&self) -> usize {
-        FILLER_BYTES_PER_OUTPUT * self.output_count
+        self.filler_bytes_per_output * self.output_count
     }
 
     /// The redeem script (see the module documentation).

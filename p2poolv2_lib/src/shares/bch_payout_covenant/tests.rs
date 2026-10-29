@@ -122,17 +122,18 @@ fn a_node_of_five_hundred_p2sh32_outputs_uses_at_most_half_its_vm_budget() {
 }
 
 /// Without the filler the same spend runs out of hash iterations at relay:
-/// the filler is what buys the budget.
+/// the filler is what buys the budget. The covenant commits to `Z = 0`, so
+/// its filler check passes and the spend fails on the hash limit itself.
 #[test]
 fn without_the_filler_a_large_node_exceeds_the_relay_limits() {
     let outputs = p2pkh_outputs(500);
-    let node = node_for(&outputs, 21_000);
-    let mut transaction = spend(&node, &outputs);
-    let mut unlocking = vec![OP_0];
-    push_data(&mut unlocking, &node.redeem_script());
-    transaction.input[0].script_sig = ScriptBuf::from_bytes(unlocking);
+    let node = node_for(&outputs, 21_000).without_filler();
+    let transaction = spend(&node, &outputs);
 
-    assert!(run(&transaction, &node).is_err());
+    let error = run(&transaction, &node).unwrap_err();
+
+    assert!(error.starts_with("hash iterations "), "{error}");
+    assert!(error.contains("exceed the standard limit"), "{error}");
 }
 
 #[test]
