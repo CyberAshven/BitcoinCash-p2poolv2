@@ -12,7 +12,8 @@ use std::io;
 use crate::accounting::payout::coinbase_budget::bch_payout_rule_tag;
 use crate::accounting::payout::sharechain_pplns::payout_rights::BCH_PAYOUT_HOLDER_RULE_TAG;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
-    BCH_COINBASE_MATURITY, BCH_PPLNS_WINDOW_BLOCKS, BCH_WORK_WEIGHT_RULE_TAG, bch_depth_rule_tag,
+    BCH_COINBASE_MATURITY, BCH_PER_SHARE_CUTS_RULE_TAG, BCH_PPLNS_WINDOW_BLOCKS,
+    BCH_WORK_WEIGHT_RULE_TAG, bch_depth_rule_tag,
 };
 use crate::config::Chain;
 use crate::node::messages::{MAX_P2P_MESSAGE_SIZE, Message, RawMessage};
@@ -75,6 +76,11 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// and covenant version). A node on other values rebuilds another coinbase
 /// whenever payees go to the tree.
 ///
+/// Then the donation and fee taken from each share's own weight at its own
+/// settings (`BCH_PER_SHARE_CUTS_RULE_TAG`). A node taking them off the
+/// whole coinbase at the paying share's settings rebuilds another coinbase
+/// whenever window shares differ in their cuts.
+///
 /// Then comes the rule that an uncle may have only one nephew on a chain
 /// (`BCH_UNCLE_ONCE_RULE_TAG`). A node without it accepts a share naming an
 /// uncle an ancestor already names, and pays that uncle twice.
@@ -99,7 +105,7 @@ fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
         Chain::BitcoinCash => Some(format!(
-            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_UNCLE_ONCE_RULE_TAG}/{BCH_SHARE_BODY_RULE_TAG}/{BCH_PAYOUT_SCRIPT_RULE_TAG}/{}/{}/{}/{BCH_NO_SEGWIT_RULE_TAG}/{BCH_WORK_WEIGHT_RULE_TAG}/{BCH_MERGE_MINING_RULE_TAG}/{BCH_SHARE_VERSION_RULE_TAG}",
+            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_PER_SHARE_CUTS_RULE_TAG}/{BCH_UNCLE_ONCE_RULE_TAG}/{BCH_SHARE_BODY_RULE_TAG}/{BCH_PAYOUT_SCRIPT_RULE_TAG}/{}/{}/{}/{BCH_NO_SEGWIT_RULE_TAG}/{BCH_WORK_WEIGHT_RULE_TAG}/{BCH_MERGE_MINING_RULE_TAG}/{BCH_SHARE_VERSION_RULE_TAG}",
             bch_payout_rule_tag(),
             bch_merkle_rule_tag(),
             bch_depth_rule_tag(),
@@ -373,7 +379,7 @@ mod tests {
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert/version-vote/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/1.0.0"
             )
         );
     }
@@ -473,6 +479,26 @@ mod tests {
         assert!(!string.contains("payout-cap11"));
     }
 
+    /// The batch's tag as first pushed had neither per-share cuts nor the
+    /// test networks' x8 ASERT easy side (`.../payout-hybrid-.../uncle-once/
+    /// .../mm2-roots-asert/version-vote`). A node on it takes the cuts off
+    /// the whole coinbase and refuses chipnet token shares dated a few
+    /// minutes before their parent, so the final tag differs from it.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_batch_before_its_review_fixes() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+            .unwrap()
+            .block_hash();
+        let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
+        let before_fixes_string = format!(
+            "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert/version-vote/1.0.0"
+        );
+        let string = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        assert_ne!(string, before_fixes_string);
+        assert!(string.contains("/cuts-per-share/"));
+        assert!(string.contains("/mm2-roots-asert8/"));
+    }
+
     /// The isolation the window rule relies on: a chipnet node from before
     /// the rule derived `/p2pool/test/<genesis tag>/1.0.0` from the same
     /// genesis. The new string differs, so the two cannot negotiate and never
@@ -503,7 +529,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert/version-vote/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/kad/1.0.0"
             )
         );
     }

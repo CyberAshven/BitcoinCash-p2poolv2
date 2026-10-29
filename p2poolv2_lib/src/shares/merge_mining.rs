@@ -32,10 +32,13 @@ use serde::{Deserialize, Serialize};
 
 /// Name of the merge-mining rules in Bitcoin Cash protocol strings: output 0
 /// in common format v2 with its format checks, a pool-built share's token
-/// root in its header (`roots`), and the ASERT header check of token shares.
-/// A node on the old `fabe6d6d` output rebuilds another coinbase for every
-/// share, and one without pool-built roots cannot read their headers.
-pub const BCH_MERGE_MINING_RULE_TAG: &str = "mm2-roots-asert";
+/// root in its header (`roots`), and the ASERT header check of token shares
+/// with the test networks' band of an eighth to eight times the computed
+/// target (`asert8`; mainnet's is a half to 1.05 times). A node on the old
+/// `fabe6d6d` output rebuilds another coinbase for every share, one without
+/// pool-built roots cannot read their headers, and one on the earlier 1.05
+/// test-network easy side refuses chipnet token shares this rule accepts.
+pub const BCH_MERGE_MINING_RULE_TAG: &str = "mm2-roots-asert8";
 
 /// The tag that opens the commitment's data: `"CTMM"`.
 pub const MERGE_MINING_MAGIC: [u8; 4] = *b"CTMM";

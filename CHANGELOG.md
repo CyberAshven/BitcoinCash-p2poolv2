@@ -80,8 +80,14 @@ consensus. The tag replaces `payout-cap11` with
 `payout-hybrid-t3072-f500-r1to3-z8-cov1`, and adds
 `body-1000000-204800`, `payee-p2pkh-p2sh20-p2sh32`, `merkle32`,
 `depths-m100`, `sigchecks3000-1452`, `no-segwit`, `weight-work`,
-`mm2-roots-asert` and `version-vote`. The donation and fee caps become 10% each
-instead of 10% together, under the same tag. Request-response, Kademlia,
+`mm2-roots-asert8` and `version-vote`, with `cuts-per-share` after the
+hybrid payout. The donation and fee caps become 10% each instead of 10%
+together, under the same tag. The full Bitcoin Cash rule tag, after the
+genesis tag:
+`pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote`.
+It differs from the tag the batch was first pushed with, which had no
+`cuts-per-share` and named `mm2-roots-asert` before the test networks'
+ASERT easy side widened to 8 times. Request-response, Kademlia,
 Identify and Noise use the same rule segments. Later rule changes activate by the
 share-version vote without changing this tag, so old and new versions
 can peer during the vote.
@@ -107,7 +113,8 @@ anchor and the donation and fee cap as they were.
   shares are token shares (3,072-byte coinbase, ASERT check); share
   validity never depends on the tokens. The share header carries a
   pool-built root (`pool_merge_mining`, header tag `0x23`), digested by the
-  share commitment; the rule tag becomes `mm2-roots-asert`.
+  share commitment; the rule tag becomes `mm2-roots-asert` (since the
+  test-network band widened, `mm2-roots-asert8`).
 - SAFA vaults in the token file: a token may give its thread
   (`"safa": {"threads", "state"}`) instead of a state hash and target, and
   each job's leaf then takes the state hash of that state and the claim
