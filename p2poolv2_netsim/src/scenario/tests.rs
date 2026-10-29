@@ -36,11 +36,13 @@ fn a_pool_fraction_above_one_is_refused() {
     assert!(scenario.validate().is_err());
 }
 
+/// The thousand miners, and the donation key every share's default donation
+/// pays.
 #[test]
 fn a_thousand_miners_in_an_18000_share_window_are_all_paid() {
     let scenario = Scenario::default();
     assert_eq!(scenario.window_shares(), 18_000);
-    assert_eq!(scenario.payees(), 1_000);
+    assert_eq!(scenario.payees(), 1_001);
 }
 
 #[test]
@@ -50,8 +52,19 @@ fn a_million_miners_at_a_tenth_of_bch_fill_at_most_the_window() {
         pool_fraction_of_bch: 0.1,
         ..Scenario::default()
     };
-    // 1e6 * (1 - exp(1,800 * ln(1 - 1e-6))) = 1,798.4.
-    assert_eq!(scenario.payees(), 1_798);
+    // 1e6 * (1 - exp(1,800 * ln(1 - 1e-6))) = 1,798.4 miners, and the
+    // donation key.
+    assert_eq!(scenario.payees(), 1_799);
+}
+
+/// Under the cap-11 rule the donation was an output of its own, not a payee.
+#[test]
+fn the_cap_11_rule_counts_only_miners_as_payees() {
+    let scenario = Scenario {
+        layout: CoinbaseLayout::cap_11(),
+        ..Scenario::default()
+    };
+    assert_eq!(scenario.payees(), 1_000);
 }
 
 #[test]
@@ -66,8 +79,9 @@ fn a_payee_override_wins_over_the_miners() {
 #[test]
 fn the_default_share_pays_a_thousand_payees_directly() {
     let sizes = Scenario::default().share_sizes();
-    assert_eq!(sizes.split.direct_outputs, 1_000);
-    assert_eq!(sizes.coinbase_bytes(), 34_401);
+    assert_eq!(sizes.split.direct_outputs, 1_001);
+    // 321 + 1,001 * 34 + 2 more bytes of output count.
+    assert_eq!(sizes.coinbase_bytes(), 34_357);
     // 32 MB / 226 = 141,592 transactions: an 18-hash branch.
     assert_eq!(sizes.merkle_branch_hashes, 18);
 }

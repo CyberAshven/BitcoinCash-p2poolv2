@@ -115,7 +115,7 @@ fn with_payees(base: &Scenario, layout: CoinbaseLayout, payees: u64) -> Scenario
 }
 
 fn payees_scenarios(base: &Scenario) -> Vec<Scenario> {
-    let no_tokens = [10, 100, 1_000, 6_008, 10_000, 29_399, 100_000, 1_000_000]
+    let no_tokens = [10, 100, 1_000, 6_010, 10_000, 29_402, 100_000, 1_000_000]
         .map(|payees| with_payees(base, CoinbaseLayout::no_tokens(), payees));
     let tokens = [100, 10_000, 1_000_000]
         .map(|payees| with_payees(base, CoinbaseLayout::with_tokens(), payees));
@@ -133,7 +133,7 @@ fn relay_scenarios(base: &Scenario) -> Vec<Scenario> {
     [ShareRelay::Full, ShareRelay::WithoutPayouts]
         .iter()
         .flat_map(|&relay| {
-            [1_000, 6_008, 29_399].map(|payees| {
+            [1_000, 6_010, 29_402].map(|payees| {
                 let shaped = with_payees(base, CoinbaseLayout::no_tokens(), payees);
                 Scenario {
                     label: format!("{}, {} relay", shaped.label, relay.name()),
@@ -207,8 +207,8 @@ fn bandwidth_scenarios(base: &Scenario) -> Vec<Scenario> {
     let uploads = [5.0, 20.0, 50.0, 200.0, 1_000.0];
     let shares = [
         (CoinbaseLayout::with_tokens(), 1_000),
-        (CoinbaseLayout::no_tokens(), 6_008),
-        (CoinbaseLayout::no_tokens(), 29_399),
+        (CoinbaseLayout::no_tokens(), 6_010),
+        (CoinbaseLayout::no_tokens(), 29_402),
     ];
     shares
         .iter()
@@ -250,7 +250,7 @@ fn interval_scenarios(base: &Scenario) -> Vec<Scenario> {
     let intervals = [1.0, 2.0, 5.0, 10.0, 30.0];
     let shares = [
         (CoinbaseLayout::with_tokens(), 1_000),
-        (CoinbaseLayout::no_tokens(), 6_008),
+        (CoinbaseLayout::no_tokens(), 6_010),
     ];
     shares
         .iter()

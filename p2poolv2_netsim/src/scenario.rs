@@ -12,7 +12,8 @@
 
 use crate::constants::{
     BCH_BLOCK_INTERVAL_SECONDS, BCH_MAINNET_ABLA_FLOOR_BYTES, BCHN_OUTBOUND_PEERS,
-    SHARE_HEADER_BYTES_PER_UNCLE, SHARE_INTERVAL_SECONDS, TYPICAL_TRANSACTION_BYTES,
+    DONATION_KEY_PAYEES, SHARE_HEADER_BYTES_PER_UNCLE, SHARE_INTERVAL_SECONDS,
+    TYPICAL_TRANSACTION_BYTES,
 };
 use crate::distribution::Distribution;
 use crate::engine::{self, BchBlockLoad, Network, NodeLink, Parameters, PeerLink};
@@ -219,11 +220,22 @@ impl Scenario {
     }
 
     /// Payees per coinbase: the override, or the miners expected to hold a
-    /// share in the window, rounded.
+    /// share in the window, rounded, plus the donation key where it is a
+    /// payee rather than an output of its own (every rule but cap-11).
     pub fn payees(&self) -> u64 {
         self.payees_override.unwrap_or_else(|| {
-            expected_payees(self.miner_count, self.miner_hashrate, self.window_shares()).round()
-                as u64
+            let miners = expected_payees(
+                self.miner_count,
+                self.miner_hashrate,
+                self.window_shares(),
+            )
+            .round() as u64;
+            match self.layout {
+                CoinbaseLayout::CappedDraw { .. } => miners,
+                CoinbaseLayout::Hybrid { .. } | CoinbaseLayout::Uncapped => {
+                    miners + DONATION_KEY_PAYEES
+                }
+            }
         })
     }
 

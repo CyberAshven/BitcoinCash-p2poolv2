@@ -28,7 +28,7 @@ fn the_relay_sweep_compares_whole_shares_with_shares_without_payouts() {
     assert_eq!(scenarios[5].relay, ShareRelay::WithoutPayouts);
     assert_eq!(
         scenarios[5].label,
-        "no-tokens, 29,399 payees, without-payouts relay"
+        "no-tokens, 29,402 payees, without-payouts relay"
     );
 }
 

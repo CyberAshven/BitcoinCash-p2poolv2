@@ -305,7 +305,7 @@ remain follow-ups.
 
 SV1 sends the whole coinbase around the extranonce. SV2 extended jobs and
 Job Declaration encode prefix and suffix as fields of at most 65,535 bytes
-each; this gives roughly 1,919 P2PKH payouts, depending on other fields.
+each; this gives roughly 1,922 P2PKH payouts, depending on other fields.
 SV2 standard channels carry headers and merkle paths, rather than the
 coinbase. A job is never truncated to fit: opening an extended channel
 whose job would not fit is refused with `coinbase-too-large`, and an open

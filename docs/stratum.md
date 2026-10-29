@@ -55,7 +55,7 @@ Every connected Stratum V1 miner gets the job with `mining.notify`, which
 carries the whole coinbase; Stratum V2 channels get the equivalent messages.
 An [SV2 extended job](https://stratumprotocol.org/specification/05-mining-protocol/)
 carries its coinbase prefix and suffix as separate `B0_64K` fields, each
-limited to 65,535 bytes. The suffix usually binds first, at about 1,919
+limited to 65,535 bytes. The suffix usually binds first, at about 1,922
 P2PKH payouts; the exact count depends on the other outputs and scripts.
 Opening an extended channel whose first job exceeds either field returns
 `OpenMiningChannelError` with `coinbase-too-large`. On a later template,

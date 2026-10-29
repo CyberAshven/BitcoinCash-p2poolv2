@@ -5,71 +5,73 @@
 use super::*;
 
 #[test]
-fn a_hybrid_coinbase_without_payouts_is_399_bytes() {
-    // S = 445 less the tree output (44) and the two extra count bytes.
-    assert_eq!(hybrid_coinbase_bytes(0, false), 399);
-    assert_eq!(hybrid_coinbase_bytes(0, true), 443);
+fn a_hybrid_coinbase_without_payouts_is_321_bytes() {
+    // S = 367 less the tree output (44) and the two extra count bytes.
+    assert_eq!(hybrid_coinbase_bytes(0, false), 321);
+    assert_eq!(hybrid_coinbase_bytes(0, true), 365);
 }
 
 #[test]
 fn a_no_token_coinbase_pays_a_thousand_payees_directly() {
-    // 1,005 outputs need a three-byte output count.
+    // 1,003 outputs need a three-byte output count.
     let split = split_payees(CoinbaseLayout::no_tokens(), 1_000);
     assert_eq!(split.direct_outputs, 1_000);
     assert_eq!(split.tree_payees, 0);
-    assert_eq!(split.coinbase_bytes, 399 + 34_000 + 2);
+    assert_eq!(split.coinbase_bytes, 321 + 34_000 + 2);
     assert_eq!(split.payout_bytes, 34_000);
 }
 
 #[test]
-fn a_no_token_coinbase_pays_29399_payees_directly_within_bchs_limit() {
-    let split = split_payees(CoinbaseLayout::no_tokens(), 29_399);
-    assert_eq!(split.direct_outputs, 29_399);
+fn a_no_token_coinbase_pays_29402_payees_directly_within_bchs_limit() {
+    // P = 1,000,000 - 367 = 999,633; with the unused tree output
+    // 999,677 >= 29,402 * 34.
+    let split = split_payees(CoinbaseLayout::no_tokens(), 29_402);
+    assert_eq!(split.direct_outputs, 29_402);
     assert_eq!(split.tree_payees, 0);
-    assert_eq!(split.coinbase_bytes, 999_967);
+    assert_eq!(split.coinbase_bytes, 999_991);
 }
 
 #[test]
-fn the_29400th_no_token_payee_starts_a_tree() {
-    // P = 1,000,000 - 445 = 999,555 bytes: 29,398 P2PKH outputs.
-    let split = split_payees(CoinbaseLayout::no_tokens(), 29_400);
-    assert_eq!(split.direct_outputs, 29_398);
-    assert_eq!(split.tree_payees, 2);
-    assert_eq!(split.coinbase_bytes, 399 + 29_398 * 34 + 44 + 2);
+fn the_29403rd_no_token_payee_starts_a_tree() {
+    // P = 999,633 bytes: 29,400 P2PKH outputs.
+    let split = split_payees(CoinbaseLayout::no_tokens(), 29_403);
+    assert_eq!(split.direct_outputs, 29_400);
+    assert_eq!(split.tree_payees, 3);
+    assert_eq!(split.coinbase_bytes, 321 + 29_400 * 34 + 44 + 2);
 }
 
 #[test]
 fn a_million_no_token_payees_keep_the_coinbase_under_bchs_limit() {
     let split = split_payees(CoinbaseLayout::no_tokens(), 1_000_000);
-    assert_eq!(split.direct_outputs, 29_398);
-    assert_eq!(split.tree_payees, 970_602);
-    assert_eq!(split.coinbase_bytes, 999_977);
-    assert_eq!(split.payout_bytes, 29_398 * 34 + 44);
+    assert_eq!(split.direct_outputs, 29_400);
+    assert_eq!(split.tree_payees, 970_600);
+    assert_eq!(split.coinbase_bytes, 999_967);
+    assert_eq!(split.payout_bytes, 29_400 * 34 + 44);
 }
 
 #[test]
-fn seventy_eight_token_payees_fit_without_a_tree() {
-    // P = 3,072 - 445 = 2,627; with the unused tree output 2,671 >= 78 * 34.
-    let split = split_payees(CoinbaseLayout::with_tokens(), 78);
-    assert_eq!(split.direct_outputs, 78);
+fn eighty_token_payees_fit_without_a_tree() {
+    // P = 3,072 - 367 = 2,705; with the unused tree output 2,749 >= 80 * 34.
+    let split = split_payees(CoinbaseLayout::with_tokens(), 80);
+    assert_eq!(split.direct_outputs, 80);
     assert_eq!(split.tree_payees, 0);
-    assert_eq!(split.coinbase_bytes, 399 + 78 * 34);
+    assert_eq!(split.coinbase_bytes, 321 + 80 * 34);
 }
 
 #[test]
-fn the_seventy_ninth_token_payee_starts_a_tree_and_leaves_77_direct() {
-    let split = split_payees(CoinbaseLayout::with_tokens(), 79);
-    assert_eq!(split.direct_outputs, 77);
+fn the_eighty_first_token_payee_starts_a_tree_and_leaves_79_direct() {
+    let split = split_payees(CoinbaseLayout::with_tokens(), 81);
+    assert_eq!(split.direct_outputs, 79);
     assert_eq!(split.tree_payees, 2);
-    assert_eq!(split.coinbase_bytes, 399 + 77 * 34 + 44);
+    assert_eq!(split.coinbase_bytes, 321 + 79 * 34 + 44);
 }
 
 #[test]
-fn a_million_token_payees_keep_a_3061_byte_coinbase() {
+fn a_million_token_payees_keep_a_3051_byte_coinbase() {
     let split = split_payees(CoinbaseLayout::with_tokens(), 1_000_000);
-    assert_eq!(split.direct_outputs, 77);
-    assert_eq!(split.tree_payees, 999_923);
-    assert_eq!(split.coinbase_bytes, 3_061);
+    assert_eq!(split.direct_outputs, 79);
+    assert_eq!(split.tree_payees, 999_921);
+    assert_eq!(split.coinbase_bytes, 3_051);
 }
 
 #[test]
@@ -83,7 +85,7 @@ fn a_limit_below_the_fixed_outputs_pays_everyone_through_the_tree() {
     );
     assert_eq!(split.direct_outputs, 0);
     assert_eq!(split.tree_payees, 10);
-    assert_eq!(split.coinbase_bytes, 443);
+    assert_eq!(split.coinbase_bytes, 365);
 }
 
 #[test]
@@ -107,7 +109,7 @@ fn cap_11_coinbase_below_the_cap_pays_every_payee() {
 fn an_uncapped_coinbase_grows_34_bytes_a_payee_without_end() {
     let split = split_payees(CoinbaseLayout::Uncapped, 1_000_000);
     assert_eq!(split.direct_outputs, 1_000_000);
-    assert_eq!(split.coinbase_bytes, 399 + 34_000_000 + 4);
+    assert_eq!(split.coinbase_bytes, 321 + 34_000_000 + 4);
 }
 
 #[test]
@@ -189,12 +191,12 @@ fn uncles_add_a_hash_each_to_the_body() {
 
 #[test]
 fn a_share_without_payouts_is_a_few_hundred_bytes_whatever_the_payees() {
-    let sizes = ShareSizes::new(CoinbaseLayout::no_tokens(), 29_399, 32_000_000, 226, 0);
+    let sizes = ShareSizes::new(CoinbaseLayout::no_tokens(), 29_402, 32_000_000, 226, 0);
     assert_eq!(
         sizes.message_payload_bytes(0),
-        1 + 305 + 1 + 118 + 1 + 18 * 32 + 999_967
+        1 + 305 + 1 + 118 + 1 + 18 * 32 + 999_991
     );
-    assert_eq!(sizes.message_payload_bytes_without_payouts(0), 1_403);
+    assert_eq!(sizes.message_payload_bytes_without_payouts(0), 1_325);
 }
 
 #[test]
@@ -245,70 +247,71 @@ fn an_uncapped_coinbase_for_a_million_payees_breaks_bch_consensus() {
 }
 
 #[test]
-fn the_pre_hybrid_share_body_limit_allows_6008_direct_payees() {
+fn the_pre_hybrid_share_body_limit_allows_6010_direct_payees() {
     let largest = largest_direct_payee_count(|sizes| {
         sizes
             .limit_check(CoinbaseLayout::Uncapped)
             .share_body_within_pre_hybrid_limit
     });
-    assert_eq!(largest, 6_008);
+    assert_eq!(largest, 6_010);
 }
 
 #[test]
-fn the_hybrid_share_body_limit_allows_35420_direct_payees() {
+fn the_hybrid_share_body_limit_allows_35422_direct_payees() {
     let largest = largest_direct_payee_count(|sizes| {
         sizes
             .limit_check(CoinbaseLayout::Uncapped)
             .share_body_within_hybrid_limit
     });
-    assert_eq!(largest, 35_420);
+    assert_eq!(largest, 35_422);
 }
 
 #[test]
-fn bch_transaction_limit_allows_29399_direct_payees() {
+fn bch_transaction_limit_allows_29402_direct_payees() {
     let largest = largest_direct_payee_count(|sizes| {
         sizes
             .limit_check(CoinbaseLayout::Uncapped)
             .coinbase_within_bch_transaction_limit
     });
-    assert_eq!(largest, 29_399);
+    assert_eq!(largest, 29_402);
 }
 
 #[test]
-fn the_p2p_message_limit_allows_38523_direct_payees() {
+fn the_p2p_message_limit_allows_38525_direct_payees() {
     let largest = largest_direct_payee_count(|sizes| {
         sizes
             .limit_check(CoinbaseLayout::Uncapped)
             .message_within_p2p_limit
     });
-    assert_eq!(largest, 38_523);
+    assert_eq!(largest, 38_525);
 }
 
 #[test]
-fn an_sv2_extended_job_field_holds_1919_direct_payees() {
+fn an_sv2_extended_job_field_holds_1922_direct_payees() {
     let largest = largest_direct_payee_count(|sizes| {
         sizes
             .limit_check(CoinbaseLayout::Uncapped)
             .coinbase_within_sv2_extended_fields
     });
-    assert_eq!(largest, 1_919);
+    assert_eq!(largest, 1_922);
 }
 
 #[test]
-fn one_vm_stack_element_holds_a_coinbase_of_282_direct_payees() {
+fn one_vm_stack_element_holds_a_coinbase_of_284_direct_payees() {
     let largest =
         largest_direct_payee_count(|sizes| sizes.coinbase_bytes() <= BCH_VM_STACK_ELEMENT_BYTES);
-    assert_eq!(largest, 282);
+    assert_eq!(largest, 284);
 }
 
 #[test]
-fn the_asic_evidence_allows_11_direct_payees() {
+fn the_asic_evidence_allows_13_direct_payees() {
+    // 321 + 13 * 34 = 763 bytes fit the 784-byte block; a 14th payee is 797.
     let largest = largest_direct_payee_count(|sizes| {
         sizes
             .limit_check(CoinbaseLayout::Uncapped)
             .coinbase_within_asic_evidence
     });
-    assert_eq!(largest, 11);
+    assert_eq!(largest, 13);
 }
 
 #[test]
@@ -323,13 +326,13 @@ fn a_message_over_one_segment_pays_a_second_packet_header() {
 }
 
 #[test]
-fn the_tree_starts_after_29399_no_token_payees_and_78_token_payees() {
+fn the_tree_starts_after_29402_no_token_payees_and_80_token_payees() {
     assert_eq!(
         largest_payee_count_without_tree(CoinbaseLayout::no_tokens()),
-        29_399
+        29_402
     );
     assert_eq!(
         largest_payee_count_without_tree(CoinbaseLayout::with_tokens()),
-        78
+        80
     );
 }

@@ -156,9 +156,22 @@ pub const BCH_MAX_COINBASE_PAYOUTS: u64 = 11;
 /// cap-11 comparison.
 pub const COINBASE_FIXED_BYTES: u64 = 408;
 
-/// Coinbase outputs other than the payouts, under both rules: merge-mining
-/// commitment, donation, fee, padding and share commitment.
+/// Coinbase outputs other than the payouts under the cap-11 rule:
+/// merge-mining commitment, donation, fee, padding and share commitment.
 pub const COINBASE_FIXED_OUTPUTS: u64 = 5;
+
+/// Coinbase outputs other than the payouts and the tree output under the
+/// hybrid rule: merge-mining commitment, padding and share commitment. Each
+/// share's donation and fee come off its own weight and their recipients are
+/// payees like any miner (`cuts-per-share`), so there is no donation or fee
+/// output.
+pub const HYBRID_COINBASE_FIXED_OUTPUTS: u64 = 3;
+
+/// Payees a hybrid coinbase pays besides the miners with a share in the
+/// window: the P2Pool donation key, which every share's default 1% donation
+/// pays. Operator fee addresses would add one each; the model's nodes take no
+/// fee.
+pub const DONATION_KEY_PAYEES: u64 = 1;
 
 /// The hybrid payout rule's coinbase limit for a share without token
 /// commitments: BCH's own `MAX_TX_SIZE`. Payees past it go to the payout
@@ -175,11 +188,11 @@ pub const TOKEN_COINBASE_THRESHOLD_BYTES: u64 = 3_072;
 /// `S` in the hybrid payout rule: the most a coinbase takes besides its
 /// PPLNS payouts, every field at its worst case: 51 bytes of transaction
 /// fields, a 100-byte scriptSig, 2 more bytes of output count, the 53-byte
-/// CTMM commitment, the donation (34), the fee (at most 44, P2SH32), the
-/// tree output (44), the padding (at most 74) and the share commitment (43)
-/// (`bch-hybrid-payouts.md`, section 3.3; `BCH_COINBASE_BYTES_BESIDE_PAYOUTS`
-/// in `coinbase_budget.rs`). The payout budget is `C - S`.
-pub const HYBRID_COINBASE_BYTES_BESIDE_PAYOUTS: u64 = 445;
+/// CTMM commitment, the tree output (44), the padding (at most 74) and the
+/// share commitment (43) (`bch-hybrid-payouts.md`, section 3.3;
+/// `BCH_COINBASE_BYTES_BESIDE_PAYOUTS` in `coinbase_budget.rs`). The donation
+/// key and fee addresses are PPLNS payees. The payout budget is `C - S`.
+pub const HYBRID_COINBASE_BYTES_BESIDE_PAYOUTS: u64 = 367;
 
 /// The same coinbase without the tree output and with a one-byte output
 /// count: the part of a hybrid coinbase that does not depend on payees.

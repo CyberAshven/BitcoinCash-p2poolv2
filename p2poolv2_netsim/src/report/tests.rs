@@ -59,7 +59,7 @@ fn a_report_names_what_it_ran() {
     };
     let report = scenario.run();
     assert!(report.summary_text().starts_with("tiny: 10 nodes"));
-    assert_eq!(report.payees, 1_000);
+    assert_eq!(report.payees, 1_001);
     assert!(report.broken_limits.is_empty());
 }
 
