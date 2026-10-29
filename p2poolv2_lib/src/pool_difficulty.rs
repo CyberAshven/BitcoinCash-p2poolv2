@@ -391,11 +391,19 @@ impl PoolDifficulty {
 
     /// Calculate the pool target clamped to stay within valid bounds.
     ///
-    /// The returned target is clamped in two directions:
-    /// 1. Never harder than bitcoin difficulty (floor) -- ASERT can produce a
-    ///    target smaller than the bitcoin target.
-    /// 2. Never easier than the chain ceiling. Bitcoin and the Bitcoin Cash
-    ///    main chain use MAX_POOL_TARGET. The mini chain uses its own anchor.
+    /// The returned target is never easier than the chain ceiling. Bitcoin
+    /// and the Bitcoin Cash main chain use MAX_POOL_TARGET. The mini chain
+    /// uses its own anchor.
+    ///
+    /// There is no floor at the block's own target: the share target can be
+    /// harder than a block, as on chipnet when BCHN offers a
+    /// minimum-difficulty block. Such a block is still submitted and pays
+    /// the PPLNS window, but it is not a share. A floor would have to take
+    /// the block target from the share's own header, whose nBits, time and
+    /// height its miner chooses; the ASERT band cannot pin them, because the
+    /// header's time stands in for its parent's and the proof-of-work limit
+    /// is always allowed on test networks. Anyone could then claim an easy
+    /// block target and mine shares at it.
     pub fn calculate_target_clamped(&self, parent: AsertParent) -> CompactTarget {
         let asert_target = self.calculate_target(parent);
 

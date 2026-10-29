@@ -1484,8 +1484,6 @@ pub fn create_test_commitment() -> ShareCommitment {
         miner_address: make_test_share_program(1).into(),
         share_witness_root: compute_witness_root(&[]),
         // Use signet-easy target so test bitcoin headers can meet pool difficulty.
-        // In production, calculate_target_clamped ensures pool target is never
-        // harder than bitcoin difficulty.
         bits: CompactTarget::from_consensus(0x1e0377ae),
         time: 1700000000,
         donation_address: None,
