@@ -4,6 +4,7 @@
 
 use super::block_template::BlockTemplate;
 use super::merge_tokens::MinerTokenJob;
+use crate::accounting::payout::payout_tree::PayoutTree;
 use crate::shares::share_block::ShareTransaction;
 use crate::shares::share_commitment::ShareCommitment;
 use bitcoin::BlockHash;
@@ -61,6 +62,9 @@ pub struct JobDetails {
     /// `None` for the empty commitment and for declared jobs, whose
     /// declarator holds its own leaves.
     pub merge_tokens: Option<Arc<MinerTokenJob>>,
+    /// The exact payout tree committed by this job's coinbase, retained so
+    /// a found block's funds can be recovered before share validation.
+    pub payout_tree: Option<Arc<PayoutTree>>,
 }
 
 /// Lock-free job tracker using DashMap for concurrent access.
@@ -116,6 +120,7 @@ impl JobTracker {
                 template_merkle_branches,
                 share_transactions: Arc::from([]),
                 merge_tokens: None,
+                payout_tree: None,
             },
         );
         job_id

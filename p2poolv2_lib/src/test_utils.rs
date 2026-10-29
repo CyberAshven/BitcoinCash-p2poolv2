@@ -118,6 +118,8 @@ use crate::stratum::work::tracker::JobTracker;
 #[cfg(test)]
 use crate::stratum::work::tracker::start_tracker_actor;
 #[cfg(test)]
+use crate::stratum::work::tracker::{JobDetails, JobId};
+#[cfg(test)]
 use binary_sv2::{B064K, B0255, Deserialize, GetSize, Seq0255, Serialize, U256};
 #[cfg(any(test, feature = "test-utils"))]
 use bitcoin::TxMerkleNode;
@@ -683,6 +685,29 @@ pub fn test_bch_prepared_with_payee_count(payee_count: u32) -> Arc<PreparedNotif
         "../../bitcoindrpc/test_data/bchn-regtest-template.json"
     ))
     .unwrap();
+    test_bch_prepared_with_weights(template, test_bch_payee_weights(payee_count))
+}
+
+/// A token-share payout snapshot with enough payees to exercise a payout
+/// tree through both Stratum protocols and Job Declaration.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_bch_prepared_with_tree_payees(payee_count: u32) -> Arc<PreparedNotifyParams> {
+    let template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    test_bch_prepared_with_weights_and_cuts(
+        template,
+        test_bch_payee_weights(payee_count),
+        (None, None),
+        (None, None),
+        Some(test_merge_token_set()),
+    )
+}
+
+/// Distinct equal-weight payees for coinbase size and tree fixtures.
+#[cfg(any(test, feature = "test-utils"))]
+fn test_bch_payee_weights(payee_count: u32) -> HashMap<Address, u128> {
     let mut weights = HashMap::with_capacity(payee_count as usize);
     for payee_index in 0..payee_count {
         let mut key_hash = [0; 20];
@@ -693,7 +718,7 @@ pub fn test_bch_prepared_with_payee_count(payee_count: u32) -> Arc<PreparedNotif
         );
         weights.insert(address, 1);
     }
-    test_bch_prepared_with_weights(template, weights)
+    weights
 }
 
 /// Build a reusable BCH payout snapshot for the supplied template and weights.
@@ -1489,6 +1514,35 @@ pub fn random_hex_string(length: usize, leading_zeroes: usize) -> String {
 /// maximum, so a share meets it within a few nonces.
 #[cfg(test)]
 pub const EASY_POOL_BITS: u32 = 0x207fffff;
+
+/// Solve a tracked regtest job to its template's network target, using the
+/// submitting session's extranonces.
+#[cfg(test)]
+pub fn solve_job_submit(
+    job_id: JobId,
+    job: &JobDetails,
+    enonce1_hex: &str,
+    enonce2_hex: &str,
+) -> SimpleRequest<'static> {
+    let job_id_hex = format!("{:016x}", job_id.0);
+    let ntime_hex = format!("{:08x}", job.blocktemplate.curtime);
+    (0u32..)
+        .map(|nonce| {
+            SimpleRequest::new_submit(
+                4,
+                "worker".to_string(),
+                job_id_hex.clone(),
+                enonce2_hex.to_string(),
+                ntime_hex.clone(),
+                format!("{nonce:08x}"),
+            )
+        })
+        .find(|submit| {
+            validate_bitcoin_difficulty(job, submit, enonce1_hex, DEFAULT_VERSION_MASK)
+                .is_ok_and(|result| result.meets_bitcoin_difficulty)
+        })
+        .unwrap()
+}
 
 /// Insert a job built by the pool's own notify path into `tracker` and return
 /// a submit message for it whose share hash meets the job's pool target.

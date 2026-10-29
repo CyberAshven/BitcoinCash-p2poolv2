@@ -15,6 +15,7 @@ use super::tracker::{JobDetails, JobId, JobTracker};
 use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, bch_split_for_commitment};
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+use crate::accounting::payout::payout_tree::PayoutTree;
 use crate::shares::auxpow::{SplitSlot, TokenSplit};
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::{ShareTransaction, encode_optional_address};
@@ -273,6 +274,8 @@ pub struct PreparedNotifyParams {
     /// which each miner's job replaces with their own. Set with
     /// `merge_tokens`.
     merge_mining_offset: Option<usize>,
+    /// Shared payout tree behind these params' coinbase root output.
+    payout_tree: Option<Arc<PayoutTree>>,
 }
 
 impl PreparedNotifyParams {
@@ -888,6 +891,7 @@ impl PreparedNotifyParamsBuilder {
             merge_tokens,
             merge_token_split,
             merge_mining_offset,
+            payout_tree: self.payouts.tree.map(Arc::new),
         })
     }
 }
@@ -1106,6 +1110,7 @@ pub(crate) fn insert_miner_job(
             template_merkle_branches: prepared.merkle_branches.clone(),
             share_transactions: Arc::clone(&prepared.share_transactions),
             merge_tokens,
+            payout_tree: prepared.payout_tree.clone(),
         },
     );
     (job_id, coinbase2)

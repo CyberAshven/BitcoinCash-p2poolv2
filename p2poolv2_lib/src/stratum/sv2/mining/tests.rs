@@ -8,11 +8,15 @@ use crate::stratum::block_submit::FoundBlockSubmitter;
 use crate::stratum::merge_disclosure::{LineLog, MergeMiningLogs};
 use crate::stratum::sv2::session::encode_message;
 use crate::stratum::work::block_template::BlockTemplate;
+#[cfg(not(feature = "sim"))]
+use crate::stratum::work::difficulty::validate::validate_bitcoin_difficulty;
 use crate::stratum::work::prepared_notify::{
     PreparedNotifyParamsBuilder, build_notify_from_prepared,
 };
 use crate::stratum::work::tracker::start_tracker_actor;
 use crate::test_utils::{make_test_share_address, setup_test_chain_store_handle};
+#[cfg(not(feature = "sim"))]
+use crate::test_utils::{solve_job_submit, test_bch_prepared_with_tree_payees};
 use crate::test_utils::{
     test_bch_custom_job, test_bch_prepared, test_bch_prepared_for_template,
     test_bch_prepared_with_payee_count, test_bch_prepared_with_tokens, test_bch_solve_custom_job,
@@ -32,6 +36,138 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 const USERNAME: &str = "tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d.rig1";
 /// Easier than almost every hash, so the test share meets the pool target.
 const EASY_POOL_BITS: u32 = 0x2100ffff;
+
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn sv2_standard_keeps_a_found_tree_before_share_pipeline_failure() {
+    let (server, _) = setup_mock_bitcoin_rpc().await;
+    mock_submit_block_with_any_body(&server).await;
+    let (ctx, emissions, _directories) = test_bch_stratum_context(&server.uri()).await;
+    drop(emissions);
+    let store = ctx.chain_store_handle.clone();
+    let tracker = Arc::clone(&ctx.tracker_handle);
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let identity = bch_identity();
+    let mut open = binary_sv2::to_bytes(OpenStandardMiningChannel {
+        request_id: 1,
+        user_identity: identity.as_str().try_into().unwrap(),
+        nominal_hash_rate: 1.0,
+        max_target: U256::new(&[0xff; 32]).unwrap(),
+    })
+    .unwrap();
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared_with_tree_payees(100)),
+        )
+        .await
+        .unwrap();
+    let mut success_payload = payload(&opened[0]);
+    let success = OpenStandardMiningChannelSuccess::from_bytes(&mut success_payload).unwrap();
+    let mut job_payload = payload(&opened[1]);
+    let wire_job = NewMiningJob::from_bytes(&mut job_payload).unwrap();
+    let channel = &channels.channels[&success.channel_id];
+    let tracked_id = channel.jobs[&wire_job.job_id].tracker_job_id;
+    let job = tracker.get_job(tracked_id).unwrap();
+    let solved = solve_job_submit(
+        tracked_id,
+        &job,
+        &channel.session.enonce1_hex,
+        &hex::encode(channel.standard_enonce2),
+    );
+    let found = validate_bitcoin_difficulty(
+        &job,
+        &solved,
+        &channel.session.enonce1_hex,
+        DEFAULT_VERSION_MASK,
+    )
+    .unwrap();
+    let mut submit = binary_sv2::to_bytes(SubmitSharesStandard {
+        channel_id: success.channel_id,
+        sequence_number: 1,
+        job_id: wire_job.job_id,
+        nonce: found.header.nonce,
+        ntime: found.header.time,
+        version: wire_job.version,
+    })
+    .unwrap();
+    let error = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_STANDARD, &mut submit, None)
+        .await
+        .unwrap_err();
+    assert!(error.contains("Failed to send share to store"));
+    let stored = store
+        .get_payout_tree(&found.coinbase.compute_txid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.payees, job.payout_tree.unwrap().payees());
+    assert_eq!(stored.bitcoin_blockhash, found.header.block_hash());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn sv2_extended_keeps_a_found_tree_before_share_pipeline_failure() {
+    let (server, _) = setup_mock_bitcoin_rpc().await;
+    mock_submit_block_with_any_body(&server).await;
+    let (ctx, emissions, _directories) = test_bch_stratum_context(&server.uri()).await;
+    drop(emissions);
+    let store = ctx.chain_store_handle.clone();
+    let tracker = Arc::clone(&ctx.tracker_handle);
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let mut open = open_extended_request(&bch_identity());
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared_with_tree_payees(100)),
+        )
+        .await
+        .unwrap();
+    let mut success_payload = payload(&opened[0]);
+    let success = OpenExtendedMiningChannelSuccess::from_bytes(&mut success_payload).unwrap();
+    let mut job_payload = payload(&opened[1]);
+    let wire_job = NewExtendedMiningJob::from_bytes(&mut job_payload).unwrap();
+    let channel = &channels.channels[&success.channel_id];
+    let tracked_id = channel.jobs[&wire_job.job_id].tracker_job_id;
+    let job = tracker.get_job(tracked_id).unwrap();
+    let solved = solve_job_submit(
+        tracked_id,
+        &job,
+        &channel.session.enonce1_hex,
+        "0000000000000001",
+    );
+    let found = validate_bitcoin_difficulty(
+        &job,
+        &solved,
+        &channel.session.enonce1_hex,
+        DEFAULT_VERSION_MASK,
+    )
+    .unwrap();
+    let mut submit = binary_sv2::to_bytes(SubmitSharesExtended {
+        channel_id: success.channel_id,
+        sequence_number: 1,
+        job_id: wire_job.job_id,
+        nonce: found.header.nonce,
+        ntime: found.header.time,
+        version: wire_job.version,
+        extranonce: B032::new(&[0, 0, 0, 0, 0, 0, 0, 1]).unwrap(),
+    })
+    .unwrap();
+    let error = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut submit, None)
+        .await
+        .unwrap_err();
+    assert!(error.contains("Failed to send share to store"));
+    let stored = store
+        .get_payout_tree(&found.coinbase.compute_txid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.payees, job.payout_tree.unwrap().payees());
+    assert_eq!(stored.bitcoin_blockhash, found.header.block_hash());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
 
 #[tokio::test]
 async fn zero_maximum_target_is_refused_at_channel_opening() {

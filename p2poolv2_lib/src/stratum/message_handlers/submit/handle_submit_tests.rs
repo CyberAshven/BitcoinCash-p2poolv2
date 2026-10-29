@@ -8,17 +8,179 @@ use crate::stratum::messages::Id;
 use crate::stratum::messages::SetDifficultyNotification;
 use crate::stratum::session::Session;
 use crate::stratum::work::gbt::build_merkle_branches_for_template;
+use crate::stratum::work::prepared_notify::insert_miner_job;
 use crate::stratum::work::tracker::start_tracker_actor;
 use crate::test_utils::{
     TEST_COINBASE_NSECS, build_pool_job_submit, build_token_win_submit, create_test_commitment,
-    load_valid_stratum_work_components, setup_test_chain_store_handle,
+    load_valid_stratum_work_components, setup_test_chain_store_handle, solve_job_submit,
+    test_bch_prepared_with_tree_payees, test_bch_stratum_context,
 };
-use bitcoin::BlockHash;
+use bitcoin::{Address, BlockHash, Network, PubkeyHash};
 use bitcoindrpc::BitcoindRpcClient;
 use bitcoindrpc::test_utils::{mock_submit_block_with_any_body, setup_mock_bitcoin_rpc};
 use p2poolv2_config::DEFAULT_VERSION_MASK;
+use p2poolv2_wallet::share_owner::ShareOwner;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+#[tokio::test]
+async fn a_found_tree_is_stored_with_the_submitted_coinbase_and_share() {
+    let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let prepared = test_bch_prepared_with_tree_payees(100);
+    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        &ctx.tracker_handle,
+    );
+    let job = ctx.tracker_handle.get_job(job_id).unwrap();
+    let submit = solve_job_submit(job_id, &job, "01010101", "0000000000000001");
+    let found =
+        validate_bitcoin_difficulty(&job, &submit, "01010101", DEFAULT_VERSION_MASK).unwrap();
+    record_found_payout_tree(&ctx, found.header, &found.coinbase, &job).await;
+    let stored = ctx.chain_store_handle.get_payout_trees().unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].coinbase_txid, found.coinbase.compute_txid());
+    assert_eq!(stored[0].bitcoin_blockhash, found.header.block_hash());
+    assert_eq!(
+        stored[0].bitcoin_height,
+        u64::from(job.blocktemplate.height)
+    );
+    assert_eq!(
+        found.coinbase.output[stored[0].root_vout as usize],
+        job.payout_tree.as_ref().unwrap().root_output()
+    );
+    let proof = CoinbaseProof::from_coinbase(
+        &found.coinbase,
+        job.share_commitment.as_ref().unwrap().share_witness_root,
+    )
+    .unwrap();
+    let expected_share = ShareHeader::from_commitment_and_header(
+        job.share_commitment.unwrap(),
+        found.header,
+        u64::from(job.blocktemplate.height),
+        proof,
+    );
+    assert_eq!(stored[0].share_blockhash, expected_share.block_hash());
+    assert_eq!(stored[0].payees, job.payout_tree.unwrap().payees());
+}
+
+/// A job without a share commitment (solo or Hydrapool mode) has no share to
+/// name, and its tree is kept all the same.
+#[tokio::test]
+async fn a_tree_job_without_a_share_commitment_is_kept_without_a_share() {
+    let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let prepared = test_bch_prepared_with_tree_payees(100);
+    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        &ctx.tracker_handle,
+    );
+    let mut job = ctx.tracker_handle.get_job(job_id).unwrap();
+    let submit = solve_job_submit(job_id, &job, "01010101", "0000000000000001");
+    let found =
+        validate_bitcoin_difficulty(&job, &submit, "01010101", DEFAULT_VERSION_MASK).unwrap();
+    job.share_commitment = None;
+    record_found_payout_tree(&ctx, found.header, &found.coinbase, &job).await;
+    let stored = ctx.chain_store_handle.get_payout_trees().unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].coinbase_txid, found.coinbase.compute_txid());
+    assert_eq!(stored[0].share_blockhash, BlockHash::all_zeros());
+}
+
+/// A store that cannot keep the tree does not hold the block back: the
+/// whole reward is at stake, and the tree is fixed in the block, where every
+/// peer validating the share keeps its own copy.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn a_failed_tree_write_still_hands_the_block_off() {
+    let (mock_server, _) = setup_mock_bitcoin_rpc().await;
+    mock_submit_block_with_any_body(&mock_server).await;
+    let (mut ctx, _emissions, _directories) = test_bch_stratum_context(&mock_server.uri()).await;
+    let (closed_store, _closed_directory) = setup_test_chain_store_handle(false).await;
+    ctx.chain_store_handle = closed_store;
+    let prepared = test_bch_prepared_with_tree_payees(100);
+    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        &ctx.tracker_handle,
+    );
+    let job = ctx.tracker_handle.get_job(job_id).unwrap();
+    let submit = solve_job_submit(job_id, &job, "01010101", "0000000000000001");
+    let found =
+        validate_bitcoin_difficulty(&job, &submit, "01010101", DEFAULT_VERSION_MASK).unwrap();
+
+    submit_found_block(&ctx, found.header, found.coinbase.clone(), &job)
+        .await
+        .unwrap();
+
+    assert!(
+        ctx.chain_store_handle
+            .get_payout_trees()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(mock_server.received_requests().await.unwrap().len(), 1);
+}
+
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn sv1_keeps_a_found_tree_even_when_the_share_pipeline_rejects_it() {
+    let (mock_server, _) = setup_mock_bitcoin_rpc().await;
+    mock_submit_block_with_any_body(&mock_server).await;
+    let (ctx, emissions, _directories) = test_bch_stratum_context(&mock_server.uri()).await;
+    drop(emissions);
+    let prepared = test_bch_prepared_with_tree_payees(100);
+    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        &ctx.tracker_handle,
+    );
+    let job = ctx.tracker_handle.get_job(job_id).unwrap();
+    let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+    session.subscribed = true;
+    session.user_id = Some(1);
+    let submit = solve_job_submit(job_id, &job, &session.enonce1_hex, "0000000000000001");
+    let store = ctx.chain_store_handle.clone();
+    let error = handle_submit(submit, &mut session, ctx).await.unwrap_err();
+    assert!(error.to_string().contains("Failed to send share to store"));
+    let stored = store.get_payout_trees().unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].payees, job.payout_tree.unwrap().payees());
+    assert_eq!(mock_server.received_requests().await.unwrap().len(), 1);
+}
+
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn a_private_declarators_tree_is_kept_before_waiting_for_its_broadcast() {
+    let (mock_server, _) = setup_mock_bitcoin_rpc().await;
+    let (ctx, _emissions, _directories) = test_bch_stratum_context(&mock_server.uri()).await;
+    let prepared = test_bch_prepared_with_tree_payees(100);
+    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        &ctx.tracker_handle,
+    );
+    let mut job = ctx.tracker_handle.get_job(job_id).unwrap();
+    job.block_available = false;
+    let submit = solve_job_submit(job_id, &job, "01010101", "0000000000000001");
+    let found =
+        validate_bitcoin_difficulty(&job, &submit, "01010101", DEFAULT_VERSION_MASK).unwrap();
+    submit_found_block(&ctx, found.header, found.coinbase, &job)
+        .await
+        .unwrap();
+    assert_eq!(ctx.chain_store_handle.get_payout_trees().unwrap().len(), 1);
+    assert!(mock_server.received_requests().await.unwrap().is_empty());
+}
 
 #[test]
 fn test_true_difficulty() {

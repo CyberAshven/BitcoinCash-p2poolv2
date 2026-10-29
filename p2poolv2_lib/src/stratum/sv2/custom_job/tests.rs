@@ -2,11 +2,43 @@ use super::*;
 use crate::shares::auxpow::{SplitSlot, TokenSplit};
 use crate::test_utils::{
     bch_template_transaction, test_bch_custom_job, test_bch_custom_job_with_leaves,
-    test_bch_declared_leaves, test_bch_prepared, test_bch_prepared_with_cuts, test_merge_token_set,
+    test_bch_declared_leaves, test_bch_prepared, test_bch_prepared_with_cuts,
+    test_bch_prepared_with_tree_payees, test_merge_token_set,
 };
 use binary_sv2::{B064K, Deserialize, Seq0255, U256};
 use bitcoin::Network;
 use p2poolv2_config::DEFAULT_VERSION_MASK;
+
+#[test]
+fn a_full_declared_job_retains_the_tree_of_its_own_coinbase() {
+    let prepared = test_bch_prepared_with_tree_payees(100);
+    let token = prepared
+        .mining_job_token([0x11; 32], prepared.template().curtime)
+        .unwrap();
+    let value = prepared.template().coinbasevalue;
+    let (mut request_bytes, declared) = test_bch_custom_job(prepared, token, vec![], true, value);
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    );
+    let (job, block) = validate_custom_job(
+        &request,
+        declared,
+        payout,
+        ShareOwner::CashP2pkh([0x22; 20]),
+        DEFAULT_VERSION_MASK,
+    )
+    .unwrap();
+    let tree = job.payout_tree.unwrap();
+    assert!(tree.payees().len() > 1);
+    let coinbase = &block.unwrap().txdata[0];
+    assert!(coinbase.output.contains(&tree.root_output()));
+    assert_eq!(
+        tree.payees().iter().map(|payee| payee.amount).sum::<u64>(),
+        tree.root_output().value.to_sat()
+    );
+}
 
 #[test]
 fn full_job_uses_declared_transactions_and_proportional_fee_revenue() {

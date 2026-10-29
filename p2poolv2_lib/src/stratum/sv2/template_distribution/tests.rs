@@ -1259,6 +1259,7 @@ async fn a_block_on_a_provided_template_goes_to_its_provider_and_not_over_rpc() 
         template_merkle_branches: Vec::new(),
         share_transactions: Arc::from([]),
         merge_tokens: None,
+        payout_tree: None,
     };
     let header = Header {
         version: Version::from_consensus(0x2000_0000),
@@ -1312,6 +1313,7 @@ async fn a_block_whose_provider_connection_is_gone_goes_over_rpc() {
         template_merkle_branches: Vec::new(),
         share_transactions: Arc::from([]),
         merge_tokens: None,
+        payout_tree: None,
     };
     let header = Header {
         version: Version::from_consensus(0x2000_0000),

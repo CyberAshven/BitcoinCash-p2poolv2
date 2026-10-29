@@ -5,6 +5,8 @@
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::config::PoolMode;
 use crate::shares::coinbase_proof::CoinbaseProof;
+use crate::shares::share_block::ShareHeader;
+use crate::store::payout_tree::StoredPayoutTree;
 #[cfg(not(feature = "sim"))]
 use crate::stratum::block_submit::{spawn_extra_node_submissions, submit_to_primary_node};
 use crate::stratum::{
@@ -279,12 +281,19 @@ fn token_win_messages<'a>(
 /// node ([`crate::stratum::block_submit::FOUND_BLOCK_RETRY_POLICY`]). Every
 /// node in `[[submit_nodes]]` gets it too, provider or not, from background
 /// tasks.
+///
+/// Before the block goes anywhere, the job's payout tree is kept with the
+/// coinbase's txid and root output (`record_found_payout_tree`), so this node
+/// executes it even if the share is later rejected or the node stops before
+/// validating it. SV1, SV2 standard and extended channels, Template
+/// Provider templates and declared jobs all submit through here.
 pub(crate) async fn submit_found_block(
     stratum_context: &StratumContext,
     header: Header,
     coinbase: bitcoin::Transaction,
     job: &JobDetails,
 ) -> Result<(), Error> {
+    record_found_payout_tree(stratum_context, header, &coinbase, job).await;
     if !job.block_available {
         info!(
             "Private declared block {} must be broadcast by its declarator",
@@ -329,6 +338,70 @@ pub(crate) async fn submit_found_block(
         let _ = (stratum_context, header, coinbase, job);
     }
     Ok(())
+}
+
+/// Keep the payout tree of a block this node found before the block goes to
+/// BCHN, the Template Provider or the declarator: the tree from the job, the
+/// coinbase's txid and the index of its root output.
+///
+/// The validator keeps it again when the share comes back through
+/// validation, and every peer keeps it when it validates the share; this is
+/// the copy that survives the share being rejected or this node stopping
+/// first. A failure is logged and the block still goes out: holding back a
+/// found block over a local store error would lose the whole reward, while
+/// the tree is fixed in the block and peers keep their own copies.
+async fn record_found_payout_tree(
+    stratum_context: &StratumContext,
+    header: Header,
+    coinbase: &bitcoin::Transaction,
+    job: &JobDetails,
+) {
+    let Some(tree) = &job.payout_tree else {
+        return;
+    };
+    let blockhash = header.block_hash();
+    let root_output = tree.root_output();
+    let Some(root_vout) = coinbase
+        .output
+        .iter()
+        .position(|output| *output == root_output)
+    else {
+        error!("The payout tree root of found block {blockhash} is missing from its coinbase");
+        return;
+    };
+    let share_blockhash = match &job.share_commitment {
+        Some(commitment) => {
+            match CoinbaseProof::from_coinbase(coinbase, commitment.share_witness_root) {
+                Ok(coinbase_proof) => ShareHeader::from_commitment_and_header(
+                    commitment.clone(),
+                    header,
+                    u64::from(job.blocktemplate.height),
+                    coinbase_proof,
+                )
+                .block_hash(),
+                Err(error) => {
+                    error!("Cannot name the share of found block {blockhash}: {error}");
+                    BlockHash::all_zeros()
+                }
+            }
+        }
+        None => BlockHash::all_zeros(),
+    };
+    let record = StoredPayoutTree::new(
+        tree,
+        coinbase.compute_txid(),
+        u32::try_from(root_vout).expect("a coinbase has far fewer than 2^32 outputs"),
+        blockhash,
+        u64::from(job.blocktemplate.height),
+        share_blockhash,
+    );
+    if let Err(error) = stratum_context
+        .chain_store_handle
+        .put_payout_tree(record)
+        .await
+    {
+        error!("Failed to keep the payout tree of found block {blockhash}: {error}");
+    }
 }
 
 /// A share rebuilt from a tracker job, ready for the share chain or the

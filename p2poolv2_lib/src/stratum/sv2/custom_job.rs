@@ -293,6 +293,7 @@ pub(crate) fn validate_custom_job(
             // room for share transactions, so its share carries none.
             share_transactions: Arc::from([]),
             merge_tokens: None,
+            payout_tree: distribution.tree.map(Arc::new),
         },
         proposal,
     ))
