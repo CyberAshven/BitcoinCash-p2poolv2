@@ -80,6 +80,15 @@ ignore = [
     "RUSTSEC-2026-0118",  # hickory-proto 0.25.2, no fix published
     "RUSTSEC-2026-0119",  # hickory-proto 0.25.2, fixed in >=0.26.1
 
+    # Reachable, blocked upstream. crypto-bigint 0.5.5 comes from k256 0.13
+    # (our script and Schnorr code, and libp2p-identity 0.2 via libp2p 0.56).
+    # The fix is only in 0.7.6, which needs k256 0.14 and libp2p 0.57. The
+    # fixed defects are in 0.7-only code (the borrowing_sub workaround,
+    # UintRef, BoxedMontyForm, ctz, div_rem, Montgomery mul). k256 0.13 calls
+    # none of that; it uses 0.5's mask-based add/sub on secret scalars.
+    # Remove when k256 moves to 0.14 and libp2p to 0.57.
+    "RUSTSEC-2026-0387",  # crypto-bigint 0.5.5, fixed only in >=0.7.6
+
     # Unmaintained proc macro, build-time only, reached through
     # libp2p-tcp -> if-watch -> netlink-packet-core. Remove when that chain
     # drops paste.
