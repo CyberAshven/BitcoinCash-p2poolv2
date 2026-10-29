@@ -355,11 +355,21 @@ fn real_chipnet_header_two_hours_before_its_parent_passes() {
         BchAsert::CHIPNET.next_bits(parent_height, parent.time),
         Some(child.bits)
     );
-    for seconds_before in [200, 260, 600, 3_600, 7_200] {
-        BchAsert::CHIPNET
-            .check_header_bits(child.bits, parent.time - seconds_before, height)
-            .unwrap_or_else(|error| panic!("{seconds_before} s before: {error}"));
-    }
+    BchAsert::CHIPNET
+        .check_header_bits(child.bits, parent.time - 200, height)
+        .unwrap();
+    BchAsert::CHIPNET
+        .check_header_bits(child.bits, parent.time - 260, height)
+        .unwrap();
+    BchAsert::CHIPNET
+        .check_header_bits(child.bits, parent.time - 600, height)
+        .unwrap();
+    BchAsert::CHIPNET
+        .check_header_bits(child.bits, parent.time - 3_600, height)
+        .unwrap();
+    BchAsert::CHIPNET
+        .check_header_bits(child.bits, parent.time - 7_200, height)
+        .unwrap();
     // The same two hours on mainnet's band would need 2^(1/24), about
     // 1.029, which 1.05 covers.
     let mut old_band = BchAsert::CHIPNET;

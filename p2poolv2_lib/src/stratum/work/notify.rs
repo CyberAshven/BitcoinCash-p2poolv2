@@ -393,7 +393,9 @@ mod tests {
     use super::*;
     use crate::accounting::OutputPair;
     use crate::accounting::payout::payout_distribution::MockPayoutDistribution;
+    use crate::config::BitcoinCashNetwork;
     use crate::pool_difficulty::AsertParent;
+    use crate::shares::bch_asert::{U256, get_compact};
     use crate::stratum::messages::Notify;
     use crate::stratum::work::block_template::{BlockTemplate, TemplateTransaction};
     use crate::stratum::work::coinbase::extract_outputs_from_coinbase2;
@@ -867,8 +869,6 @@ mod tests {
     /// token shares would be refused by every peer. Regtest has no anchor.
     #[test]
     fn token_jobs_need_a_template_inside_the_asert_band() {
-        use crate::config::BitcoinCashNetwork;
-        use crate::shares::bch_asert::{U256, get_compact};
         let data = include_str!(
             "../../../../p2poolv2_tests/test_data/gbt/regtest/ckpool/one-txn/gbt.json"
         );

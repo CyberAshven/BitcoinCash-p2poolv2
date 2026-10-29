@@ -2,6 +2,7 @@ use super::*;
 use crate::accounting::OutputPair;
 use crate::accounting::stats::metrics;
 use crate::shares::auxpow::{AuxProof, Disclosure};
+use crate::shares::bch_asert::BchAsert;
 use crate::shares::coinbase_proof::CoinbaseProof;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::stratum::block_submit::FoundBlockSubmitter;
@@ -196,6 +197,70 @@ async fn zero_maximum_target_is_refused_at_channel_opening() {
         ERROR_CODE_OPEN_MINING_CHANNEL_MAX_TARGET_OUT_OF_RANGE
     );
     assert!(channels.channels.is_empty());
+}
+
+#[tokio::test]
+async fn declared_token_jobs_refuse_template_bits_outside_the_asert_band() {
+    let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let mut open = open_extended_request(&bch_identity());
+    channels
+        .handle(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL, &mut open, None)
+        .await
+        .unwrap();
+    // Keep the regtest payout fixture, but apply chipnet's token header band.
+    // At this height and time ASERT clamps to 1; target 9 is just beyond
+    // the easy edge of 8, while still being a valid BCH compact target.
+    channels.ctx.bch_share_network = Some(BchShareNetwork::Chipnet);
+    let mut template = test_bch_prepared().template().as_ref().clone();
+    template.height = BchAsert::CHIPNET.anchor_height + 10_001;
+    template.curtime = (BchAsert::CHIPNET.anchor_parent_time + 600) as u32;
+    template.mintime = template.curtime;
+    template.bits = "01090000".into();
+    template.target =
+        hex::encode(Target::from_compact(CompactTarget::from_consensus(0x0109_0000)).to_be_bytes());
+    let prepared = test_bch_prepared_for_template(template);
+    let token = prepared
+        .mining_job_token([1; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) = test_bch_custom_job(
+        Arc::clone(&prepared),
+        token,
+        vec![],
+        true,
+        prepared.template().coinbasevalue,
+    );
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let frames = channels
+        .install_custom_job(&request, declared, Some(Arc::clone(&prepared)))
+        .await
+        .unwrap();
+    let mut response_payload = payload(&frames[0]);
+    let error = SetCustomMiningJobError::from_bytes(&mut response_payload).unwrap();
+    assert_eq!(error.error_code.as_utf8_or_hex(), "invalid-token-asert");
+    assert!(channels.channels[&1].jobs.is_empty());
+
+    // The exact empty commitment remains BCHN's decision and gets a job.
+    let token = prepared
+        .mining_job_token([2; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) = test_bch_custom_job(
+        Arc::clone(&prepared),
+        token,
+        vec![],
+        false,
+        prepared.template().coinbasevalue,
+    );
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let frames = channels
+        .install_custom_job(&request, declared, Some(prepared))
+        .await
+        .unwrap();
+    assert_eq!(
+        frame_type(&frames[0]),
+        MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS
+    );
+    assert_eq!(channels.channels[&1].jobs.len(), 1);
 }
 
 #[tokio::test]

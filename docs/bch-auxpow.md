@@ -190,6 +190,13 @@ narrow, so its band permits up to x8 on both sides. Mainnet retains the
 original asymmetric band. These are proof-format checks agreed with
 Pickaxe, not BCH block validation.
 
+Local share-block validation runs the same token-header gate as peer header
+validation. The notifier drops tokens from a template outside the band.
+Stratum V2 also checks a declared token job's nBits and requested minimum
+time before proposal validation or job installation, returning
+`invalid-token-asert` on failure. An exactly empty commitment does not need
+this token-format check.
+
 P2Pool's `BchAsert::check_header_bits` and the SAFA covenant use the same
 bands, number for number: mainnet `target × 100 ≤ computed × 105`, test
 networks `target ≤ computed × 8`, and `computed / d` floored on the hard
