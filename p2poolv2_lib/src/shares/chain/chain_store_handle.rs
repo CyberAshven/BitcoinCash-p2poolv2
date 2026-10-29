@@ -434,6 +434,18 @@ impl ChainStoreHandle {
         self.store_handle.put_payout_tree(tree).await
     }
 
+    /// Count a new tip at which BCHN does not know a kept payout tree's
+    /// block, removing it at the unknown-tip limit. Return whether removed.
+    pub async fn record_unknown_payout_tree_tip(
+        &self,
+        coinbase_txid: Txid,
+        bitcoin_tip: BlockHash,
+    ) -> Result<bool, StoreError> {
+        self.store_handle
+            .record_unknown_payout_tree_tip(coinbase_txid, bitcoin_tip)
+            .await
+    }
+
     /// Mark a kept payout tree executed.
     pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError> {
         self.store_handle
@@ -1104,6 +1116,7 @@ mockall::mock! {
         pub async fn add_pplns_share(&self, pplns_share: SimplePplnsShare) -> Result<(), StoreError>;
         pub async fn put_payout_tree(&self, tree: StoredPayoutTree) -> Result<(), StoreError>;
         pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError>;
+        pub async fn record_unknown_payout_tree_tip(&self, coinbase_txid: Txid, bitcoin_tip: BlockHash) -> Result<bool, StoreError>;
         pub async fn add_user(&self, btcaddress: String) -> Result<u64, StoreError>;
     }
 

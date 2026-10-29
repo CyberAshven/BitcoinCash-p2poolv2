@@ -4,10 +4,12 @@
 
 //! Every Bitcoin Cash P2Pool node executes the payout trees of found blocks.
 //!
-//! The validator hands the executor the payout tree of every share it
-//! validates that is a BCH block (`DefaultShareValidator::with_payout_tree_sink`).
-//! The executor keeps it in the store, whatever the share's later status on
-//! the share chain, and on each new BCH tip:
+//! The node that finds a block keeps its payout tree in the store before
+//! submitting it (`submit_found_block`), and the validator hands the
+//! executor the payout tree of every share it validates that is a BCH block
+//! (`DefaultShareValidator::with_payout_tree_sink`). The executor keeps it,
+//! whatever the share's later status on the share chain, and on each new BCH
+//! tip:
 //!
 //! - waits until the block holding the tree's coinbase has 100
 //!   confirmations, so the coinbase output can be spent in the next block
@@ -17,9 +19,12 @@
 //!   node before its children, and the child nodes of the other accepted
 //!   rates, so a tree someone else started at 2 or 3 satoshis per byte is
 //!   finished too;
-//! - rebroadcasts until nothing is waiting in BCHN's mempool and the
-//!   coinbase output is spent on chain for `SETTLED_TIPS` tips in a row, then
-//!   marks the tree executed.
+//! - rebroadcasts until every node transaction of one root variant is
+//!   confirmed for `SETTLED_TIPS` tips in a row, then marks the tree executed;
+//! - drops the record of a block BCHN still does not know after
+//!   `UNKNOWN_BLOCK_TIP_LIMIT` new tips, counted only outside initial block
+//!   download, so minimum-difficulty claims on test networks cannot build an
+//!   unbounded polling backlog.
 //!
 //! It needs no keys and no money: the covenant fixes every transaction, so
 //! every node broadcasts the same bytes and duplicates are harmless. BCH has
@@ -50,8 +55,8 @@ pub const EXECUTOR_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// in the next block: BCH's `COINBASE_MATURITY`, 100.
 pub const COINBASE_MATURITY_CONFIRMATIONS: i64 = 100;
 
-/// New tips in a row with nothing waiting in the mempool and the coinbase
-/// output spent before a tree counts as executed.
+/// New tips in a row with every transaction of a root variant confirmed
+/// before a tree counts as executed.
 pub const SETTLED_TIPS: u32 = 6;
 
 /// BCHN's `RPC_VERIFY_ALREADY_IN_CHAIN`.
@@ -93,6 +98,9 @@ pub enum BroadcastOutcome {
 pub trait TreeExecutionNode: Send + Sync {
     /// The hash of the node's best block.
     async fn best_block_hash(&self) -> Result<BlockHash, String>;
+    /// Whether the node is still in initial block download, when its not
+    /// knowing a block says nothing.
+    async fn in_initial_block_download(&self) -> Result<bool, String>;
     /// Confirmations of `blockhash`: -1 when it is off the main chain, `None`
     /// when the node does not know it.
     async fn block_confirmations(&self, blockhash: BlockHash) -> Result<Option<i64>, String>;
@@ -110,6 +118,16 @@ impl TreeExecutionNode for BitcoindRpcClient {
             .await
             .map_err(|error| error.to_string())?;
         BlockHash::from_str(&hash).map_err(|error| error.to_string())
+    }
+
+    async fn in_initial_block_download(&self) -> Result<bool, String> {
+        let info: serde_json::Value = self
+            .request("getblockchaininfo", Vec::new())
+            .await
+            .map_err(|error| error.to_string())?;
+        info.get("initialblockdownload")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| "getblockchaininfo has no initialblockdownload".to_string())
     }
 
     async fn block_confirmations(&self, blockhash: BlockHash) -> Result<Option<i64>, String> {
@@ -246,22 +264,56 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
                 return;
             }
         };
+        // An unknown block counts towards expiry only on a synced BCHN: one
+        // still downloading the chain does not know blocks it will soon have.
+        let synced = matches!(self.node.in_initial_block_download().await, Ok(false));
         for tree in trees.iter().filter(|tree| !tree.executed) {
-            self.execute_tree(tree).await;
+            self.execute_tree(tree, tip, synced).await;
         }
     }
 
     /// Broadcast one tree if it is mature, and mark it executed once it has
     /// settled.
-    async fn execute_tree(&mut self, stored: &StoredPayoutTree) {
+    async fn execute_tree(
+        &mut self,
+        stored: &StoredPayoutTree,
+        bitcoin_tip: BlockHash,
+        synced: bool,
+    ) {
         match self
             .node
             .block_confirmations(stored.bitcoin_blockhash)
             .await
         {
             Ok(Some(confirmations)) if confirmations >= COINBASE_MATURITY_CONFIRMATIONS => {}
-            Ok(_) => return,
+            Ok(None) => {
+                self.settled_tips.remove(&stored.coinbase_txid);
+                if !synced {
+                    return;
+                }
+                match self
+                    .chain_store_handle
+                    .record_unknown_payout_tree_tip(stored.coinbase_txid, bitcoin_tip)
+                    .await
+                {
+                    Ok(true) => info!(
+                        "Expired payout tree of unknown block {} (coinbase {})",
+                        stored.bitcoin_blockhash, stored.coinbase_txid
+                    ),
+                    Ok(false) => {}
+                    Err(error) => warn!(
+                        "Cannot age payout tree of unknown block {}: {error}",
+                        stored.bitcoin_blockhash
+                    ),
+                }
+                return;
+            }
+            Ok(Some(_)) => {
+                self.settled_tips.remove(&stored.coinbase_txid);
+                return;
+            }
             Err(error) => {
+                self.settled_tips.remove(&stored.coinbase_txid);
                 debug!(
                     "Cannot read the confirmations of block {}: {error}",
                     stored.bitcoin_blockhash
@@ -279,7 +331,7 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
                 return;
             }
         };
-        let mut pending = false;
+        let mut confirmed_variant = false;
         for fee_rate in BCH_TREE_FEE_RATES {
             let Some(transactions) = tree.node_transactions(fee_rate, stored.root_outpoint())
             else {
@@ -287,24 +339,46 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
             };
             // Only P2Pool's own rate starts a tree; the others are finished.
             let skip = usize::from(fee_rate != BCH_TREE_EXECUTION_FEE_RATE);
-            for transaction in transactions.iter().skip(skip) {
+            let mut root_confirmed = false;
+            let mut descendants_confirmed = true;
+            for (index, transaction) in transactions.iter().enumerate().skip(skip) {
                 match self.node.send_raw_transaction(transaction).await {
-                    BroadcastOutcome::Accepted => pending = true,
-                    BroadcastOutcome::InChain | BroadcastOutcome::MissingInputs => {}
-                    BroadcastOutcome::Rejected(reason) => warn!(
-                        "BCHN refused payout tree transaction {} of coinbase {}: {reason}",
-                        transaction.compute_txid(),
-                        stored.coinbase_txid
-                    ),
+                    BroadcastOutcome::InChain => {
+                        // A confirmed descendant also proves its root was
+                        // confirmed, even after every root output is spent.
+                        root_confirmed = true;
+                    }
+                    BroadcastOutcome::Accepted | BroadcastOutcome::MissingInputs => {
+                        if index != 0 {
+                            descendants_confirmed = false;
+                        }
+                    }
+                    BroadcastOutcome::Rejected(reason) => {
+                        if index != 0 {
+                            descendants_confirmed = false;
+                        }
+                        warn!(
+                            "BCHN refused payout tree transaction {} of coinbase {}: {reason}",
+                            transaction.compute_txid(),
+                            stored.coinbase_txid
+                        );
+                    }
                 }
             }
+            // An alternate variant with no children is never broadcast by
+            // this node. An unspent confirmed output proves it was mined.
+            if skip == 1 && transactions.len() == 1 {
+                root_confirmed = matches!(
+                    self.node
+                        .unspent_on_chain(OutPoint::new(transactions[0].compute_txid(), 0))
+                        .await,
+                    Ok(true)
+                );
+            }
+            confirmed_variant |= root_confirmed && descendants_confirmed;
         }
-        let root_spent = matches!(
-            self.node.unspent_on_chain(stored.root_outpoint()).await,
-            Ok(false)
-        );
         let settled = self.settled_tips.entry(stored.coinbase_txid).or_insert(0);
-        if pending || !root_spent {
+        if !confirmed_variant {
             *settled = 0;
             return;
         }

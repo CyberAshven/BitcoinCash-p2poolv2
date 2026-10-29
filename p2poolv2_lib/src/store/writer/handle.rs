@@ -202,6 +202,24 @@ impl StoreHandle {
         reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
     }
 
+    /// Count a new tip at which BCHN does not know a kept payout tree's
+    /// block, removing it at the unknown-tip limit. Return whether removed.
+    pub async fn record_unknown_payout_tree_tip(
+        &self,
+        coinbase_txid: Txid,
+        bitcoin_tip: BlockHash,
+    ) -> Result<bool, StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::RecordUnknownPayoutTreeTip {
+                coinbase_txid,
+                bitcoin_tip,
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
+    }
+
     /// Mark a kept payout tree executed through the writer thread.
     pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -490,6 +508,7 @@ mockall::mock! {
         pub async fn add_pplns_share(&self, pplns_share: SimplePplnsShare) -> Result<(), StoreError>;
         pub async fn put_payout_tree(&self, tree: StoredPayoutTree) -> Result<(), StoreError>;
         pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError>;
+        pub async fn record_unknown_payout_tree_tip(&self, coinbase_txid: Txid, bitcoin_tip: BlockHash) -> Result<bool, StoreError>;
         pub async fn prune_block_bodies_chunk(&self, from: u32, to: u32) -> Result<PruneStats, StoreError>;
 
         // Sync chain state updates

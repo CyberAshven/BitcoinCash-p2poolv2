@@ -146,6 +146,13 @@ pub enum WriteCommand {
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
 
+    /// Count an unknown block on a new BCH tip, expiring its payout record.
+    RecordUnknownPayoutTreeTip {
+        coinbase_txid: Txid,
+        bitcoin_tip: BlockHash,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
+    },
+
     /// Set genesis block hash (fire-and-forget)
     SetGenesisBlockHash { hash: BlockHash },
 
@@ -307,6 +314,17 @@ impl StoreWriter {
                 reply,
             } => {
                 let result = self.store.mark_payout_tree_executed(&coinbase_txid);
+                let _ = reply.send(result);
+            }
+
+            WriteCommand::RecordUnknownPayoutTreeTip {
+                coinbase_txid,
+                bitcoin_tip,
+                reply,
+            } => {
+                let result = self
+                    .store
+                    .record_unknown_payout_tree_tip(&coinbase_txid, bitcoin_tip);
                 let _ = reply.send(result);
             }
 

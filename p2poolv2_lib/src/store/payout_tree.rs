@@ -7,18 +7,28 @@
 //! A found block whose coinbase pays some payees through a payout tree is
 //! worth nothing to them until the tree's node transactions are broadcast
 //! after maturity. Every node keeps each such tree, keyed by the coinbase
-//! txid, from the moment it validates the block's share, whatever the share's
-//! later status on the share chain: the tree is fixed in the BCH block. The
+//! txid, before submitting the block, with validation as a second source,
+//! whatever the share's later status: the tree is fixed in the BCH block. The
 //! payees and their amounts are enough to rebuild every node transaction
 //! (`PayoutTree::build`); the API serves them so payees can keep their own
-//! copy. Entries are never deleted, an executed tree included (about 45 bytes
-//! per payee).
+//! copy. A record of a block BCHN still does not know after
+//! `UNKNOWN_BLOCK_TIP_LIMIT` new tips, counted only while BCHN is out of
+//! initial block download, is removed: on a test network a share can claim a
+//! found block with a minimum-difficulty header no BCHN ever accepts. Known
+//! blocks and executed trees are retained (about 45 bytes per payee).
 
 use super::{ColumnFamily, Store, writer::StoreError};
 use crate::accounting::payout::payout_tree::{PayoutTree, PayoutTreeError, TreePayee};
 use bitcoin::consensus::encode::{self, Decodable, Encodable, VarInt};
 use bitcoin::hashes::Hash;
 use bitcoin::{BlockHash, OutPoint, ScriptBuf, Txid};
+use rocksdb::WriteOptions;
+
+/// New BCH tips, outside initial block download, at which BCHN may not
+/// know a kept tree's block before the record is removed. A real block
+/// reaches BCHN well within them: the finder submits it before it relays the
+/// share, and BCH relays a block in seconds.
+pub const UNKNOWN_BLOCK_TIP_LIMIT: u32 = 6;
 
 /// A payout tree of a found block, as stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,9 +45,13 @@ pub struct StoredPayoutTree {
     pub share_blockhash: BlockHash,
     /// The tree's payees after dust merging, in canonical order.
     pub payees: Vec<TreePayee>,
-    /// Whether this node has seen every node transaction confirmed (or
-    /// settled otherwise) and stopped broadcasting it.
+    /// Whether this node has seen every node transaction confirmed and
+    /// stopped broadcasting it.
     pub executed: bool,
+    /// New BCH tips at which BCHN did not know the purported found block.
+    unknown_block_tips: u32,
+    /// Last tip counted as unknown, so restarting at that tip counts once.
+    last_unknown_tip: BlockHash,
 }
 
 impl StoredPayoutTree {
@@ -60,6 +74,8 @@ impl StoredPayoutTree {
             share_blockhash,
             payees: tree.payees().to_vec(),
             executed: false,
+            unknown_block_tips: 0,
+            last_unknown_tip: BlockHash::all_zeros(),
         }
     }
 
@@ -92,6 +108,8 @@ impl Encodable for StoredPayoutTree {
             length += payee.amount.consensus_encode(writer)?;
         }
         length += self.executed.consensus_encode(writer)?;
+        length += self.unknown_block_tips.consensus_encode(writer)?;
+        length += self.last_unknown_tip.consensus_encode(writer)?;
         Ok(length)
     }
 }
@@ -114,6 +132,8 @@ impl Decodable for StoredPayoutTree {
             });
         }
         let executed = bool::consensus_decode(reader)?;
+        let unknown_block_tips = u32::consensus_decode(reader)?;
+        let last_unknown_tip = BlockHash::consensus_decode(reader)?;
         Ok(Self {
             coinbase_txid,
             root_vout,
@@ -122,21 +142,54 @@ impl Decodable for StoredPayoutTree {
             share_blockhash,
             payees,
             executed,
+            unknown_block_tips,
+            last_unknown_tip,
         })
     }
 }
 
 impl Store {
+    /// Count a new BCH tip at which the block of a kept payout tree is
+    /// unknown. Remove the record at the limit, returning whether removed.
+    /// Counts and the last observed tip persist across executor restarts.
+    pub(crate) fn record_unknown_payout_tree_tip(
+        &self,
+        coinbase_txid: &Txid,
+        bitcoin_tip: BlockHash,
+    ) -> Result<bool, StoreError> {
+        let Some(mut tree) = self.get_payout_tree(coinbase_txid)? else {
+            return Ok(false);
+        };
+        if tree.executed || tree.last_unknown_tip == bitcoin_tip {
+            return Ok(false);
+        }
+        tree.last_unknown_tip = bitcoin_tip;
+        tree.unknown_block_tips = tree.unknown_block_tips.saturating_add(1);
+        let column_family = self.db.cf_handle(&ColumnFamily::PayoutTrees).unwrap();
+        let key = coinbase_txid.to_byte_array();
+        if tree.unknown_block_tips >= UNKNOWN_BLOCK_TIP_LIMIT {
+            self.db.delete_cf(&column_family, key)?;
+            Ok(true)
+        } else {
+            self.db
+                .put_cf(&column_family, key, encode::serialize(&tree))?;
+            Ok(false)
+        }
+    }
+
     /// Keep a found block's payout tree. A tree already kept, perhaps marked
-    /// executed, is left as it is: the same coinbase has the same tree.
+    /// executed, is left as it is: the same coinbase has the same tree. Sync
+    /// the WAL before acknowledging a new record, before block submission.
     pub(crate) fn put_payout_tree(&self, tree: &StoredPayoutTree) -> Result<(), StoreError> {
         let column_family = self.db.cf_handle(&ColumnFamily::PayoutTrees).unwrap();
         let key = tree.coinbase_txid.to_byte_array();
         if self.db.get_cf(&column_family, key)?.is_some() {
             return Ok(());
         }
+        let mut options = WriteOptions::default();
+        options.set_sync(true);
         self.db
-            .put_cf(&column_family, key, encode::serialize(tree))?;
+            .put_cf_opt(&column_family, key, encode::serialize(tree), &options)?;
         Ok(())
     }
 
@@ -214,6 +267,73 @@ mod tests {
         assert_eq!(decoded, tree);
         assert_eq!(decoded.tree().unwrap().payees(), tree.payees.as_slice());
         assert_eq!(decoded.root_outpoint().vout, 4);
+    }
+
+    #[test]
+    fn a_truncated_record_is_a_store_error() {
+        let mut encoded = encode::serialize(&stored(1));
+        encoded.pop();
+
+        assert!(encode::deserialize::<StoredPayoutTree>(&encoded).is_err());
+    }
+
+    #[test]
+    fn an_unknown_block_record_expires_after_six_distinct_tips_across_restarts() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().to_str().unwrap().to_string();
+        let store = Store::new(path.clone(), false).unwrap();
+        let tree = stored(1);
+        let coinbase_txid = tree.coinbase_txid;
+        store.put_payout_tree(&tree).unwrap();
+        assert!(
+            !store
+                .record_unknown_payout_tree_tip(&coinbase_txid, BlockHash::from_byte_array([1; 32]))
+                .unwrap()
+        );
+        // Another copy of the same tree cannot reset its expiry metadata.
+        store.put_payout_tree(&tree).unwrap();
+        drop(store);
+        let store = Store::new(path, false).unwrap();
+        assert!(
+            !store
+                .record_unknown_payout_tree_tip(&coinbase_txid, BlockHash::from_byte_array([1; 32]))
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .get_payout_tree(&coinbase_txid)
+                .unwrap()
+                .unwrap()
+                .unknown_block_tips,
+            1
+        );
+        assert!(
+            !store
+                .record_unknown_payout_tree_tip(&coinbase_txid, BlockHash::from_byte_array([2; 32]))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .record_unknown_payout_tree_tip(&coinbase_txid, BlockHash::from_byte_array([3; 32]))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .record_unknown_payout_tree_tip(&coinbase_txid, BlockHash::from_byte_array([4; 32]))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .record_unknown_payout_tree_tip(&coinbase_txid, BlockHash::from_byte_array([5; 32]))
+                .unwrap()
+        );
+        assert!(
+            store
+                .record_unknown_payout_tree_tip(&coinbase_txid, BlockHash::from_byte_array([6; 32]))
+                .unwrap()
+        );
+        assert!(store.get_payout_tree(&coinbase_txid).unwrap().is_none());
+        assert!(store.get_payout_trees().unwrap().is_empty());
     }
 
     #[test]

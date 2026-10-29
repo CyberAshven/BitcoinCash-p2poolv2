@@ -14,7 +14,9 @@ struct FakeNode {
     tip: Arc<Mutex<BlockHash>>,
     confirmations: Arc<Mutex<Option<i64>>>,
     outcome: Arc<Mutex<BroadcastOutcome>>,
+    transaction_outcomes: Arc<Mutex<HashMap<Txid, BroadcastOutcome>>>,
     root_unspent: Arc<Mutex<bool>>,
+    initial_block_download: Arc<Mutex<bool>>,
     sent: Arc<Mutex<Vec<Txid>>>,
 }
 
@@ -24,7 +26,9 @@ impl FakeNode {
             tip: Arc::new(Mutex::new(BlockHash::from_byte_array([1; 32]))),
             confirmations: Arc::new(Mutex::new(Some(confirmations))),
             outcome: Arc::new(Mutex::new(BroadcastOutcome::Accepted)),
+            transaction_outcomes: Arc::new(Mutex::new(HashMap::with_capacity(8))),
             root_unspent: Arc::new(Mutex::new(true)),
+            initial_block_download: Arc::new(Mutex::new(false)),
             sent: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -44,17 +48,29 @@ impl TreeExecutionNode for FakeNode {
         Ok(*self.tip.lock().unwrap())
     }
 
+    async fn in_initial_block_download(&self) -> Result<bool, String> {
+        Ok(*self.initial_block_download.lock().unwrap())
+    }
+
     async fn block_confirmations(&self, _blockhash: BlockHash) -> Result<Option<i64>, String> {
         Ok(*self.confirmations.lock().unwrap())
     }
 
     async fn send_raw_transaction(&self, transaction: &Transaction) -> BroadcastOutcome {
         self.sent.lock().unwrap().push(transaction.compute_txid());
-        self.outcome.lock().unwrap().clone()
+        self.transaction_outcomes
+            .lock()
+            .unwrap()
+            .get(&transaction.compute_txid())
+            .cloned()
+            .unwrap_or_else(|| self.outcome.lock().unwrap().clone())
     }
 
-    async fn unspent_on_chain(&self, _outpoint: OutPoint) -> Result<bool, String> {
-        Ok(*self.root_unspent.lock().unwrap())
+    async fn unspent_on_chain(&self, outpoint: OutPoint) -> Result<bool, String> {
+        Ok(
+            outpoint.txid == Txid::from_byte_array([0x44; 32])
+                && *self.root_unspent.lock().unwrap(),
+        )
     }
 }
 
@@ -212,6 +228,149 @@ async fn a_refused_tree_is_not_marked_executed() {
     }
 
     assert_eq!(node.sent().len(), SETTLED_TIPS as usize + 2);
+}
+
+/// The review's case: 501 payees make a root and two children. The root is
+/// confirmed and its outputs spent, but BCHN refuses both children (here for
+/// their fee). The tree is never marked executed and is broadcast again on
+/// every tip: a spent root says nothing about its children.
+#[tokio::test]
+async fn a_501_payee_tree_with_confirmed_root_and_rejected_children_stays_pending() {
+    let stored = stored_tree(501);
+    let transactions = stored
+        .tree()
+        .unwrap()
+        .node_transactions(1, stored.root_outpoint())
+        .unwrap();
+    let mut store = store_with(stored);
+    store.expect_mark_payout_tree_executed().never();
+    let node = FakeNode::new(150);
+    *node.root_unspent.lock().unwrap() = false;
+    *node.outcome.lock().unwrap() = BroadcastOutcome::Rejected("min relay fee not met".to_string());
+    node.transaction_outcomes
+        .lock()
+        .unwrap()
+        .insert(transactions[0].compute_txid(), BroadcastOutcome::InChain);
+    let mut executor = PayoutTreeExecutor::new(node.clone(), store, payout_tree_channel().1);
+    let rounds = SETTLED_TIPS as u8 + 2;
+
+    for byte in 1..=rounds {
+        node.advance_tip(byte);
+        executor.execute_round().await;
+    }
+
+    // Each round: the 1 sat/byte root and its two children, and the two
+    // children of each other rate.
+    assert_eq!(node.sent().len(), usize::from(rounds) * (3 + 2 + 2));
+    assert_eq!(
+        executor.settled_tips.values().copied().collect::<Vec<_>>(),
+        vec![0]
+    );
+}
+
+/// A confirmed root does not turn missing children into confirmed payouts.
+#[tokio::test]
+async fn a_501_payee_tree_with_missing_children_stays_pending() {
+    let stored = stored_tree(501);
+    let transactions = stored
+        .tree()
+        .unwrap()
+        .node_transactions(1, stored.root_outpoint())
+        .unwrap();
+    let mut store = store_with(stored);
+    store.expect_mark_payout_tree_executed().never();
+    let node = FakeNode::new(150);
+    *node.outcome.lock().unwrap() = BroadcastOutcome::MissingInputs;
+    node.transaction_outcomes
+        .lock()
+        .unwrap()
+        .insert(transactions[0].compute_txid(), BroadcastOutcome::InChain);
+    let mut executor = PayoutTreeExecutor::new(node.clone(), store, payout_tree_channel().1);
+
+    executor.execute_round().await;
+
+    assert_eq!(
+        executor.settled_tips.values().copied().collect::<Vec<_>>(),
+        vec![0]
+    );
+}
+
+/// Rejections belonging to conflicting fee variants do not keep a fully
+/// confirmed variant open. Its confirmed children prove the spent root.
+#[tokio::test]
+async fn a_501_payee_tree_settles_only_after_one_whole_variant_is_confirmed() {
+    let stored = stored_tree(501);
+    let coinbase_txid = stored.coinbase_txid;
+    let transactions = stored
+        .tree()
+        .unwrap()
+        .node_transactions(2, stored.root_outpoint())
+        .unwrap();
+    let mut store = store_with(stored);
+    store
+        .expect_mark_payout_tree_executed()
+        .withf(move |txid| *txid == coinbase_txid)
+        .times(1)
+        .returning(|_| Ok(()));
+    let node = FakeNode::new(150);
+    *node.root_unspent.lock().unwrap() = false;
+    *node.outcome.lock().unwrap() = BroadcastOutcome::MissingInputs;
+    node.transaction_outcomes
+        .lock()
+        .unwrap()
+        .insert(transactions[1].compute_txid(), BroadcastOutcome::InChain);
+    node.transaction_outcomes
+        .lock()
+        .unwrap()
+        .insert(transactions[2].compute_txid(), BroadcastOutcome::InChain);
+    let mut executor = PayoutTreeExecutor::new(node.clone(), store, payout_tree_channel().1);
+
+    for byte in 1..=SETTLED_TIPS as u8 {
+        node.advance_tip(byte);
+        executor.execute_round().await;
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_block_is_aged_once_per_new_bch_tip() {
+    let stored = stored_tree(3);
+    let coinbase_txid = stored.coinbase_txid;
+    let mut store = store_with(stored);
+    store
+        .expect_record_unknown_payout_tree_tip()
+        .withf(move |txid, tip| {
+            *txid == coinbase_txid && *tip == BlockHash::from_byte_array([1; 32])
+        })
+        .times(1)
+        .returning(|_, _| Ok(false));
+    store.expect_mark_payout_tree_executed().never();
+    let node = FakeNode::new(0);
+    *node.confirmations.lock().unwrap() = None;
+    let mut executor = PayoutTreeExecutor::new(node.clone(), store, payout_tree_channel().1);
+
+    executor.execute_round().await;
+    executor.execute_round().await;
+
+    assert!(node.sent().is_empty());
+}
+
+/// A BCHN still downloading the chain does not know blocks it will soon
+/// have, so its new tips never count towards removing a kept tree.
+#[tokio::test]
+async fn an_unknown_block_is_not_aged_during_initial_block_download() {
+    let mut store = store_with(stored_tree(3));
+    store.expect_record_unknown_payout_tree_tip().never();
+    let node = FakeNode::new(0);
+    *node.confirmations.lock().unwrap() = None;
+    *node.initial_block_download.lock().unwrap() = true;
+    let mut executor = PayoutTreeExecutor::new(node.clone(), store, payout_tree_channel().1);
+
+    for byte in 2..=9 {
+        node.advance_tip(byte);
+        executor.execute_round().await;
+    }
+
+    assert!(node.sent().is_empty());
 }
 
 #[tokio::test]
