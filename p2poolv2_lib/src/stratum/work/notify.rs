@@ -193,6 +193,16 @@ fn merge_token_payouts(
         );
         return Ok((output_distribution, None));
     }
+    let merge_tokens = match merge_tokens.at_height(template.height) {
+        Ok(merge_tokens) => merge_tokens,
+        Err(reason) => {
+            warn!(
+                "Template at height {} is mined without merge-mined tokens: {reason}",
+                template.height
+            );
+            return Ok((output_distribution, None));
+        }
+    };
     let Some(weights) = weights else {
         warn!("No PPLNS weights for this template yet; it is mined without merge-mined tokens");
         return Ok((output_distribution, None));

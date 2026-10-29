@@ -316,8 +316,8 @@ fn test_network_band_is_an_eighth_to_eight_times_or_the_limit() {
 }
 
 /// The exact `computed * 8` edge, where ASERT clamps to 1 so the edge and
-/// one above it are both exact compact values (`tools/safa-auxpow`'s
-/// `asert.test.mjs` checks the same two bits).
+/// one above it are both exact compact values (the SAFA tool tests
+/// the same two bits).
 #[test]
 fn test_network_easy_edge_is_exactly_eight_times() {
     let chipnet = BchAsert::CHIPNET;
@@ -372,6 +372,97 @@ fn real_chipnet_header_two_hours_before_its_parent_passes() {
             .check_header_bits(child.bits, parent.time - 260, height)
             .is_err()
     );
+}
+
+/// The header check and the SAFA covenant's band (`p2poolv2_safa`) agree on
+/// both networks, around and across both edges, with the proof-of-work
+/// limit's bits and with real headers dated from two hours before to two
+/// hours after their parents.
+#[test]
+fn header_band_matches_the_safa_tool() {
+    let mut checked = 0;
+    for (asert, network) in [
+        (BchAsert::MAINNET, "mainnet"),
+        (BchAsert::CHIPNET, "chipnet"),
+    ] {
+        for (height, time) in [
+            (
+                u64::from(asert.anchor_height) + 1,
+                (asert.anchor_parent_time + 600) as u32,
+            ),
+            (
+                u64::from(asert.anchor_height) + 121,
+                (asert.anchor_parent_time + 600) as u32,
+            ),
+            (
+                u64::from(asert.anchor_height) + 10_001,
+                (asert.anchor_parent_time + 600) as u32,
+            ),
+            (
+                u64::from(asert.anchor_height) + 50,
+                (asert.anchor_parent_time + 900_000) as u32,
+            ),
+        ] {
+            let computed = asert.next_target(height as u32 - 1, time).unwrap();
+            let mut candidates = vec![CompactTarget::from_consensus(BCH_POW_LIMIT_BITS)];
+            for (numerator, denominator) in [
+                (1, 16),
+                (1, 9),
+                (1, 8),
+                (1, 2),
+                (1, 1),
+                (104, 100),
+                (105, 100),
+                (106, 100),
+                (2, 1),
+                (8, 1),
+                (9, 1),
+                (16, 1),
+            ] {
+                let target = computed * U256::from(numerator) / U256::from(denominator);
+                if !target.is_zero() && target <= bch_pow_limit() {
+                    let compact = get_compact(target);
+                    candidates.push(compact);
+                    // One step either side of the rounded compact value.
+                    let raw = compact.to_consensus();
+                    candidates.push(CompactTarget::from_consensus(raw + 1));
+                    candidates.push(CompactTarget::from_consensus(raw - 1));
+                }
+            }
+            for bits in candidates {
+                assert_eq!(
+                    asert.check_header_bits(bits, time, height).is_ok(),
+                    p2poolv2_safa::asert_band_ok(network, bits.to_consensus(), time, height as u32)
+                        .unwrap(),
+                    "{network} {:#010x} at height {height}, time {time}",
+                    bits.to_consensus()
+                );
+                checked += 1;
+            }
+        }
+    }
+    for (pairs, asert, network) in [
+        (&MAINNET_PAIRS[..], BchAsert::MAINNET, "mainnet"),
+        (&CHIPNET_PAIRS[..], BchAsert::CHIPNET, "chipnet"),
+    ] {
+        for (parent_height, parent_hex, child_hex) in pairs {
+            let (parent, child) = real_pair(parent_hex, child_hex);
+            for skew in [-7_200_i64, -3_600, -260, -200, 0, 600, 7_200] {
+                let time = (i64::from(parent.time) + skew) as u32;
+                let height = parent_height + 1;
+                assert_eq!(
+                    asert
+                        .check_header_bits(child.bits, time, u64::from(height))
+                        .is_ok(),
+                    p2poolv2_safa::asert_band_ok(network, child.bits.to_consensus(), time, height)
+                        .unwrap(),
+                    "{network} block {height} at {skew} s"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 300, "{checked}");
 }
 
 /// Mainnet's easy side covers two hours of backwards skew too: a header

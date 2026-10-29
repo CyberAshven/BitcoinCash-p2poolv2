@@ -627,6 +627,7 @@ pub fn test_merge_token_set() -> Arc<TokenSet> {
                 state_hash: [0xaa; 32],
                 target_bits: 0x207f_ffff,
                 max_height: 16,
+                safa: None,
             },
             MergeMinedToken {
                 category: [0x22; 32],
@@ -634,6 +635,7 @@ pub fn test_merge_token_set() -> Arc<TokenSet> {
                 state_hash: [0xbb; 32],
                 target_bits: 0x1f00_ffff,
                 max_height: 16,
+                safa: None,
             },
         ])
         .unwrap(),

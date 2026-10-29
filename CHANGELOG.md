@@ -108,6 +108,16 @@ anchor and the donation and fee cap as they were.
   validity never depends on the tokens. The share header carries a
   pool-built root (`pool_merge_mining`, header tag `0x23`), digested by the
   share commitment; the rule tag becomes `mm2-roots-asert`.
+- SAFA vaults in the token file: a token may give its thread
+  (`"safa": {"threads", "state"}`) instead of a state hash and target, and
+  each job's leaf then takes the state hash of that state and the claim
+  target at the job's coinbase height, eased by the blocks since the state
+  as the covenant rebuilds it (`p2poolv2_safa::claim_target_bits`, integer
+  for integer). Copying a fixed target, as before, made leaves the covenant
+  refuses until 288 blocks after the last claim. Tests compare the node's
+  target with `p2poolv2_safa`'s over every thread count, and pin twelve
+  targets and two whole SAFA leaves printed by the Node tool's
+  `claimTargetBits` and `claimLeaf` at `88b696e8`.
 - Disclosure of each miner's leaves and wins, in Pickaxe's formats
   (pickaxe-miner PR #70 at `a92fef7`): the `CTMD` v2 leaf disclosure
   (`shares::auxpow::Disclosure`); the SV2 extension `0x4D4D` negotiated

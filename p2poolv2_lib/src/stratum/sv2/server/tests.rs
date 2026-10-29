@@ -197,6 +197,7 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
                 state_hash: [category; 32],
                 target_bits: 0x207f_ffff,
                 max_height: 16,
+                safa: None,
             })
             .collect(),
     )

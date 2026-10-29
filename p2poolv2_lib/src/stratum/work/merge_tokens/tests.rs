@@ -31,6 +31,7 @@ fn token_a() -> MergeMinedToken {
         state_hash: [0xaa; 32],
         target_bits: 0x207f_ffff,
         max_height: MAX_MERGE_MINING_TREE_HEIGHT,
+        safa: None,
     }
 }
 
@@ -41,6 +42,7 @@ fn token_b() -> MergeMinedToken {
         state_hash: [0xbb; 32],
         target_bits: 0x1f00_ffff,
         max_height: MAX_MERGE_MINING_TREE_HEIGHT,
+        safa: None,
     }
 }
 
@@ -338,4 +340,191 @@ fn a_node_does_not_start_on_a_broken_token_file() {
     let path = directory.path().join("broken.json");
     std::fs::write(&path, b"{\"tokens\":[{}]}").unwrap();
     assert!(TokenFile::open(&path).is_err());
+}
+
+/// `claimTargetBits` of the Node SAFA tool (`tools/safa-auxpow/lib.mjs`,
+/// commit `88b696e8`, before `p2poolv2_safa` replaced it): (state bits,
+/// blocks since the state, threads, claim bits), as it printed them.
+const SAFA_CLAIM_TARGET_VECTORS: [(u32, u32, u32, u32); 12] = [
+    (0x1d00ffff, 1, 1, 0x1d00ffff),
+    (0x1d00ffff, 288, 1, 0x1e00907f),
+    (0x1d00ffff, 1000, 63, 0x1d02c920),
+    (0x2000ffff, 288, 63, 0x2002c920),
+    (0x207fffff, 288, 1, 0x207fffff),
+    (0x03000001, 1, 63, 0x03000001),
+    (0x1a3106ee, 10, 7, 0x1a3b8756),
+    (0x1f7fffff, 100, 3, 0x20089553),
+    (0x03000100, 0, 2, 0x03000080),
+    (0x04008000, 0, 1, 0x03400000),
+    (0x1c7fffff, 287, 5, 0x1d0e9999),
+    (0x207fffff, 0, 1, 0x203fffff),
+];
+
+/// The node's claim targets are the Node tool's and `p2poolv2_safa`'s.
+#[test]
+fn safa_claim_targets_match_the_safa_tool() {
+    for (state_bits, height_delta, threads, expected) in SAFA_CLAIM_TARGET_VECTORS {
+        assert_eq!(
+            safa_claim_target_bits(state_bits, height_delta, threads),
+            Some(expected),
+            "{state_bits:#010x} after {height_delta} blocks over {threads} threads"
+        );
+        assert_eq!(
+            p2poolv2_safa::claim_target_bits(state_bits, height_delta, threads),
+            Ok(expected)
+        );
+    }
+    assert_eq!(safa_claim_target_bits(0x1d00_ffff, 1, 0), None);
+    assert_eq!(safa_claim_target_bits(0x0200_ffff, 1, 1), None);
+}
+
+/// Every thread count, ease and a spread of state targets, from the
+/// hardest to the easiest canonical one: the node and `p2poolv2_safa`
+/// agree, clamps and rounding included.
+#[test]
+fn safa_claim_targets_agree_with_p2poolv2_safa_everywhere() {
+    let states = [
+        0x0300_0001,
+        0x0300_0100,
+        0x0300_ffff,
+        0x0400_8000,
+        0x0240_0000,
+        0x1a31_06ee,
+        0x1c38_4bd7,
+        0x1d00_ffff,
+        0x1e00_907f,
+        0x1f7f_ffff,
+        0x2000_ffff,
+        0x2001_0000,
+        0x203f_ffff,
+        0x207f_ffff,
+    ];
+    let mut checked = 0;
+    for state_bits in states {
+        for threads in 1..=SAFA_MAX_THREADS {
+            for height_delta in [0, 1, 2, 7, 63, 100, 287, 288, 289, 4_032, u32::MAX] {
+                assert_eq!(
+                    safa_claim_target_bits(state_bits, height_delta, threads).ok_or(()),
+                    p2poolv2_safa::claim_target_bits(state_bits, height_delta, threads)
+                        .map_err(|_| ()),
+                    "{state_bits:#010x} after {height_delta} blocks over {threads} threads"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 14 * 63 * 11);
+}
+
+/// A SAFA vault on chipnet with 63 threads, thread 5 last claimed at
+/// height 329,000 with target `0x2000ffff`: `claimLeaf` of the Node tool gives
+/// these leaves for a miner paid to P2PKH(12 x 20) with a 1.5% donation to
+/// P2PKH(d0 x 20) and a 1% fee to P2PKH(fe x 20), at heights 329,001 and
+/// 329,300 (the ease capped at 288 blocks).
+const SAFA_LEAF_VECTORS: [(u32, u32, &str); 2] = [
+    (
+        329_001,
+        0x2000_8205,
+        "53e4d65d273996f978a7ef1fcf7235e1961e6fdca2295eab08d18e5471649986",
+    ),
+    (
+        329_300,
+        0x2002_c920,
+        "e7aaea290fc93691db63a04cd8a5e2495ac9577612e21397a6f30bf73e115789",
+    ),
+];
+
+/// That vault's thread state: thread 5, height 329,000, target
+/// `0x2000ffff`, reference bits `0x1a3106ee`.
+const SAFA_STATE: &str = "0500000028050500ffff0020ee06311a";
+
+/// A token file naming that vault (category 01..20 as hashed, the chipnet
+/// covenant's lock hash) with `threads` and `state`, and `extra` fields.
+fn safa_token_json(threads: u32, state: &str, extra: &str) -> String {
+    format!(
+        r#"{{"tokens":[{{"category":"201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a090807060504030201","lock_hash":"a38bbab2ff9047bceeea12f052cc9a3655178a7f7fd60768716d816fbaad7843","safa":{{"threads":{threads},"state":"{state}"}}{extra}}}]}}"#
+    )
+}
+
+/// A node mining that vault builds the SAFA tool's leaf at each job's
+/// height: the state hash from the thread's state, the target eased by the
+/// blocks since it. Checked against the Node tool's printed leaves and
+/// against `p2poolv2_safa::claim_leaf` on the compiled chipnet covenant.
+#[test]
+fn a_safa_vault_s_leaf_follows_its_thread_at_each_height() {
+    let set = Arc::new(
+        TokenSet::from_json(safa_token_json(63, SAFA_STATE, "").as_bytes())
+            .unwrap()
+            .unwrap(),
+    );
+    let split = TokenSplit {
+        donation: SplitSlot::new(150, &p2pkh(0xd0)).unwrap(),
+        fee: SplitSlot::new(100, &p2pkh(0xfe)).unwrap(),
+    };
+    assert_eq!(
+        hex::encode(set.tokens()[0].state_hash),
+        "8811e65fbf63635a1b24f5f09611c25ab1f0021fe40ab06e8156f02cde5a6978"
+    );
+    let covenant = p2poolv2_safa::create_covenant("chipnet", 63, 42_000_000_000).unwrap();
+    assert_eq!(covenant.lock_hash, set.tokens()[0].lock_hash);
+    let vault = p2poolv2_safa::Vault {
+        category: (1..=32).collect(),
+        value: 0,
+        token_amount: 0,
+        commitment: hex::decode(SAFA_STATE).unwrap(),
+    };
+    let tool_split = p2poolv2_safa::Split {
+        donation_bps: 150,
+        donation_locking_bytecode: p2pkh(0xd0),
+        fee_bps: 100,
+        fee_locking_bytecode: p2pkh(0xfe),
+    };
+    for (height, target_bits, leaf_hash) in SAFA_LEAF_VECTORS {
+        let at_height = set.at_height(height).unwrap();
+        assert_eq!(at_height.tokens()[0].target_bits, target_bits);
+        let job = at_height.miner_job(&p2pkh(0x12), split);
+        assert_eq!(hex::encode(job.entries[0].leaf.hash()), leaf_hash);
+        let tool =
+            p2poolv2_safa::claim_leaf(&covenant, &vault, &p2pkh(0x12), Some(&tool_split), height)
+                .unwrap();
+        assert_eq!(tool.target_bits, target_bits);
+        assert_eq!(hex::encode(tool.leaf_hash), leaf_hash);
+        // The win test uses the eased target too.
+        assert_eq!(
+            job.entries[0].target,
+            expand_token_target(target_bits).unwrap()
+        );
+    }
+    // No claim of a coinbase at or below the state's height can succeed.
+    assert!(set.at_height(329_000).is_err());
+    assert!(set.at_height(1).is_err());
+}
+
+/// A set without SAFA tokens is the same at every height.
+#[test]
+fn a_set_without_safa_tokens_does_not_change_with_height() {
+    let set = Arc::new(TokenSet::new(vec![token_a(), token_b()]).unwrap());
+    assert!(Arc::ptr_eq(&set, &set.at_height(1).unwrap()));
+}
+
+/// A SAFA token gives its thread instead of a state hash and target, with
+/// 1 to 63 threads and a 16-byte state whose target is canonical.
+#[test]
+fn a_safa_token_file_is_checked() {
+    assert!(TokenSet::from_json(safa_token_json(1, SAFA_STATE, "").as_bytes()).is_ok());
+    for threads in [0, 64] {
+        assert!(TokenSet::from_json(safa_token_json(threads, SAFA_STATE, "").as_bytes()).is_err());
+    }
+    assert!(TokenSet::from_json(safa_token_json(63, "0500", "").as_bytes()).is_err());
+    // A state whose target is not canonical token bits.
+    assert!(
+        TokenSet::from_json(safa_token_json(63, "0500000028050500ffff0021ee06311a", "").as_bytes())
+            .is_err()
+    );
+    for extra in [
+        r#","state_hash":"8811e65fbf63635a1b24f5f09611c25ab1f0021fe40ab06e8156f02cde5a6978""#,
+        r#","target_bits":"2000ffff""#,
+    ] {
+        assert!(TokenSet::from_json(safa_token_json(63, SAFA_STATE, extra).as_bytes()).is_err());
+    }
 }

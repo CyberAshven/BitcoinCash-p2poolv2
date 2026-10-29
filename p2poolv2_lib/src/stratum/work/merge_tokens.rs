@@ -23,10 +23,10 @@
 //! tokens.
 
 use crate::shares::auxpow::{
-    AuxError, AuxProof, AuxiliaryTree, DisclosedLeaf, Disclosure, TokenBranch, TokenLeaf,
-    TokenSplit, TreeLayout, expand_token_target,
+    AuxError, AuxProof, AuxiliaryTree, DisclosedLeaf, Disclosure, MAX_TOKEN_TARGET_BITS,
+    TokenBranch, TokenLeaf, TokenSplit, TreeLayout, encode_token_target, expand_token_target,
 };
-use crate::shares::bch_asert::BchAsert;
+use crate::shares::bch_asert::{BchAsert, U256};
 use crate::shares::merge_mining::{
     MAX_MERGE_MINING_TREE_HEIGHT, MERGE_MINING_OUTPUT_LENGTH, MergeMiningCommitment,
 };
@@ -65,6 +65,77 @@ pub struct MergeMinedToken {
     pub target_bits: u32,
     /// The tallest aux tree the token's covenant accepts, at most 16.
     pub max_height: u8,
+    /// A SAFA vault's thread, whose claim target eases with the blocks
+    /// since its last claim: `target_bits` is then the state's own target,
+    /// and each job's leaf takes the target at its height
+    /// ([`TokenSet::at_height`]).
+    pub safa: Option<SafaThread>,
+}
+
+/// The most threads a SAFA deployment has (`MAX_THREADS` in
+/// `p2poolv2_safa`).
+pub const SAFA_MAX_THREADS: u32 = 63;
+
+/// A claim's target eases by at most this many blocks since the thread's
+/// state (`EASE_CAP`).
+pub const SAFA_EASE_CAP: u32 = 288;
+
+/// One SAFA vault the node merge-mines: its deployment's thread count and
+/// the thread's 16-byte state, the vault's NFT commitment (`thread u32le,
+/// height u32le, target_bits u32le, ref_bits u32le`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SafaThread {
+    pub threads: u32,
+    pub state: [u8; 16],
+}
+
+impl SafaThread {
+    /// The coinbase height of the thread's last claim (or genesis).
+    pub fn state_height(&self) -> u32 {
+        u32::from_le_bytes(self.state[4..8].try_into().expect("four bytes"))
+    }
+
+    /// The target the thread's state holds, before easing.
+    pub fn state_target_bits(&self) -> u32 {
+        u32::from_le_bytes(self.state[8..12].try_into().expect("four bytes"))
+    }
+
+    /// `HASH256` of the state, the leaf's `state_hash`.
+    pub fn state_hash(&self) -> [u8; 32] {
+        bitcoin::hashes::sha256d::Hash::hash(&self.state).to_byte_array()
+    }
+
+    /// The target a claim of a coinbase at `height` must meet, as the
+    /// covenant rebuilds the leaf: the state's target eased by
+    /// `min(height - state height, 288) / threads`. `None` when `height` is
+    /// not above the state's.
+    pub fn claim_target_bits(&self, height: u32) -> Option<u32> {
+        let height_delta = height.checked_sub(self.state_height()).filter(|&d| d > 0)?;
+        safa_claim_target_bits(self.state_target_bits(), height_delta, self.threads)
+    }
+}
+
+/// `claim_target_bits` of `p2poolv2_safa` (the SAFA tool), integer for integer:
+/// `target * (min(dh, 288) * 5000 / threads + 5000) / 10000`, each division
+/// floored, clamped to 1 and to the easiest token target, encoded as
+/// canonical token bits. `None` for bits that are not a canonical token
+/// target or no threads.
+pub fn safa_claim_target_bits(state_bits: u32, height_delta: u32, threads: u32) -> Option<u32> {
+    if threads == 0 {
+        return None;
+    }
+    let target = U256::from_little_endian(&expand_token_target(state_bits)?);
+    let factor =
+        U256::from(u64::from(height_delta.min(SAFA_EASE_CAP)) * 5_000 / u64::from(threads) + 5_000);
+    let maximum = U256::from_little_endian(&expand_token_target(MAX_TOKEN_TARGET_BITS)?);
+    let denominator = U256::from(10_000);
+    // target * factor / 10000 without overflowing 256 bits: the quotient
+    // and remainder parts separately; an overflow is past the maximum.
+    let eased = (target / denominator)
+        .checked_mul(factor)
+        .and_then(|whole| whole.checked_add(target % denominator * factor / denominator))
+        .unwrap_or(maximum);
+    encode_token_target(eased.clamp(U256::one(), maximum))
 }
 
 /// The tokens a node merge-mines and the layout every miner's tree shares.
@@ -85,29 +156,74 @@ struct TokenFileJson {
 
 /// One token in the file: 32-byte values in hex as hashed, the compact
 /// target as eight hex digits (`"207fffff"`), and optionally the tallest
-/// tree its covenant accepts (16 when left out).
+/// tree its covenant accepts (16 when left out). A SAFA vault gives its
+/// thread instead of `state_hash` and `target_bits`, which follow from it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TokenJson {
     category: String,
     lock_hash: String,
-    state_hash: String,
-    target_bits: String,
+    #[serde(default)]
+    state_hash: Option<String>,
+    #[serde(default)]
+    target_bits: Option<String>,
     #[serde(default)]
     max_height: Option<u8>,
+    #[serde(default)]
+    safa: Option<SafaJson>,
+}
+
+/// A SAFA vault's thread: the deployment's thread count and the vault's
+/// 16-byte state (its NFT commitment) in hex.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SafaJson {
+    threads: u32,
+    state: String,
 }
 
 impl TokenJson {
     fn token(&self) -> Result<MergeMinedToken, String> {
+        let (state_hash, target_bits, safa) =
+            match (&self.state_hash, &self.target_bits, &self.safa) {
+                (Some(state_hash), Some(target_bits), None) => (
+                    hash32(state_hash, "state_hash")?,
+                    u32::from_str_radix(target_bits, 16)
+                        .ok()
+                        .filter(|_| target_bits.len() == 8)
+                        .ok_or("target_bits must be eight hexadecimal digits")?,
+                    None,
+                ),
+                (None, None, Some(safa)) => {
+                    if !(1..=SAFA_MAX_THREADS).contains(&safa.threads) {
+                        return Err(format!("safa.threads must be from 1 to {SAFA_MAX_THREADS}"));
+                    }
+                    let thread = SafaThread {
+                        threads: safa.threads,
+                        state: hex::decode(&safa.state)
+                            .ok()
+                            .and_then(|bytes| bytes.try_into().ok())
+                            .ok_or("safa.state must be 16 bytes of hex")?,
+                    };
+                    (
+                        thread.state_hash(),
+                        thread.state_target_bits(),
+                        Some(thread),
+                    )
+                }
+                _ => {
+                    return Err(
+                        "a token gives either state_hash and target_bits, or safa".to_string()
+                    );
+                }
+            };
         Ok(MergeMinedToken {
             category: hash32(&self.category, "category")?,
             lock_hash: hash32(&self.lock_hash, "lock_hash")?,
-            state_hash: hash32(&self.state_hash, "state_hash")?,
-            target_bits: u32::from_str_radix(&self.target_bits, 16)
-                .ok()
-                .filter(|_| self.target_bits.len() == 8)
-                .ok_or("target_bits must be eight hexadecimal digits")?,
+            state_hash,
+            target_bits,
             max_height: self.max_height.unwrap_or(MAX_MERGE_MINING_TREE_HEIGHT),
+            safa,
         })
     }
 }
@@ -145,6 +261,18 @@ impl TokenSet {
         {
             return Err(format!(
                 "token {} allows a tree taller than {MAX_MERGE_MINING_TREE_HEIGHT}",
+                hex::encode(token.category)
+            ));
+        }
+        if let Some(token) = tokens.iter().find(|token| {
+            token.safa.is_some_and(|thread| {
+                !(1..=SAFA_MAX_THREADS).contains(&thread.threads)
+                    || thread.state_hash() != token.state_hash
+                    || thread.state_target_bits() != token.target_bits
+            })
+        }) {
+            return Err(format!(
+                "SAFA token {} needs 1 to {SAFA_MAX_THREADS} threads and the state hash and target of its thread",
                 hex::encode(token.category)
             ));
         }
@@ -188,6 +316,39 @@ impl TokenSet {
 
     pub fn layout(&self) -> &TreeLayout {
         &self.layout
+    }
+
+    /// The set as a job whose coinbase is at `height` mines it: each SAFA
+    /// token's target eased by the blocks since its thread's state, as the
+    /// covenant rebuilds the leaf it checks (`claim_leaf` in
+    /// `p2poolv2_safa`). Other tokens, and a set without SAFA
+    /// tokens, are unchanged. An error when a SAFA thread's state is not
+    /// below `height`: no claim of that coinbase could succeed.
+    pub fn at_height(self: &Arc<Self>, height: u32) -> Result<Arc<Self>, String> {
+        if self.tokens.iter().all(|token| token.safa.is_none()) {
+            return Ok(Arc::clone(self));
+        }
+        let mut tokens = self.tokens.clone();
+        let mut targets = self.targets.clone();
+        for (token, target) in tokens.iter_mut().zip(targets.iter_mut()) {
+            let Some(thread) = token.safa else {
+                continue;
+            };
+            token.target_bits = thread.claim_target_bits(height).ok_or_else(|| {
+                format!(
+                    "SAFA token {}'s thread state is at height {}, not below the coinbase's {height}",
+                    hex::encode(token.category),
+                    thread.state_height()
+                )
+            })?;
+            *target = expand_token_target(token.target_bits)
+                .expect("claim target bits are canonical token bits");
+        }
+        Ok(Arc::new(Self {
+            tokens,
+            targets,
+            layout: self.layout.clone(),
+        }))
     }
 
     /// The commitment a job's coinbase is built and sized with before each

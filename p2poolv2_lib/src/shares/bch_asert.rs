@@ -175,7 +175,7 @@ impl BchAsert {
     /// factor of about 1.029 on mainnet, 4 on the test networks' one-hour
     /// half-life. `computed / d` is floored and the easy side is compared
     /// exactly (`target * 100 <= computed * 105` on mainnet). The bands are
-    /// the SAFA covenant's (`tools/safa-auxpow`), number for number.
+    /// the SAFA covenant's (`p2poolv2_safa`), number for number.
     pub fn check_header_bits(
         &self,
         bits: CompactTarget,

@@ -253,7 +253,22 @@ the tokens the node merge-mines (Bitcoin Cash in P2Pool mode only):
 
 Each token is its category, `HASH256` of its baton's locking bytecode, its
 current state hash, its canonical compact target and, optionally, the
-tallest tree its covenant accepts (16 when left out). At most 16 tokens,
+tallest tree its covenant accepts (16 when left out).
+
+A SAFA vault gives its thread instead of `state_hash` and `target_bits`:
+`"safa": {"threads": 63, "state": "<16-byte NFT commitment in hex>"}`.
+The SAFA covenant rebuilds a claim's leaf with the state's target eased by
+the blocks since the state (`min(dh, 288) / threads`), so a fixed target
+would only match a claim 288 blocks after the last. The node therefore
+computes each job's leaf from the thread, at the job's coinbase height:
+`state_hash` is `HASH256` of the state and `target_bits` is the SAFA
+tool's `claim_target_bits` (`p2poolv2_safa`), integer for integer
+(`safa_claim_target_bits`; tests compare the two over every thread count
+and pin vectors printed by the former Node tool's `claimTargetBits` and
+`claimLeaf`). A template at or below the state's height is mined without
+tokens.
+
+At most 16 tokens,
 one per category; the set must fit one tree no taller than the lowest
 limit among them, or the file is refused. An empty list merge-mines
 nothing. A node does not start on a file it cannot read or that is not

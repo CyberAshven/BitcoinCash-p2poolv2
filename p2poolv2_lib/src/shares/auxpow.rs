@@ -26,7 +26,7 @@
 //! This checks merge-mined work, not token issuance rules or that the parent
 //! is a complete valid BCH block; BCHN is the authority on that.
 
-use super::bch_asert::{BchAsert, bip34_height};
+use super::bch_asert::{BchAsert, U256, bip34_height};
 use super::merge_mining::{
     MAX_MERGE_MINING_TREE_HEIGHT, MERGE_MINING_OUTPUT_LENGTH, MergeMiningCommitment,
 };
@@ -375,6 +375,24 @@ pub fn expand_token_target(bits: u32) -> Option<[u8; 32]> {
     let mut target = [0; 32];
     target[exponent - 3..exponent].copy_from_slice(&mantissa.to_le_bytes()[..3]);
     Some(target)
+}
+
+/// The easiest canonical token target, `0x7fffff << 232` (bits `0x207fffff`).
+pub const MAX_TOKEN_TARGET_BITS: u32 = 0x207f_ffff;
+
+/// Canonical compact bits for a token target from 1 to `0x7fffff << 232`,
+/// rounded down: the exponent is the target's length as a VM number (its
+/// bytes plus one when the top bit is set), at least 3. The inverse of
+/// [`expand_token_target`], as the SAFA covenant and `encode_token_target`
+/// of `p2poolv2_safa` encode it. `None` outside that range.
+pub fn encode_token_target(target: U256) -> Option<u32> {
+    let maximum = U256::from_little_endian(&expand_token_target(MAX_TOKEN_TARGET_BITS)?);
+    if target.is_zero() || target > maximum {
+        return None;
+    }
+    let size = (target.bits() / 8 + 1).max(3);
+    let mantissa = (target >> (8 * (size - 3))).low_u32();
+    Some(((size as u32) << 24) | mantissa)
 }
 
 /// The slot of `category` in a tree of height `height`, at most 16.
