@@ -1,12 +1,13 @@
 # Proposal: a decentralized pool for PHOTON GPU miners
 
-**Status: proposal, 2026-10-29. No implementation is authorized by this
-document.** Parameter choices below are proposed PHOTON share-chain rules.
+**Status: proposal with an owner-authorized, offline phase 2a prototype,
+2026-10-30.** Parameter choices below are proposed PHOTON share-chain rules.
 They change neither BCH consensus nor PHOTON v3.2. The independent
 re-review of revision `4ecec7aa` clears only an isolated, test-only
 payout-covenant prototype. Share-chain and node work stay blocked until
 its findings F1 and F2 are fixed and re-reviewed (section 10). The owner
-still decides whether any prototype starts.
+authorized the isolated phase 2a prototype only; no node integration or
+spending is authorized. Its measured results are in section 5.
 
 ## 1. Goal and scope
 
@@ -863,7 +864,8 @@ state reads the reward dynamically; child state fixes it. This avoids
 embedding a program recursively inside itself. It must not trust
 witness-supplied child locks or program bytes. The proposed encoding and
 caps below are fixed for feasibility testing; bytecode extraction and
-enforcement still need VM proof. No executable covenant is supplied here.
+enforcement are demonstrated by the isolated libauth prototype below.
+This supplies no node or share-chain implementation.
 
 ### Frozen initial execution profile
 
@@ -937,7 +939,8 @@ Measure full internal and terminal transactions, maximum funding and
 script sizes, zero allocations, all rounding boundaries and the maximum
 tree under standardness and BCH consensus budgets. Old 520-byte item
 or 1,650-byte standard unlocking objections do not apply after these
-upgrades. Constructibility remains **plausible, not demonstrated**.
+upgrades. Constructibility in the pinned libauth VM is demonstrated below;
+BCHN admission remains untested.
 
 ### Re-review constructibility estimates
 
@@ -1076,6 +1079,128 @@ the full allocation manifest, root and child scripts, weights, program
 versions and proofs with each share. Keep winning manifests independently
 of ordinary DAG pruning. Serve and export them so members can retain
 offline recovery copies. A share's data must be available before credit.
+
+### Prototype measurements (phase 2a)
+
+The owner authorized the isolated Rust crate
+[`p2poolv2_photon_payout`](../../p2poolv2_photon_payout/README.md).
+Its annotated `payout.cash`, exact `program.hex` and SHA256 artifact are
+checked against the Rust assembler and pinned libauth compiler by tests.
+The program is **2,075 bytes**, and every redeem is **2,414 bytes**, including
+the minimal three-byte push header and 336-byte state. Its SHA256 is
+`5b6e4ea2802307e6fce8b94d8ed6d65751fc54af6370989688e39aa79b628f3c`.
+The context digest remains at redeem offsets 43 through 74. There is exactly
+one top-level `OP_ACTIVEBYTECODE` and no `OP_CODESEPARATOR` in the source.
+Children reconstruct the same suffix rather than trusting witness bytes.
+
+These are measurements from libauth-rs `be3ed16`'s BCH 2026 VM, with both
+standard and non-standard execution and complete resolved-transaction
+verification. They are **not BCHN acceptance or relay results**. Run
+`cargo photon-payout-measure` to reproduce the tables; its complete output
+and method are retained in
+[`measurements.md`](../../p2poolv2_photon_payout/measurements.md).
+
+All rows use 35-byte P2SH32 beneficiaries, total weight
+`43,200 * 2^256 - 1`, original reward `2^63 - 1`, four signed public synthetic
+funding inputs and one final P2PKH change output. The internal example is
+the 2,048-leaf child of a 4,096-leaf root; the terminal example is its
+eight-leaf descendant. Root input BCH is 700 satoshis; children inherit 705.
+Ordinary funders have 100-byte P2PKH unlocks. The last three rows replace
+each funder with a signed P2SH32 fixture whose unlock is exactly 10,000
+bytes, testing the funding-size ceiling against input 0's own budget.
+Each transaction verifies in both VM modes. Cost pairs below are
+standard / non-standard; `L` always means input 0's unlock length.
+
+| Spend | L | Operation cost | Operation limit | Hash iterations | Hash limits | Peak slots | Control depth | Largest item | Tx bytes and fee (sats) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Root P2SH20 | 2,617 | 363,534 / 338,830 | 2,126,400 | 193 | 1,329 / 9,303 | 36 | 4 | 2,617 | 3,442 |
+| Root P2SH32 | 2,617 | 363,665 / 338,961 | 2,126,400 | 193 | 1,329 / 9,303 | 36 | 4 | 2,617 | 3,442 |
+| Internal P2SH32 | 2,617 | 363,519 / 338,815 | 2,126,400 | 193 | 1,329 / 9,303 | 36 | 4 | 2,617 | 3,442 |
+| Terminal 8 P2SH32 | 3,222 | 1,038,866 / 1,019,026 | 2,610,400 | 155 | 1,631 / 11,420 | 44 | 9 | 3,222 | 4,569 |
+| Root P2SH20, maximum funder unlocks | 2,617 | 403,138 / 378,434 | 2,126,400 | 193 | 1,329 / 9,303 | 36 | 4 | 10,000 | 43,050 |
+| Internal, maximum funder unlocks | 2,617 | 403,123 / 378,419 | 2,126,400 | 193 | 1,329 / 9,303 | 36 | 4 | 10,000 | 43,050 |
+| Terminal 8, maximum funder unlocks | 3,222 | 1,078,470 / 1,058,630 | 2,610,400 | 155 | 1,631 / 11,420 | 44 | 9 | 10,000 | 44,177 |
+
+Operation limits are `800 * (41 + L)`, and hash limits are respectively
+`floor((41 + L) / 2)` and `floor(7 * (41 + L) / 2)`. These costs, iterations
+and limits are read directly from the final VM state's metrics. Peak slots
+are the maximum of stack length plus altstack length plus `function_count`
+over the complete opcode debug trace, including unlocking, locking and
+redeem execution. Control depth is the maximum `control_stack.len()` in
+that trace. Largest item includes both stacks and function bodies. Thus
+the 10,000-byte maximum above includes introspected funding unlocks.
+Funders do not enlarge input 0's operation or hash budget.
+
+Fees equal the exact serialized BCH transaction size at 1 satoshi per
+byte. Default dust is calculated from each serialized output, including
+its actual CashTokens prefix, as `3 * (output_bytes + 148)`. Allocation
+outputs above are each 705 satoshis of dust; token-free P2PKH change is
+546. The committed largest-prefix minima are 675 for P2PKH, 669 for P2SH20
+and 705 for P2SH32. Mixed-script positive tests exercise all three.
+Maximum-size funders add exactly 39,608 transaction bytes and satoshis
+relative to four ordinary P2PKH funders, including CompactSize growth.
+
+The following full-tree measurements use four ordinary signed P2PKH
+funders and change per spend, the same maximum-length beneficiary scripts
+and weights/reward above, and a 700-satoshi P2SH20 root. Each child spends
+its parent's actual txid and exact output; every spend conserves tokens
+and passes both complete VM checks. External BCH is fees plus final leaf
+BCH minus the inherited 700 satoshis. It is net consumed funding; temporary
+funding UTXO sizes and returned change are not counted as costs.
+
+| Leaves | Spends | Fees (sats) | External BCH (sats) | External BCH | First beneficiary's path (sats) |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 1 | 3,446 | 4,156 | 0.00004156 | 4,156 |
+| 8 | 1 | 4,569 | 9,509 | 0.00009509 | 9,509 |
+| 9 | 3 | 11,271 | 16,916 | 0.00016916 | 10,088 |
+| 64 | 15 | 60,646 | 105,066 | 0.00105066 | 21,950 |
+| 512 | 127 | 509,262 | 869,522 | 0.00869522 | 34,391 |
+| 4,096 | 1,023 | 4,098,190 | 6,985,170 | 0.06985170 | 46,832 |
+
+Path funding creates both children at every ancestor and pays the complete
+terminal bucket, but executes only the first canonical beneficiary's
+branch. For 4,096 leaves this is nine internal spends and one terminal
+spend. No token entitlement is taken to pay BCH costs. Using the maximum
+10,000-byte funders instead would add `39,608 * spends` satoshis to full
+execution and `39,608 * path_spends` to the path under these fixtures.
+These are constructed costs, replacing the earlier roughly 0.08 BCH and
+60,000-satoshi estimates; they are not fee-rate or sponsor guarantees.
+
+A release-build host benchmark hashed the 2,414-byte `R` 100,000 times in
+0.154738 seconds, or 1.547 microseconds per seed, on an AMD Ryzen 9 9955HX3D.
+This is one CPU timing under concurrent local work, not a GPU benchmark or
+claim-mining throughput result. No GPU engine exists in this crate. The
+earlier 4,435-byte `R` hashing model describes the profile maximum, not
+these actual bytes; audit the P2SH20 collision-cost margins against the
+final program rather than treating the maximum-length estimate as measured.
+
+Positive groups A1 through A8 and all listed group B mutation families
+are exercised in both VM modes, including malformed states re-locked to
+matching source addresses, a real new genesis category on change, and
+`OP_ACTIVEBYTECODE` inside `OP_INVOKE`. Rejection helpers require failure
+of the active covenant as well as complete transaction verification, so
+invalid funding signatures cannot hide a missing covenant check.
+The 4,096-leaf run has 511 internal and 512 terminal spends, exercises
+remaining depths 9 through 1, and pays all `2^63 - 1` raw units.
+The 100,000-manifest stress test is separately ignored by default and uses
+seed `0x70686f746f6e3261`. On 2026-10-30 it passed both complete VM modes
+and exact reference telescoping in 156.76 seconds. The full-tree test
+passed in 2.84 seconds; the 130 regular tests passed in a serial release
+run. Completion and reproduction details are recorded in the crate README.
+It uses valid public P2SH20 `OP_TRUE` funding for speed; normal acceptance,
+tree execution and measurements use real synthetic funding signatures.
+
+No design contradiction or VM budget failure was found in this prototype.
+The initial default 30-second nextest timeout stopped the first stress
+attempt; the explicit `photon-heavy` profile leaves normal timeouts intact.
+**Open gates:** BCHN regtest admission/relay and group C against the
+unmodified PHOTON v3.2 claim covenant are not run in phase 2a. GPU seed
+hashing and final `R` security review are also pending. The authentic root
+must originate fungible-only: introspection cannot distinguish an immutable
+NFT with an empty commitment from a fungible-only category. Token-free
+funding and whole-transaction token validation preserve that invariant on
+the authentic payout path; arbitrary donated UTXOs do not authenticate a
+PHOTON claim. No node code, network access or spending is included.
 
 ### What the existing tree actually does
 
@@ -1336,8 +1461,12 @@ The independent re-review of `4ecec7aa` sets these gates:
   revision proposes fixes for both in section 3; they need re-review
   before the gate opens.
 
-The GO is a review gate, not an authorization; the owner decides whether
-the prototype starts.
+The owner subsequently authorized phase 2a only. **Phase 2a passes in pinned
+libauth**: all A/B cases, the 1,023-spend execution and 100,000 seeded
+manifests pass in both VM modes; group D measurements are in section 5.
+The full phase 2 gate remains open for BCHN acceptance and phase 2b group C.
+Its evidence and reproduction commands are in the prototype README.
+This does not open the share-chain/node gate or authorize network spending.
 
 Review and implementation gates, in order:
 
@@ -1346,7 +1475,10 @@ Review and implementation gates, in order:
    F1 to F7 changes, the final `R` bytes, private forks, context
    eligibility, freshness/sync rules, no-NFT state, funding isolation,
    BCH excess and child-script construction before share-chain work.
-2. **Covenant feasibility, after approval.** Build a Rust-only prototype.
+2. **Covenant feasibility, phase 2a authorized.** The Rust-only prototype
+   now supplies program bytes, reference allocation/builders, adversarial
+   VM tests and measured costs (section 5). Pinned libauth execution is
+   demonstrated; BCHN acceptance and phase 2b group C remain open.
    Use libauth-rs at the workspace's pinned revision `be3ed16` with its
    BCH 2026 virtual machine, as `p2poolv2_safa` already does, together with
    BCHN regtest `testmempoolaccept` as the authority. The local test VM in

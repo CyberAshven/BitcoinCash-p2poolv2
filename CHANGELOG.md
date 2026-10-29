@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The isolated, offline `p2poolv2_photon_payout` phase 2a prototype implements
+the funded PHOTON payout covenant, checked 336-byte state, Merkle-sum tree,
+exact token allocation and Rust transaction builders. It verifies positive
+and adversarial transactions in both pinned libauth BCH 2026 VM modes,
+including a complete 4,096-leaf tree, and provides reproducible resource,
+dust, fee and funding-path measurements through `cargo photon-payout-measure`.
+It is developer tooling only, AGPL-3.0-or-later and excluded from releases.
+No node integration, network spending, BCHN acceptance or PHOTON v3.2
+claim-side approval is included.
+
 `cargo safa claimer claimer.json` follows an operator-selected SAFA vault,
 resolves pool wins' payout and split scripts by HASH256, and verifies every
 claim in the BCH 2026 VM before broadcasting. Its atomic journal resumes
