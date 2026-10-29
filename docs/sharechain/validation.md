@@ -56,9 +56,10 @@ A Bitcoin Cash share whose merge-mining commitment is not the exact empty
 one is a token share. Its Bitcoin Cash header's nBits must be what BCH's
 aserti3-2d gives at the coinbase's height, within the band agreed with
 Pickaxe: from half to 1.05 times the computed target on mainnet, from an
-eighth to 1.05 times, or the proof-of-work limit, on chipnet. A token claim
+eighth to 8 times, or the proof-of-work limit, on chipnet. A token claim
 checks the same band, so a share outside it could not claim a token. Header
-sync and block receipt run this check. Regtest has no ASERT anchor and skips
+sync, block receipt and the validation of a node's own shares run this
+check, and a node builds no token job on a template outside the band. Regtest has no ASERT anchor and skips
 it, and no-token shares are never checked: BCHN alone judges their blocks.
 See [Auxiliary work proofs](../bch-auxpow.md#the-asert-header-check).
 

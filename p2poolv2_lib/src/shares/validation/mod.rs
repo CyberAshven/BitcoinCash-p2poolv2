@@ -1884,6 +1884,12 @@ impl ShareValidator for DefaultShareValidator {
         if chain_store_handle.has_status(&share.block_hash(), Status::BlockValid) {
             return Ok(());
         }
+        // The header gate peers run before fetching a share. A share this
+        // node mined reaches here without it (stratum, then the validation
+        // worker), so without this a local token share would skip the ASERT
+        // check every peer applies, and the node would build on a share its
+        // peers refuse.
+        self.validate_header_minimum_difficulty(&share.header)?;
         self.validate_coinbase_proof(&share.header, &share.template_merkle_branches)?;
         self.validate_body_matches_header(share)?;
         self.validate_with_pool_difficulty(&share.header, chain_store_handle)?;
@@ -2364,6 +2370,69 @@ mod tests {
             .for_chain(Chain::BitcoinCash)
             .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Mainnet));
         assert!(mainnet.validate_token_share_asert(&header).is_err());
+    }
+
+    /// A share this node mined goes from stratum to the validation worker
+    /// without the header gate peers run, so `validate_share_block` runs the
+    /// gate itself: a local token share outside the ASERT band is refused
+    /// there, as every peer would refuse it.
+    #[test]
+    fn validate_share_block_refuses_a_token_share_outside_the_asert_band() {
+        let chipnet_block: bitcoin::block::Header = bitcoin::consensus::deserialize(
+            &hex::decode(concat!(
+                "00000020c5d7d2b0ceec4b1abd7e0959658bf74bce9d1612964b22006ff81557",
+                "00000000d60d4fce09b3478d9d674fb1066d99c43f785fe7227145d792f64c63",
+                "00e9c729f383d1698be2341c38f1a94a"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut share = TestShareBlockBuilder::new().build();
+        share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.miner_bitcoin_address = Address::from_script(
+            &ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array([0x22; 20])),
+            Network::Regtest,
+        )
+        .unwrap();
+        share.header.bitcoin_header = chipnet_block;
+        // The mini chain's ceiling, which the real block's hash meets.
+        let mini_ceiling =
+            CompactTarget::from_consensus(crate::shares::bch_genesis::MINI_ANCHOR_TARGET);
+        share.header.bits = mini_ceiling;
+        let token_share_at = |share: &mut ShareBlock, height: u64| {
+            share.header.bitcoin_height = height;
+            share.header.bch_coinbase = Some(crate::shares::bch_coinbase::BchCoinbase {
+                prefix: Builder::new().push_int(height as i64).into_bytes(),
+                merge_mining: MergeMiningCommitment {
+                    root: [0x01; 32],
+                    height: 0,
+                    salt: 0,
+                },
+            });
+        };
+        let chipnet = validator()
+            .for_chain(Chain::BitcoinCash)
+            .with_target_ceiling(mini_ceiling)
+            .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Chipnet));
+
+        // At its real height the header passes the gate.
+        token_share_at(&mut share, 300_002);
+        chipnet
+            .validate_header_minimum_difficulty(&share.header)
+            .unwrap();
+
+        // 2,000 blocks later at the same time ASERT gives a target far
+        // harder than the header's: outside the band.
+        token_share_at(&mut share, 302_002);
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_has_status()
+            .returning(|_, _| false);
+        let error = chipnet
+            .validate_share_block(&share, &chain_store_handle)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("ASERT"), "{error}");
     }
 
     #[test]

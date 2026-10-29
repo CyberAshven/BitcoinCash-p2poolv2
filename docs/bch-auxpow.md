@@ -189,9 +189,14 @@ narrow, so its band permits up to x8 on both sides. Mainnet retains the
 original asymmetric band. These are proof-format checks agreed with
 Pickaxe, not BCH block validation.
 
-The SAFA covenant and its JavaScript model implement the corrected x8
-test-network easy side. P2Pool's Rust `BchAsert::check_header_bits` still
-uses x1.05 on that side; the matching Rust change is a separate follow-up.
+P2Pool's `BchAsert::check_header_bits` and the SAFA covenant use the same
+bands, number for number: mainnet `target × 100 ≤ computed × 105`, test
+networks `target ≤ computed × 8`, and `computed / d` floored on the hard
+side. With a header dated two hours before its parent, which BCHN accepts
+when the parent is dated ahead, the computed target is 2^(7200 / 172800),
+about 1.029, times too hard on mainnet and 4 times on the test networks;
+both fit their bands. A test runs real chipnet block 329,001 dated 200 s,
+260 s, 10 minutes, one hour and two hours before its parent.
 
 The arithmetic follows `CalculateASERT` and `GetNextASERTWorkRequired` in
 BCHN's `src/pow.cpp` integer for integer: a truncating 64-bit division for
@@ -218,12 +223,13 @@ Tested against:
   parent, and passes the header check with only its own header.
 
 **Where P2Pool runs it.** On every proof `AuxProof::verify` checks with a
-network, and on every **token share's** bitcoin header, at the header gates
-(`validate_header_minimum_difficulty`), with the node's
-`bitcoin_cash_network`. No-token shares are not checked: BCHN alone judges
-their blocks. Until the Rust follow-up, its x1.05 test-network easy side
-still refuses a header about four minutes or more before its parent,
-although the corrected SAFA covenant accepts the wider band.
+network, and on every **token share's** bitcoin header, with the node's
+`bitcoin_cash_network`: at the header gate peers run
+(`validate_header_minimum_difficulty`), and again in
+`validate_share_block`, which a share the node mined itself reaches
+without that gate. A node builds no token job on a template whose nBits
+fail the band at its height and `curtime`; it mines that template without
+tokens. No-token shares are not checked: BCHN alone judges their blocks.
 
 ## Merge-mining tokens on a public node
 

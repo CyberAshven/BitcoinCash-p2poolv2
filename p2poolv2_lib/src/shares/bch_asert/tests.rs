@@ -280,10 +280,10 @@ fn mainnet_band_is_half_to_one_point_zero_five() {
     assert!(check(BCH_POW_LIMIT_BITS).is_err());
 }
 
-/// Chipnet: up to eight times harder, at most 5% easier, or the limit's
-/// bits.
+/// Chipnet: up to eight times harder, up to eight times easier, or the
+/// limit's bits, as the SAFA covenant's chipnet band.
 #[test]
-fn test_network_band_is_an_eighth_to_one_point_zero_five_or_the_limit() {
+fn test_network_band_is_an_eighth_to_eight_times_or_the_limit() {
     let chipnet = BchAsert::CHIPNET;
     // Twenty half-lives ahead of schedule: the target is about 2^-20 of the
     // limit, far from both clamps.
@@ -294,8 +294,18 @@ fn test_network_band_is_an_eighth_to_one_point_zero_five_or_the_limit() {
     check(computed).unwrap();
     let eighth = computed / U256::from(8);
     check(eighth).unwrap();
-    assert!(check(computed / U256::from(16)).is_err());
-    assert!(check(computed * U256::from(2)).is_err());
+    assert!(
+        check(computed / U256::from(16))
+            .unwrap_err()
+            .contains("harder")
+    );
+    check(computed * U256::from(2)).unwrap();
+    check(computed * U256::from(8)).unwrap();
+    assert!(
+        check(computed * U256::from(16))
+            .unwrap_err()
+            .contains("easier")
+    );
     chipnet
         .check_header_bits(
             CompactTarget::from_consensus(BCH_POW_LIMIT_BITS),
@@ -303,6 +313,82 @@ fn test_network_band_is_an_eighth_to_one_point_zero_five_or_the_limit() {
             height,
         )
         .unwrap();
+}
+
+/// The exact `computed * 8` edge, where ASERT clamps to 1 so the edge and
+/// one above it are both exact compact values (`tools/safa-auxpow`'s
+/// `asert.test.mjs` checks the same two bits).
+#[test]
+fn test_network_easy_edge_is_exactly_eight_times() {
+    let chipnet = BchAsert::CHIPNET;
+    let height = u64::from(chipnet.anchor_height) + 10_001;
+    let time = (chipnet.anchor_parent_time + BCH_BLOCK_SPACING) as u32;
+    assert_eq!(
+        chipnet.next_target(height as u32 - 1, time),
+        Some(U256::one())
+    );
+    assert_eq!(set_compact(0x0108_0000), Some(U256::from(8)));
+    chipnet
+        .check_header_bits(CompactTarget::from_consensus(0x0108_0000), time, height)
+        .unwrap();
+    assert_eq!(set_compact(0x0109_0000), Some(U256::from(9)));
+    assert!(
+        chipnet
+            .check_header_bits(CompactTarget::from_consensus(0x0109_0000), time, height)
+            .unwrap_err()
+            .contains("easier")
+    );
+}
+
+/// Real chipnet block 329,001 with its own nBits and a time two hours
+/// before its real parent's, which BCHN accepts when the parent is dated
+/// ahead. Only the time moves, so this checks the band, not proof of work.
+/// The old `computed * 1.05` easy side refused it from about 253 seconds.
+#[test]
+fn real_chipnet_header_two_hours_before_its_parent_passes() {
+    let (parent_height, parent_hex, child_hex) = CHIPNET_PAIRS[CHIPNET_PAIRS.len() - 1];
+    let (parent, child) = real_pair(parent_hex, child_hex);
+    let height = u64::from(parent_height) + 1;
+    assert_eq!(height, 329_001);
+    assert_eq!(child.bits.to_consensus(), 0x1a31_06ee);
+    assert_eq!(
+        BchAsert::CHIPNET.next_bits(parent_height, parent.time),
+        Some(child.bits)
+    );
+    for seconds_before in [200, 260, 600, 3_600, 7_200] {
+        BchAsert::CHIPNET
+            .check_header_bits(child.bits, parent.time - seconds_before, height)
+            .unwrap_or_else(|error| panic!("{seconds_before} s before: {error}"));
+    }
+    // The same two hours on mainnet's band would need 2^(1/24), about
+    // 1.029, which 1.05 covers.
+    let mut old_band = BchAsert::CHIPNET;
+    (old_band.easy_numerator, old_band.easy_denominator) = (105, 100);
+    old_band
+        .check_header_bits(child.bits, parent.time - 200, height)
+        .unwrap();
+    assert!(
+        old_band
+            .check_header_bits(child.bits, parent.time - 260, height)
+            .is_err()
+    );
+}
+
+/// Mainnet's easy side covers two hours of backwards skew too: a header
+/// two hours before its parent computes a target 2^(7200 / 172800) times
+/// too hard, under 1.05.
+#[test]
+fn real_mainnet_header_two_hours_before_its_parent_passes() {
+    for (parent_height, parent_hex, child_hex) in MAINNET_PAIRS {
+        let (parent, child) = real_pair(parent_hex, child_hex);
+        BchAsert::MAINNET
+            .check_header_bits(
+                child.bits,
+                parent.time - 7_200,
+                u64::from(parent_height) + 1,
+            )
+            .unwrap_or_else(|error| panic!("block {}: {error}", parent_height + 1));
+    }
 }
 
 #[test]

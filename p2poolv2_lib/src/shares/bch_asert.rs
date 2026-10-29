@@ -56,10 +56,16 @@ const MAINNET_HARD_DIVISOR: u32 = 2;
 /// Test networks' band below the computed target: up to 8 times as hard.
 const TEST_NETWORK_HARD_DIVISOR: u32 = 8;
 
-/// The band above the computed target on every network: at most 5% easier,
-/// `105 / 100`.
-const EASY_NUMERATOR: u32 = 105;
-const EASY_DENOMINATOR: u32 = 100;
+/// Mainnet's band above the computed target: at most 5% easier,
+/// `105 / 100`. A header's time can fall before its parent's by at most
+/// BCHN's two-hour future limit, which with mainnet's two-day half-life
+/// is a factor of 2^(7200 / 172800), about 1.029.
+const MAINNET_EASY: (u32, u32) = (105, 100);
+
+/// Test networks' band above the computed target: up to 8 times easier,
+/// `8 / 1`. With the one-hour half-life a header dated two hours before
+/// its parent computes a target 4 times too hard; 8 leaves room.
+const TEST_NETWORK_EASY: (u32, u32) = (8, 1);
 
 /// One network's ASERT anchor and half-life, from BCHN's chain parameters,
 /// and the band P2Pool's header check allows around the computed target.
@@ -79,6 +85,11 @@ pub struct BchAsert {
     pub allow_pow_limit: bool,
     /// A header may be this many times harder than the computed target.
     pub hard_divisor: u32,
+    /// A header may be up to `easy_numerator / easy_denominator` times
+    /// easier than the computed target.
+    pub easy_numerator: u32,
+    /// See [`Self::easy_numerator`].
+    pub easy_denominator: u32,
 }
 
 impl BchAsert {
@@ -91,6 +102,8 @@ impl BchAsert {
         half_life: 2 * 24 * 60 * 60,
         allow_pow_limit: false,
         hard_divisor: MAINNET_HARD_DIVISOR,
+        easy_numerator: MAINNET_EASY.0,
+        easy_denominator: MAINNET_EASY.1,
     };
 
     /// Chipnet (`CChipNetParams`), which shares testnet4's anchor
@@ -103,6 +116,8 @@ impl BchAsert {
         half_life: 60 * 60,
         allow_pow_limit: true,
         hard_divisor: TEST_NETWORK_HARD_DIVISOR,
+        easy_numerator: TEST_NETWORK_EASY.0,
+        easy_denominator: TEST_NETWORK_EASY.1,
     };
 
     /// Testnet4: the same anchor and half-life as chipnet.
@@ -150,14 +165,17 @@ impl BchAsert {
     /// `header_time`, and the header's target must lie in the agreed band:
     ///
     /// - mainnet: `computed / 2 <= header_target <= computed * 1.05`;
-    /// - test networks: `computed / 8 <= header_target <= computed * 1.05`,
-    ///   or nBits exactly the proof-of-work limit's (a minimum-difficulty
+    /// - test networks: `computed / 8 <= header_target <= computed * 8`, or
+    ///   nBits exactly the proof-of-work limit's (a minimum-difficulty
     ///   block).
     ///
     /// The hard side is wide because a header can be minted hours after its
-    /// parent; the easy side is narrow because a header's time can fall
-    /// before its parent's only by little. `computed / d` is floored and
-    /// `computed * 1.05` is compared exactly (`target * 100 <= computed * 105`).
+    /// parent. The easy side covers a header dated up to two hours before
+    /// its parent, which BCHN accepts when the parent is dated ahead: a
+    /// factor of about 1.029 on mainnet, 4 on the test networks' one-hour
+    /// half-life. `computed / d` is floored and the easy side is compared
+    /// exactly (`target * 100 <= computed * 105` on mainnet). The bands are
+    /// the SAFA covenant's (`tools/safa-auxpow`), number for number.
     pub fn check_header_bits(
         &self,
         bits: CompactTarget,
@@ -196,9 +214,11 @@ impl BchAsert {
         }
         // Both sides stay far below 2^256: the target is at most the limit,
         // 2^224 - 1, and so is the computed target.
-        if target * U256::from(EASY_DENOMINATOR) > computed * U256::from(EASY_NUMERATOR) {
+        if target * U256::from(self.easy_denominator) > computed * U256::from(self.easy_numerator) {
             return Err(format!(
-                "nBits {bits:#010x} is more than 5% easier than ASERT's {:#010x} at height {height}",
+                "nBits {bits:#010x} is more than {}/{} times easier than ASERT's {:#010x} at height {height}",
+                self.easy_numerator,
+                self.easy_denominator,
                 get_compact(computed).to_consensus()
             ));
         }

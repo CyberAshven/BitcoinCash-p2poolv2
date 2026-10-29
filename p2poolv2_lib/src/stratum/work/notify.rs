@@ -10,6 +10,7 @@ use crate::accounting::payout::payout_distribution::{PayoutDistribution, build_p
 use crate::accounting::payout::sharechain_pplns::pplns_window::bitcoin_block_difficulty;
 use crate::config::StratumConfig;
 use crate::pool_difficulty;
+use crate::shares::bch_asert::BchAsert;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -185,6 +186,13 @@ fn merge_token_payouts(
     let Some(merge_tokens) = merge_tokens else {
         return Ok((output_distribution, None));
     };
+    if let Err(reason) = template_meets_token_asert(template, &context.config) {
+        warn!(
+            "Template at height {} fails the ASERT band token shares must meet ({reason}); it is mined without merge-mined tokens",
+            template.height
+        );
+        return Ok((output_distribution, None));
+    }
     let Some(weights) = weights else {
         warn!("No PPLNS weights for this template yet; it is mined without merge-mined tokens");
         return Ok((output_distribution, None));
@@ -202,6 +210,22 @@ fn merge_token_payouts(
         message: format!("Token share payouts failed: {error}"),
     })?;
     Ok((payouts, Some(merge_tokens)))
+}
+
+/// Whether a token share mined on `template` would pass the ASERT check
+/// peers run on token shares (`validate_token_share_asert`): its nBits at
+/// its height, with its `curtime` standing in for the header's time. A
+/// network without an ASERT anchor (regtest, scalenet) always passes.
+fn template_meets_token_asert(
+    template: &BlockTemplate,
+    config: &StratumConfig<crate::config::Parsed>,
+) -> Result<(), String> {
+    let Some(asert) = config.bitcoin_cash_network.and_then(BchAsert::for_network) else {
+        return Ok(());
+    };
+    let bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits)
+        .map_err(|error| format!("template bits {}: {error}", template.bits))?;
+    asert.check_header_bits(bits, template.curtime, u64::from(template.height))
 }
 
 /// The address a miner's own `donation=` choice pays: the network's built-in
@@ -827,5 +851,39 @@ mod tests {
         assert_eq!(extracted_txouts[2], expected_txout_3);
         assert_eq!(extracted_txouts[3].value, Amount::ZERO);
         assert_eq!(extracted_txouts[4].value, Amount::ZERO);
+    }
+
+    /// A template whose nBits fail the token ASERT band gets no tokens: its
+    /// token shares would be refused by every peer. Regtest has no anchor.
+    #[test]
+    fn token_jobs_need_a_template_inside_the_asert_band() {
+        use crate::config::BitcoinCashNetwork;
+        use crate::shares::bch_asert::{U256, get_compact};
+        let data = include_str!(
+            "../../../../p2poolv2_tests/test_data/gbt/regtest/ckpool/one-txn/gbt.json"
+        );
+        let mut template: BlockTemplate = serde_json::from_str(data).unwrap();
+        let chipnet = BchAsert::CHIPNET;
+        template.height = chipnet.anchor_height + 1 + 120;
+        template.curtime = (chipnet.anchor_parent_time + 600) as u32;
+        let computed = chipnet
+            .next_target(template.height - 1, template.curtime)
+            .unwrap();
+        let mut config = StratumConfig::new_for_test_default().parse().unwrap();
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+
+        template.bits = format!("{:08x}", get_compact(computed).to_consensus());
+        template_meets_token_asert(&template, &config).unwrap();
+        template.bits = format!(
+            "{:08x}",
+            get_compact(computed / U256::from(16)).to_consensus()
+        );
+        assert!(
+            template_meets_token_asert(&template, &config)
+                .unwrap_err()
+                .contains("harder")
+        );
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Regtest);
+        template_meets_token_asert(&template, &config).unwrap();
     }
 }

@@ -355,9 +355,15 @@ anchor and the donation and fee cap as they were.
   mainnet and chipnet/testnet4 anchors. A token share's bitcoin header, and
   a proof's parent header, must carry nBits within `computed / 2` to
   `computed × 1.05` of ASERT's target at its BIP34 height on mainnet, and
-  `computed / 8` to `computed × 1.05` or the proof-of-work limit on test
-  networks. Tested on all 14,000 lines of the aserti3-2d specification's
-  vectors and on real mainnet and chipnet headers.
+  `computed / 8` to `computed × 8` or the proof-of-work limit on test
+  networks, the SAFA covenant's bands. The test networks' easy side was
+  1.05 at first, which refused a chipnet header dated about 253 seconds or
+  more before its parent; a test runs real chipnet block 329,001 two hours
+  before its parent. A node's own token shares are checked in
+  `validate_share_block` too, not only at the header gate peers run, and a
+  template outside the band is mined without tokens. Tested on all 14,000
+  lines of the aserti3-2d specification's vectors and on real mainnet and
+  chipnet headers.
 - Share-version vote (share-chain rule, lessons V17): every Bitcoin Cash
   share header carries its rule version and the version its node desires,
   bound by the proof of work through the share commitment and carried in
@@ -556,8 +562,7 @@ anchor and the donation and fee cap as they were.
   thread bound. The chipnet fixture is regenerated; old commitments must
   be rebuilt before deployment. The rebuilt Pickaxe claim and its result
   are saved beside it and verify in the standard BCH 2026 VM, without
-  broadcasting. P2Pool's corresponding Rust ASERT change remains a
-  separate follow-up.
+  broadcasting. P2Pool's `BchAsert` uses the same bands since.
 - A miner's stratum difficulty never goes above the share difficulty of the
   job it mines (V8 in `docs/p2pool-v1-bch-lessons.md`). `d=`, `th=`,
   `mining.suggest_difficulty` or `[stratum] minimum_difficulty` could hold a
