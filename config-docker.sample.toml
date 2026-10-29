@@ -115,6 +115,9 @@ pool_signature = "P2Poolv2"
 # chipnet: http://127.0.0.1:48332, mainnet: http://127.0.0.1:8332.
 url = "http://127.0.0.1:18443"
 username = "p2pool"
+# Regtest's public throwaway login. On chipnet and mainnet the compose stack
+# replaces it with BCHN's own password (P2POOL_BITCOINRPC__PASSWORD), which
+# BCHN makes at random on first start unless .env sets BCHN_RPC_PASSWORD.
 password = "p2pool"
 
 # Extra BCHN nodes a found block also goes to, beside [bitcoinrpc]. Optional.

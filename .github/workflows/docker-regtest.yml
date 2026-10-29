@@ -86,6 +86,43 @@ jobs:
           echo "The second node did not identify the first" >&2
           exit 1
 
+      # Chipnet and mainnet ship no RPC password: BCHN makes a random one on
+      # first start, keeps it across restarts and never logs it. -connect=0
+      # keeps this throwaway node off the chipnet network.
+      - name: Chipnet BCHN makes and keeps a random RPC password
+        run: |
+          set -eu
+          volume=bchn-rpc-check
+          start() {
+            docker run -d --name bchn-chipnet-check -e NETWORK=chipnet \
+              -v "$volume":/run/bchn-rpc p2poolv2/bchn:29.2.0 -connect=0 > /dev/null
+            for attempt in $(seq 1 30); do
+              if docker exec bchn-chipnet-check bcli getblockchaininfo > /dev/null 2>&1; then
+                return 0
+              fi
+              sleep 2
+            done
+            echo "Chipnet BCHN did not answer RPC with its generated password" >&2
+            docker logs bchn-chipnet-check 2>&1 | tail -20
+            return 1
+          }
+          secret() {
+            docker exec bchn-chipnet-check cat /run/bchn-rpc/password-chipnet
+          }
+          start
+          docker exec bchn-chipnet-check bcli getblockchaininfo | grep -q '"chain": "chip"'
+          first=$(secret)
+          [ "${#first}" -eq 64 ]
+          [ "$(docker exec bchn-chipnet-check stat -c %a /run/bchn-rpc/password-chipnet)" = 600 ]
+          if docker logs bchn-chipnet-check 2>&1 | grep -qF "$first"; then
+            echo "The BCHN RPC password appeared in the log" >&2
+            exit 1
+          fi
+          docker rm -f bchn-chipnet-check > /dev/null
+          start
+          [ "$(secret)" = "$first" ]
+          echo "Chipnet BCHN kept its random RPC password across a restart."
+
       - name: Show logs
         if: always()
         working-directory: docker
@@ -98,5 +135,7 @@ jobs:
         if: always()
         working-directory: docker
         run: |
+          docker rm -f bchn-chipnet-check || true
+          docker volume rm bchn-rpc-check || true
           docker compose -f docker-compose.node.yml -p node2 down -v || true
           docker compose down -v

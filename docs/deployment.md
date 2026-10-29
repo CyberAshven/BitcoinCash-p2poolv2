@@ -32,7 +32,12 @@ difficulty, which takes a CPU hours.
 For chipnet or mainnet, copy `config-docker.sample.toml` to `config.toml`,
 set your addresses, `dial_peers` and BCHN's RPC port, set `NETWORK`,
 `BCHN_RPC_PORT` and `P2POOL_CONFIG` in `docker/.env`, and let BCHN sync
-before starting the node. `docker/docker-compose.node.yml` adds more nodes,
+before starting the node. Chipnet and mainnet ship no RPC password: BCHN
+makes a random one on first start, unless `BCHN_RPC_PASSWORD` in
+`docker/.env` sets one. It keeps the password in the `bchn_rpc` volume, and
+the node reads it from there as `P2POOL_BITCOINRPC__PASSWORD`. Nothing logs
+it ("BCHN's RPC password" in docker/README.adoc says how to read, set or
+replace it). Only regtest uses the public `p2pool` / `p2pool` login. `docker/docker-compose.node.yml` adds more nodes,
 and `docker/docker-compose.metrics.yml` runs Prometheus and Grafana.
 
 The published image is `ghcr.io/cyberashven/bitcoincash-p2poolv2`.

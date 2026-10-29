@@ -51,10 +51,26 @@ services:
       # it keeps whatever its mounted config.toml says. Do not give this a
       # default: that would force every deployment onto one endpoint.
       - P2POOL_BITCOINRPC__URL
+    # On chipnet and mainnet BCHN's entrypoint.sh keeps its RPC password in
+    # the bchn_rpc volume, and the node takes it from there as
+    # P2POOL_BITCOINRPC__PASSWORD, unless .env sets that. Regtest has no such
+    # file and keeps the config's public login. Nothing prints the password.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        secret="/run/bchn-rpc/password-$${P2POOL_STRATUM__BITCOIN_CASH_NETWORK}"
+        if [ -z "$${P2POOL_BITCOINRPC__PASSWORD:-}" ] && [ -s "$$secret" ]; then
+          P2POOL_BITCOINRPC__PASSWORD=$$(cat "$$secret")
+          export P2POOL_BITCOINRPC__PASSWORD
+        fi
+        exec /usr/local/bin/p2poolv2 "$$@"
+      - p2poolv2
     network_mode: host
     volumes:
       - p2poolv2_data:/p2poolv2
       - ../${P2POOL_CONFIG:-config-docker.sample.toml}:/etc/p2poolv2/config.toml:ro
+      - bchn_rpc:/run/bchn-rpc:ro
     # The image's own healthcheck asks port 46884; this one follows
     # P2POOL_API_PORT. It needs /health to answer without a login: leave
     # auth_user unset or set public_dashboard = true.
@@ -73,3 +89,4 @@ services:
 
 volumes:
   p2poolv2_data:
+  bchn_rpc:

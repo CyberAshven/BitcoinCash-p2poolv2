@@ -1955,6 +1955,72 @@ mod tests {
         assert!(sets_chain, "compose should set chain = bitcoin-cash");
     }
 
+    /// Chipnet and mainnet BCHN never ship a known RPC password:
+    /// docker/bchn/entrypoint.sh adds one at start. Only regtest keeps the
+    /// public throwaway login, which config-docker.sample.toml uses.
+    #[test]
+    fn docker_bchn_ships_an_rpc_password_only_for_regtest() {
+        let sets_password = |conf: &str| {
+            conf.lines()
+                .any(|line| line.trim_start().starts_with("rpcpassword"))
+        };
+        assert!(!sets_password(include_str!(
+            "../../docker/bchn/bitcoin-chipnet.conf"
+        )));
+        assert!(!sets_password(include_str!(
+            "../../docker/bchn/bitcoin-mainnet.conf"
+        )));
+        assert!(
+            include_str!("../../docker/bchn/bitcoin-regtest.conf")
+                .lines()
+                .any(|line| line.trim() == "rpcpassword=p2pool")
+        );
+        with_var("P2POOL_BITCOINRPC__PASSWORD", None::<&str>, || {
+            let config = Config::load("../config-docker.sample.toml").unwrap();
+            assert_eq!(config.bitcoinrpc.password, "p2pool");
+        });
+    }
+
+    /// The node gets BCHN's password from the volume BCHN writes it to,
+    /// mounted read-only, as the existing P2POOL_BITCOINRPC__PASSWORD
+    /// override, under the file name entrypoint.sh uses.
+    #[test]
+    fn docker_compose_hands_the_bchn_rpc_password_to_the_node() {
+        let compose = include_str!("../../docker/docker-compose.p2poolv2.yml");
+        assert!(
+            compose
+                .lines()
+                .any(|line| line.trim() == "- bchn_rpc:/run/bchn-rpc:ro")
+        );
+        assert!(compose.contains(
+            "secret=\"/run/bchn-rpc/password-$${P2POOL_STRATUM__BITCOIN_CASH_NETWORK}\""
+        ));
+        assert!(compose.contains("export P2POOL_BITCOINRPC__PASSWORD"));
+        let entrypoint = include_str!("../../docker/bchn/entrypoint.sh");
+        assert!(entrypoint.contains("RPC_SECRET_DIR=${RPC_SECRET_DIR:-/run/bchn-rpc}"));
+        assert!(entrypoint.contains("secret=\"$RPC_SECRET_DIR/password-$NETWORK\""));
+        let compose = include_str!("../../docker/docker-compose.yml");
+        assert!(
+            compose
+                .lines()
+                .any(|line| line.trim() == "- bchn_rpc:/run/bchn-rpc")
+        );
+    }
+
+    /// The override the compose stack sets replaces the sample's regtest
+    /// password.
+    #[test]
+    fn env_override_replaces_the_docker_sample_rpc_password() {
+        with_var(
+            "P2POOL_BITCOINRPC__PASSWORD",
+            Some("4f1c0a9e7d2b6c38"),
+            || {
+                let config = Config::load("../config-docker.sample.toml").unwrap();
+                assert_eq!(config.bitcoinrpc.password, "4f1c0a9e7d2b6c38");
+            },
+        );
+    }
+
     /// config-docker.sample.toml is the image's default config and the
     /// compose stack's default mount: a Bitcoin Cash regtest node.
     #[test]

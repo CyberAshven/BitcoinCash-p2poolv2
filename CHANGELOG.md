@@ -585,6 +585,18 @@ anchor and the donation and fee cap as they were.
 
 ### Security
 
+- The Docker stack's chipnet and mainnet BCHN configs no longer ship the
+  known RPC password `p2pool`. On first start BCHN makes a random one, unless
+  `BCHN_RPC_PASSWORD` in `docker/.env` sets one. It keeps the password in the
+  `bchn_rpc` volume, and P2Poolv2 reads it from there as
+  `P2POOL_BITCOINRPC__PASSWORD`. bitcoind reads it from a config file only
+  its user can open, never from its command line, and no log prints it. Only
+  regtest keeps the public throwaway login. A CI job checks that chipnet BCHN
+  makes the password, keeps it across a restart and keeps it out of its log.
+- Cleared three cargo-deny advisories. tokio goes to 1.54.1
+  (RUSTSEC-2026-0386) and zstd-sys to 2.1.2 (RUSTSEC-2026-0410).
+  crypto-bigint 0.5.5 (RUSTSEC-2026-0387) is ignored until k256 0.14 and
+  libp2p 0.57: its fixes are in 0.7-only code that k256 0.13 does not use.
 - The buffer of blocks waiting for their parent is bounded: at most 1,024
   blocks and 32 MiB, the oldest evicted first, and a block that waited 10
   minutes is dropped. It had no cap and no expiry, and a share naming a
