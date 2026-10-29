@@ -5,8 +5,9 @@ a token whose threads are mined by any SHA-256 work that meets the token's
 target, proved with the merge-mining common format v2 that BCH P2Pool and
 Pickaxe agreed (Pickaxe PR #70, `docs/merge-mining.md`, and
 [`docs/bch-auxpow.md`](../../docs/bch-auxpow.md)). It is a reference
-covenant, not the author's token, not reviewed independently, and not
-deployed anywhere.
+covenant, not the author's token, and has not been deployed. A focused
+independent review found the ASERT-band and thread-count issues fixed
+below; a complete independent review remains open.
 
 It is the repository's one documented exception to the Rust-only rule
 ([`docs/tooling.md`](../../docs/tooling.md)): the covenant runs in the
@@ -27,7 +28,11 @@ npm test
 
 ## Threads and their state
 
-A deployment has `threads` vaults. Each is a P2SH32 output of the covenant
+A deployment has 1 to 63 `threads` vaults. Compilation and the genesis
+command reject 64 or more. With 288 threads the capped easing factor never
+exceeds 1, so a hardened vault cannot recover; the stricter 63-thread
+maximum leaves room for recovery before the 288-block cap. Each vault is
+a P2SH32 output of the covenant
 holding fungible tokens, satoshis, and one mutable NFT of the token
 category whose 16-byte commitment is the thread's state:
 
@@ -78,11 +83,13 @@ cb_branch`, `h ≤ 16`, `d ≤ 25`, nothing trailing). The covenant:
    flooring shift for its integer part, BCHN's cubic, then the clamps), the
    header's time standing in for its parent's:
    - mainnet: `computed / 2 ≤ target ≤ computed × 1.05`;
-   - chipnet: `computed / 8 ≤ target ≤ computed × 1.05`, or nBits exactly
+   - chipnet: `computed / 8 ≤ target ≤ computed × 8`, or nBits exactly
      the proof-of-work limit's `0x1d00ffff`;
    - anchors and half-lives from BCHN's chain parameters: mainnet 661,647 /
      `0x1804dafe` / 1,605,447,844 / 172,800 s; chipnet 16,844 / `0x1d00ffff`
-     / 1,605,451,779 / 3,600 s;
+     / 1,605,451,779 / 3,600 s. Chipnet needs the wider easy side because
+     the header's timestamp may precede its parent's by hours; two hours
+     span two chipnet half-lives. Mainnet keeps its original band;
    - the DAA-change fallback: once `H − state_height ≥ 4,032`, a header
      that fails the band is also accepted when
      `ref >> 4 ≤ target ≤ ref × 1.1`, `ref` being the state's `ref_bits`:
@@ -132,18 +139,19 @@ Measured by `claim.test.mjs` in the standard VM (chipnet, 4 threads):
 
 | Claim | Unlocking bytes | Op-cost / limit | Hash iterations / limit |
 |---|---|---|---|
-| `h` 0, `d` 0, no split | 1,597 | 121,751 / 1,310,400 | 40 / 819 |
-| `h` 1, `d` 1, split | 1,731 | 136,040 / 1,417,600 | 53 / 886 |
-| `h` 16, `d` 25, split | 2,979 | 257,643 / 2,416,000 | 153 / 1,510 |
-| `h` 16, `d` 25, split, fallback band | 2,979 | 267,253 / 2,416,000 | 153 / 1,510 |
-| `h` 16, `d` 25, split, 10,000-byte unlock | 10,000 | 370,038 / 8,032,800 | 263 / 5,020 |
+| `h` 0, `d` 0, no split | 1,595 | 121,745 / 1,308,800 | 40 / 818 |
+| `h` 1, `d` 1, split | 1,729 | 136,035 / 1,416,000 | 53 / 885 |
+| `h` 16, `d` 25, split | 2,977 | 257,638 / 2,414,400 | 153 / 1,509 |
+| `h` 16, `d` 25, split, fallback band | 2,977 | 267,247 / 2,414,400 | 153 / 1,509 |
+| `h` 16, `d` 25, split, 10,000-byte unlock | 10,000 | 370,058 / 8,032,800 | 263 / 5,020 |
 
-The redeem script is 1,366 bytes on chipnet and 1,363 on mainnet (with 4
-threads and 42 tBCH or more of virtual cash; it varies by a few bytes with
-the constants), so K is 1,946 and 1,943. The worst case uses 11.1% of the
+The redeem script is 1,364 bytes on chipnet and 1,363 on mainnet (with 4
+threads and 84,000,000,000 virtual satoshis; it varies by a few bytes with
+the constants), so K is 1,944 and 1,943. Mainnet's redeem script is unchanged
+byte for byte. The worst case uses 11.1% of the
 operation-cost limit and 10.1% of the hashing limit. The largest coinbase a
 claim can carry is the 10,000-byte unlocking limit less the redeem script,
-the other pushes and the proof's other parts: 7,171 bytes at the deepest
+the other pushes and the proof's other parts: 7,173 bytes at the deepest
 branches (`h` 16, `d` 25), measured. P2Pool's token shares keep the coinbase within 3,072
 bytes.
 
@@ -159,8 +167,10 @@ bytes.
   functions.
 - **ASERT** (`asert.test.mjs`): all 14,000 aserti3-2d specification vectors
   (BCHN's QA runs vendored in `p2poolv2_lib`), the 9 mainnet and 9 chipnet
-  real header pairs, the exact band edges, invalid nBits, heights below the
-  anchor, Bitcoin nBits and the fallback band.
+  real header pairs, chipnet block 329,001's nBits with a timestamp two
+  hours before its parent, the exact x8 and x8 + 1 boundaries, unchanged
+  mainnet edges, invalid nBits, heights below the anchor, Bitcoin nBits
+  and the fallback band.
 - **Claims and attacks** (`claim.test.mjs`): whole claims with and without
   a split, a whole donation, a dropped donation, the deepest proof and a
   10,000-byte unlock, on chipnet and mainnet. Refused: redirected payouts
@@ -172,7 +182,8 @@ bytes.
   `S`, a vault left under 800 satoshis, a 36-byte payout script, a wrong
   next state, an easier target in the leaf, and a fallback claim one block
   early or just harder than `ref >> 4`.
-- **Command line** (`cli.test.mjs`).
+- **Command line** (`cli.test.mjs`), including rejection of genesis thread
+  counts at or above 64 and byte-for-byte fixture reproduction.
 - **Against P2Pool's Rust side**, checked once by hand on 2026-10-24: for a
   claim the covenant accepts (chipnet, three tokens, a split),
   `p2poolv2_cli bch-auxpow verify --network chipnet` accepts its proof with
@@ -228,12 +239,38 @@ redeem script, K, locking bytecode and `lock_hash` before any funding;
 `cli.test.mjs` checks it reproduces byte for byte. The covenant does not
 depend on the category, so the real funding txid changes only the leaves.
 
+The corrected ASERT band changes the chipnet redeem script, locking
+bytecode, `lock_hash` and address. Use the regenerated fixture before any
+genesis: a deployed covenant cannot be replaced. Proofs built for the old
+`lock_hash` must be rebuilt and mined again, because the leaf, root,
+coinbase and header commitment all change.
+
+The supplied Pickaxe synthetic claim was rebuilt for this `lock_hash`,
+preserving its deployment, outpoint, vault, split, branches and coinbase
+head and tail. Its original proof fails the corrected covenant. The
+rebuilt input is [`test_data/tsafa-chipnet-claim.json`](test_data/tsafa-chipnet-claim.json);
+[`test_data/tsafa-chipnet-claim-result.json`](test_data/tsafa-chipnet-claim-result.json)
+records the original proof and rebuilt leaf, root and transaction. Copy
+the fixture's `deployment` object to `deployment.json`, then run:
+
+```sh
+node cli.mjs claim deployment.json test_data/tsafa-chipnet-claim.json
+```
+
+The CLI verifies the complete transaction in the standard BCH 2026 VM:
+txid `89771ec35e517ee27478de8a4639c8847dffbcff5a44db0c5156d180e1274c09`,
+2,105 bytes, a 2,200-satoshi fee within a 2,200-byte size bound, height
+329,001 and target `2001bffe`. Its 1,250,000,000-unit reward pays
+1,225,125,000 to the miner, 12,500,000 to the donation and 12,375,000 to
+the fee recipient. This is an offline VM check; it was not broadcast or
+accepted by BCHN.
+
 **Funds.** One chipnet UTXO that is **output 0** of its transaction, worth
 at least 8,001,155 satoshis: 4 × 2,000,000 for the vaults, a 609-satoshi
 genesis fee at 1 sat/byte (609 bytes, estimated with the largest P2PKH
 signature, a 73-byte ECDSA one, and its key) and 546 satoshis of change.
 0.081 tBCH (8,100,000 satoshis) leaves 99,391 in change. Its txid becomes the token category. Each claim
-then costs its vault `S` (1,946 plus the proof, so about 5,300 satoshis
+then costs its vault `S` (1,944 plus the proof, so about 5,300 satoshis
 for a 3,000-byte coinbase) plus 800 satoshis per token output:
 about 250 claims per thread before the seed runs out, estimated, unless
 buyers add cash through the market.

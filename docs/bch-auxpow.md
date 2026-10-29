@@ -172,18 +172,26 @@ the parent is a complete valid BCH block; BCHN is the authority on that.
 A token would otherwise accept any SHA-256 work whose header passes these
 checks. To tie the header's difficulty to Bitcoin Cash's, the header's
 nBits must be what BCH's aserti3-2d gives at the coinbase's BIP34 height,
-within a band (`BchAsert::check_header_bits`):
+within the agreed network band:
 
 - mainnet: `computed / 2 ≤ header_target ≤ computed × 1.05`;
-- test networks: `computed / 8 ≤ header_target ≤ computed × 1.05`, or nBits
+- test networks: `computed / 8 ≤ header_target ≤ computed × 8`, or nBits
   exactly the proof-of-work limit's (`0x1d00ffff`, a minimum-difficulty
   block).
 
 `computed` is ASERT's target for a parent at `height - 1` dated with the
 header's own time, which stands in for the parent's (a proof has no parent
 header). A header minted hours after its parent is harder than `computed`,
-hence the wide hard side; a header's time can fall before its parent's only
-a little, hence the narrow easy side. The bands were agreed with Pickaxe.
+hence the wide hard side. A test-network header can also predate its
+parent by hours ([BCHN timestamp checks](https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node/-/blob/master/src/validation.cpp)).
+Chipnet's one-hour half-life makes a 5% easy side too
+narrow, so its band permits up to x8 on both sides. Mainnet retains the
+original asymmetric band. These are proof-format checks agreed with
+Pickaxe, not BCH block validation.
+
+The SAFA covenant and its JavaScript model implement the corrected x8
+test-network easy side. P2Pool's Rust `BchAsert::check_header_bits` still
+uses x1.05 on that side; the matching Rust change is a separate follow-up.
 
 The arithmetic follows `CalculateASERT` and `GetNextASERTWorkRequired` in
 BCHN's `src/pow.cpp` integer for integer: a truncating 64-bit division for
@@ -212,11 +220,10 @@ Tested against:
 **Where P2Pool runs it.** On every proof `AuxProof::verify` checks with a
 network, and on every **token share's** bitcoin header, at the header gates
 (`validate_header_minimum_difficulty`), with the node's
-`bitcoin_cash_network`. A token claim's covenant checks the same band, so a
-token share outside it could not be claimed anyway. No-token shares are not
-checked: BCHN alone judges their blocks. On a test network, a parent dated
-more than about four minutes after the share's header time (one-hour
-half-life, 1.05 band) fails the easy side; such a token share is refused.
+`bitcoin_cash_network`. No-token shares are not checked: BCHN alone judges
+their blocks. Until the Rust follow-up, its x1.05 test-network easy side
+still refuses a header about four minutes or more before its parent,
+although the corrected SAFA covenant accepts the wider band.
 
 ## Merge-mining tokens on a public node
 
@@ -419,8 +426,8 @@ verifies v2 proofs inside the BCH 2026 VM. It rebuilds the leaf from
 introspection (the vault's category, locking bytecode and state, the
 claim's payout and target, and the split's `ext`), folds both branches,
 checks the header's work against the token's target and its nBits against
-ASERT at the coinbase's BIP34 height (the band above, with a fallback after
-4,032 blocks without a claim), binds that height with
+ASERT at the coinbase's BIP34 height (the corrected band above, with a
+fallback after 4,032 blocks without a claim), binds that height with
 `OP_CHECKLOCKTIMEVERIFY`, and pays the split to scripts of at most 35
 bytes. The vault is the claim's only input: it pays the fee from its own
 cash, `S` to `3S` satoshis for `S` bytes of claim bound, and keeps at least
@@ -428,8 +435,21 @@ cash, `S` to `3S` satoshis for `S` bytes of claim bound, and keeps at least
 vectors, BCHN's 14,000 aserti3-2d vectors and the real headers from this
 repository's Rust tests in the VM. A chipnet test token (tSAFA) is
 prepared but not deployed. The v1 variant passed a real regtest withdrawal
-on 2026-10-16; the v2 covenant has not yet run against BCHN. Its separate
-checks still apply:
+on 2026-10-16; the v2 covenant has not yet run against BCHN.
+
+Deployment compilation and the genesis CLI accept only 1 to 63 threads.
+At 288 or more, the age cap prevents the target from ever easing above its
+previous value. The stricter bound preserves room to recover before that
+cap. Both fixes must precede genesis because the deployed covenant is
+immutable. The regenerated chipnet fixture uses outpoint `11` x 32, output
+0, four threads and 84,000,000,000 virtual satoshis. Its new `lock_hash`
+requires new leaves and newly mined proofs; old proofs cannot claim it.
+The regression checks chipnet block 329,001's nBits with a header timestamp
+two hours before its real parent's time and rejects a target one unit
+above the x8 edge. The mainnet edges are unchanged. The
+[rebuilt Pickaxe claim](../tools/safa-auxpow/README.md#chipnet-tsafa-deployment)
+passes the standard BCH 2026 VM offline; this is not a BCHN deployment or
+broadcast.
 
 SAFA is the first requested token target. Its
 [author's draft and linked Bitauth template](https://bitcoincashresearch.org/t/safas-a-sha256-asic-minable-automated-token-market/2123)
@@ -438,7 +458,7 @@ header, coinbase or inclusion branch. Committing its baton hash in BCH does
 not satisfy that mining rule. The variant keeps the draft's threads, market
 and difficulty adjustment and replaces the mining hash check with a
 merge-mining check. It is not a deployed version of the author's token or a
-final SAFA specification. Independent review, the economic parameters (the
+final SAFA specification. A complete independent review, the economic parameters (the
 virtual reserve among them) and a final SAFA policy remain open.
 
 The linked draft's release and swap scenarios both pass in Libauth

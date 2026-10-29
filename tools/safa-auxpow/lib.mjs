@@ -32,6 +32,8 @@ export const OUTPUT_SATS = 800n;
 export const MIN_SHARE_SATS = 1000n;
 /** The DAA eases by at most this many blocks per claim. */
 export const EASE_CAP = 288;
+/** Deployment thread counts are 1 to 63, keeping the capped DAA able to ease. */
+export const MAX_THREADS = 63;
 /** Blocks without a claim after which the fallback nBits band applies. */
 export const FALLBACK_DELTA = 4032;
 /** Claim outputs pay scripts of at most 35 bytes (P2PKH, P2SH20, P2SH32), as K assumes. */
@@ -63,17 +65,19 @@ export const CLAIM_FIXED_BYTES = 4 + 1 + 36 + 3 + 4 + 1 + 104 + 3 * 87 + 4 + 70 
 /**
  * Per-network ASERT parameters, from BCHN's chain parameters
  * (`src/chainparams.cpp`: `asertAnchorParams`, `nASERTHalfLife`,
- * `fPowAllowMinDifficultyBlocks`), and P2Pool's agreed band below the
- * computed target. Regtest and scalenet have no anchor, so no deployment.
+ * `fPowAllowMinDifficultyBlocks`), and the agreed band around the computed
+ * target. Regtest and scalenet have no anchor, so no deployment.
  */
 export const NETWORKS = Object.freeze({
   mainnet: Object.freeze({
     anchorHeight: 661647, anchorBits: 0x1804dafe, anchorParentTime: 1605447844,
-    halfLife: 172800, allowPowLimit: false, hardDivisor: 2, cashAddressPrefix: 'bitcoincash',
+    halfLife: 172800, allowPowLimit: false, hardDivisor: 2,
+    easyNumerator: 105, easyDenominator: 100, cashAddressPrefix: 'bitcoincash',
   }),
   chipnet: Object.freeze({
     anchorHeight: 16844, anchorBits: 0x1d00ffff, anchorParentTime: 1605451779,
-    halfLife: 3600, allowPowLimit: true, hardDivisor: 8, cashAddressPrefix: 'bchtest',
+    halfLife: 3600, allowPowLimit: true, hardDivisor: 8,
+    easyNumerator: 8, easyDenominator: 1, cashAddressPrefix: 'bchtest',
   }),
 });
 
@@ -121,6 +125,7 @@ function libraryValues(network) {
     ANCHOR_HEIGHT: parameters.anchorHeight, ANCHOR_PARENT_TIME: parameters.anchorParentTime,
     ANCHOR_TARGET: setCompact(parameters.anchorBits), HALF_LIFE: parameters.halfLife,
     HARD_DIVISOR: parameters.hardDivisor,
+    EASY_NUMERATOR: parameters.easyNumerator, EASY_DENOMINATOR: parameters.easyDenominator,
   };
 }
 
@@ -145,12 +150,13 @@ function positiveInteger(value, name, maximum = Number.MAX_SAFE_INTEGER) {
 
 /**
  * Compile one deployment: `network` (mainnet or chipnet), the number of
- * `threads` and the AMM's `virtualSats`. The fee constant K includes the
- * redeem script, so it is found by compiling until it stops changing.
+ * `threads` (1 to 63) and the AMM's `virtualSats`. The fee constant K
+ * includes the redeem script, so it is found by compiling until it stops
+ * changing.
  */
 export function createCovenant({ network, threads, virtualSats }) {
   networkParameters(network);
-  positiveInteger(threads, 'threads', 0x7fffffff);
+  positiveInteger(threads, 'threads', MAX_THREADS);
   const virtual = BigInt(virtualSats);
   if (virtual < 0n || virtual > (1n << 62n)) throw new Error('virtual_sats must be from 0 to 2^62');
   const library = substitute(LIBRARY_SOURCE, libraryValues(network));
@@ -315,7 +321,7 @@ export function asertTarget(network, height, time) {
   );
 }
 
-/** The covenant's ASERT band for a header's nBits, time and coinbase height. */
+/** Mainnet's /2 to x1.05 band; chipnet's /8 to x8 band or exact powLimit bits. */
 export function asertBandOk(network, bits, time, height) {
   const parameters = networkParameters(network);
   const target = decodeHeaderBits(bits);
@@ -323,7 +329,8 @@ export function asertBandOk(network, bits, time, height) {
   if (parameters.allowPowLimit && bits === POW_LIMIT_BITS) return true;
   const computed = asertTarget(network, height, time);
   if (computed === null) return false;
-  return target >= computed / BigInt(parameters.hardDivisor) && target * 100n <= computed * 105n;
+  return target >= computed / BigInt(parameters.hardDivisor)
+    && target * BigInt(parameters.easyDenominator) <= computed * BigInt(parameters.easyNumerator);
 }
 
 /**

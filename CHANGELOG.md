@@ -259,7 +259,7 @@ anchor and the donation and fee cap as they were.
   aserti3-2d band on the header's nBits, with the fallback band
   `ref >> 4` to `ref × 1.1` from 4,032 blocks; and the SAFA draft's difficulty
   adjustment, eased by `min(Δh, 288) / threads`. The Unix-time lock, the CSV
-  age and the version-2 rule are gone. Its redeem script is 1,366 bytes on
+  age and the version-2 rule are gone. Its redeem script is 1,364 bytes on
   chipnet, and the worst claim measured uses 11% of the VM's operation-cost
   limit and 10% of its hashing limit. The tests run every Pickaxe PR #70
   vector, BCHN's 14,000 aserti3-2d vectors and the real headers from the Rust
@@ -529,6 +529,20 @@ anchor and the donation and fee cap as they were.
 
 ### Fixed
 
+- Before tSAFA genesis, the SAFA v2 covenant and its JavaScript model use
+  `computed / 8 <= target <= computed * 8` on chipnet, preserving the
+  exact powLimit exception. This accepts backwards timestamp skew that
+  the old x1.05 easy side rejected with chipnet's 3,600-second half-life.
+  Mainnet remains `computed / 2 <= target <= computed * 1.05`. Deployment
+  compilation and the genesis CLI reject 64 or more threads: the
+  288-block easing cap would permanently prevent recovery at 288 threads
+  or more. Tests cover the real chipnet 329,001 parameters with two hours
+  of backwards skew, x8 + 1 rejection, unchanged mainnet edges and the
+  thread bound. The chipnet fixture is regenerated; old commitments must
+  be rebuilt before deployment. The rebuilt Pickaxe claim and its result
+  are saved beside it and verify in the standard BCH 2026 VM, without
+  broadcasting. P2Pool's corresponding Rust ASERT change remains a
+  separate follow-up.
 - A miner's stratum difficulty never goes above the share difficulty of the
   job it mines (V8 in `docs/p2pool-v1-bch-lessons.md`). `d=`, `th=`,
   `mining.suggest_difficulty` or `[stratum] minimum_difficulty` could hold a

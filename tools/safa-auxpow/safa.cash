@@ -114,7 +114,8 @@
 
 // Function 7: the ASERT band of a header at the coinbase height, its own time
 // standing in for its parent's: computed / HARD_DIVISOR <= target <=
-// computed * 1.05, or (test networks) nBits exactly powLimit's.
+// computed * EASY_NUMERATOR / EASY_DENOMINATOR: mainnet /2 to x1.05,
+// test networks /8 to x8, or (test networks) nBits exactly powLimit's.
 // [nbits4 time4 height] -> [ok]
 <
     OP_ROT
@@ -130,7 +131,7 @@
         <{{ANCHOR_TARGET}}> OP_SWAP OP_ROT <{{HALF_LIFE}}>
         <6> OP_INVOKE
         OP_2DUP <{{HARD_DIVISOR}}> OP_DIV OP_GREATERTHANOREQUAL
-        OP_ROT <100> OP_MUL OP_ROT <105> OP_MUL OP_LESSTHANOREQUAL OP_BOOLAND
+        OP_ROT <{{EASY_DENOMINATOR}}> OP_MUL OP_ROT <{{EASY_NUMERATOR}}> OP_MUL OP_LESSTHANOREQUAL OP_BOOLAND
     OP_ENDIF
 > <7> OP_DEFINE
 

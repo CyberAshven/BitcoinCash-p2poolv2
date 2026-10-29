@@ -41,6 +41,25 @@ test('the chipnet tSAFA fixture reproduces byte for byte', context => {
   assert.equal(fixture.genesis.funding.txid, fixture.deployment.category);
 });
 
+test('the rebuilt Pickaxe tSAFA claim reproduces its verified transaction', context => {
+  const fixture = JSON.parse(readFileSync(new URL('test_data/tsafa-chipnet-claim-result.json', import.meta.url), 'utf8'));
+  const claimPath = fileURLToPath(new URL(`test_data/${fixture.claim_file}`, import.meta.url));
+  const deploymentPath = json(context, fixture.deployment, 'deployment.json');
+  const result = run('claim', deploymentPath, claimPath);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), fixture.result);
+});
+
+test('the original Pickaxe proof cannot claim the changed covenant lock hash', context => {
+  const fixture = JSON.parse(readFileSync(new URL('test_data/tsafa-chipnet-claim-result.json', import.meta.url), 'utf8'));
+  const rebuilt = JSON.parse(readFileSync(new URL(`test_data/${fixture.claim_file}`, import.meta.url), 'utf8'));
+  const result = run('claim', json(context, fixture.deployment, 'deployment.json'),
+    json(context, { ...rebuilt, proof: fixture.original_proof }, 'original-claim.json'));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /covenant refuses this claim/);
+  assert.equal(result.stdout, '');
+});
+
 test('leaf prints the token JSON p2poolv2_cli bch-auxpow reads, for one height', context => {
   const scenario = claimScenario({ split: SPLIT });
   const job = {
@@ -117,6 +136,41 @@ test('genesis prepares an unsigned chipnet genesis with one vault per thread and
   assert.match(mainnet.stderr, /chipnet only/);
   const notFirst = run('genesis', json(context, { ...input, funding: { ...input.funding, vout: 1 } }, 'vout.json'));
   assert.match(notFirst.stderr, /output 0/);
+});
+
+test('genesis accepts the 63-thread boundary and creates its last thread', context => {
+  const input = {
+    network: 'chipnet', threads: 63, virtual_sats: '84000000000', supply_per_thread: '420000000000',
+    seed_sats: '10000', start_height: CHIPNET_BLOCK.height, target_bits: '1d00ffff',
+    ref_bits: CHIPNET_BLOCK.bits.toString(16).padStart(8, '0'),
+    funding: { txid: '11'.repeat(32), vout: 0, value_sats: '1000000', script: binToHex(p2pkh('ab')) },
+    change_script: binToHex(p2pkh('cd')), fee_rate: 1,
+  };
+  const result = run('genesis', json(context, input));
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.deployment.threads, 63);
+  assert.equal(output.vaults.length, 63);
+  assert.equal(output.vaults[62].thread, 62);
+  assert.equal(safa.decodeState(hexToBin(output.vaults[62].commitment)).thread, 62);
+  const transaction = decodeTransactionBch(hexToBin(output.unsigned_genesis));
+  assert.notEqual(typeof transaction, 'string');
+  assert.equal(transaction.outputs.length, 64);
+  assert.equal(verify({ transaction, sourceOutputs: [{ lockingBytecode: Uint8Array.of(0x51), valueSatoshis: 1000000n }] }), true);
+});
+
+test('genesis rejects 64 threads before reading funding or building a transaction', context => {
+  const result = run('genesis', json(context, { network: 'chipnet', threads: 64, virtual_sats: '84000000000' }));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /threads.*63/);
+  assert.equal(result.stdout, '');
+});
+
+test('genesis rejects 288 threads before reading funding or building a transaction', context => {
+  const result = run('genesis', json(context, { network: 'chipnet', threads: 288, virtual_sats: '84000000000' }));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /threads.*63/);
+  assert.equal(result.stdout, '');
 });
 
 test('malformed input fails the CLI with a reason', context => {

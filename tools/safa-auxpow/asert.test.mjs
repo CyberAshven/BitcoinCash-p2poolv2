@@ -72,7 +72,7 @@ test('mainnet: computed / 2 to computed x 1.05, exact at the edges, and no powLi
   assert.equal(at(safa.POW_LIMIT_BITS), false);
 });
 
-test('chipnet: computed / 8 to computed x 1.05, or nBits exactly powLimit', () => {
+test('chipnet: computed / 8 to computed x 8, or nBits exactly powLimit', () => {
   const { anchorHeight, anchorParentTime } = safa.NETWORKS.chipnet;
   const height = anchorHeight + 1 + 120;
   const time = anchorParentTime + 600;
@@ -81,8 +81,45 @@ test('chipnet: computed / 8 to computed x 1.05, or nBits exactly powLimit', () =
   assert.equal(at(computed), true);
   assert.equal(at(computed / 8n), true);
   assert.equal(at(computed / 16n), false);
-  assert.equal(at(computed * 2n), false);
+  assert.equal(at(computed * 2n), true);
+  assert.equal(at(computed * 8n), true);
+  assert.equal(at(computed * 16n), false);
   assert.equal(band('chipnet', safa.POW_LIMIT_BITS, time, height), true);
+});
+
+test('chipnet block 329001 nBits pass with its header time two hours before its real parent', () => {
+  const pair = chipnetPairs.at(-1);
+  const parent = header(pair.parent);
+  const child = header(pair.child);
+  const time = parent.time - 7200;
+  assert.equal(pair.parentHeight + 1, 329001);
+  assert.equal(child.bits, 0x1a3106ee);
+  assert.equal(parent.time - time, 7200);
+  // Only the timestamp is moved: this tests the ASERT band, not the
+  // modified header's proof of work. The real parent's ASERT target gives
+  // the child's real nBits, while its own time can be two hours earlier.
+  assert.equal(safa.getCompact(safa.asertTarget('chipnet', 329001, parent.time)), child.bits);
+  assert.equal(band('chipnet', child.bits, time, 329001), true);
+});
+
+test('chipnet accepts the exact computed x 8 upper bound', () => {
+  const { anchorHeight, anchorParentTime } = safa.NETWORKS.chipnet;
+  const height = anchorHeight + 10001;
+  const time = anchorParentTime + 600;
+  // Clamp ASERT to 1 so both the bound and bound + 1 are exactly
+  // representable as nBits; compact precision must not round +1 away.
+  assert.equal(safa.asertTarget('chipnet', height, time), 1n);
+  assert.equal(safa.setCompact(0x01080000), 8n);
+  assert.equal(band('chipnet', 0x01080000, time, height), true);
+});
+
+test('chipnet rejects the exact computed x 8 upper bound plus one', () => {
+  const { anchorHeight, anchorParentTime } = safa.NETWORKS.chipnet;
+  const height = anchorHeight + 10001;
+  const time = anchorParentTime + 600;
+  assert.equal(safa.asertTarget('chipnet', height, time), 1n);
+  assert.equal(safa.setCompact(0x01090000), 9n);
+  assert.equal(band('chipnet', 0x01090000, time, height), false);
 });
 
 test('a Bitcoin header fails the band on both networks', () => {

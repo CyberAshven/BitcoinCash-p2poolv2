@@ -146,11 +146,14 @@ function claim(deployment, input) {
 }
 
 /**
- * A deployment's genesis, unsigned. Chipnet only: mainnet waits for an
- * independent covenant review and the owner's approval.
+ * A deployment's genesis, unsigned, with 1 to 63 threads. Chipnet only:
+ * mainnet waits for an independent covenant review and the owner's approval.
  */
 function genesis(input) {
   if (input.network !== 'chipnet') throw new Error('genesis is prepared for chipnet only');
+  if (!Number.isSafeInteger(input.threads) || input.threads < 1 || input.threads > safa.MAX_THREADS) {
+    throw new Error(`threads must be an integer from 1 to ${safa.MAX_THREADS}`);
+  }
   const deployment = { network: input.network, threads: input.threads, virtual_sats: input.virtual_sats };
   const covenant = covenantOf(deployment);
   const funding = {

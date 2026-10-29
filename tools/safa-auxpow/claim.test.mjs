@@ -308,6 +308,29 @@ test('the vault pays 1 to 3 sat/byte of K plus the proof, and not a satoshi more
 
 // ---- state and target ----
 
+test('63 threads can claim the last thread and ease its target after 288 blocks', () => {
+  const covenant = safa.createCovenant({ network: 'chipnet', threads: 63, virtualSats: 42000000000n });
+  const stateBits = 0x2000ffff;
+  const { claim } = claimScenario({
+    covenant, state: { thread: 62, height: CHIPNET_BLOCK.height - 288, targetBits: stateBits },
+  });
+  assert.equal(covenant.threads, 63);
+  assert.ok(safa.expandTokenTarget(claim.plan.targetBits) > safa.expandTokenTarget(stateBits));
+  accepts(claim);
+});
+
+test('a chipnet covenant rejects 64 threads before compilation', () => {
+  assert.throws(() => safa.createCovenant({ network: 'chipnet', threads: 64, virtualSats: 42000000000n }), /threads.*63/);
+});
+
+test('a chipnet covenant rejects 288 threads whose capped target cannot ease', () => {
+  assert.throws(() => safa.createCovenant({ network: 'chipnet', threads: 288, virtualSats: 42000000000n }), /threads.*63/);
+});
+
+test('a mainnet covenant rejects 64 threads before compilation', () => {
+  assert.throws(() => safa.createCovenant({ network: 'mainnet', threads: 64, virtualSats: 42000000000n }), /threads.*63/);
+});
+
 test('the next state is exactly the thread, the coinbase height, the claim target and the header nBits', () => {
   const { claim } = claimScenario();
   for (const [why, offset] of [['thread', 0], ['height', 4], ['target', 8], ['reference', 12]]) {
