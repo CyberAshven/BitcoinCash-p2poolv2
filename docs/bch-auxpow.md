@@ -283,7 +283,9 @@ nothing. A node does not start on a file it cannot read or that is not
 valid (at most 1 MiB). It reads the file again whenever its modification
 time changes, so the tool that claims a token can write the new state
 hash; a changed file that is broken keeps the last good tokens and logs
-why. No token is deployed yet, so no file ships with the node.
+why. No file ships with the node: a vault's state changes with every claim.
+The first token, tSAFA, is deployed on chipnet; its parameters are in
+[the SAFA tool's README](../p2poolv2_safa/README.md#chipnet-tsafa-deployment).
 
 **Each miner's root.** Every pool-built job (Stratum V1, and Stratum V2
 standard and extended channels) carries a root of its miner's own leaves at

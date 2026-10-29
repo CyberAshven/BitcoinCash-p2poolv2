@@ -233,11 +233,32 @@ no signature; whoever broadcasts it decides when.
 
 ## Chipnet tSAFA deployment
 
-Prepared, not done: nothing has been broadcast, and the owner funds and
-approves it. `genesis` refuses mainnet until the covenant has an
-independent review and the owner's approval.
+Deployed on 2026-10-29 with the owner's approval. `genesis` still refuses
+mainnet until the covenant has an independent review and the owner's
+approval.
 
-**Proposed parameters.** 4 threads; 525,000,000,000,000 base units per
+| | |
+|---|---|
+| Genesis txid | `8c5ecd6d4ce039490c233c9399cc1e591720218fd9712dc8c00edc172a06c471` (607 bytes, 609-satoshi fee) |
+| Category | `1e642d4ed9a0a44b3153a3f1fda841906eb1c9a2ce9daa2f85641ddd3e8700fe` |
+| Vaults | genesis outputs 0 to 3, threads 0 to 3, at `bchtest:rwhk4prfungulj3qwcdfcvf8khjk94nmw9t262mju2gevuae7n0qwnf98a02d` |
+| First state | start height 330,001, target bits `1d00ffff`, reference bits `1a457dba` (thread 0's commitment: `0000000011090500ffff001dba7d451a`) |
+
+`deployment.json`:
+
+```json
+{"network":"chipnet","threads":4,"virtual_sats":"84000000000","category":"1e642d4ed9a0a44b3153a3f1fda841906eb1c9a2ce9daa2f85641ddd3e8700fe"}
+```
+
+The covenant is the regenerated fixture's, byte for byte (1,364-byte redeem
+script, K 1,944). The genesis was built with `cargo safa genesis`, signed by
+the owner's chipnet BCHN wallet and accepted by its `testmempoolaccept`
+before broadcast. The owner kept PHOTON's emission: each claim pays
+1/420,000 of its vault's remaining tokens.
+
+The rest of this section is how it was prepared, for a later deployment.
+
+**Parameters.** 4 threads; 525,000,000,000,000 base units per
 thread (21,000,000 tSAFA at 8 decimals in all), so the first reward is
 1,250,000,000 units (12.5 tSAFA); 84,000,000,000 virtual satoshis, so a
 first reward is worth about 200,000 satoshis at the AMM price and a 1%

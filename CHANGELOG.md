@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The tSAFA test token is deployed on chipnet (genesis
+`8c5ecd6d…c471`, category `1e642d4e…00fe`, 4 threads), with PHOTON's
+emission of 1/420,000 of a vault's remaining tokens per claim. Its
+parameters are in `p2poolv2_safa/README.md`.
+
 Stratum V2 declared token jobs now pass the token-share ASERT band before
 the node asks BCHN to validate a proposal or installs the job. A refusal
 returns `invalid-token-asert` and preserves the channel's existing work.
