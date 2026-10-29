@@ -2,6 +2,7 @@
 
 //! Reproducible offline VM and BCH cost measurements for the frozen profile.
 
+use std::env::args;
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -116,7 +117,7 @@ fn first_path_cost(
 }
 
 fn main() -> Result<(), String> {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let arguments: Vec<String> = args().skip(1).collect();
     let spends_only = arguments.as_slice() == ["--spends-only"];
     if !arguments.is_empty() && !spends_only {
         return Err("usage: photon-payout-measure [--spends-only]".into());

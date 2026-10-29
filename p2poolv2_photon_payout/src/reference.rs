@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use libauth::runtime::bigint::BigInt;
+use libauth::sha256;
 
 /// The profile admits at most this many distinct positive beneficiaries.
 pub const MAX_LEAVES: usize = 4_096;
@@ -165,7 +166,7 @@ pub fn leaf_hash(leaf: &Beneficiary) -> Result<[u8; 32], String> {
     preimage.push(leaf.script.len() as u8);
     preimage.extend_from_slice(&leaf.script);
     preimage.extend_from_slice(&weight_bytes(&leaf.weight)?);
-    Ok(libauth::sha256
+    Ok(sha256
         .hash(&preimage)
         .try_into()
         .expect("SHA256 has 32 bytes"))
@@ -177,7 +178,7 @@ pub fn branch_hash(left: &TreeNode, right: &TreeNode) -> Result<[u8; 32], String
     preimage.push(1);
     preimage.extend_from_slice(&left.descriptor()?);
     preimage.extend_from_slice(&right.descriptor()?);
-    Ok(libauth::sha256
+    Ok(sha256
         .hash(&preimage)
         .try_into()
         .expect("SHA256 has 32 bytes"))

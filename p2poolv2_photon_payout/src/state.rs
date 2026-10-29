@@ -5,6 +5,7 @@
 //! The frozen 336-byte immutable payout state and redeem construction.
 
 use libauth::runtime::bigint::BigInt;
+use libauth::{hash160, hash256};
 
 use crate::covenant::{program_hash, redeem_script};
 use crate::reference::{TreeNode, allocation, maximum_window_weight, root_depth, weight_bytes};
@@ -182,11 +183,11 @@ pub fn script_hash_lock(redeem: &[u8], lock: RootLock) -> Vec<u8> {
     match lock {
         RootLock::P2sh20 => {
             script.extend_from_slice(&[0xa9, 0x14]);
-            script.extend_from_slice(&libauth::hash160(redeem, None));
+            script.extend_from_slice(&hash160(redeem, None));
         }
         RootLock::P2sh32 => {
             script.extend_from_slice(&[0xaa, 0x20]);
-            script.extend_from_slice(&libauth::hash256(redeem, None));
+            script.extend_from_slice(&hash256(redeem, None));
         }
     }
     script.push(0x87);
