@@ -179,7 +179,7 @@ async fn utxo_value(node: &BitcoindRpcClient, txid: Txid, vout: u32) -> Option<u
         .map(|value| Amount::from_btc(value).unwrap().to_sat())
 }
 
-/// A token share's coinbase with 700 payees: 77 are paid directly and 623
+/// A token share's coinbase with 700 payees: 79 are paid directly and 621
 /// through a two-level payout tree. After 100 blocks the node's executor
 /// broadcasts the tree at 1 sat/byte, BCHN accepts every node transaction
 /// into its mempool and a block, every payee holds its amount to the
@@ -204,7 +204,7 @@ async fn bchn_regtest_executes_a_two_level_payout_tree() {
     )
     .unwrap();
     let tree = payouts.tree.clone().unwrap();
-    assert_eq!(payouts.outputs.len(), 77);
+    assert_eq!(payouts.outputs.len(), 79);
     assert_eq!(tree.node_count(), 3);
 
     let (coinbase, blockhash, height) = mine_coinbase(&node, &payouts).await;
@@ -275,7 +275,7 @@ async fn bchn_regtest_executes_a_two_level_payout_tree() {
         ));
     }
     assert_eq!(held, expected);
-    assert_eq!(expected.len(), 623);
+    assert_eq!(expected.len(), 621);
     let paid: u64 = expected.iter().map(|(_, _, value)| value).sum();
     assert_eq!(paid + tree.total_fee(1).unwrap(), tree.value());
 

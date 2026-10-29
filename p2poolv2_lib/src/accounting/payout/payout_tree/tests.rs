@@ -271,13 +271,37 @@ fn merging_repeats_until_no_payee_is_below_dust() {
     assert_eq!(tree.payees()[0].amount, 4_700);
 }
 
-/// A tree whose only payee cannot cover its own fee at 3 sat/byte keeps
-/// it: its outputs saturate at zero rather than the build failing.
+/// An underfunded last payee must be handled by the hybrid split, never
+/// committed to a zero-valued or sub-dust tree output.
 #[test]
-fn a_last_payee_below_its_fee_saturates_at_zero() {
-    let tree = PayoutTree::build(payees(1, 0, 100)).unwrap();
+fn a_last_payee_below_its_fee_is_refused() {
+    assert_eq!(
+        PayoutTree::build(payees(1, 0, 100)),
+        Err(PayoutTreeError::InsufficientValue)
+    );
+}
+
+#[test]
+fn a_last_payee_below_fee_plus_dust_is_refused() {
+    let owed = payees(1, 0, 1_000_000);
+    let shape = TreeShape::for_payees(1);
+    let fee = MAX_TREE_FEE_RATE * node_sizes(&shape, &owed)[0] as u64;
+    let minimum = fee + owed[0].dust();
+    assert_eq!(
+        PayoutTree::build(payees(1, 0, minimum - 1)),
+        Err(PayoutTreeError::InsufficientValue)
+    );
+}
+
+#[test]
+fn a_last_payee_at_fee_plus_dust_is_relayable_at_every_rate() {
+    let owed = payees(1, 0, 1_000_000);
+    let shape = TreeShape::for_payees(1);
+    let minimum = MAX_TREE_FEE_RATE * node_sizes(&shape, &owed)[0] as u64 + owed[0].dust();
+    let tree = PayoutTree::build(payees(1, 0, minimum)).unwrap();
     let transactions = tree.node_transactions(3, root_outpoint()).unwrap();
-    assert_eq!(transactions[0].output[0].value.to_sat(), 0);
+    assert_eq!(transactions[0].output[0].value.to_sat(), owed[0].dust());
+    assert_eq!(vm_verdicts(&tree, &transactions), vec![Ok(())]);
 }
 
 // Execution.

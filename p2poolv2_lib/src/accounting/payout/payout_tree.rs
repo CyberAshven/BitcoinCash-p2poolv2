@@ -30,7 +30,9 @@
 //! - **Dust.** A node transaction is relayed, so each of its outputs must
 //!   meet BCHN's dust threshold. A payee whose net amount at the highest rate
 //!   is below its threshold leaves the tree and its amount goes to the last
-//!   payee, the largest; this repeats until no payee but the last is below.
+//!   payee, the largest; this repeats until no payee is below. If the final
+//!   payee cannot cover its fee and dust, the hybrid split pays the merged
+//!   tail directly in the space reserved for the tree root instead.
 
 use crate::shares::bch_payout_covenant::{
     NODE_LOCK_TIME, NODE_SEQUENCE, NODE_TRANSACTION_VERSION, NodeCovenant, outputs_hash,
@@ -85,6 +87,9 @@ pub enum PayoutTreeError {
     NoPayees,
     /// The payees' amounts overflow a satoshi count.
     ValueOverflow,
+    /// Even the final merged payee cannot cover its fee and dust at every
+    /// accepted rate. The hybrid split must pay this tail directly.
+    InsufficientValue,
     /// The fee left for the root is negative: the tree's value cannot cover
     /// its own child nodes. Unreachable for trees built by `build`, kept as a
     /// guard against an arithmetic mistake producing an invalid transaction.
@@ -97,6 +102,9 @@ impl fmt::Display for PayoutTreeError {
             PayoutTreeError::NoPayees => write!(formatter, "a payout tree needs payees"),
             PayoutTreeError::ValueOverflow => {
                 write!(formatter, "payout tree amounts overflow")
+            }
+            PayoutTreeError::InsufficientValue => {
+                write!(formatter, "payout tree value cannot cover its fee and dust")
             }
             PayoutTreeError::RootFeeNegative { fee_rate } => write!(
                 formatter,
@@ -234,7 +242,8 @@ pub struct PayoutTree {
 
 impl PayoutTree {
     /// Build the tree for `payees`, in canonical payout order with the
-    /// largest last. Merges payees below dust into the last one first.
+    /// largest last. Merges payees below dust into the last one first, and
+    /// refuses a tree whose final payee cannot cover its fee and dust.
     pub fn build(payees: Vec<TreePayee>) -> Result<Self, PayoutTreeError> {
         if payees.is_empty() {
             return Err(PayoutTreeError::NoPayees);
@@ -243,7 +252,7 @@ impl PayoutTree {
             .iter()
             .try_fold(0u64, |total, payee| total.checked_add(payee.amount))
             .ok_or(PayoutTreeError::ValueOverflow)?;
-        let payees = merge_dust_payees(payees);
+        let payees = merge_dust_payees(payees)?;
         let shape = TreeShape::for_payees(payees.len());
         let sizes = node_sizes(&shape, &payees);
         let mut variants = Vec::with_capacity(BCH_TREE_FEE_RATES.len());
@@ -409,8 +418,9 @@ fn net_amount(payee: &TreePayee, shared_fee: u64, fee_rate: u64) -> u64 {
 
 /// Remove payees whose net amount at the highest rate is below their dust
 /// threshold, adding their amounts to the last payee, until none is left
-/// below it. The last payee is never removed, so this ends.
-fn merge_dust_payees(mut payees: Vec<TreePayee>) -> Vec<TreePayee> {
+/// below it. Refuse an underfunded final payee so it can be paid directly
+/// by the hybrid split instead of locking money in an unrelayable tree.
+fn merge_dust_payees(mut payees: Vec<TreePayee>) -> Result<Vec<TreePayee>, PayoutTreeError> {
     loop {
         let shape = TreeShape::for_payees(payees.len());
         let sizes = node_sizes(&shape, &payees);
@@ -429,7 +439,10 @@ fn merge_dust_payees(mut payees: Vec<TreePayee>) -> Vec<TreePayee> {
         let last_payee = kept.last_mut().expect("the last payee is always kept");
         last_payee.amount += merged_amount;
         if !merged_any {
-            return kept;
+            if net_amount(last_payee, shared, MAX_TREE_FEE_RATE) < last_payee.dust() {
+                return Err(PayoutTreeError::InsufficientValue);
+            }
+            return Ok(kept);
         }
         payees = kept;
     }

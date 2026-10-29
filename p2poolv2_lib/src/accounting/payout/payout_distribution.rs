@@ -24,14 +24,22 @@ use std::error::Error;
 /// chain data.
 #[cfg_attr(test, mockall::automock)]
 pub trait PayoutDistribution {
+    /// Whether the weights already carry each window share's own donation and
+    /// fee (a Bitcoin Cash share chain), so the node's donation and fee are
+    /// not taken off the whole coinbase. Bitcoin and Hydrapool take them off
+    /// the whole coinbase.
+    fn has_per_share_cuts(&self) -> bool {
+        false
+    }
+
     /// Snapshot used by declared jobs to split a miner-selected fee revenue.
     fn pplns_weights(&self) -> Option<HashMap<Address, u128>> {
         None
     }
 
-    /// Fill distribution according to the the Payout mechanism.  The
-    /// donation and fees amount have already been filled by the trait
-    /// common implementation of get_outpoint_distribution
+    /// Fill distribution according to the payout mechanism. Bitcoin and
+    /// Hydrapool receive the amount after the finding job's cuts; Bitcoin
+    /// Cash share-chain weights already include each window share's cuts.
     ///
     /// `split` is how the share chain turns weights into outputs: every
     /// payee on Bitcoin, the hybrid payout on Bitcoin Cash (see
@@ -83,20 +91,23 @@ pub trait PayoutDistribution {
         total_amount: bitcoin::Amount,
         config: &StratumConfig<crate::config::Parsed>,
     ) -> Result<CoinbasePayouts, Box<dyn Error + Send + Sync>> {
-        // Extra two places for potential cuts
         let mut distribution = Vec::<OutputPair>::new();
-        let remaining_total_amount = include_address_and_cut(
-            &mut distribution,
-            total_amount,
-            &config.donation_address_parsed,
-            config.donation,
-        );
-        let remaining_total_amount = include_address_and_cut(
-            &mut distribution,
-            remaining_total_amount,
-            &config.fee_address_parsed,
-            config.fee,
-        );
+        let remaining_total_amount = if self.has_per_share_cuts() {
+            total_amount
+        } else {
+            let remaining = include_address_and_cut(
+                &mut distribution,
+                total_amount,
+                &config.donation_address_parsed,
+                config.donation,
+            );
+            include_address_and_cut(
+                &mut distribution,
+                remaining,
+                &config.fee_address_parsed,
+                config.fee,
+            )
+        };
 
         let tree = self.fill_distribution_from_shares(
             &mut distribution,
@@ -115,12 +126,17 @@ pub trait PayoutDistribution {
     }
 }
 
-/// Apply donation, operator fee and the exact share-chain weights, split
-/// into outputs by `split` (every payee on Bitcoin, the hybrid payout on
-/// Bitcoin Cash).
+/// The coinbase outputs of `value` for a window's `weights`, split into
+/// outputs by `split`: every payee on Bitcoin, the hybrid payout on Bitcoin
+/// Cash. What payout validation rebuilds; public so integration tests can
+/// check the coinbase a window implies.
 ///
-/// The coinbase outputs payout validation rebuilds from a window's weights;
-/// public so integration tests can check the coinbase a window implies.
+/// On Bitcoin the paying share's donation and fee come off the whole value
+/// first, as upstream has it. On Bitcoin Cash (`BchHybrid`) they are not
+/// taken here: each window share's own donation and fee are already in
+/// `weights`, their recipients payees like any other
+/// (`BCH_PER_SHARE_CUTS_RULE_TAG`), so the paying share's own settings never
+/// cut the coinbase.
 pub fn build_pplns_outputs(
     value: u64,
     weights: &HashMap<Address, u128>,
@@ -134,13 +150,18 @@ pub fn build_pplns_outputs(
         return Err("Can't build output from empty distribution. There should be at least one payout address".into());
     }
     let mut outputs = Vec::with_capacity(weights.len() + 2);
-    let remaining = include_address_and_cut(
-        &mut outputs,
-        Amount::from_sat(value),
-        donation_address,
-        donation,
-    );
-    let remaining = include_address_and_cut(&mut outputs, remaining, fee_address, fee);
+    let remaining = match split {
+        PayoutSplit::BchHybrid { .. } => Amount::from_sat(value),
+        PayoutSplit::EveryPayee => {
+            let remaining = include_address_and_cut(
+                &mut outputs,
+                Amount::from_sat(value),
+                donation_address,
+                donation,
+            );
+            include_address_and_cut(&mut outputs, remaining, fee_address, fee)
+        }
+    };
     let tree = append_payout_split(weights, remaining, split, &mut outputs)?;
     Ok(CoinbasePayouts { outputs, tree })
 }

@@ -293,13 +293,15 @@ impl PreparedNotifyParams {
     /// `donation` basis points, a step of 0.5% from 0 to 10%.
     ///
     /// `Ok(None)` means these params: no choice (`None`), or the donation
-    /// they already pay. Any other choice gets these params rebuilt at that
-    /// donation to the built-in donation address: the same template, share
-    /// chain anchor, PPLNS weights, payout split, operator fee and share
-    /// transactions, so only the donation output, the amounts after it and
-    /// the committed donation differ. The fee is still taken from what the
-    /// donation leaves. The node's own donation never replaces the miner's
-    /// choice.
+    /// they already commit to. Any other choice gets these params rebuilt at
+    /// that donation to the built-in donation address: the same template,
+    /// share chain anchor, PPLNS weights, payout split, operator fee and
+    /// share transactions, so only the committed donation differs. The
+    /// coinbase is the same: on Bitcoin Cash each window share's own
+    /// donation and fee are payees in the weights (`ShareCuts`), so the
+    /// miner's choice comes off its own shares' weight in the windows that
+    /// pay them, the fee after it. The node's own donation never replaces
+    /// the miner's choice.
     ///
     /// Only a Bitcoin Cash P2Pool node's params can be rebuilt; others, and
     /// params that are themselves a rebuild, refuse any other choice.

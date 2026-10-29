@@ -80,6 +80,13 @@ impl Payout {
 }
 
 impl PayoutDistribution for Payout {
+    fn has_per_share_cuts(&self) -> bool {
+        self.pplns_window
+            .read()
+            .expect("PPLNS window lock poisoned on read")
+            .has_per_share_cuts()
+    }
+
     fn pplns_weights(&self) -> Option<HashMap<Address, u128>> {
         self.last_weights.clone()
     }
@@ -154,6 +161,7 @@ mod tests {
         DIFFICULTY_SCALE, NEPHEW_SCALED_BONUS, UNCLE_SCALED_WEIGHT, bitcoin_block_difficulty,
     };
     use crate::config::Chain;
+    use crate::config::{BitcoinCashNetwork, bitcoin_cash_donation_address};
     use crate::shares::chain::chain_store_handle::ConfirmedHeaderResult;
     use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
     use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
@@ -741,6 +749,145 @@ mod tests {
 
         let total_distributed: Amount = result.iter().map(|pair| pair.amount).sum();
         assert_eq!(total_distributed, total_amount);
+    }
+
+    /// The finding share cannot levy its cuts on another miner's work.
+    /// The producer and validator use the same per-share cut weights.
+    #[test]
+    fn test_bch_per_share_cuts_producer_and_validator_agree() {
+        let mut contributing = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        let donation_address = bitcoin_cash_donation_address(BitcoinCashNetwork::Chipnet);
+        let fee_address = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_3G, 2)
+            .miner_bitcoin_address;
+        contributing.donation_address = Some(donation_address.clone());
+        contributing.donation = Some(1_000);
+        contributing.fee_address = Some(fee_address.clone());
+        contributing.fee = Some(1_000);
+        let mut independent =
+            build_test_header(&contributing.block_hash().to_string(), PUBKEY_2G, 2);
+        independent.donation_address = None;
+        independent.donation = None;
+        independent.fee_address = None;
+        independent.fee = None;
+        let contributing_address = contributing.miner_bitcoin_address.clone();
+        let independent_address = independent.miner_bitcoin_address.clone();
+        let anchor = independent.block_hash();
+        let rows = vec![
+            ConfirmedHeaderResult {
+                height: 1,
+                blockhash: anchor,
+                header: independent,
+            },
+            ConfirmedHeaderResult {
+                height: 0,
+                blockhash: contributing.block_hash(),
+                header: contributing,
+            },
+        ];
+        let mut store = MockChainStoreHandle::default();
+        store.expect_get_chain_tip().returning(move || Ok(anchor));
+        store.expect_get_block_metadata().returning(|_| {
+            Ok(BlockMetadata {
+                expected_height: Some(1),
+                chain_work: Work::from_le_bytes([0; 32]),
+                status: Status::BlockValid,
+                chain: ChainMembership::Confirmed,
+            })
+        });
+        store
+            .expect_get_confirmed_headers_in_range()
+            .returning(move |_, _| Ok(rows.clone()));
+        let mut payout = Payout::with_window(
+            PplnsWindow::new(bitcoin::Network::Testnet).for_chain(Chain::BitcoinCash),
+        );
+        let mut finder = make_test_config();
+        finder.chain = Chain::BitcoinCash;
+        finder.donation = Some(1_000);
+        finder.fee = Some(1_000);
+        let produced = payout
+            .get_output_distribution(&store, anchor, 1, Amount::from_sat(1_000_000), &finder)
+            .unwrap();
+        let validator_weights = payout.pplns_weights().unwrap();
+        let validated = build_pplns_outputs(
+            1_000_000,
+            &validator_weights,
+            &None,
+            None,
+            &None,
+            None,
+            PayoutSplit::for_chain(Chain::BitcoinCash, false),
+        )
+        .unwrap();
+        assert_eq!(produced, validated);
+        assert_eq!(produced.outputs.len(), 4);
+        assert_eq!(
+            produced
+                .outputs
+                .iter()
+                .find(|output| output.address == donation_address)
+                .unwrap()
+                .amount
+                .to_sat(),
+            50_000
+        );
+        assert_eq!(
+            produced
+                .outputs
+                .iter()
+                .find(|output| output.address == fee_address)
+                .unwrap()
+                .amount
+                .to_sat(),
+            45_000
+        );
+        assert_eq!(
+            produced
+                .outputs
+                .iter()
+                .find(|output| output.address == contributing_address)
+                .unwrap()
+                .amount
+                .to_sat(),
+            405_000
+        );
+        assert_eq!(
+            produced
+                .outputs
+                .iter()
+                .find(|output| output.address == independent_address)
+                .unwrap()
+                .amount
+                .to_sat(),
+            500_000
+        );
+        let rounded = build_pplns_outputs(
+            101,
+            &validator_weights,
+            &None,
+            None,
+            &None,
+            None,
+            PayoutSplit::for_chain(Chain::BitcoinCash, false),
+        )
+        .unwrap();
+        assert_eq!(
+            rounded
+                .outputs
+                .iter()
+                .find(|output| output.address == independent_address)
+                .unwrap()
+                .amount
+                .to_sat(),
+            52
+        );
+        assert_eq!(
+            rounded
+                .outputs
+                .iter()
+                .map(|output| output.amount.to_sat())
+                .sum::<u64>(),
+            101
+        );
     }
 
     /// The notifier and the validator size a Bitcoin Cash window through the

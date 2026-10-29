@@ -31,9 +31,10 @@
 use crate::accounting::OutputPair;
 use crate::accounting::payout::payout_distribution::append_proportional_distribution;
 use crate::accounting::payout::payout_tree::{
-    BCH_PAYOUT_TREE_FAN_OUT, BCH_TREE_FEE_RATES, PayoutTree, TreePayee,
+    BCH_PAYOUT_TREE_FAN_OUT, BCH_TREE_FEE_RATES, PayoutTree, PayoutTreeError, TreePayee,
 };
 use crate::config::Chain;
+use crate::shares::bch_asert::U256;
 use crate::shares::bch_payout_covenant::{FILLER_BYTES_PER_OUTPUT, NODE_COVENANT_VERSION};
 use crate::shares::bch_script::output_size_for_script_length;
 use crate::shares::merge_mining::MergeMiningCommitment;
@@ -64,11 +65,12 @@ pub const BCH_TOKEN_SHARE_COINBASE_LIMIT: usize = 3_072;
 /// Version, input count, outpoint, scriptSig length, sequence, a one-byte
 /// output count and lock time (51); BCH's largest scriptSig (100); an output
 /// count taking 3 bytes from 253 outputs (2 more); the 53-byte merge-mining
-/// record; the donation (34, P2PKH); the operator fee (44, the largest BCH
-/// output); the tree output (44); the padding before the share commitment
-/// (at most 74); and the share commitment (43).
+/// record; the tree output (44); the padding before the share commitment (at
+/// most 74); and the share commitment (43). There is no donation or fee
+/// output: on Bitcoin Cash each window share's donation and fee are payees
+/// like any other (`BCH_PER_SHARE_CUTS_RULE_TAG`).
 pub const BCH_COINBASE_BYTES_BESIDE_PAYOUTS: usize =
-    51 + 100 + 2 + 53 + 34 + 44 + TREE_OUTPUT_BYTES + 74 + 43;
+    51 + 100 + 2 + 53 + TREE_OUTPUT_BYTES + 74 + 43;
 
 /// Serialized bytes of a P2PKH output.
 pub const P2PKH_OUTPUT_BYTES: usize = 34;
@@ -80,7 +82,7 @@ pub const TREE_OUTPUT_BYTES: usize = 44;
 /// is the single byte a token covenant expects.
 pub const MAX_TOKEN_SHARE_COINBASE_OUTPUTS: usize = 253;
 
-const _: () = assert!(BCH_COINBASE_BYTES_BESIDE_PAYOUTS == 445);
+const _: () = assert!(BCH_COINBASE_BYTES_BESIDE_PAYOUTS == 367);
 
 /// The share-chain rule tag of the hybrid payout: its limits and its tree.
 ///
@@ -181,6 +183,14 @@ impl CanonicalPayee<'_> {
 }
 
 /// The hybrid payout of `amount` over `weights` within `coinbase_limit`.
+///
+/// Outputs already in `distribution` take their bytes from the limit: none
+/// on a Bitcoin Cash share chain, whose donation and fee are payees in
+/// `weights`, but Hydrapool's donation and fee outputs on Bitcoin Cash.
+///
+/// A tree tail too small to pay its own fee at 3 sat/byte and leave its
+/// largest payee above dust (`PayoutTreeError::InsufficientValue`) is merged
+/// into that payee, as dust is, and paid directly in the tree output's place.
 fn append_hybrid_distribution(
     weights: &HashMap<Address, u128>,
     amount: Amount,
@@ -189,7 +199,12 @@ fn append_hybrid_distribution(
 ) -> Result<Option<PayoutTree>, Box<dyn Error + Send + Sync>> {
     let payees = canonical_payees(weights, amount)?;
     let output_bytes: Vec<usize> = payees.iter().map(CanonicalPayee::output_bytes).collect();
-    let direct_count = direct_payee_count(&output_bytes, coinbase_limit);
+    let placed_bytes: usize = distribution
+        .iter()
+        .map(|output| output_size_for_script_length(output.address.script_pubkey().len()))
+        .sum();
+    let direct_count =
+        direct_payee_count(&output_bytes, coinbase_limit.saturating_sub(placed_bytes));
     let (direct, tree) = payees.split_at(direct_count);
     distribution.extend(direct.iter().map(|payee| OutputPair {
         address: payee.address.clone(),
@@ -205,15 +220,28 @@ fn append_hybrid_distribution(
             amount: payee.amount,
         })
         .collect();
-    Ok(Some(PayoutTree::build(tree_payees)?))
+    match PayoutTree::build(tree_payees) {
+        Ok(tree) => Ok(Some(tree)),
+        Err(PayoutTreeError::InsufficientValue) => {
+            let largest = tree.last().expect("the tree tail is nonempty");
+            distribution.push(OutputPair {
+                address: largest.address.clone(),
+                amount: Amount::from_sat(tree.iter().map(|payee| payee.amount).sum()),
+            });
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// The payees in canonical order with their amounts: ascending weight, ties
 /// by locking bytecode, then by address text; `amount * weight / total`
 /// rounded down, and the remainder to the last.
 ///
-/// Errors on an empty or zero total weight, as rule 7 does, and on a weight
-/// so large that `amount * weight` leaves 128 bits.
+/// Errors on an empty or zero total weight, as rule 7 does, or a total
+/// weight that leaves 128 bits. `amount * weight` is taken in 256 bits:
+/// per-share cuts express weights in units of `1 / 10^8`, whose product
+/// with a satoshi amount can pass 128 bits.
 fn canonical_payees(
     weights: &HashMap<Address, u128>,
     amount: Amount,
@@ -225,14 +253,10 @@ fn canonical_payees(
     if total_weight == 0 {
         return Err("Invalid total difficulty (0) when computing proportional payout".into());
     }
-    let amount_sats = u128::from(amount.to_sat());
+    let amount_sats = U256::from(amount.to_sat());
     let mut payees = Vec::with_capacity(weights.len());
     for (address, weight) in weights {
-        let pro_rata = amount_sats
-            .checked_mul(*weight)
-            .map(|scaled| scaled / total_weight)
-            .and_then(|pro_rata| u64::try_from(pro_rata).ok())
-            .ok_or("PPLNS weight overflows the coinbase split")?;
+        let pro_rata = (amount_sats * U256::from(*weight) / U256::from(total_weight)).low_u64();
         payees.push(CanonicalPayee {
             address,
             script_pubkey: address.script_pubkey(),

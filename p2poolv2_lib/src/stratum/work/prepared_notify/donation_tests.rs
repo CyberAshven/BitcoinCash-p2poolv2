@@ -95,37 +95,45 @@ fn no_choice_and_the_nodes_own_donation_use_the_nodes_params() {
     assert!(prepared.for_miner_donation(Some(100)).unwrap().is_none());
 }
 
-/// A miner who opts out mines a coinbase with no donation output, while the
-/// operator's 1% fee stays, now taken from the whole value.
+/// A coinbase's outputs but the last, the share commitment, which commits to
+/// each miner's own terms.
+fn payouts(coinbase: &Transaction) -> &[bitcoin::TxOut] {
+    &coinbase.output[..coinbase.output.len() - 1]
+}
+
+/// Whether `coinbase` has an output to the donation key or the node's fee
+/// address. On Bitcoin Cash it never does for a share's own cuts: they come
+/// off that share's own weight in the windows that pay it.
+fn pays_a_cut_output(coinbase: &Transaction) -> bool {
+    coinbase.output.iter().any(|output| {
+        output.script_pubkey == donation_script()
+            || output.script_pubkey == fee_address().script_pubkey()
+    })
+}
+
+/// A miner who opts out commits no donation in its share and keeps the
+/// operator's 1% fee. The coinbase it mines is the node's own: the choice is
+/// a term of the miner's share, not a cut of this coinbase.
 #[tokio::test]
-async fn opting_out_drops_the_donation_and_keeps_the_fee() {
+async fn opting_out_commits_no_donation_and_keeps_the_fee() {
     let prepared = node_at_the_defaults();
     let opted_out = prepared.for_miner_donation(Some(0)).unwrap().unwrap();
     let (commitment, coinbase) = mine(&opted_out);
-    let value = prepared.template.coinbasevalue;
+    let (_, node_coinbase) = mine(&prepared);
 
     assert_eq!(commitment.donation, None);
     assert_eq!(commitment.donation_address, None);
     assert_eq!(commitment.fee, Some(100));
     assert_eq!(commitment.fee_address, Some(fee_address()));
-    assert!(
-        coinbase
-            .output
-            .iter()
-            .all(|output| output.script_pubkey != donation_script())
-    );
-    assert_eq!(
-        coinbase.output[1].script_pubkey,
-        fee_address().script_pubkey()
-    );
-    assert_eq!(coinbase.output[1].value.to_sat(), value / 100);
+    assert_eq!(payouts(&coinbase), payouts(&node_coinbase));
+    assert!(!pays_a_cut_output(&coinbase));
     assert_eq!(
         coinbase
             .output
             .iter()
             .map(|output| output.value)
             .sum::<Amount>(),
-        Amount::from_sat(value)
+        Amount::from_sat(prepared.template.coinbasevalue)
     );
     assert_eq!(
         rebuilt_by_a_peer(&prepared, &commitment, &coinbase),
@@ -138,24 +146,25 @@ async fn opting_out_drops_the_donation_and_keeps_the_fee() {
     );
 }
 
-/// Half a percent goes to the built-in donation address, and the fee is
-/// taken from what the donation leaves, as before.
+/// Half a percent is committed to the built-in donation address in the
+/// miner's share, and the coinbase stays the node's.
 #[tokio::test]
-async fn a_half_percent_donation_is_paid_before_the_fee() {
+async fn a_half_percent_donation_is_committed_in_the_share() {
     let prepared = node_at_the_defaults();
     let chosen = prepared.for_miner_donation(Some(50)).unwrap().unwrap();
     let (commitment, coinbase) = mine(&chosen);
-    let value = prepared.template.coinbasevalue;
-    let donation = value * 50 / 10_000;
+    let (_, node_coinbase) = mine(&prepared);
 
     assert_eq!(commitment.donation, Some(50));
-    assert_eq!(coinbase.output[1].script_pubkey, donation_script());
-    assert_eq!(coinbase.output[1].value.to_sat(), donation);
     assert_eq!(
-        coinbase.output[2].script_pubkey,
-        fee_address().script_pubkey()
+        commitment
+            .donation_address
+            .as_ref()
+            .map(Address::script_pubkey),
+        Some(donation_script())
     );
-    assert_eq!(coinbase.output[2].value.to_sat(), (value - donation) / 100);
+    assert_eq!(payouts(&coinbase), payouts(&node_coinbase));
+    assert!(!pays_a_cut_output(&coinbase));
     assert_eq!(
         rebuilt_by_a_peer(&prepared, &commitment, &coinbase),
         coinbase
@@ -171,11 +180,9 @@ async fn the_node_cannot_override_the_miners_choice() {
     let opted_out = generous_node.for_miner_donation(Some(0)).unwrap().unwrap();
     let (commitment, coinbase) = mine(&opted_out);
     assert_eq!(commitment.donation, None);
-    assert!(
+    assert_eq!(
+        rebuilt_by_a_peer(&generous_node, &commitment, &coinbase),
         coinbase
-            .output
-            .iter()
-            .all(|output| output.script_pubkey != donation_script())
     );
 
     let node_without_donation = test_bch_prepared();
@@ -185,26 +192,24 @@ async fn the_node_cannot_override_the_miners_choice() {
         .unwrap();
     let (commitment, coinbase) = mine(&chosen);
     assert_eq!(commitment.donation, Some(200));
-    assert_eq!(coinbase.output[1].script_pubkey, donation_script());
+    assert!(!pays_a_cut_output(&coinbase));
     assert_eq!(
         rebuilt_by_a_peer(&node_without_donation, &commitment, &coinbase),
         coinbase
     );
 }
 
-/// The donation and the fee have independent 10% caps: a miner may donate
-/// 10% on a node taking a 10% fee.
+/// The donation and the fee have independent 10% caps: a miner may commit
+/// a 10% donation on a node taking a 10% fee.
 #[tokio::test]
 async fn a_ten_percent_donation_beside_a_ten_percent_fee() {
     let prepared = test_bch_prepared_with_cuts(Some(100), Some(fee_address()), Some(1_000));
     let chosen = prepared.for_miner_donation(Some(1_000)).unwrap().unwrap();
     let (commitment, coinbase) = mine(&chosen);
-    let value = prepared.template.coinbasevalue;
 
     assert_eq!(commitment.donation, Some(1_000));
     assert_eq!(commitment.fee, Some(1_000));
-    assert_eq!(coinbase.output[1].value.to_sat(), value / 10);
-    assert_eq!(coinbase.output[2].value.to_sat(), (value - value / 10) / 10);
+    assert!(!pays_a_cut_output(&coinbase));
     assert_eq!(
         rebuilt_by_a_peer(&prepared, &commitment, &coinbase),
         coinbase

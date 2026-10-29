@@ -6542,7 +6542,7 @@ mod tests {
         );
     }
 
-    /// A token share with 120 payees: the producer's coinbase pays 77
+    /// A token share with 120 payees: the producer's coinbase pays 79
     /// directly and the rest through the payout tree, within T, and the
     /// validator rebuilds exactly that coinbase from the same weights.
     #[test]
@@ -6608,15 +6608,15 @@ mod tests {
 
         assert!(result.is_ok(), "{}", result.unwrap_err());
         let tree = producer_payouts.tree.as_ref().unwrap();
-        assert_eq!(producer_payouts.outputs.len(), 77);
-        assert_eq!(tree.payees().len(), 43);
+        assert_eq!(producer_payouts.outputs.len(), 79);
+        assert_eq!(tree.payees().len(), 41);
         assert!(coinbase.output.contains(&tree.root_output()));
         assert!(coinbase.total_size() <= 3_072);
     }
 
     /// A pool-built share whose node merge-mines tokens for its miner: the
     /// header's token root is output 0 and the coinbase follows the token
-    /// share's limit, 77 payees directly and 43 through the payout tree, and
+    /// share's limit, 79 payees directly and 41 through the payout tree, and
     /// a peer rebuilds it from the header alone, knowing nothing of the
     /// tokens.
     #[test]
@@ -6685,7 +6685,7 @@ mod tests {
             );
 
         assert!(result.is_ok(), "{}", result.unwrap_err());
-        assert_eq!(producer_payouts.outputs.len(), 77);
+        assert_eq!(producer_payouts.outputs.len(), 79);
         assert!(coinbase.total_size() <= 3_072);
     }
 

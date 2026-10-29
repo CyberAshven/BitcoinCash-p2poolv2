@@ -4,7 +4,7 @@
 
 use crate::accounting::payout::coinbase_budget::{
     BCH_COINBASE_BYTES_BESIDE_PAYOUTS, BCH_TOKEN_SHARE_COINBASE_LIMIT,
-    MAX_TOKEN_SHARE_COINBASE_OUTPUTS, P2PKH_OUTPUT_BYTES, PayoutSplit, TREE_OUTPUT_BYTES,
+    MAX_TOKEN_SHARE_COINBASE_OUTPUTS, PayoutSplit, TREE_OUTPUT_BYTES,
 };
 use crate::accounting::{CoinbasePayouts, OutputPair};
 use crate::shares::bch_coinbase::BchCoinbase;
@@ -68,10 +68,6 @@ const MAX_COINBASE_SCRIPT_SIG_BYTES: usize = 100;
 /// CompactSize instead of one).
 const LARGE_OUTPUT_COUNT_EXTRA_BYTES: usize = 2;
 
-/// The largest output a Bitcoin Cash payout address takes: P2SH32, an
-/// 8-byte value, a 1-byte script length and a 35-byte script.
-const MAX_BCH_ADDRESS_OUTPUT_BYTES: usize = 8 + 1 + 35;
-
 /// The merge-mining output 0 (`MergeMiningCommitment::output`): 53 bytes.
 const MERGE_MINING_OUTPUT_BYTES: usize = MERGE_MINING_OUTPUT_LENGTH;
 
@@ -83,17 +79,17 @@ const COMMITMENT_OUTPUT_BYTES: usize = COMMITMENT_TAIL_LENGTH - LOCKTIME_LENGTH;
 
 // The coinbase this builder lays out, besides its PPLNS payouts and at the
 // worst case of every field (the transaction fields, the largest scriptSig, a
-// three-byte output count, output 0, the donation, a fee of the largest
-// payout type, the tree output, the largest padding and the commitment), is
-// exactly what the hybrid payout keeps room for, so a coinbase it splits
-// never exceeds its limit.
+// three-byte output count, output 0, the tree output, the largest padding and
+// the commitment), is exactly what the hybrid payout keeps room for, so a
+// coinbase it splits never exceeds its limit. A Bitcoin Cash share chain's
+// donation and fee are payees; outputs placed before the split, as
+// Hydrapool's donation and fee are, take their bytes from the limit
+// (`append_payout_split`).
 const _: () = assert!(
     COINBASE_TRANSACTION_FIELD_BYTES
         + MAX_COINBASE_SCRIPT_SIG_BYTES
         + LARGE_OUTPUT_COUNT_EXTRA_BYTES
         + MERGE_MINING_OUTPUT_BYTES
-        + P2PKH_OUTPUT_BYTES
-        + MAX_BCH_ADDRESS_OUTPUT_BYTES
         + TREE_OUTPUT_BYTES
         + MAX_PADDING_OUTPUT_BYTES
         + COMMITMENT_OUTPUT_BYTES
@@ -1514,8 +1510,9 @@ mod tests {
             .collect()
     }
 
-    /// The payouts of a token share with `count` payees, a donation and a
-    /// fee, split at the token share's limit.
+    /// The payouts of a token share with `count` payees, split at the token
+    /// share's limit. Donation and fee are payees in the window's weights on
+    /// Bitcoin Cash, so the share's own cuts add no output.
     fn token_share_payouts(count: u8) -> CoinbasePayouts {
         build_pplns_outputs(
             312_500_000,
@@ -1530,8 +1527,8 @@ mod tests {
     }
 
     /// The largest coinbase a token share builds, a declared 88-byte prefix,
-    /// the 12-byte extranonce, a token commitment, the donation, the fee, 77
-    /// direct payouts and the tree output, stays within T.
+    /// the 12-byte extranonce, a token commitment, 79 direct payouts and the
+    /// tree output, stays within T.
     #[test]
     fn test_the_largest_token_share_coinbase_fits_its_limit() {
         let height = 900_000u64;
@@ -1560,7 +1557,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(coinbase.input[0].script_sig.len(), 100);
-        assert_eq!(payouts.outputs.len(), 2 + 77);
+        assert_eq!(payouts.outputs.len(), 79);
         assert!(payouts.tree.is_some());
         assert!(coinbase.total_size() <= BCH_TOKEN_SHARE_COINBASE_LIMIT);
         assert!(
