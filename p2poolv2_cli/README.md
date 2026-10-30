@@ -120,36 +120,37 @@ heights with more than 20 blocks. Retains Confirmed, Candidate, and
 BlockValid blocks, plus HeaderValid blocks that are referenced as
 uncles by other blocks.
 
-### address
+### bch-share-address
 
-Print the share chain address for a taproot output key. Does not
-require a running node or config file.
+Print a Bitcoin Cash share-chain address from a P2PKH CashAddr. This
+command needs no running node, config file or private key.
 
-The input is the `witness_program` field of `bitcoin-cli
-getaddressinfo`: the already tweaked 32 byte taproot output key, in hex.
-No tweak is applied here, because the wallet applied it. The key is
-checked to be a real curve point, so a typo cannot produce an address
-whose shares nobody can ever spend.
+Choose a fresh P2PKH receiving address in a wallet whose key you control.
+Replace the example address below with that address:
 
 ```sh
-ADDR=$(bitcoin-cli -signet getnewaddress "p2pool share owner" bech32m)
-bitcoin-cli -signet getaddressinfo "$ADDR" \
-  | jq -r .witness_program \
-  | p2poolv2_cli address --network signet
+p2poolv2_cli bch-share-address --network mainnet bitcoincash:qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2
 ```
 
-The output key can also be passed as an argument instead of on stdin:
+The command also reads a CashAddr from stdin when no address argument is
+given. Networks are `mainnet` (or `main`), `chipnet`, `scalenet` and
+`regtest`. The input must include its network prefix. The result uses
+`p2pool:`, `tp2pool:`, `sp2pool:` or `rp2pool:`, respectively. It keeps
+the same P2PKH key hash and recomputes the checksum.
 
-```sh
-p2poolv2_cli address --network signet a3ea4c1c5f042ae7fbd086bc7f30e2a08c8b6753c4631db7d4b1fcb3ab941900
-```
+Use the result as `[stratum] miner_address`, or as the Stratum password
+`p2p=<share-address>`. This address owns share-chain outputs, so its key
+must be able to sign share spends. Select it separately from the BCH
+payout address used in the Stratum username.
 
-Networks are named as Bitcoin Core names them: `main`, `testnet4`,
-`signet` or `regtest`. Check `"ismine": true` and `"solvable": true` in
-the same `getaddressinfo` output; those are what tell you the wallet can
-sign for the key. Use the result as `[stratum] miner_address`, or as the
-stratum password `p2p=<address>`. See
-`docs/architecture/address-format.md`.
+BCH payouts accept P2PKH and P2SH20 CashAddr, including their token-aware
+forms. P2SH32 payout addresses are still rejected by the current payout
+parser. Share ownership accepts only P2PKH; `bch-share-address` rejects
+P2SH input. The `address` command encodes Taproot keys for the retained
+Bitcoin mode. Use `bch-share-address` for BCH.
+
+See [the command implementation](src/commands/bch_share_address.rs) and
+[BCH share trading](../docs/atomic-swap/bch-share-trading.md).
 
 ### bch-trade
 
