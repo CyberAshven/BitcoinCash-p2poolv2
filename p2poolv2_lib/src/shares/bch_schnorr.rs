@@ -24,12 +24,24 @@
 
 use hmac::{Hmac, Mac};
 use k256::elliptic_curve::PrimeField;
+use k256::elliptic_curve::hazmat::FieldArithmetic;
 use k256::elliptic_curve::ops::Reduce;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
-use k256::{FieldBytes, FieldElement, ProjectivePoint, Scalar, U256};
+use k256::elliptic_curve::sec1::ToSec1Point;
+use k256::{FieldBytes, ProjectivePoint, Scalar, Secp256k1};
 use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// secp256k1's base field. k256 0.14 no longer re-exports it at the crate
+/// root; BCH Schnorr needs it for the quadratic-residue test on `R.y`.
+pub(crate) type FieldElement = <Secp256k1 as FieldArithmetic>::FieldElement;
+
+/// BCH Schnorr challenge `e = SHA256(R.x || P || m)`, read big-endian and
+/// reduced modulo the curve order.
+pub(crate) fn challenge_scalar(challenge: Sha256) -> Scalar {
+    let digest: [u8; 32] = challenge.finalize().into();
+    <Scalar as Reduce<FieldBytes>>::reduce(&FieldBytes::from(digest))
+}
 
 /// RFC6979 section 3.6 additional data BCHN's libsecp256k1 appends for
 /// Schnorr nonces (`secp256k1_schnorr_algo16`).
@@ -44,8 +56,7 @@ pub const SCHNORR_SIGNATURE_LENGTH: usize = 64;
 /// `None` when `secret_key` is zero or not below the curve order, which no
 /// valid key is.
 pub fn sign(secret_key: &[u8; 32], digest: &[u8; 32]) -> Option<[u8; SCHNORR_SIGNATURE_LENGTH]> {
-    let secret =
-        Option::<Scalar>::from(Scalar::from_repr(FieldBytes::clone_from_slice(secret_key)))?;
+    let secret = Option::<Scalar>::from(Scalar::from_repr(FieldBytes::from(*secret_key)))?;
     if bool::from(secret.is_zero()) {
         return None;
     }
@@ -62,7 +73,7 @@ fn sign_with_nonce(
 ) -> Option<[u8; SCHNORR_SIGNATURE_LENGTH]> {
     let nonce_point = (ProjectivePoint::GENERATOR * nonce)
         .to_affine()
-        .to_encoded_point(false);
+        .to_sec1_point(false);
     let (Some(nonce_x), Some(nonce_y)) = (nonce_point.x(), nonce_point.y()) else {
         return None;
     };
@@ -72,12 +83,12 @@ fn sign_with_nonce(
 
     let public_key = (ProjectivePoint::GENERATOR * secret)
         .to_affine()
-        .to_encoded_point(true);
+        .to_sec1_point(true);
     let mut challenge = Sha256::new();
     challenge.update(nonce_x);
     challenge.update(public_key.as_bytes());
     challenge.update(digest);
-    let challenge_scalar = <Scalar as Reduce<U256>>::reduce_bytes(&challenge.finalize());
+    let challenge_scalar = challenge_scalar(challenge);
 
     let signature_scalar = nonce + challenge_scalar * secret;
     let mut signature = [0u8; SCHNORR_SIGNATURE_LENGTH];
