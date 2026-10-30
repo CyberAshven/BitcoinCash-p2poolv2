@@ -1,6 +1,6 @@
 # Bitcoin assumptions in the Bitcoin Cash port
 
-Status: audit of `alpha` at `71231a42` (2026-10-23), finished on PR #33.
+Baseline: audit of `alpha` at `71231a42` (2026-10-23), finished on PR #33.
 The research behind it is six sets of Bitcoin Cash facts, each checked
 against BCHN source, BCHN documentation, the upgrade specifications and the
 CHIPs, and eight sweeps of the code that produced 106 raw findings. This page
@@ -10,6 +10,52 @@ owner's decisions, and proposes the order of work.
 "Share-chain rule" means a rule of P2Pool's own share chain, which BCHN never
 sees. "BCH consensus" means the rules BCHN enforces on Bitcoin Cash blocks,
 which this project never changes.
+
+## Status update: 2026-10-30
+
+Checked against the code at `7ebc0892` on `feat/rust-only-tooling`.
+This table is the current status. The original audit below remains the
+baseline, including its old findings and proposed work. "Fixed" means the
+old code problem is gone. It does not mean hardware or large-block tests
+were run. M1-M9 remain measurements to make; this update does not verify
+them.
+
+In the evidence column, `L/` means `p2poolv2_lib/src/` and `C/` means
+`p2poolv2_config/src/`. Line numbers refer to the checked commit.
+
+| Item | Status | Evidence and remaining work |
+|---|---|---|
+| A1: 11 payouts, 784 bytes and lottery | Fixed | `L/accounting/payout/coinbase_budget.rs:50-122, 267-299` selects a 1,000,000-byte no-token budget or a 3,072-byte token budget and sorts payees for the hybrid split. `L/stratum/work/coinbase.rs:100-131` checks that budget. Device limits remain unmeasured. |
+| A2: 200 KiB combined body and 1 MiB frame | Fixed | `L/shares/validation/mod.rs:208-228` allows a 1,204,800-byte BCH body: a 1,000,000-byte coinbase plus 200 KiB of share transactions. `L/node/messages.rs:17-30` sets a 1,280 KiB message limit. Propagation at that size remains unmeasured. |
+| A3: Hydrapool's 784-byte shutdown | Fixed | `L/accounting/payout/simple_pplns/payout.rs:45-57` pays every payee without the share-chain hybrid split. The old 784-byte check is gone. A8 is a separate shutdown path. |
+| A4: Fixed Template Provider block limit | Fixed | `L/stratum/sv2/template_distribution.rs:428-436, 1004` uses BCHN's reported next block size limit, with a floor only as fallback. Live behavior after ABLA growth remains unverified. |
+| A5: 32-bit size and SigChecks fields | Fixed | `L/stratum/work/block_template.rs:51-57` uses `u64` for `sigoplimit` and `sizelimit`. |
+| A6: Full templates and unused decoded cache | Partly fixed | The unused decoded cache is gone. `bitcoindrpc/src/lib.rs:400-421` still requests full GBT JSON. `L/stratum/work/gbt.rs:46-49` parses it again, and `L/stratum/work/block_template.rs:149-180` decodes and hashes every transaction. No light-template RPC path exists. Large-template cost remains unmeasured. |
+| A7: SV2 large-block limits | Open | `L/stratum/sv2/session.rs:66, 566-647, 813-816` retains a 64 MiB declared-transaction budget, `u16` transaction positions and `u24` frame lengths. `L/stratum/sv2/template_distribution.rs:319-329, 370-407` retrieves full transaction lists. Extended coinbase parts are limited to 65,535 bytes at `L/stratum/sv2/mining.rs:96`. |
+| A8: Stop on an oversized final block | Open | `L/stratum/work/block_template.rs:190-203` checks the completed block against BCHN's limit. That error propagates through `L/stratum/work/prepared_notify.rs:776` to `L/stratum/work/notify.rs:364-381`, which stops the notify worker. Its comment at lines 301-307 explains the stale-work risk if it continued. |
+| A9: Provider coinbase reserve | Open | `L/stratum/sv2/template_distribution.rs:84-108` reserves 65,382 output bytes and 1,922 legacy sigops from a 65,535-byte coinbase field. It cannot carry the full BCH coinbase budget. The legacy sigop reserve also remains. |
+| A10: BCH payout scripts and CashAddr | Partly fixed | `C/cashaddr.rs:210-218` accepts token-aware forms but still requires 20-byte hashes. `L/shares/validation/mod.rs:1442-1462` permits P2PKH, P2SH20 and P2SH32 payout scripts, but `L/shares/share_block/mod.rs:173-184` still decodes through `bitcoin::Address`. P2SH32 payouts cannot yet pass that address path. |
+| A11: Two-week window cap | Open | `L/accounting/payout/sharechain_pplns/pplns_window.rs:50-74` retains the 120,960-share cap beside the three-BCH-block work window. A different cap still needs measurement and a share-chain rule decision. |
+| A12: Bitcoin-derived depths | Fixed | `L/accounting/payout/sharechain_pplns/pplns_window.rs:128-191` derives BCH depths from 100-share maturity. `L/store/prune_blocks.rs:441-446` pins payout depth 121,063 and prune depth 242,126. A11 still makes those depths large. |
+| A13: BIP141 share sigop budget | Fixed | `L/shares/validation/mod.rs:240-285` uses BCH SigChecks: at most 3,000 per transaction and 1,452 per share. `L/shares/bch_script.rs:82-86` defines the per-transaction limit. |
+| A14: 25-level coinbase branch | Fixed | `L/shares/coinbase_proof.rs:36-59` allows 32 levels for BCH shares. `L/node/p2p_message_handlers/mod.rs:38-45` sizes responses at 600 headers. This is a finite bound. Merge-mining claims keep their separate 25-level proof format. |
+| A15: SAFA's 800-byte branch check | Fixed | `p2poolv2_safa/safa.cash:188-202` folds the branch without the old 800-byte check. `p2poolv2_safa/README.md:155-162` records a 7,173-byte coinbase allowance at the deepest branches. That is a recorded VM measurement, not a new measurement made for this update. |
+| A16: Namecoin commitment layout | Fixed | `L/shares/merge_mining.rs:41-62` defines common format v2. `L/shares/auxpow.rs:5-17, 40-54` defines its salted slots and proof bounds. `L/shares/share_block/mod.rs:125-131` carries the pool-built token root fields. These are deliberate share-chain choices. |
+| A17: Rounded difficulty weights | Fixed | `L/accounting/payout/sharechain_pplns/pplns_window.rs:824-827, 1217-1223` selects `ExactWork` for BCH and weights each header by `get_work()`. |
+| A18: BCH witness commitment acceptance | Fixed | `L/shares/validation/mod.rs:827-835, 1595` rejects a witness commitment in a BCH coinbase. `L/stratum/work/block_template.rs:158-165` rejects witness transactions in BCH templates. |
+| A19: Missing BCH test networks | Partly fixed | `C/lib.rs:217-295` includes scalenet, but no selectable testnet4 network. `L/shares/bch_asert.rs:126-133` skips the anchored target check on scalenet and regtest. Scalenet operation has not been verified here. Testnet4 remains open, not decided against. |
+| A20: Base58 payout metric labels | Fixed | `L/stratum/work/tracker/parse_coinbase.rs:5, 39` uses the shared `payout_address_string` encoder with the BCH network. |
+| A21: Bitcoin payout-rights fixture | Fixed | `p2poolv2_tests/src/share_payout_rights_test.rs:46-64` uses BCH regtest difficulty, P2PKH payouts and 312,500,000 satoshis. This update reads the test; it does not rerun it. |
+| A22: Bitcoin-only simulation and tools | Partly fixed | `p2poolv2_tools/src/sim/swarm.rs:246` selects BCH, `sim/nightly.rs:584` requires BCHN, and `docker/bchn/Dockerfile:19` pins BCHN 29.2.0. `p2poolv2_sim/src/pplns_compare.rs:288-292` now compares the BCH work window with the fixed window. It remains an offline four-miner model. `p2poolv2_tools/src/jmeter.rs:201-205` deliberately keeps Bitcoin signet for CKPool. None of these source checks establishes large-block capacity. |
+| A23: Bitcoin sample and default network | Fixed | `config.sample.toml:1, 38-46` is a BCH chipnet sample. `C/lib.rs:494-515` derives the effective Bitcoin library network from `bitcoin_cash_network`. The upstream Bitcoin sample remains separate. |
+| A24: ECDSA-only share trades | Fixed | `L/shares/bch_trade.rs:18-28, 145-150` signs with BCH Schnorr and appends the FORKID sighash byte. The fixed signature size also sizes the fee. |
+| A25: Confirmed-input-only share pool | Open | `L/shares/transaction_pool.rs:860-879` refuses unconfirmed parent transactions. This is a local share-transaction pool restriction, not a BCHN mempool rule. |
+| A26: Miner keys depend on address spelling | Fixed | `L/stratum/validate_username.rs:113-118` derives `user_key` from the decoded payout script. Its tests at lines 297-327 cover alternate spellings. |
+| A27: Bitcoin metric and API names | Partly fixed | `p2poolv2_api/src/api/server.rs:415-428` exposes `found_blocks_total` and `found_block_time_seconds`; `prometheus/grafana/dashboards-public/pool-public.json` uses those names. Worker dashboards use `payout_address`. JSON fields at `p2poolv2_api/src/api/endpoints/found_blocks.rs:18-22` retain `bitcoin_height` and `miner_bitcoin_address` for API compatibility. Renaming them is deferred, not a BCH arithmetic fix. |
+
+The 100,000-byte standard transaction size is BCHN node policy. It is not
+a BCH consensus rule or a P2Pool block limit. The BCH consensus transaction
+maximum is 1,000,000 bytes. Knuth has no lower transaction-size limit.
 
 ## Summary
 
@@ -80,7 +126,7 @@ These override the findings.
   the share body allow a full 1,000,000-byte coinbase.
 - **The 100 KB standard transaction size is BCHN's node policy**, not a
   BCH consensus rule and not a P2Pool limit. Knuth has no such limit below
-  the 1,000,000-byte consensus maximum (Knuth PR #728, 2026-10-27).
+  the 1,000,000-byte BCH consensus maximum (Knuth PR #728, 2026-10-27).
 - **The simulation moves to BCHN separately.** Simulation findings are listed
   for that work and not acted on here.
 
@@ -93,9 +139,9 @@ changed:
 - **Witness-program payouts are burned, not stealable.** One sweep said a
   peer naming a SegWit-shaped payout puts value in an output anyone can take.
   On Bitcoin Cash the input script must be push-only and leave exactly one
-  stack item (consensus since November 2018), so a bare `OP_0 <program>`
-  output cannot be spent at all. A peer that names one burns only its own
-  payout. Kept as part of A10, at low weight.
+  stack item (a BCH consensus rule since November 2018), so a bare
+  `OP_0 <program>` output cannot be spent at all. A peer that names one burns
+  only its own payout. Kept as part of A10, at low weight.
 - **Template cost: high to medium.** The memory and bandwidth figures for
   full templates are estimates for 32 MB blocks. Today's blocks are tens of
   kilobytes, so the cost is real only as blocks grow. Kept under "Measure on
@@ -109,7 +155,7 @@ changed:
   S19s (because OCEAN uses a special job layout for them) is an inference
   from OCEAN's code, not a measurement. It is kept as measurement M1.
 - **SAFA's claim bound** was 7.3 KB in the sweep's arithmetic for the v1
-  covenant. The v2 covenant's tests measure 7,171 bytes of coinbase at the
+  covenant. The v2 covenant's tests measure 7,173 bytes of coinbase at the
   deepest branches (`p2poolv2_safa/README.md`).
 - **Hydrapool shutdown** was confirmed by reading the code path, not by
   running it.
@@ -142,7 +188,7 @@ builds. Risk is what happens if nothing is done.
 | A19 | No scalenet or testnet4 | `p2poolv2_config/src/lib.rs:196-265`; `p2poolv2_cli/src/commands/bch_share_address.rs:33-45`; `bch_trade.rs:56-64` | Bitcoin test practice: small-block signet and testnet | BCHN's scalenet (256 MB default) exists to test big-block applications ([test networks](https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node/-/raw/master/doc/test-networks.md)) | Add scalenet, with its own share genesis, for M3 and M2 at scale. **Scalenet done on PR #33**: `bitcoin_cash_network = "scalenet"`, share addresses `sp2pool:`, a share genesis on BCHN's scalenet genesis block, a 256 MB template floor, and no ASERT header check (BCHN has no scalenet anchor). testnet4 is not added | no | no | Medium: nothing can be measured at scale |
 | A20 | The `coinbase_output` metric labels BCH payouts with Base58 addresses | `stratum/work/tracker/parse_coinbase.rs:28-36`; `p2poolv2_api/src/api/server.rs:341-345` | Upstream's Bitcoin address display | Operators know their payouts as CashAddr | Render with `payout_address_string`. **Done on PR #33** | no | no | Low |
 | A21 | A BCH payout test pays Bitcoin signet P2WPKH addresses, measures difficulty against signet's limit and splits a 50-coin block value | `p2poolv2_tests/src/share_payout_rights_test.rs:42-52`; `p2poolv2_lib/src/test_utils.rs` (`TestShareBlockBuilder` pays signet P2WPKH) | Upstream Bitcoin fixtures | BCH subsidy is 3.125 BCH since block 840,000 ([chainparams.cpp](https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node/-/raw/master/src/chainparams.cpp)); a BCH node takes difficulty and Base58 data from its legacy network (mainnet, testnet or regtest), never signet; BCH has no SegWit | P2PKH payouts on BCH regtest's legacy network, at regtest's proof-of-work limit, splitting 312,500,000 sat. **Done on PR #33** | no | no | Low |
-| A22 | The simulation, swarm, nightly and load tests run on Bitcoin only; `pplns_compare` models 4 miners and no payout budget | `p2poolv2_lib/src/sim/**`; `p2poolv2_sim/src/pplns_compare.rs`; `p2poolv2_tools` sim and mock node | Upstream's Bitcoin Core regtest harness | Nothing measures the BCH paths under load | Owner: the simulation moves to BCHN separately; it should then cover A1, A2, A11 and M3. **Partly done on PR #33**: the sim swarm and its nightly run Bitcoin Cash against BCHN 29.2.0 (all eight scenarios pass), and the mock node answers as BCHN by default. Still Bitcoin: the JMeter plan and its configs (CKPool reads no CashAddr), and `pplns_compare`. No scenario covers A1, A2, A11 or M3 yet | no | no | High for evidence, handled separately |
+| A22 | The simulation, swarm, nightly and load tests ran on Bitcoin only; `pplns_compare` models 4 miners and no payout budget | `p2poolv2_lib/src/sim/**`; `p2poolv2_sim/src/pplns_compare.rs`; `p2poolv2_tools` sim and mock node | Upstream's Bitcoin Core regtest harness | The old harness did not exercise BCH paths under load | Owner: the simulation moves to BCHN separately; it should then cover A1, A2, A11 and M3. **Partly fixed, checked 2026-10-30**: the swarm selects BCH and its nightly requires BCHN; the Docker image pins BCHN 29.2.0. `pplns_compare` includes the BCH work-sized window beside the fixed window, but remains an offline four-miner model. The JMeter plan and configs deliberately remain Bitcoin signet for CKPool. Source inspection does not verify scenario results or large-block capacity | no | no | High for evidence, handled separately |
 | A23 | `config.sample.toml` is a Bitcoin signet config, and a BCH config must still name a Bitcoin `network` | `config.sample.toml`; `p2poolv2_config/src/lib.rs:175-187, 1040-1046`; `README.adoc` install steps | Upstream's sample | A BCH operator starts from Bitcoin addresses | Ship a BCH sample (chipnet) as the default; derive `network` from `bitcoin_cash_network`. **Done on PR #33**: `config.sample.toml` is a chipnet node, upstream's sample is `config-bitcoin.sample.toml`, and a Bitcoin Cash config may leave `network` out | no | no | Low |
 | A24 | `bch-trade` signs ECDSA only and sizes fees for 72-byte signatures | `shares/bch_trade.rs:17-18, 37-43, 117-144`; `p2poolv2_cli/src/commands/bch_trade.rs:216-258` | Bitcoin wallets' default | BCH accepts 65-byte Schnorr signatures, and the share chain verifies them | Sign with Schnorr. **Done on PR #33** (`shares/bch_schnorr.rs`): BCHN's algorithm and RFC6979 nonce, checked against BCHN's `key_tests.cpp` vectors; fees are sized for 65 bytes exactly | no | no | Low |
 | A25 | The share pool refuses chains of unconfirmed share transactions | `shares/transaction_pool.rs:9-11, 133-134, 763-765, 881-883` | Bitcoin's mempool chain limits | BCH dropped its unconfirmed-chain limit on 2021-05-15 ([upgrade](https://upgradespecs.bitcoincashnode.org/2021-05-15-upgrade/)) | Allow in-pool parents, after measuring trade use | no | no | Low |
@@ -199,7 +245,7 @@ Still to do, after the payout redesign lands:
 - `docs/architecture/pruning.md`, `async-flow.md` and `store-schema.md` size
   storage with Bitcoin figures (P2TR addresses, about 2,000 Bitcoin txids per
   share, 1 MB blocks). Recompute with A2.
-- Several pages call share-chain rules "consensus"
+- Several pages need explicit "share-chain rule" wording
   (`docs/bch-design.md:76-83`, `docs/difficulty_adjustment/asert.md:128-140`,
   `docs/bch-plan.md`). Say "share-chain rule".
 - Comments: `BIP54_COINBASE_SEQUENCE` and the share coinbase's "witness root"
@@ -208,6 +254,9 @@ Still to do, after the payout redesign lands:
   Bitcoin's block relay limit; `chain_store_handle.rs:36-38`,
   `pplns_window.rs:219-221` and `pool_difficulty.rs:33-36` carry stale
   upstream remarks.
+  **Checked 2026-10-30:** `node/messages.rs:17-30` now explains the BCH
+  share size and message budget. It no longer derives the budget from
+  Bitcoin's block relay limit.
 - `p2poolv2_cli/README.md` documents the Bitcoin taproot address flow and not
   `bch-share-address`.
 
