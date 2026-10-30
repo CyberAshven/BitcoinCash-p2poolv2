@@ -7,6 +7,7 @@ members = [
     "p2poolv2_node",
     "p2poolv2_cli",
     "p2poolv2_api",
+    "p2poolv2_electrum",
     "p2poolv2_tests",
     "p2poolv2_sim",
     "p2poolv2_tools",
@@ -96,11 +97,13 @@ bitcoindrpc = { path = "bitcoindrpc" }
 p2poolv2_wallet = { path = "p2poolv2_wallet" }
 p2poolv2_config = { path = "p2poolv2_config" }
 p2poolv2_api = { path = "p2poolv2_api" }
+p2poolv2_electrum = { path = "p2poolv2_electrum" }
 p2poolv2_lib = { path = "p2poolv2_lib", features = ["test-utils"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "default-tls"] }
 mockall = "0.15"
 mockall_double = "0.3.1"
 tempfile = "3.15.0"
+proptest = "1.5"
 tokio-test = "0.4.3"
 wiremock = "0.6.2"
 dashmap = "6"

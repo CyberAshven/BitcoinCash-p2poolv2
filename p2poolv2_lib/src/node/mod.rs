@@ -723,8 +723,8 @@ mod tests {
     use super::ChainStoreHandle;
     use super::P2PoolBehaviourEvent;
     use crate::config::{
-        ApiConfig, BitcoinCashNetwork, Chain, Config, LoggingConfig, NetworkConfig, StoreConfig,
-        StratumConfig,
+        ApiConfig, BitcoinCashNetwork, Chain, Config, ElectrumConfig, LoggingConfig, NetworkConfig,
+        StoreConfig, StratumConfig,
     };
     use crate::monitoring_events::create_monitoring_event_channel;
     use crate::node::Node;
@@ -797,6 +797,7 @@ mod tests {
                 public_dashboard: false,
                 web_root: None,
             },
+            electrum: ElectrumConfig::default(),
         };
         config.network = network_config;
 
@@ -914,6 +915,7 @@ mod tests {
                 public_dashboard: false,
                 web_root: None,
             },
+            electrum: ElectrumConfig::default(),
         }
     }
 

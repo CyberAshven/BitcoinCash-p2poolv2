@@ -66,3 +66,16 @@ pages, difficulty, simulation and atomic swap pages).
 To bring a page up to date, diff `p2poolv2/docs` from `623e4c1` to its new
 head, port the changes into the page named above, and move the commit named
 in that page's header and at the top of this page.
+
+## Code from upstream
+
+Until 2026-10-30 upstream code changes were copied by hand, one commit per
+change with credit. Since then upstream's code comes in by `git merge` of
+`upstream/main`, the first at upstream `c0c70cdb`, so a later merge conflicts
+only where both sides changed the same lines. That first merge kept this
+fork's versions of the changes already copied (the four uncle commits, the
+decoder fuzz harness, the libzmq fix), took upstream's Electrum server crate
+(off unless `[electrum] enabled`), its ansible source install, node preflight
+check and per-host vaults, its nix devShell and its CI runner updates, and
+left upstream's `grafana_p2poolv2` ansible role unused beside this fork's
+`monitoring_p2poolv2`.

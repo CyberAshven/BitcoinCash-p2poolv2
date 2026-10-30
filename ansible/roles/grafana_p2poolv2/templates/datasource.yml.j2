@@ -1,0 +1,23 @@
+# Grafana datasource provisioning -- managed by Ansible
+apiVersion: 1
+
+# Recreate only our own datasource so the pinned uid below is applied
+# cleanly; Grafana cannot change the uid of an existing datasource.
+# Datasources the operator created are never touched.
+deleteDatasources:
+  - name: "{{ p2poolv2_grafana_datasource_name }}"
+    orgId: 1
+
+# The dashboards select it by uid, so it only needs to be the default when
+# p2poolv2_grafana_datasource_default asks for it.
+datasources:
+  - name: "{{ p2poolv2_grafana_datasource_name }}"
+    type: prometheus
+    uid: "{{ p2poolv2_grafana_datasource_uid }}"
+    access: proxy
+    url: "http://127.0.0.1:{{ p2poolv2_prometheus_port }}"
+    isDefault: {{ p2poolv2_grafana_datasource_default | bool | lower }}
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: "{{ p2poolv2_prometheus_scrape_interval }}"

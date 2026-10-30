@@ -74,6 +74,7 @@ p2poolv2_config = { path = "../p2poolv2_config", features = ["test-utils"] }
 # against the SAFA tool's.
 p2poolv2_safa = { path = "../p2poolv2_safa" }
 tempfile.workspace = true
+proptest.workspace = true
 test-log = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 rand = { workspace = true }

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Merged upstream P2Poolv2 main (`c0c70cdb`) with git rather than copying
+its commits by hand, so later upstream changes merge with conflicts only
+where both sides edited the same lines. New from upstream: an Electrum
+wallet server for the share chain (off unless enabled in `[electrum]`),
+ansible installs from source and a node reachability check before
+(re)starting a pool, a nix devShell and ubuntu-26.04 CI runners. Changes
+already copied by hand (the uncle commits, the fuzz harness, the libzmq
+fix) keep this fork's versions.
+
 First part of mining on the current chain (V16): a check for Bitcoin Cash
 block headers from peers, and a store for the headers a node knows. A
 header must build on a known header, meet its own nBits, carry exactly the

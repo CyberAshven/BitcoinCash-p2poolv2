@@ -1325,6 +1325,53 @@ impl std::fmt::Debug for ApiConfig {
     }
 }
 
+/// Configuration for the Electrum wallet server.
+///
+/// The server speaks Electrum JSON-RPC over plain TCP and is meant for the
+/// operator's own wallet only, so it binds localhost by default and has no
+/// TLS or client authentication. It is off unless the `[electrum]` section
+/// enables it.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ElectrumConfig {
+    /// Start the Electrum server with the node
+    #[serde(default)]
+    pub enabled: bool,
+    /// The hostname the Electrum server binds to
+    #[serde(default = "default_electrum_hostname")]
+    pub hostname: String,
+    /// The port the Electrum server binds to
+    #[serde(default = "default_electrum_port")]
+    pub port: u16,
+    /// Maximum number of concurrent wallet connections
+    #[serde(default = "default_electrum_max_connections")]
+    pub max_connections: u32,
+}
+
+fn default_electrum_hostname() -> String {
+    "127.0.0.1".to_string()
+}
+
+/// Conventional Electrum TCP port.
+fn default_electrum_port() -> u16 {
+    50001
+}
+
+/// Local wallets only, so a small cap is plenty.
+fn default_electrum_max_connections() -> u32 {
+    64
+}
+
+impl Default for ElectrumConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hostname: default_electrum_hostname(),
+            port: default_electrum_port(),
+            max_connections: default_electrum_max_connections(),
+        }
+    }
+}
+
 /// Configuration for the no-PoW load-test simulation.
 ///
 /// Only acted upon when a binary is built with the `sim` cargo feature; the
@@ -1402,6 +1449,8 @@ pub struct Config {
     pub submit_nodes: Vec<BitcoinRpcConfig>,
     pub logging: LoggingConfig,
     pub api: ApiConfig,
+    #[serde(default)]
+    pub electrum: ElectrumConfig,
 }
 
 #[allow(dead_code)]
@@ -1608,6 +1657,21 @@ impl Config {
         self
     }
 
+    pub fn with_electrum_enabled(mut self, enabled: bool) -> Self {
+        self.electrum.enabled = enabled;
+        self
+    }
+
+    pub fn with_electrum_hostname(mut self, hostname: String) -> Self {
+        self.electrum.hostname = hostname;
+        self
+    }
+
+    pub fn with_electrum_port(mut self, port: u16) -> Self {
+        self.electrum.port = port;
+        self
+    }
+
     pub fn with_max_requests_per_second(mut self, max_requests_per_second: u64) -> Self {
         self.network.max_requests_per_second = max_requests_per_second;
         self
@@ -1794,6 +1858,54 @@ mod tests {
     fn dns_seed_defaults_to_true_when_absent() {
         let config = Config::load("../config-bitcoin.sample.toml").unwrap();
         assert!(config.network.dns_seed);
+    }
+
+    /// The sample config leaves `[electrum]` commented out, so the server is
+    /// off and every field takes its default.
+    #[test]
+    fn electrum_defaults_to_disabled_when_section_absent() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(!config.electrum.enabled);
+        assert_eq!(config.electrum.hostname, "127.0.0.1");
+        assert_eq!(config.electrum.port, 50001);
+        assert_eq!(config.electrum.max_connections, 64);
+    }
+
+    #[test]
+    fn electrum_section_values_are_parsed() {
+        let electrum: ElectrumConfig = config::Config::builder()
+            .add_source(config::File::from_str(
+                "enabled = true\nhostname = \"127.0.0.2\"\nport = 50101\nmax_connections = 8\n",
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert!(electrum.enabled);
+        assert_eq!(electrum.hostname, "127.0.0.2");
+        assert_eq!(electrum.port, 50101);
+        assert_eq!(electrum.max_connections, 8);
+    }
+
+    #[test]
+    fn env_override_sets_electrum_port() {
+        with_var("P2POOL_ELECTRUM__PORT", Some("50999"), || {
+            let config = Config::load("../config.sample.toml").unwrap();
+            assert_eq!(config.electrum.port, 50999);
+        });
+    }
+
+    #[test]
+    fn test_config_builder_sets_electrum_fields() {
+        let config = Config::load("../config.sample.toml")
+            .unwrap()
+            .with_electrum_enabled(true)
+            .with_electrum_hostname("127.0.0.3".to_string())
+            .with_electrum_port(50202);
+        assert!(config.electrum.enabled);
+        assert_eq!(config.electrum.hostname, "127.0.0.3");
+        assert_eq!(config.electrum.port, 50202);
     }
 
     #[test]
