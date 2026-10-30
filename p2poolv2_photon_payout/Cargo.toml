@@ -27,6 +27,11 @@ name = "photon-lean-measure"
 path = "src/bin/photon_lean_measure.rs"
 required-features = ["test-utils"]
 
+[[bin]]
+name = "photon-payout-sim"
+path = "src/bin/photon_payout_sim.rs"
+required-features = ["test-utils"]
+
 [dependencies]
 libauth.workspace = true
 hex.workspace = true

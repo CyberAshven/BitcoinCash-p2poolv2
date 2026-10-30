@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`cargo photon-payout-sim` is a seeded simulation of the PHOTON
+minimum-payout rules for 1,000 and 10,000 miners with mixed hash rates,
+multiples, churn and delayed funding. Under the rules as written it finds
+that small miners are not paid within 5,000 wins: most-owed priority, a
+launch backlog that never shrinks, sparse shares and the leftover
+4,096-script window cap. The design document records these findings and
+candidate changes, none adopted. Offline study only.
+
 An additive lean PHOTON split covenant, checked CashAssembly, independent
 integer reference, transaction builder and dual-mode BCH 2026 VM tests
 measure direct owed-balance payouts and per-payee token reimbursement.

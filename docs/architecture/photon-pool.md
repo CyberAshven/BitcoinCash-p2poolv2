@@ -961,9 +961,9 @@ is insufficient: a small last remainder violates the minimum.
   parameter. `C / gross` is the token deduction for fee plus dust, not a
   measured pure BCH transaction-fee fraction.
 
-The isolated lean covenant below measures these rules. Conditional economic
-simulations are a separate study step. Neither resolves the owner decisions
-or approves a deployment.
+The isolated lean covenant below measures these rules, and the seeded
+simulation after it tests their economics. Neither resolves the owner
+decisions or approves a deployment.
 
 ### Lean direct split measurements
 
@@ -1053,11 +1053,66 @@ scripts. The scanner increments N until the next whole transaction fails.
 The 100,000-byte standard transaction ceiling is inactive in all reported rows.
 
 The approximately 110 sats/payee claim is not confirmed: the shortest uniform
-standard profile here costs 126.723 sats/payee, the amount-compatible209-payee
+standard profile here costs 126.723 sats/payee, the amount-compatible 209-payee
 probe 123.349, and the all 35-byte benchmark at 100 payees 148.050. A no-overhead
 asymptote is 111 bytes for 23-byte scripts (36 bytes in R plus a 75-byte output);
 shared contract/funding/submitter/change overhead and operation density still
 apply. BCH dust fronting is additional to this fee.
+
+### Simulation findings: the rules as written do not deliver short waits
+
+`cargo photon-payout-sim` runs the rules above, as written, for 1,000 and
+10,000 miners: one giant holding 70 percent, a log-uniform mix over eight
+decades of hash rate, and a heavy-tailed mix, with multiples of 10, 20, 30
+and 50, churn, delayed funding and `N = 64`. Every number is a scenario
+assumption, not an owner decision. The compact tables are in
+[`simulation-summary.md`](../../p2poolv2_photon_payout/simulation-summary.md)
+and the full inputs and methods in
+[`simulation-results.md`](../../p2poolv2_photon_payout/simulation-results.md).
+
+In plain words: big and medium miners were paid regularly, but small and
+smaller miners were not paid at all within the 5,000-win horizon, and most
+wins paid only one to thirteen miners although up to 64 fit. The expected
+wait `multiple * C / earning rate` did not hold: a fixed probe miner whose
+formula predicts about 1.15 days waited 15 to 77 days, or was never paid.
+It is not independent of the number of miners under these rules.
+
+| Population | Miners | Payouts per won reward (after bootstrap) | Eligible miners beyond `N`, mean |
+|---|---:|---:|---:|
+| Giant 70 percent | 1,000 | 1.008 | 334 |
+| Log-uniform | 1,000 | 1.924 | 398 |
+| Heavy-tailed | 1,000 | 3.359 | 662 |
+| Giant 70 percent | 10,000 | 3.732 | 2,615 |
+| Log-uniform | 10,000 | 7.831 | 3,280 |
+| Heavy-tailed | 10,000 | 13.010 | 6,719 |
+
+The causes, in order of effect:
+
+1. **Most-owed priority.** The list is sorted by owed amount, so large old
+   debts always go first and use up each reward. A miner who has just
+   reached their minimum waits behind every larger balance, which brings
+   back the whole-win waiting the owner rejected.
+2. **A permanent backlog.** A list is fixed before its win is found, so it
+   can only pay debts that already existed. With no earlier won tokens the
+   strict rules cannot pay the first win at all (the strict genesis probe
+   rejects all 100). The conditional runs therefore assume 100 earlier
+   rewards held under an unspecified bootstrap custody. Each later win adds
+   one reward of credit and pays one reward out, so that 100-reward backlog
+   never shrinks, and everyone queues behind it.
+3. **Sparse shares.** The smallest miners seldom have a share inside the
+   4,320-share window, and the 4,096-script window cap (kept from the tree)
+   drops credit for the oldest distinct miners when more than 4,096 are
+   present. With 10,000 miners that alone excludes many of them.
+
+Candidate changes for the owner, **not adopted**: pay in the order miners
+became eligible (first come, first served) instead of most owed; remove
+the window's script cap, which only the tree needed; avoid any launch
+custody by letting a win's remainder go to the next miners in line, even
+ahead of what they have earned (bounded, and recovered from their later
+credit), so no tokens wait in custody and the backlog stays near zero; and
+size the share rate so a target smallest miner has a share in most windows.
+Each changes a proposed share-chain rule and needs the owner's approval and
+a fresh simulation.
 
 ### Historical funded Merkle-sum tree: no longer the main path
 

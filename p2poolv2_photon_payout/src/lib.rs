@@ -7,6 +7,7 @@
 pub mod covenant;
 pub mod lean;
 pub mod reference;
+pub mod simulation;
 pub mod state;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

@@ -134,6 +134,16 @@ asymptote is 111 bytes for 23-byte scripts (36 bytes in R plus a 75-byte output)
 shared contract/funding/submitter/change overhead and operation density still
 apply. BCH dust fronting is additional to this fee.
 
+## Simulation of the minimum-payout rules
+
+`cargo photon-payout-sim --summary` reproduces the compact tables in
+[simulation-summary.md](simulation-summary.md); the full inputs, integer
+checks and methods are in [simulation-results.md](simulation-results.md).
+The runs use the rules exactly as written in section 5 of the design
+document, and under them small miners are not paid within the 5,000-win
+horizon. The causes and candidate changes, none adopted, are in the design
+document's "Simulation findings" subsection.
+
 ## Retained funded Merkle-sum tree (phase 2a)
 
 The remaining tree description and measurements are historical evidence,
