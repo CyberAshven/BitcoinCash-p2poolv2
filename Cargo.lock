@@ -4324,7 +4324,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
- "toml 0.8.23",
+ "toml 1.1.5+spec-1.1.0",
  "toml_edit",
  "wiremock",
 ]
