@@ -66,10 +66,10 @@ fn test_full_share_headers_response_fits_max_message_size() {
         .header;
     // Changing committed fields after the build leaves the proof unable to
     // derive the root, so the encoder includes it: the larger encoding.
-    header.miner_bitcoin_address = longest_address.clone();
-    header.donation_address = Some(longest_address.clone());
+    header.miner_bitcoin_address = longest_address.clone().into();
+    header.donation_address = Some(longest_address.clone().into());
     header.donation = Some(u16::MAX);
-    header.fee_address = Some(longest_address);
+    header.fee_address = Some(longest_address.into());
     header.fee = Some(u16::MAX);
 
     header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);

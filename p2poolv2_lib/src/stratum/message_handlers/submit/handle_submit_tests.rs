@@ -19,6 +19,7 @@ use bitcoin::{Address, BlockHash, Network, PubkeyHash};
 use bitcoindrpc::BitcoindRpcClient;
 use bitcoindrpc::test_utils::{mock_submit_block_with_any_body, setup_mock_bitcoin_rpc};
 use p2poolv2_config::DEFAULT_VERSION_MASK;
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -27,7 +28,10 @@ use tokio::sync::mpsc;
 async fn a_found_tree_is_stored_with_the_submitted_coinbase_and_share() {
     let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
     let prepared = test_bch_prepared_with_tree_payees(100);
-    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    ));
     let (job_id, _) = insert_miner_job(
         &prepared,
         Some(&payout),
@@ -72,7 +76,10 @@ async fn a_found_tree_is_stored_with_the_submitted_coinbase_and_share() {
 async fn a_tree_job_without_a_share_commitment_is_kept_without_a_share() {
     let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
     let prepared = test_bch_prepared_with_tree_payees(100);
-    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    ));
     let (job_id, _) = insert_miner_job(
         &prepared,
         Some(&payout),
@@ -102,7 +109,10 @@ async fn a_bchn_accepted_submission_records_the_actual_share_and_resets_effort_o
     context.bitcoindrpc_client =
         BitcoindRpcClient::new(&mock_server.uri(), "testuser", "testpass").unwrap();
     let prepared = test_bch_prepared_with_tree_payees(100);
-    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    ));
     let (job_id, _) = insert_miner_job(
         &prepared,
         Some(&payout),
@@ -173,7 +183,10 @@ async fn a_failed_tree_write_still_hands_the_block_off() {
     let (closed_store, _closed_directory) = setup_test_chain_store_handle(false).await;
     ctx.chain_store_handle = closed_store;
     let prepared = test_bch_prepared_with_tree_payees(100);
-    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    ));
     let (job_id, _) = insert_miner_job(
         &prepared,
         Some(&payout),
@@ -206,7 +219,10 @@ async fn sv1_keeps_a_found_tree_even_when_the_share_pipeline_rejects_it() {
     let (ctx, emissions, _directories) = test_bch_stratum_context(&mock_server.uri()).await;
     drop(emissions);
     let prepared = test_bch_prepared_with_tree_payees(100);
-    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    ));
     let (job_id, _) = insert_miner_job(
         &prepared,
         Some(&payout),
@@ -233,7 +249,10 @@ async fn a_private_declarators_tree_is_kept_before_waiting_for_its_broadcast() {
     let (mock_server, _) = setup_mock_bitcoin_rpc().await;
     let (ctx, _emissions, _directories) = test_bch_stratum_context(&mock_server.uri()).await;
     let prepared = test_bch_prepared_with_tree_payees(100);
-    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    ));
     let (job_id, _) = insert_miner_job(
         &prepared,
         Some(&payout),

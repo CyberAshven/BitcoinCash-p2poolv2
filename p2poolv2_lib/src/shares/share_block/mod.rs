@@ -26,6 +26,7 @@ use bitcoin::{
     hashes::Hash,
 };
 use core::mem;
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::{self, ShareOwner};
 use serde::{Deserialize, Serialize};
 pub use share_transaction::{
@@ -75,9 +76,9 @@ pub struct ShareHeader {
     pub prev_share_blockhash: BlockHash,
     /// The uncles of the share
     pub uncles: Vec<BlockHash>,
-    /// Bitcoin address identifying the miner, receiving the bitcoin payout
-    #[serde(with = "crate::shares::address_serde")]
-    pub miner_bitcoin_address: Address,
+    /// Payout of the miner: the script its coinbase output pays, which may
+    /// be a Bitcoin Cash P2SH32 script `bitcoin::Address` has no form for
+    pub miner_bitcoin_address: PayoutAddress,
     /// Share chain miner address owning this share's coinbase output, stored
     /// as the witness program that address encodes. A different chain and a
     /// different key from `miner_bitcoin_address`.
@@ -98,14 +99,14 @@ pub struct ShareHeader {
     /// Timestamp for the share, as set by the miner
     pub time: u32,
     /// Donation address for developers
-    #[serde(default, with = "crate::shares::option_address_serde")]
-    pub donation_address: Option<Address>,
+    #[serde(default)]
+    pub donation_address: Option<PayoutAddress>,
     /// Donation in basis points
     #[serde(default)]
     pub donation: Option<u16>,
     /// Fee address for the pool operator
-    #[serde(default, with = "crate::shares::option_address_serde")]
-    pub fee_address: Option<Address>,
+    #[serde(default)]
+    pub fee_address: Option<PayoutAddress>,
     /// Fee in basis points
     #[serde(default)]
     pub fee: Option<u16>,
@@ -137,8 +138,8 @@ pub struct ShareHeader {
     pub share_version: ShareVersion,
 }
 
-/// Network class an encoded address is rebuilt for: the part of an
-/// `Address` its script does not carry. Segwit addresses carry an HRP and
+/// Network class an encoded address is rebuilt for: the part of a payout
+/// address its script does not carry. Segwit addresses carry an HRP and
 /// legacy ones a network kind; these three classes cover both.
 const ADDRESS_NETWORK_MAIN: u8 = 0;
 const ADDRESS_NETWORK_TEST: u8 = 1;
@@ -147,23 +148,15 @@ const ADDRESS_NETWORK_REGTEST: u8 = 2;
 /// Encode an address as its network class and script pubkey.
 ///
 /// Shorter than the address string (a P2TR script is 34 bytes against 62
-/// characters), and exact: decoding rebuilds the same `Address`.
+/// characters), and exact: decoding rebuilds the same `PayoutAddress`.
 pub(crate) fn encode_address<W: bitcoin::io::Write + ?Sized>(
-    address: &Address,
+    address: &PayoutAddress,
     writer: &mut W,
 ) -> Result<usize, bitcoin::io::Error> {
-    let network_class = if address
-        .as_unchecked()
-        .is_valid_for_network(bitcoin::Network::Bitcoin)
-    {
-        ADDRESS_NETWORK_MAIN
-    } else if address
-        .as_unchecked()
-        .is_valid_for_network(bitcoin::Network::Testnet)
-    {
-        ADDRESS_NETWORK_TEST
-    } else {
-        ADDRESS_NETWORK_REGTEST
+    let network_class = match address.network() {
+        bitcoin::Network::Bitcoin => ADDRESS_NETWORK_MAIN,
+        bitcoin::Network::Regtest => ADDRESS_NETWORK_REGTEST,
+        _ => ADDRESS_NETWORK_TEST,
     };
     let mut len = network_class.consensus_encode(writer)?;
     len += address.script_pubkey().consensus_encode(writer)?;
@@ -173,7 +166,7 @@ pub(crate) fn encode_address<W: bitcoin::io::Write + ?Sized>(
 /// Decode an address written by `encode_address`.
 fn decode_address<R: bitcoin::io::Read + ?Sized>(
     reader: &mut R,
-) -> Result<Address, bitcoin::consensus::encode::Error> {
+) -> Result<PayoutAddress, bitcoin::consensus::encode::Error> {
     let network = match u8::consensus_decode(reader)? {
         ADDRESS_NETWORK_MAIN => bitcoin::Network::Bitcoin,
         ADDRESS_NETWORK_TEST => bitcoin::Network::Testnet,
@@ -181,12 +174,12 @@ fn decode_address<R: bitcoin::io::Read + ?Sized>(
         _ => return Err(ParseFailed("unknown address network class")),
     };
     let script = bitcoin::ScriptBuf::consensus_decode(reader)?;
-    Address::from_script(&script, network).map_err(|_| ParseFailed("invalid address script"))
+    PayoutAddress::from_script(&script, network).map_err(|_| ParseFailed("invalid address script"))
 }
 
 /// Encode an optional address as a bool flag followed by the address when present.
 pub(crate) fn encode_optional_address<W: bitcoin::io::Write + ?Sized>(
-    address: &Option<Address>,
+    address: &Option<PayoutAddress>,
     writer: &mut W,
 ) -> Result<usize, bitcoin::io::Error> {
     match address {
@@ -198,7 +191,7 @@ pub(crate) fn encode_optional_address<W: bitcoin::io::Write + ?Sized>(
 /// Decode an optional address from a bool flag followed by the address.
 pub(crate) fn decode_optional_address<R: bitcoin::io::Read + ?Sized>(
     reader: &mut R,
-) -> Result<Option<Address>, bitcoin::consensus::encode::Error> {
+) -> Result<Option<PayoutAddress>, bitcoin::consensus::encode::Error> {
     if bool::consensus_decode(reader)? {
         Ok(Some(decode_address(reader)?))
     } else {
@@ -628,7 +621,7 @@ impl ShareBlock {
         let header = ShareHeader {
             prev_share_blockhash: BlockHash::all_zeros(),
             uncles: vec![],
-            miner_bitcoin_address: btcaddress,
+            miner_bitcoin_address: btcaddress.into(),
             miner_address,
             bitcoin_header: bitcoin_block.header,
             time: genesis_time,
@@ -982,7 +975,10 @@ mod tests {
             .parse::<CompressedPublicKey>()
             .unwrap();
         let expected_bitcoin_address = Address::p2wpkh(&expected_pubkey, bitcoin::Network::Signet);
-        assert_eq!(share.header.miner_bitcoin_address, expected_bitcoin_address);
+        assert_eq!(
+            share.header.miner_bitcoin_address,
+            PayoutAddress::from(&expected_bitcoin_address)
+        );
         assert_eq!(share.transactions.len(), 1);
         assert!(share.transactions[0].is_coinbase());
         // payout output + BIP141 witness commitment output
@@ -1078,7 +1074,7 @@ mod tests {
             )
             .unwrap(),
             uncles: vec![],
-            miner_bitcoin_address: btcaddress,
+            miner_bitcoin_address: btcaddress.into(),
             bits: CompactTarget::from_consensus(0x1b4188f5),
             time: 1700000000,
             donation_address: None,
@@ -1149,7 +1145,8 @@ mod tests {
         header.miner_bitcoin_address =
             Address::from_str("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
                 .unwrap()
-                .assume_checked();
+                .assume_checked()
+                .into();
         let decoded: ShareHeader = deserialize(&serialize(&header)).unwrap();
         assert_eq!(decoded, header);
         assert_eq!(decoded.block_hash(), header.block_hash());
@@ -1161,7 +1158,8 @@ mod tests {
         header.miner_bitcoin_address =
             Address::from_str("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx")
                 .unwrap()
-                .assume_checked();
+                .assume_checked()
+                .into();
         let decoded: ShareHeader = deserialize(&serialize(&header)).unwrap();
         assert_eq!(decoded, header);
     }
@@ -1169,7 +1167,8 @@ mod tests {
     #[test]
     fn test_share_header_round_trips_regtest_segwit_address() {
         let mut header = TestShareBlockBuilder::new().build().header;
-        header.miner_bitcoin_address = Address::p2wsh(&ScriptBuf::new(), bitcoin::Network::Regtest);
+        header.miner_bitcoin_address =
+            Address::p2wsh(&ScriptBuf::new(), bitcoin::Network::Regtest).into();
         let decoded: ShareHeader = deserialize(&serialize(&header)).unwrap();
         assert_eq!(decoded, header);
     }
@@ -1179,7 +1178,8 @@ mod tests {
         let mut header = TestShareBlockBuilder::new().build().header;
         header.miner_bitcoin_address = Address::from_str("1HpRF3JgafxaqjhMEjLNbevpRVvAp15t3A")
             .unwrap()
-            .assume_checked();
+            .assume_checked()
+            .into();
         let decoded: ShareHeader = deserialize(&serialize(&header)).unwrap();
         assert_eq!(decoded, header);
     }
@@ -1190,13 +1190,37 @@ mod tests {
         header.donation_address = Some(
             Address::from_str("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx")
                 .unwrap()
-                .assume_checked(),
+                .assume_checked()
+                .into(),
         );
         header.donation = Some(200);
-        header.fee_address = Some(Address::p2wsh(&ScriptBuf::new(), bitcoin::Network::Regtest));
+        header.fee_address =
+            Some(Address::p2wsh(&ScriptBuf::new(), bitcoin::Network::Regtest).into());
         header.fee = Some(100);
         let decoded: ShareHeader = deserialize(&serialize(&header)).unwrap();
         assert_eq!(decoded, header);
+    }
+
+    /// A P2SH32 payout encodes as its network class and 35-byte script, the
+    /// same layout as every other payout, and decodes to the same payout.
+    #[test]
+    fn test_share_header_round_trips_p2sh32_payouts() {
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.miner_bitcoin_address = PayoutAddress::p2sh32([0x31; 32], bitcoin::Network::Regtest);
+        header.fee_address = Some(PayoutAddress::p2sh32([0x42; 32], bitcoin::Network::Regtest));
+        header.fee = Some(100);
+        let bytes = serialize(&header);
+        let decoded: ShareHeader = deserialize(&bytes).unwrap();
+        assert_eq!(decoded, header);
+        assert_eq!(decoded.block_hash(), header.block_hash());
+        assert!(decoded.miner_bitcoin_address.is_p2sh32());
+
+        let mut encoded = Vec::new();
+        encode_address(&header.miner_bitcoin_address, &mut encoded).unwrap();
+        let mut expected = vec![ADDRESS_NETWORK_REGTEST, 35, 0xaa, 0x20];
+        expected.extend_from_slice(&[0x31; 32]);
+        expected.push(0x87);
+        assert_eq!(encoded, expected);
     }
 
     #[test]
@@ -1223,7 +1247,7 @@ mod tests {
             // The block at fixture index `index` is at share chain height `index`.
             let immature_share_count =
                 (COINBASE_MATURITY - 1).min(index.saturating_sub(COINBASE_MATURITY));
-            let mut address_difficulty_map: HashMap<bitcoin::Address, u128> =
+            let mut address_difficulty_map: HashMap<PayoutAddress, u128> =
                 HashMap::with_capacity(4);
             for prior_index in (0..index)
                 .rev()

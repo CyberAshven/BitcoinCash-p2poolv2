@@ -143,9 +143,8 @@ Use the result as `[stratum] miner_address`, or as the Stratum password
 must be able to sign share spends. Select it separately from the BCH
 payout address used in the Stratum username.
 
-BCH payouts accept P2PKH and P2SH20 CashAddr, including their token-aware
-forms. P2SH32 payout addresses are still rejected by the current payout
-parser. Share ownership accepts only P2PKH; `bch-share-address` rejects
+BCH payouts accept P2PKH, P2SH20 and P2SH32 CashAddr, including their
+token-aware forms. Share ownership accepts only P2PKH; `bch-share-address` rejects
 P2SH input. The `address` command encodes Taproot keys for the retained
 Bitcoin mode. Use `bch-share-address` for BCH.
 

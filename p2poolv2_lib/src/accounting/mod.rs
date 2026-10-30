@@ -12,7 +12,7 @@ use payout::payout_tree::PayoutTree;
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputPair {
-    pub address: bitcoin::Address,
+    pub address: p2poolv2_wallet::payout_address::PayoutAddress,
     pub amount: bitcoin::Amount,
 }
 

@@ -15,7 +15,8 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::stratum::validate_username::validate_bitcoin_cash;
-use bitcoin::{Address, Amount, BlockHash};
+use bitcoin::{Amount, BlockHash};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::HashMap;
 use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -46,7 +47,7 @@ impl PayoutDistribution for Payout {
         bitcoin_difficulty: u128,
         total_amount: bitcoin::Amount,
         remaining_total_amount: Amount,
-        bootstrap_address: Address,
+        bootstrap_address: PayoutAddress,
         // Hydrapool's coinbase is not a share-chain rule and pays every
         // payee; the share chain's hybrid payout does not apply.
         _split: PayoutSplit,
@@ -112,8 +113,8 @@ impl Payout {
         &self,
         store: &ChainStoreHandle,
         total_difficulty: u128,
-    ) -> Result<HashMap<Address, u128>, Box<dyn Error + Send + Sync>> {
-        let mut address_difficulty: HashMap<Address, u128> = HashMap::new();
+    ) -> Result<HashMap<PayoutAddress, u128>, Box<dyn Error + Send + Sync>> {
+        let mut address_difficulty: HashMap<PayoutAddress, u128> = HashMap::new();
         let mut accumulated_difficulty: u128 = 0;
 
         // Start from current time and work backwards
@@ -151,6 +152,7 @@ impl Payout {
                                         format!("Invalid bitcoin address '{btcaddress}': {e}")
                                     })?
                                     .assume_checked()
+                                    .into()
                             };
                             *address_difficulty.entry(address).or_insert(0) +=
                                 share.difficulty as u128;

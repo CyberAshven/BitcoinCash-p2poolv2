@@ -658,7 +658,7 @@ fn allocated_donation(user_identifier: &str) -> Result<Option<u16>, String> {
     );
     let commitment = crate::shares::share_commitment::ShareCommitment::from_mining_job_token(
         allocated.mining_job_token.as_bytes(),
-        payout,
+        payout.into(),
         p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]),
     )
     .unwrap();

@@ -16,16 +16,17 @@
 //!
 //! The two are separate settings: neither is derived from the other.
 
-use bitcoin::{Address, Network};
+use bitcoin::Network;
 use p2poolv2_lib::address::bch_share;
 use p2poolv2_lib::address::share_owner::ShareOwner;
+use p2poolv2_lib::config::PayoutAddress;
 use p2poolv2_lib::config::{BitcoinCashNetwork, Chain, parse_payout_address, parse_share_address};
 
 /// What the sim emitter mines with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimIdentity {
     /// The payout address every share commits to.
-    pub payout: Address,
+    pub payout: PayoutAddress,
     /// The share chain identity owning every share coinbase.
     pub share_owner: ShareOwner,
 }

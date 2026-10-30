@@ -1961,7 +1961,7 @@ mod stratum_server_tests {
                 .unwrap();
         let address = bitcoin::Address::p2wpkh(&miner_pubkey, Network::Signet);
         let output_distribution = vec![OutputPair {
-            address,
+            address: address.into(),
             amount: bitcoin::Amount::from_sat(template.coinbasevalue),
         }];
 
@@ -2565,10 +2565,13 @@ mod stratum_server_tests {
         let prepared = crate::test_utils::test_bch_prepared_with_cuts(Some(100), None, None);
         let committed_donation = |donation: Option<u16>| {
             let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
-            session.parsed_address = Some(bitcoin::Address::p2pkh(
-                bitcoin::PubkeyHash::from_byte_array([1; 20]),
-                bitcoin::Network::Regtest,
-            ));
+            session.parsed_address = Some(
+                bitcoin::Address::p2pkh(
+                    bitcoin::PubkeyHash::from_byte_array([1; 20]),
+                    bitcoin::Network::Regtest,
+                )
+                .into(),
+            );
             session.share_owner = Some(p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh(
                 [0x22; 20],
             ));
@@ -2603,10 +2606,13 @@ mod stratum_server_tests {
             None,
         );
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
-        session.parsed_address = Some(bitcoin::Address::p2pkh(
-            bitcoin::PubkeyHash::from_byte_array([0x12; 20]),
-            bitcoin::Network::Regtest,
-        ));
+        session.parsed_address = Some(
+            bitcoin::Address::p2pkh(
+                bitcoin::PubkeyHash::from_byte_array([0x12; 20]),
+                bitcoin::Network::Regtest,
+            )
+            .into(),
+        );
         session.share_owner = Some(p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh(
             [0x22; 20],
         ));
@@ -2650,10 +2656,13 @@ mod stratum_server_tests {
             None,
         );
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
-        session.parsed_address = Some(bitcoin::Address::p2pkh(
-            bitcoin::PubkeyHash::from_byte_array([0x12; 20]),
-            bitcoin::Network::Regtest,
-        ));
+        session.parsed_address = Some(
+            bitcoin::Address::p2pkh(
+                bitcoin::PubkeyHash::from_byte_array([0x12; 20]),
+                bitcoin::Network::Regtest,
+            )
+            .into(),
+        );
         session.share_owner = Some(p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh(
             [0x22; 20],
         ));

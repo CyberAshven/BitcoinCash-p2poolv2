@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::config::{BitcoinCashNetwork, Chain, parse_payout_address};
-use bitcoin::Address;
 use p2poolv2_wallet::bch_share::encode_payout_address;
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::borrow::Cow;
 
 /// Max username includes the dot and the worker name
@@ -22,7 +22,7 @@ pub struct ValidatedUsername<'a> {
     /// validated.
     pub user_key: Cow<'a, str>,
     /// Parsed and network-checked bitcoin Address (None when validation is skipped)
-    pub parsed_address: Option<Address>,
+    pub parsed_address: Option<PayoutAddress>,
     /// Optional worker name after the first dot
     pub worker_name: Option<&'a str>,
 }
@@ -67,7 +67,7 @@ pub fn validate(
                 "Expected an address for network {network}",
             ))
         })?;
-        Some(checked)
+        Some(PayoutAddress::from(checked))
     } else {
         None
     };
@@ -86,7 +86,7 @@ pub fn validate(
 
 /// Validates a Bitcoin Cash stratum username, `<cashaddr>.<workername>`.
 ///
-/// The address is a 20-byte P2PKH or P2SH CashAddr for `cash_network`. Its
+/// The address is a P2PKH, P2SH20 or P2SH32 CashAddr for `cash_network`. Its
 /// prefix (`bitcoincash:`, `bchtest:`, `bchreg:`) may be left out, as BCH
 /// miners commonly enter it; the network's prefix is then assumed and the
 /// checksum still has to match it. `user_key` is the address as a plain
@@ -147,7 +147,7 @@ pub fn validate_for_chain(
 fn parse_cash_payout(
     address: &str,
     cash_network: BitcoinCashNetwork,
-) -> Result<Address, UsernameValidationError> {
+) -> Result<PayoutAddress, UsernameValidationError> {
     parse_payout_address(
         address,
         Chain::BitcoinCash,
@@ -289,6 +289,18 @@ mod tests {
             "bitcoincash:qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2"
         );
         assert!(result.parsed_address.unwrap().script_pubkey().is_p2pkh());
+    }
+
+    /// A miner may name a P2SH32 payout: the username's CashAddr decodes to
+    /// the P2SH32 script, and its user key is the same CashAddr.
+    #[test]
+    fn bitcoin_cash_accepts_a_p2sh32_cashaddr() {
+        let cashaddr = "bchtest:pvch8mmxy0rtfrlarg7ucrxxfzds5pamg73h7370aa87d80gyhqxq7fqng6m6";
+        let username = format!("{cashaddr}.rig");
+        let result = validate_bitcoin_cash(&username, true, BitcoinCashNetwork::Chipnet).unwrap();
+        assert_eq!(result.user_key, cashaddr);
+        assert_eq!(result.worker_name, Some("rig"));
+        assert!(result.parsed_address.unwrap().is_p2sh32());
     }
 
     /// Statistics are keyed by the decoded script, so one address typed

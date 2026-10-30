@@ -18,7 +18,8 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::PplnsWindow;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
-use bitcoin::{Address, Amount, BlockHash};
+use bitcoin::{Amount, BlockHash};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::{Arc, RwLock};
@@ -31,7 +32,7 @@ use std::sync::{Arc, RwLock};
 /// acquires a write lock to update the window and compute the distribution.
 pub struct Payout {
     pplns_window: Arc<RwLock<PplnsWindow>>,
-    last_weights: Option<HashMap<Address, u128>>,
+    last_weights: Option<HashMap<PayoutAddress, u128>>,
 }
 
 impl Payout {
@@ -87,7 +88,7 @@ impl PayoutDistribution for Payout {
             .has_per_share_cuts()
     }
 
-    fn pplns_weights(&self) -> Option<HashMap<Address, u128>> {
+    fn pplns_weights(&self) -> Option<HashMap<PayoutAddress, u128>> {
         self.last_weights.clone()
     }
 
@@ -112,7 +113,7 @@ impl PayoutDistribution for Payout {
         bitcoin_difficulty: u128,
         _total_amount: bitcoin::Amount,
         remaining_total_amount: Amount,
-        _bootstrap_address: Address,
+        _bootstrap_address: PayoutAddress,
         split: PayoutSplit,
     ) -> Result<Option<PayoutTree>, Box<dyn Error + Send + Sync>> {
         self.last_weights = None;
@@ -155,6 +156,7 @@ impl PayoutDistribution for Payout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::Address;
 
     use crate::accounting::payout::payout_distribution::build_pplns_outputs;
     use crate::accounting::payout::sharechain_pplns::pplns_window::{
@@ -957,7 +959,7 @@ mod tests {
             .get_output_distribution(&store, anchor, 1, Amount::from_sat(value), &finder)
             .unwrap();
 
-        let paid = |address: &Address| {
+        let paid = |address: &PayoutAddress| {
             produced
                 .outputs
                 .iter()
@@ -1226,7 +1228,8 @@ mod tests {
                 header.miner_bitcoin_address = Address::p2pkh(
                     PubkeyHash::from_byte_array([miner; 20]),
                     bitcoin::Network::Testnet,
-                );
+                )
+                .into();
                 *prev_hash = header.block_hash();
                 Some(header)
             })

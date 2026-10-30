@@ -2,10 +2,8 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use super::address_serde;
 use super::bch_coinbase::BchCoinbase;
 use super::merge_mining::MergeMiningCommitment;
-use super::option_address_serde;
 use super::share_block::{ShareBlock, ShareHeader, decode_optional_address, encode_address};
 use super::share_version::ShareVersion;
 use super::transactions::coinbase::compute_witness_root;
@@ -14,7 +12,8 @@ use bitcoin::consensus::encode::VarInt;
 use bitcoin::consensus::{Decodable, Encodable, serialize};
 use bitcoin::hashes::Hash;
 use bitcoin::io::Write;
-use bitcoin::{Address, BlockHash, CompactTarget, WitnessMerkleNode, hashes};
+use bitcoin::{BlockHash, CompactTarget, WitnessMerkleNode, hashes};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use serde::Serialize;
 
 /// Share commitment created by miner and embedded in the bitcoin
@@ -38,8 +37,7 @@ pub struct ShareCommitment {
     /// The uncles of the share
     pub uncles: Vec<BlockHash>,
     /// Bitcoin address identifying the miner mining the share
-    #[serde(serialize_with = "address_serde::serialize")]
-    pub miner_bitcoin_address: Address,
+    pub miner_bitcoin_address: PayoutAddress,
     /// Share chain miner address owning the share coinbase output, stored as
     /// the witness program that address encodes. Distinct from
     /// `miner_bitcoin_address`, which receives the bitcoin payout.
@@ -65,13 +63,11 @@ pub struct ShareCommitment {
     /// Timestamp for the share, as set by the miner
     pub time: u32,
     /// Donation address for developers
-    #[serde(serialize_with = "option_address_serde::serialize")]
-    pub donation_address: Option<Address>,
+    pub donation_address: Option<PayoutAddress>,
     /// Donation in basis points
     pub donation: Option<u16>,
     /// Fee address for the pool operator
-    #[serde(serialize_with = "option_address_serde::serialize")]
-    pub fee_address: Option<Address>,
+    pub fee_address: Option<PayoutAddress>,
     /// Fee in basis points
     pub fee: Option<u16>,
     /// Declared BCH layout, committed before hashing begins. Legacy jobs omit it.
@@ -182,9 +178,9 @@ pub(crate) fn build_commitment_prefix(
 /// `share_witness_root` belongs here for the same reason: it is a property of
 /// the template's share transaction set, not of any one miner.
 pub(crate) fn build_commitment_suffix(
-    donation_address: &Option<Address>,
+    donation_address: &Option<PayoutAddress>,
     donation: Option<u16>,
-    fee_address: &Option<Address>,
+    fee_address: &Option<PayoutAddress>,
     fee: Option<u16>,
     share_witness_root: WitnessMerkleNode,
 ) -> Vec<u8> {
@@ -217,7 +213,7 @@ pub(crate) fn commitment_digest(
     prefix: &[u8],
     time: u32,
     suffix: &[u8],
-    miner_bitcoin_address: Option<&Address>,
+    miner_bitcoin_address: Option<&PayoutAddress>,
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
 ) -> hashes::sha256::Hash {
     let mut serialized = Vec::with_capacity(
@@ -250,7 +246,7 @@ impl ShareCommitment {
     /// the coinbase the share block carries.
     pub fn from_mining_job_token(
         token: &[u8],
-        miner_bitcoin_address: Address,
+        miner_bitcoin_address: PayoutAddress,
         miner_address: p2poolv2_wallet::share_owner::ShareOwner,
     ) -> Result<Self, bitcoin::consensus::encode::Error> {
         let invalid = bitcoin::consensus::encode::Error::ParseFailed;
@@ -400,7 +396,7 @@ impl ShareCommitment {
 
 /// Encode an optional address as a bool flag followed by the address string when present.
 pub(crate) fn encode_optional_address<W: Write + ?Sized>(
-    address: &Option<Address>,
+    address: &Option<PayoutAddress>,
     writer: &mut W,
 ) -> Result<usize, bitcoin::io::Error> {
     let mut len = 0;
@@ -427,6 +423,7 @@ mod tests {
     use crate::test_utils::create_test_commitment;
     use crate::test_utils::make_test_share_program;
     use crate::test_utils::test_coinbase_transaction;
+    use bitcoin::Address;
     use bitcoin::hashes::Hash;
     use bitcoin::{CompressedPublicKey, Network, ScriptBuf, TxMerkleNode};
     use std::str::FromStr;
@@ -537,7 +534,7 @@ mod tests {
         let other_pubkey = "02ac493f2130ca56cb5c3a559860cef9a84f90b5a85dfe4ec6e6067eeee17f4d2d"
             .parse::<CompressedPublicKey>()
             .unwrap();
-        commitment2.miner_bitcoin_address = Address::p2wpkh(&other_pubkey, Network::Signet);
+        commitment2.miner_bitcoin_address = Address::p2wpkh(&other_pubkey, Network::Signet).into();
 
         let hash1 = commitment1.hash();
         let hash2 = commitment2.hash();
@@ -580,8 +577,10 @@ mod tests {
     fn test_hash_changes_with_bitcoin_address_network() {
         let mut commitment1 = create_test_commitment();
         let mut commitment2 = create_test_commitment();
-        commitment1.miner_bitcoin_address = Address::p2wsh(&ScriptBuf::new(), Network::Testnet);
-        commitment2.miner_bitcoin_address = Address::p2wsh(&ScriptBuf::new(), Network::Regtest);
+        commitment1.miner_bitcoin_address =
+            Address::p2wsh(&ScriptBuf::new(), Network::Testnet).into();
+        commitment2.miner_bitcoin_address =
+            Address::p2wsh(&ScriptBuf::new(), Network::Regtest).into();
 
         assert_eq!(
             commitment1.miner_bitcoin_address.script_pubkey(),
@@ -715,7 +714,8 @@ mod tests {
         let donation_pubkey = "02ac493f2130ca56cb5c3a559860cef9a84f90b5a85dfe4ec6e6067eeee17f4d2d"
             .parse::<CompressedPublicKey>()
             .unwrap();
-        commitment2.donation_address = Some(Address::p2wpkh(&donation_pubkey, Network::Signet));
+        commitment2.donation_address =
+            Some(Address::p2wpkh(&donation_pubkey, Network::Signet).into());
         commitment2.donation = Some(100);
 
         assert_ne!(commitment1.hash(), commitment2.hash());
@@ -729,7 +729,7 @@ mod tests {
         let fee_pubkey = "02ac493f2130ca56cb5c3a559860cef9a84f90b5a85dfe4ec6e6067eeee17f4d2d"
             .parse::<CompressedPublicKey>()
             .unwrap();
-        commitment2.fee_address = Some(Address::p2wpkh(&fee_pubkey, Network::Signet));
+        commitment2.fee_address = Some(Address::p2wpkh(&fee_pubkey, Network::Signet).into());
         commitment2.fee = Some(50);
 
         assert_ne!(commitment1.hash(), commitment2.hash());
@@ -740,7 +740,8 @@ mod tests {
         let donation_pubkey = "02ac493f2130ca56cb5c3a559860cef9a84f90b5a85dfe4ec6e6067eeee17f4d2d"
             .parse::<CompressedPublicKey>()
             .unwrap();
-        let donation_address = Address::p2wpkh(&donation_pubkey, Network::Signet);
+        let donation_address =
+            PayoutAddress::from(Address::p2wpkh(&donation_pubkey, Network::Signet));
 
         let mut commitment1 = create_test_commitment();
         commitment1.donation_address = Some(donation_address.clone());
@@ -758,12 +759,13 @@ mod tests {
         let donation_pubkey = "02ac493f2130ca56cb5c3a559860cef9a84f90b5a85dfe4ec6e6067eeee17f4d2d"
             .parse::<CompressedPublicKey>()
             .unwrap();
-        let donation_address = Address::p2wpkh(&donation_pubkey, Network::Signet);
+        let donation_address =
+            PayoutAddress::from(Address::p2wpkh(&donation_pubkey, Network::Signet));
 
         let fee_pubkey = "020202020202020202020202020202020202020202020202020202020202020202"
             .parse::<CompressedPublicKey>()
             .unwrap();
-        let fee_address = Address::p2wpkh(&fee_pubkey, Network::Signet);
+        let fee_address = PayoutAddress::from(Address::p2wpkh(&fee_pubkey, Network::Signet));
 
         let mut commitment = create_test_commitment();
         commitment.donation_address = Some(donation_address.clone());

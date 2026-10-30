@@ -25,7 +25,7 @@ use axum::{
     extract::{Query, State},
 };
 use bitcoin::CompactTarget;
-use bitcoin::{Address, BlockHash, Network};
+use bitcoin::{BlockHash, Network};
 use p2poolv2_lib::accounting::payout::sharechain_pplns::PplnsWindow;
 use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::{
     MinerCredits, WindowCredit, WindowCredits, WindowError, bitcoin_block_difficulty,
@@ -33,6 +33,7 @@ use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::{
 use p2poolv2_lib::address::bch_share::{self, BchShareNetwork};
 use p2poolv2_lib::address::share_owner::{ShareOwner, to_address_string};
 use p2poolv2_lib::address_display::payout_address_string;
+use p2poolv2_lib::config::PayoutAddress;
 use p2poolv2_lib::config::{BitcoinCashNetwork, Chain, parse_payout_address, parse_share_address};
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::store::writer::StoreError;
@@ -133,7 +134,7 @@ pub(crate) struct MinerWindowSource {
 struct PreparationSnapshot {
     anchor: BlockHash,
     bits: u32,
-    weights: Arc<HashMap<Address, u128>>,
+    weights: Arc<HashMap<PayoutAddress, u128>>,
 }
 
 impl MinerWindowSource {
@@ -153,7 +154,7 @@ impl MinerWindowSource {
         anchor: BlockHash,
         bits: u32,
         chain_store_handle: &ChainStoreHandle,
-    ) -> Result<Arc<HashMap<Address, u128>>, ApiError> {
+    ) -> Result<Arc<HashMap<PayoutAddress, u128>>, ApiError> {
         let mut cache = self.preparation.lock().await;
         if let Some(snapshot) = cache.as_ref()
             && (snapshot.anchor, snapshot.bits) == (anchor, bits)
@@ -254,7 +255,7 @@ fn build_window_credits(
 /// Which of a share header's two addresses a query names.
 enum MinerAddress {
     /// The payout address, `miner_bitcoin_address`.
-    Payout(Address),
+    Payout(PayoutAddress),
     /// The share owner, `miner_address`: the share chain address.
     ShareOwner(ShareOwner),
 }

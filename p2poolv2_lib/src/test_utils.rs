@@ -9,6 +9,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::store::Store;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::store::writer::{StoreHandle, StoreWriter, write_channel};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 #[cfg(any(test, feature = "test-utils"))]
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-utils"))]
@@ -466,7 +467,7 @@ pub const PUBKEY_4G: &str = "02e493dbf1c10d80f3581e4904930b1404cc6c13900ee075847
 pub const PUBKEY_5G: &str = "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4";
 
 #[cfg(any(test, feature = "test-utils"))]
-pub fn make_test_address(index: usize) -> Address {
+pub fn make_test_address(index: usize) -> PayoutAddress {
     let pubkey_hex = match index {
         1 => PUBKEY_G,
         2 => PUBKEY_2G,
@@ -475,7 +476,7 @@ pub fn make_test_address(index: usize) -> Address {
         _ => panic!("index must be 1-4"),
     };
     let pubkey: bitcoin::CompressedPublicKey = pubkey_hex.parse().unwrap();
-    Address::p2wpkh(&pubkey, bitcoin::Network::Regtest)
+    Address::p2wpkh(&pubkey, bitcoin::Network::Regtest).into()
 }
 
 /// Share chain address for a well known test pubkey, via the BIP086 tweak.
@@ -566,14 +567,14 @@ pub fn test_bch_job_token_and_template() -> (Vec<u8>, Arc<BlockTemplate>) {
 /// Apply the reusable BCH payout snapshot to an externally supplied template.
 #[cfg(any(test, feature = "test-utils"))]
 pub fn test_bch_prepared_for_template(template: BlockTemplate) -> Arc<PreparedNotifyParams> {
-    let first = Address::p2pkh(
+    let first = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([1; 20]),
         bitcoin::Network::Regtest,
-    );
-    let second = Address::p2pkh(
+    ));
+    let second = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([2; 20]),
         bitcoin::Network::Regtest,
-    );
+    ));
     let weights = HashMap::from([(first, 1), (second, 3)]);
     test_bch_prepared_with_weights(template, weights)
 }
@@ -584,21 +585,21 @@ pub fn test_bch_prepared_for_template(template: BlockTemplate) -> Arc<PreparedNo
 #[cfg(any(test, feature = "test-utils"))]
 pub fn test_bch_prepared_with_cuts(
     donation: Option<u16>,
-    fee_address: Option<Address>,
+    fee_address: Option<PayoutAddress>,
     fee: Option<u16>,
 ) -> Arc<PreparedNotifyParams> {
     let template: BlockTemplate = serde_json::from_str(include_str!(
         "../../bitcoindrpc/test_data/bchn-regtest-template.json"
     ))
     .unwrap();
-    let first = Address::p2pkh(
+    let first = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([1; 20]),
         bitcoin::Network::Regtest,
-    );
-    let second = Address::p2pkh(
+    ));
+    let second = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([2; 20]),
         bitcoin::Network::Regtest,
-    );
+    ));
     let weights = HashMap::from([(first, 1), (second, 3)]);
     let donation_address = donation.map(|_| {
         crate::config::bitcoin_cash_donation_address(crate::config::BitcoinCashNetwork::Regtest)
@@ -649,21 +650,21 @@ pub fn test_merge_token_set() -> Arc<TokenSet> {
 pub fn test_bch_prepared_with_tokens(
     tokens: Arc<TokenSet>,
     donation: Option<u16>,
-    fee_address: Option<Address>,
+    fee_address: Option<PayoutAddress>,
     fee: Option<u16>,
 ) -> Arc<PreparedNotifyParams> {
     let template: BlockTemplate = serde_json::from_str(include_str!(
         "../../bitcoindrpc/test_data/bchn-regtest-template.json"
     ))
     .unwrap();
-    let first = Address::p2pkh(
+    let first = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([1; 20]),
         bitcoin::Network::Regtest,
-    );
-    let second = Address::p2pkh(
+    ));
+    let second = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([2; 20]),
         bitcoin::Network::Regtest,
-    );
+    ));
     let weights = HashMap::from([(first, 1), (second, 3)]);
     let donation_address = donation.map(|_| {
         crate::config::bitcoin_cash_donation_address(crate::config::BitcoinCashNetwork::Regtest)
@@ -709,15 +710,15 @@ pub fn test_bch_prepared_with_tree_payees(payee_count: u32) -> Arc<PreparedNotif
 
 /// Distinct equal-weight payees for coinbase size and tree fixtures.
 #[cfg(any(test, feature = "test-utils"))]
-fn test_bch_payee_weights(payee_count: u32) -> HashMap<Address, u128> {
+fn test_bch_payee_weights(payee_count: u32) -> HashMap<PayoutAddress, u128> {
     let mut weights = HashMap::with_capacity(payee_count as usize);
     for payee_index in 0..payee_count {
         let mut key_hash = [0; 20];
         key_hash[..4].copy_from_slice(&payee_index.to_le_bytes());
-        let address = Address::p2pkh(
+        let address = PayoutAddress::from(Address::p2pkh(
             bitcoin::PubkeyHash::from_byte_array(key_hash),
             bitcoin::Network::Regtest,
-        );
+        ));
         weights.insert(address, 1);
     }
     weights
@@ -727,7 +728,7 @@ fn test_bch_payee_weights(payee_count: u32) -> HashMap<Address, u128> {
 #[cfg(any(test, feature = "test-utils"))]
 fn test_bch_prepared_with_weights(
     template: BlockTemplate,
-    weights: HashMap<Address, u128>,
+    weights: HashMap<PayoutAddress, u128>,
 ) -> Arc<PreparedNotifyParams> {
     test_bch_prepared_with_weights_and_cuts(template, weights, (None, None), (None, None), None)
 }
@@ -738,9 +739,9 @@ fn test_bch_prepared_with_weights(
 #[cfg(any(test, feature = "test-utils"))]
 fn test_bch_prepared_with_weights_and_cuts(
     template: BlockTemplate,
-    weights: HashMap<Address, u128>,
-    (donation_address, donation): (Option<Address>, Option<u16>),
-    (fee_address, fee): (Option<Address>, Option<u16>),
+    weights: HashMap<PayoutAddress, u128>,
+    (donation_address, donation): (Option<PayoutAddress>, Option<u16>),
+    (fee_address, fee): (Option<PayoutAddress>, Option<u16>),
     merge_tokens: Option<Arc<TokenSet>>,
 ) -> Arc<PreparedNotifyParams> {
     let anchor = BlockHash::from_byte_array([0x33; 32]);
@@ -782,10 +783,10 @@ fn test_bch_prepared_with_weights_and_cuts(
 /// split, as the node requires.
 #[cfg(test)]
 pub(crate) fn test_bch_declared_leaves(token: &[u8]) -> MinerTokenJob {
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         bitcoin::Network::Regtest,
-    );
+    ));
     let terms = ShareCommitment::from_mining_job_token(
         token,
         payout.clone(),
@@ -866,10 +867,10 @@ pub(crate) fn test_bch_custom_job_with_leaves(
     disclosure: Disclosure,
 ) -> (Vec<u8>, DeclaredJob) {
     let template = prepared.template();
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         bitcoin::Network::Regtest,
-    );
+    ));
     let mut commitment =
         ShareCommitment::from_mining_job_token(&token, payout, ShareOwner::CashP2pkh([0x22; 20]))
             .unwrap();
@@ -956,10 +957,10 @@ pub(crate) fn test_bch_custom_job_with_leaves(
 /// token's target is regtest's limit, which the solved header meets.
 #[cfg(test)]
 pub fn test_bch_auxpow() -> (AuxProof, TokenLeaf) {
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         bitcoin::Network::Regtest,
-    )
+    ))
     .script_pubkey();
     let leaf = TokenLeaf::new(
         [0xa1; 32],
@@ -1308,11 +1309,8 @@ pub fn build_test_header_with_uncles(
 
 /// Parse a bitcoin address string into a checked Address for tests.
 #[cfg(any(test, feature = "test-utils"))]
-pub fn parse_address_from_string(address_str: &str) -> bitcoin::Address {
-    address_str
-        .parse::<bitcoin::Address<_>>()
-        .unwrap()
-        .assume_checked()
+pub fn parse_address_from_string(address_str: &str) -> PayoutAddress {
+    address_str.parse().unwrap()
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -1501,7 +1499,7 @@ pub fn create_test_commitment() -> ShareCommitment {
     let pubkey = "020202020202020202020202020202020202020202020202020202020202020202"
         .parse::<CompressedPublicKey>()
         .unwrap();
-    let btcaddress = Address::p2wpkh(&pubkey, bitcoin::Network::Signet);
+    let btcaddress = PayoutAddress::from(Address::p2wpkh(&pubkey, bitcoin::Network::Signet));
     ShareCommitment {
         prev_share_blockhash: BlockHash::from_str(
             "0000000086704a35f17580d06f76d4c02d2b1f68774800675fb45f0411205bb4",
@@ -1646,10 +1644,10 @@ pub fn build_token_win_submit(
     enonce1_hex: &str,
 ) -> (SimpleRequest<'static>, crate::stratum::work::tracker::JobId) {
     let prepared = test_bch_prepared_with_tokens(test_merge_token_set(), Some(100), None, None);
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x12; 20]),
         bitcoin::Network::Regtest,
-    );
+    ));
     let (job_id, _) = crate::stratum::work::prepared_notify::insert_miner_job(
         &prepared,
         Some(&payout),
@@ -1848,7 +1846,7 @@ pub struct TestShareBlockBuilder {
     uncles: Vec<BlockHash>,
     miner_pubkey: Option<String>,
     share_owner: Option<ShareOwner>,
-    payout_address: Option<Address>,
+    payout_address: Option<PayoutAddress>,
     transactions: Vec<Transaction>,
     work: Option<u32>,
     nonce: Option<u32>,
@@ -1897,7 +1895,7 @@ impl TestShareBlockBuilder {
     /// Pay the share's coinbase slice to `address` instead of the signet
     /// P2WPKH address derived from the miner pubkey, e.g. a Bitcoin Cash
     /// P2PKH payout.
-    pub fn payout_address(mut self, address: Address) -> Self {
+    pub fn payout_address(mut self, address: PayoutAddress) -> Self {
         self.payout_address = Some(address);
         self
     }
@@ -1934,7 +1932,7 @@ impl TestShareBlockBuilder {
         let pubkey = CompressedPublicKey::from_str(pubkey_hex).unwrap();
         let btcaddress = self
             .payout_address
-            .unwrap_or_else(|| Address::p2wpkh(&pubkey, bitcoin::Network::Signet));
+            .unwrap_or_else(|| Address::p2wpkh(&pubkey, bitcoin::Network::Signet).into());
         let secp = Secp256k1::verification_only();
         let share_owner = self.share_owner.unwrap_or_else(|| {
             P2PoolAddress::from_internal_key(
@@ -2032,7 +2030,7 @@ fn test_share_block(
     bitcoin_block: Option<Block>,
     prev_share_blockhash: &str,
     uncles: Vec<BlockHash>,
-    btcaddress: &Address,
+    btcaddress: &PayoutAddress,
     share_owner: &ShareOwner,
     other_share_transactions: Vec<ShareTransaction>,
     work: Option<u32>,
@@ -2168,7 +2166,7 @@ fn test_share_block(
 pub struct TestShareHeaderBuilder {
     prev_share_blockhash: Option<BlockHash>,
     uncles: Vec<BlockHash>,
-    btcaddress: Option<Address>,
+    btcaddress: Option<PayoutAddress>,
     transactions: Vec<Transaction>,
 }
 
@@ -2193,7 +2191,7 @@ impl TestShareHeaderBuilder {
         self
     }
 
-    pub fn btcaddress(mut self, btcaddress: Address) -> Self {
+    pub fn btcaddress(mut self, btcaddress: PayoutAddress) -> Self {
         self.btcaddress = Some(btcaddress);
         self
     }

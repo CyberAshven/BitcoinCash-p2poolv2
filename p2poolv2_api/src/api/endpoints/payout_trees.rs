@@ -13,12 +13,13 @@ use axum::{
     extract::{Query, State},
 };
 use bitcoin::consensus::encode::serialize_hex;
-use bitcoin::{Address, Network, Txid};
+use bitcoin::{Network, Txid};
 use p2poolv2_lib::accounting::payout::payout_tree::{
     BCH_TREE_EXECUTION_FEE_RATE, BCH_TREE_FEE_RATES,
 };
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::address_display::payout_address_string;
+use p2poolv2_lib::config::PayoutAddress;
 use p2poolv2_lib::store::payout_tree::StoredPayoutTree;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -113,7 +114,7 @@ fn detail(
         .payees
         .iter()
         .map(|payee| PayoutTreePayee {
-            address: Address::from_script(&payee.script_pubkey, network)
+            address: PayoutAddress::from_script(&payee.script_pubkey, network)
                 .map(|address| payout_address_string(&address, cash_network))
                 .unwrap_or_else(|_| payee.script_pubkey.to_hex_string()),
             script_hex: payee.script_pubkey.to_hex_string(),
@@ -218,16 +219,22 @@ mod tests {
         assert!(detail.variants[0].total_fee < detail.variants[2].total_fee);
     }
 
+    /// A P2SH32 payee (`OP_HASH256 <32 bytes> OP_EQUAL`) is shown as its
+    /// CashAddr, with its script beside it.
     #[test]
-    fn a_p2sh32_payee_is_shown_by_its_script() {
+    fn a_p2sh32_payee_is_shown_as_its_cashaddr() {
         let mut tree = stored();
         let mut script = vec![0xaa, 0x20];
         script.extend_from_slice(&[0x77; 32]);
         script.push(0x87);
         tree.payees[0].script_pubkey = ScriptBuf::from_bytes(script.clone());
 
-        let detail = detail(&tree, Network::Regtest, None).unwrap();
+        let detail = detail(&tree, Network::Regtest, Some(BchShareNetwork::Regtest)).unwrap();
 
-        assert_eq!(detail.payees[0].address, hex::encode(&script));
+        assert_eq!(
+            detail.payees[0].address,
+            p2poolv2_lib::address::bch_share::encode_p2sh32_cashaddr("bchreg", &[0x77; 32])
+        );
+        assert_eq!(detail.payees[0].script_hex, hex::encode(&script));
     }
 }

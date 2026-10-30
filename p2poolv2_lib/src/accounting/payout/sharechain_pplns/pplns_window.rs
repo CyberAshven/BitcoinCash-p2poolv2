@@ -25,6 +25,7 @@ use bitcoin::BlockHash;
 use bitcoin::hashes::Hash;
 use bitcoin::params::Params;
 use bitcoin::{CompactTarget, PubkeyHash, ScriptBuf, Target, Txid, Work};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
@@ -593,7 +594,7 @@ pub struct WindowCredit {
     /// Payout address the weight is paid to: the share's or the uncle's own
     /// `miner_bitcoin_address`, or on Bitcoin Cash the P2PKH address of
     /// whoever else holds the share's payout right.
-    pub payout_address: Address,
+    pub payout_address: PayoutAddress,
 }
 
 /// What one miner earns in a payout window.
@@ -615,7 +616,7 @@ impl MinerCredits {
         &mut self,
         credit: &Credit,
         height: u32,
-        payout_address: Option<&Address>,
+        payout_address: Option<&PayoutAddress>,
         max_credits: usize,
     ) {
         if credit.nephew.is_some() {
@@ -662,7 +663,7 @@ pub struct WindowCredits {
     pub window_weight: u128,
     /// Credits of each payout address (`miner_bitcoin_address`) the window
     /// credits.
-    pub by_payout_address: HashMap<Address, MinerCredits>,
+    pub by_payout_address: HashMap<PayoutAddress, MinerCredits>,
     /// Credits of each share owner (`miner_address`, the share chain
     /// address) the window credits.
     pub by_share_owner: HashMap<ShareOwner, MinerCredits>,
@@ -848,7 +849,7 @@ impl PplnsWindow {
         if !self.per_share_cuts {
             return ShareCuts::default();
         }
-        let mut cut = |address: &Option<Address>, basis_points: Option<u16>| {
+        let mut cut = |address: &Option<PayoutAddress>, basis_points: Option<u16>| {
             address
                 .as_ref()
                 .zip(basis_points)
@@ -962,7 +963,7 @@ impl PplnsWindow {
         start_hash: BlockHash,
         paying_block_difficulty: u128,
         chain_store_handle: &ChainStoreHandle,
-    ) -> Result<HashMap<Address, u128>, WindowError> {
+    ) -> Result<HashMap<PayoutAddress, u128>, WindowError> {
         let resolved =
             self.resolve_window(start_hash, paying_block_difficulty, chain_store_handle)?;
         self.distribution_for_resolved(start_hash, &resolved)
@@ -981,7 +982,7 @@ impl PplnsWindow {
         &self,
         start_hash: BlockHash,
         resolved: &ResolvedWindow,
-    ) -> Result<HashMap<Address, u128>, WindowError> {
+    ) -> Result<HashMap<PayoutAddress, u128>, WindowError> {
         let mut weight_by_key = vec![0u128; self.address_keys.len()];
         if !self.per_share_cuts {
             self.walk_window(start_hash, resolved, |_, entry| {
@@ -1168,10 +1169,9 @@ impl PplnsWindow {
         let mut payees = HashMap::with_capacity(holders.len());
         for (share, holder) in holders {
             let key = *key_by_holder.entry(holder).or_insert_with(|| {
-                self.address_keys.key_for(Address::p2pkh(
-                    PubkeyHash::from_byte_array(holder),
-                    self.network,
-                ))
+                self.address_keys.key_for(
+                    Address::p2pkh(PubkeyHash::from_byte_array(holder), self.network).into(),
+                )
             });
             payees.insert(share, key);
         }
@@ -1538,8 +1538,8 @@ impl PplnsWindow {
     fn collect_distribution(
         &self,
         difficulty_by_key: &[u128],
-    ) -> Result<HashMap<Address, u128>, WindowError> {
-        let mut by_script: HashMap<ScriptBuf, (Address, u128)> =
+    ) -> Result<HashMap<PayoutAddress, u128>, WindowError> {
+        let mut by_script: HashMap<ScriptBuf, (PayoutAddress, u128)> =
             HashMap::with_capacity(difficulty_by_key.len());
         for (index, difficulty) in difficulty_by_key.iter().enumerate() {
             if *difficulty > 0
@@ -1847,7 +1847,7 @@ impl PplnsWindow {
         &mut self,
         blockhash: BlockHash,
         height: u32,
-        miner_address: Address,
+        miner_address: PayoutAddress,
         share_owner: ShareOwner,
         difficulty: u128,
         uncle_entries: Vec<UncleEntry>,
@@ -1872,7 +1872,7 @@ impl PplnsWindow {
     fn build_uncle_entry(
         &mut self,
         blockhash: BlockHash,
-        miner_address: Address,
+        miner_address: PayoutAddress,
         share_owner: ShareOwner,
         difficulty: u128,
     ) -> UncleEntry {
@@ -2068,7 +2068,7 @@ impl PplnsWindow {
                     .assume_checked();
                 uncle_entries.push(self.build_uncle_entry(
                     BlockHash::all_zeros(),
-                    uncle_miner,
+                    uncle_miner.into(),
                     BENCHMARK_SHARE_OWNER,
                     uncle_difficulty,
                 ));
@@ -2082,7 +2082,7 @@ impl PplnsWindow {
             let entry = self.build_confirmed_entry(
                 blockhash,
                 height,
-                miner_address,
+                miner_address.into(),
                 BENCHMARK_SHARE_OWNER,
                 difficulty,
                 uncle_entries,
@@ -2113,7 +2113,7 @@ impl PplnsWindow {
         &self,
         start_hash: BlockHash,
         paying_block_difficulty: u128,
-    ) -> Result<HashMap<Address, u128>, WindowError> {
+    ) -> Result<HashMap<PayoutAddress, u128>, WindowError> {
         let confirmed_start_index = self.find_start_index(start_hash).ok_or_else(|| {
             WindowError::ReadFailure(format!("anchor {start_hash} is not cached").into())
         })?;
@@ -2141,7 +2141,7 @@ mockall::mock! {
             start_hash: BlockHash,
             paying_block_difficulty: u128,
             chain_store_handle: &ChainStoreHandle,
-        ) -> Result<HashMap<Address, u128>, WindowError>;
+        ) -> Result<HashMap<PayoutAddress, u128>, WindowError>;
     }
 }
 
@@ -5135,12 +5135,30 @@ mod tests {
     #[test]
     fn test_bch_transferred_share_and_uncle_keep_their_own_cuts() {
         let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
-        let share_payee = Address::p2pkh(PubkeyHash::from_byte_array([1; 20]), Network::Regtest);
-        let uncle_payee = Address::p2pkh(PubkeyHash::from_byte_array([2; 20]), Network::Regtest);
-        let buyer = Address::p2pkh(PubkeyHash::from_byte_array([3; 20]), Network::Regtest);
-        let donation = Address::p2pkh(PubkeyHash::from_byte_array([4; 20]), Network::Regtest);
-        let share_fee = Address::p2pkh(PubkeyHash::from_byte_array([5; 20]), Network::Regtest);
-        let uncle_fee = Address::p2pkh(PubkeyHash::from_byte_array([6; 20]), Network::Regtest);
+        let share_payee = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([1; 20]),
+            Network::Regtest,
+        ));
+        let uncle_payee = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([2; 20]),
+            Network::Regtest,
+        ));
+        let buyer = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([3; 20]),
+            Network::Regtest,
+        ));
+        let donation = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([4; 20]),
+            Network::Regtest,
+        ));
+        let share_fee = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([5; 20]),
+            Network::Regtest,
+        ));
+        let uncle_fee = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([6; 20]),
+            Network::Regtest,
+        ));
         let donation_key = window.address_keys.key_for(donation.clone());
         let share_fee_key = window.address_keys.key_for(share_fee.clone());
         let uncle_fee_key = window.address_keys.key_for(uncle_fee.clone());
@@ -5185,8 +5203,14 @@ mod tests {
     #[test]
     fn test_bch_cut_payees_aggregate_by_script() {
         let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
-        let address = Address::p2pkh(PubkeyHash::from_byte_array([1; 20]), Network::Regtest);
-        let alias = Address::p2pkh(PubkeyHash::from_byte_array([1; 20]), Network::Bitcoin);
+        let address = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([1; 20]),
+            Network::Regtest,
+        ));
+        let alias = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([1; 20]),
+            Network::Bitcoin,
+        ));
         window.address_keys.key_for(address);
         window.address_keys.key_for(alias.clone());
 

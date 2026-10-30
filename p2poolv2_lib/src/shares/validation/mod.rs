@@ -67,9 +67,10 @@ use crate::stratum::work::gbt::compute_merkle_root_from_branches;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoin::hashes::Hash as HashTrait;
 use bitcoin::{
-    Address, Amount, BlockHash, CompactTarget, PubkeyHash, ScriptBuf, Target, Transaction,
-    TxMerkleNode, transaction::Version,
+    Amount, BlockHash, CompactTarget, PubkeyHash, ScriptBuf, Target, Transaction, TxMerkleNode,
+    transaction::Version,
 };
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, RwLock};
@@ -1667,7 +1668,7 @@ impl DefaultShareValidator {
     /// When the PPLNS window is empty (bootstrap phase), returns an error.
     fn build_expected_outputs(
         share_header: &ShareHeader,
-        address_difficulty_map: &HashMap<Address, u128>,
+        address_difficulty_map: &HashMap<PayoutAddress, u128>,
         coinbase_value: u64,
         split: PayoutSplit,
     ) -> Result<CoinbasePayouts, ValidationError> {
@@ -2201,6 +2202,7 @@ mod tests {
         test_coinbase_transaction,
     };
     use crate::utils::time_provider::TestTimeProvider;
+    use bitcoin::Address;
     use bitcoin::consensus::encode::deserialize_hex;
     use bitcoin::pow::Work;
     use bitcoin::script::{Builder, PushBytesBuf};
@@ -2411,7 +2413,8 @@ mod tests {
             &ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array([0x22; 20])),
             Network::Regtest,
         )
-        .unwrap();
+        .unwrap()
+        .into();
         share.header.bitcoin_header = chipnet_block;
         // The mini chain's ceiling, which the real block's hash meets.
         let mini_ceiling =
@@ -2483,7 +2486,9 @@ mod tests {
 
     fn header_paying(script: ScriptBuf) -> ShareHeader {
         let mut header = TestShareBlockBuilder::new().build().header;
-        header.miner_bitcoin_address = Address::from_script(&script, Network::Regtest).unwrap();
+        header.miner_bitcoin_address = Address::from_script(&script, Network::Regtest)
+            .unwrap()
+            .into();
         header
     }
 
@@ -2503,6 +2508,20 @@ mod tests {
         let header = header_paying(ScriptBuf::new_p2sh(&bitcoin::ScriptHash::from_byte_array(
             [7; 20],
         )));
+        assert!(
+            validator()
+                .for_chain(Chain::BitcoinCash)
+                .validate_payout_scripts(&header)
+                .is_ok()
+        );
+    }
+
+    /// A P2SH32 payee (`OP_HASH256 <32 bytes> OP_EQUAL`), which
+    /// `bitcoin::Address` cannot hold, passes the payout script rule.
+    #[test]
+    fn bitcoin_cash_accepts_a_p2sh32_payee() {
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.miner_bitcoin_address = PayoutAddress::p2sh32([7; 32], Network::Regtest);
         assert!(
             validator()
                 .for_chain(Chain::BitcoinCash)
@@ -2545,7 +2564,8 @@ mod tests {
                 &ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::from_byte_array([8; 32])),
                 Network::Regtest,
             )
-            .unwrap(),
+            .unwrap()
+            .into(),
         );
         let error = validator()
             .for_chain(Chain::BitcoinCash)
@@ -3014,10 +3034,13 @@ mod tests {
     #[test]
     fn bitcoin_cash_accepts_the_default_donation_to_the_built_in_key() {
         let mut share = TestShareBlockBuilder::new().build();
-        share.header.donation_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
-            Network::Testnet,
-        ));
+        share.header.donation_address = Some(
+            Address::p2pkh(
+                PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
+                Network::Testnet,
+            )
+            .into(),
+        );
         share.header.donation = Some(150);
         let bch_validator = validator().for_chain(Chain::BitcoinCash);
         assert!(bch_validator.validate_payout_cuts(&share.header).is_ok());
@@ -3026,10 +3049,8 @@ mod tests {
     #[test]
     fn bitcoin_cash_rejects_a_donation_to_another_key() {
         let mut share = TestShareBlockBuilder::new().build();
-        share.header.donation_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array([0x33; 20]),
-            Network::Testnet,
-        ));
+        share.header.donation_address =
+            Some(Address::p2pkh(PubkeyHash::from_byte_array([0x33; 20]), Network::Testnet).into());
         share.header.donation = Some(150);
         let error = validator()
             .for_chain(Chain::BitcoinCash)
@@ -3043,15 +3064,16 @@ mod tests {
     /// key) and fee (to another key), in basis points.
     fn bitcoin_cash_header_with_cuts(donation: u16, fee: u16) -> ShareHeader {
         let mut share = TestShareBlockBuilder::new().build();
-        share.header.donation_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
-            Network::Testnet,
-        ));
+        share.header.donation_address = Some(
+            Address::p2pkh(
+                PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
+                Network::Testnet,
+            )
+            .into(),
+        );
         share.header.donation = Some(donation);
-        share.header.fee_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array([0x33; 20]),
-            Network::Testnet,
-        ));
+        share.header.fee_address =
+            Some(Address::p2pkh(PubkeyHash::from_byte_array([0x33; 20]), Network::Testnet).into());
         share.header.fee = Some(fee);
         share.header
     }
@@ -3098,10 +3120,8 @@ mod tests {
     #[test]
     fn bitcoin_accepts_a_full_donation_to_any_address() {
         let mut share = TestShareBlockBuilder::new().build();
-        share.header.donation_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array([0x33; 20]),
-            Network::Testnet,
-        ));
+        share.header.donation_address =
+            Some(Address::p2pkh(PubkeyHash::from_byte_array([0x33; 20]), Network::Testnet).into());
         share.header.donation = Some(MAX_BASIS_POINTS);
         assert!(validator().validate_payout_cuts(&share.header).is_ok());
     }
@@ -3109,10 +3129,8 @@ mod tests {
     #[test]
     fn bitcoin_rejects_a_fee_above_one_hundred_percent() {
         let mut share = TestShareBlockBuilder::new().build();
-        share.header.fee_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array([0x33; 20]),
-            Network::Testnet,
-        ));
+        share.header.fee_address =
+            Some(Address::p2pkh(PubkeyHash::from_byte_array([0x33; 20]), Network::Testnet).into());
         share.header.fee = Some(MAX_BASIS_POINTS + 1);
         let error = validator().validate_payout_cuts(&share.header).unwrap_err();
         assert_eq!(error.kind(), FailureKind::Consensus);
@@ -6627,10 +6645,13 @@ mod tests {
     /// validator rebuilds exactly that coinbase from the same weights.
     #[test]
     fn a_token_share_past_t_is_rebuilt_with_its_payout_tree() {
-        let weights: HashMap<Address, u128> = (1..=120u8)
+        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
             .map(|byte| {
                 (
-                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
                     u128::from(byte) * 1_000,
                 )
             })
@@ -6701,10 +6722,13 @@ mod tests {
     /// tokens.
     #[test]
     fn a_pool_built_token_share_is_rebuilt_from_its_header_root() {
-        let weights: HashMap<Address, u128> = (1..=120u8)
+        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
             .map(|byte| {
                 (
-                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
                     u128::from(byte) * 1_000,
                 )
             })
@@ -6829,10 +6853,13 @@ mod tests {
     /// output index; the same share as a mere share hands over nothing.
     #[test]
     fn a_found_block_hands_its_payout_tree_to_the_sink() {
-        let weights: HashMap<Address, u128> = (1..=120u8)
+        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
             .map(|byte| {
                 (
-                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
                     u128::from(byte) * 1_000,
                 )
             })
@@ -6916,10 +6943,13 @@ mod tests {
     /// share would, is not the coinbase its commitment implies.
     #[test]
     fn a_token_share_paying_every_payee_directly_is_rejected() {
-        let weights: HashMap<Address, u128> = (1..=120u8)
+        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
             .map(|byte| {
                 (
-                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
                     u128::from(byte) * 1_000,
                 )
             })
@@ -6983,10 +7013,13 @@ mod tests {
     /// and the validator agrees.
     #[test]
     fn a_no_token_share_with_the_same_payees_pays_every_one_directly() {
-        let weights: HashMap<Address, u128> = (1..=120u8)
+        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
             .map(|byte| {
                 (
-                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
                     u128::from(byte) * 1_000,
                 )
             })

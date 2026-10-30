@@ -14,9 +14,10 @@ use crate::shares::share_commitment::ShareCommitment;
 use crate::stratum::work::coinbase::{
     EXTRANONCE_SEPARATOR, build_declared_coinbase, check_bch_coinbase_limit,
 };
+use bitcoin::Amount;
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash;
-use bitcoin::{Address, Amount};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -39,7 +40,7 @@ pub struct PreparedCoinbase {
 pub fn prepare_coinbase(
     token: &[u8],
     mut commitment: ShareCommitment,
-    weights: &HashMap<Address, u128>,
+    weights: &HashMap<PayoutAddress, u128>,
     value: u64,
     height: u32,
     descriptor: BchCoinbase,

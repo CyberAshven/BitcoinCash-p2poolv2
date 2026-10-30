@@ -31,6 +31,7 @@ use bitcoindrpc::test_utils::{mock_submit_block_with_any_body, setup_mock_bitcoi
 use p2poolv2_config::DEFAULT_VERSION_MASK;
 use p2poolv2_wallet::bch_share::encode_payout_address;
 use p2poolv2_wallet::bch_share::{BchShareAddress, BchShareNetwork};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use tokio::sync::mpsc;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
@@ -268,10 +269,10 @@ async fn active_custom_job_keeps_its_share_credit_after_difficulty_changes() {
     let (mut ctx, mut emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
     ctx.start_difficulty = 5;
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         Network::Regtest,
-    );
+    ));
     let identity = encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap();
     let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
         request_id: 1,
@@ -361,10 +362,10 @@ async fn node_rejection_does_not_install_a_custom_job() {
         .await;
     let (ctx, _emissions, _dirs) = test_bch_stratum_context(&rpc.uri()).await;
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         Network::Regtest,
-    );
+    ));
     let identity = encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap();
     let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
         request_id: 1,
@@ -404,10 +405,10 @@ async fn node_rejection_does_not_install_a_custom_job() {
 async fn new_bits_on_the_same_parent_send_a_new_prev_hash() {
     let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         Network::Regtest,
-    );
+    ));
     let identity = encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap();
     let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
         request_id: 1,
@@ -451,10 +452,10 @@ async fn new_bits_on_the_same_parent_send_a_new_prev_hash() {
 async fn a_zero_version_mask_does_not_allow_version_rolling() {
     let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
     let mut channels = MiningChannels::new(ctx, 0);
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         Network::Regtest,
-    );
+    ));
     let identity = encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap();
     let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
         request_id: 1,
@@ -531,10 +532,10 @@ fn the_main_chain_ceiling_target_is_no_harder_than_its_share_target() {
 async fn a_fast_channel_opens_at_the_share_difficulty_of_its_first_job() {
     let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         Network::Regtest,
-    );
+    ));
     let identity = encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap();
     let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
         request_id: 1,
@@ -576,10 +577,10 @@ async fn a_fast_channel_opens_at_the_share_difficulty_of_its_first_job() {
 async fn a_channel_above_the_share_difficulty_gets_set_target_before_the_job() {
     let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         Network::Regtest,
-    );
+    ));
     let identity = encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap();
     let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
         request_id: 1,
@@ -634,7 +635,7 @@ async fn extended_channel_mines_the_job_it_is_sent_and_its_share_is_emitted() {
         PreparedNotifyParamsBuilder::new(
             Arc::new(template.clone()),
             vec![OutputPair {
-                address: Address::p2wpkh(&payout_key, Network::Signet),
+                address: Address::p2wpkh(&payout_key, Network::Signet).into(),
                 amount: Amount::from_sat(template.coinbasevalue),
             }],
             b"P2Poolv2",
@@ -889,7 +890,7 @@ async fn standard_channel_mines_the_merkle_root_it_is_sent() {
         PreparedNotifyParamsBuilder::new(
             Arc::new(template.clone()),
             vec![OutputPair {
-                address: Address::p2wpkh(&payout_key, Network::Signet),
+                address: Address::p2wpkh(&payout_key, Network::Signet).into(),
                 amount: Amount::from_sat(template.coinbasevalue),
             }],
             b"P2Poolv2",
@@ -1011,7 +1012,7 @@ async fn a_share_below_the_channel_target_keeps_the_block_submission_policy() {
         PreparedNotifyParamsBuilder::new(
             Arc::new(template.clone()),
             vec![OutputPair {
-                address: Address::p2wpkh(&payout_key, Network::Signet),
+                address: Address::p2wpkh(&payout_key, Network::Signet).into(),
                 amount: Amount::from_sat(template.coinbasevalue),
             }],
             b"P2Poolv2",
@@ -1134,7 +1135,7 @@ async fn a_hydrapool_share_meeting_the_channel_target_is_queued_at_the_job_diffi
         PreparedNotifyParamsBuilder::new(
             Arc::new(template.clone()),
             vec![OutputPair {
-                address: Address::p2wpkh(&payout_key, Network::Signet),
+                address: Address::p2wpkh(&payout_key, Network::Signet).into(),
                 amount: Amount::from_sat(template.coinbasevalue),
             }],
             b"P2Poolv2",
@@ -1265,7 +1266,7 @@ async fn a_hydrapool_share_below_the_channel_target_is_not_queued() {
         PreparedNotifyParamsBuilder::new(
             Arc::new(template.clone()),
             vec![OutputPair {
-                address: Address::p2wpkh(&payout_key, Network::Signet),
+                address: Address::p2wpkh(&payout_key, Network::Signet).into(),
                 amount: Amount::from_sat(template.coinbasevalue),
             }],
             b"P2Poolv2",
@@ -2160,10 +2161,10 @@ fn a_coinbase_past_the_extended_job_field_limit_is_refused() {
 
 /// The identity of a Bitcoin Cash miner paid at a P2PKH address.
 fn bch_identity() -> String {
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         Network::Regtest,
-    );
+    ));
     encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap()
 }
 
@@ -2353,10 +2354,10 @@ async fn a_standard_channel_gets_templates_an_open_extended_channel_cannot_carry
 #[tokio::test]
 async fn an_sv1_notify_carries_a_coinbase_an_extended_job_cannot() {
     let prepared = test_bch_prepared_with_payee_count(2_000);
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         Network::Regtest,
-    );
+    ));
     let tracker = start_tracker_actor();
 
     let notify = build_notify_from_prepared(
@@ -2404,10 +2405,10 @@ async fn open_with_donation(
 ) -> (MiningChannels, Vec<Vec<u8>>, [tempfile::TempDir; 2]) {
     let (ctx, _emissions, dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         Network::Regtest,
-    );
+    ));
     let identity = format!(
         "{}.rig1{identity_options}",
         encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap()
@@ -2463,7 +2464,7 @@ async fn an_identity_donation_is_the_channels_on_every_job() {
             format!(
                 "{}.rig1",
                 encode_payout_address(
-                    &Address::p2pkh(
+                    Address::p2pkh(
                         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
                         Network::Regtest
                     ),

@@ -333,7 +333,9 @@ mod tests {
     fn test_coinbase_proof_rejects_changed_miner_bitcoin_address_network() {
         let mut header = non_genesis_share_header();
         let script = header.miner_bitcoin_address.script_pubkey();
-        header.miner_bitcoin_address = Address::from_script(&script, Network::Regtest).unwrap();
+        header.miner_bitcoin_address = Address::from_script(&script, Network::Regtest)
+            .unwrap()
+            .into();
         assert_ne!(
             header.miner_bitcoin_address,
             non_genesis_share_header().miner_bitcoin_address

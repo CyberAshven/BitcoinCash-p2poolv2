@@ -9,7 +9,6 @@ use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::address_display::payout_address_string;
 use p2poolv2_lib::store::found_block::FoundBlock;
 use serde::Serialize;
-use std::str::FromStr;
 use std::sync::Arc;
 
 /// A bitcoin block found by the pool, as JSON.
@@ -31,8 +30,11 @@ impl FoundBlockResponse {
             bitcoin_blockhash: block.bitcoin_blockhash.to_string(),
             share_blockhash: block.share_blockhash.to_string(),
             bitcoin_time: block.bitcoin_time,
-            miner_bitcoin_address: match bitcoin::Address::from_str(&block.miner_bitcoin_address) {
-                Ok(address) => payout_address_string(&address.assume_checked(), cash_network),
+            miner_bitcoin_address: match block
+                .miner_bitcoin_address
+                .parse::<p2poolv2_lib::config::PayoutAddress>()
+            {
+                Ok(address) => payout_address_string(&address, cash_network),
                 Err(_) => block.miner_bitcoin_address.clone(),
             },
         }

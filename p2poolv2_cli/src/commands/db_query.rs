@@ -7,7 +7,6 @@
 //! These functions open a RocksDB store in read-only mode and query it
 //! directly, without requiring a running node or API server.
 
-use bitcoin::Address;
 use bitcoin::BlockHash;
 use bitcoin::Network;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
@@ -17,6 +16,7 @@ use p2poolv2_lib::store::Store;
 use p2poolv2_lib::store::dag_store::{DagEntry, MAX_UNCLES_DEPTH};
 use p2poolv2_lib::store::writer::StoreError;
 use p2poolv2_lib::utils::time_provider::format_timestamp;
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use serde::Serialize;
 use serde_json::Value;
 use std::error::Error;
@@ -343,7 +343,7 @@ fn short_miner_address(
 /// A Bitcoin address keeps its first ten characters, as before. A CashAddr
 /// begins with its network prefix, the same for every miner, so it is
 /// truncated from both ends like a share chain address.
-fn short_payout_address(address: &Address, cash_network: Option<BchShareNetwork>) -> String {
+fn short_payout_address(address: &PayoutAddress, cash_network: Option<BchShareNetwork>) -> String {
     let rendered = payout_address_string(address, cash_network);
     match cash_network {
         Some(_) => ends(&rendered, 6),

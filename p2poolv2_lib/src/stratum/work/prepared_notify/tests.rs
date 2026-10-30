@@ -7,10 +7,12 @@ use crate::test_utils::make_test_share_address;
 use crate::test_utils::make_test_share_program;
 use crate::test_utils::test_bch_prepared;
 use crate::test_utils::test_coinbase_transaction;
+use bitcoin::Address;
 use bitcoin::{
     Amount, CompressedPublicKey, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
     Txid, Witness, absolute,
 };
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
 
 #[test]
@@ -22,10 +24,10 @@ fn bch_job_token_roundtrips_all_terms_within_the_wire_budget() {
         &prepared.uncles,
         prepared.bits,
     );
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
         Network::Regtest,
-    );
+    ));
     prepared.donation_address = Some(payout.clone());
     prepared.donation = Some(150);
     prepared.fee_address = Some(payout.clone());
@@ -93,12 +95,12 @@ fn test_template() -> BlockTemplate {
     serde_json::from_str(data).expect("Failed to parse BlockTemplate")
 }
 
-fn test_address() -> Address {
+fn test_address() -> PayoutAddress {
     let miner_pubkey: CompressedPublicKey =
         "020202020202020202020202020202020202020202020202020202020202020202"
             .parse()
             .unwrap();
-    Address::p2wpkh(&miner_pubkey, Network::Signet)
+    Address::p2wpkh(&miner_pubkey, Network::Signet).into()
 }
 
 fn test_output_distribution(template: &BlockTemplate) -> Vec<OutputPair> {
@@ -193,10 +195,10 @@ fn share_transactions_within_the_block_size_limit_are_all_kept() {
 async fn a_job_without_share_transactions_commits_to_the_empty_root() {
     let prepared = test_bch_prepared();
     let tracker = start_tracker_actor();
-    let payout = Address::p2pkh(
+    let payout = PayoutAddress::from(Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([1; 20]),
         Network::Regtest,
-    );
+    ));
 
     let (job_id, _) = insert_miner_job(
         &prepared,
@@ -222,10 +224,10 @@ async fn coinbase_part_lengths_are_the_lengths_of_each_miners_job() {
 
     let jobs: Vec<JobDetails> = (1..=3u8)
         .map(|byte| {
-            let payout = Address::p2pkh(
+            let payout = PayoutAddress::from(Address::p2pkh(
                 bitcoin::PubkeyHash::from_byte_array([byte; 20]),
                 Network::Regtest,
-            );
+            ));
             let (job_id, _) = insert_miner_job(
                 &prepared,
                 Some(&payout),
@@ -274,7 +276,7 @@ fn bch_job_rejects_a_coinbase_that_exceeds_the_block_limit() {
     template.sizelimit = 81;
     template.validate_bch().unwrap();
     let distribution = vec![OutputPair {
-        address: Address::p2pkh(bitcoin::PubkeyHash::all_zeros(), Network::Regtest),
+        address: Address::p2pkh(bitcoin::PubkeyHash::all_zeros(), Network::Regtest).into(),
         amount: bitcoin::Amount::from_sat(template.coinbasevalue),
     }];
     let result =
@@ -395,7 +397,7 @@ fn test_different_addresses_produce_different_hashes() {
         "02ac493f2130ca56cb5c3a559860cef9a84f90b5a85dfe4ec6e6067eeee17f4d2d"
             .parse()
             .unwrap();
-    let address2 = Address::p2wpkh(&other_pubkey, Network::Signet);
+    let address2 = PayoutAddress::from(Address::p2wpkh(&other_pubkey, Network::Signet));
     let share_address = make_test_share_program(1);
 
     let time = 1_700_000_000;
@@ -653,11 +655,12 @@ fn test_split_coinbase2_rejects_short_coinbase2() {
 }
 
 /// A P2PKH regtest payout to twenty `byte` bytes.
-fn regtest_payout(byte: u8) -> Address {
+fn regtest_payout(byte: u8) -> PayoutAddress {
     Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([byte; 20]),
         Network::Regtest,
     )
+    .into()
 }
 
 /// The coinbase a miner hashes for a job, with zero extranonce bytes.

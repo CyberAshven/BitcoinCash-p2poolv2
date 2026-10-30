@@ -121,7 +121,7 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
         bitcoin::PubkeyHash::from_byte_array([0xfe; 20]),
         Network::Regtest,
     );
-    let prepared = test_bch_prepared_with_cuts(Some(100), Some(fee_address), Some(100));
+    let prepared = test_bch_prepared_with_cuts(Some(100), Some(fee_address.into()), Some(100));
     let cache = PoolTransactionCache::new();
     cache.set_prepared(Arc::clone(&prepared));
     let (_template_sender, template_rx) = watch::channel(Some(Arc::clone(&prepared)));
@@ -214,7 +214,7 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
     // the declaration longer than the listener's 4,096-byte reads.
     let terms = ShareCommitment::from_mining_job_token(
         &token,
-        payout.clone(),
+        payout.clone().into(),
         p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]),
     )
     .unwrap();

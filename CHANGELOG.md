@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Bitcoin Cash miners can be paid to P2SH32 addresses (`OP_HASH256 <32
+bytes> OP_EQUAL`, from the 2023-05-15 upgrade), which contracts and
+CashTokens covenants use. The share-chain rules already allowed P2SH32
+payout scripts; the node could not hold them, because payouts were
+`bitcoin::Address` values. Payouts are now `PayoutAddress`, a locking
+script and network class, end to end: CashAddr parsing in config and
+Stratum usernames, share headers, PPLNS weights, the coinbase, and the API
+and CLI, which show P2SH32 as CashAddr. Share header bytes are unchanged,
+so this is neither a share-chain rule change nor a Bitcoin Cash consensus
+change.
+
 The P2P message decoder is now fuzzed: a cargo-fuzz harness, ported from
 upstream P2Poolv2, feeds arbitrary bytes to `RawMessage` decoding, both
 unframed and inside a correctly checksummed frame, so this fork's own

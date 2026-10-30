@@ -4,7 +4,6 @@
 
 mod cashaddr;
 
-use bitcoin::address::NetworkChecked;
 use bitcoin::base58;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
@@ -12,6 +11,7 @@ use bitcoin::{Address, Network, PubkeyHash};
 use bitcoindrpc::BitcoinRpcConfig;
 use p2poolv2_wallet::Address as ShareAddress;
 use p2poolv2_wallet::bch_share::{self, BchShareAddress, BchShareNetwork};
+pub use p2poolv2_wallet::payout_address::PayoutAddress;
 use serde::Deserialize;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -87,11 +87,12 @@ pub fn bitcoin_cash_donation_cashaddr(network: BitcoinCashNetwork) -> &'static s
 
 /// Donation output for a Bitcoin Cash network: P2PKH to
 /// [`BITCOIN_CASH_DONATION_PUBKEY_HASH`].
-pub fn bitcoin_cash_donation_address(network: BitcoinCashNetwork) -> Address {
+pub fn bitcoin_cash_donation_address(network: BitcoinCashNetwork) -> PayoutAddress {
     Address::p2pkh(
         PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
         network.legacy_network(),
     )
+    .into()
 }
 
 /// Error type for configuration parsing and validation.
@@ -111,22 +112,22 @@ impl std::fmt::Display for ConfigError {
 /// Parse a payout address for the chain this node is configured to mine.
 ///
 /// Bitcoin keeps the existing address parser. Bitcoin Cash accepts only a
-/// CashAddr whose prefix matches `bitcoin_cash_network`, and returns the
-/// legacy script those bytes encode.
+/// CashAddr whose prefix matches `bitcoin_cash_network`: P2PKH, P2SH20 or
+/// P2SH32, token-aware or not. Either way the result is the script paid.
 pub fn parse_payout_address(
     address: &str,
     chain: Chain,
     network: Network,
     bitcoin_cash_network: Option<BitcoinCashNetwork>,
-) -> Result<Address, ConfigError> {
+) -> Result<PayoutAddress, ConfigError> {
     match chain {
-        Chain::Bitcoin => parse_address(address, network),
+        Chain::Bitcoin => parse_address(address, network).map(PayoutAddress::from),
         Chain::BitcoinCash => {
             let bitcoin_cash_network = bitcoin_cash_network.ok_or_else(|| ConfigError {
                 message: "bitcoin_cash_network is required when chain is bitcoin-cash".to_string(),
             })?;
             cashaddr::decode(address, bitcoin_cash_network)
-                .map(|decoded| decoded.to_address())
+                .map(|decoded| decoded.to_payout_address())
                 .map_err(|error| ConfigError {
                     message: format!("Invalid Bitcoin Cash payout address: {error}"),
                 })
@@ -273,8 +274,8 @@ impl BitcoinCashNetwork {
 
     /// Bitcoin network whose base58 version bytes and proof-of-work limit
     /// match this Bitcoin Cash network: mainnet `0x1d00ffff`, chipnet and
-    /// scalenet `0x1d00ffff` (as testnet), regtest `0x207fffff`. It lets
-    /// `bitcoin::Address` carry a decoded CashAddr script, and it is the
+    /// scalenet `0x1d00ffff` (as testnet), regtest `0x207fffff`. It is the
+    /// network class a decoded CashAddr payout is held under, and it is the
     /// `stratum.network` a Bitcoin Cash node uses for difficulty and its P2P
     /// protocol id.
     pub fn legacy_network(self) -> Network {
@@ -467,11 +468,11 @@ pub struct StratumConfig<State = Raw> {
 
     // Parsed addresses - only available when State = Parsed
     #[serde(skip)]
-    pub bootstrap_address_parsed: Option<Address<NetworkChecked>>,
+    pub bootstrap_address_parsed: Option<PayoutAddress>,
     #[serde(skip)]
-    pub donation_address_parsed: Option<Address<NetworkChecked>>,
+    pub donation_address_parsed: Option<PayoutAddress>,
     #[serde(skip)]
-    pub fee_address_parsed: Option<Address<NetworkChecked>>,
+    pub fee_address_parsed: Option<PayoutAddress>,
     #[serde(skip)]
     pub miner_address_parsed: Option<ShareAddress>,
     /// Bitcoin Cash share owner, set only when `chain` is bitcoin-cash.
@@ -728,19 +729,19 @@ impl StratumConfig<Raw> {
 
 impl StratumConfig<Parsed> {
     /// Get the parsed and validated bootstrap address
-    pub fn bootstrap_address(&self) -> &Address<NetworkChecked> {
+    pub fn bootstrap_address(&self) -> &PayoutAddress {
         self.bootstrap_address_parsed
             .as_ref()
             .expect("bootstrap_address_parsed should always be Some in Parsed state")
     }
 
     /// Get the parsed and validated donation address, if any
-    pub fn donation_address(&self) -> Option<&Address<NetworkChecked>> {
+    pub fn donation_address(&self) -> Option<&PayoutAddress> {
         self.donation_address_parsed.as_ref()
     }
 
     /// Get the parsed and validated fee address, if any
-    pub fn fee_address(&self) -> Option<&Address<NetworkChecked>> {
+    pub fn fee_address(&self) -> Option<&PayoutAddress> {
         self.fee_address_parsed.as_ref()
     }
 
@@ -1027,7 +1028,7 @@ fn resolve_donation(
     bitcoin_cash_network: Option<BitcoinCashNetwork>,
     donation_address: Option<&str>,
     donation: Option<u16>,
-) -> Result<(Option<Address>, Option<u16>), ConfigError> {
+) -> Result<(Option<PayoutAddress>, Option<u16>), ConfigError> {
     match chain {
         Chain::Bitcoin => {
             let parsed = donation_address
@@ -2615,7 +2616,7 @@ mod bitcoin_cash_donation_tests {
     fn mainnet_donation_string_decodes_to_the_built_in_key() {
         let decoded = cashaddr::decode(BITCOIN_CASH_DONATION_ADDRESS, BitcoinCashNetwork::Mainnet)
             .unwrap()
-            .to_address();
+            .to_payout_address();
         assert_eq!(
             decoded,
             bitcoin_cash_donation_address(BitcoinCashNetwork::Mainnet)
@@ -2629,7 +2630,7 @@ mod bitcoin_cash_donation_tests {
             BitcoinCashNetwork::Chipnet,
         )
         .unwrap()
-        .to_address();
+        .to_payout_address();
         assert_eq!(
             decoded,
             bitcoin_cash_donation_address(BitcoinCashNetwork::Chipnet)
@@ -2643,7 +2644,7 @@ mod bitcoin_cash_donation_tests {
             BitcoinCashNetwork::Regtest,
         )
         .unwrap()
-        .to_address();
+        .to_payout_address();
         assert_eq!(
             decoded,
             bitcoin_cash_donation_address(BitcoinCashNetwork::Regtest)
@@ -2674,7 +2675,7 @@ mod bitcoin_cash_donation_tests {
         let published =
             cashaddr::decode(BITCOIN_CASH_DONATION_ADDRESS, BitcoinCashNetwork::Mainnet)
                 .unwrap()
-                .to_address();
+                .to_payout_address();
         assert_eq!(parsed.donation, Some(DEFAULT_BITCOIN_CASH_DONATION));
         assert_eq!(parsed.donation_address(), Some(&published));
     }

@@ -22,6 +22,7 @@ use crate::shares::validation::tally_share_version_votes;
 use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::work::merge_tokens::{TokenFile, TokenSet};
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, warn};
@@ -179,7 +180,7 @@ fn build_prepared_notify(
 fn merge_token_payouts(
     template: &BlockTemplate,
     output_distribution: CoinbasePayouts,
-    weights: Option<&std::collections::HashMap<bitcoin::Address, u128>>,
+    weights: Option<&std::collections::HashMap<PayoutAddress, u128>>,
     merge_tokens: Option<Arc<TokenSet>>,
     context: &NotifyContext,
 ) -> Result<(CoinbasePayouts, Option<Arc<TokenSet>>), WorkError> {
@@ -242,9 +243,7 @@ fn template_meets_token_asert(
 /// donation address on a Bitcoin Cash node in P2Pool mode, which builds every
 /// miner's jobs and shares itself. `None` elsewhere: a Bitcoin node or
 /// Hydrapool mode mines with the node's donation and refuses the option.
-fn miner_donation_address(
-    config: &StratumConfig<crate::config::Parsed>,
-) -> Option<bitcoin::Address> {
+fn miner_donation_address(config: &StratumConfig<crate::config::Parsed>) -> Option<PayoutAddress> {
     match (config.chain, config.mode, config.bitcoin_cash_network) {
         (crate::config::Chain::BitcoinCash, crate::config::PoolMode::P2poolv2, Some(network)) => {
             Some(crate::config::bitcoin_cash_donation_address(network))
@@ -457,7 +456,8 @@ mod tests {
             address: "bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr"
                 .parse::<bitcoin::Address<_>>()
                 .unwrap()
-                .assume_checked(),
+                .assume_checked()
+                .into(),
             amount: Amount::from_sat(template.coinbasevalue),
         }];
 
@@ -467,10 +467,9 @@ mod tests {
                 .build()
                 .expect("Failed to build prepared notify");
 
-        let address = "bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr"
-            .parse::<bitcoin::Address<_>>()
-            .unwrap()
-            .assume_checked();
+        let address: PayoutAddress = "bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr"
+            .parse()
+            .unwrap();
         let tracker_handle = start_tracker_actor();
         let notify_json = build_notify_from_prepared(
             &prepared,
@@ -600,10 +599,10 @@ mod tests {
         let mut config = StratumConfig::new_for_test_default().parse().unwrap();
         config.chain = crate::config::Chain::BitcoinCash;
         config.bitcoin_cash_network = Some(BitcoinCashNetwork::Regtest);
-        let address = Address::p2pkh(
+        let address = PayoutAddress::from(Address::p2pkh(
             bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
             Network::Regtest,
-        );
+        ));
         let mut payout = MockPayoutDistribution::default();
         payout.expect_pplns_weights().returning(|| None);
         payout
@@ -720,7 +719,8 @@ mod tests {
             address: "bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr"
                 .parse::<bitcoin::Address<_>>()
                 .unwrap()
-                .assume_checked(),
+                .assume_checked()
+                .into(),
             amount: Amount::from_sat(5000000000),
         }];
         let mut mock_payout = MockPayoutDistribution::default();
@@ -772,7 +772,7 @@ mod tests {
             "020202020202020202020202020202020202020202020202020202020202020202"
                 .parse()
                 .unwrap();
-        let miner_address = Address::p2wpkh(&miner_pubkey, Network::Signet);
+        let miner_address = PayoutAddress::from(Address::p2wpkh(&miner_pubkey, Network::Signet));
         let tracker_handle = start_tracker_actor();
         let result = build_notify_from_prepared(
             prepared.as_ref().unwrap(),
@@ -823,7 +823,7 @@ mod tests {
             "020202020202020202020202020202020202020202020202020202020202020202"
                 .parse()
                 .unwrap();
-        let btcaddress = Address::p2wpkh(&miner_pubkey, Network::Signet);
+        let btcaddress = PayoutAddress::from(Address::p2wpkh(&miner_pubkey, Network::Signet));
 
         let pool_difficulty =
             pool_difficulty::PoolDifficulty::new(genesis.header.bits, genesis.header.time, 0);
@@ -832,7 +832,8 @@ mod tests {
             address: "bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr"
                 .parse::<bitcoin::Address<_>>()
                 .unwrap()
-                .assume_checked(),
+                .assume_checked()
+                .into(),
             amount: Amount::from_sat(template.coinbasevalue),
         }];
         let mock_payout = mock_payout_with_distribution(test_distribution);
@@ -927,13 +928,15 @@ mod tests {
             OutputPair {
                 address: bitcoin::Address::from_str("bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr")
                     .unwrap()
-                    .assume_checked(),
+                    .assume_checked()
+                    .into(),
                 amount: Amount::from_sat(50000),
             },
             OutputPair {
                 address: bitcoin::Address::from_str("bcrt1qlk935ze2fsu86zjp395uvtegztrkaezawxx0wf")
                     .unwrap()
-                    .assume_checked(),
+                    .assume_checked()
+                    .into(),
                 amount: Amount::from_sat(12345),
             },
         ];

@@ -350,9 +350,9 @@ impl BchnValidateAddress {
 /// reads payout addresses with. Like BCHN it takes the address with or
 /// without the network's prefix and answers with the prefixed, lowercase
 /// form, the hex `scriptPubKey`, whether it pays a script and whether it is
-/// token-aware. The parser takes the 20-byte P2PKH and P2SH addresses this
-/// node pays, token-aware or not, so a P2SH32 address, which BCHN also
-/// accepts, and a legacy base58 one answer `isvalid: false` here.
+/// token-aware. The parser takes the P2PKH, P2SH20 and P2SH32 addresses this
+/// node pays, token-aware or not, so a legacy base58 address, which BCHN also
+/// accepts, answers `isvalid: false` here.
 fn bchn_validate_address(address: &Value, network: BitcoinCashNetwork) -> BchnValidateAddress {
     let Some(text) = address.as_str() else {
         return BchnValidateAddress::invalid();
@@ -370,8 +370,8 @@ fn bchn_validate_address(address: &Value, network: BitcoinCashNetwork) -> BchnVa
     ) else {
         return BchnValidateAddress::invalid();
     };
-    // The first payload symbol is the CashAddr type of a 20-byte address:
-    // `z` and `r` are the token-aware P2PKH and P2SH types. BCHN answers a
+    // The first payload symbol carries the CashAddr type: `z` and `r` are
+    // the token-aware P2PKH and P2SH types, whatever the hash size. BCHN answers a
     // token-aware address in its own, token-aware form.
     let token_aware = prefixed
         .split_once(':')
@@ -390,7 +390,7 @@ fn bchn_validate_address(address: &Value, network: BitcoinCashNetwork) -> BchnVa
         isvalid: true,
         address: Some(canonical),
         script_pub_key: Some(script.to_hex_string()),
-        isscript: Some(script.is_p2sh()),
+        isscript: Some(script.is_p2sh() || parsed.is_p2sh32()),
         istokenaware: Some(token_aware),
     }
 }

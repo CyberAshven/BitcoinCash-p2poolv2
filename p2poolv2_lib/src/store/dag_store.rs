@@ -9,7 +9,8 @@ use crate::shares::share_block::{ShareBlock, ShareHeader, is_terminal_blockhash}
 use crate::shares::validation::MAX_UNCLES;
 use bitcoin::consensus::{self, Encodable, encode};
 use bitcoin::hashes::Hash;
-use bitcoin::{Address, BlockHash, CompactTarget, Work};
+use bitcoin::{BlockHash, CompactTarget, Work};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use tracing::{debug, warn};
@@ -55,8 +56,7 @@ pub struct ShareInfo {
     /// legacy network whose base58 version bytes match, and only the API and
     /// CLI layers know to spell it as CashAddr. Serializes as the address
     /// string, as the header does.
-    #[serde(with = "crate::shares::address_serde")]
-    pub miner_bitcoin_address: Address,
+    pub miner_bitcoin_address: PayoutAddress,
     /// Miner address, as the witness program the header stores.
     ///
     /// Not the bech32m form: rendering that needs a network, and the store is
@@ -76,8 +76,7 @@ pub struct UncleInfo {
     pub prev_blockhash: BlockHash,
     /// Payout address, as the header stores it. See
     /// [`ShareInfo::miner_bitcoin_address`].
-    #[serde(with = "crate::shares::address_serde")]
-    pub miner_bitcoin_address: Address,
+    pub miner_bitcoin_address: PayoutAddress,
     /// Miner address, as the witness program the header stores. See
     /// [`ShareInfo::miner_address`].
     #[serde(with = "p2poolv2_wallet::share_owner::serde_hex")]
@@ -870,8 +869,7 @@ pub struct DagEntry {
     pub uncles: Vec<BlockHash>,
     /// Payout address, or `None` when the header could not be read. See
     /// [`ShareInfo::miner_bitcoin_address`].
-    #[serde(with = "crate::shares::option_address_serde")]
-    pub miner_bitcoin_address: Option<Address>,
+    pub miner_bitcoin_address: Option<PayoutAddress>,
     /// Miner address, or `None` when the header could not be read.
     ///
     /// The witness program rather than the bech32m form: the store is network

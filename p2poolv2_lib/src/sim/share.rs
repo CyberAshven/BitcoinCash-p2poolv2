@@ -21,7 +21,8 @@ use crate::stratum::work::gbt::compute_merkle_root_from_branches;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_from_prepared};
 use crate::stratum::work::tracker::JobTracker;
 use bitcoin::block::Header;
-use bitcoin::{Address, BlockHash, CompactTarget};
+use bitcoin::{BlockHash, CompactTarget};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -52,7 +53,7 @@ pub struct SimShareParams<'a> {
     /// This node's payout address on the chain it mines. On Bitcoin Cash it
     /// is the decoded CashAddr, carried as a `bitcoin::Address` under the
     /// matching legacy network.
-    pub miner_address: &'a Address,
+    pub miner_address: &'a PayoutAddress,
     /// This node's share chain identity, owning the share coinbase output:
     /// a taproot program on Bitcoin, a P2PKH key hash on Bitcoin Cash.
     pub share_owner: ShareOwner,
@@ -152,6 +153,7 @@ mod tests {
     use crate::stratum::work::prepared_notify::PreparedNotifyParamsBuilder;
     use crate::stratum::work::tracker::start_tracker_actor;
     use crate::test_utils::make_test_share_program;
+    use bitcoin::Address;
     use bitcoin::transaction::Version;
     use bitcoin::{Amount, CompactTarget, CompressedPublicKey, Network};
 
@@ -166,12 +168,12 @@ mod tests {
         serde_json::from_str(data).expect("parse BlockTemplate")
     }
 
-    fn test_address() -> Address {
+    fn test_address() -> PayoutAddress {
         let pubkey: CompressedPublicKey =
             "020202020202020202020202020202020202020202020202020202020202020202"
                 .parse()
                 .unwrap();
-        Address::p2wpkh(&pubkey, Network::Regtest)
+        Address::p2wpkh(&pubkey, Network::Regtest).into()
     }
 
     fn build_prepared(template: std::sync::Arc<BlockTemplate>) -> PreparedNotifyParams {
@@ -304,10 +306,10 @@ mod tests {
         ))
         .expect("parse BCHN template");
         let template = std::sync::Arc::new(template);
-        let payout = Address::p2pkh(
+        let payout = PayoutAddress::from(Address::p2pkh(
             bitcoin::PubkeyHash::from_byte_array([0x11; 20]),
             Network::Regtest,
-        );
+        ));
         let owner = ShareOwner::CashP2pkh([0x22; 20]);
         let prepared = PreparedNotifyParamsBuilder::new(
             template.clone(),

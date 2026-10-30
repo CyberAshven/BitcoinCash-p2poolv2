@@ -11,7 +11,8 @@ use crate::config::StratumConfig;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
-use bitcoin::{Address, Amount, BlockHash};
+use bitcoin::{Amount, BlockHash};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::HashMap;
 use std::error::Error;
 
@@ -33,7 +34,7 @@ pub trait PayoutDistribution {
     }
 
     /// Snapshot used by declared jobs to split a miner-selected fee revenue.
-    fn pplns_weights(&self) -> Option<HashMap<Address, u128>> {
+    fn pplns_weights(&self) -> Option<HashMap<PayoutAddress, u128>> {
         None
     }
 
@@ -55,7 +56,7 @@ pub trait PayoutDistribution {
         bitcoin_difficulty: u128,
         total_amount: bitcoin::Amount,
         remaining_total_amount: Amount,
-        bootstrap_address: Address,
+        bootstrap_address: PayoutAddress,
         split: PayoutSplit,
     ) -> Result<Option<PayoutTree>, Box<dyn Error + Send + Sync>>;
 
@@ -139,10 +140,10 @@ pub trait PayoutDistribution {
 /// cut the coinbase.
 pub fn build_pplns_outputs(
     value: u64,
-    weights: &HashMap<Address, u128>,
-    donation_address: &Option<Address>,
+    weights: &HashMap<PayoutAddress, u128>,
+    donation_address: &Option<PayoutAddress>,
     donation: Option<u16>,
-    fee_address: &Option<Address>,
+    fee_address: &Option<PayoutAddress>,
     fee: Option<u16>,
     split: PayoutSplit,
 ) -> Result<CoinbasePayouts, Box<dyn Error + Send + Sync>> {
@@ -175,7 +176,7 @@ pub fn build_pplns_outputs(
 pub(crate) fn include_address_and_cut(
     distribution: &mut Vec<OutputPair>,
     total_amount: bitcoin::Amount,
-    address: &Option<Address>,
+    address: &Option<PayoutAddress>,
     cut: Option<u16>, // in basis points
 ) -> Amount {
     const BASIS_POINT_FACTOR: u64 = 10_000; // 100 * 100
@@ -209,7 +210,7 @@ pub(crate) fn include_address_and_cut(
 /// Entries are sorted by address string to ensure the remainder from
 /// integer truncation is always assigned to the same deterministic address.
 pub(crate) fn append_proportional_distribution(
-    address_difficulty_map: &HashMap<Address, u128>,
+    address_difficulty_map: &HashMap<PayoutAddress, u128>,
     total_amount: bitcoin::Amount,
     distribution: &mut Vec<OutputPair>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -222,7 +223,7 @@ pub(crate) fn append_proportional_distribution(
         );
     }
 
-    let mut sorted_entries: Vec<(&Address, &u128)> = address_difficulty_map.iter().collect();
+    let mut sorted_entries: Vec<(&PayoutAddress, &u128)> = address_difficulty_map.iter().collect();
     sorted_entries.sort_by(|(address_a, _), (address_b, _)| {
         address_a.to_string().cmp(&address_b.to_string())
     });
@@ -266,6 +267,32 @@ mod tests {
         );
         assert_eq!(remaining, bitcoin::Amount::from_sat(100_000));
         assert!(distribution.is_empty());
+    }
+
+    /// A miner with a P2SH32 payout is paid directly by a Bitcoin Cash
+    /// coinbase output locking with its P2SH32 script.
+    #[test]
+    fn a_p2sh32_payee_is_paid_its_own_script() {
+        let p2sh32 = PayoutAddress::p2sh32([0x31; 32], bitcoin::Network::Regtest);
+        let p2pkh = parse_address_from_string("mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn");
+        let weights = HashMap::from([(p2sh32.clone(), 3), (p2pkh, 1)]);
+        let payouts = build_pplns_outputs(
+            100_000_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, false),
+        )
+        .unwrap();
+        let paid = payouts
+            .outputs
+            .iter()
+            .find(|output| output.address.script_pubkey() == p2sh32.script_pubkey())
+            .expect("the P2SH32 payee is paid directly");
+        assert_eq!(paid.amount, bitcoin::Amount::from_sat(75_000_000));
+        assert_eq!(paid.address.script_pubkey().len(), 35);
     }
 
     #[test]
@@ -344,7 +371,7 @@ mod tests {
         let total_amount = bitcoin::Amount::from_sat(100);
 
         // Run multiple times to confirm the same address always gets the remainder
-        let mut remainder_addresses: Vec<Address> = Vec::with_capacity(10);
+        let mut remainder_addresses: Vec<PayoutAddress> = Vec::with_capacity(10);
         for _ in 0..10 {
             let mut result = Vec::new();
             append_proportional_distribution(&address_difficulty_map, total_amount, &mut result)

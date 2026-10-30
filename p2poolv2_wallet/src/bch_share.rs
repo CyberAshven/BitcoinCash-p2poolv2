@@ -17,10 +17,11 @@
 //! The text encoding itself, [`encode_cashaddr`], is shared with payout
 //! display: a payout address is the same CashAddr under a payout prefix.
 
+use crate::payout_address::PayoutAddress;
 use bitcoin::hashes::Hash;
-use bitcoin::{Address, PubkeyHash, ScriptBuf};
+use bitcoin::{PubkeyHash, ScriptBuf};
 
-const CHARSET: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+pub(crate) const CHARSET: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 const GENERATOR: [u64; 5] = [
     0x98f2bc8e61,
     0x79b76d99e2,
@@ -28,13 +29,13 @@ const GENERATOR: [u64; 5] = [
     0xae2eabe2a8,
     0x1e4f43e470,
 ];
-const P2PKH_VERSION: u8 = 0x00;
-const P2SH_VERSION: u8 = 0x08;
+pub(crate) const P2PKH_VERSION: u8 = 0x00;
+pub(crate) const P2SH_VERSION: u8 = 0x08;
 /// Script hash type with size code 3, a 256-bit hash.
-const P2SH32_VERSION: u8 = P2SH_VERSION | 0x03;
+pub(crate) const P2SH32_VERSION: u8 = P2SH_VERSION | 0x03;
 /// Type bit that makes types 0 and 1 the token-aware types 2 and 3
 /// (CashTokens, "CashAddress Token Support").
-const TOKEN_AWARE_TYPE: u8 = 0x10;
+pub(crate) const TOKEN_AWARE_TYPE: u8 = 0x10;
 
 /// Script a 20-byte CashAddr payload pays, named by its version byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +61,7 @@ impl CashAddrType {
 /// is the same encoding under `bitcoincash`, `bchtest` or `bchreg`, which is
 /// how the API and CLI spell a Bitcoin Cash payout.
 pub fn encode_cashaddr(prefix: &str, address_type: CashAddrType, hash: &[u8; 20]) -> String {
-    encode_versioned_payload(prefix, address_type.version(), hash)
+    encode_cashaddr_payload(prefix, address_type.version(), hash)
 }
 
 /// Token-aware CashAddr text for a 20-byte hash under `prefix`: type 2 for
@@ -73,7 +74,7 @@ pub fn encode_token_aware_cashaddr(
     address_type: CashAddrType,
     hash: &[u8; 20],
 ) -> String {
-    encode_versioned_payload(prefix, address_type.version() | TOKEN_AWARE_TYPE, hash)
+    encode_cashaddr_payload(prefix, address_type.version() | TOKEN_AWARE_TYPE, hash)
 }
 
 /// CashAddr text for a P2SH32 locking script's 32-byte hash under `prefix`.
@@ -83,11 +84,11 @@ pub fn encode_token_aware_cashaddr(
 /// The version byte keeps the script hash type and sets the size code for a
 /// 256-bit hash.
 pub fn encode_p2sh32_cashaddr(prefix: &str, hash: &[u8; 32]) -> String {
-    encode_versioned_payload(prefix, P2SH32_VERSION, hash)
+    encode_cashaddr_payload(prefix, P2SH32_VERSION, hash)
 }
 
 /// CashAddr text for a version byte and hash under `prefix`.
-fn encode_versioned_payload(prefix: &str, version: u8, hash: &[u8]) -> String {
+pub fn encode_cashaddr_payload(prefix: &str, version: u8, hash: &[u8]) -> String {
     let mut payload = Vec::with_capacity(1 + hash.len());
     payload.push(version);
     payload.extend_from_slice(hash);
@@ -125,6 +126,16 @@ impl BchShareNetwork {
             BchShareNetwork::Chipnet => "tp2pool",
             BchShareNetwork::Regtest => "rp2pool",
             BchShareNetwork::Scalenet => "sp2pool",
+        }
+    }
+
+    /// CashAddr prefix of this network's payouts: `bitcoincash`, or
+    /// `bchtest` for chipnet and scalenet, or `bchreg`.
+    pub fn payout_prefix(self) -> &'static str {
+        match self {
+            BchShareNetwork::Mainnet => "bitcoincash",
+            BchShareNetwork::Chipnet | BchShareNetwork::Scalenet => "bchtest",
+            BchShareNetwork::Regtest => "bchreg",
         }
     }
 }
@@ -173,31 +184,19 @@ impl BchShareAddress {
     }
 }
 
-/// Format a 20-byte P2PKH or P2SH payout under the chain's CashAddr prefix.
+/// Format a P2PKH, P2SH20 or P2SH32 payout under the chain's CashAddr prefix.
 ///
 /// Errors for any other payout, which has no CashAddr form.
 pub fn encode_payout_address(
-    address: &Address,
+    address: impl Into<PayoutAddress>,
     network: BchShareNetwork,
 ) -> Result<String, BchShareAddressError> {
-    let script = address.script_pubkey();
-    let (address_type, hash_bytes) = if script.is_p2pkh() {
-        (CashAddrType::PayToPublicKeyHash, &script.as_bytes()[3..23])
-    } else if script.is_p2sh() {
-        (CashAddrType::PayToScriptHash, &script.as_bytes()[2..22])
-    } else {
-        return Err(BchShareAddressError {
-            message: "payout is not a 20-byte P2PKH or P2SH".to_string(),
-        });
-    };
-    let mut hash = [0u8; 20];
-    hash.copy_from_slice(hash_bytes);
-    let prefix = match network {
-        BchShareNetwork::Mainnet => "bitcoincash",
-        BchShareNetwork::Chipnet | BchShareNetwork::Scalenet => "bchtest",
-        BchShareNetwork::Regtest => "bchreg",
-    };
-    Ok(encode_cashaddr(prefix, address_type, &hash))
+    address
+        .into()
+        .cashaddr(network)
+        .ok_or_else(|| BchShareAddressError {
+            message: "payout is not a P2PKH, P2SH20 or P2SH32".to_string(),
+        })
 }
 
 /// Decode `address` and require `expected`.
@@ -297,7 +296,7 @@ fn decode_payload(
     })
 }
 
-fn prefix_expand(prefix: &str) -> Vec<u8> {
+pub(crate) fn prefix_expand(prefix: &str) -> Vec<u8> {
     let mut expanded = Vec::with_capacity(prefix.len() + 1);
     for byte in prefix.bytes() {
         expanded.push(byte & 0x1f);
@@ -306,7 +305,7 @@ fn prefix_expand(prefix: &str) -> Vec<u8> {
     expanded
 }
 
-fn polymod(values: &[u8]) -> u64 {
+pub(crate) fn polymod(values: &[u8]) -> u64 {
     let mut checksum = 1u64;
     for value in values {
         let top = checksum >> 35;
@@ -346,7 +345,7 @@ fn base32_decode(payload: &str) -> Result<Vec<u8>, BchShareAddressError> {
     Ok(decoded)
 }
 
-fn convert_bits(data: &[u8], from: u32, to: u32, pad: bool) -> Option<Vec<u8>> {
+pub(crate) fn convert_bits(data: &[u8], from: u32, to: u32, pad: bool) -> Option<Vec<u8>> {
     let mut accumulator = 0u32;
     let mut bits = 0u32;
     let maximum = (1u32 << to) - 1;
@@ -375,6 +374,7 @@ fn convert_bits(data: &[u8], from: u32, to: u32, pad: bool) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::Address;
 
     /// The 32-byte P2SH vector of the CashAddr specification, payload
     /// 3173ef6623c6b48ffd1a3dcc0cc6489b0a07bb47a37f47cfef4fe69de825c060.
