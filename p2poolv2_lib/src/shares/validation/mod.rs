@@ -2189,10 +2189,11 @@ mod tests {
     use crate::stratum::work::gbt::build_merkle_branches_for_template;
     use crate::test_utils::{
         BCH_TRANSFER_ECDSA_ALL_WITHOUT_FORK_ID, BCH_TRANSFER_SCHNORR_ALL,
-        BCH_TRANSFER_SCRIPT_PUBKEY, TEST_COINBASE_NSECS, TRADE_BUYER_SECRET_KEY, TRADE_SECRET,
-        TRADE_SELLER_SECRET_KEY, TestShareBlockBuilder, build_block_from_work_components,
-        genesis_for_tests, load_share_headers_test_data, make_test_address,
-        setup_pool_difficulty_mocks, test_coinbase_transaction,
+        BCH_TRANSFER_SCRIPT_PUBKEY, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G, PUBKEY_G,
+        TEST_COINBASE_NSECS, TRADE_BUYER_SECRET_KEY, TRADE_SECRET, TRADE_SELLER_SECRET_KEY,
+        TestShareBlockBuilder, build_block_from_work_components, genesis_for_tests,
+        load_share_headers_test_data, make_test_address, setup_pool_difficulty_mocks,
+        test_coinbase_transaction,
     };
     use crate::utils::time_provider::TestTimeProvider;
     use bitcoin::consensus::encode::deserialize_hex;
@@ -3413,8 +3414,6 @@ mod tests {
         );
     }
 
-    use crate::test_utils::{PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_G};
-
     #[tokio::test]
     async fn test_validate_uncles_valid() {
         let mut chain_store_handle = ChainStoreHandle::default();
@@ -3673,17 +3672,20 @@ mod tests {
         );
     }
 
-    /// An uncle may have only one nephew on a chain. Here the nephew's parent
-    /// already names the uncle, so the nephew naming it again would have the
-    /// payout window credit the uncle twice, with two nephew bonuses.
+    // Regression cases ported from pool2win's upstream P2Poolv2 commit
+    // a57252b454a09c0307428158093a16bd1194f905 (MIT OR Apache-2.0).
+    /// An uncle already listed by the nephew's parent is rejected as
+    /// it would have its work and payout counted twice on one chain.
     #[tokio::test]
-    async fn test_validate_uncles_rejects_uncle_already_named_by_parent() {
+    async fn test_validate_uncles_rejects_uncle_listed_by_parent() {
         let mut chain_store_handle = ChainStoreHandle::default();
 
-        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
-        let uncle_hash = uncle.block_hash();
-        let grandparent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
+        // grandparent (h:19) <- parent (h:20, lists uncle) <- nephew (h:21).
+        // The uncle (h:19) is the grandparent's sibling.
+        let grandparent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
         let grandparent_hash = grandparent.block_hash();
+        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
+        let uncle_hash = uncle.block_hash();
         let parent = TestShareBlockBuilder::new()
             .prev_share_blockhash(grandparent_hash.to_string())
             .uncles(vec![uncle_hash])
@@ -3691,20 +3693,17 @@ mod tests {
             .build();
         let parent_hash = parent.block_hash();
 
-        // Grandparent and uncle at 19, parent at 20, nephew at 21: the uncle
-        // is two heights below the nephew, within MAX_UNCLES_DEPTH.
         chain_store_handle
             .expect_get_block_metadata_batch()
-            .returning(move |hashes| {
-                Ok(hashes
-                    .iter()
-                    .map(|hash| {
-                        let height = if *hash == parent_hash { 20 } else { 19 };
-                        (*hash, metadata_at_height(height))
-                    })
-                    .collect())
+            .withf(move |hashes| hashes == [parent_hash, uncle_hash])
+            .times(1)
+            .returning(move |_| {
+                Ok(vec![
+                    (parent_hash, metadata_at_height(20)),
+                    (uncle_hash, metadata_at_height(19)),
+                ])
             });
-        // Ancestry walk: parent (names the uncle) -> grandparent -> genesis.
+        // Ancestry walk: parent -> grandparent -> genesis sentinel.
         let parent_header = parent.header.clone();
         let grandparent_header = grandparent.header.clone();
         chain_store_handle
@@ -3717,141 +3716,205 @@ mod tests {
                 }
             });
 
-        let second_nephew = TestShareBlockBuilder::new()
+        let invalid_share = TestShareBlockBuilder::new()
             .prev_share_blockhash(parent_hash.to_string())
             .uncles(vec![uncle_hash])
             .miner_pubkey(PUBKEY_4G)
             .build();
 
         let error = validator()
-            .validate_uncles(&second_nephew, &chain_store_handle)
+            .validate_uncles(&invalid_share, &chain_store_handle)
             .unwrap_err();
         assert_eq!(error.kind(), FailureKind::Consensus);
         assert!(
             error
                 .to_string()
-                .contains("is already an uncle of an ancestor"),
-            "unexpected error: {error}"
+                .contains("is already an uncle of an ancestor of the nephew")
         );
     }
 
-    /// The rule reaches every ancestor that could have named the uncle: here
-    /// the grandparent names an uncle three heights below the nephew, the
-    /// deepest an uncle may sit.
+    /// The reuse check covers every ancestor that could have listed the uncle,
+    /// not only the parent.
     #[tokio::test]
-    async fn test_validate_uncles_rejects_uncle_already_named_by_grandparent() {
+    async fn test_validate_uncles_rejects_uncle_listed_by_grandparent() {
         let mut chain_store_handle = ChainStoreHandle::default();
 
-        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
+        // great-grandparent (h:18) <- grandparent (h:19, lists uncle)
+        // <- parent (h:20) <- nephew (h:21). The uncle (h:18) is the
+        // great-grandparent's sibling, MAX_UNCLES_DEPTH below the nephew.
+        let great_grandparent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
+        let great_grandparent_hash = great_grandparent.block_hash();
+        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
         let uncle_hash = uncle.block_hash();
         let grandparent = TestShareBlockBuilder::new()
+            .prev_share_blockhash(great_grandparent_hash.to_string())
             .uncles(vec![uncle_hash])
-            .miner_pubkey(PUBKEY_2G)
+            .miner_pubkey(PUBKEY_3G)
             .build();
         let grandparent_hash = grandparent.block_hash();
         let parent = TestShareBlockBuilder::new()
             .prev_share_blockhash(grandparent_hash.to_string())
-            .miner_pubkey(PUBKEY_3G)
+            .miner_pubkey(PUBKEY_4G)
             .build();
         let parent_hash = parent.block_hash();
 
-        // Uncle at 18, grandparent at 19, parent at 20, nephew at 21.
         chain_store_handle
             .expect_get_block_metadata_batch()
-            .returning(move |hashes| {
-                Ok(hashes
-                    .iter()
-                    .map(|hash| {
-                        let height = if *hash == parent_hash {
-                            20
-                        } else if *hash == uncle_hash {
-                            18
-                        } else {
-                            19
-                        };
-                        (*hash, metadata_at_height(height))
-                    })
-                    .collect())
+            .withf(move |hashes| hashes == [parent_hash, uncle_hash])
+            .times(1)
+            .returning(move |_| {
+                Ok(vec![
+                    (parent_hash, metadata_at_height(20)),
+                    (uncle_hash, metadata_at_height(18)),
+                ])
             });
+        // Ancestry walk: parent -> grandparent -> great-grandparent.
         let parent_header = parent.header.clone();
         let grandparent_header = grandparent.header.clone();
+        let great_grandparent_header = great_grandparent.header.clone();
         chain_store_handle
             .expect_get_share_header()
             .returning(move |hash| {
                 if *hash == parent_hash {
                     Ok(parent_header.clone())
-                } else {
+                } else if *hash == grandparent_hash {
                     Ok(grandparent_header.clone())
+                } else {
+                    Ok(great_grandparent_header.clone())
                 }
             });
 
+        let invalid_share = TestShareBlockBuilder::new()
+            .prev_share_blockhash(parent_hash.to_string())
+            .uncles(vec![uncle_hash])
+            .miner_pubkey(PUBKEY_5G)
+            .build();
+
+        let error = validator()
+            .validate_uncles(&invalid_share, &chain_store_handle)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(
+            error
+                .to_string()
+                .contains("is already an uncle of an ancestor of the nephew")
+        );
+    }
+
+    /// Two nephews racing at the same height may both list the same uncle:
+    /// neither is an ancestor of the other, so neither share is rejected.
+    #[tokio::test]
+    async fn test_validate_uncles_allows_sibling_nephews_listing_same_uncle() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+
+        // parent (h:20) has two children, both at h:21, both listing the
+        // uncle (h:20, the parent's sibling).
+        let parent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
+        let parent_hash = parent.block_hash();
+        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
+        let uncle_hash = uncle.block_hash();
+
+        chain_store_handle
+            .expect_get_block_metadata_batch()
+            .withf(move |hashes| hashes == [parent_hash, uncle_hash])
+            .times(2)
+            .returning(move |_| {
+                Ok(vec![
+                    (parent_hash, metadata_at_height(20)),
+                    (uncle_hash, metadata_at_height(20)),
+                ])
+            });
+        // Ancestry walk: parent -> genesis sentinel.
+        let parent_header = parent.header.clone();
+        chain_store_handle
+            .expect_get_share_header()
+            .returning(move |_| Ok(parent_header.clone()));
+
+        let first_nephew = TestShareBlockBuilder::new()
+            .prev_share_blockhash(parent_hash.to_string())
+            .uncles(vec![uncle_hash])
+            .miner_pubkey(PUBKEY_3G)
+            .build();
         let second_nephew = TestShareBlockBuilder::new()
             .prev_share_blockhash(parent_hash.to_string())
             .uncles(vec![uncle_hash])
             .miner_pubkey(PUBKEY_4G)
             .build();
 
-        let error = validator()
-            .validate_uncles(&second_nephew, &chain_store_handle)
-            .unwrap_err();
-        assert_eq!(error.kind(), FailureKind::Consensus);
         assert!(
-            error
-                .to_string()
-                .contains("is already an uncle of an ancestor"),
-            "unexpected error: {error}"
+            validator()
+                .validate_uncles(&first_nephew, &chain_store_handle)
+                .is_ok()
+        );
+        assert!(
+            validator()
+                .validate_uncles(&second_nephew, &chain_store_handle)
+                .is_ok()
         );
     }
 
-    /// Siblings may each name the same uncle: only one of them can stay on
-    /// the chain, so the rule looks at the nephew's own ancestry only. Here
-    /// the parent names no uncle, whatever its siblings did.
+    /// The losing nephew of a race can itself be an uncle on the winning chain,
+    /// even though both nephews listed the same uncle. Only uncles listed by
+    /// ancestors count, not uncles listed by uncles.
     #[tokio::test]
-    async fn test_validate_uncles_allows_uncle_not_named_by_an_ancestor() {
+    async fn test_validate_uncles_allows_losing_nephew_as_uncle() {
         let mut chain_store_handle = ChainStoreHandle::default();
 
-        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
-        let uncle_hash = uncle.block_hash();
-        let grandparent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
-        let grandparent_hash = grandparent.block_hash();
-        let parent = TestShareBlockBuilder::new()
-            .prev_share_blockhash(grandparent_hash.to_string())
+        // parent (h:20) <- winning_nephew (h:21, lists shared_uncle)
+        //               <- losing_nephew (h:21, lists shared_uncle)
+        // share (h:22) builds on winning_nephew and lists losing_nephew.
+        let parent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
+        let parent_hash = parent.block_hash();
+        let shared_uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
+        let shared_uncle_hash = shared_uncle.block_hash();
+        let winning_nephew = TestShareBlockBuilder::new()
+            .prev_share_blockhash(parent_hash.to_string())
+            .uncles(vec![shared_uncle_hash])
             .miner_pubkey(PUBKEY_3G)
             .build();
-        let parent_hash = parent.block_hash();
+        let winning_nephew_hash = winning_nephew.block_hash();
+        let losing_nephew = TestShareBlockBuilder::new()
+            .prev_share_blockhash(parent_hash.to_string())
+            .uncles(vec![shared_uncle_hash])
+            .miner_pubkey(PUBKEY_4G)
+            .build();
+        let losing_nephew_hash = losing_nephew.block_hash();
 
+        // Both nephews at h:21, so the share is at h:22.
         chain_store_handle
             .expect_get_block_metadata_batch()
-            .returning(move |hashes| {
-                Ok(hashes
-                    .iter()
-                    .map(|hash| {
-                        let height = if *hash == parent_hash { 20 } else { 19 };
-                        (*hash, metadata_at_height(height))
-                    })
-                    .collect())
+            .withf(move |hashes| hashes == [winning_nephew_hash, losing_nephew_hash])
+            .times(1)
+            .returning(move |_| {
+                Ok(vec![
+                    (winning_nephew_hash, metadata_at_height(21)),
+                    (losing_nephew_hash, metadata_at_height(21)),
+                ])
             });
+        // Ancestry walk: winning_nephew -> parent -> genesis sentinel.
+        let winning_nephew_header = winning_nephew.header.clone();
         let parent_header = parent.header.clone();
-        let grandparent_header = grandparent.header.clone();
         chain_store_handle
             .expect_get_share_header()
             .returning(move |hash| {
-                if *hash == parent_hash {
-                    Ok(parent_header.clone())
+                if *hash == winning_nephew_hash {
+                    Ok(winning_nephew_header.clone())
                 } else {
-                    Ok(grandparent_header.clone())
+                    Ok(parent_header.clone())
                 }
             });
 
-        let nephew = TestShareBlockBuilder::new()
-            .prev_share_blockhash(parent_hash.to_string())
-            .uncles(vec![uncle_hash])
-            .miner_pubkey(PUBKEY_4G)
+        let share = TestShareBlockBuilder::new()
+            .prev_share_blockhash(winning_nephew_hash.to_string())
+            .uncles(vec![losing_nephew_hash])
+            .miner_pubkey(PUBKEY_5G)
             .build();
 
-        validator()
-            .validate_uncles(&nephew, &chain_store_handle)
-            .expect("an uncle no ancestor names is accepted");
+        assert!(
+            validator()
+                .validate_uncles(&share, &chain_store_handle)
+                .is_ok()
+        );
     }
 
     #[tokio::test]
