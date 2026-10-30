@@ -77,9 +77,9 @@ tree's shape and script sizes. Only token shares, or windows past about
 P2Pool nodes. The old 200 KiB combined body limit came from upstream, a
 Bitcoin pool, and would have capped direct payouts at about 6,000 miners.
 The implemented share limit allows a full 1,000,000-byte coinbase
-(BCH's own transaction limit; a coinbase is never relayed by BCHN, so the
-100 KB relay limit does not apply) plus the share's own 200 KiB of share
-transactions and its header. That stays one fixed share-chain constant. The
+(BCH's own transaction limit; a coinbase is never relayed by BCHN, so
+BCHN's 100 KB standard-size policy does not apply) plus the share's own
+200 KiB of share transactions and its header. That stays one fixed share-chain constant. The
 cost is bandwidth: a share with 29,400 payees is about 1 MB, made about every
 10 seconds, and on a slow uplink it reaches peers late, so more shares end
 up as uncles. The fix is in how shares travel, not in the limit: every node
@@ -116,7 +116,8 @@ bytes and cannot continue a half-finished hash. So the cheap path stops near
 script; our estimate is that each 10 KB input then hashes only about half a
 kilobyte, so a 100 KB transaction adds only about 5 KB (a prototype must
 measure this). A pool that finds a block may also put a claim of up to 1 MB
-into it itself (BCH only relays 100 KB, but accepts 1 MB inside a block);
+into it itself (BCHN's policy relays only 100 KB, while BCH consensus
+accepts 1 MB; Knuth relays up to 1 MB);
 that helps only when this pool finds the block. Better long-term options:
 move the token record to the end of the coinbase, where P2Pool's existing
 midstate trick makes claims independent of coinbase size, or a future BCH
@@ -197,7 +198,7 @@ Checked against BCHN master and the BCH upgrade specifications on
 | Coinbase maturity | 100 blocks | BCH consensus | `consensus.h` (`COINBASE_MATURITY`) |
 | Tokens on coinbase outputs | never | BCH consensus | CashTokens spec; `validation.cpp` |
 | Block size | ABLA, at least 32,000,000 bytes on mainnet; BCHN's 2 GB guard is temporary | BCH consensus | `consensus.h`, CHIP-2023-04 |
-| Largest standard transaction | 100,000 bytes (`MAX_STANDARD_TX_SIZE`) | relay policy | `policy.h` |
+| Largest standard transaction | 100,000 bytes (`MAX_STANDARD_TX_SIZE`) in BCHN; Knuth adds no limit below 1,000,000 | node policy, not BCH consensus | BCHN `policy.h`; Knuth PR #728 |
 | Unlocking bytecode per input | 10,000 bytes, standard and consensus since May 2026 | both | CHIP-2024-12 P2S; `policy.cpp`; `vm_limits.h` |
 | Largest stack item | 10,000 bytes | BCH consensus | CHIP-2021-05 VM Limits; `vm_limits.h` |
 | Operation cost per input | at most `(41 + unlocking length) * 800` | both | VM Limits CHIP |
@@ -576,7 +577,9 @@ The BCH block carries one more output for the tree: 44 bytes.
   native opcode. This is the binding limit.
 - **Operation cost: `(41 + L) * 800` per input**, so each input's work grows
   with its own unlocking length, never with the transaction's.
-- **Transaction size:** 100,000 bytes to relay, 1,000,000 bytes in a block.
+- **Transaction size:** 1,000,000 bytes by BCH consensus. BCHN's policy
+  relays and templates only up to 100,000 bytes; Knuth's adds no limit
+  below 1,000,000 (Knuth PR #728, 2026-10-27).
 
 ### 7.2 The ladder
 
@@ -653,7 +656,7 @@ bytes of unlocking) less about 0.3M of linking checks:
 | Claim transaction | Inputs | Coinbase hashed in script |
 |---|---|---|
 | 100,000 bytes (standard) | about 10 | 4 to 7 KB |
-| 1,000,000 bytes (consensus, not relayed) | about 100 | 40 to 70 KB |
+| 1,000,000 bytes (consensus; not relayed by BCHN) | about 100 | 40 to 70 KB |
 | Same, if 0.2M per block held | | about 25 KB and 250 KB |
 
 So at standard size, chaining in script hashes less than native hashing
@@ -666,8 +669,11 @@ at any size.
 The miner that finds a BCH block decides what it contains. Neither the
 coinbase nor a transaction the winner adds itself is ever relayed on its
 own, so only BCH consensus binds them: 1,000,000 bytes per transaction.
-That lets a P2Pool node mine a claim larger than the 100,000-byte relay
-limit, for example a 1 MB chained claim (7.3).
+That lets a P2Pool node mine a claim larger than BCHN's 100,000-byte
+standard size, for example a 1 MB chained claim (7.3). That size is node
+policy, not a BCH rule: Knuth has relayed transactions up to the 1,000,000-byte
+consensus limit since its PR #728 (merged 2026-10-27), so such a claim can
+also travel between Knuth nodes. BCHN nodes still refuse it.
 
 What BCHN allows (BCHN master):
 
@@ -759,9 +765,9 @@ share body limit = 1,000,000   the coinbase: BCH consensus MAX_TX_SIZE
 ```
 
 A coinbase is never relayed by BCHN on its own (it reaches BCHN only inside
-a block through `submitblock`), so BCHN's 100,000-byte relay limit never
-applies to it; only the 1,000,000-byte consensus limit does. Derived sizes
-change with it: `MAX_P2P_MESSAGE_SIZE` is 1.25 MiB, and the block
+a block through `submitblock`), so BCHN's 100,000-byte standard-size
+policy never applies to it; only the 1,000,000-byte consensus limit does.
+Derived sizes change with it: `MAX_P2P_MESSAGE_SIZE` is 1.25 MiB, and the block
 receiver's pending buffer, bounded at 32 MiB, holds at least 26 of the
 largest shares. The organise worker's channel (512 shares) and pending
 buffer (1,024 shares), bounded by count alone, would hold about 620 MB and

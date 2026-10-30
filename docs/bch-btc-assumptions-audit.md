@@ -78,8 +78,9 @@ These override the findings.
   [Hybrid payouts on Bitcoin Cash](architecture/bch-hybrid-payouts.md), a
   proposal awaiting the owner's agreement. The owner has also directed that
   the share body allow a full 1,000,000-byte coinbase.
-- **The 100 KB standard transaction size is relay policy**, not a P2Pool
-  limit.
+- **The 100 KB standard transaction size is BCHN's node policy**, not a
+  BCH consensus rule and not a P2Pool limit. Knuth has no such limit below
+  the 1,000,000-byte consensus maximum (Knuth PR #728, 2026-10-27).
 - **The simulation moves to BCHN separately.** Simulation findings are listed
   for that work and not acted on here.
 
@@ -233,7 +234,7 @@ Already correct for Bitcoin Cash:
   outpoint another pool transaction spends (`PoolRejection::Conflict`), and
   its priority rule only decides which non-conflicting transaction a full pool
   keeps. Nothing replaces a first-seen spend.
-- The 100 KB standard transaction size is not used anywhere as a P2Pool
+- BCHN's 100 KB standard transaction size is not used anywhere as a P2Pool
   limit. `MAX_POOL_TRANSACTION_SIZE` (50 KiB) is P2Pool's own limit on share
   transactions, which P2Pool governs.
 - CTOR, the BIP34 height push, the 100-byte scriptSig, coinbase version 2,
