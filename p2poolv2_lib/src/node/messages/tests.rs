@@ -120,7 +120,7 @@ fn test_largest_bch_share_block_fits_max_message_size() {
     share.transactions = vec![ShareTransaction(share_transaction)];
     share.template_merkle_branches = vec![TxMerkleNode::all_zeros(); 32];
 
-    let encoded = encode::serialize(&Message::ShareBlock(share));
+    let encoded = encode::serialize(&Message::ShareBlock(share, Vec::new()));
 
     assert!(encoded.len() > BCH_SHARE_BODY_SIZE_LIMIT);
     assert!(
@@ -283,6 +283,8 @@ fn test_message_discriminants_unique() {
         TRANSACTION,
         HANDSHAKE,
         ACK,
+        SHARE_HEADERS_WITH_BCH,
+        SHARE_BLOCK_WITH_BCH,
     ];
 
     // Check all discriminants are unique
@@ -482,6 +484,60 @@ fn test_share_headers_message_round_trips_with_branches() {
     let decoded: Message = encode::deserialize(&encode::serialize(&message)).unwrap();
 
     assert_eq!(decoded, message);
+}
+
+/// Real mainnet blocks 661,647 and 661,648, as carried BCH headers.
+fn carried() -> Vec<bitcoin::block::Header> {
+    use crate::shares::bch_asert::tests::{MAINNET_PAIRS, header};
+    vec![header(MAINNET_PAIRS[0].1), header(MAINNET_PAIRS[1].1)]
+}
+
+/// A batch carrying BCH headers uses its own discriminant and round trips
+/// with them; without any it keeps the plain one, so Bitcoin bytes are
+/// unchanged.
+#[test]
+fn test_share_headers_round_trip_with_carried_bch_headers() {
+    use message_discriminants::*;
+    let header = TestShareBlockBuilder::new().nonce(1).build().header;
+    let plain = ShareHeaderBatch::from_headers_with_branches(vec![(header, Vec::new())]);
+    let plain_bytes = encode::serialize(&Message::ShareHeaders(plain.clone()));
+    assert_eq!(plain_bytes[0], SHARE_HEADERS);
+
+    let message = Message::ShareHeaders(plain.clone().with_bch_headers(carried()));
+    let bytes = encode::serialize(&message);
+    assert_eq!(bytes[0], SHARE_HEADERS_WITH_BCH);
+    assert_eq!(bytes.len(), plain_bytes.len() + 1 + 2 * 80);
+    let decoded: Message = encode::deserialize(&bytes).unwrap();
+    assert_eq!(decoded, message);
+}
+
+#[test]
+fn test_share_block_round_trips_with_carried_bch_headers() {
+    use message_discriminants::*;
+    let block = TestShareBlockBuilder::new().nonce(1).build();
+    let plain = encode::serialize(&Message::ShareBlock(block.clone(), Vec::new()));
+    assert_eq!(plain[0], SHARE_BLOCK);
+
+    let message = Message::ShareBlock(block, carried());
+    let bytes = encode::serialize(&message);
+    assert_eq!(bytes[0], SHARE_BLOCK_WITH_BCH);
+    let decoded: Message = encode::deserialize(&bytes).unwrap();
+    assert_eq!(decoded, message);
+}
+
+/// The carried-header count is checked before anything is allocated: none
+/// (which a sender writes with the plain discriminant) and more than the
+/// cap are both malformed.
+#[test]
+fn test_carried_bch_header_count_outside_one_to_the_cap_is_rejected() {
+    use crate::shares::bch_carried_headers::MAX_CARRIED_BCH_HEADERS;
+    use message_discriminants::*;
+    for count in [0, MAX_CARRIED_BCH_HEADERS + 1] {
+        let mut bytes = vec![SHARE_BLOCK_WITH_BCH];
+        bytes.extend(encode::serialize(&bitcoin::VarInt::from(count)));
+        bytes.extend(vec![0u8; 80 * count]);
+        assert!(encode::deserialize::<Message>(&bytes).is_err(), "{count}");
+    }
 }
 
 /// A header naming a branch the batch does not carry is a malformed

@@ -38,6 +38,11 @@ use bitcoin::block::Header;
 use bitcoin::consensus::{Decodable, Encodable};
 use bitcoin::{BlockHash, CompactTarget, Target};
 
+/// Protocol tag segment for mining on the current chain: Bitcoin Cash
+/// headers travel with shares, and a share is paid only for work on the
+/// paying share's BCH chain or one block off it.
+pub const BCH_CURRENT_CHAIN_RULE_TAG: &str = "bch-prev-1off";
+
 /// BCHN's `MAX_FUTURE_BLOCK_TIME`: a block may be dated at most two hours
 /// ahead of the node's clock.
 pub const MAX_FUTURE_BLOCK_TIME: u32 = 2 * 60 * 60;

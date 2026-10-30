@@ -32,6 +32,7 @@ use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
 use crate::shares::bch_asert::BchAsert;
+use crate::shares::bch_headers::BchHeaderRules;
 use crate::shares::bch_script;
 #[cfg(test)]
 #[mockall_double::double]
@@ -666,6 +667,10 @@ pub trait ShareValidator {
     /// Used by header-sync validation to run ASERT checks without rebuilding a
     /// fresh PoolDifficulty on every batch.
     fn pool_difficulty(&self) -> &PoolDifficulty;
+
+    /// The rules a Bitcoin Cash header from a peer must pass, or `None` on
+    /// a Bitcoin node, which ignores carried headers.
+    fn bch_header_rules(&self) -> Option<BchHeaderRules>;
 }
 
 /// Production implementation of ShareValidator.
@@ -690,6 +695,8 @@ pub struct DefaultShareValidator {
     /// a token share's bitcoin header. `None` on Bitcoin and on regtest,
     /// which has no ASERT anchor.
     bch_asert: Option<BchAsert>,
+    /// Header rules of the Bitcoin Cash network, for carried headers.
+    bch_header_rules: Option<BchHeaderRules>,
     /// Where the payout tree of each validated share that is a BCH block
     /// goes, to be kept and executed (`node::payout_tree_executor`). `None`
     /// keeps no trees, as in tests and on Bitcoin.
@@ -721,6 +728,7 @@ impl DefaultShareValidator {
             chain: Chain::Bitcoin,
             target_ceiling: CompactTarget::from_consensus(MAX_POOL_TARGET),
             bch_asert: None,
+            bch_header_rules: None,
             payout_tree_sink: None,
         }
     }
@@ -777,6 +785,7 @@ impl DefaultShareValidator {
     /// on regtest, the check is skipped.
     pub fn with_bitcoin_cash_network(mut self, network: Option<BitcoinCashNetwork>) -> Self {
         self.bch_asert = network.and_then(BchAsert::for_network);
+        self.bch_header_rules = network.map(BchHeaderRules::for_network);
         self
     }
 
@@ -1807,6 +1816,10 @@ impl ShareValidator for DefaultShareValidator {
         &self.pool_difficulty
     }
 
+    fn bch_header_rules(&self) -> Option<BchHeaderRules> {
+        self.bch_header_rules
+    }
+
     fn validate_with_pool_difficulty(
         &self,
         share_header: &ShareHeader,
@@ -2167,6 +2180,8 @@ mockall::mock! {
         fn validate_block_size(&self, share: &ShareBlock) -> Result<(), ValidationError>;
 
         fn pool_difficulty(&self) -> &PoolDifficulty;
+
+        fn bch_header_rules(&self) -> Option<BchHeaderRules>;
     }
 }
 

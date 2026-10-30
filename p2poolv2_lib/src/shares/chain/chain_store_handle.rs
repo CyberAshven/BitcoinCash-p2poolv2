@@ -440,6 +440,28 @@ impl ChainStoreHandle {
         self.store_handle.get_bch_best_hash(height)
     }
 
+    /// The Bitcoin Cash headers a message carrying `shares` attaches, so a
+    /// receiver can place each share's BCH prev
+    /// (`shares::bch_carried_headers`). Empty on a Bitcoin node, whose store
+    /// knows no BCH header.
+    pub fn carried_bch_headers(&self, shares: &[ShareHeader]) -> Vec<bitcoin::block::Header> {
+        let header = |hash: &BlockHash| self.get_bch_header(hash).ok().flatten();
+        let best = |height: u32| self.get_bch_best_hash(height).ok().flatten();
+        let paths = shares.iter().map(|share| {
+            let parent_prev = self
+                .get_share_header(&share.prev_share_blockhash)
+                .ok()
+                .map(|parent| parent.bitcoin_header.prev_blockhash);
+            crate::shares::bch_carried_headers::required_path(
+                share.bitcoin_header.prev_blockhash,
+                parent_prev,
+                header,
+                best,
+            )
+        });
+        crate::shares::bch_carried_headers::merge_for_message(paths)
+    }
+
     /// Point heights of the BCH best-chain index at new blocks and set its tip.
     pub async fn set_bch_best_chain(
         &self,
@@ -1119,6 +1141,7 @@ mockall::mock! {
         pub fn get_bch_header(&self, block_hash: &BlockHash) -> Result<Option<KnownBchHeader>, StoreError>;
         pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError>;
         pub fn get_bch_best_hash(&self, height: u32) -> Result<Option<BlockHash>, StoreError>;
+        pub fn carried_bch_headers(&self, shares: &[ShareHeader]) -> Vec<bitcoin::block::Header>;
         pub async fn set_bch_best_chain(&self, updates: Vec<(u32, BlockHash)>, tip_height: u32) -> Result<(), StoreError>;
         pub async fn record_accepted_found_block(&self, found_block: FoundBlock) -> Result<bool, StoreError>;
         pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError>;

@@ -3,9 +3,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::node::p2p_message_handlers::MAX_HEADERS_IN_RESPONSE;
+use crate::shares::bch_carried_headers::MAX_CARRIED_BCH_HEADERS;
 use crate::shares::coinbase_proof::MAX_COINBASE_MERKLE_BRANCH_LENGTH;
 use crate::shares::share_block::{ShareBlock, ShareHeader, Txids};
 use crate::store::dag_store::MAX_BLOCKS_PER_HEIGHT;
+use bitcoin::block::Header;
 use bitcoin::consensus::{Decodable, Encodable, encode};
 use bitcoin::hashes::{Hash, sha256d};
 use bitcoin::io::{Read, Write};
@@ -48,6 +50,11 @@ mod message_discriminants {
     pub const TRANSACTION: u8 = 7;
     pub const HANDSHAKE: u8 = 8;
     pub const ACK: u8 = 9;
+    /// `SHARE_HEADERS` preceded by the Bitcoin Cash headers it carries.
+    /// Sent only when it carries some, so Bitcoin messages are unchanged.
+    pub const SHARE_HEADERS_WITH_BCH: u8 = 10;
+    /// `SHARE_BLOCK` preceded by the Bitcoin Cash headers it carries.
+    pub const SHARE_BLOCK_WITH_BCH: u8 = 11;
 }
 
 /// InventoryMessage discriminants to determine the type of inventory message
@@ -73,7 +80,9 @@ pub enum Message {
     GetShareHeaders(Vec<BlockHash>, BlockHash),
     GetShareBlocks(Vec<BlockHash>, BlockHash),
     ShareHeaders(ShareHeaderBatch),
-    ShareBlock(ShareBlock),
+    /// A share block with the Bitcoin Cash headers a receiver needs to place
+    /// its BCH prev (`shares::bch_carried_headers`); empty on Bitcoin.
+    ShareBlock(ShareBlock, Vec<Header>),
     GetData(GetData),
     Transaction(bitcoin::Transaction),
     Handshake(HandshakeData),
@@ -157,7 +166,7 @@ impl Message {
             Message::GetShareHeaders(_, _) => "GetShareHeaders",
             Message::GetShareBlocks(_, _) => "GetShareBlocks",
             Message::ShareHeaders(_) => "ShareHeaders",
-            Message::ShareBlock(_) => "ShareBlock",
+            Message::ShareBlock(..) => "ShareBlock",
             Message::GetData(_) => "GetData",
             Message::Transaction(_) => "Transaction",
             Message::Handshake(_) => "Handshake",
@@ -192,6 +201,9 @@ pub struct ShareHeaderBatch {
     /// Index into `branches` for the header at the same position.
     branch_indexes: Vec<u16>,
     branches: Vec<Vec<TxMerkleNode>>,
+    /// Bitcoin Cash headers a receiver needs to place the shares' BCH prevs,
+    /// oldest first (`shares::bch_carried_headers`); empty on Bitcoin.
+    bch_headers: Vec<Header>,
 }
 
 impl ShareHeaderBatch {
@@ -220,7 +232,19 @@ impl ShareHeaderBatch {
             headers,
             branch_indexes,
             branches,
+            bch_headers: Vec::new(),
         }
+    }
+
+    /// This batch carrying `bch_headers`.
+    pub fn with_bch_headers(mut self, bch_headers: Vec<Header>) -> Self {
+        self.bch_headers = bch_headers;
+        self
+    }
+
+    /// The Bitcoin Cash headers carried, oldest first.
+    pub fn bch_headers(&self) -> &[Header] {
+        &self.bch_headers
     }
 
     /// The headers, in message order.
@@ -341,6 +365,7 @@ impl Decodable for ShareHeaderBatch {
             headers,
             branch_indexes,
             branches,
+            bch_headers: Vec::new(),
         })
     }
 
@@ -348,6 +373,35 @@ impl Decodable for ShareHeaderBatch {
     fn consensus_decode<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
         Self::consensus_decode_from_finite_reader(&mut r.take(MAX_P2P_MESSAGE_SIZE as u64))
     }
+}
+
+/// Write carried Bitcoin Cash headers: a count, then each 80-byte header.
+fn encode_bch_headers<W: Write + ?Sized>(
+    headers: &[Header],
+    w: &mut W,
+) -> Result<usize, bitcoin::io::Error> {
+    let mut len = VarInt::from(headers.len()).consensus_encode(w)?;
+    for header in headers {
+        len += header.consensus_encode(w)?;
+    }
+    Ok(len)
+}
+
+/// Read carried Bitcoin Cash headers, refusing more than
+/// `MAX_CARRIED_BCH_HEADERS` before allocating, and an empty list, which a
+/// sender writes with the plain discriminant instead.
+fn decode_bch_headers<R: Read + ?Sized>(r: &mut R) -> Result<Vec<Header>, encode::Error> {
+    let count = VarInt::consensus_decode(r)?.0 as usize;
+    if count == 0 || count > MAX_CARRIED_BCH_HEADERS {
+        return Err(encode::Error::ParseFailed(
+            "Bitcoin Cash header count outside 1 to 128",
+        ));
+    }
+    let mut headers = Vec::with_capacity(count);
+    for _ in 0..count {
+        headers.push(Header::consensus_decode(r)?);
+    }
+    Ok(headers)
 }
 
 impl Encodable for Message {
@@ -376,13 +430,25 @@ impl Encodable for Message {
                 len += stop.consensus_encode(w)?;
                 Ok(len)
             }
-            Message::ShareHeaders(headers) => {
+            Message::ShareHeaders(headers) if headers.bch_headers.is_empty() => {
                 let mut len = SHARE_HEADERS.consensus_encode(w)?;
                 len += headers.consensus_encode(w)?;
                 Ok(len)
             }
-            Message::ShareBlock(block) => {
+            Message::ShareHeaders(headers) => {
+                let mut len = SHARE_HEADERS_WITH_BCH.consensus_encode(w)?;
+                len += encode_bch_headers(&headers.bch_headers, w)?;
+                len += headers.consensus_encode(w)?;
+                Ok(len)
+            }
+            Message::ShareBlock(block, bch_headers) if bch_headers.is_empty() => {
                 let mut len = SHARE_BLOCK.consensus_encode(w)?;
+                len += block.consensus_encode(w)?;
+                Ok(len)
+            }
+            Message::ShareBlock(block, bch_headers) => {
+                let mut len = SHARE_BLOCK_WITH_BCH.consensus_encode(w)?;
+                len += encode_bch_headers(bch_headers, w)?;
                 len += block.consensus_encode(w)?;
                 Ok(len)
             }
@@ -428,7 +494,23 @@ impl Decodable for Message {
             SHARE_HEADERS => Ok(Message::ShareHeaders(ShareHeaderBatch::consensus_decode(
                 r,
             )?)),
-            SHARE_BLOCK => Ok(Message::ShareBlock(ShareBlock::consensus_decode(r)?)),
+            SHARE_HEADERS_WITH_BCH => {
+                let bch_headers = decode_bch_headers(r)?;
+                Ok(Message::ShareHeaders(
+                    ShareHeaderBatch::consensus_decode(r)?.with_bch_headers(bch_headers),
+                ))
+            }
+            SHARE_BLOCK => Ok(Message::ShareBlock(
+                ShareBlock::consensus_decode(r)?,
+                Vec::new(),
+            )),
+            SHARE_BLOCK_WITH_BCH => {
+                let bch_headers = decode_bch_headers(r)?;
+                Ok(Message::ShareBlock(
+                    ShareBlock::consensus_decode(r)?,
+                    bch_headers,
+                ))
+            }
             GET_DATA => Ok(Message::GetData(GetData::consensus_decode(r)?)),
             TRANSACTION => Ok(Message::Transaction(
                 bitcoin::Transaction::consensus_decode(r)?,

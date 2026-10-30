@@ -35,7 +35,8 @@ do not build it.
 
 `seed_corpus/wire_message_decode` contains payloads for this fork's message
 format: empty inventories and share-header batches, block requests, an
-acknowledgement, a handshake, and invalid discriminants and lengths. Copy
+acknowledgement, a handshake, share headers and a share block carrying a
+Bitcoin Cash header, and invalid discriminants and lengths. Copy
 these files into `corpus/wire_message_decode` before a local run to start
 with the same seeds as CI. The length limit includes the current maximum
 P2P payload plus one byte to exercise its rejection boundary. It is a fuzz

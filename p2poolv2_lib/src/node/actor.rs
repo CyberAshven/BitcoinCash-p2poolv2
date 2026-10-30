@@ -836,7 +836,7 @@ impl NodeActor {
                     .send_response(response_channel, msg);
                 debug!("Sent message to response channel: {request_id:?}");
             }
-            SwarmSend::BroadcastBlock(share_block) => {
+            SwarmSend::BroadcastBlock(share_block, bch_headers) => {
                 let connected_peers = self.node.connected_peers();
                 let peer_knowledge = self
                     .node
@@ -844,6 +844,7 @@ impl NodeActor {
                     .peer_block_knowledge_mut();
                 send_share_block_broadcast(
                     share_block,
+                    bch_headers,
                     &connected_peers,
                     peer_knowledge,
                     &mut self.node.swarm,

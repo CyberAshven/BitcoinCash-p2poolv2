@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Share messages now carry the Bitcoin Cash headers a receiver needs to
+place each share's BCH prev, the second part of mining on the current
+chain (V16). A share carries the headers from its BCH prev back to the
+sender's BCHN best chain, below its parent's BCH prev: none on its
+parent's block, one after a new block, the orphan for a share on an
+orphan, the branch after a reorg, up to 32. Each message carries at most
+128, oldest first, under two new message types used only when it carries
+some, so Bitcoin messages are unchanged. Receivers check every header
+(exact aserti3-2d nBits, proof of work, two-hour limit) and store those
+that pass; a header that fails rejects the message. The Bitcoin Cash
+protocol strings end in `bch-prev-1off`: a share-chain rule change the
+owner approved, shipped as a flag day, so nodes from before cannot peer
+and every node must upgrade together. It is not a Bitcoin Cash consensus
+change. Shares are not yet judged by their BCH prev.
+
 Merged upstream P2Poolv2 main (`c0c70cdb`) with git rather than copying
 its commits by hand, so later upstream changes merge with conflicts only
 where both sides edited the same lines. New from upstream: an Electrum

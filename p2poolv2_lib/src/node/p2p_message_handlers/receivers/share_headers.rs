@@ -4,6 +4,7 @@
 
 use crate::node::messages::ShareHeaderBatch;
 use crate::node::p2p_message_handlers::MAX_HEADERS_IN_RESPONSE;
+use crate::node::p2p_message_handlers::receivers::bch_headers::learn_carried_bch_headers;
 use crate::node::p2p_message_handlers::senders::send_getheaders;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::{SwarmSend, messages::Message};
@@ -207,6 +208,12 @@ pub async fn handle_share_headers<C: Send + Sync>(
     block_fetcher_handle: BlockFetcherHandle,
     share_validator: &(dyn ShareValidator + Send + Sync),
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    learn_carried_bch_headers(
+        header_batch.bch_headers(),
+        &chain_store_handle,
+        share_validator,
+    )
+    .await?;
     let share_headers = header_batch.headers();
     debug!("Received {} ShareHeaders", share_headers.len());
     if !share_headers.is_empty() {
