@@ -7,7 +7,7 @@ use crate::{
     shares::share_block::ShareHeader,
     store::{block_tx_metadata::BlockMetadata, writer::StoreError},
 };
-use bitcoin::BlockHash;
+use bitcoin::{BlockHash, Work};
 use tracing::{debug, info};
 
 use super::{Height, Store, TopResult};
@@ -16,9 +16,8 @@ impl Store {
     /// Organise a share header into the candidate chain.
     ///
     /// Reads block metadata, top candidate, and top confirmed from the store,
-    /// then extends or reorgs the candidate chain as needed. Also marks any
-    /// uncles referenced by the header in the uncles index so that
-    /// find_uncles will not select them again.
+    /// then extends or reorgs the candidate chain as needed. Also records the
+    /// header as the nephew of each uncle it references in the uncles index.
     ///
     /// Returns the new candidate height and chain if the candidate chain
     /// changed, or None if unchanged.
@@ -183,6 +182,11 @@ impl Store {
     /// Stores the header, computes height and chain work from the
     /// parent, records uncle references in the block and uncles
     /// indexes, and writes initial metadata with HeaderValid status.
+    ///
+    /// Chain work is the parent's chain work plus the header's own work plus
+    /// the own work of each uncle it lists, a share-chain rule from
+    /// 2026-10-30 (upstream P2Poolv2 commit 604fe3ce). Errors if the parent
+    /// or any uncle header is not in the store.
     fn initialise_new_header(
         &self,
         header: &ShareHeader,
@@ -208,7 +212,8 @@ impl Store {
             ))
         })?;
         let new_height = prev_height + 1;
-        let new_chain_work = prev_metadata.chain_work + share_work;
+        let uncles_work = self.sum_uncles_work(header, blockhash)?;
+        let new_chain_work = prev_metadata.chain_work + share_work + uncles_work;
 
         for uncle_blockhash in &header.uncles {
             self.update_block_index(uncle_blockhash, blockhash, batch)?;
@@ -225,6 +230,29 @@ impl Store {
         self.update_block_metadata(blockhash, &metadata, batch)?;
 
         Ok(metadata)
+    }
+
+    /// Sum the own work of the uncles listed by `header`, reading their
+    /// headers in one batch. Only each uncle's own work counts, not the work
+    /// of its uncles, so every uncle is counted once per chain.
+    ///
+    /// Errors if any uncle header is not in the store. Ported from
+    /// pool2win's upstream P2Poolv2 commit 604fe3ce (MIT OR Apache-2.0).
+    pub(crate) fn sum_uncles_work(
+        &self,
+        header: &ShareHeader,
+        blockhash: &BlockHash,
+    ) -> Result<Work, StoreError> {
+        let uncle_headers = self.get_share_headers(&header.uncles)?;
+        if uncle_headers.len() != header.uncles.len() {
+            return Err(StoreError::NotFound(format!(
+                "Uncle header not found for block {blockhash}"
+            )));
+        }
+        Ok(uncle_headers.iter().fold(
+            Work::from_be_bytes([0u8; 32]),
+            |total, (_, uncle_header)| total + uncle_header.get_work(),
+        ))
     }
 }
 

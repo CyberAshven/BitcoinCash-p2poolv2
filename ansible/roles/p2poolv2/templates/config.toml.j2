@@ -103,7 +103,9 @@ username = "{{ p2poolv2_bitcoin_rpc_user }}"
 password = "{{ p2poolv2_bitcoin_rpc_pass }}"
 
 [logging]
+{% if p2poolv2_log_file | length > 0 %}
 file = "{{ p2poolv2_log_file }}"
+{% endif %}
 level = "{{ p2poolv2_log_level }}"
 console = {{ p2poolv2_log_console | bool | lower }}
 stats_dir = "{{ p2poolv2_stats_dir }}"

@@ -7,6 +7,7 @@ use crate::stratum::work::coinbase::extract_outputs_from_coinbase2;
 use crate::stratum::work::tracker::JobTracker;
 use bitcoin::Amount;
 use p2poolv2_wallet::bch_share::BchShareNetwork;
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::sync::Arc;
 
 /// Parse the coinbase in the latest job and return its paying outputs and
@@ -34,7 +35,7 @@ pub fn get_distribution(
             // them
             for (index, tx_out) in outputs.iter().enumerate() {
                 if tx_out.value != Amount::ZERO {
-                    match bitcoin::Address::from_script(&tx_out.script_pubkey, network) {
+                    match PayoutAddress::from_script(&tx_out.script_pubkey, network) {
                         Ok(address) => {
                             let address = payout_address_string(&address, cash_network);
                             exposition.push_str(&format!(

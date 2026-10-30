@@ -33,8 +33,9 @@ use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::{self, Hash};
 use bitcoin::transaction::Version;
-use bitcoin::{Address, BlockHash, CompactTarget, WitnessMerkleNode};
+use bitcoin::{BlockHash, CompactTarget, WitnessMerkleNode};
 use p2poolv2_config::MAX_BITCOIN_CASH_CUT;
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -177,7 +178,7 @@ const MINER_DONATION_CHOICES: usize = (MAX_BITCOIN_CASH_CUT / MINER_DONATION_STE
 /// miners connect. Rebuilt params carry no `MinerDonations` of their own.
 struct MinerDonations {
     /// The built-in donation address on this network.
-    address: Address,
+    address: PayoutAddress,
     /// Builder inputs the params do not otherwise keep.
     pool_signature: Vec<u8>,
     clean_jobs: bool,
@@ -206,7 +207,7 @@ struct MinerDonations {
 /// shared by every miner who chose the same.
 pub struct PreparedNotifyParams {
     /// Exact difficulty weights at this job's share-chain anchor.
-    pplns_weights: Option<Arc<HashMap<Address, u128>>>,
+    pplns_weights: Option<Arc<HashMap<PayoutAddress, u128>>>,
     /// Set on a Bitcoin Cash P2Pool node's own params: how to rebuild them
     /// for a miner's own donation ([`Self::for_miner_donation`]).
     miner_donations: Option<Box<MinerDonations>>,
@@ -234,11 +235,11 @@ pub struct PreparedNotifyParams {
     /// Share chain difficulty target (for building ShareCommitment struct)
     bits: CompactTarget,
     /// Donation address for developers
-    donation_address: Option<Address>,
+    donation_address: Option<PayoutAddress>,
     /// Donation in basis points
     donation: Option<u16>,
     /// Fee address for the pool operator
-    fee_address: Option<Address>,
+    fee_address: Option<PayoutAddress>,
     /// Fee in basis points
     fee: Option<u16>,
     /// Shared block template
@@ -389,7 +390,7 @@ impl PreparedNotifyParams {
     /// and fee in its split. `None` without tokens or without a payout.
     pub(crate) fn miner_token_job(
         &self,
-        miner_bitcoin_address: Option<&Address>,
+        miner_bitcoin_address: Option<&PayoutAddress>,
     ) -> Option<MinerTokenJob> {
         let tokens = self.merge_tokens.as_ref()?;
         let address = miner_bitcoin_address?;
@@ -571,8 +572,8 @@ fn build_json_template(
 /// params and use the miner address to build share commitment, thus
 /// the coinbase1 for each individual client.
 pub(crate) struct PreparedNotifyParamsBuilder {
-    pplns_weights: Option<Arc<HashMap<Address, u128>>>,
-    miner_donation_address: Option<Address>,
+    pplns_weights: Option<Arc<HashMap<PayoutAddress, u128>>>,
+    miner_donation_address: Option<PayoutAddress>,
     payout_split: PayoutSplit,
     template: Arc<BlockTemplate>,
     payouts: CoinbasePayouts,
@@ -581,9 +582,9 @@ pub(crate) struct PreparedNotifyParamsBuilder {
     prev_share_blockhash: BlockHash,
     uncles: Vec<BlockHash>,
     bits: CompactTarget,
-    donation_address: Option<Address>,
+    donation_address: Option<PayoutAddress>,
     donation: Option<u16>,
-    fee_address: Option<Address>,
+    fee_address: Option<PayoutAddress>,
     fee: Option<u16>,
     include_merge_mining: bool,
     merge_tokens: Option<Arc<TokenSet>>,
@@ -636,7 +637,7 @@ impl PreparedNotifyParamsBuilder {
         self
     }
 
-    pub fn pplns_weights(mut self, weights: Option<HashMap<Address, u128>>) -> Self {
+    pub fn pplns_weights(mut self, weights: Option<HashMap<PayoutAddress, u128>>) -> Self {
         self.pplns_weights = weights.map(Arc::new);
         self
     }
@@ -659,7 +660,7 @@ impl PreparedNotifyParamsBuilder {
         self
     }
 
-    pub fn donation_address(mut self, donation_address: Option<Address>) -> Self {
+    pub fn donation_address(mut self, donation_address: Option<PayoutAddress>) -> Self {
         self.donation_address = donation_address;
         self
     }
@@ -669,7 +670,7 @@ impl PreparedNotifyParamsBuilder {
         self
     }
 
-    pub fn fee_address(mut self, fee_address: Option<Address>) -> Self {
+    pub fn fee_address(mut self, fee_address: Option<PayoutAddress>) -> Self {
         self.fee_address = fee_address;
         self
     }
@@ -709,7 +710,7 @@ impl PreparedNotifyParamsBuilder {
     /// network's built-in one (`PreparedNotifyParams::for_miner_donation`).
     /// Only a Bitcoin Cash P2Pool node sets this, with the PPLNS weights the
     /// rebuilds split; `None`, the default, refuses a miner's choice.
-    pub fn miner_donations(mut self, donation_address: Option<Address>) -> Self {
+    pub fn miner_donations(mut self, donation_address: Option<PayoutAddress>) -> Self {
         self.miner_donation_address = donation_address;
         self
     }
@@ -903,12 +904,12 @@ impl PreparedNotifyParamsBuilder {
 /// pays it to, so each token win is shared as each block is. A rate of 0,
 /// or none, leaves its slot empty; both empty is a zero `ext`.
 pub(crate) fn token_split(
-    donation_address: &Option<Address>,
+    donation_address: &Option<PayoutAddress>,
     donation: Option<u16>,
-    fee_address: &Option<Address>,
+    fee_address: &Option<PayoutAddress>,
     fee: Option<u16>,
 ) -> Result<TokenSplit, WorkError> {
-    let slot = |address: &Option<Address>, rate: Option<u16>| {
+    let slot = |address: &Option<PayoutAddress>, rate: Option<u16>| {
         match (address, rate) {
             (Some(address), Some(rate)) => SplitSlot::new(rate, address.script_pubkey().as_bytes()),
             _ => Ok(SplitSlot::EMPTY),
@@ -971,7 +972,7 @@ fn get_commitment_hex(
     commitment_prefix: &[u8],
     time: u32,
     commitment_suffix: &[u8],
-    miner_bitcoin_address: Option<&Address>,
+    miner_bitcoin_address: Option<&PayoutAddress>,
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
 ) -> String {
     let digest = commitment_digest(
@@ -1024,7 +1025,7 @@ fn build_per_miner_coinbase2(
 /// empty commitment.
 pub(crate) fn insert_miner_job(
     prepared: &PreparedNotifyParams,
-    miner_bitcoin_address: Option<&Address>,
+    miner_bitcoin_address: Option<&PayoutAddress>,
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
     tracker_handle: &JobTracker,
 ) -> (JobId, String) {
@@ -1126,7 +1127,7 @@ pub(crate) fn insert_miner_job(
 #[cfg(any(test, feature = "sim"))]
 pub(crate) fn build_notify_from_prepared(
     prepared: &PreparedNotifyParams,
-    miner_bitcoin_address: Option<&Address>,
+    miner_bitcoin_address: Option<&PayoutAddress>,
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
     tracker_handle: &JobTracker,
 ) -> Result<String, WorkError> {
@@ -1143,7 +1144,7 @@ pub(crate) fn build_notify_from_prepared(
 /// inserted, for what follows the notify (a miner's token leaves).
 pub(crate) fn build_notify_with_job_id(
     prepared: &PreparedNotifyParams,
-    miner_bitcoin_address: Option<&Address>,
+    miner_bitcoin_address: Option<&PayoutAddress>,
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
     tracker_handle: &JobTracker,
 ) -> Result<(String, JobId), WorkError> {

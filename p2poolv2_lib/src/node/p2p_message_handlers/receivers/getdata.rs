@@ -31,7 +31,9 @@ pub async fn handle_getdata_block<C: Send + Sync>(
     let response_message = match chain_store_handle.get_share(&block_hash) {
         Some(share_block) => {
             debug!("Serving block {} to peer", block_hash);
-            Message::ShareBlock(share_block)
+            let bch_headers =
+                chain_store_handle.carried_bch_headers(std::slice::from_ref(&share_block.header));
+            Message::ShareBlock(share_block, bch_headers)
         }
         None => {
             debug!("Block {} not found, sending notfound", block_hash);
@@ -62,6 +64,9 @@ mod tests {
         let (swarm_tx, mut swarm_rx) = mpsc::channel::<SwarmSend<u32>>(1);
         let response_channel = 1u32;
         let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
 
         let block = TestShareBlockBuilder::new().build();
         let block_hash = block.block_hash();
@@ -76,7 +81,7 @@ mod tests {
 
         assert!(result.is_ok());
 
-        if let Some(SwarmSend::Response(channel, Message::ShareBlock(share_block))) =
+        if let Some(SwarmSend::Response(channel, Message::ShareBlock(share_block, _))) =
             swarm_rx.recv().await
         {
             assert_eq!(channel, response_channel);
@@ -91,6 +96,9 @@ mod tests {
         let (swarm_tx, mut swarm_rx) = mpsc::channel::<SwarmSend<u32>>(1);
         let response_channel = 1u32;
         let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
 
         let block_hash = "0000000000000000000000000000000000000000000000000000000000000001"
             .parse::<BlockHash>()
@@ -118,6 +126,9 @@ mod tests {
         let (swarm_tx, swarm_rx) = mpsc::channel::<SwarmSend<u32>>(1);
         let response_channel = 1u32;
         let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
 
         let block_hash = "0000000000000000000000000000000000000000000000000000000000000001"
             .parse::<BlockHash>()

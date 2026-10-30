@@ -14,6 +14,7 @@ use crate::shares::witness_commitment::{WITNESS_COMMITMENT_LENGTH, WitnessCommit
 use crate::stratum::session::{EXTRANONCE1_SIZE, EXTRANONCE2_SIZE};
 use crate::stratum::work::error::WorkError;
 use crate::utils::time_provider::TimeProvider;
+use bitcoin::Amount;
 use bitcoin::absolute::LockTime;
 use bitcoin::blockdata::script::Builder;
 use bitcoin::consensus::{deserialize, serialize};
@@ -22,9 +23,9 @@ use bitcoin::network::Network;
 use bitcoin::opcodes::all::{OP_PUSHBYTES_32, OP_RETURN};
 use bitcoin::script::{Instruction, PushBytesBuf};
 use bitcoin::transaction::{Sequence, Transaction, TxIn, TxOut, Version};
-use bitcoin::{Address, Amount};
 use hashes::sha256;
 use hex::FromHex;
+use p2poolv2_wallet::payout_address::PayoutAddress;
 
 pub(crate) const EXTRANONCE_SEPARATOR: [u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE] =
     [1u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE];
@@ -136,8 +137,10 @@ pub(crate) fn check_bch_coinbase_limit(
 ///
 /// Delegates to `p2poolv2_config::parse_address` and converts the error.
 #[allow(dead_code)]
-pub fn parse_address(address: &str, network: Network) -> Result<Address, WorkError> {
-    p2poolv2_config::parse_address(address, network).map_err(WorkError::from)
+pub fn parse_address(address: &str, network: Network) -> Result<PayoutAddress, WorkError> {
+    p2poolv2_config::parse_address(address, network)
+        .map(PayoutAddress::from)
+        .map_err(WorkError::from)
 }
 
 /// Get timestamp from provider, in seconds and nanoseconds.
@@ -623,6 +626,7 @@ mod tests {
         stratum::work::block_template::BlockTemplate,
         test_utils::{create_test_commitment, genesis_for_tests},
     };
+    use bitcoin::Address;
     use bitcoin::PubkeyHash;
     use std::collections::HashMap;
 
@@ -1492,18 +1496,22 @@ mod tests {
     /// A P2PKH payout output on Bitcoin Cash.
     fn bch_payout(byte: u8, amount: u64) -> OutputPair {
         OutputPair {
-            address: Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+            address: Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest)
+                .into(),
             amount: Amount::from_sat(amount),
         }
     }
 
     /// `count` P2PKH payees weighing their number: the canonical order is by
     /// number.
-    fn bch_weights(count: u8) -> HashMap<Address, u128> {
+    fn bch_weights(count: u8) -> HashMap<PayoutAddress, u128> {
         (1..=count)
             .map(|byte| {
                 (
-                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
                     u128::from(byte),
                 )
             })

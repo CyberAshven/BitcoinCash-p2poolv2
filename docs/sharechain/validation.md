@@ -96,6 +96,21 @@ Uncles are paid, so they pass the same checks as every share, plus:
 
 How uncles are paid is on [PPLNS accounting](pplns-accounting.md#uncles).
 
+Uncles also count when a node picks the best chain. Since 2026-10-30 a
+chain's work is the work of its shares plus the work of every uncle they
+name, each uncle counted once. A branch whose shares name uncles is
+heavier than its own shares alone, so nodes can pick a different best
+branch than they did before. This is a share-chain rule change, taken
+from upstream P2Poolv2 (commit 604fe3ce); it is not a Bitcoin Cash
+consensus rule, and it makes no share valid or invalid.
+
+Because a header adds its uncles' work as soon as it is organised, a node
+checks a share's uncles against the rules above before it organises the
+header: during header sync, and when a block arrives, not only when the
+body is validated. During header sync an uncle must arrive before the
+share that names it. Nodes send headers height by height, and an uncle is
+always lower than its nephew, so it does.
+
 ## Bitcoin Cash payouts follow the PPLNS window
 
 Every Bitcoin Cash coinbase a share carries must pay the share chain's PPLNS
@@ -189,11 +204,13 @@ version.
 
 ## Mining on the current chain
 
-Upstream adds a rule that a coinbase pays a share only if the Bitcoin Cash
-block the share builds on sits on the paying share's chain, or one block off
-it. **This fork has not built it yet.** See
-[Mining on the current chain](current-chain.md) for the design and what it
-needs on Bitcoin Cash.
+A coinbase pays a share only if the Bitcoin Cash block the share builds on
+sits on the paying share's chain, or one block off it, and the paying share's
+BCH prev sizes the window. A share whose window pays no one, or that builds on
+the all-zero hash without being the chain's first share, is invalid; a share
+whose window places work on a BCH block the node does not know yet waits,
+`Recoverable`. Built on 2026-10-30 from upstream's design. See
+[Mining on the current chain](current-chain.md).
 
 ## Bitcoin Cash blocks are not validated
 

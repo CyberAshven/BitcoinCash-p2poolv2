@@ -6,11 +6,32 @@
 > Copyright 2024-2026 P2Poolv2 Developers, MIT or Apache-2.0. Adapted to
 > Bitcoin Cash by this fork; see the [port map](../upstream-port-map.md).
 
-**Status on Bitcoin Cash: not built.** Upstream designed this defense for
-Bitcoin; this fork has not implemented it yet, and plans it before mainnet
-([Requirements](../requirements.md#functional)). This page explains the
-attack, the design, and what it needs on Bitcoin Cash. The full design, with
-its formal model, is
+**Status on Bitcoin Cash: built on 2026-10-30, not yet run on chipnet.**
+Upstream designed this defense for Bitcoin; this fork built it before mainnet
+([Requirements](../requirements.md#functional)). It is a share-chain rule
+change shipped as a flag day: the protocol strings end in `bch-prev-1off`,
+so nodes from before cannot peer, and every Bitcoin Cash node must upgrade
+together. The parts:
+
+- the header check (`p2poolv2_lib/src/shares/bch_headers.rs`), which
+  requires each header's exact aserti3-2d nBits from its known parent;
+- the store of known headers (`p2poolv2_lib/src/store/bch_headers.rs`),
+  which a worker fills from the node's own BCHN
+  (`p2poolv2_lib/src/node/bch_header_feeder.rs`): every 5 seconds it walks
+  back from BCHN's best block to a known header, a new node first learns
+  8,400 headers, about 58 days, and each new template's previous block is
+  learned before jobs are built on it;
+- carried headers (`p2poolv2_lib/src/shares/bch_carried_headers.rs`): share
+  messages carry the BCH headers a receiver needs;
+- the known BCH prev: a node stores a peer's share body only once it knows
+  the share's BCH prev, and a share in the payout zone with an unknown BCH
+  prev is `Recoverable` until its header arrives. Share headers, and so fork
+  choice, never wait on it;
+- the payout rule
+  (`p2poolv2_lib/src/accounting/payout/sharechain_pplns/bch_eligibility.rs`).
+
+This page explains the attack, the design, and what it needs on Bitcoin
+Cash. The full design, with its formal model and this fork's deviations, is
 [Mine on the current Bitcoin chain](../architecture/mine-on-bitcoin-chain.md).
 
 ## The hostile fork attack
@@ -73,6 +94,23 @@ own BCHN tip, so every node that knows the same headers rebuilds the same
 coinbase. An ineligible share keeps its place in the window and earns
 nothing. An ineligible uncle earns nothing and its nephew no bonus for it.
 
+On Bitcoin Cash the paying share's BCH prev also sizes the window. The window
+holds three expected blocks' worth of work
+([PPLNS accounting](pplns-accounting.md)), and one block's worth is the
+difficulty Bitcoin Cash requires of the block after the paying share's BCH
+prev, which every node computes from that known header. Before this rule it
+was the nBits the paying share's header claims, which only a found block has
+to get right. The test networks' 20-minute rule is left out, so a late
+chipnet block does not shrink the window.
+
+A share whose window pays no one, because none of its window's work is on its
+BCH chain or one block off it, is invalid: it builds on an old or foreign
+block, and anyone can make one for one share's proof of work. When this
+node's own template would pay no one, the job builder withdraws the work, as
+for any payout it cannot build, and tries again with the next template. Only
+the share chain's first share, built from the network's first block, builds
+on the all-zero hash; any other share that does is invalid.
+
 ## Why not reject stale work instead
 
 Tying share validity to the local node's tip fails: nodes see new blocks at
@@ -95,19 +133,21 @@ Each node checks carried headers itself, without asking BCHN:
   half-life on mainnet
   ([specification](https://upgradespecs.bitcoincashnode.org/2020-11-15-asert/)).
   On chipnet and the other test networks, a block whose time is more than 20
-  minutes after its parent's uses the minimum difficulty. The node needs a
-  Rust aserti3-2d header validator with each network's anchor; the share
-  chain already uses the same integer formula for its own targets
-  ([Share difficulty: ASERT](../difficulty_adjustment/asert.md)).
+  minutes after its parent's uses the minimum difficulty. This fork checks it
+  with its own Rust aserti3-2d validator and each network's anchor, the same
+  integer formula the share chain uses for its own targets
+  ([Share difficulty: ASERT](../difficulty_adjustment/asert.md)). Scalenet
+  has no anchor here, so its headers are checked for links, proof of work and
+  time only, and its windows are sized by the claimed nBits.
 - **Its timestamp** is at most two hours ahead of the node's clock, as BCHN
   requires (`MAX_FUTURE_BLOCK_TIME` in BCHN's `src/chain.h`). Under
   aserti3-2d every block's bits depend on timestamps, so without this limit a
   fake branch could pick times that ease its bits.
 
-A header that passes cost a full block of real proof of work. Upstream's node
-keeps about six weeks of headers (roughly 6,048 blocks, which is also six
-weeks on Bitcoin Cash), filled from its node's notifications and from carried
-headers.
+A header that passes cost a full block of real proof of work. Upstream's
+design keeps about 8,400 headers. This fork's node first learns 8,400 back
+from its BCHN's tip, about 58 days, then follows BCHN's best block and adds
+the carried headers that pass.
 
 BCHN's finalization helps but does not replace the rule. By default BCHN
 refuses a reorg deeper than 10 blocks (`DEFAULT_MAX_REORG_DEPTH` in its
@@ -127,5 +167,6 @@ share builds on.
   such races are rare.
 - Payout variance rises during a fork war.
 
-Until it is built, run your own BCHN, or a Template Provider you trust, and
-keep it well connected ([Known attacks](../known-attacks.md)).
+Still run your own BCHN, or a Template Provider you trust, and keep it well
+connected ([Known attacks](../known-attacks.md)): your templates choose the
+chain your shares and coinbases pay.

@@ -97,8 +97,8 @@ contributed work.
 
 | Metric | Type | Source |
 |---|---|---|
-| `found_blocks_total` | counter | live read of `FoundBlocks` CF |
-| `found_block_time_seconds{blockhash,height,miner,network}` | gauge | live read of `FoundBlocks` CF |
+| `found_blocks_total` | counter | live read of `AcceptedFoundBlocks` CF |
+| `found_block_time_seconds{blockhash,height,miner,network}` | gauge | live read of `AcceptedFoundBlocks` CF |
 
 Before PR #33 these were `bitcoin_blocks_found_total` and
 `bitcoin_block_found_time_seconds`, and the per-user and per-worker series
@@ -106,25 +106,26 @@ were labelled `btcaddress` instead of `payout_address`. The dashboards in
 `prometheus/grafana/` use the new names; a dashboard of your own needs the
 same renames.
 
-Derived from the share chain and persisted in the store
-(`store/found_block.rs`, see `store-schema.md`). When `confirm_blocks`
-confirms a share, it checks the share's header and the headers of its
-uncles; each one whose bitcoin header meets the bitcoin network target
-(`ShareHeader::meets_bitcoin_difficulty`) is written to the `FoundBlocks`
-column family in the same batch as the confirmation. This records blocks
-found by any node's miners, not just locally connected ones, including
-blocks carried by uncles.
+Persisted after BCHN acceptance (`store/found_block.rs`, see
+`store-schema.md`). Confirmation records shares and uncles meeting their
+own claimed BCH targets in the `FoundBlocks` column family as unverified
+candidates. Meeting a claimed target does not establish that BCHN
+requires that target or accepts the block. Candidates are excluded from
+the API and found-block metrics until accepted.
 
-- **Restart-safe and node-consistent.** The list lives in RocksDB and is
-  derived from the chain, so every node reports the same blocks.
-- **Rebuilt on sync.** Only header data is read, so header-only
-  confirmation below the prune height records the same entries; a fresh
-  node rebuilds the list as it syncs. No `is_current` gate is needed
-  because the gauge value is the bitcoin header time, not now(). A node
-  upgraded in place only records blocks confirmed after the upgrade.
-- **Never deleted.** A share chain reorg does not undo a bitcoin block,
-  so entries are kept and the counter is monotonic. Whether a block
-  stayed on the bitcoin main chain is left to the block explorer.
+- **Restart-safe.** Positive BCHN `submitblock` verdicts (`accepted` or a
+  valid `duplicate`) are persisted in `AcceptedFoundBlocks`. A duplicate
+  acceptance does not add another find. Inconclusive, rejected and failed
+  submissions do not establish acceptance.
+- **Verified across nodes.** A background worker checks candidates from
+  any miner, including uncles and header-only historical shares, against
+  BCHN's block hash at the claimed height. A matching hash records
+  acceptance. RPC failures defer the check without affecting shares.
+  Different nodes can report different counts while verification catches
+  up or their BCHN nodes are unavailable.
+- **Never deleted after acceptance.** A share chain reorg does not remove
+  the record. Whether the block later left BCHN's best chain is left to
+  the block explorer.
 - **Not limited by Prometheus retention.** Every scrape carries the full
   list, so an instant query always shows every found block.
 
@@ -171,11 +172,12 @@ Why the confirmed-chain work and not a per-share accumulator:
   chainwork), so it survives restarts and agrees across nodes. It also
   survives pruning, since the tip metadata carries the cumulative scalar
   rather than re-summing shares.
-- **Excludes uncle work.** `chain_work` sums only main-chain share work,
-  so this measures confirmed-chain hashrate and undercounts total pool
-  hashrate by the uncle/orphan rate. This mirrors how Bitcoin network
-  hashrate is estimated from chainwork and is the accepted trade-off for
-  reorg-safety.
+- **Includes named uncle work.** Since 2026-10-30 `chain_work` sums the
+  work of the main-chain shares and of every uncle they name, each uncle
+  once. This measures the hashrate behind the chain plus its named uncles.
+  It still undercounts total pool hashrate by the orphan rate: a share no
+  nephew names adds nothing. This mirrors how Bitcoin network hashrate is
+  estimated from chainwork and is the accepted trade-off for reorg-safety.
 
 **Only emitted while the chain is current** (`ChainStoreHandle::is_current`
 -- confirmed tip within `MAX_TIP_AGE_SECS` = 300s of now). During sync the
@@ -203,10 +205,12 @@ periods.
 `work_since_last_block` accumulates the pool difficulty of each confirmed
 sharechain share (via `MetricsMessage::RecordConfirmedShare` from the
 organise worker's `record_confirmed_block`) and resets to zero
-(`MetricsMessage::ResetBlockEffort`) when the **pool** finds a bitcoin
-block. The reset is driven by a pool-wide share-chain signal (a confirmed
-share that meets the bitcoin target), so it fires for a block found by any node's miners,
-not just local ones -- this makes it a true pool "round luck" metric
+(`MetricsMessage::ResetBlockEffort`) after a newly recorded BCHN-accepted
+pool block. A positive local submission verdict or the background
+verifier's matching BCHN chain hash can trigger the reset, so blocks found
+by other nodes' miners count too. A share merely meeting its claimed BCH
+target never resets effort, and duplicate acceptances reset it only once.
+This makes it a pool "round luck" metric
 (>100% means the pool is overdue for a block). It is runtime-only (not
 persisted): a fresh or pruned node cannot reconstruct
 work-since-last-block from history. Uncles are excluded so it tracks the
@@ -221,7 +225,9 @@ Accumulation is **skipped while syncing** (`is_current` is false): during
 sync `record_confirmed_block` replays the whole backlog and `work_since_last_block`
 never resets (no real bitcoin block is found during replay), so it would
 balloon to the entire chain's work and report an absurd effort. Only
-real-time confirmed shares count.
+real-time confirmed shares count. The acceptance verifier also skips
+effort resets for historical candidates present at startup or observed
+while syncing, so later verification cannot erase current-round effort.
 
 **Grafana:** Gauge or Bar gauge of
 `work_since_last_block / network_difficulty`. Values around 1.0 (100%)

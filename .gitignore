@@ -17,6 +17,7 @@ tools/log_dashboard/agent_logs/
 tools/log_dashboard/last_processed.txt
 
 config.toml
+!.cargo/config.toml
 config-dev.toml
 config-*-copy.toml
 # The cargo aliases for the developer tools (docs/tooling.md) are not a node
@@ -36,6 +37,7 @@ spec/**/states
 # Ansible inventory and vault (contain hostnames, credentials)
 ansible/inventory/hosts.yml
 ansible/inventory/group_vars/all/vault.yml
+ansible/inventory/host_vars/
 
 # Editors
 .zed/

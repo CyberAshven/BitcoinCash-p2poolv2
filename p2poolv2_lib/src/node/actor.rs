@@ -15,8 +15,10 @@ use crate::config::{Chain, Config, PoolMode};
 use crate::monitoring_events::MonitoringEventSender;
 use crate::node::Node;
 use crate::node::SwarmSend;
+use crate::node::bch_header_feeder::BchHeaderFeeder;
 use crate::node::dns_seeds;
 use crate::node::emission_worker::EmissionWorker;
+use crate::node::found_block_verifier::FoundBlockVerifier;
 use crate::node::messages::Message;
 use crate::node::organise_worker::{OrganiseWorker, create_organise_channel};
 use crate::node::p2p_health::P2pHealth;
@@ -502,6 +504,27 @@ impl NodeActor {
         }
         let share_validator: Arc<dyn ShareValidator + Send + Sync> = Arc::new(validator);
 
+        // Accounting verification is separate from share validation and the
+        // serial organisation path. A slow BCHN never holds up either one.
+        let (found_block_verifier, bch_header_feeder) = if chain == Chain::BitcoinCash {
+            let client = BitcoindRpcClient::new(
+                &config.bitcoinrpc.url,
+                &config.bitcoinrpc.username,
+                &config.bitcoinrpc.password,
+            )?;
+            (
+                Some(FoundBlockVerifier::new(
+                    client.clone(),
+                    chain_store_handle.clone(),
+                    metrics.clone(),
+                )),
+                // Follows BCHN's headers for mining on the current chain.
+                Some(BchHeaderFeeder::new(client, chain_store_handle.clone())),
+            )
+        } else {
+            (None, None)
+        };
+
         let node = Node::new(
             config,
             chain_store_handle.clone(),
@@ -527,7 +550,27 @@ impl NodeActor {
         )
         .with_depths(ChainDepths::for_chain(chain));
         let mut workers: JoinSet<Result<(), String>> = JoinSet::new();
-        let mut worker_names: HashMap<tokio::task::Id, &'static str> = HashMap::with_capacity(4);
+        let mut worker_names: HashMap<tokio::task::Id, &'static str> = HashMap::with_capacity(6);
+
+        if let Some(verifier) = found_block_verifier {
+            let verifier_id = workers
+                .spawn(async move {
+                    verifier.run().await;
+                    Ok(())
+                })
+                .id();
+            worker_names.insert(verifier_id, "Found block verifier");
+        }
+
+        if let Some(feeder) = bch_header_feeder {
+            let feeder_id = workers
+                .spawn(async move {
+                    feeder.run().await;
+                    Ok(())
+                })
+                .id();
+            worker_names.insert(feeder_id, "BCH header feeder");
+        }
 
         let organise_worker_id = workers
             .spawn(async move {
@@ -793,7 +836,7 @@ impl NodeActor {
                     .send_response(response_channel, msg);
                 debug!("Sent message to response channel: {request_id:?}");
             }
-            SwarmSend::BroadcastBlock(share_block) => {
+            SwarmSend::BroadcastBlock(share_block, bch_headers) => {
                 let connected_peers = self.node.connected_peers();
                 let peer_knowledge = self
                     .node
@@ -801,6 +844,7 @@ impl NodeActor {
                     .peer_block_knowledge_mut();
                 send_share_block_broadcast(
                     share_block,
+                    bch_headers,
                     &connected_peers,
                     peer_knowledge,
                     &mut self.node.swarm,

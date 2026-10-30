@@ -102,7 +102,7 @@ mainnet has not started.
 | **Permissionless mining.** Anyone joins without permission. | Met. |
 | **Trustless joins.** A new node follows the most-work valid chain, trusting no one. | Met. Headers sync from genesis with full difficulty checks. |
 | **Sovereign templates.** Every node builds its own templates. | Met. The node's own BCHN, or a Stratum V2 Template Provider; miners can declare their own jobs (Job Declaration, both modes). |
-| **Mining on the current chain.** A coinbase pays only work on the BCH chain its block extends, give or take one block. | **Not met.** Designed upstream (`architecture/mine-on-bitcoin-chain.md`) but not built. On BCH it needs a header store and a header validator for aserti3-2d and chipnet's 20-minute rule. Planned before mainnet. |
+| **Mining on the current chain.** A coinbase pays only work on the BCH chain its block extends, give or take one block. | **Built, not yet run on chipnet.** Upstream's design (`architecture/mine-on-bitcoin-chain.md`), built on 2026-10-30: a header store fed by BCHN, an aserti3-2d header check with chipnet's 20-minute rule, carried headers, and the payout rule. A flag day (`bch-prev-1off`). |
 | **Precise hashrate reporting.** Miners see their hashrate from Stratum shares. | Met. The dashboard, `/miner` and Prometheus metrics. |
 
 ### Payouts

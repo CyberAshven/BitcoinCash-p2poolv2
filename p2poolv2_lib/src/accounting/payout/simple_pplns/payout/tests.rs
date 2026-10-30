@@ -57,7 +57,13 @@ async fn bitcoin_cash_payout_combines_prefixed_and_prefixless_usernames() {
     let mut payout = Payout::new(86400, config.bitcoin_cash_network);
     let total = Amount::from_sat(100_000_000);
     let distribution = payout
-        .get_output_distribution(&store, BlockHash::all_zeros(), 400, total, &config)
+        .get_output_distribution(
+            &store,
+            BlockHash::all_zeros(),
+            400_u128.into(),
+            total,
+            &config,
+        )
         .unwrap()
         .outputs;
     assert_eq!(distribution.len(), 4);
@@ -137,7 +143,13 @@ async fn bootstrap_payout_preserves_donation_and_fee() {
     let mut payout = Payout::new(86400, config.bitcoin_cash_network);
     let total = Amount::from_sat(100_000_000);
     let distribution = payout
-        .get_output_distribution(&store, BlockHash::all_zeros(), 400, total, &config)
+        .get_output_distribution(
+            &store,
+            BlockHash::all_zeros(),
+            400_u128.into(),
+            total,
+            &config,
+        )
         .unwrap()
         .outputs;
     assert_eq!(distribution.len(), 3);
@@ -619,7 +631,7 @@ async fn test_get_output_distribution_single_address() {
         .get_output_distribution(
             &chain_store_handle,
             BlockHash::all_zeros(),
-            1000,
+            1000_u128.into(),
             total_amount,
             &stratum_config,
         )
@@ -679,7 +691,7 @@ async fn test_get_output_distribution_multiple_addresses() {
         .get_output_distribution(
             &chain_store_handle,
             BlockHash::all_zeros(),
-            1000,
+            1000_u128.into(),
             total_amount,
             &stratum_config,
         )
@@ -766,7 +778,7 @@ async fn test_get_output_distribution_same_address_multiple_shares() {
         .get_output_distribution(
             &chain_store_handle,
             BlockHash::all_zeros(),
-            1000,
+            1000_u128.into(),
             total_amount,
             &stratum_config,
         )
@@ -803,7 +815,7 @@ async fn test_get_output_distribution_empty_shares() {
         .get_output_distribution(
             &chain_store_handle,
             BlockHash::all_zeros(),
-            1000,
+            1000_u128.into(),
             total_amount,
             &stratum_config,
         )
@@ -865,7 +877,7 @@ async fn test_get_output_distribution_with_donation() {
         .get_output_distribution(
             &chain_store_handle,
             BlockHash::all_zeros(),
-            1000,
+            1000_u128.into(),
             total_amount,
             &stratum_config,
         )
@@ -958,7 +970,7 @@ async fn test_get_output_distribution_with_fee() {
         .get_output_distribution(
             &chain_store_handle,
             BlockHash::all_zeros(),
-            1000,
+            1000_u128.into(),
             total_amount,
             &stratum_config,
         )
@@ -1057,7 +1069,7 @@ async fn test_get_output_distribution_with_donation_and_fee() {
         .get_output_distribution(
             &chain_store_handle,
             BlockHash::all_zeros(),
-            1000,
+            1000_u128.into(),
             total_amount,
             &stratum_config,
         )
@@ -1138,7 +1150,7 @@ async fn test_get_output_distribution_with_donation_empty_shares() {
         .get_output_distribution(
             &chain_store_handle,
             BlockHash::all_zeros(),
-            1000,
+            1000_u128.into(),
             total_amount,
             &stratum_config,
         )
@@ -1201,7 +1213,7 @@ async fn test_get_output_distribution_with_zero_donation() {
         .get_output_distribution(
             &chain_store_handle,
             BlockHash::all_zeros(),
-            1000,
+            1000_u128.into(),
             total_amount,
             &stratum_config,
         )
@@ -1291,7 +1303,7 @@ async fn test_get_output_distribution_with_zero_fee() {
         .get_output_distribution(
             &chain_store_handle,
             BlockHash::all_zeros(),
-            1000,
+            1000_u128.into(),
             total_amount,
             &stratum_config,
         )
@@ -1363,7 +1375,7 @@ async fn test_get_output_distribution_with_full_donation_and_invalid_miner_addre
         .get_output_distribution(
             &chain_store_handle,
             BlockHash::all_zeros(),
-            1000,
+            1000_u128.into(),
             total_amount,
             &stratum_config,
         )

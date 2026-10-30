@@ -24,7 +24,10 @@ pub enum ColumnFamily {
     TemplateMerkleBranches,
     BitcoinCoinbase,
     FoundBlocks,
+    AcceptedFoundBlocks,
     PayoutTrees,
+    BchHeaders,
+    BchBestChain,
 }
 
 impl ColumnFamily {
@@ -49,7 +52,10 @@ impl ColumnFamily {
             ColumnFamily::TemplateMerkleBranches => "template_merkle_branches",
             ColumnFamily::BitcoinCoinbase => "bitcoin_coinbase",
             ColumnFamily::FoundBlocks => "found_blocks",
+            ColumnFamily::AcceptedFoundBlocks => "accepted_found_blocks",
             ColumnFamily::PayoutTrees => "payout_trees",
+            ColumnFamily::BchHeaders => "bch_headers",
+            ColumnFamily::BchBestChain => "bch_best_chain",
         }
     }
 }

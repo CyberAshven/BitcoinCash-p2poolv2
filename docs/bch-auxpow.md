@@ -190,6 +190,13 @@ narrow, so its band permits up to x8 on both sides. Mainnet retains the
 original asymmetric band. These are proof-format checks agreed with
 Pickaxe, not BCH block validation.
 
+Local share-block validation runs the same token-header gate as peer header
+validation. The notifier drops tokens from a template outside the band.
+Stratum V2 also checks a declared token job's nBits and requested minimum
+time before proposal validation or job installation, returning
+`invalid-token-asert` on failure. An exactly empty commitment does not need
+this token-format check.
+
 P2Pool's `BchAsert::check_header_bits` and the SAFA covenant use the same
 bands, number for number: mainnet `target × 100 ≤ computed × 105`, test
 networks `target ≤ computed × 8`, and `computed / d` floored on the hard
@@ -276,7 +283,9 @@ nothing. A node does not start on a file it cannot read or that is not
 valid (at most 1 MiB). It reads the file again whenever its modification
 time changes, so the tool that claims a token can write the new state
 hash; a changed file that is broken keeps the last good tokens and logs
-why. No token is deployed yet, so no file ships with the node.
+why. No file ships with the node: a vault's state changes with every claim.
+The first token, tSAFA, is deployed on chipnet; its parameters are in
+[the SAFA tool's README](../p2poolv2_safa/README.md#chipnet-tsafa-deployment).
 
 **Each miner's root.** Every pool-built job (Stratum V1, and Stratum V2
 standard and extended channels) carries a root of its miner's own leaves at
@@ -393,7 +402,9 @@ and branch and checked as a covenant would check it, with the ASERT check
 on mainnet and chipnet, before it is sent or logged; one that fails is
 logged and dropped. A proof needs the block's coinbase branch to be at most
 25 deep, the proof format's limit. P2Pool builds no claim transactions:
-claiming is the miner's, or their tool's, with the token's covenant.
+claiming is the miner's, or their tool's, with the token's covenant. An
+operator can run [`safa claimer`](../p2poolv2_safa/README.md#claimer) separately
+to follow one SAFA vault, verify pool wins and broadcast the claims.
 
 ## Job Declaration leaves
 

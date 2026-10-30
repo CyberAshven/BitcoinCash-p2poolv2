@@ -216,10 +216,8 @@ fn found_blocks(state: &AppState) -> Vec<FoundBlockRow> {
 /// A payout address the store keeps in Bitcoin's spelling, spelled for the
 /// chain this node mines. One that does not parse is shown as it is.
 fn payout_address_display(state: &AppState, stored: &str) -> String {
-    match bitcoin::Address::from_str(stored) {
-        Ok(address) => {
-            payout_address_string(&address.assume_checked(), state.app_config.cash_network)
-        }
+    match stored.parse::<p2poolv2_lib::config::PayoutAddress>() {
+        Ok(address) => payout_address_string(&address, state.app_config.cash_network),
         Err(_) => stored.to_string(),
     }
 }

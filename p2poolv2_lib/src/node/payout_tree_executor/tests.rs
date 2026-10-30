@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 struct FakeNode {
     tip: Arc<Mutex<BlockHash>>,
     confirmations: Arc<Mutex<Option<i64>>>,
+    confirmation_error: Arc<Mutex<Option<String>>>,
     outcome: Arc<Mutex<BroadcastOutcome>>,
     transaction_outcomes: Arc<Mutex<HashMap<Txid, BroadcastOutcome>>>,
     root_unspent: Arc<Mutex<bool>>,
@@ -25,6 +26,7 @@ impl FakeNode {
         Self {
             tip: Arc::new(Mutex::new(BlockHash::from_byte_array([1; 32]))),
             confirmations: Arc::new(Mutex::new(Some(confirmations))),
+            confirmation_error: Arc::new(Mutex::new(None)),
             outcome: Arc::new(Mutex::new(BroadcastOutcome::Accepted)),
             transaction_outcomes: Arc::new(Mutex::new(HashMap::with_capacity(8))),
             root_unspent: Arc::new(Mutex::new(true)),
@@ -53,7 +55,10 @@ impl TreeExecutionNode for FakeNode {
     }
 
     async fn block_confirmations(&self, _blockhash: BlockHash) -> Result<Option<i64>, String> {
-        Ok(*self.confirmations.lock().unwrap())
+        match self.confirmation_error.lock().unwrap().clone() {
+            Some(error) => Err(error),
+            None => Ok(*self.confirmations.lock().unwrap()),
+        }
     }
 
     async fn send_raw_transaction(&self, transaction: &Transaction) -> BroadcastOutcome {
@@ -292,6 +297,39 @@ async fn a_501_payee_tree_with_missing_children_stays_pending() {
     assert_eq!(
         executor.settled_tips.values().copied().collect::<Vec<_>>(),
         vec![0]
+    );
+}
+
+/// An RPC failure cannot count as another settled tip, or as evidence
+/// that a found block is unknown and should expire.
+#[tokio::test]
+async fn a_confirmation_rpc_error_resets_settlement_without_aging_the_record() {
+    let mut store = store_with(stored_tree(501));
+    store.expect_mark_payout_tree_executed().never();
+    store.expect_record_unknown_payout_tree_tip().never();
+    let node = FakeNode::new(150);
+    *node.outcome.lock().unwrap() = BroadcastOutcome::InChain;
+    let mut executor = PayoutTreeExecutor::new(node.clone(), store, payout_tree_channel().1);
+
+    executor.execute_round().await;
+    assert_eq!(
+        executor.settled_tips.values().copied().collect::<Vec<_>>(),
+        vec![1]
+    );
+    let sent_before_error = node.sent().len();
+    *node.confirmation_error.lock().unwrap() = Some("BCHN RPC connection closed".to_string());
+    node.advance_tip(2);
+    executor.execute_round().await;
+
+    assert!(executor.settled_tips.is_empty());
+    assert_eq!(node.sent().len(), sent_before_error);
+
+    *node.confirmation_error.lock().unwrap() = None;
+    node.advance_tip(3);
+    executor.execute_round().await;
+    assert_eq!(
+        executor.settled_tips.values().copied().collect::<Vec<_>>(),
+        vec![1]
     );
 }
 

@@ -25,14 +25,15 @@ use axum::{
     extract::{Query, State},
 };
 use bitcoin::CompactTarget;
-use bitcoin::{Address, BlockHash, Network};
+use bitcoin::{BlockHash, Network};
 use p2poolv2_lib::accounting::payout::sharechain_pplns::PplnsWindow;
 use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::{
-    MinerCredits, WindowCredit, WindowCredits, WindowError, bitcoin_block_difficulty,
+    MinerCredits, PayingBlock, WindowCredit, WindowCredits, WindowError, bitcoin_block_difficulty,
 };
 use p2poolv2_lib::address::bch_share::{self, BchShareNetwork};
 use p2poolv2_lib::address::share_owner::{ShareOwner, to_address_string};
 use p2poolv2_lib::address_display::payout_address_string;
+use p2poolv2_lib::config::PayoutAddress;
 use p2poolv2_lib::config::{BitcoinCashNetwork, Chain, parse_payout_address, parse_share_address};
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::store::writer::StoreError;
@@ -133,7 +134,8 @@ pub(crate) struct MinerWindowSource {
 struct PreparationSnapshot {
     anchor: BlockHash,
     bits: u32,
-    weights: Arc<HashMap<Address, u128>>,
+    previous_hash: BlockHash,
+    weights: Arc<HashMap<PayoutAddress, u128>>,
 }
 
 impl MinerWindowSource {
@@ -145,18 +147,21 @@ impl MinerWindowSource {
         }
     }
 
-    /// Exact payout weights use the selected paying block's bits, never the
-    /// dashboard's estimate from an older anchor header. Cache one snapshot;
-    /// lock ordering is preparation-cache then window, only on a blocking task.
+    /// Exact payout weights use the selected paying block's bits and
+    /// previous block, never the dashboard's estimate from an older anchor
+    /// header. Cache one snapshot; lock ordering is preparation-cache then
+    /// window, only on a blocking task.
     pub(crate) async fn preparation_weights(
         &self,
         anchor: BlockHash,
         bits: u32,
+        previous_hash: BlockHash,
         chain_store_handle: &ChainStoreHandle,
-    ) -> Result<Arc<HashMap<Address, u128>>, ApiError> {
+    ) -> Result<Arc<HashMap<PayoutAddress, u128>>, ApiError> {
         let mut cache = self.preparation.lock().await;
         if let Some(snapshot) = cache.as_ref()
-            && (snapshot.anchor, snapshot.bits) == (anchor, bits)
+            && (snapshot.anchor, snapshot.bits, snapshot.previous_hash)
+                == (anchor, bits, previous_hash)
         {
             return Ok(Arc::clone(&snapshot.weights));
         }
@@ -169,7 +174,11 @@ impl MinerWindowSource {
             let difficulty =
                 bitcoin_block_difficulty(CompactTarget::from_consensus(bits), window.network());
             window
-                .get_distribution_from_start_hash(anchor, difficulty, &store)
+                .get_distribution_from_start_hash(
+                    anchor,
+                    PayingBlock::new(difficulty, previous_hash),
+                    &store,
+                )
                 .map_err(window_error)
         })
         .await
@@ -178,6 +187,7 @@ impl MinerWindowSource {
         *cache = Some(PreparationSnapshot {
             anchor,
             bits,
+            previous_hash,
             weights: Arc::clone(&weights),
         });
         Ok(weights)
@@ -215,23 +225,23 @@ impl MinerWindowSource {
 /// Walk the window once for `anchor`, under its write lock. Blocks, so it
 /// runs on a blocking thread.
 ///
-/// On Bitcoin Cash the window is sized by the paying block's difficulty, and
-/// the next block has no header yet. The anchor share's own bitcoin header
-/// carries the bits this node last mined on, which the next share carries too
-/// unless a new bitcoin block arrives first, so the view is sized from them.
-/// The fixed Bitcoin window does not read them.
+/// On Bitcoin Cash the window is sized by the paying block's difficulty and
+/// pays the work on its BCH chain, and the next block has no header yet. The
+/// anchor share's own bitcoin header carries the bits and the previous block
+/// this node last mined on, which the next share carries too unless a new
+/// bitcoin block arrives first, so the view is resolved from them. The fixed
+/// Bitcoin window does not read them.
 fn build_window_credits(
     window: &RwLock<PplnsWindow>,
     anchor: BlockHash,
     chain_store_handle: &ChainStoreHandle,
 ) -> Result<WindowCredits, ApiError> {
-    let anchor_bits = chain_store_handle
+    let anchor_header = chain_store_handle
         .get_share_header(&anchor)
         .map_err(|error| {
             ApiError::ServerError(format!("Failed to read the anchor share: {error}"))
         })?
-        .bitcoin_header
-        .bits;
+        .bitcoin_header;
     let mut window = window
         .write()
         .map_err(|_| ApiError::ServerError("PPLNS window lock poisoned".to_string()))?;
@@ -240,11 +250,14 @@ fn build_window_credits(
             "PPLNS window is not loaded yet".to_string(),
         ));
     }
-    let paying_block_difficulty = bitcoin_block_difficulty(anchor_bits, window.network());
+    let paying_block = PayingBlock::new(
+        bitcoin_block_difficulty(anchor_header.bits, window.network()),
+        anchor_header.prev_blockhash,
+    );
     window
         .get_window_credits_from_start_hash(
             anchor,
-            paying_block_difficulty,
+            paying_block,
             chain_store_handle,
             MAX_NUM_SHARES_IN_RESPONSE as usize,
         )
@@ -254,7 +267,7 @@ fn build_window_credits(
 /// Which of a share header's two addresses a query names.
 enum MinerAddress {
     /// The payout address, `miner_bitcoin_address`.
-    Payout(Address),
+    Payout(PayoutAddress),
     /// The share owner, `miner_address`: the share chain address.
     ShareOwner(ShareOwner),
 }
@@ -390,9 +403,10 @@ fn parse_bitcoin_miner(address: &str, network: Network) -> Result<MinerAddress, 
 /// failure is a server error.
 fn window_error(error: WindowError) -> ApiError {
     match error {
-        WindowError::InsufficientEntries { .. } | WindowError::RightsHistoryTooShallow { .. } => {
-            ApiError::ServiceUnavailable(error.to_string())
-        }
+        WindowError::InsufficientEntries { .. }
+        | WindowError::RightsHistoryTooShallow { .. }
+        | WindowError::UnknownBchPrev { .. }
+        | WindowError::NothingEligible { .. } => ApiError::ServiceUnavailable(error.to_string()),
         WindowError::ReadFailure(_) => {
             ApiError::ServerError(format!("Failed to read the PPLNS window: {error}"))
         }
@@ -714,7 +728,12 @@ mod tests {
             .pplns_window
             .as_ref()
             .unwrap()
-            .preparation_weights(genesis.block_hash(), bits, &state.chain_store_handle)
+            .preparation_weights(
+                genesis.block_hash(),
+                bits,
+                template.previousblockhash.parse().unwrap(),
+                &state.chain_store_handle,
+            )
             .await
             .unwrap();
         let commitment = ShareCommitment::from_mining_job_token(

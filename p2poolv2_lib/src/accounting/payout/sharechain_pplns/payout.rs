@@ -12,13 +12,14 @@ use crate::accounting::OutputPair;
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, append_payout_split};
 use crate::accounting::payout::payout_distribution::PayoutDistribution;
 use crate::accounting::payout::payout_tree::PayoutTree;
-use crate::accounting::payout::sharechain_pplns::pplns_window::PplnsWindow;
+use crate::accounting::payout::sharechain_pplns::pplns_window::{PayingBlock, PplnsWindow};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
-use bitcoin::{Address, Amount, BlockHash};
+use bitcoin::{Amount, BlockHash};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::{Arc, RwLock};
@@ -31,7 +32,7 @@ use std::sync::{Arc, RwLock};
 /// acquires a write lock to update the window and compute the distribution.
 pub struct Payout {
     pplns_window: Arc<RwLock<PplnsWindow>>,
-    last_weights: Option<HashMap<Address, u128>>,
+    last_weights: Option<HashMap<PayoutAddress, u128>>,
 }
 
 impl Payout {
@@ -87,18 +88,18 @@ impl PayoutDistribution for Payout {
             .has_per_share_cuts()
     }
 
-    fn pplns_weights(&self) -> Option<HashMap<Address, u128>> {
+    fn pplns_weights(&self) -> Option<HashMap<PayoutAddress, u128>> {
         self.last_weights.clone()
     }
 
     /// Fill payout distribution from the incrementally maintained PPLNS window.
     ///
     /// The window starts below the shares not yet mature for the paying
-    /// share. On Bitcoin it is `PPLNS_WINDOW_SHARES` shares and the bitcoin
-    /// difficulty plays no part. On Bitcoin Cash `bitcoin_difficulty`, the
-    /// difficulty of the template the job is built on and so of the header
-    /// the share will carry, sizes it (see `BCH_PPLNS_WINDOW_BLOCKS`). The
-    /// validator calls the same window with the difficulty in the share's
+    /// share. On Bitcoin it is `PPLNS_WINDOW_SHARES` shares and the paying
+    /// block plays no part. On Bitcoin Cash `paying_block`, the template the
+    /// job is built on and so the header the share will carry, sizes it (see
+    /// `BCH_PPLNS_WINDOW_BLOCKS`) and picks the work it pays (mining on the
+    /// current chain). The validator calls the same window with the share's
     /// header. An empty window is an error.
     ///
     /// `split` turns the weights into outputs: every payee on Bitcoin, the
@@ -109,10 +110,10 @@ impl PayoutDistribution for Payout {
         distribution: &mut Vec<OutputPair>,
         chain_store_handle: &ChainStoreHandle,
         anchor: BlockHash,
-        bitcoin_difficulty: u128,
+        paying_block: PayingBlock,
         _total_amount: bitcoin::Amount,
         remaining_total_amount: Amount,
-        _bootstrap_address: Address,
+        _bootstrap_address: PayoutAddress,
         split: PayoutSplit,
     ) -> Result<Option<PayoutTree>, Box<dyn Error + Send + Sync>> {
         self.last_weights = None;
@@ -134,11 +135,8 @@ impl PayoutDistribution for Payout {
             .into());
         }
 
-        let address_difficulty_map = window.get_distribution_from_start_hash(
-            anchor,
-            bitcoin_difficulty,
-            chain_store_handle,
-        )?;
+        let address_difficulty_map =
+            window.get_distribution_from_start_hash(anchor, paying_block, chain_store_handle)?;
 
         let tree = append_payout_split(
             &address_difficulty_map,
@@ -155,6 +153,7 @@ impl PayoutDistribution for Payout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::Address;
 
     use crate::accounting::payout::payout_distribution::build_pplns_outputs;
     use crate::accounting::payout::sharechain_pplns::pplns_window::{
@@ -203,7 +202,7 @@ mod tests {
         let config = make_test_config();
         let total_amount = Amount::from_sat(100_000_000);
         let error = payout
-            .get_output_distribution(&mock, genesis_hash, 1000, total_amount, &config)
+            .get_output_distribution(&mock, genesis_hash, 1000_u128.into(), total_amount, &config)
             .unwrap_err();
 
         assert!(
@@ -244,7 +243,7 @@ mod tests {
         let config = make_test_config();
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
-            .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
+            .get_output_distribution(&mock, tip_hash, u128::MAX.into(), total_amount, &config)
             .unwrap()
             .outputs;
 
@@ -295,7 +294,7 @@ mod tests {
         let config = make_test_config();
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
-            .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
+            .get_output_distribution(&mock, tip_hash, u128::MAX.into(), total_amount, &config)
             .unwrap()
             .outputs;
 
@@ -367,7 +366,7 @@ mod tests {
         let config = make_test_config();
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
-            .get_output_distribution(&mock, anchor, u128::MAX, total_amount, &config)
+            .get_output_distribution(&mock, anchor, u128::MAX.into(), total_amount, &config)
             .unwrap()
             .outputs;
 
@@ -424,7 +423,7 @@ mod tests {
         let config = make_test_config();
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
-            .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
+            .get_output_distribution(&mock, tip_hash, u128::MAX.into(), total_amount, &config)
             .unwrap()
             .outputs;
 
@@ -507,7 +506,7 @@ mod tests {
         let config = make_test_config();
         let total_amount = Amount::from_sat(100_000_000);
         let result = payout
-            .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
+            .get_output_distribution(&mock, tip_hash, u128::MAX.into(), total_amount, &config)
             .unwrap()
             .outputs;
 
@@ -589,7 +588,7 @@ mod tests {
             .get_output_distribution(
                 &mock,
                 tip_hash,
-                single_share_difficulty,
+                single_share_difficulty.into(),
                 total_amount,
                 &config,
             )
@@ -660,7 +659,7 @@ mod tests {
             .get_output_distribution(
                 &mock,
                 tip_hash,
-                single_share_difficulty,
+                single_share_difficulty.into(),
                 total_amount,
                 &config,
             )
@@ -735,7 +734,7 @@ mod tests {
         let total_amount = Amount::from_sat(100_000_000);
 
         let result = payout
-            .get_output_distribution(&mock, tip_hash, u128::MAX, total_amount, &config)
+            .get_output_distribution(&mock, tip_hash, u128::MAX.into(), total_amount, &config)
             .unwrap()
             .outputs;
 
@@ -805,7 +804,13 @@ mod tests {
         finder.donation = Some(1_000);
         finder.fee = Some(1_000);
         let produced = payout
-            .get_output_distribution(&store, anchor, 1, Amount::from_sat(1_000_000), &finder)
+            .get_output_distribution(
+                &store,
+                anchor,
+                1_u128.into(),
+                Amount::from_sat(1_000_000),
+                &finder,
+            )
             .unwrap();
         let validator_weights = payout.pplns_weights().unwrap();
         let validated = build_pplns_outputs(
@@ -954,10 +959,16 @@ mod tests {
         finder.donation = Some(0);
 
         let produced = payout
-            .get_output_distribution(&store, anchor, 1, Amount::from_sat(value), &finder)
+            .get_output_distribution(
+                &store,
+                anchor,
+                1_u128.into(),
+                Amount::from_sat(value),
+                &finder,
+            )
             .unwrap();
 
-        let paid = |address: &Address| {
+        let paid = |address: &PayoutAddress| {
             produced
                 .outputs
                 .iter()
@@ -977,7 +988,7 @@ mod tests {
         let validated = build_pplns_outputs(
             value,
             &validator_window
-                .get_distribution_from_start_hash(anchor, 1, &validator_store)
+                .get_distribution_from_start_hash(anchor, 1_u128.into(), &validator_store)
                 .unwrap(),
             &paying.donation_address,
             paying.donation,
@@ -1010,7 +1021,13 @@ mod tests {
         finder.donation = Some(100);
 
         let produced = payout
-            .get_output_distribution(&store, anchor, 1, Amount::from_sat(1_000_000), &finder)
+            .get_output_distribution(
+                &store,
+                anchor,
+                1_u128.into(),
+                Amount::from_sat(1_000_000),
+                &finder,
+            )
             .unwrap();
 
         assert_eq!(produced.outputs.len(), 1);
@@ -1087,7 +1104,7 @@ mod tests {
             .get_output_distribution(
                 &mock,
                 tip_hash,
-                bitcoin_block_difficulty(template_bits, bitcoin::Network::Testnet),
+                (bitcoin_block_difficulty(template_bits, bitcoin::Network::Testnet)).into(),
                 total_amount,
                 &config,
             )
@@ -1099,7 +1116,7 @@ mod tests {
         let validator_weights = window
             .get_distribution_from_start_hash(
                 paying_header.prev_share_blockhash,
-                paying_block_difficulty,
+                paying_block_difficulty.into(),
                 &mock,
             )
             .unwrap();
@@ -1184,7 +1201,7 @@ mod tests {
             .get_output_distribution(
                 &mock,
                 tip_hash,
-                bitcoin_block_difficulty(template_bits, bitcoin::Network::Testnet),
+                (bitcoin_block_difficulty(template_bits, bitcoin::Network::Testnet)).into(),
                 total_amount,
                 &config,
             )
@@ -1196,7 +1213,7 @@ mod tests {
         let validator_weights = window
             .get_distribution_from_start_hash(
                 paying_header.prev_share_blockhash,
-                paying_block_difficulty,
+                paying_block_difficulty.into(),
                 &mock,
             )
             .unwrap();
@@ -1226,7 +1243,8 @@ mod tests {
                 header.miner_bitcoin_address = Address::p2pkh(
                     PubkeyHash::from_byte_array([miner; 20]),
                     bitcoin::Network::Testnet,
-                );
+                )
+                .into();
                 *prev_hash = header.block_hash();
                 Some(header)
             })
@@ -1271,7 +1289,7 @@ mod tests {
             .get_output_distribution(
                 &mock,
                 tip_hash,
-                paying_block_difficulty,
+                paying_block_difficulty.into(),
                 total_amount,
                 &config,
             )
@@ -1279,7 +1297,7 @@ mod tests {
         let shared_window = payout.shared_pplns_window();
         let mut window = shared_window.write().unwrap();
         let validator_weights = window
-            .get_distribution_from_start_hash(tip_hash, paying_block_difficulty, &mock)
+            .get_distribution_from_start_hash(tip_hash, paying_block_difficulty.into(), &mock)
             .unwrap();
         let validator_outputs = build_pplns_outputs(
             total_amount.to_sat(),

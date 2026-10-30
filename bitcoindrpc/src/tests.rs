@@ -118,6 +118,7 @@ async fn test_getblockchaininfo() {
         GetBlockchainInfo {
             initial_block_download: true,
             chain: None,
+            blocks: None,
         }
     );
 }

@@ -114,7 +114,7 @@ fn bench_get_distribution_from_start_hash(criterion: &mut Criterion) {
                 window
                     .get_distribution_from_start_hash(
                         tip,
-                        paying_block_difficulty,
+                        paying_block_difficulty.into(),
                         &chain_store_handle,
                     )
                     .expect("tip should be in window"),

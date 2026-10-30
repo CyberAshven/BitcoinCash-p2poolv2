@@ -7,6 +7,7 @@ members = [
     "p2poolv2_node",
     "p2poolv2_cli",
     "p2poolv2_api",
+    "p2poolv2_electrum",
     "p2poolv2_tests",
     "p2poolv2_sim",
     "p2poolv2_tools",
@@ -15,6 +16,7 @@ members = [
     "p2poolv2_tui",
     "p2poolv2_netsim",
     "p2poolv2_safa",
+    "p2poolv2_photon_payout",
 ]
 resolver = "2"
 
@@ -58,7 +60,6 @@ libp2p = { version = "0.56", features = [
     "macros",
     "kad",
     "ping",
-    "secp256k1",
     "request-response",
 ] }
 tokio = { version = "1.0", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "signal", "macros"] }
@@ -86,8 +87,8 @@ zmq = "0.10"
 bitcoin = { version = "0.32.5", features = ["serde", "rand"] }
 bitcoinconsensus = { version = "0.106.0" }
 # Bitcoin Cash Schnorr share signatures; expose-field gives the quadratic-residue
-# check that scheme needs. libp2p-identity already pulls in this version.
-k256 = { version = "0.13.4", default-features = false, features = ["arithmetic", "expose-field"] }
+# check that scheme needs.
+k256 = { version = "0.14.0", default-features = false, features = ["arithmetic"] }
 base64 = "0.23.1"
 chrono = { version = "0.4", features = ["serde"] }
 tokio-util = { version = "0.7.15", features = ["codec"] }
@@ -96,11 +97,13 @@ bitcoindrpc = { path = "bitcoindrpc" }
 p2poolv2_wallet = { path = "p2poolv2_wallet" }
 p2poolv2_config = { path = "p2poolv2_config" }
 p2poolv2_api = { path = "p2poolv2_api" }
+p2poolv2_electrum = { path = "p2poolv2_electrum" }
 p2poolv2_lib = { path = "p2poolv2_lib", features = ["test-utils"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "default-tls"] }
 mockall = "0.15"
 mockall_double = "0.3.1"
 tempfile = "3.15.0"
+proptest = "1.5"
 tokio-test = "0.4.3"
 wiremock = "0.6.2"
 dashmap = "6"

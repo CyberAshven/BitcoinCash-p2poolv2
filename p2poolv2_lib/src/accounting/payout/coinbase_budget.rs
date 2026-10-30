@@ -39,7 +39,8 @@ use crate::shares::bch_payout_covenant::{FILLER_BYTES_PER_OUTPUT, NODE_COVENANT_
 use crate::shares::bch_script::output_size_for_script_length;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::{ShareHeader, share_has_token_commitment};
-use bitcoin::{Address, Amount, ScriptBuf};
+use bitcoin::{Amount, ScriptBuf};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::HashMap;
 use std::error::Error;
 
@@ -152,7 +153,7 @@ pub fn split_for_share(chain: Chain, header: &ShareHeader) -> PayoutSplit {
 /// `EveryPayee` is `append_proportional_distribution`. `BchHybrid` is the
 /// hybrid payout (see the module docs).
 pub(crate) fn append_payout_split(
-    weights: &HashMap<Address, u128>,
+    weights: &HashMap<PayoutAddress, u128>,
     amount: Amount,
     split: PayoutSplit,
     distribution: &mut Vec<OutputPair>,
@@ -170,7 +171,7 @@ pub(crate) fn append_payout_split(
 
 /// One payee in canonical order, with what the split needs to know of it.
 struct CanonicalPayee<'weights> {
-    address: &'weights Address,
+    address: &'weights PayoutAddress,
     script_pubkey: ScriptBuf,
     weight: u128,
     amount: u64,
@@ -192,7 +193,7 @@ impl CanonicalPayee<'_> {
 /// largest payee above dust (`PayoutTreeError::InsufficientValue`) is merged
 /// into that payee, as dust is, and paid directly in the tree output's place.
 fn append_hybrid_distribution(
-    weights: &HashMap<Address, u128>,
+    weights: &HashMap<PayoutAddress, u128>,
     amount: Amount,
     coinbase_limit: usize,
     distribution: &mut Vec<OutputPair>,
@@ -243,7 +244,7 @@ fn append_hybrid_distribution(
 /// per-share cuts express weights in units of `1 / 10^8`, whose product
 /// with a satoshi amount can pass 128 bits.
 fn canonical_payees(
-    weights: &HashMap<Address, u128>,
+    weights: &HashMap<PayoutAddress, u128>,
     amount: Amount,
 ) -> Result<Vec<CanonicalPayee<'_>>, Box<dyn Error + Send + Sync>> {
     let total_weight = weights

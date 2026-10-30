@@ -11,10 +11,11 @@
 //! -- the API and the CLI -- can build one.
 //!
 //! A payout address has the same problem on a Bitcoin Cash node. It is held
-//! as a `bitcoin::Address` under the legacy network whose base58 version bytes
-//! match (see `BitcoinCashNetwork::legacy_network`), so its `Display` is the
-//! right key hash in Bitcoin's spelling. [`payout_address_string`] spells it
-//! as the CashAddr the operator configured.
+//! as a `PayoutAddress`, a locking script under the legacy network class
+//! whose base58 version bytes match (see `BitcoinCashNetwork::legacy_network`),
+//! so its `Display` is Bitcoin's spelling of the same hash, or CashAddr for
+//! P2SH32, which Bitcoin cannot spell. [`payout_address_string`] spells it as
+//! the CashAddr the operator configured.
 //!
 //! These are the shapes those layers serve. They exist as their own types
 //! rather than as a rewrite of serialized store types, so a response stays a
@@ -28,8 +29,9 @@
 
 use crate::shares::share_block::ShareHeader;
 use crate::store::dag_store::{DagEntry, ShareInfo, UncleInfo};
-use bitcoin::{Address, BlockHash, CompactTarget, Network};
+use bitcoin::{BlockHash, CompactTarget, Network};
 use p2poolv2_wallet::bch_share::{BchShareNetwork, encode_payout_address};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::{self, ShareOwner};
 use serde::Serialize;
 use serde_json::Value;
@@ -66,7 +68,10 @@ fn address_for(
 /// hash. `encode_payout_address` refuses any other address because it has no
 /// CashAddr form, and such an address keeps its own form here rather than
 /// being hidden.
-pub fn payout_address_string(address: &Address, cash_network: Option<BchShareNetwork>) -> String {
+pub fn payout_address_string(
+    address: &PayoutAddress,
+    cash_network: Option<BchShareNetwork>,
+) -> String {
     match cash_network.map(|cash_network| encode_payout_address(address, cash_network)) {
         Some(Ok(cashaddr)) => cashaddr,
         Some(Err(_)) | None => address.to_string(),
@@ -269,6 +274,7 @@ mod tests {
     use crate::test_utils::{
         TestShareBlockBuilder, make_test_share_program, parse_address_from_string,
     };
+    use bitcoin::Address;
     use bitcoin::hashes::Hash;
     use bitcoin::{PubkeyHash, ScriptHash};
     use p2poolv2_wallet::bch_share::BchShareNetwork;
@@ -504,10 +510,10 @@ mod tests {
 
     #[test]
     fn renders_a_mainnet_cash_payout_with_the_mainnet_prefix() {
-        let address = Address::p2pkh(
+        let address = PayoutAddress::from(Address::p2pkh(
             PubkeyHash::from_byte_array(SPECIFICATION_HASH),
             Network::Bitcoin,
-        );
+        ));
 
         assert_eq!(
             payout_address_string(&address, Some(BchShareNetwork::Mainnet)),
@@ -517,10 +523,10 @@ mod tests {
 
     #[test]
     fn renders_a_cash_script_hash_payout_as_cashaddr() {
-        let address = Address::p2sh_from_hash(
+        let address = PayoutAddress::from(Address::p2sh_from_hash(
             ScriptHash::from_byte_array(SPECIFICATION_HASH),
             Network::Testnet,
-        );
+        ));
 
         assert_eq!(
             payout_address_string(&address, Some(BchShareNetwork::Chipnet)),

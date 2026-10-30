@@ -37,15 +37,15 @@ keeps the existing anchor `0x1b4188f5` and that same ceiling, so a Bitcoin
 config that omits `chain` still starts on the taproot genesis.
 
 A Bitcoin Cash startup that would encode a witness payout is rejected at
-config parse. CashAddr decoding accepts only 20-byte P2PKH and P2SH. The
-decoded script is what the existing coinbase builder pays. Token addresses
-and longer hashes are rejected.
+config parse. CashAddr decoding accepts P2PKH, P2SH20 and P2SH32 (since
+2026-10-30), token-aware or not. The decoded script is what the coinbase
+builder pays. Any other CashAddr type or hash size is rejected.
 
 An invalid BCHN template is not forwarded to job construction. The poll and
 ZMQ paths both use this check.
 
 Stratum usernames on a Bitcoin Cash node are `<cashaddr>.<worker>`. The
-CashAddr must be a 20-byte P2PKH or P2SH payout address for
+CashAddr must be a P2PKH, P2SH20 or P2SH32 payout address for
 `bitcoin_cash_network`; its prefix may be left out, as BCH miners commonly
 do, and the checksum must still match that network's prefix. Before
 2026-10-14 the username parser only read Bitcoin addresses, so no Bitcoin

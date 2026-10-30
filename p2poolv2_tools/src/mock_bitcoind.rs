@@ -18,11 +18,22 @@
 //! template and answers, for the JMeter comparison with CKPool, which still
 //! mines Bitcoin signet (`config-load-test.toml`, the CKPool configs).
 //!
+//! As BCHN it also serves the header of the block its template builds on:
+//! the node follows BCHN's headers (mining on the current chain), and the
+//! template's real parent has no header to serve. So the mock makes up a
+//! parent, a first block of a regtest chain (previous block all zeros), and
+//! points the template at it; `getbestblockhash` names it and
+//! `getblockheader` serves it. The template keeps its own height.
+//!
 //! HTTP is handled by hand on a raw TCP socket, as the JavaScript server did:
 //! CKPool reads with LF-only line endings and non-blocking reads, so each
 //! response (headers and body) goes out in one write.
 
 use crate::error::{ToolError, ToolResult};
+use bitcoin::block::{Header, Version};
+use bitcoin::consensus::encode::serialize_hex;
+use bitcoin::hashes::Hash;
+use bitcoin::{BlockHash, CompactTarget, TxMerkleNode};
 use p2poolv2_config::{BitcoinCashNetwork, Chain, parse_payout_address};
 use p2poolv2_wallet::bch_share::encode_payout_address;
 use regex::bytes::Regex;
@@ -115,6 +126,9 @@ impl NodeKind {
 pub struct MockNode {
     kind: NodeKind,
     template: Value,
+    /// The made-up block a BCHN template builds on, served by
+    /// `getblockheader`.
+    parent: Option<Header>,
 }
 
 impl MockNode {
@@ -122,15 +136,76 @@ impl MockNode {
     /// the node's built-in one, with the easy `bits` and `target` overrides
     /// applied.
     pub fn load(kind: NodeKind, path: Option<&Path>) -> ToolResult<Self> {
+        let mut template = load_template(kind, path)?;
+        let parent = match kind {
+            NodeKind::Bchn(_) => {
+                let parent = made_up_parent(&template);
+                template["previousblockhash"] = Value::String(parent.block_hash().to_string());
+                Some(parent)
+            }
+            NodeKind::BitcoinCore => None,
+        };
         Ok(Self {
             kind,
-            template: load_template(kind, path)?,
+            template,
+            parent,
         })
+    }
+
+    /// The made-up block a BCHN template builds on.
+    pub fn parent(&self) -> Option<&Header> {
+        self.parent.as_ref()
     }
 
     /// The template `getblocktemplate` answers with.
     pub fn template(&self) -> &Value {
         &self.template
+    }
+}
+
+/// A regtest chain's first block, dated ten minutes before `template`'s
+/// `curtime`, for a BCHN template to build on.
+fn made_up_parent(template: &Value) -> Header {
+    let curtime = template
+        .get("curtime")
+        .and_then(Value::as_u64)
+        .and_then(|time| u32::try_from(time).ok())
+        .unwrap_or(1_700_000_000);
+    Header {
+        version: Version::from_consensus(0x2000_0000),
+        prev_blockhash: BlockHash::all_zeros(),
+        merkle_root: TxMerkleNode::all_zeros(),
+        time: curtime.saturating_sub(600),
+        bits: CompactTarget::from_consensus(0x207f_ffff),
+        nonce: 0,
+    }
+}
+
+/// `getblockheader`: the made-up parent, raw when `params[1]` is false,
+/// else its verbose fields with height 0. Any other block is unknown, as
+/// BCHN answers (code -5).
+fn block_header_reply(params: Option<&Value>, parent: Option<&Header>) -> Result<String, RpcError> {
+    let asked = params
+        .and_then(|params| params.get(0))
+        .and_then(Value::as_str);
+    let verbose = params
+        .and_then(|params| params.get(1))
+        .is_none_or(is_truthy);
+    match parent {
+        Some(parent) if asked == Some(parent.block_hash().to_string().as_str()) => {
+            if verbose {
+                Ok(serialize(&serde_json::json!({
+                    "hash": parent.block_hash().to_string(),
+                    "height": 0,
+                })))
+            } else {
+                Ok(serialize(&serialize_hex(parent)))
+            }
+        }
+        _ => Err(RpcError {
+            code: -5,
+            message: "Block not found".to_string(),
+        }),
     }
 }
 
@@ -350,9 +425,9 @@ impl BchnValidateAddress {
 /// reads payout addresses with. Like BCHN it takes the address with or
 /// without the network's prefix and answers with the prefixed, lowercase
 /// form, the hex `scriptPubKey`, whether it pays a script and whether it is
-/// token-aware. The parser takes the 20-byte P2PKH and P2SH addresses this
-/// node pays, token-aware or not, so a P2SH32 address, which BCHN also
-/// accepts, and a legacy base58 one answer `isvalid: false` here.
+/// token-aware. The parser takes the P2PKH, P2SH20 and P2SH32 addresses this
+/// node pays, token-aware or not, so a legacy base58 address, which BCHN also
+/// accepts, answers `isvalid: false` here.
 fn bchn_validate_address(address: &Value, network: BitcoinCashNetwork) -> BchnValidateAddress {
     let Some(text) = address.as_str() else {
         return BchnValidateAddress::invalid();
@@ -370,8 +445,8 @@ fn bchn_validate_address(address: &Value, network: BitcoinCashNetwork) -> BchnVa
     ) else {
         return BchnValidateAddress::invalid();
     };
-    // The first payload symbol is the CashAddr type of a 20-byte address:
-    // `z` and `r` are the token-aware P2PKH and P2SH types. BCHN answers a
+    // The first payload symbol carries the CashAddr type: `z` and `r` are
+    // the token-aware P2PKH and P2SH types, whatever the hash size. BCHN answers a
     // token-aware address in its own, token-aware form.
     let token_aware = prefixed
         .split_once(':')
@@ -390,7 +465,7 @@ fn bchn_validate_address(address: &Value, network: BitcoinCashNetwork) -> BchnVa
         isvalid: true,
         address: Some(canonical),
         script_pub_key: Some(script.to_hex_string()),
-        isscript: Some(script.is_p2sh()),
+        isscript: Some(script.is_p2sh() || parsed.is_p2sh32()),
         istokenaware: Some(token_aware),
     }
 }
@@ -412,6 +487,7 @@ fn reply_to(body: &[u8], node: &MockNode) -> Reply {
         Some("getbestblockhash") => Ok(serialize(
             template.get("previousblockhash").unwrap_or(&Value::Null),
         )),
+        Some("getblockheader") => block_header_reply(params, node.parent.as_ref()),
         Some("validateaddress") => Ok(match node.kind {
             NodeKind::Bchn(network) => serialize(&bchn_validate_address(
                 &first_param_or_empty(params),

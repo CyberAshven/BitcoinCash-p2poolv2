@@ -34,13 +34,15 @@ pub async fn handle_getheaders<C: Send + Sync>(
         &stop_block_hash,
         MAX_HEADERS_IN_RESPONSE,
     )?;
+    let bch_headers = chain_store_handle.carried_bch_headers(&response_headers);
     let mut entries = Vec::with_capacity(response_headers.len());
     for header in response_headers {
         let branch = chain_store_handle.get_template_merkle_branches(&header.block_hash())?;
         entries.push((header, branch));
     }
-    let headers_message =
-        Message::ShareHeaders(ShareHeaderBatch::from_headers_with_branches(entries));
+    let headers_message = Message::ShareHeaders(
+        ShareHeaderBatch::from_headers_with_branches(entries).with_bch_headers(bch_headers),
+    );
     // Send response and handle errors by logging them before returning
     debug!("Sending Headers {headers_message:?}");
     if let Err(err) = swarm_tx

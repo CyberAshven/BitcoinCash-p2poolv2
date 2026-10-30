@@ -50,10 +50,11 @@ use bitcoin::consensus::encode::VarInt;
 use bitcoin::hashes::{Hash, hash160, sha256, sha256d};
 use bitcoin::secp256k1::{self, Message, Secp256k1};
 use bitcoin::{Sequence, Transaction, TxOut};
-use k256::elliptic_curve::ops::Reduce;
-use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
+use k256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
 use k256::elliptic_curve::{Group, PrimeField};
-use k256::{AffinePoint, EncodedPoint, FieldBytes, FieldElement, ProjectivePoint, Scalar, U256};
+use k256::{AffinePoint, FieldBytes, ProjectivePoint, Scalar, Sec1Point};
+
+use crate::shares::bch_schnorr::{FieldElement, challenge_scalar};
 use sha2::{Digest, Sha256};
 
 const OP_DUP: u8 = 0x76;
@@ -593,30 +594,31 @@ pub(crate) fn verify_schnorr(
 ) -> Result<(), BchScriptError> {
     let rejected = BchScriptError::SignatureRejected { input_index };
     let (r_bytes, s_bytes) = signature.split_at(32);
-    let r_bytes = FieldBytes::clone_from_slice(r_bytes);
+    let r_bytes = FieldBytes::try_from(r_bytes).map_err(|_| rejected.clone())?;
     if bool::from(FieldElement::from_bytes(&r_bytes).is_none()) {
         return Err(rejected);
     }
-    let signature_scalar =
-        Option::<Scalar>::from(Scalar::from_repr(FieldBytes::clone_from_slice(s_bytes)))
-            .ok_or(rejected.clone())?;
-    let encoded_key = EncodedPoint::from_bytes(public_key)
+    let signature_scalar = Option::<Scalar>::from(Scalar::from_repr(
+        FieldBytes::try_from(s_bytes).map_err(|_| rejected.clone())?,
+    ))
+    .ok_or(rejected.clone())?;
+    let encoded_key = Sec1Point::from_bytes(public_key)
         .map_err(|_| BchScriptError::InvalidPublicKey { input_index })?;
-    let key_point = Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&encoded_key))
+    let key_point = Option::<AffinePoint>::from(AffinePoint::from_sec1_point(&encoded_key))
         .ok_or(BchScriptError::InvalidPublicKey { input_index })?;
 
     let mut challenge = Sha256::new();
     challenge.update(r_bytes);
-    challenge.update(key_point.to_encoded_point(true).as_bytes());
+    challenge.update(key_point.to_sec1_point(true).as_bytes());
     challenge.update(digest);
-    let challenge_scalar = <Scalar as Reduce<U256>>::reduce_bytes(&challenge.finalize());
+    let challenge_scalar = challenge_scalar(challenge);
 
     let nonce_point = ProjectivePoint::GENERATOR * signature_scalar
         - ProjectivePoint::from(key_point) * challenge_scalar;
     if bool::from(nonce_point.is_identity()) {
         return Err(rejected);
     }
-    let nonce_encoded = nonce_point.to_affine().to_encoded_point(false);
+    let nonce_encoded = nonce_point.to_affine().to_sec1_point(false);
     let (Some(nonce_x), Some(nonce_y)) = (nonce_encoded.x(), nonce_encoded.y()) else {
         return Err(rejected);
     };
@@ -931,7 +933,7 @@ mod tests {
         // Input 0 pushes 0x47 bytes: DER 30 44 02 20 <r> 02 20 <s>, then 0x41.
         let script_sig = transaction.input[0].script_sig.to_bytes();
         let der = &script_sig[1..71];
-        let low_s = Scalar::from_repr(FieldBytes::clone_from_slice(&der[38..70])).unwrap();
+        let low_s = Scalar::from_repr(FieldBytes::try_from(&der[38..70]).unwrap()).unwrap();
         let high_s = low_s.neg().to_repr();
         let mut high_der = Vec::with_capacity(72);
         high_der.extend_from_slice(&[0x30, 0x45]);
@@ -1154,18 +1156,18 @@ mod tests {
         let secret = Scalar::from(7u64);
         let public_key = (ProjectivePoint::GENERATOR * secret)
             .to_affine()
-            .to_encoded_point(true);
+            .to_sec1_point(true);
         let digest = [0x5a; 32];
         let nonce = Scalar::from(3u64);
         let nonce_encoded = (ProjectivePoint::GENERATOR * nonce)
             .to_affine()
-            .to_encoded_point(false);
+            .to_sec1_point(false);
         let nonce_x = nonce_encoded.x().unwrap();
         let mut challenge = Sha256::new();
         challenge.update(nonce_x);
         challenge.update(public_key.as_bytes());
         challenge.update(digest);
-        let challenge_scalar = <Scalar as Reduce<U256>>::reduce_bytes(&challenge.finalize());
+        let challenge_scalar = challenge_scalar(challenge);
 
         let mut non_square_signature = Vec::with_capacity(64);
         non_square_signature.extend_from_slice(nonce_x);
@@ -1188,7 +1190,7 @@ mod tests {
     fn schnorr_rejects_an_r_not_below_the_field_size() {
         let public_key = (ProjectivePoint::GENERATOR * Scalar::from(7u64))
             .to_affine()
-            .to_encoded_point(true);
+            .to_sec1_point(true);
         let mut signature = [0x01u8; 64];
         signature[..32].copy_from_slice(&[0xff; 32]);
         assert_eq!(
@@ -1288,12 +1290,11 @@ mod tests {
             SighashType::from_byte(0x41).unwrap(),
         )
         .unwrap();
-        let secret_scalar =
-            Scalar::from_repr(FieldBytes::clone_from_slice(&TRADE_BUYER_SECRET_KEY)).unwrap();
+        let secret_scalar = Scalar::from_repr(FieldBytes::from(TRADE_BUYER_SECRET_KEY)).unwrap();
         let first_nonce = Scalar::from(0x1234_5678u64);
         let first_point = (ProjectivePoint::GENERATOR * first_nonce)
             .to_affine()
-            .to_encoded_point(false);
+            .to_sec1_point(false);
         let first_y = FieldElement::from_bytes(first_point.y().unwrap()).unwrap();
         let nonce = if bool::from(first_y.sqrt().is_some()) {
             first_nonce
@@ -1302,14 +1303,14 @@ mod tests {
         };
         let nonce_x = *(ProjectivePoint::GENERATOR * nonce)
             .to_affine()
-            .to_encoded_point(false)
+            .to_sec1_point(false)
             .x()
             .unwrap();
         let mut challenge = Sha256::new();
         challenge.update(nonce_x);
         challenge.update(buyer.public_key());
         challenge.update(digest);
-        let challenge_scalar = <Scalar as Reduce<U256>>::reduce_bytes(&challenge.finalize());
+        let challenge_scalar = challenge_scalar(challenge);
         let mut signature = Vec::with_capacity(65);
         signature.extend_from_slice(&nonce_x);
         signature.extend_from_slice(&(nonce + challenge_scalar * secret_scalar).to_repr());

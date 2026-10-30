@@ -36,6 +36,7 @@ use p2poolv2_lib::accounting::CoinbasePayouts;
 use p2poolv2_lib::accounting::payout::coinbase_budget::PayoutSplit;
 use p2poolv2_lib::accounting::payout::payout_distribution::build_pplns_outputs;
 use p2poolv2_lib::config::Chain;
+use p2poolv2_lib::config::PayoutAddress;
 use p2poolv2_lib::node::payout_tree_executor::{
     PayoutTreeExecutor, SETTLED_TIPS, payout_tree_channel,
 };
@@ -75,13 +76,13 @@ async fn mine(node: &BitcoindRpcClient, blocks: u64) {
 }
 
 /// `count` P2PKH payees weighing their number.
-fn weights(count: u32, seed: u8) -> HashMap<Address, u128> {
+fn weights(count: u32, seed: u8) -> HashMap<PayoutAddress, u128> {
     (1..=count)
         .map(|number| {
             let mut hash = [seed; 20];
             hash[..4].copy_from_slice(&number.to_le_bytes());
             (
-                Address::p2pkh(PubkeyHash::from_byte_array(hash), Network::Regtest),
+                Address::p2pkh(PubkeyHash::from_byte_array(hash), Network::Regtest).into(),
                 u128::from(number),
             )
         })

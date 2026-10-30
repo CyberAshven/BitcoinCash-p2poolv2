@@ -4,7 +4,6 @@
 
 mod cashaddr;
 
-use bitcoin::address::NetworkChecked;
 use bitcoin::base58;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
@@ -12,6 +11,7 @@ use bitcoin::{Address, Network, PubkeyHash};
 use bitcoindrpc::BitcoinRpcConfig;
 use p2poolv2_wallet::Address as ShareAddress;
 use p2poolv2_wallet::bch_share::{self, BchShareAddress, BchShareNetwork};
+pub use p2poolv2_wallet::payout_address::PayoutAddress;
 use serde::Deserialize;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -87,11 +87,12 @@ pub fn bitcoin_cash_donation_cashaddr(network: BitcoinCashNetwork) -> &'static s
 
 /// Donation output for a Bitcoin Cash network: P2PKH to
 /// [`BITCOIN_CASH_DONATION_PUBKEY_HASH`].
-pub fn bitcoin_cash_donation_address(network: BitcoinCashNetwork) -> Address {
+pub fn bitcoin_cash_donation_address(network: BitcoinCashNetwork) -> PayoutAddress {
     Address::p2pkh(
         PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
         network.legacy_network(),
     )
+    .into()
 }
 
 /// Error type for configuration parsing and validation.
@@ -111,22 +112,22 @@ impl std::fmt::Display for ConfigError {
 /// Parse a payout address for the chain this node is configured to mine.
 ///
 /// Bitcoin keeps the existing address parser. Bitcoin Cash accepts only a
-/// CashAddr whose prefix matches `bitcoin_cash_network`, and returns the
-/// legacy script those bytes encode.
+/// CashAddr whose prefix matches `bitcoin_cash_network`: P2PKH, P2SH20 or
+/// P2SH32, token-aware or not. Either way the result is the script paid.
 pub fn parse_payout_address(
     address: &str,
     chain: Chain,
     network: Network,
     bitcoin_cash_network: Option<BitcoinCashNetwork>,
-) -> Result<Address, ConfigError> {
+) -> Result<PayoutAddress, ConfigError> {
     match chain {
-        Chain::Bitcoin => parse_address(address, network),
+        Chain::Bitcoin => parse_address(address, network).map(PayoutAddress::from),
         Chain::BitcoinCash => {
             let bitcoin_cash_network = bitcoin_cash_network.ok_or_else(|| ConfigError {
                 message: "bitcoin_cash_network is required when chain is bitcoin-cash".to_string(),
             })?;
             cashaddr::decode(address, bitcoin_cash_network)
-                .map(|decoded| decoded.to_address())
+                .map(|decoded| decoded.to_payout_address())
                 .map_err(|error| ConfigError {
                     message: format!("Invalid Bitcoin Cash payout address: {error}"),
                 })
@@ -273,8 +274,8 @@ impl BitcoinCashNetwork {
 
     /// Bitcoin network whose base58 version bytes and proof-of-work limit
     /// match this Bitcoin Cash network: mainnet `0x1d00ffff`, chipnet and
-    /// scalenet `0x1d00ffff` (as testnet), regtest `0x207fffff`. It lets
-    /// `bitcoin::Address` carry a decoded CashAddr script, and it is the
+    /// scalenet `0x1d00ffff` (as testnet), regtest `0x207fffff`. It is the
+    /// network class a decoded CashAddr payout is held under, and it is the
     /// `stratum.network` a Bitcoin Cash node uses for difficulty and its P2P
     /// protocol id.
     pub fn legacy_network(self) -> Network {
@@ -467,11 +468,11 @@ pub struct StratumConfig<State = Raw> {
 
     // Parsed addresses - only available when State = Parsed
     #[serde(skip)]
-    pub bootstrap_address_parsed: Option<Address<NetworkChecked>>,
+    pub bootstrap_address_parsed: Option<PayoutAddress>,
     #[serde(skip)]
-    pub donation_address_parsed: Option<Address<NetworkChecked>>,
+    pub donation_address_parsed: Option<PayoutAddress>,
     #[serde(skip)]
-    pub fee_address_parsed: Option<Address<NetworkChecked>>,
+    pub fee_address_parsed: Option<PayoutAddress>,
     #[serde(skip)]
     pub miner_address_parsed: Option<ShareAddress>,
     /// Bitcoin Cash share owner, set only when `chain` is bitcoin-cash.
@@ -728,19 +729,19 @@ impl StratumConfig<Raw> {
 
 impl StratumConfig<Parsed> {
     /// Get the parsed and validated bootstrap address
-    pub fn bootstrap_address(&self) -> &Address<NetworkChecked> {
+    pub fn bootstrap_address(&self) -> &PayoutAddress {
         self.bootstrap_address_parsed
             .as_ref()
             .expect("bootstrap_address_parsed should always be Some in Parsed state")
     }
 
     /// Get the parsed and validated donation address, if any
-    pub fn donation_address(&self) -> Option<&Address<NetworkChecked>> {
+    pub fn donation_address(&self) -> Option<&PayoutAddress> {
         self.donation_address_parsed.as_ref()
     }
 
     /// Get the parsed and validated fee address, if any
-    pub fn fee_address(&self) -> Option<&Address<NetworkChecked>> {
+    pub fn fee_address(&self) -> Option<&PayoutAddress> {
         self.fee_address_parsed.as_ref()
     }
 
@@ -1027,7 +1028,7 @@ fn resolve_donation(
     bitcoin_cash_network: Option<BitcoinCashNetwork>,
     donation_address: Option<&str>,
     donation: Option<u16>,
-) -> Result<(Option<Address>, Option<u16>), ConfigError> {
+) -> Result<(Option<PayoutAddress>, Option<u16>), ConfigError> {
     match chain {
         Chain::Bitcoin => {
             let parsed = donation_address
@@ -1324,6 +1325,53 @@ impl std::fmt::Debug for ApiConfig {
     }
 }
 
+/// Configuration for the Electrum wallet server.
+///
+/// The server speaks Electrum JSON-RPC over plain TCP and is meant for the
+/// operator's own wallet only, so it binds localhost by default and has no
+/// TLS or client authentication. It is off unless the `[electrum]` section
+/// enables it.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ElectrumConfig {
+    /// Start the Electrum server with the node
+    #[serde(default)]
+    pub enabled: bool,
+    /// The hostname the Electrum server binds to
+    #[serde(default = "default_electrum_hostname")]
+    pub hostname: String,
+    /// The port the Electrum server binds to
+    #[serde(default = "default_electrum_port")]
+    pub port: u16,
+    /// Maximum number of concurrent wallet connections
+    #[serde(default = "default_electrum_max_connections")]
+    pub max_connections: u32,
+}
+
+fn default_electrum_hostname() -> String {
+    "127.0.0.1".to_string()
+}
+
+/// Conventional Electrum TCP port.
+fn default_electrum_port() -> u16 {
+    50001
+}
+
+/// Local wallets only, so a small cap is plenty.
+fn default_electrum_max_connections() -> u32 {
+    64
+}
+
+impl Default for ElectrumConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hostname: default_electrum_hostname(),
+            port: default_electrum_port(),
+            max_connections: default_electrum_max_connections(),
+        }
+    }
+}
+
 /// Configuration for the no-PoW load-test simulation.
 ///
 /// Only acted upon when a binary is built with the `sim` cargo feature; the
@@ -1401,6 +1449,8 @@ pub struct Config {
     pub submit_nodes: Vec<BitcoinRpcConfig>,
     pub logging: LoggingConfig,
     pub api: ApiConfig,
+    #[serde(default)]
+    pub electrum: ElectrumConfig,
 }
 
 #[allow(dead_code)]
@@ -1607,6 +1657,21 @@ impl Config {
         self
     }
 
+    pub fn with_electrum_enabled(mut self, enabled: bool) -> Self {
+        self.electrum.enabled = enabled;
+        self
+    }
+
+    pub fn with_electrum_hostname(mut self, hostname: String) -> Self {
+        self.electrum.hostname = hostname;
+        self
+    }
+
+    pub fn with_electrum_port(mut self, port: u16) -> Self {
+        self.electrum.port = port;
+        self
+    }
+
     pub fn with_max_requests_per_second(mut self, max_requests_per_second: u64) -> Self {
         self.network.max_requests_per_second = max_requests_per_second;
         self
@@ -1793,6 +1858,54 @@ mod tests {
     fn dns_seed_defaults_to_true_when_absent() {
         let config = Config::load("../config-bitcoin.sample.toml").unwrap();
         assert!(config.network.dns_seed);
+    }
+
+    /// The sample config leaves `[electrum]` commented out, so the server is
+    /// off and every field takes its default.
+    #[test]
+    fn electrum_defaults_to_disabled_when_section_absent() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(!config.electrum.enabled);
+        assert_eq!(config.electrum.hostname, "127.0.0.1");
+        assert_eq!(config.electrum.port, 50001);
+        assert_eq!(config.electrum.max_connections, 64);
+    }
+
+    #[test]
+    fn electrum_section_values_are_parsed() {
+        let electrum: ElectrumConfig = config::Config::builder()
+            .add_source(config::File::from_str(
+                "enabled = true\nhostname = \"127.0.0.2\"\nport = 50101\nmax_connections = 8\n",
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert!(electrum.enabled);
+        assert_eq!(electrum.hostname, "127.0.0.2");
+        assert_eq!(electrum.port, 50101);
+        assert_eq!(electrum.max_connections, 8);
+    }
+
+    #[test]
+    fn env_override_sets_electrum_port() {
+        with_var("P2POOL_ELECTRUM__PORT", Some("50999"), || {
+            let config = Config::load("../config.sample.toml").unwrap();
+            assert_eq!(config.electrum.port, 50999);
+        });
+    }
+
+    #[test]
+    fn test_config_builder_sets_electrum_fields() {
+        let config = Config::load("../config.sample.toml")
+            .unwrap()
+            .with_electrum_enabled(true)
+            .with_electrum_hostname("127.0.0.3".to_string())
+            .with_electrum_port(50202);
+        assert!(config.electrum.enabled);
+        assert_eq!(config.electrum.hostname, "127.0.0.3");
+        assert_eq!(config.electrum.port, 50202);
     }
 
     #[test]
@@ -2615,7 +2728,7 @@ mod bitcoin_cash_donation_tests {
     fn mainnet_donation_string_decodes_to_the_built_in_key() {
         let decoded = cashaddr::decode(BITCOIN_CASH_DONATION_ADDRESS, BitcoinCashNetwork::Mainnet)
             .unwrap()
-            .to_address();
+            .to_payout_address();
         assert_eq!(
             decoded,
             bitcoin_cash_donation_address(BitcoinCashNetwork::Mainnet)
@@ -2629,7 +2742,7 @@ mod bitcoin_cash_donation_tests {
             BitcoinCashNetwork::Chipnet,
         )
         .unwrap()
-        .to_address();
+        .to_payout_address();
         assert_eq!(
             decoded,
             bitcoin_cash_donation_address(BitcoinCashNetwork::Chipnet)
@@ -2643,7 +2756,7 @@ mod bitcoin_cash_donation_tests {
             BitcoinCashNetwork::Regtest,
         )
         .unwrap()
-        .to_address();
+        .to_payout_address();
         assert_eq!(
             decoded,
             bitcoin_cash_donation_address(BitcoinCashNetwork::Regtest)
@@ -2674,7 +2787,7 @@ mod bitcoin_cash_donation_tests {
         let published =
             cashaddr::decode(BITCOIN_CASH_DONATION_ADDRESS, BitcoinCashNetwork::Mainnet)
                 .unwrap()
-                .to_address();
+                .to_payout_address();
         assert_eq!(parsed.donation, Some(DEFAULT_BITCOIN_CASH_DONATION));
         assert_eq!(parsed.donation_address(), Some(&published));
     }

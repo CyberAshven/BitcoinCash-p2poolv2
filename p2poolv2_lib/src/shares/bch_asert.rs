@@ -356,4 +356,4 @@ pub fn bip34_height(script_sig: &[u8]) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

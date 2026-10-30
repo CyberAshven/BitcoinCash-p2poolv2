@@ -8,6 +8,7 @@ use crate::accounting::payout::payout_distribution::{
     PayoutDistribution, append_proportional_distribution,
 };
 use crate::accounting::payout::payout_tree::PayoutTree;
+use crate::accounting::payout::sharechain_pplns::pplns_window::PayingBlock;
 use crate::config::BitcoinCashNetwork;
 #[cfg(test)]
 #[mockall_double::double]
@@ -15,7 +16,8 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::stratum::validate_username::validate_bitcoin_cash;
-use bitcoin::{Address, Amount, BlockHash};
+use bitcoin::{Amount, BlockHash};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::HashMap;
 use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -43,10 +45,10 @@ impl PayoutDistribution for Payout {
         // Time-window PPLNS is not anchored on a share; it queries by
         // timestamp, so the share-chain anchor does not apply here.
         _anchor: BlockHash,
-        bitcoin_difficulty: u128,
+        paying_block: PayingBlock,
         total_amount: bitcoin::Amount,
         remaining_total_amount: Amount,
-        bootstrap_address: Address,
+        bootstrap_address: PayoutAddress,
         // Hydrapool's coinbase is not a share-chain rule and pays every
         // payee; the share chain's hybrid payout does not apply.
         _split: PayoutSplit,
@@ -55,8 +57,9 @@ impl PayoutDistribution for Payout {
         // This avoids parsing miner addresses when 100% goes to donation/fee
         // This also avoids running PPLNS share look ups when we don't need to use that data
         if remaining_total_amount > bitcoin::Amount::ZERO {
-            let total_difficulty =
-                bitcoin_difficulty.saturating_mul(HYDRAPOOL_DIFFICULTY_MULTIPLIER);
+            let total_difficulty = paying_block
+                .claimed_difficulty
+                .saturating_mul(HYDRAPOOL_DIFFICULTY_MULTIPLIER);
             let address_difficulty_map =
                 self.accumulate_difficulty_by_address(chain_store_handle, total_difficulty)?;
 
@@ -112,8 +115,8 @@ impl Payout {
         &self,
         store: &ChainStoreHandle,
         total_difficulty: u128,
-    ) -> Result<HashMap<Address, u128>, Box<dyn Error + Send + Sync>> {
-        let mut address_difficulty: HashMap<Address, u128> = HashMap::new();
+    ) -> Result<HashMap<PayoutAddress, u128>, Box<dyn Error + Send + Sync>> {
+        let mut address_difficulty: HashMap<PayoutAddress, u128> = HashMap::new();
         let mut accumulated_difficulty: u128 = 0;
 
         // Start from current time and work backwards
@@ -151,6 +154,7 @@ impl Payout {
                                         format!("Invalid bitcoin address '{btcaddress}': {e}")
                                     })?
                                     .assume_checked()
+                                    .into()
                             };
                             *address_difficulty.entry(address).or_insert(0) +=
                                 share.difficulty as u128;

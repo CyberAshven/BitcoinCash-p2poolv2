@@ -51,7 +51,7 @@ Stores block metadata (height, chain work, status).
 ```rust
 pub struct BlockMetadata {
     pub expected_height: Option<u32>,      // Expected block height in chain, if known
-    pub chain_work: Work,         // Cumulative chain work (32 bytes LE)
+    pub chain_work: Work,         // Parent's chain_work + own work + named uncles' own work (32 bytes LE)
 }
 ```
 
@@ -80,10 +80,14 @@ The coinbase merkle branch a header's `CoinbaseProof` is checked against.
 
 ### 1d. `BitcoinCoinbase` - Bitcoin Coinbase
 
-The bitcoin coinbase a share block carries: the transaction the miner hashed,
-holding the aux flags, extranonce, nanosecond timestamp, payouts and BIP141
-witness commitment. Not part of the block hash; its txid is the one the
-header's `CoinbaseProof` gives.
+The coinbase a share block carries: the transaction the miner hashed,
+holding the aux flags, extranonce, nanosecond timestamp and payouts. On
+Bitcoin Cash it has no witness data and no witness commitment; the retained
+Bitcoin mode adds the BIP141 witness commitment. Not part of the block hash;
+its txid is the one the header's `CoinbaseProof` gives. On Bitcoin Cash it
+is at most 1,000,000 bytes (the BCH transaction size rule), or 3,072 bytes
+for a token share; see the storage budget in
+[async-flow.md](async-flow.md#bch-storage-and-memory-budget-2026-10-30).
 
 | Key                    | Value                                  | Notes |
 |------------------------|----------------------------------------|-------|
@@ -232,7 +236,8 @@ with a pruned block unless a kept block still includes the transaction.
 `BlockTxids`, `BitcoinTxids`, `BitcoinCoinbase` and candidate `BlockHeight`
 entries are deleted below the prune target. Headers, metadata, the block
 index, `h:` and confirmed height entries, `TemplateMerkleBranches`, `Uncles`
-and `FoundBlocks` are kept forever. See `pruning.md`.
+and both `FoundBlocks` and `AcceptedFoundBlocks` are kept forever. See
+`pruning.md`.
 
 ---
 
@@ -272,16 +277,18 @@ Stores user data indexed by internal ID.
 ```rust
 pub struct StoredUser {
     pub user_id: u64,           // Internal unique ID
-    pub btcaddress: String,     // Bitcoin address
+    pub btcaddress: String,     // Payout address from the username (CashAddr on BCH)
     pub created_at: u64,        // Timestamp (seconds since epoch)
 }
 ```
 
 ---
 
-### 12. `UserIndex` - BTC Address→User ID
+### 12. `UserIndex` - Payout Address→User ID
 
-Secondary index for looking up users by Bitcoin address.
+Secondary index for looking up users by payout address. On Bitcoin Cash this
+is the CashAddr the miner put in its username. The key and field keep the
+upstream name `btcaddress`.
 
 | Key                   | Value                  |
 |-----------------------|------------------------|
@@ -291,27 +298,44 @@ Secondary index for looking up users by Bitcoin address.
 
 ### 13. `Metadata` - General Metadata
 
-Reserved for general metadata storage.
+Store-wide values.
 
-| Key | Value |
-|-----|-------|
-| TBD | TBD   |
+| Key            | Value                  | Notes |
+|----------------|------------------------|-------|
+| `store_format` | `u32` (4 bytes LE)     | `STORE_FORMAT_VERSION`, written with genesis. Startup refuses a store with another version or none, and tells the operator to delete it and resync |
+
+Version 1 (2026-10-30) is the first: chain work counts named uncles' work.
+Stores written before it have no version.
 
 ---
 
-### 14. `FoundBlocks` - Bitcoin Blocks Found by the Pool
+### 14. `FoundBlocks` - Unverified Bitcoin Cash Block Candidates
 
-One entry per bitcoin block carried by a confirmed share or by an uncle
-of a confirmed share (a share header whose bitcoin header meets the
-bitcoin network target). Written in `confirm_blocks`, in the same batch
-as the confirmation, from header data only, so prune-zone header-only
-confirmation during sync rebuilds the list. Entries are never deleted:
-a share chain reorg does not undo the bitcoin block, and re-confirmation
-rewrites identical bytes. Never pruned. Read by the `/metrics` handler.
+One entry per block carried by a confirmed share or an uncle whose BCH
+header meets the target its own bits claim. Written in `confirm_blocks`,
+in the same batch as confirmation, from header data only, including
+prune-zone header-only confirmation. This is not proof of BCHN acceptance.
+Older entries use the same encoding and remain unverified candidates
+after an upgrade. Re-confirmation rewrites identical bytes; never pruned.
 
 | Key                                                     | Value                                                                                      |
 |---------------------------------------------------------|--------------------------------------------------------------------------------------------|
 | `bitcoin_height` (8 bytes BE) + `bitcoin_blockhash` (32 bytes) | consensus-encoded `share_blockhash` (32 bytes), `bitcoin_time` (u32), `miner_bitcoin_address` (string) |
+
+### 14a. `AcceptedFoundBlocks` - BCHN-Accepted Pool Blocks
+
+Uses the same key and value encoding as `FoundBlocks`. Written through
+StoreWriter only after a positive BCHN `submitblock` verdict or BCHN's
+chain hash matching the candidate at its declared height. Local accepted
+submissions can be recorded before their share is persisted. The
+serialized existence check makes duplicate acceptance idempotent. Only
+this column family feeds the found-block API and metrics. Never pruned.
+
+Normal writable opening creates this column family in an existing store
+without modifying legacy candidates or share data. Read-only opening of
+an older store works without creating it and reports no accepted finds.
+Once BCHN verifies an old candidate, its accepted record persists across
+restarts. No share validity or payout rule depends on either record.
 
 ---
 
@@ -348,7 +372,8 @@ see `pruning.md`.
 ### Reorg Logic
 
 - Find common ancestor with current tip
-- If shares have common ancestor: compare cumulative `chain_work`
+- If shares have common ancestor: compare cumulative `chain_work`, which
+  includes the work of the uncles each chain names
 - If disjoint chains: compare work over PPLNS window
 - Update tips: remove prev_share_blockhash and uncles from tips
 

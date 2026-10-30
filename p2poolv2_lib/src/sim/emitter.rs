@@ -26,8 +26,8 @@ use crate::sim::timing::{
 use crate::stratum::emission::EmissionSender;
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use crate::stratum::work::tracker::{JobTracker, start_tracker_actor};
-use bitcoin::Address;
 use bitcoindrpc::BitcoindRpcClient;
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::sync::Arc;
@@ -39,7 +39,7 @@ use tracing::{debug, info, warn};
 pub struct SimEmitter {
     emissions_tx: EmissionSender,
     template_rx: watch::Receiver<Option<Arc<PreparedNotifyParams>>>,
-    miner_address: Address,
+    miner_address: PayoutAddress,
     share_owner: ShareOwner,
     config: SimConfig,
     /// RPC client used to submit a real regtest block on a statistical block-find.
@@ -58,7 +58,7 @@ impl SimEmitter {
     pub fn new(
         emissions_tx: EmissionSender,
         template_rx: watch::Receiver<Option<Arc<PreparedNotifyParams>>>,
-        miner_address: Address,
+        miner_address: PayoutAddress,
         share_owner: ShareOwner,
         config: SimConfig,
         bitcoindrpc: BitcoindRpcClient,

@@ -7,8 +7,8 @@ use crate::utils::time_provider::SystemTimeProvider;
 use crate::{
     stratum::difficulty_adjuster::DifficultyAdjusterTrait, utils::time_provider::TimeProvider,
 };
-use bitcoin::Address;
 use bitcoin::secp256k1::rand::{self, Rng};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
 use std::time::SystemTime;
 
@@ -34,7 +34,7 @@ pub struct Session<D: DifficultyAdjusterTrait> {
     /// bitcoin address used as user identifier
     pub btcaddress: Option<String>,
     /// Parsed and network-checked bitcoin Address, set once at authorization time
-    pub parsed_address: Option<Address>,
+    pub parsed_address: Option<PayoutAddress>,
     /// Share chain address from the `p2p=` password option, owning this miner's
     /// share coinbase outputs. Set once at authorization time. Distinct from
     /// `parsed_address`, which is the bitcoin payout address on the other chain.

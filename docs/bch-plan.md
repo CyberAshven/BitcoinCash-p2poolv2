@@ -702,7 +702,9 @@ move most BCH hashrate to the share chain.
       block's payout can differ between forks only if they split more than
       100 shares below the paying share, while uncles, the forks seen in
       normal running, are at most `MAX_UNCLES_DEPTH` (3) deep. P2Pool v1 ran
-      with no skip at all. `PAYOUT_DEPTH` and pruning stay sized by
+      with a one-share skip: its payout walk starts at the paying share's
+      grandparent ([`data.py:254`](https://github.com/jtoomim/p2pool/blob/ece15b03fc2367d02e730b2b85b666217fa8985e/p2pool/data.py#L254)).
+      `PAYOUT_DEPTH` and pruning stay sized by
       Bitcoin's larger 6,048, so they cover it: a Bitcoin Cash coinbase
       pays at most 121,063 shares deep (100, the 120,960 cap and uncle
       depth 3), inside `PAYOUT_DEPTH` (127,008), and block bodies are kept

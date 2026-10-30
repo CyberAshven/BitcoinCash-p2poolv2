@@ -7,6 +7,7 @@ pub mod senders;
 
 use crate::node::SwarmSend;
 use crate::node::messages::{GetData, Message};
+use crate::node::p2p_message_handlers::receivers::bch_headers::learn_carried_bch_headers;
 use crate::node::p2p_message_handlers::receivers::block_receiver::BlockReceiverHandle;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::validation_worker::ValidationSender;
@@ -122,7 +123,7 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
             )
             .await
         }
-        Message::ShareBlock(share_block) => {
+        Message::ShareBlock(share_block, bch_headers) => {
             if let Err(err) = ctx
                 .swarm_tx
                 .send(SwarmSend::Response(ctx.response_channel, Message::Ack))
@@ -131,6 +132,12 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
                 error!("Failed to send ShareBlock ack to peer {}: {err}", ctx.peer);
                 return Err(format!("Failed to send ShareBlock ack: {err}").into());
             }
+            learn_carried_bch_headers(
+                &bch_headers,
+                &ctx.chain_store_handle,
+                ctx.share_validator.as_ref(),
+            )
+            .await?;
             let parent_hash = share_block.header.prev_share_blockhash;
             handle_share_block(
                 share_block,
@@ -225,19 +232,23 @@ pub async fn handle_response<C: Send + Sync>(
             error!("Error handling received share headers: {}", e);
             e
         }),
-        Message::ShareBlock(share_block) => handle_share_block(
-            share_block,
-            &chain_store_handle,
-            validation_tx,
-            &block_receiver_handle,
-            &block_fetcher_handle,
-            share_validator.as_ref(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to add share from response: {}", e);
-            format!("Failed to add share from response: {e}").into()
-        }),
+        Message::ShareBlock(share_block, bch_headers) => {
+            learn_carried_bch_headers(&bch_headers, &chain_store_handle, share_validator.as_ref())
+                .await?;
+            handle_share_block(
+                share_block,
+                &chain_store_handle,
+                validation_tx,
+                &block_receiver_handle,
+                &block_fetcher_handle,
+                share_validator.as_ref(),
+            )
+            .await
+            .map_err(|e| {
+                error!("Failed to add share from response: {}", e);
+                format!("Failed to add share from response: {e}").into()
+            })
+        }
         Message::NotFound(get_data) => {
             debug!("Received not found response from peer: {}", peer);
             match get_data {

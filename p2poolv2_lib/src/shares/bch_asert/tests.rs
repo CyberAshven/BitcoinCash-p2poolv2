@@ -80,7 +80,7 @@ fn every_specification_vector_matches() {
 /// child)`, as a Fulcrum server (`bch.imaginary.cash`) returned them on
 /// 2026-10-23: the first two ASERT blocks after anchor 661,647, then pairs
 /// every 50,000 blocks and one near the tip.
-const MAINNET_PAIRS: [(u32, &str, &str); 9] = [
+pub(crate) const MAINNET_PAIRS: [(u32, &str, &str); 9] = [
     (
         661647,
         "000000202df7a2e0562ebbbd8dc95ca6669c4f1ba888484c2cc7e403000000000000000067418c23d8901e49555725fb2e37adfb9ed29a05833eb4774d53b63b44ba457e8937b15ffeda04183c2b1978",
@@ -132,7 +132,7 @@ const MAINNET_PAIRS: [(u32, &str, &str); 9] = [
 /// 2026-10-23: the first two ASERT blocks after anchor 16,844, then later
 /// pairs, including minimum-difficulty block 300,001 (more than 20 minutes
 /// after its parent) and the ASERT block on top of it.
-const CHIPNET_PAIRS: [(u32, &str, &str); 9] = [
+pub(crate) const CHIPNET_PAIRS: [(u32, &str, &str); 9] = [
     (
         16844,
         "000000205581230d485df30b62e4b569b58df654c72e958af76893ad6278dc8b000000000e50f6458dcdbc3f3d677ba6e7acd7922b6a92562462e8d3faa2169a6f28ef7ed144b15fffff001d08f7a0eb",
@@ -180,7 +180,7 @@ const CHIPNET_PAIRS: [(u32, &str, &str); 9] = [
     ),
 ];
 
-fn header(hex_header: &str) -> Header {
+pub(crate) fn header(hex_header: &str) -> Header {
     deserialize(&hex::decode(hex_header).unwrap()).unwrap()
 }
 
@@ -355,11 +355,21 @@ fn real_chipnet_header_two_hours_before_its_parent_passes() {
         BchAsert::CHIPNET.next_bits(parent_height, parent.time),
         Some(child.bits)
     );
-    for seconds_before in [200, 260, 600, 3_600, 7_200] {
-        BchAsert::CHIPNET
-            .check_header_bits(child.bits, parent.time - seconds_before, height)
-            .unwrap_or_else(|error| panic!("{seconds_before} s before: {error}"));
-    }
+    BchAsert::CHIPNET
+        .check_header_bits(child.bits, parent.time - 200, height)
+        .unwrap();
+    BchAsert::CHIPNET
+        .check_header_bits(child.bits, parent.time - 260, height)
+        .unwrap();
+    BchAsert::CHIPNET
+        .check_header_bits(child.bits, parent.time - 600, height)
+        .unwrap();
+    BchAsert::CHIPNET
+        .check_header_bits(child.bits, parent.time - 3_600, height)
+        .unwrap();
+    BchAsert::CHIPNET
+        .check_header_bits(child.bits, parent.time - 7_200, height)
+        .unwrap();
     // The same two hours on mainnet's band would need 2^(1/24), about
     // 1.029, which 1.05 covers.
     let mut old_band = BchAsert::CHIPNET;

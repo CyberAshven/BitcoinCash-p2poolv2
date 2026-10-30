@@ -173,11 +173,15 @@ connection. See [Pool size limits](sharechain/pool-size.md) and
 A node can be fed templates for a chain the network does not follow, and a
 coinbase may pay work done on such a chain.
 
-**Open.** Shares do not yet carry or check the BCH headers they build on
-(upstream's "mine on the current chain" design). On BCH it needs aserti3-2d
-and chipnet's 20-minute rule. BCHN's automatic finalization of blocks ten
-deep limits how deep a BCH reorg can go, but does not replace the rule. Run
-your own BCHN, or a Template Provider you trust, and keep it well connected.
+**Mitigated on 2026-10-30, not yet run on chipnet.** Shares carry the BCH
+headers they build on, every node checks them (aserti3-2d and chipnet's
+20-minute rule), and a coinbase pays only work on its block's BCH chain, give
+or take one block ([Mining on the current chain](sharechain/current-chain.md),
+upstream's design). Work on a made-up block is never paid, and a hostile fork
+is paid for at most its first two block intervals. BCHN's automatic
+finalization of blocks ten deep limits how deep a BCH reorg can go. Still run
+your own BCHN, or a Template Provider you trust, and keep it well connected:
+your templates choose the chain your coinbases pay.
 
 ### Share-chain reorgs and traded shares
 

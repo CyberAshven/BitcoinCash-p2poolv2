@@ -5,8 +5,10 @@
 use super::*;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::test_utils::TestShareBlockBuilder;
+use bitcoin::Address;
 use bitcoin::hashes::Hash;
 use bitcoin::{Network, PubkeyHash, ScriptHash, TxOut};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 
 /// A coinbase subsidy of 3.125 BCH, in satoshis.
 const SUBSIDY: u64 = 312_500_000;
@@ -20,29 +22,29 @@ const TOKEN: PayoutSplit = PayoutSplit::BchHybrid {
 };
 
 /// P2PKH address of payee `number`.
-fn p2pkh(number: u32) -> Address {
+fn p2pkh(number: u32) -> PayoutAddress {
     let mut hash = [0x11u8; 20];
     hash[..4].copy_from_slice(&number.to_le_bytes());
-    Address::p2pkh(PubkeyHash::from_byte_array(hash), Network::Regtest)
+    Address::p2pkh(PubkeyHash::from_byte_array(hash), Network::Regtest).into()
 }
 
 /// P2SH20 address of payee `number`.
-fn p2sh20(number: u32) -> Address {
+fn p2sh20(number: u32) -> PayoutAddress {
     let mut hash = [0x22u8; 20];
     hash[..4].copy_from_slice(&number.to_le_bytes());
-    Address::p2sh_from_hash(ScriptHash::from_byte_array(hash), Network::Regtest)
+    Address::p2sh_from_hash(ScriptHash::from_byte_array(hash), Network::Regtest).into()
 }
 
 /// `count` P2PKH payees, payee `n` (from 1) weighing `n * 1_000`, so the
 /// canonical order is by number.
-fn rising_weights(count: u32) -> HashMap<Address, u128> {
+fn rising_weights(count: u32) -> HashMap<PayoutAddress, u128> {
     (1..=count)
         .map(|number| (p2pkh(number), u128::from(number) * 1_000))
         .collect()
 }
 
 fn split(
-    weights: &HashMap<Address, u128>,
+    weights: &HashMap<PayoutAddress, u128>,
     amount: u64,
     split: PayoutSplit,
 ) -> (Vec<OutputPair>, Option<PayoutTree>) {
@@ -281,7 +283,7 @@ fn no_payee_after_the_straddler_is_moved_back() {
 /// P2SH20 output is smaller than the bytes some payees already took.
 #[test]
 fn a_mixed_payee_straddling_by_one_byte_goes_to_the_tree() {
-    let mut weights: HashMap<Address, u128> = (1..=73u32)
+    let mut weights: HashMap<PayoutAddress, u128> = (1..=73u32)
         .map(|number| (p2pkh(number), u128::from(number)))
         .collect();
     weights.extend((74..=86u32).map(|number| (p2sh20(number), u128::from(number))));
@@ -354,7 +356,7 @@ fn direct_payouts_below_dust_are_paid_as_they_are() {
 fn tree_payees_below_dust_are_merged_into_the_largest() {
     // 79 tiny direct payees, then two tree payees: one owed about 400
     // satoshis, below dust after its fee, and the largest.
-    let mut weights: HashMap<Address, u128> = (1..=79u32)
+    let mut weights: HashMap<PayoutAddress, u128> = (1..=79u32)
         .map(|number| (p2pkh(number), u128::from(number)))
         .collect();
     weights.insert(p2pkh(80), 40_000);
@@ -374,7 +376,7 @@ fn tree_payees_below_dust_are_merged_into_the_largest() {
 #[test]
 fn the_split_is_deterministic() {
     let weights = rising_weights(300);
-    let reordered: HashMap<Address, u128> = (1..=300u32)
+    let reordered: HashMap<PayoutAddress, u128> = (1..=300u32)
         .rev()
         .map(|number| (p2pkh(number), u128::from(number) * 1_000))
         .collect();

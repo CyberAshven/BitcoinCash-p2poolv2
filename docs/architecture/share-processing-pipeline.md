@@ -314,12 +314,32 @@ witness root bound, it follows from the header. See
 - Spawns EmissionWorker with `organise_tx`
 - Handles `SwarmSend::Broadcast` to send shares to all peers
 
+### FoundBlockVerifier (`node/found_block_verifier.rs`)
+- Runs as a supervised worker on Bitcoin Cash, independently of validation
+  and organisation, so BCHN latency cannot delay share confirmation.
+- Confirmation records shares and uncles meeting their own claimed BCH
+  targets as unverified candidates. This does not prove BCHN acceptance.
+- Periodically asks BCHN for the block hash at each candidate's height.
+  Matching hashes are recorded in `AcceptedFoundBlocks` by StoreWriter;
+  failures or different hashes leave the candidate available for retry,
+  until BCHN's block at that height is final (10 blocks deep, BCHN's
+  `-maxreorgdepth`); then the candidate is not checked again until a
+  restart.
+- The local submission path also records positive `submitblock` verdicts
+  (`accepted` or a valid `duplicate`). Inconclusive verdicts do not count.
+- A newly persisted acceptance resets runtime effort once. The verifier
+  excludes historical candidates and candidates observed while syncing
+  from effort resets. Neither acceptance nor a missing verdict changes
+  share validity or payout eligibility.
+
 ### StoreWriter (`store/writer/mod.rs`)
 - Runs on dedicated OS thread via `tokio::task::spawn_blocking`
 - Receives `WriteCommand` variants via `std::sync::mpsc` (unbounded)
 - Processes commands sequentially with `WriteBatch` for atomicity
 - `WriteCommand::OrganiseHeader` calls `Store::organise_header()` with a single batch for atomic candidate chain updates
 - `WriteCommand::OrganiseBlock` calls `Store::organise_block()` with a single batch for atomic confirmed chain promotion
+- `WriteCommand::RecordAcceptedFoundBlock` serializes acceptance writes and
+  reports whether a block is newly recorded, preventing duplicate resets.
 
 ### ChainStoreHandle (`shares/chain/chain_store_handle.rs`)
 - Wraps `StoreHandle` with chain-level logic (height calculation, chain work)
@@ -611,6 +631,16 @@ shares not yet mature for the paying share (`COINBASE_MATURITY`, with the first
 Both counts are fixed share counts with no node-local setting and no bitcoin
 difficulty in them. Every node must pay the same window, so they are network
 constants rather than config.
+
+On Bitcoin Cash the window instead holds `BCH_PPLNS_WINDOW_BLOCKS` blocks'
+worth of work, sized from the nBits Bitcoin Cash requires after the share's
+BCH prev (`bitcoin_header.prev_blockhash`), and pays only the work on that
+prev's chain or one block off it (`sharechain_pplns/bch_eligibility.rs`,
+`mine-on-bitcoin-chain.md`). The notifier passes its template's bits and
+previous block (`PayingBlock`), the validator the share header's. A window
+that places work on a BCH block the node does not know yet is `Recoverable`
+(`UnknownBchPrev`); one that pays no one makes the share `Invalid`
+(`NothingEligible`).
 
 The window is anchored on the share's declared `prev_share_blockhash`, not the
 live confirmed tip, via `PplnsWindow::get_distribution_from_start_hash`. The

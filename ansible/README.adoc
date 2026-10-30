@@ -17,7 +17,7 @@ $EDITOR inventory/group_vars/all/vault.yml
 # 3. Encrypt the vault
 ansible-vault encrypt inventory/group_vars/all/vault.yml
 
-# 4. Dry run to verify
+# 4. Dry run to verify (add -K if sudo on a host needs a password)
 ansible-playbook -i inventory/hosts.yml playbook.yml --check --diff --ask-vault-pass
 
 # 5. Deploy
@@ -33,6 +33,8 @@ ansible-playbook -i inventory/hosts.yml playbook.yml --tags nginx --ask-vault-pa
 ansible-playbook -i inventory/hosts.yml playbook.yml --tags monitoring --ask-vault-pass
 ----
 
+Deploy to one host only with `--limit <host>`.
+
 == What it does
 
 The playbook deploys one or more P2Poolv2 instances to a host, each on a
@@ -45,10 +47,27 @@ Three roles:
 
 *p2poolv2*:: Installs the p2poolv2 binary and CLI from this fork's release
   (`https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases`) with the
-  release's installer script (auto-detects architecture), templates the TOML
-  config with `chain = "bitcoin-cash"`, and manages the systemd service.
+  release's installer script (auto-detects architecture), or builds them on
+  the host (`p2poolv2_install_method: source`). Templates the TOML config
+  with `chain = "bitcoin-cash"` and manages the systemd service. Before
+  (re)starting a node it checks that the instance's BCHN RPC port and ZMQ
+  endpoint are reachable, and stops the run if not. BCHN itself is not
+  managed. The node serves its own dashboard, so no dashboard files are
+  installed.
 
-*nginx_p2poolv2*:: Installs nginx as a reverse proxy in front of the API with rate limiting, WebSocket support, and Let's Encrypt certificates via certbot. Optionally proxies Grafana.
+*nginx_p2poolv2*:: Installs nginx as a reverse proxy in front of the API with rate limiting, WebSocket support, and TLS from certificates you obtain on the host. Optionally proxies Grafana.
+
+*grafana_p2poolv2*:: Installs Prometheus and Grafana and provisions the P2Poolv2 datasource and dashboards. See <<Grafana>>.
+
+Each host chooses its roles with `p2poolv2_nginx_enabled` and `p2poolv2_monitoring_enabled` (both default to true).
+
+=== Binary install method
+
+Set `p2poolv2_install_method` per host:
+
+`release` (default):: Installs the GitHub release for `p2poolv2_version` with the official installer script, which auto-detects architecture and verifies checksums.
+
+`source`:: Builds `p2poolv2_source_ref` (branch, tag or commit) on the host and installs the result. A dedicated `p2poolv2-build` user owns the rust toolchain (installed with rustup) and the checkout in `/var/lib/p2poolv2-build`. The build reruns only when the ref resolves to a commit other than the one installed. A first build takes 10-20 minutes and needs a few GB of RAM.
 
 *monitoring_p2poolv2*:: Installs Prometheus (distribution package) and Grafana
   (Grafana's apt repository), both listening on loopback. Prometheus scrapes
@@ -72,21 +91,27 @@ ansible/
   roles/
     p2poolv2/
       defaults/main.yml                 # All configurable variables with defaults
-      tasks/main.yml                    # Install, configure, enable service
       templates/
         config.toml.j2                  # P2Poolv2 TOML config
         p2poolv2@.service.j2            # Systemd template unit
-      handlers/main.yml                 # Restart/reload handlers
+      handlers/main.yml                 # Unused; restarts are inline per instance
+      tasks/
+        main.yml                        # Configure and enable services
+        install_release.yml             # Install from a GitHub release
+        install_source.yml              # Build and install from a git ref
+        preflight.yml                   # bitcoind RPC and ZMQ reachability
     nginx_p2poolv2/
       defaults/main.yml                 # Nginx-specific defaults
-      tasks/main.yml                    # Install nginx, deploy site, certbot
+      tasks/main.yml                    # Install nginx, deploy site
       templates/
-        p2poolv2_site.conf.j2           # Nginx site config
-      handlers/main.yml                 # Reload handler
+        p2poolv2_site.conf.j2           # Nginx site config with SSL
+        p2poolv2_http.conf.j2           # HTTP-only config for certificate acquisition
+      handlers/main.yml                 # Config test, then reload
     monitoring_p2poolv2/
       defaults/main.yml                 # Prometheus and Grafana settings
       tasks/main.yml                    # Install, configure, provision dashboards
       templates/                        # prometheus.yml, Grafana env and provisioning
+    grafana_p2poolv2/                   # Upstream's monitoring role, kept for merges; not used here
       handlers/main.yml                 # Restart handlers
 ----
 
@@ -134,6 +159,8 @@ Each entry of `p2poolv2_instances` takes these keys; the role's
 | `bitcoin_rpc_url`, `bitcoin_rpc_user`, `bitcoin_rpc_pass`, `zmq_endpoint` | The instance's BCHN.
 |===
 
+Logs go to the systemd journal (`journalctl -u p2poolv2@<instance>`). Set `p2poolv2_log_file` to also write daily-rotated files; p2poolv2 never deletes old ones.
+
 == Multiple instances
 
 Define multiple entries in `p2poolv2_instances` in your inventory to run mainnet and chipnet (or any combination) on the same host. Each instance needs unique ports and its own BCHN. Set `enabled: false` on an instance to skip it during deployment.
@@ -150,16 +177,24 @@ Define multiple entries in `p2poolv2_instances` in your inventory to run mainnet
 | BCHN ZMQ hashblock | 28332 | 28333
 |===
 
+These are the ports in `hosts.yml.example`. The ZMQ endpoint must match the `zmqpubhashblock` setting of that network's bitcoind.
+
+The playbook does not manage the host firewall. When you enable an instance, open its stratum and P2P ports in the firewall yourself.
+
 == Nginx
 
-Nginx is configured once per host (not per instance). The config includes:
+Nginx is configured once per host (not per instance), Debian/Ubuntu only. The config includes:
 
 - Reverse proxy to the P2Poolv2 API with rate limiting and WebSocket support
 - HTTP to HTTPS redirect
 - Optional redirect domains (e.g. a bare domain to a node subdomain)
 - Optional Grafana reverse proxy (set `p2poolv2_grafana_domain`)
-- Let's Encrypt certificates via certbot
+- TLS with Let's Encrypt certificates from `/etc/letsencrypt/live/<domain>/`
 - Basic auth header injection toward the API backend (derived from vault credentials)
+
+The role owns a single site, `p2poolv2.conf`, and leaves other sites on the host alone. To replace a hand-written site, list it in `p2poolv2_nginx_remove_sites`; it is removed only after `p2poolv2.conf` is in place. Every reload runs `nginx -t` first, so a broken config fails the play while nginx keeps serving the previous one.
+
+Certificates are not managed by the playbook: obtain and renew them on the host yourself (e.g. with certbot), and reload nginx after a renewal. The role deploys the full SSL config only once a certificate exists for `p2poolv2_domain` (covering the redirect domains) and for `p2poolv2_grafana_domain` if set. Until then it deploys an HTTP-only config, which also serves certbot's HTTP-01 challenge; rerun the role after obtaining the certificates.
 
 == Monitoring
 
@@ -194,7 +229,9 @@ To generate an API auth token:
 p2poolv2_cli gen-auth <username> <password>
 ----
 
-Store the username, password, and resulting token in the vault. The nginx basic auth header is derived automatically from the username and password.
+Store the username, password, and resulting token in the vault. The nginx basic auth header and the Prometheus scrape credentials are derived from the username and password, so the token must be generated from the same pair.
+
+With several hosts, give each host its own BCHN RPC credentials in a per-host vault, `inventory/host_vars/<host>/vault.yml`, using the same key names (`vault_bchn_rpc_user`, `vault_bchn_rpc_pass`). Ansible loads a host's `host_vars` only for that host. Keep these keys out of `group_vars/all/vault.yml` so a missing host vault fails the run instead of silently using another host's credentials. Shared secrets (API auth, Grafana admin password) stay in `group_vars/all/vault.yml`. The `host_vars/` directory is gitignored.
 
 == Upgrades
 
@@ -204,10 +241,10 @@ version string stays the same when the binaries change. Run the playbook with
 
 == Prerequisites
 
-* Ansible 2.12+
+* ansible-core with the `community.general` collection
 * A target host running Ubuntu (tested on 22.04) or Debian
-* SSH access with sudo privileges
+* SSH access with sudo privileges (run with `-K` if sudo needs a password)
 * A running Bitcoin Cash Node (BCHN) per network on the target, with
   `server=1`, an RPC login and `zmqpubhashblock` (not managed by this
   playbook; see `docs/requirements.md`)
-* DNS records pointing your domain(s) to the target host (for Let's Encrypt)
+* DNS records pointing your domain(s) to the target host (for Let's Encrypt, nginx role only)

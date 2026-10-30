@@ -398,13 +398,50 @@ impl BlockReceiver {
     }
 
     /// The header checks a block passes before it is stored and organised:
-    /// ASERT difficulty, then the timestamp rules. A failure drops the block.
+    /// ASERT difficulty, the timestamp rules, then the uncle rules. A failure
+    /// drops the block. Storing organises the header, which credits its
+    /// uncles' work to chain work, so uncles are checked here rather than
+    /// only during full validation.
+    ///
+    /// On Bitcoin Cash the block's BCH prev must be known too (mining on the
+    /// current chain): a body is stored only once every node storing it can
+    /// place its work on the BCH chain. An unknown prev drops the body with
+    /// no verdict; a copy carrying the header, or a later fetch, brings it
+    /// back. Share headers never wait on it, so every node holds the same
+    /// share header chain.
     fn validate_header_before_storing(
         &self,
         share_block: &ShareBlock,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.validate_asert(share_block)?;
-        self.validate_timestamp(share_block)
+        self.validate_timestamp(share_block)?;
+        self.share_validator
+            .validate_uncles(&share_block.header, &self.chain_store_handle)?;
+        self.validate_bch_prev_known(share_block)
+    }
+
+    /// The BCH prev of a Bitcoin Cash share block is a known header. The
+    /// all-zero hash names no block and is never known, so a share on it is
+    /// dropped too; only the chain's first share, which is built locally and
+    /// never received, builds on it.
+    fn validate_bch_prev_known(
+        &self,
+        share_block: &ShareBlock,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if self.share_validator.bch_header_rules().is_none() {
+            return Ok(());
+        }
+        let prev = share_block.header.bitcoin_header.prev_blockhash;
+        if prev != <BlockHash as bitcoin::hashes::Hash>::all_zeros()
+            && self.chain_store_handle.get_bch_header(&prev)?.is_some()
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "Bitcoin Cash block {prev} that share {} builds on is not known yet",
+            share_block.block_hash()
+        )
+        .into())
     }
 
     /// Timestamp rules against the stored ancestry, as header sync applies

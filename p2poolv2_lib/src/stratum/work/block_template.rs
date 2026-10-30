@@ -198,8 +198,18 @@ impl BlockTemplate {
                 size.checked_add(transaction.data.len() / 2)
             });
         if block_size.is_none_or(|size| size as u64 > self.sizelimit) {
+            let size = block_size.map_or_else(
+                || "more than usize::MAX".to_string(),
+                |size| size.to_string(),
+            );
             return Err(WorkError {
-                message: "BCH block including coinbase exceeds node block size limit".to_string(),
+                message: format!(
+                    "BCH block of {size} bytes including its {}-byte coinbase exceeds BCHN's block \
+                     size limit of {} bytes. Lower BCHN's -blockmaxsize or \
+                     -percentblockmaxsize so its templates leave room for the pool's coinbase",
+                    coinbase.total_size(),
+                    self.sizelimit
+                ),
             });
         }
         Ok(())

@@ -197,6 +197,7 @@ async fn handle_connection<ShutdownSignal>(
             prepared = next_template(template_rx.as_mut()) => {
                 match (prepared, channels.as_mut()) {
                     (Some(prepared), Some(channels)) => channels.on_template(&prepared),
+                    (None, Some(_)) => break,
                     _ => Vec::new(),
                 }
             }

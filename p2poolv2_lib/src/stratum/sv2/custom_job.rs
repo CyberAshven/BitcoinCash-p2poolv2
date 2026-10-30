@@ -23,8 +23,9 @@ use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoin::block::{Header, Version};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::{Hash, sha256d};
-use bitcoin::{Address, Amount, Block, BlockHash, CompactTarget, TxMerkleNode, TxOut};
+use bitcoin::{Amount, Block, BlockHash, CompactTarget, TxMerkleNode, TxOut};
 use mining_sv2::SetCustomMiningJob;
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -123,7 +124,7 @@ fn check_declared_tokens(
 pub(crate) fn validate_custom_job(
     request: &SetCustomMiningJob,
     declared: DeclaredJob,
-    payout: Address,
+    payout: PayoutAddress,
     owner: ShareOwner,
     version_mask: i32,
 ) -> Result<(JobDetails, Option<Block>), String> {

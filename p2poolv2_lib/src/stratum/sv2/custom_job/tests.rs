@@ -6,8 +6,10 @@ use crate::test_utils::{
     test_bch_prepared_with_tree_payees, test_merge_token_set,
 };
 use binary_sv2::{B064K, Deserialize, Seq0255, U256};
+use bitcoin::Address;
 use bitcoin::Network;
 use p2poolv2_config::DEFAULT_VERSION_MASK;
+use p2poolv2_wallet::payout_address::PayoutAddress;
 
 #[test]
 fn a_full_declared_job_retains_the_tree_of_its_own_coinbase() {
@@ -25,7 +27,7 @@ fn a_full_declared_job_retains_the_tree_of_its_own_coinbase() {
     let (job, block) = validate_custom_job(
         &request,
         declared,
-        payout,
+        payout.into(),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
     )
@@ -59,7 +61,7 @@ fn full_job_uses_declared_transactions_and_proportional_fee_revenue() {
     let (job, block) = validate_custom_job(
         &request,
         declared,
-        payout,
+        payout.into(),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
     )
@@ -105,7 +107,7 @@ fn private_job_preserves_hidden_merkle_path_without_pool_transactions() {
     let (job, block) = validate_custom_job(
         &request,
         declared,
-        payout,
+        payout.into(),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
     )
@@ -138,7 +140,7 @@ fn full_job_rejects_wrong_merkle_path() {
         validate_custom_job(
             &request,
             declared,
-            payout,
+            payout.into(),
             ShareOwner::CashP2pkh([0x22; 20]),
             DEFAULT_VERSION_MASK
         )
@@ -170,7 +172,7 @@ fn private_job_rejects_diverted_pplns_payment() {
         validate_custom_job(
             &request,
             declared,
-            payout,
+            payout.into(),
             ShareOwner::CashP2pkh([0x22; 20]),
             DEFAULT_VERSION_MASK
         )
@@ -197,7 +199,7 @@ fn full_job_rejects_changed_declaration() {
         validate_custom_job(
             &request,
             declared,
-            payout,
+            payout.into(),
             ShareOwner::CashP2pkh([0x22; 20]),
             DEFAULT_VERSION_MASK
         )
@@ -207,11 +209,12 @@ fn full_job_rejects_changed_declaration() {
 }
 
 /// A P2PKH regtest address paying twenty `byte` bytes.
-fn regtest_payout(byte: u8) -> Address {
+fn regtest_payout(byte: u8) -> PayoutAddress {
     Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array([byte; 20]),
         Network::Regtest,
     )
+    .into()
 }
 
 /// Validate the Full-Template job on `prepared` whose declaration
@@ -219,7 +222,7 @@ fn regtest_payout(byte: u8) -> Address {
 /// the miner paid to P2PKH(22 x 20).
 fn validate_declared_leaves(
     prepared: Arc<crate::stratum::work::prepared_notify::PreparedNotifyParams>,
-    leaf_payout: &Address,
+    leaf_payout: &PayoutAddress,
     split: TokenSplit,
 ) -> Result<(JobDetails, Option<Block>), String> {
     let token = prepared
@@ -247,7 +250,7 @@ fn validate_declared_leaves(
 }
 
 /// The node's 1% donation and 1% fee, each to the script the coinbase pays.
-fn node_cuts_split(fee_address: &Address) -> TokenSplit {
+fn node_cuts_split(fee_address: &PayoutAddress) -> TokenSplit {
     let donation =
         crate::config::bitcoin_cash_donation_address(crate::config::BitcoinCashNetwork::Regtest);
     TokenSplit {

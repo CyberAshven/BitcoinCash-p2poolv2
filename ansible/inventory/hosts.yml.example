@@ -10,6 +10,8 @@
 # Each instance needs its own BCHN on the host (not managed by this playbook):
 # mainnet RPC 8332, chipnet RPC 48332, each with its own zmqpubhashblock port.
 # Mainnet and chipnet run the same P2Poolv2 rules; only the network differs.
+#
+# If sudo on a host needs a password, run the playbook with -K.
 
 all:
   children:
@@ -19,15 +21,31 @@ all:
           ansible_user: ubuntu
 
           p2poolv2_version: "0.0.1-alpha"
-          p2poolv2_certbot_email: "you@example.com"
+          # release: install this fork's GitHub release for p2poolv2_version
+          # source:  build p2poolv2_source_ref on the host
+          p2poolv2_install_method: release
+          # p2poolv2_source_ref: alpha
+
+          # Roles enabled on this host
+          p2poolv2_nginx_enabled: true
+          p2poolv2_monitoring_enabled: true
 
           # Nginx -- host-level config
           p2poolv2_domain: your-domain.example.com
           p2poolv2_redirect_domains: []
-          p2poolv2_api_port: 46884
+          p2poolv2_api_port: 46885
           # p2poolv2_api_auth_user: "{{ vault_api_auth_user }}"
           # p2poolv2_api_auth_pass: "{{ vault_api_auth_pass }}"
           # p2poolv2_grafana_domain: grafana.example.com
+          # Site configs in sites-enabled to remove (e.g. ones being replaced)
+          p2poolv2_nginx_remove_sites: []
+
+          # Grafana listen address: 127.0.0.1 behind nginx, 0.0.0.0 for LAN access
+          p2poolv2_grafana_listen_address: "127.0.0.1"
+          # Extra Prometheus scrape targets besides the p2poolv2 instances
+          # p2poolv2_prometheus_extra_targets:
+          #   - job_name: node
+          #     target: "localhost:9100"
 
           # Prometheus and Grafana (roles/monitoring_p2poolv2). Prometheus
           # scrapes every enabled instance's /metrics on 127.0.0.1.
@@ -61,8 +79,9 @@ all:
               bitcoin_rpc_user: "{{ vault_bchn_rpc_user }}"
               bitcoin_rpc_pass: "{{ vault_bchn_rpc_pass }}"
               zmq_endpoint: "tcp://127.0.0.1:28332"
-              api_port: 46884
+              api_port: 46886
               # api_auth_user: "{{ vault_api_auth_user }}"
+              # api_auth_pass: "{{ vault_api_auth_pass }}"
               # api_auth_token: "{{ vault_api_auth_token }}"
               # public_dashboard: true
               pool_signature: "P2Poolv2"
@@ -87,8 +106,11 @@ all:
               bitcoin_rpc_user: "{{ vault_bchn_rpc_user }}"
               bitcoin_rpc_pass: "{{ vault_bchn_rpc_pass }}"
               zmq_endpoint: "tcp://127.0.0.1:28333"
+              # api_hostname: "127.0.0.1"
               api_port: 46885
               # api_auth_user: "{{ vault_api_auth_user }}"
+              # api_auth_pass: "{{ vault_api_auth_pass }}"
               # api_auth_token: "{{ vault_api_auth_token }}"
               pool_signature: "P2Poolv2"
               # sv2_port: 3337
+              # stats_dir: "/var/lib/p2poolv2/chipnet/stats"

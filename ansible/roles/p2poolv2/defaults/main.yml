@@ -11,12 +11,32 @@ p2poolv2_version: "0.0.1-alpha"
 p2poolv2_force_install: false
 p2poolv2_instance: "chipnet"
 
+# How to get the p2poolv2 binaries:
+#   release -- install the GitHub release for p2poolv2_version
+#   source  -- build p2poolv2_source_ref on the host
+p2poolv2_install_method: "release"
+
 # GitHub release URL base
 # The installer script auto-detects architecture.
 p2poolv2_release_url: "https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases/download/v{{ p2poolv2_version }}"
 
+# --- Source build (p2poolv2_install_method: source) ---
+# Branch, tag or commit to build. The build reruns whenever it resolves
+# to a different commit than the one last installed.
+p2poolv2_source_repo: "https://github.com/CyberAshven/BitcoinCash-p2poolv2.git"
+p2poolv2_source_ref: "alpha"
+# Dedicated unprivileged user that owns the rust toolchain and checkout
+p2poolv2_build_user: "p2poolv2-build"
+p2poolv2_build_home: "/var/lib/p2poolv2-build"
+# Records the commit of the installed source build
+p2poolv2_source_stamp: "{{ p2poolv2_bin_dir }}/.source-commit"
+
 # Installation paths
 p2poolv2_bin_dir: "/opt/p2poolv2/bin"
+# This fork's node serves its dashboard itself, so no dashboard files are
+# installed. Set true only for a build that reads P2POOL_STATIC_DIR.
+p2poolv2_install_dashboard_files: false
+p2poolv2_static_dir: "/opt/p2poolv2/share/static"
 p2poolv2_config_dir: "/etc/p2poolv2"
 
 # System user
@@ -121,17 +141,20 @@ p2poolv2_bitcoin_rpc_user: ""
 p2poolv2_bitcoin_rpc_pass: ""
 
 # --- Logging config ---
-p2poolv2_log_file: "/var/log/p2poolv2/{{ p2poolv2_instance }}/p2poolv2.log"
+# Logs go to the console, which systemd sends to journald. Set a file path
+# to also write daily-rotated files; p2poolv2 never deletes old ones.
+p2poolv2_log_file: ""
 p2poolv2_log_level: "info"
-p2poolv2_log_console: false
+p2poolv2_log_console: true
 p2poolv2_stats_dir: "/var/lib/p2poolv2/{{ p2poolv2_instance }}/stats"
 
 # --- API config ---
 # Bind to localhost only -- nginx proxies public access
 p2poolv2_api_hostname: "127.0.0.1"
 p2poolv2_api_port: 46884
-# p2poolv2_api_auth_user: ""
-# p2poolv2_api_auth_token: ""
+# Empty disables API authentication
+p2poolv2_api_auth_user: ""
+p2poolv2_api_auth_token: ""
 p2poolv2_api_cors_allowed: false
 # Open the dashboard, the web_root frontend and the read-only share chain
 # routes to anyone (a public node); /metrics, /peers, /blocked_ips and

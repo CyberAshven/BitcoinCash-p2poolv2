@@ -99,13 +99,11 @@ const OUTPUT_COUNT_SIZE: u32 = 3;
 pub(crate) const COINBASE_OUTPUT_RESERVE: u32 =
     MAX_SUBMITTED_COINBASE - COINBASE_WITHOUT_OUTPUTS - OUTPUT_COUNT_SIZE;
 
-/// Size of a P2PKH output: the smallest output this coinbase pays that has a
-/// signature operation. P2SH payouts and the OP_RETURN commitments have none.
-const P2PKH_OUTPUT_SIZE: u32 = 34;
-
-/// `coinbase_output_max_additional_sigops`: one legacy sigop for every P2PKH
-/// payout that fits the reserve.
-pub(crate) const COINBASE_OUTPUT_SIGOPS: u16 = (COINBASE_OUTPUT_RESERVE / P2PKH_OUTPUT_SIZE) as u16;
+/// BCH SigChecks reserve, carried in the protocol's legacy-named
+/// `coinbase_output_max_additional_sigops` field. A coinbase executes no
+/// scripts, so its SigChecks count is zero regardless of its outputs.
+/// See <https://upgradespecs.bitcoincashnode.org/2020-05-15-sigchecks/#counting-rule>.
+pub(crate) const COINBASE_OUTPUT_SIGCHECKS: u16 = 0;
 
 /// Block bytes per SigCheck a Bitcoin Cash block may use.
 const BYTES_PER_SIGCHECK: u32 = 141;
@@ -590,12 +588,12 @@ fn setup_connection_frame(provider: &TemplateProvider) -> Result<Vec<u8>, String
     )
 }
 
-/// `CoinbaseOutputConstraints` sized for the largest PPLNS coinbase.
+/// Reserve bytes for the largest PPLNS coinbase and zero BCH SigChecks.
 fn coinbase_output_constraints_frame() -> Result<Vec<u8>, String> {
     encode_frame(
         CoinbaseOutputConstraints {
             coinbase_output_max_additional_size: COINBASE_OUTPUT_RESERVE,
-            coinbase_output_max_additional_sigops: COINBASE_OUTPUT_SIGOPS,
+            coinbase_output_max_additional_sigops: COINBASE_OUTPUT_SIGCHECKS,
         },
         MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS,
     )
@@ -827,7 +825,7 @@ async fn open_connection(
         .await
         .map_err(|error| format!("write: {error}"))?;
     info!(
-        "Template Provider at {} set up; reserved {COINBASE_OUTPUT_RESERVE} coinbase output bytes and {COINBASE_OUTPUT_SIGOPS} sigops",
+        "Template Provider at {} set up; reserved {COINBASE_OUTPUT_RESERVE} coinbase output bytes and {COINBASE_OUTPUT_SIGCHECKS} BCH SigChecks",
         provider.address
     );
     Ok((transport, stream, early_messages))

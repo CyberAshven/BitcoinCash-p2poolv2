@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 mod bitcoin_block_validation;
+#[cfg(test)]
+mod version_vote_tests;
 
 use super::share_block::{MAX_POOL_TARGET, ShareHeader};
 use crate::accounting::CoinbasePayouts;
@@ -17,7 +19,7 @@ use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 #[cfg(not(test))]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
-    ChainDepths, WindowError, bitcoin_block_difficulty,
+    ChainDepths, PayingBlock, WindowError, bitcoin_block_difficulty,
 };
 use crate::config::{
     BITCOIN_CASH_DONATION_PUBKEY_HASH, BitcoinCashNetwork, Chain, MAX_BASIS_POINTS,
@@ -30,6 +32,7 @@ use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
 use crate::shares::bch_asert::BchAsert;
+use crate::shares::bch_headers::BchHeaderRules;
 use crate::shares::bch_script;
 #[cfg(test)]
 #[mockall_double::double]
@@ -65,9 +68,10 @@ use crate::stratum::work::gbt::compute_merkle_root_from_branches;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoin::hashes::Hash as HashTrait;
 use bitcoin::{
-    Address, Amount, BlockHash, CompactTarget, PubkeyHash, ScriptBuf, Target, Transaction,
-    TxMerkleNode, transaction::Version,
+    Amount, BlockHash, CompactTarget, PubkeyHash, ScriptBuf, Target, Transaction, TxMerkleNode,
+    transaction::Version,
 };
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, RwLock};
@@ -371,21 +375,31 @@ pub(crate) fn tally_share_version_votes(
     parent_hash: BlockHash,
     chain_store_handle: &ChainStoreHandle,
 ) -> Result<VersionTally, StoreError> {
+    tally_share_version_votes_from_headers(parent_hash, |blockhash| {
+        chain_store_handle.get_share_header(blockhash)
+    })
+}
+
+/// Walk the vote span using the caller's header reader. Keeping the walk
+/// independent of the handle lets real-store tests exercise the same traversal
+/// when validation's other unit tests replace the handle with a mock.
+fn tally_share_version_votes_from_headers(
+    parent_hash: BlockHash,
+    mut get_share_header: impl FnMut(&BlockHash) -> Result<ShareHeader, StoreError>,
+) -> Result<VersionTally, StoreError> {
     let mut current = parent_hash;
     for _ in 0..SHARE_VERSION_VOTE_DEPTH - SHARE_VERSION_VOTE_SPAN {
         if is_terminal_blockhash(&current) {
             return Ok(VersionTally::default());
         }
-        current = chain_store_handle
-            .get_share_header(&current)?
-            .prev_share_blockhash;
+        current = get_share_header(&current)?.prev_share_blockhash;
     }
     let mut tally = VersionTally::default();
     for _ in 0..SHARE_VERSION_VOTE_SPAN {
         if is_terminal_blockhash(&current) {
             break;
         }
-        let header = chain_store_handle.get_share_header(&current)?;
+        let header = get_share_header(&current)?;
         tally.add_share(header.share_version, header.bits);
         current = header.prev_share_blockhash;
     }
@@ -514,9 +528,14 @@ pub trait ShareValidator {
     /// include that an uncle may have only one nephew on a chain. Whether an
     /// uncle's block body is stored is checked separately, and only for blocks
     /// inside the PPLNS zone.
+    ///
+    /// Needs only headers and metadata, never bodies, so it runs before a
+    /// peer's header is organised (header sync and block receipt) as well as
+    /// during block validation. Organising credits uncle work to chain work,
+    /// so an unchecked header could otherwise inflate a branch's work.
     fn validate_uncles(
         &self,
-        share: &ShareBlock,
+        share_header: &ShareHeader,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError>;
 
@@ -648,6 +667,10 @@ pub trait ShareValidator {
     /// Used by header-sync validation to run ASERT checks without rebuilding a
     /// fresh PoolDifficulty on every batch.
     fn pool_difficulty(&self) -> &PoolDifficulty;
+
+    /// The rules a Bitcoin Cash header from a peer must pass, or `None` on
+    /// a Bitcoin node, which ignores carried headers.
+    fn bch_header_rules(&self) -> Option<BchHeaderRules>;
 }
 
 /// Production implementation of ShareValidator.
@@ -672,6 +695,8 @@ pub struct DefaultShareValidator {
     /// a token share's bitcoin header. `None` on Bitcoin and on regtest,
     /// which has no ASERT anchor.
     bch_asert: Option<BchAsert>,
+    /// Header rules of the Bitcoin Cash network, for carried headers.
+    bch_header_rules: Option<BchHeaderRules>,
     /// Where the payout tree of each validated share that is a BCH block
     /// goes, to be kept and executed (`node::payout_tree_executor`). `None`
     /// keeps no trees, as in tests and on Bitcoin.
@@ -703,6 +728,7 @@ impl DefaultShareValidator {
             chain: Chain::Bitcoin,
             target_ceiling: CompactTarget::from_consensus(MAX_POOL_TARGET),
             bch_asert: None,
+            bch_header_rules: None,
             payout_tree_sink: None,
         }
     }
@@ -759,7 +785,47 @@ impl DefaultShareValidator {
     /// on regtest, the check is skipped.
     pub fn with_bitcoin_cash_network(mut self, network: Option<BitcoinCashNetwork>) -> Self {
         self.bch_asert = network.and_then(BchAsert::for_network);
+        self.bch_header_rules = network.map(BchHeaderRules::for_network);
         self
+    }
+
+    /// Mining on the current chain: a Bitcoin Cash share in the payout zone
+    /// needs its BCH prev's header known before it can be paid or pay
+    /// others. Until a header arrives, with this share's message or a later
+    /// one, the share is `Recoverable`, never invalid: a node that has not
+    /// learned the header yet may learn it. The all-zero hash names no block:
+    /// only the chain's first share, built locally from the network's first
+    /// block, builds on it, and any other share that does is invalid. Shares
+    /// below the payout zone are not checked (`validate_below_pplns_depth`),
+    /// so a new node syncs old shares its header store does not reach.
+    fn validate_bch_prev_known(
+        &self,
+        share_header: &ShareHeader,
+        chain_store_handle: &ChainStoreHandle,
+    ) -> Result<(), ValidationError> {
+        if self.bch_header_rules.is_none() {
+            return Ok(());
+        }
+        let prev = share_header.bitcoin_header.prev_blockhash;
+        if prev == BlockHash::all_zeros() {
+            if share_header.prev_share_blockhash == BlockHash::all_zeros() {
+                return Ok(());
+            }
+            return Err(ValidationError::consensus(format!(
+                "Share {} builds on no Bitcoin Cash block",
+                share_header.block_hash()
+            )));
+        }
+        match chain_store_handle.get_bch_header(&prev) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(ValidationError::recoverable(format!(
+                "Bitcoin Cash block {prev} that share {} builds on is not known yet",
+                share_header.block_hash()
+            ))),
+            Err(error) => Err(ValidationError::store_access(format!(
+                "Cannot read Bitcoin Cash header {prev}: {error}"
+            ))),
+        }
     }
 
     /// The share-version vote rule (`shares::share_version`) for a Bitcoin
@@ -942,17 +1008,17 @@ impl DefaultShareValidator {
     /// uncle metadata are read in a single batch to avoid per-uncle lookups.
     fn validate_uncle_positions(
         &self,
-        share: &ShareBlock,
+        share_header: &ShareHeader,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError> {
-        if share.header.uncles.is_empty() {
+        if share_header.uncles.is_empty() {
             return Ok(());
         }
 
-        let parent_hash = share.header.prev_share_blockhash;
-        let mut hashes = Vec::with_capacity(1 + share.header.uncles.len());
+        let parent_hash = share_header.prev_share_blockhash;
+        let mut hashes = Vec::with_capacity(1 + share_header.uncles.len());
         hashes.push(parent_hash);
-        hashes.extend_from_slice(&share.header.uncles);
+        hashes.extend_from_slice(&share_header.uncles);
         let metadata_by_hash: HashMap<BlockHash, BlockMetadata> = chain_store_handle
             .get_block_metadata_batch(&hashes)
             .map_err(|error| {
@@ -980,7 +1046,7 @@ impl DefaultShareValidator {
 
         let ancestry = self.collect_recent_ancestry(parent_hash, chain_store_handle)?;
 
-        for uncle in &share.header.uncles {
+        for uncle in &share_header.uncles {
             let uncle_height = metadata_by_hash
                 .get(uncle)
                 .ok_or_else(|| {
@@ -1495,12 +1561,14 @@ impl DefaultShareValidator {
             .write()
             .expect("PPLNS window lock poisoned on write");
 
-        let paying_block_difficulty =
-            bitcoin_block_difficulty(share.header.bitcoin_header.bits, window.network());
+        let paying_block = PayingBlock::new(
+            bitcoin_block_difficulty(share.header.bitcoin_header.bits, window.network()),
+            share.header.bitcoin_header.prev_blockhash,
+        );
         let address_difficulty_map = window
             .get_distribution_from_start_hash(
                 share.header.prev_share_blockhash,
-                paying_block_difficulty,
+                paying_block,
                 chain_store_handle,
             )
             .map_err(|error| match error {
@@ -1512,10 +1580,18 @@ impl DefaultShareValidator {
                 | WindowError::RightsHistoryTooShallow { .. } => ValidationError::unresolvable(
                     format!("Cannot resolve PPLNS window from prev_share_blockhash: {error}"),
                 ),
-                // A store read failed or the ancestry is not stored yet; either
-                // may resolve later.
-                WindowError::ReadFailure(_) => ValidationError::recoverable(format!(
-                    "Failed to resolve PPLNS window from prev_share_blockhash: {error}"
+                // A store read failed, the ancestry is not stored yet, or a
+                // BCH header the window places work with has not arrived;
+                // each may resolve later.
+                WindowError::ReadFailure(_) | WindowError::UnknownBchPrev { .. } => {
+                    ValidationError::recoverable(format!(
+                        "Failed to resolve PPLNS window from prev_share_blockhash: {error}"
+                    ))
+                }
+                // The share builds on a BCH chain none of its window's work
+                // is on, so its coinbase can pay no one.
+                WindowError::NothingEligible { .. } => ValidationError::consensus(format!(
+                    "Share pays no one on its Bitcoin Cash chain: {error}"
                 )),
             })?;
 
@@ -1650,7 +1726,7 @@ impl DefaultShareValidator {
     /// When the PPLNS window is empty (bootstrap phase), returns an error.
     fn build_expected_outputs(
         share_header: &ShareHeader,
-        address_difficulty_map: &HashMap<Address, u128>,
+        address_difficulty_map: &HashMap<PayoutAddress, u128>,
         coinbase_value: u64,
         split: PayoutSplit,
     ) -> Result<CoinbasePayouts, ValidationError> {
@@ -1789,6 +1865,10 @@ impl ShareValidator for DefaultShareValidator {
         &self.pool_difficulty
     }
 
+    fn bch_header_rules(&self) -> Option<BchHeaderRules> {
+        self.bch_header_rules
+    }
+
     fn validate_with_pool_difficulty(
         &self,
         share_header: &ShareHeader,
@@ -1894,7 +1974,8 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_body_matches_header(share)?;
         self.validate_with_pool_difficulty(&share.header, chain_store_handle)?;
         self.validate_share_version(&share.header, chain_store_handle)?;
-        self.validate_uncles(share, chain_store_handle)?;
+        self.validate_bch_prev_known(&share.header, chain_store_handle)?;
+        self.validate_uncles(&share.header, chain_store_handle)?;
         self.validate_uncle_bodies_present(share, chain_store_handle)?;
         self.validate_block_size(share)?;
         self.validate_transaction_count(share)?;
@@ -1913,7 +1994,7 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_body_matches_header(share)?;
         self.validate_with_pool_difficulty(&share.header, chain_store_handle)?;
         self.validate_share_version(&share.header, chain_store_handle)?;
-        self.validate_uncles(share, chain_store_handle)?;
+        self.validate_uncles(&share.header, chain_store_handle)?;
         self.validate_block_size(share)?;
         self.validate_transaction_count(share)?;
         Ok(())
@@ -1921,21 +2002,21 @@ impl ShareValidator for DefaultShareValidator {
 
     fn validate_uncles(
         &self,
-        share: &ShareBlock,
+        share_header: &ShareHeader,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError> {
-        if share.header.uncles.len() > MAX_UNCLES {
+        if share_header.uncles.len() > MAX_UNCLES {
             return Err(ValidationError::consensus(format!(
                 "Too many uncles: {} exceeds maximum of {}",
-                share.header.uncles.len(),
+                share_header.uncles.len(),
                 MAX_UNCLES
             )));
         }
-        let unique_uncles: HashSet<&BlockHash> = share.header.uncles.iter().collect();
-        if share.header.uncles.len() != unique_uncles.len() {
+        let unique_uncles: HashSet<&BlockHash> = share_header.uncles.iter().collect();
+        if share_header.uncles.len() != unique_uncles.len() {
             return Err(ValidationError::consensus("Share has duplicate uncles"));
         }
-        self.validate_uncle_positions(share, chain_store_handle)?;
+        self.validate_uncle_positions(share_header, chain_store_handle)?;
         Ok(())
     }
 
@@ -2103,7 +2184,7 @@ mockall::mock! {
 
         fn validate_uncles(
             &self,
-            share: &ShareBlock,
+            share_header: &ShareHeader,
             chain_store_handle: &ChainStoreHandle,
         ) -> Result<(), ValidationError>;
 
@@ -2149,6 +2230,8 @@ mockall::mock! {
         fn validate_block_size(&self, share: &ShareBlock) -> Result<(), ValidationError>;
 
         fn pool_difficulty(&self) -> &PoolDifficulty;
+
+        fn bch_header_rules(&self) -> Option<BchHeaderRules>;
     }
 }
 
@@ -2177,12 +2260,14 @@ mod tests {
     use crate::stratum::work::gbt::build_merkle_branches_for_template;
     use crate::test_utils::{
         BCH_TRANSFER_ECDSA_ALL_WITHOUT_FORK_ID, BCH_TRANSFER_SCHNORR_ALL,
-        BCH_TRANSFER_SCRIPT_PUBKEY, TEST_COINBASE_NSECS, TRADE_BUYER_SECRET_KEY, TRADE_SECRET,
-        TRADE_SELLER_SECRET_KEY, TestShareBlockBuilder, build_block_from_work_components,
-        genesis_for_tests, load_share_headers_test_data, make_test_address,
-        setup_pool_difficulty_mocks, test_coinbase_transaction,
+        BCH_TRANSFER_SCRIPT_PUBKEY, PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_5G, PUBKEY_G,
+        TEST_COINBASE_NSECS, TRADE_BUYER_SECRET_KEY, TRADE_SECRET, TRADE_SELLER_SECRET_KEY,
+        TestShareBlockBuilder, build_block_from_work_components, genesis_for_tests,
+        load_share_headers_test_data, make_test_address, setup_pool_difficulty_mocks,
+        test_coinbase_transaction,
     };
     use crate::utils::time_provider::TestTimeProvider;
+    use bitcoin::Address;
     use bitcoin::consensus::encode::deserialize_hex;
     use bitcoin::pow::Work;
     use bitcoin::script::{Builder, PushBytesBuf};
@@ -2256,138 +2341,6 @@ mod tests {
         validator()
             .validate_share_version(&child, &ChainStoreHandle::default())
             .unwrap();
-    }
-
-    /// A store holding a chain of `length` share headers: `hashes[0]` is
-    /// the parent a tally starts from, each header's parent is the next, and
-    /// the last one's parent is the all-zeros terminal (genesis's parent).
-    /// Share `i` desires `desired(i)`, all at the same target.
-    fn store_of_chain(
-        length: u32,
-        desired: impl Fn(u32) -> u32,
-    ) -> (Vec<BlockHash>, ChainStoreHandle) {
-        let template = TestShareBlockBuilder::new()
-            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
-            .build()
-            .header;
-        let hash_of = |index: u32| {
-            let mut bytes = [0xab; 32];
-            bytes[..4].copy_from_slice(&index.to_le_bytes());
-            BlockHash::from_byte_array(bytes)
-        };
-        let hashes: Vec<BlockHash> = (0..length).map(hash_of).collect();
-        let mut headers = HashMap::with_capacity(length as usize);
-        for index in 0..length {
-            let mut header = template.clone();
-            header.share_version.desired_version = desired(index);
-            header.prev_share_blockhash = if index + 1 == length {
-                BlockHash::all_zeros()
-            } else {
-                hash_of(index + 1)
-            };
-            headers.insert(hash_of(index), header);
-        }
-        let mut chain_store_handle = ChainStoreHandle::default();
-        chain_store_handle
-            .expect_get_share_header()
-            .returning(move |hash| {
-                headers
-                    .get(hash)
-                    .cloned()
-                    .ok_or_else(|| StoreError::NotFound(hash.to_string()))
-            });
-        (hashes, chain_store_handle)
-    }
-
-    /// The tally of `count` shares at the test template's target desiring
-    /// `version`.
-    fn tally_of(version: u32, count: u32) -> VersionTally {
-        let bits = TestShareBlockBuilder::new().build().header.bits;
-        let mut tally = VersionTally::default();
-        for _ in 0..count {
-            tally.add_share(
-                crate::shares::share_version::ShareVersion {
-                    version: 1,
-                    desired_version: version,
-                },
-                bits,
-            );
-        }
-        tally
-    }
-
-    /// The tally counts exactly the shares from `SHARE_VERSION_VOTE_DEPTH -
-    /// SHARE_VERSION_VOTE_SPAN` to `SHARE_VERSION_VOTE_DEPTH - 1` below the
-    /// parent (the parent itself is 0): the last share skipped and the
-    /// first share past the span desire version 3 and are not counted; the
-    /// span's first and last desire 2 and are.
-    #[test]
-    fn share_version_tally_counts_exactly_the_vote_span() {
-        let first = SHARE_VERSION_VOTE_DEPTH - SHARE_VERSION_VOTE_SPAN;
-        let last = SHARE_VERSION_VOTE_DEPTH - 1;
-        let (hashes, chain_store_handle) = store_of_chain(SHARE_VERSION_VOTE_DEPTH + 10, |index| {
-            if (first..=last).contains(&index) {
-                2
-            } else {
-                3
-            }
-        });
-        let tally = tally_share_version_votes(hashes[0], &chain_store_handle).unwrap();
-        assert_eq!(tally, tally_of(2, SHARE_VERSION_VOTE_SPAN));
-        assert!(tally.supports(2, 100));
-        assert!(!tally.supports(3, 1));
-
-        // One share deeper, the span moves by one: share `first` drops out
-        // and the first share past the old span, desiring 3, comes in.
-        let tally = tally_share_version_votes(hashes[1], &chain_store_handle).unwrap();
-        let mut expected = tally_of(2, SHARE_VERSION_VOTE_SPAN - 1);
-        let bits = TestShareBlockBuilder::new().build().header.bits;
-        expected.add_share(
-            crate::shares::share_version::ShareVersion {
-                version: 1,
-                desired_version: 3,
-            },
-            bits,
-        );
-        assert_eq!(tally, expected);
-    }
-
-    /// A chain that reaches genesis before the span has no votes; one that
-    /// reaches it inside the span counts only the shares it has.
-    #[test]
-    fn share_version_tally_stops_at_genesis() {
-        let first = SHARE_VERSION_VOTE_DEPTH - SHARE_VERSION_VOTE_SPAN;
-        // Genesis is the last share skipped: nothing is left to count.
-        let (hashes, chain_store_handle) = store_of_chain(first, |_| 2);
-        let tally = tally_share_version_votes(hashes[0], &chain_store_handle).unwrap();
-        assert_eq!(tally, VersionTally::default());
-        assert!(!tally.supports(1, 0));
-
-        // Genesis 100 shares into the span.
-        let (hashes, chain_store_handle) = store_of_chain(first + 100, |_| 2);
-        let tally = tally_share_version_votes(hashes[0], &chain_store_handle).unwrap();
-        assert_eq!(tally, tally_of(2, 100));
-
-        // Genesis exactly the span's last share.
-        let (hashes, chain_store_handle) = store_of_chain(SHARE_VERSION_VOTE_DEPTH, |_| 2);
-        let tally = tally_share_version_votes(hashes[0], &chain_store_handle).unwrap();
-        assert_eq!(tally, tally_of(2, SHARE_VERSION_VOTE_SPAN));
-
-        // Starting from the terminal hash itself, there is nothing.
-        assert_eq!(
-            tally_share_version_votes(BlockHash::all_zeros(), &chain_store_handle).unwrap(),
-            VersionTally::default()
-        );
-    }
-
-    /// A header missing from the store is an error, not a smaller tally.
-    #[test]
-    fn share_version_tally_fails_on_a_missing_header() {
-        let (_, chain_store_handle) = store_of_chain(3, |_| 2);
-        assert!(matches!(
-            tally_share_version_votes(BlockHash::from_byte_array([0x01; 32]), &chain_store_handle),
-            Err(StoreError::NotFound(_))
-        ));
     }
 
     /// BCH's SigChecks budget: at most 3,000 in one transaction and 1,452
@@ -2525,7 +2478,8 @@ mod tests {
             &ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array([0x22; 20])),
             Network::Regtest,
         )
-        .unwrap();
+        .unwrap()
+        .into();
         share.header.bitcoin_header = chipnet_block;
         // The mini chain's ceiling, which the real block's hash meets.
         let mini_ceiling =
@@ -2597,7 +2551,9 @@ mod tests {
 
     fn header_paying(script: ScriptBuf) -> ShareHeader {
         let mut header = TestShareBlockBuilder::new().build().header;
-        header.miner_bitcoin_address = Address::from_script(&script, Network::Regtest).unwrap();
+        header.miner_bitcoin_address = Address::from_script(&script, Network::Regtest)
+            .unwrap()
+            .into();
         header
     }
 
@@ -2617,6 +2573,65 @@ mod tests {
         let header = header_paying(ScriptBuf::new_p2sh(&bitcoin::ScriptHash::from_byte_array(
             [7; 20],
         )));
+        assert!(
+            validator()
+                .for_chain(Chain::BitcoinCash)
+                .validate_payout_scripts(&header)
+                .is_ok()
+        );
+    }
+
+    /// Mining on the current chain: a Bitcoin Cash share whose BCH prev is
+    /// not known is `Recoverable`, not invalid; known, it passes; on the
+    /// all-zero hash it is invalid unless it is the chain's first share; a
+    /// Bitcoin node does not check.
+    #[test]
+    fn a_share_on_an_unknown_bch_prev_is_recoverable() {
+        use crate::shares::bch_headers::KnownBchHeader;
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.bitcoin_header.prev_blockhash = BlockHash::from_byte_array([0x77; 32]);
+        let bch = validator()
+            .for_chain(Chain::BitcoinCash)
+            .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Mainnet));
+        let store_knowing = |known: bool| {
+            let mut chain_store_handle = ChainStoreHandle::default();
+            let header = header.bitcoin_header;
+            chain_store_handle
+                .expect_get_bch_header()
+                .returning(move |_| Ok(known.then_some(KnownBchHeader { height: 1, header })));
+            chain_store_handle
+        };
+
+        let error = bch
+            .validate_bch_prev_known(&header, &store_knowing(false))
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Recoverable);
+        bch.validate_bch_prev_known(&header, &store_knowing(true))
+            .unwrap();
+
+        let mut on_nothing = header.clone();
+        on_nothing.bitcoin_header.prev_blockhash = BlockHash::all_zeros();
+        on_nothing.prev_share_blockhash = BlockHash::from_byte_array([0x55; 32]);
+        let error = bch
+            .validate_bch_prev_known(&on_nothing, &ChainStoreHandle::default())
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        let mut first = on_nothing;
+        first.prev_share_blockhash = BlockHash::all_zeros();
+        bch.validate_bch_prev_known(&first, &ChainStoreHandle::default())
+            .unwrap();
+        validator()
+            .for_chain(Chain::Bitcoin)
+            .validate_bch_prev_known(&header, &ChainStoreHandle::default())
+            .unwrap();
+    }
+
+    /// A P2SH32 payee (`OP_HASH256 <32 bytes> OP_EQUAL`), which
+    /// `bitcoin::Address` cannot hold, passes the payout script rule.
+    #[test]
+    fn bitcoin_cash_accepts_a_p2sh32_payee() {
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.miner_bitcoin_address = PayoutAddress::p2sh32([7; 32], Network::Regtest);
         assert!(
             validator()
                 .for_chain(Chain::BitcoinCash)
@@ -2659,7 +2674,8 @@ mod tests {
                 &ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::from_byte_array([8; 32])),
                 Network::Regtest,
             )
-            .unwrap(),
+            .unwrap()
+            .into(),
         );
         let error = validator()
             .for_chain(Chain::BitcoinCash)
@@ -3128,10 +3144,13 @@ mod tests {
     #[test]
     fn bitcoin_cash_accepts_the_default_donation_to_the_built_in_key() {
         let mut share = TestShareBlockBuilder::new().build();
-        share.header.donation_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
-            Network::Testnet,
-        ));
+        share.header.donation_address = Some(
+            Address::p2pkh(
+                PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
+                Network::Testnet,
+            )
+            .into(),
+        );
         share.header.donation = Some(150);
         let bch_validator = validator().for_chain(Chain::BitcoinCash);
         assert!(bch_validator.validate_payout_cuts(&share.header).is_ok());
@@ -3140,10 +3159,8 @@ mod tests {
     #[test]
     fn bitcoin_cash_rejects_a_donation_to_another_key() {
         let mut share = TestShareBlockBuilder::new().build();
-        share.header.donation_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array([0x33; 20]),
-            Network::Testnet,
-        ));
+        share.header.donation_address =
+            Some(Address::p2pkh(PubkeyHash::from_byte_array([0x33; 20]), Network::Testnet).into());
         share.header.donation = Some(150);
         let error = validator()
             .for_chain(Chain::BitcoinCash)
@@ -3157,15 +3174,16 @@ mod tests {
     /// key) and fee (to another key), in basis points.
     fn bitcoin_cash_header_with_cuts(donation: u16, fee: u16) -> ShareHeader {
         let mut share = TestShareBlockBuilder::new().build();
-        share.header.donation_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
-            Network::Testnet,
-        ));
+        share.header.donation_address = Some(
+            Address::p2pkh(
+                PubkeyHash::from_byte_array(BITCOIN_CASH_DONATION_PUBKEY_HASH),
+                Network::Testnet,
+            )
+            .into(),
+        );
         share.header.donation = Some(donation);
-        share.header.fee_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array([0x33; 20]),
-            Network::Testnet,
-        ));
+        share.header.fee_address =
+            Some(Address::p2pkh(PubkeyHash::from_byte_array([0x33; 20]), Network::Testnet).into());
         share.header.fee = Some(fee);
         share.header
     }
@@ -3212,10 +3230,8 @@ mod tests {
     #[test]
     fn bitcoin_accepts_a_full_donation_to_any_address() {
         let mut share = TestShareBlockBuilder::new().build();
-        share.header.donation_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array([0x33; 20]),
-            Network::Testnet,
-        ));
+        share.header.donation_address =
+            Some(Address::p2pkh(PubkeyHash::from_byte_array([0x33; 20]), Network::Testnet).into());
         share.header.donation = Some(MAX_BASIS_POINTS);
         assert!(validator().validate_payout_cuts(&share.header).is_ok());
     }
@@ -3223,10 +3239,8 @@ mod tests {
     #[test]
     fn bitcoin_rejects_a_fee_above_one_hundred_percent() {
         let mut share = TestShareBlockBuilder::new().build();
-        share.header.fee_address = Some(Address::p2pkh(
-            PubkeyHash::from_byte_array([0x33; 20]),
-            Network::Testnet,
-        ));
+        share.header.fee_address =
+            Some(Address::p2pkh(PubkeyHash::from_byte_array([0x33; 20]), Network::Testnet).into());
         share.header.fee = Some(MAX_BASIS_POINTS + 1);
         let error = validator().validate_payout_cuts(&share.header).unwrap_err();
         assert_eq!(error.kind(), FailureKind::Consensus);
@@ -3533,8 +3547,6 @@ mod tests {
         );
     }
 
-    use crate::test_utils::{PUBKEY_2G, PUBKEY_3G, PUBKEY_4G, PUBKEY_G};
-
     #[tokio::test]
     async fn test_validate_uncles_valid() {
         let mut chain_store_handle = ChainStoreHandle::default();
@@ -3568,7 +3580,7 @@ mod tests {
 
         assert!(
             validator()
-                .validate_uncles(&valid_share, &chain_store_handle)
+                .validate_uncles(&valid_share.header, &chain_store_handle)
                 .is_ok()
         );
     }
@@ -3592,7 +3604,7 @@ mod tests {
             .miner_pubkey(PUBKEY_G)
             .build();
 
-        let result = validator().validate_uncles(&invalid_share, &chain_store_handle);
+        let result = validator().validate_uncles(&invalid_share.header, &chain_store_handle);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Too many uncles"));
     }
@@ -3608,7 +3620,7 @@ mod tests {
             .miner_pubkey(PUBKEY_G)
             .build();
 
-        let result = validator().validate_uncles(&invalid_share, &chain_store_handle);
+        let result = validator().validate_uncles(&invalid_share.header, &chain_store_handle);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("duplicate uncles"));
     }
@@ -3670,7 +3682,7 @@ mod tests {
             .build();
 
         validator()
-            .validate_uncles(&share, &chain_store_handle)
+            .validate_uncles(&share.header, &chain_store_handle)
             .expect("chain-shape acceptance must not depend on stored bodies");
     }
 
@@ -3723,7 +3735,7 @@ mod tests {
             .build();
 
         let error = validator()
-            .validate_uncles(&invalid_share, &chain_store_handle)
+            .validate_uncles(&invalid_share.header, &chain_store_handle)
             .unwrap_err();
         // A rule violation with all data present is a Consensus failure.
         assert_eq!(error.kind(), FailureKind::Consensus);
@@ -3753,7 +3765,7 @@ mod tests {
             .build();
 
         let error = validator()
-            .validate_uncles(&share, &chain_store_handle)
+            .validate_uncles(&share.header, &chain_store_handle)
             .unwrap_err();
         assert_eq!(error.kind(), FailureKind::Recoverable);
         assert!(error.to_string().contains("metadata not found"));
@@ -3788,22 +3800,25 @@ mod tests {
 
         assert!(
             validator()
-                .validate_uncles(&share, &chain_store_handle)
+                .validate_uncles(&share.header, &chain_store_handle)
                 .is_ok()
         );
     }
 
-    /// An uncle may have only one nephew on a chain. Here the nephew's parent
-    /// already names the uncle, so the nephew naming it again would have the
-    /// payout window credit the uncle twice, with two nephew bonuses.
+    // Regression cases ported from pool2win's upstream P2Poolv2 commit
+    // a57252b454a09c0307428158093a16bd1194f905 (MIT OR Apache-2.0).
+    /// An uncle already listed by the nephew's parent is rejected as
+    /// it would have its work and payout counted twice on one chain.
     #[tokio::test]
-    async fn test_validate_uncles_rejects_uncle_already_named_by_parent() {
+    async fn test_validate_uncles_rejects_uncle_listed_by_parent() {
         let mut chain_store_handle = ChainStoreHandle::default();
 
-        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
-        let uncle_hash = uncle.block_hash();
-        let grandparent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
+        // grandparent (h:19) <- parent (h:20, lists uncle) <- nephew (h:21).
+        // The uncle (h:19) is the grandparent's sibling.
+        let grandparent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
         let grandparent_hash = grandparent.block_hash();
+        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
+        let uncle_hash = uncle.block_hash();
         let parent = TestShareBlockBuilder::new()
             .prev_share_blockhash(grandparent_hash.to_string())
             .uncles(vec![uncle_hash])
@@ -3811,20 +3826,17 @@ mod tests {
             .build();
         let parent_hash = parent.block_hash();
 
-        // Grandparent and uncle at 19, parent at 20, nephew at 21: the uncle
-        // is two heights below the nephew, within MAX_UNCLES_DEPTH.
         chain_store_handle
             .expect_get_block_metadata_batch()
-            .returning(move |hashes| {
-                Ok(hashes
-                    .iter()
-                    .map(|hash| {
-                        let height = if *hash == parent_hash { 20 } else { 19 };
-                        (*hash, metadata_at_height(height))
-                    })
-                    .collect())
+            .withf(move |hashes| hashes == [parent_hash, uncle_hash])
+            .times(1)
+            .returning(move |_| {
+                Ok(vec![
+                    (parent_hash, metadata_at_height(20)),
+                    (uncle_hash, metadata_at_height(19)),
+                ])
             });
-        // Ancestry walk: parent (names the uncle) -> grandparent -> genesis.
+        // Ancestry walk: parent -> grandparent -> genesis sentinel.
         let parent_header = parent.header.clone();
         let grandparent_header = grandparent.header.clone();
         chain_store_handle
@@ -3837,141 +3849,205 @@ mod tests {
                 }
             });
 
-        let second_nephew = TestShareBlockBuilder::new()
+        let invalid_share = TestShareBlockBuilder::new()
             .prev_share_blockhash(parent_hash.to_string())
             .uncles(vec![uncle_hash])
             .miner_pubkey(PUBKEY_4G)
             .build();
 
         let error = validator()
-            .validate_uncles(&second_nephew, &chain_store_handle)
+            .validate_uncles(&invalid_share.header, &chain_store_handle)
             .unwrap_err();
         assert_eq!(error.kind(), FailureKind::Consensus);
         assert!(
             error
                 .to_string()
-                .contains("is already an uncle of an ancestor"),
-            "unexpected error: {error}"
+                .contains("is already an uncle of an ancestor of the nephew")
         );
     }
 
-    /// The rule reaches every ancestor that could have named the uncle: here
-    /// the grandparent names an uncle three heights below the nephew, the
-    /// deepest an uncle may sit.
+    /// The reuse check covers every ancestor that could have listed the uncle,
+    /// not only the parent.
     #[tokio::test]
-    async fn test_validate_uncles_rejects_uncle_already_named_by_grandparent() {
+    async fn test_validate_uncles_rejects_uncle_listed_by_grandparent() {
         let mut chain_store_handle = ChainStoreHandle::default();
 
-        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
+        // great-grandparent (h:18) <- grandparent (h:19, lists uncle)
+        // <- parent (h:20) <- nephew (h:21). The uncle (h:18) is the
+        // great-grandparent's sibling, MAX_UNCLES_DEPTH below the nephew.
+        let great_grandparent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
+        let great_grandparent_hash = great_grandparent.block_hash();
+        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
         let uncle_hash = uncle.block_hash();
         let grandparent = TestShareBlockBuilder::new()
+            .prev_share_blockhash(great_grandparent_hash.to_string())
             .uncles(vec![uncle_hash])
-            .miner_pubkey(PUBKEY_2G)
+            .miner_pubkey(PUBKEY_3G)
             .build();
         let grandparent_hash = grandparent.block_hash();
         let parent = TestShareBlockBuilder::new()
             .prev_share_blockhash(grandparent_hash.to_string())
-            .miner_pubkey(PUBKEY_3G)
+            .miner_pubkey(PUBKEY_4G)
             .build();
         let parent_hash = parent.block_hash();
 
-        // Uncle at 18, grandparent at 19, parent at 20, nephew at 21.
         chain_store_handle
             .expect_get_block_metadata_batch()
-            .returning(move |hashes| {
-                Ok(hashes
-                    .iter()
-                    .map(|hash| {
-                        let height = if *hash == parent_hash {
-                            20
-                        } else if *hash == uncle_hash {
-                            18
-                        } else {
-                            19
-                        };
-                        (*hash, metadata_at_height(height))
-                    })
-                    .collect())
+            .withf(move |hashes| hashes == [parent_hash, uncle_hash])
+            .times(1)
+            .returning(move |_| {
+                Ok(vec![
+                    (parent_hash, metadata_at_height(20)),
+                    (uncle_hash, metadata_at_height(18)),
+                ])
             });
+        // Ancestry walk: parent -> grandparent -> great-grandparent.
         let parent_header = parent.header.clone();
         let grandparent_header = grandparent.header.clone();
+        let great_grandparent_header = great_grandparent.header.clone();
         chain_store_handle
             .expect_get_share_header()
             .returning(move |hash| {
                 if *hash == parent_hash {
                     Ok(parent_header.clone())
-                } else {
+                } else if *hash == grandparent_hash {
                     Ok(grandparent_header.clone())
+                } else {
+                    Ok(great_grandparent_header.clone())
                 }
             });
 
+        let invalid_share = TestShareBlockBuilder::new()
+            .prev_share_blockhash(parent_hash.to_string())
+            .uncles(vec![uncle_hash])
+            .miner_pubkey(PUBKEY_5G)
+            .build();
+
+        let error = validator()
+            .validate_uncles(&invalid_share.header, &chain_store_handle)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(
+            error
+                .to_string()
+                .contains("is already an uncle of an ancestor of the nephew")
+        );
+    }
+
+    /// Two nephews racing at the same height may both list the same uncle:
+    /// neither is an ancestor of the other, so neither share is rejected.
+    #[tokio::test]
+    async fn test_validate_uncles_allows_sibling_nephews_listing_same_uncle() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+
+        // parent (h:20) has two children, both at h:21, both listing the
+        // uncle (h:20, the parent's sibling).
+        let parent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
+        let parent_hash = parent.block_hash();
+        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
+        let uncle_hash = uncle.block_hash();
+
+        chain_store_handle
+            .expect_get_block_metadata_batch()
+            .withf(move |hashes| hashes == [parent_hash, uncle_hash])
+            .times(2)
+            .returning(move |_| {
+                Ok(vec![
+                    (parent_hash, metadata_at_height(20)),
+                    (uncle_hash, metadata_at_height(20)),
+                ])
+            });
+        // Ancestry walk: parent -> genesis sentinel.
+        let parent_header = parent.header.clone();
+        chain_store_handle
+            .expect_get_share_header()
+            .returning(move |_| Ok(parent_header.clone()));
+
+        let first_nephew = TestShareBlockBuilder::new()
+            .prev_share_blockhash(parent_hash.to_string())
+            .uncles(vec![uncle_hash])
+            .miner_pubkey(PUBKEY_3G)
+            .build();
         let second_nephew = TestShareBlockBuilder::new()
             .prev_share_blockhash(parent_hash.to_string())
             .uncles(vec![uncle_hash])
             .miner_pubkey(PUBKEY_4G)
             .build();
 
-        let error = validator()
-            .validate_uncles(&second_nephew, &chain_store_handle)
-            .unwrap_err();
-        assert_eq!(error.kind(), FailureKind::Consensus);
         assert!(
-            error
-                .to_string()
-                .contains("is already an uncle of an ancestor"),
-            "unexpected error: {error}"
+            validator()
+                .validate_uncles(&first_nephew.header, &chain_store_handle)
+                .is_ok()
+        );
+        assert!(
+            validator()
+                .validate_uncles(&second_nephew.header, &chain_store_handle)
+                .is_ok()
         );
     }
 
-    /// Siblings may each name the same uncle: only one of them can stay on
-    /// the chain, so the rule looks at the nephew's own ancestry only. Here
-    /// the parent names no uncle, whatever its siblings did.
+    /// The losing nephew of a race can itself be an uncle on the winning chain,
+    /// even though both nephews listed the same uncle. Only uncles listed by
+    /// ancestors count, not uncles listed by uncles.
     #[tokio::test]
-    async fn test_validate_uncles_allows_uncle_not_named_by_an_ancestor() {
+    async fn test_validate_uncles_allows_losing_nephew_as_uncle() {
         let mut chain_store_handle = ChainStoreHandle::default();
 
-        let uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
-        let uncle_hash = uncle.block_hash();
-        let grandparent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
-        let grandparent_hash = grandparent.block_hash();
-        let parent = TestShareBlockBuilder::new()
-            .prev_share_blockhash(grandparent_hash.to_string())
+        // parent (h:20) <- winning_nephew (h:21, lists shared_uncle)
+        //               <- losing_nephew (h:21, lists shared_uncle)
+        // share (h:22) builds on winning_nephew and lists losing_nephew.
+        let parent = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_G).build();
+        let parent_hash = parent.block_hash();
+        let shared_uncle = TestShareBlockBuilder::new().miner_pubkey(PUBKEY_2G).build();
+        let shared_uncle_hash = shared_uncle.block_hash();
+        let winning_nephew = TestShareBlockBuilder::new()
+            .prev_share_blockhash(parent_hash.to_string())
+            .uncles(vec![shared_uncle_hash])
             .miner_pubkey(PUBKEY_3G)
             .build();
-        let parent_hash = parent.block_hash();
+        let winning_nephew_hash = winning_nephew.block_hash();
+        let losing_nephew = TestShareBlockBuilder::new()
+            .prev_share_blockhash(parent_hash.to_string())
+            .uncles(vec![shared_uncle_hash])
+            .miner_pubkey(PUBKEY_4G)
+            .build();
+        let losing_nephew_hash = losing_nephew.block_hash();
 
+        // Both nephews at h:21, so the share is at h:22.
         chain_store_handle
             .expect_get_block_metadata_batch()
-            .returning(move |hashes| {
-                Ok(hashes
-                    .iter()
-                    .map(|hash| {
-                        let height = if *hash == parent_hash { 20 } else { 19 };
-                        (*hash, metadata_at_height(height))
-                    })
-                    .collect())
+            .withf(move |hashes| hashes == [winning_nephew_hash, losing_nephew_hash])
+            .times(1)
+            .returning(move |_| {
+                Ok(vec![
+                    (winning_nephew_hash, metadata_at_height(21)),
+                    (losing_nephew_hash, metadata_at_height(21)),
+                ])
             });
+        // Ancestry walk: winning_nephew -> parent -> genesis sentinel.
+        let winning_nephew_header = winning_nephew.header.clone();
         let parent_header = parent.header.clone();
-        let grandparent_header = grandparent.header.clone();
         chain_store_handle
             .expect_get_share_header()
             .returning(move |hash| {
-                if *hash == parent_hash {
-                    Ok(parent_header.clone())
+                if *hash == winning_nephew_hash {
+                    Ok(winning_nephew_header.clone())
                 } else {
-                    Ok(grandparent_header.clone())
+                    Ok(parent_header.clone())
                 }
             });
 
-        let nephew = TestShareBlockBuilder::new()
-            .prev_share_blockhash(parent_hash.to_string())
-            .uncles(vec![uncle_hash])
-            .miner_pubkey(PUBKEY_4G)
+        let share = TestShareBlockBuilder::new()
+            .prev_share_blockhash(winning_nephew_hash.to_string())
+            .uncles(vec![losing_nephew_hash])
+            .miner_pubkey(PUBKEY_5G)
             .build();
 
-        validator()
-            .validate_uncles(&nephew, &chain_store_handle)
-            .expect("an uncle no ancestor names is accepted");
+        assert!(
+            validator()
+                .validate_uncles(&share.header, &chain_store_handle)
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -4003,7 +4079,7 @@ mod tests {
             .miner_pubkey(PUBKEY_G)
             .build();
 
-        let result = validator().validate_uncles(&invalid_share, &chain_store_handle);
+        let result = validator().validate_uncles(&invalid_share.header, &chain_store_handle);
         assert!(result.is_err());
         assert!(
             result
@@ -4042,7 +4118,7 @@ mod tests {
             .miner_pubkey(PUBKEY_G)
             .build();
 
-        let result = validator().validate_uncles(&invalid_share, &chain_store_handle);
+        let result = validator().validate_uncles(&invalid_share.header, &chain_store_handle);
         assert!(result.is_err());
         assert!(
             result
@@ -4083,7 +4159,7 @@ mod tests {
 
         assert!(
             validator()
-                .validate_uncles(&valid_share, &chain_store_handle)
+                .validate_uncles(&valid_share.header, &chain_store_handle)
                 .is_ok()
         );
     }
@@ -6679,10 +6755,13 @@ mod tests {
     /// validator rebuilds exactly that coinbase from the same weights.
     #[test]
     fn a_token_share_past_t_is_rebuilt_with_its_payout_tree() {
-        let weights: HashMap<Address, u128> = (1..=120u8)
+        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
             .map(|byte| {
                 (
-                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
                     u128::from(byte) * 1_000,
                 )
             })
@@ -6753,10 +6832,13 @@ mod tests {
     /// tokens.
     #[test]
     fn a_pool_built_token_share_is_rebuilt_from_its_header_root() {
-        let weights: HashMap<Address, u128> = (1..=120u8)
+        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
             .map(|byte| {
                 (
-                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
                     u128::from(byte) * 1_000,
                 )
             })
@@ -6881,10 +6963,13 @@ mod tests {
     /// output index; the same share as a mere share hands over nothing.
     #[test]
     fn a_found_block_hands_its_payout_tree_to_the_sink() {
-        let weights: HashMap<Address, u128> = (1..=120u8)
+        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
             .map(|byte| {
                 (
-                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
                     u128::from(byte) * 1_000,
                 )
             })
@@ -6968,10 +7053,13 @@ mod tests {
     /// share would, is not the coinbase its commitment implies.
     #[test]
     fn a_token_share_paying_every_payee_directly_is_rejected() {
-        let weights: HashMap<Address, u128> = (1..=120u8)
+        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
             .map(|byte| {
                 (
-                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
                     u128::from(byte) * 1_000,
                 )
             })
@@ -7035,10 +7123,13 @@ mod tests {
     /// and the validator agrees.
     #[test]
     fn a_no_token_share_with_the_same_payees_pays_every_one_directly() {
-        let weights: HashMap<Address, u128> = (1..=120u8)
+        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
             .map(|byte| {
                 (
-                    Address::p2pkh(PubkeyHash::from_byte_array([byte; 20]), Network::Regtest),
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
                     u128::from(byte) * 1_000,
                 )
             })

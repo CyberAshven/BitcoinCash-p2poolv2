@@ -10,11 +10,13 @@ use crate::stratum::work::coinbase::parse_bitcoin_coinbase_fields;
 use crate::stratum::work::difficulty::validate::build_coinbase_from_components;
 use crate::stratum::work::tracker::start_tracker_actor;
 use crate::test_utils::{test_bch_prepared, test_bch_prepared_with_cuts};
+use bitcoin::Address;
 use bitcoin::{Amount, Network, PubkeyHash, Transaction};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
 
-fn fee_address() -> Address {
-    Address::p2pkh(PubkeyHash::from_byte_array([0x55; 20]), Network::Regtest)
+fn fee_address() -> PayoutAddress {
+    Address::p2pkh(PubkeyHash::from_byte_array([0x55; 20]), Network::Regtest).into()
 }
 
 fn donation_script() -> bitcoin::ScriptBuf {
@@ -30,7 +32,10 @@ fn node_at_the_defaults() -> Arc<PreparedNotifyParams> {
 /// coinbase the miner hashes.
 fn mine(prepared: &PreparedNotifyParams) -> (ShareCommitment, Transaction) {
     let tracker = start_tracker_actor();
-    let payout = Address::p2pkh(PubkeyHash::from_byte_array([1; 20]), Network::Regtest);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([1; 20]),
+        Network::Regtest,
+    ));
     let (job_id, _) = insert_miner_job(
         prepared,
         Some(&payout),
@@ -160,7 +165,7 @@ async fn a_half_percent_donation_is_committed_in_the_share() {
         commitment
             .donation_address
             .as_ref()
-            .map(Address::script_pubkey),
+            .map(PayoutAddress::script_pubkey),
         Some(donation_script())
     );
     assert_eq!(payouts(&coinbase), payouts(&node_coinbase));
@@ -268,7 +273,10 @@ fn params_without_miner_donations_refuse_a_choice() {
         "../../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
     ))
     .unwrap();
-    let payout = Address::p2pkh(PubkeyHash::from_byte_array([1; 20]), Network::Regtest);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([1; 20]),
+        Network::Regtest,
+    ));
     let prepared = PreparedNotifyParamsBuilder::new(
         Arc::new(template.clone()),
         vec![crate::accounting::OutputPair {

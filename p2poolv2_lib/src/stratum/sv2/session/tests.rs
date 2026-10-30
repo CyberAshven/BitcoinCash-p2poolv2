@@ -7,6 +7,17 @@ use bitcoin::script::Builder;
 use bitcoin::transaction::{Sequence, TxIn, TxOut, Version};
 use bitcoin::{Amount, OutPoint, ScriptBuf, Witness};
 
+#[test]
+fn withdrawing_the_template_clears_job_declaration_work() {
+    let cache = PoolTransactionCache::new();
+    cache.set_prepared(test_bch_prepared());
+    assert!(cache.prepared.read().unwrap().is_some());
+    cache.clear_prepared();
+    assert!(cache.prepared.read().unwrap().is_none());
+    cache.set_prepared(test_bch_prepared());
+    assert!(cache.prepared.read().unwrap().is_some());
+}
+
 fn registry() -> Arc<Mutex<JobRegistry>> {
     let cache = PoolTransactionCache::new();
     cache.set_prepared(test_bch_prepared());
@@ -647,7 +658,7 @@ fn allocated_donation(user_identifier: &str) -> Result<Option<u16>, String> {
     );
     let commitment = crate::shares::share_commitment::ShareCommitment::from_mining_job_token(
         allocated.mining_job_token.as_bytes(),
-        payout,
+        payout.into(),
         p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]),
     )
     .unwrap();

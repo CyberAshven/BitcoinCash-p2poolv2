@@ -203,7 +203,8 @@ pub struct MiningChannels {
 
 impl MiningChannels {
     /// Validate and install a declared BCH job before acknowledging reward
-    /// eligibility. Its token must carry the channel's own donation.
+    /// eligibility. Its token must carry the channel's own donation, and a
+    /// nonempty token commitment must pass this network's ASERT header band.
     pub(crate) async fn install_custom_job(
         &mut self,
         request: &SetCustomMiningJob<'_>,
@@ -253,6 +254,21 @@ impl MiningChannels {
                     return custom_job_error(request, "invalid-custom-job");
                 }
             };
+        if job
+            .share_commitment
+            .as_ref()
+            .and_then(|commitment| commitment.bch_coinbase.as_ref())
+            .is_some_and(|coinbase| !coinbase.merge_mining.is_empty())
+            && let Some(asert) = self.ctx.token_asert()
+            && let Err(reason) = asert.check_header_bits(
+                CompactTarget::from_consensus(request.nbits),
+                request.min_ntime,
+                u64::from(job.blocktemplate.height),
+            )
+        {
+            debug!("Rejected SV2 token job outside the ASERT band: {reason}");
+            return custom_job_error(request, "invalid-token-asert");
+        }
         if let Some(proposal) = proposal {
             match timeout(
                 Duration::from_secs(10),

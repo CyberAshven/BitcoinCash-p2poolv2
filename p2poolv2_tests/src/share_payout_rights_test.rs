@@ -23,6 +23,7 @@ use p2poolv2_lib::accounting::payout::sharechain_pplns::PplnsWindow;
 use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::DIFFICULTY_SCALE;
 use p2poolv2_lib::address::share_owner::ShareOwner;
 use p2poolv2_lib::config::Chain;
+use p2poolv2_lib::config::PayoutAddress;
 use p2poolv2_lib::pool_difficulty::PoolDifficulty;
 use p2poolv2_lib::shares::bch_htlc::{HtlcContract, secret_hash};
 use p2poolv2_lib::shares::bch_trade::{
@@ -55,13 +56,13 @@ const MINIMUM_PAYING_DIFFICULTY: u128 = 1;
 const COINBASE_VALUE: u64 = 312_500_000;
 
 /// The P2PKH payout the seller mined its share with.
-fn seller_mining_payout() -> Address {
-    Address::p2pkh(PubkeyHash::from_byte_array([0x5e; 20]), NETWORK)
+fn seller_mining_payout() -> PayoutAddress {
+    Address::p2pkh(PubkeyHash::from_byte_array([0x5e; 20]), NETWORK).into()
 }
 
 /// The P2PKH payout every other share pays.
-fn other_miner_payout() -> Address {
-    Address::p2pkh(PubkeyHash::from_byte_array([0x07; 20]), NETWORK)
+fn other_miner_payout() -> PayoutAddress {
+    Address::p2pkh(PubkeyHash::from_byte_array([0x07; 20]), NETWORK).into()
 }
 
 fn seller() -> TradeKey {
@@ -73,8 +74,8 @@ fn buyer() -> TradeKey {
 }
 
 /// The BCH address a share's right pays when its holder is `key`.
-fn holder_address(key: &TradeKey) -> Address {
-    Address::p2pkh(PubkeyHash::from_byte_array(key.pubkey_hash()), NETWORK)
+fn holder_address(key: &TradeKey) -> PayoutAddress {
+    Address::p2pkh(PubkeyHash::from_byte_array(key.pubkey_hash()), NETWORK).into()
 }
 
 /// Receive a block the way the node does once its parent is valid: run the
@@ -216,11 +217,11 @@ fn weights(
     window: &mut PplnsWindow,
     anchor: &ShareBlock,
     chain_store_handle: &ChainStoreHandle,
-) -> HashMap<Address, u128> {
+) -> HashMap<PayoutAddress, u128> {
     window
         .get_distribution_from_start_hash(
             anchor.block_hash(),
-            MINIMUM_PAYING_DIFFICULTY,
+            MINIMUM_PAYING_DIFFICULTY.into(),
             chain_store_handle,
         )
         .unwrap()
@@ -245,7 +246,7 @@ fn next_coinbase(
     .outputs
 }
 
-fn pays(outputs: &[OutputPair], address: &Address) -> bool {
+fn pays(outputs: &[OutputPair], address: &PayoutAddress) -> bool {
     outputs.iter().any(|output| output.address == *address)
 }
 

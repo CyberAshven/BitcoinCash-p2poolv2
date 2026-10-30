@@ -7,7 +7,9 @@ use super::error::WorkError;
 use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::PayoutSplit;
 use crate::accounting::payout::payout_distribution::{PayoutDistribution, build_pplns_outputs};
-use crate::accounting::payout::sharechain_pplns::pplns_window::bitcoin_block_difficulty;
+use crate::accounting::payout::sharechain_pplns::pplns_window::{
+    PayingBlock, bitcoin_block_difficulty,
+};
 use crate::config::StratumConfig;
 use crate::pool_difficulty;
 use crate::shares::bch_asert::BchAsert;
@@ -22,6 +24,7 @@ use crate::shares::validation::tally_share_version_votes;
 use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::work::merge_tokens::{TokenFile, TokenSet};
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, warn};
@@ -48,12 +51,13 @@ pub(crate) struct NotifyContext {
 /// Build the output distribution for the coinbase transaction using
 /// payout accounting in NotifyContext.
 ///
-/// The template's bitcoin difficulty is passed to the payout. Hydrapool uses
-/// it as its window target. The share chain uses it on Bitcoin Cash to size
-/// the window, which is why it must come from the template's bits: they are
-/// the bits the share's header carries, so a validator reading them from the
-/// header sizes the same window. On Bitcoin the share chain window is
-/// `PPLNS_WINDOW_SHARES` deep and ignores it.
+/// The template's bitcoin difficulty and previous block are passed to the
+/// payout. Hydrapool uses the difficulty as its window target. The share
+/// chain uses both on Bitcoin Cash, to size the window and pick the work it
+/// pays, which is why they must come from the template: the share's header
+/// carries the template's bits and previous block, so a validator reading
+/// them from the header resolves the same window. On Bitcoin the share chain
+/// window is `PPLNS_WINDOW_SHARES` deep and ignores them.
 ///
 /// Returns `Err` if the payout distribution cannot be resolved.
 fn build_output_distribution(
@@ -65,13 +69,22 @@ fn build_output_distribution(
 
     let compact_target = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap();
     let bitcoin_difficulty = bitcoin_block_difficulty(compact_target, context.config.network);
+    let bch_prev = template
+        .previousblockhash
+        .parse::<bitcoin::BlockHash>()
+        .map_err(|error| WorkError {
+            message: format!(
+                "Template previous block {} is not a block hash: {error}",
+                template.previousblockhash
+            ),
+        })?;
 
     context
         .payout
         .get_output_distribution(
             &context.chain_store_handle,
             anchor,
-            bitcoin_difficulty,
+            PayingBlock::new(bitcoin_difficulty, bch_prev),
             total_amount,
             &context.config,
         )
@@ -179,7 +192,7 @@ fn build_prepared_notify(
 fn merge_token_payouts(
     template: &BlockTemplate,
     output_distribution: CoinbasePayouts,
-    weights: Option<&std::collections::HashMap<bitcoin::Address, u128>>,
+    weights: Option<&std::collections::HashMap<PayoutAddress, u128>>,
     merge_tokens: Option<Arc<TokenSet>>,
     context: &NotifyContext,
 ) -> Result<(CoinbasePayouts, Option<Arc<TokenSet>>), WorkError> {
@@ -242,9 +255,7 @@ fn template_meets_token_asert(
 /// donation address on a Bitcoin Cash node in P2Pool mode, which builds every
 /// miner's jobs and shares itself. `None` elsewhere: a Bitcoin node or
 /// Hydrapool mode mines with the node's donation and refuses the option.
-fn miner_donation_address(
-    config: &StratumConfig<crate::config::Parsed>,
-) -> Option<bitcoin::Address> {
+fn miner_donation_address(config: &StratumConfig<crate::config::Parsed>) -> Option<PayoutAddress> {
     match (config.chain, config.mode, config.bitcoin_cash_network) {
         (crate::config::Chain::BitcoinCash, crate::config::PoolMode::P2poolv2, Some(network)) => {
             Some(crate::config::bitcoin_cash_donation_address(network))
@@ -275,20 +286,38 @@ pub type NotifyReceiver = mpsc::Receiver<NotifyCmd>;
 
 /// Build a PreparedNotifyParams and publish it via the watch channel.
 ///
-/// Returns Ok(()) on success, or Err if all receivers have been dropped.
+/// A preparation failure withdraws the previous job from both mining and Job
+/// Declaration, and returns `Ok(false)` so a later template can recover. No
+/// template transactions are removed: their CTOR order is not dependency order.
+/// Returns `Ok(true)` after publishing, or `Err` if all receivers were dropped.
 fn publish_prepared_notify(
     template: &Arc<BlockTemplate>,
     clean_jobs: bool,
     context: &mut NotifyContext,
     template_tx: &watch::Sender<Option<Arc<PreparedNotifyParams>>>,
-) -> Result<(), WorkError> {
-    let prepared = Arc::new(build_prepared_notify(template, clean_jobs, context)?);
-    context
-        .pool_transactions
-        .set_prepared(Arc::clone(&prepared));
-    template_tx.send(Some(prepared)).map_err(|_| WorkError {
+) -> Result<bool, WorkError> {
+    let prepared = match build_prepared_notify(template, clean_jobs, context) {
+        Ok(prepared) => {
+            let prepared = Arc::new(prepared);
+            context
+                .pool_transactions
+                .set_prepared(Arc::clone(&prepared));
+            Some(prepared)
+        }
+        Err(reason) => {
+            warn!(
+                "Withdrawing mining work at height {}: {reason}; waiting for a fitting template",
+                template.height
+            );
+            context.pool_transactions.clear_prepared();
+            None
+        }
+    };
+    let published = prepared.is_some();
+    template_tx.send(prepared).map_err(|_| WorkError {
         message: "All template receivers dropped".to_string(),
-    })
+    })?;
+    Ok(published)
 }
 
 /// Start the notifier task that broadcasts prepared templates via a watch channel.
@@ -298,13 +327,11 @@ fn publish_prepared_notify(
 /// watch channel. Each connection handler receives the prepared
 /// template and builds per-miner notifies independently.
 ///
-/// Returns as soon as a template cannot be prepared, which the node turns into
-/// `ShutdownReason::Error`. Continuing is not an option: the watch channel
-/// keeps handing every connected and newly connecting miner the last template
-/// that did build, so the pool would go on hashing a previousblockhash bitcoin
-/// has moved past, with nothing to age the job out and only a repeated error
-/// log to show for it. The block template fetcher shuts the node down on the
-/// same class of failure.
+/// A template that cannot be prepared withdraws the previous work. Mining
+/// connections close on that withdrawal, rather than leaving miners hashing a
+/// stale previousblockhash. The worker stays available for the next template or
+/// a rebuild of the latest template, and recovery always clears previous jobs.
+/// Returns when the command channel or all template receivers have closed.
 ///
 /// On Bitcoin Cash `share_transaction_pool` supplies the share transactions
 /// each notify's shares carry; Bitcoin passes `None`.
@@ -352,33 +379,40 @@ pub async fn start_notify(
     };
 
     let mut latest_template: Option<Arc<BlockTemplate>> = None;
+    let mut work_available = false;
 
     while let Some(cmd) = notifier_rx.recv().await {
         match cmd {
             NotifyCmd::SendToAll { template } => {
-                let clean_jobs = latest_template.is_none()
+                let clean_jobs = !work_available
+                    || latest_template.is_none()
                     || latest_template.as_ref().unwrap().previousblockhash
                         != template.previousblockhash;
                 latest_template = Some(Arc::clone(&template));
 
-                if let Err(error) = publish_prepared_notify(
+                match publish_prepared_notify(
                     &template,
                     clean_jobs,
                     &mut notify_context,
                     &template_tx,
                 ) {
-                    error!("Failed to publish notify, shutting down: {error}");
-                    return;
+                    Ok(published) => work_available = published,
+                    Err(error) => {
+                        error!("Failed to publish notify, shutting down: {error}");
+                        return;
+                    }
                 }
             }
             NotifyCmd::NewNotify => {
                 if let Some(ref template) = latest_template {
                     debug!("NewNotify: sending notify with latest template");
-                    if let Err(error) =
-                        publish_prepared_notify(template, true, &mut notify_context, &template_tx)
+                    match publish_prepared_notify(template, true, &mut notify_context, &template_tx)
                     {
-                        error!("Failed to publish new notify, shutting down: {error}");
-                        return;
+                        Ok(published) => work_available = published,
+                        Err(error) => {
+                            error!("Failed to publish new notify, shutting down: {error}");
+                            return;
+                        }
                     }
                 } else {
                     debug!("NewNotify received but no template available yet");
@@ -393,7 +427,9 @@ mod tests {
     use super::*;
     use crate::accounting::OutputPair;
     use crate::accounting::payout::payout_distribution::MockPayoutDistribution;
+    use crate::config::BitcoinCashNetwork;
     use crate::pool_difficulty::AsertParent;
+    use crate::shares::bch_asert::{U256, get_compact};
     use crate::stratum::messages::Notify;
     use crate::stratum::work::block_template::{BlockTemplate, TemplateTransaction};
     use crate::stratum::work::coinbase::extract_outputs_from_coinbase2;
@@ -404,6 +440,7 @@ mod tests {
     use crate::test_utils::genesis_for_tests;
     use crate::test_utils::make_test_share_address;
     use bitcoin::CompressedPublicKey;
+    use bitcoin::hashes::Hash;
     use bitcoin::{Address, Amount, Network, ScriptBuf, TxOut};
     use std::collections::HashMap;
     use std::str::FromStr;
@@ -431,7 +468,8 @@ mod tests {
             address: "bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr"
                 .parse::<bitcoin::Address<_>>()
                 .unwrap()
-                .assume_checked(),
+                .assume_checked()
+                .into(),
             amount: Amount::from_sat(template.coinbasevalue),
         }];
 
@@ -441,10 +479,9 @@ mod tests {
                 .build()
                 .expect("Failed to build prepared notify");
 
-        let address = "bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr"
-            .parse::<bitcoin::Address<_>>()
-            .unwrap()
-            .assume_checked();
+        let address: PayoutAddress = "bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr"
+            .parse()
+            .unwrap();
         let tracker_handle = start_tracker_actor();
         let notify_json = build_notify_from_prepared(
             &prepared,
@@ -474,16 +511,9 @@ mod tests {
         );
     }
 
-    /// A template that cannot be prepared ends the notifier rather than leaving
-    /// the previous one in the watch channel.
-    ///
-    /// The watch channel hands its last value to every connected miner and to
-    /// every miner that connects afterwards, so keeping a job whose
-    /// previousblockhash bitcoin has moved past would silently put the whole
-    /// pool on dead work. Returning here is what the node turns into a
-    /// shutdown.
+    /// A failed payout resolution withdraws work without ending the notifier.
     #[tokio::test]
-    async fn test_start_notify_stops_when_a_template_cannot_be_prepared() {
+    async fn test_start_notify_withdraws_when_a_template_cannot_be_prepared() {
         let (template_tx, mut template_rx) =
             watch::channel::<Option<Arc<PreparedNotifyParams>>>(None);
         let (notify_tx, notify_rx) = mpsc::channel::<NotifyCmd>(10);
@@ -542,15 +572,127 @@ mod tests {
             .await
             .expect("Failed to send template");
 
-        tokio::time::timeout(std::time::Duration::from_secs(5), task_handle)
+        tokio::time::timeout(std::time::Duration::from_secs(5), template_rx.changed())
             .await
-            .expect("notifier must stop when a template cannot be prepared")
-            .expect("notifier task panicked");
+            .expect("notifier must withdraw work when preparation fails")
+            .expect("notifier must keep its template sender open");
 
         assert!(
             template_rx.borrow_and_update().is_none(),
             "no job may be published from a template that failed to prepare"
         );
+        assert!(!task_handle.is_finished());
+        drop(notify_tx);
+        task_handle.await.expect("notifier task panicked");
+    }
+
+    /// An oversized BCH job withdraws the old work, and the next fitting
+    /// template is published with clean_jobs even at the same BCH chain tip.
+    #[tokio::test]
+    async fn test_start_notify_recovers_after_an_oversized_bch_template() {
+        let (template_tx, mut template_rx) = watch::channel(None);
+        let (notify_tx, notify_rx) = mpsc::channel(10);
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let genesis = genesis_for_tests();
+        let genesis_hash = genesis.block_hash();
+        let genesis_header = genesis.header.clone();
+        chain_store_handle
+            .expect_get_mining_base_and_uncles()
+            .returning(move || Ok((genesis_hash, vec![])));
+        chain_store_handle.expect_get_asert_parent().returning(|_| {
+            let header = genesis_for_tests().header;
+            Ok(AsertParent::from_header(&header, 0, header.time))
+        });
+        chain_store_handle
+            .expect_get_share_header()
+            .returning(|_| Ok(genesis_for_tests().header));
+        let pool_difficulty =
+            pool_difficulty::PoolDifficulty::new(genesis_header.bits, genesis_header.time, 0);
+        let mut config = StratumConfig::new_for_test_default().parse().unwrap();
+        config.chain = crate::config::Chain::BitcoinCash;
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Regtest);
+        let address = PayoutAddress::from(Address::p2pkh(
+            bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+            Network::Regtest,
+        ));
+        let mut payout = MockPayoutDistribution::default();
+        payout.expect_pplns_weights().returning(|| None);
+        payout
+            .expect_get_output_distribution()
+            .returning(move |_, _, _, amount, _| {
+                Ok(CoinbasePayouts::direct(vec![OutputPair {
+                    address: address.clone(),
+                    amount,
+                }]))
+            });
+        let task_handle = tokio::spawn(async move {
+            start_notify(
+                notify_rx,
+                template_tx,
+                chain_store_handle,
+                &config,
+                Box::new(payout),
+                pool_difficulty,
+                PoolTransactionCache::new(),
+                None,
+            )
+            .await;
+        });
+        let template: BlockTemplate = serde_json::from_str(include_str!(
+            "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+        ))
+        .unwrap();
+        notify_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::new(template.clone()),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), template_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(template_rx.borrow_and_update().is_some());
+
+        let mut oversized = template.clone();
+        oversized.sizelimit = 81;
+        oversized.validate_bch().unwrap();
+        notify_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::new(oversized),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), template_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(template_rx.borrow_and_update().is_none());
+        assert!(!task_handle.is_finished());
+
+        notify_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::new(template.clone()),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), template_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = template_rx.borrow_and_update().clone().unwrap();
+        assert_eq!(
+            prepared.template().previousblockhash,
+            template.previousblockhash
+        );
+        let tracker = start_tracker_actor();
+        let notify: Notify = serde_json::from_str(
+            &build_notify_from_prepared(&prepared, None, None, &tracker).unwrap(),
+        )
+        .unwrap();
+        assert!(notify.params.clean_jobs);
+        drop(notify_tx);
+        task_handle.await.unwrap();
     }
 
     #[tokio::test]
@@ -589,7 +731,8 @@ mod tests {
             address: "bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr"
                 .parse::<bitcoin::Address<_>>()
                 .unwrap()
-                .assume_checked(),
+                .assume_checked()
+                .into(),
             amount: Amount::from_sat(5000000000),
         }];
         let mut mock_payout = MockPayoutDistribution::default();
@@ -641,7 +784,7 @@ mod tests {
             "020202020202020202020202020202020202020202020202020202020202020202"
                 .parse()
                 .unwrap();
-        let miner_address = Address::p2wpkh(&miner_pubkey, Network::Signet);
+        let miner_address = PayoutAddress::from(Address::p2wpkh(&miner_pubkey, Network::Signet));
         let tracker_handle = start_tracker_actor();
         let result = build_notify_from_prepared(
             prepared.as_ref().unwrap(),
@@ -692,7 +835,7 @@ mod tests {
             "020202020202020202020202020202020202020202020202020202020202020202"
                 .parse()
                 .unwrap();
-        let btcaddress = Address::p2wpkh(&miner_pubkey, Network::Signet);
+        let btcaddress = PayoutAddress::from(Address::p2wpkh(&miner_pubkey, Network::Signet));
 
         let pool_difficulty =
             pool_difficulty::PoolDifficulty::new(genesis.header.bits, genesis.header.time, 0);
@@ -701,7 +844,8 @@ mod tests {
             address: "bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr"
                 .parse::<bitcoin::Address<_>>()
                 .unwrap()
-                .assume_checked(),
+                .assume_checked()
+                .into(),
             amount: Amount::from_sat(template.coinbasevalue),
         }];
         let mock_payout = mock_payout_with_distribution(test_distribution);
@@ -796,13 +940,15 @@ mod tests {
             OutputPair {
                 address: bitcoin::Address::from_str("bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr")
                     .unwrap()
-                    .assume_checked(),
+                    .assume_checked()
+                    .into(),
                 amount: Amount::from_sat(50000),
             },
             OutputPair {
                 address: bitcoin::Address::from_str("bcrt1qlk935ze2fsu86zjp395uvtegztrkaezawxx0wf")
                     .unwrap()
-                    .assume_checked(),
+                    .assume_checked()
+                    .into(),
                 amount: Amount::from_sat(12345),
             },
         ];
@@ -867,8 +1013,6 @@ mod tests {
     /// token shares would be refused by every peer. Regtest has no anchor.
     #[test]
     fn token_jobs_need_a_template_inside_the_asert_band() {
-        use crate::config::BitcoinCashNetwork;
-        use crate::shares::bch_asert::{U256, get_compact};
         let data = include_str!(
             "../../../../p2poolv2_tests/test_data/gbt/regtest/ckpool/one-txn/gbt.json"
         );

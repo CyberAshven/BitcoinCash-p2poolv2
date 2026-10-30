@@ -78,7 +78,7 @@ pub fn build(
     let header = ShareHeader {
         prev_share_blockhash: bitcoin::BlockHash::all_zeros(),
         uncles: vec![],
-        miner_bitcoin_address,
+        miner_bitcoin_address: miner_bitcoin_address.into(),
         miner_address,
         bitcoin_header: anchor.header,
         time: sim_overrides::genesis_timestamp(&genesis_data),

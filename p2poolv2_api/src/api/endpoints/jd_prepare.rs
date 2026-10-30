@@ -105,8 +105,17 @@ pub(crate) async fn prepare(
         .pplns_window
         .as_ref()
         .ok_or_else(|| ApiError::ServiceUnavailable("verified PPLNS window unavailable".into()))?;
+    let previous_hash = request
+        .previous_hash
+        .parse()
+        .map_err(|_| ApiError::BadRequest("invalid previous block hash".into()))?;
     let weights = window
-        .preparation_weights(anchor, request.nbits, &state.chain_store_handle)
+        .preparation_weights(
+            anchor,
+            request.nbits,
+            previous_hash,
+            &state.chain_store_handle,
+        )
         .await?;
     let descriptor = BchCoinbase {
         prefix: hex::decode(&request.script_prefix)

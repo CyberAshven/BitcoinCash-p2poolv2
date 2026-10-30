@@ -119,9 +119,9 @@ impl SafaThread {
 /// `target * (min(dh, 288) * 5000 / threads + 5000) / 10000`, each division
 /// floored, clamped to 1 and to the easiest token target, encoded as
 /// canonical token bits. `None` for bits that are not a canonical token
-/// target or no threads.
+/// target or a thread count outside 1 to 63.
 pub fn safa_claim_target_bits(state_bits: u32, height_delta: u32, threads: u32) -> Option<u32> {
-    if threads == 0 {
+    if !(1..=SAFA_MAX_THREADS).contains(&threads) {
         return None;
     }
     let target = U256::from_little_endian(&expand_token_target(state_bits)?);
@@ -331,18 +331,17 @@ impl TokenSet {
         let mut tokens = self.tokens.clone();
         let mut targets = self.targets.clone();
         for (token, target) in tokens.iter_mut().zip(targets.iter_mut()) {
-            let Some(thread) = token.safa else {
-                continue;
-            };
-            token.target_bits = thread.claim_target_bits(height).ok_or_else(|| {
-                format!(
-                    "SAFA token {}'s thread state is at height {}, not below the coinbase's {height}",
-                    hex::encode(token.category),
-                    thread.state_height()
-                )
-            })?;
-            *target = expand_token_target(token.target_bits)
-                .expect("claim target bits are canonical token bits");
+            if let Some(thread) = token.safa {
+                token.target_bits = thread.claim_target_bits(height).ok_or_else(|| {
+                    format!(
+                        "SAFA token {}'s thread state is at height {}, not below the coinbase's {height}",
+                        hex::encode(token.category),
+                        thread.state_height()
+                    )
+                })?;
+                *target = expand_token_target(token.target_bits)
+                    .expect("claim target bits are canonical token bits");
+            }
         }
         Ok(Arc::new(Self {
             tokens,

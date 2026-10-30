@@ -1,0 +1,382 @@
+// PHOTON lean direct split v2. The share chain orders R; this pays in that order.
+// The early context digest binds every section4 proof-seed choice externally.
+<0> OP_PICK // copy state
+<0> OP_SPLIT OP_NIP <4> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<0> OP_PICK // copy version
+<2>
+OP_NUMEQUAL OP_VERIFY
+<0> OP_ROLL // take version
+OP_DROP
+<0> OP_PICK // copy state
+<4> OP_SPLIT OP_NIP <4> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<0> OP_PICK // copy network
+<4>
+OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_ROLL // take network
+OP_DROP
+<0> OP_PICK // copy state
+<8> OP_SPLIT OP_NIP <32> OP_SPLIT OP_DROP
+<1> OP_PICK // copy state
+<72> OP_SPLIT OP_NIP <8> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<0> OP_PICK // copy cost
+<0>
+OP_GREATERTHAN OP_VERIFY
+<0> OP_PICK // copy cost
+<922337203685477580>
+OP_LESSTHANOREQUAL OP_VERIFY
+<2> OP_PICK // copy state
+<80> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<0> OP_PICK // copy count
+<0>
+OP_GREATERTHAN OP_VERIFY
+<3> OP_PICK // copy state
+OP_SIZE OP_NIP <82> OP_NUMEQUALVERIFY
+<3> OP_ROLL // take state
+OP_DROP
+OP_INPUTINDEX OP_0 OP_NUMEQUALVERIFY OP_TXVERSION OP_2 OP_NUMEQUALVERIFY OP_TXLOCKTIME OP_0 OP_NUMEQUALVERIFY
+OP_0 OP_UTXOTOKENCATEGORY
+<0> OP_PICK // copy actual_category
+<4> OP_PICK // copy category
+OP_EQUALVERIFY
+<0> OP_ROLL // take actual_category
+OP_DROP
+OP_0 OP_UTXOTOKENCOMMITMENT OP_0 OP_EQUALVERIFY OP_0 OP_UTXOTOKENAMOUNT
+<0> OP_PICK // copy remaining
+<0>
+OP_GREATERTHAN OP_VERIFY
+<0> OP_PICK // copy remaining
+<9223372036854775807>
+OP_LESSTHANOREQUAL OP_VERIFY
+OP_TXINPUTCOUNT
+<0> OP_PICK // copy inputs
+<2>
+OP_GREATERTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy inputs
+<5>
+OP_LESSTHANOREQUAL OP_VERIFY
+<0>
+OP_BEGIN
+<0> OP_PICK // copy input_index
+OP_INPUTSEQUENCENUMBER <4294967295> OP_NUMEQUALVERIFY
+<0> OP_PICK // copy input_index
+OP_IF
+<0> OP_PICK // copy input_index
+OP_UTXOTOKENCATEGORY OP_0 OP_EQUALVERIFY
+OP_ELSE
+OP_ENDIF
+<0> OP_PICK // copy input_index
+OP_INPUTBYTECODE OP_SIZE OP_NIP <10000> OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy input_index
+OP_1ADD
+<1> OP_ROLL // take input_index
+OP_DROP
+<6> OP_ROLL // take submitter
+<6> OP_ROLL // take category
+<6> OP_ROLL // take cost
+<6> OP_ROLL // take count
+<6> OP_ROLL // take remaining
+<6> OP_ROLL // take inputs
+<6> OP_ROLL // take input_index
+<0> OP_PICK // copy input_index
+<2> OP_PICK // copy inputs
+OP_NUMEQUAL OP_UNTIL
+<0> OP_ROLL // take input_index
+OP_DROP
+<0> OP_ROLL // take inputs
+OP_DROP
+<4> OP_PICK // copy submitter
+// The only beneficiary scripts are exact standard P2PKH, P2SH20 or P2SH32 templates.
+<0> OP_PICK // copy script
+OP_SIZE OP_NIP
+<0> OP_PICK // copy script_length
+<25>
+OP_NUMEQUAL
+OP_IF
+<1> OP_PICK // copy script
+<0> OP_SPLIT OP_NIP <3> OP_SPLIT OP_DROP
+<0x76a914>
+OP_EQUALVERIFY
+<1> OP_PICK // copy script
+<23> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0x88ac>
+OP_EQUALVERIFY
+OP_ELSE
+<0> OP_PICK // copy script_length
+<23>
+OP_NUMEQUAL
+OP_IF
+<1> OP_PICK // copy script
+<0> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0xa914>
+OP_EQUALVERIFY
+<1> OP_PICK // copy script
+<22> OP_SPLIT OP_NIP <1> OP_SPLIT OP_DROP
+<0x87>
+OP_EQUALVERIFY
+OP_ELSE
+<0> OP_PICK // copy script_length
+<35>
+OP_NUMEQUAL OP_VERIFY
+<1> OP_PICK // copy script
+<0> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0xaa20>
+OP_EQUALVERIFY
+<1> OP_PICK // copy script
+<34> OP_SPLIT OP_NIP <1> OP_SPLIT OP_DROP
+<0x87>
+OP_EQUALVERIFY
+OP_ENDIF
+OP_ENDIF
+<0> OP_ROLL // take script_length
+OP_DROP
+<0> OP_ROLL // take script
+OP_DROP
+<0>
+<0>
+<0>
+OP_BEGIN
+OP_FROMALTSTACK
+<0> OP_ROLL // take entries
+OP_1 OP_SPLIT OP_SWAP <0x00> OP_CAT OP_BIN2NUM OP_SPLIT
+<0> OP_ROLL // take rest
+<8> OP_SPLIT
+<0> OP_ROLL // take rest
+OP_2 OP_SPLIT OP_0 OP_EQUALVERIFY
+<1> OP_ROLL // take owed_bytes
+<0x00> OP_CAT OP_BIN2NUM
+<1> OP_ROLL // take multiple_bytes
+<0x00> OP_CAT OP_BIN2NUM
+<0> OP_PICK // copy multiple
+<10>
+OP_GREATERTHANOREQUAL OP_VERIFY
+<1> OP_PICK // copy owed
+<9223372036854775807>
+OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy multiple
+<9> OP_PICK // copy cost
+OP_MUL
+<2> OP_PICK // copy owed
+<1> OP_PICK // copy minimum
+OP_GREATERTHANOREQUAL OP_VERIFY
+// The only beneficiary scripts are exact standard P2PKH, P2SH20 or P2SH32 templates.
+<3> OP_PICK // copy script
+OP_SIZE OP_NIP
+<0> OP_PICK // copy script_length
+<25>
+OP_NUMEQUAL
+OP_IF
+<4> OP_PICK // copy script
+<0> OP_SPLIT OP_NIP <3> OP_SPLIT OP_DROP
+<0x76a914>
+OP_EQUALVERIFY
+<4> OP_PICK // copy script
+<23> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0x88ac>
+OP_EQUALVERIFY
+OP_ELSE
+<0> OP_PICK // copy script_length
+<23>
+OP_NUMEQUAL
+OP_IF
+<4> OP_PICK // copy script
+<0> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0xa914>
+OP_EQUALVERIFY
+<4> OP_PICK // copy script
+<22> OP_SPLIT OP_NIP <1> OP_SPLIT OP_DROP
+<0x87>
+OP_EQUALVERIFY
+OP_ELSE
+<0> OP_PICK // copy script_length
+<35>
+OP_NUMEQUAL OP_VERIFY
+<4> OP_PICK // copy script
+<0> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0xaa20>
+OP_EQUALVERIFY
+<4> OP_PICK // copy script
+<34> OP_SPLIT OP_NIP <1> OP_SPLIT OP_DROP
+<0x87>
+OP_EQUALVERIFY
+OP_ENDIF
+OP_ENDIF
+<8> OP_PICK // copy remaining
+OP_IF
+<3> OP_PICK // copy owed
+<9> OP_PICK // copy remaining
+OP_MIN
+<0> OP_PICK // copy gross
+<3> OP_PICK // copy minimum
+OP_GREATERTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy gross
+<12> OP_PICK // copy cost
+OP_SUB
+<8> OP_PICK // copy paid
+OP_OUTPUTBYTECODE
+<0> OP_PICK // copy actual
+<8> OP_PICK // copy script
+OP_EQUALVERIFY
+<0> OP_ROLL // take actual
+OP_DROP
+<8> OP_PICK // copy paid
+OP_OUTPUTTOKENCATEGORY
+<0> OP_PICK // copy actual
+<15> OP_PICK // copy category
+OP_EQUALVERIFY
+<0> OP_ROLL // take actual
+OP_DROP
+<8> OP_PICK // copy paid
+OP_OUTPUTTOKENCOMMITMENT OP_0 OP_EQUALVERIFY
+<8> OP_PICK // copy paid
+OP_OUTPUTTOKENAMOUNT
+<0> OP_PICK // copy actual
+<2> OP_PICK // copy net
+OP_EQUALVERIFY
+<0> OP_ROLL // take actual
+OP_DROP
+<8> OP_PICK // copy paid
+OP_OUTPUTVALUE
+<7> OP_PICK // copy script
+OP_SIZE OP_NIP <200> OP_ADD <3> OP_MUL
+<1> OP_PICK // copy value
+OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy value
+<2100000000000000>
+OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_ROLL // take value
+<8> OP_PICK // copy output_bch
+OP_ADD
+<8> OP_ROLL // take output_bch
+OP_DROP
+<10> OP_PICK // copy remaining
+<3> OP_ROLL // take gross
+OP_SUB
+<10> OP_ROLL // take remaining
+OP_DROP
+<8> OP_PICK // copy paid
+OP_1ADD
+<9> OP_ROLL // take paid
+OP_DROP
+<3> OP_ROLL // take net
+OP_DROP
+<12> OP_ROLL // take submitter
+<12> OP_ROLL // take category
+<12> OP_ROLL // take cost
+<12> OP_ROLL // take count
+<5> OP_ROLL // take remaining
+<12> OP_ROLL // take entry_index
+<6> OP_ROLL // take paid
+<7> OP_ROLL // take output_bch
+<12> OP_ROLL // take script
+<12> OP_ROLL // take owed
+<12> OP_ROLL // take multiple
+<12> OP_ROLL // take minimum
+<12> OP_ROLL // take script_length
+OP_ELSE
+OP_ENDIF
+<4> OP_ROLL // take script
+OP_DROP
+<0> OP_ROLL // take script_length
+OP_DROP
+<2> OP_ROLL // take owed
+OP_DROP
+<1> OP_ROLL // take multiple
+OP_DROP
+<0> OP_ROLL // take minimum
+OP_DROP
+<2> OP_PICK // copy entry_index
+OP_1ADD
+<3> OP_ROLL // take entry_index
+OP_DROP
+<7> OP_ROLL // take submitter
+<7> OP_ROLL // take category
+<7> OP_ROLL // take cost
+<7> OP_ROLL // take count
+<7> OP_ROLL // take remaining
+<5> OP_ROLL // take entry_index
+<7> OP_ROLL // take paid
+<7> OP_ROLL // take output_bch
+<2> OP_PICK // copy entry_index
+<5> OP_PICK // copy count
+OP_NUMEQUAL OP_UNTIL
+OP_FROMALTSTACK OP_0 OP_EQUALVERIFY
+<3> OP_PICK // copy remaining
+<0>
+OP_NUMEQUAL OP_VERIFY
+<1> OP_PICK // copy paid
+<6> OP_PICK // copy cost
+OP_MUL
+<2> OP_PICK // copy paid
+OP_OUTPUTBYTECODE
+<0> OP_PICK // copy actual
+<10> OP_PICK // copy submitter
+OP_EQUALVERIFY
+<0> OP_ROLL // take actual
+OP_DROP
+<2> OP_PICK // copy paid
+OP_OUTPUTTOKENCATEGORY
+<0> OP_PICK // copy actual
+<9> OP_PICK // copy category
+OP_EQUALVERIFY
+<0> OP_ROLL // take actual
+OP_DROP
+<2> OP_PICK // copy paid
+OP_OUTPUTTOKENCOMMITMENT OP_0 OP_EQUALVERIFY
+<2> OP_PICK // copy paid
+OP_OUTPUTTOKENAMOUNT
+<0> OP_PICK // copy actual
+<2> OP_PICK // copy submitter_tokens
+OP_EQUALVERIFY
+<0> OP_ROLL // take actual
+OP_DROP
+<2> OP_PICK // copy paid
+OP_OUTPUTVALUE
+<9> OP_PICK // copy submitter
+OP_SIZE OP_NIP <200> OP_ADD <3> OP_MUL
+<1> OP_PICK // copy value
+OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy value
+<2100000000000000>
+OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_ROLL // take value
+<2> OP_PICK // copy output_bch
+OP_ADD
+<2> OP_ROLL // take output_bch
+OP_DROP
+<2> OP_PICK // copy paid
+OP_1ADD
+OP_TXOUTPUTCOUNT
+<0> OP_PICK // copy output_count
+<2> OP_PICK // copy change_index
+OP_SUB
+<0> OP_PICK // copy extra
+<0>
+OP_GREATERTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy extra
+<1>
+OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy extra
+OP_IF
+<2> OP_PICK // copy change_index
+OP_OUTPUTTOKENCATEGORY OP_0 OP_EQUALVERIFY
+OP_ELSE
+OP_ENDIF
+<3> OP_PICK // copy output_bch
+OP_0 OP_UTXOVALUE OP_GREATERTHANOREQUAL OP_VERIFY
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_1

@@ -521,8 +521,9 @@ impl<'network> Simulation<'network> {
     /// Uncles for a share `node` builds on `base`, as `Store::find_uncles`
     /// picks them: children of the base's parent, grandparent and
     /// great-grandparent that are not on the base's own chain, accepted by
-    /// the node and not already named as an uncle by a share the node holds,
-    /// highest first, the lowest hash breaking a tie, at most three.
+    /// the node and not already named as an uncle by the base or one of its
+    /// ancestors, highest first, the lowest hash breaking a tie, at most
+    /// three. An uncle named only on another branch can still be named here.
     fn select_uncles(&self, node: usize, base: usize) -> Vec<usize> {
         let mut ancestry = Vec::with_capacity(MAX_UNCLES_DEPTH + 1);
         ancestry.push(base);
@@ -540,7 +541,7 @@ impl<'network> Simulation<'network> {
             .flat_map(|&ancestor| self.shares[ancestor].children.iter().copied())
             .filter(|child| !ancestry.contains(child))
             .filter(|&child| self.at_node[child][node].stage == Stage::Accepted)
-            .filter(|&child| !self.is_already_uncle(node, child))
+            .filter(|&child| !Self::is_uncle_on_ancestry(&self.shares[child], &ancestry))
             .collect();
         candidates.sort_by(|first, second| {
             let first_share = &self.shares[*first];
@@ -554,11 +555,8 @@ impl<'network> Simulation<'network> {
         candidates
     }
 
-    fn is_already_uncle(&self, node: usize, share: usize) -> bool {
-        self.shares[share]
-            .nephews
-            .iter()
-            .any(|&nephew| self.at_node[nephew][node].stage != Stage::Unknown)
+    fn is_uncle_on_ancestry(share: &Share, ancestry: &[usize]) -> bool {
+        share.nephews.iter().any(|nephew| ancestry.contains(nephew))
     }
 
     fn on_share_arrives(&mut self, time: f64, node: usize, share: usize, from_peer_index: usize) {

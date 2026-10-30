@@ -342,40 +342,169 @@ fn a_node_does_not_start_on_a_broken_token_file() {
     assert!(TokenFile::open(&path).is_err());
 }
 
-/// `claimTargetBits` of the Node SAFA tool (`tools/safa-auxpow/lib.mjs`,
-/// commit `88b696e8`, before `p2poolv2_safa` replaced it): (state bits,
-/// blocks since the state, threads, claim bits), as it printed them.
-const SAFA_CLAIM_TARGET_VECTORS: [(u32, u32, u32, u32); 12] = [
-    (0x1d00ffff, 1, 1, 0x1d00ffff),
-    (0x1d00ffff, 288, 1, 0x1e00907f),
-    (0x1d00ffff, 1000, 63, 0x1d02c920),
-    (0x2000ffff, 288, 63, 0x2002c920),
-    (0x207fffff, 288, 1, 0x207fffff),
-    (0x03000001, 1, 63, 0x03000001),
-    (0x1a3106ee, 10, 7, 0x1a3b8756),
-    (0x1f7fffff, 100, 3, 0x20089553),
-    (0x03000100, 0, 2, 0x03000080),
-    (0x04008000, 0, 1, 0x03400000),
-    (0x1c7fffff, 287, 5, 0x1d0e9999),
-    (0x207fffff, 0, 1, 0x203fffff),
-];
-
-/// The node's claim targets are the Node tool's and `p2poolv2_safa`'s.
+/// These named vectors are `claimTargetBits` outputs of the Node SAFA tool
+/// (`tools/safa-auxpow/lib.mjs`, commit `88b696e8`), before `p2poolv2_safa`
+/// replaced it. Both implementations must retain its integer rounding.
 #[test]
-fn safa_claim_targets_match_the_safa_tool() {
-    for (state_bits, height_delta, threads, expected) in SAFA_CLAIM_TARGET_VECTORS {
-        assert_eq!(
-            safa_claim_target_bits(state_bits, height_delta, threads),
-            Some(expected),
-            "{state_bits:#010x} after {height_delta} blocks over {threads} threads"
-        );
-        assert_eq!(
-            p2poolv2_safa::claim_target_bits(state_bits, height_delta, threads),
-            Ok(expected)
-        );
-    }
+fn safa_claim_target_matches_lib_mjs_one_block_one_thread() {
+    assert_eq!(safa_claim_target_bits(0x1d00_ffff, 1, 1), Some(0x1d00_ffff));
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x1d00_ffff, 1, 1),
+        Ok(0x1d00_ffff)
+    );
+}
+
+#[test]
+fn safa_claim_target_matches_lib_mjs_at_easing_cap() {
+    assert_eq!(
+        safa_claim_target_bits(0x1d00_ffff, 288, 1),
+        Some(0x1e00_907f)
+    );
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x1d00_ffff, 288, 1),
+        Ok(0x1e00_907f)
+    );
+}
+
+#[test]
+fn safa_claim_target_matches_lib_mjs_beyond_easing_cap() {
+    assert_eq!(
+        safa_claim_target_bits(0x1d00_ffff, 1_000, 63),
+        Some(0x1d02_c920)
+    );
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x1d00_ffff, 1_000, 63),
+        Ok(0x1d02_c920)
+    );
+}
+
+#[test]
+fn safa_claim_target_matches_lib_mjs_maximum_threads() {
+    assert_eq!(
+        safa_claim_target_bits(0x2000_ffff, 288, 63),
+        Some(0x2002_c920)
+    );
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x2000_ffff, 288, 63),
+        Ok(0x2002_c920)
+    );
+}
+
+#[test]
+fn safa_claim_target_matches_lib_mjs_maximum_target_clamp() {
+    assert_eq!(
+        safa_claim_target_bits(0x207f_ffff, 288, 1),
+        Some(0x207f_ffff)
+    );
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x207f_ffff, 288, 1),
+        Ok(0x207f_ffff)
+    );
+}
+
+#[test]
+fn safa_claim_target_matches_lib_mjs_minimum_target_clamp() {
+    assert_eq!(
+        safa_claim_target_bits(0x0300_0001, 1, 63),
+        Some(0x0300_0001)
+    );
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x0300_0001, 1, 63),
+        Ok(0x0300_0001)
+    );
+}
+
+#[test]
+fn safa_claim_target_matches_lib_mjs_fractional_thread_ease() {
+    assert_eq!(
+        safa_claim_target_bits(0x1a31_06ee, 10, 7),
+        Some(0x1a3b_8756)
+    );
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x1a31_06ee, 10, 7),
+        Ok(0x1a3b_8756)
+    );
+}
+
+#[test]
+fn safa_claim_target_matches_lib_mjs_compact_exponent_carry() {
+    assert_eq!(
+        safa_claim_target_bits(0x1f7f_ffff, 100, 3),
+        Some(0x2008_9553)
+    );
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x1f7f_ffff, 100, 3),
+        Ok(0x2008_9553)
+    );
+}
+
+#[test]
+fn safa_claim_target_matches_lib_mjs_zero_delta() {
+    assert_eq!(safa_claim_target_bits(0x0300_0100, 0, 2), Some(0x0300_0080));
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x0300_0100, 0, 2),
+        Ok(0x0300_0080)
+    );
+}
+
+#[test]
+fn safa_claim_target_matches_lib_mjs_compact_exponent_borrow() {
+    assert_eq!(safa_claim_target_bits(0x0400_8000, 0, 1), Some(0x0340_0000));
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x0400_8000, 0, 1),
+        Ok(0x0340_0000)
+    );
+}
+
+#[test]
+fn safa_claim_target_matches_lib_mjs_before_easing_cap() {
+    assert_eq!(
+        safa_claim_target_bits(0x1c7f_ffff, 287, 5),
+        Some(0x1d0e_9999)
+    );
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x1c7f_ffff, 287, 5),
+        Ok(0x1d0e_9999)
+    );
+}
+
+#[test]
+fn safa_claim_target_matches_lib_mjs_zero_delta_at_maximum() {
+    assert_eq!(safa_claim_target_bits(0x207f_ffff, 0, 1), Some(0x203f_ffff));
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x207f_ffff, 0, 1),
+        Ok(0x203f_ffff)
+    );
+}
+
+#[test]
+fn safa_claim_target_caps_the_height_before_multiplication() {
+    assert_eq!(
+        safa_claim_target_bits(0x2000_ffff, u32::MAX, 63),
+        Some(0x2002_c920)
+    );
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x2000_ffff, u32::MAX, 63),
+        Ok(0x2002_c920)
+    );
+}
+
+#[test]
+fn safa_claim_target_rejects_no_threads() {
     assert_eq!(safa_claim_target_bits(0x1d00_ffff, 1, 0), None);
+    assert!(p2poolv2_safa::claim_target_bits(0x1d00_ffff, 1, 0).is_err());
+}
+
+#[test]
+fn safa_claim_target_rejects_too_many_threads() {
+    assert_eq!(safa_claim_target_bits(0x1d00_ffff, 1, 64), None);
+    assert!(p2poolv2_safa::claim_target_bits(0x1d00_ffff, 1, 64).is_err());
+}
+
+#[test]
+fn safa_claim_target_rejects_noncanonical_state_bits() {
     assert_eq!(safa_claim_target_bits(0x0200_ffff, 1, 1), None);
+    assert!(p2poolv2_safa::claim_target_bits(0x0200_ffff, 1, 1).is_err());
 }
 
 /// Every thread count, ease and a spread of state targets, from the
@@ -415,24 +544,6 @@ fn safa_claim_targets_agree_with_p2poolv2_safa_everywhere() {
     }
     assert_eq!(checked, 14 * 63 * 11);
 }
-
-/// A SAFA vault on chipnet with 63 threads, thread 5 last claimed at
-/// height 329,000 with target `0x2000ffff`: `claimLeaf` of the Node tool gives
-/// these leaves for a miner paid to P2PKH(12 x 20) with a 1.5% donation to
-/// P2PKH(d0 x 20) and a 1% fee to P2PKH(fe x 20), at heights 329,001 and
-/// 329,300 (the ease capped at 288 blocks).
-const SAFA_LEAF_VECTORS: [(u32, u32, &str); 2] = [
-    (
-        329_001,
-        0x2000_8205,
-        "53e4d65d273996f978a7ef1fcf7235e1961e6fdca2295eab08d18e5471649986",
-    ),
-    (
-        329_300,
-        0x2002_c920,
-        "e7aaea290fc93691db63a04cd8a5e2495ac9577612e21397a6f30bf73e115789",
-    ),
-];
 
 /// That vault's thread state: thread 5, height 329,000, target
 /// `0x2000ffff`, reference bits `0x1a3106ee`.
@@ -479,22 +590,44 @@ fn a_safa_vault_s_leaf_follows_its_thread_at_each_height() {
         fee_bps: 100,
         fee_locking_bytecode: p2pkh(0xfe),
     };
-    for (height, target_bits, leaf_hash) in SAFA_LEAF_VECTORS {
-        let at_height = set.at_height(height).unwrap();
-        assert_eq!(at_height.tokens()[0].target_bits, target_bits);
-        let job = at_height.miner_job(&p2pkh(0x12), split);
-        assert_eq!(hex::encode(job.entries[0].leaf.hash()), leaf_hash);
-        let tool =
-            p2poolv2_safa::claim_leaf(&covenant, &vault, &p2pkh(0x12), Some(&tool_split), height)
-                .unwrap();
-        assert_eq!(tool.target_bits, target_bits);
-        assert_eq!(hex::encode(tool.leaf_hash), leaf_hash);
-        // The win test uses the eased target too.
-        assert_eq!(
-            job.entries[0].target,
-            expand_token_target(target_bits).unwrap()
-        );
-    }
+    let next_height = set.at_height(329_001).unwrap();
+    assert_eq!(next_height.tokens()[0].target_bits, 0x2000_8205);
+    let next_job = next_height.miner_job(&p2pkh(0x12), split);
+    assert_eq!(
+        hex::encode(next_job.entries[0].leaf.hash()),
+        "53e4d65d273996f978a7ef1fcf7235e1961e6fdca2295eab08d18e5471649986"
+    );
+    let next_tool =
+        p2poolv2_safa::claim_leaf(&covenant, &vault, &p2pkh(0x12), Some(&tool_split), 329_001)
+            .unwrap();
+    assert_eq!(next_tool.target_bits, 0x2000_8205);
+    assert_eq!(next_tool.leaf_hash, next_job.entries[0].leaf.hash());
+    assert_eq!(
+        next_job.entries[0].target,
+        expand_token_target(0x2000_8205).unwrap()
+    );
+
+    let capped_height = set.at_height(329_300).unwrap();
+    assert_eq!(capped_height.tokens()[0].target_bits, 0x2002_c920);
+    let capped_job = capped_height.miner_job(&p2pkh(0x12), split);
+    assert_eq!(
+        hex::encode(capped_job.entries[0].leaf.hash()),
+        "e7aaea290fc93691db63a04cd8a5e2495ac9577612e21397a6f30bf73e115789"
+    );
+    let capped_tool =
+        p2poolv2_safa::claim_leaf(&covenant, &vault, &p2pkh(0x12), Some(&tool_split), 329_300)
+            .unwrap();
+    assert_eq!(capped_tool.target_bits, 0x2002_c920);
+    assert_eq!(capped_tool.leaf_hash, capped_job.entries[0].leaf.hash());
+    assert_eq!(
+        capped_job.entries[0].target,
+        expand_token_target(0x2002_c920).unwrap()
+    );
+    // Preparing a second job reuses the original state rather than easing
+    // an already eased target. Old jobs retain the target they committed to.
+    assert_eq!(next_height.at_height(329_300).unwrap(), capped_height);
+    assert_eq!(set.tokens()[0].target_bits, 0x2000_ffff);
+    assert_eq!(next_height.tokens()[0].target_bits, 0x2000_8205);
     // No claim of a coinbase at or below the state's height can succeed.
     assert!(set.at_height(329_000).is_err());
     assert!(set.at_height(1).is_err());
@@ -512,19 +645,23 @@ fn a_set_without_safa_tokens_does_not_change_with_height() {
 #[test]
 fn a_safa_token_file_is_checked() {
     assert!(TokenSet::from_json(safa_token_json(1, SAFA_STATE, "").as_bytes()).is_ok());
-    for threads in [0, 64] {
-        assert!(TokenSet::from_json(safa_token_json(threads, SAFA_STATE, "").as_bytes()).is_err());
-    }
+    assert!(TokenSet::from_json(safa_token_json(0, SAFA_STATE, "").as_bytes()).is_err());
+    assert!(TokenSet::from_json(safa_token_json(64, SAFA_STATE, "").as_bytes()).is_err());
     assert!(TokenSet::from_json(safa_token_json(63, "0500", "").as_bytes()).is_err());
     // A state whose target is not canonical token bits.
     assert!(
         TokenSet::from_json(safa_token_json(63, "0500000028050500ffff0021ee06311a", "").as_bytes())
             .is_err()
     );
-    for extra in [
+    assert!(TokenSet::from_json(safa_token_json(
+        63,
+        SAFA_STATE,
         r#","state_hash":"8811e65fbf63635a1b24f5f09611c25ab1f0021fe40ab06e8156f02cde5a6978""#,
-        r#","target_bits":"2000ffff""#,
-    ] {
-        assert!(TokenSet::from_json(safa_token_json(63, SAFA_STATE, extra).as_bytes()).is_err());
-    }
+    ).as_bytes()).is_err());
+    assert!(
+        TokenSet::from_json(
+            safa_token_json(63, SAFA_STATE, r#","target_bits":"2000ffff""#,).as_bytes()
+        )
+        .is_err()
+    );
 }

@@ -7,6 +7,195 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The payout rule, the last part of mining on the current chain (V16): a
+Bitcoin Cash coinbase pays a window share only when the BCH block the share
+builds on is on the paying share's BCH chain or one block off it, a block
+that lost an orphan race or the block after a lagging template's. Work on a
+made-up block, or on a fork two or more blocks off the chain, earns nothing.
+Such a share keeps its slot and its work in the window, so the window's size
+does not depend on which shares are paid. An uncle off the chain earns
+nothing, and a nephew earns an uncle's bonus only when both are paid. The
+window's three blocks of work are now sized from the nBits Bitcoin Cash
+requires after the paying share's BCH prev, which every node computes from
+that known header, not from the nBits the share claims; the test networks'
+20-minute rule is left out. A share whose window pays no one is invalid; when
+this node's own template would pay no one, it withdraws work and tries the
+next template. A share building on the all-zero hash is invalid unless it is
+the share chain's first. Job Declaration preparation takes the template's
+previous block too. A share-chain rule change the owner approved, under the
+`bch-prev-1off` flag day: every Bitcoin Cash node must run it together. Not a
+Bitcoin Cash consensus change.
+
+A node now stores a peer's share body only once it knows the BCH block the
+share builds on, and a share in the payout zone whose BCH prev is unknown
+waits, `Recoverable`, until the header arrives. Share headers never wait,
+so every node keeps the same share header chain and a new node still syncs
+shares older than its BCH headers. Each new template's previous block is
+learned from BCHN before jobs are built on it, so this node's own shares and
+the headers it sends with them never lack it. `mock_bitcoind` serves a
+made-up parent header for its BCHN templates. Third part of mining on the
+current chain (V16).
+
+Share messages now carry the Bitcoin Cash headers a receiver needs to
+place each share's BCH prev, the second part of mining on the current
+chain (V16). A share carries the headers from its BCH prev back to the
+sender's BCHN best chain, below its parent's BCH prev: none on its
+parent's block, one after a new block, the orphan for a share on an
+orphan, the branch after a reorg, up to 32. Each message carries at most
+128, oldest first, under two new message types used only when it carries
+some, so Bitcoin messages are unchanged. Receivers check every header
+(exact aserti3-2d nBits, proof of work, two-hour limit) and store those
+that pass; a header that fails rejects the message. The Bitcoin Cash
+protocol strings end in `bch-prev-1off`: a share-chain rule change the
+owner approved, shipped as a flag day, so nodes from before cannot peer
+and every node must upgrade together. It is not a Bitcoin Cash consensus
+change.
+
+Merged upstream P2Poolv2 main (`c0c70cdb`) with git rather than copying
+its commits by hand, so later upstream changes merge with conflicts only
+where both sides edited the same lines. New from upstream: an Electrum
+wallet server for the share chain (off unless enabled in `[electrum]`),
+ansible installs from source and a node reachability check before
+(re)starting a pool, a nix devShell and ubuntu-26.04 CI runners. Changes
+already copied by hand (the uncle commits, the fuzz harness, the libzmq
+fix) keep this fork's versions.
+
+First part of mining on the current chain (V16): a check for Bitcoin Cash
+block headers from peers, and a store for the headers a node knows. A
+header must build on a known header, meet its own nBits, carry exactly the
+nBits Bitcoin Cash requires after its parent (aserti3-2d, the 20-minute
+minimum-difficulty rule on test networks, a fixed nBits on regtest), and
+be dated at most two hours ahead. Tested on real mainnet and chipnet
+headers. A worker fills the store from the node's own BCHN, walking back
+from its best block every 5 seconds; a new node first learns 8,400
+headers, about 58 days.
+
+Bitcoin Cash miners can be paid to P2SH32 addresses (`OP_HASH256 <32
+bytes> OP_EQUAL`, from the 2023-05-15 upgrade), which contracts and
+CashTokens covenants use. The share-chain rules already allowed P2SH32
+payout scripts; the node could not hold them, because payouts were
+`bitcoin::Address` values. Payouts are now `PayoutAddress`, a locking
+script and network class, end to end: CashAddr parsing in config and
+Stratum usernames, share headers, PPLNS weights, the coinbase, and the API
+and CLI, which show P2SH32 as CashAddr. Share header bytes are unchanged,
+so this is neither a share-chain rule change nor a Bitcoin Cash consensus
+change.
+
+The P2P message decoder is now fuzzed: a cargo-fuzz harness, ported from
+upstream P2Poolv2, feeds arbitrary bytes to `RawMessage` decoding, both
+unframed and inside a correctly checksummed frame, so this fork's own
+payloads such as `ShareHeaderBatch` are reached. A 60-second smoke test
+runs on alpha pushes and pull requests as its own workflow, and a
+one-hour run is scheduled nightly. The corpus lives in the repository and
+the GitHub Actions cache. Testing only; no node behaviour changes.
+
+A BCH job that does not fit BCHN's block size limit no longer stops the
+node from serving miners. The pool withdraws the work, which disconnects
+SV1 and SV2 miners so none keeps hashing a stale job, logs the sizes with
+advice to lower BCHN's `-blockmaxsize` or `-percentblockmaxsize`, and
+publishes the next template that fits. BCHN's template transactions are
+never trimmed.
+
+The Stratum V2 Template Provider is now asked to reserve 0 BCH SigChecks
+for the coinbase instead of 1,922 legacy sigops: Bitcoin Cash counts
+SigChecks, and a coinbase executes no scripts.
+
+A share whose BCH header meets the target that header claims is no longer
+counted as a found block on its own say-so. It is kept as a candidate,
+and it becomes a found block only once BCHN accepts it: a positive
+`submitblock` verdict for a block this node submits, or BCHN reporting
+the block in its chain for one found through another node. Only accepted
+blocks appear in the API and found-block metrics and reset block effort.
+A background worker checks candidates without slowing share processing,
+and stops checking one once BCHN has finalized another block at its
+height. Payouts and share-chain rules are unchanged.
+
+Uncles now count when a node picks the best share chain: a chain's work
+is its shares' work plus the work of every uncle they name. This is a
+share-chain rule change approved on 2026-10-30 and taken from upstream
+P2Poolv2 (604fe3ce), not a Bitcoin Cash consensus change; no share
+becomes valid or invalid. Nodes now check a share's uncles before
+organising its header, during header sync and when a block arrives
+(upstream de1c1c73), and header sync waits for an uncle the way it waits
+for a parent. A node now picks uncles from its own branch only, so an
+uncle named on a losing branch can still be named (upstream d14d8a00).
+The share-chain store records a format version: a store written before
+this change is refused at startup with a message to delete it and resync
+the share chain from peers.
+
+The PHOTON payout design now records the rules the owner adopted on
+2026-10-30, for the PHOTON pool only: first come, first served; the rest
+of a win paid ahead within the expected credit of shares already found,
+with no launch custody; no window script cap; a 48-hour window; and the
+version 2 lean covenant. BCH P2Pool's payouts and share chain are
+unchanged. Design text only; no node or share-chain code.
+
+`cargo photon-payout-sim --candidate-summary` re-runs the PHOTON payout
+study under four candidate rules the owner asked to test, none adopted:
+first come, first served; pay-ahead bounded by the expected credit of
+shares already found, with no launch custody; no window script cap; and
+other share rates and window lengths. At 1,000 miners no win is blocked
+and a fixed small miner is paid about as often as its threshold formula
+predicts. At 10,000 miners a 12-hour window often leaves no valid payout
+list; a 48-hour window removes every blocked win. A version 2 lean
+covenant pays in the share chain's order; version 1 is unchanged.
+Offline study only.
+
+`cargo photon-payout-sim` is a seeded simulation of the PHOTON
+minimum-payout rules for 1,000 and 10,000 miners with mixed hash rates,
+multiples, churn and delayed funding. Under the rules as written it finds
+that small miners are not paid within 5,000 wins: most-owed priority, a
+launch backlog that never shrinks, sparse shares and the leftover
+4,096-script window cap. The design document records these findings and
+candidate changes, none adopted. Offline study only.
+
+An additive lean PHOTON split covenant, checked CashAssembly, independent
+integer reference, transaction builder and dual-mode BCH 2026 VM tests
+measure direct owed-balance payouts and per-payee token reimbursement.
+`cargo photon-lean-measure` records fees, dust, BCH fronting and the
+script-size/operation-cost boundaries. The existing funded-tree program
+and tests remain unchanged. No claim-side or node integration is included.
+
+The owner's 2026-10-30 PHOTON payout study makes a direct minimum-payout
+split the main proposed path: backed balances carry between wins, miners
+choose a minimum multiple, and submitters front BCH for a fixed token
+reimbursement per payment. The design retains proof-seed/parent/context
+binding and records bootstrap, tail-coverage, cap, reservation and funding
+blockers. The earlier funded tree and phase 2a measurements remain as a
+historical alternative. This is offline design work only.
+
+The isolated, offline `p2poolv2_photon_payout` phase 2a prototype implements
+the funded PHOTON payout covenant, checked 336-byte state, Merkle-sum tree,
+exact token allocation and Rust transaction builders. It verifies positive
+and adversarial transactions in both pinned libauth BCH 2026 VM modes,
+including a complete 4,096-leaf tree, and provides reproducible resource,
+dust, fee and funding-path measurements through `cargo photon-payout-measure`.
+It is developer tooling only, AGPL-3.0-or-later and excluded from releases.
+No node integration, network spending, BCHN acceptance or PHOTON v3.2
+claim-side approval is included.
+
+`cargo safa claimer claimer.json` follows an operator-selected SAFA vault,
+resolves pool wins' payout and split scripts by HASH256, and verifies every
+claim in the BCH 2026 VM before broadcasting. Its atomic journal resumes
+log offsets, delays and pending sends; atomic token-file updates preserve
+all other fields. It follows external claims and AMM moves, drops stale
+proofs, and supports `--once` and `--dry-run`. An unchanged public tSAFA
+pool win is covered by offline VM tests. Mainnet uses the same code with a
+different deployment and configuration.
+
+The tSAFA test token is deployed on chipnet (genesis
+`8c5ecd6d…c471`, category `1e642d4e…00fe`, 4 threads), with PHOTON's
+emission of 1/420,000 of a vault's remaining tokens per claim. Its
+parameters are in `p2poolv2_safa/README.md`.
+
+Stratum V2 declared token jobs now pass the token-share ASERT band before
+the node asks BCHN to validate a proposal or installs the job. A refusal
+returns `invalid-token-asert` and preserves the channel's existing work.
+The exact empty commitment still follows the no-token path. Vote-span and
+genesis-stop regressions now traverse real stored headers rather than a
+mocked chain. SAFA claim targets reject thread counts outside 1 to 63 and
+have named historical target vectors and repeated-job coverage.
+
 Bitcoin Cash donation and operator fee are taken per share, as P2Pool v1
 took its donation (the owner's decision, 2026-10-29). Each window share's
 own donation, then its fee from what the donation leaves, come off that

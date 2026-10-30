@@ -187,6 +187,10 @@ pub struct GetBlockchainInfo {
     /// `regtest` on BCHN. `None` when the node does not report one.
     #[serde(default)]
     pub chain: Option<String>,
+    /// Height of the node's best chain. `None` when the node does not
+    /// report one.
+    #[serde(default)]
+    pub blocks: Option<u64>,
 }
 
 /// The fields of a verbose `getblockheader` result that are read.
@@ -337,6 +341,32 @@ impl BitcoindRpcClient {
 
     pub async fn getblockchaininfo(&self) -> Result<GetBlockchainInfo, BitcoindRpcError> {
         self.request("getblockchaininfo", vec![]).await
+    }
+
+    /// Hash, as hex, of the tip of the node's best chain.
+    pub async fn get_best_block_hash(&self) -> Result<String, BitcoindRpcError> {
+        self.request("getbestblockhash", vec![]).await
+    }
+
+    /// The 80-byte header of the block with `block_hash`, from a
+    /// non-verbose `getblockheader`. An RPC error when the node does not
+    /// know the block.
+    pub async fn get_block_header(
+        &self,
+        block_hash: &str,
+    ) -> Result<bitcoin::block::Header, BitcoindRpcError> {
+        let text: String = self
+            .request(
+                "getblockheader",
+                vec![serde_json::json!(block_hash), serde_json::json!(false)],
+            )
+            .await?;
+        let bytes = hex::decode(&text).map_err(|error| BitcoindRpcError::ParseError {
+            message: format!("block header {block_hash} is not hex: {error}"),
+        })?;
+        bitcoin::consensus::deserialize(&bytes).map_err(|error| BitcoindRpcError::ParseError {
+            message: format!("block header {block_hash} does not decode: {error}"),
+        })
     }
 
     /// Hash, as hex, of the block at `height` on the node's best chain. An

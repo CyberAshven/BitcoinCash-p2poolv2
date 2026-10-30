@@ -16,8 +16,10 @@ mod handle;
 pub use handle::StoreHandle;
 
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
+use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
+use crate::store::found_block::FoundBlock;
 use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::PruneStats;
 use bitcoin::{BlockHash, TxMerkleNode, Txid};
@@ -49,6 +51,10 @@ pub enum StoreError {
     /// A block body below the prune target was offered for storage. Its
     /// body would be deleted again, so it is refused.
     BelowPruneHeight(BlockHash),
+    /// The store was written in another format than this build's
+    /// (`STORE_FORMAT_VERSION`). Raised at startup; the operator must
+    /// delete the store and resync.
+    OutdatedStore(String),
 }
 
 impl fmt::Display for StoreError {
@@ -65,6 +71,7 @@ impl fmt::Display for StoreError {
             StoreError::BelowPruneHeight(blockhash) => {
                 write!(f, "Block {blockhash} is below the prune target")
             }
+            StoreError::OutdatedStore(msg) => write!(f, "Outdated store: {msg}"),
         }
     }
 }
@@ -132,6 +139,24 @@ pub enum WriteCommand {
     AddPplnsShare {
         pplns_share: SimplePplnsShare,
         reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+
+    /// Add Bitcoin Cash headers this node now knows.
+    AddBchHeaders {
+        headers: Vec<KnownBchHeader>,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    /// Point heights of the BCH best-chain index at new blocks and set its
+    /// tip, dropping heights above the tip.
+    SetBchBestChain {
+        updates: Vec<(u32, BlockHash)>,
+        tip_height: u32,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    /// Record a block whose BCHN acceptance the caller has verified.
+    RecordAcceptedFoundBlock {
+        found_block: FoundBlock,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
     },
 
     /// Keep a found block's payout tree (idempotent).
@@ -306,6 +331,23 @@ impl StoreWriter {
             WriteCommand::PutPayoutTree { tree, reply } => {
                 debug!("Keeping the payout tree of coinbase {}", tree.coinbase_txid);
                 let result = self.store.put_payout_tree(&tree);
+                let _ = reply.send(result);
+            }
+
+            WriteCommand::AddBchHeaders { headers, reply } => {
+                let result = self.store.add_bch_headers(&headers);
+                let _ = reply.send(result);
+            }
+            WriteCommand::SetBchBestChain {
+                updates,
+                tip_height,
+                reply,
+            } => {
+                let result = self.store.set_bch_best_chain(&updates, tip_height);
+                let _ = reply.send(result);
+            }
+            WriteCommand::RecordAcceptedFoundBlock { found_block, reply } => {
+                let result = self.store.record_accepted_found_block(&found_block);
                 let _ = reply.send(result);
             }
 
