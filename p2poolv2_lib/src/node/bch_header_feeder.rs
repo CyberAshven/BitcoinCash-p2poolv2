@@ -21,6 +21,11 @@
 //!
 //! On a node whose store knows no header yet, the walk stops after
 //! [`INITIAL_HEADERS`] blocks and asks BCHN for the height of the oldest.
+//! The node runs one round before it dials peers
+//! ([`BchHeaderFeeder::first_sync`]), so the share bodies they send find
+//! their BCH prevs known instead of being dropped and fetched again. One walk
+//! runs at a time in a node: the feeder, the template relay and that first
+//! round each walk BCHN's headers, and a walk that waited finds them known.
 //! These headers come from the node's own BCHN, which has validated them, so
 //! they are not run through `BchHeaderRules::check`; headers from peers are.
 //!
@@ -40,7 +45,8 @@ use bitcoin::hashes::Hash;
 use bitcoindrpc::BitcoindRpcClient;
 use std::str::FromStr;
 use std::time::Duration;
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::sync::Mutex;
+use tokio::time::{MissedTickBehavior, interval, timeout};
 use tracing::{debug, info, warn};
 
 /// How often the feeder asks BCHN for its best block.
@@ -54,6 +60,16 @@ pub const INITIAL_HEADERS: usize = 8_400;
 /// The most best-chain index entries one update rewrites: a reorg deeper
 /// than BCHN allows (10 blocks), or a first index over the whole store.
 const MAX_INDEX_REWRITE: usize = INITIAL_HEADERS + 1;
+
+/// How long a node waits for its first round of BCHN's headers before it
+/// syncs shares anyway. A new store's walk of [`INITIAL_HEADERS`] took about
+/// a minute against a BCHN over Tailscale.
+pub(crate) const FIRST_SYNC_LIMIT: Duration = Duration::from_secs(300);
+
+/// One header walk at a time in a node process. Without it, the walks of a
+/// new store by the feeder, the template relay and the first round would
+/// each fetch the same [`INITIAL_HEADERS`] from BCHN.
+static WALK: Mutex<()> = Mutex::const_new(());
 
 #[derive(Clone)]
 pub(crate) struct BchHeaderFeeder {
@@ -86,6 +102,25 @@ impl BchHeaderFeeder {
         }
     }
 
+    /// One round before this node syncs shares from peers, so the share
+    /// bodies it fetches find their BCH prevs known. Gives up after `limit`,
+    /// or on a BCHN error, and leaves the rest to [`Self::run`]: a node
+    /// whose BCHN is down still starts.
+    pub(crate) async fn first_sync(&self, limit: Duration) {
+        match timeout(limit, self.sync_once()).await {
+            Ok(Ok(added)) => {
+                info!("Learned {added} Bitcoin Cash headers from BCHN before syncing shares")
+            }
+            Ok(Err(error)) => {
+                warn!("Cannot follow BCHN's headers before syncing shares: {error}")
+            }
+            Err(_) => warn!(
+                "BCHN's headers took longer than {} s; syncing shares while the feeder goes on",
+                limit.as_secs()
+            ),
+        }
+    }
+
     /// Learn the headers from BCHN's best block back to a known one, index
     /// BCHN's best chain, and return how many headers were added.
     async fn sync_once(&self) -> Result<usize, String> {
@@ -104,6 +139,7 @@ impl BchHeaderFeeder {
     /// Learn `hash` and the headers below it back to a known one, from BCHN,
     /// and return how many were added. BCHN must know `hash`.
     pub(crate) async fn learn_from(&self, hash: BlockHash) -> Result<usize, String> {
+        let _walk = WALK.lock().await;
         let mut hash = hash;
         let mut walked: Vec<Header> = Vec::new();
         let oldest_height = loop {

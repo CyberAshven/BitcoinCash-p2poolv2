@@ -349,3 +349,75 @@ async fn the_template_relay_learns_a_new_templates_parent_first() {
         .count();
     assert_eq!(header_requests, 3, "one walk of three headers, not two");
 }
+
+/// Two walks at once, as the feeder and the template relay start them on a
+/// new store, fetch each header from BCHN once: the second waits and finds
+/// them known.
+#[tokio::test]
+async fn walks_at_once_fetch_each_header_once() {
+    let chain = chain_from_first_block(3, 0);
+    let server = bchn(&chain[2], &chain).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+    let first = feeder(&server, &held);
+    let second = feeder(&server, &held);
+
+    let (first_added, second_added) = tokio::join!(
+        first.learn_from(chain[2].block_hash()),
+        second.learn_from(chain[2].block_hash())
+    );
+
+    let mut added = [first_added.unwrap(), second_added.unwrap()];
+    added.sort_unstable();
+    assert_eq!(added, [0, 3]);
+    let requests = server.received_requests().await.unwrap();
+    let header_requests = requests
+        .iter()
+        .filter(|request| String::from_utf8_lossy(&request.body).contains("getblockheader"))
+        .count();
+    assert_eq!(header_requests, 3);
+}
+
+/// The round before share sync learns and indexes BCHN's chain.
+#[tokio::test]
+async fn the_first_sync_learns_bchns_chain() {
+    let chain = chain_from_first_block(3, 0);
+    let server = bchn(&chain[2], &chain).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+
+    feeder(&server, &held)
+        .first_sync(Duration::from_secs(10))
+        .await;
+
+    let held = held.lock().unwrap();
+    assert_eq!(held.headers.len(), 3);
+    assert_eq!(held.tip, Some(2));
+}
+
+/// A BCHN that does not answer in time, or at all, never holds up the node:
+/// the first round gives up and learns nothing.
+#[tokio::test]
+async fn the_first_sync_gives_up_on_a_slow_or_absent_bchn() {
+    let slow = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"result": null, "error": null, "id": 0}))
+                .set_delay(Duration::from_secs(30)),
+        )
+        .mount(&slow)
+        .await;
+    let held = Arc::new(Mutex::new(Held::default()));
+    let started = std::time::Instant::now();
+    feeder(&slow, &held)
+        .first_sync(Duration::from_millis(200))
+        .await;
+    assert!(started.elapsed() < Duration::from_secs(10));
+
+    let absent = BchHeaderFeeder::new(
+        BitcoindRpcClient::new("http://127.0.0.1:9", "user", "pass").unwrap(),
+        store_holding(Arc::clone(&held)),
+    );
+    absent.first_sync(Duration::from_secs(10)).await;
+
+    assert!(held.lock().unwrap().headers.is_empty());
+}

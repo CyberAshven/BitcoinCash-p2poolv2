@@ -15,7 +15,7 @@ use crate::config::{Chain, Config, PoolMode};
 use crate::monitoring_events::MonitoringEventSender;
 use crate::node::Node;
 use crate::node::SwarmSend;
-use crate::node::bch_header_feeder::BchHeaderFeeder;
+use crate::node::bch_header_feeder::{BchHeaderFeeder, FIRST_SYNC_LIMIT};
 use crate::node::dns_seeds;
 use crate::node::emission_worker::EmissionWorker;
 use crate::node::found_block_verifier::FoundBlockVerifier;
@@ -111,6 +111,18 @@ impl NodeHandle {
             Some((pool, relay_rx)) => (Some(pool), Some(relay_rx)),
             None => (None, None),
         };
+        // Mining on the current chain: learn BCHN's headers before dialing
+        // peers, so the share bodies they send find their BCH prevs known.
+        if config.stratum.chain == Chain::BitcoinCash {
+            let client = BitcoindRpcClient::new(
+                &config.bitcoinrpc.url,
+                &config.bitcoinrpc.username,
+                &config.bitcoinrpc.password,
+            )?;
+            BchHeaderFeeder::new(client, chain_store_handle.clone())
+                .first_sync(FIRST_SYNC_LIMIT)
+                .await;
+        }
         let (node_actor, stopping_rx) = NodeActor::new(
             config,
             chain_store_handle,

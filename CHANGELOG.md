@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A Bitcoin Cash node learns BCHN's headers before it dials peers, for at
+most 5 minutes, so the share bodies peers send in the payout zone find
+their BCH prevs known instead of being dropped and fetched again. One walk
+of BCHN's headers runs at a time, so a new store's 8,400 headers are
+fetched once rather than by the feeder and the template relay each. On
+chipnet the first walk took about a minute; the node then built jobs on
+chipnet's tip. No share-chain rule changes.
+
 The payout rule, the last part of mining on the current chain (V16): a
 Bitcoin Cash coinbase pays a window share only when the BCH block the share
 builds on is on the paying share's BCH chain or one block off it, a block

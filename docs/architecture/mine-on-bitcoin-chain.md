@@ -625,8 +625,11 @@ This fork built the design on 2026-10-30, with these differences:
   Any other share on it is `Invalid`, and its body is never stored.
 - **An unknown prev** while building a window, the paying share's or a
   window share's, is `Recoverable` (`UnknownBchPrev`).
-- **Not built:** waiting for the first header sync before syncing shares,
-  and retaining a share whose carried headers do not link for a later retry.
+- **First header sync.** A node runs one round of the header feeder before
+  it dials peers, for at most 5 minutes, so the share bodies they send find
+  their prevs known. One walk of BCHN's headers runs at a time in a node.
+- **Not built:** retaining a share whose carried headers do not link for a
+  later retry. Its body is dropped and fetched again on the next sync retry.
 
 ## Open items
 
