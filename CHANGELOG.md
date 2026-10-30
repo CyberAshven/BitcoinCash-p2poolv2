@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The payout rule, the last part of mining on the current chain (V16): a
+Bitcoin Cash coinbase pays a window share only when the BCH block the share
+builds on is on the paying share's BCH chain or one block off it, a block
+that lost an orphan race or the block after a lagging template's. Work on a
+made-up block, or on a fork two or more blocks off the chain, earns nothing.
+Such a share keeps its slot and its work in the window, so the window's size
+does not depend on which shares are paid. An uncle off the chain earns
+nothing, and a nephew earns an uncle's bonus only when both are paid. The
+window's three blocks of work are now sized from the nBits Bitcoin Cash
+requires after the paying share's BCH prev, which every node computes from
+that known header, not from the nBits the share claims; the test networks'
+20-minute rule is left out. A share whose window pays no one is invalid; when
+this node's own template would pay no one, it withdraws work and tries the
+next template. A share building on the all-zero hash is invalid unless it is
+the share chain's first. Job Declaration preparation takes the template's
+previous block too. A share-chain rule change the owner approved, under the
+`bch-prev-1off` flag day: every Bitcoin Cash node must run it together. Not a
+Bitcoin Cash consensus change.
+
 A node now stores a peer's share body only once it knows the BCH block the
 share builds on, and a share in the payout zone whose BCH prev is unknown
 waits, `Recoverable`, until the header arrives. Share headers never wait,
@@ -15,7 +34,7 @@ shares older than its BCH headers. Each new template's previous block is
 learned from BCHN before jobs are built on it, so this node's own shares and
 the headers it sends with them never lack it. `mock_bitcoind` serves a
 made-up parent header for its BCHN templates. Third part of mining on the
-current chain (V16); the payout rule follows.
+current chain (V16).
 
 Share messages now carry the Bitcoin Cash headers a receiver needs to
 place each share's BCH prev, the second part of mining on the current
@@ -30,7 +49,7 @@ that pass; a header that fails rejects the message. The Bitcoin Cash
 protocol strings end in `bch-prev-1off`: a share-chain rule change the
 owner approved, shipped as a flag day, so nodes from before cannot peer
 and every node must upgrade together. It is not a Bitcoin Cash consensus
-change. Shares are not yet judged by their BCH prev.
+change.
 
 Merged upstream P2Poolv2 main (`c0c70cdb`) with git rather than copying
 its commits by hand, so later upstream changes merge with conflicts only
@@ -49,8 +68,7 @@ minimum-difficulty rule on test networks, a fixed nBits on regtest), and
 be dated at most two hours ahead. Tested on real mainnet and chipnet
 headers. A worker fills the store from the node's own BCHN, walking back
 from its best block every 5 seconds; a new node first learns 8,400
-headers, about 58 days. Nothing reads them yet, so no share-chain rule
-changes.
+headers, about 58 days.
 
 Bitcoin Cash miners can be paid to P2SH32 addresses (`OP_HASH256 <32
 bytes> OP_EQUAL`, from the 2023-05-15 upgrade), which contracts and

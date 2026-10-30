@@ -592,12 +592,49 @@ ineligible share. Share messages also gain carried headers.
   within 4x at a retarget boundary. A fake branch could use easy `bits`,
   at a quarter of a block per header or less.
 
+## On Bitcoin Cash
+
+This fork built the design on 2026-10-30, with these differences:
+
+- **Activation.** A flag day, not an activation height: the protocol strings
+  end in `bch-prev-1off`, so nodes without the rule cannot peer, and a node
+  refuses a share-chain store from before (`STORE_FORMAT_VERSION`). No share
+  keeps the old payout rule.
+- **Header store.** Fed from the local BCHN by walking back with
+  `getblockheader` from its best block every 5 seconds, and from each new
+  template's previous block before jobs are built on it, as "Possible
+  simplification" proposes; no zmq `sequence` handling. A new node first
+  learns 8,400 headers. Headers are checked with aserti3-2d, not Bitcoin's
+  retarget (`shares/bch_headers.rs`).
+- **Window size.** The Bitcoin Cash window holds `BCH_PPLNS_WINDOW_BLOCKS`
+  (3) expected blocks' worth of work, at most 120,960 shares. One block's
+  worth comes from the nBits Bitcoin Cash requires after the paying share's
+  bitcoin prev (`BchHeaderRules::sizing_bits`), not the nBits the paying
+  share claims, which only a found block must get right. The test networks'
+  20-minute rule is left out of it. Ineligible shares count towards the work
+  as they count towards the slots.
+- **Cache entries** hold the 32-byte bitcoin prev. The window caches each
+  prev's height and parent, and the paying chain it walked last, so the
+  eligible set of a new paying prev costs a walk over cached places.
+- **Nothing eligible.** A checking node marks the share `Invalid`
+  (`NothingEligible`), as above. The job builder withdraws the work instead
+  of stopping the node, as it does for any payout it cannot build:
+  connections close, and the next template is tried.
+- **The all-zero hash** is the bitcoin prev of the share chain's first share
+  only, which is built from the network's first block and never received.
+  Any other share on it is `Invalid`, and its body is never stored.
+- **An unknown prev** while building a window, the paying share's or a
+  window share's, is `Recoverable` (`UnknownBchPrev`).
+- **Not built:** waiting for the first header sync before syncing shares,
+  and retaining a share whose carried headers do not link for a later retry.
+
 ## Open items
 
 - **Checking a share with nothing eligible.** The decision was to stop
   the node. That is kept for the job builder, but a checking node marks
   the share `Invalid` instead, since an old bitcoin prev produces such a
-  share for one share's proof of work. To confirm.
+  share for one share's proof of work. To confirm. On Bitcoin Cash the job
+  builder withdraws work instead (see "On Bitcoin Cash").
 - **Pending-buffer gap.** Changes 1 and 2 under "Denial of service" fix
   an existing unbounded buffer and are independent of this design. They
   should be tracked as their own issue.
@@ -605,7 +642,8 @@ ineligible share. Share messages also gain carried headers.
   a share's own bitcoin header are not checked. A share can claim easy
   `bits` and show up as a found block in the found-block records and the
   effort metrics. Record a found block only if the local bitcoind
-  accepted it.
+  accepted it. Done on Bitcoin Cash: a block counts as found only once
+  BCHN accepts it.
 
 ## Formal model
 

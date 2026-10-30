@@ -632,6 +632,16 @@ Both counts are fixed share counts with no node-local setting and no bitcoin
 difficulty in them. Every node must pay the same window, so they are network
 constants rather than config.
 
+On Bitcoin Cash the window instead holds `BCH_PPLNS_WINDOW_BLOCKS` blocks'
+worth of work, sized from the nBits Bitcoin Cash requires after the share's
+BCH prev (`bitcoin_header.prev_blockhash`), and pays only the work on that
+prev's chain or one block off it (`sharechain_pplns/bch_eligibility.rs`,
+`mine-on-bitcoin-chain.md`). The notifier passes its template's bits and
+previous block (`PayingBlock`), the validator the share header's. A window
+that places work on a BCH block the node does not know yet is `Recoverable`
+(`UnknownBchPrev`); one that pays no one makes the share `Invalid`
+(`NothingEligible`).
+
 The window is anchored on the share's declared `prev_share_blockhash`, not the
 live confirmed tip, via `PplnsWindow::get_distribution_from_start_hash`. The
 work-building path (notify) anchors the coinbase it hands to miners on the same

@@ -204,11 +204,13 @@ version.
 
 ## Mining on the current chain
 
-Upstream adds a rule that a coinbase pays a share only if the Bitcoin Cash
-block the share builds on sits on the paying share's chain, or one block off
-it. **This fork has not built it yet.** See
-[Mining on the current chain](current-chain.md) for the design and what it
-needs on Bitcoin Cash.
+A coinbase pays a share only if the Bitcoin Cash block the share builds on
+sits on the paying share's chain, or one block off it, and the paying share's
+BCH prev sizes the window. A share whose window pays no one, or that builds on
+the all-zero hash without being the chain's first share, is invalid; a share
+whose window places work on a BCH block the node does not know yet waits,
+`Recoverable`. Built on 2026-10-30 from upstream's design. See
+[Mining on the current chain](current-chain.md).
 
 ## Bitcoin Cash blocks are not validated
 
