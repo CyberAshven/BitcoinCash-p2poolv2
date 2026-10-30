@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The owner's 2026-10-30 PHOTON payout study makes a direct minimum-payout
+split the main proposed path: backed balances carry between wins, miners
+choose a minimum multiple, and submitters front BCH for a fixed token
+reimbursement per payment. The design retains proof-seed/parent/context
+binding and records bootstrap, tail-coverage, cap, reservation and funding
+blockers. The earlier funded tree and phase 2a measurements remain as a
+historical alternative. This is offline design work only.
+
 The isolated, offline `p2poolv2_photon_payout` phase 2a prototype implements
 the funded PHOTON payout covenant, checked 336-byte state, Merkle-sum tree,
 exact token allocation and Rust transaction builders. It verifies positive

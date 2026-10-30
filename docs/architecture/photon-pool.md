@@ -1,21 +1,35 @@
 # Proposal: a decentralized pool for PHOTON GPU miners
 
-**Status: proposal with an owner-authorized, offline phase 2a prototype,
-2026-10-30.** Parameter choices below are proposed PHOTON share-chain rules.
+**Status: owner-approved minimum-payout design study, 2026-10-30.**
+The main payout path is the direct, minimum-payout split in section 5.
+The funded Merkle-sum tree and its complete phase 2a measurements are
+retained there as a historical alternative, no longer the main path.
+Parameter choices below are proposed PHOTON share-chain rules.
 They change neither BCH consensus nor PHOTON v3.2. The independent
 re-review of revision `4ecec7aa` clears only an isolated, test-only
 payout-covenant prototype. Share-chain and node work stay blocked until
 its findings F1 and F2 are fixed and re-reviewed (section 10). The owner
-authorized the isolated phase 2a prototype only; no node integration or
-spending is authorized. Its measured results are in section 5.
+authorized isolated offline covenant experiments and a Rust payout
+simulation for this study; no node integration, network calls or spending
+are authorized. The earlier tree's measured results remain in section 5.
 
 ## 1. Goal and scope
 
 Build a sister program in this Rust workspace. PHOTON miners contribute
 verifiable work to a separate peer-to-peer share chain. Each winning claim
-locks its reward to the preceding PPLNS window. Anyone can fund and execute
-the distribution. No operator holds the reward key or a withdrawal ledger.
+locks its reward to a direct payout commitment selected from the preceding
+share-chain ledger. Won tokens credit that ledger by the PPLNS window;
+unpaid balances carry between wins. Anyone can front the split's BCH and
+receive the committed token reimbursement. No operator holds the reward key
+or a private withdrawal ledger.
 Pickaxe is one client. The protocol must permit independent clients.
+
+The owner's decisions of **2026-10-30** distinguish two share-chain
+families. The BCH share chain continues mining BCH, with tokens merge-mined
+on that BCH work, SAFA style. Standalone token share chains serve tokens
+with their own proof of work, PHOTON v3.2 style. One program is configured
+per token; miners choose which chain to join. This study changes neither
+the BCH P2Pool program nor its payout rules.
 
 The owner chose this approach over a hosted Pickaxe pool on 2026-10-29.
 The goal is lower individual payout variance without a payout custodian.
@@ -250,9 +264,9 @@ is a format proposal; golden byte vectors must precede implementation.
 |---|---|
 | Domain | Wire version, 2 bytes; chain identifier, 32 bytes; BCH network identifier, 4 bytes; category, 32 bytes; vault lock hash, 32 bytes |
 | DAG metadata | Parent share identifier, 32 bytes; height, 8 bytes; timestamp in Unix seconds, 8 bytes; ordered uncle identifiers, each 32 bytes |
-| Work and ownership | Share target, 32 bytes; miner's token payout locking bytecode with length; authenticated per-share fee policy, if approved |
+| Work and ownership | Share target, 32 bytes; miner's token payout locking bytecode with length; minimum multiple (at least 10, default 20); authenticated per-share fee policy, if approved |
 | Baton anchor | Actual spent txid, 32 bytes; output index, 4 bytes; source value in satoshis, 8 bytes; source token amount in raw units, 8 bytes; source commitment, 100 bytes; source confirmation height in BCH blocks, 4 bytes, `0xffffffff` while unconfirmed; context BCH height, 4 bytes; vault-lineage digest, 32 bytes; transition count, 8 bytes; bounded path delta from the parent |
-| Distribution | Canonical parent-window weights root, 32 bytes; total integer weight; tree parameters and covenant version |
+| Distribution | Canonical parent-window weights commitment, total integer weight, ledger/reservation digest, voted C, payout cap/profile and covenant version; direct payout list in R |
 | Proof | Compressed public key, 33 bytes; nonce, 4 bytes; datasig, 64 bytes; tail decrement in raw units, 2 bytes; age in BCH blocks, 2 bytes |
 
 Proposed work and weight fields use unsigned 64-byte little-endian integers.
@@ -272,9 +286,12 @@ is not known when work starts. The spent baton outpoint is included.
 The payout vector is calculated from the parent, excluding the current
 share and its newly referenced uncles. This avoids a self-reference:
 current proof determines future credit, not its own reward commitment.
-The first job uses an explicit bootstrap distribution with the miner as
-the sole beneficiary until credited history exists. That exception and
-the genesis domain must be visible to every miner.
+The first job needs an explicit bootstrap rule. The former proposal paid
+the finding miner alone; the owner has not selected that exception for the
+minimum-payout design. No miner may be paid ahead of earned balance outside
+an owner-approved bootstrap rule. The genesis domain and any such exception
+must be visible to every miner. Empty prior balances cannot cover the first
+win under the ordinary rules; this is an open blocker, not a default rule.
 
 A server job supplies a reconstruction specification, not a final complete
 claim template. The claim public key is the miner's transient datasig key,
@@ -554,8 +571,10 @@ P2SH20 security in section 4 does not rely on any wall-clock window.
 
 ## 4. The payout commitment R
 
-`R` is the full root redeem bytecode. The claim's output index 1 is exactly
-`OP_HASH160 <HASH160(R)> OP_EQUAL`. Nodes rebuild `R`; they never accept
+`R` is the full payout redeem bytecode. With the P2SH20 candidate profile,
+the claim's output index 1 is exactly
+`OP_HASH160 <HASH160(R)> OP_EQUAL`; P2SH32 remains an open owner choice.
+Nodes rebuild `R`; they never accept
 a miner-supplied script hash without its expected preimage.
 
 The canonical constructor contains these immutable values:
@@ -563,9 +582,14 @@ The canonical constructor contains these immutable values:
 - A PHOTON-pool domain and covenant version, BCH network, token category
   and deployment lock hash.
 - The expected parent share identifier, spent baton outpoint,
-  `metadata_hash`, and canonical parent-window Merkle-sum root and weight.
-- Allocation order, tree shape, depth bounds, the reviewed program identifier,
-  and output/funding rules from section 5.
+  `metadata_hash`, canonical parent-window weights and ledger state digest.
+- For the main path: the direct ordered payee scripts, gross owed amounts,
+  each miner's minimum multiple, `C`, cap/profile version, the reviewed
+  program identifier and exact output/funding rules from section 5.
+  The digest binds the complete preceding share-chain ledger, including
+  outstanding reservations; BCH script execution does not authenticate
+  that ledger. The historical tree instead binds its Merkle-sum root,
+  total weight, allocation order, tree shape and depth bounds.
 - The complete proof seed: compressed claim public key, message nonce,
   exact datasig bytes, claimed age, sequence, derived contract target,
   and every other non-tail claim choice. Pin the amount layout, base
@@ -605,11 +629,21 @@ trip per batch. At about 1.6 GH/s per device, the host path is about
 for a CPU, but an extra pipeline stage before each tail window. Measure
 both options; the tail cost itself is unchanged.
 
-`R` commits weights, not final token amounts. The root reads the actual
-reward amount when spent. Different miners on the same parent therefore
-commit the same beneficiary weights, but generally different redeem
-scripts because their metadata differs. The brief's "same payout" is an
-economic statement, not necessarily an identical output script.
+On the main path, `R` directly commits ordered gross owed amounts rather
+than a Merkle tree. It reads the actual reward and derives each gross
+payment as `min(committed_owed, remaining_reward)`. It must consume that
+reward exactly while meeting every paid miner's minimum. Tail-dependent
+clipping can make a particular commitment unspendable; section 5 records
+the coverage and final-minimum conditions. Different miners on one parent
+generally have different `R` because their proof seed and metadata differ.
+The historical tree below commits weights rather than final token amounts.
+
+The security discussion that follows was reviewed for the historical tree.
+Its binding requirements continue to apply, but its script lengths and
+offset-dependent cost margins are not measurements of the lean program.
+The final lean `R` needs its own byte-exact review. References below to a
+bootstrap paying the finder describe the earlier proposal, not a selected
+bootstrap for this design.
 
 ### Cost-based P2SH20 decision
 
@@ -779,7 +813,164 @@ kernel models, and in its view that would remove the pool's
 competitiveness. Those percentages are unmeasured models. The auditor's
 sign-off on the final `R` bytes and the owner's choice remain open.
 
-## 5. A funded fungible-token payout covenant
+## 5. Minimum payouts with a lean direct split
+
+### The owner's design, in plain words
+
+These are the owner's decisions of **2026-10-30**, not independently chosen
+implementation defaults. The owner rejected making the funded payout tree
+the main path: the measured 4,096-leaf win needs 0.06985170 BCH externally,
+including 4,098,190 satoshis in fees, about 1,001 fee satoshis per payee.
+That can cost more than the small token payments are worth. Paying whole
+wins to miners in turn was also rejected: a very small miner could wait
+years. The tree, its code and its measurements remain available unchanged.
+
+Instead, each miner accumulates an owed token balance on the PHOTON share
+chain. Only actual won tokens create credit, allocated by the same PPLNS
+window described above. Nothing is advanced from hoped-for future wins.
+An unpaid balance carries forward and remains backed by won tokens. Miners
+choose how large a payment must become before it is worth settling.
+
+One lean transaction splits each funded win. It pays eligible miners with
+the largest balances first, up to a cap `N`. It pays each selected miner
+what is owed, clipping only the last payment to the reward still available.
+No payment may exceed what is owed; a clipped payment must still reach that
+miner's chosen minimum. The split must distribute its entire actual reward.
+It cannot create a token change output, donate a remainder, or pay ahead to
+make the numbers fit. If these conditions cannot all be met, the prototype
+rejects that split and records the conflict; it does not invent a bootstrap
+or change the priority rule.
+
+`C` is one payout's cost expressed in raw token units, a single share-chain
+parameter. Each miner records a multiple with their payout script in their
+shares: at least 10, with 20 as the default. Their minimum gross payment is
+`multiple * C`. The submitter fronts the BCH fee and output dust, receives
+`C` tokens from each payment, and sends the rest to its miner. Thus a miner
+paid exactly their minimum gives up `1 / multiple` of that gross token
+payment; larger payments lose less. Each miner keeps the BCH dust on their
+output. If nobody funds a split, the tokens stay locked and the miner's
+unpaid balance is retained.
+
+The owner requires that payouts never cost more BCH than the tokens are
+worth, with no sponsor. This is an execution condition, not a price oracle:
+an independent submitter chooses whether the token reimbursement covers
+its actual BCH outlay. `C` can be changed only through the share chain's
+upgrade vote. No automatic price update is part of this design. An on-chain
+Cauldron price averaged over about a week is a possible later option only.
+Without a price source the protocol cannot prove that token reimbursement
+is worth the BCH spent; no willing submitter means no settlement guarantee.
+
+### Exact ledger and selection rules
+
+1. Identify a miner by their authenticated payout script, aggregating that
+   script's window credit. Bind their multiple in their shares as with the
+   script. An omitted multiple means 20; values below 10 are invalid.
+   Multiple changes and conflicting multiples for one aggregated script
+   need a deterministic, authenticated activation rule before a profile is
+   frozen. A third party naming another miner's public script must not
+   acquire the right to change that miner's minimum. No latest/min/max
+   rule is selected here; changes must not rewrite an already locked `R`.
+2. Credit only the actual reward of a settled pool claim on the selected
+   BCH history. Use the parent PPLNS weights and exact telescoping integer
+   allocation: `floor(reward * upper / total) - floor(reward * lower / total)`.
+   This is accounting arithmetic, not a payout tree. A tail burn, if later
+   approved, is never credited. A conflicting lost claim creates no credit.
+3. Maintain gross owed balances, already reserved amounts and confirmed
+   gross debits separately. A split consumes gross debt; its payee receives
+   `gross - C`, and the submitter receives `C`. A payment that is merely
+   proposed or unfunded is not a confirmed debit. The backing identity is
+   `total won = confirmed gross debits + total gross owed`, with reorg-aware
+   rollback and exact integer arithmetic. Reserved debt is included in owed.
+4. Take the parent ledger snapshot before proof-seed/tail search. Exclude
+   debt already assigned to an immutable pending payout. Select available
+   balances at least `multiple * C`, descending by gross owed, breaking ties
+   by ascending raw locking bytecode. Bind the selected prefix and its
+   scripts, amounts and multiples directly in `R`; at most `N` payees can be
+   paid. `N` is a profile cap, independent of the old window's 4,096-script
+   bound. That credit-window bound is not automatically removed by this study.
+5. Let actual input tokens be `A`, `remaining = A`, and `paid_count = 0`.
+   Visit committed entries in order while `remaining > 0`. Set
+   `gross = min(committed_owed, remaining)`. Require
+   `gross >= multiple * C`, subtract `gross` from `remaining`, and emit
+   exactly `gross - C` tokens to that entry's exact script. Since
+   `multiple >= 10` and `C > 0`, every emitted amount is positive.
+   Increment `paid_count`. Reject unless `remaining == 0` and
+   `1 <= paid_count <= N`. Unused committed suffix entries receive no output.
+6. Emit exactly one submitter token output after the payees, with
+   `paid_count * C` tokens in the same category, then optionally one
+   token-free BCH change output. The submitter chooses its own standard
+   payout script. The payee outputs plus submitter tokens equal `A` exactly.
+   No other token output, burn, NFT, category change or token-bearing funding
+   is permitted on an authentic fungible-only payout path.
+7. Use input 0 as the sole payout input and one through four token-free
+   BCH funding inputs for the measured prototype. Require version 2,
+   locktime 0 and final sequences on all inputs. Bind output order, script,
+   token category and exact amounts. Each token output receives at least
+   the profile's dust minimum. Keep inherited payout BCH among the token
+   outputs; outside funding pays the fee and missing dust. The submitter's
+   BCH change carries no tokens. Funding signatures bind the actual complete
+   transaction. The covenant has no privileged executor or owner key.
+8. Reserve every immutable live win's gross allocations before selecting
+   another win's list; competing sibling jobs reserve only on the selected
+   settled branch. The selected baton lineage's accepted wins must be
+   reflected even if a share-parent ledger snapshot is older. Retain
+   winning `R`, source outpoints and allocation data
+   beyond normal share pruning. Funding refusal retains the reservation and
+   debt. Confirmation applies its debit once; reorgs undo dependent credits,
+   reservations and debits without relabeling old locked payout outputs.
+   Exact durable replay/finality rules are an integration gate, not code
+   supplied by this offline study.
+
+### Coverage conditions and open contradictions
+
+For a fixed pre-win list with owed values `owed_i`, define prefix sum
+`S_j = sum(owed_i for i < j)`. A reward `A` is distributable exactly when
+some prefix ends at entry `j <= N`, `S_j < A <= S_j + owed_j`, and its last
+gross payment `A - S_j >= multiple_j * C`; each preceding full payment
+must also meet its minimum. Equality at a completed prefix uses that
+preceding entry as the last payee. Merely having a list sum at least `A`
+is insufficient: a small last remainder violates the minimum.
+
+- **Bootstrap blocker.** Before the first won tokens there is no backed
+  eligible debt, yet `R` must be fixed before mining that first win. The
+  ordinary rules cannot construct that first payable job. A bootstrap is
+  required and remains the owner's decision. The former finder-only rule
+  is not carried forward as approval.
+- **Immutable list and tail gaps.** The supported tail changes `A` by up to
+  65,535 raw units. A list may cover the largest reward but fail a smaller
+  one at a prefix boundary. Validate coverage for every allowed tail, or
+  explicitly filter to payable tails while preserving proof validation.
+  Such filtering reduces useful search space and needs a profile decision.
+  Later earnings, a new `C`, or a new multiple cannot repair an old `R`.
+- **Cap and priority blockage.** The first `N` eligible balances might not
+  cover a whole reward, or clipping the last one can be below its minimum.
+  Skipping that entry, paying over debt, splitting a win into several
+  transactions or carrying token change would change the approved design.
+  This study fails closed and measures the resulting blocked wins.
+- **Timing and reservations.** Current-win credit is unknown until the
+  tail is found; it cannot be inserted into a list already hashed for that
+  proof. Earlier won balances and immutable pending lists must not be
+  promised twice. The aggregate backing identity alone does not guarantee
+  that every inaccessible old root can ever pay its remaining debt.
+- **Value and funding.** `C` is a token unit count, not proof of BCH value.
+  Fee-only estimates omit payee dust and the submitter's token-output dust.
+  The no-sponsor condition can stop payouts indefinitely when reimbursement
+  is unattractive. Vote timing and stale committed `C` can extend that stop.
+  A single `C` cannot exactly match every transaction's different amortized
+  fee, amount encoding and script lengths; it is a voted reimbursement
+  parameter. `C / gross` is the token deduction for fee plus dust, not a
+  measured pure BCH transaction-fee fraction.
+
+The lean covenant, measured costs and conditional simulation are added by
+the next two study steps. They do not resolve these owner decisions or
+approve a deployment.
+
+### Historical funded Merkle-sum tree: no longer the main path
+
+Everything below through the end of section 5 retains the earlier tree
+proposal and its phase 2a evidence for comparison. Its sponsor model,
+per-win allocations without accrual, tree state and caps apply to that
+alternative only. They do not override the minimum-payout rules above.
 
 ### Allocation and tree shape
 
@@ -1300,8 +1491,8 @@ delivery dates and do not include external audit waiting time.
 | `store`, `store/writer`, `store/organise`, chain handle | RocksDB lifecycle, serialized writes, atomic batches, locator and chain-index algorithms | Generic validated-work/header access, codecs, new database/genesis and PHOTON pruning depths | 2 to 4 engineer-weeks |
 | `pool_difficulty.rs` | Integer ASERT arithmetic | Positive strict-target work, PHOTON ceiling, anchors and parameters | 1 to 2 engineer-weeks |
 | `accounting/payout/sharechain_pplns` | Incremental window cache, work aggregation and uncle bookkeeping | PHOTON window, credit fields and rounding; remove BCH maturity, block-work sizing and traded payout rights | 2 to 4 engineer-weeks |
-| `shares/bch_payout_covenant`, `accounting/payout/payout_tree` | Test-harness and canonical-manifest patterns | New funded fungible covenant and weighted token tree | 3 to 6 engineer-weeks |
-| `node/payout_tree_executor`, `store/payout_tree`, API | Durable recovery, manifest serving, rebroadcast/reorg concepts | Sponsor budgets, dynamic funding/change, actual outpoint tracking; remove coinbase-maturity and fixed-txid assumptions | 2 to 4 engineer-weeks |
+| `shares/bch_payout_covenant`, `accounting/payout/payout_tree` | Test-harness and canonical-manifest patterns | Direct funded split, gross balance/reservation ledger and voted minimum parameters; historical tree retained separately | Earlier tree estimate 3 to 6 engineer-weeks; lean integration unestimated |
+| `node/payout_tree_executor`, `store/payout_tree`, API | Durable recovery, manifest serving, rebroadcast/reorg concepts | Submitter economic limits and token reimbursement, dynamic funding/change, actual outpoint tracking; remove coinbase-maturity and fixed-txid assumptions | Earlier tree estimate 2 to 4 engineer-weeks; lean integration unestimated |
 | Miner-facing protocol and job source | Rate-estimation concepts and BCHN RPC methods | PHOTON messages, baton watcher, job generation and submission | 2 to 4 engineer-weeks |
 | Cross-node verification and independent interoperability | Existing multi-node harness approach | Forks, funding adversaries, wins, reorgs, malicious jobs and external-client vectors | 3 to 6 engineer-weeks |
 
@@ -1319,9 +1510,10 @@ rules. The executor's separate 100-BCH-block coinbase maturity does not
 apply either. Full source files should not be copied and renamed merely
 to claim reuse. Integration work may overlap; the table is not a summed
 calendar schedule. Pickaxe changes and independent audit are additional.
-The effort rows sum to 20 to 40 engineer-weeks before that additional
-work [table arithmetic]. Unmeasured covenant feasibility and unresolved
-profile decisions prevent a reliable delivery estimate.
+The original tree effort rows summed to 20 to 40 engineer-weeks before
+that additional work. They are not a delivery estimate for the new ledger
+and lean payout path. Unresolved profile decisions prevent a reliable
+delivery estimate.
 
 ## 8. Miner protocol and Pickaxe work
 
@@ -1335,11 +1527,12 @@ the applicable protocol process; do not silently overload BCH messages.
 The protocol needs these operations:
 
 - Open a PHOTON channel with chain/deployment identifier, worker label,
-  payout script, supported layouts and covenant versions. No withdrawal
+  payout script, minimum multiple, supported layouts and covenant versions. No withdrawal
   key or wallet seed is sent.
 - Deliver a job identifier and generation, complete baton anchor, lineage
-  digest and path delta, parent and uncle context, PPLNS manifest/root,
-  canonical metadata, the `R` constructor, age, amounts, fee/value
+  digest and path delta, parent and uncle context, PPLNS weights,
+  ledger/reservation digest and direct payee list, canonical metadata,
+  voted `C`, cap and multiples, the `R` constructor, age, amounts, fee/value
   policy, layout, and the contract, chain and vardiff targets. Include enough data for the client
   to rebuild the template and check its beneficiary vector. The miner
   supplies its own transient key, nonce and datasig before constructing
@@ -1412,23 +1605,41 @@ share's authenticated credit policy, not the finding miner's whole window.
 | Historical baton after oracle spend | Authentic `V` is insufficient when the context includes confirmed `O` spending it. Reject that share and any share that references an old-baton uncle; filter PPLNS by paying lineage. An unconfirmed `O` creates no competing context. Conflicting single-input claims remain a risk until BCH resolves them; each needs a real contract win. |
 | A pool miner broadcasts a win to its own address | Changing output index 1 changes the checked HASH256. Reusing the same datasig does not preserve the PoW. A miner can mine a separate solo template, but that proof fails the pool's expected-`R` check and earns no pool credit. |
 | Duplicate payout inputs or reused output obligations | Exactly one distribution input at index 0; all funding inputs token-free. Check every input and output, not just the active input. |
-| Token burn, fake child lock or altered rounding | Distribution always conserves its actual input reward using exact sums and intervals. Claim-tail burning is a separate owner-selected profile with an exact bounded loss. Funding category must equal the empty vector; token amount zero cannot exclude NFTs. |
+| Token burn, theft or altered amounts | The lean split conserves the actual input reward: gross-minus-C to the committed payees, C per actual payee to the submitter. The historical tree uses telescoping intervals. Claim-tail burning remains a separate open profile. Funding category must equal the empty vector; token amount zero cannot exclude NFTs. |
 | Cached schedule carry or result-buffer overflow | Retain the conserved-tail carry guard or recompute block 8. Compare at the easier statistical/contract target, detect total hits above capacity, and rescan/subdivide at contract target until every win is recovered. |
 | Work overflow or uncle rounding/replay | Checked 512-bit work and weights, bounded wider products, raw-work clipping before conserved 9/1 uncle accounting, and ancestry-wide deduplication by claim digest. Existing saturating u128 PPLNS cannot be inherited. |
 | Redirect inherited BCH excess | Proposed beneficiaries have token entitlements and minimum BCH only. Aggregate excess can be assigned among them arbitrarily; funder signatures bind actual outputs. Owner must approve or require deterministic BCH allocation. |
 | Funding fee griefing | No inherited payout BCH can go to change or fees. Funders sign complete transactions and fund all fees. Never assume child-pays-for-parent will rescue a low-fee claim. No free public funding wallet. Competing funded spends may delay each other under local first-seen policy. |
-| Nobody sponsors distribution | Tokens wait with no deadline. Settlement liveness depends on a willing funder and retained manifests. Small entitlements may not justify their BCH cost. |
+| Nobody funds distribution | The main path has no sponsor. Tokens wait in their original R, owed balances remain, and immutable reservations prevent double payment. Settlement needs willing token-reimbursed submitters, retained manifests and a payable tail/list combination. A blocked R is not repaired by later earnings. |
 | Missing payout data or eclipse | Require data before credit, replicate and export winning manifests, retain them beyond DAG pruning, use independent peers. Hashes alone cannot recover missing scripts. |
 | Reorg or locktime malleability | Persist conflict sets by spent baton and claim digest, resolve actual txids, roll back dependent work and payout tracking. Never treat RPC acceptance as confirmation. |
 
 ## 10. Open decisions and phases
 
+The owner's 2026-10-30 minimum-payout choices above replace sponsorship
+and per-win tree fan-out as the main path. The following remain **open
+owner decisions**, with no default selected by this study:
+
+- The bootstrap rule for first wins before backed balances build up.
+- Miners who leave below their minimum: pay when a split has room, or
+  expire after a long time. Neither policy is implemented or assumed.
+- The payee cap `N` and the initial raw-token value of `C`.
+- How often `C` may change and the upgrade vote's threshold.
+- P2SH20 or P2SH32 for claim output index 1, after review of final lean `R`.
+- The share rate needed by the smallest miners; a fee threshold cannot
+  give credit to a miner who has not found a credited chain share.
+
+Coverage gaps, fixed-list reservations, multiple-change activation and
+the price/no-sponsor execution condition in section 5 also need explicit
+resolution before share-chain implementation. A possible week-averaged
+Cauldron price remains a later option, outside this design.
+
 The owner must decide the following before a profile is approved:
 
 - Share/PPLNS parameters, depth-based uncle policy, bootstrap beneficiary
   rule and restart after an outage longer than the path-delta bound,
-  authenticated-context lag policy, optional per-share fees, sponsor
-  budget and who is expected to fund small payouts.
+  authenticated-context lag policy and optional per-share fees. Sponsor
+  budgets belong only to the retained historical tree, not the main path.
 - Conserved tail or bounded tail burning. Burning trades token supply
   for a possible SHA-bound candidate-rate gain in solo and pool mining;
   it is not assumed merely because BCHN permits implicit burns.
@@ -1442,9 +1653,10 @@ The owner must decide the following before a profile is approved:
   freezes the aggregate-only rule as its default; this decision stays
   pending.
 
-The initial tree/state/funding/arithmetic caps in section 5 are fixed
-prototype bounds; changes require explicit profile revision and new
-measurements. No sponsor reimbursement from PHOTON is assumed.
+The historical tree/state/funding/arithmetic caps in section 5 remain fixed
+prototype bounds for that alternative. Its program and tests are retained.
+The main path reimburses submitters in tokens as specified above and has
+no sponsor; no initial `C`, cap `N` or bootstrap has been approved here.
 
 ### Gate status
 
@@ -1505,9 +1717,10 @@ Review and implementation gates, in order:
    authorization for any spending. Mainnet needs the owner's approval
    after the audit and measured results.
 
-### Phase 2 acceptance checklist
+### Historical funded-tree phase 2 acceptance checklist
 
-These are the re-review's acceptance tests. Every positive case must pass,
+These are the re-review's tests for the retained funded tree, not a lean
+split deployment approval. Every positive case must pass,
 and every mutation must fail, in the standard and non-standard libauth-rs
 VMs and in BCHN regtest.
 
