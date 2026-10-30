@@ -8,7 +8,7 @@ on 2026-10-23. Both v1 repositories were read, not run. Nothing on this page
 was measured on a live pool; the dust figures are arithmetic and say so.
 Implementation status for exact work and hybrid payouts was updated on
 2026-10-24 for PR #33; the original comparison remains the study baseline.
-The dated status below refreshes V1 to V23 from source at `7ebc0892`.
+The dated status below refreshes V1 to V23 from source at `e3b41b47`.
 
 P2Poolv2 is better than P2Pool v1 almost everywhere: uncles instead of lost
 orphans, ASERT instead of a 200-share retarget, Rust instead of Python 2, a
@@ -59,7 +59,7 @@ instead of repeating it.
 
 ## Status update: 2026-10-30
 
-These statuses come from source at `7ebc0892`. "Fixed" means the requested
+These statuses come from source at `e3b41b47`. "Fixed" means the requested
 code path exists. It does not mean a fresh live-pool or device check passed.
 The original study and recommendations below remain the baseline, except
 for the corrected merkle and stratum comparisons.
@@ -82,9 +82,9 @@ Paths in the evidence column use `L/` for `p2poolv2_lib/src/`, `C/` for
 | V10: Relay found blocks through share peers | Open | Extra RPC nodes are configured destinations, not share peers. `L/node/organise_worker.rs:825-837` records block-grade peer shares for effort accounting; it does not relay a full BCH block to BCHN. |
 | V11: No BCH transaction list in shares | Fixed | `L/shares/share_block/mod.rs:490-510` carries share transactions, the coinbase and its branch. It does not carry the BCH template's transaction list. |
 | V12: Compact coinbase transport | Open | The midstate proof exists at `L/shares/coinbase_proof.rs:6-20`. The full `bitcoin_coinbase` still travels at `L/shares/share_block/mod.rs:501-510`, and validators rebuild it at `L/shares/validation/mod.rs:1534-1553`. |
-| V13: Deeper merkle branches | Fixed to the adopted bound | `L/shares/coinbase_proof.rs:36-59` permits 32 levels for BCH share proofs. Token merge-mining proofs retain their separate 25-level bound. |
+| V13: Deeper merkle branches | Fixed to the adopted bound | `L/shares/coinbase_proof.rs:36-59` permits 32 levels for BCH share proofs. Token merge-mining proofs retain their separate 25-level bound at `L/shares/auxpow.rs:54,839`. |
 | V14: Node-derived block size | Partly fixed | `L/stratum/work/block_template.rs:190-203` checks the final block against the node's size limit. `L/stratum/work/prepared_notify.rs:934-960` trims only share transactions. Recovery when the final BCH coinbase exceeds template room remains A8. |
-| V15: Startup BCH chain check | Fixed | `N/preflight.rs:91-149` checks the chain name and BCH-only checkpoint. `C/lib.rs:310-321` supplies the mainnet and chipnet checkpoints. Regtest skips the checkpoint. RPC vendor identity is not proved. |
+| V15: Startup BCH chain check | Fixed | `N/preflight.rs:91-149` checks the chain name and BCH-only checkpoint. `C/lib.rs:309-325` supplies the mainnet, chipnet and scalenet checkpoints. Regtest skips the checkpoint. RPC vendor identity is not proved. |
 | V16: Work on the real BCH chain | Open | `L/shares/validation/mod.rs:839-854` checks BCH header target format only for token shares. Payout sizing still trusts the paying header's bits at `L/shares/validation/mod.rs:1510-1516`. The carried-header eligibility design is not implemented. |
 | V17: Work-weighted version votes | Partly fixed | `L/shares/share_version.rs:14-63,225-276` implements 60% acceptance and a 95% builder switch. Only version 1 is supported. A second-rule activation has not been demonstrated here. |
 | V18: Uncle rate and miner efficiency | Open | `A/api/endpoints/miner.rs:58-83` exposes miner share and uncle counts. `A/api/dashboard/history.rs:157-164` derives pool hashrate from confirmed shares alone. The requested pool uncle rate and miner efficiency are absent. |
