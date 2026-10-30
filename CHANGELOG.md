@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The P2P message decoder is now fuzzed: a cargo-fuzz harness, ported from
+upstream P2Poolv2, feeds arbitrary bytes to `RawMessage` decoding, both
+unframed and inside a correctly checksummed frame, so this fork's own
+payloads such as `ShareHeaderBatch` are reached. A 60-second smoke test
+runs on alpha pushes and pull requests as its own workflow, and a
+one-hour run is scheduled nightly. The corpus lives in the repository and
+the GitHub Actions cache. Testing only; no node behaviour changes.
+
 A BCH job that does not fit BCHN's block size limit no longer stops the
 node from serving miners. The pool withdraws the work, which disconnects
 SV1 and SV2 miners so none keeps hashing a stale job, logs the sizes with
