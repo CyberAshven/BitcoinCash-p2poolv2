@@ -304,3 +304,48 @@ async fn learn_from_walks_back_from_any_block_bchn_knows() {
     assert_eq!(held.headers[&chain[1].block_hash()], known(1, chain[1]));
     assert_eq!(held.index_writes, 0);
 }
+
+/// The relay learns each new template's previous block before passing the
+/// template on, and asks BCHN only when the previous block changes.
+#[tokio::test]
+async fn the_template_relay_learns_a_new_templates_parent_first() {
+    use crate::stratum::work::block_template::BlockTemplate;
+    let chain = chain_from_first_block(3, 0);
+    let server = bchn(&chain[2], &chain).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+    let mut template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    template.previousblockhash = chain[2].block_hash().to_string();
+    let template = Arc::new(template);
+
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+    let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(4);
+    let relay = tokio::spawn(relay_templates_learning_prevs(
+        BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap(),
+        store_holding(Arc::clone(&held)),
+        input_rx,
+        output_tx,
+    ));
+    for _ in 0..2 {
+        input_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::clone(&template),
+            })
+            .await
+            .unwrap();
+        let relayed = output_rx.recv().await.unwrap();
+        assert!(matches!(relayed, NotifyCmd::SendToAll { .. }));
+        assert_eq!(held.lock().unwrap().headers.len(), 3);
+    }
+    drop(input_tx);
+    relay.await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    let header_requests = requests
+        .iter()
+        .filter(|request| String::from_utf8_lossy(&request.body).contains("getblockheader"))
+        .count();
+    assert_eq!(header_requests, 3, "one walk of three headers, not two");
+}

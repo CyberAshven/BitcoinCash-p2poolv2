@@ -17,9 +17,12 @@ every 5 seconds it walks back from BCHN's best block to a known header,
 and a new node first learns 8,400 headers, about 58 days. Since the same
 day, share messages carry the BCH headers a receiver needs
 (`p2poolv2_lib/src/shares/bch_carried_headers.rs`), and the protocol
-strings end in `bch-prev-1off`, so nodes from before cannot peer. Not built
-yet: storing a share's body only once its BCH prev is known, and the payout
-rule. Until all of it
+strings end in `bch-prev-1off`, so nodes from before cannot peer. A node
+stores a peer's share body only once it knows the share's BCH prev, and a
+share in the payout zone with an unknown BCH prev is `Recoverable` until its
+header arrives; share headers, and so fork choice, never wait on it. Each
+new template's previous block is learned from BCHN before jobs are built on
+it. Not built yet: the payout rule. Until all of it
 is built, no share-chain rule has changed. This page explains the
 attack, the design, and what it needs on Bitcoin Cash. The full design, with
 its formal model, is

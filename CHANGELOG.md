@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A node now stores a peer's share body only once it knows the BCH block the
+share builds on, and a share in the payout zone whose BCH prev is unknown
+waits, `Recoverable`, until the header arrives. Share headers never wait,
+so every node keeps the same share header chain and a new node still syncs
+shares older than its BCH headers. Each new template's previous block is
+learned from BCHN before jobs are built on it, so this node's own shares and
+the headers it sends with them never lack it. `mock_bitcoind` serves a
+made-up parent header for its BCHN templates. Third part of mining on the
+current chain (V16); the payout rule follows.
+
 Share messages now carry the Bitcoin Cash headers a receiver needs to
 place each share's BCH prev, the second part of mining on the current
 chain (V16). A share carries the headers from its BCH prev back to the

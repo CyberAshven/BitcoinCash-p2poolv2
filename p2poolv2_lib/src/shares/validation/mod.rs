@@ -789,6 +789,38 @@ impl DefaultShareValidator {
         self
     }
 
+    /// Mining on the current chain: a Bitcoin Cash share in the payout zone
+    /// needs its BCH prev's header known before it can be paid or pay
+    /// others. Until a header arrives, with this share's message or a later
+    /// one, the share is `Recoverable`, never invalid: a node that has not
+    /// learned the header yet may learn it. The chain's first share builds on
+    /// the all-zero hash and is exempt. Shares below the payout zone are not
+    /// checked (`validate_below_pplns_depth`), so a new node syncs old shares
+    /// its header store does not reach.
+    fn validate_bch_prev_known(
+        &self,
+        share_header: &ShareHeader,
+        chain_store_handle: &ChainStoreHandle,
+    ) -> Result<(), ValidationError> {
+        if self.bch_header_rules.is_none() {
+            return Ok(());
+        }
+        let prev = share_header.bitcoin_header.prev_blockhash;
+        if prev == BlockHash::all_zeros() {
+            return Ok(());
+        }
+        match chain_store_handle.get_bch_header(&prev) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(ValidationError::recoverable(format!(
+                "Bitcoin Cash block {prev} that share {} builds on is not known yet",
+                share_header.block_hash()
+            ))),
+            Err(error) => Err(ValidationError::store_access(format!(
+                "Cannot read Bitcoin Cash header {prev}: {error}"
+            ))),
+        }
+    }
+
     /// The share-version vote rule (`shares::share_version`) for a Bitcoin
     /// Cash share: its version is its parent's, or the next one with 60% of
     /// the vote span's work behind it. Bitcoin shares carry no version.
@@ -1925,6 +1957,7 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_body_matches_header(share)?;
         self.validate_with_pool_difficulty(&share.header, chain_store_handle)?;
         self.validate_share_version(&share.header, chain_store_handle)?;
+        self.validate_bch_prev_known(&share.header, chain_store_handle)?;
         self.validate_uncles(&share.header, chain_store_handle)?;
         self.validate_uncle_bodies_present(share, chain_store_handle)?;
         self.validate_block_size(share)?;
@@ -2529,6 +2562,43 @@ mod tests {
                 .validate_payout_scripts(&header)
                 .is_ok()
         );
+    }
+
+    /// Mining on the current chain: a Bitcoin Cash share whose BCH prev is
+    /// not known is `Recoverable`, not invalid; known, it passes; the chain's
+    /// first share and a Bitcoin node are not checked.
+    #[test]
+    fn a_share_on_an_unknown_bch_prev_is_recoverable() {
+        use crate::shares::bch_headers::KnownBchHeader;
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.bitcoin_header.prev_blockhash = BlockHash::from_byte_array([0x77; 32]);
+        let bch = validator()
+            .for_chain(Chain::BitcoinCash)
+            .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Mainnet));
+        let store_knowing = |known: bool| {
+            let mut chain_store_handle = ChainStoreHandle::default();
+            let header = header.bitcoin_header;
+            chain_store_handle
+                .expect_get_bch_header()
+                .returning(move |_| Ok(known.then_some(KnownBchHeader { height: 1, header })));
+            chain_store_handle
+        };
+
+        let error = bch
+            .validate_bch_prev_known(&header, &store_knowing(false))
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Recoverable);
+        bch.validate_bch_prev_known(&header, &store_knowing(true))
+            .unwrap();
+
+        let mut first = header.clone();
+        first.bitcoin_header.prev_blockhash = BlockHash::all_zeros();
+        bch.validate_bch_prev_known(&first, &ChainStoreHandle::default())
+            .unwrap();
+        validator()
+            .for_chain(Chain::Bitcoin)
+            .validate_bch_prev_known(&header, &ChainStoreHandle::default())
+            .unwrap();
     }
 
     /// A P2SH32 payee (`OP_HASH256 <32 bytes> OP_EQUAL`), which

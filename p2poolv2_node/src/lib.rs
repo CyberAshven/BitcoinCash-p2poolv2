@@ -13,6 +13,7 @@ pub mod background_tasks;
 pub mod preflight;
 pub mod signal;
 
+use bitcoindrpc::BitcoindRpcClient;
 use p2poolv2_api::start_api_server;
 use p2poolv2_electrum::start_electrum_server;
 use p2poolv2_lib::accounting::payout::simple_pplns::share_worker::PplnsShareWorker;
@@ -23,6 +24,7 @@ use p2poolv2_lib::config::{
     BitcoinCashNetwork, Chain, Config, PoolMode, TemplateProvider, bitcoin_cash_donation_cashaddr,
 };
 use p2poolv2_lib::node::actor::NodeHandle;
+use p2poolv2_lib::node::bch_header_feeder::relay_templates_learning_prevs;
 use p2poolv2_lib::pool_difficulty::PoolDifficulty;
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::shares::merge_mining::MergeMiningCommitment;
@@ -307,7 +309,31 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let (notify_tx, notify_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
     let tracker_handle = start_tracker_actor();
 
-    let notify_tx_for_gbt = notify_tx.clone();
+    // On Bitcoin Cash each new template's previous block is learned before
+    // the notifier builds jobs on it (mining on the current chain).
+    let notify_tx_for_gbt = if stratum_config.chain == Chain::BitcoinCash {
+        let client = match BitcoindRpcClient::new(
+            &bitcoinrpc_config.url,
+            &bitcoinrpc_config.username,
+            &bitcoinrpc_config.password,
+        ) {
+            Ok(client) => client,
+            Err(e) => {
+                error!("Failed to create the BCHN client for templates: {e}");
+                return Err(ExitCode::FAILURE);
+            }
+        };
+        let (learning_tx, learning_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
+        tokio::spawn(relay_templates_learning_prevs(
+            client,
+            chain_store_handle.clone(),
+            learning_rx,
+            notify_tx.clone(),
+        ));
+        learning_tx
+    } else {
+        notify_tx.clone()
+    };
     let bitcoinrpc_config_cloned = bitcoinrpc_config.clone();
     // ZMQ block notifications only trigger getblocktemplate; a Template
     // Provider pushes its own templates, also after a block this node finds.

@@ -33,6 +33,7 @@ use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::stratum::work::notify::{NotifyCmd, NotifyReceiver, NotifySender};
 use bitcoin::BlockHash;
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
@@ -196,6 +197,38 @@ impl BchHeaderFeeder {
         self.store
             .get_bch_header(hash)
             .map_err(|error| format!("reading header {hash}: {error}"))
+    }
+}
+
+/// Relay block templates from `input` to the notifier on `output`, first
+/// learning each new template's previous block from BCHN. Without it a
+/// share mined in the seconds after a new block, before the next feeder
+/// round, would build on a block this node does not know: it could not
+/// check the share, nor send peers the header to place it.
+///
+/// A template whose previous block cannot be learned is still relayed: the
+/// feeder's next round retries, and holding work back would idle miners.
+pub async fn relay_templates_learning_prevs(
+    client: BitcoindRpcClient,
+    store: ChainStoreHandle,
+    mut input: NotifyReceiver,
+    output: NotifySender,
+) {
+    let feeder = BchHeaderFeeder::new(client, store);
+    let mut learned: Option<BlockHash> = None;
+    while let Some(command) = input.recv().await {
+        if let NotifyCmd::SendToAll { template } = &command
+            && let Ok(prev) = BlockHash::from_str(&template.previousblockhash)
+            && learned != Some(prev)
+        {
+            match feeder.learn_from(prev).await {
+                Ok(_) => learned = Some(prev),
+                Err(error) => warn!("Cannot learn template parent {prev} from BCHN: {error}"),
+            }
+        }
+        if output.send(command).await.is_err() {
+            break;
+        }
     }
 }
 

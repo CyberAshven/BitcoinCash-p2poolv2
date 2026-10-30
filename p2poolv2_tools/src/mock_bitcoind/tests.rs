@@ -45,7 +45,13 @@ fn the_default_is_the_bchn_regtest_template() {
     let template = bchn().template().clone();
     assert_eq!(template["bits"], "2100ffff");
     assert_eq!(template["target"], EASY_TARGET);
-    assert_eq!(template["previousblockhash"], BCHN_REGTEST_PARENT);
+    // The fixture's real parent has no header to serve, so the mock builds
+    // on a block it made up.
+    assert_ne!(template["previousblockhash"], BCHN_REGTEST_PARENT);
+    assert_eq!(
+        template["previousblockhash"],
+        bchn().parent().unwrap().block_hash().to_string()
+    );
     assert_eq!(template["height"], 102);
 }
 
@@ -155,10 +161,36 @@ fn submitblock_answers_null() {
 #[test]
 fn getbestblockhash_answers_the_template_parent() {
     let node = bchn();
+    let parent = node.parent().unwrap().block_hash();
     assert_eq!(
         body_of(reply_to(br#"{"method":"getbestblockhash","id":2}"#, &node)),
-        format!("{{\"result\":\"{BCHN_REGTEST_PARENT}\",\"error\":null,\"id\":2}}\n")
+        format!("{{\"result\":\"{parent}\",\"error\":null,\"id\":2}}\n")
     );
+}
+
+/// The made-up parent is served raw and verbose, linking to nothing, so
+/// a node following the mock's headers learns a one-block chain.
+#[test]
+fn getblockheader_serves_the_made_up_parent() {
+    let node = bchn();
+    let parent = *node.parent().unwrap();
+    let hash = parent.block_hash();
+    let raw = format!(r#"{{"method":"getblockheader","params":["{hash}",false],"id":4}}"#);
+    let response: Value = serde_json::from_str(&body_of(reply_to(raw.as_bytes(), &node))).unwrap();
+    let decoded: Header =
+        bitcoin::consensus::encode::deserialize_hex(response["result"].as_str().unwrap()).unwrap();
+    assert_eq!(decoded, parent);
+    assert_eq!(decoded.prev_blockhash, BlockHash::all_zeros());
+
+    let verbose = format!(r#"{{"method":"getblockheader","params":["{hash}",true],"id":5}}"#);
+    let response: Value =
+        serde_json::from_str(&body_of(reply_to(verbose.as_bytes(), &node))).unwrap();
+    assert_eq!(response["result"]["height"], 0);
+
+    let other = r#"{"method":"getblockheader","params":["00",false],"id":6}"#;
+    let response: Value =
+        serde_json::from_str(&body_of(reply_to(other.as_bytes(), &node))).unwrap();
+    assert_eq!(response["error"]["code"], -5);
 }
 
 #[test]
