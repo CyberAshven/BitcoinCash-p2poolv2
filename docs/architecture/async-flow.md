@@ -125,37 +125,57 @@ thread. These do NOT need `spawn_blocking` because:
 Write operations correctly use async channels to the StoreWriter thread
 because they involve compaction-visible mutations and batch commits.
 
-## Memory Budget: Two Weeks at One Share per 10 Seconds
+## BCH Storage and Memory Budget (2026-10-30)
 
-The chain retains two weeks of shares: 1,209,600 seconds / 10 = ~121,000 shares.
+These are planning estimates, not disk or cache measurements. MB and GB
+use decimal bytes. The rate assumption is one stored share per 10 seconds.
+The BCH payout window is capped at 120,960 shares, about two weeks. Body
+retention is longer: `BCH_PRUNE_DEPTH` is 242,126 shares, about 28 days,
+before the prune interval and background-task lag. Headers and merkle
+branches remain after body pruning.
 
-Per-share storage breakdown:
+A share stores its BCH coinbase, coinbase merkle branch and share-chain
+transactions. It does not store every transaction from the BCH template.
+`BitcoinTxids` has no production writer. The earlier estimate of 7.7 GB of
+template txids and 2 GB of deduplicated BCH bodies did not describe this
+store. See `store/share_store.rs` and `store/prune_blocks.rs`.
 
-| Component               | Per share  | 121K shares |
-|-------------------------|------------|-------------|
-| ShareHeader (with uncles) | ~282 B   | ~34 MB      |
-| BlockMetadata           | 38 B       | ~4.6 MB     |
-| Indexes (height, children) | ~64 B   | ~7.7 MB     |
-| Coinbase tx + share txids | ~120 B   | ~14.5 MB    |
-| Bitcoin txids (~2000/share) | ~64 KB  | ~7.7 GB     |
+For no-token shares with `N` direct P2PKH payees, use `367 + 34 * N`
+bytes as a conservative coinbase budget. The 367 bytes reserve every
+non-payee field at its largest size, including a tree output even when
+none is needed. P2SH20 outputs take 32 bytes each; P2SH32 outputs take 44.
+There is no BCH witness data or witness commitment. Token shares cap the
+coinbase at 3,072 bytes and move excess payees to a payout tree. No-token
+coinbases may reach 1,000,000 bytes. See `accounting/payout/coinbase_budget.rs`.
 
-Bitcoin transaction bodies are deduplicated across shares (~60 shares per
-bitcoin block). Over two weeks that is ~2016 bitcoin blocks at ~1 MB each
-= ~2 GB.
+| Coinbase scenario | Bytes per coinbase | 242,126 retained coinbases |
+|---|---|---|
+| 10 direct P2PKH payees | at most 707 | 0.17 GB |
+| 100 direct P2PKH payees | at most 3,767 | 0.91 GB |
+| 1,000 direct P2PKH payees | at most 34,367 | 8.32 GB |
+| Token-share limit | 3,072 | 0.74 GB |
+| No-token limit | 1,000,000 | 242.13 GB |
 
-Totals:
+The share-chain rule permits another 204,800 bytes of share transactions.
+Filling both body allowances on every retained share gives 291.71 GB of
+raw transaction bytes. This excludes headers, branches, keys, transaction
+indexes, payout-tree data, forks, RocksDB overhead and pruning lag. It is
+not an on-disk upper bound. See `shares/validation/mod.rs`.
 
-- Core share chain (headers + metadata + indexes): ~60 MB
-- Bitcoin txid lists per share: ~7.7 GB
-- Deduplicated bitcoin tx bodies: ~2 GB
-- Total on disk: ~10 GB
+At the same rate, permanent header and branch data grows by an estimated
+3.7-4.2 GB per year in the 32 MB to 1 GB template scenarios in the
+[pruning appendix](pruning.md#appendix-growth-of-data-kept-forever).
+BCHN holds full BCH block data separately. At 600 seconds per BCH block,
+two weeks contain about 2,016 blocks: 32 MB blocks would add 64.51 GB;
+128 MB blocks, 258.05 GB; and 1 GB blocks, 2.02 TB. These are hypothetical
+filled-block volumes. Mainnet's 32 MB ABLA floor is not a fixed block-size
+cap. Use the actual template size and BCHN's pruning settings when sizing
+a deployment. See the [ABLA specification](https://gitlab.com/0353F40E/ebaa/-/blob/main/README.md#configuration-constants).
 
-The core share chain (~60 MB) fits easily in the RocksDB block cache, so
-`getheaders` and `getblocks` reads stay in memory. `getdata_block` serves
-full shares including bitcoin txids (~7.7 GB total) which will not all fit
-in a typical block cache (256 MB - 1 GB). Serving old shares may hit disk,
-but this is acceptable because block fetching is decoupled to the
-BlockFetcher worker and is not latency-critical.
+Serialized byte counts do not predict heap use or cache hit rates. A
+large template also occupies memory in RPC decoding and job construction.
+Measure those paths and old-share reads under the intended load before
+assuming the working set fits in memory.
 
 ## When to Revisit
 
