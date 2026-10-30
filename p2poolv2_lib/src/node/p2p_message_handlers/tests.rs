@@ -610,6 +610,10 @@ async fn test_handle_response_share_headers() {
     let mut chain_store_handle = ChainStoreHandle::default();
 
     let mut mock_validator = MockDefaultShareValidator::default();
+
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     mock_validator
         .expect_validate_header_minimum_difficulty()
         .returning(|_| Ok(()));

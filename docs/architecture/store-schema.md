@@ -51,7 +51,7 @@ Stores block metadata (height, chain work, status).
 ```rust
 pub struct BlockMetadata {
     pub expected_height: Option<u32>,      // Expected block height in chain, if known
-    pub chain_work: Work,         // Cumulative chain work (32 bytes LE)
+    pub chain_work: Work,         // Parent's chain_work + own work + named uncles' own work (32 bytes LE)
 }
 ```
 
@@ -297,11 +297,14 @@ upstream name `btcaddress`.
 
 ### 13. `Metadata` - General Metadata
 
-Reserved for general metadata storage.
+Store-wide values.
 
-| Key | Value |
-|-----|-------|
-| TBD | TBD   |
+| Key            | Value                  | Notes |
+|----------------|------------------------|-------|
+| `store_format` | `u32` (4 bytes LE)     | `STORE_FORMAT_VERSION`, written with genesis. Startup refuses a store with another version or none, and tells the operator to delete it and resync |
+
+Version 1 (2026-10-30) is the first: chain work counts named uncles' work.
+Stores written before it have no version.
 
 ---
 
@@ -354,7 +357,8 @@ see `pruning.md`.
 ### Reorg Logic
 
 - Find common ancestor with current tip
-- If shares have common ancestor: compare cumulative `chain_work`
+- If shares have common ancestor: compare cumulative `chain_work`, which
+  includes the work of the uncles each chain names
 - If disjoint chains: compare work over PPLNS window
 - Update tips: remove prev_share_blockhash and uncles from tips
 

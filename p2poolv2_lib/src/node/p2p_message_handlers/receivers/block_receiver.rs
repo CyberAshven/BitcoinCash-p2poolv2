@@ -398,13 +398,19 @@ impl BlockReceiver {
     }
 
     /// The header checks a block passes before it is stored and organised:
-    /// ASERT difficulty, then the timestamp rules. A failure drops the block.
+    /// ASERT difficulty, the timestamp rules, then the uncle rules. A failure
+    /// drops the block. Storing organises the header, which credits its
+    /// uncles' work to chain work, so uncles are checked here rather than
+    /// only during full validation.
     fn validate_header_before_storing(
         &self,
         share_block: &ShareBlock,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.validate_asert(share_block)?;
-        self.validate_timestamp(share_block)
+        self.validate_timestamp(share_block)?;
+        self.share_validator
+            .validate_uncles(&share_block.header, &self.chain_store_handle)?;
+        Ok(())
     }
 
     /// Timestamp rules against the stored ancestry, as header sync applies

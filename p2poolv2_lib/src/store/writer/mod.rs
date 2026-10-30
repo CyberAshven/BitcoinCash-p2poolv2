@@ -49,6 +49,10 @@ pub enum StoreError {
     /// A block body below the prune target was offered for storage. Its
     /// body would be deleted again, so it is refused.
     BelowPruneHeight(BlockHash),
+    /// The store was written in another format than this build's
+    /// (`STORE_FORMAT_VERSION`). Raised at startup; the operator must
+    /// delete the store and resync.
+    OutdatedStore(String),
 }
 
 impl fmt::Display for StoreError {
@@ -65,6 +69,7 @@ impl fmt::Display for StoreError {
             StoreError::BelowPruneHeight(blockhash) => {
                 write!(f, "Block {blockhash} is below the prune target")
             }
+            StoreError::OutdatedStore(msg) => write!(f, "Outdated store: {msg}"),
         }
     }
 }

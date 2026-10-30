@@ -171,6 +171,114 @@ fn test_organise_header_reorgs_when_fork_has_more_work() {
     assert_eq!(top.hash, fork_share.block_hash());
 }
 
+// Chain-work tests ported from pool2win's upstream P2Poolv2 commit
+// 604fe3ce54b9129f2689eb81748c8447682fb3a6 (MIT OR Apache-2.0).
+/// A share's chain work includes the work of the uncles it lists, so a
+/// chain is weighed by all the work it references.
+///
+/// Scenario: genesis -> share1(h:1) -> share2(h:2), with uncle_block
+/// (work 2) as a fork child of genesis at h:1, listed by share2.
+#[test]
+fn test_organise_header_chain_work_includes_uncle_work() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+
+    let genesis = TestShareBlockBuilder::new().nonce(0xe9695791).build();
+    let mut batch = Store::get_write_batch();
+    store.setup_genesis(&genesis, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+
+    let share1 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .nonce(0xe9695792)
+        .build();
+    store.push_to_candidate_chain(&share1).unwrap();
+
+    let uncle_block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .work(2)
+        .nonce(0xe9695799)
+        .build();
+    store.store_with_valid_metadata(&uncle_block);
+
+    let share2 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share1.block_hash().to_string())
+        .uncles(vec![uncle_block.block_hash()])
+        .nonce(0xe9695793)
+        .build();
+    store.push_to_candidate_chain(&share2).unwrap();
+
+    let expected_work = genesis.header.get_work()
+        + share1.header.get_work()
+        + share2.header.get_work()
+        + uncle_block.header.get_work();
+    assert_eq!(
+        store
+            .get_block_metadata(&share2.block_hash())
+            .unwrap()
+            .chain_work,
+        expected_work
+    );
+}
+
+/// Fork choice weighs uncle work: a branch with less work on its main
+/// line but more total work once uncles count becomes the candidate tip.
+///
+/// Scenario: genesis -> share1(h:1), uncle_block (work 2) as a fork
+/// child of genesis at h:1. heavy_share (work 2) extends share1 and
+/// becomes the candidate tip. light_share (work 1) also extends share1
+/// and lists uncle_block. Both branches share genesis -> share1, so they
+/// differ only at h:2. On the main line alone light_share's branch has
+/// less work (1 < 2), but counting its uncle it has more (1 + 2 > 2).
+#[test]
+fn test_organise_header_reorgs_to_branch_with_more_uncle_work() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+
+    let genesis = TestShareBlockBuilder::new().nonce(0xe9695791).build();
+    let mut batch = Store::get_write_batch();
+    store.setup_genesis(&genesis, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+
+    let share1 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .nonce(0xe9695792)
+        .build();
+    store.push_to_candidate_chain(&share1).unwrap();
+
+    let uncle_block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .work(2)
+        .nonce(0xe9695799)
+        .build();
+    store.store_with_valid_metadata(&uncle_block);
+
+    let heavy_share = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share1.block_hash().to_string())
+        .work(2)
+        .nonce(0xe9695793)
+        .build();
+    store.push_to_candidate_chain(&heavy_share).unwrap();
+    assert_eq!(
+        store.get_top_candidate().unwrap().hash,
+        heavy_share.block_hash()
+    );
+
+    let light_share = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share1.block_hash().to_string())
+        .uncles(vec![uncle_block.block_hash()])
+        .nonce(0xe9695794)
+        .build();
+
+    let result = store.push_to_candidate_chain(&light_share).unwrap();
+
+    assert!(result.is_some());
+    assert_eq!(
+        store.get_top_candidate().unwrap().hash,
+        light_share.block_hash()
+    );
+}
+
 // Uncle-index assertions adapted from pool2win's upstream P2Poolv2 commit
 // d14d8a00b9acffe26149bb39585881461e09c228 (MIT OR Apache-2.0).
 /// Organising a header that references uncles should record the

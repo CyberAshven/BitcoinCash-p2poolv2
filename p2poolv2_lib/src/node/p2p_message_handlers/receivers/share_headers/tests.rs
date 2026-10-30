@@ -116,6 +116,10 @@ async fn test_fewer_than_max_headers_does_not_send_getheaders() {
     let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
 
     let mut mock_validator = MockDefaultShareValidator::default();
+
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let share_headers = vec![build_valid_test_header()];
@@ -147,6 +151,10 @@ async fn test_handle_share_headers_rejects_header_with_invalid_coinbase_proof() 
     let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
 
     let mut mock_validator = MockDefaultShareValidator::default();
+
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     mock_validator
         .expect_validate_header_minimum_difficulty()
         .returning(|_| Ok(()));
@@ -206,6 +214,10 @@ async fn test_handle_share_headers_stores_branches_of_validated_headers() {
     let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
 
     let mut mock_validator = MockDefaultShareValidator::default();
+
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let result = handle_share_headers(
@@ -219,6 +231,54 @@ async fn test_handle_share_headers_stores_branches_of_validated_headers() {
     .await;
 
     assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+}
+
+/// Organising a header credits its uncles' work to chain work, so a header
+/// whose uncles break a share-chain rule is rejected before it is
+/// organised, not only once its body is validated. Adapted from pool2win's
+/// upstream P2Poolv2 commit de1c1c73 (MIT OR Apache-2.0).
+#[tokio::test]
+async fn test_handle_share_headers_rejects_invalid_uncles_before_organising() {
+    let peer_id = libp2p::PeerId::random();
+    let header = build_valid_test_header();
+    let branch = vec![bitcoin::TxMerkleNode::from_byte_array([0x42; 32])];
+
+    let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_add_header_template_merkle_branches()
+        .returning(|_| Ok(()));
+    chain_store_handle.expect_organise_header().times(0);
+    setup_chain_validation_mocks(&mut chain_store_handle);
+
+    let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<oneshot::Sender<Message>>>(32);
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+
+    let mut mock_validator = MockDefaultShareValidator::default();
+    setup_minimum_difficulty_mock(&mut mock_validator);
+    mock_validator
+        .expect_validate_uncles()
+        .times(1)
+        .returning(|_, _| {
+            Err(ValidationError::consensus(
+                "Uncle is already listed by an ancestor of the nephew",
+            ))
+        });
+
+    let result = handle_share_headers(
+        peer_id,
+        ShareHeaderBatch::from_headers_with_branches(vec![(header, branch)]),
+        chain_store_handle,
+        swarm_tx,
+        block_fetcher_handle,
+        &mock_validator,
+    )
+    .await;
+
+    let error = result.unwrap_err();
+    assert!(
+        error.to_string().contains("already listed by an ancestor"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -264,6 +324,10 @@ async fn test_share_headers_sends_getheaders_to_same_peer() {
     let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
 
     let mut mock_validator = MockDefaultShareValidator::default();
+
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let first = build_valid_test_header();
@@ -334,6 +398,10 @@ async fn test_fewer_than_max_headers_sends_fetch_blocks_event() {
         block_fetcher::create_block_fetcher_channel();
 
     let mut mock_validator = MockDefaultShareValidator::default();
+
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let share_headers = vec![build_valid_test_header()];
@@ -377,6 +445,10 @@ async fn test_asert_mismatch_rejected() {
     let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
 
     let mut mock_validator = MockDefaultShareValidator::default();
+
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     // Header with wrong bits (genesis bits instead of MAX_POOL_TARGET)
@@ -414,6 +486,9 @@ fn test_validate_header_chain_accepts_single_header_linked_to_anchor() {
     let mut chain_store_handle = ChainStoreHandle::default();
     setup_chain_validation_mocks(&mut chain_store_handle);
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let result = validate_header_chain(
@@ -452,6 +527,9 @@ fn test_validate_header_chain_checks_timestamps_against_batch_and_store_ancestor
     let mut chain_store_handle = ChainStoreHandle::default();
     setup_chain_validation_mocks(&mut chain_store_handle);
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     mock_validator
         .expect_validate_header_minimum_difficulty()
         .returning(|_| Ok(()));
@@ -506,6 +584,9 @@ fn test_validate_header_chain_rejects_a_header_with_an_invalid_timestamp() {
     let mut chain_store_handle = ChainStoreHandle::default();
     setup_chain_validation_mocks(&mut chain_store_handle);
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     mock_validator
         .expect_validate_header_minimum_difficulty()
         .returning(|_| Ok(()));
@@ -563,6 +644,9 @@ fn test_validate_header_chain_accepts_linear_chain() {
     let mut chain_store_handle = ChainStoreHandle::default();
     setup_chain_validation_mocks(&mut chain_store_handle);
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let headers = vec![share_a, share_b];
@@ -602,6 +686,9 @@ fn test_validate_header_chain_accepts_uncle_before_nephew() {
     let mut chain_store_handle = ChainStoreHandle::default();
     setup_chain_validation_mocks(&mut chain_store_handle);
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     // Order: share_a, uncle, share_b (as get_descendant_blockhashes produces)
@@ -612,6 +699,98 @@ fn test_validate_header_chain_accepts_uncle_before_nephew() {
         &mock_validator,
     );
     assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+}
+
+/// Headers are organised in batch order, and organising a nephew reads its
+/// uncles' headers to add their work, so an uncle delivered after its
+/// nephew is treated as missing. Adapted from pool2win's upstream P2Poolv2
+/// commit 604fe3ce (MIT OR Apache-2.0).
+#[test]
+fn test_validate_header_chain_rejects_uncle_after_nephew() {
+    let anchor = TestShareBlockBuilder::new().nonce(1).build();
+    let anchor_hash = anchor.block_hash();
+    let mut share_a = TestShareBlockBuilder::new()
+        .prev_share_blockhash(anchor_hash.to_string())
+        .nonce(2)
+        .build()
+        .header;
+    share_a.bits = CompactTarget::from_consensus(MAX_POOL_TARGET);
+    // uncle is a sibling of share_a (same parent = anchor)
+    let mut uncle = TestShareBlockBuilder::new()
+        .prev_share_blockhash(anchor_hash.to_string())
+        .nonce(3)
+        .build()
+        .header;
+    uncle.bits = CompactTarget::from_consensus(MAX_POOL_TARGET);
+    let mut share_b = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share_a.block_hash().to_string())
+        .uncles(vec![uncle.block_hash()])
+        .nonce(4)
+        .build()
+        .header;
+    share_b.bits = CompactTarget::from_consensus(MAX_POOL_TARGET);
+
+    // Only the anchor is in the store.
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let template_header = build_valid_test_header();
+    let genesis_header = template_header.clone();
+    chain_store_handle
+        .expect_get_genesis_header()
+        .returning(move || Ok(genesis_header.clone()));
+    let share_header = template_header.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(share_header.clone()));
+    let asert_parent_header = template_header.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent_header,
+                0,
+                asert_parent_header.time,
+            ))
+        });
+    let anchor_metadata = BlockMetadata {
+        expected_height: Some(0),
+        chain_work: Work::from_hex("0x00").unwrap(),
+        status: Status::BlockValid,
+        chain: ChainMembership::Confirmed,
+    };
+    let single_metadata = anchor_metadata.clone();
+    chain_store_handle
+        .expect_get_block_metadata()
+        .returning(move |hash| {
+            if *hash == anchor_hash {
+                Ok(single_metadata.clone())
+            } else {
+                Err(StoreError::NotFound(format!("{hash} not found")))
+            }
+        });
+    chain_store_handle
+        .expect_get_block_metadata_batch()
+        .returning(move |hashes| {
+            Ok(hashes
+                .iter()
+                .filter(|hash| **hash == anchor_hash)
+                .map(|hash| (*hash, anchor_metadata.clone()))
+                .collect())
+        });
+    let mut mock_validator = MockDefaultShareValidator::default();
+    setup_minimum_difficulty_mock(&mut mock_validator);
+
+    // Order: share_a, share_b, uncle -- the uncle arrives after its nephew.
+    let headers = vec![share_a, share_b, uncle];
+    let result = validate_header_chain(
+        &share_header_batch_with_empty_branches(headers),
+        &chain_store_handle,
+        &mock_validator,
+    );
+    let error = result.unwrap_err();
+    assert!(
+        matches!(error, HeaderSyncError::MissingUncle { .. }),
+        "{error}"
+    );
 }
 
 #[test]
@@ -633,6 +812,9 @@ fn test_validate_header_chain_rejects_first_header_not_linked_to_anchor() {
         .expect_get_block_metadata_batch()
         .returning(|_| Ok(Vec::new()));
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let result = validate_header_chain(
@@ -709,6 +891,9 @@ fn test_validate_header_chain_rejects_forest_with_disconnected_subtree() {
         .expect_get_share_header()
         .returning(move |_| Ok(template_header.clone()));
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let headers = vec![share_a, share_c];
@@ -761,6 +946,9 @@ fn test_validate_header_chain_accepts_fork_from_anchor() {
     let mut chain_store_handle = ChainStoreHandle::default();
     setup_chain_validation_mocks(&mut chain_store_handle);
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let headers = vec![share_a, share_b, share_c, share_d];
@@ -806,6 +994,9 @@ fn test_validate_header_chain_accepts_uncle_referencing_anchor() {
     let mut chain_store_handle = ChainStoreHandle::default();
     setup_chain_validation_mocks(&mut chain_store_handle);
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let headers = vec![share_a, share_b, uncle, share_c];
@@ -879,6 +1070,9 @@ fn test_validate_header_chain_accepts_uncle_subtree_before_nephew() {
     let mut chain_store_handle = ChainStoreHandle::default();
     setup_chain_validation_mocks(&mut chain_store_handle);
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let headers = vec![
@@ -957,6 +1151,9 @@ fn test_validate_header_chain_accepts_uncle_declaring_confirmed_block_as_its_unc
     let mut chain_store_handle = ChainStoreHandle::default();
     setup_chain_validation_mocks(&mut chain_store_handle);
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     // Batch order: A, fork_parent, B, U, C
@@ -1058,6 +1255,9 @@ fn test_validate_header_chain_accepts_multiple_anchors() {
                 .collect())
         });
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let headers = vec![share_a, share_b];
@@ -1184,6 +1384,9 @@ async fn test_handle_share_headers_retries_on_missing_external_parent() {
         .expect_build_locator()
         .return_once(|_| Ok(vec![BlockHash::all_zeros()]));
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let (swarm_tx, mut swarm_rx) = mpsc::channel::<SwarmSend<oneshot::Sender<Message>>>(32);
@@ -1224,6 +1427,10 @@ async fn test_handle_share_headers_propagates_asert_mismatch() {
     let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
 
     let mut mock_validator = MockDefaultShareValidator::default();
+
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     // Header with wrong bits -- will trigger ASERT mismatch
@@ -1288,6 +1495,9 @@ fn test_validate_header_chain_rejects_batch_with_unknown_external_parent() {
                 .collect())
         });
     let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     setup_minimum_difficulty_mock(&mut mock_validator);
 
     let headers = vec![share_a, share_b];

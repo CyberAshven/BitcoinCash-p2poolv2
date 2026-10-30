@@ -96,6 +96,21 @@ Uncles are paid, so they pass the same checks as every share, plus:
 
 How uncles are paid is on [PPLNS accounting](pplns-accounting.md#uncles).
 
+Uncles also count when a node picks the best chain. Since 2026-10-30 a
+chain's work is the work of its shares plus the work of every uncle they
+name, each uncle counted once. A branch whose shares name uncles is
+heavier than its own shares alone, so nodes can pick a different best
+branch than they did before. This is a share-chain rule change, taken
+from upstream P2Poolv2 (commit 604fe3ce); it is not a Bitcoin Cash
+consensus rule, and it makes no share valid or invalid.
+
+Because a header adds its uncles' work as soon as it is organised, a node
+checks a share's uncles against the rules above before it organises the
+header: during header sync, and when a block arrives, not only when the
+body is validated. During header sync an uncle must arrive before the
+share that names it. Nodes send headers height by height, and an uncle is
+always lower than its nephew, so it does.
+
 ## Bitcoin Cash payouts follow the PPLNS window
 
 Every Bitcoin Cash coinbase a share carries must pay the share chain's PPLNS

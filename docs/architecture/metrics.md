@@ -171,11 +171,12 @@ Why the confirmed-chain work and not a per-share accumulator:
   chainwork), so it survives restarts and agrees across nodes. It also
   survives pruning, since the tip metadata carries the cumulative scalar
   rather than re-summing shares.
-- **Excludes uncle work.** `chain_work` sums only main-chain share work,
-  so this measures confirmed-chain hashrate and undercounts total pool
-  hashrate by the uncle/orphan rate. This mirrors how Bitcoin network
-  hashrate is estimated from chainwork and is the accepted trade-off for
-  reorg-safety.
+- **Includes named uncle work.** Since 2026-10-30 `chain_work` sums the
+  work of the main-chain shares and of every uncle they name, each uncle
+  once. This measures the hashrate behind the chain plus its named uncles.
+  It still undercounts total pool hashrate by the orphan rate: a share no
+  nephew names adds nothing. This mirrors how Bitcoin network hashrate is
+  estimated from chainwork and is the accepted trade-off for reorg-safety.
 
 **Only emitted while the chain is current** (`ChainStoreHandle::is_current`
 -- confirmed tip within `MAX_TIP_AGE_SECS` = 300s of now). During sync the

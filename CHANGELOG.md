@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Uncles now count when a node picks the best share chain: a chain's work
+is its shares' work plus the work of every uncle they name. This is a
+share-chain rule change approved on 2026-10-30 and taken from upstream
+P2Poolv2 (604fe3ce), not a Bitcoin Cash consensus change; no share
+becomes valid or invalid. Nodes now check a share's uncles before
+organising its header, during header sync and when a block arrives
+(upstream de1c1c73), and header sync waits for an uncle the way it waits
+for a parent. A node now picks uncles from its own branch only, so an
+uncle named on a losing branch can still be named (upstream d14d8a00).
+The share-chain store records a format version: a store written before
+this change is refused at startup with a message to delete it and resync
+the share chain from peers.
+
 The PHOTON payout design now records the rules the owner adopted on
 2026-10-30, for the PHOTON pool only: first come, first served; the rest
 of a win paid ahead within the expected credit of shares already found,

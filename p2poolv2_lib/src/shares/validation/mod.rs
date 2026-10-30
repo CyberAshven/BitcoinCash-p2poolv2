@@ -526,9 +526,14 @@ pub trait ShareValidator {
     /// include that an uncle may have only one nephew on a chain. Whether an
     /// uncle's block body is stored is checked separately, and only for blocks
     /// inside the PPLNS zone.
+    ///
+    /// Needs only headers and metadata, never bodies, so it runs before a
+    /// peer's header is organised (header sync and block receipt) as well as
+    /// during block validation. Organising credits uncle work to chain work,
+    /// so an unchecked header could otherwise inflate a branch's work.
     fn validate_uncles(
         &self,
-        share: &ShareBlock,
+        share_header: &ShareHeader,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError>;
 
@@ -954,17 +959,17 @@ impl DefaultShareValidator {
     /// uncle metadata are read in a single batch to avoid per-uncle lookups.
     fn validate_uncle_positions(
         &self,
-        share: &ShareBlock,
+        share_header: &ShareHeader,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError> {
-        if share.header.uncles.is_empty() {
+        if share_header.uncles.is_empty() {
             return Ok(());
         }
 
-        let parent_hash = share.header.prev_share_blockhash;
-        let mut hashes = Vec::with_capacity(1 + share.header.uncles.len());
+        let parent_hash = share_header.prev_share_blockhash;
+        let mut hashes = Vec::with_capacity(1 + share_header.uncles.len());
         hashes.push(parent_hash);
-        hashes.extend_from_slice(&share.header.uncles);
+        hashes.extend_from_slice(&share_header.uncles);
         let metadata_by_hash: HashMap<BlockHash, BlockMetadata> = chain_store_handle
             .get_block_metadata_batch(&hashes)
             .map_err(|error| {
@@ -992,7 +997,7 @@ impl DefaultShareValidator {
 
         let ancestry = self.collect_recent_ancestry(parent_hash, chain_store_handle)?;
 
-        for uncle in &share.header.uncles {
+        for uncle in &share_header.uncles {
             let uncle_height = metadata_by_hash
                 .get(uncle)
                 .ok_or_else(|| {
@@ -1906,7 +1911,7 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_body_matches_header(share)?;
         self.validate_with_pool_difficulty(&share.header, chain_store_handle)?;
         self.validate_share_version(&share.header, chain_store_handle)?;
-        self.validate_uncles(share, chain_store_handle)?;
+        self.validate_uncles(&share.header, chain_store_handle)?;
         self.validate_uncle_bodies_present(share, chain_store_handle)?;
         self.validate_block_size(share)?;
         self.validate_transaction_count(share)?;
@@ -1925,7 +1930,7 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_body_matches_header(share)?;
         self.validate_with_pool_difficulty(&share.header, chain_store_handle)?;
         self.validate_share_version(&share.header, chain_store_handle)?;
-        self.validate_uncles(share, chain_store_handle)?;
+        self.validate_uncles(&share.header, chain_store_handle)?;
         self.validate_block_size(share)?;
         self.validate_transaction_count(share)?;
         Ok(())
@@ -1933,21 +1938,21 @@ impl ShareValidator for DefaultShareValidator {
 
     fn validate_uncles(
         &self,
-        share: &ShareBlock,
+        share_header: &ShareHeader,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError> {
-        if share.header.uncles.len() > MAX_UNCLES {
+        if share_header.uncles.len() > MAX_UNCLES {
             return Err(ValidationError::consensus(format!(
                 "Too many uncles: {} exceeds maximum of {}",
-                share.header.uncles.len(),
+                share_header.uncles.len(),
                 MAX_UNCLES
             )));
         }
-        let unique_uncles: HashSet<&BlockHash> = share.header.uncles.iter().collect();
-        if share.header.uncles.len() != unique_uncles.len() {
+        let unique_uncles: HashSet<&BlockHash> = share_header.uncles.iter().collect();
+        if share_header.uncles.len() != unique_uncles.len() {
             return Err(ValidationError::consensus("Share has duplicate uncles"));
         }
-        self.validate_uncle_positions(share, chain_store_handle)?;
+        self.validate_uncle_positions(share_header, chain_store_handle)?;
         Ok(())
     }
 
@@ -2115,7 +2120,7 @@ mockall::mock! {
 
         fn validate_uncles(
             &self,
-            share: &ShareBlock,
+            share_header: &ShareHeader,
             chain_store_handle: &ChainStoreHandle,
         ) -> Result<(), ValidationError>;
 
@@ -3447,7 +3452,7 @@ mod tests {
 
         assert!(
             validator()
-                .validate_uncles(&valid_share, &chain_store_handle)
+                .validate_uncles(&valid_share.header, &chain_store_handle)
                 .is_ok()
         );
     }
@@ -3471,7 +3476,7 @@ mod tests {
             .miner_pubkey(PUBKEY_G)
             .build();
 
-        let result = validator().validate_uncles(&invalid_share, &chain_store_handle);
+        let result = validator().validate_uncles(&invalid_share.header, &chain_store_handle);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Too many uncles"));
     }
@@ -3487,7 +3492,7 @@ mod tests {
             .miner_pubkey(PUBKEY_G)
             .build();
 
-        let result = validator().validate_uncles(&invalid_share, &chain_store_handle);
+        let result = validator().validate_uncles(&invalid_share.header, &chain_store_handle);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("duplicate uncles"));
     }
@@ -3549,7 +3554,7 @@ mod tests {
             .build();
 
         validator()
-            .validate_uncles(&share, &chain_store_handle)
+            .validate_uncles(&share.header, &chain_store_handle)
             .expect("chain-shape acceptance must not depend on stored bodies");
     }
 
@@ -3602,7 +3607,7 @@ mod tests {
             .build();
 
         let error = validator()
-            .validate_uncles(&invalid_share, &chain_store_handle)
+            .validate_uncles(&invalid_share.header, &chain_store_handle)
             .unwrap_err();
         // A rule violation with all data present is a Consensus failure.
         assert_eq!(error.kind(), FailureKind::Consensus);
@@ -3632,7 +3637,7 @@ mod tests {
             .build();
 
         let error = validator()
-            .validate_uncles(&share, &chain_store_handle)
+            .validate_uncles(&share.header, &chain_store_handle)
             .unwrap_err();
         assert_eq!(error.kind(), FailureKind::Recoverable);
         assert!(error.to_string().contains("metadata not found"));
@@ -3667,7 +3672,7 @@ mod tests {
 
         assert!(
             validator()
-                .validate_uncles(&share, &chain_store_handle)
+                .validate_uncles(&share.header, &chain_store_handle)
                 .is_ok()
         );
     }
@@ -3723,7 +3728,7 @@ mod tests {
             .build();
 
         let error = validator()
-            .validate_uncles(&invalid_share, &chain_store_handle)
+            .validate_uncles(&invalid_share.header, &chain_store_handle)
             .unwrap_err();
         assert_eq!(error.kind(), FailureKind::Consensus);
         assert!(
@@ -3791,7 +3796,7 @@ mod tests {
             .build();
 
         let error = validator()
-            .validate_uncles(&invalid_share, &chain_store_handle)
+            .validate_uncles(&invalid_share.header, &chain_store_handle)
             .unwrap_err();
         assert_eq!(error.kind(), FailureKind::Consensus);
         assert!(
@@ -3843,12 +3848,12 @@ mod tests {
 
         assert!(
             validator()
-                .validate_uncles(&first_nephew, &chain_store_handle)
+                .validate_uncles(&first_nephew.header, &chain_store_handle)
                 .is_ok()
         );
         assert!(
             validator()
-                .validate_uncles(&second_nephew, &chain_store_handle)
+                .validate_uncles(&second_nephew.header, &chain_store_handle)
                 .is_ok()
         );
     }
@@ -3912,7 +3917,7 @@ mod tests {
 
         assert!(
             validator()
-                .validate_uncles(&share, &chain_store_handle)
+                .validate_uncles(&share.header, &chain_store_handle)
                 .is_ok()
         );
     }
@@ -3946,7 +3951,7 @@ mod tests {
             .miner_pubkey(PUBKEY_G)
             .build();
 
-        let result = validator().validate_uncles(&invalid_share, &chain_store_handle);
+        let result = validator().validate_uncles(&invalid_share.header, &chain_store_handle);
         assert!(result.is_err());
         assert!(
             result
@@ -3985,7 +3990,7 @@ mod tests {
             .miner_pubkey(PUBKEY_G)
             .build();
 
-        let result = validator().validate_uncles(&invalid_share, &chain_store_handle);
+        let result = validator().validate_uncles(&invalid_share.header, &chain_store_handle);
         assert!(result.is_err());
         assert!(
             result
@@ -4026,7 +4031,7 @@ mod tests {
 
         assert!(
             validator()
-                .validate_uncles(&valid_share, &chain_store_handle)
+                .validate_uncles(&valid_share.header, &chain_store_handle)
                 .is_ok()
         );
     }
