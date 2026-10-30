@@ -8,6 +8,7 @@ on 2026-10-23. Both v1 repositories were read, not run. Nothing on this page
 was measured on a live pool; the dust figures are arithmetic and say so.
 Implementation status for exact work and hybrid payouts was updated on
 2026-10-24 for PR #33; the original comparison remains the study baseline.
+The dated status below refreshes V1 to V23 from source at `7ebc0892`.
 
 P2Poolv2 is better than P2Pool v1 almost everywhere: uncles instead of lost
 orphans, ASERT instead of a 200-share retarget, Rust instead of Python 2, a
@@ -32,28 +33,66 @@ instead of repeating it.
   about 2,583 sat today. It falls under BCHN's 546-sat dust threshold after
   the 2036 halving, or now if BCH moves to 1-minute blocks (258 sat). The
   implemented [hybrid payout rule](architecture/bch-hybrid-payouts.md) pays such
-  outputs as they are, which BCH consensus allows, and v1 did too. The real
+  outputs as they are, which BCH consensus rules allow, and v1 did too. The real
   limit is value: with 1-minute blocks one share pays less than it costs to
   spend after the 2028 halving. A 3-day cap keeps one share above dust in
   both cases at today's subsidy; v1 also let a small miner's node mine harder
   shares.
-- **Miners can be underpaid today.** Nothing keeps a miner's stratum
-  difficulty at or below the share difficulty. If it is above, the miner
-  throws away hashes that were valid shares. v1 never set a difficulty above
-  the share difficulty itself.
-- **Found blocks deserve more care.** This fork sends a found block once, over
-  RPC, with no retry. v1 sent it over two paths with retries, and before 2019
-  every peer re-sent it too.
-- **Mainnet needs a way to change rules without a restart.** Every share-chain
-  change so far was a flag day on a fresh store. v1 changed rules on a live
-  chain by a vote in the shares.
-- **Check the node is really BCHN.** v1 refused to start unless its node had
-  the 2017 Bitcoin Cash fork block. This fork only checks that the node has
-  finished syncing.
+- **Miner difficulty is capped.** SV1 and SV2 jobs cap the session difficulty
+  at the share difficulty, rounded down with a minimum of 1 (V8).
+- **Found blocks are retried.** RPC submission retries transient failures and
+  time-outs for two minutes. Operators can add other RPC nodes. Share-peer
+  relay, BCH P2P submission and light submission remain open (V9, V10).
+- **Version votes have machinery.** Shares carry rule versions and work-weighted
+  votes. This build supports only version 1. A real second-version upgrade
+  remains unverified (V17).
+- **Startup checks the BCH chain.** The node checks the RPC chain name and a
+  BCH-only checkpoint after syncing. Regtest has no checkpoint. This checks
+  chain identity, rather than proving which software serves RPC (V15).
+- **BCH chain eligibility remains open.** Plain BCH shares are not checked
+  against the real BCH ancestry they claim. The token-only ASERT format check
+  does not fill that gap (V16).
 - **Already learned:** shares carry no BCH transactions (v1 got there in 2019
   after years of forwarding problems), block size comes from BCHN, payouts are
   carried as scripts, unknown usernames are refused, and stale shares earn as
   uncles.
+
+## Status update: 2026-10-30
+
+These statuses come from source at `7ebc0892`. "Fixed" means the requested
+code path exists. It does not mean a fresh live-pool or device check passed.
+The original study and recommendations below remain the baseline, except
+for the corrected merkle and stratum comparisons.
+
+Paths in the evidence column use `L/` for `p2poolv2_lib/src/`, `C/` for
+`p2poolv2_config/src/`, `A/` for `p2poolv2_api/src/`, and `N/` for
+`p2poolv2_node/src/`. Line numbers refer to that source snapshot.
+
+| Item | Status | Source evidence and remaining work |
+|---|---|---|
+| V1: Three BCH blocks of work | Fixed | `L/accounting/payout/sharechain_pplns/pplns_window.rs:74,817-827` selects three blocks of work. `L/shares/validation/mod.rs:1510-1516` sizes it from the paying header. Header authenticity remains V16. |
+| V2: Three-day cap | Open | `L/accounting/payout/sharechain_pplns/pplns_window.rs:50-53` still caps the production window at 120,960 shares, or 14 days at 10 seconds per share. |
+| V3: One-share payout delay | Decided against | The adopted BCH maturity is 100 shares at `L/accounting/payout/sharechain_pplns/pplns_window.rs:128-134`. The historical one-share delay is not this fork's rule. |
+| V4: Fractional edge share | Decided against for now | `L/accounting/payout/sharechain_pplns/pplns_window.rs:1433-1445` credits the whole final entry before stopping. The study below defers fractional credit. |
+| V5: Expected-hash weights | Fixed | `L/accounting/payout/sharechain_pplns/pplns_window.rs:824-827,1217-1223` selects exact work for BCH payout weights. |
+| V6: Harder shares for tiny payouts | Decided against in the adopted design | `L/accounting/payout/coinbase_budget.rs:17-29,192-193` pays direct sub-dust outputs unchanged and sends the overflow to the hybrid payout tree. It does not raise a miner's share difficulty. |
+| V7: Variable share difficulty | Open | `L/shares/validation/mod.rs:1822-1838` requires the calculated pool target. Comparing variable difficulty with the present main/mini chains remains a study. |
+| V8: Cap miner difficulty | Fixed | `L/stratum/difficulty_adjuster/mod.rs:61-71,423-429` computes and applies the ceiling. SV1 uses it at `L/stratum/server.rs:861-879`; SV2 uses it at `L/stratum/sv2/mining.rs:795-843`. The minimum session difficulty is 1. |
+| V9: Robust found-block submission | Partly fixed | `L/stratum/block_submit.rs:48-52,150-180,197-212` supplies retries, time-outs and extra RPC nodes. BCH P2P and light submission remain open. |
+| V10: Relay found blocks through share peers | Open | Extra RPC nodes are configured destinations, not share peers. `L/node/organise_worker.rs:825-837` records block-grade peer shares for effort accounting; it does not relay a full BCH block to BCHN. |
+| V11: No BCH transaction list in shares | Fixed | `L/shares/share_block/mod.rs:490-510` carries share transactions, the coinbase and its branch. It does not carry the BCH template's transaction list. |
+| V12: Compact coinbase transport | Open | The midstate proof exists at `L/shares/coinbase_proof.rs:6-20`. The full `bitcoin_coinbase` still travels at `L/shares/share_block/mod.rs:501-510`, and validators rebuild it at `L/shares/validation/mod.rs:1534-1553`. |
+| V13: Deeper merkle branches | Fixed to the adopted bound | `L/shares/coinbase_proof.rs:36-59` permits 32 levels for BCH share proofs. Token merge-mining proofs retain their separate 25-level bound. |
+| V14: Node-derived block size | Partly fixed | `L/stratum/work/block_template.rs:190-203` checks the final block against the node's size limit. `L/stratum/work/prepared_notify.rs:934-960` trims only share transactions. Recovery when the final BCH coinbase exceeds template room remains A8. |
+| V15: Startup BCH chain check | Fixed | `N/preflight.rs:91-149` checks the chain name and BCH-only checkpoint. `C/lib.rs:310-321` supplies the mainnet and chipnet checkpoints. Regtest skips the checkpoint. RPC vendor identity is not proved. |
+| V16: Work on the real BCH chain | Open | `L/shares/validation/mod.rs:839-854` checks BCH header target format only for token shares. Payout sizing still trusts the paying header's bits at `L/shares/validation/mod.rs:1510-1516`. The carried-header eligibility design is not implemented. |
+| V17: Work-weighted version votes | Partly fixed | `L/shares/share_version.rs:14-63,225-276` implements 60% acceptance and a 95% builder switch. Only version 1 is supported. A second-rule activation has not been demonstrated here. |
+| V18: Uncle rate and miner efficiency | Open | `A/api/endpoints/miner.rs:58-83` exposes miner share and uncle counts. `A/api/dashboard/history.rs:157-164` derives pool hashrate from confirmed shares alone. The requested pool uncle rate and miner efficiency are absent. |
+| V19: Current payout amount | Open | `A/api/endpoints/miner.rs:74-83` exposes a payout fraction, without the requested satoshi amount. |
+| V20: Inflated-reward warning | Open | `L/shares/validation/mod.rs:412-421,1534-1544` bounds the coinbase total by the money supply, then distributes it. It has no requested subsidy-plus-fees warning or counter. Local template fees must not become a share-chain validity rule. |
+| V21: Zero-prefixed CashAddr regression | Open test | `C/cashaddr.rs:180-198,220-225` preserves decoded bytes. The existing tests beginning at `C/cashaddr.rs:233` do not cover the requested zero-prefixed hash. No current padding bug was found in this source review. |
+| V22: Real coinbase and device evidence | Partly fixed | `L/accounting/payout/coinbase_budget.rs:50-122` removes the old cap. Current ASIC limits and large-pool propagation remain unmeasured; historical v1 observations do not establish them. |
+| V23: Vardiff, workers and version rolling | Fixed | Vardiff is at `L/stratum/difficulty_adjuster/mod.rs:74-82`; worker parsing at `L/stratum/validate_username.rs:160-176`; version-rolling negotiation at `L/stratum/message_handlers/configure.rs:35-50`, using `C/lib.rs:20`. |
 
 ## Licences
 
@@ -92,7 +131,7 @@ Line numbers are jtoomim's at `ece15b0` unless marked "forrestv".
 | Donation and fee | Donation by per-share weight, default 0 since `75b9fdc`; operator fee by crediting a random fraction of shares to the operator (`work.py:212-213`) | 1% donation by default and an operator fee, each capped at 10% (decisions 9, 13), taken off each share's own weight as v1 took its donation (`cuts-per-share`); the donation key and fee addresses are payees, with no separate outputs |
 | Share difficulty | Per share, up to 30 times the pool minimum (`data.py:170`); minimum retargeted over 200 shares, at most 10% per share (`data.py:162-168`) | One per chain, ASERT anchored at the parent (decision 12); bits must equal it (`validation/mod.rs:1443`) |
 | Lowest share difficulty | 1 (`MAX_TARGET`, `networks/bitcoincash.py:19`) | Mini chain ceiling 4.55 (`0x1c384bd7`) |
-| Stratum difficulty | Per connection; the node's own choice never above the share difficulty (`bitcoin/stratum.py:86, 136-150`) | ckpool-style vardiff, not capped at the share difficulty (V8) |
+| Stratum difficulty | Per connection; the node's own choice never above the share difficulty (`bitcoin/stratum.py:86, 136-150`) | ckpool-style vardiff, capped at the share difficulty since PR #33, with a minimum of 1 (V8) |
 | Block size | Hard-coded 32 MB (`networks/bitcoincash.py:36`) | From BCHN (A4, A5) |
 | BCH transactions in shares | None since share version 34 (2019) | None |
 | Coinbase in shares | Not carried; rebuilt by peers, tied by a SHA-256 midstate (`data.py:24-42`) | Carried whole (`share_block/mod.rs:404-413`); A2 |
@@ -136,7 +175,7 @@ estimated), that is any pool under about 1.1 PH/s, which a new pool is at
 its start.
 
 Below dust is not invalid. A coinbase output may hold any value under BCH
-consensus; dust is relay policy for transactions that create outputs. The
+consensus rules; dust is relay policy for transactions that create outputs. The
 [hybrid payout rule](architecture/bch-hybrid-payouts.md) (section 3.5)
 pays sub-dust coinbase outputs as they are, as v1 did
 (`data.py:334-336`); its estimate that this starts around 2036 is the
@@ -156,7 +195,9 @@ A11's 3-day cap one share stays above dust with 10-minute blocks through the
 ## Lessons
 
 "Rule" says whether the recommendation changes P2Pool's share-chain rules,
-which needs the owner's agreement. No recommendation changes BCH consensus.
+which needs the owner's agreement. No recommendation changes BCH consensus rules.
+The table keeps the original comparison and its later PR #33 notes. Use the
+dated status update above for current implementation status.
 
 | # | Lesson from v1 | v1 source | This fork | Recommendation | Rule | Port or idea |
 |---|---|---|---|---|---|---|
@@ -172,7 +213,7 @@ which needs the owner's agreement. No recommendation changes BCH consensus.
 | V10 | Every node rebuilt a block found by a peer and submitted it to its own node | `node.py:282-300`; `data.py:629-633`; dropped in share version 34 (`5ba9eba`, merged `473afc4`) | **Lack**, as v1 since 2019: a peer's block-grade share is only counted (`organise_worker.rs:792`); `known-attacks.md`, block withholding | Optional found-block relay: the finder sends the whole block once to its share-chain peers, which submit it to their own BCHN. A node-to-node message, not a share rule. Helps home nodes with slow uplinks. **Partly done on PR #33**: an operator can list extra BCHN nodes in `[[submit_nodes]]`, which every found block also goes to. The relay to peers is not built | No | Idea |
 | V11 | Shares carry no BCH transactions. v1 forwarded transactions between nodes and raised the limits at each block size step (new transactions per share 50 kB to 1 MB, `643768f`; remembered transactions 2.5 MB to 25 MB, a share-protocol hard fork, `e48be1f`; messages 1 MB to 8 MB to 32 MB, `e8d182a`, `72cbbb2`), then removed it all | forrestv `data.py:74`, forrestv `p2p.py:30, 33`; `p2p.py:30-33, 195-255`; `data.py:123-126` | **Have**: header, coinbase proof and coinbase merkle branch (`share_block/mod.rs:393-414`) | Keep. Never put BCH transactions or the BCH block size in share rules | No | None |
 | V12 | The coinbase itself was never sent: peers rebuilt it from share data, and a SHA-256 midstate tied it to the proof of work | `data.py:24-42, 361-372, 552-557` | **Partly**: the midstate exists (`coinbase_proof.rs`) and validators rebuild the coinbase (`validation/mod.rs:1198-1267`), but the whole coinbase is still carried (A2) | Take A2's compact option, which the hybrid payout design also lists as a follow-up: carry only the scriptSig, extranonce and aux fields. v1 ran this way with up to 4,000 payees | Yes | Idea |
-| V13 | The 16-level merkle branch limit was removed for BCH | `e2bad3e` | **Differently**: 25 levels (`coinbase_proof.rs:38`) | As A14 | Yes | Idea |
+| V13 | The 16-level merkle branch limit was removed for BCH | `e2bad3e` | **Have**: BCH share proofs allow 32 levels (`coinbase_proof.rs:36-59`); token proofs keep their separate 25-level bound | Keep the adopted bound (A14) | Already a rule | Done |
 | V14 | Block size hard-coded per network: each BCH increase needed a v1 release (8 MB to 32 MB, `df7409d`). The template was cut by position to fit | `networks/bitcoincash.py:36-37`; `data.py:200-203` | **Have**: limit from BCHN (A4, A5) | Keep. If a coinbase ever outgrows BCHN's 1,000-byte reserve (A8), never cut a template by position: BCH blocks are in canonical order (CTOR), where a child can sort before its parent, so a cut can keep a child without its parent. This is read from v1's code; it never happened live because BCH blocks were never full | No | None |
 | V15 | At start, the node must have the 2017 BCH fork block and report the right chain | `bitcoin/networks/bitcoincash.py:17-21`; `ee0d7ca` | **Lack**: preflight checks only initial block download (`p2poolv2_node/src/preflight.rs:41-49`); `GetBlockchainInfo` reads one field (`bitcoindrpc/src/lib.rs:100-104`) | Check `getblockchaininfo` `chain` against `bitcoin_cash_network`, and that a BCH-only block after the 2018 BSV and 2020 eCash splits is in the node's chain; refuse to start otherwise. **Done on PR #33** (`preflight.rs`): the chain name before the sync wait, BCHN's checkpoint 661,648 (mainnet) or 115,252 (chipnet) after it | No | Idea |
 | V16 | The best chain is chosen by work per real BCH time, using the BCH heights the shares built on, checked against the node's own bitcoind; a chain built on unknown BCH blocks scores lowest | `data.py:866-878`; `bitcoin/height_tracker.py:83-125` | **Lack**: "mine on the current chain" is not built (`sharechain/current-chain.md`) | Use as one input when that rule is designed | Fork choice; a rule once that design lands | Port: `data.py:866-878` |
