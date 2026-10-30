@@ -80,10 +80,14 @@ The coinbase merkle branch a header's `CoinbaseProof` is checked against.
 
 ### 1d. `BitcoinCoinbase` - Bitcoin Coinbase
 
-The bitcoin coinbase a share block carries: the transaction the miner hashed,
-holding the aux flags, extranonce, nanosecond timestamp, payouts and BIP141
-witness commitment. Not part of the block hash; its txid is the one the
-header's `CoinbaseProof` gives.
+The coinbase a share block carries: the transaction the miner hashed,
+holding the aux flags, extranonce, nanosecond timestamp and payouts. On
+Bitcoin Cash it has no witness data and no witness commitment; the retained
+Bitcoin mode adds the BIP141 witness commitment. Not part of the block hash;
+its txid is the one the header's `CoinbaseProof` gives. On Bitcoin Cash it
+is at most 1,000,000 bytes (the BCH transaction size rule), or 3,072 bytes
+for a token share; see the storage budget in
+[async-flow.md](async-flow.md#bch-storage-and-memory-budget-2026-10-30).
 
 | Key                    | Value                                  | Notes |
 |------------------------|----------------------------------------|-------|
@@ -272,16 +276,18 @@ Stores user data indexed by internal ID.
 ```rust
 pub struct StoredUser {
     pub user_id: u64,           // Internal unique ID
-    pub btcaddress: String,     // Bitcoin address
+    pub btcaddress: String,     // Payout address from the username (CashAddr on BCH)
     pub created_at: u64,        // Timestamp (seconds since epoch)
 }
 ```
 
 ---
 
-### 12. `UserIndex` - BTC Address→User ID
+### 12. `UserIndex` - Payout Address→User ID
 
-Secondary index for looking up users by Bitcoin address.
+Secondary index for looking up users by payout address. On Bitcoin Cash this
+is the CashAddr the miner put in its username. The key and field keep the
+upstream name `btcaddress`.
 
 | Key                   | Value                  |
 |-----------------------|------------------------|
