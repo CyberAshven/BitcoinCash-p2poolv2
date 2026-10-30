@@ -18,28 +18,28 @@ use libauth::{
 const MONEY_MAX: i128 = 2_100_000_000_000_000;
 
 #[derive(Clone)]
-struct Assembly {
-    text: String,
-    stack: Vec<String>,
+pub(crate) struct Assembly {
+    pub(crate) text: String,
+    pub(crate) stack: Vec<String>,
 }
 
 impl Assembly {
-    fn new(inputs: &[&str]) -> Self {
+    pub(crate) fn new(inputs: &[&str]) -> Self {
         Self {
             text: String::new(),
             stack: inputs.iter().map(|name| (*name).to_owned()).collect(),
         }
     }
 
-    fn line(&mut self, text: &str) {
+    pub(crate) fn line(&mut self, text: &str) {
         writeln!(self.text, "{text}").expect("writing to a string");
     }
 
-    fn comment(&mut self, text: &str) {
+    pub(crate) fn comment(&mut self, text: &str) {
         self.line(&format!("// {text}"));
     }
 
-    fn raw(&mut self, code: &str, consumed: usize, outputs: &[&str]) {
+    pub(crate) fn raw(&mut self, code: &str, consumed: usize, outputs: &[&str]) {
         assert!(self.stack.len() >= consumed, "stack underflow: {code}");
         self.stack.truncate(self.stack.len() - consumed);
         self.stack
@@ -47,15 +47,15 @@ impl Assembly {
         self.line(code);
     }
 
-    fn integer(&mut self, value: i128, name: &str) {
+    pub(crate) fn integer(&mut self, value: i128, name: &str) {
         self.raw(&format!("<{value}>"), 0, &[name]);
     }
 
-    fn bytes(&mut self, value: &str, name: &str) {
+    pub(crate) fn bytes(&mut self, value: &str, name: &str) {
         self.raw(&format!("<0x{value}>"), 0, &[name]);
     }
 
-    fn copy(&mut self, name: &str) {
+    pub(crate) fn copy(&mut self, name: &str) {
         let position = self
             .stack
             .iter()
@@ -65,7 +65,7 @@ impl Assembly {
         self.raw(&format!("<{depth}> OP_PICK // copy {name}"), 0, &[name]);
     }
 
-    fn take(&mut self, name: &str) {
+    pub(crate) fn take(&mut self, name: &str) {
         let position = self
             .stack
             .iter()
@@ -77,12 +77,12 @@ impl Assembly {
         self.line(&format!("<{depth}> OP_ROLL // take {name}"));
     }
 
-    fn remove(&mut self, name: &str) {
+    pub(crate) fn remove(&mut self, name: &str) {
         self.take(name);
         self.raw("OP_DROP", 1, &[]);
     }
 
-    fn assign(&mut self, name: &str) {
+    pub(crate) fn assign(&mut self, name: &str) {
         assert_ne!(self.stack.last().map(String::as_str), Some(name));
         let position = self
             .stack
@@ -97,11 +97,11 @@ impl Assembly {
         }
     }
 
-    fn unsigned(&mut self, name: &str) {
+    pub(crate) fn unsigned(&mut self, name: &str) {
         self.raw("<0x00> OP_CAT OP_BIN2NUM", 1, &[name]);
     }
 
-    fn slice(&mut self, source: &str, start: i128, length: i128, name: &str) {
+    pub(crate) fn slice(&mut self, source: &str, start: i128, length: i128, name: &str) {
         self.copy(source);
         self.raw(
             &format!("<{start}> OP_SPLIT OP_NIP <{length}> OP_SPLIT OP_DROP"),
@@ -110,24 +110,24 @@ impl Assembly {
         );
     }
 
-    fn field(&mut self, source: &str, start: i128, length: i128, name: &str) {
+    pub(crate) fn field(&mut self, source: &str, start: i128, length: i128, name: &str) {
         self.slice(source, start, length, name);
         self.unsigned(name);
     }
 
-    fn compare_integer(&mut self, name: &str, value: i128, operation: &str) {
+    pub(crate) fn compare_integer(&mut self, name: &str, value: i128, operation: &str) {
         self.copy(name);
         self.integer(value, "constant");
         self.raw(&format!("{operation} OP_VERIFY"), 2, &[]);
     }
 
-    fn equal(&mut self, left: &str, right: &str) {
+    pub(crate) fn equal(&mut self, left: &str, right: &str) {
         self.copy(left);
         self.copy(right);
         self.raw("OP_EQUALVERIFY", 2, &[]);
     }
 
-    fn clean_return(&mut self, names: &[&str]) {
+    pub(crate) fn clean_return(&mut self, names: &[&str]) {
         for name in names.iter().rev() {
             self.copy(name);
             self.raw("OP_TOALTSTACK", 1, &[]);
@@ -142,17 +142,17 @@ impl Assembly {
         self.stack = names.iter().map(|name| (*name).to_owned()).collect();
     }
 
-    fn function(&mut self, identifier: i128, body: Assembly) {
+    pub(crate) fn function(&mut self, identifier: i128, body: Assembly) {
         self.line("<");
         self.line(&body.text);
         self.line(&format!("> <{identifier}> OP_DEFINE"));
     }
 
-    fn invoke(&mut self, identifier: i128, count: usize, names: &[&str]) {
+    pub(crate) fn invoke(&mut self, identifier: i128, count: usize, names: &[&str]) {
         self.raw(&format!("<{identifier}> OP_INVOKE"), count, names);
     }
 
-    fn branch(&mut self, yes: impl FnOnce(&mut Self), no: impl FnOnce(&mut Self)) {
+    pub(crate) fn branch(&mut self, yes: impl FnOnce(&mut Self), no: impl FnOnce(&mut Self)) {
         self.raw("OP_IF", 1, &[]);
         let saved = self.stack.clone();
         yes(self);
@@ -290,7 +290,7 @@ fn payment_function() -> Assembly {
     code
 }
 
-fn validate_script(code: &mut Assembly) {
+pub(crate) fn validate_script(code: &mut Assembly) {
     code.comment(
         "The only beneficiary scripts are exact standard P2PKH, P2SH20 or P2SH32 templates.",
     );

@@ -5,6 +5,7 @@
 //! Isolated, offline PHOTON payout covenant feasibility prototype.
 
 pub mod covenant;
+pub mod lean;
 pub mod reference;
 pub mod state;
 #[cfg(any(test, feature = "test-utils"))]

@@ -14,3 +14,6 @@ docker/regtest/** text eol=lf
 # donate_qr` and compared byte for byte by its tests, so LF on every
 # checkout, Windows included.
 website/donate-*.svg text eol=lf
+
+# Generated CashAssembly is compared byte for byte with the Rust assembler.
+p2poolv2_photon_payout/*.cash text eol=lf

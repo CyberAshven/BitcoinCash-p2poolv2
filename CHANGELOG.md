@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+An additive lean PHOTON split covenant, checked CashAssembly, independent
+integer reference, transaction builder and dual-mode BCH 2026 VM tests
+measure direct owed-balance payouts and per-payee token reimbursement.
+`cargo photon-lean-measure` records fees, dust, BCH fronting and the
+script-size/operation-cost boundaries. The existing funded-tree program
+and tests remain unchanged. No claim-side or node integration is included.
+
 The owner's 2026-10-30 PHOTON payout study makes a direct minimum-payout
 split the main proposed path: backed balances carry between wins, miners
 choose a minimum multiple, and submitters front BCH for a fixed token
