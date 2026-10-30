@@ -10,6 +10,7 @@
 
 use super::{StoreError, WriteCommand, WriteSender};
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
+use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
 use crate::store::found_block::FoundBlock;
@@ -180,6 +181,26 @@ impl StoreHandle {
     /// Get claimed block candidates still awaiting BCHN verification.
     pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
         self.store.get_candidate_found_blocks()
+    }
+
+    /// The known Bitcoin Cash header with hash `block_hash`, if any.
+    pub fn get_bch_header(
+        &self,
+        block_hash: &BlockHash,
+    ) -> Result<Option<KnownBchHeader>, StoreError> {
+        self.store.get_bch_header(block_hash)
+    }
+
+    /// Add Bitcoin Cash headers this node now knows.
+    pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::AddBchHeaders {
+                headers,
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
     }
 
     /// Record verified BCHN acceptance through the serialized writer.
@@ -507,6 +528,8 @@ mockall::mock! {
         pub fn get_total_work(&self) -> Result<Work, StoreError>;
         pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
         pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
+        pub fn get_bch_header(&self, block_hash: &BlockHash) -> Result<Option<KnownBchHeader>, StoreError>;
+        pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError>;
         pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError>;
         pub fn get_payout_tree(&self, coinbase_txid: &Txid) -> Result<Option<StoredPayoutTree>, StoreError>;
         pub fn get_confirmed_at_height(&self, height: u32) -> Result<BlockHash, StoreError>;

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 mod address_filter;
+pub(crate) mod bch_header_feeder;
 pub mod behaviour;
 pub mod connection_tracker;
 mod dns_seeds;

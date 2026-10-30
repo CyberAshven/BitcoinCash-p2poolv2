@@ -16,6 +16,7 @@ mod handle;
 pub use handle::StoreHandle;
 
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
+use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
 use crate::store::found_block::FoundBlock;
@@ -141,6 +142,11 @@ pub enum WriteCommand {
     },
 
     /// Record a block whose BCHN acceptance the caller has verified.
+    /// Add Bitcoin Cash headers this node now knows.
+    AddBchHeaders {
+        headers: Vec<KnownBchHeader>,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     RecordAcceptedFoundBlock {
         found_block: FoundBlock,
         reply: oneshot::Sender<Result<bool, StoreError>>,
@@ -321,6 +327,10 @@ impl StoreWriter {
                 let _ = reply.send(result);
             }
 
+            WriteCommand::AddBchHeaders { headers, reply } => {
+                let result = self.store.add_bch_headers(&headers);
+                let _ = reply.send(result);
+            }
             WriteCommand::RecordAcceptedFoundBlock { found_block, reply } => {
                 let result = self.store.record_accepted_found_block(&found_block);
                 let _ = reply.send(result);

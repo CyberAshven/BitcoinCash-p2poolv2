@@ -13,7 +13,10 @@ header must build on a known header, meet its own nBits, carry exactly the
 nBits Bitcoin Cash requires after its parent (aserti3-2d, the 20-minute
 minimum-difficulty rule on test networks, a fixed nBits on regtest), and
 be dated at most two hours ahead. Tested on real mainnet and chipnet
-headers. Nothing uses them yet, so no share-chain rule changes.
+headers. A worker fills the store from the node's own BCHN, walking back
+from its best block every 5 seconds; a new node first learns 8,400
+headers, about 58 days. Nothing reads them yet, so no share-chain rule
+changes.
 
 Bitcoin Cash miners can be paid to P2SH32 addresses (`OP_HASH256 <32
 bytes> OP_EQUAL`, from the 2023-05-15 upgrade), which contracts and

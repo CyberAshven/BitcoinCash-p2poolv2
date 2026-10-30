@@ -11,6 +11,7 @@
 use crate::accounting::payout::sharechain_pplns::pplns_window::PRUNE_INTERVAL;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::pool_difficulty::AsertParent;
+use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{
     ShareBlock, ShareHeader, ShareTransaction, is_terminal_blockhash,
 };
@@ -419,6 +420,19 @@ impl ChainStoreHandle {
     /// Get claimed block candidates still awaiting BCHN verification.
     pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
         self.store_handle.get_candidate_found_blocks()
+    }
+
+    /// The known Bitcoin Cash header with hash `block_hash`, if any.
+    pub fn get_bch_header(
+        &self,
+        block_hash: &BlockHash,
+    ) -> Result<Option<KnownBchHeader>, StoreError> {
+        self.store_handle.get_bch_header(block_hash)
+    }
+
+    /// Add Bitcoin Cash headers this node now knows.
+    pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError> {
+        self.store_handle.add_bch_headers(headers).await
     }
 
     /// Record a block after verifying BCHN acceptance, returning whether new.
@@ -1086,6 +1100,8 @@ mockall::mock! {
         pub fn get_share_header(&self, share_hash: &BlockHash) -> Result<ShareHeader, StoreError>;
         pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
         pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
+        pub fn get_bch_header(&self, block_hash: &BlockHash) -> Result<Option<KnownBchHeader>, StoreError>;
+        pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError>;
         pub async fn record_accepted_found_block(&self, found_block: FoundBlock) -> Result<bool, StoreError>;
         pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError>;
         pub fn get_payout_tree(&self, coinbase_txid: &Txid) -> Result<Option<StoredPayoutTree>, StoreError>;

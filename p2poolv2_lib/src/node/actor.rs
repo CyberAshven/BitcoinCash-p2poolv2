@@ -15,6 +15,7 @@ use crate::config::{Chain, Config, PoolMode};
 use crate::monitoring_events::MonitoringEventSender;
 use crate::node::Node;
 use crate::node::SwarmSend;
+use crate::node::bch_header_feeder::BchHeaderFeeder;
 use crate::node::dns_seeds;
 use crate::node::emission_worker::EmissionWorker;
 use crate::node::found_block_verifier::FoundBlockVerifier;
@@ -505,19 +506,23 @@ impl NodeActor {
 
         // Accounting verification is separate from share validation and the
         // serial organisation path. A slow BCHN never holds up either one.
-        let found_block_verifier = if chain == Chain::BitcoinCash {
+        let (found_block_verifier, bch_header_feeder) = if chain == Chain::BitcoinCash {
             let client = BitcoindRpcClient::new(
                 &config.bitcoinrpc.url,
                 &config.bitcoinrpc.username,
                 &config.bitcoinrpc.password,
             )?;
-            Some(FoundBlockVerifier::new(
-                client,
-                chain_store_handle.clone(),
-                metrics.clone(),
-            ))
+            (
+                Some(FoundBlockVerifier::new(
+                    client.clone(),
+                    chain_store_handle.clone(),
+                    metrics.clone(),
+                )),
+                // Follows BCHN's headers for mining on the current chain.
+                Some(BchHeaderFeeder::new(client, chain_store_handle.clone())),
+            )
         } else {
-            None
+            (None, None)
         };
 
         let node = Node::new(
@@ -545,7 +550,7 @@ impl NodeActor {
         )
         .with_depths(ChainDepths::for_chain(chain));
         let mut workers: JoinSet<Result<(), String>> = JoinSet::new();
-        let mut worker_names: HashMap<tokio::task::Id, &'static str> = HashMap::with_capacity(5);
+        let mut worker_names: HashMap<tokio::task::Id, &'static str> = HashMap::with_capacity(6);
 
         if let Some(verifier) = found_block_verifier {
             let verifier_id = workers
@@ -555,6 +560,16 @@ impl NodeActor {
                 })
                 .id();
             worker_names.insert(verifier_id, "Found block verifier");
+        }
+
+        if let Some(feeder) = bch_header_feeder {
+            let feeder_id = workers
+                .spawn(async move {
+                    feeder.run().await;
+                    Ok(())
+                })
+                .id();
+            worker_names.insert(feeder_id, "BCH header feeder");
         }
 
         let organise_worker_id = workers

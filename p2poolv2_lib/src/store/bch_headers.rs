@@ -23,6 +23,16 @@ impl Store {
         );
     }
 
+    /// Add every header in `headers` to the known Bitcoin Cash headers.
+    pub fn add_bch_headers(&self, headers: &[KnownBchHeader]) -> Result<(), StoreError> {
+        let mut batch = Self::get_write_batch();
+        for known in headers {
+            self.add_bch_header(known, &mut batch);
+        }
+        self.commit_batch(batch)?;
+        Ok(())
+    }
+
     /// The known Bitcoin Cash header with hash `block_hash`, if any.
     pub fn get_bch_header(
         &self,
