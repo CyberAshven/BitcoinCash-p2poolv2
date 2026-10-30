@@ -24,6 +24,8 @@ cargo +nightly fuzz build wire_message_decode
 cargo +nightly fuzz run wire_message_decode -- -max_total_time=60 -max_len=1310721 -rss_limit_mb=2048
 ```
 
+A prebuilt cargo-fuzz, as CI installs, may default to the musl target, where
+AddressSanitizer cannot run; CI passes `--target x86_64-unknown-linux-gnu`.
 Cargo-fuzz has no `--locked` option; CI checks the lockfile before and after
 the run. On Windows, cargo-fuzz
 requires the platform setup described in the

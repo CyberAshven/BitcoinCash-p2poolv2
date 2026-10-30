@@ -64,7 +64,8 @@ jobs:
 
       - name: Smoke test decoder (60 seconds)
         working-directory: p2poolv2_lib
-        run: cargo fuzz run wire_message_decode -- -max_total_time=60 -max_len=1310721 -rss_limit_mb=2048
+        # The prebuilt cargo-fuzz defaults to musl, where AddressSanitizer cannot run.
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu wire_message_decode -- -max_total_time=60 -max_len=1310721 -rss_limit_mb=2048
 
       - name: Check fuzz lockfile stayed unchanged
         run: git diff --exit-code -- p2poolv2_lib/fuzz/Cargo.lock

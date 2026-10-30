@@ -1,6 +1,12 @@
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 1 }
 
+# A sweep over time offsets and targets: about 7 seconds on a desktop, but
+# it passed 30 seconds on a loaded CI runner. Allow it two minutes.
+[[profile.default.overrides]]
+filter = 'package(p2poolv2_safa) and test(header_band_agrees_across_time_offsets_and_targets)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # Explicitly selected only for the ignored PHOTON feasibility stress tests.
 [profile.photon-heavy]
 slow-timeout = { period = "60s", terminate-after = 60 }
