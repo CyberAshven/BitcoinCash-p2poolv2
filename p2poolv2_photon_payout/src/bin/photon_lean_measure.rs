@@ -6,14 +6,39 @@ use std::env::args;
 
 use p2poolv2_photon_payout::lean::program::{compile_program, generated_source};
 use p2poolv2_photon_payout::lean::test_utils::{
-    FIXTURE_COST, build_fixture, claim_amount_fixture, mixed_profile, profile_fixture, verify_both,
+    FIXTURE_COST, build_fixture, claim_amount_fixture, mixed_profile, script_profile, verify_both,
 };
+use p2poolv2_photon_payout::lean::{BuiltSplit, ListOrder, Manifest};
 use p2poolv2_photon_payout::state::RootLock;
 use p2poolv2_photon_payout::transaction::output_dust;
 use p2poolv2_photon_payout::vm::measure_input;
 
-fn row(count: usize, length: usize) -> Result<(), String> {
-    let split = profile_fixture(count, length)?;
+/// Equal debts in script order are valid for both list orders.
+fn profile(count: usize, length: usize, order: ListOrder) -> Result<BuiltSplit, String> {
+    let mut manifest = script_profile(count, length)?;
+    manifest.order = order;
+    build_fixture(
+        &manifest,
+        count as u64 * 20 * FIXTURE_COST,
+        RootLock::P2sh20,
+    )
+}
+
+fn mixed_manifest(count: usize, order: ListOrder) -> Result<Manifest, String> {
+    let mut manifest = mixed_profile(count)?;
+    manifest.order = order;
+    Ok(manifest)
+}
+
+fn table_header() {
+    println!(
+        "| N | R bytes | Unlock bytes | Op cost/limit | Hash std; nonstd | Tx bytes/fee | Fee/payee | Dust payee/submitter/change | Gross front sats | Net external sats | Max item | Peak slots |"
+    );
+    println!("|---:|---:|---:|---:|---|---:|---:|---|---:|---:|---:|---:|");
+}
+
+fn row(count: usize, length: usize, order: ListOrder) -> Result<(), String> {
+    let split = profile(count, length, order)?;
     verify_both(&split)?;
     let standard = measure_input(&split.transaction, &split.source_outputs, 0, true)?;
     let nonstandard = measure_input(&split.transaction, &split.source_outputs, 0, false)?;
@@ -43,6 +68,11 @@ fn row(count: usize, length: usize) -> Result<(), String> {
 }
 
 fn main() -> Result<(), String> {
+    let order = if args().any(|argument| argument == "--share-order") {
+        ListOrder::ShareChain
+    } else {
+        ListOrder::MostOwed
+    };
     if args().nth(1).as_deref() == Some("--claim-capacity") {
         let mut maximum = 187usize;
         while claim_amount_fixture(maximum + 1)
@@ -119,35 +149,41 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
     if args().nth(1).as_deref() == Some("--source") {
-        print!("{}", generated_source());
+        print!("{}", generated_source(order));
         return Ok(());
     }
-    println!("# Lean direct split measurements");
-    println!();
     println!(
-        "Pinned libauth be3ed16396c9eb9c0e57343474d36079a37c8dae, BCH 2026. Program {} bytes. All listed spends verify both complete VMs. Equal gross debt 20*C, C=2^32 raw tokens, multiplier20, maximum 35-byte P2SH32 payee scripts, P2PKH submitter/change, one 100-byte signed P2PKH funding unlock, 700 inherited satoshis, P2SH20 root. All payee/submitter token amounts use nine-byte CompactSize. Fee=serialized bytes at 1 sat/byte.",
-        compile_program()?.len()
+        "# Lean direct split measurements{}",
+        match order {
+            ListOrder::MostOwed => "",
+            ListOrder::ShareChain => ": version 2, share-chain order",
+        }
     );
     println!();
     println!(
-        "| N | R bytes | Unlock bytes | Op cost/limit | Hash std; nonstd | Tx bytes/fee | Fee/payee | Dust payee/submitter/change | Gross front sats | Net external sats | Max item | Peak slots |"
+        "Pinned libauth be3ed16396c9eb9c0e57343474d36079a37c8dae, BCH 2026. Program {} bytes. All listed spends verify both complete VMs. Equal gross debt 20*C, C=2^32 raw tokens, multiplier 20, maximum 35-byte P2SH32 payee scripts, P2PKH submitter/change, one 100-byte signed P2PKH funding unlock, 700 inherited satoshis, P2SH20 root. All payee/submitter token amounts use nine-byte CompactSize. Fee=serialized bytes at 1 sat/byte.",
+        compile_program(order)?.len()
     );
-    println!("|---:|---:|---:|---:|---|---:|---:|---|---:|---:|---:|---:|");
-    row(1, 35)?;
-    row(8, 35)?;
-    row(32, 35)?;
-    row(64, 35)?;
-    row(100, 35)?;
+    println!();
+    table_header();
+    row(1, 35, order)?;
+    row(8, 35, order)?;
+    row(32, 35, order)?;
+    row(64, 35, order)?;
+    row(100, 35, order)?;
     for length in [35, 25, 23] {
         let mut maximum = 1usize;
-        while profile_fixture(maximum + 1, length)
+        while profile(maximum + 1, length, order)
             .and_then(|split| verify_both(&split))
             .is_ok()
         {
             maximum += 1;
         }
-        row(maximum, length)?;
-        let next = profile_fixture(maximum + 1, length).and_then(|split| verify_both(&split));
+        if length != 35 {
+            table_header();
+        }
+        row(maximum, length, order)?;
+        let next = profile(maximum + 1, length, order).and_then(|split| verify_both(&split));
         println!(
             "\nLargest N with {length}-byte payees: {maximum}. N={} fails: {}.\n",
             maximum + 1,
@@ -155,7 +191,7 @@ fn main() -> Result<(), String> {
         );
     }
     let mut mixed_maximum = 187;
-    while mixed_profile(mixed_maximum + 1)
+    while mixed_manifest(mixed_maximum + 1, order)
         .and_then(|manifest| {
             build_fixture(
                 &manifest,
@@ -169,7 +205,7 @@ fn main() -> Result<(), String> {
         mixed_maximum += 1;
     }
     let mixed = build_fixture(
-        &mixed_profile(mixed_maximum)?,
+        &mixed_manifest(mixed_maximum, order)?,
         mixed_maximum as u64 * 20 * FIXTURE_COST,
         RootLock::P2sh20,
     )?;
@@ -186,7 +222,7 @@ fn main() -> Result<(), String> {
         mixed.fee as f64 / mixed_maximum as f64,
         mixed.gross_fronting,
         mixed.external_satoshis,
-        mixed_profile(mixed_maximum + 1)
+        mixed_manifest(mixed_maximum + 1, order)
             .and_then(|manifest| build_fixture(
                 &manifest,
                 (mixed_maximum + 1) as u64 * 20 * FIXTURE_COST,
@@ -196,7 +232,7 @@ fn main() -> Result<(), String> {
             .expect_err("mixed boundary")
     );
     println!(
-        "Method: lengths from actual R and input unlocking; final libauth counters and limits plus full opcode-debug trace maxima via existing vm::measure_input; transaction bytes from libauth BCH serializer after fixed-length Schnorr funding signature; dust=3*(serialized output bytes+148) via existing output_dust. Gross fronting=sum token-output BCH minima+fee; net external subtracts inherited700, returned BCH change is excluded. The covenant minima conservatively reserve nine-byte token amounts (705 sats for P2SH32,675 P2PKH); BCH-only change dust546. 100000-byte standard transaction cap is checked by builder, 10000-byte unlock/redeem item caps checked before construction and by VMs. BCHN and market value are untested."
+        "Method: lengths from actual R and input unlocking; final libauth counters and limits plus full opcode-debug trace maxima via existing vm::measure_input; transaction bytes from libauth BCH serializer after fixed-length Schnorr funding signature; dust=3*(serialized output bytes+148) via existing output_dust. Gross fronting=sum token-output BCH minima+fee; net external subtracts inherited 700, returned BCH change is excluded. The covenant minima conservatively reserve nine-byte token amounts (705 sats for P2SH32, 675 P2PKH); BCH-only change dust 546. 100000-byte standard transaction cap is checked by builder, 10000-byte unlock/redeem item caps checked before construction and by VMs. BCHN and market value are untested."
     );
     Ok(())
 }

@@ -11,6 +11,7 @@ use libauth::{
 };
 
 use crate::covenant::{Assembly, validate_script};
+use crate::lean::reference::ListOrder;
 
 trait ReplaceSlot {
     fn replace_slot(&mut self, name: &str);
@@ -56,12 +57,19 @@ fn output(code: &mut Assembly, script: &str, amount: &str, index: &str) {
 }
 
 /// Annotated exact program; no tree opcode or artifact is modified.
-pub fn generated_source() -> String {
+pub fn generated_source(order: ListOrder) -> String {
     let mut code = Assembly::new(&["submitter", "state"]);
-    code.comment("PHOTON lean direct split v1. R commits ordered debts, not a Merkle tree.");
+    match order {
+        ListOrder::MostOwed => {
+            code.comment("PHOTON lean direct split v1. R commits ordered debts, not a Merkle tree.")
+        }
+        ListOrder::ShareChain => code.comment(
+            "PHOTON lean direct split v2. The share chain orders R; this pays in that order.",
+        ),
+    }
     code.comment("The early context digest binds every section4 proof-seed choice externally.");
     code.field("state", 0, 4, "version");
-    code.compare_integer("version", 1, "OP_NUMEQUAL");
+    code.compare_integer("version", i128::from(order.version()), "OP_NUMEQUAL");
     code.remove("version");
     code.field("state", 4, 4, "network");
     code.compare_integer("network", 4, "OP_LESSTHANOREQUAL");
@@ -131,8 +139,10 @@ pub fn generated_source() -> String {
     code.integer(0, "entry_index");
     code.integer(0, "paid");
     code.integer(0, "output_bch");
-    code.integer(i64::MAX as i128, "previous_owed");
-    code.integer(0, "previous_script");
+    if order == ListOrder::MostOwed {
+        code.integer(i64::MAX as i128, "previous_owed");
+        code.integer(0, "previous_script");
+    }
     code.line("OP_BEGIN");
     let loop_stack = code.stack.clone();
     code.raw("OP_FROMALTSTACK", 0, &["entries"]);
@@ -159,36 +169,38 @@ pub fn generated_source() -> String {
     code.copy("minimum");
     code.raw("OP_GREATERTHANOREQUAL OP_VERIFY", 2, &[]);
     validate_script(&mut code);
-    code.copy("script");
-    code.raw(
-        "OP_REVERSEBYTES <0x00> OP_CAT OP_BIN2NUM",
-        1,
-        &["script_number"],
-    );
-    code.copy("script_length");
-    code.raw(
-        "<35> OP_SWAP OP_SUB <8> OP_MUL OP_LSHIFTNUM",
-        2,
-        &["sort_key"],
-    );
-    code.copy("owed");
-    code.copy("previous_owed");
-    code.raw("OP_LESSTHANOREQUAL OP_VERIFY", 2, &[]);
-    code.copy("owed");
-    code.copy("previous_owed");
-    code.raw("OP_NUMEQUAL", 2, &["tie"]);
-    code.branch(
-        |code| {
-            code.copy("sort_key");
-            code.copy("previous_script");
-            code.raw("OP_GREATERTHAN OP_VERIFY", 2, &[]);
-        },
-        |_| {},
-    );
-    code.take("sort_key");
-    code.replace_slot("previous_script");
-    code.copy("owed");
-    code.replace_slot("previous_owed");
+    if order == ListOrder::MostOwed {
+        code.copy("script");
+        code.raw(
+            "OP_REVERSEBYTES <0x00> OP_CAT OP_BIN2NUM",
+            1,
+            &["script_number"],
+        );
+        code.copy("script_length");
+        code.raw(
+            "<35> OP_SWAP OP_SUB <8> OP_MUL OP_LSHIFTNUM",
+            2,
+            &["sort_key"],
+        );
+        code.copy("owed");
+        code.copy("previous_owed");
+        code.raw("OP_LESSTHANOREQUAL OP_VERIFY", 2, &[]);
+        code.copy("owed");
+        code.copy("previous_owed");
+        code.raw("OP_NUMEQUAL", 2, &["tie"]);
+        code.branch(
+            |code| {
+                code.copy("sort_key");
+                code.copy("previous_script");
+                code.raw("OP_GREATERTHAN OP_VERIFY", 2, &[]);
+            },
+            |_| {},
+        );
+        code.take("sort_key");
+        code.replace_slot("previous_script");
+        code.copy("owed");
+        code.replace_slot("previous_owed");
+    }
     let payment_stack = code.stack.clone();
     code.copy("remaining");
     code.branch(
@@ -259,21 +271,23 @@ pub fn generated_source() -> String {
 }
 
 /// Compile once with pinned libauth; every byte belongs to the new covenant.
-pub fn compile_program() -> Result<Vec<u8>, String> {
-    static PROGRAM: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
-    PROGRAM
-        .get_or_init(|| {
-            let compiler = create_compiler_bch(CompilerConfiguration {
-                scripts: BTreeMap::from([("lean".into(), generated_source())]),
-                vm: Some(create_virtual_machine_bch_2026(Some(false))),
-                ..Default::default()
-            });
-            match compiler.generate_bytecode(&CompilationData::default(), "lean") {
-                BytecodeGenerationResult::Success { bytecode } => Ok(bytecode),
-                BytecodeGenerationResult::Error(error) => {
-                    Err(format!("lean CashAssembly: {error:?}"))
-                }
-            }
-        })
-        .clone()
+pub fn compile_program(order: ListOrder) -> Result<Vec<u8>, String> {
+    static MOST_OWED: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+    static SHARE_CHAIN: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+    match order {
+        ListOrder::MostOwed => &MOST_OWED,
+        ListOrder::ShareChain => &SHARE_CHAIN,
+    }
+    .get_or_init(|| {
+        let compiler = create_compiler_bch(CompilerConfiguration {
+            scripts: BTreeMap::from([("lean".into(), generated_source(order))]),
+            vm: Some(create_virtual_machine_bch_2026(Some(false))),
+            ..Default::default()
+        });
+        match compiler.generate_bytecode(&CompilationData::default(), "lean") {
+            BytecodeGenerationResult::Success { bytecode } => Ok(bytecode),
+            BytecodeGenerationResult::Error(error) => Err(format!("lean CashAssembly: {error:?}")),
+        }
+    })
+    .clone()
 }

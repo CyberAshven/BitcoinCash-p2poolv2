@@ -2,7 +2,9 @@
 
 //! Reusable public synthetic fixtures for lean VM tests and measurements.
 
-use crate::lean::{BuiltSplit, Entry, Manifest, ProofBinding, SplitOptions, build_split};
+use crate::lean::{
+    BuiltSplit, Entry, ListOrder, Manifest, ProofBinding, SplitOptions, build_split,
+};
 use crate::state::{RootLock, script_hash_lock};
 use crate::test_utils::{
     beneficiary_script, funding_input, funding_script, sign_funding_transaction, spend_options,
@@ -28,6 +30,7 @@ pub fn proof_binding() -> ProofBinding {
 /// Equal debts in canonical script order; all token amounts use nine bytes.
 pub fn manifest(count: usize) -> Manifest {
     Manifest {
+        order: ListOrder::MostOwed,
         network: 0,
         category: [0x22; 32],
         context: [0x44; 32],

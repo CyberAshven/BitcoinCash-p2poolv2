@@ -60,9 +60,32 @@ pub struct Entry {
     pub multiple: u16,
 }
 
-/// Already ordered, bounded list; order is descending debt, then script bytes.
+/// Who fixes the order in which the covenant pays committed entries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ListOrder {
+    /// Version 1: the covenant checks descending debt, then script bytes.
+    #[default]
+    MostOwed,
+    /// Version 2: the share chain fixes the order, for example first
+    /// eligible, first paid. The covenant pays in R's order and checks none.
+    ShareChain,
+}
+
+impl ListOrder {
+    /// The R header version that selects this program.
+    pub fn version(self) -> u32 {
+        match self {
+            Self::MostOwed => 1,
+            Self::ShareChain => 2,
+        }
+    }
+}
+
+/// Already ordered, bounded list. Version 1 orders by descending debt, then
+/// script bytes; version 2 keeps the order the share chain committed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
+    pub order: ListOrder,
     pub network: u32,
     /// Raw wire order, opposite libauth's category display order.
     pub category: [u8; 32],
@@ -97,10 +120,12 @@ impl Manifest {
             if !scripts.insert(entry.script.as_slice()) {
                 return Err("duplicate beneficiary script".into());
             }
-            if previous.is_some_and(|prior| {
-                prior.owed < entry.owed
-                    || (prior.owed == entry.owed && prior.script >= entry.script)
-            }) {
+            if self.order == ListOrder::MostOwed
+                && previous.is_some_and(|prior| {
+                    prior.owed < entry.owed
+                        || (prior.owed == entry.owed && prior.script >= entry.script)
+                })
+            {
                 return Err("beneficiaries are not in canonical most-owed order".into());
             }
             previous = Some(entry);
@@ -112,7 +137,7 @@ impl Manifest {
     pub fn state(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
         let mut encoded = Vec::with_capacity(HEADER_BYTES + self.entries.len() * 46);
-        encoded.extend_from_slice(&[1, 0, 0, 0]);
+        encoded.extend_from_slice(&self.order.version().to_le_bytes());
         encoded.extend_from_slice(&self.network.to_le_bytes());
         encoded.extend_from_slice(&self.category);
         encoded.extend_from_slice(&self.context);
@@ -143,7 +168,7 @@ impl Manifest {
             redeem.extend_from_slice(&libauth::encode_data_push(&record));
             redeem.push(0x6b);
         }
-        redeem.extend_from_slice(&compile_program()?);
+        redeem.extend_from_slice(&compile_program(self.order)?);
         Ok(redeem)
     }
 

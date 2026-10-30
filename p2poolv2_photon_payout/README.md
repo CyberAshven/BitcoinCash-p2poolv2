@@ -53,6 +53,15 @@ The measurements use complete signed synthetic transactions in both pinned
 libauth BCH 2026 modes. No BCHN admission or market-value result is claimed.
 Full artifact: [lean-measurements.md](lean-measurements.md).
 
+`ListOrder::ShareChain` selects lean version 2 for the simulated
+first-come, first-served rule. Its header version is 2, and it pays entries
+in the order `R` commits, without the most-owed ordering check; all other
+checks are unchanged. `lean-payout-share-order.cash` is its checked source.
+Version 1's bytes and artifact are unchanged. Version 2 is 818 program bytes
+and fits 188, 238 and 198 payees with 35-, 25- and 23-byte scripts, or 244
+in the densest mix. Reproduce with `cargo photon-lean-measure --share-order`;
+full artifact: [lean-share-order-measurements.md](lean-share-order-measurements.md).
+
 ### Lean direct split measurements
 
 Parentheses identify beneficiary script length. Operation cost pairs are
@@ -143,6 +152,20 @@ The runs use the rules exactly as written in section 5 of the design
 document, and under them small miners are not paid within the 5,000-win
 horizon. The causes and candidate changes, none adopted, are in the design
 document's "Simulation findings" subsection.
+
+`cargo photon-payout-sim --candidate-summary` re-runs the same scenarios
+under the four candidate changes, still not adopted: first come, first
+served; pay-ahead bounded by the expected credit of shares already found,
+with no launch history; no window script cap; and 10-second or 1-second
+shares with 12-hour or 48-hour windows. Tables:
+[candidate-summary.md](candidate-summary.md); per-period detail:
+[candidate-results.md](candidate-results.md) (`--candidate`). At 1,000
+miners no win is blocked and the fixed probe is paid about every 1.0 to
+1.2 days, matching its threshold formula. At 10,000 miners a 12-hour
+window often leaves no valid list, so those wins cannot be mined; a
+48-hour window at `N = 187` removes every blocked win, with the same probe
+waits. The design document's "Candidate rules re-run" subsection explains
+the results.
 
 ## Retained funded Merkle-sum tree (phase 2a)
 

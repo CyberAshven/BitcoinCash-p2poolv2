@@ -9,7 +9,7 @@ use p2poolv2_photon_payout::lean::test_utils::{
     FIXTURE_COST, build_fixture, claim_amount_fixture, fixture, manifest, mixed_profile,
     profile_fixture, proof_binding, reject_both, replace_redeem, small_cost_fixture, verify_both,
 };
-use p2poolv2_photon_payout::lean::{SplitOptions, build_split};
+use p2poolv2_photon_payout::lean::{ListOrder, SplitOptions, build_split};
 use p2poolv2_photon_payout::state::RootLock;
 use p2poolv2_photon_payout::test_utils::{
     beneficiary_script, funding_script, sign_funding_transaction, spend_options,
@@ -229,7 +229,84 @@ fn lean_exact_minimum_gross_not_net() {
 
 #[test]
 fn lean_annotations_match_checked_source() {
-    assert_eq!(generated_source(), include_str!("../lean-payout.cash"));
+    assert_eq!(
+        generated_source(ListOrder::MostOwed),
+        include_str!("../lean-payout.cash")
+    );
+}
+
+#[test]
+fn lean_share_order_annotations_match_checked_source() {
+    assert_eq!(
+        generated_source(ListOrder::ShareChain),
+        include_str!("../lean-payout-share-order.cash")
+    );
+}
+
+/// First-eligible order: smaller debts ahead of larger ones, not most owed.
+fn share_order_manifest(count: usize) -> p2poolv2_photon_payout::lean::Manifest {
+    let mut listed = manifest(count);
+    listed.order = ListOrder::ShareChain;
+    for (index, entry) in listed.entries.iter_mut().enumerate() {
+        entry.owed = (20 + index as u64) * FIXTURE_COST;
+    }
+    listed
+}
+
+#[test]
+fn lean_share_order_ascending_debts_pass_both_modes() {
+    let listed = share_order_manifest(8);
+    let reward = listed.entries.iter().map(|entry| entry.owed).sum();
+    verify_both(&build_fixture(&listed, reward, RootLock::P2sh20).unwrap()).unwrap();
+}
+
+#[test]
+fn lean_most_owed_rejects_share_order_list() {
+    let mut listed = share_order_manifest(8);
+    listed.order = ListOrder::MostOwed;
+    let reward = listed.entries.iter().map(|entry| entry.owed).sum();
+    assert!(build_fixture(&listed, reward, RootLock::P2sh20).is_err());
+}
+
+#[test]
+fn lean_share_order_clips_last_committed_entry() {
+    let listed = share_order_manifest(3);
+    let reward = (20 + 21 + 20) * FIXTURE_COST;
+    let split = build_fixture(&listed, reward, RootLock::P2sh20).unwrap();
+    assert_eq!(
+        split.gross_payments,
+        vec![20 * FIXTURE_COST, 21 * FIXTURE_COST, 20 * FIXTURE_COST]
+    );
+    verify_both(&split).unwrap();
+}
+
+#[test]
+fn lean_share_order_swapped_outputs_fail() {
+    let listed = share_order_manifest(8);
+    let reward = listed.entries.iter().map(|entry| entry.owed).sum();
+    let mut split = build_fixture(&listed, reward, RootLock::P2sh20).unwrap();
+    split.transaction.outputs.swap(0, 1);
+    reject_both(&mut split).unwrap();
+}
+
+#[test]
+fn lean_share_order_version_one_header_fails() {
+    let listed = share_order_manifest(8);
+    let reward = listed.entries.iter().map(|entry| entry.owed).sum();
+    let mut split = build_fixture(&listed, reward, RootLock::P2sh20).unwrap();
+    let mut redeem = split.redeem.clone();
+    // OP_PUSHDATA1 and its length precede the little-endian version word.
+    assert_eq!(redeem[2], 2);
+    redeem[2] = 1;
+    replace_redeem(&mut split, redeem, true);
+    reject_both(&mut split).unwrap();
+}
+
+#[test]
+fn lean_share_order_64_payees_both_modes() {
+    let listed = share_order_manifest(64);
+    let reward = listed.entries.iter().map(|entry| entry.owed).sum();
+    verify_both(&build_fixture(&listed, reward, RootLock::P2sh20).unwrap()).unwrap();
 }
 
 #[test]

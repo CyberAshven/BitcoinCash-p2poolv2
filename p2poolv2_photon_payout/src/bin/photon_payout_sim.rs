@@ -4,9 +4,9 @@
 
 use std::env::args;
 
-use p2poolv2_photon_payout::lean::{Entry, Manifest, SplitOptions, build_split};
+use p2poolv2_photon_payout::lean::{Entry, ListOrder, Manifest, SplitOptions, build_split};
 use p2poolv2_photon_payout::simulation::{
-    CommittedOwed, Payment, PeriodSummary, Population, Scheduling, SimulationConfig,
+    CommittedOwed, Payment, PeriodSummary, Population, Rules, Scheduling, SimulationConfig,
     SimulationReport, SplitCost, simulate,
 };
 use p2poolv2_photon_payout::state::RootLock;
@@ -15,11 +15,13 @@ use p2poolv2_photon_payout::test_utils::{
 };
 
 fn builder_cost(
+    order: ListOrder,
     cost_tokens: u64,
     committed: &[CommittedOwed],
     payments: &[Payment],
 ) -> Result<SplitCost, String> {
     let manifest = Manifest {
+        order,
         network: 0,
         category: [0x22; 32],
         context: [0x44; 32],
@@ -95,18 +97,38 @@ fn print_report(report: &SimulationReport) {
         report.outstanding_fundable_roots,
         report.first_split_opportunity,
     );
-    println!(
-        "Integer check: won {} = gross paid {} + unpaid {} + unallocated {}; reserved {} is included in unpaid; reimbursement {} is included in gross paid. Outside claims {} emitted {}; ending vault {}.",
-        report.total_won_tokens,
-        report.gross_paid_tokens,
-        report.unpaid_tokens,
-        report.unallocated_tokens,
-        report.reserved_tokens,
-        report.reimbursement_tokens,
-        report.outside_claims,
-        report.outside_emitted_tokens,
-        report.ending_vault_tokens,
-    );
+    if report.config.rules == Rules::Written {
+        println!(
+            "Integer check: won {} = gross paid {} + unpaid {} + unallocated {}; reserved {} is included in unpaid; reimbursement {} is included in gross paid. Outside claims {} emitted {}; ending vault {}.",
+            report.total_won_tokens,
+            report.gross_paid_tokens,
+            report.unpaid_tokens,
+            report.unallocated_tokens,
+            report.reserved_tokens,
+            report.reimbursement_tokens,
+            report.outside_claims,
+            report.outside_emitted_tokens,
+            report.ending_vault_tokens,
+        );
+    } else {
+        println!(
+            "Signed check: won {} = gross paid {} + unpaid {} - advanced {} + unallocated {}; reserved {} is included in unpaid; reimbursement {} is included in gross paid. Outside claims {} emitted {}; ending vault {}. Peak advanced {} raw units ({:.3} mean rewards); advanced held by departed miners {}; paid beyond a miner's own bound {}.",
+            report.total_won_tokens,
+            report.gross_paid_tokens,
+            report.unpaid_tokens,
+            report.advanced_tokens,
+            report.unallocated_tokens,
+            report.reserved_tokens,
+            report.reimbursement_tokens,
+            report.outside_claims,
+            report.outside_emitted_tokens,
+            report.ending_vault_tokens,
+            report.peak_advanced_tokens,
+            in_rewards(report.peak_advanced_tokens, report),
+            report.departed_advanced_tokens,
+            report.beyond_bound_tokens,
+        );
+    }
     println!();
     println!(
         "| Period | Opportunities | Won | Splits | Payouts/opportunity | Payouts/won | Eligible rank>N mean/max | Fee/split sats | Gross front/split sats | Net external/split sats |"
@@ -160,9 +182,152 @@ fn print_report(report: &SimulationReport) {
     println!();
 }
 
+/// Express raw token units as a multiple of the run's mean won reward.
+fn in_rewards(tokens: u64, report: &SimulationReport) -> f64 {
+    let wins = (report.bootstrap.won + report.established.won).max(1) as f64;
+    tokens as f64 / (report.total_won_tokens.max(1) as f64 / wins)
+}
+
+/// Candidate runs: N=64 and N=187 at 10-second shares, then N=187 at
+/// 1-second shares, each with a 12-hour window; then N=187 at 10-second
+/// shares with a 48-hour window.
+fn candidate_runs(quick: bool) -> Result<Vec<SimulationReport>, String> {
+    let mut reports = Vec::with_capacity(18);
+    for (payee_cap, share_seconds, window_hours, sizes) in [
+        (64, 10.0, 12.0, &[1_000, 10_000][..]),
+        (187, 10.0, 12.0, &[1_000, 10_000][..]),
+        (187, 1.0, 12.0, &[10_000][..]),
+        (187, 10.0, 48.0, &[10_000][..]),
+    ] {
+        for miners in sizes {
+            for population in [
+                Population::Giant,
+                Population::LogUniform,
+                Population::HeavyTailed,
+            ] {
+                let mut config = SimulationConfig::candidate(*miners, population);
+                config.payee_cap = payee_cap;
+                config.share_seconds = share_seconds;
+                config.window_shares = (window_hours * 3_600.0 / share_seconds) as usize;
+                if quick {
+                    config.opportunities = 100;
+                }
+                reports.push(run(&config)?);
+            }
+        }
+    }
+    Ok(reports)
+}
+
+fn candidate_header() {
+    println!(
+        "Candidate rules, not adopted: the queue is paid in the order miners' earned balances reached their minimum; the rest of each win is paid ahead to the miners whose shares already in the window are expected to earn the most, never beyond that expectation; a leftover too small for the next miner's minimum goes to the entry before it; no 4,096-script window stop; no launch history or custody. A list that cannot be built leaves that win unmined (strict). Seed `0x70686f746f6e6d70`; 5,000 potential pool wins per run; C=1,000,000 raw units; multiples uniform in 10/20/30/50; churn and delayed funding as in the written-rules study. Windows hold 12 hours of full-pool shares (4,320 at 10 s, 43,200 at 1 s), except the last three runs: 48 hours (17,280 at 10 s). BCH costs serialize each list through the version 2 (share-chain order) lean builder with 35-byte payees. Reproduce with `cargo photon-payout-sim --candidate-summary`; full per-period tables with `--candidate`."
+    );
+    println!();
+}
+
+fn window_hours(report: &SimulationReport) -> f64 {
+    report.config.window_shares as f64 * report.config.share_seconds / 3_600.0
+}
+
+fn print_candidate_summary(reports: &[SimulationReport]) {
+    candidate_header();
+    println!(
+        "| Population | Miners | N | Share s | Window h | Won/blocked (by N) | Payouts/won | Queue beyond N mean/max | Fee/payee sats | Peak advanced (rewards) | End advanced (rewards) | Departed advanced (rewards) | Beyond own bound (rewards) |"
+    );
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    for report in reports {
+        let period = &report.established;
+        let won = report.bootstrap.won + report.established.won;
+        let payouts = report.bootstrap.payouts + report.established.payouts;
+        let fees = report.bootstrap.fee_satoshis + report.established.fee_satoshis;
+        println!(
+            "| {} | {} | {} | {} | {} | {}/{} ({}) | {:.3} | {:.1}/{} | {:.1} | {:.3} | {:.3} | {:.3} | {:.4} |",
+            report.config.population.name(),
+            report.config.miners,
+            report.config.payee_cap,
+            report.config.share_seconds,
+            window_hours(report),
+            won,
+            report.blocked_coverage + report.blocked_remainder,
+            report.blocked_slots,
+            payouts as f64 / won.max(1) as f64,
+            period.backlog_sum as f64 / period.opportunities.max(1) as f64,
+            period.backlog_max,
+            fees as f64 / payouts.max(1) as f64,
+            in_rewards(report.peak_advanced_tokens, report),
+            in_rewards(report.advanced_tokens, report),
+            in_rewards(report.departed_advanced_tokens, report),
+            in_rewards(report.beyond_bound_tokens, report),
+        );
+    }
+    println!();
+    println!(
+        "Blocked wins had no valid list, so the pool could not mine them; \"by N\" counts those that all offers together could have covered, so only the payee cap blocked them. The others lacked enough earned balance plus bounded advance in total. Payouts/won and fee/payee cover the whole run, including the first 100 wins. Queue beyond N counts queued miners not listed in a win, after the first 100. Advanced balances are tokens paid ahead and not yet recovered from later credit, in mean won rewards; departed advances are recovered only if those miners return. Beyond own bound is paid above a miner's earned balance plus expected credit, only by absorbing a leftover smaller than the next minimum."
+    );
+    println!();
+    println!(
+        "| Population | Miners | N | Share s | Window h | Class | Paid/total | Zero shares | Mean/P95 interval days | Mean m*C/rate days | First payout mean days | Unpaid raw tokens |"
+    );
+    println!("|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|");
+    for report in reports {
+        for class in &report.classes {
+            println!(
+                "| {} | {} | {} | {} | {} | {} | {}/{} | {} | {}/{} | {:.3} | {} | {} |",
+                report.config.population.name(),
+                report.config.miners,
+                report.config.payee_cap,
+                report.config.share_seconds,
+                window_hours(report),
+                class.class,
+                class.paid_miners,
+                class.miners,
+                class.zero_share_miners,
+                number(class.mean_wait_days),
+                number(class.percentile_95_days),
+                class.mean_threshold_wait_days,
+                number(class.mean_first_wait_days),
+                class.unpaid_tokens,
+            );
+        }
+    }
+    println!();
+    println!(
+        "Intervals are completed payout-to-payout waits, event weighted; m*C/rate is the threshold wait averaged over miners. `censored` means no completed interval within about 139 days, not a measured infinite wait. Zero-share miners found no share during the run."
+    );
+    println!();
+    println!(
+        "| Population | Miners | N | Share s | Window h | Probe payouts | Mean/P95 interval days | m*C/earning-rate days | Unpaid raw tokens |"
+    );
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|");
+    for report in reports {
+        println!(
+            "| {} | {} | {} | {} | {} | {} | {}/{} | {:.3} | {} |",
+            report.config.population.name(),
+            report.config.miners,
+            report.config.payee_cap,
+            report.config.share_seconds,
+            window_hours(report),
+            report.probe.payouts,
+            number(report.probe.mean_wait_days),
+            number(report.probe.percentile_95_days),
+            report.probe.threshold_wait_days,
+            report.probe.unpaid_tokens,
+        );
+    }
+    println!();
+    println!(
+        "The probe keeps 0.0001 of the original full pool's hash and m=20 in every run, so its threshold wait is the same everywhere; a population-independent rule gives it the same observed wait at 1,000 and 10,000 miners."
+    );
+}
+
 fn run(config: &SimulationConfig) -> Result<SimulationReport, String> {
+    let order = match config.rules {
+        Rules::Written => ListOrder::MostOwed,
+        Rules::Candidate => ListOrder::ShareChain,
+    };
     simulate(config, |committed, payments| {
-        builder_cost(config.cost_tokens, committed, payments)
+        builder_cost(order, config.cost_tokens, committed, payments)
     })
 }
 
@@ -292,8 +457,34 @@ fn main() -> Result<(), String> {
     let arguments: Vec<String> = args().skip(1).collect();
     let quick = arguments.as_slice() == ["--quick"];
     let summary = arguments.as_slice() == ["--summary"];
+    let candidate = arguments.first().map(String::as_str) == Some("--candidate");
+    let candidate_summary = arguments.as_slice() == ["--candidate-summary"];
+    if candidate || candidate_summary {
+        let candidate_quick = arguments.get(1).map(String::as_str) == Some("--quick");
+        if arguments.len() > 1 + usize::from(candidate) {
+            return Err(
+                "usage: photon-payout-sim [--quick|--summary|--candidate [--quick]|--candidate-summary]"
+                    .into(),
+            );
+        }
+        let reports = candidate_runs(candidate_quick)?;
+        if candidate_summary {
+            print_candidate_summary(&reports);
+        } else {
+            println!("# Seeded minimum-payout study: candidate rules");
+            println!();
+            candidate_header();
+            for report in &reports {
+                print_report(report);
+            }
+        }
+        return Ok(());
+    }
     if !arguments.is_empty() && !quick && !summary {
-        return Err("usage: photon-payout-sim [--quick|--summary]".into());
+        return Err(
+            "usage: photon-payout-sim [--quick|--summary|--candidate [--quick]|--candidate-summary]"
+                .into(),
+        );
     }
     let mut reports = Vec::with_capacity(12);
     if !summary {

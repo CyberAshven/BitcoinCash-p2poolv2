@@ -1111,8 +1111,132 @@ custody by letting a win's remainder go to the next miners in line, even
 ahead of what they have earned (bounded, and recovered from their later
 credit), so no tokens wait in custody and the backlog stays near zero; and
 size the share rate so a target smallest miner has a share in most windows.
-Each changes a proposed share-chain rule and needs the owner's approval and
-a fresh simulation.
+Each changes a proposed share-chain rule and needs the owner's approval.
+The re-run below simulates them.
+
+### Candidate rules re-run: first come, first served with bounded pay-ahead
+
+On **2026-10-30** the owner asked for the four candidate changes above to be
+simulated. They are still **not adopted**. Each changes a proposed share-chain
+rule and needs the owner's approval before any design text treats it as
+settled. In plain words, the simulated rules are:
+
+1. **First come, first served.** A miner joins the queue when their earned
+   balance first reaches their own minimum (`multiple * C`). The queue is
+   paid in that order, ties broken by script bytes. A miner paid in full
+   rejoins at the back once they have earned their minimum again. A miner
+   whose payment was clipped keeps their place for the rest.
+2. **No tokens held at launch.** There is no launch history and nothing is
+   held in custody; the first win pays at once. After the queue, the rest
+   of each win is paid ahead to the miners whose shares already in the
+   window are expected to earn the most. Nobody is paid ahead of more than
+   the expected PPLNS credit of shares they have already found, so those
+   same shares repay the advance. Its expected loss is zero; only pool luck
+   makes the real credit differ. If what remains after an entry is too
+   small to pay the next miner's minimum at the smallest possible reward,
+   the entry before absorbs it: a small extra advance, below one further
+   minimum plus the 65,535-unit tail span. If no list of at most `N`
+   payees can cover the reward, the pool cannot build a job for that win,
+   and the study counts it as blocked.
+3. **No 4,096-script window cap.** Every share in the window earns credit.
+4. **Share rate and window length.** The study compares 10-second and
+   1-second pool shares with a 12-hour window, and a 48-hour window at
+   10-second shares.
+
+The expected credit of a share at position `j` (oldest 0) in a window holding
+`L` of `W` shares is `q * reward * (H(W-1) - H(L-1) + (j+1)/W)`. Here `q` is
+the chance that a pool share is also a win and `H` is the harmonic number. The
+first term covers a window that is still filling, as at launch. The study
+computes this in floating point; a deployed rule needs exact integer
+arithmetic, for example from the ratio of the share and claim targets.
+
+**Covenant change.** First come, first served cannot use the version 1
+lean covenant, which checks that `R` lists debts most-owed first. That
+check adds no security: a dishonest `R` could name anyone, and the share
+chain must validate `R` against its ledger in any case. Version 2 (header
+version 2) drops it and pays entries in the order `R` commits; every other
+check is unchanged. Version 1's bytes, artifact and measurements are
+unchanged. Version 2 is 818 program bytes instead of 885. Its largest
+measured standard lists are 188 payees with 35-byte scripts, 238 with
+25-byte P2PKH and 198 with 23-byte P2SH20 (versus 187, 99 and 83), and 244
+in the densest mix (versus 207). The ordering check was most of the
+operation cost for short scripts. The fee is 117 to 154 sats per payee for
+lists of 64 or more. Full table:
+[`lean-share-order-measurements.md`](../../p2poolv2_photon_payout/lean-share-order-measurements.md).
+
+`cargo photon-payout-sim --candidate-summary` reproduces the tables in
+[`candidate-summary.md`](../../p2poolv2_photon_payout/candidate-summary.md);
+the per-period tables are in
+[`candidate-results.md`](../../p2poolv2_photon_payout/candidate-results.md).
+The seed, populations, multiples, churn, delayed funding, `C` and 5,000-win
+horizon match the written-rules study. Costs serialize every list through
+the version 2 builder. The fixed probe miner has 0.0001 of the original
+pool's hash and multiple 20; its threshold wait `multiple * C / earning rate`
+is about 1.15 days in every run.
+
+| Miners | Mix | N | Share interval | Window | Blocked wins of 5,000 (by N alone) | Payouts per won reward | Probe interval mean / P95 days | Peak paid ahead, rewards |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | Giant 70 percent | 64 | 10 s | 12 h | 0 (0) | 44.338 | 1.162 / 3.492 | 1.805 |
+| 1,000 | Log-uniform | 64 | 10 s | 12 h | 0 (0) | 63.941 | 0.987 / 3.026 | 2.311 |
+| 1,000 | Heavy-tailed | 64 | 10 s | 12 h | 0 (0) | 63.933 | 1.123 / 3.492 | 3.438 |
+| 10,000 | Giant 70 percent | 64 | 10 s | 12 h | 80 (6) | 46.930 | 1.538 / 4.043 | 7.440 |
+| 10,000 | Log-uniform | 64 | 10 s | 12 h | 4,927 (4,927) | 63.219 | censored / censored | 8.023 |
+| 10,000 | Heavy-tailed | 64 | 10 s | 12 h | 4,980 (4,980) | 61.050 | censored / censored | 6.836 |
+| 1,000 | Giant 70 percent | 187 | 10 s | 12 h | 0 (0) | 44.338 | 1.162 / 3.492 | 1.805 |
+| 1,000 | Log-uniform | 187 | 10 s | 12 h | 0 (0) | 83.567 | 0.987 / 3.026 | 2.126 |
+| 1,000 | Heavy-tailed | 187 | 10 s | 12 h | 0 (0) | 109.883 | 0.992 / 2.974 | 2.905 |
+| 10,000 | Giant 70 percent | 187 | 10 s | 12 h | 57 (0) | 47.114 | 1.538 / 3.920 | 7.422 |
+| 10,000 | Log-uniform | 187 | 10 s | 12 h | 380 (50) | 121.722 | 1.477 / 3.713 | 7.033 |
+| 10,000 | Heavy-tailed | 187 | 10 s | 12 h | 1,680 (140) | 120.727 | 2.047 / 4.745 | 10.653 |
+| 10,000 | Giant 70 percent | 187 | 1 s | 12 h | 3,280 (0) | 58.410 | 2.400 / 5.778 | 6.897 |
+| 10,000 | Log-uniform | 187 | 1 s | 12 h | 4,094 (1,092) | 168.599 | 4.651 / 8.732 | 6.332 |
+| 10,000 | Heavy-tailed | 187 | 1 s | 12 h | 4,984 (86) | 128.125 | censored / censored | 5.438 |
+| 10,000 | Giant 70 percent | 187 | 10 s | 48 h | 0 (0) | 63.635 | 1.216 / 3.040 | 11.098 |
+| 10,000 | Log-uniform | 187 | 10 s | 48 h | 0 (0) | 129.071 | 0.984 / 2.180 | 12.086 |
+| 10,000 | Heavy-tailed | 187 | 10 s | 48 h | 0 (0) | 119.600 | 1.241 / 3.054 | 19.887 |
+
+What the re-run shows:
+
+- **At 1,000 miners the four changes work.** No win was blocked at
+  `N = 64` or `N = 187`. The probe was paid every 0.99 to 1.16 days on
+  average, matching its 1.15-day threshold; under the written rules it
+  waited 15 to 77 days. Medium miners were paid every 0.3 to 0.6 days.
+- **At 10,000 miners with a 12-hour window the pool often cannot mine.** At
+  `N = 64`, almost every win in the log-uniform and heavy-tailed mixes had
+  no valid list, all because 64 payees were too few. At `N = 187`, 380 and
+  1,680 of 5,000 wins were blocked, mostly because the balances of miners
+  still below their minimum added up to more than the bounded pay-ahead
+  could cover.
+- **One-second shares made that worse.** With the same 12-hour window, more
+  small miners hold balances below their minimum, and each share's expected
+  credit is a tenth as large, so less of it reaches anyone's minimum. They
+  did let more small miners find shares: in the giant mix, small miners with
+  no share fell from 1,022 to 148.
+- **A 48-hour window removed every blocked win at 10,000 miners** in all
+  three mixes. The probe was paid every 0.98 to 1.24 days, the same as at
+  1,000 miners and as its formula, so under these rules its wait does not
+  depend on the number of miners. Medium miners were paid every 0.6 to 2.2
+  days, sooner than their 3.4 to 4.1-day thresholds because pay-ahead
+  reaches them before they have earned it all.
+- **Costs.** Fees were 138 to 159 sats per payee across all runs. In the
+  48-hour runs, tokens paid ahead and not yet recovered peaked at 11 to 20
+  mean rewards; miners who had left held at most 0.04 rewards of advances,
+  recovered only if they return; and payments above a miner's own bound,
+  from absorbing small leftovers, totalled at most 7.9 rewards out of 5,000.
+- **The smallest miners still find no shares.** At 10-second shares a miner
+  below about one ten-millionth of the pool almost never finds one: 2,405
+  of 2,460 tiny miners in the 10,000-miner giant mix found none in about
+  139 days. This
+  is the smallest-miner floor the owner raised. A faster share rate
+  includes them, but adds share-chain load and, with a 12-hour window, blocks
+  wins.
+
+Before any of this is adopted, the owner would decide: first come, first
+served; the pay-ahead bound (expected credit of found shares) and the
+leftover rule; the window length (48 hours studied); `N` (187 studied;
+version 2 allows up to 188, 238, 198 or 244 by script mix); the share
+rate and smallest-miner floor; and what happens to advances held by miners
+who leave. None of these runs touched a node, chipnet or mainnet.
 
 ### Historical funded Merkle-sum tree: no longer the main path
 
@@ -1777,6 +1901,11 @@ owner decisions**, with no default selected by this study:
 - P2SH20 or P2SH32 for claim output index 1, after review of final lean `R`.
 - The share rate needed by the smallest miners; a fee threshold cannot
   give credit to a miner who has not found a credited chain share.
+- Whether to adopt the simulated candidate rules: first come, first served;
+  pay-ahead bounded by the expected credit of found shares, which replaces
+  any launch custody; no window script cap; a 48-hour window; and the
+  version 2 covenant that pays in the share chain's order. The section 5
+  re-run is evidence for this choice, not an approval.
 
 Coverage gaps, fixed-list reservations, multiple-change activation and
 the price/no-sponsor execution condition in section 5 also need explicit

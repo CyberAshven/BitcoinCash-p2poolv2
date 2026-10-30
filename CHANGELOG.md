@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`cargo photon-payout-sim --candidate-summary` re-runs the PHOTON payout
+study under four candidate rules the owner asked to test, none adopted:
+first come, first served; pay-ahead bounded by the expected credit of
+shares already found, with no launch custody; no window script cap; and
+other share rates and window lengths. At 1,000 miners no win is blocked
+and a fixed small miner is paid about as often as its threshold formula
+predicts. At 10,000 miners a 12-hour window often leaves no valid payout
+list; a 48-hour window removes every blocked win. A version 2 lean
+covenant pays in the share chain's order; version 1 is unchanged.
+Offline study only.
+
 `cargo photon-payout-sim` is a seeded simulation of the PHOTON
 minimum-payout rules for 1,000 and 10,000 miners with mixed hash rates,
 multiples, churn and delayed funding. Under the rules as written it finds

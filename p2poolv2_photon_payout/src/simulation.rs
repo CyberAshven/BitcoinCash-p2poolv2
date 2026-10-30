@@ -7,6 +7,11 @@
 //! prior wins, but assumes an unspecified bootstrap custody rule. No such rule
 //! is selected here. The diagnostic mode permits new wins with unspendable
 //! payout commitments; its results do not establish a realizable protocol.
+//!
+//! `Rules::Candidate` applies four changes that await the owner's decision:
+//! first eligible, first paid; the rest of a win paid ahead, bounded by the
+//! expected credit of shares already in the window; no window script stop;
+//! and no launch history or custody.
 
 use std::collections::VecDeque;
 
@@ -32,6 +37,20 @@ impl Population {
     }
 }
 
+/// Largest PHOTON tail; a committed list must pay correctly at every tail.
+pub const TAIL_SPAN: u64 = 65_535;
+
+/// Which list rules the study applies. Neither is an owner decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rules {
+    /// Section 5 as written: most owed first, never paid ahead.
+    Written,
+    /// Candidate changes: the queue in the order miners reached their minimum,
+    /// then the rest paid ahead to the miners whose shares already in the
+    /// window are expected to earn the most, never beyond that expectation.
+    Candidate,
+}
+
 /// Treatment of commitments which cannot distribute their complete reward.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scheduling {
@@ -45,6 +64,7 @@ pub enum Scheduling {
 /// Explicit scenario inputs; none of these values is an owner decision.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimulationConfig {
+    pub rules: Rules,
     pub miners: usize,
     pub population: Population,
     pub scheduling: Scheduling,
@@ -82,6 +102,7 @@ impl SimulationConfig {
     /// Repeatable study parameters, deliberately separate from a live profile.
     pub fn study(miners: usize, population: Population) -> Self {
         Self {
+            rules: Rules::Written,
             miners,
             population,
             scheduling: Scheduling::HoldBlockedRoots,
@@ -102,6 +123,18 @@ impl SimulationConfig {
         }
     }
 
+    /// The four candidate changes at the same scenario inputs as `study`.
+    /// A list that cannot be built leaves that win unmined; nothing is held.
+    pub fn candidate(miners: usize, population: Population) -> Self {
+        Self {
+            rules: Rules::Candidate,
+            scheduling: Scheduling::Strict,
+            historical_wins: 0,
+            window_script_cap: usize::MAX,
+            ..Self::study(miners, population)
+        }
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.miners == 0
             || self.opportunities == 0
@@ -109,7 +142,7 @@ impl SimulationConfig {
             || self.window_script_cap == 0
             || self.payee_cap == 0
             || self.cost_tokens == 0
-            || self.cost_tokens > u64::MAX / 50
+            || self.cost_tokens > i64::MAX as u64 / 50
             || self.vault_tokens / 420_000 < (1u64 << 32) + 65_537
             || !self.share_seconds.is_finite()
             || !self.win_seconds.is_finite()
@@ -213,8 +246,13 @@ struct Account {
     hash_weight: f64,
     multiple: u16,
     joined: bool,
-    owed: u64,
-    reserved: u64,
+    /// Won-backed credit minus confirmed gross payments; negative once paid
+    /// ahead under the candidate rules.
+    balance: i64,
+    /// Gross payments locked in immutable, not yet funded lists.
+    reserved: i64,
+    /// Opportunity at which the earned balance reached the minimum.
+    eligible_since: Option<usize>,
     gross_paid: u64,
     net_paid: u64,
     reimbursement: u64,
@@ -227,6 +265,16 @@ struct Account {
     first_active: Option<f64>,
     active_seconds: f64,
     share_count: usize,
+}
+
+impl Account {
+    fn available(&self) -> i64 {
+        self.balance - self.reserved
+    }
+
+    fn minimum(&self, cost_tokens: u64) -> i64 {
+        i64::from(self.multiple) * cost_tokens as i64
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -253,6 +301,8 @@ pub struct ClassSummary {
     pub reimbursement_fraction: Option<f64>,
     pub unpaid_tokens: u64,
     pub reserved_tokens: u64,
+    /// Paid ahead and not yet recovered from later credit.
+    pub advanced_tokens: u64,
 }
 
 /// Aggregate statistics over either the first 100 or later opportunities.
@@ -280,9 +330,21 @@ pub struct SimulationReport {
     pub reimbursement_tokens: u64,
     pub unpaid_tokens: u64,
     pub reserved_tokens: u64,
+    /// Paid ahead and not yet recovered: won = paid + unpaid - advanced +
+    /// unallocated.
+    pub advanced_tokens: u64,
+    pub peak_advanced_tokens: u64,
+    /// Advanced balances of miners who left; recovered only if they return.
+    pub departed_advanced_tokens: u64,
+    /// Payments above the miner's own bound, from absorbing a leftover too
+    /// small for the next miner's minimum.
+    pub beyond_bound_tokens: u64,
     pub unallocated_tokens: u64,
     pub blocked_coverage: usize,
     pub blocked_remainder: usize,
+    /// Candidate rules: refused lists that only the payee cap blocked; the
+    /// rest lacked enough earned balance and bounded advance in total.
+    pub blocked_slots: usize,
     pub permanently_stranded_tokens: u64,
     pub outstanding_fundable_roots: usize,
     pub outside_claims: usize,
@@ -353,8 +415,9 @@ fn population(config: &SimulationConfig, generator: &mut EventGenerator) -> Vec<
             hash_weight,
             multiple,
             joined,
-            owed: 0,
+            balance: 0,
             reserved: 0,
+            eligible_since: None,
             gross_paid: 0,
             net_paid: 0,
             reimbursement: 0,
@@ -474,9 +537,9 @@ fn credit_reward(
             let upper = lower + *count as u128;
             let credit = ((u128::from(reward) * upper) / denominator
                 - (u128::from(reward) * lower) / denominator) as u64;
-            accounts[miner].owed = accounts[miner]
-                .owed
-                .checked_add(credit)
+            accounts[miner].balance = accounts[miner]
+                .balance
+                .checked_add(i64::try_from(credit).map_err(|_| "credit overflow")?)
                 .ok_or("owed token overflow")?;
             accounts[miner].credited = accounts[miner]
                 .credited
@@ -496,11 +559,11 @@ fn freeze_list(
 ) -> (Vec<CommittedOwed>, usize) {
     let mut eligible = Vec::with_capacity(accounts.len());
     for (miner, account) in accounts.iter().enumerate() {
-        let available = account.owed - account.reserved;
-        if available >= u64::from(account.multiple) * cost_tokens {
+        let available = account.available();
+        if available >= account.minimum(cost_tokens) {
             eligible.push(CommittedOwed {
                 miner,
-                owed: available,
+                owed: available as u64,
                 multiple: account.multiple,
             });
         }
@@ -522,9 +585,185 @@ fn freeze_list(
     (eligible, backlog)
 }
 
+/// One miner offered to a candidate-rules list, with the most they may get.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Offered {
+    pub miner: usize,
+    /// Earned balance for a queued miner; balance plus the bounded advance
+    /// for a miner paid ahead.
+    pub cap: u64,
+    pub multiple: u16,
+}
+
+/// Candidate list: the queue in first-eligible order, then pay-ahead offers.
+///
+/// Prefer as many queued miners as still allow coverage within `payee_cap`.
+/// Every entry but the last is paid its whole cap at every tail; the last
+/// takes what is left. An entry is only followed by another when the
+/// smallest possible reward still leaves the next one its minimum. Otherwise
+/// that entry absorbs the leftover: an extra advance below one further
+/// minimum plus the tail span. `None` means no list covers the reward.
+pub fn plan_queue_list(
+    queue: &[Offered],
+    ahead: &[Offered],
+    payee_cap: usize,
+    cost_tokens: u64,
+    reward_maximum: u64,
+) -> Option<Vec<CommittedOwed>> {
+    let reward_minimum = reward_maximum.saturating_sub(TAIL_SPAN);
+    let prefix = |offers: &[Offered]| {
+        let mut sums = Vec::with_capacity(offers.len() + 1);
+        sums.push(0u128);
+        for offer in offers {
+            sums.push(sums[sums.len() - 1] + u128::from(offer.cap));
+        }
+        sums
+    };
+    let queue = &queue[..queue.len().min(payee_cap)];
+    let ahead = &ahead[..ahead.len().min(payee_cap)];
+    let queue_sums = prefix(queue);
+    let ahead_sums = prefix(ahead);
+    let queued = (0..=queue.len()).rev().find(|count| {
+        queue_sums[*count] + ahead_sums[(payee_cap - count).min(ahead.len())]
+            >= u128::from(reward_maximum)
+    })?;
+    let offers: Vec<&Offered> = queue[..queued]
+        .iter()
+        .chain(&ahead[..(payee_cap - queued).min(ahead.len())])
+        .collect();
+    let mut committed = Vec::with_capacity(offers.len());
+    let mut listed = 0u64;
+    for (index, offer) in offers.iter().enumerate() {
+        let after = listed.checked_add(offer.cap)?;
+        let next_fits = offers.get(index + 1).is_some_and(|next| {
+            after < reward_maximum
+                && reward_minimum.saturating_sub(after)
+                    >= cost_tokens.saturating_mul(u64::from(next.multiple))
+        });
+        committed.push(CommittedOwed {
+            miner: offer.miner,
+            owed: if next_fits {
+                offer.cap
+            } else {
+                reward_maximum - listed
+            },
+            multiple: offer.multiple,
+        });
+        if !next_fits {
+            return Some(committed);
+        }
+        listed = after;
+    }
+    None
+}
+
+/// Expected future PPLNS credit of each miner's shares already in the window.
+///
+/// A share at position `j` (oldest 0) of a window holding `L` of `W` shares
+/// stays for `W - L + j + 1` more pool shares. Each is a win with
+/// probability `q` and credits `reward / length`, so its expectation is
+/// `q * reward * (H(W-1) - H(L-1) + (j+1)/W)`, with `H` the harmonic number.
+/// A deployed rule needs exact integer arithmetic; this study uses floats.
+fn expected_credit(
+    shares: &VecDeque<usize>,
+    harmonic: &[f64],
+    window: usize,
+    win_probability: f64,
+    reward: u64,
+    miners: usize,
+) -> Vec<u64> {
+    let mut expected = vec![0.0f64; miners];
+    if let Some(filled) = shares.len().checked_sub(1) {
+        let filling = harmonic[window - 1] - harmonic[filled];
+        for (position, miner) in shares.iter().enumerate() {
+            expected[*miner] += filling + (position + 1) as f64 / window as f64;
+        }
+    }
+    let scale = win_probability * reward as f64;
+    expected
+        .into_iter()
+        .map(|value| (value * scale).floor() as u64)
+        .collect()
+}
+
+/// Candidate-rules list from the pre-win ledger and parent window. The flag
+/// marks a refused list that every offer together could have covered, so
+/// only the payee cap blocked it.
+fn freeze_queue(
+    accounts: &[Account],
+    expected: &[u64],
+    config: &SimulationConfig,
+    reward_maximum: u64,
+) -> (Vec<CommittedOwed>, usize, bool) {
+    let mut order: Vec<(usize, usize)> = accounts
+        .iter()
+        .enumerate()
+        .filter_map(|(miner, account)| account.eligible_since.map(|since| (since, miner)))
+        .collect();
+    order.sort_unstable();
+    let queue: Vec<Offered> = order
+        .into_iter()
+        .map(|(_, miner)| Offered {
+            miner,
+            cap: accounts[miner].available() as u64,
+            multiple: accounts[miner].multiple,
+        })
+        .collect();
+    let mut ahead: Vec<Offered> = accounts
+        .iter()
+        .enumerate()
+        .filter(|(_, account)| account.eligible_since.is_none())
+        .filter_map(|(miner, account)| {
+            let cap = account.available() + expected[miner] as i64;
+            (cap >= account.minimum(config.cost_tokens)).then_some(Offered {
+                miner,
+                cap: cap as u64,
+                multiple: account.multiple,
+            })
+        })
+        .collect();
+    ahead.sort_unstable_by(|left, right| {
+        right
+            .cap
+            .cmp(&left.cap)
+            .then_with(|| left.miner.cmp(&right.miner))
+    });
+    let committed = plan_queue_list(
+        &queue,
+        &ahead,
+        config.payee_cap,
+        config.cost_tokens,
+        reward_maximum,
+    )
+    .unwrap_or_default();
+    let listed = committed
+        .iter()
+        .filter(|entry| accounts[entry.miner].eligible_since.is_some())
+        .count();
+    let capacity: u128 = queue
+        .iter()
+        .chain(&ahead)
+        .map(|offer| u128::from(offer.cap))
+        .sum();
+    let slot_limited = committed.is_empty() && capacity >= u128::from(reward_maximum);
+    (committed, queue.len() - listed, slot_limited)
+}
+
+/// Join the queue on first reaching the minimum; leave it once below.
+fn refresh_queue(accounts: &mut [Account], cost_tokens: u64, opportunity: usize) {
+    for account in accounts {
+        if account.available() < account.minimum(cost_tokens) {
+            account.eligible_since = None;
+        } else if account.eligible_since.is_none() {
+            account.eligible_since = Some(opportunity);
+        }
+    }
+}
+
 fn settle(
     pending: PendingSplit,
     accounts: &mut [Account],
+    rules: Rules,
     cost_tokens: u64,
     now: f64,
     main_start: f64,
@@ -537,14 +776,15 @@ fn settle(
     period.net_external_satoshis += pending.cost.net_external_satoshis;
     for payment in pending.payments {
         let account = &mut accounts[payment.miner];
-        account.reserved = account
-            .reserved
-            .checked_sub(payment.gross)
-            .ok_or("payment lacks a reservation")?;
-        account.owed = account
-            .owed
-            .checked_sub(payment.gross)
-            .ok_or("payment exceeds backed debt")?;
+        let gross = payment.gross as i64;
+        if account.reserved < gross {
+            return Err("payment lacks a reservation".into());
+        }
+        account.reserved -= gross;
+        account.balance -= gross;
+        if rules == Rules::Written && account.balance < 0 {
+            return Err("payment exceeds backed debt".into());
+        }
         account.gross_paid += payment.gross;
         account.net_paid += payment.gross - cost_tokens;
         account.reimbursement += cost_tokens;
@@ -636,8 +876,15 @@ fn class_summaries(
                     .map(|account| account.credited - account.historical_credit)
                     .sum(),
                 reimbursement_fraction: (gross > 0).then_some(charged as f64 / gross as f64),
-                unpaid_tokens: selected.iter().map(|account| account.owed).sum(),
-                reserved_tokens: selected.iter().map(|account| account.reserved).sum(),
+                unpaid_tokens: selected
+                    .iter()
+                    .map(|account| account.balance.max(0) as u64)
+                    .sum(),
+                reserved_tokens: selected.iter().map(|account| account.reserved as u64).sum(),
+                advanced_tokens: selected
+                    .iter()
+                    .map(|account| account.balance.min(0).unsigned_abs())
+                    .sum(),
             });
         }
     }
@@ -654,6 +901,7 @@ pub fn simulate(
     mut cost: impl FnMut(&[CommittedOwed], &[Payment]) -> Result<SplitCost, String>,
 ) -> Result<SimulationReport, String> {
     config.validate()?;
+    let candidate = config.rules == Rules::Candidate;
     let mut generator = EventGenerator { state: config.seed };
     let mut accounts = population(config, &mut generator);
     let mut shares = VecDeque::with_capacity(config.window_shares + 1);
@@ -668,6 +916,7 @@ pub fn simulate(
     let mut stranded = 0u64;
     let mut blocked_coverage = 0;
     let mut blocked_remainder = 0;
+    let mut blocked_slots = 0;
     let mut first_split = None;
     let mut bootstrap = PeriodSummary::default();
     let mut established = PeriodSummary::default();
@@ -676,6 +925,20 @@ pub fn simulate(
     let mut outside_emitted_tokens = 0u64;
     let total_opportunities = config.historical_wins + config.opportunities;
     let mut distribution = distribution(&accounts);
+    let harmonic: Vec<f64> = if candidate {
+        (0..=config.window_shares)
+            .scan(0.0, |sum, count| {
+                if count > 0 {
+                    *sum += 1.0 / count as f64;
+                }
+                Some(*sum)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut peak_advanced = 0u64;
+    let mut beyond_bound = 0u64;
     for opportunity in 0..total_opportunities {
         let historical = opportunity < config.historical_wins;
         let main_index = opportunity.saturating_sub(config.historical_wins);
@@ -744,13 +1007,50 @@ pub fn simulate(
         }
         let tail = generator.next() % 65_536;
         let (reward_maximum, reward) = reward_for_tail(vault, tail)?;
-        let (committed, backlog) = freeze_list(
-            &accounts,
-            config.payee_cap,
-            config.cost_tokens,
-            reward_maximum,
-        );
+        let expected = if candidate {
+            expected_credit(
+                &shares,
+                &harmonic,
+                config.window_shares,
+                config.share_seconds / config.win_seconds,
+                reward_maximum,
+                accounts.len(),
+            )
+        } else {
+            Vec::new()
+        };
+        let (committed, backlog, slot_limited) = match config.rules {
+            Rules::Written => {
+                let (committed, backlog) = freeze_list(
+                    &accounts,
+                    config.payee_cap,
+                    config.cost_tokens,
+                    reward_maximum,
+                );
+                (committed, backlog, false)
+            }
+            Rules::Candidate => freeze_queue(&accounts, &expected, config, reward_maximum),
+        };
+        if slot_limited {
+            blocked_slots += 1;
+        }
+        // Each entry's own bound before this win's credit: earned balance
+        // when queued, plus expected credit when paid ahead.
+        let bounds: Vec<i64> = committed
+            .iter()
+            .map(|entry| {
+                let account = &accounts[entry.miner];
+                account.available()
+                    + match account.eligible_since {
+                        Some(_) => 0,
+                        None => expected.get(entry.miner).map_or(0, |value| *value as i64),
+                    }
+            })
+            .collect();
         let planned = allocate_committed(&committed, reward, config.cost_tokens);
+        if candidate && !committed.is_empty() && planned.is_err() {
+            return Err("a candidate list does not pay its own reward".into());
+        }
         let accepted =
             historical || planned.is_ok() || config.scheduling == Scheduling::HoldBlockedRoots;
         if accepted {
@@ -783,13 +1083,20 @@ pub fn simulate(
             match planned {
                 Ok(payments) => {
                     let split_cost = cost(&committed, &payments)?;
-                    for payment in &payments {
+                    for (index, payment) in payments.iter().enumerate() {
                         let account = &mut accounts[payment.miner];
+                        let gross = payment.gross as i64;
+                        beyond_bound += (gross - bounds[index]).max(0) as u64;
                         account.reserved = account
                             .reserved
-                            .checked_add(payment.gross)
+                            .checked_add(gross)
                             .ok_or("reservation overflow")?;
-                        if account.reserved > account.owed {
+                        if candidate {
+                            // Paid in full: rejoin at the back once earned again.
+                            if payment.gross == committed[index].owed {
+                                account.eligible_since = None;
+                            }
+                        } else if account.reserved > account.balance {
                             return Err("reservation exceeds won-backed debt".into());
                         }
                     }
@@ -823,6 +1130,7 @@ pub fn simulate(
                     settle(
                         split,
                         &mut accounts,
+                        config.rules,
                         config.cost_tokens,
                         now,
                         main_start,
@@ -836,6 +1144,9 @@ pub fn simulate(
                 }
             }
         }
+        if candidate {
+            refresh_queue(&mut accounts, config.cost_tokens, opportunity);
+        }
         append_share(
             winner.expect("arrival loop found a winner"),
             &mut accounts,
@@ -843,15 +1154,20 @@ pub fn simulate(
             &mut counts,
             config.window_shares,
         );
-        let owed: u64 = accounts.iter().map(|account| account.owed).sum();
+        let balance: i128 = accounts
+            .iter()
+            .map(|account| i128::from(account.balance))
+            .sum();
         let paid: u64 = accounts.iter().map(|account| account.gross_paid).sum();
-        if owed
-            .checked_add(paid)
-            .and_then(|sum| sum.checked_add(unallocated))
-            != Some(won_tokens)
-        {
+        if balance + i128::from(paid) + i128::from(unallocated) != i128::from(won_tokens) {
             return Err("won tokens do not equal paid gross plus outstanding debt".into());
         }
+        peak_advanced = peak_advanced.max(
+            accounts
+                .iter()
+                .map(|account| account.balance.min(0).unsigned_abs())
+                .sum(),
+        );
     }
     for account in &mut accounts {
         if let Some(since) = account.active_since.take() {
@@ -874,7 +1190,7 @@ pub fn simulate(
             / (mean_reward * probe_account.hash_weight / config.win_seconds)
             / 86_400.0,
         solo_wait_days: config.win_seconds / probe_account.hash_weight / 86_400.0,
-        unpaid_tokens: probe_account.owed,
+        unpaid_tokens: probe_account.balance.max(0) as u64,
     };
     Ok(SimulationReport {
         config: config.clone(),
@@ -883,11 +1199,26 @@ pub fn simulate(
         total_won_tokens: won_tokens,
         gross_paid_tokens: accounts.iter().map(|account| account.gross_paid).sum(),
         reimbursement_tokens: accounts.iter().map(|account| account.reimbursement).sum(),
-        unpaid_tokens: accounts.iter().map(|account| account.owed).sum(),
-        reserved_tokens: accounts.iter().map(|account| account.reserved).sum(),
+        unpaid_tokens: accounts
+            .iter()
+            .map(|account| account.balance.max(0) as u64)
+            .sum(),
+        reserved_tokens: accounts.iter().map(|account| account.reserved as u64).sum(),
+        advanced_tokens: accounts
+            .iter()
+            .map(|account| account.balance.min(0).unsigned_abs())
+            .sum(),
+        peak_advanced_tokens: peak_advanced,
+        departed_advanced_tokens: accounts
+            .iter()
+            .filter(|account| !account.joined)
+            .map(|account| account.balance.min(0).unsigned_abs())
+            .sum(),
+        beyond_bound_tokens: beyond_bound,
         unallocated_tokens: unallocated,
         blocked_coverage,
         blocked_remainder,
+        blocked_slots,
         permanently_stranded_tokens: stranded,
         outstanding_fundable_roots: pending.len(),
         outside_claims,

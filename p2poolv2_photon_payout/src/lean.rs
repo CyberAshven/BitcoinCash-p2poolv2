@@ -8,5 +8,5 @@ pub mod reference;
 pub mod test_utils;
 pub mod transaction;
 
-pub use reference::{Entry, Manifest, ProofBinding};
+pub use reference::{Entry, ListOrder, Manifest, ProofBinding};
 pub use transaction::{BuiltSplit, SplitOptions, build_split};
