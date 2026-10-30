@@ -422,15 +422,6 @@ impl Store {
         Ok(())
     }
 
-    /// Check if a blockhash has been used as an uncle
-    pub fn is_already_uncle(&self, blockhash: &BlockHash) -> bool {
-        let uncles_cf = self.db.cf_handle(&ColumnFamily::Uncles).unwrap();
-        matches!(
-            self.db.get_cf::<&[u8]>(&uncles_cf, blockhash.as_ref()),
-            Ok(Some(_))
-        )
-    }
-
     /// Get the nephews that have included a blockhash as an uncle
     pub fn get_nephews(&self, uncle: &BlockHash) -> Option<Vec<BlockHash>> {
         let uncles_cf = self.db.cf_handle(&ColumnFamily::Uncles).unwrap();
@@ -444,10 +435,17 @@ impl Store {
     /// chain_work descending.
     ///
     /// Algorithm: walk the base's ancestry up to `MAX_UNCLES_DEPTH` parent
-    /// pointers. The children of those ancestors that are not themselves on
-    /// the base's ancestry, not on the confirmed chain, not already used as
-    /// an uncle, and have their block body stored are the uncle candidates.
-    /// Return the top `MAX_UNCLES` by chain_work.
+    /// pointers, collecting the uncles listed by the base and its ancestors.
+    /// The children of those ancestors that are not themselves on the base's
+    /// ancestry, not on the confirmed chain, not already listed as an uncle on
+    /// this ancestry, and have their block body stored are the uncle
+    /// candidates. Return the top `MAX_UNCLES` by chain_work.
+    ///
+    /// The listed-uncle exclusion matches the validation rule that an uncle
+    /// appears at most once per chain. It looks only at the base's ancestry,
+    /// so an uncle listed by a nephew on a losing branch is still available.
+    /// Ported from pool2win's upstream P2Poolv2 commit d14d8a00
+    /// (MIT OR Apache-2.0).
     ///
     /// Anchoring on `base_hash` (the nephew's parent) rather than the
     /// confirmed tip keeps every returned uncle within `MAX_UNCLES_DEPTH` of
@@ -463,12 +461,17 @@ impl Store {
         let mut ancestors: Vec<BlockHash> = Vec::with_capacity(MAX_UNCLES_DEPTH as usize);
         let mut ancestry: HashSet<BlockHash> =
             HashSet::with_capacity(MAX_UNCLES_DEPTH as usize + 1);
+        let mut uncles_listed_on_ancestry: HashSet<BlockHash> =
+            HashSet::with_capacity(MAX_UNCLES_DEPTH as usize * MAX_UNCLES);
         ancestry.insert(*base_hash);
         let mut current = *base_hash;
         let mut steps = 0;
         while steps < MAX_UNCLES_DEPTH as usize && !is_terminal_blockhash(&current) {
             let parent = match self.get_share_header(&current)? {
-                Some(header) => header.prev_share_blockhash,
+                Some(header) => {
+                    uncles_listed_on_ancestry.extend(header.uncles.iter().copied());
+                    header.prev_share_blockhash
+                }
                 None => return Ok(Vec::new()),
             };
             if !is_terminal_blockhash(&parent) {
@@ -492,7 +495,7 @@ impl Store {
             .filter(|(_, blockhash)| {
                 !ancestry.contains(blockhash)
                     && !self.is_confirmed(blockhash)
-                    && !self.is_already_uncle(blockhash)
+                    && !uncles_listed_on_ancestry.contains(blockhash)
                     && self.share_block_exists(blockhash)
             })
             .filter(|(ancestor, blockhash)| self.is_child_of(blockhash, ancestor))
