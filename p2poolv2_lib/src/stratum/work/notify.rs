@@ -275,20 +275,38 @@ pub type NotifyReceiver = mpsc::Receiver<NotifyCmd>;
 
 /// Build a PreparedNotifyParams and publish it via the watch channel.
 ///
-/// Returns Ok(()) on success, or Err if all receivers have been dropped.
+/// A preparation failure withdraws the previous job from both mining and Job
+/// Declaration, and returns `Ok(false)` so a later template can recover. No
+/// template transactions are removed: their CTOR order is not dependency order.
+/// Returns `Ok(true)` after publishing, or `Err` if all receivers were dropped.
 fn publish_prepared_notify(
     template: &Arc<BlockTemplate>,
     clean_jobs: bool,
     context: &mut NotifyContext,
     template_tx: &watch::Sender<Option<Arc<PreparedNotifyParams>>>,
-) -> Result<(), WorkError> {
-    let prepared = Arc::new(build_prepared_notify(template, clean_jobs, context)?);
-    context
-        .pool_transactions
-        .set_prepared(Arc::clone(&prepared));
-    template_tx.send(Some(prepared)).map_err(|_| WorkError {
+) -> Result<bool, WorkError> {
+    let prepared = match build_prepared_notify(template, clean_jobs, context) {
+        Ok(prepared) => {
+            let prepared = Arc::new(prepared);
+            context
+                .pool_transactions
+                .set_prepared(Arc::clone(&prepared));
+            Some(prepared)
+        }
+        Err(reason) => {
+            warn!(
+                "Withdrawing mining work at height {}: {reason}; waiting for a fitting template",
+                template.height
+            );
+            context.pool_transactions.clear_prepared();
+            None
+        }
+    };
+    let published = prepared.is_some();
+    template_tx.send(prepared).map_err(|_| WorkError {
         message: "All template receivers dropped".to_string(),
-    })
+    })?;
+    Ok(published)
 }
 
 /// Start the notifier task that broadcasts prepared templates via a watch channel.
@@ -298,13 +316,11 @@ fn publish_prepared_notify(
 /// watch channel. Each connection handler receives the prepared
 /// template and builds per-miner notifies independently.
 ///
-/// Returns as soon as a template cannot be prepared, which the node turns into
-/// `ShutdownReason::Error`. Continuing is not an option: the watch channel
-/// keeps handing every connected and newly connecting miner the last template
-/// that did build, so the pool would go on hashing a previousblockhash bitcoin
-/// has moved past, with nothing to age the job out and only a repeated error
-/// log to show for it. The block template fetcher shuts the node down on the
-/// same class of failure.
+/// A template that cannot be prepared withdraws the previous work. Mining
+/// connections close on that withdrawal, rather than leaving miners hashing a
+/// stale previousblockhash. The worker stays available for the next template or
+/// a rebuild of the latest template, and recovery always clears previous jobs.
+/// Returns when the command channel or all template receivers have closed.
 ///
 /// On Bitcoin Cash `share_transaction_pool` supplies the share transactions
 /// each notify's shares carry; Bitcoin passes `None`.
@@ -352,33 +368,40 @@ pub async fn start_notify(
     };
 
     let mut latest_template: Option<Arc<BlockTemplate>> = None;
+    let mut work_available = false;
 
     while let Some(cmd) = notifier_rx.recv().await {
         match cmd {
             NotifyCmd::SendToAll { template } => {
-                let clean_jobs = latest_template.is_none()
+                let clean_jobs = !work_available
+                    || latest_template.is_none()
                     || latest_template.as_ref().unwrap().previousblockhash
                         != template.previousblockhash;
                 latest_template = Some(Arc::clone(&template));
 
-                if let Err(error) = publish_prepared_notify(
+                match publish_prepared_notify(
                     &template,
                     clean_jobs,
                     &mut notify_context,
                     &template_tx,
                 ) {
-                    error!("Failed to publish notify, shutting down: {error}");
-                    return;
+                    Ok(published) => work_available = published,
+                    Err(error) => {
+                        error!("Failed to publish notify, shutting down: {error}");
+                        return;
+                    }
                 }
             }
             NotifyCmd::NewNotify => {
                 if let Some(ref template) = latest_template {
                     debug!("NewNotify: sending notify with latest template");
-                    if let Err(error) =
-                        publish_prepared_notify(template, true, &mut notify_context, &template_tx)
+                    match publish_prepared_notify(template, true, &mut notify_context, &template_tx)
                     {
-                        error!("Failed to publish new notify, shutting down: {error}");
-                        return;
+                        Ok(published) => work_available = published,
+                        Err(error) => {
+                            error!("Failed to publish new notify, shutting down: {error}");
+                            return;
+                        }
                     }
                 } else {
                     debug!("NewNotify received but no template available yet");
@@ -406,6 +429,7 @@ mod tests {
     use crate::test_utils::genesis_for_tests;
     use crate::test_utils::make_test_share_address;
     use bitcoin::CompressedPublicKey;
+    use bitcoin::hashes::Hash;
     use bitcoin::{Address, Amount, Network, ScriptBuf, TxOut};
     use std::collections::HashMap;
     use std::str::FromStr;
@@ -476,16 +500,9 @@ mod tests {
         );
     }
 
-    /// A template that cannot be prepared ends the notifier rather than leaving
-    /// the previous one in the watch channel.
-    ///
-    /// The watch channel hands its last value to every connected miner and to
-    /// every miner that connects afterwards, so keeping a job whose
-    /// previousblockhash bitcoin has moved past would silently put the whole
-    /// pool on dead work. Returning here is what the node turns into a
-    /// shutdown.
+    /// A failed payout resolution withdraws work without ending the notifier.
     #[tokio::test]
-    async fn test_start_notify_stops_when_a_template_cannot_be_prepared() {
+    async fn test_start_notify_withdraws_when_a_template_cannot_be_prepared() {
         let (template_tx, mut template_rx) =
             watch::channel::<Option<Arc<PreparedNotifyParams>>>(None);
         let (notify_tx, notify_rx) = mpsc::channel::<NotifyCmd>(10);
@@ -544,15 +561,127 @@ mod tests {
             .await
             .expect("Failed to send template");
 
-        tokio::time::timeout(std::time::Duration::from_secs(5), task_handle)
+        tokio::time::timeout(std::time::Duration::from_secs(5), template_rx.changed())
             .await
-            .expect("notifier must stop when a template cannot be prepared")
-            .expect("notifier task panicked");
+            .expect("notifier must withdraw work when preparation fails")
+            .expect("notifier must keep its template sender open");
 
         assert!(
             template_rx.borrow_and_update().is_none(),
             "no job may be published from a template that failed to prepare"
         );
+        assert!(!task_handle.is_finished());
+        drop(notify_tx);
+        task_handle.await.expect("notifier task panicked");
+    }
+
+    /// An oversized BCH job withdraws the old work, and the next fitting
+    /// template is published with clean_jobs even at the same BCH chain tip.
+    #[tokio::test]
+    async fn test_start_notify_recovers_after_an_oversized_bch_template() {
+        let (template_tx, mut template_rx) = watch::channel(None);
+        let (notify_tx, notify_rx) = mpsc::channel(10);
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let genesis = genesis_for_tests();
+        let genesis_hash = genesis.block_hash();
+        let genesis_header = genesis.header.clone();
+        chain_store_handle
+            .expect_get_mining_base_and_uncles()
+            .returning(move || Ok((genesis_hash, vec![])));
+        chain_store_handle.expect_get_asert_parent().returning(|_| {
+            let header = genesis_for_tests().header;
+            Ok(AsertParent::from_header(&header, 0, header.time))
+        });
+        chain_store_handle
+            .expect_get_share_header()
+            .returning(|_| Ok(genesis_for_tests().header));
+        let pool_difficulty =
+            pool_difficulty::PoolDifficulty::new(genesis_header.bits, genesis_header.time, 0);
+        let mut config = StratumConfig::new_for_test_default().parse().unwrap();
+        config.chain = crate::config::Chain::BitcoinCash;
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Regtest);
+        let address = Address::p2pkh(
+            bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+            Network::Regtest,
+        );
+        let mut payout = MockPayoutDistribution::default();
+        payout.expect_pplns_weights().returning(|| None);
+        payout
+            .expect_get_output_distribution()
+            .returning(move |_, _, _, amount, _| {
+                Ok(CoinbasePayouts::direct(vec![OutputPair {
+                    address: address.clone(),
+                    amount,
+                }]))
+            });
+        let task_handle = tokio::spawn(async move {
+            start_notify(
+                notify_rx,
+                template_tx,
+                chain_store_handle,
+                &config,
+                Box::new(payout),
+                pool_difficulty,
+                PoolTransactionCache::new(),
+                None,
+            )
+            .await;
+        });
+        let template: BlockTemplate = serde_json::from_str(include_str!(
+            "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+        ))
+        .unwrap();
+        notify_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::new(template.clone()),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), template_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(template_rx.borrow_and_update().is_some());
+
+        let mut oversized = template.clone();
+        oversized.sizelimit = 81;
+        oversized.validate_bch().unwrap();
+        notify_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::new(oversized),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), template_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(template_rx.borrow_and_update().is_none());
+        assert!(!task_handle.is_finished());
+
+        notify_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::new(template.clone()),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), template_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = template_rx.borrow_and_update().clone().unwrap();
+        assert_eq!(
+            prepared.template().previousblockhash,
+            template.previousblockhash
+        );
+        let tracker = start_tracker_actor();
+        let notify: Notify = serde_json::from_str(
+            &build_notify_from_prepared(&prepared, None, None, &tracker).unwrap(),
+        )
+        .unwrap();
+        assert!(notify.params.clean_jobs);
+        drop(notify_tx);
+        task_handle.await.unwrap();
     }
 
     #[tokio::test]

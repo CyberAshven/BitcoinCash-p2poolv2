@@ -96,6 +96,11 @@ impl PoolTransactionCache {
     pub(crate) fn set_prepared(&self, prepared: Arc<PreparedNotifyParams>) {
         *self.prepared.write().expect("pool prepared template lock") = Some(prepared);
     }
+
+    /// Withdraw the template so new Job Declaration tokens cannot use stale work.
+    pub(crate) fn clear_prepared(&self) {
+        *self.prepared.write().expect("pool prepared template lock") = None;
+    }
 }
 
 impl Default for PoolTransactionCache {

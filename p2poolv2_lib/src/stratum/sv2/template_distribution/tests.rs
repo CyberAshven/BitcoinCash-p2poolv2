@@ -888,11 +888,26 @@ fn coinbase_output_constraints_reserve_the_largest_coinbase_submit_solution_carr
     assert_eq!(message_type, MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS);
     let constraints = CoinbaseOutputConstraints::from_bytes(&mut payload).unwrap();
     assert_eq!(constraints.coinbase_output_max_additional_size, 65_382);
-    assert_eq!(constraints.coinbase_output_max_additional_sigops, 1_923);
     assert_eq!(
         COINBASE_WITHOUT_OUTPUTS + OUTPUT_COUNT_SIZE + COINBASE_OUTPUT_RESERVE,
         u32::from(u16::MAX)
     );
+}
+
+#[test]
+fn coinbase_output_constraints_reserve_zero_bch_sigchecks() {
+    let frame = coinbase_output_constraints_frame().unwrap();
+    let mut messages = decode_plain_frames(&mut Decoder::new(), &mut Vec::new(), &frame).unwrap();
+    let Sv2Message {
+        message_type,
+        mut payload,
+        ..
+    } = messages.remove(0);
+    assert_eq!(message_type, MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS);
+    // The wire payload keeps the existing u32 byte reserve and u16 field.
+    assert_eq!(payload.len(), 6);
+    let constraints = CoinbaseOutputConstraints::from_bytes(&mut payload).unwrap();
+    assert_eq!(constraints.coinbase_output_max_additional_sigops, 0);
 }
 
 #[test]

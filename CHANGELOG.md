@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A BCH job that does not fit BCHN's block size limit no longer stops the
+node from serving miners. The pool withdraws the work, which disconnects
+SV1 and SV2 miners so none keeps hashing a stale job, logs the sizes with
+advice to lower BCHN's `-blockmaxsize` or `-percentblockmaxsize`, and
+publishes the next template that fits. BCHN's template transactions are
+never trimmed.
+
+The Stratum V2 Template Provider is now asked to reserve 0 BCH SigChecks
+for the coinbase instead of 1,922 legacy sigops: Bitcoin Cash counts
+SigChecks, and a coinbase executes no scripts.
+
 A share whose BCH header meets the target that header claims is no longer
 counted as a found block on its own say-so. It is kept as a candidate,
 and it becomes a found block only once BCHN accepts it: a positive

@@ -679,7 +679,8 @@ impl StratumContext {
 ///
 /// Handling new notify on new templates. Watches for new prepared
 /// templates via the watch channel and builds per-miner notify
-/// messages.
+/// messages. A withdrawn template closes the connection so the miner stops
+/// working on its previous job and reconnects to await fresh work.
 #[allow(clippy::too_many_arguments)] // wiring constructor: each parameter is a distinct collaborator, a params struct would only move the list
 async fn handle_connection<R, W, T: TimeProvider>(
     reader: R,
@@ -763,7 +764,10 @@ where
             Ok(()) = template_rx.changed() => {
                 // Clone inside a block to ensure the watch Ref guard is dropped before await
                 let prepared_template = { template_rx.borrow_and_update().clone() };
-                if session.username.is_none() {
+                if prepared_template.is_none() {
+                    info!("Mining work withdrawn, closing connection from {addr}");
+                    break;
+                } else if session.username.is_none() {
                     // Not yet authorized, skip building notify
                 } else if let Some(prepared) = prepared_template {
                     match job_lines(session, &prepared, is_hydrapool, &ctx.tracker_handle) {
@@ -967,8 +971,8 @@ mod stratum_server_tests {
     use crate::stratum::messages::SimpleRequest;
     use crate::stratum::server;
     use crate::stratum::work::tracker::start_tracker_actor;
-    use crate::test_utils::make_test_share_address;
     use crate::test_utils::{TestShareBlockBuilder, setup_test_chain_store_handle};
+    use crate::test_utils::{make_test_share_address, test_bch_prepared, test_bch_stratum_context};
     use crate::utils::time_provider::TestTimeProvider;
     use bitcoin::hashes::Hash;
     use bitcoindrpc::test_utils::setup_mock_bitcoin_rpc;
@@ -976,6 +980,38 @@ mod stratum_server_tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn withdrawing_work_closes_the_sv1_connection() {
+        let (context, _emissions, _directories) =
+            test_bch_stratum_context("http://127.0.0.1:1").await;
+        let (_client, stream) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(stream);
+        let (_message_sender, messages) = mpsc::channel(1);
+        let (_shutdown_sender, shutdown) = oneshot::channel();
+        let (templates, receiver) = watch::channel(Some(test_bch_prepared()));
+        let address = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let connection = tokio::spawn(async move {
+            handle_connection(
+                BufReader::new(reader),
+                writer,
+                address,
+                messages,
+                shutdown,
+                DEFAULT_VERSION_MASK,
+                context,
+                &SystemTimeProvider {},
+                receiver,
+            )
+            .await
+        });
+        templates.send(None).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), connection)
+            .await
+            .expect("withdrawal must close a connection holding previous work")
+            .unwrap()
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn test_create_and_start_server() {
