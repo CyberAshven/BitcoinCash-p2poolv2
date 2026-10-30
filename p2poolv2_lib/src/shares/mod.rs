@@ -4,6 +4,7 @@
 
 pub mod auxpow;
 pub mod bch_asert;
+pub mod bch_carried_headers;
 pub mod bch_coinbase;
 pub mod bch_genesis;
 pub mod bch_headers;
