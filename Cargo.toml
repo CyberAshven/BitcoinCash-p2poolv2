@@ -59,7 +59,6 @@ libp2p = { version = "0.56", features = [
     "macros",
     "kad",
     "ping",
-    "secp256k1",
     "request-response",
 ] }
 tokio = { version = "1.0", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "signal", "macros"] }
@@ -87,7 +86,7 @@ zmq = "0.10"
 bitcoin = { version = "0.32.5", features = ["serde", "rand"] }
 bitcoinconsensus = { version = "0.106.0" }
 # Bitcoin Cash Schnorr share signatures; expose-field gives the quadratic-residue
-# check that scheme needs. libp2p-identity already pulls in this version.
+# check that scheme needs.
 k256 = { version = "0.13.4", default-features = false, features = ["arithmetic", "expose-field"] }
 base64 = "0.23.1"
 chrono = { version = "0.4", features = ["serde"] }
