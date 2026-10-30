@@ -1127,15 +1127,16 @@ The causes, in order of effect:
    drops credit for the oldest distinct miners when more than 4,096 are
    present. With 10,000 miners that alone excludes many of them.
 
-Candidate changes, adopted by the owner on 2026-10-30 after the re-run
-below (with a 48-hour window rather than a faster share rate): pay in the order miners
-became eligible (first come, first served) instead of most owed; remove
-the window's script cap, which only the tree needed; avoid any launch
-custody by letting a win's remainder go to the next miners in line, even
-ahead of what they have earned (bounded, and recovered from their later
-credit), so no tokens wait in custody and the backlog stays near zero; and
-size the share rate so a target smallest miner has a share in most windows.
-Each changes a PHOTON share-chain rule; the re-run below simulates them.
+Candidate changes: pay in the order miners became eligible (first come,
+first served) instead of most owed; remove the window's script cap, which
+only the tree needed; avoid any launch custody by letting a win's
+remainder go to the next miners in line, even ahead of what they have
+earned (bounded, and recovered from their later credit), so no tokens wait
+in custody and the backlog stays near zero; and size the share rate so a
+target smallest miner has a share in most windows. Each changes a PHOTON
+share-chain rule. The re-run below simulates them; the owner adopted the
+first three on 2026-10-30, with a 48-hour window instead of a faster share
+rate.
 
 ### Candidate rules re-run: first come, first served with bounded pay-ahead
 
