@@ -1,9 +1,12 @@
 # PHOTON minimum-payout study and retained tree prototype
 
 The main proposed path is the owner's **2026-10-30** minimum-payout design:
-won tokens create backed gross balances, miners choose multiples of a
-voted token cost `C` (floor 10, default 20), and a single direct split pays
-the most owed eligible miners. Each actual payee contributes `C` tokens
+won tokens create balances, miners choose multiples of a voted token cost
+`C` (floor 10, default 20), and a single direct split pays the queue first
+come, first served, then pays the rest ahead within the expected credit of
+shares already found, over a 48-hour window. The owner adopted those rules
+on 2026-10-30 for the PHOTON pool only; they do not change BCH P2Pool, and
+PHOTON is GPU-mined, not merge-mined with BCH. Each actual payee contributes `C` tokens
 to the submitter, who fronts BCH fees and all output dust. `R` still binds
 the complete proof seed, parent and context. There is no sponsor or price
 oracle. This crate is an offline study, with no node, share-chain, wallet,
@@ -53,7 +56,7 @@ The measurements use complete signed synthetic transactions in both pinned
 libauth BCH 2026 modes. No BCHN admission or market-value result is claimed.
 Full artifact: [lean-measurements.md](lean-measurements.md).
 
-`ListOrder::ShareChain` selects lean version 2 for the simulated
+`ListOrder::ShareChain` selects lean version 2 for the adopted
 first-come, first-served rule. Its header version is 2, and it pays entries
 in the order `R` commits, without the most-owed ordering check; all other
 checks are unchanged. `lean-payout-share-order.cash` is its checked source.
@@ -154,8 +157,8 @@ horizon. The causes and candidate changes, none adopted, are in the design
 document's "Simulation findings" subsection.
 
 `cargo photon-payout-sim --candidate-summary` re-runs the same scenarios
-under the four candidate changes, still not adopted: first come, first
-served; pay-ahead bounded by the expected credit of shares already found,
+under the four candidate changes, which the owner adopted with the 48-hour
+window: first come, first served; pay-ahead bounded by the expected credit of shares already found,
 with no launch history; no window script cap; and 10-second or 1-second
 shares with 12-hour or 48-hour windows. Tables:
 [candidate-summary.md](candidate-summary.md); per-period detail:

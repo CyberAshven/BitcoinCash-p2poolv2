@@ -286,12 +286,13 @@ is not known when work starts. The spent baton outpoint is included.
 The payout vector is calculated from the parent, excluding the current
 share and its newly referenced uncles. This avoids a self-reference:
 current proof determines future credit, not its own reward commitment.
-The first job needs an explicit bootstrap rule. The former proposal paid
-the finding miner alone; the owner has not selected that exception for the
-minimum-payout design. No miner may be paid ahead of earned balance outside
-an owner-approved bootstrap rule. The genesis domain and any such exception
-must be visible to every miner. Empty prior balances cannot cover the first
-win under the ordinary rules; this is an open blocker, not a default rule.
+The first job needs no separate bootstrap rule. Under the payout rules the
+owner adopted on 2026-10-30 (section 5), a win the earned balances cannot
+cover is paid ahead, never beyond the expected credit of shares already in
+the window. At launch every balance is empty, so the first list consists
+only of such advances; no tokens are held in custody. The former proposal,
+paying the finding miner alone, is not part of this design. The genesis
+domain must still be visible to every miner.
 
 A server job supplies a reconstruction specification, not a final complete
 claim template. The claim public key is the miner's transient datasig key,
@@ -367,7 +368,8 @@ unconfirmed claims of at most 1,000 bytes each, above every claim layout
 in section 2, so at most 18,240 bytes of path evidence per share
 [proposed profile; arithmetic]. A parent more than 256 transitions behind,
 about 43 hours of claims at one per 600 seconds, cannot be extended.
-Restarting after such an outage needs the bootstrap rule in section 10.
+Restarting after such an outage needs the outage-restart rule in
+section 10.
 A cold peer recomputes the lineage from the deployment outpoint with its
 own BCH view and fetches carried claims.
 
@@ -500,14 +502,16 @@ Do not inherit BCH's 256-bit work type or the existing saturating
 height field bound ordinary cumulative chainwork below `2^320` work units.
 Uncle work is paid once but does not add to fork-choice chainwork.
 
-Use a fixed work budget for the PPLNS window, proposed as 4,320 times
-bootstrap-share work. That is nominally 12 hours at the proposed
-10-second interval, not a rolling promise of 12 hours after hashrate
-changes. Clip the oldest included work to the remaining budget. Aggregate
-by payout locking bytecode. No BCH coinbase maturity skip, traded payout
-rights, BCH-difficulty multiplier or BCH-denominated dust merging applies.
-An alternative window tied to PHOTON expected claim work needs explicit
-pool-hopping analysis before selection. The owner must select the budget.
+Use a fixed work budget for the PPLNS window: 17,280 times bootstrap-share
+work, nominally 48 hours at the proposed 10-second interval. The owner
+chose 48 hours on 2026-10-30, after the section 5 simulation: a 12-hour
+window (4,320 shares) left too little expected credit to pay ahead for
+10,000 miners, and wins could not be listed. It is not a rolling promise
+of 48 hours after hashrate changes. Clip the oldest included work to the
+remaining budget. Aggregate by payout locking bytecode. No BCH coinbase
+maturity skip, traded payout rights, BCH-difficulty multiplier or
+BCH-denominated dust merging applies. An alternative window tied to PHOTON
+expected claim work needs explicit pool-hopping analysis before selection.
 
 Propose at most 2 uncle references per share and a 6-share ancestry bound.
 These are depth rules, not v3.2 limits or seconds [proposed profile]. Use
@@ -536,26 +540,14 @@ walk farther to replace them. Ineligible uncles never reach this walk:
 their includer is invalid (above). Check positional validity and
 deduplication before this walk.
 
-The walk also caps distinct payout scripts at section 5's 4,096 leaves
-[re-review F2]. A script is admitted when an item first gives it positive
-weight. Stop the walk before the first item that would admit a 4,097th
-script: that item and every older item get zero weight and consume no
-budget. The window then credits less than its full budget, and the
-manifest shows where the walk stopped. Without this rule, a minority miner
-using one fresh script per share, or ordinary growth, can push a window
-past 4,096 scripts. The window holds up to 4,320 items when every item
-carries at least bootstrap work, and more if the share-target ceiling
-allows easier shares. Every manifest would then be rejected, no child job
-could be built, and the window would never slide. An alternative is a
-share-target ceiling that keeps the window at most 4,096 items: every
-credited item, uncles included, must then carry at least
-`4,320 / 4,096`, about 1.055, times bootstrap work [arithmetic]. This
-proposal prefers the cap rule because it holds whatever the ceiling is.
-Golden vectors must cover the stop point, ties and uncles.
+The walk has no cap on distinct payout scripts. The historical funded tree
+needed one at its 4,096 leaves [re-review F2]; the adopted direct split
+credits a balance ledger instead, so every item in the budget earns its
+weight. The owner removed the cap on 2026-10-30. Golden vectors must cover
+ties and uncles.
 
 Aggregate the resulting weights by payout script and drop scripts whose
-total is zero; section 5 rejects any manifest with a zero-weight leaf.
-An all-zero non-bootstrap window cannot build a job.
+total is zero; only positive weights earn credit.
 
 Timestamps must exceed the median of the preceding 11 share timestamps;
 a proposed future allowance is 15 seconds. Both are proposed PHOTON
@@ -642,8 +634,8 @@ The security discussion that follows was reviewed for the historical tree.
 Its binding requirements continue to apply, but its script lengths and
 offset-dependent cost margins are not measurements of the lean program.
 The final lean `R` needs its own byte-exact review. References below to a
-bootstrap paying the finder describe the earlier proposal, not a selected
-bootstrap for this design.
+bootstrap paying the finder describe the earlier proposal; the adopted
+rules pay the first win ahead against expected credit instead (section 5).
 
 ### Cost-based P2SH20 decision
 
@@ -825,21 +817,35 @@ That can cost more than the small token payments are worth. Paying whole
 wins to miners in turn was also rejected: a very small miner could wait
 years. The tree, its code and its measurements remain available unchanged.
 
-Instead, each miner accumulates an owed token balance on the PHOTON share
-chain. Only actual won tokens create credit, allocated by the same PPLNS
-window described above. Nothing is advanced from hoped-for future wins.
-An unpaid balance carries forward and remains backed by won tokens. Miners
-choose how large a payment must become before it is worth settling.
+Instead, each miner accumulates a token balance on the PHOTON share chain.
+Only actual won tokens create credit, allocated by the same PPLNS window
+described above. A balance carries forward between wins. Miners choose how
+large a payment must become before it is worth settling.
 
-One lean transaction splits each funded win. It pays eligible miners with
-the largest balances first, up to a cap `N`. It pays each selected miner
-what is owed, clipping only the last payment to the reward still available.
-No payment may exceed what is owed; a clipped payment must still reach that
-miner's chosen minimum. The split must distribute its entire actual reward.
-It cannot create a token change output, donate a remainder, or pay ahead to
-make the numbers fit. If these conditions cannot all be met, the prototype
-rejects that split and records the conflict; it does not invent a bootstrap
-or change the priority rule.
+One lean transaction splits each funded win. On **2026-10-30**, after the
+simulation below, the owner adopted these payout rules for the PHOTON pool
+only; BCH P2Pool's own payouts and share chain are unchanged:
+
+1. **First come, first served.** A miner joins the queue when their earned
+   balance first reaches their own minimum, and the queue is paid in that
+   order. A miner paid in full rejoins at the back once they have earned
+   their minimum again; one whose payment was clipped keeps their place.
+2. **The rest is paid ahead, within a bound.** If the queue does not use
+   the whole win, the rest goes to the miners whose shares already in the
+   window are expected to earn the most. Nobody is paid ahead of more than
+   the expected PPLNS credit of the shares they have already found, so
+   those same shares repay the advance. No tokens are held in custody,
+   and the first win at launch is paid the same way.
+3. **No small leftovers.** If what remains after an entry would be too
+   small to pay the next miner's minimum, the entry before absorbs it: a
+   small extra advance below one further minimum plus the tail span.
+4. **No script cap, and a 48-hour window.** Every share in the window earns
+   credit (section 3).
+
+Every payment still meets its miner's minimum, the split pays out its
+entire reward, and there is no token change output or donated remainder.
+A list that cannot meet these conditions within `N` payees cannot be
+mined; the simulation found none with a 48-hour window and `N = 187`.
 
 `C` is one payout's cost expressed in raw token units, a single share-chain
 parameter. Each miner records a multiple with their payout script in their
@@ -875,22 +881,38 @@ is worth the BCH spent; no willing submitter means no settlement guarantee.
    allocation: `floor(reward * upper / total) - floor(reward * lower / total)`.
    This is accounting arithmetic, not a payout tree. A tail burn, if later
    approved, is never credited. A conflicting lost claim creates no credit.
-3. Maintain gross owed balances, already reserved amounts and confirmed
-   gross debits separately. A split consumes gross debt; its payee receives
-   `gross - C`, and the submitter receives `C`. A payment that is merely
-   proposed or unfunded is not a confirmed debit. The backing identity is
-   `total won = confirmed gross debits + total gross owed`, with reorg-aware
-   rollback and exact integer arithmetic. Reserved debt is included in owed.
-4. Take the parent ledger snapshot before proof-seed/tail search. Exclude
-   debt already assigned to an immutable pending payout. Select available
-   balances at least `multiple * C`, descending by gross owed, breaking ties
-   by ascending raw locking bytecode. Bind the selected prefix and its
-   scripts, amounts and multiples directly in `R`; at most `N` payees can be
-   paid. `N` is a profile cap, independent of the old window's 4,096-script
-   bound. That credit-window bound is not automatically removed by this study.
+3. Maintain signed balances (won credit minus confirmed gross debits; a
+   balance is negative while paid ahead), reserved amounts and confirmed
+   gross debits separately. A split consumes gross balance; its payee
+   receives `gross - C`, and the submitter receives `C`. A payment that is
+   merely proposed or unfunded is not a confirmed debit. The backing
+   identity is `total won = confirmed gross debits + sum of signed
+   balances`, with reorg-aware rollback and exact integer arithmetic.
+   Available balance is the signed balance minus reservations.
+4. Take the parent ledger snapshot before proof-seed/tail search. A miner is
+   queued from the first ledger update at which their available balance
+   reaches `multiple * C`; ties at one update go by ascending raw locking
+   bytecode. Leave the queue when the available balance drops below the
+   minimum: a miner paid in full, then credited back above it, requeues at
+   the back. A queued entry's cap is its available balance. Every other
+   miner may be offered at cap `available + E`, where `E` is the expected
+   credit of its shares in the parent window, if that reaches its minimum;
+   offers go largest cap first, ties by bytecode. For a share at position
+   `j` (oldest 0) of a window holding `L` of `W` shares,
+   `E = q * reward * (H(W-1) - H(L-1) + (j+1)/W)`, where `q` is the chance
+   a share is also a claim and `H` the harmonic number. A deployed profile
+   needs this in exact integers over the work budget; the study used
+   floating point. Take as many queued entries, in order, as still let at
+   most `N` entries cover the largest possible reward, then offers. Walk
+   the list: an entry is followed by another only if the smallest possible
+   reward still leaves the next one its minimum; otherwise that entry's
+   cap becomes whatever covers the largest reward, and the list ends. Bind
+   the scripts, caps and multiples directly in `R`, in that order. If no
+   list fits, no job can be built. Lean version 2 pays in `R`'s order and
+   checks no ordering itself; the share chain validates the order.
 5. Let actual input tokens be `A`, `remaining = A`, and `paid_count = 0`.
    Visit committed entries in order while `remaining > 0`. Set
-   `gross = min(committed_owed, remaining)`. Require
+   `gross = min(committed_cap, remaining)`. Require
    `gross >= multiple * C`, subtract `gross` from `remaining`, and emit
    exactly `gross - C` tokens to that entry's exact script. Since
    `multiple >= 10` and `C > 0`, every emitted amount is positive.
@@ -923,30 +945,30 @@ is worth the BCH spent; no willing submitter means no settlement guarantee.
 
 ### Coverage conditions and open contradictions
 
-For a fixed pre-win list with owed values `owed_i`, define prefix sum
-`S_j = sum(owed_i for i < j)`. A reward `A` is distributable exactly when
-some prefix ends at entry `j <= N`, `S_j < A <= S_j + owed_j`, and its last
+For a fixed pre-win list with caps `cap_i`, define prefix sum
+`S_j = sum(cap_i for i < j)`. A reward `A` is distributable exactly when
+some prefix ends at entry `j <= N`, `S_j < A <= S_j + cap_j`, and its last
 gross payment `A - S_j >= multiple_j * C`; each preceding full payment
-must also meet its minimum. Equality at a completed prefix uses that
-preceding entry as the last payee. Merely having a list sum at least `A`
-is insufficient: a small last remainder violates the minimum.
+must also meet its minimum. Merely having a list sum at least `A` is
+insufficient: a small last remainder violates the minimum. The adopted
+list walk (rule 4) builds every list so that each tail is distributable.
 
-- **Bootstrap blocker.** Before the first won tokens there is no backed
-  eligible debt, yet `R` must be fixed before mining that first win. The
-  ordinary rules cannot construct that first payable job. A bootstrap is
-  required and remains the owner's decision. The former finder-only rule
-  is not carried forward as approval.
+- **Launch.** Resolved by the adopted rules: the first win is paid ahead
+  against expected credit, with no custody. The former finder-only rule is
+  not part of this design.
 - **Immutable list and tail gaps.** The supported tail changes `A` by up to
-  65,535 raw units. A list may cover the largest reward but fail a smaller
-  one at a prefix boundary. Validate coverage for every allowed tail, or
-  explicitly filter to payable tails while preserving proof validation.
-  Such filtering reduces useful search space and needs a profile decision.
-  Later earnings, a new `C`, or a new multiple cannot repair an old `R`.
-- **Cap and priority blockage.** The first `N` eligible balances might not
-  cover a whole reward, or clipping the last one can be below its minimum.
-  Skipping that entry, paying over debt, splitting a win into several
-  transactions or carrying token change would change the approved design.
-  This study fails closed and measures the resulting blocked wins.
+  65,535 raw units. Resolved by the leftover rule, which leaves the last
+  entry its minimum at the smallest reward. Later earnings, a new `C`, or a
+  new multiple still cannot repair an old `R`.
+- **Cap and coverage.** If the queue and bounded offers cannot cover a
+  reward within `N` entries, no job can be built for that win. With a
+  12-hour window this blocked many wins at 10,000 miners; with the adopted
+  48-hour window and `N = 187` the simulation found none. A smaller `N`, a
+  shorter window or a much larger population can bring it back.
+- **Advances.** Paid-ahead balances are recovered from the credit of shares
+  already found; pool luck can leave a small shortfall. A miner who leaves
+  while paid ahead takes the unrecovered amount with them: at most 0.04
+  mean rewards across a whole 48-hour-window run.
 - **Timing and reservations.** Current-win credit is unknown until the
   tail is found; it cannot be inserted into a list already hashed for that
   proof. Earlier won balances and immutable pending lists must not be
@@ -1059,9 +1081,10 @@ asymptote is 111 bytes for 23-byte scripts (36 bytes in R plus a 75-byte output)
 shared contract/funding/submitter/change overhead and operation density still
 apply. BCH dust fronting is additional to this fee.
 
-### Simulation findings: the rules as written do not deliver short waits
+### Simulation findings: the earlier rules did not deliver short waits
 
-`cargo photon-payout-sim` runs the rules above, as written, for 1,000 and
+`cargo photon-payout-sim` runs the earlier rules (most owed first, never
+paid ahead, a 4,096-script window cap and launch custody) for 1,000 and
 10,000 miners: one giant holding 70 percent, a log-uniform mix over eight
 decades of hash rate, and a heavy-tailed mix, with multiples of 10, 20, 30
 and 50, churn, delayed funding and `N = 64`. Every number is a scenario
@@ -1104,22 +1127,22 @@ The causes, in order of effect:
    drops credit for the oldest distinct miners when more than 4,096 are
    present. With 10,000 miners that alone excludes many of them.
 
-Candidate changes for the owner, **not adopted**: pay in the order miners
+Candidate changes, adopted by the owner on 2026-10-30 after the re-run
+below (with a 48-hour window rather than a faster share rate): pay in the order miners
 became eligible (first come, first served) instead of most owed; remove
 the window's script cap, which only the tree needed; avoid any launch
 custody by letting a win's remainder go to the next miners in line, even
 ahead of what they have earned (bounded, and recovered from their later
 credit), so no tokens wait in custody and the backlog stays near zero; and
 size the share rate so a target smallest miner has a share in most windows.
-Each changes a proposed share-chain rule and needs the owner's approval.
-The re-run below simulates them.
+Each changes a PHOTON share-chain rule; the re-run below simulates them.
 
 ### Candidate rules re-run: first come, first served with bounded pay-ahead
 
 On **2026-10-30** the owner asked for the four candidate changes above to be
-simulated. They are still **not adopted**. Each changes a proposed share-chain
-rule and needs the owner's approval before any design text treats it as
-settled. In plain words, the simulated rules are:
+simulated. After seeing the results the owner adopted them, with a 48-hour
+window, for the PHOTON pool only (rules at the start of this section). In
+plain words, the simulated rules are:
 
 1. **First come, first served.** A miner joins the queue when their earned
    balance first reaches their own minimum (`multiple * C`). The queue is
@@ -1231,12 +1254,11 @@ What the re-run shows:
   includes them, but adds share-chain load and, with a 12-hour window, blocks
   wins.
 
-Before any of this is adopted, the owner would decide: first come, first
-served; the pay-ahead bound (expected credit of found shares) and the
-leftover rule; the window length (48 hours studied); `N` (187 studied;
-version 2 allows up to 188, 238, 198 or 244 by script mix); the share
-rate and smallest-miner floor; and what happens to advances held by miners
-who leave. None of these runs touched a node, chipnet or mainnet.
+The owner adopted first come, first served, the pay-ahead bound, the
+leftover rule, no script cap and the 48-hour window. Still open: `N` (187
+studied; version 2 allows up to 188, 238, 198 or 244 by script mix), the
+share rate and smallest-miner floor, and what happens to advances held by
+miners who leave. None of these runs touched a node, chipnet or mainnet.
 
 ### Historical funded Merkle-sum tree: no longer the main path
 
@@ -1890,22 +1912,25 @@ share's authenticated credit policy, not the finding miner's whole window.
 ## 10. Open decisions and phases
 
 The owner's 2026-10-30 minimum-payout choices above replace sponsorship
-and per-win tree fan-out as the main path. The following remain **open
-owner decisions**, with no default selected by this study:
+and per-win tree fan-out as the main path. Also on 2026-10-30 the owner
+adopted, for the PHOTON pool only: first come, first served; pay-ahead
+bounded by the expected credit of found shares, which replaces any launch
+bootstrap or custody; no window script cap; a 48-hour window; and the
+version 2 covenant that pays in the share chain's order. BCH P2Pool is
+unchanged. The following remain **open owner decisions**, with no
+default selected by this study:
 
-- The bootstrap rule for first wins before backed balances build up.
 - Miners who leave below their minimum: pay when a split has room, or
   expire after a long time. Neither policy is implemented or assumed.
+- Miners who leave while paid ahead: the study measured at most 0.04 mean
+  rewards unrecovered over a 48-hour-window run; no policy is selected.
 - The payee cap `N` and the initial raw-token value of `C`.
 - How often `C` may change and the upgrade vote's threshold.
 - P2SH20 or P2SH32 for claim output index 1, after review of final lean `R`.
 - The share rate needed by the smallest miners; a fee threshold cannot
-  give credit to a miner who has not found a credited chain share.
-- Whether to adopt the simulated candidate rules: first come, first served;
-  pay-ahead bounded by the expected credit of found shares, which replaces
-  any launch custody; no window script cap; a 48-hour window; and the
-  version 2 covenant that pays in the share chain's order. The section 5
-  re-run is evidence for this choice, not an approval.
+  give credit to a miner who has not found a credited chain share. At
+  10-second shares, miners below about one ten-millionth of the pool
+  almost never find one.
 
 Coverage gaps, fixed-list reservations, multiple-change activation and
 the price/no-sponsor execution condition in section 5 also need explicit
@@ -1914,8 +1939,8 @@ Cauldron price remains a later option, outside this design.
 
 The owner must decide the following before a profile is approved:
 
-- Share/PPLNS parameters, depth-based uncle policy, bootstrap beneficiary
-  rule and restart after an outage longer than the path-delta bound,
+- Share parameters other than the 48-hour window, depth-based uncle
+  policy, restart after an outage longer than the path-delta bound,
   authenticated-context lag policy and optional per-share fees. Sponsor
   budgets belong only to the retained historical tree, not the main path.
 - Conserved tail or bounded tail burning. Burning trades token supply
@@ -1934,7 +1959,7 @@ The owner must decide the following before a profile is approved:
 The historical tree/state/funding/arithmetic caps in section 5 remain fixed
 prototype bounds for that alternative. Its program and tests are retained.
 The main path reimburses submitters in tokens as specified above and has
-no sponsor; no initial `C`, cap `N` or bootstrap has been approved here.
+no sponsor; no initial `C` or cap `N` has been approved here.
 
 ### Gate status
 

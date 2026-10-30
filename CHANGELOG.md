@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The PHOTON payout design now records the rules the owner adopted on
+2026-10-30, for the PHOTON pool only: first come, first served; the rest
+of a win paid ahead within the expected credit of shares already found,
+with no launch custody; no window script cap; a 48-hour window; and the
+version 2 lean covenant. BCH P2Pool's payouts and share chain are
+unchanged. Design text only; no node or share-chain code.
+
 `cargo photon-payout-sim --candidate-summary` re-runs the PHOTON payout
 study under four candidate rules the owner asked to test, none adopted:
 first come, first served; pay-ahead bounded by the expected credit of
