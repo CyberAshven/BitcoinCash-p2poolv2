@@ -9,6 +9,7 @@ pub mod sharechain_pplns;
 pub mod simple_pplns;
 
 use crate::config::{BitcoinCashNetwork, Chain, PoolMode};
+use crate::shares::bch_headers::BchHeaderRules;
 use payout_distribution::PayoutDistribution;
 use sharechain_pplns::pplns_window::PplnsWindow;
 use std::sync::{Arc, RwLock};
@@ -21,7 +22,10 @@ const DEFAULT_SIMPLE_PPLNS_STEP_SIZE_SECONDS: u64 = 86_400;
 /// In P2Poolv2 mode the share chain PPLNS payout walks the confirmed
 /// chain and the returned window is shared with the organise worker. The
 /// window rule follows `chain` (see `PplnsWindow::for_chain`), so the notifier
-/// and the validator, which share the window, size it the same way.
+/// and the validator, which share the window, size it the same way. A Bitcoin
+/// Cash window also pays only the work on the paying block's BCH chain, by
+/// the header rules of `bitcoin_cash_network`
+/// (`PplnsWindow::with_bch_header_rules`).
 ///
 /// In Hydrapool mode the simple PPLNS payout reads shares directly
 /// from rocksdb. The returned window is an empty placeholder that
@@ -35,8 +39,14 @@ pub fn build_payout_for_mode(
 ) -> (Box<dyn PayoutDistribution + Send>, Arc<RwLock<PplnsWindow>>) {
     match mode {
         PoolMode::P2poolv2 => {
-            let payout =
-                sharechain_pplns::Payout::with_window(PplnsWindow::new(network).for_chain(chain));
+            let bch_header_rules = bitcoin_cash_network
+                .filter(|_| chain == Chain::BitcoinCash)
+                .map(BchHeaderRules::for_network);
+            let payout = sharechain_pplns::Payout::with_window(
+                PplnsWindow::new(network)
+                    .for_chain(chain)
+                    .with_bch_header_rules(bch_header_rules),
+            );
             let window = payout.shared_pplns_window();
             (Box::new(payout), window)
         }

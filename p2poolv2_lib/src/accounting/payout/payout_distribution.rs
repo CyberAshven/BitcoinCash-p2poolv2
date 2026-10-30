@@ -4,6 +4,7 @@
 
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, append_payout_split};
 use crate::accounting::payout::payout_tree::PayoutTree;
+use crate::accounting::payout::sharechain_pplns::pplns_window::PayingBlock;
 use crate::accounting::{CoinbasePayouts, OutputPair};
 use crate::config::StratumConfig;
 #[cfg(test)]
@@ -53,7 +54,7 @@ pub trait PayoutDistribution {
         distribution: &mut Vec<OutputPair>,
         chain_store_handle: &ChainStoreHandle,
         anchor: BlockHash,
-        bitcoin_difficulty: u128,
+        paying_block: PayingBlock,
         total_amount: bitcoin::Amount,
         remaining_total_amount: Amount,
         bootstrap_address: PayoutAddress,
@@ -68,12 +69,14 @@ pub trait PayoutDistribution {
     ///   passes the same tip it commits as `prev_share_blockhash`, so the
     ///   window it pays matches the one the validator reconstructs from
     ///   that prev, closing the read-tip-vs-payout-tip race.
-    /// * `bitcoin_difficulty` - Difficulty of the bitcoin block being paid for,
-    ///   from the bits of the template the job is built on (see
-    ///   `bitcoin_block_difficulty`). Hydrapool's time-window PPLNS uses it as
-    ///   its window target. The share chain window uses it on Bitcoin Cash, to
-    ///   hold `BCH_PPLNS_WINDOW_BLOCKS` blocks' worth of work, and ignores it
-    ///   on Bitcoin, where the window is `PPLNS_WINDOW_SHARES` mature shares.
+    /// * `paying_block` - The bitcoin block being paid for: the difficulty of
+    ///   the bits of the template the job is built on (see
+    ///   `bitcoin_block_difficulty`), and the block the template builds on.
+    ///   Hydrapool's time-window PPLNS uses the difficulty as its window
+    ///   target. The share chain window uses both on Bitcoin Cash, to hold
+    ///   `BCH_PPLNS_WINDOW_BLOCKS` blocks' worth of work and pay only the work
+    ///   on the template's BCH chain, and ignores them on Bitcoin, where the
+    ///   window is `PPLNS_WINDOW_SHARES` mature shares.
     /// * `total_amount` - Total bitcoin amount to distribute among contributors
     ///
     /// These are the payouts of a pool-built job, which always carries the
@@ -88,7 +91,7 @@ pub trait PayoutDistribution {
         &mut self,
         chain_store_handle: &ChainStoreHandle,
         anchor: BlockHash,
-        bitcoin_difficulty: u128,
+        paying_block: PayingBlock,
         total_amount: bitcoin::Amount,
         config: &StratumConfig<crate::config::Parsed>,
     ) -> Result<CoinbasePayouts, Box<dyn Error + Send + Sync>> {
@@ -114,7 +117,7 @@ pub trait PayoutDistribution {
             &mut distribution,
             chain_store_handle,
             anchor,
-            bitcoin_difficulty,
+            paying_block,
             total_amount,
             remaining_total_amount,
             config.bootstrap_address().clone(),

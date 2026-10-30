@@ -7,7 +7,9 @@ use super::error::WorkError;
 use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::PayoutSplit;
 use crate::accounting::payout::payout_distribution::{PayoutDistribution, build_pplns_outputs};
-use crate::accounting::payout::sharechain_pplns::pplns_window::bitcoin_block_difficulty;
+use crate::accounting::payout::sharechain_pplns::pplns_window::{
+    PayingBlock, bitcoin_block_difficulty,
+};
 use crate::config::StratumConfig;
 use crate::pool_difficulty;
 use crate::shares::bch_asert::BchAsert;
@@ -49,12 +51,13 @@ pub(crate) struct NotifyContext {
 /// Build the output distribution for the coinbase transaction using
 /// payout accounting in NotifyContext.
 ///
-/// The template's bitcoin difficulty is passed to the payout. Hydrapool uses
-/// it as its window target. The share chain uses it on Bitcoin Cash to size
-/// the window, which is why it must come from the template's bits: they are
-/// the bits the share's header carries, so a validator reading them from the
-/// header sizes the same window. On Bitcoin the share chain window is
-/// `PPLNS_WINDOW_SHARES` deep and ignores it.
+/// The template's bitcoin difficulty and previous block are passed to the
+/// payout. Hydrapool uses the difficulty as its window target. The share
+/// chain uses both on Bitcoin Cash, to size the window and pick the work it
+/// pays, which is why they must come from the template: the share's header
+/// carries the template's bits and previous block, so a validator reading
+/// them from the header resolves the same window. On Bitcoin the share chain
+/// window is `PPLNS_WINDOW_SHARES` deep and ignores them.
 ///
 /// Returns `Err` if the payout distribution cannot be resolved.
 fn build_output_distribution(
@@ -66,13 +69,22 @@ fn build_output_distribution(
 
     let compact_target = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap();
     let bitcoin_difficulty = bitcoin_block_difficulty(compact_target, context.config.network);
+    let bch_prev = template
+        .previousblockhash
+        .parse::<bitcoin::BlockHash>()
+        .map_err(|error| WorkError {
+            message: format!(
+                "Template previous block {} is not a block hash: {error}",
+                template.previousblockhash
+            ),
+        })?;
 
     context
         .payout
         .get_output_distribution(
             &context.chain_store_handle,
             anchor,
-            bitcoin_difficulty,
+            PayingBlock::new(bitcoin_difficulty, bch_prev),
             total_amount,
             &context.config,
         )

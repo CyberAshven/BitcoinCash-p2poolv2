@@ -11,6 +11,7 @@
 //! right (`payout_rights`).
 
 mod address_keys;
+mod bch_eligibility;
 pub mod payout;
 pub mod payout_rights;
 pub mod pplns_window;

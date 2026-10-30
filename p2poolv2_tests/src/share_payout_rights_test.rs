@@ -221,7 +221,7 @@ fn weights(
     window
         .get_distribution_from_start_hash(
             anchor.block_hash(),
-            MINIMUM_PAYING_DIFFICULTY,
+            MINIMUM_PAYING_DIFFICULTY.into(),
             chain_store_handle,
         )
         .unwrap()

@@ -8,6 +8,7 @@ use crate::accounting::payout::payout_distribution::{
     PayoutDistribution, append_proportional_distribution,
 };
 use crate::accounting::payout::payout_tree::PayoutTree;
+use crate::accounting::payout::sharechain_pplns::pplns_window::PayingBlock;
 use crate::config::BitcoinCashNetwork;
 #[cfg(test)]
 #[mockall_double::double]
@@ -44,7 +45,7 @@ impl PayoutDistribution for Payout {
         // Time-window PPLNS is not anchored on a share; it queries by
         // timestamp, so the share-chain anchor does not apply here.
         _anchor: BlockHash,
-        bitcoin_difficulty: u128,
+        paying_block: PayingBlock,
         total_amount: bitcoin::Amount,
         remaining_total_amount: Amount,
         bootstrap_address: PayoutAddress,
@@ -56,8 +57,9 @@ impl PayoutDistribution for Payout {
         // This avoids parsing miner addresses when 100% goes to donation/fee
         // This also avoids running PPLNS share look ups when we don't need to use that data
         if remaining_total_amount > bitcoin::Amount::ZERO {
-            let total_difficulty =
-                bitcoin_difficulty.saturating_mul(HYDRAPOOL_DIFFICULTY_MULTIPLIER);
+            let total_difficulty = paying_block
+                .claimed_difficulty
+                .saturating_mul(HYDRAPOOL_DIFFICULTY_MULTIPLIER);
             let address_difficulty_map =
                 self.accumulate_difficulty_by_address(chain_store_handle, total_difficulty)?;
 

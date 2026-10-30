@@ -144,6 +144,48 @@ fn regtest_requires_the_parents_bits() {
     );
 }
 
+/// The window's nBits is the child's required nBits, except that a late
+/// test network child does not drop it to the limit.
+#[test]
+fn sizing_bits_are_the_asert_bits_whatever_the_paying_blocks_time() {
+    let chipnet = BchHeaderRules::for_network(BitcoinCashNetwork::Chipnet);
+    let mut late = 0;
+    for (parent_height, parent_hex, child_hex) in CHIPNET_PAIRS {
+        let parent = known(parent_height, parent_hex);
+        let child = header(child_hex);
+        let asert = BchAsert::for_network(BitcoinCashNetwork::Chipnet)
+            .unwrap()
+            .next_bits(parent_height, parent.header.time);
+        assert_eq!(chipnet.sizing_bits(&parent), asert);
+        if child.time > parent.header.time + MIN_DIFFICULTY_GAP {
+            assert_ne!(chipnet.sizing_bits(&parent), Some(child.bits));
+            late += 1;
+        } else {
+            assert_eq!(chipnet.sizing_bits(&parent), Some(child.bits));
+        }
+    }
+    assert_eq!(late, 1);
+    let mainnet = BchHeaderRules::for_network(BitcoinCashNetwork::Mainnet);
+    for (parent_height, parent_hex, child_hex) in MAINNET_PAIRS {
+        let parent = known(parent_height, parent_hex);
+        assert_eq!(mainnet.sizing_bits(&parent), Some(header(child_hex).bits));
+    }
+}
+
+/// Regtest sizes by the parent's nBits; scalenet, unchecked, by none.
+#[test]
+fn sizing_bits_follow_the_network_bits_rule() {
+    let parent = known(10, MAINNET_PAIRS[0].1);
+    assert_eq!(
+        BchHeaderRules::for_network(BitcoinCashNetwork::Regtest).sizing_bits(&parent),
+        Some(parent.header.bits)
+    );
+    assert_eq!(
+        BchHeaderRules::for_network(BitcoinCashNetwork::Scalenet).sizing_bits(&parent),
+        None
+    );
+}
+
 #[test]
 fn a_known_header_round_trips_its_encoding() {
     let parent = known(MAINNET_PAIRS[6].0, MAINNET_PAIRS[6].1);

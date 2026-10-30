@@ -19,7 +19,7 @@ use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 #[cfg(not(test))]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
-    ChainDepths, WindowError, bitcoin_block_difficulty,
+    ChainDepths, PayingBlock, WindowError, bitcoin_block_difficulty,
 };
 use crate::config::{
     BITCOIN_CASH_DONATION_PUBKEY_HASH, BitcoinCashNetwork, Chain, MAX_BASIS_POINTS,
@@ -793,10 +793,11 @@ impl DefaultShareValidator {
     /// needs its BCH prev's header known before it can be paid or pay
     /// others. Until a header arrives, with this share's message or a later
     /// one, the share is `Recoverable`, never invalid: a node that has not
-    /// learned the header yet may learn it. The chain's first share builds on
-    /// the all-zero hash and is exempt. Shares below the payout zone are not
-    /// checked (`validate_below_pplns_depth`), so a new node syncs old shares
-    /// its header store does not reach.
+    /// learned the header yet may learn it. The all-zero hash names no block:
+    /// only the chain's first share, built locally from the network's first
+    /// block, builds on it, and any other share that does is invalid. Shares
+    /// below the payout zone are not checked (`validate_below_pplns_depth`),
+    /// so a new node syncs old shares its header store does not reach.
     fn validate_bch_prev_known(
         &self,
         share_header: &ShareHeader,
@@ -807,7 +808,13 @@ impl DefaultShareValidator {
         }
         let prev = share_header.bitcoin_header.prev_blockhash;
         if prev == BlockHash::all_zeros() {
-            return Ok(());
+            if share_header.prev_share_blockhash == BlockHash::all_zeros() {
+                return Ok(());
+            }
+            return Err(ValidationError::consensus(format!(
+                "Share {} builds on no Bitcoin Cash block",
+                share_header.block_hash()
+            )));
         }
         match chain_store_handle.get_bch_header(&prev) {
             Ok(Some(_)) => Ok(()),
@@ -1554,12 +1561,14 @@ impl DefaultShareValidator {
             .write()
             .expect("PPLNS window lock poisoned on write");
 
-        let paying_block_difficulty =
-            bitcoin_block_difficulty(share.header.bitcoin_header.bits, window.network());
+        let paying_block = PayingBlock::new(
+            bitcoin_block_difficulty(share.header.bitcoin_header.bits, window.network()),
+            share.header.bitcoin_header.prev_blockhash,
+        );
         let address_difficulty_map = window
             .get_distribution_from_start_hash(
                 share.header.prev_share_blockhash,
-                paying_block_difficulty,
+                paying_block,
                 chain_store_handle,
             )
             .map_err(|error| match error {
@@ -1571,10 +1580,18 @@ impl DefaultShareValidator {
                 | WindowError::RightsHistoryTooShallow { .. } => ValidationError::unresolvable(
                     format!("Cannot resolve PPLNS window from prev_share_blockhash: {error}"),
                 ),
-                // A store read failed or the ancestry is not stored yet; either
-                // may resolve later.
-                WindowError::ReadFailure(_) => ValidationError::recoverable(format!(
-                    "Failed to resolve PPLNS window from prev_share_blockhash: {error}"
+                // A store read failed, the ancestry is not stored yet, or a
+                // BCH header the window places work with has not arrived;
+                // each may resolve later.
+                WindowError::ReadFailure(_) | WindowError::UnknownBchPrev { .. } => {
+                    ValidationError::recoverable(format!(
+                        "Failed to resolve PPLNS window from prev_share_blockhash: {error}"
+                    ))
+                }
+                // The share builds on a BCH chain none of its window's work
+                // is on, so its coinbase can pay no one.
+                WindowError::NothingEligible { .. } => ValidationError::consensus(format!(
+                    "Share pays no one on its Bitcoin Cash chain: {error}"
                 )),
             })?;
 
@@ -2565,8 +2582,9 @@ mod tests {
     }
 
     /// Mining on the current chain: a Bitcoin Cash share whose BCH prev is
-    /// not known is `Recoverable`, not invalid; known, it passes; the chain's
-    /// first share and a Bitcoin node are not checked.
+    /// not known is `Recoverable`, not invalid; known, it passes; on the
+    /// all-zero hash it is invalid unless it is the chain's first share; a
+    /// Bitcoin node does not check.
     #[test]
     fn a_share_on_an_unknown_bch_prev_is_recoverable() {
         use crate::shares::bch_headers::KnownBchHeader;
@@ -2591,8 +2609,15 @@ mod tests {
         bch.validate_bch_prev_known(&header, &store_knowing(true))
             .unwrap();
 
-        let mut first = header.clone();
-        first.bitcoin_header.prev_blockhash = BlockHash::all_zeros();
+        let mut on_nothing = header.clone();
+        on_nothing.bitcoin_header.prev_blockhash = BlockHash::all_zeros();
+        on_nothing.prev_share_blockhash = BlockHash::from_byte_array([0x55; 32]);
+        let error = bch
+            .validate_bch_prev_known(&on_nothing, &ChainStoreHandle::default())
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        let mut first = on_nothing;
+        first.prev_share_blockhash = BlockHash::all_zeros();
         bch.validate_bch_prev_known(&first, &ChainStoreHandle::default())
             .unwrap();
         validator()

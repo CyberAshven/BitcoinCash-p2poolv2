@@ -421,7 +421,9 @@ impl BlockReceiver {
     }
 
     /// The BCH prev of a Bitcoin Cash share block is a known header. The
-    /// chain's first share builds on the all-zero hash and is exempt.
+    /// all-zero hash names no block and is never known, so a share on it is
+    /// dropped too; only the chain's first share, which is built locally and
+    /// never received, builds on it.
     fn validate_bch_prev_known(
         &self,
         share_block: &ShareBlock,
@@ -430,8 +432,8 @@ impl BlockReceiver {
             return Ok(());
         }
         let prev = share_block.header.bitcoin_header.prev_blockhash;
-        if prev == <BlockHash as bitcoin::hashes::Hash>::all_zeros()
-            || self.chain_store_handle.get_bch_header(&prev)?.is_some()
+        if prev != <BlockHash as bitcoin::hashes::Hash>::all_zeros()
+            && self.chain_store_handle.get_bch_header(&prev)?.is_some()
         {
             return Ok(());
         }

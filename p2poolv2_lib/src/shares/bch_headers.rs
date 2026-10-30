@@ -170,6 +170,23 @@ impl BchHeaderRules {
         }
     }
 
+    /// The nBits that sizes a payout window paid by a block on `parent`: the
+    /// nBits Bitcoin Cash requires of `parent`'s next block, or `None` where
+    /// this node does not check nBits (scalenet).
+    ///
+    /// Unlike [`Self::required_bits`] it leaves out the test networks'
+    /// 20-minute rule, which depends on the paying block's own time: a block
+    /// dated late may take the proof-of-work limit, and a window sized by
+    /// that would fall back to its share cap. Every node computes the same
+    /// nBits from the same known parent, so no miner can choose it.
+    pub fn sizing_bits(&self, parent: &KnownBchHeader) -> Option<CompactTarget> {
+        match self.bits {
+            BitsRule::Asert(asert) => asert.next_bits(parent.height, parent.header.time),
+            BitsRule::Parent => Some(parent.header.bits),
+            BitsRule::Unchecked => None,
+        }
+    }
+
     /// Check `header` from a peer against its known `parent`, at `now`
     /// (seconds since the epoch), and return it as known.
     pub fn check(
