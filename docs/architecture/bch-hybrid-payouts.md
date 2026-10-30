@@ -76,15 +76,16 @@ tree's shape and script sizes. Only token shares, or windows past about
 **Another limit of P2Pool's own.** Each share carries its coinbase between
 P2Pool nodes. The old 200 KiB combined body limit came from upstream, a
 Bitcoin pool, and would have capped direct payouts at about 6,000 miners.
-The implemented share limit allows a full 1,000,000-byte coinbase
-(BCH's own transaction limit; a coinbase is never relayed by BCHN, so
-BCHN's 100 KB standard-size policy does not apply) plus the share's own
-200 KiB of share transactions and its header. That stays one fixed
-share-chain constant. The cost is bandwidth: a share with 29,400 payees is about 1 MB, made about every
-10 seconds, and on a slow uplink it reaches peers late, so more shares end
-up as uncles. The fix is in how shares travel, not in the limit: every node
-already rebuilds the payouts itself, so shares can be sent without them, a
-few hundred bytes each, with the full coinbase fetched only when needed.
+The implemented share limit allows a full 1,000,000-byte coinbase (BCH's own
+transaction limit; a coinbase is never relayed by BCHN, so BCHN's 100 KB
+standard-size policy does not apply) plus the share's own 200 KiB of share
+transactions and its header. That stays one fixed share-chain constant. The
+cost is bandwidth: a share with 29,400 payees is about 1 MB, made about
+every 10 seconds, and on a slow uplink it reaches peers late, so more shares
+end up as uncles. The fix is in how shares travel, not in the limit: every
+node already rebuilds the payouts itself, so shares can be sent without
+them, a few hundred bytes each, with the full coinbase fetched only when
+needed.
 
 **What can go wrong.**
 - *Fees rise above 1 sat/byte.* The default executor keeps rebroadcasting the
