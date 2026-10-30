@@ -172,9 +172,31 @@ impl StoreHandle {
         self.store.get_total_work()
     }
 
-    /// Get every bitcoin block found by the pool, ordered by bitcoin height.
+    /// Get BCHN-accepted pool blocks, ordered by Bitcoin Cash height.
     pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
         self.store.get_found_blocks()
+    }
+
+    /// Get claimed block candidates still awaiting BCHN verification.
+    pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
+        self.store.get_candidate_found_blocks()
+    }
+
+    /// Record verified BCHN acceptance through the serialized writer.
+    /// Return whether the block was newly inserted; callers must verify
+    /// BCHN acceptance before invoking this method.
+    pub async fn record_accepted_found_block(
+        &self,
+        found_block: FoundBlock,
+    ) -> Result<bool, StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::RecordAcceptedFoundBlock {
+                found_block,
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
     }
 
     /// Get every kept Bitcoin Cash payout tree, ordered by coinbase txid.
@@ -484,6 +506,7 @@ mockall::mock! {
         pub fn get_chain_tip(&self) -> Result<BlockHash, StoreError>;
         pub fn get_total_work(&self) -> Result<Work, StoreError>;
         pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
+        pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
         pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError>;
         pub fn get_payout_tree(&self, coinbase_txid: &Txid) -> Result<Option<StoredPayoutTree>, StoreError>;
         pub fn get_confirmed_at_height(&self, height: u32) -> Result<BlockHash, StoreError>;
@@ -495,6 +518,7 @@ mockall::mock! {
         pub fn get_children_blockhashes(&self, blockhash: &BlockHash) -> Result<Option<Vec<BlockHash>>, StoreError>;
 
         // Serialized writes (async)
+        pub async fn record_accepted_found_block(&self, found_block: FoundBlock) -> Result<bool, StoreError>;
         pub async fn organise_header(&self, header: ShareHeader) -> Result<Option<u32>, StoreError>;
         pub async fn organise_block(&self) -> Result<Option<u32>, StoreError>;
         pub async fn mark_invalid(&self, blockhash: BlockHash) -> Result<(), StoreError>;

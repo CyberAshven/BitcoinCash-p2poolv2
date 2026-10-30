@@ -411,9 +411,26 @@ impl ChainStoreHandle {
         self.store_handle.get_total_work()
     }
 
-    /// Get every bitcoin block found by the pool, ordered by bitcoin height.
+    /// Get BCHN-accepted pool blocks, ordered by Bitcoin Cash height.
     pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
         self.store_handle.get_found_blocks()
+    }
+
+    /// Get claimed block candidates still awaiting BCHN verification.
+    pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
+        self.store_handle.get_candidate_found_blocks()
+    }
+
+    /// Record a block after verifying BCHN acceptance, returning whether new.
+    /// The caller must verify a successful BCHN submission or membership in
+    /// BCHN's chain before invoking this method.
+    pub async fn record_accepted_found_block(
+        &self,
+        found_block: FoundBlock,
+    ) -> Result<bool, StoreError> {
+        self.store_handle
+            .record_accepted_found_block(found_block)
+            .await
     }
 
     /// Get every kept Bitcoin Cash payout tree, ordered by coinbase txid.
@@ -1068,6 +1085,8 @@ mockall::mock! {
         pub fn get_share_headers(&self, share_hashes: &[BlockHash]) -> Result<Vec<(BlockHash, ShareHeader)>, StoreError>;
         pub fn get_share_header(&self, share_hash: &BlockHash) -> Result<ShareHeader, StoreError>;
         pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
+        pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
+        pub async fn record_accepted_found_block(&self, found_block: FoundBlock) -> Result<bool, StoreError>;
         pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError>;
         pub fn get_payout_tree(&self, coinbase_txid: &Txid) -> Result<Option<StoredPayoutTree>, StoreError>;
         pub fn get_headers_for_locator(&self, block_hashes: &[BlockHash], stop_block_hash: &BlockHash, limit: usize) -> Result<Vec<ShareHeader>, StoreError>;

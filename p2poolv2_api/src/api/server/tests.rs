@@ -112,8 +112,8 @@ async fn test_metrics_endpoint_exposes_found_blocks() {
         .await
         .unwrap();
 
-    // The regtest genesis header meets its own target, so confirming
-    // this share records a found bitcoin block.
+    // A header meeting its claimed target is only a candidate until BCHN
+    // acceptance has been recorded.
     let mut share = TestShareBlockBuilder::new()
         .prev_share_blockhash(genesis.block_hash().to_string())
         .nonce(0xe9695792)
@@ -131,6 +131,25 @@ async fn test_metrics_endpoint_exposes_found_blocks() {
         .unwrap();
     state.chain_store_handle.organise_block().await.unwrap();
 
+    let unverified = metrics(State(state.clone())).await;
+    assert!(unverified.contains("found_blocks_total 0\n"));
+    assert!(
+        state
+            .chain_store_handle
+            .get_found_blocks()
+            .unwrap()
+            .is_empty()
+    );
+    let candidate = state
+        .chain_store_handle
+        .get_candidate_found_blocks()
+        .unwrap();
+    assert_eq!(candidate.len(), 1);
+    state
+        .chain_store_handle
+        .record_accepted_found_block(candidate[0].clone())
+        .await
+        .unwrap();
     let exposition = metrics(State(state)).await;
 
     assert!(exposition.contains("found_blocks_total 1\n"));

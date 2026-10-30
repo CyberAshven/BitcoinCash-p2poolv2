@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A share whose BCH header meets the target that header claims is no longer
+counted as a found block on its own say-so. It is kept as a candidate,
+and it becomes a found block only once BCHN accepts it: a positive
+`submitblock` verdict for a block this node submits, or BCHN reporting
+the block in its chain for one found through another node. Only accepted
+blocks appear in the API and found-block metrics and reset block effort.
+A background worker checks candidates without slowing share processing,
+and stops checking one once BCHN has finalized another block at its
+height. Payouts and share-chain rules are unchanged.
+
 Uncles now count when a node picks the best share chain: a chain's work
 is its shares' work plus the work of every uncle they name. This is a
 share-chain rule change approved on 2026-10-30 and taken from upstream

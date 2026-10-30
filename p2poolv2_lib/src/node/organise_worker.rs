@@ -790,8 +790,8 @@ impl OrganiseWorker {
         }
     }
 
-    /// Record one newly confirmed block: its work for the effort metric, a
-    /// bitcoin block find if it is one, and a Share event for subscribers.
+    /// Record one newly confirmed share's work and emit its Share event.
+    /// BCH block acceptance is tracked separately from share confirmation.
     ///
     /// Reads are current: the writer commits the confirmation batch before
     /// replying to `organise_block`, and the organise worker is the only thing
@@ -825,13 +825,6 @@ impl OrganiseWorker {
         if self.chain_store_handle.is_current() {
             let share_difficulty = bitcoin::Target::from_compact(header.bits).difficulty_float();
             let _ = self.metrics.record_confirmed_share(share_difficulty).await;
-
-            // If this confirmed share is itself a bitcoin block (found by any
-            // node's miners), reset the effort accumulator toward the next
-            // block. The find itself is recorded in the store on confirmation.
-            if header.meets_bitcoin_difficulty() {
-                let _ = self.metrics.reset_block_effort().await;
-            }
         }
 
         self.emit_share_monitoring_event(&header, height);

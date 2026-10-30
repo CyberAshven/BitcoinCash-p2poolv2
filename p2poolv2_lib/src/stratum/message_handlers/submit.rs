@@ -6,9 +6,13 @@ use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::config::PoolMode;
 use crate::shares::coinbase_proof::CoinbaseProof;
 use crate::shares::share_block::ShareHeader;
+#[cfg(not(feature = "sim"))]
+use crate::store::found_block::FoundBlock;
 use crate::store::payout_tree::StoredPayoutTree;
 #[cfg(not(feature = "sim"))]
-use crate::stratum::block_submit::{spawn_extra_node_submissions, submit_to_primary_node};
+use crate::stratum::block_submit::{
+    FoundBlockAcceptance, spawn_extra_node_submissions, submit_to_primary_node,
+};
 use crate::stratum::{
     difficulty_adjuster::DifficultyAdjusterTrait,
     emission::Emission,
@@ -303,34 +307,39 @@ pub(crate) async fn submit_found_block(
     }
     #[cfg(not(feature = "sim"))]
     {
+        let acceptance = found_block_acceptance(stratum_context, header, &coinbase, job);
         // Decode the template transactions only for this rare case.
         let block = Arc::new(
             build_full_block(header, coinbase, &job.blocktemplate)
                 .map_err(|error| Error::SubmitFailure(error.to_string()))?,
         );
-        info!("Found block {}", block.block_hash());
+        info!("Submitting BCH block candidate {}", block.block_hash());
         let submitter = &stratum_context.found_block_submitter;
         spawn_extra_node_submissions(
             &block,
             &submitter.extra_nodes,
             &stratum_context.metrics,
             submitter.retry,
+            acceptance.clone(),
         );
         let unsent = match &job.blocktemplate.provided {
             Some(provided) => provided.submit(Arc::unwrap_or_clone(block)).err(),
             None => Some(Arc::unwrap_or_clone(block)),
         };
-        if let Some(block) = unsent
-            && submit_to_primary_node(
+        if let Some(block) = unsent {
+            let result = submit_to_primary_node(
                 &block,
                 &stratum_context.bitcoindrpc_client,
                 &stratum_context.metrics,
                 &submitter.retry,
             )
-            .await
-            .node_has_block()
-        {
-            request_template_refresh(stratum_context);
+            .await;
+            if let Some(acceptance) = acceptance {
+                acceptance.record(&result, &stratum_context.metrics).await;
+            }
+            if result.node_has_block() {
+                request_template_refresh(stratum_context);
+            }
         }
     }
     #[cfg(feature = "sim")]
@@ -338,6 +347,45 @@ pub(crate) async fn submit_found_block(
         let _ = (stratum_context, header, coinbase, job);
     }
     Ok(())
+}
+
+/// Describe the locally mined share for a later positive BCHN verdict.
+/// Constructing this record alone never publishes a found block.
+#[cfg(not(feature = "sim"))]
+fn found_block_acceptance(
+    context: &StratumContext,
+    header: Header,
+    coinbase: &bitcoin::Transaction,
+    job: &JobDetails,
+) -> Option<FoundBlockAcceptance> {
+    let commitment = job.share_commitment.as_ref()?;
+    let coinbase_proof = match CoinbaseProof::from_coinbase(coinbase, commitment.share_witness_root)
+    {
+        Ok(proof) => proof,
+        Err(error) => {
+            error!(
+                "Cannot name the share for BCH candidate {}: {error}",
+                header.block_hash()
+            );
+            return None;
+        }
+    };
+    let share_header = ShareHeader::from_commitment_and_header(
+        commitment.clone(),
+        header,
+        u64::from(job.blocktemplate.height),
+        coinbase_proof,
+    );
+    Some(FoundBlockAcceptance {
+        store: context.chain_store_handle.clone(),
+        found: FoundBlock {
+            bitcoin_height: share_header.bitcoin_height,
+            bitcoin_blockhash: header.block_hash(),
+            share_blockhash: share_header.block_hash(),
+            bitcoin_time: header.time,
+            miner_bitcoin_address: share_header.miner_bitcoin_address.to_string(),
+        },
+    })
 }
 
 /// Keep the payout tree of a block this node found before the block goes to

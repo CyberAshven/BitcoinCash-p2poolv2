@@ -18,6 +18,7 @@ pub use handle::StoreHandle;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
+use crate::store::found_block::FoundBlock;
 use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::PruneStats;
 use bitcoin::{BlockHash, TxMerkleNode, Txid};
@@ -137,6 +138,12 @@ pub enum WriteCommand {
     AddPplnsShare {
         pplns_share: SimplePplnsShare,
         reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+
+    /// Record a block whose BCHN acceptance the caller has verified.
+    RecordAcceptedFoundBlock {
+        found_block: FoundBlock,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
     },
 
     /// Keep a found block's payout tree (idempotent).
@@ -311,6 +318,11 @@ impl StoreWriter {
             WriteCommand::PutPayoutTree { tree, reply } => {
                 debug!("Keeping the payout tree of coinbase {}", tree.coinbase_txid);
                 let result = self.store.put_payout_tree(&tree);
+                let _ = reply.send(result);
+            }
+
+            WriteCommand::RecordAcceptedFoundBlock { found_block, reply } => {
+                let result = self.store.record_accepted_found_block(&found_block);
                 let _ = reply.send(result);
             }
 

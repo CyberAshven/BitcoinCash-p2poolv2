@@ -17,6 +17,7 @@ use crate::node::Node;
 use crate::node::SwarmSend;
 use crate::node::dns_seeds;
 use crate::node::emission_worker::EmissionWorker;
+use crate::node::found_block_verifier::FoundBlockVerifier;
 use crate::node::messages::Message;
 use crate::node::organise_worker::{OrganiseWorker, create_organise_channel};
 use crate::node::p2p_health::P2pHealth;
@@ -502,6 +503,23 @@ impl NodeActor {
         }
         let share_validator: Arc<dyn ShareValidator + Send + Sync> = Arc::new(validator);
 
+        // Accounting verification is separate from share validation and the
+        // serial organisation path. A slow BCHN never holds up either one.
+        let found_block_verifier = if chain == Chain::BitcoinCash {
+            let client = BitcoindRpcClient::new(
+                &config.bitcoinrpc.url,
+                &config.bitcoinrpc.username,
+                &config.bitcoinrpc.password,
+            )?;
+            Some(FoundBlockVerifier::new(
+                client,
+                chain_store_handle.clone(),
+                metrics.clone(),
+            ))
+        } else {
+            None
+        };
+
         let node = Node::new(
             config,
             chain_store_handle.clone(),
@@ -527,7 +545,17 @@ impl NodeActor {
         )
         .with_depths(ChainDepths::for_chain(chain));
         let mut workers: JoinSet<Result<(), String>> = JoinSet::new();
-        let mut worker_names: HashMap<tokio::task::Id, &'static str> = HashMap::with_capacity(4);
+        let mut worker_names: HashMap<tokio::task::Id, &'static str> = HashMap::with_capacity(5);
+
+        if let Some(verifier) = found_block_verifier {
+            let verifier_id = workers
+                .spawn(async move {
+                    verifier.run().await;
+                    Ok(())
+                })
+                .id();
+            worker_names.insert(verifier_id, "Found block verifier");
+        }
 
         let organise_worker_id = workers
             .spawn(async move {

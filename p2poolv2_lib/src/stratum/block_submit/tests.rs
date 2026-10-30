@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::accounting::stats::metrics::spawn_test_metrics_handle;
+use crate::test_utils::setup_test_chain_store_handle;
 use bitcoin::Network;
 use bitcoin::constants::genesis_block;
 use wiremock::matchers::{body_partial_json, method};
@@ -191,10 +192,33 @@ async fn the_primary_node_result_is_counted() {
         .await;
     let metrics = spawn_test_metrics_handle();
     let block = genesis_block(Network::Regtest);
+    let (store, _directory) = setup_test_chain_store_handle(true).await;
+    let acceptance = FoundBlockAcceptance {
+        store,
+        found: FoundBlock {
+            bitcoin_height: 0,
+            bitcoin_blockhash: block.block_hash(),
+            share_blockhash: block.block_hash(),
+            bitcoin_time: block.header.time,
+            miner_bitcoin_address: "miner".to_string(),
+        },
+    };
+    metrics.record_confirmed_share(12.0).await.unwrap();
 
     let result = submit_to_primary_node(&block, &client_for(&server), &metrics, &FAST_POLICY).await;
 
     assert_eq!(result, BlockSubmission::Accepted);
+    acceptance.record(&result, &metrics).await;
+    assert_eq!(
+        acceptance.store.get_found_blocks().unwrap(),
+        vec![acceptance.found.clone()]
+    );
+    assert_eq!(metrics.get_metrics().await.work_since_last_block, 0.0);
+    metrics.record_confirmed_share(7.0).await.unwrap();
+    acceptance
+        .record(&BlockSubmission::Duplicate, &metrics)
+        .await;
+    assert_eq!(metrics.get_metrics().await.work_since_last_block, 7.0);
     let counted = metrics.get_metrics().await;
     assert_eq!(
         counted
@@ -202,6 +226,43 @@ async fn the_primary_node_result_is_counted() {
             .get(&("primary".to_string(), "accepted".to_string())),
         Some(&1)
     );
+}
+
+#[tokio::test]
+async fn inconclusive_and_rejected_submissions_do_not_record_finds_or_reset_effort() {
+    let (store, _directory) = setup_test_chain_store_handle(true).await;
+    let block = genesis_block(Network::Regtest);
+    let acceptance = FoundBlockAcceptance {
+        store,
+        found: FoundBlock {
+            bitcoin_height: 0,
+            bitcoin_blockhash: block.block_hash(),
+            share_blockhash: block.block_hash(),
+            bitcoin_time: block.header.time,
+            miner_bitcoin_address: "miner".to_string(),
+        },
+    };
+    let metrics = spawn_test_metrics_handle();
+    metrics.record_confirmed_share(9.0).await.unwrap();
+
+    acceptance
+        .record(&BlockSubmission::Inconclusive, &metrics)
+        .await;
+    assert!(acceptance.store.get_found_blocks().unwrap().is_empty());
+    assert_eq!(metrics.get_metrics().await.work_since_last_block, 9.0);
+    acceptance
+        .record(
+            &BlockSubmission::Rejected("bad-diffbits".to_string()),
+            &metrics,
+        )
+        .await;
+    assert!(acceptance.store.get_found_blocks().unwrap().is_empty());
+    assert_eq!(metrics.get_metrics().await.work_since_last_block, 9.0);
+    acceptance
+        .record(&BlockSubmission::Failed("timeout".to_string()), &metrics)
+        .await;
+    assert!(acceptance.store.get_found_blocks().unwrap().is_empty());
+    assert_eq!(metrics.get_metrics().await.work_since_last_block, 9.0);
 }
 
 /// Every extra node gets the block from its own task and is counted under
@@ -221,7 +282,7 @@ async fn an_extra_node_gets_the_block_and_is_counted() {
     let block = Arc::new(genesis_block(Network::Regtest));
     let extra_nodes: Arc<[BitcoindRpcClient]> = Arc::from([client_for(&server)]);
 
-    spawn_extra_node_submissions(&block, &extra_nodes, &metrics, FAST_POLICY);
+    spawn_extra_node_submissions(&block, &extra_nodes, &metrics, FAST_POLICY, None);
 
     let counted = timeout(Duration::from_secs(5), async {
         let key = ("extra1".to_string(), "duplicate".to_string());

@@ -236,7 +236,8 @@ with a pruned block unless a kept block still includes the transaction.
 `BlockTxids`, `BitcoinTxids`, `BitcoinCoinbase` and candidate `BlockHeight`
 entries are deleted below the prune target. Headers, metadata, the block
 index, `h:` and confirmed height entries, `TemplateMerkleBranches`, `Uncles`
-and `FoundBlocks` are kept forever. See `pruning.md`.
+and both `FoundBlocks` and `AcceptedFoundBlocks` are kept forever. See
+`pruning.md`.
 
 ---
 
@@ -308,19 +309,33 @@ Stores written before it have no version.
 
 ---
 
-### 14. `FoundBlocks` - Bitcoin Blocks Found by the Pool
+### 14. `FoundBlocks` - Unverified Bitcoin Cash Block Candidates
 
-One entry per bitcoin block carried by a confirmed share or by an uncle
-of a confirmed share (a share header whose bitcoin header meets the
-bitcoin network target). Written in `confirm_blocks`, in the same batch
-as the confirmation, from header data only, so prune-zone header-only
-confirmation during sync rebuilds the list. Entries are never deleted:
-a share chain reorg does not undo the bitcoin block, and re-confirmation
-rewrites identical bytes. Never pruned. Read by the `/metrics` handler.
+One entry per block carried by a confirmed share or an uncle whose BCH
+header meets the target its own bits claim. Written in `confirm_blocks`,
+in the same batch as confirmation, from header data only, including
+prune-zone header-only confirmation. This is not proof of BCHN acceptance.
+Older entries use the same encoding and remain unverified candidates
+after an upgrade. Re-confirmation rewrites identical bytes; never pruned.
 
 | Key                                                     | Value                                                                                      |
 |---------------------------------------------------------|--------------------------------------------------------------------------------------------|
 | `bitcoin_height` (8 bytes BE) + `bitcoin_blockhash` (32 bytes) | consensus-encoded `share_blockhash` (32 bytes), `bitcoin_time` (u32), `miner_bitcoin_address` (string) |
+
+### 14a. `AcceptedFoundBlocks` - BCHN-Accepted Pool Blocks
+
+Uses the same key and value encoding as `FoundBlocks`. Written through
+StoreWriter only after a positive BCHN `submitblock` verdict or BCHN's
+chain hash matching the candidate at its declared height. Local accepted
+submissions can be recorded before their share is persisted. The
+serialized existence check makes duplicate acceptance idempotent. Only
+this column family feeds the found-block API and metrics. Never pruned.
+
+Normal writable opening creates this column family in an existing store
+without modifying legacy candidates or share data. Read-only opening of
+an older store works without creating it and reports no accepted finds.
+Once BCHN verifies an old candidate, its accepted record persists across
+restarts. No share validity or payout rule depends on either record.
 
 ---
 

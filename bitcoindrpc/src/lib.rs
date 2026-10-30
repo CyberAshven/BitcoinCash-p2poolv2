@@ -187,6 +187,10 @@ pub struct GetBlockchainInfo {
     /// `regtest` on BCHN. `None` when the node does not report one.
     #[serde(default)]
     pub chain: Option<String>,
+    /// Height of the node's best chain. `None` when the node does not
+    /// report one.
+    #[serde(default)]
+    pub blocks: Option<u64>,
 }
 
 /// The fields of a verbose `getblockheader` result that are read.

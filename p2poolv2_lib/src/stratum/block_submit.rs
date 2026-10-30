@@ -15,6 +15,8 @@
 //! `docs/p2pool-v1-bch-lessons.md`).
 
 use crate::accounting::stats::metrics::MetricsHandle;
+use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::store::found_block::FoundBlock;
 use bitcoin::Block;
 use bitcoindrpc::{BitcoindRpcClient, SubmitBlockOutcome};
 use std::sync::Arc;
@@ -110,6 +112,12 @@ pub enum BlockSubmission {
 }
 
 impl BlockSubmission {
+    /// Only a positive BCHN verdict proves acceptance. Merely storing a block
+    /// with an inconclusive verdict does not count as finding one.
+    pub fn is_accepted(&self) -> bool {
+        matches!(self, Self::Accepted | Self::Duplicate)
+    }
+
     /// Metric label of this result.
     pub fn label(&self) -> &'static str {
         match self {
@@ -128,6 +136,37 @@ impl BlockSubmission {
             self,
             BlockSubmission::Accepted | BlockSubmission::Duplicate | BlockSubmission::Inconclusive
         )
+    }
+}
+
+/// The pool share behind a locally submitted block, recorded only after BCHN
+/// accepts it. Copies share one serialized store writer, so several BCHN
+/// replies for the same block reset effort only once.
+#[derive(Clone)]
+pub struct FoundBlockAcceptance {
+    pub store: ChainStoreHandle,
+    pub found: FoundBlock,
+}
+
+impl FoundBlockAcceptance {
+    /// Persist a positive node verdict before resetting the effort metric.
+    pub async fn record(&self, result: &BlockSubmission, metrics: &MetricsHandle) {
+        if result.is_accepted() {
+            match self
+                .store
+                .record_accepted_found_block(self.found.clone())
+                .await
+            {
+                Ok(true) => {
+                    let _ = metrics.reset_block_effort().await;
+                }
+                Ok(false) => {}
+                Err(error) => error!(
+                    "Cannot record accepted BCH block {}: {error}",
+                    self.found.bitcoin_blockhash
+                ),
+            }
+        }
     }
 }
 
@@ -199,16 +238,21 @@ pub fn spawn_extra_node_submissions(
     extra_nodes: &[BitcoindRpcClient],
     metrics: &MetricsHandle,
     policy: SubmitRetryPolicy,
+    acceptance: Option<FoundBlockAcceptance>,
 ) {
     for (index, client) in extra_nodes.iter().enumerate() {
         let block = Arc::clone(block);
         let client = client.clone();
         let metrics = metrics.clone();
         let label = extra_node_label(index);
+        let acceptance = acceptance.clone();
         tokio::spawn(async move {
             let (result, retries) = submit_with_retry(&block, &client, &policy).await;
             log_submission(&block, &label, &result, retries);
             record_submission(&metrics, label, &result, retries).await;
+            if let Some(acceptance) = acceptance {
+                acceptance.record(&result, &metrics).await;
+            }
         });
     }
 }

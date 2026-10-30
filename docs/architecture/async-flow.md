@@ -70,6 +70,10 @@ except the per-peer services and the StoreWriter thread:
 - **ValidationWorker** -- context-free validation, one spawned task per block,
   concurrency capped by a semaphore sized to the CPU count.
 - **OrganiseWorker** -- serial candidate-to-confirmed promotion.
+- **FoundBlockVerifier** -- on Bitcoin Cash, checks candidate block hashes
+  against BCHN's chain independently of share confirmation. RPC failures
+  defer accounting and do not stop share processing. Positive acceptance is
+  persisted through StoreWriter before resetting runtime block effort.
 - **EmissionWorker** -- turns stratum shares into share blocks (P2Poolv2
   mode).
 - **PplnsShareWorker** -- stores hydrapool PPLNS shares that met their session

@@ -7,6 +7,7 @@ pub mod behaviour;
 pub mod connection_tracker;
 mod dns_seeds;
 pub mod emission_worker;
+mod found_block_verifier;
 pub mod organise_worker;
 pub mod p2p_health;
 pub mod payout_tree_executor;

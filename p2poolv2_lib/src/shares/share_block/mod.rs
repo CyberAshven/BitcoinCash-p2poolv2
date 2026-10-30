@@ -260,12 +260,9 @@ impl ShareHeader {
         BlockHash::from_engine(engine)
     }
 
-    /// True when this share's bitcoin header meets the bitcoin network target,
-    /// i.e. the share found a bitcoin block.
-    ///
-    /// On the header rather than the block because the confirmed-block
-    /// follow-up in the organise worker works from headers: the transactions
-    /// say nothing about whether the PoW cleared the network target.
+    /// True when the bitcoin header meets the target its own bits claim.
+    /// This proves neither that BCHN requires that target nor that BCHN
+    /// accepted the block. Found-block accounting requires BCHN evidence.
     pub fn meets_bitcoin_difficulty(&self) -> bool {
         Target::from_compact(self.bitcoin_header.bits).is_met_by(self.bitcoin_header.block_hash())
     }
@@ -527,10 +524,8 @@ impl ShareBlock {
         self.header.bitcoin_header.difficulty(network)
     }
 
-    /// True when this share's bitcoin header meets the bitcoin network
-    /// target, i.e. the share found a bitcoin block. Detected from the share
-    /// itself so it holds pool-wide (every node sees the share on the chain),
-    /// not just for blocks found by locally connected miners.
+    /// True when this share's bitcoin header meets its claimed target.
+    /// This is a block candidate, not evidence of BCHN acceptance.
     pub fn is_bitcoin_block(&self) -> bool {
         self.header.meets_bitcoin_difficulty()
     }

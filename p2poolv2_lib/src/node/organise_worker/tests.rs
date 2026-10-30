@@ -1188,7 +1188,7 @@ async fn test_confirmed_block_skips_effort_while_syncing() {
 }
 
 #[tokio::test]
-async fn test_confirmed_bitcoin_block_resets_block_effort() {
+async fn test_confirmed_claimed_bitcoin_target_does_not_reset_block_effort() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
@@ -1252,8 +1252,8 @@ async fn test_confirmed_bitcoin_block_resets_block_effort() {
         stub_share_validator_with_success(),
     );
 
-    // Make the confirmed share a real bitcoin block: the regtest genesis
-    // header meets its own target, so is_bitcoin_block() is true.
+    // The header meets its own target, but BCHN has supplied no verdict.
+    metrics.record_confirmed_share(7.0).await.unwrap();
     organise_tx
         .send(OrganiseEvent::Block {
             share_block: share,
@@ -1266,10 +1266,9 @@ async fn test_confirmed_bitcoin_block_resets_block_effort() {
     let result = worker.run().await;
     assert!(result.is_ok());
 
-    // A pool-wide block find from the share chain resets the effort
-    // accumulator.
+    // Share confirmation adds work without resetting the accumulator.
     let pool_metrics = metrics.get_metrics().await;
-    assert_eq!(pool_metrics.work_since_last_block, 0.0);
+    assert!(pool_metrics.work_since_last_block > 7.0);
 }
 
 #[tokio::test]
