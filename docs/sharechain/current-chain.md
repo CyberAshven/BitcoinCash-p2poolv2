@@ -6,9 +6,15 @@
 > Copyright 2024-2026 P2Poolv2 Developers, MIT or Apache-2.0. Adapted to
 > Bitcoin Cash by this fork; see the [port map](../upstream-port-map.md).
 
-**Status on Bitcoin Cash: not built.** Upstream designed this defense for
-Bitcoin; this fork has not implemented it yet, and plans it before mainnet
-([Requirements](../requirements.md#functional)). This page explains the
+**Status on Bitcoin Cash: in progress, not active.** Upstream designed this
+defense for Bitcoin; this fork plans it before mainnet
+([Requirements](../requirements.md#functional)). Built on 2026-10-30: the
+header check (`p2poolv2_lib/src/shares/bch_headers.rs`), which requires
+each header's exact aserti3-2d nBits from its known parent, and the store
+of known headers (`p2poolv2_lib/src/store/bch_headers.rs`). Not built yet:
+filling that store from BCHN, carrying headers with shares, accepting a
+share only once its BCH prev is known, and the payout rule. Until all of it
+is built, no share-chain rule has changed. This page explains the
 attack, the design, and what it needs on Bitcoin Cash. The full design, with
 its formal model, is
 [Mine on the current Bitcoin chain](../architecture/mine-on-bitcoin-chain.md).

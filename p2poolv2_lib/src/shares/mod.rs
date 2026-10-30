@@ -6,6 +6,7 @@ pub mod auxpow;
 pub mod bch_asert;
 pub mod bch_coinbase;
 pub mod bch_genesis;
+pub mod bch_headers;
 pub mod bch_htlc;
 pub mod bch_payout_covenant;
 pub mod bch_schnorr;

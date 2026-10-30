@@ -26,6 +26,7 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 ///   names. Stores written before this have no version.
 pub const STORE_FORMAT_VERSION: u32 = 1;
 
+pub mod bch_headers;
 pub mod block_tx_metadata;
 pub mod column_families;
 pub mod dag_store;
@@ -214,6 +215,8 @@ impl Store {
         );
         let payout_trees_cf =
             ColumnFamilyDescriptor::new(ColumnFamily::PayoutTrees, RocksDbOptions::default());
+        let bch_headers_cf =
+            ColumnFamilyDescriptor::new(ColumnFamily::BchHeaders, Self::cf_options_with_bloom());
 
         let cfs = vec![
             block_metadata_cf_descriptor,
@@ -237,6 +240,7 @@ impl Store {
             found_blocks_cf,
             accepted_found_blocks_cf,
             payout_trees_cf,
+            bch_headers_cf,
         ];
 
         // for the db too, we use default options for now
