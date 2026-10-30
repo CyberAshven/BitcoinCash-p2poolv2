@@ -4,17 +4,41 @@
 
 use super::*;
 use crate::shares::bch_asert::tests::{MAINNET_PAIRS, header};
+use bitcoin::block::Version;
 use bitcoin::consensus::serialize;
+use bitcoin::{CompactTarget, TxMerkleNode};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 use wiremock::matchers::{body_partial_json, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Three real consecutive mainnet headers: 661,647, 661,648 and 661,649.
-fn chain() -> [Header; 3] {
+fn mainnet_chain() -> [Header; 3] {
     [
         header(MAINNET_PAIRS[0].1),
         header(MAINNET_PAIRS[1].1),
         header(MAINNET_PAIRS[1].2),
     ]
+}
+
+/// `length` linked headers from a first block at height 0, as a regtest
+/// chain has. The feeder trusts its own BCHN, so they need no proof of work.
+/// `fork` changes every merkle root, for a competing branch.
+fn chain_from_first_block(length: u8, fork: u8) -> Vec<Header> {
+    let mut chain: Vec<Header> = Vec::new();
+    for height in 0..length {
+        chain.push(Header {
+            version: Version::from_consensus(0x2000_0000),
+            prev_blockhash: chain
+                .last()
+                .map_or(BlockHash::all_zeros(), Header::block_hash),
+            merkle_root: TxMerkleNode::from_byte_array([height ^ fork; 32]),
+            time: 1_700_000_000 + u32::from(height) * 600,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: u32::from(fork),
+        });
+    }
+    chain
 }
 
 async fn answer(server: &MockServer, request: serde_json::Value, result: serde_json::Value) {
@@ -50,69 +74,126 @@ async fn bchn(tip: &Header, served: &[Header]) -> MockServer {
     server
 }
 
-fn feeder(server: &MockServer, store: ChainStoreHandle) -> BchHeaderFeeder {
+/// What a store holds: known headers and the best-chain index.
+#[derive(Default)]
+struct Held {
+    headers: HashMap<BlockHash, KnownBchHeader>,
+    index: BTreeMap<u32, BlockHash>,
+    tip: Option<u32>,
+    index_writes: usize,
+}
+
+/// A mocked store backed by `held`, behaving as the RocksDB store does.
+fn store_holding(held: Arc<Mutex<Held>>) -> ChainStoreHandle {
+    let mut store = ChainStoreHandle::default();
+    let reads = Arc::clone(&held);
+    store
+        .expect_get_bch_header()
+        .returning(move |hash| Ok(reads.lock().unwrap().headers.get(hash).copied()));
+    let writes = Arc::clone(&held);
+    store.expect_add_bch_headers().returning(move |headers| {
+        let mut held = writes.lock().unwrap();
+        for known in headers {
+            held.headers.insert(known.block_hash(), known);
+        }
+        Ok(())
+    });
+    let index_reads = Arc::clone(&held);
+    store
+        .expect_get_bch_best_hash()
+        .returning(move |height| Ok(index_reads.lock().unwrap().index.get(&height).copied()));
+    let index_writes = Arc::clone(&held);
+    store
+        .expect_set_bch_best_chain()
+        .returning(move |updates, tip| {
+            let mut held = index_writes.lock().unwrap();
+            held.index.retain(|height, _| *height <= tip);
+            held.index.extend(updates);
+            held.tip = Some(tip);
+            held.index_writes += 1;
+            Ok(())
+        });
+    store
+}
+
+fn known(height: u32, header: Header) -> KnownBchHeader {
+    KnownBchHeader { height, header }
+}
+
+fn feeder(server: &MockServer, held: &Arc<Mutex<Held>>) -> BchHeaderFeeder {
     BchHeaderFeeder::new(
         BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap(),
-        store,
+        store_holding(Arc::clone(held)),
     )
 }
 
-/// A store that knows only `known`.
-fn store_knowing(known: Option<KnownBchHeader>) -> ChainStoreHandle {
-    let mut store = ChainStoreHandle::default();
-    store
-        .expect_get_bch_header()
-        .returning(move |hash| Ok(known.filter(|known| known.block_hash() == *hash)));
-    store
-}
-
 #[tokio::test]
-async fn a_new_tip_is_walked_back_to_the_known_header_and_stored_oldest_first() {
-    let [first, second, third] = chain();
+async fn a_new_tip_is_walked_back_to_the_known_header_and_indexed() {
+    let [first, second, third] = mainnet_chain();
     let server = bchn(&third, &[second, third]).await;
-    let mut store = store_knowing(Some(KnownBchHeader {
-        height: 661_647,
-        header: first,
-    }));
-    store
-        .expect_add_bch_headers()
-        .withf(move |headers| {
-            headers
-                == &vec![
-                    KnownBchHeader {
-                        height: 661_648,
-                        header: second,
-                    },
-                    KnownBchHeader {
-                        height: 661_649,
-                        header: third,
-                    },
-                ]
-        })
-        .times(1)
-        .returning(|_| Ok(()));
+    let held = Arc::new(Mutex::new(Held::default()));
+    held.lock()
+        .unwrap()
+        .headers
+        .insert(first.block_hash(), known(661_647, first));
 
-    assert_eq!(feeder(&server, store).sync_once().await, Ok(2));
+    assert_eq!(feeder(&server, &held).sync_once().await, Ok(2));
+
+    let held = held.lock().unwrap();
+    assert_eq!(held.headers[&second.block_hash()], known(661_648, second));
+    assert_eq!(held.headers[&third.block_hash()], known(661_649, third));
+    assert_eq!(held.tip, Some(661_649));
+    assert_eq!(held.index[&661_649], third.block_hash());
+    assert_eq!(held.index[&661_648], second.block_hash());
+    assert_eq!(held.index[&661_647], first.block_hash());
 }
 
+/// A tip already known and indexed costs no write.
 #[tokio::test]
-async fn a_known_tip_adds_nothing() {
-    let [_, _, third] = chain();
-    let server = bchn(&third, &[]).await;
-    let mut store = store_knowing(Some(KnownBchHeader {
-        height: 661_649,
-        header: third,
-    }));
-    store.expect_add_bch_headers().never();
+async fn a_known_indexed_tip_writes_nothing() {
+    let chain = chain_from_first_block(3, 0);
+    let server = bchn(&chain[2], &[]).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+    {
+        let mut held = held.lock().unwrap();
+        for (height, header) in chain.iter().enumerate() {
+            held.headers
+                .insert(header.block_hash(), known(height as u32, *header));
+            held.index.insert(height as u32, header.block_hash());
+        }
+        held.tip = Some(2);
+    }
 
-    assert_eq!(feeder(&server, store).sync_once().await, Ok(0));
+    assert_eq!(feeder(&server, &held).sync_once().await, Ok(0));
+    assert_eq!(held.lock().unwrap().index_writes, 0);
+}
+
+/// A chain shorter than the initial walk, as on regtest, is learned down to
+/// its first block at height 0.
+#[tokio::test]
+async fn a_short_chain_is_learned_from_its_first_block() {
+    let chain = chain_from_first_block(4, 0);
+    let server = bchn(&chain[3], &chain).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+
+    assert_eq!(feeder(&server, &held).sync_once().await, Ok(4));
+
+    let held = held.lock().unwrap();
+    for (height, header) in chain.iter().enumerate() {
+        assert_eq!(
+            held.headers[&header.block_hash()],
+            known(height as u32, *header)
+        );
+        assert_eq!(held.index[&(height as u32)], header.block_hash());
+    }
+    assert_eq!(held.tip, Some(3));
 }
 
 /// A store that knows no header learns a bounded stretch back from the tip,
 /// anchored on the height BCHN gives the oldest header it walked.
 #[tokio::test]
 async fn an_empty_store_learns_a_bounded_stretch_anchored_on_bchns_height() {
-    let [_, second, third] = chain();
+    let [_, second, third] = mainnet_chain();
     let server = bchn(&third, &[second, third]).await;
     answer(
         &server,
@@ -123,19 +204,103 @@ async fn an_empty_store_learns_a_bounded_stretch_anchored_on_bchns_height() {
         serde_json::json!({ "height": 661_648 }),
     )
     .await;
-    let mut store = store_knowing(None);
-    store
-        .expect_add_bch_headers()
-        .withf(move |headers| {
-            headers.len() == 2
-                && headers[0].height == 661_648
-                && headers[0].header == second
-                && headers[1].height == 661_649
-        })
-        .times(1)
-        .returning(|_| Ok(()));
-    let mut feeder = feeder(&server, store);
+    let held = Arc::new(Mutex::new(Held::default()));
+    let mut feeder = feeder(&server, &held);
     feeder.initial_headers = 2;
 
     assert_eq!(feeder.sync_once().await, Ok(2));
+
+    let held = held.lock().unwrap();
+    assert_eq!(held.headers[&second.block_hash()], known(661_648, second));
+    assert_eq!(held.headers[&third.block_hash()], known(661_649, third));
+}
+
+/// BCHN reorganises onto a branch this node already learned from a peer:
+/// nothing new to fetch, but the index moves to the branch.
+#[tokio::test]
+async fn a_reorg_onto_a_known_branch_moves_the_index() {
+    let main = chain_from_first_block(4, 0);
+    let mut branch = main[..2].to_vec();
+    // A competing block 2 and 3 on block 1.
+    for (height, header) in chain_from_first_block(4, 0x55)
+        .into_iter()
+        .enumerate()
+        .skip(2)
+    {
+        let prev = branch.last().unwrap().block_hash();
+        branch.push(Header {
+            prev_blockhash: prev,
+            ..header
+        });
+        assert_eq!(branch.len(), height + 1);
+    }
+    let server = bchn(&branch[3], &[]).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+    {
+        let mut held = held.lock().unwrap();
+        for chain in [&main, &branch] {
+            for (height, header) in chain.iter().enumerate() {
+                held.headers
+                    .insert(header.block_hash(), known(height as u32, *header));
+            }
+        }
+        for (height, header) in main.iter().enumerate() {
+            held.index.insert(height as u32, header.block_hash());
+        }
+        held.tip = Some(3);
+    }
+
+    assert_eq!(feeder(&server, &held).sync_once().await, Ok(0));
+
+    let held = held.lock().unwrap();
+    assert_eq!(held.index[&3], branch[3].block_hash());
+    assert_eq!(held.index[&2], branch[2].block_hash());
+    assert_eq!(held.index[&1], main[1].block_hash());
+    assert_eq!(held.tip, Some(3));
+}
+
+/// BCHN reorganises onto a shorter branch: heights above its tip leave the
+/// index.
+#[tokio::test]
+async fn a_reorg_onto_a_shorter_branch_trims_the_index() {
+    let main = chain_from_first_block(4, 0);
+    let server = bchn(&main[2], &[]).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+    {
+        let mut held = held.lock().unwrap();
+        for (height, header) in main.iter().enumerate() {
+            held.headers
+                .insert(header.block_hash(), known(height as u32, *header));
+            held.index.insert(height as u32, header.block_hash());
+        }
+        held.tip = Some(3);
+    }
+
+    assert_eq!(feeder(&server, &held).sync_once().await, Ok(0));
+
+    let held = held.lock().unwrap();
+    assert_eq!(held.tip, Some(2));
+    assert_eq!(held.index.get(&3), None);
+    assert_eq!(held.index[&2], main[2].block_hash());
+}
+
+/// `learn_from` walks back from a block that is not BCHN's best, such as a
+/// new template's previous block, without touching the index.
+#[tokio::test]
+async fn learn_from_walks_back_from_any_block_bchn_knows() {
+    let chain = chain_from_first_block(3, 0);
+    let server = bchn(&chain[2], &chain).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+
+    assert_eq!(
+        feeder(&server, &held)
+            .learn_from(chain[1].block_hash())
+            .await,
+        Ok(2)
+    );
+
+    let held = held.lock().unwrap();
+    assert_eq!(held.headers.len(), 2);
+    assert_eq!(held.headers[&chain[1].block_hash()], known(1, chain[1]));
+    assert_eq!(held.index_writes, 0);
 }

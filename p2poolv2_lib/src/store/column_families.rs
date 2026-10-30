@@ -27,6 +27,7 @@ pub enum ColumnFamily {
     AcceptedFoundBlocks,
     PayoutTrees,
     BchHeaders,
+    BchBestChain,
 }
 
 impl ColumnFamily {
@@ -54,6 +55,7 @@ impl ColumnFamily {
             ColumnFamily::AcceptedFoundBlocks => "accepted_found_blocks",
             ColumnFamily::PayoutTrees => "payout_trees",
             ColumnFamily::BchHeaders => "bch_headers",
+            ColumnFamily::BchBestChain => "bch_best_chain",
         }
     }
 }

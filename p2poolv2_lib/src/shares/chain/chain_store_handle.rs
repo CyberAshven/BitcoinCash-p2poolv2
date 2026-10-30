@@ -435,6 +435,22 @@ impl ChainStoreHandle {
         self.store_handle.add_bch_headers(headers).await
     }
 
+    /// The hash at `height` on the node's BCHN best chain, as last indexed.
+    pub fn get_bch_best_hash(&self, height: u32) -> Result<Option<BlockHash>, StoreError> {
+        self.store_handle.get_bch_best_hash(height)
+    }
+
+    /// Point heights of the BCH best-chain index at new blocks and set its tip.
+    pub async fn set_bch_best_chain(
+        &self,
+        updates: Vec<(u32, BlockHash)>,
+        tip_height: u32,
+    ) -> Result<(), StoreError> {
+        self.store_handle
+            .set_bch_best_chain(updates, tip_height)
+            .await
+    }
+
     /// Record a block after verifying BCHN acceptance, returning whether new.
     /// The caller must verify a successful BCHN submission or membership in
     /// BCHN's chain before invoking this method.
@@ -1102,6 +1118,8 @@ mockall::mock! {
         pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
         pub fn get_bch_header(&self, block_hash: &BlockHash) -> Result<Option<KnownBchHeader>, StoreError>;
         pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError>;
+        pub fn get_bch_best_hash(&self, height: u32) -> Result<Option<BlockHash>, StoreError>;
+        pub async fn set_bch_best_chain(&self, updates: Vec<(u32, BlockHash)>, tip_height: u32) -> Result<(), StoreError>;
         pub async fn record_accepted_found_block(&self, found_block: FoundBlock) -> Result<bool, StoreError>;
         pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError>;
         pub fn get_payout_tree(&self, coinbase_txid: &Txid) -> Result<Option<StoredPayoutTree>, StoreError>;

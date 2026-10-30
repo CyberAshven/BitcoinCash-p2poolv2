@@ -141,12 +141,19 @@ pub enum WriteCommand {
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
 
-    /// Record a block whose BCHN acceptance the caller has verified.
     /// Add Bitcoin Cash headers this node now knows.
     AddBchHeaders {
         headers: Vec<KnownBchHeader>,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    /// Point heights of the BCH best-chain index at new blocks and set its
+    /// tip, dropping heights above the tip.
+    SetBchBestChain {
+        updates: Vec<(u32, BlockHash)>,
+        tip_height: u32,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    /// Record a block whose BCHN acceptance the caller has verified.
     RecordAcceptedFoundBlock {
         found_block: FoundBlock,
         reply: oneshot::Sender<Result<bool, StoreError>>,
@@ -329,6 +336,14 @@ impl StoreWriter {
 
             WriteCommand::AddBchHeaders { headers, reply } => {
                 let result = self.store.add_bch_headers(&headers);
+                let _ = reply.send(result);
+            }
+            WriteCommand::SetBchBestChain {
+                updates,
+                tip_height,
+                reply,
+            } => {
+                let result = self.store.set_bch_best_chain(&updates, tip_height);
                 let _ = reply.send(result);
             }
             WriteCommand::RecordAcceptedFoundBlock { found_block, reply } => {

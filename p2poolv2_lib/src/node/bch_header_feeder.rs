@@ -6,10 +6,18 @@
 //!
 //! Every few seconds the feeder asks BCHN for its best block. When the store
 //! does not know it, the feeder walks back with `getblockheader` until it
-//! reaches a known header and stores the headers it walked, oldest first,
-//! each one height above its parent. A reorg is the same walk: the new
-//! branch is added and the old one stays known, since a share on a block
-//! that lost an orphan race is still placed on the chain.
+//! reaches a known header, or the chain's first block, and stores the
+//! headers it walked, oldest first, each one height above its parent. A
+//! reorg is the same walk: the new branch is added and the old one stays
+//! known, since a share on a block that lost an orphan race is still placed
+//! on the chain. [`BchHeaderFeeder::learn_from`] runs the same walk from any
+//! block BCHN knows, such as a new template's previous block.
+//!
+//! The feeder also keeps an index of BCHN's best chain, height to hash. After
+//! each walk it points the tip's height and every height below it that
+//! disagrees at the best chain's blocks, and drops heights above a tip that
+//! moved down. A sender uses the index to tell which headers its peers
+//! surely have.
 //!
 //! On a node whose store knows no header yet, the walk stops after
 //! [`INITIAL_HEADERS`] blocks and asks BCHN for the height of the oldest.
@@ -17,8 +25,7 @@
 //! they are not run through `BchHeaderRules::check`; headers from peers are.
 //!
 //! Part of mining on the current chain (V16,
-//! `docs/sharechain/current-chain.md`). Nothing reads the store yet, so this
-//! changes no share-chain rule.
+//! `docs/sharechain/current-chain.md`).
 
 use crate::shares::bch_headers::KnownBchHeader;
 #[cfg(test)]
@@ -28,6 +35,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use bitcoin::BlockHash;
 use bitcoin::block::Header;
+use bitcoin::hashes::Hash;
 use bitcoindrpc::BitcoindRpcClient;
 use std::str::FromStr;
 use std::time::Duration;
@@ -42,6 +50,11 @@ const FEED_INTERVAL: Duration = Duration::from_secs(5);
 /// depth shares are validated to (about 29.4 days) and room besides.
 pub const INITIAL_HEADERS: usize = 8_400;
 
+/// The most best-chain index entries one update rewrites: a reorg deeper
+/// than BCHN allows (10 blocks), or a first index over the whole store.
+const MAX_INDEX_REWRITE: usize = INITIAL_HEADERS + 1;
+
+#[derive(Clone)]
 pub(crate) struct BchHeaderFeeder {
     client: BitcoindRpcClient,
     store: ChainStoreHandle,
@@ -72,23 +85,32 @@ impl BchHeaderFeeder {
         }
     }
 
-    /// Learn the headers from BCHN's best block back to a known one, and
-    /// return how many were added.
+    /// Learn the headers from BCHN's best block back to a known one, index
+    /// BCHN's best chain, and return how many headers were added.
     async fn sync_once(&self) -> Result<usize, String> {
         let best = self
             .client
             .get_best_block_hash()
             .await
             .map_err(|error| format!("getbestblockhash: {error}"))?;
-        let mut hash =
+        let best =
             BlockHash::from_str(&best).map_err(|error| format!("best block hash: {error}"))?;
+        let added = self.learn_from(best).await?;
+        self.index_best_chain(best).await?;
+        Ok(added)
+    }
+
+    /// Learn `hash` and the headers below it back to a known one, from BCHN,
+    /// and return how many were added. BCHN must know `hash`.
+    pub(crate) async fn learn_from(&self, hash: BlockHash) -> Result<usize, String> {
+        let mut hash = hash;
         let mut walked: Vec<Header> = Vec::new();
-        let parent_height = loop {
+        let oldest_height = loop {
             if let Some(known) = self.known(&hash)? {
                 if walked.is_empty() {
                     return Ok(0);
                 }
-                break known.height;
+                break known.height + 1;
             }
             if walked.len() == self.initial_headers {
                 // A store with nothing to link to: anchor the walk on the
@@ -105,9 +127,7 @@ impl BchHeaderFeeder {
                     "Learning {} Bitcoin Cash headers back from BCHN's tip to height {height}",
                     walked.len()
                 );
-                break height
-                    .checked_sub(1)
-                    .ok_or_else(|| "the walk reached genesis".to_string())?;
+                break height;
             }
             let header = self
                 .client
@@ -116,22 +136,60 @@ impl BchHeaderFeeder {
                 .map_err(|error| format!("getblockheader {hash}: {error}"))?;
             hash = header.prev_blockhash;
             walked.push(header);
+            if hash == BlockHash::all_zeros() {
+                // The chain's first block, at height 0.
+                break 0;
+            }
         };
         let added = walked.len();
         let headers = walked
             .into_iter()
             .rev()
-            .zip(1..)
-            .map(|(header, offset)| KnownBchHeader {
-                height: parent_height + offset,
-                header,
-            })
+            .zip(oldest_height..)
+            .map(|(header, height)| KnownBchHeader { height, header })
             .collect();
         self.store
             .add_bch_headers(headers)
             .await
             .map_err(|error| format!("storing headers: {error}"))?;
         Ok(added)
+    }
+
+    /// Point the best-chain index at the chain ending at `tip`: every height
+    /// from the tip down to the first one already indexed with the right
+    /// block, and no height above the tip.
+    async fn index_best_chain(&self, tip: BlockHash) -> Result<(), String> {
+        let tip = self
+            .known(&tip)?
+            .ok_or_else(|| format!("best block {tip} is not known"))?;
+        let mut updates = Vec::new();
+        let mut current = tip;
+        while updates.len() < MAX_INDEX_REWRITE {
+            let indexed = self
+                .store
+                .get_bch_best_hash(current.height)
+                .map_err(|error| format!("reading the best-chain index: {error}"))?;
+            if indexed == Some(current.block_hash()) {
+                break;
+            }
+            updates.push((current.height, current.block_hash()));
+            let parent = current.header.prev_blockhash;
+            match self.known(&parent)? {
+                Some(parent) if current.height > 0 => current = parent,
+                _ => break,
+            }
+        }
+        let above_tip = self
+            .store
+            .get_bch_best_hash(tip.height.saturating_add(1))
+            .map_err(|error| format!("reading the best-chain index: {error}"))?;
+        if updates.is_empty() && above_tip.is_none() {
+            return Ok(());
+        }
+        self.store
+            .set_bch_best_chain(updates, tip.height)
+            .await
+            .map_err(|error| format!("writing the best-chain index: {error}"))
     }
 
     fn known(&self, hash: &BlockHash) -> Result<Option<KnownBchHeader>, String> {

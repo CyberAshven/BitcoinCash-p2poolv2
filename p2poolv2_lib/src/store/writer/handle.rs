@@ -191,6 +191,28 @@ impl StoreHandle {
         self.store.get_bch_header(block_hash)
     }
 
+    /// The hash at `height` on the node's BCHN best chain, as last indexed.
+    pub fn get_bch_best_hash(&self, height: u32) -> Result<Option<BlockHash>, StoreError> {
+        self.store.get_bch_best_hash(height)
+    }
+
+    /// Point heights of the BCH best-chain index at new blocks and set its tip.
+    pub async fn set_bch_best_chain(
+        &self,
+        updates: Vec<(u32, BlockHash)>,
+        tip_height: u32,
+    ) -> Result<(), StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::SetBchBestChain {
+                updates,
+                tip_height,
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
+    }
+
     /// Add Bitcoin Cash headers this node now knows.
     pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -530,6 +552,8 @@ mockall::mock! {
         pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
         pub fn get_bch_header(&self, block_hash: &BlockHash) -> Result<Option<KnownBchHeader>, StoreError>;
         pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError>;
+        pub fn get_bch_best_hash(&self, height: u32) -> Result<Option<BlockHash>, StoreError>;
+        pub async fn set_bch_best_chain(&self, updates: Vec<(u32, BlockHash)>, tip_height: u32) -> Result<(), StoreError>;
         pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError>;
         pub fn get_payout_tree(&self, coinbase_txid: &Txid) -> Result<Option<StoredPayoutTree>, StoreError>;
         pub fn get_confirmed_at_height(&self, height: u32) -> Result<BlockHash, StoreError>;

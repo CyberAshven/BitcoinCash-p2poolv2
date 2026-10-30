@@ -217,6 +217,8 @@ impl Store {
             ColumnFamilyDescriptor::new(ColumnFamily::PayoutTrees, RocksDbOptions::default());
         let bch_headers_cf =
             ColumnFamilyDescriptor::new(ColumnFamily::BchHeaders, Self::cf_options_with_bloom());
+        let bch_best_chain_cf =
+            ColumnFamilyDescriptor::new(ColumnFamily::BchBestChain, RocksDbOptions::default());
 
         let cfs = vec![
             block_metadata_cf_descriptor,
@@ -241,6 +243,7 @@ impl Store {
             accepted_found_blocks_cf,
             payout_trees_cf,
             bch_headers_cf,
+            bch_best_chain_cf,
         ];
 
         // for the db too, we use default options for now
