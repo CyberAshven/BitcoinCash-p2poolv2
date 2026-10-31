@@ -7,8 +7,8 @@ use crate::utils::time_provider::SystemTimeProvider;
 use crate::{
     stratum::difficulty_adjuster::DifficultyAdjusterTrait, utils::time_provider::TimeProvider,
 };
-use bitcoin::Address;
 use bitcoin::secp256k1::rand::{self, Rng};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
 use std::time::SystemTime;
 
@@ -34,7 +34,7 @@ pub struct Session<D: DifficultyAdjusterTrait> {
     /// bitcoin address used as user identifier
     pub btcaddress: Option<String>,
     /// Parsed and network-checked bitcoin Address, set once at authorization time
-    pub parsed_address: Option<Address>,
+    pub parsed_address: Option<PayoutAddress>,
     /// Share chain address from the `p2p=` password option, owning this miner's
     /// share coinbase outputs. Set once at authorization time. Distinct from
     /// `parsed_address`, which is the bitcoin payout address on the other chain.
@@ -42,6 +42,9 @@ pub struct Session<D: DifficultyAdjusterTrait> {
     /// Share owner committed into the work notify. Taproot for Bitcoin, a
     /// 20-byte P2PKH hash for Bitcoin Cash. Set once at authorization.
     pub share_owner: Option<ShareOwner>,
+    /// Bitcoin Cash donation in basis points, resolved from the miner login.
+    /// `Some(0)` is an explicit opt-out; Bitcoin leaves this unset.
+    pub donation: Option<u16>,
     /// Worker name for the mining device
     pub workername: Option<String>,
     /// Optional password of the miner, supplied by the miner, we just store it in session
@@ -64,6 +67,10 @@ pub struct Session<D: DifficultyAdjusterTrait> {
     pub auth_failed_once: bool,
     /// Set after authorization to trigger the first notify from the watch channel
     pub needs_first_notify: bool,
+    /// The miner asked for `pickaxe-merge` in `mining.configure` and the
+    /// node merge-mines tokens: each job's leaves and each token win's
+    /// proof follow (`stratum::merge_disclosure`).
+    pub merge_disclosure: bool,
 }
 
 impl<D: DifficultyAdjusterTrait> Session<D> {
@@ -88,6 +95,7 @@ impl<D: DifficultyAdjusterTrait> Session<D> {
             parsed_address: None,
             miner_address: None,
             share_owner: None,
+            donation: None,
             password: None,
             user_id: None,
             worker_id: None,
@@ -98,6 +106,7 @@ impl<D: DifficultyAdjusterTrait> Session<D> {
             last_share_time: None,
             auth_failed_once: false,
             needs_first_notify: false,
+            merge_disclosure: false,
         }
     }
 
@@ -167,6 +176,7 @@ mod tests {
             )
         );
         assert!(!session.subscribed);
+        assert_eq!(session.donation, None);
     }
 
     #[test]

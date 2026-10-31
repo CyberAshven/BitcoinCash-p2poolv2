@@ -3,12 +3,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 mod address_filter;
+pub mod bch_header_feeder;
 pub mod behaviour;
 pub mod connection_tracker;
 mod dns_seeds;
 pub mod emission_worker;
+mod found_block_verifier;
 pub mod organise_worker;
 pub mod p2p_health;
+pub mod payout_tree_executor;
 pub mod peer_reconnector;
 pub mod request_response_handler;
 pub mod request_sender;
@@ -89,7 +92,9 @@ pub enum SwarmSend<C> {
     /// Broadcast a full ShareBlock to connected peers, filtering by
     /// peer_block_knowledge. The actor records each recipient so that
     /// subsequent broadcasts of the same block are suppressed.
-    BroadcastBlock(ShareBlock),
+    /// A validated share block to relay, with the Bitcoin Cash headers it
+    /// carries.
+    BroadcastBlock(ShareBlock, Vec<bitcoin::block::Header>),
     Disconnect(PeerId),
     /// Dial an address once, without reconnect tracking. Used for
     /// addresses returned by DNS seeds.
@@ -720,8 +725,8 @@ mod tests {
     use super::ChainStoreHandle;
     use super::P2PoolBehaviourEvent;
     use crate::config::{
-        ApiConfig, BitcoinCashNetwork, Chain, Config, LoggingConfig, NetworkConfig, StoreConfig,
-        StratumConfig,
+        ApiConfig, BitcoinCashNetwork, Chain, Config, ElectrumConfig, LoggingConfig, NetworkConfig,
+        StoreConfig, StratumConfig,
     };
     use crate::monitoring_events::create_monitoring_event_channel;
     use crate::node::Node;
@@ -771,6 +776,7 @@ mod tests {
                 username: "testuser".to_string(),
                 password: "testpass".to_string(),
             },
+            submit_nodes: vec![],
             store: StoreConfig {
                 path: "test_chain.db".to_string(),
                 pplns_ttl_days: 3,
@@ -793,6 +799,7 @@ mod tests {
                 public_dashboard: false,
                 web_root: None,
             },
+            electrum: ElectrumConfig::default(),
         };
         config.network = network_config;
 
@@ -888,6 +895,7 @@ mod tests {
                 username: "testuser".to_string(),
                 password: "testpass".to_string(),
             },
+            submit_nodes: vec![],
             store: StoreConfig {
                 path: "test_chain.db".to_string(),
                 pplns_ttl_days: 3,
@@ -909,6 +917,7 @@ mod tests {
                 public_dashboard: false,
                 web_root: None,
             },
+            electrum: ElectrumConfig::default(),
         }
     }
 

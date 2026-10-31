@@ -109,7 +109,7 @@
           },
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "sum by(btcaddress) (rate(worker_shares_valid_total{btcaddress=\"$user_address\"}[5m]))",
+          "expr": "sum by(payout_address) (rate(worker_shares_valid_total{payout_address=\"$user_address\"}[5m]))",
           "instant": false,
           "legendFormat": "Hashrate (5m)",
           "range": true,
@@ -121,7 +121,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "builder",
-          "expr": "sum by(btcaddress) (rate(worker_shares_valid_total{btcaddress=\"$user_address\"}[1h]))",
+          "expr": "sum by(payout_address) (rate(worker_shares_valid_total{payout_address=\"$user_address\"}[1h]))",
           "instant": false,
           "legendFormat": "Hashrate (1h)",
           "range": true,
@@ -222,7 +222,7 @@
           },
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "rate(worker_shares_valid_total{btcaddress=~\"$user_address\", workername=~\"$workername\"}[5m])",
+          "expr": "rate(worker_shares_valid_total{payout_address=~\"$user_address\", workername=~\"$workername\"}[5m])",
           "instant": false,
           "legendFormat": "{{workername}}",
           "range": true,
@@ -285,7 +285,7 @@
         {
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "worker_best_share_ever{btcaddress=\"$user_address\", workername=\"$workername\"}",
+          "expr": "worker_best_share_ever{payout_address=\"$user_address\", workername=\"$workername\"}",
           "format": "time_series",
           "instant": true,
           "legendFormat": "{{workername}}",
@@ -331,7 +331,7 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(worker_shares_valid_total,btcaddress)",
+        "definition": "label_values(worker_shares_valid_total,payout_address)",
         "hide": 0,
         "includeAll": false,
         "label": "Payout address (CashAddr)",
@@ -340,7 +340,7 @@
         "options": [],
         "query": {
           "qryType": 1,
-          "query": "label_values(worker_shares_valid_total,btcaddress)",
+          "query": "label_values(worker_shares_valid_total,payout_address)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
@@ -362,7 +362,7 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(worker_shares_valid_total{btcaddress=\"$user_address\"},workername)",
+        "definition": "label_values(worker_shares_valid_total{payout_address=\"$user_address\"},workername)",
         "description": "The worker name for the metric",
         "hide": 0,
         "includeAll": true,
@@ -372,7 +372,7 @@
         "options": [],
         "query": {
           "qryType": 1,
-          "query": "label_values(worker_shares_valid_total{btcaddress=\"$user_address\"},workername)",
+          "query": "label_values(worker_shares_valid_total{payout_address=\"$user_address\"},workername)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,

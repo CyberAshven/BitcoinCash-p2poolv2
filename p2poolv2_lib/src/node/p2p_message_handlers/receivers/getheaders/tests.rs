@@ -8,6 +8,9 @@ use tokio::sync::mpsc;
 #[tokio::test]
 async fn test_handle_getheaders() {
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     let (swarm_tx, mut swarm_rx) = mpsc::channel::<SwarmSend<u32>>(1);
     let response_channel = 1u32;
 
@@ -57,6 +60,9 @@ async fn test_handle_getheaders() {
 #[tokio::test]
 async fn test_handle_getheaders_serves_stored_branches() {
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     let (swarm_tx, mut swarm_rx) = mpsc::channel::<SwarmSend<u32>>(1);
 
     let block1 = TestShareBlockBuilder::new().nonce(1).build();
@@ -97,6 +103,9 @@ async fn test_handle_getheaders_serves_stored_branches() {
 #[tokio::test]
 async fn test_handle_getheaders_send_failure() {
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     let (swarm_tx, swarm_rx) = mpsc::channel::<SwarmSend<u32>>(1);
     let response_channel = 1u32;
 

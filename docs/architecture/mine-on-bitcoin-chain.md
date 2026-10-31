@@ -311,28 +311,41 @@ unsolicited share block. None of them waits on bitcoind.
    oldest first and stop at the first failure, and skip header hashes
    that failed recently (a bounded cache). Headers that pass go into the
    header store.
-3. **Bitcoin prev known.** If the header of `btc_prev(S)` is now known,
-   carry on as today: store the share header, fetch and validate the body
-   (including the payout rule), and organise it.
-4. **Otherwise drop it.** It is not stored, validated or relayed, and it
-   gets no verdict. Its hash goes into a bounded, expiring cache of
-   dropped shares, so a child naming it is dropped without asking for it
-   again. In a `ShareHeaderBatch`, the rest of the batch depends on it,
-   so the batch stops there.
+3. **Store the share header.** The header is stored and organised
+   whatever its bitcoin prev, so fork choice never waits on bitcoin
+   headers and every node keeps the same share header chain.
+4. **Store the body only on a known bitcoin prev.** If the header of
+   `btc_prev(S)` is known, fetch and validate the body (including the
+   payout rule). Otherwise the block receiver drops the body
+   (`validate_bch_prev_known`), the block fetcher's missing-data scan
+   fetches it again while the share stays on the candidate chain, and a
+   window in the payout zone that needs it is `Recoverable`
+   (`UnknownBchPrev`) until the header arrives.
 
-**Why acceptance needs a known bitcoin prev.** Without it, an attacker
+As built, this differs from the first design, which dropped the share
+header too and kept a bounded, expiring cache of dropped shares. Neither
+is needed: a share whose body is never stored never becomes
+`BlockValid`, and the job builder only builds on the best `BlockValid`
+share above the confirmed tip (`ChainStoreHandle::get_mining_base`). No
+honest node builds on a share on a fabricated bitcoin prev, the honest
+branch outgrows it within a share or two, and once it is off the
+candidate chain its body is not fetched again. See
+[current-chain.md](../sharechain/current-chain.md).
+
+**Why the body needs a known bitcoin prev.** Without it, an attacker
 could mine a share on a real orphan and send it with headers to some
 nodes and without to others. Nodes would then place it differently in
-later windows and disagree on later coinbases. Requiring the header at
-acceptance means every accepted share's bitcoin prev is in every
-accepting node's header store. Shares on a fabricated bitcoin prev never
-get a header, so they are never accepted.
+later windows and disagree on later coinbases. Requiring the header
+before the body is stored means every share a node validates has its
+bitcoin prev in that node's header store. Shares on a fabricated bitcoin
+prev never get a header, so they are never validated or paid.
 
-**An honest share is almost never dropped.** Its parent was accepted
-first, so its carried headers link onto a bitcoin prev the node knows.
-What remains is a relay that leaves headers out, and a local clock more
-than 2 hours behind. Either way the share comes back when a descendant
-names it as parent and the missing-parent handling fetches it again.
+**An honest share's body is almost never dropped.** Its parent was
+accepted first, so its carried headers link onto a bitcoin prev the node
+knows. What remains is a relay that leaves headers out, and a local clock
+more than 2 hours behind. Either way the share's header stays, and its
+body is fetched again once the bitcoin prev's header arrives, carried by
+a later share or learned from bitcoind by the header feeder.
 
 Initial block download cannot cause drops: the node does not start until
 bitcoind has finished it (`wait_for_bitcoin_node_synced` in
@@ -534,16 +547,17 @@ dropped on the next arrival (`share-processing-pipeline.md`, "BlockReceiver
 ancestry gate"). That is change 2 below, with expiry in place of the
 prune-height drop: a parent below `current_prune_height()` makes the
 ancestry gate release the block, and anything else expires. Change 1 is
-still open: a share naming an unknown parent is still buffered, now inside
-the bounds.
+done too (2026-10-31): a share naming a parent or uncle with no known header
+is dropped, unless that ancestor waits in the buffer itself, and the node
+asks the sender for the headers of the parent and the uncles.
 
 ### Changes
 
 | Change | Required | Stops |
 |---|---|---|
-| 1. Drop a share whose parent or uncle header is unknown, instead of buffering it (recovery is the existing missing-parent header request) | yes, independent of #652 | fabricated-parent floods (today's gap) |
+| 1. Drop a share whose parent or uncle header is unknown, instead of buffering it (recovery is the existing missing-parent header request) (done 2026-10-31; an ancestor waiting in the buffer counts as known) | yes, independent of #652 | fabricated-parent floods |
 | 2. Cap the parent-wait buffer, evicting the longest-waiting entry, and drop entries whose parent fell below `current_prune_height()` (done 2026-10-23, with expiry instead of the prune-height drop) | yes, independent of #652 | memory exhaustion from withheld bodies |
-| 3. Drop shares whose bitcoin prev is unknown, with a bounded, expiring cache of dropped hashes | yes, for #652 | memory cost of fabricated-prev shares, and repeat fetches of them |
+| 3. Drop shares whose bitcoin prev is unknown, with a bounded, expiring cache of dropped hashes (built differently: the body is dropped and the header kept; no cache is needed, see "Accepting a share") | yes, for #652 | memory cost of fabricated-prev shares, and repeat fetches of them |
 | 4. Cap carried headers per share and per batch in the decoder (about 100), check them locally, stop at the first failure, cache failed hashes | yes, for #652 | message size and header-check load: a fabricated header costs one local check, no RPC |
 | 5. Disconnect a peer whose share still has an unknown bitcoin prev after its carried headers are checked | optional | bandwidth from one connection |
 
@@ -592,12 +606,52 @@ ineligible share. Share messages also gain carried headers.
   within 4x at a retarget boundary. A fake branch could use easy `bits`,
   at a quarter of a block per header or less.
 
+## On Bitcoin Cash
+
+This fork built the design on 2026-10-30, with these differences:
+
+- **Activation.** A flag day, not an activation height: the protocol strings
+  end in `bch-prev-1off`, so nodes without the rule cannot peer, and a node
+  refuses a share-chain store from before (`STORE_FORMAT_VERSION`). No share
+  keeps the old payout rule.
+- **Header store.** Fed from the local BCHN by walking back with
+  `getblockheader` from its best block every 5 seconds, and from each new
+  template's previous block before jobs are built on it, as "Possible
+  simplification" proposes; no zmq `sequence` handling. A new node first
+  learns 8,400 headers. Headers are checked with aserti3-2d, not Bitcoin's
+  retarget (`shares/bch_headers.rs`).
+- **Window size.** The Bitcoin Cash window holds `BCH_PPLNS_WINDOW_BLOCKS`
+  (3) expected blocks' worth of work, at most 120,960 shares. One block's
+  worth comes from the nBits Bitcoin Cash requires after the paying share's
+  bitcoin prev (`BchHeaderRules::sizing_bits`), not the nBits the paying
+  share claims, which only a found block must get right. The test networks'
+  20-minute rule is left out of it. Ineligible shares count towards the work
+  as they count towards the slots.
+- **Cache entries** hold the 32-byte bitcoin prev. The window caches each
+  prev's height and parent, and the paying chain it walked last, so the
+  eligible set of a new paying prev costs a walk over cached places.
+- **Nothing eligible.** A checking node marks the share `Invalid`
+  (`NothingEligible`), as above. The job builder withdraws the work instead
+  of stopping the node, as it does for any payout it cannot build:
+  connections close, and the next template is tried.
+- **The all-zero hash** is the bitcoin prev of the share chain's first share
+  only, which is built from the network's first block and never received.
+  Any other share on it is `Invalid`, and its body is never stored.
+- **An unknown prev** while building a window, the paying share's or a
+  window share's, is `Recoverable` (`UnknownBchPrev`).
+- **First header sync.** A node runs one round of the header feeder before
+  it dials peers, for at most 5 minutes, so the share bodies they send find
+  their prevs known. One walk of BCHN's headers runs at a time in a node.
+- **Not built:** retaining a share whose carried headers do not link for a
+  later retry. Its body is dropped and fetched again on the next sync retry.
+
 ## Open items
 
 - **Checking a share with nothing eligible.** The decision was to stop
   the node. That is kept for the job builder, but a checking node marks
   the share `Invalid` instead, since an old bitcoin prev produces such a
-  share for one share's proof of work. To confirm.
+  share for one share's proof of work. To confirm. On Bitcoin Cash the job
+  builder withdraws work instead (see "On Bitcoin Cash").
 - **Pending-buffer gap.** Changes 1 and 2 under "Denial of service" fix
   an existing unbounded buffer and are independent of this design. They
   should be tracked as their own issue.
@@ -605,7 +659,8 @@ ineligible share. Share messages also gain carried headers.
   a share's own bitcoin header are not checked. A share can claim easy
   `bits` and show up as a found block in the found-block records and the
   effort metrics. Record a found block only if the local bitcoind
-  accepted it.
+  accepted it. Done on Bitcoin Cash: a block counts as found only once
+  BCHN accepts it.
 
 ## Formal model
 

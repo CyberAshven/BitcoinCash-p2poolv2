@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+pub mod bch_headers;
 pub mod block_receiver;
 pub mod getblocks;
 pub mod getdata;

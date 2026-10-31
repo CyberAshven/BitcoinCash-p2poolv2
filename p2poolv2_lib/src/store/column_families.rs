@@ -25,6 +25,10 @@ pub enum ColumnFamily {
     BitcoinCoinbase,
     FoundBlocks,
     HashrateSamples,
+    AcceptedFoundBlocks,
+    PayoutTrees,
+    BchHeaders,
+    BchBestChain,
 }
 
 impl ColumnFamily {
@@ -50,6 +54,10 @@ impl ColumnFamily {
             ColumnFamily::BitcoinCoinbase => "bitcoin_coinbase",
             ColumnFamily::FoundBlocks => "found_blocks",
             ColumnFamily::HashrateSamples => "hashrate_samples",
+            ColumnFamily::AcceptedFoundBlocks => "accepted_found_blocks",
+            ColumnFamily::PayoutTrees => "payout_trees",
+            ColumnFamily::BchHeaders => "bch_headers",
+            ColumnFamily::BchBestChain => "bch_best_chain",
         }
     }
 }

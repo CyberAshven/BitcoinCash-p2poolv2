@@ -1,0 +1,912 @@
+// PHOTON phase 2a prototype v1. Witness: count:u16 then descriptors or leaves.
+// Read active redeem bytecode HERE, outside every function invocation.
+OP_ACTIVEBYTECODE
+<1> OP_PICK // copy state
+OP_SIZE OP_NIP <336> OP_NUMEQUALVERIFY
+<0> OP_PICK // copy redeem
+<0> OP_SPLIT OP_NIP <3> OP_SPLIT OP_DROP
+<0x4d5001>
+OP_EQUALVERIFY
+<0> OP_PICK // copy redeem
+<3> OP_SPLIT OP_NIP <336> OP_SPLIT OP_DROP
+<0> OP_PICK // copy embedded_state
+<3> OP_PICK // copy state
+OP_EQUALVERIFY
+<0> OP_ROLL // take embedded_state
+OP_DROP
+<0> OP_PICK // copy redeem
+<339> OP_SPLIT OP_NIP
+<0> OP_PICK // copy program
+OP_SIZE OP_NIP <4096> OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy program
+OP_SHA256
+<3> OP_PICK // copy state
+<72> OP_SPLIT OP_NIP <32> OP_SPLIT OP_DROP
+<1> OP_PICK // copy program_digest
+<1> OP_PICK // copy pinned_digest
+OP_EQUALVERIFY
+<1> OP_ROLL // take program_digest
+OP_DROP
+<0> OP_ROLL // take pinned_digest
+OP_DROP
+<2> OP_PICK // copy state
+<0> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<0> OP_PICK // copy version
+<1>
+OP_NUMEQUAL OP_VERIFY
+<0> OP_ROLL // take version
+OP_DROP
+<2> OP_PICK // copy state
+<2> OP_SPLIT OP_NIP <1> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<0> OP_PICK // copy mode
+<2>
+OP_LESSTHAN OP_VERIFY
+<3> OP_PICK // copy state
+<3> OP_SPLIT OP_NIP <1> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<0> OP_PICK // copy depth
+<9>
+OP_LESSTHANOREQUAL OP_VERIFY
+<4> OP_PICK // copy state
+<4> OP_SPLIT OP_NIP <4> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<0> OP_PICK // copy network
+<4>
+OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_ROLL // take network
+OP_DROP
+<4> OP_PICK // copy state
+<8> OP_SPLIT OP_NIP <32> OP_SPLIT OP_DROP
+<5> OP_PICK // copy state
+<104> OP_SPLIT OP_NIP <32> OP_SPLIT OP_DROP
+<6> OP_PICK // copy state
+<136> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<0> OP_PICK // copy total
+<0>
+OP_GREATERTHAN OP_VERIFY
+<7> OP_PICK // copy state
+<200> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<8> OP_PICK // copy state
+<264> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<1> OP_PICK // copy lower
+<1> OP_PICK // copy upper
+OP_LESSTHAN OP_VERIFY
+<0> OP_PICK // copy upper
+<3> OP_PICK // copy total
+OP_LESSTHANOREQUAL OP_VERIFY
+<9> OP_PICK // copy state
+<328> OP_SPLIT OP_NIP <8> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+OP_INPUTINDEX <0> OP_NUMEQUALVERIFY OP_TXVERSION <2> OP_NUMEQUALVERIFY OP_TXLOCKTIME <0> OP_NUMEQUALVERIFY
+<0> OP_UTXOTOKENCATEGORY
+<0> OP_PICK // copy actual_category
+<7> OP_PICK // copy category
+OP_EQUALVERIFY
+<0> OP_ROLL // take actual_category
+OP_DROP
+<0> OP_UTXOTOKENCOMMITMENT OP_0 OP_EQUALVERIFY
+<7> OP_PICK // copy mode
+OP_IF
+<0> OP_PICK // copy reward
+<0>
+OP_GREATERTHAN OP_VERIFY
+<0> OP_UTXOBYTECODE
+<10> OP_PICK // copy redeem
+OP_HASH256 <0xaa20> OP_SWAP OP_CAT <0x87> OP_CAT
+<1> OP_PICK // copy active_lock
+<1> OP_PICK // copy expected_lock
+OP_EQUALVERIFY
+<1> OP_ROLL // take active_lock
+OP_DROP
+<0> OP_ROLL // take expected_lock
+OP_DROP
+OP_ELSE
+<0> OP_PICK // copy reward
+<0>
+OP_NUMEQUAL OP_VERIFY
+<2> OP_PICK // copy lower
+<0>
+OP_NUMEQUAL OP_VERIFY
+<1> OP_PICK // copy upper
+<4> OP_PICK // copy total
+OP_EQUALVERIFY
+<0> OP_UTXOTOKENAMOUNT
+<1> OP_ROLL // take reward
+OP_DROP
+<0> OP_UTXOBYTECODE
+<0> OP_PICK // copy active_lock
+OP_SIZE OP_NIP <23> OP_NUMEQUAL
+OP_IF
+<10> OP_PICK // copy redeem
+OP_HASH160 <0xa914> OP_SWAP OP_CAT <0x87> OP_CAT
+OP_ELSE
+<10> OP_PICK // copy redeem
+OP_HASH256 <0xaa20> OP_SWAP OP_CAT <0x87> OP_CAT
+OP_ENDIF
+<1> OP_PICK // copy active_lock
+<1> OP_PICK // copy expected_lock
+OP_EQUALVERIFY
+<1> OP_ROLL // take active_lock
+OP_DROP
+<0> OP_ROLL // take expected_lock
+OP_DROP
+OP_ENDIF
+<0> OP_PICK // copy reward
+<0>
+OP_GREATERTHAN OP_VERIFY
+<0> OP_PICK // copy reward
+<9223372036854775807>
+OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy reward
+<2> OP_PICK // copy upper
+OP_MUL
+<4> OP_PICK // copy total
+OP_DIV
+<1> OP_PICK // copy reward
+<4> OP_PICK // copy lower
+OP_MUL
+<5> OP_PICK // copy total
+OP_DIV OP_SUB
+<0> OP_UTXOTOKENAMOUNT
+<0> OP_PICK // copy active_amount
+<2> OP_PICK // copy expected_amount
+OP_EQUALVERIFY
+<0> OP_ROLL // take active_amount
+OP_DROP
+<0> OP_ROLL // take expected_amount
+OP_DROP
+// Exactly one distribution input and 1..4 token-free funding inputs; all sequences final; MoneyRange checked.
+OP_TXINPUTCOUNT
+<0> OP_PICK // copy input_count
+<2>
+OP_GREATERTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy input_count
+<5>
+OP_LESSTHANOREQUAL OP_VERIFY
+<0>
+<0>
+OP_BEGIN
+<1> OP_PICK // copy input_index
+OP_INPUTSEQUENCENUMBER <4294967295> OP_NUMEQUALVERIFY
+<1> OP_PICK // copy input_index
+OP_IF
+<1> OP_PICK // copy input_index
+OP_UTXOTOKENCATEGORY OP_0 OP_EQUALVERIFY
+OP_ELSE
+OP_ENDIF
+<1> OP_PICK // copy input_index
+OP_INPUTBYTECODE OP_SIZE OP_NIP <10000> OP_LESSTHANOREQUAL OP_VERIFY
+<1> OP_PICK // copy input_index
+OP_UTXOVALUE
+<0> OP_PICK // copy input_value
+<0>
+OP_GREATERTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy input_value
+<2100000000000000>
+OP_LESSTHANOREQUAL OP_VERIFY
+<1> OP_PICK // copy input_satoshis
+<1> OP_ROLL // take input_value
+OP_ADD
+<1> OP_ROLL // take input_satoshis
+OP_DROP
+<0> OP_PICK // copy input_satoshis
+<2100000000000000>
+OP_LESSTHANOREQUAL OP_VERIFY
+<1> OP_PICK // copy input_index
+OP_1ADD
+<2> OP_ROLL // take input_index
+OP_DROP
+<1> OP_ROLL // take input_satoshis
+<14> OP_ROLL // take witness
+<14> OP_ROLL // take state
+<14> OP_ROLL // take redeem
+<14> OP_ROLL // take program
+<14> OP_ROLL // take mode
+<14> OP_ROLL // take depth
+<14> OP_ROLL // take category
+<14> OP_ROLL // take subtree
+<14> OP_ROLL // take total
+<14> OP_ROLL // take lower
+<14> OP_ROLL // take upper
+<14> OP_ROLL // take reward
+<14> OP_ROLL // take input_count
+<14> OP_ROLL // take input_index
+<14> OP_ROLL // take input_satoshis
+<1> OP_PICK // copy input_index
+<3> OP_PICK // copy input_count
+OP_NUMEQUAL OP_UNTIL
+<1> OP_ROLL // take input_index
+OP_DROP
+<1> OP_ROLL // take input_count
+OP_DROP
+<0> OP_ROLL // take input_satoshis
+OP_DROP
+<
+// Function 1: recursively hash a deterministic midpoint tree of 98-byte descriptors.
+<0> OP_PICK // copy count
+<1>
+OP_NUMEQUAL
+OP_IF
+<1> OP_PICK // copy descriptors
+OP_SIZE OP_NIP
+<0> OP_PICK // copy length
+<98>
+OP_NUMEQUAL OP_VERIFY
+<0> OP_ROLL // take length
+OP_DROP
+<0> OP_ROLL // take count
+OP_DROP
+OP_ELSE
+<0> OP_PICK // copy count
+<2>
+OP_DIV
+<2> OP_PICK // copy descriptors
+<1> OP_PICK // copy left_count
+<98> OP_MUL OP_SPLIT
+<1> OP_PICK // copy left_bytes
+<3> OP_PICK // copy left_count
+<1> OP_INVOKE
+<1> OP_PICK // copy right_bytes
+<5> OP_PICK // copy count
+<5> OP_PICK // copy left_count
+OP_SUB
+<1> OP_INVOKE
+<0x01>
+<2> OP_PICK // copy left
+<2> OP_PICK // copy right
+OP_CAT OP_CAT OP_SHA256
+<2> OP_PICK // copy left
+<32> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<2> OP_PICK // copy right
+<32> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+OP_ADD <65> OP_NUM2BIN <64> OP_SPLIT OP_SWAP OP_DROP <0x00> OP_EQUALVERIFY
+<2> OP_PICK // copy left
+<32> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<2> OP_PICK // copy right
+<32> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+OP_ADD <65> OP_NUM2BIN <64> OP_SPLIT OP_DROP
+<7> OP_PICK // copy count
+<2> OP_NUM2BIN
+OP_CAT
+<1> OP_ROLL // take node_hash
+OP_SWAP OP_CAT
+<0> OP_PICK // copy combined
+OP_TOALTSTACK
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_FROMALTSTACK
+OP_ENDIF
+
+> <1> OP_DEFINE
+<
+// Function 2: exact ordered positive allocation, or omit a zero allocation.
+<4> OP_PICK // copy amount
+<0>
+OP_GREATERTHAN
+OP_IF
+<1> OP_PICK // copy index
+OP_OUTPUTBYTECODE
+<0> OP_PICK // copy actual_script
+<7> OP_PICK // copy script
+OP_EQUALVERIFY
+<0> OP_ROLL // take actual_script
+OP_DROP
+<1> OP_PICK // copy index
+OP_OUTPUTTOKENCATEGORY
+<0> OP_PICK // copy actual_category
+<4> OP_PICK // copy category
+OP_EQUALVERIFY
+<0> OP_ROLL // take actual_category
+OP_DROP
+<1> OP_PICK // copy index
+OP_OUTPUTTOKENCOMMITMENT OP_0 OP_EQUALVERIFY
+<1> OP_PICK // copy index
+OP_OUTPUTTOKENAMOUNT
+<0> OP_PICK // copy actual_amount
+<6> OP_PICK // copy amount
+OP_EQUALVERIFY
+<0> OP_ROLL // take actual_amount
+OP_DROP
+<1> OP_PICK // copy index
+OP_OUTPUTVALUE
+<0> OP_PICK // copy value
+<5> OP_PICK // copy minimum
+OP_GREATERTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy value
+<2100000000000000>
+OP_LESSTHANOREQUAL OP_VERIFY
+<1> OP_PICK // copy satoshis
+<1> OP_ROLL // take value
+OP_ADD
+<1> OP_ROLL // take satoshis
+OP_DROP
+<0> OP_PICK // copy satoshis
+<2100000000000000>
+OP_LESSTHANOREQUAL OP_VERIFY
+<1> OP_PICK // copy index
+OP_1ADD
+<2> OP_ROLL // take index
+OP_DROP
+<1> OP_ROLL // take satoshis
+OP_ELSE
+OP_ENDIF
+<0> OP_PICK // copy satoshis
+OP_TOALTSTACK
+<1> OP_PICK // copy index
+OP_TOALTSTACK
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_FROMALTSTACK
+OP_FROMALTSTACK
+
+> <2> OP_DEFINE
+<11> OP_ROLL // take witness
+<2> OP_SPLIT OP_SWAP <0x00> OP_CAT OP_BIN2NUM
+<0> OP_PICK // copy count
+<1>
+OP_GREATERTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy count
+<4096>
+OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy count
+<8>
+<10> OP_PICK // copy depth
+OP_LSHIFTNUM OP_LESSTHANOREQUAL OP_VERIFY
+<9> OP_PICK // copy mode
+OP_NOT
+OP_IF
+<8> OP_PICK // copy depth
+OP_IF
+<0> OP_PICK // copy count
+<8>
+<10> OP_PICK // copy depth
+OP_1SUB OP_LSHIFTNUM OP_GREATERTHAN OP_VERIFY
+OP_ELSE
+OP_ENDIF
+OP_ELSE
+OP_ENDIF
+<0>
+<0>
+<2> OP_PICK // copy count
+<8>
+OP_GREATERTHAN
+OP_IF
+// Internal witness is two authenticated hash/weight/count descriptors; intervals and locks are never witness choices.
+<10> OP_PICK // copy depth
+<0>
+OP_GREATERTHAN OP_VERIFY
+<3> OP_PICK // copy witness
+OP_SIZE OP_NIP <196> OP_NUMEQUALVERIFY
+<3> OP_PICK // copy witness
+<0> OP_SPLIT OP_NIP <98> OP_SPLIT OP_DROP
+<4> OP_PICK // copy witness
+<98> OP_SPLIT OP_NIP <98> OP_SPLIT OP_DROP
+<1> OP_PICK // copy left
+<96> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<5> OP_PICK // copy count
+<2> OP_DIV
+<1> OP_PICK // copy left_count
+<1> OP_PICK // copy expected_left
+OP_EQUALVERIFY
+<0> OP_ROLL // take expected_left
+OP_DROP
+<1> OP_PICK // copy right
+<96> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<1> OP_PICK // copy left_count
+<1> OP_PICK // copy right_count
+OP_ADD
+<0> OP_PICK // copy sum_count
+<8> OP_PICK // copy count
+OP_EQUALVERIFY
+<0> OP_ROLL // take sum_count
+OP_DROP
+<3> OP_PICK // copy left
+<32> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<3> OP_PICK // copy right
+<32> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<1> OP_PICK // copy left_weight
+<0>
+OP_GREATERTHAN OP_VERIFY
+<0> OP_PICK // copy right_weight
+<0>
+OP_GREATERTHAN OP_VERIFY
+<12> OP_PICK // copy lower
+<2> OP_PICK // copy left_weight
+OP_ADD
+<0> OP_PICK // copy middle
+<2> OP_PICK // copy right_weight
+OP_ADD
+<0> OP_PICK // copy sum_upper
+<14> OP_PICK // copy upper
+OP_EQUALVERIFY
+<0> OP_ROLL // take sum_upper
+OP_DROP
+<0x01>
+<7> OP_PICK // copy left
+<7> OP_PICK // copy right
+OP_CAT OP_CAT OP_SHA256
+<7> OP_PICK // copy left
+<32> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<7> OP_PICK // copy right
+<32> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+OP_ADD <65> OP_NUM2BIN <64> OP_SPLIT OP_SWAP OP_DROP <0x00> OP_EQUALVERIFY
+<7> OP_PICK // copy left
+<32> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+<7> OP_PICK // copy right
+<32> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+<0x00> OP_CAT OP_BIN2NUM
+OP_ADD <65> OP_NUM2BIN <64> OP_SPLIT OP_DROP
+<11> OP_PICK // copy count
+<2> OP_NUM2BIN
+OP_CAT
+<1> OP_ROLL // take node_hash
+OP_SWAP OP_CAT
+<0> OP_PICK // copy node
+<0> OP_SPLIT OP_NIP <32> OP_SPLIT OP_DROP
+<0> OP_PICK // copy hash
+<18> OP_PICK // copy subtree
+OP_EQUALVERIFY
+<0> OP_ROLL // take hash
+OP_DROP
+// Canonical child state retains network, category, context and program digest, and pins original reward.
+<0x010001>
+<19> OP_PICK // copy depth
+OP_1SUB <1> OP_NUM2BIN OP_CAT
+<23> OP_PICK // copy state
+<4> OP_SPLIT OP_NIP <100> OP_SPLIT OP_DROP
+OP_CAT
+<8> OP_PICK // copy left
+<0> OP_SPLIT OP_NIP <32> OP_SPLIT OP_DROP
+OP_CAT
+<23> OP_PICK // copy state
+<136> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+OP_CAT
+<15> OP_PICK // copy lower
+<65> OP_NUM2BIN <64> OP_SPLIT OP_DROP OP_CAT
+<2> OP_PICK // copy middle
+<65> OP_NUM2BIN <64> OP_SPLIT OP_DROP OP_CAT
+<13> OP_PICK // copy reward
+<8> OP_NUM2BIN OP_CAT
+<0x4d5001>
+<1> OP_ROLL // take child_state
+OP_CAT
+<21> OP_PICK // copy program
+OP_CAT OP_HASH256
+<0xaa20>
+<1> OP_ROLL // take child_hash
+OP_CAT <0x87> OP_CAT
+<13> OP_PICK // copy reward
+<3> OP_PICK // copy middle
+OP_MUL
+<17> OP_PICK // copy total
+OP_DIV
+<14> OP_PICK // copy reward
+<17> OP_PICK // copy lower
+OP_MUL
+<18> OP_PICK // copy total
+OP_DIV OP_SUB
+<1> OP_PICK // copy child_script
+<1> OP_PICK // copy amount
+<705>
+<22> OP_PICK // copy category
+<15> OP_PICK // copy index
+<15> OP_PICK // copy satoshis
+<2> OP_INVOKE
+<12> OP_ROLL // take satoshis
+OP_DROP
+<11> OP_ROLL // take left
+<11> OP_ROLL // take right
+<11> OP_ROLL // take left_count
+<11> OP_ROLL // take right_count
+<11> OP_ROLL // take left_weight
+<11> OP_ROLL // take right_weight
+<11> OP_ROLL // take middle
+<11> OP_ROLL // take node
+<11> OP_ROLL // take child_script
+<11> OP_ROLL // take amount
+<11> OP_ROLL // take new_index
+<12> OP_ROLL // take index
+OP_DROP
+<11> OP_ROLL // take satoshis
+<11> OP_ROLL // take left
+<11> OP_ROLL // take right
+<11> OP_ROLL // take left_count
+<11> OP_ROLL // take right_count
+<11> OP_ROLL // take left_weight
+<11> OP_ROLL // take right_weight
+<11> OP_ROLL // take middle
+<11> OP_ROLL // take node
+<11> OP_ROLL // take child_script
+<11> OP_ROLL // take amount
+<1> OP_ROLL // take child_script
+OP_DROP
+<0> OP_ROLL // take amount
+OP_DROP
+// Canonical child state retains network, category, context and program digest, and pins original reward.
+<0x010001>
+<19> OP_PICK // copy depth
+OP_1SUB <1> OP_NUM2BIN OP_CAT
+<23> OP_PICK // copy state
+<4> OP_SPLIT OP_NIP <100> OP_SPLIT OP_DROP
+OP_CAT
+<7> OP_PICK // copy right
+<0> OP_SPLIT OP_NIP <32> OP_SPLIT OP_DROP
+OP_CAT
+<23> OP_PICK // copy state
+<136> OP_SPLIT OP_NIP <64> OP_SPLIT OP_DROP
+OP_CAT
+<2> OP_PICK // copy middle
+<65> OP_NUM2BIN <64> OP_SPLIT OP_DROP OP_CAT
+<14> OP_PICK // copy upper
+<65> OP_NUM2BIN <64> OP_SPLIT OP_DROP OP_CAT
+<13> OP_PICK // copy reward
+<8> OP_NUM2BIN OP_CAT
+<0x4d5001>
+<1> OP_ROLL // take child_state
+OP_CAT
+<21> OP_PICK // copy program
+OP_CAT OP_HASH256
+<0xaa20>
+<1> OP_ROLL // take child_hash
+OP_CAT <0x87> OP_CAT
+<13> OP_PICK // copy reward
+<15> OP_PICK // copy upper
+OP_MUL
+<17> OP_PICK // copy total
+OP_DIV
+<14> OP_PICK // copy reward
+<4> OP_PICK // copy middle
+OP_MUL
+<18> OP_PICK // copy total
+OP_DIV OP_SUB
+<1> OP_PICK // copy child_script
+<1> OP_PICK // copy amount
+<705>
+<22> OP_PICK // copy category
+<15> OP_PICK // copy index
+<15> OP_PICK // copy satoshis
+<2> OP_INVOKE
+<12> OP_ROLL // take satoshis
+OP_DROP
+<11> OP_ROLL // take left
+<11> OP_ROLL // take right
+<11> OP_ROLL // take left_count
+<11> OP_ROLL // take right_count
+<11> OP_ROLL // take left_weight
+<11> OP_ROLL // take right_weight
+<11> OP_ROLL // take middle
+<11> OP_ROLL // take node
+<11> OP_ROLL // take child_script
+<11> OP_ROLL // take amount
+<11> OP_ROLL // take new_index
+<12> OP_ROLL // take index
+OP_DROP
+<11> OP_ROLL // take satoshis
+<11> OP_ROLL // take left
+<11> OP_ROLL // take right
+<11> OP_ROLL // take left_count
+<11> OP_ROLL // take right_count
+<11> OP_ROLL // take left_weight
+<11> OP_ROLL // take right_weight
+<11> OP_ROLL // take middle
+<11> OP_ROLL // take node
+<11> OP_ROLL // take child_script
+<11> OP_ROLL // take amount
+<1> OP_ROLL // take child_script
+OP_DROP
+<0> OP_ROLL // take amount
+OP_DROP
+<7> OP_ROLL // take left
+OP_DROP
+<6> OP_ROLL // take right
+OP_DROP
+<5> OP_ROLL // take left_count
+OP_DROP
+<4> OP_ROLL // take right_count
+OP_DROP
+<3> OP_ROLL // take left_weight
+OP_DROP
+<2> OP_ROLL // take right_weight
+OP_DROP
+<1> OP_ROLL // take middle
+OP_DROP
+<0> OP_ROLL // take node
+OP_DROP
+OP_ELSE
+// Terminal buckets reveal one to eight positive leaves; hash the same midpoint tree, including all zero allocations.
+OP_0
+<0>
+<0>
+<9> OP_PICK // copy lower
+OP_DUP OP_DROP
+OP_BEGIN
+<7> OP_ROLL // take witness
+<1> OP_SPLIT OP_SWAP <0x00> OP_CAT OP_BIN2NUM OP_SPLIT
+<0> OP_ROLL // take tail
+<64> OP_SPLIT
+// The only beneficiary scripts are exact standard P2PKH, P2SH20 or P2SH32 templates.
+<2> OP_PICK // copy script
+OP_SIZE OP_NIP
+<0> OP_PICK // copy script_length
+<25>
+OP_NUMEQUAL
+OP_IF
+<3> OP_PICK // copy script
+<0> OP_SPLIT OP_NIP <3> OP_SPLIT OP_DROP
+<0x76a914>
+OP_EQUALVERIFY
+<3> OP_PICK // copy script
+<23> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0x88ac>
+OP_EQUALVERIFY
+OP_ELSE
+<0> OP_PICK // copy script_length
+<23>
+OP_NUMEQUAL
+OP_IF
+<3> OP_PICK // copy script
+<0> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0xa914>
+OP_EQUALVERIFY
+<3> OP_PICK // copy script
+<22> OP_SPLIT OP_NIP <1> OP_SPLIT OP_DROP
+<0x87>
+OP_EQUALVERIFY
+OP_ELSE
+<0> OP_PICK // copy script_length
+<35>
+OP_NUMEQUAL OP_VERIFY
+<3> OP_PICK // copy script
+<0> OP_SPLIT OP_NIP <2> OP_SPLIT OP_DROP
+<0xaa20>
+OP_EQUALVERIFY
+<3> OP_PICK // copy script
+<34> OP_SPLIT OP_NIP <1> OP_SPLIT OP_DROP
+<0x87>
+OP_EQUALVERIFY
+OP_ENDIF
+OP_ENDIF
+<3> OP_PICK // copy script
+OP_REVERSEBYTES <0x00> OP_CAT OP_BIN2NUM
+<1> OP_PICK // copy script_length
+<35> OP_SWAP OP_SUB <8> OP_MUL OP_LSHIFTNUM
+<0> OP_PICK // copy sort_key
+<7> OP_PICK // copy previous_script
+OP_GREATERTHAN OP_VERIFY
+<0> OP_ROLL // take sort_key
+<6> OP_ROLL // take previous_script
+OP_DROP
+<5> OP_ROLL // take cursor
+<5> OP_ROLL // take script
+<5> OP_ROLL // take weight_bytes
+<5> OP_ROLL // take witness
+<5> OP_ROLL // take script_length
+<2> OP_PICK // copy weight_bytes
+<0x00> OP_CAT OP_BIN2NUM
+<0> OP_PICK // copy weight
+<0>
+OP_GREATERTHAN OP_VERIFY
+<5> OP_PICK // copy cursor
+<1> OP_PICK // copy weight
+OP_ADD
+<0> OP_PICK // copy next_cursor
+<15> OP_PICK // copy upper
+OP_LESSTHANOREQUAL OP_VERIFY
+<13> OP_PICK // copy reward
+<1> OP_PICK // copy next_cursor
+OP_MUL
+<17> OP_PICK // copy total
+OP_DIV
+<14> OP_PICK // copy reward
+<8> OP_PICK // copy cursor
+OP_MUL
+<18> OP_PICK // copy total
+OP_DIV OP_SUB
+<6> OP_PICK // copy script
+<1> OP_PICK // copy amount
+<5> OP_PICK // copy script_length
+<200> OP_ADD <3> OP_MUL
+<22> OP_PICK // copy category
+<16> OP_PICK // copy index
+<16> OP_PICK // copy satoshis
+<2> OP_INVOKE
+<13> OP_ROLL // take satoshis
+OP_DROP
+<12> OP_ROLL // take descriptors
+<12> OP_ROLL // take leaf_index
+<12> OP_ROLL // take previous_script
+<12> OP_ROLL // take cursor
+<12> OP_ROLL // take script
+<12> OP_ROLL // take weight_bytes
+<12> OP_ROLL // take witness
+<12> OP_ROLL // take script_length
+<12> OP_ROLL // take weight
+<12> OP_ROLL // take next_cursor
+<12> OP_ROLL // take amount
+<12> OP_ROLL // take new_index
+<13> OP_ROLL // take index
+OP_DROP
+<12> OP_ROLL // take satoshis
+<12> OP_ROLL // take descriptors
+<12> OP_ROLL // take leaf_index
+<12> OP_ROLL // take previous_script
+<12> OP_ROLL // take cursor
+<12> OP_ROLL // take script
+<12> OP_ROLL // take weight_bytes
+<12> OP_ROLL // take witness
+<12> OP_ROLL // take script_length
+<12> OP_ROLL // take weight
+<12> OP_ROLL // take next_cursor
+<12> OP_ROLL // take amount
+<0x00>
+<4> OP_PICK // copy script_length
+<1> OP_NUM2BIN OP_CAT
+<7> OP_PICK // copy script
+OP_CAT
+<6> OP_PICK // copy weight_bytes
+OP_CAT OP_SHA256
+<6> OP_PICK // copy weight_bytes
+OP_CAT <0x0100> OP_CAT
+<11> OP_PICK // copy descriptors
+<1> OP_ROLL // take descriptor
+OP_CAT
+<11> OP_ROLL // take descriptors
+OP_DROP
+<10> OP_ROLL // take leaf_index
+<10> OP_ROLL // take previous_script
+<10> OP_ROLL // take cursor
+<10> OP_ROLL // take script
+<10> OP_ROLL // take weight_bytes
+<10> OP_ROLL // take witness
+<10> OP_ROLL // take script_length
+<10> OP_ROLL // take weight
+<10> OP_ROLL // take next_cursor
+<10> OP_ROLL // take amount
+<1> OP_ROLL // take next_cursor
+<7> OP_ROLL // take cursor
+OP_DROP
+<6> OP_ROLL // take script
+<6> OP_ROLL // take weight_bytes
+<6> OP_ROLL // take witness
+<6> OP_ROLL // take script_length
+<6> OP_ROLL // take weight
+<6> OP_ROLL // take amount
+<5> OP_ROLL // take script
+OP_DROP
+<4> OP_ROLL // take weight_bytes
+OP_DROP
+<2> OP_ROLL // take script_length
+OP_DROP
+<1> OP_ROLL // take weight
+OP_DROP
+<0> OP_ROLL // take amount
+OP_DROP
+<3> OP_PICK // copy leaf_index
+OP_1ADD
+<4> OP_ROLL // take leaf_index
+OP_DROP
+<3> OP_ROLL // take previous_script
+<3> OP_ROLL // take cursor
+<3> OP_ROLL // take witness
+<18> OP_ROLL // take state
+<18> OP_ROLL // take redeem
+<18> OP_ROLL // take program
+<18> OP_ROLL // take mode
+<18> OP_ROLL // take depth
+<18> OP_ROLL // take category
+<18> OP_ROLL // take subtree
+<18> OP_ROLL // take total
+<18> OP_ROLL // take lower
+<18> OP_ROLL // take upper
+<18> OP_ROLL // take reward
+<11> OP_ROLL // take witness
+<18> OP_ROLL // take count
+<18> OP_ROLL // take index
+<18> OP_ROLL // take satoshis
+<18> OP_ROLL // take descriptors
+<18> OP_ROLL // take leaf_index
+<18> OP_ROLL // take previous_script
+<18> OP_ROLL // take cursor
+<2> OP_PICK // copy leaf_index
+<7> OP_PICK // copy count
+OP_NUMEQUAL OP_UNTIL
+<7> OP_PICK // copy witness
+OP_0
+OP_EQUALVERIFY
+<0> OP_PICK // copy cursor
+<10> OP_PICK // copy upper
+OP_EQUALVERIFY
+<3> OP_PICK // copy descriptors
+<7> OP_PICK // copy count
+<1> OP_INVOKE
+<0> OP_PICK // copy root_descriptor
+<0> OP_SPLIT OP_NIP <32> OP_SPLIT OP_DROP
+<0> OP_PICK // copy hash
+<15> OP_PICK // copy subtree
+OP_EQUALVERIFY
+<5> OP_ROLL // take descriptors
+OP_DROP
+<4> OP_ROLL // take leaf_index
+OP_DROP
+<3> OP_ROLL // take previous_script
+OP_DROP
+<2> OP_ROLL // take cursor
+OP_DROP
+<1> OP_ROLL // take root_descriptor
+OP_DROP
+<0> OP_ROLL // take hash
+OP_DROP
+OP_ENDIF
+// Only an optional final token-free change output may follow all exact allocations.
+OP_TXOUTPUTCOUNT
+<0> OP_PICK // copy output_count
+<3> OP_PICK // copy index
+OP_SUB
+<0> OP_PICK // copy extra
+<0>
+OP_GREATERTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy extra
+<1>
+OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy extra
+OP_IF
+<3> OP_PICK // copy index
+OP_OUTPUTTOKENCATEGORY OP_0 OP_EQUALVERIFY
+<3> OP_PICK // copy index
+OP_OUTPUTVALUE
+<0> OP_PICK // copy change_value
+<0>
+OP_GREATERTHANOREQUAL OP_VERIFY
+<0> OP_PICK // copy change_value
+<2100000000000000>
+OP_LESSTHANOREQUAL OP_VERIFY
+<0> OP_ROLL // take change_value
+OP_DROP
+OP_ELSE
+OP_ENDIF
+<2> OP_PICK // copy satoshis
+<0> OP_UTXOVALUE OP_GREATERTHANOREQUAL OP_VERIFY
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_DROP
+OP_1

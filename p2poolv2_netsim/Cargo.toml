@@ -1,0 +1,31 @@
+[package]
+name = "p2poolv2_netsim"
+description = "Discrete-event simulator of share propagation in a Bitcoin Cash P2Poolv2 network"
+version.workspace = true
+edition.workspace = true
+# New code for the Bitcoin Cash fork, which is distributed under AGPL-3.0
+# (docs/bch-plan.md, decision 13). It ports the model of upstream's
+# p2poolv2/Ns3_simulation, which has no licence file; no upstream code is
+# copied. See README.md.
+license = "AGPL-3.0-or-later"
+authors.workspace = true
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+keywords = ["bitcoin-cash", "mining", "pool", "simulation"]
+categories = ["simulation"]
+rust-version.workspace = true
+publish.workspace = true
+
+# Developer tooling only: never part of a release.
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "netsim"
+path = "src/bin/netsim.rs"

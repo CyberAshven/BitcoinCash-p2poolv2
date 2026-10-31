@@ -205,7 +205,7 @@ pub fn spawn_delayed_broadcast(
             tokio::time::sleep(delay).await;
         }
         if swarm_tx
-            .send(SwarmSend::BroadcastBlock(share_block))
+            .send(SwarmSend::BroadcastBlock(share_block, Vec::new()))
             .await
             .is_err()
         {

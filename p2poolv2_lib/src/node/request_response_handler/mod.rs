@@ -274,7 +274,7 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
                     self.peer_block_knowledge.record_block_known(peer, *hash);
                 }
             }
-            Message::ShareBlock(block) => {
+            Message::ShareBlock(block, _) => {
                 self.peer_block_knowledge
                     .record_block_known(peer, block.block_hash());
             }

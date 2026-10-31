@@ -1,0 +1,37 @@
+[package]
+name = "p2poolv2_daa"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Share difficulty adjustment simulator for the Bitcoin Cash share chain, run on the share chain's own ASERT code"
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Developer tooling only: never part of a release.
+[package.metadata.dist]
+dist = false
+
+[[bin]]
+name = "daa_sim"
+path = "src/main.rs"
+
+[dependencies]
+bitcoin = { workspace = true }
+clap = { workspace = true }
+# The share chain's own ASERT code (pool_difficulty.rs), its ceilings and the
+# stratum constants the mining model uses. This dependency is why the
+# simulator is its own crate: p2poolv2_tools does not link the node library.
+p2poolv2_lib = { path = "../p2poolv2_lib" }
+# SeededSequence (SplitMix64) and summarize, shared with the sim harness.
+p2poolv2_tools = { path = "../p2poolv2_tools" }
+# SVG only, as in p2poolv2_tools: no font or image crates.
+plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

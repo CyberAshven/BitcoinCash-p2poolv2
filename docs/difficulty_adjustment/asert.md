@@ -135,7 +135,10 @@ regtest node upgrades in one release and starts from a new store path.
 Bitcoin Cash protocol strings carry the rule as `asert-parent` after the
 payout rule (`/p2pool/test/<genesis tag>/pplns-k3-m100/asert-parent/1.0.0`,
 `BCH_ASERT_ANCHOR_TAG`; since the share-trading rules, followed by
-`trade-htlc`, then `payout-holder`, then `payout-cap11`, then `uncle-once`), so nodes on the old rule fail the handshake
+`trade-htlc`, then `payout-holder`, then the hybrid payout
+`payout-hybrid-t3072-f500-r1to3-z8-cov1`, which replaced `payout-cap11`,
+then `uncle-once` and the segments of the 2026-10-24 rule batch; see
+`share_chain_rule_tag`), so nodes on the old rule fail the handshake
 instead of trading shares the other rejects. Mainnet starts with the rule
 from its first share.
 
@@ -147,6 +150,11 @@ hashrate. On Bitcoin nothing changes. On Bitcoin Cash the genesis time now
 sets only the interval the second share is measured from, so anchoring at
 launch still starts the chain regulated, and a run whose genesis time is far
 in the past starts from the ceiling instead of from a debt.
+
+[bch-daa-analysis.md](bch-daa-analysis.md) compares both anchors, other
+half-lives and upstream's window algorithms over BTC/BCH switching, growth
+from one BitAxe to exahashes and quiet periods, with this code
+(`p2poolv2_daa`, `cargo daa-sim`).
 
 ## Bitcoin
 

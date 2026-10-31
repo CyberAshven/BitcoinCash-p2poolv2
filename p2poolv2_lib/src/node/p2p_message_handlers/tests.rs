@@ -40,6 +40,9 @@ async fn test_handle_request_getheaders() {
     let (swarm_tx, mut swarm_rx) = mpsc::channel(32);
     let response_channel = 1u32;
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     let time_provider = TestTimeProvider::new(SystemTime::now());
     let (block_fetcher_handle, validation_tx, block_receiver_handle) = test_handles();
 
@@ -97,6 +100,9 @@ async fn test_handle_get_share_blocks() {
     let (swarm_tx, mut swarm_rx) = mpsc::channel(32);
     let (response_channel, _response_channel_rx) = oneshot::channel::<Message>();
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     let time_provider = TestTimeProvider::new(SystemTime::now());
     let (block_fetcher_handle, validation_tx, block_receiver_handle) = test_handles();
 
@@ -146,6 +152,9 @@ async fn test_handle_request_inventory_for_blocks() {
     let (swarm_tx, mut swarm_rx) = mpsc::channel(32);
     let (response_channel_tx, _response_channel_rx) = oneshot::channel::<Message>();
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     let time_provider = TestTimeProvider::new(SystemTime::now());
     let (block_fetcher_handle, validation_tx, block_receiver_handle) = test_handles();
 
@@ -286,6 +295,9 @@ async fn test_handle_request_get_data_for_block_confirmed() {
     let (swarm_tx, mut swarm_rx) = mpsc::channel(32);
     let response_channel = 1u32;
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     let time_provider = TestTimeProvider::new(SystemTime::now());
     let (block_fetcher_handle, validation_tx, block_receiver_handle) = test_handles();
 
@@ -319,7 +331,7 @@ async fn test_handle_request_get_data_for_block_confirmed() {
     let result = handle_request(ctx).await;
     assert!(result.is_ok());
 
-    if let Some(SwarmSend::Response(channel, Message::ShareBlock(share_block))) =
+    if let Some(SwarmSend::Response(channel, Message::ShareBlock(share_block, _))) =
         swarm_rx.recv().await
     {
         assert_eq!(channel, response_channel);
@@ -335,6 +347,9 @@ async fn test_handle_request_get_data_for_block_not_found() {
     let (swarm_tx, mut swarm_rx) = mpsc::channel(32);
     let response_channel = 1u32;
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     let time_provider = TestTimeProvider::new(SystemTime::now());
     let (block_fetcher_handle, validation_tx, block_receiver_handle) = test_handles();
 
@@ -444,6 +459,9 @@ async fn test_handle_request_share_headers() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let (response_channel_tx, _response_channel_rx) = oneshot::channel::<Message>();
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     let time_provider = TestTimeProvider::new(SystemTime::now());
     let (block_fetcher_handle, validation_tx, block_receiver_handle) = test_handles();
 
@@ -486,6 +504,9 @@ async fn test_handle_request_share_block_sends_ack_and_processes() {
     let (swarm_tx, mut swarm_rx) = mpsc::channel(32);
     let response_channel = 1u32;
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     let time_provider = TestTimeProvider::new(SystemTime::now());
     let (block_fetcher_handle, validation_tx, block_receiver_handle) = test_handles();
 
@@ -503,7 +524,7 @@ async fn test_handle_request_share_block_sends_ack_and_processes() {
 
     let ctx = RequestContext {
         peer: peer_id,
-        request: Message::ShareBlock(share_block),
+        request: Message::ShareBlock(share_block, Vec::new()),
         chain_store_handle,
         response_channel,
         swarm_tx,
@@ -538,6 +559,9 @@ async fn test_handle_request_share_block_missing_parent_sends_getheaders() {
     let (swarm_tx, mut swarm_rx) = mpsc::channel(32);
     let response_channel = 5u32;
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     let time_provider = TestTimeProvider::new(SystemTime::now());
     let (block_fetcher_handle, validation_tx, block_receiver_handle) = test_handles();
 
@@ -565,7 +589,7 @@ async fn test_handle_request_share_block_missing_parent_sends_getheaders() {
 
     let ctx = RequestContext {
         peer: peer_id,
-        request: Message::ShareBlock(share_block),
+        request: Message::ShareBlock(share_block, Vec::new()),
         chain_store_handle,
         response_channel,
         swarm_tx,
@@ -608,8 +632,15 @@ async fn test_handle_request_share_block_missing_parent_sends_getheaders() {
 async fn test_handle_response_share_headers() {
     let peer_id = libp2p::PeerId::random();
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
 
     let mut mock_validator = MockDefaultShareValidator::default();
+
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
     mock_validator
         .expect_validate_header_minimum_difficulty()
         .returning(|_| Ok(()));

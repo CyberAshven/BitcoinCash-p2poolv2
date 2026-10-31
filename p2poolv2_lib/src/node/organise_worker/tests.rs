@@ -1188,7 +1188,7 @@ async fn test_confirmed_block_skips_effort_while_syncing() {
 }
 
 #[tokio::test]
-async fn test_confirmed_bitcoin_block_resets_block_effort() {
+async fn test_confirmed_claimed_bitcoin_target_does_not_reset_block_effort() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
@@ -1252,8 +1252,8 @@ async fn test_confirmed_bitcoin_block_resets_block_effort() {
         stub_share_validator_with_success(),
     );
 
-    // Make the confirmed share a real bitcoin block: the regtest genesis
-    // header meets its own target, so is_bitcoin_block() is true.
+    // The header meets its own target, but BCHN has supplied no verdict.
+    metrics.record_confirmed_share(7.0).await.unwrap();
     organise_tx
         .send(OrganiseEvent::Block {
             share_block: share,
@@ -1266,10 +1266,9 @@ async fn test_confirmed_bitcoin_block_resets_block_effort() {
     let result = worker.run().await;
     assert!(result.is_ok());
 
-    // A pool-wide block find from the share chain resets the effort
-    // accumulator.
+    // Share confirmation adds work without resetting the accumulator.
     let pool_metrics = metrics.get_metrics().await;
-    assert_eq!(pool_metrics.work_since_last_block, 0.0);
+    assert!(pool_metrics.work_since_last_block > 7.0);
 }
 
 #[tokio::test]
@@ -1552,6 +1551,87 @@ async fn test_repeated_delivery_takes_one_buffer_slot() {
         "every delivery of the same block must share one slot"
     );
     assert_eq!(buffered[0].block_hash, share.block_hash());
+}
+
+/// A worker whose every parent is `HeaderValid` without a body, so every
+/// block it processes is buffered under parent height 1, and whose pending
+/// buffer has `limits`.
+fn worker_buffering_everything(limits: BufferLimits) -> OrganiseWorker {
+    let mut worker = worker_with_parent_metadata(
+        Ok(parent_metadata(
+            Status::HeaderValid,
+            ChainMembership::Candidate,
+        )),
+        false,
+    );
+    worker.pending_blocks = PendingBuffer::new(limits);
+    worker
+}
+
+/// Past its block bound the buffer evicts its oldest block rather than
+/// turning the new one away, so blocks stuck behind a parent that never
+/// validates cannot pin it. The evicted block stays stored, to be
+/// re-validated as a stranded parent when a descendant arrives.
+#[tokio::test]
+async fn test_full_buffer_evicts_its_oldest_block() {
+    let mut worker = worker_buffering_everything(BufferLimits {
+        max_blocks: 2,
+        max_bytes: usize::MAX,
+    });
+    let shares: Vec<ShareBlock> = (0..3)
+        .map(|nonce| TestShareBlockBuilder::new().nonce(nonce).build())
+        .collect();
+
+    for share in &shares {
+        let outcome = worker
+            .process_share_block(share.clone(), true)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ProcessOutcome::Buffered));
+    }
+
+    let buffered: Vec<BlockHash> = worker
+        .pending_blocks
+        .get(&1)
+        .unwrap()
+        .iter()
+        .map(|entry| entry.block_hash)
+        .collect();
+    assert_eq!(
+        buffered,
+        vec![shares[1].block_hash(), shares[2].block_hash()]
+    );
+}
+
+/// The byte bound evicts the same way, before the block bound is reached.
+#[tokio::test]
+async fn test_buffer_past_its_byte_bound_evicts_its_oldest_block() {
+    let shares: Vec<ShareBlock> = (0..3)
+        .map(|nonce| TestShareBlockBuilder::new().nonce(nonce).build())
+        .collect();
+    let size = shares[0].encoded_size();
+    let mut worker = worker_buffering_everything(BufferLimits {
+        max_blocks: PENDING_BLOCKS_CAPACITY,
+        max_bytes: 2 * size + size / 2,
+    });
+
+    for share in &shares {
+        worker
+            .process_share_block(share.clone(), true)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(worker.pending_blocks.len(), 2);
+    assert!(worker.pending_blocks.bytes() <= 2 * size + size / 2);
+    assert!(
+        worker
+            .pending_blocks
+            .get(&1)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.block_hash != shares[0].block_hash())
+    );
 }
 
 #[tokio::test]

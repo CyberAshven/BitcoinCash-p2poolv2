@@ -81,6 +81,28 @@ pub enum Message<'a> {
     Response(Response<'a>),
     Notify(Notify),
     SetDifficulty(SetDifficultyNotification<'a>),
+    Extension(ExtensionNotification),
+}
+
+/// A notification of a stratum extension the miner asked for in
+/// `mining.configure`, such as Pickaxe's `pickaxe.merge_leaves`:
+/// `{"id":null,"method":...,"params":[...]}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionNotification {
+    pub id: Id,
+    pub method: String,
+    pub params: Vec<Value>,
+}
+
+impl ExtensionNotification {
+    /// The notification `method` with `params` and a null id.
+    pub fn new(method: &str, params: Vec<Value>) -> Self {
+        Self {
+            id: Id::None(()),
+            method: method.to_string(),
+            params,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

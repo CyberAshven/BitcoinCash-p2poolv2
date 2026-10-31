@@ -6,6 +6,7 @@ use crate::node::messages::Message;
 use crate::node::request_response_handler::peer_block_knowledge::PeerBlockKnowledge;
 use crate::node::request_sender::RequestSender;
 use crate::shares::share_block::ShareBlock;
+use bitcoin::block::Header;
 use libp2p::PeerId;
 use tracing::debug;
 
@@ -21,6 +22,7 @@ use tracing::debug;
 /// swarm_tx channel that the actor also drains).
 pub fn send_share_block_broadcast(
     share_block: ShareBlock,
+    bch_headers: Vec<Header>,
     connected_peers: &[PeerId],
     peer_block_knowledge: &mut PeerBlockKnowledge,
     request_sender: &mut impl RequestSender,
@@ -32,7 +34,10 @@ pub fn send_share_block_broadcast(
             debug!("Skipping broadcast to peer {peer_id}: already knows block {block_hash}");
         } else {
             debug!("Broadcasting ShareBlock {block_hash} to peer {peer_id}");
-            request_sender.send_request(peer_id, Message::ShareBlock(share_block.clone()));
+            request_sender.send_request(
+                peer_id,
+                Message::ShareBlock(share_block.clone(), bch_headers.clone()),
+            );
             peer_block_knowledge.record_block_known(peer_id, block_hash);
         }
     }
@@ -60,7 +65,13 @@ mod tests {
             .returning(|_, _| ());
 
         let connected = vec![peer_a, peer_b, peer_c];
-        send_share_block_broadcast(share_block, &connected, &mut knowledge, &mut mock_sender);
+        send_share_block_broadcast(
+            share_block,
+            Vec::new(),
+            &connected,
+            &mut knowledge,
+            &mut mock_sender,
+        );
 
         assert!(knowledge.peer_knows_block(&peer_a, &block_hash));
         assert!(knowledge.peer_knows_block(&peer_b, &block_hash));
@@ -85,7 +96,13 @@ mod tests {
             .returning(|_, _| ());
 
         let connected = vec![peer_a, peer_b];
-        send_share_block_broadcast(share_block, &connected, &mut knowledge, &mut mock_sender);
+        send_share_block_broadcast(
+            share_block,
+            Vec::new(),
+            &connected,
+            &mut knowledge,
+            &mut mock_sender,
+        );
 
         assert!(knowledge.peer_knows_block(&peer_b, &block_hash));
     }
@@ -105,7 +122,13 @@ mod tests {
         mock_sender.expect_send_request().never();
 
         let connected = vec![peer_a, peer_b];
-        send_share_block_broadcast(share_block, &connected, &mut knowledge, &mut mock_sender);
+        send_share_block_broadcast(
+            share_block,
+            Vec::new(),
+            &connected,
+            &mut knowledge,
+            &mut mock_sender,
+        );
     }
 
     #[test]
@@ -116,6 +139,12 @@ mod tests {
         let mut mock_sender = MockRequestSender::new();
         mock_sender.expect_send_request().never();
 
-        send_share_block_broadcast(share_block, &[], &mut knowledge, &mut mock_sender);
+        send_share_block_broadcast(
+            share_block,
+            Vec::new(),
+            &[],
+            &mut knowledge,
+            &mut mock_sender,
+        );
     }
 }

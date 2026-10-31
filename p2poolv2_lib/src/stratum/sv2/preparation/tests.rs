@@ -1,9 +1,11 @@
 use super::*;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::test_utils::{test_bch_custom_job_with_aux, test_bch_prepared};
+use bitcoin::Address;
 use bitcoin::consensus::deserialize;
 use bitcoin::script::Builder;
 use bitcoin::{Network, PubkeyHash};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
 
 #[test]
@@ -11,24 +13,33 @@ fn full_preparation_matches_pplns_with_selected_fee_revenue() {
     let prepared = test_bch_prepared();
     let weights = HashMap::from([
         (
-            Address::p2pkh(PubkeyHash::from_byte_array([1; 20]), Network::Regtest),
+            PayoutAddress::from(Address::p2pkh(
+                PubkeyHash::from_byte_array([1; 20]),
+                Network::Regtest,
+            )),
             1,
         ),
         (
-            Address::p2pkh(PubkeyHash::from_byte_array([2; 20]), Network::Regtest),
+            PayoutAddress::from(Address::p2pkh(
+                PubkeyHash::from_byte_array([2; 20]),
+                Network::Regtest,
+            )),
             3,
         ),
     ]);
-    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    ));
     let full = true;
     let value = 5_000_000_219;
     let token = prepared
         .mining_job_token([0x11; 32], prepared.template().curtime)
         .unwrap();
     let aux = MergeMiningCommitment {
-        merkle_root: [0x77; 32],
-        tree_size: 2,
-        nonce: 9,
+        root: [0x77; 32],
+        height: 1,
+        salt: 9,
     };
     let commitment = ShareCommitment::from_mining_job_token(
         &token,
@@ -71,7 +82,7 @@ fn full_preparation_matches_pplns_with_selected_fee_revenue() {
         value
     );
     assert_eq!(
-        MergeMiningCommitment::from_output(&coinbase.output[coinbase.output.len() - 3]).unwrap(),
+        MergeMiningCommitment::from_output(&coinbase.output[0]).unwrap(),
         aux
     );
 }
@@ -80,24 +91,33 @@ fn coinbase_only_preparation_preserves_pplns_and_aux_commitment() {
     let prepared = test_bch_prepared();
     let weights = HashMap::from([
         (
-            Address::p2pkh(PubkeyHash::from_byte_array([1; 20]), Network::Regtest),
+            PayoutAddress::from(Address::p2pkh(
+                PubkeyHash::from_byte_array([1; 20]),
+                Network::Regtest,
+            )),
             1,
         ),
         (
-            Address::p2pkh(PubkeyHash::from_byte_array([2; 20]), Network::Regtest),
+            PayoutAddress::from(Address::p2pkh(
+                PubkeyHash::from_byte_array([2; 20]),
+                Network::Regtest,
+            )),
             3,
         ),
     ]);
-    let payout = Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    ));
     let full = false;
     let value = 5_000_000_004;
     let token = prepared
         .mining_job_token([0x11; 32], prepared.template().curtime)
         .unwrap();
     let aux = MergeMiningCommitment {
-        merkle_root: [0x77; 32],
-        tree_size: 2,
-        nonce: 9,
+        root: [0x77; 32],
+        height: 1,
+        salt: 9,
     };
     let commitment = ShareCommitment::from_mining_job_token(
         &token,
@@ -140,7 +160,7 @@ fn coinbase_only_preparation_preserves_pplns_and_aux_commitment() {
         value
     );
     assert_eq!(
-        MergeMiningCommitment::from_output(&coinbase.output[coinbase.output.len() - 3]).unwrap(),
+        MergeMiningCommitment::from_output(&coinbase.output[0]).unwrap(),
         aux
     );
 }

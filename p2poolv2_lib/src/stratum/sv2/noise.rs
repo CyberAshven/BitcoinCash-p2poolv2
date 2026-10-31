@@ -18,6 +18,7 @@
 //! sends its ElligatorSwift key and accepts the provider only if the
 //! provider's certificate is signed by the authority key it pins.
 
+use super::session::Sv2Message;
 use crate::config::Sv2Authority;
 use codec_sv2::{
     Decrypted, Handshake, NoiseDecoder, NoiseEncoder, TransportDecryptState, TransportEncryptState,
@@ -123,8 +124,8 @@ impl NoiseTransport {
         })
     }
 
-    /// Decrypt `incoming` into complete messages: type and payload.
-    pub(crate) fn decode(&mut self, incoming: &[u8]) -> Result<Vec<(u8, Vec<u8>)>, String> {
+    /// Decrypt `incoming` into complete messages.
+    pub(crate) fn decode(&mut self, incoming: &[u8]) -> Result<Vec<Sv2Message>, String> {
         self.inbox.extend_from_slice(incoming);
         let mut messages = Vec::new();
         let mut reading = true;
@@ -146,8 +147,8 @@ impl NoiseTransport {
                 {
                     Decrypted::Frame(mut frame, state) => {
                         self.decrypt = Some(state);
-                        let message_type = frame.header().msg_type();
-                        messages.push((message_type, frame.payload().to_vec()));
+                        let header = frame.header();
+                        messages.push(Sv2Message::from_frame(&header, frame.payload()));
                     }
                     Decrypted::Incomplete(_, state) => self.decrypt = Some(state),
                 }

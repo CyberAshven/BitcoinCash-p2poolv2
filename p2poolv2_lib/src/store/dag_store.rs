@@ -9,7 +9,8 @@ use crate::shares::share_block::{ShareBlock, ShareHeader, is_terminal_blockhash}
 use crate::shares::validation::MAX_UNCLES;
 use bitcoin::consensus::{self, Encodable, encode};
 use bitcoin::hashes::Hash;
-use bitcoin::{Address, BlockHash, CompactTarget, Work};
+use bitcoin::{BlockHash, CompactTarget, Work};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use tracing::{debug, warn};
@@ -55,8 +56,7 @@ pub struct ShareInfo {
     /// legacy network whose base58 version bytes match, and only the API and
     /// CLI layers know to spell it as CashAddr. Serializes as the address
     /// string, as the header does.
-    #[serde(with = "crate::shares::address_serde")]
-    pub miner_bitcoin_address: Address,
+    pub miner_bitcoin_address: PayoutAddress,
     /// Miner address, as the witness program the header stores.
     ///
     /// Not the bech32m form: rendering that needs a network, and the store is
@@ -76,8 +76,7 @@ pub struct UncleInfo {
     pub prev_blockhash: BlockHash,
     /// Payout address, as the header stores it. See
     /// [`ShareInfo::miner_bitcoin_address`].
-    #[serde(with = "crate::shares::address_serde")]
-    pub miner_bitcoin_address: Address,
+    pub miner_bitcoin_address: PayoutAddress,
     /// Miner address, as the witness program the header stores. See
     /// [`ShareInfo::miner_address`].
     #[serde(with = "p2poolv2_wallet::share_owner::serde_hex")]
@@ -422,15 +421,6 @@ impl Store {
         Ok(())
     }
 
-    /// Check if a blockhash has been used as an uncle
-    pub fn is_already_uncle(&self, blockhash: &BlockHash) -> bool {
-        let uncles_cf = self.db.cf_handle(&ColumnFamily::Uncles).unwrap();
-        matches!(
-            self.db.get_cf::<&[u8]>(&uncles_cf, blockhash.as_ref()),
-            Ok(Some(_))
-        )
-    }
-
     /// Get the nephews that have included a blockhash as an uncle
     pub fn get_nephews(&self, uncle: &BlockHash) -> Option<Vec<BlockHash>> {
         let uncles_cf = self.db.cf_handle(&ColumnFamily::Uncles).unwrap();
@@ -444,10 +434,17 @@ impl Store {
     /// chain_work descending.
     ///
     /// Algorithm: walk the base's ancestry up to `MAX_UNCLES_DEPTH` parent
-    /// pointers. The children of those ancestors that are not themselves on
-    /// the base's ancestry, not on the confirmed chain, not already used as
-    /// an uncle, and have their block body stored are the uncle candidates.
-    /// Return the top `MAX_UNCLES` by chain_work.
+    /// pointers, collecting the uncles listed by the base and its ancestors.
+    /// The children of those ancestors that are not themselves on the base's
+    /// ancestry, not on the confirmed chain, not already listed as an uncle on
+    /// this ancestry, and have their block body stored are the uncle
+    /// candidates. Return the top `MAX_UNCLES` by chain_work.
+    ///
+    /// The listed-uncle exclusion matches the validation rule that an uncle
+    /// appears at most once per chain. It looks only at the base's ancestry,
+    /// so an uncle listed by a nephew on a losing branch is still available.
+    /// Ported from pool2win's upstream P2Poolv2 commit d14d8a00
+    /// (MIT OR Apache-2.0).
     ///
     /// Anchoring on `base_hash` (the nephew's parent) rather than the
     /// confirmed tip keeps every returned uncle within `MAX_UNCLES_DEPTH` of
@@ -463,12 +460,17 @@ impl Store {
         let mut ancestors: Vec<BlockHash> = Vec::with_capacity(MAX_UNCLES_DEPTH as usize);
         let mut ancestry: HashSet<BlockHash> =
             HashSet::with_capacity(MAX_UNCLES_DEPTH as usize + 1);
+        let mut uncles_listed_on_ancestry: HashSet<BlockHash> =
+            HashSet::with_capacity(MAX_UNCLES_DEPTH as usize * MAX_UNCLES);
         ancestry.insert(*base_hash);
         let mut current = *base_hash;
         let mut steps = 0;
         while steps < MAX_UNCLES_DEPTH as usize && !is_terminal_blockhash(&current) {
             let parent = match self.get_share_header(&current)? {
-                Some(header) => header.prev_share_blockhash,
+                Some(header) => {
+                    uncles_listed_on_ancestry.extend(header.uncles.iter().copied());
+                    header.prev_share_blockhash
+                }
                 None => return Ok(Vec::new()),
             };
             if !is_terminal_blockhash(&parent) {
@@ -492,7 +494,7 @@ impl Store {
             .filter(|(_, blockhash)| {
                 !ancestry.contains(blockhash)
                     && !self.is_confirmed(blockhash)
-                    && !self.is_already_uncle(blockhash)
+                    && !uncles_listed_on_ancestry.contains(blockhash)
                     && self.share_block_exists(blockhash)
             })
             .filter(|(ancestor, blockhash)| self.is_child_of(blockhash, ancestor))
@@ -867,8 +869,7 @@ pub struct DagEntry {
     pub uncles: Vec<BlockHash>,
     /// Payout address, or `None` when the header could not be read. See
     /// [`ShareInfo::miner_bitcoin_address`].
-    #[serde(with = "crate::shares::option_address_serde")]
-    pub miner_bitcoin_address: Option<Address>,
+    pub miner_bitcoin_address: Option<PayoutAddress>,
     /// Miner address, or `None` when the header could not be read.
     ///
     /// The witness program rather than the bech32m form: the store is network

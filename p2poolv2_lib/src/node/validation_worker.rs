@@ -10,7 +10,8 @@
 //! `OrganiseEvent::Block` and `SwarmSend::BroadcastBlock` events. Runs in a dedicated
 //! tokio task, decoupled from the P2P message handler hot path.
 
-use crate::config::Chain;
+use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
+use crate::config::{BitcoinCashNetwork, Chain};
 use crate::node::SwarmSend;
 use crate::node::messages::Message;
 use crate::node::organise_worker::{OrganiseEvent, OrganiseSender};
@@ -95,6 +96,8 @@ pub struct ValidationWorker {
     chain: Chain,
     /// Easiest share target the validator accepts. Defaults to the main ceiling.
     target_ceiling: CompactTarget,
+    /// The Bitcoin Cash network whose ASERT checks token shares' headers.
+    bitcoin_cash_network: Option<BitcoinCashNetwork>,
 }
 
 impl ValidationWorker {
@@ -117,7 +120,15 @@ impl ValidationWorker {
             target_ceiling: CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
+            bitcoin_cash_network: None,
         }
+    }
+
+    /// Select the Bitcoin Cash network whose ASERT parameters check a token
+    /// share's bitcoin header (`DefaultShareValidator::with_bitcoin_cash_network`).
+    pub fn with_bitcoin_cash_network(mut self, network: Option<BitcoinCashNetwork>) -> Self {
+        self.bitcoin_cash_network = network;
+        self
     }
 
     /// Select the chain whose share owner this worker's validator accepts.
@@ -138,11 +149,13 @@ impl ValidationWorker {
     /// Returns `Err(ValidationWorkerError)` on fatal failure.
     pub async fn run(mut self) -> Result<(), ValidationWorkerError> {
         info!("Validation worker started");
+        let depths = ChainDepths::for_chain(self.chain);
 
         let share_validator: Arc<dyn ShareValidator + Send + Sync> = Arc::new(
             DefaultShareValidator::new(self.pool_difficulty)
                 .for_chain(self.chain)
-                .with_target_ceiling(self.target_ceiling),
+                .with_target_ceiling(self.target_ceiling)
+                .with_bitcoin_cash_network(self.bitcoin_cash_network),
         );
 
         while let Some(event) = self.validation_rx.recv().await {
@@ -176,6 +189,7 @@ impl ValidationWorker {
                     chain_store_handle,
                     organise_tx,
                     swarm_tx,
+                    depths,
                 )
                 .await;
             });
@@ -206,6 +220,7 @@ async fn validate_and_emit(
     chain_store_handle: ChainStoreHandle,
     organise_tx: OrganiseSender,
     swarm_tx: mpsc::Sender<SwarmSend<ResponseChannel<Message>>>,
+    depths: ChainDepths,
 ) {
     let locally_mined = prefetched_block.is_some();
     let share_block = match prefetched_block {
@@ -219,7 +234,7 @@ async fn validate_and_emit(
         },
     };
 
-    let in_pplns_zone = match check_pplns_zone(&block_hash, &chain_store_handle) {
+    let in_pplns_zone = match check_pplns_zone(&block_hash, &chain_store_handle, depths) {
         Ok(result) => result,
         Err(error_message) => {
             error!("Error checking for pplns zone: {error_message}");
@@ -291,7 +306,12 @@ async fn validate_and_emit(
     if locally_mined || chain_store_handle.is_current() {
         #[cfg(not(feature = "sim"))]
         {
-            if let Err(send_error) = swarm_tx.send(SwarmSend::BroadcastBlock(share_block)).await {
+            let bch_headers =
+                chain_store_handle.carried_bch_headers(std::slice::from_ref(&share_block.header));
+            if let Err(send_error) = swarm_tx
+                .send(SwarmSend::BroadcastBlock(share_block, bch_headers))
+                .await
+            {
                 error!("Failed to send broadcast for validated block {block_hash}: {send_error}");
             }
         }
@@ -333,6 +353,9 @@ mod tests {
     async fn test_validation_worker_validates_and_sends_organise_event() {
         let (validation_tx, validation_rx) = create_validation_channel();
         let mut mock_chain_handle = MockChainStoreHandle::new();
+        mock_chain_handle
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
 
         let share_block = TestShareBlockBuilder::new().build();
         let block_hash = share_block.block_hash();
@@ -340,6 +363,9 @@ mod tests {
 
         // Mock clone for spawned task
         let mut mock_clone = MockChainStoreHandle::new();
+        mock_clone
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
         mock_clone
             .expect_get_share()
             .returning(move |_| Some(share_block_clone.clone()));
@@ -391,12 +417,18 @@ mod tests {
     async fn test_validation_worker_sends_broadcast_on_success() {
         let (validation_tx, validation_rx) = create_validation_channel();
         let mut mock_chain_handle = MockChainStoreHandle::new();
+        mock_chain_handle
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
 
         let share_block = TestShareBlockBuilder::new().build();
         let block_hash = share_block.block_hash();
         let share_block_clone = share_block.clone();
 
         let mut mock_clone = MockChainStoreHandle::new();
+        mock_clone
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
         mock_clone
             .expect_get_share()
             .returning(move |_| Some(share_block_clone.clone()));
@@ -431,7 +463,7 @@ mod tests {
             .unwrap();
 
         let swarm_event = tokio::time::timeout(Duration::from_secs(2), swarm_rx.recv()).await;
-        if let Ok(Some(SwarmSend::BroadcastBlock(broadcast_block))) = swarm_event {
+        if let Ok(Some(SwarmSend::BroadcastBlock(broadcast_block, _))) = swarm_event {
             assert_eq!(broadcast_block.block_hash(), block_hash);
         } else {
             panic!("Expected SwarmSend::BroadcastBlock after successful validation");
@@ -444,12 +476,18 @@ mod tests {
     async fn test_validation_worker_skips_broadcast_when_not_current() {
         let (validation_tx, validation_rx) = create_validation_channel();
         let mut mock_chain_handle = MockChainStoreHandle::new();
+        mock_chain_handle
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
 
         let share_block = TestShareBlockBuilder::new().build();
         let block_hash = share_block.block_hash();
         let share_block_clone = share_block.clone();
 
         let mut mock_clone = MockChainStoreHandle::new();
+        mock_clone
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
         mock_clone
             .expect_get_share()
             .returning(move |_| Some(share_block_clone.clone()));
@@ -509,11 +547,17 @@ mod tests {
     async fn test_locally_mined_block_broadcasts_when_not_current() {
         let (validation_tx, validation_rx) = create_validation_channel();
         let mut mock_chain_handle = MockChainStoreHandle::new();
+        mock_chain_handle
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
 
         let share_block = TestShareBlockBuilder::new().build();
         let block_hash = share_block.block_hash();
 
         let mut mock_clone = MockChainStoreHandle::new();
+        mock_clone
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
         mock_clone.expect_get_share().never();
         mock_clone
             .expect_get_block_metadata()
@@ -546,7 +590,7 @@ mod tests {
             .unwrap();
 
         let swarm_event = tokio::time::timeout(Duration::from_secs(2), swarm_rx.recv()).await;
-        if let Ok(Some(SwarmSend::BroadcastBlock(broadcast_block))) = swarm_event {
+        if let Ok(Some(SwarmSend::BroadcastBlock(broadcast_block, _))) = swarm_event {
             assert_eq!(broadcast_block.block_hash(), block_hash);
         } else {
             panic!(
@@ -561,10 +605,16 @@ mod tests {
     async fn test_validation_worker_skips_missing_block() {
         let (validation_tx, validation_rx) = create_validation_channel();
         let mut mock_chain_handle = MockChainStoreHandle::new();
+        mock_chain_handle
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
 
         let block_hash = TestShareBlockBuilder::new().build().block_hash();
 
         let mut mock_clone = MockChainStoreHandle::new();
+        mock_clone
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
         mock_clone.expect_get_share().returning(|_| None);
         mock_chain_handle
             .expect_clone()
@@ -626,6 +676,9 @@ mod tests {
 
         let mut mock_chain_handle = MockChainStoreHandle::new();
         mock_chain_handle
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
+        mock_chain_handle
             .expect_get_block_metadata()
             .returning(|_| Ok(pplns_zone_metadata()));
         mock_chain_handle
@@ -642,6 +695,7 @@ mod tests {
             mock_chain_handle,
             organise_tx,
             swarm_tx,
+            ChainDepths::BITCOIN,
         )
         .await;
 
@@ -667,6 +721,9 @@ mod tests {
 
         let mut mock_chain_handle = MockChainStoreHandle::new();
         mock_chain_handle
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
+        mock_chain_handle
             .expect_get_block_metadata()
             .returning(|_| Ok(pplns_zone_metadata()));
         mock_chain_handle
@@ -683,6 +740,7 @@ mod tests {
             mock_chain_handle,
             organise_tx,
             swarm_tx,
+            ChainDepths::BITCOIN,
         )
         .await;
 
@@ -697,11 +755,17 @@ mod tests {
     async fn test_validate_share_block_skips_store_read() {
         let (validation_tx, validation_rx) = create_validation_channel();
         let mut mock_chain_handle = MockChainStoreHandle::new();
+        mock_chain_handle
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
 
         let share_block = TestShareBlockBuilder::new().build();
         let block_hash = share_block.block_hash();
 
         let mut mock_clone = MockChainStoreHandle::new();
+        mock_clone
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
         mock_clone.expect_get_share().never();
         mock_clone
             .expect_get_block_metadata()
@@ -745,7 +809,7 @@ mod tests {
         }
 
         let swarm_event = tokio::time::timeout(Duration::from_secs(2), swarm_rx.recv()).await;
-        if let Ok(Some(SwarmSend::BroadcastBlock(broadcast_block))) = swarm_event {
+        if let Ok(Some(SwarmSend::BroadcastBlock(broadcast_block, _))) = swarm_event {
             assert_eq!(broadcast_block.block_hash(), block_hash);
         } else {
             panic!("Expected SwarmSend::BroadcastBlock for prefetched share block");
@@ -763,12 +827,18 @@ mod tests {
     async fn test_validation_worker_successfully_validates_blocks_in_prune_zone() {
         let (validation_tx, validation_rx) = create_validation_channel();
         let mut mock_chain_handle = MockChainStoreHandle::new();
+        mock_chain_handle
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
 
         let share_block = TestShareBlockBuilder::new().build();
         let block_hash = share_block.block_hash();
         let share_block_clone = share_block.clone();
 
         let mut mock_clone = MockChainStoreHandle::new();
+        mock_clone
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
         mock_clone
             .expect_get_share()
             .returning(move |_| Some(share_block_clone.clone()));

@@ -236,9 +236,10 @@ above it): inputs not spent on the confirmed chain nor by a share between
 the confirmed tip and the mining base, final and mature at the share's
 height. It skips a transaction that does not fit and stops adding at 99
 transactions (`TXS_COUNT_LIMIT` less the coinbase), 64 KiB
-(`MAX_SHARE_TRANSACTION_BYTES`) and the sigop budget; the job builder then
-drops transactions from the end until the share's transactions, its share
-coinbase and its bitcoin coinbase fit `BLOCK_TXS_SIZE_LIMIT` (200 KiB).
+(`MAX_SHARE_TRANSACTION_BYTES`) and the SigChecks budget (1,452); the job builder then
+drops transactions from the end until the share's transactions and its share
+coinbase fit `BLOCK_TXS_SIZE_LIMIT` (200 KiB); the bitcoin coinbase has its
+own limit, BCH's 1,000,000 bytes.
 
 The chosen set is fixed for the job: its `share_witness_root` goes into the
 share commitment every miner on the job hashes, the job keeps the set, and a
@@ -365,8 +366,12 @@ Choices, and why:
   so the same unlocking script passes BCHN and the share chain.
 - **Signatures.** `SIGHASH_FORKID` ECDSA (strict DER, low S) or Bitcoin Cash
   Schnorr, over the replay-protected digest with the redeem script as the
-  script code, as for any Bitcoin Cash P2SH spend. The tools sign ECDSA
-  with `SIGHASH_ALL | SIGHASH_FORKID`.
+  script code, as for any Bitcoin Cash P2SH spend. The tools sign Bitcoin
+  Cash Schnorr with `SIGHASH_ALL | SIGHASH_FORKID`, with BCHN's
+  deterministic nonce (RFC6979 with the `Schnorr+SHA256` tag), so the same
+  key and transaction give the signature BCHN's wallet would. A Schnorr
+  signature is always 65 bytes with its sighash byte, so the fee is sized
+  exactly before signing.
 
 ### Covenants and introspection
 
@@ -463,9 +468,9 @@ chain is at height 50,000 and Bitcoin Cash at height 300,000.
    contract's locking script and 40,000,000 units; it has at least 100 share
    confirmations; the refund height is far enough ahead (see Timeouts); and
    the output does not expire first. An output expires when its root
-   coinbase falls more than `PAYOUT_DEPTH` (127,008) shares below the
+   coinbase falls more than `BCH_PAYOUT_DEPTH` (121,063) shares below the
    spending share, so the refund height plus a day of shares must stay
-   below the root height plus 127,008.
+   below the root height plus 121,063.
 6. **Buyer locks BCH.** Pay 50,000 satoshis to the BCH contract's P2SH32
    address from any wallet that pays `p` CashAddr, or from a P2PKH coin:
 

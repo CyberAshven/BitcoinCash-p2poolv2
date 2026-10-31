@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use bitcoin::Address;
+use p2poolv2_wallet::payout_address::PayoutAddress;
 
 const INITIAL_SIZE: usize = 1000;
 
@@ -16,7 +16,7 @@ const INITIAL_SIZE: usize = 1000;
 ///
 /// The window interns payout addresses (the default) and share owners, the
 /// share chain addresses, each in its own `AddressKeys`.
-pub(super) struct AddressKeys<T = Address>(Vec<Option<T>>);
+pub(super) struct AddressKeys<T = PayoutAddress>(Vec<Option<T>>);
 
 impl<T> Default for AddressKeys<T> {
     fn default() -> Self {

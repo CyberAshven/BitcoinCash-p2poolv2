@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::shares::share_block::ShareBlock;
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::store::column_families::ColumnFamily;
@@ -16,12 +17,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 use writer::StoreError;
 
+/// Key in the `Metadata` column family that holds the store format version.
+const STORE_FORMAT_KEY: &[u8] = b"store_format";
+
+/// Format version of the share-chain store this build writes. A store with
+/// another version, or with none, was written under other rules: startup
+/// refuses it, so the operator resyncs the share chain instead of mixing
+/// old and new data in one database.
+///
+/// - 1 (2026-10-30): chain work counts the work of each uncle a share
+///   names. Stores written before this have no version.
+pub const STORE_FORMAT_VERSION: u32 = 1;
+
+pub mod bch_headers;
 pub mod block_tx_metadata;
 pub mod column_families;
 pub mod dag_store;
 pub mod found_block;
 pub mod hashrate_samples;
 pub mod organise;
+pub mod payout_tree;
 mod pplns_shares;
 pub mod prune_blocks;
 mod prune_shares;
@@ -45,6 +60,9 @@ pub struct Store {
     db: DB,
     // Thread-safe chain state for use by ChainStore
     genesis_blockhash: Arc<RwLock<Option<BlockHash>>>,
+    /// The chain's share-chain depths, which size pruning and the reorg
+    /// depth limit.
+    depths: ChainDepths,
 }
 
 /// Merge operator for appending BlockHashes to a Vec<BlockHash>.
@@ -197,6 +215,16 @@ impl Store {
             ColumnFamilyDescriptor::new(ColumnFamily::FoundBlocks, RocksDbOptions::default());
         let hashrate_samples_cf =
             ColumnFamilyDescriptor::new(ColumnFamily::HashrateSamples, RocksDbOptions::default());
+        let accepted_found_blocks_cf = ColumnFamilyDescriptor::new(
+            ColumnFamily::AcceptedFoundBlocks,
+            RocksDbOptions::default(),
+        );
+        let payout_trees_cf =
+            ColumnFamilyDescriptor::new(ColumnFamily::PayoutTrees, RocksDbOptions::default());
+        let bch_headers_cf =
+            ColumnFamilyDescriptor::new(ColumnFamily::BchHeaders, Self::cf_options_with_bloom());
+        let bch_best_chain_cf =
+            ColumnFamilyDescriptor::new(ColumnFamily::BchBestChain, RocksDbOptions::default());
 
         let cfs = vec![
             block_metadata_cf_descriptor,
@@ -219,6 +247,10 @@ impl Store {
             bitcoin_coinbase_cf,
             found_blocks_cf,
             hashrate_samples_cf,
+            accepted_found_blocks_cf,
+            payout_trees_cf,
+            bch_headers_cf,
+            bch_best_chain_cf,
         ];
 
         // for the db too, we use default options for now
@@ -245,8 +277,37 @@ impl Store {
             db,
             // Initialise chain state fields
             genesis_blockhash: Arc::new(RwLock::new(None)),
+            depths: ChainDepths::BITCOIN,
         };
         Ok(store)
+    }
+
+    /// Size the prune depth, prune target and reorg depth limit by `chain`'s
+    /// own depths ([`ChainDepths::for_chain`]). A new store uses Bitcoin's;
+    /// a Bitcoin Cash node sets its own before anything reads them.
+    pub fn with_chain(mut self, chain: crate::config::Chain) -> Self {
+        self.depths = ChainDepths::for_chain(chain);
+        self
+    }
+
+    /// The share-chain depths this store prunes and reorgs by.
+    pub fn depths(&self) -> ChainDepths {
+        self.depths
+    }
+
+    /// The chain a stored share chain belongs to, read from its genesis
+    /// share's owner: a Bitcoin Cash genesis pays a P2PKH share owner, a
+    /// Bitcoin one a taproot program. `None` for a store without a genesis.
+    /// For tools that open a store without a node config.
+    pub fn stored_chain(&self) -> Option<crate::config::Chain> {
+        let genesis = self.get_confirmed_at_height(0).ok()?;
+        let header = self.get_share_header(&genesis).ok()??;
+        Some(match header.miner_address {
+            p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh(_) => {
+                crate::config::Chain::BitcoinCash
+            }
+            p2poolv2_wallet::share_owner::ShareOwner::Taproot(_) => crate::config::Chain::Bitcoin,
+        })
     }
 
     /// Get a rocksb write batch
@@ -373,6 +434,12 @@ impl Store {
             chain: ChainMembership::None,
         };
         self.update_block_metadata(&blockhash, &metadata, batch)?;
+        let metadata_cf = self.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        batch.put_cf(
+            &metadata_cf,
+            STORE_FORMAT_KEY,
+            STORE_FORMAT_VERSION.to_le_bytes(),
+        );
 
         *self.genesis_blockhash.write().unwrap() = Some(blockhash);
 
@@ -387,9 +454,35 @@ impl Store {
         Ok(())
     }
 
+    /// Refuse a store written in another format than this build's.
+    fn check_store_format(&self) -> Result<(), StoreError> {
+        let metadata_cf = self.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        let stored = self
+            .db
+            .get_cf(&metadata_cf, STORE_FORMAT_KEY)
+            .map_err(|error| StoreError::Database(error.to_string()))?
+            .map(|bytes| <[u8; 4]>::try_from(bytes.as_slice()).map(u32::from_le_bytes));
+        let found = match stored {
+            Some(Ok(version)) if version == STORE_FORMAT_VERSION => return Ok(()),
+            Some(Ok(version)) => format!("format {version}"),
+            Some(Err(_)) => "an unreadable format version".to_string(),
+            None => "no format version (it was written before 2026-10-30)".to_string(),
+        };
+        Err(StoreError::OutdatedStore(format!(
+            "the share-chain store at {} has {found}, and this node writes format \
+             {STORE_FORMAT_VERSION}, where chain work counts uncle work. Delete the store \
+             directory and restart to resync the share chain from peers.",
+            self.path
+        )))
+    }
+
     /// Initialise chain state from existing data in the store.
     /// Sets the genesis blockhash so chain tip and total work can be read from the confirmed chain index.
+    ///
+    /// Returns `StoreError::OutdatedStore` when the store was written in
+    /// another format (`STORE_FORMAT_VERSION`).
     pub fn init_chain_state_from_store(&self, genesis_hash: BlockHash) -> Result<(), StoreError> {
+        self.check_store_format()?;
         self.set_genesis_blockhash(genesis_hash);
         debug!(
             "Initialised chain state: tip={}, height={}, work={}",
@@ -532,10 +625,11 @@ impl Store {
     ///
     /// Used in tests for shares that need to be discoverable by
     /// forward walks and uncle lookups. The metadata height and
-    /// chain_work are computed from the parent. Panics if the parent
-    /// is not in the store -- missing parent in test setup is a bug.
-    /// Does NOT go through organise_header, so it avoids candidate
-    /// chain side effects.
+    /// chain_work are computed from the parent, with chain_work adding
+    /// uncle work as `initialise_new_header` does. Panics if the parent
+    /// or an uncle header is not in the store -- missing data in test
+    /// setup is a bug. Does NOT go through organise_header, so it avoids
+    /// candidate chain side effects.
     pub fn store_with_valid_metadata(&self, share: &ShareBlock) {
         let blockhash = share.block_hash();
         let share_work = share.header.get_work();
@@ -549,7 +643,8 @@ impl Store {
             });
         let parent_height = parent_metadata.expected_height.unwrap_or_default();
         let height = parent_height + 1;
-        let chain_work = parent_metadata.chain_work + share_work;
+        let uncles_work = self.sum_uncles_work(&share.header, &blockhash).unwrap();
+        let chain_work = parent_metadata.chain_work + share_work + uncles_work;
         let mut batch = Store::get_write_batch();
         self.add_share_block(share, &mut batch).unwrap();
         self.set_height_to_blockhash(&blockhash, height, &mut batch)
@@ -568,9 +663,10 @@ impl Store {
     /// Create Valid metadata for a share without storing its block data.
     ///
     /// Also stores the header in the Header CF so that downstream
-    /// children can look up parent timestamps and heights. Panics if
-    /// the parent is not in the store -- missing parent in test setup
-    /// is a bug.
+    /// children can look up parent timestamps and heights. chain_work
+    /// adds uncle work as `initialise_new_header` does. Panics if the
+    /// parent or an uncle header is not in the store -- missing data in
+    /// test setup is a bug.
     pub fn create_valid_metadata_only(&self, share: &ShareBlock) {
         let blockhash = share.block_hash();
         let share_work = share.header.get_work();
@@ -584,7 +680,8 @@ impl Store {
             });
         let parent_height = parent_metadata.expected_height.unwrap_or_default();
         let height = parent_height + 1;
-        let chain_work = parent_metadata.chain_work + share_work;
+        let uncles_work = self.sum_uncles_work(&share.header, &blockhash).unwrap();
+        let chain_work = parent_metadata.chain_work + share_work + uncles_work;
         let mut batch = Store::get_write_batch();
         self.add_share_header(&share.header, &mut batch).unwrap();
         self.set_height_to_blockhash(&blockhash, height, &mut batch)
@@ -609,6 +706,68 @@ mod tests {
     use bitcoin::consensus;
     use bitcoin::hashes::Hash;
     use tempfile::tempdir;
+
+    /// A store set up by this build reopens: `setup_genesis` writes the
+    /// store format version that `init_chain_state_from_store` checks.
+    #[test]
+    fn test_store_from_this_build_reopens() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+
+        store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap();
+    }
+
+    /// A store written before chain work counted uncle work has no format
+    /// version. Startup refuses it and tells the operator to resync.
+    #[test]
+    fn test_store_without_format_version_is_refused() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        store.db.delete_cf(&metadata_cf, STORE_FORMAT_KEY).unwrap();
+
+        let error = store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap_err();
+        assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
+        assert!(error.to_string().contains("Delete the store directory"));
+    }
+
+    /// A store from another format version is refused too.
+    #[test]
+    fn test_store_with_another_format_version_is_refused() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        store
+            .db
+            .put_cf(
+                &metadata_cf,
+                STORE_FORMAT_KEY,
+                (STORE_FORMAT_VERSION + 1).to_le_bytes(),
+            )
+            .unwrap();
+
+        let error = store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap_err();
+        let expected = format!("has format {}", STORE_FORMAT_VERSION + 1);
+        assert!(error.to_string().contains(&expected), "{error}");
+    }
 
     #[test_log::test]
     fn test_chain_state_management() {

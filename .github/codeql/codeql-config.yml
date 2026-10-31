@@ -8,5 +8,7 @@ paths-ignore:
   - "**/tests.rs"
   - "**/*_tests.rs"
   - "**/test_utils.rs"
+  # The SAFA tool's integration tests and their fixed public vectors.
+  - p2poolv2_safa/tests
   - "**/benches"
   - load-tests

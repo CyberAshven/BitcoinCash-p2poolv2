@@ -118,7 +118,7 @@ async fn test_pruned_node_serves_kept_body() {
     .await
     .unwrap();
 
-    let Some(SwarmSend::Response(_, Message::ShareBlock(share_block))) = swarm_rx.recv().await
+    let Some(SwarmSend::Response(_, Message::ShareBlock(share_block, _))) = swarm_rx.recv().await
     else {
         panic!("expected a ShareBlock response");
     };

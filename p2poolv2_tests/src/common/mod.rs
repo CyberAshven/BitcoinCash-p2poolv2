@@ -4,7 +4,7 @@
 
 use bitcoindrpc::BitcoinRpcConfig;
 use p2poolv2_lib::config::{
-    ApiConfig, Config, LoggingConfig, NetworkConfig, StoreConfig, StratumConfig,
+    ApiConfig, Config, ElectrumConfig, LoggingConfig, NetworkConfig, StoreConfig, StratumConfig,
 };
 
 /// Build a default test configuration with test values that can be replaced later by each test
@@ -37,6 +37,7 @@ pub fn default_test_config() -> Config {
             username: "testuser".to_string(),
             password: "testpass".to_string(),
         },
+        submit_nodes: vec![],
         store: StoreConfig {
             path: "test_chain.db".to_string(),
             pplns_ttl_days: 3,
@@ -58,5 +59,6 @@ pub fn default_test_config() -> Config {
             public_dashboard: false,
             web_root: None,
         },
+        electrum: ElectrumConfig::default(),
     }
 }

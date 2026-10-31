@@ -18,9 +18,17 @@
 # vault.yml is gitignored; never commit a real value, encrypted or not, to
 # this example.
 
-# Bitcoin Cash Node RPC credentials (shared across instances on the same host)
+# Bitcoin Cash Node RPC credentials (shared across instances on the same host).
+# With a single host they can live here. With several hosts, put each
+# host's pair in its own vault, inventory/host_vars/<host>/vault.yml, with
+# the same key names, and leave them out of this file so a missing host
+# vault fails loudly instead of using another host's credentials:
+#   ansible-vault create inventory/host_vars/<host>/vault.yml
 vault_bchn_rpc_user: "your_rpc_user"
 vault_bchn_rpc_pass: "your_rpc_password"
+
+# Grafana admin password, set on every host running Grafana
+vault_grafana_admin_password: "your_grafana_admin_password"
 
 # API authentication (optional)
 # Generate the auth_token with: p2poolv2_cli gen-auth <username> <password>

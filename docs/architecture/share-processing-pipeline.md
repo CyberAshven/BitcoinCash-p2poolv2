@@ -178,13 +178,24 @@ block spending an output below it, which only a proof-of-work-only verdict
 can accept, is stored with an unknown coinbase root on its outputs
 (`pruning.md`, "Missing Input at Write Time").
 
+Only a block whose parent and uncles the node already knows is buffered:
+each has a header in the store or waits in `pending` itself
+(`BlockReceiver::ancestors_known`). A block naming any other ancestor, such
+as a made-up parent, is dropped. The node asks the sender for headers
+whenever a share names an ancestor it lacks
+(`request_headers_for_missing_blocks`, for the parent and the uncles), so an
+honest share dropped this way comes back through header sync and the block
+fetcher. A block waiting on a buffered parent stays, so a parent and child
+gossiped in turn still commit together.
+
 The buffer is bounded (`PendingLimits` in `block_receiver.rs`): at most
 `MAX_PENDING_BLOCKS` (1,024) blocks and `MAX_PENDING_BYTES` (32 MiB, by
 consensus encoding), the oldest evicted first, and a block that has waited
 longer than `PENDING_BLOCK_TTL` (10 minutes) is dropped on the next arrival. A
-block naming a parent that never arrives costs one share of proof of work
-(the admission gate checks its coinbase proof), and the mini chain's shares
-are cheap, so without the bounds a peer could grow the buffer without limit.
+block naming a known parent whose body never arrives costs one share of proof
+of work (the admission gate checks its coinbase proof), and the mini chain's
+shares are cheap, so without the bounds a peer could grow the buffer without
+limit.
 The bound is global, not per peer: peer identities are free. An honest block
 that is evicted or expires while still on the candidate chain is fetched again
 by the block fetcher's missing-data scan. Upstream's design diagram
@@ -314,12 +325,32 @@ witness root bound, it follows from the header. See
 - Spawns EmissionWorker with `organise_tx`
 - Handles `SwarmSend::Broadcast` to send shares to all peers
 
+### FoundBlockVerifier (`node/found_block_verifier.rs`)
+- Runs as a supervised worker on Bitcoin Cash, independently of validation
+  and organisation, so BCHN latency cannot delay share confirmation.
+- Confirmation records shares and uncles meeting their own claimed BCH
+  targets as unverified candidates. This does not prove BCHN acceptance.
+- Periodically asks BCHN for the block hash at each candidate's height.
+  Matching hashes are recorded in `AcceptedFoundBlocks` by StoreWriter;
+  failures or different hashes leave the candidate available for retry,
+  until BCHN's block at that height is final (10 blocks deep, BCHN's
+  `-maxreorgdepth`); then the candidate is not checked again until a
+  restart.
+- The local submission path also records positive `submitblock` verdicts
+  (`accepted` or a valid `duplicate`). Inconclusive verdicts do not count.
+- A newly persisted acceptance resets runtime effort once. The verifier
+  excludes historical candidates and candidates observed while syncing
+  from effort resets. Neither acceptance nor a missing verdict changes
+  share validity or payout eligibility.
+
 ### StoreWriter (`store/writer/mod.rs`)
 - Runs on dedicated OS thread via `tokio::task::spawn_blocking`
 - Receives `WriteCommand` variants via `std::sync::mpsc` (unbounded)
 - Processes commands sequentially with `WriteBatch` for atomicity
 - `WriteCommand::OrganiseHeader` calls `Store::organise_header()` with a single batch for atomic candidate chain updates
 - `WriteCommand::OrganiseBlock` calls `Store::organise_block()` with a single batch for atomic confirmed chain promotion
+- `WriteCommand::RecordAcceptedFoundBlock` serializes acceptance writes and
+  reports whether a block is newly recorded, preventing duplicate resets.
 
 ### ChainStoreHandle (`shares/chain/chain_store_handle.rs`)
 - Wraps `StoreHandle` with chain-level logic (height calculation, chain work)
@@ -333,21 +364,45 @@ witness root bound, it follows from the header. See
 | emissions_rx | tokio mpsc | 1000 | Stratum server -> EmissionWorker (P2Poolv2 mode) |
 | pplns_shares_rx | tokio mpsc | 1000 | Stratum server -> PplnsShareWorker (Hydrapool mode) |
 | validation_tx/rx | tokio mpsc | 8192 | Share handlers -> ValidationWorker |
-| organise_tx/rx | tokio mpsc | 512 | ValidationWorker/EmissionWorker -> OrganiseWorker |
+| organise_tx/rx | tokio mpsc with a byte budget | 512 events, 64 MiB | ValidationWorker/EmissionWorker -> OrganiseWorker |
 | swarm_tx/rx | tokio mpsc | 100 | ValidationWorker/EmissionWorker -> NodeActor |
 | block_fetcher_tx/rx | tokio mpsc | 8192 | Share handlers -> BlockFetcher |
 | write_tx/rx | std::sync mpsc | unbounded | StoreHandle -> StoreWriter (serialized writes) |
 
 The organise channel and the organise worker's `pending_blocks` buffer both
-hold whole `ShareBlock`s, each bounded at `BLOCK_TXS_SIZE_LIMIT` (200 KB, the
-share transactions and the bitcoin coinbase together) by `handle_share_block`, so their capacities set the worst-case memory of the
-organise path -- 512 + 1024 entries, rather than the 8192 + 16384 they held
-before, which allowed several GB of bodies in flight. The channel is pure
-backpressure between the parallel validation tasks and the serial organise
-worker, so a deeper queue buys no throughput and only widens the zone-tiering
-window. `PENDING_BLOCKS_CAPACITY` is sized at twice the channel because a child
-can sit a full channel ahead of its parent, and overflow there drops a block
-that is already stored and will not be re-fetched.
+hold whole `ShareBlock`s, each bounded by `handle_share_block` at
+`BLOCK_TXS_SIZE_LIMIT` (200 KB, the share transactions and the bitcoin
+coinbase together) on Bitcoin and at `BCH_SHARE_BODY_SIZE_LIMIT` (a
+1,000,000-byte coinbase plus 200 KiB of share transactions) on Bitcoin Cash.
+Both are bounded by count and by bytes, the bytes counted by each block's
+consensus encoding (`ShareBlock::encoded_size`):
+
+| | Count | Bytes | Past a bound |
+|---|---|---|---|
+| Organise channel | 512 events (`ORGANISE_CHANNEL_CAPACITY`) | 64 MiB (`ORGANISE_CHANNEL_BYTES`) | the validation task waits (backpressure) |
+| `pending_blocks` | 1,024 blocks (`PENDING_BLOCKS_CAPACITY`) | 128 MiB (`PENDING_BLOCKS_BYTES`) | the oldest blocks are evicted |
+
+By count alone, full of the largest Bitcoin Cash shares, they would hold
+about 620 MB and 1.2 GB; with the byte bounds the organise path holds at
+most 192 MiB of bodies. Honest shares are far smaller (about 35 KB at 1,000
+payees), so they meet the count bounds first. The counts were already cut
+from 8192 + 16384, which allowed several GB of bodies in flight.
+
+The channel is pure backpressure between the parallel validation tasks and
+the serial organise worker, so a deeper queue buys no throughput and only
+widens the zone-tiering window. A sender takes as many permits of a
+semaphore as its block has bytes before queuing it and hands them back when
+the worker receives it (`organise_worker/channel.rs`); a block larger than
+the whole budget takes all of it and passes once the queue is empty.
+`InvalidBlock` events carry a hash and take no bytes.
+
+`PENDING_BLOCKS_CAPACITY` and `PENDING_BLOCKS_BYTES` are twice the channel's
+because a child can sit a full channel ahead of its parent. Past either
+bound the oldest arrivals are evicted (`organise_worker/pending_buffer.rs`),
+so blocks stuck behind a parent that never validates cannot pin the buffer.
+An evicted block is already stored with its body; it is not fetched again
+but stays `HeaderValid`, so the worker re-validates it as a stranded parent
+when a descendant arrives (`redrive_stranded_parent`), or at the next start.
 
 ## BlockHeight Column Family Key Schema
 
@@ -587,6 +642,16 @@ shares not yet mature for the paying share (`COINBASE_MATURITY`, with the first
 Both counts are fixed share counts with no node-local setting and no bitcoin
 difficulty in them. Every node must pay the same window, so they are network
 constants rather than config.
+
+On Bitcoin Cash the window instead holds `BCH_PPLNS_WINDOW_BLOCKS` blocks'
+worth of work, sized from the nBits Bitcoin Cash requires after the share's
+BCH prev (`bitcoin_header.prev_blockhash`), and pays only the work on that
+prev's chain or one block off it (`sharechain_pplns/bch_eligibility.rs`,
+`mine-on-bitcoin-chain.md`). The notifier passes its template's bits and
+previous block (`PayingBlock`), the validator the share header's. A window
+that places work on a BCH block the node does not know yet is `Recoverable`
+(`UnknownBchPrev`); one that pays no one makes the share `Invalid`
+(`NothingEligible`).
 
 The window is anchored on the share's declared `prev_share_blockhash`, not the
 live confirmed tip, via `PplnsWindow::get_distribution_from_start_hash`. The

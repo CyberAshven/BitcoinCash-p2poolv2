@@ -80,6 +80,7 @@
 //! address.
 
 pub mod bch_share;
+pub mod payout_address;
 pub mod share_owner;
 pub mod witness_program_codec;
 

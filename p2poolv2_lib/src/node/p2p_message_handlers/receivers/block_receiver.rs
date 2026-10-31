@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::validation_worker::{ValidationEvent, ValidationSender};
 #[cfg(test)]
@@ -15,7 +16,6 @@ use crate::store::block_tx_metadata::Status;
 use crate::store::prune_blocks::prune_height_for_tip;
 use crate::store::writer::StoreError;
 use bitcoin::BlockHash;
-use bitcoin::consensus::Encodable;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::error::Error;
 use std::sync::Arc;
@@ -33,9 +33,13 @@ const BLOCK_RECEIVER_CHANNEL_CAPACITY: usize = 8192;
 pub const MAX_PENDING_BLOCKS: usize = 1_024;
 
 /// Most bytes, by consensus encoding, the pending buffer holds before it
-/// evicts the oldest: 32 MiB, at least 160 blocks of the largest size the
-/// admission gate lets through (`BLOCK_TXS_SIZE_LIMIT`, 200 KiB, plus header
-/// and merkle branches).
+/// evicts the oldest: 32 MiB, at least 160 blocks of the largest Bitcoin
+/// share (`BLOCK_TXS_SIZE_LIMIT`, 200 KiB, plus header and merkle branches)
+/// and at least 26 of the largest Bitcoin Cash share
+/// (`BCH_SHARE_BODY_SIZE_LIMIT`, a 1,000,000-byte coinbase and 200 KiB of
+/// share transactions), more than one peer's 16 requests in flight. Honest
+/// Bitcoin Cash shares are far smaller (about 35 KB at 1,000 payees), and a
+/// block evicted early is fetched again.
 pub const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 
 /// How long a block may wait in the pending buffer for its ancestry. An
@@ -109,10 +113,12 @@ struct PendingBlock {
 ///
 /// The buffer is bounded (`PendingLimits`): at most `max_blocks` blocks and
 /// `max_bytes` bytes, the oldest evicted first, and a block older than
-/// `max_age` is dropped on the next event. A block naming a parent that never
-/// arrives costs a share's proof of work (the admission gate checks the
-/// coinbase proof), but the mini chain's share difficulty is low, so without
-/// the bounds a peer could grow the buffer without limit. The bound is global
+/// `max_age` is dropped on the next event. Only a block whose parent and
+/// uncles the node knows, by header or in the buffer, is buffered; any
+/// other is dropped. A block naming a known parent whose body never arrives
+/// costs a share's proof of work (the admission gate checks the coinbase
+/// proof), but the mini chain's share difficulty is low, so without the
+/// bounds a peer could grow the buffer without limit. The bound is global
 /// rather than per peer: peer identities are free, so a per-peer quota bounds
 /// one connection, not an attacker.
 pub struct BlockReceiver {
@@ -139,15 +145,26 @@ pub struct BlockReceiver {
     /// Prune height from the last successful candidate tip read, used when
     /// the tip cannot be read.
     last_prune_height: u32,
+    /// The chain's depths, which size the prune height.
+    depths: ChainDepths,
 }
 
 /// Size of a share block as the pending buffer counts it: its consensus
-/// encoding, measured without allocating. Encoding into a sink cannot fail;
-/// if it ever did, the block is counted as too large to buffer.
+/// encoding (`ShareBlock::encoded_size`).
 fn buffered_size(share_block: &ShareBlock) -> usize {
-    share_block
-        .consensus_encode(&mut bitcoin::io::sink())
-        .unwrap_or(usize::MAX)
+    share_block.encoded_size()
+}
+
+/// The ancestors a block names: its parent, unless it is the genesis
+/// share, and its uncles.
+fn named_ancestors(share_block: &ShareBlock) -> Vec<BlockHash> {
+    let header = &share_block.header;
+    let mut ancestors = Vec::with_capacity(1 + header.uncles.len());
+    if !is_terminal_blockhash(&header.prev_share_blockhash) {
+        ancestors.push(header.prev_share_blockhash);
+    }
+    ancestors.extend_from_slice(&header.uncles);
+    ancestors
 }
 
 impl BlockReceiver {
@@ -172,7 +189,15 @@ impl BlockReceiver {
             block_fetcher_handle,
             validation_tx,
             last_prune_height: 0,
+            depths: ChainDepths::BITCOIN,
         }
+    }
+
+    /// Size the prune height by `depths` (`ChainDepths::for_chain`);
+    /// Bitcoin's until set.
+    pub fn with_depths(mut self, depths: ChainDepths) -> Self {
+        self.depths = depths;
+        self
     }
 
     /// Use other bounds on the pending buffer than `PendingLimits::default`.
@@ -320,7 +345,7 @@ impl BlockReceiver {
     fn current_prune_height(&mut self) -> u32 {
         match self.chain_store_handle.get_candidate_tip_height() {
             Ok(Some(tip_height)) => {
-                self.last_prune_height = prune_height_for_tip(tip_height);
+                self.last_prune_height = prune_height_for_tip(self.depths, tip_height);
                 self.last_prune_height
             }
             Ok(None) => 0,
@@ -341,16 +366,11 @@ impl BlockReceiver {
     /// Blocks below `prune_height` are exempt because their bodies are never
     /// fetched; requiring one would stall the chain at the prune boundary.
     ///
-    /// An ancestor with no metadata has simply not arrived: the store reports
-    /// that as an error and the block is buffered rather than dropped.
+    /// An ancestor with no metadata has not arrived: the store reports that
+    /// as an error, read here as not ready. `ancestors_known` then decides
+    /// whether the block is buffered or dropped.
     fn ancestry_ready(&self, share_block: &ShareBlock, prune_height: u32) -> bool {
-        let header = &share_block.header;
-        let mut ancestors = Vec::with_capacity(1 + header.uncles.len());
-        if !is_terminal_blockhash(&header.prev_share_blockhash) {
-            ancestors.push(header.prev_share_blockhash);
-        }
-        ancestors.extend_from_slice(&header.uncles);
-
+        let ancestors = named_ancestors(share_block);
         match self
             .chain_store_handle
             .all_block_and_uncle_data_available(&ancestors, prune_height)
@@ -364,6 +384,25 @@ impl BlockReceiver {
                 false
             }
         }
+    }
+
+    /// Whether the node knows every ancestor the block names: each has a
+    /// header in the store or waits in `pending` itself.
+    ///
+    /// A block naming any other ancestor is dropped, not buffered: it may
+    /// name a parent that does not exist, and buffering it would let cheap
+    /// shares crowd honest blocks out of the bounded buffer. The node asks
+    /// the sender for headers when a share names an ancestor it lacks
+    /// (`request_headers_for_missing_blocks`), so an honest share comes back
+    /// through header sync and the block fetcher.
+    fn ancestors_known(&self, share_block: &ShareBlock) -> bool {
+        let mut ancestors = named_ancestors(share_block);
+        ancestors.retain(|hash| !self.pending.contains_key(hash));
+        ancestors.is_empty()
+            || self
+                .chain_store_handle
+                .get_missing_blockhashes(&ancestors)
+                .is_empty()
     }
 
     /// ASERT difficulty check against the parent as stored.
@@ -387,13 +426,50 @@ impl BlockReceiver {
     }
 
     /// The header checks a block passes before it is stored and organised:
-    /// ASERT difficulty, then the timestamp rules. A failure drops the block.
+    /// ASERT difficulty, the timestamp rules, then the uncle rules. A failure
+    /// drops the block. Storing organises the header, which credits its
+    /// uncles' work to chain work, so uncles are checked here rather than
+    /// only during full validation.
+    ///
+    /// On Bitcoin Cash the block's BCH prev must be known too (mining on the
+    /// current chain): a body is stored only once every node storing it can
+    /// place its work on the BCH chain. An unknown prev drops the body with
+    /// no verdict; a copy carrying the header, or a later fetch, brings it
+    /// back. Share headers never wait on it, so every node holds the same
+    /// share header chain.
     fn validate_header_before_storing(
         &self,
         share_block: &ShareBlock,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.validate_asert(share_block)?;
-        self.validate_timestamp(share_block)
+        self.validate_timestamp(share_block)?;
+        self.share_validator
+            .validate_uncles(&share_block.header, &self.chain_store_handle)?;
+        self.validate_bch_prev_known(share_block)
+    }
+
+    /// The BCH prev of a Bitcoin Cash share block is a known header. The
+    /// all-zero hash names no block and is never known, so a share on it is
+    /// dropped too; only the chain's first share, which is built locally and
+    /// never received, builds on it.
+    fn validate_bch_prev_known(
+        &self,
+        share_block: &ShareBlock,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if self.share_validator.bch_header_rules().is_none() {
+            return Ok(());
+        }
+        let prev = share_block.header.bitcoin_header.prev_blockhash;
+        if prev != <BlockHash as bitcoin::hashes::Hash>::all_zeros()
+            && self.chain_store_handle.get_bch_header(&prev)?.is_some()
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "Bitcoin Cash block {prev} that share {} builds on is not known yet",
+            share_block.block_hash()
+        )
+        .into())
     }
 
     /// Timestamp rules against the stored ancestry, as header sync applies
@@ -466,8 +542,10 @@ impl BlockReceiver {
     /// Otherwise, if the block's direct parent and all uncles are at
     /// HeaderValid+, validate ASERT, persist, then drive any
     /// descendants buffered in pending. If the parent or uncles are
-    /// not yet ready, buffer in pending. The headers-first pipeline
-    /// will supply ancestors via header sync and block fetch.
+    /// not yet ready, buffer in pending, unless one of them is unknown
+    /// even as a header (`ancestors_known`): then drop the block. The
+    /// headers-first pipeline will supply ancestors via header sync and
+    /// block fetch.
     async fn process_share_block(
         &mut self,
         share_block: ShareBlock,
@@ -521,6 +599,12 @@ impl BlockReceiver {
             return Ok(());
         }
         if !self.ancestry_ready(&share_block, prune_height) {
+            if !self.ancestors_known(&share_block) {
+                debug!(
+                    "Dropping block {block_hash}: it names a parent or uncle with no known header"
+                );
+                return Ok(());
+            }
             debug!("Block {block_hash} has unready ancestors, buffering");
             self.add_to_pending(block_hash, share_block, now);
             return Ok(());

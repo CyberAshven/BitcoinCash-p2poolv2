@@ -102,7 +102,7 @@ mainnet has not started.
 | **Permissionless mining.** Anyone joins without permission. | Met. |
 | **Trustless joins.** A new node follows the most-work valid chain, trusting no one. | Met. Headers sync from genesis with full difficulty checks. |
 | **Sovereign templates.** Every node builds its own templates. | Met. The node's own BCHN, or a Stratum V2 Template Provider; miners can declare their own jobs (Job Declaration, both modes). |
-| **Mining on the current chain.** A coinbase pays only work on the BCH chain its block extends, give or take one block. | **Not met.** Designed upstream (`architecture/mine-on-bitcoin-chain.md`) but not built. On BCH it needs a header store and a header validator for aserti3-2d and chipnet's 20-minute rule. Planned before mainnet. |
+| **Mining on the current chain.** A coinbase pays only work on the BCH chain its block extends, give or take one block. | **Built, not yet run on chipnet.** Upstream's design (`architecture/mine-on-bitcoin-chain.md`), built on 2026-10-30: a header store fed by BCHN, an aserti3-2d header check with chipnet's 20-minute rule, carried headers, and the payout rule. A flag day (`bch-prev-1off`). |
 | **Precise hashrate reporting.** Miners see their hashrate from Stratum shares. | Met. The dashboard, `/miner` and Prometheus metrics. |
 
 ### Payouts
@@ -112,7 +112,7 @@ mainnet has not started.
 | **Unilateral exits.** Nobody holds payouts or must sign before miners own them. | Met. Payouts are coinbase outputs to miners' own CashAddr scripts, spendable after 100 blocks. |
 | **Payout commitment at template time.** The work commits to the payouts. | Met. The job's coinbase is the payout; the share commits to it. |
 | **Deterministic, verifiable payouts.** Payouts follow from the share chain and every node checks them. | Met. Validators rebuild each share's coinbase: window, donation, fee and payout rights to traded shares. |
-| **Scalability.** Thousands of miners without hitting coinbase size limits. | **At risk.** Bitcoin Cash blocks have room (ABLA), but every miner in the window gets an output, and stock ASIC firmware is reported to cap the coinbase at about a dozen outputs. Not yet measured on BCH hardware; a coinbase byte budget, or a covenant payout tree in one output (which BCH's introspection opcodes allow today), is the fix being considered. |
+| **Scalability.** Thousands of miners without hitting coinbase size limits. | Met with limits. Bitcoin Cash blocks have room (ABLA). A coinbase pays every miner directly up to Bitcoin Cash's 1,000,000-byte transaction limit, about 29,400 P2PKH payees; a share that merge-mines tokens keeps its coinbase within 3,072 bytes, and payees past a share's limit are paid through a covenant payout tree (plan decision 14). Not yet run at that scale. An SV2 extended channel takes a coinbase of about 1,900 P2PKH payouts at most, and upstream's report that stock ASIC firmware takes only about a dozen outputs is not yet measured on BCH hardware; Stratum V2 standard channels hash headers only. See [Pool size limits](sharechain/pool-size.md). |
 | **Small miner support.** Small miners can spend their earnings without third parties. | Met with limits. The mini share chain and the work-sized window keep payouts above dust (see [small-miners.md](small-miners.md)); shares can be sold for BCH through a hash time locked contract ([atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md)). |
 
 ### Bitcoin Cash additions
@@ -123,7 +123,7 @@ far").
 | Requirement | Status |
 |---|---|
 | Mainnet and chipnet run the same rules; only the network switch differs. | Met. |
-| Fixed 1.5% donation by default, operator fee optional, 10% cap on both together, enforced by the share chain. | Met. |
+| Fixed 1% donation by default, operator fee optional (1% when only its address is set), a 10% cap on each (no combined cap, since 2026-10-24), enforced by the share chain. | Met. |
 | CashAddr payouts, P2PKH share owners, canonical transaction order. | Met. |
 | Stratum V2 first, with Noise encryption, both Job Declaration modes and Template Distribution. | Met; interoperability with independent clients is still being tested. |
 | All code Rust. | Met. |

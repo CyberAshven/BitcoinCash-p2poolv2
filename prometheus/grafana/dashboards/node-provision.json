@@ -224,7 +224,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "count((sum by (btcaddress) (rate(worker_shares_valid_total[5m])) > 0))",
+          "expr": "count((sum by (payout_address) (rate(worker_shares_valid_total[5m])) > 0))",
           "instant": false,
           "legendFormat": "Users",
           "range": true,
@@ -318,7 +318,7 @@
         {
           "editorMode": "code",
           "exemplar": false,
-          "expr": "count((sum by (btcaddress, workername) (rate(worker_shares_valid_total[5m])) > 0))",
+          "expr": "count((sum by (payout_address, workername) (rate(worker_shares_valid_total[5m])) > 0))",
           "instant": false,
           "legendFormat": "Workers",
           "range": true,
@@ -522,7 +522,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (btcshort) (\n  label_replace(\n    worker_shares_valid_total,\n    \"btcshort\", \"$1...$2\", \"btcaddress\", \"^(....).*(........)$\"\n  )\n)",
+          "expr": "sum by (short_address) (\n  label_replace(\n    worker_shares_valid_total,\n    \"short_address\", \"$1...$2\", \"payout_address\", \"^(....).*(........)$\"\n  )\n)",
           "instant": false,
           "legendFormat": "__auto",
           "range": true,

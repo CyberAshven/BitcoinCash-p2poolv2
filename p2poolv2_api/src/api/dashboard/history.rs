@@ -419,7 +419,8 @@ mod tests {
             height: 1,
             miner_bitcoin_address: bitcoin::Address::from_str(CONNECTED_PAYOUT)
                 .expect("valid address")
-                .assume_checked(),
+                .assume_checked()
+                .into(),
             miner_address: ShareOwner::CashP2pkh([0x11; 20]),
             timestamp: time,
             bits: difficulty_one(),

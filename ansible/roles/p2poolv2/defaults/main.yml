@@ -11,12 +11,32 @@ p2poolv2_version: "0.0.1-alpha"
 p2poolv2_force_install: false
 p2poolv2_instance: "chipnet"
 
+# How to get the p2poolv2 binaries:
+#   release -- install the GitHub release for p2poolv2_version
+#   source  -- build p2poolv2_source_ref on the host
+p2poolv2_install_method: "release"
+
 # GitHub release URL base
 # The installer script auto-detects architecture.
 p2poolv2_release_url: "https://github.com/CyberAshven/BitcoinCash-p2poolv2/releases/download/v{{ p2poolv2_version }}"
 
+# --- Source build (p2poolv2_install_method: source) ---
+# Branch, tag or commit to build. The build reruns whenever it resolves
+# to a different commit than the one last installed.
+p2poolv2_source_repo: "https://github.com/CyberAshven/BitcoinCash-p2poolv2.git"
+p2poolv2_source_ref: "alpha"
+# Dedicated unprivileged user that owns the rust toolchain and checkout
+p2poolv2_build_user: "p2poolv2-build"
+p2poolv2_build_home: "/var/lib/p2poolv2-build"
+# Records the commit of the installed source build
+p2poolv2_source_stamp: "{{ p2poolv2_bin_dir }}/.source-commit"
+
 # Installation paths
 p2poolv2_bin_dir: "/opt/p2poolv2/bin"
+# This fork's node serves its dashboard itself, so no dashboard files are
+# installed. Set true only for a build that reads P2POOL_STATIC_DIR.
+p2poolv2_install_dashboard_files: false
+p2poolv2_static_dir: "/opt/p2poolv2/share/static"
 p2poolv2_config_dir: "/etc/p2poolv2"
 
 # System user
@@ -75,15 +95,18 @@ p2poolv2_bootstrap_address: ""
 # Payout address for solo mining, a CashAddr. Leave unset otherwise.
 # p2poolv2_solo_address: ""
 
-# Every Bitcoin Cash node donates 150 basis points (1.5%) of each block it
-# finds to the project address unless donation is set; 0 opts out. Setting
-# donation_address is optional, and it must be the project address.
-# p2poolv2_donation: 150
+# Every Bitcoin Cash node donates 100 basis points (1%) of each block it
+# finds to the project address unless donation is set; 0 opts out. A
+# miner's login may choose its own with donation=<percent>, which this
+# setting never overrides. Setting donation_address is optional, and it must
+# be the project address.
+# p2poolv2_donation: 100
 # p2poolv2_donation_address: "bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k"
-# A public pool's own cut, in basis points, taken after the donation. Donation
-# plus fee may not exceed 1000 (10%): peers reject shares above that.
+# A public pool's own cut, in basis points, taken after the donation: 100
+# (1%) when fee_address is set and fee is not. The donation and the fee may
+# each be at most 1000 (10%): peers reject shares above that.
 # p2poolv2_fee_address: ""
-# p2poolv2_fee: 0
+# p2poolv2_fee: 100
 
 # ZMQ always binds to localhost -- never expose to the network
 p2poolv2_zmq_endpoint: "tcp://127.0.0.1:28332"
@@ -118,17 +141,20 @@ p2poolv2_bitcoin_rpc_user: ""
 p2poolv2_bitcoin_rpc_pass: ""
 
 # --- Logging config ---
-p2poolv2_log_file: "/var/log/p2poolv2/{{ p2poolv2_instance }}/p2poolv2.log"
+# Logs go to the console, which systemd sends to journald. Set a file path
+# to also write daily-rotated files; p2poolv2 never deletes old ones.
+p2poolv2_log_file: ""
 p2poolv2_log_level: "info"
-p2poolv2_log_console: false
+p2poolv2_log_console: true
 p2poolv2_stats_dir: "/var/lib/p2poolv2/{{ p2poolv2_instance }}/stats"
 
 # --- API config ---
 # Bind to localhost only -- nginx proxies public access
 p2poolv2_api_hostname: "127.0.0.1"
 p2poolv2_api_port: 46884
-# p2poolv2_api_auth_user: ""
-# p2poolv2_api_auth_token: ""
+# Empty disables API authentication
+p2poolv2_api_auth_user: ""
+p2poolv2_api_auth_token: ""
 p2poolv2_api_cors_allowed: false
 # Open the dashboard, the web_root frontend and the read-only share chain
 # routes (including GET /peers and a tokenless /ws connection) to anyone

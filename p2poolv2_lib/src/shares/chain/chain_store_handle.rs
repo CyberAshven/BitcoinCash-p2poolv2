@@ -11,16 +11,18 @@
 use crate::accounting::payout::sharechain_pplns::pplns_window::PRUNE_INTERVAL;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::pool_difficulty::AsertParent;
+use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{
     ShareBlock, ShareHeader, ShareTransaction, is_terminal_blockhash,
 };
 use crate::store::block_tx_metadata::{BlockMetadata, Status};
 use crate::store::dag_store::{BlockValidSearch, ShareDag, UncleInfo};
 use crate::store::found_block::FoundBlock;
+use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::{PruneStats, get_range_to_prune};
 use crate::store::transaction_store::PrevoutCheck;
 use crate::store::writer::{StoreError, StoreHandle};
-use bitcoin::{BlockHash, TxMerkleNode, Work};
+use bitcoin::{BlockHash, TxMerkleNode, Txid, Work};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
@@ -410,9 +412,114 @@ impl ChainStoreHandle {
         self.store_handle.get_total_work()
     }
 
-    /// Get every bitcoin block found by the pool, ordered by bitcoin height.
+    /// Get BCHN-accepted pool blocks, ordered by Bitcoin Cash height.
     pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
         self.store_handle.get_found_blocks()
+    }
+
+    /// Get claimed block candidates still awaiting BCHN verification.
+    pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
+        self.store_handle.get_candidate_found_blocks()
+    }
+
+    /// The known Bitcoin Cash header with hash `block_hash`, if any.
+    pub fn get_bch_header(
+        &self,
+        block_hash: &BlockHash,
+    ) -> Result<Option<KnownBchHeader>, StoreError> {
+        self.store_handle.get_bch_header(block_hash)
+    }
+
+    /// Add Bitcoin Cash headers this node now knows.
+    pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError> {
+        self.store_handle.add_bch_headers(headers).await
+    }
+
+    /// The hash at `height` on the node's BCHN best chain, as last indexed.
+    pub fn get_bch_best_hash(&self, height: u32) -> Result<Option<BlockHash>, StoreError> {
+        self.store_handle.get_bch_best_hash(height)
+    }
+
+    /// The Bitcoin Cash headers a message carrying `shares` attaches, so a
+    /// receiver can place each share's BCH prev
+    /// (`shares::bch_carried_headers`). Empty on a Bitcoin node, whose store
+    /// knows no BCH header.
+    pub fn carried_bch_headers(&self, shares: &[ShareHeader]) -> Vec<bitcoin::block::Header> {
+        let header = |hash: &BlockHash| self.get_bch_header(hash).ok().flatten();
+        let best = |height: u32| self.get_bch_best_hash(height).ok().flatten();
+        let paths = shares.iter().map(|share| {
+            let parent_prev = self
+                .get_share_header(&share.prev_share_blockhash)
+                .ok()
+                .map(|parent| parent.bitcoin_header.prev_blockhash);
+            crate::shares::bch_carried_headers::required_path(
+                share.bitcoin_header.prev_blockhash,
+                parent_prev,
+                header,
+                best,
+            )
+        });
+        crate::shares::bch_carried_headers::merge_for_message(paths)
+    }
+
+    /// Point heights of the BCH best-chain index at new blocks and set its tip.
+    pub async fn set_bch_best_chain(
+        &self,
+        updates: Vec<(u32, BlockHash)>,
+        tip_height: u32,
+    ) -> Result<(), StoreError> {
+        self.store_handle
+            .set_bch_best_chain(updates, tip_height)
+            .await
+    }
+
+    /// Record a block after verifying BCHN acceptance, returning whether new.
+    /// The caller must verify a successful BCHN submission or membership in
+    /// BCHN's chain before invoking this method.
+    pub async fn record_accepted_found_block(
+        &self,
+        found_block: FoundBlock,
+    ) -> Result<bool, StoreError> {
+        self.store_handle
+            .record_accepted_found_block(found_block)
+            .await
+    }
+
+    /// Get every kept Bitcoin Cash payout tree, ordered by coinbase txid.
+    pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError> {
+        self.store_handle.get_payout_trees()
+    }
+
+    /// Get the payout tree of a coinbase, if kept.
+    pub fn get_payout_tree(
+        &self,
+        coinbase_txid: &Txid,
+    ) -> Result<Option<StoredPayoutTree>, StoreError> {
+        self.store_handle.get_payout_tree(coinbase_txid)
+    }
+
+    /// Keep a found block's payout tree.
+    pub async fn put_payout_tree(&self, tree: StoredPayoutTree) -> Result<(), StoreError> {
+        self.store_handle.put_payout_tree(tree).await
+    }
+
+    /// Count a new tip at which BCHN does not know a kept payout tree's
+    /// block, removing it at the unknown-tip limit. Return whether removed.
+    pub async fn record_unknown_payout_tree_tip(
+        &self,
+        coinbase_txid: Txid,
+        bitcoin_tip: BlockHash,
+    ) -> Result<bool, StoreError> {
+        self.store_handle
+            .record_unknown_payout_tree_tip(coinbase_txid, bitcoin_tip)
+            .await
+    }
+
+    /// Mark a kept payout tree executed.
+    pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError> {
+        self.store_handle
+            .mark_payout_tree_executed(coinbase_txid)
+            .await
     }
 
     /// Get the confirmed blockhash at the height
@@ -1030,6 +1137,15 @@ mockall::mock! {
         pub fn get_share_headers(&self, share_hashes: &[BlockHash]) -> Result<Vec<(BlockHash, ShareHeader)>, StoreError>;
         pub fn get_share_header(&self, share_hash: &BlockHash) -> Result<ShareHeader, StoreError>;
         pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
+        pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
+        pub fn get_bch_header(&self, block_hash: &BlockHash) -> Result<Option<KnownBchHeader>, StoreError>;
+        pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError>;
+        pub fn get_bch_best_hash(&self, height: u32) -> Result<Option<BlockHash>, StoreError>;
+        pub fn carried_bch_headers(&self, shares: &[ShareHeader]) -> Vec<bitcoin::block::Header>;
+        pub async fn set_bch_best_chain(&self, updates: Vec<(u32, BlockHash)>, tip_height: u32) -> Result<(), StoreError>;
+        pub async fn record_accepted_found_block(&self, found_block: FoundBlock) -> Result<bool, StoreError>;
+        pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError>;
+        pub fn get_payout_tree(&self, coinbase_txid: &Txid) -> Result<Option<StoredPayoutTree>, StoreError>;
         pub fn get_headers_for_locator(&self, block_hashes: &[BlockHash], stop_block_hash: &BlockHash, limit: usize) -> Result<Vec<ShareHeader>, StoreError>;
         pub fn get_blockhashes_for_locator(&self, locator: &[BlockHash], stop_block_hash: &BlockHash, max_blockhashes: usize) -> Result<Vec<BlockHash>, StoreError>;
         pub fn get_tip_height(&self) -> Result<Option<u32>, StoreError>;
@@ -1074,6 +1190,9 @@ mockall::mock! {
         pub async fn add_share_block(&self, share: ShareBlock) -> Result<(), StoreError>;
         pub async fn add_share_block_and_organise_header(&self, share: ShareBlock) -> Result<Option<u32>, StoreError>;
         pub async fn add_pplns_share(&self, pplns_share: SimplePplnsShare) -> Result<(), StoreError>;
+        pub async fn put_payout_tree(&self, tree: StoredPayoutTree) -> Result<(), StoreError>;
+        pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError>;
+        pub async fn record_unknown_payout_tree_tip(&self, coinbase_txid: Txid, bitcoin_tip: BlockHash) -> Result<bool, StoreError>;
         pub async fn add_user(&self, btcaddress: String) -> Result<u64, StoreError>;
     }
 

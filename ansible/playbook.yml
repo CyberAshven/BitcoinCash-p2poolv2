@@ -14,6 +14,9 @@
 #   ansible-playbook -i inventory/hosts.yml playbook.yml --tags nginx
 #   ansible-playbook -i inventory/hosts.yml playbook.yml --tags monitoring
 #
+# Tags reach the roles' tasks through include_role `apply`; tags on the
+# include task alone would only select the include, not its tasks.
+#
 # Optional instance keys map to role variables with an empty default; the
 # config template leaves an empty value out. (`default(omit)` does not work
 # here: omit only applies to module arguments, so in role vars it would
@@ -27,6 +30,8 @@
     - name: Deploy p2poolv2 instance
       ansible.builtin.include_role:
         name: p2poolv2
+        apply:
+          tags: [p2poolv2]
       vars:
         p2poolv2_instance: "{{ instance.instance }}"
         p2poolv2_p2p_listen_address: "{{ instance.p2p_listen_address }}"
@@ -62,6 +67,7 @@
         p2poolv2_max_established_per_peer: "{{ instance.max_established_per_peer | default(2) }}"
         p2poolv2_external_address: "{{ instance.external_address | default('') }}"
         p2poolv2_wait_for_chain_sync: "{{ instance.wait_for_chain_sync | default(true) }}"
+        p2poolv2_stats_dir: "{{ instance.stats_dir | default('/var/lib/p2poolv2/' ~ instance.instance ~ '/stats') }}"
         p2poolv2_sv2_port: "{{ instance.sv2_port | default('') }}"
         p2poolv2_sv2_authority_public_key: "{{ instance.sv2_authority_public_key | default('') }}"
         p2poolv2_sv2_authority_secret_key: "{{ instance.sv2_authority_secret_key | default('') }}"
@@ -79,10 +85,15 @@
     - name: Deploy nginx
       ansible.builtin.include_role:
         name: nginx_p2poolv2
+        apply:
+          tags: [nginx]
+      when: p2poolv2_nginx_enabled | default(true)
       tags: [nginx]
 
     - name: Deploy Prometheus and Grafana
       ansible.builtin.include_role:
         name: monitoring_p2poolv2
+        apply:
+          tags: [monitoring]
       when: p2poolv2_monitoring_enabled | default(true)
       tags: [monitoring]

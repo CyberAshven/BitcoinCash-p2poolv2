@@ -63,11 +63,7 @@ pub(crate) async fn prepare(
         .app_config
         .cash_network
         .ok_or_else(|| ApiError::BadRequest("BCH preparation requires a BCH share chain".into()))?;
-    let network = match cash_network {
-        bch_share::BchShareNetwork::Mainnet => BitcoinCashNetwork::Mainnet,
-        bch_share::BchShareNetwork::Chipnet => BitcoinCashNetwork::Chipnet,
-        bch_share::BchShareNetwork::Regtest => BitcoinCashNetwork::Regtest,
-    };
+    let network = BitcoinCashNetwork::from_share_network(cash_network);
     let invalid = |_| ApiError::BadRequest("invalid BCH identity or token".into());
     let payout = parse_payout_address(
         &request.payout,
@@ -109,8 +105,17 @@ pub(crate) async fn prepare(
         .pplns_window
         .as_ref()
         .ok_or_else(|| ApiError::ServiceUnavailable("verified PPLNS window unavailable".into()))?;
+    let previous_hash = request
+        .previous_hash
+        .parse()
+        .map_err(|_| ApiError::BadRequest("invalid previous block hash".into()))?;
     let weights = window
-        .preparation_weights(anchor, request.nbits, &state.chain_store_handle)
+        .preparation_weights(
+            anchor,
+            request.nbits,
+            previous_hash,
+            &state.chain_store_handle,
+        )
         .await?;
     let descriptor = BchCoinbase {
         prefix: hex::decode(&request.script_prefix)

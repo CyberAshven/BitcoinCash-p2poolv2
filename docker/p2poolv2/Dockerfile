@@ -24,19 +24,13 @@ RUN apt-get update && \
 RUN mkdir -p /p2poolv2
 WORKDIR /p2poolv2
 
-# Copies just the essential files to be able to fetch
+# Copy workspace manifests and crate entry points for dependency resolution.
 COPY --parents ./**/Cargo.toml .
 COPY --parents ./**/lib.rs .
 COPY --parents ./**/main.rs .
 COPY --parents ./**/benches/*.rs .
 COPY ./Cargo.lock .
 COPY ./rust-toolchain.toml .
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/usr/local/rustup \
-    --mount=type=cache,target=/p2poolv2/target \
-    cargo fetch --locked
 
 # Every workspace crate in the p2poolv2_node dependency graph.
 COPY --parents bitcoindrpc/ .
@@ -49,11 +43,13 @@ COPY --parents p2poolv2_node/ .
 
 ENV RUST_LOG=info
 
-# Build and install
+# Fetch and install together: exported layers do not preserve cache mounts,
+# so a cached fetch step alone cannot supply a fresh runner's offline build.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/usr/local/rustup \
     --mount=type=cache,target=/p2poolv2/target \
+    cargo fetch --locked && \
     cargo install --locked --offline --path ./p2poolv2_node
 
 # Must match the builder's Debian release. See the note above.

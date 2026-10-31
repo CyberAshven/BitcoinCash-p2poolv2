@@ -87,9 +87,15 @@ fn build_test_handler_parts(
 async fn test_dispatch_response_share_headers() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
 
     chain_store_handle.expect_clone().returning(|| {
         let mut cloned = ChainStoreHandle::default();
+        cloned
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
         cloned.expect_organise_header().returning(|_| Ok(None));
         cloned
             .expect_find_fork_point_height()
@@ -146,6 +152,9 @@ async fn test_dispatch_response_not_found() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
     chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
+    chain_store_handle
         .expect_clone()
         .returning(ChainStoreHandle::default);
 
@@ -166,6 +175,9 @@ async fn test_dispatch_response_not_found() {
 async fn test_dispatch_response_inventory() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     chain_store_handle
         .expect_clone()
         .returning(ChainStoreHandle::default);
@@ -194,6 +206,9 @@ async fn test_dispatch_response_unexpected_message() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
     chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
+    chain_store_handle
         .expect_clone()
         .returning(ChainStoreHandle::default);
 
@@ -213,6 +228,9 @@ async fn test_dispatch_response_unexpected_message() {
 async fn test_dispatch_response_enqueues_to_worker() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     chain_store_handle
         .expect_clone()
         .returning(ChainStoreHandle::default);
@@ -242,6 +260,9 @@ async fn test_dispatch_response_enqueues_to_worker() {
 async fn test_dispatch_response_drops_when_worker_full() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     chain_store_handle
         .expect_clone()
         .returning(ChainStoreHandle::default);
@@ -290,6 +311,9 @@ fn test_dispatch_response_is_synchronous() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
     chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
+    chain_store_handle
         .expect_clone()
         .returning(ChainStoreHandle::default);
     let (mut handler, _response_worker_rx) = build_test_handler_parts(
@@ -310,6 +334,9 @@ fn test_dispatch_response_is_synchronous() {
 async fn test_dispatch_request_disconnects_on_full_peer_channel() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     chain_store_handle
         .expect_clone()
         .returning(ChainStoreHandle::default);
@@ -357,6 +384,9 @@ async fn test_dispatch_request_disconnects_on_full_peer_channel() {
 async fn test_dispatch_request_calls_service() {
     let (swarm_tx, mut swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
 
     let block1 = TestShareBlockBuilder::new().build();
     let block2 = TestShareBlockBuilder::new().build();
@@ -366,6 +396,7 @@ async fn test_dispatch_request_calls_service() {
 
     chain_store_handle.expect_clone().returning(|| {
         let mut mock = ChainStoreHandle::default();
+        mock.expect_carried_bch_headers().returning(|_| Vec::new());
         let headers = vec![
             TestShareBlockBuilder::new().build().header,
             TestShareBlockBuilder::new().build().header,
@@ -405,8 +436,14 @@ async fn test_dispatch_request_calls_service() {
 async fn test_dispatch_request_creates_handle_on_the_fly() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     chain_store_handle.expect_clone().returning(|| {
         let mut cloned = ChainStoreHandle::default();
+        cloned
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
         cloned.expect_is_current().returning(|| true);
         cloned
             .expect_get_missing_blockhashes()
@@ -437,6 +474,9 @@ async fn test_dispatch_request_creates_handle_on_the_fly() {
 async fn test_dispatch_request_removes_stale_handle_on_closed() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     chain_store_handle
         .expect_clone()
         .returning(ChainStoreHandle::default);
@@ -474,8 +514,14 @@ async fn test_dispatch_request_removes_stale_handle_on_closed() {
 async fn test_dispatch_request_records_inventory_knowledge() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     chain_store_handle.expect_clone().returning(|| {
         let mut cloned = ChainStoreHandle::default();
+        cloned
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
         cloned.expect_is_current().returning(|| true);
         cloned
             .expect_get_missing_blockhashes()
@@ -510,11 +556,17 @@ async fn test_dispatch_request_records_inventory_knowledge() {
 async fn test_dispatch_response_records_share_block_knowledge() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
 
     // The cloned handle is used by handle_response -> handle_share_block,
     // which checks for duplicates, validates header, and stores the block.
     chain_store_handle.expect_clone().returning(|| {
         let mut cloned = ChainStoreHandle::default();
+        cloned
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
         cloned.expect_share_block_exists().returning(|_| false);
         cloned.expect_is_candidate().returning(|_| false);
         cloned.expect_add_share_block().returning(|_| Ok(()));
@@ -545,7 +597,7 @@ async fn test_dispatch_response_records_share_block_knowledge() {
     let result = handler.dispatch_response(
         peer_id,
         ConnectionId::new_unchecked(1),
-        Message::ShareBlock(block),
+        Message::ShareBlock(block, Vec::new()),
     );
     assert!(result.is_ok());
 
@@ -561,6 +613,9 @@ async fn test_dispatch_response_records_share_block_knowledge() {
 async fn test_dispatch_response_records_inventory_knowledge() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     chain_store_handle
         .expect_clone()
         .returning(ChainStoreHandle::default);
@@ -589,8 +644,14 @@ async fn test_dispatch_response_records_inventory_knowledge() {
 async fn test_remove_peer() {
     let (swarm_tx, _swarm_rx) = mpsc::channel(32);
     let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
     chain_store_handle.expect_clone().returning(|| {
         let mut cloned = ChainStoreHandle::default();
+        cloned
+            .expect_carried_bch_headers()
+            .returning(|_| Vec::new());
         cloned.expect_is_current().returning(|| true);
         cloned
             .expect_get_missing_blockhashes()

@@ -4,6 +4,7 @@
 
 use crate::node::messages::ShareHeaderBatch;
 use crate::node::p2p_message_handlers::MAX_HEADERS_IN_RESPONSE;
+use crate::node::p2p_message_handlers::receivers::bch_headers::learn_carried_bch_headers;
 use crate::node::p2p_message_handlers::senders::send_getheaders;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::{SwarmSend, messages::Message};
@@ -191,6 +192,10 @@ impl From<ValidationError> for HeaderSyncError {
 ///   - Cumulative chain work exceeds minimum threshold
 ///
 /// Phase 2 -- Organise:
+///   - Before organising each header, validate its uncles (count, duplicates,
+///     positions, reuse by an ancestor). Organising credits uncle work to chain
+///     work, so this cannot wait for the body. Earlier headers in the batch are
+///     already organised, so the check sees them.
 ///   - Store validated headers via organise_header (persists metadata for later
 ///     validate_with_pool_difficulty in validate_share_block)
 ///
@@ -203,6 +208,12 @@ pub async fn handle_share_headers<C: Send + Sync>(
     block_fetcher_handle: BlockFetcherHandle,
     share_validator: &(dyn ShareValidator + Send + Sync),
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    learn_carried_bch_headers(
+        header_batch.bch_headers(),
+        &chain_store_handle,
+        share_validator,
+    )
+    .await?;
     let share_headers = header_batch.headers();
     debug!("Received {} ShareHeaders", share_headers.len());
     if !share_headers.is_empty() {
@@ -259,6 +270,13 @@ pub async fn handle_share_headers<C: Send + Sync>(
         .add_header_template_merkle_branches(header_batch.blockhashes_with_branches())
         .await?;
     for header in share_headers {
+        if let Err(error) = share_validator.validate_uncles(header, &chain_store_handle) {
+            error!(
+                "Rejecting header {} from peer {peer_id}: {error}",
+                header.block_hash()
+            );
+            return Err(error.into());
+        }
         chain_store_handle.organise_header(header.clone()).await?;
     }
 
@@ -281,8 +299,8 @@ pub async fn handle_share_headers<C: Send + Sync>(
 /// checks that the batch forms a connected DAG (every header's parent is
 /// either earlier in the batch or in the store), that every header is bound
 /// to its proof of work by its coinbase proof and meets ASERT difficulty,
-/// that all declared uncle hashes are available, and that cumulative work
-/// exceeds the minimum threshold.
+/// that every declared uncle is earlier in the batch or in the store, and
+/// that cumulative work exceeds the minimum threshold.
 fn validate_header_chain(
     header_batch: &ShareHeaderBatch,
     chain_store_handle: &ChainStoreHandle,
@@ -307,17 +325,11 @@ fn validate_header_chain(
         .max()
         .unwrap_or(Work::from_hex("0x00").unwrap());
 
-    let (batch_hashes, cumulative_chain_work) = validate_dag_connectivity_and_difficulty(
+    let cumulative_chain_work = validate_dag_connectivity_and_difficulty(
         header_batch,
         share_validator,
         pool_difficulty,
         &anchor_hashes,
-        chain_store_handle,
-        lowest_anchor_height,
-    )?;
-    verify_all_uncles_available(
-        share_headers,
-        &batch_hashes,
         chain_store_handle,
         lowest_anchor_height,
     )?;
@@ -352,8 +364,11 @@ fn get_cached_asert_parent(
 
 /// Validate that the batch forms a connected DAG with valid difficulty.
 ///
-/// Every header's parent must be either already processed in this batch
-/// or present in the store. Every header must pass minimum difficulty,
+/// Every header's parent and every uncle it declares must be either
+/// already processed in this batch or present in the store. Headers are
+/// organised in batch order, and organising a header reads its uncles'
+/// headers to add their work, so an uncle delivered after its nephew is
+/// missing. Every header must pass minimum difficulty,
 /// its coinbase proof against the batch's branch for it, the timestamp rules
 /// (`ShareValidator::validate_header_timestamp`, against the times of up to
 /// `MTP_WINDOW` ancestors from the batch and the store), and ASERT target
@@ -362,8 +377,7 @@ fn get_cached_asert_parent(
 /// full-validation zone never run `validate_timestamp`, so this is the only
 /// place their times are checked.
 ///
-/// Returns the set of all blockhashes in the batch and the cumulative
-/// work across all headers.
+/// Returns the cumulative work across all headers.
 fn validate_dag_connectivity_and_difficulty(
     header_batch: &ShareHeaderBatch,
     share_validator: &(dyn ShareValidator + Send + Sync),
@@ -371,7 +385,7 @@ fn validate_dag_connectivity_and_difficulty(
     anchor_hashes: &HashSet<BlockHash>,
     chain_store_handle: &ChainStoreHandle,
     lowest_anchor_height: u32,
-) -> Result<(HashSet<BlockHash>, Work), HeaderSyncError> {
+) -> Result<Work, HeaderSyncError> {
     let share_headers = header_batch.headers();
     let mut known_hashes: HashSet<BlockHash> =
         HashSet::with_capacity(share_headers.len() + anchor_hashes.len());
@@ -422,6 +436,12 @@ fn validate_dag_connectivity_and_difficulty(
 
         let header_height = parent.height + 1;
         check_dense_height(&mut blocks_per_height, header_height)?;
+        check_uncles_known(
+            header,
+            &known_hashes,
+            chain_store_handle,
+            lowest_anchor_height,
+        )?;
 
         let header_hash = header.block_hash();
         asert_parent_cache.insert(
@@ -439,7 +459,7 @@ fn validate_dag_connectivity_and_difficulty(
         cumulative_work = cumulative_work + header.get_work();
     }
 
-    Ok((known_hashes, cumulative_work))
+    Ok(cumulative_work)
 }
 
 /// A header's time and parent, all the median time past walk reads.
@@ -502,25 +522,26 @@ fn check_dense_height(
     Ok(())
 }
 
-/// Verify every uncle hash declared by any header in the batch exists
-/// either as another header in this batch or in the store. Catches
-/// phantom uncle references that no peer ever sent.
-fn verify_all_uncles_available(
-    share_headers: &[ShareHeader],
-    batch_hashes: &HashSet<BlockHash>,
+/// Verify every uncle declared by `header` is a header already processed
+/// in this batch or is in the store. Catches phantom uncle references that
+/// no peer ever sent, and uncles delivered after their nephew.
+///
+/// Ported from pool2win's upstream P2Poolv2 commit 604fe3ce
+/// (MIT OR Apache-2.0).
+fn check_uncles_known(
+    header: &ShareHeader,
+    known_hashes: &HashSet<BlockHash>,
     chain_store_handle: &ChainStoreHandle,
     lowest_anchor_height: u32,
 ) -> Result<(), HeaderSyncError> {
-    for header in share_headers {
-        for uncle_hash in &header.uncles {
-            if !batch_hashes.contains(uncle_hash)
-                && chain_store_handle.get_block_metadata(uncle_hash).is_err()
-            {
-                return Err(HeaderSyncError::MissingUncle {
-                    uncle_hash: *uncle_hash,
-                    lowest_anchor_height,
-                });
-            }
+    for uncle_hash in &header.uncles {
+        if !known_hashes.contains(uncle_hash)
+            && chain_store_handle.get_block_metadata(uncle_hash).is_err()
+        {
+            return Err(HeaderSyncError::MissingUncle {
+                uncle_hash: *uncle_hash,
+                lowest_anchor_height,
+            });
         }
     }
     Ok(())

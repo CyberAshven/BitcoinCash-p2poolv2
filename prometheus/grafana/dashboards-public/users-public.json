@@ -91,11 +91,11 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "topk(15, sum by(btcaddress) (rate(worker_shares_valid_total[1h])))",
+          "expr": "topk(15, sum by(payout_address) (rate(worker_shares_valid_total[1h])))",
           "refId": "A",
           "instant": false,
           "range": true,
-          "legendFormat": "{{btcaddress}}"
+          "legendFormat": "{{payout_address}}"
         }
       ]
     },
@@ -166,7 +166,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by(btcaddress) (rate(worker_shares_valid_total[1h]))",
+          "expr": "sum by(payout_address) (rate(worker_shares_valid_total[1h]))",
           "refId": "A",
           "format": "table",
           "instant": true,
@@ -178,7 +178,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "max by(btcaddress) (worker_best_share_ever)",
+          "expr": "max by(payout_address) (worker_best_share_ever)",
           "refId": "B",
           "format": "table",
           "instant": true,
@@ -189,7 +189,7 @@
         {
           "id": "joinByField",
           "options": {
-            "byField": "btcaddress",
+            "byField": "payout_address",
             "mode": "outer"
           }
         },
@@ -202,7 +202,7 @@
               "Time 2": true
             },
             "renameByName": {
-              "btcaddress": "Payout address",
+              "payout_address": "Payout address",
               "Value #A": "Hashrate",
               "Value #B": "Best share"
             }
@@ -266,11 +266,11 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "topk(10, sum by(btcaddress) (rate(worker_shares_valid_total[1h])))",
+          "expr": "topk(10, sum by(payout_address) (rate(worker_shares_valid_total[1h])))",
           "refId": "A",
           "instant": true,
           "range": false,
-          "legendFormat": "{{btcaddress}}"
+          "legendFormat": "{{payout_address}}"
         },
         {
           "datasource": {
@@ -278,11 +278,11 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "label_replace(sum(rate(worker_shares_valid_total[1h])) - sum(topk(10, sum by(btcaddress) (rate(worker_shares_valid_total[1h])))), \"btcaddress\", \"Others\", \"\", \"\")",
+          "expr": "label_replace(sum(rate(worker_shares_valid_total[1h])) - sum(topk(10, sum by(payout_address) (rate(worker_shares_valid_total[1h])))), \"payout_address\", \"Others\", \"\", \"\")",
           "refId": "B",
           "instant": true,
           "range": false,
-          "legendFormat": "{{btcaddress}}"
+          "legendFormat": "{{payout_address}}"
         }
       ]
     }

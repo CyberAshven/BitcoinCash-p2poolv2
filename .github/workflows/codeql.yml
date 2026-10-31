@@ -26,10 +26,8 @@ jobs:
         include:
           - language: actions
             sarif: actions
-          - language: javascript-typescript
-            sarif: javascript
-          - language: python
-            sarif: python
+          # All code is Rust: the SAFA tool, the last JavaScript, is now
+          # p2poolv2_safa, and no Python is left (docs/tooling.md).
           - language: rust
             sarif: rust
     steps:
@@ -51,6 +49,13 @@ jobs:
 
       # paths-ignore is a hint to the extractor; also drop test-file results
       # from the SARIF so test fixtures can never raise alerts.
+      #
+      # The sim harness drops one rule only: hard-coded-cryptographic-value.
+      # CodeQL loses track of struct fields in its settings types, so port
+      # numbers, timeouts and an exit code appear to reach the RPC password.
+      # The one real literal is the RPC_PASS default "p2pool", the throwaway
+      # regtest login also set in docker/bchn/bitcoin-regtest.conf and
+      # sim-nightly.yml. All other rules still run on the harness.
       - uses: advanced-security/filter-sarif@2da736ff05ef065cb2894ac6892e47b5eac2c3c0 # v1.1
         with:
           patterns: |
@@ -59,6 +64,8 @@ jobs:
             -**/*_tests.rs
             -**/test_utils.rs
             -load-tests/**
+            -p2poolv2_tools/src/sim/**:rust/hard-coded-cryptographic-value
+            -p2poolv2_tools/src/bin/sim_harness.rs:rust/hard-coded-cryptographic-value
           input: sarif-results/${{ matrix.sarif }}.sarif
           output: sarif-results/${{ matrix.sarif }}.sarif
 

@@ -11,6 +11,7 @@ pub mod jd_prepare;
 pub mod miner;
 pub mod miners;
 pub mod network;
+pub mod payout_trees;
 pub mod share;
 pub mod share_headers;
 pub mod share_transaction;

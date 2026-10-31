@@ -10,14 +10,16 @@
 
 use super::{StoreError, WriteCommand, WriteSender};
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
+use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
 use crate::store::found_block::FoundBlock;
 use crate::store::hashrate_samples::HashrateSample;
+use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::PruneStats;
 use crate::store::stored_user::StoredUser;
 use crate::store::transaction_store::PrevoutCheck;
-use bitcoin::{BlockHash, TxMerkleNode, Work};
+use bitcoin::{BlockHash, TxMerkleNode, Txid, Work};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -172,9 +174,128 @@ impl StoreHandle {
         self.store.get_total_work()
     }
 
-    /// Get every bitcoin block found by the pool, ordered by bitcoin height.
+    /// Get BCHN-accepted pool blocks, ordered by Bitcoin Cash height.
     pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
         self.store.get_found_blocks()
+    }
+
+    /// Get claimed block candidates still awaiting BCHN verification.
+    pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
+        self.store.get_candidate_found_blocks()
+    }
+
+    /// The known Bitcoin Cash header with hash `block_hash`, if any.
+    pub fn get_bch_header(
+        &self,
+        block_hash: &BlockHash,
+    ) -> Result<Option<KnownBchHeader>, StoreError> {
+        self.store.get_bch_header(block_hash)
+    }
+
+    /// The hash at `height` on the node's BCHN best chain, as last indexed.
+    pub fn get_bch_best_hash(&self, height: u32) -> Result<Option<BlockHash>, StoreError> {
+        self.store.get_bch_best_hash(height)
+    }
+
+    /// Point heights of the BCH best-chain index at new blocks and set its tip.
+    pub async fn set_bch_best_chain(
+        &self,
+        updates: Vec<(u32, BlockHash)>,
+        tip_height: u32,
+    ) -> Result<(), StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::SetBchBestChain {
+                updates,
+                tip_height,
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
+    }
+
+    /// Add Bitcoin Cash headers this node now knows.
+    pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::AddBchHeaders {
+                headers,
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
+    }
+
+    /// Record verified BCHN acceptance through the serialized writer.
+    /// Return whether the block was newly inserted; callers must verify
+    /// BCHN acceptance before invoking this method.
+    pub async fn record_accepted_found_block(
+        &self,
+        found_block: FoundBlock,
+    ) -> Result<bool, StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::RecordAcceptedFoundBlock {
+                found_block,
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
+    }
+
+    /// Get every kept Bitcoin Cash payout tree, ordered by coinbase txid.
+    pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError> {
+        self.store.get_payout_trees()
+    }
+
+    /// Get the payout tree of a coinbase, if kept.
+    pub fn get_payout_tree(
+        &self,
+        coinbase_txid: &Txid,
+    ) -> Result<Option<StoredPayoutTree>, StoreError> {
+        self.store.get_payout_tree(coinbase_txid)
+    }
+
+    /// Keep a found block's payout tree through the writer thread.
+    pub async fn put_payout_tree(&self, tree: StoredPayoutTree) -> Result<(), StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::PutPayoutTree {
+                tree: Box::new(tree),
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
+    }
+
+    /// Count a new tip at which BCHN does not know a kept payout tree's
+    /// block, removing it at the unknown-tip limit. Return whether removed.
+    pub async fn record_unknown_payout_tree_tip(
+        &self,
+        coinbase_txid: Txid,
+        bitcoin_tip: BlockHash,
+    ) -> Result<bool, StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::RecordUnknownPayoutTreeTip {
+                coinbase_txid,
+                bitcoin_tip,
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
+    }
+
+    /// Mark a kept payout tree executed through the writer thread.
+    pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::MarkPayoutTreeExecuted {
+                coinbase_txid,
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
     }
 
     /// Get the confirmed blockhash at a specific height.
@@ -457,6 +578,13 @@ mockall::mock! {
         pub fn get_chain_tip(&self) -> Result<BlockHash, StoreError>;
         pub fn get_total_work(&self) -> Result<Work, StoreError>;
         pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
+        pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
+        pub fn get_bch_header(&self, block_hash: &BlockHash) -> Result<Option<KnownBchHeader>, StoreError>;
+        pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError>;
+        pub fn get_bch_best_hash(&self, height: u32) -> Result<Option<BlockHash>, StoreError>;
+        pub async fn set_bch_best_chain(&self, updates: Vec<(u32, BlockHash)>, tip_height: u32) -> Result<(), StoreError>;
+        pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError>;
+        pub fn get_payout_tree(&self, coinbase_txid: &Txid) -> Result<Option<StoredPayoutTree>, StoreError>;
         pub fn get_confirmed_at_height(&self, height: u32) -> Result<BlockHash, StoreError>;
         pub fn get_pplns_shares(&self) -> Vec<SimplePplnsShare>;
         pub fn get_pplns_shares_filtered(&self, limit: Option<usize>, start_time: Option<u64>, end_time: Option<u64>) -> Vec<SimplePplnsShare>;
@@ -466,6 +594,7 @@ mockall::mock! {
         pub fn get_children_blockhashes(&self, blockhash: &BlockHash) -> Result<Option<Vec<BlockHash>>, StoreError>;
 
         // Serialized writes (async)
+        pub async fn record_accepted_found_block(&self, found_block: FoundBlock) -> Result<bool, StoreError>;
         pub async fn organise_header(&self, header: ShareHeader) -> Result<Option<u32>, StoreError>;
         pub async fn organise_block(&self) -> Result<Option<u32>, StoreError>;
         pub async fn mark_invalid(&self, blockhash: BlockHash) -> Result<(), StoreError>;
@@ -477,6 +606,9 @@ mockall::mock! {
         pub async fn init_chain_state_from_store(&self, genesis_hash: BlockHash) -> Result<(), StoreError>;
         pub async fn add_user(&self, btcaddress: String) -> Result<u64, StoreError>;
         pub async fn add_pplns_share(&self, pplns_share: SimplePplnsShare) -> Result<(), StoreError>;
+        pub async fn put_payout_tree(&self, tree: StoredPayoutTree) -> Result<(), StoreError>;
+        pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError>;
+        pub async fn record_unknown_payout_tree_tip(&self, coinbase_txid: Txid, bitcoin_tip: BlockHash) -> Result<bool, StoreError>;
         pub async fn prune_block_bodies_chunk(&self, from: u32, to: u32) -> Result<PruneStats, StoreError>;
 
         // Sync chain state updates

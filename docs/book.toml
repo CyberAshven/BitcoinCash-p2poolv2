@@ -16,5 +16,8 @@ create-missing = false
 [output.html]
 git-repository-url = "https://github.com/CyberAshven/BitcoinCash-p2poolv2"
 edit-url-template = "https://github.com/CyberAshven/BitcoinCash-p2poolv2/edit/alpha/docs/{path}"
-# GitHub Pages project URL, used for the 404 page's links.
-site-url = "/BitcoinCash-p2poolv2/"
+# Where the book sits on the GitHub Pages site, used for the 404 page's
+# links. The landing page from website/ is the site's root and the book is
+# under docs/; .github/workflows/docs.yml also serves the 404 page at the
+# root, where these absolute links still resolve.
+site-url = "/BitcoinCash-p2poolv2/docs/"

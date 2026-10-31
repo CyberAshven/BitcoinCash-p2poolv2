@@ -31,6 +31,7 @@ use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::{
     BCH_PPLNS_WINDOW_BLOCKS, COINBASE_MATURITY, DIFFICULTY_SCALE, PPLNS_WINDOW_SHARES,
 };
 use p2poolv2_lib::config::Chain;
+use p2poolv2_lib::config::PayoutAddress;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::collections::HashMap;
@@ -188,8 +189,8 @@ impl Ledger {
         height: usize,
         finder: usize,
         rule: &Rule,
-        weights: &HashMap<Address, u128>,
-        miner_by_address: &HashMap<Address, usize>,
+        weights: &HashMap<PayoutAddress, u128>,
+        miner_by_address: &HashMap<PayoutAddress, usize>,
     ) {
         let total_weight: u128 = weights.values().sum();
         self.blocks += 1;
@@ -278,7 +279,7 @@ fn run_regime(regime: &Regime, seed: u64, maturity: usize) -> Result<Vec<RuleSum
     let block_difficulty = (SHARE_DIFFICULTY as f64 * shares_per_block).round() as u128;
     let drawn = draw_chain(regime.share_count, 1.0 / shares_per_block, seed);
     let addresses = miner_addresses();
-    let miner_by_address: HashMap<Address, usize> = addresses
+    let miner_by_address: HashMap<PayoutAddress, usize> = addresses
         .iter()
         .enumerate()
         .map(|(miner, address)| (address.clone(), miner))
@@ -375,13 +376,14 @@ fn draw_chain(share_count: usize, block_probability: f64, seed: u64) -> DrawnCha
 }
 
 /// One payout address per miner.
-fn miner_addresses() -> Vec<Address> {
+fn miner_addresses() -> Vec<PayoutAddress> {
     (0..MINER_COUNT)
         .map(|miner| {
             Address::p2pkh(
                 PubkeyHash::from_byte_array([miner as u8 + 1; 20]),
                 Network::Bitcoin,
             )
+            .into()
         })
         .collect()
 }
@@ -397,9 +399,9 @@ fn share_hash(height: usize) -> BlockHash {
 #[allow(clippy::type_complexity)] // mirrors populate_for_benchmark's argument
 fn window_entries(
     drawn: &DrawnChain,
-    addresses: &[Address],
+    addresses: &[PayoutAddress],
 ) -> Vec<(BlockHash, String, u128, Vec<(String, u128)>)> {
-    let address_strings: Vec<String> = addresses.iter().map(Address::to_string).collect();
+    let address_strings: Vec<String> = addresses.iter().map(PayoutAddress::to_string).collect();
     (0..drawn.miner_by_height.len())
         .rev()
         .map(|height| {

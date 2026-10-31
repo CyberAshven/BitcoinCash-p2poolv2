@@ -7,6 +7,7 @@ pub mod senders;
 
 use crate::node::SwarmSend;
 use crate::node::messages::{GetData, Message};
+use crate::node::p2p_message_handlers::receivers::bch_headers::learn_carried_bch_headers;
 use crate::node::p2p_message_handlers::receivers::block_receiver::BlockReceiverHandle;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::validation_worker::ValidationSender;
@@ -19,6 +20,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::transaction_pool::{ShareTransactionPool, SubmitOutcome, TransactionSource};
 use crate::shares::validation::ShareValidator;
 use crate::utils::time_provider::TimeProvider;
+use bitcoin::BlockHash;
 use receivers::getblocks::handle_getblocks;
 use receivers::getdata::handle_getdata_block;
 use receivers::getheaders::handle_getheaders;
@@ -37,12 +39,12 @@ use tracing::{debug, error};
 ///
 /// Sized so the worst case fits `MAX_P2P_MESSAGE_SIZE`: every header with
 /// worst-case fields, its bitcoin merkle root included, and its own coinbase
-/// branch of `MAX_COINBASE_MERKLE_BRANCH_LENGTH` entries and a declared BCH
-/// coinbase descriptor -- about 1.5 KB a
-/// header. Real batches omit the root and share a branch per block template,
-/// at well under 1 KB a header.
+/// branch of `MAX_COINBASE_MERKLE_BRANCH_LENGTH` (32) entries and a declared
+/// BCH coinbase descriptor -- 1,584 bytes a header, so 600 headers plus a
+/// dense height of 20 take about 982 KB. Real batches omit the root and
+/// share a branch per block template, at well under 1 KB a header.
 /// `test_full_share_headers_response_fits_max_message_size` guards it.
-pub(crate) const MAX_HEADERS_IN_RESPONSE: usize = 650;
+pub(crate) const MAX_HEADERS_IN_RESPONSE: usize = 600;
 
 /// The Tower service that processes inbound P2P requests.
 pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
@@ -122,7 +124,7 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
             )
             .await
         }
-        Message::ShareBlock(share_block) => {
+        Message::ShareBlock(share_block, bch_headers) => {
             if let Err(err) = ctx
                 .swarm_tx
                 .send(SwarmSend::Response(ctx.response_channel, Message::Ack))
@@ -131,7 +133,18 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
                 error!("Failed to send ShareBlock ack to peer {}: {err}", ctx.peer);
                 return Err(format!("Failed to send ShareBlock ack: {err}").into());
             }
-            let parent_hash = share_block.header.prev_share_blockhash;
+            learn_carried_bch_headers(
+                &bch_headers,
+                &ctx.chain_store_handle,
+                ctx.share_validator.as_ref(),
+            )
+            .await?;
+            // The block receiver drops a share naming a parent or uncle with
+            // no known header; asking for headers brings it back.
+            let ancestors: Vec<BlockHash> =
+                std::iter::once(share_block.header.prev_share_blockhash)
+                    .chain(share_block.header.uncles.iter().copied())
+                    .collect();
             handle_share_block(
                 share_block,
                 &ctx.chain_store_handle,
@@ -142,7 +155,7 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
             )
             .await?;
             request_headers_for_missing_blocks(
-                &[parent_hash],
+                &ancestors,
                 ctx.peer,
                 ctx.chain_store_handle,
                 ctx.swarm_tx,
@@ -225,19 +238,23 @@ pub async fn handle_response<C: Send + Sync>(
             error!("Error handling received share headers: {}", e);
             e
         }),
-        Message::ShareBlock(share_block) => handle_share_block(
-            share_block,
-            &chain_store_handle,
-            validation_tx,
-            &block_receiver_handle,
-            &block_fetcher_handle,
-            share_validator.as_ref(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to add share from response: {}", e);
-            format!("Failed to add share from response: {e}").into()
-        }),
+        Message::ShareBlock(share_block, bch_headers) => {
+            learn_carried_bch_headers(&bch_headers, &chain_store_handle, share_validator.as_ref())
+                .await?;
+            handle_share_block(
+                share_block,
+                &chain_store_handle,
+                validation_tx,
+                &block_receiver_handle,
+                &block_fetcher_handle,
+                share_validator.as_ref(),
+            )
+            .await
+            .map_err(|e| {
+                error!("Failed to add share from response: {}", e);
+                format!("Failed to add share from response: {e}").into()
+            })
+        }
         Message::NotFound(get_data) => {
             debug!("Received not found response from peer: {}", peer);
             match get_data {

@@ -16,11 +16,14 @@ mod handle;
 pub use handle::StoreHandle;
 
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
+use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
+use crate::store::found_block::FoundBlock;
 use crate::store::hashrate_samples::HashrateSample;
+use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::PruneStats;
-use bitcoin::{BlockHash, TxMerkleNode};
+use bitcoin::{BlockHash, TxMerkleNode, Txid};
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -49,6 +52,10 @@ pub enum StoreError {
     /// A block body below the prune target was offered for storage. Its
     /// body would be deleted again, so it is refused.
     BelowPruneHeight(BlockHash),
+    /// The store was written in another format than this build's
+    /// (`STORE_FORMAT_VERSION`). Raised at startup; the operator must
+    /// delete the store and resync.
+    OutdatedStore(String),
 }
 
 impl fmt::Display for StoreError {
@@ -65,6 +72,7 @@ impl fmt::Display for StoreError {
             StoreError::BelowPruneHeight(blockhash) => {
                 write!(f, "Block {blockhash} is below the prune target")
             }
+            StoreError::OutdatedStore(msg) => write!(f, "Outdated store: {msg}"),
         }
     }
 }
@@ -132,6 +140,43 @@ pub enum WriteCommand {
     AddPplnsShare {
         pplns_share: SimplePplnsShare,
         reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+
+    /// Add Bitcoin Cash headers this node now knows.
+    AddBchHeaders {
+        headers: Vec<KnownBchHeader>,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    /// Point heights of the BCH best-chain index at new blocks and set its
+    /// tip, dropping heights above the tip.
+    SetBchBestChain {
+        updates: Vec<(u32, BlockHash)>,
+        tip_height: u32,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    /// Record a block whose BCHN acceptance the caller has verified.
+    RecordAcceptedFoundBlock {
+        found_block: FoundBlock,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
+    },
+
+    /// Keep a found block's payout tree (idempotent).
+    PutPayoutTree {
+        tree: Box<StoredPayoutTree>,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+
+    /// Mark a kept payout tree executed.
+    MarkPayoutTreeExecuted {
+        coinbase_txid: Txid,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+
+    /// Count an unknown block on a new BCH tip, expiring its payout record.
+    RecordUnknownPayoutTreeTip {
+        coinbase_txid: Txid,
+        bitcoin_tip: BlockHash,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
     },
 
     /// Set genesis block hash (fire-and-forget)
@@ -288,6 +333,48 @@ impl StoreWriter {
             WriteCommand::AddPplnsShare { pplns_share, reply } => {
                 debug!("Adding PPLNS share for user: {}", pplns_share.user_id);
                 let result = self.store.add_pplns_share(pplns_share);
+                let _ = reply.send(result);
+            }
+
+            WriteCommand::PutPayoutTree { tree, reply } => {
+                debug!("Keeping the payout tree of coinbase {}", tree.coinbase_txid);
+                let result = self.store.put_payout_tree(&tree);
+                let _ = reply.send(result);
+            }
+
+            WriteCommand::AddBchHeaders { headers, reply } => {
+                let result = self.store.add_bch_headers(&headers);
+                let _ = reply.send(result);
+            }
+            WriteCommand::SetBchBestChain {
+                updates,
+                tip_height,
+                reply,
+            } => {
+                let result = self.store.set_bch_best_chain(&updates, tip_height);
+                let _ = reply.send(result);
+            }
+            WriteCommand::RecordAcceptedFoundBlock { found_block, reply } => {
+                let result = self.store.record_accepted_found_block(&found_block);
+                let _ = reply.send(result);
+            }
+
+            WriteCommand::MarkPayoutTreeExecuted {
+                coinbase_txid,
+                reply,
+            } => {
+                let result = self.store.mark_payout_tree_executed(&coinbase_txid);
+                let _ = reply.send(result);
+            }
+
+            WriteCommand::RecordUnknownPayoutTreeTip {
+                coinbase_txid,
+                bitcoin_tip,
+                reply,
+            } => {
+                let result = self
+                    .store
+                    .record_unknown_payout_tree_tip(&coinbase_txid, bitcoin_tip);
                 let _ = reply.send(result);
             }
 

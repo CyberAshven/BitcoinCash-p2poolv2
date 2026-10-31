@@ -1,0 +1,50 @@
+# P2Poolv2 for Bitcoin Cash on Umbrel, mining on Umbrel's Bitcoin Cash Node
+# app. Ported from p2poolv2/umbrel-app (Apache-2.0); see ../README.md.
+#
+# The node reads p2pool.toml, which Umbrel copies into this app's folder on
+# install and keeps across app updates, with the P2POOL_* variables below on
+# top. Umbrel fills in ${APP_BITCOIN_CASH_NODE_*} from the exports of the
+# Bitcoin Cash Node app this app depends on, so the RPC login and the ZMQ
+# endpoint never need typing in. Values on the app's settings page override
+# the variables here.
+#
+# Ports: Stratum V1 3340 and share chain P2P 6890 are published on the
+# Umbrel. They differ from the Bitcoin P2Poolv2 app's 3333 and 6884, from
+# Umbrel's Bitcoin and Bitcoin Cash Node apps, and from this store's external
+# node app (3341, 6891), so all of them can run side by side. The API and
+# dashboard (46884) are reached only through Umbrel's app proxy.
+
+services:
+  app_proxy:
+    environment:
+      # <app id>_<service>_1, the container's name on Umbrel's network.
+      APP_HOST: bch-p2pool_p2pool_1
+      APP_PORT: 46884
+
+  p2pool:
+    image: ghcr.io/cyberashven/bitcoincash-p2poolv2:v0.0.1-alpha
+    user: "1000:1000"
+    restart: on-failure
+    # Lets the share store close cleanly on stop.
+    stop_grace_period: 1m
+    ports:
+      - "3340:3340"
+      - "6890:6890"
+    volumes:
+      - ${APP_DATA_DIR}/p2pool.toml:/etc/p2poolv2/config.toml:ro
+      - ${APP_DATA_DIR}/data:/p2poolv2
+    environment:
+      - P2POOL_CONFIG=/etc/p2poolv2/config.toml
+      - RUST_LOG=info
+      # A Bitcoin Cash node on the network the Bitcoin Cash Node app runs.
+      - P2POOL_STRATUM__CHAIN=bitcoin-cash
+      - P2POOL_STRATUM__BITCOIN_CASH_NETWORK=mainnet
+      - P2POOL_BITCOINRPC__URL=http://${APP_BITCOIN_CASH_NODE_NODE_IP}:${APP_BITCOIN_CASH_NODE_RPC_PORT}
+      - P2POOL_BITCOINRPC__USERNAME=${APP_BITCOIN_CASH_NODE_RPC_USER}
+      - P2POOL_BITCOINRPC__PASSWORD=${APP_BITCOIN_CASH_NODE_RPC_PASS}
+      - P2POOL_STRATUM__ZMQPUBHASHBLOCK=tcp://${APP_BITCOIN_CASH_NODE_NODE_IP}:${APP_BITCOIN_CASH_NODE_ZMQ_HASHBLOCK_PORT}
+      # The ports published above, and the API port the app proxy and the
+      # image's health check use.
+      - P2POOL_STRATUM__PORT=3340
+      - P2POOL_NETWORK__LISTEN_ADDRESS=/ip4/0.0.0.0/tcp/6890
+      - P2POOL_API__PORT=46884

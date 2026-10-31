@@ -5,7 +5,7 @@
 //! P2Poolv2 node library.
 //!
 //! Provides [`build_node`] which constructs the full node pipeline (store,
-//! stratum, P2P, API) and returns [`NodeHandles`] for injecting extra
+//! stratum, P2P, API, Electrum) and returns [`NodeHandles`] for injecting extra
 //! producers (e.g. a sim emitter) plus a [`NodeRunner`] that drives the
 //! event loop.
 
@@ -13,7 +13,9 @@ pub mod background_tasks;
 pub mod preflight;
 pub mod signal;
 
+use bitcoindrpc::BitcoindRpcClient;
 use p2poolv2_api::start_api_server;
+use p2poolv2_electrum::start_electrum_server;
 use p2poolv2_lib::accounting::payout::simple_pplns::share_worker::PplnsShareWorker;
 use p2poolv2_lib::accounting::payout::{build_payout_for_mode, payout_pplns_window};
 use p2poolv2_lib::accounting::stats::metrics;
@@ -22,6 +24,7 @@ use p2poolv2_lib::config::{
     BitcoinCashNetwork, Chain, Config, PoolMode, TemplateProvider, bitcoin_cash_donation_cashaddr,
 };
 use p2poolv2_lib::node::actor::NodeHandle;
+use p2poolv2_lib::node::bch_header_feeder::relay_templates_learning_prevs;
 use p2poolv2_lib::pool_difficulty::PoolDifficulty;
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::shares::merge_mining::MergeMiningCommitment;
@@ -39,12 +42,14 @@ use p2poolv2_lib::stratum::work::template_trigger::merge_template_triggers;
 use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
 use p2poolv2_lib::stratum::zmq_listener::{ZmqListener, ZmqListenerTrait};
 use signal::{ShutdownReason, setup_signal_handler};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::{error, info, trace};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, trace, warn};
 
 /// Interval in seconds to poll for new block templates since the last zmq event signal
 const GBT_POLL_INTERVAL: u64 = 10;
@@ -72,6 +77,10 @@ enum TemplateFeed {
     Provider(TemplateProvider),
 }
 
+/// How long shutdown waits for the Electrum server to close its listener
+/// and connections before moving on.
+const ELECTRUM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Handles exposed by [`build_node`] for wiring external producers (e.g. sim emitter).
 pub struct NodeHandles {
     /// Sender for injecting share emissions into the node pipeline.
@@ -84,6 +93,10 @@ pub struct NodeHandles {
 
 /// Opaque runner returned by [`build_node`]. Call [`NodeRunner::run`] to start
 /// the event loop and block until shutdown.
+///
+/// `electrum_task` is `None` when the Electrum server is disabled. Shutdown
+/// cancels `electrum_shutdown` and waits up to `ELECTRUM_SHUTDOWN_TIMEOUT`
+/// for the task.
 pub struct NodeRunner {
     exit_sender: watch::Sender<ShutdownReason>,
     sig_handle: JoinHandle<()>,
@@ -91,6 +104,8 @@ pub struct NodeRunner {
     node_handle: NodeHandle,
     stratum_shutdown_tx: tokio::sync::oneshot::Sender<()>,
     api_shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    electrum_shutdown: CancellationToken,
+    electrum_task: Option<JoinHandle<()>>,
     metrics_handle: metrics::MetricsHandle,
     stats_dir: String,
 }
@@ -104,6 +119,8 @@ impl NodeRunner {
         let node_handle = self.node_handle;
         let stratum_shutdown_tx = self.stratum_shutdown_tx;
         let api_shutdown_tx = self.api_shutdown_tx;
+        let electrum_shutdown = self.electrum_shutdown;
+        let electrum_task = self.electrum_task;
         let metrics_handle = self.metrics_handle;
         let stats_dir = self.stats_dir;
 
@@ -125,6 +142,10 @@ impl NodeRunner {
 
             let _ = stratum_shutdown_tx.send(());
             let _ = api_shutdown_tx.send(());
+            electrum_shutdown.cancel();
+            if let Some(electrum_task) = electrum_task {
+                stop_electrum_server(electrum_task).await;
+            }
             let _ = exit_sender.send(reason);
             reason
         };
@@ -163,7 +184,24 @@ impl NodeRunner {
     }
 }
 
+/// Wait for the cancelled Electrum server task to finish, logging a join
+/// failure or a timeout. A stuck task is left behind rather than blocking
+/// node shutdown.
+async fn stop_electrum_server(electrum_task: JoinHandle<()>) {
+    match tokio::time::timeout(ELECTRUM_SHUTDOWN_TIMEOUT, electrum_task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(join_error)) => error!("Electrum server task failed: {join_error}"),
+        Err(_) => warn!(
+            "Electrum server did not stop within {ELECTRUM_SHUTDOWN_TIMEOUT:?}, continuing shutdown"
+        ),
+    }
+}
+
 /// Build the full node pipeline and return handles + a runner.
+///
+/// The Electrum server starts after the API server when
+/// `config.electrum.enabled`; it runs under its own supervisor, so its
+/// failures never shut the node down.
 ///
 /// The caller can wire extra producers (e.g. a sim emitter) into
 /// `NodeHandles::emissions_tx` and `NodeHandles::template_rx` before
@@ -174,7 +212,11 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 
     let genesis = p2poolv2_lib::shares::bch_genesis::genesis_for_stratum(&config.stratum)
         .expect("share genesis data is fixed");
-    let store = Arc::new(Store::new(config.store.path.clone(), false).unwrap());
+    let store = Arc::new(
+        Store::new(config.store.path.clone(), false)
+            .unwrap()
+            .with_chain(config.stratum.chain),
+    );
 
     let (write_tx, write_rx) = write_channel();
     let store_writer = StoreWriter::new(store.clone(), write_rx);
@@ -209,6 +251,21 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     };
     info!("Latest tip {} at height {}", tip, height);
 
+    // A Bitcoin Cash node mines only for BCHN on the configured network: the
+    // chain name is checked before waiting for the node to sync, and a block
+    // only Bitcoin Cash has once it has synced.
+    let bitcoin_cash_network = match config.stratum.chain {
+        Chain::BitcoinCash => config.stratum.bitcoin_cash_network,
+        Chain::Bitcoin => None,
+    };
+    if let Some(network) = bitcoin_cash_network
+        && let Err(error) =
+            preflight::verify_bitcoin_cash_chain_name(&config.bitcoinrpc, network).await
+    {
+        error!("Refusing to start: {error}");
+        return Err(ExitCode::FAILURE);
+    }
+
     if let Err(error) = preflight::wait_for_bitcoin_node_synced(
         &config.bitcoinrpc,
         Duration::from_secs(300),
@@ -228,6 +285,13 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         }
     }
 
+    if let Some(network) = bitcoin_cash_network
+        && let Err(error) = preflight::verify_bitcoin_cash_block(&config.bitcoinrpc, network).await
+    {
+        error!("Refusing to start: {error}");
+        return Err(ExitCode::FAILURE);
+    }
+
     background_tasks::start_background_tasks(
         config.stratum.mode,
         store.clone(),
@@ -239,13 +303,38 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 
     let stratum_config = config.stratum.clone().parse().unwrap();
     let bitcoinrpc_config = config.bitcoinrpc.clone();
+    let extra_submit_nodes = config.submit_nodes.clone();
 
     let (stratum_shutdown_tx, stratum_shutdown_rx) = tokio::sync::oneshot::channel();
     let (notify_tx, notify_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
     let tracker_handle = start_tracker_actor();
     let tracker_handle_for_notify = tracker_handle.clone();
 
-    let notify_tx_for_gbt = notify_tx.clone();
+    // On Bitcoin Cash each new template's previous block is learned before
+    // the notifier builds jobs on it (mining on the current chain).
+    let notify_tx_for_gbt = if stratum_config.chain == Chain::BitcoinCash {
+        let client = match BitcoindRpcClient::new(
+            &bitcoinrpc_config.url,
+            &bitcoinrpc_config.username,
+            &bitcoinrpc_config.password,
+        ) {
+            Ok(client) => client,
+            Err(e) => {
+                error!("Failed to create the BCHN client for templates: {e}");
+                return Err(ExitCode::FAILURE);
+            }
+        };
+        let (learning_tx, learning_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
+        tokio::spawn(relay_templates_learning_prevs(
+            client,
+            chain_store_handle.clone(),
+            learning_rx,
+            notify_tx.clone(),
+        ));
+        learning_tx
+    } else {
+        notify_tx.clone()
+    };
     let bitcoinrpc_config_cloned = bitcoinrpc_config.clone();
     // ZMQ block notifications only trigger getblocktemplate; a Template
     // Provider pushes its own templates, also after a block this node finds.
@@ -276,12 +365,18 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             "Bitcoin Cash templates, share owners, and {:?} share chain genesis are selected for {:?}.",
             stratum_config.bch_share_chain, stratum_config.bitcoin_cash_network
         );
+        // Only a P2Pool node builds each miner's jobs with their own donation.
+        let miner_choice = if stratum_config.mode == PoolMode::P2poolv2 {
+            " A miner's login may choose its own with donation=<percent>."
+        } else {
+            ""
+        };
         match (stratum_config.donation, stratum_config.bitcoin_cash_network) {
             (Some(basis_points), Some(network)) => info!(
-                "Donating {basis_points} basis points of each block this node finds to {}. Set donation = 0 to opt out.",
+                "Donating {basis_points} basis points of each block this node finds to {}. Set donation = 0 to opt out.{miner_choice}",
                 bitcoin_cash_donation_cashaddr(network)
             ),
-            _ => info!("Bitcoin Cash donation is off (donation = 0)."),
+            _ => info!("Bitcoin Cash donation is off (donation = 0).{miner_choice}"),
         }
     }
 
@@ -408,7 +503,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         port,
         pool_transactions: pool_transactions.clone(),
         merge_mining: match share_chain {
-            Chain::BitcoinCash => Some(MergeMiningCommitment::reserved()),
+            Chain::BitcoinCash => Some(MergeMiningCommitment::empty()),
             Chain::Bitcoin => None,
         },
         authority: stratum_config.sv2_authority(),
@@ -439,7 +534,14 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             .share_chain(share_chain)
             .bch_share_network(bch_share_network)
             .cash_share(cash_share)
-            .sv2(sv2_listener);
+            .merge_mining_tokens(
+                stratum_config
+                    .merge_mining_tokens
+                    .as_ref()
+                    .map(PathBuf::from),
+            )
+            .sv2(sv2_listener)
+            .extra_submit_nodes(extra_submit_nodes);
         let mut stratum_server = match template_refresh_tx {
             Some(template_refresh_tx) => {
                 stratum_server_builder.template_refresh_tx(template_refresh_tx)
@@ -517,6 +619,21 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         config.api.hostname, config.api.port
     );
 
+    let electrum_shutdown = CancellationToken::new();
+    let electrum_task = if config.electrum.enabled {
+        info!(
+            "Starting Electrum server on host {} port {}",
+            config.electrum.hostname, config.electrum.port
+        );
+        Some(start_electrum_server(
+            config.electrum.clone(),
+            electrum_shutdown.clone(),
+        ))
+    } else {
+        info!("Electrum server disabled");
+        None
+    };
+
     let handles = NodeHandles {
         emissions_tx: emissions_tx_for_handles,
         template_rx: template_rx_for_handles,
@@ -530,6 +647,8 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         node_handle,
         stratum_shutdown_tx,
         api_shutdown_tx,
+        electrum_shutdown,
+        electrum_task,
         metrics_handle,
         stats_dir: config.logging.stats_dir.clone(),
     };
@@ -538,9 +657,5 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 }
 
 fn bch_share_network(network: BitcoinCashNetwork) -> BchShareNetwork {
-    match network {
-        BitcoinCashNetwork::Mainnet => BchShareNetwork::Mainnet,
-        BitcoinCashNetwork::Chipnet => BchShareNetwork::Chipnet,
-        BitcoinCashNetwork::Regtest => BchShareNetwork::Regtest,
-    }
+    network.share_network()
 }

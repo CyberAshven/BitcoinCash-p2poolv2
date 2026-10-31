@@ -53,35 +53,45 @@ Defined in `accounting/payout/sharechain_pplns/pplns_window.rs`.
 
 ### Bitcoin Cash
 
-The Bitcoin Cash fork keeps these constants. Its own payout rules sit inside
-them:
+The constants above are Bitcoin's (upstream's). Since the share-chain rule
+batch of 2026-10-24 (audit A12), Bitcoin Cash derives its own from its
+100-share maturity instead of Bitcoin's 6,048 (`ChainDepths::BITCOIN_CASH`):
 
-| Depth below the paying share | Shares | Covered by |
+| Constant | Value | Derivation |
 |---|---|---|
-| `BCH_COINBASE_MATURITY` skip | 100 | |
-| + window, sized by the paying header's difficulty, capped at `PPLNS_WINDOW_SHARES` | at most 121,060 | |
-| + uncles of the deepest window share (`MAX_UNCLES_DEPTH`) | at most 121,063 | `PAYOUT_DEPTH` (127,008) |
-| Block bodies kept (`PRUNE_DEPTH + PRUNE_INTERVAL` below the confirmed tip) | 254,376 | |
+| `BCH_COINBASE_MATURITY` | 100 | BCH's coinbase maturity, counted in shares |
+| `PPLNS_WINDOW_SHARES` | 120,960 | the window cap, unchanged |
+| `MAX_UNCLES_DEPTH` | 3 | an uncle of the deepest window share |
+| `BCH_PAYOUT_DEPTH` | 121,063 | 100 + 120,960 + 3: the deepest share a coinbase pays |
+| `BCH_PRUNE_DEPTH` | 242,126 | 2 x `BCH_PAYOUT_DEPTH` |
+| `PRUNE_INTERVAL` | 360 | unchanged |
+| Block bodies kept below the confirmed tip | 242,486 | `BCH_PRUNE_DEPTH + PRUNE_INTERVAL` |
 
+- `BCH_PAYOUT_DEPTH` is a share-chain rule: a Bitcoin Cash share coinbase
+  output can be spent from depth 100 and expires 121,063 shares below the
+  spending share. It also sizes the full-validation zone, so every share a
+  coinbase near the tip pays is fully validated, and the reorg depth limit
+  ("Reorg Depth Limit"), 121,063 shares below the confirmed tip.
+- Doubled, it is the prune depth, for the same reason as on Bitcoin: a
+  spend at the bottom of the zone may use outputs down to two payout depths
+  below the tip, exactly the prune height.
 - The window walk reads headers only (`PplnsWindow` caches confirmed headers
-  and their uncles), and headers are never pruned. So pruning cannot remove
-  anything a Bitcoin Cash payout needs, at any depth. The full-validation
-  zone still covers every share a coinbase near the tip pays.
-- A Bitcoin Cash share coinbase output can be spent from depth 100 and
-  expires at `PAYOUT_DEPTH`, the same expiry as Bitcoin, so the body an
-  in-zone spend needs is kept as on Bitcoin.
-- Production builds assert at compile time that
-  `BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES + MAX_UNCLES_DEPTH <=
-  PAYOUT_DEPTH`. The sim build shortens Bitcoin's maturity and the window
-  only; Bitcoin Cash's maturity stays 100 there, and the sim swarm runs
-  Bitcoin.
+  and their uncles), and headers are never pruned, so pruning cannot remove
+  anything a payout needs at any depth.
+- Every chain's depths are asserted at compile time: the walk plus its
+  uncles fits the payout depth, and the deepest followed fork with its
+  uncles stays above the prune target. The store, the block receiver, the
+  organise and validation workers and the share transaction pool all read
+  the node's chain's depths (`Store::with_chain`, `ChainDepths::for_chain`).
+- The sim build shortens the window to 80 shares; Bitcoin Cash's maturity
+  stays 100 there, so the sim's `BCH_PAYOUT_DEPTH` is 183 and its prune
+  depth 366.
 - Bitcoin Cash nodes relay share transactions and mine them in their shares
   (since 2026-10-22, `shares/transaction_pool.rs`, `handle_stratum_share.rs`),
   so a block may spend an output this node never fetched. Both rules that
   makes necessary are in place, on Bitcoin Cash and Bitcoin alike: the
   missing-input marker ("Missing Input at Write Time") and the reorg depth
-  limit at `PAYOUT_DEPTH` (127,008 shares) below the confirmed tip ("Reorg
-  Depth Limit").
+  limit at one payout depth below the confirmed tip ("Reorg Depth Limit").
 
 ## Model: Rules for Validity, Boundaries for Storage
 
@@ -770,24 +780,68 @@ never matter.
 
 ## Appendix: Growth of Data Kept Forever
 
-At one share per 10s there are 3,153,600 shares per year. Sizes are raw
-and include the 32-byte key. Hashes do not compress. The figures assume
-candidate index entries are pruned.
+### BCH estimate, 2026-10-30
 
-| Item | Per share | Per year |
+At one stored share per 10 seconds there are 3,153,600 shares per year.
+These are raw-size planning estimates, not measured database growth.
+GB uses decimal bytes. Candidate index entries are assumed to be pruned.
+Extra fork records, payout-tree data, `FoundBlocks`, RocksDB overhead and
+compaction space are excluded.
+
+For a pool-built no-token BCH header with a P2PKH payee, no donation or
+fee address, and no uncles, `ShareHeader` encodes to 260 bytes. Each uncle
+adds 32 bytes. Allow about 310 bytes including the 32-byte key at an
+assumed average of half an uncle per stored share. Token commitments,
+declared jobs, other payout scripts and optional addresses add bytes.
+This is a sample header size, not a maximum. See
+`shares/share_block/mod.rs`, `shares/coinbase_proof.rs` and
+`p2poolv2_wallet/src/share_owner.rs`.
+
+| Permanent records | Estimated bytes per stored share | Estimated GB per year |
 |---|---|---|
-| `Header` (261 B value + P2TR address + ~0.5 uncles, + key) | ~321 B | 1.0 GB |
-| `BlockMetadata` | ~71 B | 0.22 GB |
-| `BlockIndex` | ~68 B | 0.21 GB |
-| `BlockHeight` (height list + confirmed entry) | ~75 B | 0.24 GB |
-| `TemplateMerkleBranches`, 12-13 levels on mainnet (0 for an empty template, 16 max) | 417-449 B | 1.3-1.4 GB |
-| **Total on mainnet** | **~1.0 KB** | **~3.1 GB (15 GB after 5 years)** |
+| `Header`, sample above | 310 | 0.98 |
+| `BlockMetadata`, known height and 32-byte key | 71 | 0.22 |
+| Parent, height and uncle indexes, planning allowance | 200 | 0.63 |
 
-The bitcoin coinbase is body data and is pruned. It is about `235 + 31
-* miners` bytes, or 43 bytes per payout for P2TR:
+A stored coinbase branch adds `33 + 32 * depth` bytes: a 32-byte key,
+one-byte count and the hashes. Its depth grows with template transaction
+count, not directly with block bytes. For illustration, assume an average
+serialized transaction size of 250 bytes and filled templates. BCH has
+no witness bytes to discount. These are workload assumptions, not an
+observed transaction mix or a claimed block-size limit.
 
-| Miners paid | Coinbase | Per year if it were kept | Held under pruning |
+| BCH template scenario | Approximate transaction count | Branch depth | Branch bytes per share | Total permanent GB per year, using the allowances above |
+|---|---|---|---|---|
+| 32 MB | 128,000 | 17 | 577 | 3.65 |
+| 128 MB | 512,000 | 19 | 641 | 3.85 |
+| 1 GB | 4,000,000 | 22 | 737 | 4.16 |
+| BCH share-chain branch limit | up to 2^32 | 32 | 1,057 | 5.17 |
+
+The last row is this implementation's branch limit, not a BCH block-size
+limit. Mainnet ABLA starts at a 32 MB floor and adjusts with demand. BCHN
+currently has a temporary 2 GB guard. The
+[ABLA specification](https://gitlab.com/0353F40E/ebaa/-/blob/main/README.md#32-bit-implementation-limitation)
+calls for removing it by May 2028. Use BCHN's current template limit when
+planning capacity. Do not assume every block fills it.
+
+The BCH coinbase is body data and is pruned. A conservative direct-payout
+budget is `367 + 34 * payees` bytes for P2PKH outputs. P2SH20 outputs
+take 32 bytes; P2SH32 outputs take 44. The 367-byte allowance includes a
+tree output and all other fields at their largest sizes. There is no BCH
+witness commitment. See `accounting/payout/coinbase_budget.rs`.
+
+| No-token P2PKH payees | Coinbase budget | GB per year if kept | GB for 242,126 retained coinbases |
 |---|---|---|---|
-| 10 | ~0.5 KB | 1.7 GB | 0.14 GB |
-| 100 | ~3.3 KB | 10.4 GB | 0.84 GB |
-| 1,000 | ~31 KB | 98 GB | 7.9 GB |
+| 10 | 707 B | 2.23 | 0.17 |
+| 100 | 3,767 B | 11.88 | 0.91 |
+| 1,000 | 34,367 B | 108.38 | 8.32 |
+
+`BCH_PRUNE_DEPTH` is 242,126 shares, about 28 days at this rate. Token
+shares cap their coinbase at 3,072 bytes and use a payout tree as needed.
+No-token coinbases may reach the 1,000,000-byte
+[BCH transaction maximum](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/master/src/consensus/consensus.h).
+At that size, the retained coinbases alone take 242.13 GB of raw bytes.
+The separate 204,800-byte share-transaction allowance raises the body-byte
+estimate to 291.71 GB if every share fills both allowances. This excludes
+body indexes and the other costs above. Prune intervals and task lag also
+increase the retained set. These figures are not disk-space upper bounds.

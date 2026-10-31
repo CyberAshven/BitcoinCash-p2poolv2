@@ -100,6 +100,7 @@ mod tests {
     use bitcoin::{Address, Amount, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Txid, Witness};
     use bitcoin::{BlockHash, CompactTarget};
     use bitcoin::{Transaction, absolute::LockTime, transaction::Version};
+    use p2poolv2_wallet::payout_address::PayoutAddress;
     use std::collections::HashMap;
     use std::slice;
     use std::str::FromStr;
@@ -341,10 +342,10 @@ mod tests {
             "../../../bitcoindrpc/test_data/bchn-regtest-template.json"
         ))
         .unwrap();
-        let payout = Address::p2pkh(
+        let payout = PayoutAddress::from(Address::p2pkh(
             bitcoin::PubkeyHash::from_byte_array([1; 20]),
             bitcoin::Network::Regtest,
-        );
+        ));
         let outputs = build_pplns_outputs(
             template.coinbasevalue,
             &HashMap::from([(payout.clone(), 1)]),

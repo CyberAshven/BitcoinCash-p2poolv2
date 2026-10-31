@@ -59,7 +59,7 @@ impl PoolMetrics {
         output.push('\n');
 
         output.push_str(
-            "# HELP work_since_last_block Confirmed sharechain pool difficulty since the last bitcoin block was found\n",
+            "# HELP work_since_last_block Confirmed sharechain pool difficulty since the pool last found a block\n",
         );
         output.push_str("# TYPE work_since_last_block gauge\n");
         output.push_str(&format!(
@@ -68,8 +68,40 @@ impl PoolMetrics {
         ));
         output.push('\n');
 
+        output.push_str(&self.found_block_submission_expositions());
+
         output.push_str(&self.get_worker_expositions());
 
+        output
+    }
+
+    /// Found blocks sent to BCHN nodes since start, by node and outcome, and
+    /// the times one was sent again. The node label is `primary` for
+    /// `[bitcoinrpc]` and `extra1` and on for `[[submit_nodes]]`, never a URL.
+    fn found_block_submission_expositions(&self) -> String {
+        let mut output = String::with_capacity(
+            320 + 96 * (self.found_block_submissions.len() + self.found_block_submit_retries.len()),
+        );
+        output.push_str(
+            "# HELP found_block_submissions_total Found blocks sent to a BCHN node, by node and outcome\n",
+        );
+        output.push_str("# TYPE found_block_submissions_total counter\n");
+        for ((node, outcome), count) in &self.found_block_submissions {
+            output.push_str(&format!(
+                "found_block_submissions_total{{node=\"{node}\",outcome=\"{outcome}\"}} {count}\n"
+            ));
+        }
+        output.push('\n');
+        output.push_str(
+            "# HELP found_block_submit_retries_total Times a found block was sent again to a BCHN node after a connection error, time-out or busy node\n",
+        );
+        output.push_str("# TYPE found_block_submit_retries_total counter\n");
+        for (node, retries) in &self.found_block_submit_retries {
+            output.push_str(&format!(
+                "found_block_submit_retries_total{{node=\"{node}\"}} {retries}\n"
+            ));
+        }
+        output.push('\n');
         output
     }
 
@@ -99,19 +131,19 @@ impl PoolMetrics {
             .filter(|(_, u)| !u.should_remove(current_time) && u.shares_valid_total > 0)
             .collect();
 
-        // User metrics with btcaddress label
-        output.push_str("# HELP user_shares_valid_total Total valid shares submitted by user\n");
+        // User metrics with payout_address label
+        output.push_str("# HELP user_shares_valid_total Total valid shares submitted by user, by payout address\n");
         output.push_str("# TYPE user_shares_valid_total counter\n");
         for (btcaddress, user) in &some_shares_users {
             output.push_str(&format!(
-                "user_shares_valid_total{{btcaddress=\"{}\"}} {:.0}\n",
+                "user_shares_valid_total{{payout_address=\"{}\"}} {:.0}\n",
                 btcaddress,
                 (user.shares_valid_total as f64) * TWO32
             ));
         }
         output.push('\n');
 
-        // Worker metrics with btcaddress and workername labels
+        // Worker metrics with payout_address and workername labels
         output
             .push_str("# HELP worker_shares_valid_total Total valid shares submitted by worker\n");
         output.push_str("# TYPE worker_shares_valid_total counter\n");
@@ -126,7 +158,7 @@ impl PoolMetrics {
                     workername
                 };
                 output.push_str(&format!(
-                    "worker_shares_valid_total{{btcaddress=\"{}\",workername=\"{}\"}} {:.0}\n",
+                    "worker_shares_valid_total{{payout_address=\"{}\",workername=\"{}\"}} {:.0}\n",
                     btcaddress,
                     display_name,
                     (worker.shares_valid_total as f64) * TWO32
@@ -148,7 +180,7 @@ impl PoolMetrics {
                     workername
                 };
                 output.push_str(&format!(
-                    "worker_best_share{{btcaddress=\"{}\",workername=\"{}\"}} {}\n",
+                    "worker_best_share{{payout_address=\"{}\",workername=\"{}\"}} {}\n",
                     btcaddress, display_name, worker.best_share
                 ));
             }
@@ -170,7 +202,7 @@ impl PoolMetrics {
                     workername
                 };
                 output.push_str(&format!(
-                    "worker_best_share_ever{{btcaddress=\"{}\",workername=\"{}\"}} {}\n",
+                    "worker_best_share_ever{{payout_address=\"{}\",workername=\"{}\"}} {}\n",
                     btcaddress, display_name, worker.best_share_ever
                 ));
             }
@@ -191,7 +223,7 @@ impl PoolMetrics {
                     workername
                 };
                 output.push_str(&format!(
-                    "worker_last_share_at{{btcaddress=\"{}\",workername=\"{}\"}} {}\n",
+                    "worker_last_share_at{{payout_address=\"{}\",workername=\"{}\"}} {}\n",
                     btcaddress, display_name, worker.last_share_at
                 ));
             }
@@ -206,8 +238,37 @@ impl PoolMetrics {
 mod tests {
     use super::*;
     use crate::accounting::stats::user::User;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::time::SystemTime;
+
+    #[test]
+    fn found_block_submissions_are_exposed_by_node_and_outcome() {
+        let metrics = PoolMetrics {
+            found_block_submissions: BTreeMap::from([
+                (("primary".to_string(), "accepted".to_string()), 2),
+                (("extra1".to_string(), "failed".to_string()), 1),
+            ]),
+            found_block_submit_retries: BTreeMap::from([
+                ("primary".to_string(), 0),
+                ("extra1".to_string(), 7),
+            ]),
+            ..Default::default()
+        };
+
+        let exposition = metrics.get_exposition();
+
+        assert!(exposition.contains("# TYPE found_block_submissions_total counter"));
+        assert!(
+            exposition.contains(
+                "found_block_submissions_total{node=\"primary\",outcome=\"accepted\"} 2\n"
+            )
+        );
+        assert!(
+            exposition
+                .contains("found_block_submissions_total{node=\"extra1\",outcome=\"failed\"} 1\n")
+        );
+        assert!(exposition.contains("found_block_submit_retries_total{node=\"extra1\"} 7\n"));
+    }
 
     fn now() -> u64 {
         SystemTime::now()
@@ -307,7 +368,7 @@ mod tests {
         assert!(exposition.contains("# HELP user_shares_valid_total"));
         assert!(exposition.contains("# TYPE user_shares_valid_total counter"));
         assert!(exposition.contains(&format!(
-            r#"user_shares_valid_total{{btcaddress="bc1quser1"}} {:.0}"#,
+            r#"user_shares_valid_total{{payout_address="bc1quser1"}} {:.0}"#,
             42.0 * TWO32
         )));
 
@@ -315,47 +376,43 @@ mod tests {
         assert!(exposition.contains("# HELP worker_shares_valid"));
         assert!(exposition.contains("# TYPE worker_shares_valid_total counter"));
         assert!(exposition.contains(&format!(
-            r#"worker_shares_valid_total{{btcaddress="bc1quser1",workername="worker1"}} {:.0}"#,
+            r#"worker_shares_valid_total{{payout_address="bc1quser1",workername="worker1"}} {:.0}"#,
             20.0 * TWO32
         )));
         // Inactive worker2 should NOT be present
         assert!(!exposition.contains(&format!(
-            r#"worker_shares_valid_total{{btcaddress="bc1quser1",workername="worker2"}} {:.0}"#,
+            r#"worker_shares_valid_total{{payout_address="bc1quser1",workername="worker2"}} {:.0}"#,
             22.0 * TWO32
         )));
 
         assert!(exposition.contains("# HELP worker_best_share"));
         assert!(exposition.contains("# TYPE worker_best_share gauge"));
-        assert!(
-            exposition
-                .contains("worker_best_share{btcaddress=\"bc1quser1\",workername=\"worker1\"} 800")
-        );
+        assert!(exposition.contains(
+            "worker_best_share{payout_address=\"bc1quser1\",workername=\"worker1\"} 800"
+        ));
         // Inactive worker2 should NOT be present
-        assert!(
-            !exposition
-                .contains("worker_best_share{btcaddress=\"bc1quser1\",workername=\"worker2\"} 600")
-        );
+        assert!(!exposition.contains(
+            "worker_best_share{payout_address=\"bc1quser1\",workername=\"worker2\"} 600"
+        ));
 
         assert!(exposition.contains("# HELP worker_best_share_ever"));
         assert!(exposition.contains("# TYPE worker_best_share_ever gauge"));
         assert!(exposition.contains(
-            "worker_best_share_ever{btcaddress=\"bc1quser1\",workername=\"worker1\"} 1500"
+            "worker_best_share_ever{payout_address=\"bc1quser1\",workername=\"worker1\"} 1500"
         ));
         // Inactive worker2 should NOT be present
-        assert!(
-            !exposition.contains(
-                "worker_best_share_ever{btcaddress=\"bc1quser1\",workername=\"worker2\"} 0"
-            )
-        );
+        assert!(!exposition.contains(
+            "worker_best_share_ever{payout_address=\"bc1quser1\",workername=\"worker2\"} 0"
+        ));
 
         assert!(exposition.contains("# HELP worker_last_share_at"));
         assert!(exposition.contains("# TYPE worker_last_share_at gauge"));
         assert!(exposition.contains(&format!(
-            "worker_last_share_at{{btcaddress=\"bc1quser1\",workername=\"worker1\"}} {recent}"
+            "worker_last_share_at{{payout_address=\"bc1quser1\",workername=\"worker1\"}} {recent}"
         )));
         // Inactive worker2 should NOT be present
         assert!(!exposition.contains(&format!(
-            "worker_last_share_at{{btcaddress=\"bc1quser1\",workername=\"worker2\"}} {recent}"
+            "worker_last_share_at{{payout_address=\"bc1quser1\",workername=\"worker2\"}} {recent}"
         )));
 
         // Verify no p2pool_ prefix
@@ -397,27 +454,26 @@ mod tests {
 
         // Check user-level metric
         assert!(exposition.contains(&format!(
-            r#"user_shares_valid_total{{btcaddress="bc1qtest"}} {:.0}"#,
+            r#"user_shares_valid_total{{payout_address="bc1qtest"}} {:.0}"#,
             10.0 * TWO32
         )));
 
         // Verify that empty workername is replaced with "unnamed"
         assert!(exposition.contains(r#"workername="unnamed""#));
         assert!(exposition.contains(&format!(
-            r#"worker_shares_valid_total{{btcaddress="bc1qtest",workername="unnamed"}} {:.0}"#,
+            r#"worker_shares_valid_total{{payout_address="bc1qtest",workername="unnamed"}} {:.0}"#,
             10.0 * TWO32
         )));
         assert!(
-            exposition
-                .contains(r#"worker_best_share{btcaddress="bc1qtest",workername="unnamed"} 500"#)
-        );
-        assert!(
             exposition.contains(
-                r#"worker_best_share_ever{btcaddress="bc1qtest",workername="unnamed"} 500"#
+                r#"worker_best_share{payout_address="bc1qtest",workername="unnamed"} 500"#
             )
         );
+        assert!(exposition.contains(
+            r#"worker_best_share_ever{payout_address="bc1qtest",workername="unnamed"} 500"#
+        ));
         assert!(exposition.contains(&format!(
-            r#"worker_last_share_at{{btcaddress="bc1qtest",workername="unnamed"}} {recent}"#
+            r#"worker_last_share_at{{payout_address="bc1qtest",workername="unnamed"}} {recent}"#
         )));
     }
 }

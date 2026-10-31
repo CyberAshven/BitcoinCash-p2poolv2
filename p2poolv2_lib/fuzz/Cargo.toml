@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2024-2026 P2Poolv2 Developers (see AUTHORS)
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Ported from p2poolv2/p2poolv2 da18b991 and 543d6240 by Juwon Ogunseye.
+
+# Keep cargo-fuzz and its native instrumentation out of the normal workspace.
+[workspace]
+
+[package]
+name = "p2poolv2-lib-fuzz"
+version = "0.0.1-alpha"
+publish = false
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bitcoin = "0.32"
+
+[dependencies.p2poolv2_lib]
+path = ".."
+
+[[bin]]
+name = "wire_message_decode"
+path = "fuzz_targets/wire_message_decode.rs"
+test = false
+doc = false
+bench = false

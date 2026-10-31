@@ -1,0 +1,221 @@
+---
+# Grafana + Prometheus role -- native install and configuration for
+# monitoring p2poolv2 metrics. Grafana is fully provisioned: datasource
+# and dashboards come from this repo, not from the Grafana UI.
+
+# --- Grafana repository setup (Debian/Ubuntu) ---
+
+- name: Ensure keyring directory exists (Debian/Ubuntu)
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Download Grafana GPG key (Debian/Ubuntu)
+  ansible.builtin.get_url:
+    url: https://apt.grafana.com/gpg.key
+    dest: /etc/apt/keyrings/grafana.asc
+    mode: "0644"
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Add Grafana apt repository (Debian/Ubuntu)
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/grafana.asc] https://apt.grafana.com stable main"
+    state: present
+    filename: grafana
+    update_cache: true
+  when: ansible_facts['os_family'] == "Debian"
+
+# --- Install packages ---
+# Prometheus is in the default repos on Debian/Ubuntu (universe) and Arch
+# (extra). On Arch the package database is deliberately not synced: a sync
+# without a full upgrade is a partial upgrade. If pacman cannot find a
+# package version, run `pacman -Syu` on the host first.
+# acl lets Ansible run the password reset as the unprivileged grafana user.
+
+- name: Install prometheus and grafana (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name:
+      - acl
+      - prometheus
+      - grafana
+    state: present
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Install prometheus and grafana (Arch)
+  community.general.pacman:
+    name:
+      - acl
+      - prometheus
+      - grafana
+    state: present
+  when: ansible_facts['os_family'] == "Archlinux"
+
+# --- Prometheus ---
+
+# Holds the p2poolv2 API password, so only the prometheus group can read it
+- name: Deploy prometheus.yml
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /etc/prometheus/prometheus.yml
+    owner: root
+    group: prometheus
+    mode: "0640"
+    validate: promtool check config %s
+  notify: restart prometheus
+
+- name: Bind Prometheus to {{ p2poolv2_prometheus_listen_address }}
+  ansible.builtin.lineinfile:
+    path: "{{ p2poolv2_prometheus_args_file }}"
+    regexp: "^{{ p2poolv2_prometheus_args_variable }}="
+    line: '{{ p2poolv2_prometheus_args_variable }}="--web.listen-address={{ p2poolv2_prometheus_listen_address }}:{{ p2poolv2_prometheus_port }}"'
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart prometheus
+
+# --- Grafana settings ---
+
+- name: Ensure Grafana unit override directory exists
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ p2poolv2_grafana_service }}.service.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy Grafana unit override
+  ansible.builtin.template:
+    src: grafana-override.conf.j2
+    dest: "/etc/systemd/system/{{ p2poolv2_grafana_service }}.service.d/p2poolv2.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - reload systemd
+    - restart grafana
+
+# --- Grafana provisioning and dashboards ---
+
+- name: Ensure Grafana provisioning directories exist
+  ansible.builtin.file:
+    path: "{{ p2poolv2_grafana_provisioning_dir }}/{{ item }}"
+    state: directory
+    owner: root
+    group: grafana
+    mode: "0755"
+  loop:
+    - datasources
+    - dashboards
+
+- name: Deploy Grafana datasource provisioning
+  ansible.builtin.template:
+    src: datasource.yml.j2
+    dest: "{{ p2poolv2_grafana_provisioning_dir }}/datasources/prometheus.yml"
+    owner: root
+    group: grafana
+    mode: "0644"
+  notify: restart grafana
+
+- name: Deploy Grafana dashboard provisioning config
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../prometheus/grafana/provisioning/dashboards/"
+    dest: "{{ p2poolv2_grafana_provisioning_dir }}/dashboards/"
+    owner: root
+    group: grafana
+    mode: "0644"
+  notify: restart grafana
+
+- name: Ensure Grafana dashboards directory exists
+  ansible.builtin.file:
+    path: "{{ p2poolv2_grafana_dashboards_dir }}"
+    state: directory
+    owner: grafana
+    group: grafana
+    mode: "0755"
+
+# Deploys both the private dashboards and the variable-free public ones
+# (shareable with Grafana's "Share externally"). The repo files are shared
+# with the Docker stack, so the datasource uid is substituted here:
+#   - private: the default of their datasource dropdown
+#   - public:  the ${DS_PROMETHEUS} placeholder, otherwise only filled in
+#     by a manual UI import
+# The template module is not used because the dashboards contain Grafana's
+# own double-brace legend syntax. The dashboard provider rescans every 10
+# seconds, so no restart is needed.
+- name: Deploy Grafana dashboard JSON files
+  ansible.builtin.copy:
+    content: >-
+      {{ lookup('ansible.builtin.file', item, rstrip=false)
+         | replace('"value": "prometheus"', '"value": "' ~ p2poolv2_grafana_datasource_uid ~ '"')
+         | replace('${DS_PROMETHEUS}', p2poolv2_grafana_datasource_uid) }}
+    dest: "{{ p2poolv2_grafana_dashboards_dir }}/{{ item | basename }}"
+    owner: grafana
+    group: grafana
+    mode: "0644"
+  loop: "{{ query('ansible.builtin.fileglob',
+                  playbook_dir ~ '/../prometheus/grafana/dashboards/*.json',
+                  playbook_dir ~ '/../prometheus/grafana/dashboards-public/*.json') }}"
+  loop_control:
+    label: "{{ item | basename }}"
+
+# --- Enable and start services ---
+
+- name: Apply pending config before starting services
+  ansible.builtin.meta: flush_handlers
+
+# Check mode does not install the packages, so the services may not exist yet
+- name: Enable and start prometheus service
+  ansible.builtin.systemd:
+    name: prometheus
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Enable and start grafana service
+  ansible.builtin.systemd:
+    name: "{{ p2poolv2_grafana_service }}"
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"
+
+# --- Grafana admin password ---
+# GF_SECURITY_ADMIN_PASSWORD only applies when Grafana creates its database,
+# so an existing install is checked by logging in and reset if that fails.
+
+- name: Wait for Grafana to accept connections
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ p2poolv2_grafana_port }}"
+    timeout: 60
+  when: not ansible_check_mode
+
+- name: Check Grafana admin password
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ p2poolv2_grafana_port }}/api/user"
+    user: admin
+    password: "{{ p2poolv2_grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 401]
+  register: p2poolv2_grafana_login
+  no_log: true
+  when: not ansible_check_mode
+
+- name: Reset Grafana admin password
+  ansible.builtin.command:
+    argv:
+      - "{{ p2poolv2_grafana_binary }}"
+      - cli
+      - --homepath
+      - /usr/share/grafana
+      - --config
+      - "{{ p2poolv2_grafana_config_file }}"
+      - "cfg:default.paths.data={{ p2poolv2_grafana_data_dir }}"
+      - admin
+      - reset-admin-password
+      - "{{ p2poolv2_grafana_admin_password }}"
+  become_user: grafana
+  no_log: true
+  when: not ansible_check_mode and p2poolv2_grafana_login.status == 401

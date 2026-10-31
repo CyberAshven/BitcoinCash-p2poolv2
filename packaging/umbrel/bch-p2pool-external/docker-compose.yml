@@ -1,0 +1,44 @@
+# P2Poolv2 for Bitcoin Cash on Umbrel, mining on a Bitcoin Cash Node (BCHN)
+# that runs elsewhere: chipnet or mainnet. Ported from p2poolv2/umbrel-app
+# (Apache-2.0); see ../README.md.
+#
+# The node reads p2pool.toml, which Umbrel copies into this app's folder on
+# install and keeps across app updates, with the P2POOL_* variables below on
+# top. BCHN's RPC login and ZMQ endpoint come from p2pool.toml or, on
+# umbrelOS 2.0 and later, from the app's settings page, whose values override
+# both.
+#
+# Ports: Stratum V1 3341 and share chain P2P 6891 are published on the
+# Umbrel. They differ from the Bitcoin P2Poolv2 app's 3333 and 6884, from
+# Umbrel's Bitcoin and Bitcoin Cash Node apps, and from this store's
+# bch-p2pool app (3340, 6890), so all of them can run side by side. The API
+# and dashboard (46884) are reached only through Umbrel's app proxy.
+
+services:
+  app_proxy:
+    environment:
+      # <app id>_<service>_1, the container's name on Umbrel's network.
+      APP_HOST: bch-p2pool-external_p2pool_1
+      APP_PORT: 46884
+
+  p2pool:
+    image: ghcr.io/cyberashven/bitcoincash-p2poolv2:v0.0.1-alpha
+    user: "1000:1000"
+    restart: on-failure
+    # Lets the share store close cleanly on stop.
+    stop_grace_period: 1m
+    ports:
+      - "3341:3341"
+      - "6891:6891"
+    volumes:
+      - ${APP_DATA_DIR}/p2pool.toml:/etc/p2poolv2/config.toml:ro
+      - ${APP_DATA_DIR}/data:/p2poolv2
+    environment:
+      - P2POOL_CONFIG=/etc/p2poolv2/config.toml
+      - RUST_LOG=info
+      - P2POOL_STRATUM__CHAIN=bitcoin-cash
+      # The ports published above, and the API port the app proxy and the
+      # image's health check use.
+      - P2POOL_STRATUM__PORT=3341
+      - P2POOL_NETWORK__LISTEN_ADDRESS=/ip4/0.0.0.0/tcp/6891
+      - P2POOL_API__PORT=46884

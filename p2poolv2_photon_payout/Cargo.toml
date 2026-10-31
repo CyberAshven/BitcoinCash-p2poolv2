@@ -1,0 +1,37 @@
+[package]
+name = "p2poolv2_photon_payout"
+version.workspace = true
+edition.workspace = true
+license = "AGPL-3.0-or-later"
+homepage.workspace = true
+repository.workspace = true
+publish = false
+# The pinned libauth BCH 2026 VM requires Rust 1.90.
+rust-version = "1.90"
+description = "Offline PHOTON funded payout covenant feasibility prototype"
+
+[package.metadata.dist]
+dist = false
+
+[features]
+default = ["test-utils"]
+test-utils = []
+
+[[bin]]
+name = "photon-payout-measure"
+path = "src/bin/photon_payout_measure.rs"
+required-features = ["test-utils"]
+
+[[bin]]
+name = "photon-lean-measure"
+path = "src/bin/photon_lean_measure.rs"
+required-features = ["test-utils"]
+
+[[bin]]
+name = "photon-payout-sim"
+path = "src/bin/photon_payout_sim.rs"
+required-features = ["test-utils"]
+
+[dependencies]
+libauth.workspace = true
+hex.workspace = true

@@ -176,7 +176,7 @@ pub const FIELDS: [FieldSpec; 44] = [
         "donation",
         "Donation in basis points (100 = 1%); 0 opts out",
         ValueKind::Integer,
-        Some("150"),
+        Some("100"),
     ),
     optional(
         "stratum",
@@ -188,7 +188,7 @@ pub const FIELDS: [FieldSpec; 44] = [
     optional(
         "stratum",
         "fee",
-        "Operator fee in basis points, taken after the donation (both at most 10%)",
+        "Operator fee in basis points, taken after the donation; 100 (1%) once fee_address is set (each at most 10%)",
         ValueKind::Integer,
         None,
     ),

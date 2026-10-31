@@ -66,7 +66,12 @@ fn main() {
 
     println!("Opening store at: {db_path}");
     let store = match Store::new(db_path.clone(), true) {
-        Ok(store) => store,
+        // The prune boundary depends on the chain's depths, which the store's
+        // own genesis tells.
+        Ok(store) => {
+            let chain = store.stored_chain().unwrap_or_default();
+            store.with_chain(chain)
+        }
         Err(error) => {
             eprintln!("Failed to open store: {error}");
             process::exit(1);

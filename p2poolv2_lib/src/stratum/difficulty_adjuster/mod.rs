@@ -10,10 +10,12 @@
 
 use crate::accounting::calc::{decay_time, sane_time_diff, time_bias};
 use crate::config::DEFAULT_MAXIMUM_DIFFICULTY;
+use bitcoin::{CompactTarget, Network, Target};
 #[cfg(test)]
 use mockall::automock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// The target Difficulty Rate Ratio (DRR) for standard clients
 /// This aims for about 1 share every 3.33 seconds
@@ -39,6 +41,35 @@ pub const MIN_DECAY_INTERVAL: f64 = 0.05;
 
 /// Lowest difficulty a session is ever given. Difficulty 0 has no share target.
 pub const MINIMUM_SESSION_DIFFICULTY: u64 = 1;
+
+/// Set once the node has warned that `[stratum] minimum_difficulty` is above
+/// the share difficulty, so the warning is logged once, not per session.
+static MINIMUM_ABOVE_SHARE_DIFFICULTY_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Highest stratum difficulty that still lets every share-chain share
+/// through, for a job whose share target is `share_bits`.
+///
+/// A miner only submits hashes that meet its session difficulty. A session
+/// difficulty above the share difficulty makes the miner throw away hashes
+/// that meet the share target, so it is paid for fewer hashes than it did.
+/// This is the share difficulty in stratum units (difficulty 1 is the mainnet
+/// difficulty-1 target, as `mining.set_difficulty` and the SV2 targets use),
+/// rounded down so that its target is never harder than the share target.
+/// It is at least [`MINIMUM_SESSION_DIFFICULTY`]: a share target easier than
+/// difficulty 1, as on regtest, still gets difficulty 1. `None` for a zero
+/// target, which no job carries.
+pub fn share_difficulty_ceiling(share_bits: CompactTarget) -> Option<u64> {
+    let share_target = Target::from_compact(share_bits);
+    if share_target == Target::ZERO {
+        return None;
+    }
+    let difficulty = share_target.difficulty(Network::Bitcoin);
+    Some(
+        u64::try_from(difficulty)
+            .unwrap_or(u64::MAX)
+            .max(MINIMUM_SESSION_DIFFICULTY),
+    )
+}
 
 /// DifficultyAdjuster implements the dynamic difficulty adjustment algorithm based on CKPool.
 ///
@@ -77,6 +108,11 @@ pub struct DifficultyAdjuster {
     /// Difficulty of shares that arrived too soon after the last decay to be
     /// decayed, saturating at `u64::MAX`.
     pub unaccounted_shares: u64,
+    /// Share difficulty of the latest job sent to this session, from
+    /// [`share_difficulty_ceiling`]. The session difficulty never goes above
+    /// it, whatever vardiff, the pool minimum or the miner asks for. `None`
+    /// before the first job and in Hydrapool mode, which has no share chain.
+    pub share_difficulty_ceiling: Option<u64>,
 }
 
 #[cfg_attr(test, automock)]
@@ -144,6 +180,13 @@ pub trait DifficultyAdjusterTrait {
     fn set_current_difficulty(&mut self, difficulty: u64);
 
     fn get_current_difficulty(&self) -> u64;
+
+    /// Record the share difficulty ceiling of the job about to be sent (see
+    /// [`share_difficulty_ceiling`]) and lower the session difficulty to it
+    /// when it is above. Returns the new session difficulty when it was
+    /// lowered, so the caller tells the miner before sending the job. `None`
+    /// clears the ceiling (Hydrapool mode).
+    fn set_share_difficulty_ceiling(&mut self, ceiling: Option<u64>) -> Option<u64>;
 }
 
 pub enum Dsps {
@@ -176,6 +219,7 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
             pool_minimum_difficulty,
             pool_maximum_difficulty,
             unaccounted_shares: 0,
+            share_difficulty_ceiling: None,
         }
     }
 
@@ -350,7 +394,10 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
     /// The result is at least `MINIMUM_SESSION_DIFFICULTY` and at most the
     /// pool maximum, which is [`DEFAULT_MAXIMUM_DIFFICULTY`] when none is
     /// configured, whatever the client asks for. The maximum wins over the
-    /// minimum when an operator configures them crossed.
+    /// minimum when an operator configures them crossed. Once a job has been
+    /// sent, the result is also at most that job's share difficulty
+    /// ([`Self::share_difficulty_ceiling`]), which wins over the pool
+    /// minimum and the client's suggestion.
     fn apply_difficulty_constraints(
         &self,
         calculated_diff: u64,
@@ -377,6 +424,7 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
         let maximum = self
             .pool_maximum_difficulty
             .unwrap_or(DEFAULT_MAXIMUM_DIFFICULTY)
+            .min(self.share_difficulty_ceiling.unwrap_or(u64::MAX))
             .max(MINIMUM_SESSION_DIFFICULTY);
         diff.clamp(MINIMUM_SESSION_DIFFICULTY, maximum)
     }
@@ -446,6 +494,31 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
     /// Get current difficulty
     fn get_current_difficulty(&self) -> u64 {
         self.current_difficulty
+    }
+
+    fn set_share_difficulty_ceiling(&mut self, ceiling: Option<u64>) -> Option<u64> {
+        self.share_difficulty_ceiling = ceiling;
+        let ceiling = ceiling?;
+        if self.pool_minimum_difficulty > ceiling
+            && !MINIMUM_ABOVE_SHARE_DIFFICULTY_WARNED.swap(true, Ordering::Relaxed)
+        {
+            warn!(
+                "[stratum] minimum_difficulty {} is above the share difficulty {ceiling}; \
+                 miners are held at the share difficulty so they lose no shares. \
+                 Lower minimum_difficulty to {ceiling} or less.",
+                self.pool_minimum_difficulty
+            );
+        }
+        if self.current_difficulty <= ceiling {
+            return None;
+        }
+        debug!(
+            "Session difficulty {} is above the share difficulty {ceiling}, lowering it",
+            self.current_difficulty
+        );
+        self.old_difficulty = self.current_difficulty;
+        self.current_difficulty = ceiling;
+        Some(ceiling)
     }
 }
 
@@ -1104,5 +1177,117 @@ mod tests {
             );
             assert_eq!(adjuster.unaccounted_shares, 0);
         }
+    }
+
+    #[test]
+    fn share_difficulty_ceiling_of_the_bch_mini_chain_ceiling_rounds_down_to_4() {
+        // 0x1c384bd7 is difficulty 4.55; 5 would discard shares between 4.55 and 5.
+        assert_eq!(
+            share_difficulty_ceiling(CompactTarget::from_consensus(0x1c38_4bd7)),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn share_difficulty_ceiling_of_the_bch_main_chain_ceiling_is_1164() {
+        assert_eq!(
+            share_difficulty_ceiling(CompactTarget::from_consensus(0x1b38_4bd7)),
+            Some(1164)
+        );
+    }
+
+    #[test]
+    fn share_difficulty_ceiling_of_the_difficulty_one_target_is_1() {
+        assert_eq!(
+            share_difficulty_ceiling(CompactTarget::from_consensus(0x1d00_ffff)),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn share_difficulty_ceiling_of_a_target_easier_than_difficulty_one_is_1() {
+        assert_eq!(
+            share_difficulty_ceiling(CompactTarget::from_consensus(0x207f_ffff)),
+            Some(MINIMUM_SESSION_DIFFICULTY)
+        );
+    }
+
+    #[test]
+    fn share_difficulty_ceiling_of_a_zero_target_is_none() {
+        assert_eq!(
+            share_difficulty_ceiling(CompactTarget::from_consensus(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_session_above_the_share_difficulty_is_lowered_to_it() {
+        let mut adjuster = DifficultyAdjuster::new(5_000, 1, None);
+
+        assert_eq!(
+            adjuster.set_share_difficulty_ceiling(Some(1164)),
+            Some(1164)
+        );
+        assert_eq!(adjuster.get_current_difficulty(), 1164);
+        assert_eq!(adjuster.old_difficulty, 5_000);
+    }
+
+    #[test]
+    fn a_session_at_or_below_the_share_difficulty_is_left_alone() {
+        let mut adjuster = DifficultyAdjuster::new(1164, 1, None);
+
+        assert_eq!(adjuster.set_share_difficulty_ceiling(Some(1164)), None);
+        assert_eq!(adjuster.get_current_difficulty(), 1164);
+    }
+
+    #[test]
+    fn a_suggested_difficulty_above_the_share_difficulty_is_capped() {
+        let mut adjuster = DifficultyAdjuster::new(1, 1, None);
+        adjuster.set_share_difficulty_ceiling(Some(4));
+
+        assert_eq!(adjuster.apply_difficulty_constraints(100, Some(100)), 4);
+    }
+
+    #[test]
+    fn a_pool_minimum_above_the_share_difficulty_is_capped() {
+        let mut adjuster = DifficultyAdjuster::new(1, 50, None);
+        adjuster.set_share_difficulty_ceiling(Some(4));
+
+        assert_eq!(adjuster.apply_difficulty_constraints(1, None), 4);
+    }
+
+    #[test]
+    fn a_pool_maximum_below_the_share_difficulty_still_applies() {
+        let mut adjuster = DifficultyAdjuster::new(1, 1, Some(10));
+        adjuster.set_share_difficulty_ceiling(Some(1164));
+
+        assert_eq!(adjuster.apply_difficulty_constraints(500, None), 10);
+    }
+
+    #[test]
+    fn clearing_the_ceiling_removes_the_cap() {
+        let mut adjuster = DifficultyAdjuster::new(1, 1, None);
+        adjuster.set_share_difficulty_ceiling(Some(4));
+        assert_eq!(adjuster.set_share_difficulty_ceiling(None), None);
+
+        assert_eq!(adjuster.apply_difficulty_constraints(100, None), 100);
+    }
+
+    #[test]
+    fn vardiff_never_raises_a_session_above_the_share_difficulty() {
+        let mut adjuster = DifficultyAdjuster::new(4, 1, None);
+        adjuster.set_share_difficulty_ceiling(Some(4));
+        let current_timestamp = SystemTime::now();
+        let _ = adjuster.record_share_submission(4, 1, None, current_timestamp);
+        let past_time = current_timestamp - Duration::from_secs(MIN_SECONDS_BEFORE_ADJUST + 10);
+        adjuster.first_share_timestamp = Some(past_time);
+        adjuster.last_difficulty_change_timestamp = Some(past_time);
+        // A miner fast enough for vardiff to want difficulty 1,000.
+        adjuster.difficulty_shares_per_second_5min_window = 300.0;
+
+        let (new_difficulty, _) = adjuster.record_share_submission(4, 2, None, current_timestamp);
+
+        assert_eq!(new_difficulty, None);
+        assert_eq!(adjuster.get_current_difficulty(), 4);
     }
 }

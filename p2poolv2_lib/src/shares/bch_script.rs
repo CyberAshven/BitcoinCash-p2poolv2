@@ -22,9 +22,11 @@
 //!   script, P2SH20, multisig and token-prefixed outputs are rejected.
 //!
 //! Outputs are restricted too ([`verify_outputs`]): every output a share
-//! transaction creates is P2PKH or P2SH32 and holds at least BCHN's dust
-//! threshold for that output, so every share output stays above the dust
-//! limit and can be spent again. A transaction is also final at the height
+//! transaction creates is P2PKH or P2SH32 and holds at least the value BCHN's
+//! dust formula gives for that output. BCHN applies that formula to
+//! satoshis, as relay policy; the share chain reuses it as its own floor on
+//! share units (10^8 to a share), a share-chain rule BCHN never sees, so a
+//! share cannot be split into crumbs. A transaction is also final at the height
 //! of the share that includes it ([`verify_final`]), so the refund path
 //! cannot be mined before its height.
 //!
@@ -48,18 +50,21 @@ use bitcoin::consensus::encode::VarInt;
 use bitcoin::hashes::{Hash, hash160, sha256, sha256d};
 use bitcoin::secp256k1::{self, Message, Secp256k1};
 use bitcoin::{Sequence, Transaction, TxOut};
-use k256::elliptic_curve::ops::Reduce;
-use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
+use k256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
 use k256::elliptic_curve::{Group, PrimeField};
-use k256::{AffinePoint, EncodedPoint, FieldBytes, FieldElement, ProjectivePoint, Scalar, U256};
+use k256::{AffinePoint, FieldBytes, ProjectivePoint, Scalar, Sec1Point};
+
+use crate::shares::bch_schnorr::{FieldElement, challenge_scalar};
 use sha2::{Digest, Sha256};
 
 const OP_DUP: u8 = 0x76;
 const OP_HASH160: u8 = 0xa9;
 const OP_EQUALVERIFY: u8 = 0x88;
 const OP_CHECKSIG: u8 = 0xac;
+const OP_EQUAL: u8 = 0x87;
 const PUBKEY_HASH_LENGTH: u8 = 20;
 const P2PKH_SCRIPT_LENGTH: usize = 25;
+const P2SH20_SCRIPT_LENGTH: usize = 23;
 /// Largest push a single opcode byte can make. Larger pushes need
 /// `OP_PUSHDATA`, which minimal-push rules forbid for signatures and keys.
 const MAX_DIRECT_PUSH: u8 = 0x4b;
@@ -74,6 +79,28 @@ const UNCOMPRESSED_KEY_LENGTH: usize = 65;
 /// (a contract spend) and accepts shares it rejects (a dust or `OP_RETURN`
 /// output), so the two must not peer.
 pub const BCH_SHARE_TRADE_RULE_TAG: &str = "trade-htlc";
+
+/// Most SigChecks one transaction may execute: BCHN's `MAX_TX_SIGCHECKS`
+/// (`src/consensus/consensus.h`), BCH consensus since the 2020-05-15
+/// upgrade ([SigChecks](https://upgradespecs.bitcoincashnode.org/2020-05-15-sigchecks/)).
+/// The share chain holds its transactions to the same limit.
+pub const MAX_TX_SIGCHECKS: usize = 3_000;
+
+/// Bytes of block per SigCheck a block may execute: BCHN's
+/// `BLOCK_MAXBYTES_MAXSIGCHECKS_RATIO`, so a block of `n` bytes may execute
+/// `n / 141` SigChecks. The share chain applies the same density to the
+/// share transactions a share carries.
+pub const BYTES_PER_SIGCHECK: usize = 141;
+
+/// The SigChecks a share transaction the share chain accepts executes, as
+/// BCH counts them (the 2020-05-15 SigChecks specification): every accepted
+/// input is a P2PKH spend or a claim or refund of the share-trading
+/// contract, each running exactly one `OP_CHECKSIG` with a non-empty
+/// signature that must verify, which counts one; outputs count none.
+/// Meaningful once [`verify_transaction`] has accepted the transaction.
+pub fn sig_checks(transaction: &Transaction) -> usize {
+    transaction.input.len()
+}
 
 /// BCHN's default `-dustrelayfee`, `DUST_RELAY_TX_FEE` in `policy.h`, in
 /// satoshis per kilobyte.
@@ -183,7 +210,9 @@ pub fn verify_transaction(
 
 /// Check that every output is P2PKH or P2SH32 and not dust.
 ///
-/// Applies to the outputs of non-coinbase share transactions. A share
+/// Values are share units, and [`dust_threshold`], BCHN's satoshi formula,
+/// serves as the share chain's floor on them. Applies to the outputs of
+/// non-coinbase share transactions. A share
 /// coinbase pays one whole share unit to its owner's P2PKH script, far above
 /// the threshold.
 pub fn verify_outputs(transaction: &Transaction) -> Result<(), BchScriptError> {
@@ -212,10 +241,20 @@ pub fn verify_outputs(transaction: &Transaction) -> Result<(), BchScriptError> {
 /// (34 + 148 bytes) and 576 for P2SH32 (44 + 148 bytes). The value of an
 /// output at or above the threshold is not dust.
 pub fn dust_threshold(output: &TxOut) -> u64 {
-    let script_length = output.script_pubkey.len();
-    let output_size = 8 + VarInt::from(script_length).size() + script_length;
-    let spend_size = output_size as u64 + DUST_SPENDING_INPUT_SIZE;
+    dust_threshold_for_script_length(output.script_pubkey.len())
+}
+
+/// [`dust_threshold`] for an output whose locking script is
+/// `script_length` bytes: the threshold depends on the output's size alone.
+pub fn dust_threshold_for_script_length(script_length: usize) -> u64 {
+    let spend_size = output_size_for_script_length(script_length) as u64 + DUST_SPENDING_INPUT_SIZE;
     DUST_FEE_MULTIPLE * (spend_size * DUST_RELAY_FEE_PER_KILOBYTE / 1_000)
+}
+
+/// Serialized bytes of an output whose locking script is `script_length`
+/// bytes: the 8-byte value, the CompactSize length and the script.
+pub fn output_size_for_script_length(script_length: usize) -> usize {
+    8 + VarInt::from(script_length).size() + script_length
 }
 
 /// Check that `transaction` is final in a share at `block_height`.
@@ -406,6 +445,34 @@ pub(crate) fn verify_signature(
     }
 }
 
+/// The 20-byte hash of a P2SH20 locking script
+/// (`OP_HASH160 <20 bytes> OP_EQUAL`), or `None` for any other script.
+pub fn p2sh20_hash(script: &[u8]) -> Option<&[u8; 20]> {
+    if script.len() != P2SH20_SCRIPT_LENGTH
+        || script[0] != OP_HASH160
+        || script[1] != PUBKEY_HASH_LENGTH
+        || script[22] != OP_EQUAL
+    {
+        return None;
+    }
+    script[2..22].try_into().ok()
+}
+
+/// Whether `script` is a Bitcoin Cash payout script: P2PKH, P2SH20 or
+/// P2SH32.
+///
+/// A share-chain rule for every address a Bitcoin Cash share header names
+/// (the payee, the donation and the fee). These are the locking scripts
+/// CashAddr encodes (types 0 and 1, 20 and 32 bytes; token-aware types 2 and
+/// 3 lock with the same scripts). A witness program, which a share header
+/// can otherwise carry, is no Bitcoin Cash script: BCH has no SegWit, and
+/// such an output can never be spent (push-only unlocking bytecode leaving
+/// one item, consensus since November 2018), so it would only burn its
+/// payout.
+pub fn is_bch_payout_script(script: &[u8]) -> bool {
+    p2pkh_hash(script).is_some() || p2sh20_hash(script).is_some() || p2sh32_hash(script).is_some()
+}
+
 /// The 20-byte key hash of a P2PKH script, or `None` for any other script.
 pub fn p2pkh_hash(script: &[u8]) -> Option<&[u8; 20]> {
     if script.len() != P2PKH_SCRIPT_LENGTH
@@ -519,7 +586,7 @@ fn is_strict_der(der: &[u8]) -> bool {
 /// `e = SHA256(r || compressed(P) || m) mod n`; `R = sG - eP`; fail if `R` is
 /// the point at infinity, if `x(R) != r`, or if `y(R)` is not a quadratic
 /// residue modulo `p`.
-fn verify_schnorr(
+pub(crate) fn verify_schnorr(
     signature: &[u8],
     public_key: &[u8],
     digest: &[u8; 32],
@@ -527,30 +594,31 @@ fn verify_schnorr(
 ) -> Result<(), BchScriptError> {
     let rejected = BchScriptError::SignatureRejected { input_index };
     let (r_bytes, s_bytes) = signature.split_at(32);
-    let r_bytes = FieldBytes::clone_from_slice(r_bytes);
+    let r_bytes = FieldBytes::try_from(r_bytes).map_err(|_| rejected.clone())?;
     if bool::from(FieldElement::from_bytes(&r_bytes).is_none()) {
         return Err(rejected);
     }
-    let signature_scalar =
-        Option::<Scalar>::from(Scalar::from_repr(FieldBytes::clone_from_slice(s_bytes)))
-            .ok_or(rejected.clone())?;
-    let encoded_key = EncodedPoint::from_bytes(public_key)
+    let signature_scalar = Option::<Scalar>::from(Scalar::from_repr(
+        FieldBytes::try_from(s_bytes).map_err(|_| rejected.clone())?,
+    ))
+    .ok_or(rejected.clone())?;
+    let encoded_key = Sec1Point::from_bytes(public_key)
         .map_err(|_| BchScriptError::InvalidPublicKey { input_index })?;
-    let key_point = Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&encoded_key))
+    let key_point = Option::<AffinePoint>::from(AffinePoint::from_sec1_point(&encoded_key))
         .ok_or(BchScriptError::InvalidPublicKey { input_index })?;
 
     let mut challenge = Sha256::new();
     challenge.update(r_bytes);
-    challenge.update(key_point.to_encoded_point(true).as_bytes());
+    challenge.update(key_point.to_sec1_point(true).as_bytes());
     challenge.update(digest);
-    let challenge_scalar = <Scalar as Reduce<U256>>::reduce_bytes(&challenge.finalize());
+    let challenge_scalar = challenge_scalar(challenge);
 
     let nonce_point = ProjectivePoint::GENERATOR * signature_scalar
         - ProjectivePoint::from(key_point) * challenge_scalar;
     if bool::from(nonce_point.is_identity()) {
         return Err(rejected);
     }
-    let nonce_encoded = nonce_point.to_affine().to_encoded_point(false);
+    let nonce_encoded = nonce_point.to_affine().to_sec1_point(false);
     let (Some(nonce_x), Some(nonce_y)) = (nonce_encoded.x(), nonce_encoded.y()) else {
         return Err(rejected);
     };
@@ -865,7 +933,7 @@ mod tests {
         // Input 0 pushes 0x47 bytes: DER 30 44 02 20 <r> 02 20 <s>, then 0x41.
         let script_sig = transaction.input[0].script_sig.to_bytes();
         let der = &script_sig[1..71];
-        let low_s = Scalar::from_repr(FieldBytes::clone_from_slice(&der[38..70])).unwrap();
+        let low_s = Scalar::from_repr(FieldBytes::try_from(&der[38..70]).unwrap()).unwrap();
         let high_s = low_s.neg().to_repr();
         let mut high_der = Vec::with_capacity(72);
         high_der.extend_from_slice(&[0x30, 0x45]);
@@ -1088,18 +1156,18 @@ mod tests {
         let secret = Scalar::from(7u64);
         let public_key = (ProjectivePoint::GENERATOR * secret)
             .to_affine()
-            .to_encoded_point(true);
+            .to_sec1_point(true);
         let digest = [0x5a; 32];
         let nonce = Scalar::from(3u64);
         let nonce_encoded = (ProjectivePoint::GENERATOR * nonce)
             .to_affine()
-            .to_encoded_point(false);
+            .to_sec1_point(false);
         let nonce_x = nonce_encoded.x().unwrap();
         let mut challenge = Sha256::new();
         challenge.update(nonce_x);
         challenge.update(public_key.as_bytes());
         challenge.update(digest);
-        let challenge_scalar = <Scalar as Reduce<U256>>::reduce_bytes(&challenge.finalize());
+        let challenge_scalar = challenge_scalar(challenge);
 
         let mut non_square_signature = Vec::with_capacity(64);
         non_square_signature.extend_from_slice(nonce_x);
@@ -1122,7 +1190,7 @@ mod tests {
     fn schnorr_rejects_an_r_not_below_the_field_size() {
         let public_key = (ProjectivePoint::GENERATOR * Scalar::from(7u64))
             .to_affine()
-            .to_encoded_point(true);
+            .to_sec1_point(true);
         let mut signature = [0x01u8; 64];
         signature[..32].copy_from_slice(&[0xff; 32]);
         assert_eq!(
@@ -1222,12 +1290,11 @@ mod tests {
             SighashType::from_byte(0x41).unwrap(),
         )
         .unwrap();
-        let secret_scalar =
-            Scalar::from_repr(FieldBytes::clone_from_slice(&TRADE_BUYER_SECRET_KEY)).unwrap();
+        let secret_scalar = Scalar::from_repr(FieldBytes::from(TRADE_BUYER_SECRET_KEY)).unwrap();
         let first_nonce = Scalar::from(0x1234_5678u64);
         let first_point = (ProjectivePoint::GENERATOR * first_nonce)
             .to_affine()
-            .to_encoded_point(false);
+            .to_sec1_point(false);
         let first_y = FieldElement::from_bytes(first_point.y().unwrap()).unwrap();
         let nonce = if bool::from(first_y.sqrt().is_some()) {
             first_nonce
@@ -1236,14 +1303,14 @@ mod tests {
         };
         let nonce_x = *(ProjectivePoint::GENERATOR * nonce)
             .to_affine()
-            .to_encoded_point(false)
+            .to_sec1_point(false)
             .x()
             .unwrap();
         let mut challenge = Sha256::new();
         challenge.update(nonce_x);
         challenge.update(buyer.public_key());
         challenge.update(digest);
-        let challenge_scalar = <Scalar as Reduce<U256>>::reduce_bytes(&challenge.finalize());
+        let challenge_scalar = challenge_scalar(challenge);
         let mut signature = Vec::with_capacity(65);
         signature.extend_from_slice(&nonce_x);
         signature.extend_from_slice(&(nonce + challenge_scalar * secret_scalar).to_repr());
@@ -2059,6 +2126,36 @@ mod tests {
                 block_height: 4_000_000,
             })
         );
+    }
+
+    #[test]
+    fn p2pkh_p2sh20_and_p2sh32_are_bitcoin_cash_payout_scripts() {
+        let p2pkh = ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::from_byte_array([1; 20]));
+        let p2sh20 = ScriptBuf::new_p2sh(&bitcoin::ScriptHash::from_byte_array([2; 20]));
+        let p2sh32 = p2sh32_script(&[3; 32]);
+        assert!(is_bch_payout_script(p2pkh.as_bytes()));
+        assert!(is_bch_payout_script(p2sh20.as_bytes()));
+        assert!(is_bch_payout_script(p2sh32.as_bytes()));
+    }
+
+    #[test]
+    fn witness_programs_and_data_outputs_are_not_bitcoin_cash_payout_scripts() {
+        let p2wpkh = ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([1; 20]));
+        let p2wsh = ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::from_byte_array([1; 32]));
+        assert!(!is_bch_payout_script(p2wpkh.as_bytes()));
+        assert!(!is_bch_payout_script(p2wsh.as_bytes()));
+        assert!(!is_bch_payout_script(&[0x6a, 0x00]));
+        assert!(!is_bch_payout_script(&[]));
+    }
+
+    #[test]
+    fn dust_thresholds_follow_the_output_size() {
+        assert_eq!(dust_threshold_for_script_length(25), 546);
+        assert_eq!(dust_threshold_for_script_length(23), 540);
+        assert_eq!(dust_threshold_for_script_length(35), 576);
+        assert_eq!(output_size_for_script_length(25), 34);
+        assert_eq!(output_size_for_script_length(23), 32);
+        assert_eq!(output_size_for_script_length(35), 44);
     }
 
     // The same spends run opcode by opcode on `test_utils::bch_vm`, which

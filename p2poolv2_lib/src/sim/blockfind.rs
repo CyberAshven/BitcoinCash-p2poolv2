@@ -15,7 +15,8 @@
 //!
 //! Only compiled under the `sim` feature. See docs/simulation/load-test-plan.md.
 
-use crate::stratum::message_handlers::submit::{build_full_block, submit_block};
+use crate::stratum::block_submit::submit_block;
+use crate::stratum::message_handlers::submit::build_full_block;
 use crate::stratum::work::block_template::BlockTemplate;
 use bitcoin::BlockHash;
 use bitcoin::block::Header;
@@ -31,8 +32,9 @@ const MAX_GRIND: u64 = 1 << 7;
 /// PPLNS payout) and the template's transactions.
 ///
 /// `prev_share_blockhash` is the paying share's parent, the anchor its payout
-/// was computed from. It is logged so `load-tests/sim/maturity_check.py` can
-/// map each bitcoin block to the paying share's height.
+/// was computed from. It is logged so the sim harness's maturity check
+/// (`cargo sim maturity-check`) can map each bitcoin block to the paying
+/// share's height.
 pub async fn submit_sim_block(
     mut header: Header,
     coinbase: bitcoin::Transaction,

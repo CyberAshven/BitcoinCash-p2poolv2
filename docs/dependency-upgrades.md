@@ -38,7 +38,7 @@ For these, the gate above is necessary but not sufficient. Add:
 1. **The sim swarm**, which is the only automated coverage of reconnection,
    catch-up and partition recovery:
    ```sh
-   NODE_COUNT=10 ./load-tests/sim/nightly.sh all
+   NODE_COUNT=10 cargo sim nightly all
    ```
    `restart-delayed` is the scenario that matters most: it takes a node down
    past the 300s tip-age threshold. Check `verify_chain: PASS (10/10)` in the

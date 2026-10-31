@@ -121,6 +121,7 @@ fn cash_network(network: BitcoinCashNetwork) -> CashNetwork {
         BitcoinCashNetwork::Mainnet => CashNetwork::Mainnet,
         BitcoinCashNetwork::Chipnet => CashNetwork::Chipnet,
         BitcoinCashNetwork::Regtest => CashNetwork::Regtest,
+        BitcoinCashNetwork::Scalenet => CashNetwork::Scalenet,
     }
 }
 

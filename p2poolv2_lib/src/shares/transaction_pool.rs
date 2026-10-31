@@ -24,12 +24,12 @@
 
 use crate::accounting::payout::sharechain_pplns::payout_rights::has_share_transactions;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
-    BCH_COINBASE_MATURITY, PAYOUT_DEPTH,
+    BCH_COINBASE_MATURITY, BCH_PAYOUT_DEPTH,
 };
 use crate::shares::bch_script::{self, BchScriptError};
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::ShareTransaction;
-use crate::shares::validation::{MAX_BLOCK_SIGOPS_COST, TXS_COUNT_LIMIT};
+use crate::shares::validation::{BCH_MAX_SHARE_SIGCHECKS, TXS_COUNT_LIMIT};
 use crate::store::transaction_store::{PrevoutCheck, PrevoutRejection};
 use crate::store::writer::StoreError;
 use bitcoin::{Amount, BlockHash, OutPoint, Transaction, TxOut, Txid};
@@ -57,9 +57,6 @@ pub const MAX_SHARE_TRANSACTION_BYTES: usize = 64 * 1024;
 /// Most pool transactions one share carries: all but the coinbase of
 /// `TXS_COUNT_LIMIT`.
 pub const MAX_SHARE_TRANSACTIONS: usize = TXS_COUNT_LIMIT as usize - 1;
-/// Sigop cost the share's coinbase and anything else keeps from
-/// `MAX_BLOCK_SIGOPS_COST`.
-const SHARE_SIGOP_RESERVE: usize = 1_000;
 /// Average transactions a second the pool admits from peers, all together.
 pub const PEER_TRANSACTIONS_PER_SECOND: u64 = 10;
 /// Most transactions the pool admits from peers in one burst.
@@ -142,8 +139,8 @@ pub enum PoolRejection {
     OutputsExceedInputs { inputs: Amount, outputs: Amount },
     #[error("transaction is not final at share height {height}: {error}")]
     NotFinal { height: u32, error: BchScriptError },
-    #[error("transaction sigop cost {cost} exceeds the share budget of {limit}")]
-    TooManySigops { cost: usize, limit: usize },
+    #[error("transaction executes {sig_checks} SigChecks, over the {limit} a transaction may")]
+    TooManySigChecks { sig_checks: usize, limit: usize },
     #[error("too many transactions from peers; try again later")]
     RateLimited,
     #[error(
@@ -190,7 +187,7 @@ struct PoolEntry {
     transaction: Arc<ShareTransaction>,
     txid: Txid,
     size: usize,
-    sigop_cost: usize,
+    sig_checks: usize,
     /// Share units the transaction burns: its inputs less its outputs. The
     /// share coinbase pays a fixed unit, so nobody receives them.
     fee: u64,
@@ -555,7 +552,7 @@ impl ShareTransactionPool {
             transaction: Arc::new(ShareTransaction(transaction.clone())),
             txid,
             size,
-            sigop_cost: checked.sigop_cost,
+            sig_checks: checked.sig_checks,
             fee: checked.fee,
             arrived_at: now_seconds(),
         };
@@ -748,7 +745,7 @@ impl ShareTransactionPool {
         match store.check_prevouts(
             &outpoints,
             height,
-            height.saturating_sub(PAYOUT_DEPTH as u32),
+            height.saturating_sub(BCH_PAYOUT_DEPTH as u32),
             BCH_COINBASE_MATURITY,
         )? {
             PrevoutCheck::Accepted => {}
@@ -785,20 +782,19 @@ fn select_within_budget<'entry>(
     ready: impl Iterator<Item = &'entry PoolEntry>,
     branch_spends: &HashSet<OutPoint>,
 ) -> Vec<ShareTransaction> {
-    let sigop_budget = MAX_BLOCK_SIGOPS_COST - SHARE_SIGOP_RESERVE;
     let mut selected = Vec::new();
     let mut bytes = 0;
-    let mut sigops = 0;
+    let mut sig_checks = 0;
     for entry in ready {
         let fits = selected.len() < MAX_SHARE_TRANSACTIONS
             && bytes + entry.size <= MAX_SHARE_TRANSACTION_BYTES
-            && sigops + entry.sigop_cost <= sigop_budget;
+            && sig_checks + entry.sig_checks <= BCH_MAX_SHARE_SIGCHECKS;
         let conflicts = entry
             .spends()
             .any(|outpoint| branch_spends.contains(&outpoint));
         if fits && !conflicts {
             bytes += entry.size;
-            sigops += entry.sigop_cost;
+            sig_checks += entry.sig_checks;
             selected.push(entry.transaction.as_ref().clone());
         }
     }
@@ -866,7 +862,8 @@ fn source_txids(transaction: &Transaction) -> Vec<Txid> {
 /// unspent on the confirmed chain; coinbase inputs are mature and no input's
 /// coinbase root has expired; the Bitcoin Cash interpreter accepts every
 /// input; outputs are P2PKH or P2SH32 above dust; inputs cover outputs; it is
-/// final at `height`. Returns its sigop cost and the share units it burns.
+/// final at `height`; it executes at most `MAX_TX_SIGCHECKS`. Returns its
+/// SigChecks and the share units it burns.
 fn check_against_confirmed_chain(
     chain_store_handle: &ChainStoreHandle,
     transaction: &Transaction,
@@ -892,7 +889,7 @@ fn check_against_confirmed_chain(
     if let PrevoutCheck::Rejected(rejection) = chain_store_handle.check_prevouts(
         &outpoints,
         height,
-        height.saturating_sub(PAYOUT_DEPTH as u32),
+        height.saturating_sub(BCH_PAYOUT_DEPTH as u32),
         BCH_COINBASE_MATURITY,
     )? {
         return Err(PoolRejection::Prevout(rejection));
@@ -913,36 +910,32 @@ fn check_against_confirmed_chain(
     bch_script::verify_final(transaction, height)
         .map_err(|error| PoolRejection::NotFinal { height, error })?;
 
-    let sigop_cost = sigop_cost(transaction, &spent_outputs);
-    let limit = MAX_BLOCK_SIGOPS_COST - SHARE_SIGOP_RESERVE;
-    if sigop_cost > limit {
-        return Err(PoolRejection::TooManySigops {
-            cost: sigop_cost,
-            limit,
-        });
-    }
+    let sig_checks = check_sig_checks(transaction)?;
     Ok(ChainCheck {
-        sigop_cost,
+        sig_checks,
         fee: (inputs - outputs).to_sat(),
     })
 }
 
 /// What `check_against_confirmed_chain` learns of an admissible transaction.
 struct ChainCheck {
-    sigop_cost: usize,
+    /// SigChecks the transaction executes, as share validation counts them.
+    sig_checks: usize,
     /// Share units the transaction burns: its inputs less its outputs.
     fee: u64,
 }
 
-/// BIP141 sigop cost of `transaction`, as share validation counts it.
-fn sigop_cost(transaction: &Transaction, spent_outputs: &[(usize, TxOut)]) -> usize {
-    let spent: HashMap<OutPoint, &TxOut> = transaction
-        .input
-        .iter()
-        .zip(spent_outputs)
-        .map(|(input, (_, output))| (input.previous_output, output))
-        .collect();
-    transaction.total_sigop_cost(|outpoint| spent.get(outpoint).map(|output| (*output).clone()))
+/// The SigChecks of an accepted `transaction`, refused past BCH's
+/// `MAX_TX_SIGCHECKS`, as share validation counts them.
+fn check_sig_checks(transaction: &Transaction) -> Result<usize, PoolRejection> {
+    let sig_checks = bch_script::sig_checks(transaction);
+    if sig_checks > bch_script::MAX_TX_SIGCHECKS {
+        return Err(PoolRejection::TooManySigChecks {
+            sig_checks,
+            limit: bch_script::MAX_TX_SIGCHECKS,
+        });
+    }
+    Ok(sig_checks)
 }
 
 fn now_seconds() -> u64 {
@@ -1038,7 +1031,7 @@ mod tests {
             txid: transaction.compute_txid(),
             transaction: Arc::new(ShareTransaction(transaction)),
             size,
-            sigop_cost: 4,
+            sig_checks: inputs.len(),
             fee: 0,
             arrived_at,
         }
@@ -1323,6 +1316,47 @@ mod tests {
         );
     }
 
+    /// The share's SigChecks budget: selection skips a transaction that
+    /// would take the share past `BCH_MAX_SHARE_SIGCHECKS` and keeps taking
+    /// ones that fit.
+    #[test]
+    fn selection_stops_at_the_share_sig_checks_budget() {
+        let mut heavy = entry(&[outpoint(1)], 1_000, 0);
+        heavy.sig_checks = BCH_MAX_SHARE_SIGCHECKS - 1;
+        let mut over = entry(&[outpoint(2)], 1_000, 0);
+        over.sig_checks = 2;
+        let last = entry(&[outpoint(3)], 1_000, 0);
+
+        let selected = select_within_budget([&heavy, &over, &last].into_iter(), &HashSet::new());
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|transaction| transaction.compute_txid())
+                .collect::<Vec<_>>(),
+            vec![heavy.txid, last.txid]
+        );
+    }
+
+    /// A transaction executing more than BCH's 3,000 SigChecks is refused,
+    /// whatever its scripts; 3,000 is accepted.
+    #[test]
+    fn a_transaction_past_max_tx_sig_checks_is_refused() {
+        let inputs: Vec<OutPoint> = (0..=bch_script::MAX_TX_SIGCHECKS as u32)
+            .map(|vout| OutPoint::new(Txid::from_byte_array([7; 32]), vout))
+            .collect();
+        let over = entry(&inputs, 1_000, 0);
+        assert!(matches!(
+            check_sig_checks(&over.transaction.0),
+            Err(PoolRejection::TooManySigChecks {
+                sig_checks: 3_001,
+                limit: 3_000
+            })
+        ));
+        let at_limit = entry(&inputs[1..], 1_000, 0);
+        assert_eq!(check_sig_checks(&at_limit.transaction.0).unwrap(), 3_000);
+    }
+
     #[test]
     fn selection_skips_a_transaction_spending_what_the_branch_spent() {
         let spent_on_branch = entry(&[outpoint(1)], 1_000, 0);
@@ -1488,10 +1522,9 @@ mod tests {
         assert!(matches!(refused, Err(PoolRejection::Script(_))));
     }
 
-    // The sim build's PAYOUT_DEPTH is 100, so there a share coinbase output
-    // can be spent only exactly 100 shares deep and anything built on it
-    // expires a share later. The tests that go deeper run in production
-    // builds only.
+    // The sim build's BCH_PAYOUT_DEPTH is 183 (100 + its 80-share window +
+    // 3), so there a share coinbase output expires 83 shares after it
+    // matures. The tests that go deeper run in production builds only.
     #[cfg(not(feature = "sim"))]
     #[tokio::test]
     async fn a_refund_before_its_refund_height_is_refused() {

@@ -41,7 +41,9 @@ pub use server::bind;
 pub(crate) use server::{Sv2Mining, serve};
 #[cfg(test)]
 pub(crate) use session::{Declaration, DeclaredJob, decode_plain_frames, encode_message};
-pub use session::{JobDeclarationMode, JobRegistry, PoolTransactionCache, Sv2Connection};
+pub use session::{
+    JobDeclarationMode, JobRegistry, PoolTransactionCache, Sv2Connection, Sv2Message,
+};
 pub use template_distribution::{ProvidedTemplate, start_template_provider};
 
 use bitcoin::Transaction;

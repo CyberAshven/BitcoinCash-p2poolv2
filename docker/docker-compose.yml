@@ -20,8 +20,13 @@ services:
     environment:
       - NETWORK=${NETWORK:?NETWORK must be set in .env, see docker/.env.sample}
       - REGTEST_INITIAL_BLOCKS=${REGTEST_INITIAL_BLOCKS:-101}
+      # Chipnet and mainnet: the RPC password. Empty means random on first
+      # start, kept in the bchn_rpc volume. Regtest ignores it.
+      - BCHN_RPC_PASSWORD=${BCHN_RPC_PASSWORD:-}
     volumes:
       - bchn_data:/data
+      # Chipnet and mainnet: the RPC password, read-only in p2poolv2.
+      - bchn_rpc:/run/bchn-rpc
     ports:
       - "127.0.0.1:${BCHN_RPC_PORT:-18443}:${BCHN_RPC_PORT:-18443}" # RPC: regtest 18443, chipnet 48332, mainnet 8332
       - "127.0.0.1:28332:28332" # ZMQ hashblock, the same on every network
@@ -123,6 +128,7 @@ services:
 
 volumes:
   bchn_data:
+  bchn_rpc:
   p2poolv2_data:
   regtest_miner:
 

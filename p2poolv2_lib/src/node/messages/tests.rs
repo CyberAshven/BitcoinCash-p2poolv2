@@ -1,7 +1,9 @@
 use super::*;
+use crate::accounting::payout::coinbase_budget::BCH_MAX_TX_SIZE;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::merge_mining::MergeMiningCommitment;
-use crate::shares::validation::MAX_UNCLES;
+use crate::shares::share_block::ShareTransaction;
+use crate::shares::validation::{BCH_SHARE_BODY_SIZE_LIMIT, BLOCK_TXS_SIZE_LIMIT, MAX_UNCLES};
 use crate::test_utils::TestShareBlockBuilder;
 use bitcoin::consensus::encode;
 use bitcoin::script::Builder;
@@ -64,16 +66,16 @@ fn test_full_share_headers_response_fits_max_message_size() {
         .header;
     // Changing committed fields after the build leaves the proof unable to
     // derive the root, so the encoder includes it: the larger encoding.
-    header.miner_bitcoin_address = longest_address.clone();
-    header.donation_address = Some(longest_address.clone());
+    header.miner_bitcoin_address = longest_address.clone().into();
+    header.donation_address = Some(longest_address.clone().into());
     header.donation = Some(u16::MAX);
-    header.fee_address = Some(longest_address);
+    header.fee_address = Some(longest_address.into());
     header.fee = Some(u16::MAX);
 
     header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
     header.bch_coinbase = Some(BchCoinbase {
         prefix: vec![0xff; 88],
-        merge_mining: MergeMiningCommitment::reserved(),
+        merge_mining: MergeMiningCommitment::empty(),
     });
 
     let header_count = MAX_SHARE_HEADER_BATCH_LENGTH;
@@ -96,17 +98,50 @@ fn test_full_share_headers_response_fits_max_message_size() {
     );
 }
 
+/// The largest Bitcoin Cash share a peer may send -- a 1,000,000-byte
+/// coinbase, 200 KiB of share transactions, a 32-level coinbase branch and a
+/// header with every field at its largest -- fits one message.
 #[test]
-fn declared_bch_header_batch_round_trips_a_compressed_25_level_proof() {
+fn test_largest_bch_share_block_fits_max_message_size() {
+    let mut share = TestShareBlockBuilder::new()
+        .uncles(vec![BlockHash::all_zeros(); MAX_UNCLES])
+        .build();
+    share.header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
+    share.header.bch_coinbase = Some(BchCoinbase {
+        prefix: vec![0xff; 88],
+        merge_mining: MergeMiningCommitment::empty(),
+    });
+    let coinbase_padding = BCH_MAX_TX_SIZE - share.bitcoin_coinbase.total_size();
+    share.bitcoin_coinbase.output[0].script_pubkey =
+        bitcoin::ScriptBuf::from_bytes(vec![0; coinbase_padding]);
+    let mut share_transaction = share.transactions[0].0.clone();
+    share_transaction.output[0].script_pubkey =
+        bitcoin::ScriptBuf::from_bytes(vec![0; BLOCK_TXS_SIZE_LIMIT as usize]);
+    share.transactions = vec![ShareTransaction(share_transaction)];
+    share.template_merkle_branches = vec![TxMerkleNode::all_zeros(); 32];
+
+    let encoded = encode::serialize(&Message::ShareBlock(share, Vec::new()));
+
+    assert!(encoded.len() > BCH_SHARE_BODY_SIZE_LIMIT);
+    assert!(
+        encoded.len() < MAX_P2P_MESSAGE_SIZE,
+        "the largest share is {} bytes, over the {} byte cap",
+        encoded.len(),
+        MAX_P2P_MESSAGE_SIZE
+    );
+}
+
+#[test]
+fn declared_bch_header_batch_round_trips_a_compressed_32_level_proof() {
     let mut header = TestShareBlockBuilder::new().build().header;
     header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
     header.bch_coinbase = Some(BchCoinbase {
         prefix: Builder::new()
             .push_int(header.bitcoin_height as i64)
             .into_bytes(),
-        merge_mining: MergeMiningCommitment::reserved(),
+        merge_mining: MergeMiningCommitment::empty(),
     });
-    let branch = vec![TxMerkleNode::all_zeros(); 25];
+    let branch = vec![TxMerkleNode::all_zeros(); 32];
     header.bitcoin_header.merkle_root =
         header.coinbase_proof.merkle_root(&header, &branch).unwrap();
     let batch = ShareHeaderBatch::from_headers_with_branches(vec![(header, branch)]);
@@ -248,6 +283,8 @@ fn test_message_discriminants_unique() {
         TRANSACTION,
         HANDSHAKE,
         ACK,
+        SHARE_HEADERS_WITH_BCH,
+        SHARE_BLOCK_WITH_BCH,
     ];
 
     // Check all discriminants are unique
@@ -447,6 +484,60 @@ fn test_share_headers_message_round_trips_with_branches() {
     let decoded: Message = encode::deserialize(&encode::serialize(&message)).unwrap();
 
     assert_eq!(decoded, message);
+}
+
+/// Real mainnet blocks 661,647 and 661,648, as carried BCH headers.
+fn carried() -> Vec<bitcoin::block::Header> {
+    use crate::shares::bch_asert::tests::{MAINNET_PAIRS, header};
+    vec![header(MAINNET_PAIRS[0].1), header(MAINNET_PAIRS[1].1)]
+}
+
+/// A batch carrying BCH headers uses its own discriminant and round trips
+/// with them; without any it keeps the plain one, so Bitcoin bytes are
+/// unchanged.
+#[test]
+fn test_share_headers_round_trip_with_carried_bch_headers() {
+    use message_discriminants::*;
+    let header = TestShareBlockBuilder::new().nonce(1).build().header;
+    let plain = ShareHeaderBatch::from_headers_with_branches(vec![(header, Vec::new())]);
+    let plain_bytes = encode::serialize(&Message::ShareHeaders(plain.clone()));
+    assert_eq!(plain_bytes[0], SHARE_HEADERS);
+
+    let message = Message::ShareHeaders(plain.clone().with_bch_headers(carried()));
+    let bytes = encode::serialize(&message);
+    assert_eq!(bytes[0], SHARE_HEADERS_WITH_BCH);
+    assert_eq!(bytes.len(), plain_bytes.len() + 1 + 2 * 80);
+    let decoded: Message = encode::deserialize(&bytes).unwrap();
+    assert_eq!(decoded, message);
+}
+
+#[test]
+fn test_share_block_round_trips_with_carried_bch_headers() {
+    use message_discriminants::*;
+    let block = TestShareBlockBuilder::new().nonce(1).build();
+    let plain = encode::serialize(&Message::ShareBlock(block.clone(), Vec::new()));
+    assert_eq!(plain[0], SHARE_BLOCK);
+
+    let message = Message::ShareBlock(block, carried());
+    let bytes = encode::serialize(&message);
+    assert_eq!(bytes[0], SHARE_BLOCK_WITH_BCH);
+    let decoded: Message = encode::deserialize(&bytes).unwrap();
+    assert_eq!(decoded, message);
+}
+
+/// The carried-header count is checked before anything is allocated: none
+/// (which a sender writes with the plain discriminant) and more than the
+/// cap are both malformed.
+#[test]
+fn test_carried_bch_header_count_outside_one_to_the_cap_is_rejected() {
+    use crate::shares::bch_carried_headers::MAX_CARRIED_BCH_HEADERS;
+    use message_discriminants::*;
+    for count in [0, MAX_CARRIED_BCH_HEADERS + 1] {
+        let mut bytes = vec![SHARE_BLOCK_WITH_BCH];
+        bytes.extend(encode::serialize(&bitcoin::VarInt::from(count)));
+        bytes.extend(vec![0u8; 80 * count]);
+        assert!(encode::deserialize::<Message>(&bytes).is_err(), "{count}");
+    }
 }
 
 /// A header naming a branch the batch does not carry is a malformed

@@ -61,7 +61,9 @@ donation_address = "{{ p2poolv2_donation_address }}"
 {% endif %}
 {% if p2poolv2_fee_address | default('') | string | length > 0 %}
 fee_address = "{{ p2poolv2_fee_address }}"
-fee = {{ p2poolv2_fee if (p2poolv2_fee | default('') | string | length > 0) else 0 }}
+{% if p2poolv2_fee | default('') | string | length > 0 %}
+fee = {{ p2poolv2_fee }}
+{% endif %}
 {% endif %}
 zmqpubhashblock = "{{ p2poolv2_zmq_endpoint }}"
 version_mask = "{{ p2poolv2_version_mask }}"
@@ -101,7 +103,9 @@ username = "{{ p2poolv2_bitcoin_rpc_user }}"
 password = "{{ p2poolv2_bitcoin_rpc_pass }}"
 
 [logging]
+{% if p2poolv2_log_file | length > 0 %}
 file = "{{ p2poolv2_log_file }}"
+{% endif %}
 level = "{{ p2poolv2_log_level }}"
 console = {{ p2poolv2_log_console | bool | lower }}
 stats_dir = "{{ p2poolv2_stats_dir }}"

@@ -51,17 +51,20 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --system --home-dir /data --shell /usr/sbin/nologin bchn \
-    && mkdir -p /data /etc/bchn \
-    && chown bchn:bchn /data
+    && mkdir -p /data /etc/bchn /run/bchn-rpc \
+    && chown bchn:bchn /data /run/bchn-rpc
 
 COPY bitcoin-regtest.conf bitcoin-chipnet.conf bitcoin-mainnet.conf /etc/bchn/
-COPY bcli bootstrap.sh healthcheck.sh /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/bcli /usr/local/bin/bootstrap.sh /usr/local/bin/healthcheck.sh
+COPY bcli bootstrap.sh entrypoint.sh healthcheck.sh /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/bcli /usr/local/bin/bootstrap.sh \
+    /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh
 
 USER bchn
 VOLUME ["/data"]
 
 # NETWORK picks the configuration file: regtest, chipnet or mainnet.
+# On chipnet and mainnet, entrypoint.sh sets the RPC password: from
+# BCHN_RPC_PASSWORD, or random on first start, kept in /run/bchn-rpc.
 ENV NETWORK=regtest
 
 # P2P and RPC ports: regtest 18444/18443, chipnet 48333/48332,
@@ -75,4 +78,4 @@ LABEL org.opencontainers.image.version="${BCHN_VERSION}"
 HEALTHCHECK --interval=10s --timeout=5s --start-period=120s --retries=6 \
     CMD ["/usr/local/bin/healthcheck.sh"]
 
-ENTRYPOINT ["/bin/sh", "-c", "exec bitcoind -conf=/etc/bchn/bitcoin-${NETWORK}.conf -datadir=/data \"$@\"", "bitcoind"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

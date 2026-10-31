@@ -5,7 +5,9 @@
 //! Explicit opt-in checks against two disposable BCHN regtest nodes.
 
 use super::{PoolTransactionCache, Sv2Mining, bind, serve};
-use crate::shares::auxpow::{AuxPowProof, AuxiliaryTree, AuxiliaryWork};
+use crate::shares::auxpow::{
+    AuxProof, AuxiliaryTree, DisclosedLeaf, Disclosure, TokenLeaf, TokenSplit,
+};
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::ShareHeader;
 use crate::stratum::work::block_template::BlockTemplate;
@@ -16,7 +18,7 @@ use crate::test_utils::{
 };
 use binary_sv2::{B016M, B032, B064K, B0255, Deserialize, Seq064K, U256};
 use bitcoin::consensus::{deserialize, serialize};
-use bitcoin::hashes::{Hash, sha256d};
+use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, Block, BlockHash, Network, PubkeyHash, Transaction};
 use bitcoindrpc::BitcoindRpcClient;
 use common_messages_sv2::{
@@ -41,8 +43,7 @@ use mining_sv2::{
 use p2poolv2_config::DEFAULT_VERSION_MASK;
 use p2poolv2_wallet::bch_share::{BchShareNetwork, encode_payout_address};
 use serde_json::{Value, json};
-use std::env::{self, VarError};
-use std::fs;
+use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -107,7 +108,6 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
     ctx.bitcoindrpc_client = pool.clone();
     let cache = PoolTransactionCache::new();
     cache.set_prepared(Arc::clone(&prepared));
-    cache.set(transactions.clone());
     let (template_sender, template_rx) = watch::channel(Some(Arc::clone(&prepared)));
     let authority = test_sv2_authority();
     let listener = bind("127.0.0.1", 0).await.unwrap();
@@ -118,7 +118,7 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
         listener,
         Arc::clone(&connection_limit),
         cache.clone(),
-        Some(MergeMiningCommitment::reserved()),
+        Some(MergeMiningCommitment::empty()),
         Some(Sv2Mining {
             ctx,
             version_mask: DEFAULT_VERSION_MASK,
@@ -185,26 +185,41 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
         .iter()
         .map(|transaction| transaction.compute_wtxid().to_byte_array())
         .collect::<Vec<_>>();
-    let first_work = AuxiliaryWork {
-        chain_id: 1,
-        hash: sha256d::Hash::hash(b"token-A"),
+    // Two synthetic tokens whose target is regtest's limit, so every regtest
+    // block wins both.
+    let token_payout =
+        Address::p2pkh(PubkeyHash::from_byte_array([0x22; 20]), Network::Regtest).script_pubkey();
+    let first_work = TokenLeaf::new(
+        [0xa1; 32],
+        &[0x51],
+        [0xa2; 32],
+        token_payout.as_bytes(),
+        0x207f_ffff,
+        [0; 32],
+    );
+    let second_work = TokenLeaf::new(
+        [0xb1; 32],
+        &[0x52],
+        [0xb2; 32],
+        token_payout.as_bytes(),
+        0x207f_ffff,
+        [0; 32],
+    );
+    let auxiliary_tree = AuxiliaryTree::build(&[first_work, second_work]).unwrap();
+    // The declaration discloses its leaves, which pay the miner with no
+    // split: this node takes no donation or fee.
+    let disclosure = Disclosure {
+        leaves: vec![
+            DisclosedLeaf {
+                leaf: first_work,
+                split: TokenSplit::default(),
+            },
+            DisclosedLeaf {
+                leaf: second_work,
+                split: TokenSplit::default(),
+            },
+        ],
     };
-    let second_work = match env::var("BCHN_JD_AUXILIARY_WORK") {
-        Ok(path) => {
-            let bytes = fs::read(path).expect("read auxiliary work JSON");
-            assert!(
-                bytes.len() <= 4096,
-                "auxiliary work JSON exceeds 4096 bytes"
-            );
-            serde_json::from_slice(&bytes).expect("decode auxiliary work JSON")
-        }
-        Err(VarError::NotPresent) => AuxiliaryWork {
-            chain_id: 2,
-            hash: sha256d::Hash::hash(b"token-B"),
-        },
-        Err(error) => panic!("invalid BCHN_JD_AUXILIARY_WORK: {error}"),
-    };
-    let auxiliary_tree = AuxiliaryTree::build(&[first_work, second_work], 0).unwrap();
     let (mut request_bytes, declared) = test_bch_custom_job_with_aux(
         Arc::clone(&prepared),
         token.clone(),
@@ -230,7 +245,7 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
                         .collect(),
                 )
                 .unwrap(),
-                excess_data: B064K::new(&[]).unwrap(),
+                excess_data: B064K::new(&disclosure.encode()).unwrap(),
             },
         )
         .await;
@@ -323,22 +338,26 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
             .unwrap(),
         full_header.merkle_root
     );
-    let mut full_auxpow = AuxPowProof {
-        parent_header: full_header,
-        coinbase: test_bch_custom_coinbase(&request, &extranonce_prefix),
-        coinbase_branch: emission.template_merkle_branches.clone(),
-        auxiliary: auxiliary_tree.proofs[0].clone(),
-    };
-    full_auxpow
-        .verify(first_work, full_header.target())
-        .unwrap();
-    full_auxpow.auxiliary = auxiliary_tree.proofs[1].clone();
-    full_auxpow
-        .verify(second_work, full_header.target())
-        .unwrap();
+    let full_coinbase = test_bch_custom_coinbase(&request, &extranonce_prefix);
+    let full_proofs = [first_work, second_work]
+        .iter()
+        .zip(&auxiliary_tree.branches)
+        .map(|(leaf, branch)| {
+            let proof = AuxProof::new(
+                full_header,
+                &full_coinbase,
+                &emission.template_merkle_branches,
+                auxiliary_tree.commitment,
+                branch,
+            )
+            .unwrap();
+            proof.verify(leaf, 16, None).unwrap();
+            hex::encode(proof.to_bytes().unwrap())
+        })
+        .collect::<Vec<_>>();
     println!(
         "{}",
-        json!({"mode": "full-template", "height": full_height, "hash": pool_tip.to_string(), "coinbase_value": full_value, "transaction": full_txid, "auxiliary_chains": 2, "auxpow_proof": full_auxpow})
+        json!({"mode": "full-template", "height": full_height, "hash": pool_tip.to_string(), "coinbase_value": full_value, "transaction": full_txid, "tokens": 2, "aux_proofs": full_proofs})
     );
 
     let raw: String = wallet
@@ -373,7 +392,6 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
     let private_height = template.height;
     let private_value = template.coinbasevalue + private_fee;
     let prepared = test_bch_prepared_for_template(template);
-    cache.set(Vec::new());
     cache.set_prepared(Arc::clone(&prepared));
     template_sender.send(Some(Arc::clone(&prepared))).unwrap();
     mining.receive(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB).await;
@@ -402,18 +420,15 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
         .await;
     let allocated = AllocateMiningJobTokenSuccess::from_bytes(&mut allocated_payload).unwrap();
     let token = allocated.mining_job_token.as_bytes().to_vec();
-    let private_tree = AuxiliaryTree::build(&[second_work], 7).unwrap();
-    assert_ne!(
-        private_tree.commitment.merkle_root,
-        auxiliary_tree.commitment.merkle_root
-    );
+    // A Coinbase-only job declares no leaves, so it merge-mines no token:
+    // its output 0 is the empty commitment.
     let (mut request_bytes, _) = test_bch_custom_job_with_aux(
         Arc::clone(&prepared),
         token,
         vec![private_transaction.clone()],
         false,
         private_value,
-        private_tree.commitment,
+        MergeMiningCommitment::empty(),
     );
     let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
     let private_header = test_bch_solve_custom_job(&request, &extranonce_prefix);
@@ -503,18 +518,9 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
     })
     .await
     .expect("the pool node did not validate the private block broadcast by the client");
-    let private_auxpow = AuxPowProof {
-        parent_header: private_header,
-        coinbase: private_block.txdata[0].clone(),
-        coinbase_branch: emission.template_merkle_branches,
-        auxiliary: private_tree.proofs[0].clone(),
-    };
-    private_auxpow
-        .verify(second_work, private_header.target())
-        .unwrap();
     println!(
         "{}",
-        json!({"mode": "coinbase-only", "height": private_height, "hash": private_header.block_hash().to_string(), "coinbase_value": private_value, "private_fee": private_fee, "transaction": private_txid, "auxiliary_chains": 1, "auxpow_proof": private_auxpow})
+        json!({"mode": "coinbase-only", "height": private_height, "hash": private_header.block_hash().to_string(), "coinbase_value": private_value, "private_fee": private_fee, "transaction": private_txid, "tokens": 0})
     );
     drop(mining);
     drop(full_jdc);

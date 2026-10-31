@@ -10,7 +10,7 @@ use bitcoin::script::Builder;
 use bitcoin::{BlockHash, Transaction, TxOut, WitnessMerkleNode, Wtxid, merkle_tree};
 use p2poolv2_wallet::share_owner::ShareOwner;
 
-const SHARE_VALUE: u64 = 1; // 100_000_000 satoshi == 1 BTC == 1 share
+const SHARE_VALUE: u64 = 1; // 100_000_000 share-chain base units == 1 share unit
 /// BIP141 witness commitment header: OP_RETURN, push 36, magic "aa21a9ed".
 pub(crate) const BIP141_COMMITMENT_HEADER: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 /// Witness reserved value (BIP141): 32 zero bytes, stored as the sole

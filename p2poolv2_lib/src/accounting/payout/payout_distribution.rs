@@ -2,15 +2,18 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use crate::accounting::OutputPair;
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, append_payout_split};
+use crate::accounting::payout::payout_tree::PayoutTree;
+use crate::accounting::payout::sharechain_pplns::pplns_window::PayingBlock;
+use crate::accounting::{CoinbasePayouts, OutputPair};
 use crate::config::StratumConfig;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
-use bitcoin::{Address, Amount, BlockHash};
+use bitcoin::{Amount, BlockHash};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::HashMap;
 use std::error::Error;
 
@@ -23,31 +26,40 @@ use std::error::Error;
 /// chain data.
 #[cfg_attr(test, mockall::automock)]
 pub trait PayoutDistribution {
+    /// Whether the weights already carry each window share's own donation and
+    /// fee (a Bitcoin Cash share chain), so the node's donation and fee are
+    /// not taken off the whole coinbase. Bitcoin and Hydrapool take them off
+    /// the whole coinbase.
+    fn has_per_share_cuts(&self) -> bool {
+        false
+    }
+
     /// Snapshot used by declared jobs to split a miner-selected fee revenue.
-    fn pplns_weights(&self) -> Option<HashMap<Address, u128>> {
+    fn pplns_weights(&self) -> Option<HashMap<PayoutAddress, u128>> {
         None
     }
 
-    /// Fill distribution according to the the Payout mechanism.  The
-    /// donation and fees amount have already been filled by the trait
-    /// common implementation of get_outpoint_distribution
+    /// Fill distribution according to the payout mechanism. Bitcoin and
+    /// Hydrapool receive the amount after the finding job's cuts; Bitcoin
+    /// Cash share-chain weights already include each window share's cuts.
     ///
     /// `split` is how the share chain turns weights into outputs: every
-    /// payee on Bitcoin, the coinbase budget on Bitcoin Cash (see
-    /// `coinbase_budget`). Hydrapool's time-window payout is not share-chain
-    /// consensus and pays every payee whatever it is given.
+    /// payee on Bitcoin, the hybrid payout on Bitcoin Cash (see
+    /// `coinbase_budget`), which returns the payout tree when payees go to
+    /// one. Hydrapool's time-window payout is not a share-chain rule and pays
+    /// every payee whatever it is given.
     #[allow(clippy::too_many_arguments)]
     fn fill_distribution_from_shares(
         &mut self,
         distribution: &mut Vec<OutputPair>,
         chain_store_handle: &ChainStoreHandle,
         anchor: BlockHash,
-        bitcoin_difficulty: u128,
+        paying_block: PayingBlock,
         total_amount: bitcoin::Amount,
         remaining_total_amount: Amount,
-        bootstrap_address: Address,
+        bootstrap_address: PayoutAddress,
         split: PayoutSplit,
-    ) -> Result<(), Box<dyn Error + Send + Sync>>;
+    ) -> Result<Option<PayoutTree>, Box<dyn Error + Send + Sync>>;
 
     /// Generate output distribution based on PPLNS shares weighted by difficulty.
     ///
@@ -57,85 +69,105 @@ pub trait PayoutDistribution {
     ///   passes the same tip it commits as `prev_share_blockhash`, so the
     ///   window it pays matches the one the validator reconstructs from
     ///   that prev, closing the read-tip-vs-payout-tip race.
-    /// * `bitcoin_difficulty` - Difficulty of the bitcoin block being paid for,
-    ///   from the bits of the template the job is built on (see
-    ///   `bitcoin_block_difficulty`). Hydrapool's time-window PPLNS uses it as
-    ///   its window target. The share chain window uses it on Bitcoin Cash, to
-    ///   hold `BCH_PPLNS_WINDOW_BLOCKS` blocks' worth of work, and ignores it
-    ///   on Bitcoin, where the window is `PPLNS_WINDOW_SHARES` mature shares.
+    /// * `paying_block` - The bitcoin block being paid for: the difficulty of
+    ///   the bits of the template the job is built on (see
+    ///   `bitcoin_block_difficulty`), and the block the template builds on.
+    ///   Hydrapool's time-window PPLNS uses the difficulty as its window
+    ///   target. The share chain window uses both on Bitcoin Cash, to hold
+    ///   `BCH_PPLNS_WINDOW_BLOCKS` blocks' worth of work and pay only the work
+    ///   on the template's BCH chain, and ignores them on Bitcoin, where the
+    ///   window is `PPLNS_WINDOW_SHARES` mature shares.
     /// * `total_amount` - Total bitcoin amount to distribute among contributors
     ///
-    /// On Bitcoin Cash (`config.chain`) the share chain's outputs follow the
-    /// coinbase budget, its tail drawn from `anchor` (see
-    /// `PayoutSplit::for_chain`), as the validator rebuilds them.
+    /// These are the payouts of a pool-built job, which always carries the
+    /// exact empty merge-mining commitment: on Bitcoin Cash (`config.chain`)
+    /// they follow the hybrid payout at the no-token limit
+    /// (`PayoutSplit::for_chain`), as the validator rebuilds them.
     ///
     /// # Returns
-    /// Vector of OutputPair containing addresses and their proportional amounts
+    /// The donation, fee and direct payout outputs, and the payout tree if
+    /// some payees go to one.
     fn get_output_distribution(
         &mut self,
         chain_store_handle: &ChainStoreHandle,
         anchor: BlockHash,
-        bitcoin_difficulty: u128,
+        paying_block: PayingBlock,
         total_amount: bitcoin::Amount,
         config: &StratumConfig<crate::config::Parsed>,
-    ) -> Result<Vec<OutputPair>, Box<dyn Error + Send + Sync>> {
-        // Extra two places for potential cuts
+    ) -> Result<CoinbasePayouts, Box<dyn Error + Send + Sync>> {
         let mut distribution = Vec::<OutputPair>::new();
-        let remaining_total_amount = include_address_and_cut(
-            &mut distribution,
-            total_amount,
-            &config.donation_address_parsed,
-            config.donation,
-        );
-        let remaining_total_amount = include_address_and_cut(
-            &mut distribution,
-            remaining_total_amount,
-            &config.fee_address_parsed,
-            config.fee,
-        );
+        let remaining_total_amount = if self.has_per_share_cuts() {
+            total_amount
+        } else {
+            let remaining = include_address_and_cut(
+                &mut distribution,
+                total_amount,
+                &config.donation_address_parsed,
+                config.donation,
+            );
+            include_address_and_cut(
+                &mut distribution,
+                remaining,
+                &config.fee_address_parsed,
+                config.fee,
+            )
+        };
 
-        self.fill_distribution_from_shares(
+        let tree = self.fill_distribution_from_shares(
             &mut distribution,
             chain_store_handle,
             anchor,
-            bitcoin_difficulty,
+            paying_block,
             total_amount,
             remaining_total_amount,
             config.bootstrap_address().clone(),
-            PayoutSplit::for_chain(config.chain, anchor),
+            PayoutSplit::for_chain(config.chain, false),
         )?;
-        Ok(distribution)
+        Ok(CoinbasePayouts {
+            outputs: distribution,
+            tree,
+        })
     }
 }
 
-/// Apply donation, operator fee and the exact share-chain difficulty weights,
-/// split into outputs by `split` (every payee on Bitcoin, the coinbase budget
-/// on Bitcoin Cash).
+/// The coinbase outputs of `value` for a window's `weights`, split into
+/// outputs by `split`: every payee on Bitcoin, the hybrid payout on Bitcoin
+/// Cash. What payout validation rebuilds; public so integration tests can
+/// check the coinbase a window implies.
 ///
-/// The coinbase outputs payout validation rebuilds from a window's weights;
-/// public so integration tests can check the coinbase a window implies.
+/// On Bitcoin the paying share's donation and fee come off the whole value
+/// first, as upstream has it. On Bitcoin Cash (`BchHybrid`) they are not
+/// taken here: each window share's own donation and fee are already in
+/// `weights`, their recipients payees like any other
+/// (`BCH_PER_SHARE_CUTS_RULE_TAG`), so the paying share's own settings never
+/// cut the coinbase.
 pub fn build_pplns_outputs(
     value: u64,
-    weights: &HashMap<Address, u128>,
-    donation_address: &Option<Address>,
+    weights: &HashMap<PayoutAddress, u128>,
+    donation_address: &Option<PayoutAddress>,
     donation: Option<u16>,
-    fee_address: &Option<Address>,
+    fee_address: &Option<PayoutAddress>,
     fee: Option<u16>,
     split: PayoutSplit,
-) -> Result<Vec<OutputPair>, Box<dyn Error + Send + Sync>> {
+) -> Result<CoinbasePayouts, Box<dyn Error + Send + Sync>> {
     if weights.is_empty() {
         return Err("Can't build output from empty distribution. There should be at least one payout address".into());
     }
     let mut outputs = Vec::with_capacity(weights.len() + 2);
-    let remaining = include_address_and_cut(
-        &mut outputs,
-        Amount::from_sat(value),
-        donation_address,
-        donation,
-    );
-    let remaining = include_address_and_cut(&mut outputs, remaining, fee_address, fee);
-    append_payout_split(weights, remaining, split, &mut outputs)?;
-    Ok(outputs)
+    let remaining = match split {
+        PayoutSplit::BchHybrid { .. } => Amount::from_sat(value),
+        PayoutSplit::EveryPayee => {
+            let remaining = include_address_and_cut(
+                &mut outputs,
+                Amount::from_sat(value),
+                donation_address,
+                donation,
+            );
+            include_address_and_cut(&mut outputs, remaining, fee_address, fee)
+        }
+    };
+    let tree = append_payout_split(weights, remaining, split, &mut outputs)?;
+    Ok(CoinbasePayouts { outputs, tree })
 }
 
 /// Appends new output pair to distribution and returns remaining amount.
@@ -147,7 +179,7 @@ pub fn build_pplns_outputs(
 pub(crate) fn include_address_and_cut(
     distribution: &mut Vec<OutputPair>,
     total_amount: bitcoin::Amount,
-    address: &Option<Address>,
+    address: &Option<PayoutAddress>,
     cut: Option<u16>, // in basis points
 ) -> Amount {
     const BASIS_POINT_FACTOR: u64 = 10_000; // 100 * 100
@@ -181,7 +213,7 @@ pub(crate) fn include_address_and_cut(
 /// Entries are sorted by address string to ensure the remainder from
 /// integer truncation is always assigned to the same deterministic address.
 pub(crate) fn append_proportional_distribution(
-    address_difficulty_map: &HashMap<Address, u128>,
+    address_difficulty_map: &HashMap<PayoutAddress, u128>,
     total_amount: bitcoin::Amount,
     distribution: &mut Vec<OutputPair>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -194,7 +226,7 @@ pub(crate) fn append_proportional_distribution(
         );
     }
 
-    let mut sorted_entries: Vec<(&Address, &u128)> = address_difficulty_map.iter().collect();
+    let mut sorted_entries: Vec<(&PayoutAddress, &u128)> = address_difficulty_map.iter().collect();
     sorted_entries.sort_by(|(address_a, _), (address_b, _)| {
         address_a.to_string().cmp(&address_b.to_string())
     });
@@ -240,6 +272,32 @@ mod tests {
         assert!(distribution.is_empty());
     }
 
+    /// A miner with a P2SH32 payout is paid directly by a Bitcoin Cash
+    /// coinbase output locking with its P2SH32 script.
+    #[test]
+    fn a_p2sh32_payee_is_paid_its_own_script() {
+        let p2sh32 = PayoutAddress::p2sh32([0x31; 32], bitcoin::Network::Regtest);
+        let p2pkh = parse_address_from_string("mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn");
+        let weights = HashMap::from([(p2sh32.clone(), 3), (p2pkh, 1)]);
+        let payouts = build_pplns_outputs(
+            100_000_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, false),
+        )
+        .unwrap();
+        let paid = payouts
+            .outputs
+            .iter()
+            .find(|output| output.address.script_pubkey() == p2sh32.script_pubkey())
+            .expect("the P2SH32 payee is paid directly");
+        assert_eq!(paid.amount, bitcoin::Amount::from_sat(75_000_000));
+        assert_eq!(paid.address.script_pubkey().len(), 35);
+    }
+
     #[test]
     fn a_full_cut_takes_everything() {
         let address = parse_address_from_string("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq");
@@ -252,6 +310,28 @@ mod tests {
         );
         assert_eq!(remaining, bitcoin::Amount::ZERO);
         assert_eq!(distribution[0].amount, bitcoin::Amount::from_sat(100_000));
+    }
+
+    /// Bitcoin Cash caps the donation and the fee at 10% each. The fee is
+    /// taken from what the donation leaves, so 10% and 10% take 10% and 9%
+    /// of the coinbase value.
+    #[test]
+    fn a_ten_percent_fee_after_a_ten_percent_donation_takes_nine_percent() {
+        let donation = parse_address_from_string("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq");
+        let fee = parse_address_from_string("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+        let cap = crate::config::MAX_BITCOIN_CASH_CUT;
+        let mut distribution = Vec::with_capacity(2);
+        let remaining = include_address_and_cut(
+            &mut distribution,
+            bitcoin::Amount::from_sat(1_000_000),
+            &Some(donation),
+            Some(cap),
+        );
+        let remaining =
+            include_address_and_cut(&mut distribution, remaining, &Some(fee), Some(cap));
+        assert_eq!(distribution[0].amount, bitcoin::Amount::from_sat(100_000));
+        assert_eq!(distribution[1].amount, bitcoin::Amount::from_sat(90_000));
+        assert_eq!(remaining, bitcoin::Amount::from_sat(810_000));
     }
 
     #[test]
@@ -294,7 +374,7 @@ mod tests {
         let total_amount = bitcoin::Amount::from_sat(100);
 
         // Run multiple times to confirm the same address always gets the remainder
-        let mut remainder_addresses: Vec<Address> = Vec::with_capacity(10);
+        let mut remainder_addresses: Vec<PayoutAddress> = Vec::with_capacity(10);
         for _ in 0..10 {
             let mut result = Vec::new();
             append_proportional_distribution(&address_difficulty_map, total_amount, &mut result)

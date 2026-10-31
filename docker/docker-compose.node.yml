@@ -26,3 +26,9 @@ services:
 
 volumes:
   p2poolv2_data:
+  # The shared BCHN's RPC password (chipnet and mainnet), from the stack
+  # docker-compose.yml starts, whose project is named p2poolv2. Set
+  # P2POOL_BITCOINRPC__PASSWORD in this node's .env to use another BCHN.
+  bchn_rpc:
+    external: true
+    name: p2poolv2_bchn_rpc

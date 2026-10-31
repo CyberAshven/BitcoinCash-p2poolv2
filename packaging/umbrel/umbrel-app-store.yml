@@ -1,0 +1,5 @@
+# Umbrel community app store for P2Poolv2 on Bitcoin Cash. Umbrel reads this
+# file from the root of the store's repository; see README.md for how to
+# publish this folder as one. Every app id here must start with this id.
+id: "bch-p2pool"
+name: "Bitcoin Cash P2Pool"

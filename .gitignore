@@ -8,6 +8,8 @@ logs/*
 logs*/*
 config/
 data/
+# The Umbrel apps ship an empty data/ folder for the node's store and logs.
+!/packaging/umbrel/*/data/
 
 tools/log_dashboard/venv/
 tools/log_dashboard/stats.json*
@@ -15,9 +17,13 @@ tools/log_dashboard/agent_logs/
 tools/log_dashboard/last_processed.txt
 
 config.toml
+!.cargo/config.toml
 config-dev.toml
 config-*-copy.toml
 config-node2.toml
+# The cargo aliases for the developer tools (docs/tooling.md) are not a node
+# config.
+!/.cargo/config.toml
 
 
 spec/**/*pdf
@@ -32,6 +38,7 @@ spec/**/states
 # Ansible inventory and vault (contain hostnames, credentials)
 ansible/inventory/hosts.yml
 ansible/inventory/group_vars/all/vault.yml
+ansible/inventory/host_vars/
 
 # Editors
 .zed/
@@ -39,9 +46,6 @@ ansible/inventory/group_vars/all/vault.yml
 .idea/
 
 perf.data
-# matplotlib venv for sim plotting
-load-tests/sim/.venv/
-load-tests/sim/__pycache__/
 
 # Rust/WASM dashboard builds
 /p2poolv2_web/dist

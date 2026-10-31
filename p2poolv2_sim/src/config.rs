@@ -20,8 +20,12 @@ pub struct SimNodeConfig {
 
 impl SimNodeConfig {
     /// Load from a TOML config file path.
+    ///
+    /// Applies the same Bitcoin Cash adjustments as `Config::load`: on
+    /// `chain = "bitcoin-cash"`, `stratum.network` becomes the network
+    /// `bitcoin_cash_network` implies and the DNS seeds are off.
     pub fn load(path: &str) -> Result<Self, config::ConfigError> {
-        config::Config::builder()
+        let loaded: Self = config::Config::builder()
             .add_source(config::File::with_name(path))
             // Nesting uses `__` so that a single `_` stays part of a field name.
             // With a single-underscore separator, P2POOL_STORE_PPLNS_TTL_DAYS
@@ -33,6 +37,13 @@ impl SimNodeConfig {
                     .separator("__"),
             )
             .build()?
-            .try_deserialize()
+            .try_deserialize()?;
+        Ok(Self {
+            node: loaded
+                .node
+                .with_bitcoin_cash_network_derived()
+                .with_bitcoin_cash_dns_seed_off(),
+            sim: loaded.sim,
+        })
     }
 }
