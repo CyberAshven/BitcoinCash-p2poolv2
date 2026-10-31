@@ -534,14 +534,15 @@ dropped on the next arrival (`share-processing-pipeline.md`, "BlockReceiver
 ancestry gate"). That is change 2 below, with expiry in place of the
 prune-height drop: a parent below `current_prune_height()` makes the
 ancestry gate release the block, and anything else expires. Change 1 is
-still open: a share naming an unknown parent is still buffered, now inside
-the bounds.
+done too (2026-10-31): a share naming a parent or uncle with no known header
+is dropped, unless that ancestor waits in the buffer itself, and the node
+asks the sender for the headers of the parent and the uncles.
 
 ### Changes
 
 | Change | Required | Stops |
 |---|---|---|
-| 1. Drop a share whose parent or uncle header is unknown, instead of buffering it (recovery is the existing missing-parent header request) | yes, independent of #652 | fabricated-parent floods (today's gap) |
+| 1. Drop a share whose parent or uncle header is unknown, instead of buffering it (recovery is the existing missing-parent header request) (done 2026-10-31; an ancestor waiting in the buffer counts as known) | yes, independent of #652 | fabricated-parent floods |
 | 2. Cap the parent-wait buffer, evicting the longest-waiting entry, and drop entries whose parent fell below `current_prune_height()` (done 2026-10-23, with expiry instead of the prune-height drop) | yes, independent of #652 | memory exhaustion from withheld bodies |
 | 3. Drop shares whose bitcoin prev is unknown, with a bounded, expiring cache of dropped hashes | yes, for #652 | memory cost of fabricated-prev shares, and repeat fetches of them |
 | 4. Cap carried headers per share and per batch in the decoder (about 100), check them locally, stop at the first failure, cache failed hashes | yes, for #652 | message size and header-check load: a fabricated header costs one local check, no RPC |
