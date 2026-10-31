@@ -34,8 +34,9 @@ measured hashrate and vardiff.
 ## Stratum server
 
 1. Fetches block templates: `getblocktemplate` from BCHN on every ZMQ
-   `hashblock` event and every 10 seconds in between, or templates pushed by
-   a Stratum V2 Template Provider (`template_source = "sv2"`).
+   `hashblock` event, on every block BCHN announces on its P2P port when
+   `node_p2p_address` is set, and every 10 seconds in between, or templates
+   pushed by a Stratum V2 Template Provider (`template_source = "sv2"`).
 2. Builds work for the mining devices from the template and from what the
    controller supplies: the coinbase payouts and the pool difficulty. It
    serves Stratum V1 and Stratum V2 (standard and extended channels, and Job

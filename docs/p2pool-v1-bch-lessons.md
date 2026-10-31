@@ -231,7 +231,8 @@ dated status update above for current implementation status.
   on any BCH header with valid proof of work that a P2Pool peer sent, before
   its own node had the block (`work.py:104-125`, `node.py:224-247`). BCHN is
   the authority: mine on what BCHN has validated, signalled by its ZMQ
-  `hashblock`.
+  `hashblock` or, with `node_p2p_address`, by its block `inv` on the P2P
+  port, which v1 itself listened for (`bitcoin/p2p.py` `handle_inv`).
 - **Paying the operator for unknown usernames.** A username v1 could not parse
   mined to the node's own address (`work.py:221-229`, README line 122). This
   fork refuses it (`stratum/validate_username.rs`).

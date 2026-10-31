@@ -33,6 +33,9 @@ use p2poolv2_lib::store::Store;
 use p2poolv2_lib::store::writer::{StoreHandle, StoreWriter, write_channel};
 use p2poolv2_lib::stratum::client_connections::start_connections_handler;
 use p2poolv2_lib::stratum::emission::Emission;
+use p2poolv2_lib::stratum::node_p2p_listener::{
+    NodeP2pListener, NodeP2pListenerTrait, network_magic,
+};
 use p2poolv2_lib::stratum::server::{StratumServerBuilder, Sv2Listener};
 use p2poolv2_lib::stratum::sv2::start_template_provider;
 use p2poolv2_lib::stratum::work::gbt::start_gbt;
@@ -341,10 +344,25 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         Some(provider) => (TemplateFeed::Provider(provider.clone()), None),
         None => match ZmqListener.start(&stratum_config.zmqpubhashblock) {
             Ok(zmq_trigger_rx) => {
+                // With node_p2p_address, blocks announced on the node's P2P
+                // port also wake the template task: not every node has ZMQ.
+                let node_p2p_magic = network_magic(bitcoin_cash_network, stratum_config.network);
+                let node_p2p_trigger_rx = match stratum_config
+                    .node_p2p_address
+                    .as_deref()
+                    .map(|address| NodeP2pListener.start(address, node_p2p_magic))
+                    .transpose()
+                {
+                    Ok(node_p2p_trigger_rx) => node_p2p_trigger_rx,
+                    Err(e) => {
+                        error!("Failed to set up the node P2P listener: {e}");
+                        return Err(ExitCode::FAILURE);
+                    }
+                };
                 // A block this node finds also wakes the template task,
                 // through the refresh sender the stratum servers hold.
                 let (template_refresh_tx, template_trigger_rx) =
-                    merge_template_triggers(zmq_trigger_rx);
+                    merge_template_triggers(zmq_trigger_rx, node_p2p_trigger_rx);
                 (
                     TemplateFeed::Rpc {
                         template_trigger_rx,

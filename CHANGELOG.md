@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A node can hear new blocks on its Bitcoin Cash node's P2P port, as
+jtoomim's p2pool did: with `node_p2p_address` in `[stratum]` it connects
+there as a peer that relays no transactions, fetches a template as soon as
+the node announces a block with `inv` or `headers`, answers pings and
+reconnects after errors, warning once per outage. That works with any node,
+including BCHD and Knuth, which have no ZMQ and so left miners on the old
+parent until the next 10-second poll. ZMQ is unchanged, and without the
+setting nothing changes. On regtest BCHN 29.2.0 without ZMQ, the template
+fetch came 13 to 16 ms after BCHN's new tip, against 2.8 to 9.7 s without
+it; with ZMQ as well, each block costs one extra fetch. No share-chain rule
+changes.
+
 A node no longer buffers a share that names a parent or uncle it has no
 header for; it drops the share and asks the sender for headers, now for the
 uncles as well as the parent, which brings an honest share back through

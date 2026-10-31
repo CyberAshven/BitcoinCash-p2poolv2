@@ -353,6 +353,11 @@ pub struct StratumConfig<State = Raw> {
     pub solo_address: Option<String>,
     /// The ZMQ publisher address for block hashes
     pub zmqpubhashblock: String,
+    /// `HOST:PORT` of the node's P2P port. When set, the node's new-block
+    /// announcements there wake the template task too, for nodes without ZMQ.
+    /// Absent means no P2P connection to the node, as before.
+    #[serde(default)]
+    pub node_p2p_address: Option<String>,
     /// The bitcoin address to use for first jobs when there are no shares (string in Raw state)
     pub bootstrap_address: String,
     /// The donation address for developers (string in Raw state).
@@ -691,6 +696,7 @@ impl StratumConfig<Raw> {
             ),
             solo_address: self.solo_address,
             zmqpubhashblock: self.zmqpubhashblock,
+            node_p2p_address: self.node_p2p_address,
             bootstrap_address: self.bootstrap_address,
             donation_address: self.donation_address,
             donation,
@@ -1103,6 +1109,7 @@ impl StratumConfig<Raw> {
             maximum_difficulty: Some(1000),
             solo_address: None,
             zmqpubhashblock: "tcp://127.0.0.1:28332".to_string(),
+            node_p2p_address: None,
             bootstrap_address: "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk".to_string(),
             donation_address: None,
             donation: None,
@@ -1582,6 +1589,11 @@ impl Config {
         self
     }
 
+    pub fn with_stratum_node_p2p_address(mut self, node_p2p_address: Option<String>) -> Self {
+        self.stratum.node_p2p_address = node_p2p_address;
+        self
+    }
+
     pub fn with_stratum_bootstrap_address(mut self, bootstrap_address: String) -> Self {
         self.stratum.bootstrap_address = bootstrap_address;
         self
@@ -1704,6 +1716,7 @@ mod tests {
             .with_stratum_port(3333)
             .with_stratum_solo_address("bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr".to_string())
             .with_stratum_zmqpubhashblock("tcp://127.0.0.1:28332".to_string())
+            .with_stratum_node_p2p_address(Some("127.0.0.1:8333".to_string()))
             .with_stratum_bootstrap_address("bcrt1qxyz123example456bitcoin789address".to_string())
             .with_start_difficulty(1)
             .with_minimum_difficulty(1)
@@ -1739,6 +1752,10 @@ mod tests {
         assert_eq!(
             config.stratum.zmqpubhashblock,
             "tcp://127.0.0.1:28332".to_string()
+        );
+        assert_eq!(
+            config.stratum.node_p2p_address,
+            Some("127.0.0.1:8333".to_string())
         );
         assert_eq!(
             config.stratum.bootstrap_address.to_string(),

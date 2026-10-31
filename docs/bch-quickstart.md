@@ -8,7 +8,8 @@ pool. Try it on regtest or chipnet first.
 ## 1. Run Bitcoin Cash Node
 
 P2Poolv2 asks BCHN for templates over JSON-RPC and listens for new blocks
-over ZMQ. In `bitcoin.conf`:
+over ZMQ (and, with `node_p2p_address`, on BCHN's P2P port). In
+`bitcoin.conf`:
 
 ```ini
 server=1
@@ -66,7 +67,14 @@ A Bitcoin Cash config needs no `network`: the node uses the network
 one network agree.
 
 Point `[bitcoinrpc]` at BCHN's RPC port and `zmqpubhashblock` at its ZMQ
-endpoint.
+endpoint. Optionally set `node_p2p_address` in `[stratum]` to BCHN's P2P port
+(`127.0.0.1:48333` on chipnet, `127.0.0.1:8333` on mainnet): the node then
+also hears each new block as a P2P peer of BCHN, the way jtoomim's p2pool
+did. It is what gives a node without ZMQ, such as BCHD or Knuth, a new
+template at once instead of at the next 10-second poll. The node must accept
+P2P connections: BCHN does by default, but not with `-listen=0` or with
+`-connect` and no `-listen=1`. On a node without ZMQ, `zmqpubhashblock` can
+stay at its default; it never fires.
 
 At start the node checks that `[bitcoinrpc]` is BCHN on
 `bitcoin_cash_network`, and refuses to start otherwise with an error that
