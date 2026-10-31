@@ -20,6 +20,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::transaction_pool::{ShareTransactionPool, SubmitOutcome, TransactionSource};
 use crate::shares::validation::ShareValidator;
 use crate::utils::time_provider::TimeProvider;
+use bitcoin::BlockHash;
 use receivers::getblocks::handle_getblocks;
 use receivers::getdata::handle_getdata_block;
 use receivers::getheaders::handle_getheaders;
@@ -138,7 +139,12 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
                 ctx.share_validator.as_ref(),
             )
             .await?;
-            let parent_hash = share_block.header.prev_share_blockhash;
+            // The block receiver drops a share naming a parent or uncle with
+            // no known header; asking for headers brings it back.
+            let ancestors: Vec<BlockHash> =
+                std::iter::once(share_block.header.prev_share_blockhash)
+                    .chain(share_block.header.uncles.iter().copied())
+                    .collect();
             handle_share_block(
                 share_block,
                 &ctx.chain_store_handle,
@@ -149,7 +155,7 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
             )
             .await?;
             request_headers_for_missing_blocks(
-                &[parent_hash],
+                &ancestors,
                 ctx.peer,
                 ctx.chain_store_handle,
                 ctx.swarm_tx,

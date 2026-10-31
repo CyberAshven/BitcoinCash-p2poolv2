@@ -19,8 +19,9 @@ together. The parts:
   which a worker fills from the node's own BCHN
   (`p2poolv2_lib/src/node/bch_header_feeder.rs`): every 5 seconds it walks
   back from BCHN's best block to a known header, a new node first learns
-  8,400 headers, about 58 days, and each new template's previous block is
-  learned before jobs are built on it;
+  8,400 headers, about 58 days (about a minute over Tailscale to a Start9
+  BCHN, before the node dials peers), and each new template's previous
+  block is learned before jobs are built on it;
 - carried headers (`p2poolv2_lib/src/shares/bch_carried_headers.rs`): share
   messages carry the BCH headers a receiver needs;
 - the known BCH prev: a node stores a peer's share body only once it knows

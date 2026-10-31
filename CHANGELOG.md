@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A node no longer buffers a share that names a parent or uncle it has no
+header for; it drops the share and asks the sender for headers, now for the
+uncles as well as the parent, which brings an honest share back through
+header sync. Shares naming made-up parents can no longer crowd honest blocks
+out of the pending buffer. A share whose parent waits in the buffer is still
+buffered behind it. No share-chain rule changes.
+
+A Bitcoin Cash node learns BCHN's headers before it dials peers, for at
+most 5 minutes, so the share bodies peers send in the payout zone find
+their BCH prevs known instead of being dropped and fetched again. One walk
+of BCHN's headers runs at a time, so a new store's 8,400 headers are
+fetched once rather than by the feeder and the template relay each. On
+chipnet the first walk took about a minute; the node then built jobs on
+chipnet's tip. No share-chain rule changes.
+
 The payout rule, the last part of mining on the current chain (V16): a
 Bitcoin Cash coinbase pays a window share only when the BCH block the share
 builds on is on the paying share's BCH chain or one block off it, a block

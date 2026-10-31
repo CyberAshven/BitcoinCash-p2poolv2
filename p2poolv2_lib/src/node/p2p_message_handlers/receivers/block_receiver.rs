@@ -113,10 +113,12 @@ struct PendingBlock {
 ///
 /// The buffer is bounded (`PendingLimits`): at most `max_blocks` blocks and
 /// `max_bytes` bytes, the oldest evicted first, and a block older than
-/// `max_age` is dropped on the next event. A block naming a parent that never
-/// arrives costs a share's proof of work (the admission gate checks the
-/// coinbase proof), but the mini chain's share difficulty is low, so without
-/// the bounds a peer could grow the buffer without limit. The bound is global
+/// `max_age` is dropped on the next event. Only a block whose parent and
+/// uncles the node knows, by header or in the buffer, is buffered; any
+/// other is dropped. A block naming a known parent whose body never arrives
+/// costs a share's proof of work (the admission gate checks the coinbase
+/// proof), but the mini chain's share difficulty is low, so without the
+/// bounds a peer could grow the buffer without limit. The bound is global
 /// rather than per peer: peer identities are free, so a per-peer quota bounds
 /// one connection, not an attacker.
 pub struct BlockReceiver {
@@ -151,6 +153,18 @@ pub struct BlockReceiver {
 /// encoding (`ShareBlock::encoded_size`).
 fn buffered_size(share_block: &ShareBlock) -> usize {
     share_block.encoded_size()
+}
+
+/// The ancestors a block names: its parent, unless it is the genesis
+/// share, and its uncles.
+fn named_ancestors(share_block: &ShareBlock) -> Vec<BlockHash> {
+    let header = &share_block.header;
+    let mut ancestors = Vec::with_capacity(1 + header.uncles.len());
+    if !is_terminal_blockhash(&header.prev_share_blockhash) {
+        ancestors.push(header.prev_share_blockhash);
+    }
+    ancestors.extend_from_slice(&header.uncles);
+    ancestors
 }
 
 impl BlockReceiver {
@@ -352,16 +366,11 @@ impl BlockReceiver {
     /// Blocks below `prune_height` are exempt because their bodies are never
     /// fetched; requiring one would stall the chain at the prune boundary.
     ///
-    /// An ancestor with no metadata has simply not arrived: the store reports
-    /// that as an error and the block is buffered rather than dropped.
+    /// An ancestor with no metadata has not arrived: the store reports that
+    /// as an error, read here as not ready. `ancestors_known` then decides
+    /// whether the block is buffered or dropped.
     fn ancestry_ready(&self, share_block: &ShareBlock, prune_height: u32) -> bool {
-        let header = &share_block.header;
-        let mut ancestors = Vec::with_capacity(1 + header.uncles.len());
-        if !is_terminal_blockhash(&header.prev_share_blockhash) {
-            ancestors.push(header.prev_share_blockhash);
-        }
-        ancestors.extend_from_slice(&header.uncles);
-
+        let ancestors = named_ancestors(share_block);
         match self
             .chain_store_handle
             .all_block_and_uncle_data_available(&ancestors, prune_height)
@@ -375,6 +384,25 @@ impl BlockReceiver {
                 false
             }
         }
+    }
+
+    /// Whether the node knows every ancestor the block names: each has a
+    /// header in the store or waits in `pending` itself.
+    ///
+    /// A block naming any other ancestor is dropped, not buffered: it may
+    /// name a parent that does not exist, and buffering it would let cheap
+    /// shares crowd honest blocks out of the bounded buffer. The node asks
+    /// the sender for headers when a share names an ancestor it lacks
+    /// (`request_headers_for_missing_blocks`), so an honest share comes back
+    /// through header sync and the block fetcher.
+    fn ancestors_known(&self, share_block: &ShareBlock) -> bool {
+        let mut ancestors = named_ancestors(share_block);
+        ancestors.retain(|hash| !self.pending.contains_key(hash));
+        ancestors.is_empty()
+            || self
+                .chain_store_handle
+                .get_missing_blockhashes(&ancestors)
+                .is_empty()
     }
 
     /// ASERT difficulty check against the parent as stored.
@@ -514,8 +542,10 @@ impl BlockReceiver {
     /// Otherwise, if the block's direct parent and all uncles are at
     /// HeaderValid+, validate ASERT, persist, then drive any
     /// descendants buffered in pending. If the parent or uncles are
-    /// not yet ready, buffer in pending. The headers-first pipeline
-    /// will supply ancestors via header sync and block fetch.
+    /// not yet ready, buffer in pending, unless one of them is unknown
+    /// even as a header (`ancestors_known`): then drop the block. The
+    /// headers-first pipeline will supply ancestors via header sync and
+    /// block fetch.
     async fn process_share_block(
         &mut self,
         share_block: ShareBlock,
@@ -569,6 +599,12 @@ impl BlockReceiver {
             return Ok(());
         }
         if !self.ancestry_ready(&share_block, prune_height) {
+            if !self.ancestors_known(&share_block) {
+                debug!(
+                    "Dropping block {block_hash}: it names a parent or uncle with no known header"
+                );
+                return Ok(());
+            }
             debug!("Block {block_hash} has unready ancestors, buffering");
             self.add_to_pending(block_hash, share_block, now);
             return Ok(());

@@ -178,13 +178,24 @@ block spending an output below it, which only a proof-of-work-only verdict
 can accept, is stored with an unknown coinbase root on its outputs
 (`pruning.md`, "Missing Input at Write Time").
 
+Only a block whose parent and uncles the node already knows is buffered:
+each has a header in the store or waits in `pending` itself
+(`BlockReceiver::ancestors_known`). A block naming any other ancestor, such
+as a made-up parent, is dropped. The node asks the sender for headers
+whenever a share names an ancestor it lacks
+(`request_headers_for_missing_blocks`, for the parent and the uncles), so an
+honest share dropped this way comes back through header sync and the block
+fetcher. A block waiting on a buffered parent stays, so a parent and child
+gossiped in turn still commit together.
+
 The buffer is bounded (`PendingLimits` in `block_receiver.rs`): at most
 `MAX_PENDING_BLOCKS` (1,024) blocks and `MAX_PENDING_BYTES` (32 MiB, by
 consensus encoding), the oldest evicted first, and a block that has waited
 longer than `PENDING_BLOCK_TTL` (10 minutes) is dropped on the next arrival. A
-block naming a parent that never arrives costs one share of proof of work
-(the admission gate checks its coinbase proof), and the mini chain's shares
-are cheap, so without the bounds a peer could grow the buffer without limit.
+block naming a known parent whose body never arrives costs one share of proof
+of work (the admission gate checks its coinbase proof), and the mini chain's
+shares are cheap, so without the bounds a peer could grow the buffer without
+limit.
 The bound is global, not per peer: peer identities are free. An honest block
 that is evicted or expires while still on the candidate chain is fetched again
 by the block fetcher's missing-data scan. Upstream's design diagram
