@@ -133,6 +133,31 @@ sv2_cert_validity_secs = 3600
 
 Miners then pin the public key.
 
+### Light templates
+
+`template_source = "rpc_light"` asks the node in `[bitcoinrpc]` for light
+templates (`getblocktemplatelight`): the node keeps the template's
+transactions and sends only their merkle branch, so the pool never fetches
+or holds them. A block found on one goes back as its header and coinbase with
+`submitblocklight`, and the node adds the transactions. A template the node
+cannot give light (no `getblocktemplatelight`, no `merkle` in it, or no
+`miningblocksizelimit` in `getmininginfo`) comes from `getblocktemplate`,
+with a warning logged once. BCHN gives light templates; BCHD and Knuth do
+not today.
+
+The pool cannot count a light template's transactions, so it takes the
+node's mining size limit (`-blockmaxsize` or equivalent) as their size: that
+limit, the pool's coinbase and 89 bytes of header and transaction count must
+fit the block size limit, or the node withdraws work and logs why. BCHN's
+default leaves half of the block on mainnet and regtest but none on chipnet,
+where `-blockmaxsize` must be lowered. `[[submit_nodes]]` cannot be used with
+light templates: only the node that made a template can complete its block.
+
+The transactions move to the node's disk instead: BCHN writes each light
+job's transactions under `<datadir>/gbt/` and deletes them after
+`-gbtstoretime` (3600 s by default). With 5 MB templates and a poll every
+10 s that is about 1.9 GB an hour.
+
 ### Templates from a Stratum V2 Template Provider
 
 By default the node asks BCHN for templates over RPC. To take them from a

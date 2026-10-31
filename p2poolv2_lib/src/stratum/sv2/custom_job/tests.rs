@@ -1,9 +1,10 @@
 use super::*;
 use crate::shares::auxpow::{SplitSlot, TokenSplit};
+use crate::stratum::work::block_template::LightJob;
 use crate::test_utils::{
     bch_template_transaction, test_bch_custom_job, test_bch_custom_job_with_leaves,
-    test_bch_declared_leaves, test_bch_prepared, test_bch_prepared_with_cuts,
-    test_bch_prepared_with_tree_payees, test_merge_token_set,
+    test_bch_declared_leaves, test_bch_prepared, test_bch_prepared_for_template,
+    test_bch_prepared_with_cuts, test_bch_prepared_with_tree_payees, test_merge_token_set,
 };
 use binary_sv2::{B064K, Deserialize, Seq0255, U256};
 use bitcoin::Address;
@@ -88,6 +89,42 @@ fn full_job_uses_declared_transactions_and_proportional_fee_revenue() {
             .root,
         root
     );
+}
+
+/// A job declared on the pool's light template has the declarator's
+/// transactions, so the pool's light job id and merkle branch are dropped.
+#[test]
+fn full_job_on_a_light_template_drops_the_light_job() {
+    let mut template = test_bch_prepared().template().as_ref().clone();
+    template.light = Some(LightJob {
+        job_id: "ec631dfd0a785808f1341c9c6596d8bd25c3e13a".to_string(),
+        merkle_branch: vec![TxMerkleNode::all_zeros()],
+        mining_block_size_limit: 16_000_000,
+    });
+    let prepared = test_bch_prepared_for_template(template);
+    let token = prepared
+        .mining_job_token([0x11; 32], prepared.template().curtime)
+        .unwrap();
+    let selected: bitcoin::Transaction =
+        deserialize(&hex::decode(bch_template_transaction(1).data).unwrap()).unwrap();
+    let (mut request_bytes, declared) =
+        test_bch_custom_job(prepared, token, vec![selected.clone()], true, 5_000_000_004);
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let payout = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    );
+    let (job, block) = validate_custom_job(
+        &request,
+        declared,
+        payout.into(),
+        ShareOwner::CashP2pkh([0x22; 20]),
+        DEFAULT_VERSION_MASK,
+    )
+    .unwrap();
+    assert!(job.blocktemplate.light.is_none());
+    assert_eq!(job.blocktemplate.transactions.len(), 1);
+    assert_eq!(block.unwrap().txdata[1], selected);
 }
 
 #[test]
