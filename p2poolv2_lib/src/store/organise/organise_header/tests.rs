@@ -93,6 +93,52 @@ fn test_organise_header_noop_when_conditions_not_met() {
     assert_eq!(top_after.height, 2);
 }
 
+/// A candidate reorg forgets every refused reorg: a remembered fork point
+/// holds only while the chain below it is unchanged.
+#[test]
+fn test_organise_header_reorg_forgets_refused_reorgs() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+
+    let genesis = TestShareBlockBuilder::new().nonce(0xe9695791).build();
+    let mut batch = Store::get_write_batch();
+    store.setup_genesis(&genesis, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+
+    let share1 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .nonce(0xe9695792)
+        .build();
+    store.push_to_candidate_chain(&share1).unwrap();
+
+    // fork_share: sibling of share1 with more work, so organising it reorgs.
+    let fork_share = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .work(2)
+        .nonce(0xe9695793)
+        .build();
+    store.store_with_valid_metadata(&fork_share);
+
+    store
+        .refused_reorgs
+        .lock()
+        .unwrap()
+        .insert(share1.block_hash(), 0);
+
+    let mut batch = Store::get_write_batch();
+    let result = store
+        .organise_header(&fork_share.header, &mut batch)
+        .unwrap();
+    store.commit_batch(batch).unwrap();
+
+    assert_eq!(result, Some(1));
+    assert_eq!(
+        store.get_top_candidate().unwrap().hash,
+        fork_share.block_hash()
+    );
+    assert!(store.refused_reorgs.lock().unwrap().is_empty());
+}
+
 #[test]
 fn test_organise_header_reorgs_when_fork_has_more_work() {
     let temp_dir = tempdir().unwrap();

@@ -75,6 +75,13 @@ impl Store {
         }
 
         if self.should_reorg_candidate(&blockhash, &metadata, top_candidate.as_ref()) {
+            // Refuse, without walking the branch again, a reorg refused before
+            // for forking below the reorg floor, or one to a child of such a
+            // refused block.
+            if self.reorg_refused_before(&blockhash, &header.prev_share_blockhash)? {
+                debug!("Refusing candidate reorg to {blockhash}: its branch was refused before");
+                return Ok(None);
+            }
             // Refuse a reorg whose branch descends through an Invalid block.
             if self.reorg_branch_has_invalid(&blockhash)? {
                 debug!(
