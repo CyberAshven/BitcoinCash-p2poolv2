@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A candidate reorg no longer takes confirmed shares off the confirmed chain.
+A reorg from a confirmed branch point left the old candidates above it
+marked Candidate; when such a branch came back with more work, its walk
+stopped at that stale mark below the confirmed tip, and the rewind marked
+the confirmed shares above it as on no chain while the confirmed index still
+listed them (seen in the sim `deep-fork-refused` run as `verify_chain`
+errors on one node). The reorg now takes those old candidates off, and a
+rewind never clears a confirmed share's membership. A store already in this
+state is not repaired; `verify_chain` reports it. No share-chain rule
+changes.
+
 A node no longer buffers a share that names a parent or uncle it has no
 header for; it drops the share and asks the sender for headers, now for the
 uncles as well as the parent, which brings an honest share back through
