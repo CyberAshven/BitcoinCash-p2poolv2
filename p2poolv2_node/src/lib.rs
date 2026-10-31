@@ -646,6 +646,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         );
         Some(start_electrum_server(
             config.electrum.clone(),
+            chain_store_handle.clone(),
             electrum_shutdown.clone(),
         ))
     } else {
