@@ -586,16 +586,21 @@ within the limit, can still drop the tip far enough to reach an `Unknown`
 root. A node partitioned from the pool for more than 14.7 days cannot rejoin
 by itself and needs a fresh store.
 
-**Open issue: the refusal is not remembered.** The node redoes it on every
-announcement of a block on the refused branch: it sends `getheaders`, gets
-the branch's headers back from height 1, and refuses each one again with a
+**The refusal is remembered.** Without memory the node redid it on every
+announcement of a block on the refused branch: it sent `getheaders`, got
+the branch's headers back from height 1, and refused each one again with a
 walk to the fork point. The sim `deep-fork-refused` run logged about 10,000
 refusals in 90 seconds over 474 headers. At production depth that cost is
-quadratic in the fork depth, and a peer holding such a branch can trigger it
-with made-up announcements at no extra work. Reaching it needs a majority
-attack first. The planned fix keeps refused fork points in memory so a
-repeat refusal costs a lookup, and disconnects a peer whose chain is
-refused.
+quadratic in the fork depth, and a peer holding such a branch could trigger
+it with made-up announcements at no extra work, once a majority attack had
+built the branch. The store now keeps each refused block in memory with the
+height its branch forks from (`reorg_refused_before`): a repeat costs a
+lookup, and a child of a refused block is refused by its parent's entry
+without a walk. A remembered fork point is used only while it is below the
+reorg floor, every candidate reorg forgets them all, and the memory holds at
+most 65,536 blocks and starts empty on restart, so it refuses only what the
+walk would refuse. The node still answers the peer and stays connected;
+disconnecting a peer whose chain is refused is left for later.
 
 ### Tests
 
