@@ -18,6 +18,15 @@ rewind never clears a confirmed share's membership. A store already in this
 state is not repaired; `verify_chain` reports it. No share-chain rule
 changes.
 
+A node now remembers a candidate reorg it refused for forking more than
+`MAX_REORG_DEPTH` below its confirmed tip. A peer sending the refused branch
+again made the node walk it back to its fork point once per header, a cost
+growing with the square of the fork's depth; a repeat now costs a lookup,
+and a child of a refused block is refused by its parent's entry. The node
+refuses exactly what it refused before: a remembered fork point is used only
+while it is below the reorg floor, every candidate reorg forgets them all,
+and the memory starts empty on restart. No share-chain rule changes.
+
 A node no longer buffers a share that names a parent or uncle it has no
 header for; it drops the share and asks the sender for headers, now for the
 uncles as well as the parent, which brings an honest share back through
