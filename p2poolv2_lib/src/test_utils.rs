@@ -900,6 +900,9 @@ pub(crate) fn test_bch_custom_job_with_leaves(
         disclosure,
     };
     let mut selected = template.as_ref().clone();
+    // The declarator's merkle path is over its own transactions, never a
+    // light template's branch.
+    selected.light = None;
     selected.transactions = transactions
         .iter()
         .map(|tx| TemplateTransaction {

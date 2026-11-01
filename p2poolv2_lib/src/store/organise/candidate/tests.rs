@@ -1748,6 +1748,120 @@ fn test_reorg_branch_forking_exactly_payout_depth_below_confirmed_tip_is_followe
     );
 }
 
+/// A refused deep fork is remembered, and a child of it is refused by
+/// lookup: the child is not even in the store, so its branch cannot be
+/// walked. A block on the chain is not refused.
+#[test]
+fn test_reorg_refused_before_refuses_a_refused_fork_and_its_children() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+    let genesis = TestShareBlockBuilder::new().nonce(0xe9695791).build();
+    let mut batch = Store::get_write_batch();
+    store.setup_genesis(&genesis, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+    let share_1 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .nonce(0xe9695792)
+        .build();
+    store.push_to_candidate_chain(&share_1).unwrap();
+    let share_2 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share_1.block_hash().to_string())
+        .nonce(0xe9695793)
+        .build();
+    store.push_to_candidate_chain(&share_2).unwrap();
+    let fork = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share_2.block_hash().to_string())
+        .nonce(0xe9695799)
+        .build();
+    store.store_with_valid_metadata(&fork);
+    let fork_child = TestShareBlockBuilder::new()
+        .prev_share_blockhash(fork.block_hash().to_string())
+        .nonce(0xe969579a)
+        .build();
+    let mut batch = Store::get_write_batch();
+    store.set_top_confirmed_height(2 + MAX_REORG_DEPTH as u32 + 1, &mut batch);
+    store.commit_batch(batch).unwrap();
+
+    assert!(
+        !store
+            .reorg_refused_before(&fork.block_hash(), &share_2.block_hash())
+            .unwrap()
+    );
+    assert!(
+        store
+            .reorg_branch_forks_below_reorg_floor(&fork.block_hash())
+            .unwrap()
+    );
+
+    assert!(
+        store
+            .reorg_refused_before(&fork.block_hash(), &share_2.block_hash())
+            .unwrap()
+    );
+    assert!(
+        store
+            .reorg_refused_before(&fork_child.block_hash(), &fork.block_hash())
+            .unwrap()
+    );
+    assert!(
+        !store
+            .reorg_refused_before(&share_2.block_hash(), &share_1.block_hash())
+            .unwrap()
+    );
+}
+
+/// A remembered refusal is not used once the confirmed tip falls back and
+/// the floor no longer refuses the fork: every refusal is forgotten and the
+/// branch is walked again, which now follows it.
+#[test]
+fn test_reorg_refused_before_forgets_refusals_once_the_floor_falls() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+    let genesis = TestShareBlockBuilder::new().nonce(0xe9695791).build();
+    let mut batch = Store::get_write_batch();
+    store.setup_genesis(&genesis, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+    let share_1 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .nonce(0xe9695792)
+        .build();
+    store.push_to_candidate_chain(&share_1).unwrap();
+    let share_2 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share_1.block_hash().to_string())
+        .nonce(0xe9695793)
+        .build();
+    store.push_to_candidate_chain(&share_2).unwrap();
+    let fork = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share_2.block_hash().to_string())
+        .nonce(0xe9695799)
+        .build();
+    store.store_with_valid_metadata(&fork);
+    let mut batch = Store::get_write_batch();
+    store.set_top_confirmed_height(2 + MAX_REORG_DEPTH as u32 + 1, &mut batch);
+    store.commit_batch(batch).unwrap();
+    assert!(
+        store
+            .reorg_branch_forks_below_reorg_floor(&fork.block_hash())
+            .unwrap()
+    );
+
+    let mut batch = Store::get_write_batch();
+    store.set_top_confirmed_height(2 + MAX_REORG_DEPTH as u32, &mut batch);
+    store.commit_batch(batch).unwrap();
+
+    assert!(
+        !store
+            .reorg_refused_before(&fork.block_hash(), &share_2.block_hash())
+            .unwrap()
+    );
+    assert!(store.refused_reorgs.lock().unwrap().is_empty());
+    assert!(
+        !store
+            .reorg_branch_forks_below_reorg_floor(&fork.block_hash())
+            .unwrap()
+    );
+}
+
 /// A branch forking `MAX_UNCLES_DEPTH` above the prune target was followed
 /// before share transactions. It is refused now: it forks a whole
 /// `PAYOUT_DEPTH` deeper than the floor.

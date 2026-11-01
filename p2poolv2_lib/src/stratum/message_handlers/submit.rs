@@ -286,6 +286,11 @@ fn token_win_messages<'a>(
 /// node in `[[submit_nodes]]` gets it too, provider or not, from background
 /// tasks.
 ///
+/// A block on a light template is its header and coinbase only, and goes to
+/// the node that made the template with `submitblocklight`, which adds the
+/// transactions it kept for the job. `[[submit_nodes]]` is refused with
+/// light templates.
+///
 /// Before the block goes anywhere, the job's payout tree is kept with the
 /// coinbase's txid and root output (`record_found_payout_tree`), so this node
 /// executes it even if the share is later rejected or the node stops before
@@ -313,7 +318,18 @@ pub(crate) async fn submit_found_block(
             build_full_block(header, coinbase, &job.blocktemplate)
                 .map_err(|error| Error::SubmitFailure(error.to_string()))?,
         );
-        info!("Submitting BCH block candidate {}", block.block_hash());
+        let light_job_id = job
+            .blocktemplate
+            .light
+            .as_ref()
+            .map(|light| light.job_id.as_str());
+        match light_job_id {
+            Some(job_id) => info!(
+                "Submitting BCH block candidate {} on light template job {job_id}",
+                block.block_hash()
+            ),
+            None => info!("Submitting BCH block candidate {}", block.block_hash()),
+        }
         let submitter = &stratum_context.found_block_submitter;
         spawn_extra_node_submissions(
             &block,
@@ -329,6 +345,7 @@ pub(crate) async fn submit_found_block(
         if let Some(block) = unsent {
             let result = submit_to_primary_node(
                 &block,
+                light_job_id,
                 &stratum_context.bitcoindrpc_client,
                 &stratum_context.metrics,
                 &submitter.retry,
@@ -566,6 +583,8 @@ fn request_template_refresh(stratum_context: &StratumContext) {
 
 /// Build full block from header, coinbase and blocktemplate
 /// Return an error for malformed template transactions rather than panicking.
+/// A light template lists no transactions, so its block is the header and
+/// coinbase that `submitblocklight` takes.
 /// Only called for the rare case of finding a bitcoin block (real auto-submit
 /// in non-sim builds; the sim statistical block-find under `sim`).
 pub(crate) fn build_full_block(

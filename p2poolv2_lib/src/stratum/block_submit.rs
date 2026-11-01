@@ -12,7 +12,9 @@
 //! to every extra node the operator lists in `[[submit_nodes]]`, each with its
 //! own retries, so a node that is down or slow loses nothing. P2Pool v1 sent a
 //! found block over two paths with retries (V9 in
-//! `docs/p2pool-v1-bch-lessons.md`).
+//! `docs/p2pool-v1-bch-lessons.md`). A block found on a light template goes,
+//! with the same retries, only to the node that made the template, with
+//! `submitblocklight`.
 
 use crate::accounting::stats::metrics::MetricsHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -185,9 +187,13 @@ impl From<SubmitBlockOutcome> for BlockSubmission {
 /// may pass ([`bitcoindrpc::BitcoindRpcError::is_transient`]) or time-out,
 /// until the node answers or `policy.retry_window` ends.
 ///
+/// A block found on a light template, whose job is `light_job_id`, holds
+/// only its header and coinbase and goes with `submitblocklight` instead.
+///
 /// Returns the result and how many times the block was sent again.
 pub async fn submit_with_retry(
     block: &Block,
+    light_job_id: Option<&str>,
     client: &BitcoindRpcClient,
     policy: &SubmitRetryPolicy,
 ) -> (BlockSubmission, u32) {
@@ -195,7 +201,13 @@ pub async fn submit_with_retry(
     let mut backoff = policy.first_backoff;
     let mut retries = 0;
     loop {
-        let failure = match timeout(policy.attempt_timeout, client.submit_block(block)).await {
+        let attempt = async {
+            match light_job_id {
+                Some(job_id) => client.submit_block_light(block, job_id).await,
+                None => client.submit_block(block).await,
+            }
+        };
+        let failure = match timeout(policy.attempt_timeout, attempt).await {
             Ok(Ok(outcome)) => return (outcome.into(), retries),
             Ok(Err(error)) if !error.is_transient() => {
                 return (BlockSubmission::Failed(error.to_string()), retries);
@@ -224,7 +236,7 @@ pub async fn submit_with_retry(
 /// said. Used where no metrics handle exists: the Template Provider's RPC
 /// fallback and the simulation's block find.
 pub async fn submit_block(block: &Block, client: &BitcoindRpcClient) -> BlockSubmission {
-    let (result, retries) = submit_with_retry(block, client, &FOUND_BLOCK_RETRY_POLICY).await;
+    let (result, retries) = submit_with_retry(block, None, client, &FOUND_BLOCK_RETRY_POLICY).await;
     log_submission(block, PRIMARY_NODE_LABEL, &result, retries);
     result
 }
@@ -247,7 +259,7 @@ pub fn spawn_extra_node_submissions(
         let label = extra_node_label(index);
         let acceptance = acceptance.clone();
         tokio::spawn(async move {
-            let (result, retries) = submit_with_retry(&block, &client, &policy).await;
+            let (result, retries) = submit_with_retry(&block, None, &client, &policy).await;
             log_submission(&block, &label, &result, retries);
             record_submission(&metrics, label, &result, retries).await;
             if let Some(acceptance) = acceptance {
@@ -259,13 +271,16 @@ pub fn spawn_extra_node_submissions(
 
 /// Send a found block to the node in `[bitcoinrpc]` with retries, log the
 /// result and count it in `found_block_submissions_total` as `primary`.
+/// `light_job_id` names the light template a block was found on
+/// ([`submit_with_retry`]).
 pub async fn submit_to_primary_node(
     block: &Block,
+    light_job_id: Option<&str>,
     client: &BitcoindRpcClient,
     metrics: &MetricsHandle,
     policy: &SubmitRetryPolicy,
 ) -> BlockSubmission {
-    let (result, retries) = submit_with_retry(block, client, policy).await;
+    let (result, retries) = submit_with_retry(block, light_job_id, client, policy).await;
     log_submission(block, PRIMARY_NODE_LABEL, &result, retries);
     record_submission(metrics, PRIMARY_NODE_LABEL.to_string(), &result, retries).await;
     result

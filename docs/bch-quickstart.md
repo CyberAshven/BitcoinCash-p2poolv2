@@ -8,7 +8,8 @@ pool. Try it on regtest or chipnet first.
 ## 1. Run Bitcoin Cash Node
 
 P2Poolv2 asks BCHN for templates over JSON-RPC and listens for new blocks
-over ZMQ. In `bitcoin.conf`:
+over ZMQ (and, with `node_p2p_address`, on BCHN's P2P port). In
+`bitcoin.conf`:
 
 ```ini
 server=1
@@ -66,7 +67,14 @@ A Bitcoin Cash config needs no `network`: the node uses the network
 one network agree.
 
 Point `[bitcoinrpc]` at BCHN's RPC port and `zmqpubhashblock` at its ZMQ
-endpoint.
+endpoint. Optionally set `node_p2p_address` in `[stratum]` to BCHN's P2P port
+(`127.0.0.1:48333` on chipnet, `127.0.0.1:8333` on mainnet): the node then
+also hears each new block as a P2P peer of BCHN, the way jtoomim's p2pool
+did. It is what gives a node without ZMQ, such as BCHD or Knuth, a new
+template at once instead of at the next 10-second poll. The node must accept
+P2P connections: BCHN does by default, but not with `-listen=0` or with
+`-connect` and no `-listen=1`. On a node without ZMQ, `zmqpubhashblock` can
+stay at its default; it never fires.
 
 At start the node checks that `[bitcoinrpc]` is BCHN on
 `bitcoin_cash_network`, and refuses to start otherwise with an error that
@@ -132,6 +140,31 @@ sv2_cert_validity_secs = 3600
 ```
 
 Miners then pin the public key.
+
+### Light templates
+
+`template_source = "rpc_light"` asks the node in `[bitcoinrpc]` for light
+templates (`getblocktemplatelight`): the node keeps the template's
+transactions and sends only their merkle branch, so the pool never fetches
+or holds them. A block found on one goes back as its header and coinbase with
+`submitblocklight`, and the node adds the transactions. A template the node
+cannot give light (no `getblocktemplatelight`, no `merkle` in it, or no
+`miningblocksizelimit` in `getmininginfo`) comes from `getblocktemplate`,
+with a warning logged once. BCHN gives light templates; BCHD and Knuth do
+not today.
+
+The pool cannot count a light template's transactions, so it takes the
+node's mining size limit (`-blockmaxsize` or equivalent) as their size: that
+limit, the pool's coinbase and 89 bytes of header and transaction count must
+fit the block size limit, or the node withdraws work and logs why. BCHN's
+default leaves half of the block on mainnet and regtest but none on chipnet,
+where `-blockmaxsize` must be lowered. `[[submit_nodes]]` cannot be used with
+light templates: only the node that made a template can complete its block.
+
+The transactions move to the node's disk instead: BCHN writes each light
+job's transactions under `<datadir>/gbt/` and deletes them after
+`-gbtstoretime` (3600 s by default). With 5 MB templates and a poll every
+10 s that is about 1.9 GB an hour.
 
 ### Templates from a Stratum V2 Template Provider
 

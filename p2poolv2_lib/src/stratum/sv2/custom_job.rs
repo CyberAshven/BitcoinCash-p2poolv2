@@ -224,8 +224,10 @@ pub(crate) fn validate_custom_job(
     template.coinbaseaux.clear();
     template.default_witness_commitment = None;
     // A declared block has the declarator's transactions, not a provider
-    // template's, so it never goes back to a Template Provider.
+    // template's, so it never goes back to a Template Provider, nor a light
+    // template's, so the node's job id and merkle branch do not apply.
     template.provided = None;
+    template.light = None;
     template.transactions = declared
         .transactions
         .as_ref()

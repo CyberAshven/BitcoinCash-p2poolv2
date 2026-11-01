@@ -3,24 +3,69 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::config::Chain;
-use crate::stratum::work::block_template::BlockTemplate;
+use crate::stratum::work::block_template::{BlockTemplate, LightJob};
 use crate::stratum::work::error::WorkError;
 use crate::stratum::work::notify::{NotifyCmd, NotifySender};
+use bitcoin::TxMerkleNode;
 use bitcoin::hashes::{Hash, sha256d};
 use bitcoindrpc::{BitcoinRpcConfig, BitcoindRpcClient};
+use serde_json::json;
 use std::sync::Arc;
-use tracing::{debug, error, instrument};
+use tracing::{debug, error, instrument, warn};
 
 #[cfg(test)]
 const GBT_NO_TRANSACTIONS_FIXTURE: &str =
     include_str!("../../../../p2poolv2_tests/test_data/gbt/signet/gbt-no-transactions.json");
 
+/// Why a fetch with `template_source = "rpc_light"` took the node's full
+/// template. Each is warned about once ([`LightTemplateLog`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LightFallback {
+    /// The node has no `getblocktemplatelight` (method not found), as BCHD.
+    NoLightTemplateRpc,
+    /// `getblocktemplatelight` failed.
+    LightTemplateFailed,
+    /// The light template has no `job_id` or no `merkle`, as Knuth's has no
+    /// `merkle` today, or it is malformed.
+    LightTemplateUnusable,
+    /// `getmininginfo` failed or reports no `miningblocksizelimit`, without
+    /// which a block on a light template has no size bound (BCHD, Knuth).
+    NoMiningSizeLimit,
+}
+
+/// A light template the node could not give, and why.
+#[derive(Debug)]
+struct LightTemplateUnavailable {
+    reason: LightFallback,
+    detail: String,
+}
+
+/// What a `template_source = "rpc_light"` template task remembers between
+/// fetches, so that each fallback reason, and a node with no template at
+/// all, is logged once rather than at every poll.
+#[derive(Debug, Default)]
+struct LightTemplateLog {
+    /// The fallback reasons warned about so far.
+    warned: Vec<LightFallback>,
+    /// Whether the node was reported to give no template at all. Cleared when
+    /// it gives one again.
+    reported_no_template: bool,
+}
+
 /// Compute merkle branches for the transactions in the block template
 /// Return an error for invalid transaction IDs instead of panicking on node data.
+/// A light template's branch is the one the node gave ([`LightJob`]).
 #[allow(dead_code)]
 pub fn build_merkle_branches_for_template(
     template: &BlockTemplate,
 ) -> Result<Vec<sha256d::Hash>, WorkError> {
+    if let Some(light) = &template.light {
+        return Ok(light
+            .merkle_branch
+            .iter()
+            .map(|node| node.to_raw_hash())
+            .collect());
+    }
     let txids = template
         .transactions
         .iter()
@@ -43,11 +88,166 @@ pub async fn get_bch_block_template(
         .map_err(|error| WorkError {
             message: error.to_string(),
         })?;
-    let template: BlockTemplate = serde_json::from_str(&json).map_err(|error| WorkError {
+    parse_bch_block_template(&json)
+}
+
+/// Parse and validate a full BCH template.
+fn parse_bch_block_template(json: &str) -> Result<BlockTemplate, WorkError> {
+    let template: BlockTemplate = serde_json::from_str(json).map_err(|error| WorkError {
         message: format!("Invalid BCH template JSON: {error}"),
     })?;
     template.validate_bch()?;
     Ok(template)
+}
+
+/// Fetch a light template for `template_source = "rpc_light"`, or the
+/// node's full template when it gives no usable light one: per template,
+/// so a node that gains or loses light templates is followed. BCHN gives
+/// light templates; BCHD and Knuth give none usable today.
+///
+/// Each fallback reason is warned about the first time only. `Ok(None)`
+/// when the node has no `getblocktemplate` either, as Knuth, which is
+/// logged once until the node gives a template again.
+async fn get_bch_light_or_full_template(
+    bitcoind: &BitcoindRpcClient,
+    log: &mut LightTemplateLog,
+) -> Result<Option<BlockTemplate>, WorkError> {
+    let unavailable = match get_bch_light_block_template(bitcoind).await {
+        Ok(template) => {
+            log.reported_no_template = false;
+            return Ok(Some(template));
+        }
+        Err(unavailable) => unavailable,
+    };
+    if log.warned.contains(&unavailable.reason) {
+        debug!("Taking the node's full template: {}", unavailable.detail);
+    } else {
+        warn!(
+            "No usable light template from the node ({}); taking its full template \
+             (getblocktemplate) instead. Logged once for this reason",
+            unavailable.detail
+        );
+        log.warned.push(unavailable.reason);
+    }
+    match bitcoind.get_bch_block_template().await {
+        Ok(json) => {
+            log.reported_no_template = false;
+            parse_bch_block_template(&json).map(Some)
+        }
+        Err(error) if error.is_method_not_found() => {
+            if !log.reported_no_template {
+                error!(
+                    "The node offers neither a usable light template ({}) nor getblocktemplate; \
+                     no mining work until it gives a template",
+                    unavailable.detail
+                );
+                log.reported_no_template = true;
+            }
+            Ok(None)
+        }
+        Err(error) => Err(WorkError {
+            message: error.to_string(),
+        }),
+    }
+}
+
+/// Fetch a light template: `getblocktemplatelight`, then `getmininginfo`
+/// for the node's mining size limit, which bounds the size of a block on it.
+async fn get_bch_light_block_template(
+    bitcoind: &BitcoindRpcClient,
+) -> Result<BlockTemplate, LightTemplateUnavailable> {
+    let json = bitcoind
+        .get_bch_block_template_light()
+        .await
+        .map_err(|error| {
+            if error.is_method_not_found() {
+                LightTemplateUnavailable {
+                    reason: LightFallback::NoLightTemplateRpc,
+                    detail: "the node has no getblocktemplatelight".to_string(),
+                }
+            } else {
+                LightTemplateUnavailable {
+                    reason: LightFallback::LightTemplateFailed,
+                    detail: format!("getblocktemplatelight failed: {error}"),
+                }
+            }
+        })?;
+    let (mut template, job_id, merkle_branch) = parse_bch_light_block_template(&json)?;
+    let no_mining_size_limit = |detail: String| LightTemplateUnavailable {
+        reason: LightFallback::NoMiningSizeLimit,
+        detail,
+    };
+    let mining_block_size_limit = bitcoind
+        .getmininginfo()
+        .await
+        .map_err(|error| no_mining_size_limit(format!("getmininginfo failed: {error}")))?
+        .mining_block_size_limit
+        .ok_or_else(|| {
+            no_mining_size_limit("getmininginfo reports no miningblocksizelimit".to_string())
+        })?;
+    template.light = Some(LightJob {
+        job_id,
+        merkle_branch,
+        mining_block_size_limit,
+    });
+    template
+        .validate_bch()
+        .map_err(|error| LightTemplateUnavailable {
+            reason: LightFallback::LightTemplateUnusable,
+            detail: error.message,
+        })?;
+    Ok(template)
+}
+
+/// Read a `getblocktemplatelight` result: a template without `transactions`,
+/// with the node's `job_id` and the coinbase's merkle branch `merkle`, whose
+/// hashes are shown like transaction IDs. Returns the template, the job id
+/// and the branch.
+///
+/// A light template may lack `coinbaseaux`, `longpollid` and `sigoplimit`
+/// (Knuth's sends the same limit as `sigchecklimit`). They are filled in
+/// here, for light templates only; a full template must carry them.
+fn parse_bch_light_block_template(
+    json: &str,
+) -> Result<(BlockTemplate, String, Vec<TxMerkleNode>), LightTemplateUnavailable> {
+    let unusable = |detail: String| LightTemplateUnavailable {
+        reason: LightFallback::LightTemplateUnusable,
+        detail,
+    };
+    let mut value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|error| unusable(format!("invalid light template JSON: {error}")))?;
+    let fields = value
+        .as_object_mut()
+        .ok_or_else(|| unusable("the light template is not a JSON object".to_string()))?;
+    let job_id = match fields.remove("job_id") {
+        Some(serde_json::Value::String(job_id)) if !job_id.is_empty() => job_id,
+        _ => return Err(unusable("the light template has no job_id".to_string())),
+    };
+    let merkle: Vec<String> = fields
+        .remove("merkle")
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| unusable(format!("invalid light template merkle: {error}")))?
+        .ok_or_else(|| unusable("the light template has no merkle".to_string()))?;
+    let merkle_branch = merkle
+        .iter()
+        .map(|hash| {
+            hash.parse::<sha256d::Hash>()
+                .map(TxMerkleNode::from_raw_hash)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| unusable(format!("invalid light template merkle hash: {error}")))?;
+    fields.entry("transactions").or_insert_with(|| json!([]));
+    fields.entry("coinbaseaux").or_insert_with(|| json!({}));
+    fields.entry("longpollid").or_insert_with(|| json!(""));
+    if !fields.contains_key("sigoplimit")
+        && let Some(sigchecklimit) = fields.get("sigchecklimit").cloned()
+    {
+        fields.insert("sigoplimit".to_string(), sigchecklimit);
+    }
+    let template: BlockTemplate = serde_json::from_value(value)
+        .map_err(|error| unusable(format!("invalid light template: {error}")))?;
+    Ok((template, job_id, merkle_branch))
 }
 
 /// Compute the bitcoin merkle root by walking the merkle branches from the
@@ -98,18 +298,24 @@ fn compute_merkle_branches(input_txids: Vec<sha256d::Hash>) -> Vec<sha256d::Hash
 ///
 /// Bitcoin keeps the SegWit and Signet rule negotiation. Bitcoin Cash uses
 /// the BCHN request and rejects the template before it can become a job.
+/// With `light_log` (`template_source = "rpc_light"`) Bitcoin Cash asks for
+/// a light template first ([`get_bch_light_or_full_template`]). `Ok(None)`
+/// when the node gives no template and that was already logged.
 async fn fetch_template(
     bitcoind: &BitcoindRpcClient,
     network: bitcoin::Network,
     chain: Chain,
-) -> Result<BlockTemplate, WorkError> {
-    match chain {
-        Chain::Bitcoin => get_block_template(bitcoind, network)
+    light_log: Option<&mut LightTemplateLog>,
+) -> Result<Option<BlockTemplate>, WorkError> {
+    match (chain, light_log) {
+        (Chain::Bitcoin, _) => get_block_template(bitcoind, network)
             .await
+            .map(Some)
             .map_err(|error| WorkError {
                 message: error.to_string(),
             }),
-        Chain::BitcoinCash => get_bch_block_template(bitcoind).await,
+        (Chain::BitcoinCash, None) => get_bch_block_template(bitcoind).await.map(Some),
+        (Chain::BitcoinCash, Some(log)) => get_bch_light_or_full_template(bitcoind, log).await,
     }
 }
 
@@ -139,12 +345,15 @@ async fn get_block_template(
 ///
 /// Listen to zmqpubhashblock from bitcoind.
 /// Otherwise, poll for new block templates every poll_interval seconds.
+/// With `light_templates` (`template_source = "rpc_light"`, Bitcoin Cash)
+/// each fetch asks for a light template first.
 pub async fn start_gbt(
     bitcoin_config: BitcoinRpcConfig,
     result_tx: NotifySender,
     poll_interval: u64,
     network: bitcoin::Network,
     chain: Chain,
+    light_templates: bool,
     mut zmq_trigger_rx: tokio::sync::mpsc::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create the RPC client once and reuse it for all requests
@@ -172,12 +381,13 @@ pub async fn start_gbt(
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_interval));
         // avoid spamming if it is taking longer than [poll_internal]
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut light_log = light_templates.then(LightTemplateLog::default);
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    match fetch_template(&bitcoind, network, chain).await {
-                        Ok(template) => {
+                    match fetch_template(&bitcoind, network, chain, light_log.as_mut()).await {
+                        Ok(Some(template)) => {
                             if result_tx
                                 .send(NotifyCmd::SendToAll {
                                     template: Arc::new(template),
@@ -188,6 +398,7 @@ pub async fn start_gbt(
                                 error!("Failed to send block template to channel");
                             }
                         }
+                        Ok(None) => {}
                         Err(e) => {
                             error!("Error polling block template: {}", e);
                         }
@@ -197,8 +408,8 @@ pub async fn start_gbt(
                     match result {
                         Some(_) => {
                             debug!("Received ZMQ block notification");
-                            match fetch_template(&bitcoind, network, chain).await {
-                                Ok(template) => {
+                            match fetch_template(&bitcoind, network, chain, light_log.as_mut()).await {
+                                Ok(Some(template)) => {
                                     if result_tx
                                         .send(NotifyCmd::SendToAll {
                                             template: Arc::new(template),
@@ -210,6 +421,7 @@ pub async fn start_gbt(
                                     }
                                     interval.reset();
                                 }
+                                Ok(None) => {}
                                 Err(e) => {
                                     error!(
                                         "Error getting block template after ZMQ notification: {}",
@@ -236,6 +448,253 @@ mod gbt_load_tests {
     use crate::test_utils::bch_template_transaction;
     use bitcoin::hex::FromHex;
     use bitcoindrpc::test_utils::{mock_method, setup_mock_bitcoin_rpc};
+    use wiremock::matchers::{body_partial_json, method};
+    use wiremock::{Mock, ResponseTemplate};
+
+    /// BCHN 29.2.0's regtest `getblocktemplatelight` for a mempool of three
+    /// transactions, whose IDs its `getblocktemplate` listed as 05c5afd4...,
+    /// e3ae391a... and edb88f2c... .
+    const BCHN_LIGHT_TEMPLATE: &str = r#"{
+        "capabilities": ["proposal"],
+        "version": 536870912,
+        "previousblockhash": "21806fe2b8639db291436084f7663fccb43eb9bfcfb4adb3fa3c74495b17a2b3",
+        "job_id": "ec631dfd0a785808f1341c9c6596d8bd25c3e13a",
+        "merkle": [
+            "05c5afd435dd1721f47af7256f88de898f20fdc0c2291c354cb1fef66a6e0be4",
+            "3a08f3692fe21e4e24a4cdbea262370850ae531ac130c8373ca43f7b79e453a5"
+        ],
+        "coinbaseaux": {"flags": ""},
+        "coinbasevalue": 5000000657,
+        "longpollid": "21806fe2b8639db291436084f7663fccb43eb9bfcfb4adb3fa3c74495b17a2b3727",
+        "target": "7fffff0000000000000000000000000000000000000000000000000000000000",
+        "mintime": 1793475699,
+        "mutable": ["time", "job_id", "merkle", "prevblock"],
+        "noncerange": "00000000ffffffff",
+        "sigoplimit": 226950,
+        "sizelimit": 32000000,
+        "curtime": 1793476401,
+        "bits": "207fffff",
+        "height": 122
+    }"#;
+
+    /// A light template with only the fields Knuth's `getblocktemplatelight`
+    /// sends today (no `merkle`, `coinbaseaux`, `longpollid` or
+    /// `sigoplimit`; `sigchecklimit` instead), with regtest values.
+    const KNUTH_SHAPED_LIGHT_TEMPLATE: &str = r#"{
+        "version": 536870912,
+        "previousblockhash": "21806fe2b8639db291436084f7663fccb43eb9bfcfb4adb3fa3c74495b17a2b3",
+        "height": 122,
+        "coinbasevalue": 5000000000,
+        "target": "7fffff0000000000000000000000000000000000000000000000000000000000",
+        "bits": "207fffff",
+        "mintime": 1793475699,
+        "curtime": 1793476401,
+        "sizelimit": 32000000,
+        "sigchecklimit": 226950,
+        "noncerange": "00000000ffffffff",
+        "mutable": ["time", "transactions", "prevblock"],
+        "job_id": "ec631dfd0a785808f1341c9c6596d8bd25c3e13a"
+    }"#;
+
+    /// The node's `merkle` reads as the branch the full path computes from
+    /// the same transactions' IDs, in the same order and byte order.
+    #[test]
+    fn bchn_light_template_branch_matches_the_full_template_branch() {
+        let (template, job_id, merkle_branch) =
+            parse_bch_light_block_template(BCHN_LIGHT_TEMPLATE).unwrap();
+        let txids: Vec<sha256d::Hash> = vec![
+            "05c5afd435dd1721f47af7256f88de898f20fdc0c2291c354cb1fef66a6e0be4"
+                .parse()
+                .unwrap(),
+            "e3ae391ab48ac099d13ee81eb0c7f84d206e7d4e8c4ab36b00d58bb731e06bc4"
+                .parse()
+                .unwrap(),
+            "edb88f2cd502c5ed4d432f3d4383c674d17bcf9847eb1cd063ed93038257348f"
+                .parse()
+                .unwrap(),
+        ];
+        let expected: Vec<TxMerkleNode> = compute_merkle_branches(txids)
+            .into_iter()
+            .map(TxMerkleNode::from_raw_hash)
+            .collect();
+        assert_eq!(merkle_branch, expected);
+        assert_eq!(job_id, "ec631dfd0a785808f1341c9c6596d8bd25c3e13a");
+        assert!(template.transactions.is_empty());
+        assert_eq!(template.height, 122);
+    }
+
+    #[tokio::test]
+    async fn bchn_light_template_flows_through_rpc_and_validation() {
+        let (server, config) = setup_mock_bitcoin_rpc().await;
+        mock_method(
+            &server,
+            "getblocktemplatelight",
+            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            BCHN_LIGHT_TEMPLATE.to_string(),
+        )
+        .await;
+        mock_method(
+            &server,
+            "getmininginfo",
+            serde_json::json!([]),
+            r#"{"blocks": 121, "miningblocksizelimit": 16000000, "chain": "regtest"}"#.into(),
+        )
+        .await;
+        let client =
+            BitcoindRpcClient::new(&config.url, &config.username, &config.password).unwrap();
+        let template = get_bch_light_block_template(&client).await.unwrap();
+        let light = template.light.as_ref().unwrap();
+        assert_eq!(light.job_id, "ec631dfd0a785808f1341c9c6596d8bd25c3e13a");
+        assert_eq!(light.mining_block_size_limit, 16_000_000);
+        let branches = build_merkle_branches_for_template(&template).unwrap();
+        assert_eq!(branches.len(), 2);
+        assert_eq!(
+            branches[0].to_string(),
+            "05c5afd435dd1721f47af7256f88de898f20fdc0c2291c354cb1fef66a6e0be4"
+        );
+    }
+
+    #[test]
+    fn a_light_template_without_coinbaseaux_longpollid_or_sigoplimit_parses() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(KNUTH_SHAPED_LIGHT_TEMPLATE).unwrap();
+        json["merkle"] = serde_json::json!([]);
+        let (template, _, merkle_branch) =
+            parse_bch_light_block_template(&json.to_string()).unwrap();
+        assert!(merkle_branch.is_empty());
+        assert_eq!(template.sigoplimit, 226_950);
+        assert!(template.coinbaseaux.is_empty());
+        template.validate_bch().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_light_template_without_merkle_takes_the_full_template() {
+        let (server, config) = setup_mock_bitcoin_rpc().await;
+        mock_method(
+            &server,
+            "getblocktemplatelight",
+            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            KNUTH_SHAPED_LIGHT_TEMPLATE.to_string(),
+        )
+        .await;
+        mock_method(
+            &server,
+            "getblocktemplate",
+            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            include_str!("../../../../bitcoindrpc/test_data/bchn-regtest-template.json").into(),
+        )
+        .await;
+        let client =
+            BitcoindRpcClient::new(&config.url, &config.username, &config.password).unwrap();
+        let mut log = LightTemplateLog::default();
+        let template = get_bch_light_or_full_template(&client, &mut log)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(template.light.is_none());
+        assert_eq!(template.height, 102);
+        assert_eq!(log.warned, vec![LightFallback::LightTemplateUnusable]);
+    }
+
+    #[tokio::test]
+    async fn a_node_without_getblocktemplatelight_gives_the_full_template() {
+        let (server, config) = setup_mock_bitcoin_rpc().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                serde_json::json!({ "method": "getblocktemplatelight" }),
+            ))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "result": null,
+                "error": { "code": -32601, "message": "Method not found" },
+                "id": 0
+            })))
+            .mount(&server)
+            .await;
+        mock_method(
+            &server,
+            "getblocktemplate",
+            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            include_str!("../../../../bitcoindrpc/test_data/bchn-regtest-template.json").into(),
+        )
+        .await;
+        let client =
+            BitcoindRpcClient::new(&config.url, &config.username, &config.password).unwrap();
+        let mut log = LightTemplateLog::default();
+        let template = get_bch_light_or_full_template(&client, &mut log)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(template.light.is_none());
+        assert_eq!(log.warned, vec![LightFallback::NoLightTemplateRpc]);
+    }
+
+    #[tokio::test]
+    async fn a_node_without_a_mining_size_limit_gives_the_full_template() {
+        let (server, config) = setup_mock_bitcoin_rpc().await;
+        mock_method(
+            &server,
+            "getblocktemplatelight",
+            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            BCHN_LIGHT_TEMPLATE.to_string(),
+        )
+        .await;
+        mock_method(
+            &server,
+            "getmininginfo",
+            serde_json::json!([]),
+            r#"{"blocks": 121, "chain": "regtest"}"#.into(),
+        )
+        .await;
+        mock_method(
+            &server,
+            "getblocktemplate",
+            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            include_str!("../../../../bitcoindrpc/test_data/bchn-regtest-template.json").into(),
+        )
+        .await;
+        let client =
+            BitcoindRpcClient::new(&config.url, &config.username, &config.password).unwrap();
+        let mut log = LightTemplateLog::default();
+        let template = get_bch_light_or_full_template(&client, &mut log)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(template.light.is_none());
+        assert_eq!(log.warned, vec![LightFallback::NoMiningSizeLimit]);
+    }
+
+    /// Knuth today: a light template without `merkle` and no
+    /// `getblocktemplate`. No template, reported once, not an error each poll.
+    #[tokio::test]
+    async fn a_node_with_neither_usable_template_gives_none() {
+        let (server, config) = setup_mock_bitcoin_rpc().await;
+        mock_method(
+            &server,
+            "getblocktemplatelight",
+            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            KNUTH_SHAPED_LIGHT_TEMPLATE.to_string(),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                serde_json::json!({ "method": "getblocktemplate" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": null,
+                "error": { "code": -32601, "message": "Method not found" },
+                "id": 0
+            })))
+            .mount(&server)
+            .await;
+        let client =
+            BitcoindRpcClient::new(&config.url, &config.username, &config.password).unwrap();
+        let mut log = LightTemplateLog::default();
+        let fetched = get_bch_light_or_full_template(&client, &mut log)
+            .await
+            .unwrap();
+        assert!(fetched.is_none());
+        assert!(log.reported_no_template);
+    }
 
     #[tokio::test]
     async fn bch_template_flows_through_rpc_and_validation() {
@@ -541,6 +1000,7 @@ mod gbt_server_tests {
             1,
             bitcoin::Network::Signet,
             Chain::Bitcoin,
+            false,
             zmq_trigger_rx,
         )
         .await;
@@ -596,6 +1056,7 @@ mod gbt_server_tests {
             60,
             bitcoin::Network::Signet,
             Chain::Bitcoin,
+            false,
             zmq_trigger_rx,
         )
         .await;
@@ -648,6 +1109,7 @@ mod gbt_server_tests {
             60,
             bitcoin::Network::Regtest,
             Chain::BitcoinCash,
+            false,
             zmq_trigger_rx,
         )
         .await;
@@ -692,6 +1154,7 @@ mod gbt_server_tests {
             60,
             bitcoin::Network::Signet,
             Chain::BitcoinCash,
+            false,
             zmq_trigger_rx,
         )
         .await;

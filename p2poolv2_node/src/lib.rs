@@ -21,7 +21,8 @@ use p2poolv2_lib::accounting::payout::{build_payout_for_mode, payout_pplns_windo
 use p2poolv2_lib::accounting::stats::metrics;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::config::{
-    BitcoinCashNetwork, Chain, Config, PoolMode, TemplateProvider, bitcoin_cash_donation_cashaddr,
+    BitcoinCashNetwork, Chain, Config, PoolMode, TemplateProvider, TemplateSource,
+    bitcoin_cash_donation_cashaddr,
 };
 use p2poolv2_lib::node::actor::NodeHandle;
 use p2poolv2_lib::node::bch_header_feeder::relay_templates_learning_prevs;
@@ -33,6 +34,9 @@ use p2poolv2_lib::store::Store;
 use p2poolv2_lib::store::writer::{StoreHandle, StoreWriter, write_channel};
 use p2poolv2_lib::stratum::client_connections::start_connections_handler;
 use p2poolv2_lib::stratum::emission::Emission;
+use p2poolv2_lib::stratum::node_p2p_listener::{
+    NodeP2pListener, NodeP2pListenerTrait, network_magic,
+};
 use p2poolv2_lib::stratum::server::{StratumServerBuilder, Sv2Listener};
 use p2poolv2_lib::stratum::sv2::start_template_provider;
 use p2poolv2_lib::stratum::work::gbt::start_gbt;
@@ -69,7 +73,8 @@ const NOTIFY_CHANNEL_CAPACITY: usize = 1000;
 /// Where the node's block templates come from.
 enum TemplateFeed {
     /// `getblocktemplate`, polled and triggered by ZMQ block notifications
-    /// and by blocks this node finds.
+    /// and by blocks this node finds. With `template_source = "rpc_light"`,
+    /// `getblocktemplatelight` first.
     Rpc {
         template_trigger_rx: mpsc::Receiver<()>,
     },
@@ -342,10 +347,25 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         Some(provider) => (TemplateFeed::Provider(provider.clone()), None),
         None => match ZmqListener.start(&stratum_config.zmqpubhashblock) {
             Ok(zmq_trigger_rx) => {
+                // With node_p2p_address, blocks announced on the node's P2P
+                // port also wake the template task: not every node has ZMQ.
+                let node_p2p_magic = network_magic(bitcoin_cash_network, stratum_config.network);
+                let node_p2p_trigger_rx = match stratum_config
+                    .node_p2p_address
+                    .as_deref()
+                    .map(|address| NodeP2pListener.start(address, node_p2p_magic))
+                    .transpose()
+                {
+                    Ok(node_p2p_trigger_rx) => node_p2p_trigger_rx,
+                    Err(e) => {
+                        error!("Failed to set up the node P2P listener: {e}");
+                        return Err(ExitCode::FAILURE);
+                    }
+                };
                 // A block this node finds also wakes the template task,
                 // through the refresh sender the stratum servers hold.
                 let (template_refresh_tx, template_trigger_rx) =
-                    merge_template_triggers(zmq_trigger_rx);
+                    merge_template_triggers(zmq_trigger_rx, node_p2p_trigger_rx);
                 (
                     TemplateFeed::Rpc {
                         template_trigger_rx,
@@ -393,6 +413,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
                     GBT_POLL_INTERVAL,
                     stratum_config.network,
                     stratum_config.chain,
+                    stratum_config.template_source == TemplateSource::RpcLight,
                     template_trigger_rx,
                 )
                 .await

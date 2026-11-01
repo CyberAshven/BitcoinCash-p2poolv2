@@ -109,12 +109,12 @@ const fn secret(field: FieldSpec) -> FieldSpec {
 const NETWORKS: &[&str] = &["mainnet", "chipnet", "regtest"];
 const CHAINS: &[&str] = &["bitcoin-cash", "bitcoin"];
 const SHARE_CHAINS: &[&str] = &["main", "mini"];
-const TEMPLATE_SOURCES: &[&str] = &["rpc", "sv2"];
+const TEMPLATE_SOURCES: &[&str] = &["rpc", "rpc_light", "sv2"];
 const MODES: &[&str] = &["p2poolv2", "hydrapool"];
 const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 
 /// The settings listed, in order.
-pub const FIELDS: [FieldSpec; 44] = [
+pub const FIELDS: [FieldSpec; 45] = [
     // The network switch and the chain come first: they decide the rest.
     optional(
         "stratum",
@@ -221,7 +221,8 @@ pub const FIELDS: [FieldSpec; 44] = [
     optional(
         "stratum",
         "template_source",
-        "Where block templates come from: rpc (BCHN) or sv2 (a Template Provider)",
+        "Where block templates come from: rpc (BCHN), rpc_light (the node's light templates) \
+         or sv2 (a Template Provider)",
         ValueKind::Choice(TEMPLATE_SOURCES),
         Some("rpc"),
     ),
@@ -258,6 +259,13 @@ pub const FIELDS: [FieldSpec; 44] = [
         "zmqpubhashblock",
         "BCHN's ZMQ hashblock publisher, e.g. tcp://127.0.0.1:28332",
         ValueKind::Text,
+    ),
+    optional(
+        "stratum",
+        "node_p2p_address",
+        "HOST:PORT of the node's P2P port, for new blocks without ZMQ, e.g. 127.0.0.1:8333",
+        ValueKind::Text,
+        None,
     ),
     required(
         "stratum",

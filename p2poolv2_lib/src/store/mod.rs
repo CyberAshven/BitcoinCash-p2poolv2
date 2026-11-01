@@ -12,7 +12,8 @@ use bitcoin::consensus::Encodable;
 use bitcoin::consensus::encode;
 use bitcoin::{BlockHash, Work};
 use rocksdb::{BlockBasedOptions, ColumnFamilyDescriptor, DB, Options as RocksDbOptions};
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 use writer::StoreError;
@@ -63,6 +64,9 @@ pub struct Store {
     /// The chain's share-chain depths, which size pruning and the reorg
     /// depth limit.
     depths: ChainDepths,
+    /// Blocks whose candidate reorg was refused for forking below the reorg
+    /// floor, each with the height its branch forks from. In memory only.
+    refused_reorgs: Mutex<HashMap<BlockHash, u32>>,
 }
 
 /// Merge operator for appending BlockHashes to a Vec<BlockHash>.
@@ -278,6 +282,7 @@ impl Store {
             // Initialise chain state fields
             genesis_blockhash: Arc::new(RwLock::new(None)),
             depths: ChainDepths::BITCOIN,
+            refused_reorgs: Mutex::new(HashMap::new()),
         };
         Ok(store)
     }

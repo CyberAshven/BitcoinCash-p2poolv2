@@ -131,6 +131,7 @@ mod tests {
             height: 1,
             default_witness_commitment: None,
             provided: None,
+            light: None,
         }
     }
 

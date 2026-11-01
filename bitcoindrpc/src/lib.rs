@@ -61,6 +61,9 @@ impl std::fmt::Debug for BitcoinRpcConfig {
 /// `RPC_IN_WARMUP`: the node is starting and does not answer yet.
 const RPC_IN_WARMUP: i32 = -28;
 
+/// `RPC_METHOD_NOT_FOUND`: the node has no RPC of that name.
+const RPC_METHOD_NOT_FOUND: i32 = -32601;
+
 /// Error type for the BitcoindRpcClient
 #[derive(Debug)]
 pub enum BitcoindRpcError {
@@ -99,6 +102,13 @@ impl BitcoindRpcError {
             BitcoindRpcError::RpcError { code, .. } => *code == RPC_IN_WARMUP,
             BitcoindRpcError::Other(_) => false,
         }
+    }
+
+    /// Whether the node answered that it has no RPC of that name, as a node
+    /// without `getblocktemplatelight` (BCHD) or without `getblocktemplate`
+    /// (Knuth) does.
+    pub fn is_method_not_found(&self) -> bool {
+        matches!(self, BitcoindRpcError::RpcError { code, .. } if *code == RPC_METHOD_NOT_FOUND)
     }
 }
 
@@ -191,6 +201,16 @@ pub struct GetBlockchainInfo {
     /// report one.
     #[serde(default)]
     pub blocks: Option<u64>,
+}
+
+/// The field of `getmininginfo` that is read.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub struct GetMiningInfo {
+    /// The most bytes the node fills a block it builds with, set by its
+    /// `-blockmaxsize` or equivalent. `None` when the node does not report
+    /// one, as BCHD and Knuth do not.
+    #[serde(rename = "miningblocksizelimit", default)]
+    pub mining_block_size_limit: Option<u64>,
 }
 
 /// The fields of a verbose `getblockheader` result that are read.
@@ -343,6 +363,10 @@ impl BitcoindRpcClient {
         self.request("getblockchaininfo", vec![]).await
     }
 
+    pub async fn getmininginfo(&self) -> Result<GetMiningInfo, BitcoindRpcError> {
+        self.request("getmininginfo", vec![]).await
+    }
+
     /// Hash, as hex, of the tip of the node's best chain.
     pub async fn get_best_block_hash(&self) -> Result<String, BitcoindRpcError> {
         self.request("getbestblockhash", vec![]).await
@@ -425,6 +449,23 @@ impl BitcoindRpcClient {
             "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
         })])
         .await
+    }
+
+    /// Fetch a light template with `getblocktemplatelight`, sent with the
+    /// capabilities of [`Self::get_bch_block_template`]. The node keeps the
+    /// template's transactions and returns a `job_id` and their merkle
+    /// branch (`merkle`) instead. Sent once: a caller that gets an error
+    /// takes the full template, which is sent again on errors.
+    pub async fn get_bch_block_template_light(&self) -> Result<String, BitcoindRpcError> {
+        let result: serde_json::Value = self
+            .request(
+                "getblocktemplatelight",
+                vec![serde_json::json!({
+                    "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
+                })],
+            )
+            .await?;
+        Ok(result.to_string())
     }
 
     async fn request_block_template(
@@ -545,6 +586,27 @@ impl BitcoindRpcClient {
     ) -> Result<SubmitBlockOutcome, BitcoindRpcError> {
         let params = vec![serde_json::Value::String(serialize_hex(block))];
         let result: serde_json::Value = self.request("submitblock", params).await?;
+        Ok(SubmitBlockOutcome::from_result(&result))
+    }
+
+    /// Send `block`, found on the light template `job_id`, with
+    /// `submitblocklight`: `block` holds the header and the coinbase only,
+    /// and the node adds the transactions it kept for the job. The answer
+    /// reads as [`Self::submit_block`]'s.
+    ///
+    /// The node must still hold the job. BCHN keeps one for an hour on disk
+    /// (`-gbtstoretime`) and the last 10 in memory (`-gbtcachesize`), longer
+    /// than the 15 minutes a pool job stays open.
+    pub async fn submit_block_light(
+        &self,
+        block: &bitcoin::Block,
+        job_id: &str,
+    ) -> Result<SubmitBlockOutcome, BitcoindRpcError> {
+        let params = vec![
+            serde_json::Value::String(serialize_hex(block)),
+            serde_json::Value::String(job_id.to_string()),
+        ];
+        let result: serde_json::Value = self.request("submitblocklight", params).await?;
         Ok(SubmitBlockOutcome::from_result(&result))
     }
 }

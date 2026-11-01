@@ -40,7 +40,7 @@ async fn an_accepted_block_is_sent_once() {
         .await;
     let block = genesis_block(Network::Regtest);
 
-    let result = submit_with_retry(&block, &client_for(&server), &FAST_POLICY).await;
+    let result = submit_with_retry(&block, None, &client_for(&server), &FAST_POLICY).await;
 
     assert_eq!(result, (BlockSubmission::Accepted, 0));
 }
@@ -57,7 +57,7 @@ async fn a_duplicate_means_the_node_has_the_block() {
         .await;
     let block = genesis_block(Network::Regtest);
 
-    let (result, _) = submit_with_retry(&block, &client_for(&server), &FAST_POLICY).await;
+    let (result, _) = submit_with_retry(&block, None, &client_for(&server), &FAST_POLICY).await;
 
     assert_eq!(result, BlockSubmission::Duplicate);
     assert!(result.node_has_block());
@@ -75,7 +75,8 @@ async fn an_inconclusive_block_is_not_sent_again() {
         .await;
     let block = genesis_block(Network::Regtest);
 
-    let (result, retries) = submit_with_retry(&block, &client_for(&server), &FAST_POLICY).await;
+    let (result, retries) =
+        submit_with_retry(&block, None, &client_for(&server), &FAST_POLICY).await;
 
     assert_eq!(result, BlockSubmission::Inconclusive);
     assert!(result.node_has_block());
@@ -92,7 +93,8 @@ async fn a_rejected_block_is_not_sent_again() {
         .await;
     let block = genesis_block(Network::Regtest);
 
-    let (result, retries) = submit_with_retry(&block, &client_for(&server), &FAST_POLICY).await;
+    let (result, retries) =
+        submit_with_retry(&block, None, &client_for(&server), &FAST_POLICY).await;
 
     assert_eq!(result, BlockSubmission::Rejected("high-hash".to_string()));
     assert!(!result.node_has_block());
@@ -119,7 +121,7 @@ async fn a_busy_node_gets_the_block_again_until_it_answers() {
         .await;
     let block = genesis_block(Network::Regtest);
 
-    let result = submit_with_retry(&block, &client_for(&server), &FAST_POLICY).await;
+    let result = submit_with_retry(&block, None, &client_for(&server), &FAST_POLICY).await;
 
     assert_eq!(result, (BlockSubmission::Accepted, 2));
 }
@@ -144,7 +146,8 @@ async fn an_attempt_without_an_answer_in_time_is_sent_again() {
         .await;
     let block = genesis_block(Network::Regtest);
 
-    let (result, retries) = submit_with_retry(&block, &client_for(&server), &FAST_POLICY).await;
+    let (result, retries) =
+        submit_with_retry(&block, None, &client_for(&server), &FAST_POLICY).await;
 
     assert_eq!(result, BlockSubmission::Duplicate);
     assert_eq!(retries, 1);
@@ -155,7 +158,7 @@ async fn an_unreachable_node_fails_after_the_retry_window() {
     let client = BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap();
     let block = genesis_block(Network::Regtest);
 
-    let (result, retries) = submit_with_retry(&block, &client, &FAST_POLICY).await;
+    let (result, retries) = submit_with_retry(&block, None, &client, &FAST_POLICY).await;
 
     assert!(matches!(result, BlockSubmission::Failed(_)));
     assert!(retries >= 1);
@@ -177,7 +180,8 @@ async fn an_rpc_error_is_not_sent_again() {
         .await;
     let block = genesis_block(Network::Regtest);
 
-    let (result, retries) = submit_with_retry(&block, &client_for(&server), &FAST_POLICY).await;
+    let (result, retries) =
+        submit_with_retry(&block, None, &client_for(&server), &FAST_POLICY).await;
 
     assert!(matches!(result, BlockSubmission::Failed(ref reason) if reason.contains("-22")));
     assert_eq!(retries, 0);
@@ -205,7 +209,8 @@ async fn the_primary_node_result_is_counted() {
     };
     metrics.record_confirmed_share(12.0).await.unwrap();
 
-    let result = submit_to_primary_node(&block, &client_for(&server), &metrics, &FAST_POLICY).await;
+    let result =
+        submit_to_primary_node(&block, None, &client_for(&server), &metrics, &FAST_POLICY).await;
 
     assert_eq!(result, BlockSubmission::Accepted);
     acceptance.record(&result, &metrics).await;
