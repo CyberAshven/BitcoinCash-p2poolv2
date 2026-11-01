@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The node's Docker image builds again. `p2poolv2_node` depends on
+`p2poolv2_electrum` since the upstream merge, but the Dockerfile copied
+only that crate's `Cargo.toml` and `lib.rs`, so the image build failed with
+six missing modules on the 2026-11-01 release. The Dockerfile now copies
+the whole crate, as it does for every other crate in the node's dependency
+graph.
+
 A node can hear new blocks on its Bitcoin Cash node's P2P port, as
 jtoomim's p2pool did: with `node_p2p_address` in `[stratum]` it connects
 there as a peer that relays no transactions, fetches a template as soon as
