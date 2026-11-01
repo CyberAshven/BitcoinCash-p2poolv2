@@ -3,19 +3,19 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The overview, as `/dashboard` shows it: KPI cards, the hashrate chart,
-//! the newest found blocks and a page of the share chain. Its first page of
-//! shares is live, from `/ws`; the rest polls on the timer.
+//! the newest found blocks and the newest few share heights. Its shares are
+//! live, from `/ws`; the shares page has the whole chain.
 
 use super::blocks::{NO_BLOCKS_YET, blocks_table};
-use crate::api::{ChainInfo, FoundBlock, Hashrate, HashratePoint, Miners, Share, Shares};
+use crate::api::{ChainInfo, FoundBlock, Hashrate, HashratePoint, Miners, Share};
 use crate::app::{Ctx, ctx, polled};
 use crate::chart::HashrateChart;
 use crate::format::{
     UNKNOWN, difficulty_from_bits, difficulty_from_network_hashrate, fmt_ago, fmt_difficulty,
     fmt_hashrate, optional,
 };
-use crate::layout::{KpiCard, Tone, ago_cell, loading, miner_link, pager, share_link};
-use crate::route::{PAGE_SIZE, Paging, Route, Tab};
+use crate::layout::{KpiCard, Tone, ago_cell, loading, miner_link, share_link};
+use crate::route::{Route, Tab};
 use leptos::prelude::*;
 use std::cmp::Reverse;
 use std::collections::HashSet;
@@ -55,6 +55,10 @@ pub const MAX_HISTORY_POINTS: usize = 2_592_000 / 60;
 
 /// Found blocks the overview lists; the blocks page has them all.
 const RECENT_BLOCKS: usize = 5;
+
+/// Confirmed share heights the overview's Recent shares lists; the shares
+/// page has them all.
+const RECENT_SHARES: usize = 5;
 
 /// A confirmed share or one of its uncles, as the overview lists it.
 #[derive(Clone, Debug, PartialEq)]
@@ -128,7 +132,7 @@ fn share_row_view(row: ShareRow) -> impl IntoView {
     }
 }
 
-fn shares_table(rows: Vec<ShareRow>) -> impl IntoView {
+pub fn shares_table(rows: Vec<ShareRow>) -> impl IntoView {
     view! {
         <div class="table-wrap">
             <table class="table">
@@ -176,15 +180,10 @@ fn first_error(errors: [Option<String>; 4]) -> Option<String> {
 }
 
 #[component]
-pub fn OverviewPage(page: usize) -> impl IntoView {
+pub fn OverviewPage() -> impl IntoView {
     let context = ctx();
     context.frame.set("Dashboard", Tab::Dashboard, Vec::new());
-    let Ctx {
-        connection,
-        clock,
-        recent,
-        ..
-    } = context;
+    let Ctx { clock, recent, .. } = context;
 
     let stored_window = crate::app::stored(crate::app::local_storage(), "p2pool.range")
         .and_then(|stored| stored.parse::<u64>().ok())
@@ -222,26 +221,6 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         let live = recent.with(|shares| shares.first().map(|share| share.height));
         polled.max(live)
     });
-    let paging =
-        Signal::derive(move || Paging::of(page, tip.get().map_or(0, |tip| tip as usize + 1)));
-    // Older pages are read from `/shares` below the polled tip, so they move
-    // on the node's refresh; the first page is the live list.
-    let older = LocalResource::new(move || {
-        let connection = connection.get();
-        let newest = loaded(&chain, |info| info.chain_tip_height).flatten();
-        async move {
-            let skipped =
-                newest.map_or(0, |newest| Paging::of(page, newest as usize + 1).skipped());
-            match newest {
-                Some(newest) if skipped > 0 => {
-                    let to = newest.saturating_sub(u32::try_from(skipped).unwrap_or(u32::MAX));
-                    let path = format!("/shares?to={to}&num={PAGE_SIZE}");
-                    Some(connection.get::<Shares>(&path).await)
-                }
-                _ => None,
-            }
-        }
-    });
 
     let found = Memo::new(move |_| {
         loaded(&blocks, |blocks| {
@@ -252,13 +231,11 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         })
         .unwrap_or_default()
     });
+    // The overview shows the few newest heights; `recent` stays newest
+    // first, and the shares page carries the whole chain.
     let rows = Signal::derive(move || {
-        if page <= 1 {
-            return Some(recent.with(|shares| found.with(|found| share_rows(shares, found))));
-        }
-        older.with(|older| match older {
-            Some(Some(Ok(shares))) => Some(found.with(|found| share_rows(&shares.shares, found))),
-            _ => None,
+        recent.with(|shares| {
+            found.with(|found| share_rows(&shares[..shares.len().min(RECENT_SHARES)], found))
         })
     });
     let history = Memo::new(move |_| {
@@ -506,26 +483,25 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
     let shares_panel = move || {
         let known_tip = tip.get();
         let answered = chain.with(Option::is_some) || known_tip.is_some();
-        match rows.get() {
-            _ if !answered => loading(),
-            None => loading(),
-            Some(rows) if rows.is_empty() => {
-                let text = if known_tip.is_none() {
-                    "No confirmed shares yet. Point a miner at this node's stratum port to get started."
-                } else {
-                    "No shares on this page."
-                };
-                view! { <p class="empty-state">{text}</p> }.into_any()
-            }
-            Some(rows) => {
-                let Paging { page, pages } = paging.get();
-                view! {
-                    {shares_table(rows)}
-                    {pager(page, pages, |page| Route::Dashboard { page })}
-                }
-                .into_any()
-            }
+        if !answered {
+            return loading();
         }
+        let rows = rows.get();
+        if rows.is_empty() {
+            let text = if known_tip.is_none() {
+                "No confirmed shares yet. Point a miner at this node's stratum port to get started."
+            } else {
+                "No shares on this page."
+            };
+            return view! { <p class="empty-state">{text}</p> }.into_any();
+        }
+        view! {
+            {shares_table(rows)}
+            <div class="panel-more">
+                <a href=Route::Shares { page: 1 }.href()>"More found shares \u{2192}"</a>
+            </div>
+        }
+        .into_any()
     };
 
     view! {
@@ -551,7 +527,13 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
                 notes=network_notes
             />
             <KpiCard label="Share chain height" value=height notes=share_notes />
-            <KpiCard label="Blocks found" value=blocks_found href="#/blocks" notes=blocks_note />
+            <KpiCard
+                label="Blocks found"
+                value=blocks_found
+                tone=Tone::Green
+                href="#/blocks"
+                notes=blocks_note
+            />
         </div>
         <div class="panel">
             <h2 class="hashrate-head">

@@ -35,7 +35,7 @@ use super::assets;
 use super::history::Sample;
 use super::pages::{
     self, BlockView, BlocksView, FoundBlockRow, MinerRow, MinerView, MinersView, Overview, Paging,
-    ShareRow, ShareView, Site, WorkerRow,
+    ShareRow, ShareView, SharesView, Site, WorkerRow,
 };
 use crate::api::endpoints::miner::{MinerResponse, MinerShare, WindowSummary};
 use crate::api::endpoints::share::{BitcoinHeaderOutput, ShareLookupOutput};
@@ -422,7 +422,6 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         blocks_found: blocks.len(),
         blocks,
         shares,
-        shares_paging: Paging { page: 1, pages: 2 },
         auto: pages::Auto::On,
         range_key: pages::normalize_range(None),
         pool_on: true,
@@ -532,6 +531,22 @@ fn every_page() -> String {
             vec![found_block()],
         ),
         overview(Vec::new(), Vec::new(), Vec::new()),
+        pages::shares(&SharesView {
+            site: site(),
+            now: 1_000,
+            tip_height: Some(30),
+            shares: vec![share_row(false), share_row(true)],
+            paging: Paging { page: 2, pages: 3 },
+        })
+        .into_string(),
+        pages::shares(&SharesView {
+            site: site(),
+            now: 1_000,
+            tip_height: None,
+            shares: Vec::new(),
+            paging: Paging { page: 1, pages: 1 },
+        })
+        .into_string(),
         pages::blocks(&BlocksView {
             site: site(),
             now: 1_000,

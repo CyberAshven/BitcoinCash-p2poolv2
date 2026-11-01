@@ -39,7 +39,7 @@ use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::address_display::payout_address_string;
 use pages::{
     BlockView, BlocksView, FoundBlockRow, MinerRow, MinerView, MinersView, Overview, PAGE_SIZE,
-    Paging, ShareRow, ShareView, Site, WorkerRow,
+    Paging, ShareRow, ShareView, SharesView, Site, WorkerRow,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -52,6 +52,10 @@ const MINER_HASHRATE_SHARES: u32 = 500;
 
 /// Found blocks the overview lists; the blocks page has them all.
 const RECENT_BLOCKS: usize = 5;
+
+/// Confirmed share heights the overview's Recent shares panel lists; the
+/// shares page has them all, [`pages::PAGE_SIZE`] per page.
+const OVERVIEW_SHARES: usize = 5;
 
 /// What the dashboard handlers share: the API's state and the history its
 /// sampler fills.
@@ -67,6 +71,7 @@ pub(crate) struct DashboardState {
 pub(crate) fn router(app: Arc<AppState>, history: Arc<HashrateHistory>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/dashboard", get(overview))
+        .route("/dashboard/shares", get(shares))
         .route("/dashboard/blocks", get(blocks))
         .route("/dashboard/block/{hash}", get(block))
         .route("/dashboard/miners", get(miners))
@@ -164,15 +169,22 @@ fn share_found_a_block(state: &AppState, blockhash: &BlockHash) -> bool {
 }
 
 /// One page of the confirmed share chain, newest first, each share followed
-/// by the uncles it includes, with the tip height.
-fn share_page(state: &AppState, page: Option<usize>) -> (Option<u32>, Paging, Vec<ShareRow>) {
+/// by the uncles it includes, with the tip height. `window` is how many
+/// heights a page spans: [`OVERVIEW_SHARES`] for the overview's Recent
+/// shares, `pages::PAGE_SIZE` for the shares page.
+fn share_page(
+    state: &AppState,
+    page: Option<usize>,
+    window: usize,
+) -> (Option<u32>, Paging, Vec<ShareRow>) {
     let Ok(Some(tip)) = state.chain_store_handle.get_tip_height() else {
         return (None, Paging::of(None, 0), Vec::new());
     };
     let paging = Paging::of(page, tip as usize + 1);
-    let skipped = u32::try_from((paging.page - 1) * PAGE_SIZE).unwrap_or(u32::MAX);
+    let skipped = u32::try_from((paging.page - 1) * window).unwrap_or(u32::MAX);
     let newest = tip.saturating_sub(skipped);
-    let oldest = newest.saturating_sub(PAGE_SIZE as u32 - 1);
+    let span = u32::try_from(window.saturating_sub(1)).unwrap_or(u32::MAX);
+    let oldest = newest.saturating_sub(span);
     let shares = state
         .chain_store_handle
         .store_handle()
@@ -353,13 +365,13 @@ async fn overview(
     let now = unix_now();
     let chain = read_store(state, move |state| {
         (
-            share_page(state, query.page),
+            share_page(state, None, OVERVIEW_SHARES),
             pool_hashrate(state, now),
             found_blocks(state),
         )
     })
     .await;
-    let ((tip_height, shares_paging, shares), pool_hashrate, blocks) = match chain {
+    let ((tip_height, _, shares), pool_hashrate, blocks) = match chain {
         Ok(chain) => chain,
         Err(error) => return error_page(state, error),
     };
@@ -403,7 +415,6 @@ async fn overview(
         blocks_found,
         blocks: blocks.into_iter().take(RECENT_BLOCKS).collect(),
         shares,
-        shares_paging,
         auto,
         range_key,
         pool_on,
@@ -432,6 +443,25 @@ async fn blocks(
         now: unix_now(),
         blocks_found,
         blocks,
+        paging,
+    }))
+}
+
+async fn shares(
+    State(dashboard): State<Arc<DashboardState>>,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    let state = &dashboard.app;
+    let (tip_height, paging, shares) =
+        match read_store(state, move |state| share_page(state, query.page, PAGE_SIZE)).await {
+            Ok(page) => page,
+            Err(error) => return error_page(state, error),
+        };
+    html(pages::shares(&SharesView {
+        site: site(state),
+        now: unix_now(),
+        tip_height,
+        shares,
         paging,
     }))
 }
@@ -666,7 +696,8 @@ mod tests {
     use p2poolv2_lib::node::actor::NodeHandle;
     use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
     use p2poolv2_lib::test_utils::{
-        PUBKEY_G, TestShareBlockBuilder, genesis_for_tests, setup_test_chain_store_handle,
+        PUBKEY_G, TestShareBlockBuilder, build_confirmed_test_chain, genesis_for_tests,
+        setup_test_chain_store_handle,
     };
     use tower::ServiceExt;
 
@@ -1316,11 +1347,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_overview_clamps_its_page() {
+    async fn the_overview_recent_shares_stop_at_five_heights() {
         let (state, _store, _metrics) = build_state(None, None).await;
-        let (status, body, _) = get(&state, "/dashboard?page=999").await;
+        build_confirmed_test_chain(&state.chain_store_handle, 30).await;
+        let (status, body, _) = get(&state, "/dashboard").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            recent_share_row_heights(&body),
+            vec![30, 29, 28, 27, 26],
+            "the overview lists the five newest heights, newest first"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_overview_links_to_the_shares_page_instead_of_a_pager() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        build_confirmed_test_chain(&state.chain_store_handle, 8).await;
+        let (status, body, _) = get(&state, "/dashboard").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("href=\"/dashboard/shares\""));
+        assert!(body.contains("More found shares"));
+        assert!(!body.contains("page="));
+        assert!(!body.contains("rel=\"prev\""));
+    }
+
+    #[tokio::test]
+    async fn the_overview_ignores_its_page_parameter() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        build_confirmed_test_chain(&state.chain_store_handle, 8).await;
+        let (_, plain, _) = get(&state, "/dashboard").await;
+        let (status, paged, _) = get(&state, "/dashboard?page=999").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            recent_share_row_heights(&paged),
+            recent_share_row_heights(&plain),
+            "the overview shows the same recent shares on every request"
+        );
+        assert_eq!(recent_share_row_heights(&paged), vec![8, 7, 6, 5, 4]);
+    }
+
+    #[tokio::test]
+    async fn the_shares_page_paces_the_whole_chain() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        build_confirmed_test_chain(&state.chain_store_handle, 30).await;
+        let (status, body, _) = get(&state, "/dashboard/shares").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            recent_share_row_heights(&body),
+            (6..=30).rev().collect::<Vec<u32>>(),
+            "the first page holds twenty-five heights, newest first"
+        );
+        assert!(body.contains("Page 1 of 2"));
+        assert!(body.contains("/dashboard/shares?page=2"));
+        let (_, second, _) = get(&state, "/dashboard/shares?page=2").await;
+        assert_eq!(
+            recent_share_row_heights(&second),
+            vec![5, 4, 3, 2, 1, 0],
+            "the second page carries the rest down to genesis"
+        );
+        assert!(second.contains("Page 2 of 2"));
+    }
+
+    #[tokio::test]
+    async fn the_shares_page_without_a_chain_says_so() {
+        let (state, _store, _metrics) = build_state(None, None).await;
+        let (status, body, _) = get(&state, "/dashboard/shares").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("No confirmed shares yet."));
+        assert!(!body.contains("rel=\"prev\""));
     }
 
     #[tokio::test]

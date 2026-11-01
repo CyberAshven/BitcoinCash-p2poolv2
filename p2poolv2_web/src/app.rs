@@ -12,7 +12,7 @@ use crate::layout::{Footer, Header, PageFrame, Trail};
 use crate::route::{PAGE_SIZE, Route};
 use crate::views::{
     BlockPage, BlocksPage, HelpPage, MinerPage, MinersPage, OverviewPage, SearchPage, SettingsPage,
-    SharePage,
+    SharePage, SharesPage,
 };
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::{Message, futures::WebSocket};
@@ -223,7 +223,8 @@ pub fn App() -> impl IntoView {
         <main class="container">
             <Trail />
             {move || match ctx.route.get() {
-                Route::Dashboard { page } => view! { <OverviewPage page=page /> }.into_any(),
+                Route::Dashboard { page: _ } => view! { <OverviewPage /> }.into_any(),
+                Route::Shares { page } => view! { <SharesPage page=page /> }.into_any(),
                 Route::Blocks { page } => view! { <BlocksPage page=page /> }.into_any(),
                 Route::Block(hash) => view! { <BlockPage hash=hash /> }.into_any(),
                 Route::Miners { page } => view! { <MinersPage page=page /> }.into_any(),

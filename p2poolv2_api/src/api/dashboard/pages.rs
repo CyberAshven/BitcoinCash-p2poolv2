@@ -82,7 +82,7 @@ pub(crate) fn series_on(value: Option<&str>) -> bool {
 /// The query fragment carrying the two chart series toggles, with the hidden
 /// state only: `""` when both series show, `&pool=0`, `&node=0` or both when
 /// a series is off. The links that must survive a click (range buttons, the
-/// auto-refresh toggle, the pager) append it to keep the state.
+/// auto-refresh toggle) append it to keep the state.
 pub(crate) fn series_q(pool_on: bool, node_on: bool) -> String {
     let mut query = String::new();
     if !pool_on {
@@ -220,9 +220,9 @@ pub(crate) struct Overview {
     pub(crate) blocks_found: usize,
     /// The newest of them, newest first.
     pub(crate) blocks: Vec<FoundBlockRow>,
-    /// This page of the share chain, newest first.
+    /// The newest confirmed shares, newest first, uncles under the share that
+    /// includes them, at most `super::OVERVIEW_SHARES` heights.
     pub(crate) shares: Vec<ShareRow>,
-    pub(crate) shares_paging: Paging,
     /// The overview's stateless auto-refresh toggle, from `?auto=`.
     pub(crate) auto: Auto,
     /// The normalized `?range=` key selecting the chart window, from
@@ -240,6 +240,16 @@ pub(crate) struct BlocksView {
     pub(crate) now: u64,
     pub(crate) blocks_found: usize,
     pub(crate) blocks: Vec<FoundBlockRow>,
+    pub(crate) paging: Paging,
+}
+
+/// The shares page: one page of the whole confirmed share chain.
+pub(crate) struct SharesView {
+    pub(crate) site: Site,
+    pub(crate) now: u64,
+    pub(crate) tip_height: Option<u32>,
+    /// This page of the share chain, newest first.
+    pub(crate) shares: Vec<ShareRow>,
     pub(crate) paging: Paging,
 }
 
@@ -770,7 +780,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             (kpi_card("Share chain height",
                 view.tip_height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string()), "", None,
                 &[format!("Difficulty {}", optional(view.share_difficulty, fmt_difficulty))]))
-            (kpi_card("Blocks found", view.blocks_found.to_string(), "", Some("/dashboard/blocks"),
+            (kpi_card("Blocks found", view.blocks_found.to_string(), "kpi-value-green", Some("/dashboard/blocks"),
                 &[last_block
                     .map(|time| format!("Last {}", fmt_ago(view.now, u64::from(time))))
                     .unwrap_or_else(|| "None yet".to_string())]))
@@ -824,15 +834,11 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                         }
                     }
                 }
-                (pager(&format!(
-                    "/dashboard?range={}{series_arg}",
-                    view.range_key
-                ), view.shares_paging))
+                div.panel-more { a href="/dashboard/shares" { "More found shares →" } }
             }
         }
     };
-    let refresh = (view.shares_paging.page == 1 && matches!(view.auto, Auto::On))
-        .then_some(OVERVIEW_REFRESH_SECONDS);
+    let refresh = matches!(view.auto, Auto::On).then_some(OVERVIEW_REFRESH_SECONDS);
     layout(
         &view.site,
         "Dashboard",
@@ -863,6 +869,60 @@ pub(crate) fn blocks(view: &BlocksView) -> Markup {
         "Blocks",
         Tab::Blocks,
         &[dashboard_crumb(), Crumb::here("Blocks")],
+        None,
+        None,
+        None,
+        "",
+        body,
+    )
+}
+
+pub(crate) fn shares(view: &SharesView) -> Markup {
+    let body = html! {
+        div.panel {
+            h2 {
+                "Recent shares"
+                span.panel-note {
+                    "newest first, uncles under the share that includes them"
+                    @if let Some(tip) = view.tip_height { " · tip " (tip) }
+                }
+            }
+            @if view.shares.is_empty() {
+                p.empty-state {
+                    @if view.tip_height.is_none() { "No confirmed shares yet. Point a miner at this node's stratum port to get started." }
+                    @else { "No shares on this page." }
+                }
+            } @else {
+                div.table-wrap {
+                    table.table {
+                        thead { tr { th { "Height" } th { "Share hash" } th { "Type" } th { "Miner (payout)" } th { "Share owner" } th { "Time" } th { "Difficulty" } } }
+                        tbody {
+                            @for row in &view.shares {
+                                tr.uncle-row[row.is_uncle] {
+                                    td { (row.height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string())) }
+                                    td { (share_link(&row.blockhash)) }
+                                    td {
+                                        @if row.is_uncle { "uncle" } @else { "share" }
+                                        @if row.is_block { " " span.badge-block { "block" } }
+                                    }
+                                    td { (miner_link(&row.payout_address)) }
+                                    td { (miner_link(&row.share_address)) }
+                                    (ago_cell(view.now, u64::from(row.time)))
+                                    td.mono { (optional(row.difficulty, fmt_difficulty)) }
+                                }
+                            }
+                        }
+                    }
+                }
+                (pager("/dashboard/shares", view.paging))
+            }
+        }
+    };
+    layout(
+        &view.site,
+        "Shares",
+        Tab::None,
+        &[dashboard_crumb(), Crumb::here("Shares")],
         None,
         None,
         None,
@@ -1299,7 +1359,6 @@ mod tests {
             blocks_found: 0,
             blocks: Vec::new(),
             shares: Vec::new(),
-            shares_paging: Paging::of(None, 0),
             auto: Auto::On,
             range_key: normalize_range(None),
             pool_on: true,
@@ -1657,5 +1716,75 @@ mod tests {
         let card = page.split("kpi-label\">Share chain height").nth(1).unwrap();
         let card = card.split("kpi-card").next().unwrap();
         assert!(card.contains("Difficulty —"));
+    }
+
+    #[test]
+    fn the_blocks_found_card_values_it_green() {
+        let page = overview(&empty_overview()).into_string();
+        let card = page.split("kpi-label\">Blocks found").nth(1).unwrap();
+        let card = card.split("kpi-card").next().unwrap();
+        assert!(card.contains("kpi-value kpi-value-green"));
+    }
+
+    #[test]
+    fn the_overview_recent_shares_link_to_the_shares_page_instead_of_a_pager() {
+        let mut view = empty_overview();
+        view.tip_height = Some(30);
+        view.shares = vec![ShareRow {
+            height: Some(30),
+            blockhash: "ab".to_string(),
+            time: 900,
+            payout_address: "bchtest:qpayout".to_string(),
+            share_address: "tp2pool:qowner".to_string(),
+            difficulty: Some(4.0),
+            is_uncle: false,
+            is_block: false,
+        }];
+        let page = overview(&view).into_string();
+        assert!(page.contains("href=\"/dashboard/shares\""));
+        assert!(page.contains("More found shares"));
+        assert!(!page.contains("page="));
+        assert!(!page.contains("Previous"));
+    }
+
+    #[test]
+    fn the_shares_page_lists_the_chain_with_a_pager() {
+        let view = SharesView {
+            site: site(),
+            now: 1_000,
+            tip_height: Some(30),
+            shares: vec![ShareRow {
+                height: Some(30),
+                blockhash: "ab".to_string(),
+                time: 900,
+                payout_address: "bchtest:qpayout".to_string(),
+                share_address: "tp2pool:qowner".to_string(),
+                difficulty: Some(4.0),
+                is_uncle: false,
+                is_block: false,
+            }],
+            paging: Paging { page: 2, pages: 3 },
+        };
+        let page = shares(&view).into_string();
+        assert!(page.contains("<td>30</td>"));
+        assert!(page.contains("Page 2 of 3"));
+        assert!(page.contains("/dashboard/shares?page=1"));
+        assert!(page.contains("/dashboard/shares?page=3"));
+        assert!(page.contains("tip 30"));
+        assert!(!page.contains("<script"));
+    }
+
+    #[test]
+    fn the_shares_page_without_a_chain_says_so() {
+        let view = SharesView {
+            site: site(),
+            now: 1_000,
+            tip_height: None,
+            shares: Vec::new(),
+            paging: Paging { page: 1, pages: 1 },
+        };
+        let page = shares(&view).into_string();
+        assert!(page.contains("No confirmed shares yet."));
+        assert!(!page.contains("Previous"));
     }
 }
