@@ -10,6 +10,7 @@ pub mod error;
 pub mod merge_disclosure;
 pub mod message_handlers;
 pub mod messages;
+pub mod node_p2p_listener;
 pub(crate) mod parse_password;
 pub mod server;
 pub mod session;

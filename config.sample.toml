@@ -109,6 +109,13 @@ bootstrap_address = "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2"
 # BCHN's ZMQ block notifications: start BCHN with
 # -zmqpubhashblock=tcp://127.0.0.1:28332.
 zmqpubhashblock = "tcp://127.0.0.1:28332"
+# The node's P2P port (48333 on chipnet, 8333 on mainnet). When set, the
+# node connects there as a peer that relays no transactions and fetches a
+# template as soon as the node announces a block, as jtoomim's p2pool did.
+# Use it for a node without ZMQ (BCHD, Knuth); zmqpubhashblock above then
+# never fires and can stay as it is. Absent means template fetches on ZMQ
+# and every 10 seconds only.
+# node_p2p_address = "127.0.0.1:48333"
 # Stratum V2 listen port. Absent means the node does not open an SV2 socket.
 # Local frames are unencrypted, so keep it on localhost or a trusted LAN.
 # A Mining connection opens standard or extended channels with

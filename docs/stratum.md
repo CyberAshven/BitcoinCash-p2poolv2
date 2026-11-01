@@ -32,7 +32,13 @@ Share validator -----------blocks--------------> BCHN or Template Provider
 BCHN announces a new block over ZMQ (`zmqpubhashblock`), right after this node
 submits a block of its own, and otherwise every 10 seconds
 (`GBT_POLL_INTERVAL` in `p2poolv2_node/src/lib.rs`), so that new transactions
-make it into the work. With `template_source = "rpc_light"` it asks the
+make it into the work. With `node_p2p_address` set it also fetches one as soon
+as BCHN announces a block on its P2P port, as jtoomim's p2pool did
+(`stratum/node_p2p_listener.rs`): this node connects there as a peer that
+relays no transactions, answers pings, and reconnects after errors. That works
+with any Bitcoin Cash node, including BCHD and Knuth, which have no ZMQ. With
+both ZMQ and the P2P port, one block wakes the fetcher twice, which costs one
+extra fetch, as a poll does. With `template_source = "rpc_light"` it asks the
 node for `getblocktemplatelight` first, a template with the transactions'
 merkle branch and a job id instead of the transactions, and takes
 `getblocktemplate` for any template the node cannot give light
