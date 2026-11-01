@@ -934,6 +934,7 @@ mod tests {
             sizelimit: 0,
             weightlimit: 0,
             provided: None,
+            light: None,
         };
 
         let original_output_pairs = vec![

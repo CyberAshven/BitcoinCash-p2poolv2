@@ -128,7 +128,17 @@ zmqpubhashblock = "tcp://127.0.0.1:28332"
 # Seconds each Noise certificate stays valid. Default 3600.
 # sv2_cert_validity_secs = 3600
 # Where block templates come from. Default "rpc": getblocktemplate from the
-# node in [bitcoinrpc]. "sv2" takes them from a Stratum V2 Template Provider
+# node in [bitcoinrpc]. "rpc_light" asks that node for light templates
+# (getblocktemplatelight): the node keeps the transactions and sends their
+# merkle branch, and a block found on one goes back as its header and
+# coinbase (submitblocklight). Any template the node cannot give light, for
+# want of getblocktemplatelight, its merkle branch or getmininginfo's
+# miningblocksizelimit, comes from getblocktemplate, with a warning. BCHN
+# gives light templates; BCHD and Knuth do not today. The node's mining size
+# limit (-blockmaxsize or equivalent) must leave room below the block size
+# limit for the pool's coinbase, or the node withdraws work: BCHN's default
+# leaves half on mainnet and regtest, none on chipnet. Not with
+# [[submit_nodes]]. "sv2" takes them from a Stratum V2 Template Provider
 # (Template Distribution Protocol) and sends found blocks back to it;
 # [bitcoinrpc] is still required, to check each template's parent, validate
 # shares and take blocks the provider cannot.

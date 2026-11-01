@@ -32,7 +32,11 @@ Share validator -----------blocks--------------> BCHN or Template Provider
 BCHN announces a new block over ZMQ (`zmqpubhashblock`), right after this node
 submits a block of its own, and otherwise every 10 seconds
 (`GBT_POLL_INTERVAL` in `p2poolv2_node/src/lib.rs`), so that new transactions
-make it into the work. With `template_source = "sv2"` the node takes
+make it into the work. With `template_source = "rpc_light"` it asks the
+node for `getblocktemplatelight` first, a template with the transactions'
+merkle branch and a job id instead of the transactions, and takes
+`getblocktemplate` for any template the node cannot give light
+(`stratum/work/gbt.rs`). With `template_source = "sv2"` the node takes
 templates from a Stratum V2 Template Provider instead, checks them as it
 checks BCHN's, and still asks BCHN for the height each template builds on
 (`stratum/sv2/template_distribution.rs`).
@@ -104,8 +108,9 @@ current difficulty and rejects duplicates. Then:
 - a share that meets the **pool target** goes to the share chain, which
   stores it and relays it to peers;
 - a share that also meets the **Bitcoin Cash target** is a block, and is
-  submitted straight away: with `submitblock` to BCHN, or back to the
-  Template Provider whose template it used.
+  submitted straight away: with `submitblock` to BCHN, with
+  `submitblocklight` (header and coinbase only) to the node that made a light
+  template, or back to the Template Provider whose template it used.
 
 **Found blocks** (`stratum/block_submit.rs`). A block is worth the whole
 block reward, so it never depends on one RPC call. BCHN gets it again after

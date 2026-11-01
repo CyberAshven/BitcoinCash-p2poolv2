@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`template_source = "rpc_light"`, opt-in and Bitcoin Cash only, takes light
+templates from the node in `[bitcoinrpc]`: `getblocktemplatelight` gives a
+job id and the coinbase's merkle branch while the node keeps the
+transactions, and a block found on one goes back as its header and coinbase
+with `submitblocklight`, with the same retries. The node is asked per
+template: one it cannot give light (no `getblocktemplatelight`, no `merkle`,
+or no `miningblocksizelimit` in `getmininginfo`) comes from
+`getblocktemplate`, with a warning logged once. BCHN gives light templates;
+BCHD and Knuth do not today. A light block is sized with the node's mining
+size limit in place of its transactions, so that limit must leave room for
+the pool's coinbase, or the node withdraws work and says to lower
+`-blockmaxsize` or its equivalent. `[[submit_nodes]]` is refused with it. On
+BCHN regtest with 24,441 transactions (5.3 MB) waiting, the light template
+was 1.6 KB against 14.9 MB, the node's memory stayed at 34 MB where full
+templates added about 20 MB each, and a 24,508-transaction block went back
+with `submitblocklight`. `rpc`, the default, is unchanged. No share-chain
+rule changes.
+
 A candidate reorg no longer takes confirmed shares off the confirmed chain.
 A reorg from a confirmed branch point left the old candidates above it
 marked Candidate; when such a branch came back with more work, its walk
