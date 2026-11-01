@@ -84,6 +84,12 @@ pub struct JobTracker {
     /// templates keep arriving. Read on every `/hashrate` and `/metrics`
     /// request, hence a lock the readers share.
     latest_network_bits: RwLock<Option<CompactTarget>>,
+    /// The share target the newest prepared notify asks miners to meet
+    /// (`PoolDifficulty::calculate_target_clamped`, refreshed on every
+    /// notify build). Kept like `latest_network_bits` rather than derived
+    /// from jobs so the current pool difficulty survives job expiry and
+    /// reads the same live feed. `None` until the first notify is built.
+    pool_target: RwLock<Option<CompactTarget>>,
 }
 
 impl JobTracker {
@@ -98,6 +104,7 @@ impl JobTracker {
             job_shares: DashMap::new(),
             latest_job_id: AtomicU64::new(timestamp),
             latest_network_bits: RwLock::new(None),
+            pool_target: RwLock::new(None),
         }
     }
 
@@ -173,6 +180,27 @@ impl JobTracker {
             .write()
             .expect("network bits lock poisoned");
         *slot = Some(bits);
+    }
+
+    /// Record the share target of the newest prepared notify.
+    ///
+    /// Called once per notify build with the ASERT-clamped target miners
+    /// must meet, so the current pool difficulty is readable while no
+    /// miner is connected and after the job map has been cleaned out.
+    pub fn set_pool_target(&self, target: CompactTarget) {
+        let mut slot = self.pool_target.write().expect("pool target lock poisoned");
+        *slot = Some(target);
+    }
+
+    /// Current pool share difficulty in the share chain's units, from the
+    /// newest prepared notify's target ([`Self::set_pool_target`]). Returns
+    /// None until the first notify is built. Uses `difficulty_float`, the
+    /// same mainnet-relative conversion as
+    /// [`Self::get_network_difficulty`], so both gauges share units.
+    pub fn get_pool_difficulty(&self) -> Option<f64> {
+        let target_bits = *self.pool_target.read().expect("pool target lock poisoned");
+        let target = bitcoin::Target::from_compact(target_bits?);
+        Some(target.difficulty_float())
     }
 
     /// Current bitcoin network difficulty derived from the newest block
@@ -380,6 +408,29 @@ mod tests {
 
         tracker.set_network_bits(new_bits);
         assert_eq!(tracker.get_network_difficulty(), Some(new_difficulty));
+    }
+
+    #[tokio::test]
+    async fn pool_difficulty_is_none_before_the_first_notify() {
+        let tracker = start_tracker_actor();
+
+        assert!(tracker.get_pool_difficulty().is_none());
+    }
+
+    #[tokio::test]
+    async fn pool_difficulty_follows_the_newest_notify_target() {
+        let tracker = start_tracker_actor();
+
+        let old_target = CompactTarget::from_consensus(0x1a4188f5);
+        let new_target = CompactTarget::from_consensus(0x1a4188f6);
+        let old_difficulty = bitcoin::Target::from_compact(old_target).difficulty_float();
+        let new_difficulty = bitcoin::Target::from_compact(new_target).difficulty_float();
+
+        tracker.set_pool_target(old_target);
+        assert_eq!(tracker.get_pool_difficulty(), Some(old_difficulty));
+
+        tracker.set_pool_target(new_target);
+        assert_eq!(tracker.get_pool_difficulty(), Some(new_difficulty));
     }
 
     #[tokio::test]

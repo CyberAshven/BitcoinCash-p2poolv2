@@ -153,6 +153,9 @@ pub struct Hashrate {
     pub pool_hashrate: Option<f64>,
     pub local_hashrate: Option<f64>,
     pub network_hashrate: Option<f64>,
+    /// Current pool share difficulty (the newest prepared notify's ASERT
+    /// target, in the share chain's units). None until the first notify.
+    pub share_difficulty: Option<f64>,
     /// Oldest first.
     pub history: Vec<HashratePoint>,
 }

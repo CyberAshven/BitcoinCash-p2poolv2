@@ -372,7 +372,13 @@ const P2P_HEALTH_TIMEOUT: Duration = Duration::from_secs(1);
 
 async fn metrics(State(state): State<Arc<AppState>>) -> String {
     //  Get base metrics
-    let pool_metrics = state.metrics_handle.get_metrics().await;
+    let mut pool_metrics = state.metrics_handle.get_metrics().await;
+    // The metrics actor never writes the pool difficulty; the live value is
+    // the newest prepared notify's target, read here at scrape time so the
+    // gauge is not stuck at 0. `None` until the first notify is built.
+    if let Some(pool_difficulty) = state.tracker_handle.get_pool_difficulty() {
+        pool_metrics.pool_difficulty = pool_difficulty;
+    }
     let mut exposition = pool_metrics.get_exposition();
 
     if let Some(coinbase_distribution) = parse_coinbase::get_distribution(

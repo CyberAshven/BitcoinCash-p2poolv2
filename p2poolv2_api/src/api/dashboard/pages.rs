@@ -206,6 +206,9 @@ pub(crate) struct Overview {
     pub(crate) local_hashrate: Option<f64>,
     pub(crate) network_hashrate: Option<f64>,
     pub(crate) network_difficulty: Option<f64>,
+    /// Current pool share difficulty (the newest prepared notify's ASERT
+    /// target, in the share chain's units), read live from the job tracker.
+    pub(crate) share_difficulty: Option<f64>,
     pub(crate) miners_online: usize,
     pub(crate) workers_online: usize,
     /// Shares the pool accepted since the node started, node-wide.
@@ -765,7 +768,8 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                 &[format!("Difficulty {}", optional(view.network_difficulty, fmt_difficulty)),
                   "Est. from diff. 10-min blocks".to_string()]))
             (kpi_card("Share chain height",
-                view.tip_height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string()), "", None, &[]))
+                view.tip_height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string()), "", None,
+                &[format!("Difficulty {}", optional(view.share_difficulty, fmt_difficulty))]))
             (kpi_card("Blocks found", view.blocks_found.to_string(), "", Some("/dashboard/blocks"),
                 &[last_block
                     .map(|time| format!("Last {}", fmt_ago(view.now, u64::from(time))))
@@ -1286,6 +1290,7 @@ mod tests {
             local_hashrate: None,
             network_hashrate: None,
             network_difficulty: None,
+            share_difficulty: None,
             miners_online: 0,
             workers_online: 0,
             accepted_shares_total: 0,
@@ -1630,5 +1635,27 @@ mod tests {
         let node_card = page.split("kpi-label\">Node hashrate").nth(1).unwrap();
         let node_card = node_card.split("kpi-card").next().unwrap();
         assert!(node_card.contains("3 rejected of 10 shares"));
+    }
+
+    #[test]
+    fn the_share_chain_height_card_notes_the_share_difficulty() {
+        let mut view = empty_overview();
+        view.tip_height = Some(30);
+        view.share_difficulty = Some(73.0);
+        let page = overview(&view).into_string();
+        let card = page.split("kpi-label\">Share chain height").nth(1).unwrap();
+        let card = card.split("kpi-card").next().unwrap();
+        assert!(card.contains("Difficulty 73"));
+    }
+
+    #[test]
+    fn the_share_chain_height_card_shows_a_dash_before_the_first_notify() {
+        let mut view = empty_overview();
+        view.tip_height = Some(30);
+        view.share_difficulty = None;
+        let page = overview(&view).into_string();
+        let card = page.split("kpi-label\">Share chain height").nth(1).unwrap();
+        let card = card.split("kpi-card").next().unwrap();
+        assert!(card.contains("Difficulty —"));
     }
 }

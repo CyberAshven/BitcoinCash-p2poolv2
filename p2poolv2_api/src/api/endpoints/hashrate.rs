@@ -60,6 +60,10 @@ pub struct HashrateResponse {
     pub pool_hashrate: Option<f64>,
     pub local_hashrate: Option<f64>,
     pub network_hashrate: Option<f64>,
+    /// Current pool share difficulty (the ASERT target of the newest
+    /// prepared notify, in the share chain's units). Live tracker read,
+    /// independent of the samples: None until the first notify is built.
+    pub share_difficulty: Option<f64>,
     /// Samples in the window, oldest first.
     pub history: Vec<HashratePoint>,
 }
@@ -145,6 +149,7 @@ async fn hashrate(
         pool_hashrate: current.pool_hashrate,
         local_hashrate: current.local_hashrate,
         network_hashrate: current.network_hashrate,
+        share_difficulty: state.app.tracker_handle.get_pool_difficulty(),
         history: in_window(&samples, window),
     }))
 }

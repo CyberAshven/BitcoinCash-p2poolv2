@@ -33,8 +33,13 @@ pub struct PoolMetrics {
     pub best_share_ever: u64,
     /// User metrics
     pub users: HashMap<String, User>,
-    /// Current pool difficulty
-    pub pool_difficulty: u64,
+    /// Current pool share difficulty in the share chain's units
+    /// (`difficulty_float` of the newest prepared notify's target). The
+    /// metrics actor never writes it: `/metrics` fills it from
+    /// `JobTracker::get_pool_difficulty` at scrape time, so it is 0.0
+    /// until the first notify is built. Runtime-only (not persisted).
+    #[serde(default)]
+    pub pool_difficulty: f64,
     /// Confirmed sharechain pool difficulty since the last bitcoin block was
     /// found; reset to zero on each block find. Numerator of the block effort
     /// metric (`work_since_last_block / network_difficulty`). Runtime-only (not
@@ -68,7 +73,7 @@ impl Default for PoolMetrics {
             best_share: 0,
             best_share_ever: 0,
             users: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
-            pool_difficulty: 0,
+            pool_difficulty: 0.0,
             work_since_last_block: 0.0,
             found_block_submissions: BTreeMap::new(),
             found_block_submit_retries: BTreeMap::new(),

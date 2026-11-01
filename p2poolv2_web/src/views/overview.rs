@@ -361,6 +361,13 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         ]
     });
     let pool_notes = Signal::derive(move || vec!["Confirmed shares, last hour".to_string()]);
+    let share_notes = Signal::derive(move || {
+        let share_difficulty = loaded(&hashrate, |hashrate| hashrate.share_difficulty).flatten();
+        vec![format!(
+            "Difficulty {}",
+            optional(share_difficulty, fmt_difficulty)
+        )]
+    });
     let height = Signal::derive(move || {
         tip.get()
             .map_or_else(|| UNKNOWN.to_string(), |tip| tip.to_string())
@@ -543,7 +550,7 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
                 tone=Tone::Net
                 notes=network_notes
             />
-            <KpiCard label="Share chain height" value=height notes={Vec::<String>::new()} />
+            <KpiCard label="Share chain height" value=height notes=share_notes />
             <KpiCard label="Blocks found" value=blocks_found href="#/blocks" notes=blocks_note />
         </div>
         <div class="panel">

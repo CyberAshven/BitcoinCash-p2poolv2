@@ -413,6 +413,7 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         local_hashrate: Some(1e9),
         network_hashrate: Some(1e15),
         network_difficulty: Some(1e5),
+        share_difficulty: Some(73.0),
         miners_online: 1,
         workers_online: 1,
         accepted_shares_total: 10,

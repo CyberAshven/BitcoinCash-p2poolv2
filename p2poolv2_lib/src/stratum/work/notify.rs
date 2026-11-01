@@ -119,6 +119,7 @@ fn build_prepared_notify(
             message: format!("Failed to read the mining base for ASERT: {error}"),
         })?;
     let target = context.pool_difficulty.calculate_target_clamped(parent);
+    context.tracker.set_pool_target(target);
     // Bitcoin Cash shares follow the mining base's rule version, or the next
     // one once 95% of the vote span's work desires it (`next_share_version`).
     let share_version = if context.config.chain == crate::config::Chain::BitcoinCash {

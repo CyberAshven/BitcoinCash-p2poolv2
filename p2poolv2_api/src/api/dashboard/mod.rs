@@ -394,6 +394,7 @@ async fn overview(
         local_hashrate,
         network_hashrate,
         network_difficulty,
+        share_difficulty: state.tracker_handle.get_pool_difficulty(),
         miners_online,
         workers_online,
         accepted_shares_total: metrics.accepted_total,
