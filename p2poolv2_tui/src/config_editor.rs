@@ -109,7 +109,7 @@ const fn secret(field: FieldSpec) -> FieldSpec {
 const NETWORKS: &[&str] = &["mainnet", "chipnet", "regtest"];
 const CHAINS: &[&str] = &["bitcoin-cash", "bitcoin"];
 const SHARE_CHAINS: &[&str] = &["main", "mini"];
-const TEMPLATE_SOURCES: &[&str] = &["rpc", "sv2"];
+const TEMPLATE_SOURCES: &[&str] = &["rpc", "rpc_light", "sv2"];
 const MODES: &[&str] = &["p2poolv2", "hydrapool"];
 const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 
@@ -221,7 +221,8 @@ pub const FIELDS: [FieldSpec; 45] = [
     optional(
         "stratum",
         "template_source",
-        "Where block templates come from: rpc (BCHN) or sv2 (a Template Provider)",
+        "Where block templates come from: rpc (BCHN), rpc_light (the node's light templates) \
+         or sv2 (a Template Provider)",
         ValueKind::Choice(TEMPLATE_SOURCES),
         Some("rpc"),
     ),

@@ -21,7 +21,8 @@ use p2poolv2_lib::accounting::payout::{build_payout_for_mode, payout_pplns_windo
 use p2poolv2_lib::accounting::stats::metrics;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::config::{
-    BitcoinCashNetwork, Chain, Config, PoolMode, TemplateProvider, bitcoin_cash_donation_cashaddr,
+    BitcoinCashNetwork, Chain, Config, PoolMode, TemplateProvider, TemplateSource,
+    bitcoin_cash_donation_cashaddr,
 };
 use p2poolv2_lib::node::actor::NodeHandle;
 use p2poolv2_lib::node::bch_header_feeder::relay_templates_learning_prevs;
@@ -72,7 +73,8 @@ const NOTIFY_CHANNEL_CAPACITY: usize = 1000;
 /// Where the node's block templates come from.
 enum TemplateFeed {
     /// `getblocktemplate`, polled and triggered by ZMQ block notifications
-    /// and by blocks this node finds.
+    /// and by blocks this node finds. With `template_source = "rpc_light"`,
+    /// `getblocktemplatelight` first.
     Rpc {
         template_trigger_rx: mpsc::Receiver<()>,
     },
@@ -410,6 +412,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
                     GBT_POLL_INTERVAL,
                     stratum_config.network,
                     stratum_config.chain,
+                    stratum_config.template_source == TemplateSource::RpcLight,
                     template_trigger_rx,
                 )
                 .await

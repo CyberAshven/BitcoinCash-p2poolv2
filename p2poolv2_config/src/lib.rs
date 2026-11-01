@@ -430,7 +430,9 @@ pub struct StratumConfig<State = Raw> {
     #[serde(default)]
     pub sv2_cert_validity_secs: Option<u64>,
     /// Where block templates come from. `rpc`, the default and what every
-    /// existing configuration uses, asks the node in `[bitcoinrpc]`. `sv2`
+    /// existing configuration uses, asks the node in `[bitcoinrpc]`.
+    /// `rpc_light` asks the same node for light templates, which leave the
+    /// transactions in the node, and for full ones when it has none. `sv2`
     /// takes them from a Stratum V2 Template Provider at
     /// `template_provider_address` and sends found blocks back to it.
     #[serde(default)]
@@ -670,6 +672,7 @@ impl StratumConfig<Raw> {
         };
 
         validate_cuts(self.chain, donation, fee)?;
+        validate_light_templates(self.chain, self.template_source)?;
 
         let sv2_authority = parse_sv2_authority(
             self.sv2_port,
@@ -783,6 +786,11 @@ pub enum TemplateSource {
     /// `getblocktemplate` from the node in `[bitcoinrpc]`.
     #[default]
     Rpc,
+    /// `getblocktemplatelight` from the node in `[bitcoinrpc]`, and
+    /// `submitblocklight` for a block found on one; `getblocktemplate` for
+    /// any template the node cannot give light. Bitcoin Cash only.
+    #[serde(rename = "rpc_light")]
+    RpcLight,
     /// A Stratum V2 Template Provider, over the Template Distribution
     /// Protocol.
     Sv2,
@@ -840,14 +848,28 @@ impl TemplateProvider {
     }
 }
 
+/// Check that `template_source = "rpc_light"` is on Bitcoin Cash, whose
+/// nodes are the ones with light templates.
+fn validate_light_templates(chain: Chain, source: TemplateSource) -> Result<(), ConfigError> {
+    if source == TemplateSource::RpcLight && chain != Chain::BitcoinCash {
+        return Err(ConfigError {
+            message:
+                "template_source = \"rpc_light\" is supported only with chain = \"bitcoin-cash\""
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Check the Template Provider settings against `template_source`.
 ///
-/// `rpc` takes no provider settings, so a provider address left in a
-/// configuration cannot be silently ignored. `sv2` needs an address, works
-/// only on Bitcoin Cash (a Bitcoin provider's required segwit commitment
-/// output is not mapped), and needs the provider's key unless it is on this
-/// computer: the specification allows unencrypted frames only between local
-/// roles, and an unauthenticated provider could keep every found block.
+/// `rpc` and `rpc_light` take no provider settings, so a provider address
+/// left in a configuration cannot be silently ignored. `sv2` needs an
+/// address, works only on Bitcoin Cash (a Bitcoin provider's required segwit
+/// commitment output is not mapped), and needs the provider's key unless it
+/// is on this computer: the specification allows unencrypted frames only
+/// between local roles, and an unauthenticated provider could keep every
+/// found block.
 fn parse_template_provider(
     chain: Chain,
     bitcoin_cash_network: Option<BitcoinCashNetwork>,
@@ -855,7 +877,7 @@ fn parse_template_provider(
     address: Option<&str>,
     authority_public_key: Option<&str>,
 ) -> Result<Option<TemplateProvider>, ConfigError> {
-    if source == TemplateSource::Rpc {
+    if source != TemplateSource::Sv2 {
         if address.is_some() || authority_public_key.is_some() {
             return Err(ConfigError {
                 message: "template_provider_address and template_provider_authority_public_key need template_source = \"sv2\"".to_string(),
@@ -1473,6 +1495,9 @@ impl Config {
     ///
     /// On Bitcoin Cash, `network.dns_seed` is also turned off (see
     /// [`Config::with_bitcoin_cash_dns_seed_off`]).
+    ///
+    /// `[[submit_nodes]]` with light templates is refused (see
+    /// [`Config::validate_submit_nodes`]).
     pub fn load(path: &str) -> Result<Self, config::ConfigError> {
         let built = config::Config::builder()
             .add_source(config::File::with_name(path))
@@ -1496,9 +1521,26 @@ impl Config {
                     .to_string(),
             ));
         }
+        loaded.validate_submit_nodes()?;
         Ok(loaded
             .with_bitcoin_cash_network_derived()
             .with_bitcoin_cash_dns_seed_off())
+    }
+
+    /// Refuse `[[submit_nodes]]` with `template_source = "rpc_light"`. A
+    /// block found on a light template is sent as its header and coinbase,
+    /// which only the node in `[bitcoinrpc]` can complete: it kept the
+    /// template's transactions. That node relays the block to its peers.
+    pub fn validate_submit_nodes(&self) -> Result<(), config::ConfigError> {
+        if self.stratum.template_source == TemplateSource::RpcLight && !self.submit_nodes.is_empty()
+        {
+            return Err(config::ConfigError::Message(
+                "[[submit_nodes]] cannot be used with template_source = \"rpc_light\": a block \
+                 found on a light template can only be completed by the node in [bitcoinrpc]"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Set `stratum.network` from `bitcoin_cash_network` on a Bitcoin Cash
@@ -3350,6 +3392,59 @@ mod template_provider_tests {
                 network: BitcoinCashNetwork::Regtest,
             }
         );
+    }
+
+    #[test]
+    fn template_source_rpc_light_deserializes_and_parses_on_bitcoin_cash() {
+        with_vars(
+            [("P2POOL_STRATUM__TEMPLATE_SOURCE", Some("rpc_light"))],
+            || {
+                let config = Config::load("../config.sample.toml").unwrap();
+                assert_eq!(config.stratum.template_source, TemplateSource::RpcLight);
+                assert!(
+                    config
+                        .stratum
+                        .parse()
+                        .unwrap()
+                        .template_provider()
+                        .is_none()
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn rpc_light_templates_on_bitcoin_are_rejected() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.template_source = TemplateSource::RpcLight;
+        let error = config.parse().unwrap_err();
+        assert!(error.message.contains("rpc_light"), "{}", error.message);
+        assert!(error.message.contains("bitcoin-cash"), "{}", error.message);
+    }
+
+    #[test]
+    fn rpc_light_templates_with_submit_nodes_are_rejected() {
+        let config: Config = config::Config::builder()
+            .add_source(config::File::with_name("../config.sample.toml"))
+            .add_source(config::File::from_str(
+                r#"
+                [stratum]
+                template_source = "rpc_light"
+
+                [[submit_nodes]]
+                url = "http://bchn-a.example:8332"
+                username = "a"
+                password = "secret-a"
+                "#,
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+
+        let error = config.validate_submit_nodes().unwrap_err();
+        assert!(error.to_string().contains("submit_nodes"), "{error}");
     }
 
     #[test]

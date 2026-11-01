@@ -95,6 +95,7 @@ mod tests {
             sizelimit: 0,
             weightlimit: 0,
             provided: None,
+            light: None,
         }
     }
 

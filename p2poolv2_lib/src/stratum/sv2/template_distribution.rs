@@ -542,6 +542,7 @@ fn provided_block_template(
             height,
             solutions,
         }),
+        light: None,
     };
     template.validate_bch()?;
     let branches = build_merkle_branches_for_template(&template)?

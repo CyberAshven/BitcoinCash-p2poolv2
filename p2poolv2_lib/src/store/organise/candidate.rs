@@ -32,6 +32,13 @@ const TOP_CANDIDATE_KEY: &str = "meta:top_candidate_height";
 /// result window.
 const NEEDING_VALIDATION_SCAN_BATCH_HEIGHTS: u32 = 512;
 
+/// Most refused reorgs remembered by `remember_refused_reorg`, a few MiB.
+///
+/// Only a branch outweighing the candidate chain is refused, so honest
+/// operation never fills it. When full it starts again empty, and a refusal
+/// walks its branch until it is remembered again.
+const MAX_REFUSED_REORGS: usize = 65_536;
+
 impl Store {
     /// Increment top candidate key if height is one more than current height
     ///
@@ -567,6 +574,7 @@ impl Store {
     ///
     /// Returns false when the confirmed tip is within `MAX_REORG_DEPTH` of
     /// genesis (or absent), or when the branch does not reach either chain.
+    /// A refusal is remembered for `reorg_refused_before`.
     pub(super) fn reorg_branch_forks_below_reorg_floor(
         &self,
         blockhash: &BlockHash,
@@ -591,7 +599,60 @@ impl Store {
                     "Branch point {branch_point} missing expected_height"
                 ))
             })?;
-        Ok(branch_point_height < reorg_floor)
+        if branch_point_height >= reorg_floor {
+            return Ok(false);
+        }
+        self.remember_refused_reorg(*blockhash, branch_point_height);
+        Ok(true)
+    }
+
+    /// Whether a candidate reorg to `blockhash`, or to its parent
+    /// `prev_blockhash`, was refused before for forking below the reorg
+    /// floor. A child forks where its parent does, so it is refused and
+    /// remembered too.
+    ///
+    /// Without this, a peer sending a refused branch again makes the node walk
+    /// the branch back to its fork point for every header that outweighs the
+    /// candidate tip, a cost growing with the square of the fork's depth. A
+    /// remembered fork point is used only while it is below the reorg floor;
+    /// once the floor falls to it, every refusal is forgotten.
+    pub(super) fn reorg_refused_before(
+        &self,
+        blockhash: &BlockHash,
+        prev_blockhash: &BlockHash,
+    ) -> Result<bool, StoreError> {
+        let branch_point_height = {
+            let refused_reorgs = self.refused_reorgs.lock().unwrap();
+            refused_reorgs
+                .get(blockhash)
+                .or_else(|| refused_reorgs.get(prev_blockhash))
+                .copied()
+        };
+        let Some(branch_point_height) = branch_point_height else {
+            return Ok(false);
+        };
+        if branch_point_height >= self.reorg_floor()? {
+            self.forget_refused_reorgs();
+            return Ok(false);
+        }
+        self.remember_refused_reorg(*blockhash, branch_point_height);
+        Ok(true)
+    }
+
+    /// Remember that a candidate reorg to `blockhash` was refused because its
+    /// branch forks at `branch_point_height`, below the reorg floor.
+    fn remember_refused_reorg(&self, blockhash: BlockHash, branch_point_height: Height) {
+        let mut refused_reorgs = self.refused_reorgs.lock().unwrap();
+        if refused_reorgs.len() >= MAX_REFUSED_REORGS && !refused_reorgs.contains_key(&blockhash) {
+            refused_reorgs.clear();
+        }
+        refused_reorgs.insert(blockhash, branch_point_height);
+    }
+
+    /// Forget every refused reorg. A remembered fork point holds only while
+    /// the chain below it is unchanged, so every candidate reorg forgets them.
+    fn forget_refused_reorgs(&self) {
+        self.refused_reorgs.lock().unwrap().clear();
     }
 
     /// Reorgs the candidate chain to the branch ending at `blockhash`.
@@ -606,6 +667,7 @@ impl Store {
         top_candidate: Option<&TopResult>,
         batch: &mut rocksdb::WriteBatch,
     ) -> Result<(Height, Chain), StoreError> {
+        self.forget_refused_reorgs();
         let branch = self
             .get_branch_to_chain(blockhash, |h| self.is_candidate(h) || self.is_confirmed(h))?
             .ok_or_else(|| {
@@ -618,7 +680,7 @@ impl Store {
         })?;
 
         if self.is_confirmed(branch_point) {
-            self.reorg_candidate_from_confirmed(&branch, batch)
+            self.reorg_candidate_from_confirmed(&branch, top_candidate, batch)
         } else {
             self.reorg_candidate_from_candidate(&branch, top_candidate, batch)
         }
@@ -646,6 +708,7 @@ impl Store {
         let invalid_height = invalid_metadata.expected_height.ok_or_else(|| {
             StoreError::NotFound("Invalidated candidate missing expected_height".into())
         })?;
+        self.forget_refused_reorgs();
         self.detach_candidate_branch(invalid_hash, invalid_height, batch)?;
         let final_top = self.rebuild_candidate_from_parent(invalid_hash, invalid_height, batch)?;
         self.set_top_candidate_height_after_rebuild(final_top, confirmed_top, batch);
@@ -757,29 +820,54 @@ impl Store {
             StoreError::NotFound("Empty branch in reorg_candidate_from_candidate.".into())
         })?;
         let reorged_out_chain = self.get_candidates_chain(branch_point, top_candidate)?;
-        for (height, uncandidate) in &reorged_out_chain {
-            self.delete_candidate_entry(*height, batch);
-            let mut metadata = self.get_block_metadata(uncandidate)?;
-            metadata.chain = ChainMembership::None;
-            self.update_block_metadata(uncandidate, &metadata, batch)?;
-        }
+        self.rewind_candidate_entries(&reorged_out_chain, batch)?;
 
         self.write_branch_as_candidates(branch, batch)
     }
 
     /// Reorg when the branch point is on the confirmed chain.
     ///
-    /// No old candidate entries need removal. Writes all branch
-    /// members above the confirmed branch point as candidates.
+    /// Removes old candidate entries above the confirmed branch point:
+    /// candidates run ahead of the confirmed tip, and one left marked
+    /// Candidate would later be taken for a branch point. Then writes all
+    /// branch members above the confirmed branch point as candidates.
     fn reorg_candidate_from_confirmed(
         &self,
         branch: &VecDeque<BlockHash>,
+        top_candidate: Option<&TopResult>,
         batch: &mut rocksdb::WriteBatch,
     ) -> Result<(Height, Chain), StoreError> {
+        let branch_point = branch.front().ok_or_else(|| {
+            StoreError::NotFound("Empty branch in reorg_candidate_from_confirmed.".into())
+        })?;
+        let mut reorged_out_chain = self.get_candidates_chain(branch_point, top_candidate)?;
+        reorged_out_chain.retain(|(_, candidate)| candidate != branch_point);
+        self.rewind_candidate_entries(&reorged_out_chain, batch)?;
+
         let mut entries = branch.iter();
         entries.next(); // skip the confirmed branch point
         let above_confirmed: VecDeque<BlockHash> = entries.copied().collect();
         self.write_branch_as_candidates(&above_confirmed, batch)
+    }
+
+    /// Take `reorged_out_chain` off the candidate chain: drop each candidate
+    /// index entry and clear the chain membership of each block that is only
+    /// a candidate. A confirmed block keeps its membership, since the
+    /// candidate chain coexists with the confirmed chain.
+    fn rewind_candidate_entries(
+        &self,
+        reorged_out_chain: &Chain,
+        batch: &mut rocksdb::WriteBatch,
+    ) -> Result<(), StoreError> {
+        for (height, uncandidate) in reorged_out_chain {
+            self.delete_candidate_entry(*height, batch);
+            let mut metadata = self.get_block_metadata(uncandidate)?;
+            if metadata.chain == ChainMembership::Candidate {
+                metadata.chain = ChainMembership::None;
+                self.update_block_metadata(uncandidate, &metadata, batch)?;
+            }
+        }
+        Ok(())
     }
 
     /// Write a sequence of blockhashes as candidate entries, updating

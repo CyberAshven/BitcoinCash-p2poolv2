@@ -93,6 +93,52 @@ fn test_organise_header_noop_when_conditions_not_met() {
     assert_eq!(top_after.height, 2);
 }
 
+/// A candidate reorg forgets every refused reorg: a remembered fork point
+/// holds only while the chain below it is unchanged.
+#[test]
+fn test_organise_header_reorg_forgets_refused_reorgs() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+
+    let genesis = TestShareBlockBuilder::new().nonce(0xe9695791).build();
+    let mut batch = Store::get_write_batch();
+    store.setup_genesis(&genesis, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+
+    let share1 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .nonce(0xe9695792)
+        .build();
+    store.push_to_candidate_chain(&share1).unwrap();
+
+    // fork_share: sibling of share1 with more work, so organising it reorgs.
+    let fork_share = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .work(2)
+        .nonce(0xe9695793)
+        .build();
+    store.store_with_valid_metadata(&fork_share);
+
+    store
+        .refused_reorgs
+        .lock()
+        .unwrap()
+        .insert(share1.block_hash(), 0);
+
+    let mut batch = Store::get_write_batch();
+    let result = store
+        .organise_header(&fork_share.header, &mut batch)
+        .unwrap();
+    store.commit_batch(batch).unwrap();
+
+    assert_eq!(result, Some(1));
+    assert_eq!(
+        store.get_top_candidate().unwrap().hash,
+        fork_share.block_hash()
+    );
+    assert!(store.refused_reorgs.lock().unwrap().is_empty());
+}
+
 #[test]
 fn test_organise_header_reorgs_when_fork_has_more_work() {
     let temp_dir = tempdir().unwrap();
@@ -560,6 +606,102 @@ fn test_organise_header_reorgs_when_branch_point_is_confirmed() {
 
     // Genesis should still be confirmed, not demoted
     assert!(store.is_confirmed(&genesis.block_hash()));
+}
+
+/// A candidate reorg from a confirmed branch point takes the old candidates
+/// above it off the candidate chain, and a later reorg never takes confirmed
+/// blocks off the confirmed chain.
+///
+/// Layout: genesis -> share1 (confirmed h:1). fork_share2 (h:2) is a
+/// candidate above the confirmed tip. share2, its heavier sibling, reorgs the
+/// candidate chain from share1 (Confirmed), then share2 and share3 are
+/// confirmed. fork_share3, fork_share2's child, brings the old branch back
+/// with more work.
+///
+/// Fail-first: before the fix the first reorg left fork_share2 marked
+/// Candidate, so the walk from fork_share3 stopped there, below the confirmed
+/// tip, and the rewind from fork_share2's height marked the confirmed share2
+/// and share3 as on no chain while the confirmed index still listed them.
+#[test]
+fn test_organise_header_reorg_from_confirmed_branch_point_keeps_confirmed_blocks() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+
+    let genesis = TestShareBlockBuilder::new().nonce(0xe9695791).build();
+    let mut batch = Store::get_write_batch();
+    store.setup_genesis(&genesis, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+
+    let share1 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .nonce(0xe9695792)
+        .build();
+    store.push_to_confirmed_chain(&share1).unwrap();
+
+    let fork_share2 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share1.block_hash().to_string())
+        .nonce(0xe9695793)
+        .build();
+    store.push_to_candidate_chain(&fork_share2).unwrap();
+    assert!(store.is_candidate(&fork_share2.block_hash()));
+
+    // share2 outweighs fork_share2; the walk back reaches share1 (Confirmed).
+    let share2 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share1.block_hash().to_string())
+        .work(3)
+        .nonce(0xe9695794)
+        .build();
+    store.push_to_confirmed_chain(&share2).unwrap();
+    assert_eq!(store.get_top_confirmed().unwrap().hash, share2.block_hash());
+    assert_eq!(
+        store
+            .get_block_metadata(&fork_share2.block_hash())
+            .unwrap()
+            .chain,
+        ChainMembership::None
+    );
+
+    let share3 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share2.block_hash().to_string())
+        .nonce(0xe9695795)
+        .build();
+    store.push_to_confirmed_chain(&share3).unwrap();
+    assert_eq!(store.get_top_confirmed().unwrap().hash, share3.block_hash());
+
+    // fork_share3 outweighs share3, so organising it reorgs the candidates.
+    let fork_share3 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(fork_share2.block_hash().to_string())
+        .work(8)
+        .nonce(0xe9695796)
+        .build();
+    store.store_with_valid_metadata(&fork_share3);
+    assert!(
+        store
+            .get_block_metadata(&fork_share3.block_hash())
+            .unwrap()
+            .chain_work
+            > store.get_top_candidate().unwrap().work
+    );
+    let mut batch = Store::get_write_batch();
+    let result = store
+        .organise_header(&fork_share3.header, &mut batch)
+        .unwrap();
+    store.commit_batch(batch).unwrap();
+
+    assert_eq!(result, Some(3));
+    assert_eq!(
+        store.get_top_candidate().unwrap().hash,
+        fork_share3.block_hash()
+    );
+    assert!(store.is_candidate(&fork_share2.block_hash()));
+    for confirmed in [&share1, &share2, &share3] {
+        assert!(
+            store.is_confirmed(&confirmed.block_hash()),
+            "{} must stay confirmed",
+            confirmed.block_hash()
+        );
+    }
+    assert_eq!(store.get_top_confirmed().unwrap().hash, share3.block_hash());
 }
 
 /// Re-organising a header that is already confirmed must not

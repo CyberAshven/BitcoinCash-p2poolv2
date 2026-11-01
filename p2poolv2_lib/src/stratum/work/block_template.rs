@@ -2,15 +2,37 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::shares::coinbase_proof::MAX_COINBASE_MERKLE_BRANCH_LENGTH;
 use crate::stratum::sv2::ProvidedTemplate;
 use crate::stratum::work::error::WorkError;
 use bitcoin::block::Header;
 use bitcoin::consensus::encode::VarInt;
 use bitcoin::hashes::Hash;
 use bitcoin::script::PushBytesBuf;
-use bitcoin::{BlockHash, CompactTarget, Target, Transaction, Txid};
+use bitcoin::{BlockHash, CompactTarget, Target, Transaction, TxMerkleNode, Txid};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// The largest encoding of a block's transaction count, a 9-byte
+/// CompactSize. A light template does not say how many transactions the
+/// node keeps for it.
+const MAX_TRANSACTION_COUNT_SIZE: u64 = 9;
+
+/// A light template's job (`template_source = "rpc_light"`): the node kept
+/// the template's transactions and gave their merkle branch instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LightJob {
+    /// The node's `job_id`, which `submitblocklight` names the job by.
+    pub job_id: String,
+    /// The coinbase's merkle branch over the node's transactions, the
+    /// template's `merkle`, in the order and byte order of
+    /// `build_merkle_branches_for_template` on the same transactions.
+    pub merkle_branch: Vec<TxMerkleNode>,
+    /// `getmininginfo.miningblocksizelimit`, the most bytes the node fills a
+    /// block it builds with. The node is assumed to keep the template's
+    /// transactions within it; no other bound on their size is known.
+    pub mining_block_size_limit: u64,
+}
 
 /// Transaction data in the block template
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -70,6 +92,11 @@ pub struct BlockTemplate<T = TemplateTransaction> {
     /// part of a node's JSON template.
     #[serde(skip)]
     pub provided: Option<ProvidedTemplate>,
+    /// Set when the node sent a light template: `transactions` is then empty
+    /// and a block found on it goes back with `submitblocklight`. Never part
+    /// of a node's JSON template.
+    #[serde(skip)]
+    pub light: Option<LightJob>,
 }
 
 impl TryFrom<&TemplateTransaction> for Transaction {
@@ -104,6 +131,8 @@ impl BlockTemplate {
 
     /// Check BCH template data before computing merkle branches or issuing jobs.
     /// CTOR is checked in displayed transaction ID order; the coinbase is separate.
+    /// A light template lists no transactions, and its merkle branch is no
+    /// longer than a share's coinbase proof may be.
     pub fn validate_bch(&self) -> Result<(), WorkError> {
         let invalid = |message: &str| WorkError {
             message: format!("Invalid BCH template: {message}"),
@@ -143,6 +172,14 @@ impl BlockTemplate {
             })
         {
             return Err(invalid("Bitcoin-only consensus fields"));
+        }
+        if let Some(light) = &self.light {
+            if !self.transactions.is_empty() {
+                return Err(invalid("light template lists transactions"));
+            }
+            if light.merkle_branch.len() > MAX_COINBASE_MERKLE_BRANCH_LENGTH {
+                return Err(invalid("light template merkle branch is too long"));
+            }
         }
         let mut previous_txid: Option<Txid> = None;
         let mut transaction_bytes = 0usize;
@@ -187,7 +224,12 @@ impl BlockTemplate {
     }
 
     /// Check the final size of an already validated BCH template with its coinbase.
+    /// A light template is checked with the node's mining size limit in place
+    /// of its transactions' bytes ([`LightJob::validate_block_size`]).
     pub(crate) fn validate_bch_block_size(&self, coinbase: &Transaction) -> Result<(), WorkError> {
+        if let Some(light) = &self.light {
+            return light.validate_block_size(self.sizelimit, coinbase);
+        }
         let prefix_size = Header::SIZE
             + VarInt(self.transactions.len() as u64 + 1).size()
             + coinbase.total_size();
@@ -209,6 +251,42 @@ impl BlockTemplate {
                      -percentblockmaxsize so its templates leave room for the pool's coinbase",
                     coinbase.total_size(),
                     self.sizelimit
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl LightJob {
+    /// Check that a block on this job fits `size_limit` with `coinbase`.
+    ///
+    /// Its transactions' bytes are not known, only that the node keeps them
+    /// within `mining_block_size_limit`. The block fits whatever they are
+    /// when the header, the largest transaction count, the coinbase and that
+    /// limit together do.
+    fn validate_block_size(
+        &self,
+        size_limit: u64,
+        coinbase: &Transaction,
+    ) -> Result<(), WorkError> {
+        let block_size_bound =
+            (Header::SIZE as u64 + MAX_TRANSACTION_COUNT_SIZE + coinbase.total_size() as u64)
+                .checked_add(self.mining_block_size_limit);
+        if block_size_bound.is_none_or(|bound| bound > size_limit) {
+            let bound = block_size_bound.map_or_else(
+                || "more than u64::MAX".to_string(),
+                |bound| bound.to_string(),
+            );
+            return Err(WorkError {
+                message: format!(
+                    "BCH block of up to {bound} bytes, with its {}-byte coinbase and the node's \
+                     mining size limit of {} bytes for the light template's transactions, \
+                     exceeds the block size limit of {size_limit} bytes. Lower the node's \
+                     -blockmaxsize (or equivalent) so its light templates leave room for the \
+                     pool's coinbase",
+                    coinbase.total_size(),
+                    self.mining_block_size_limit
                 ),
             });
         }
@@ -412,6 +490,42 @@ mod tests {
         template.validate_bch_block_size(&coinbase).unwrap();
         template.sizelimit -= 1;
         assert!(template.validate_bch_block_size(&coinbase).is_err());
+    }
+
+    /// A light block fits when the header, a 9-byte transaction count, the
+    /// coinbase and the node's mining size limit together do.
+    #[test]
+    fn bch_light_block_size_accepts_the_bound_and_rejects_one_byte_less() {
+        let mut template: BlockTemplate = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        template.light = Some(LightJob {
+            job_id: "ec631dfd0a785808f1341c9c6596d8bd25c3e13a".to_string(),
+            merkle_branch: vec![TxMerkleNode::all_zeros()],
+            mining_block_size_limit: 16_000_000,
+        });
+        let coinbase = test_coinbase_transaction(1);
+        template.sizelimit = (Header::SIZE + 9 + coinbase.total_size()) as u64 + 16_000_000;
+        template.validate_bch().unwrap();
+        template.validate_bch_block_size(&coinbase).unwrap();
+        template.sizelimit -= 1;
+        let error = template.validate_bch_block_size(&coinbase).unwrap_err();
+        assert!(error.message.contains("-blockmaxsize"), "{}", error.message);
+    }
+
+    #[test]
+    fn bch_rejects_a_light_merkle_branch_longer_than_a_coinbase_proof() {
+        let mut template: BlockTemplate = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        template.light = Some(LightJob {
+            job_id: "ec631dfd0a785808f1341c9c6596d8bd25c3e13a".to_string(),
+            merkle_branch: vec![TxMerkleNode::all_zeros(); MAX_COINBASE_MERKLE_BRANCH_LENGTH + 1],
+            mining_block_size_limit: 16_000_000,
+        });
+        assert!(
+            template
+                .validate_bch()
+                .unwrap_err()
+                .message
+                .contains("merkle branch")
+        );
     }
 
     #[test]
