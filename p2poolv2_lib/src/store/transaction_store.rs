@@ -153,6 +153,17 @@ impl Decodable for StoredTxOut {
     }
 }
 
+/// The coinbase ancestry the Outputs CF records for one output, which
+/// `bitcoin::TxOut` cannot carry. Spendability rules read these: a coinbase
+/// output needs `COINBASE_MATURITY`, and any output expires once its
+/// coinbase root falls more than `PAYOUT_DEPTH` below the spending block,
+/// or is `Unknown` (see `check_prevouts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputOrigin {
+    pub is_coinbase: bool,
+    pub coinbase_root: CoinbaseRoot,
+}
+
 /// A TxIn stored in the Inputs CF together with its witness.
 ///
 /// `bitcoin::TxIn::consensus_encode` does not include the witness
@@ -894,10 +905,7 @@ impl Store {
     /// A txid can be in multiple blocks when competing miners include
     /// the same transaction in different blocks.
     /// This is the reverse lookup of add_txids_to_blocks_index.
-    pub(crate) fn get_blockhashes_for_txid(
-        &self,
-        txid: &Txid,
-    ) -> Result<Vec<BlockHash>, StoreError> {
+    pub fn get_blockhashes_for_txid(&self, txid: &Txid) -> Result<Vec<BlockHash>, StoreError> {
         let txids_blocks_cf = self.db.cf_handle(&ColumnFamily::TxidsBlocks).unwrap();
 
         match self.db.get_cf::<&[u8]>(&txids_blocks_cf, txid.as_ref())? {
@@ -1021,16 +1029,32 @@ impl Store {
     ///
     /// Returns `NotFound` if the transaction, or any of its input or
     /// output rows, is missing (for example removed by the pruner after
-    /// the metadata read).
+    /// the metadata read). See `get_tx_with_output_origins`.
     pub fn get_tx(&self, txid: &bitcoin::Txid) -> Result<Transaction, StoreError> {
+        self.get_tx_with_output_origins(txid)
+            .map(|(transaction, _output_origins)| transaction)
+    }
+
+    /// Get a transaction together with each output's `OutputOrigin` (the
+    /// coinbase flag and `coinbase_root_height` that `Transaction` drops),
+    /// in output order.
+    ///
+    /// Loads the tx metadata, then each input (with its witness) and each
+    /// output row. Returns `NotFound` if any row is missing, so a prune
+    /// that interleaves with the reads surfaces as an error, never a panic.
+    pub fn get_tx_with_output_origins(
+        &self,
+        txid: &bitcoin::Txid,
+    ) -> Result<(Transaction, Vec<OutputOrigin>), StoreError> {
         let tx_metadata = self.get_tx_metadata(txid)?;
 
         debug!("Transaction metadata: {:?}", tx_metadata);
 
         let inputs_cf = self.db.cf_handle(&ColumnFamily::Inputs).unwrap();
         let outputs_cf = self.db.cf_handle(&ColumnFamily::Outputs).unwrap();
-        let mut inputs = Vec::new();
-        let mut outputs = Vec::new();
+        let mut inputs = Vec::with_capacity(tx_metadata.input_count as usize);
+        let mut outputs = Vec::with_capacity(tx_metadata.output_count as usize);
+        let mut output_origins = Vec::with_capacity(tx_metadata.output_count as usize);
 
         for i in 0..tx_metadata.input_count {
             let input_key = outpoint_key(txid, i);
@@ -1055,14 +1079,18 @@ impl Store {
                 .ok_or_else(|| {
                     StoreError::NotFound(format!("Output not found for {output_key}"))
                 })?;
-            let output = match encode::deserialize::<StoredTxOut>(&output) {
-                Ok(stored) => stored.tx_out,
+            let stored = match encode::deserialize::<StoredTxOut>(&output) {
+                Ok(stored) => stored,
                 Err(e) => {
                     tracing::error!("Error deserializing output: {e:?}");
                     return Err(e.into());
                 }
             };
-            outputs.push(output);
+            output_origins.push(OutputOrigin {
+                is_coinbase: stored.is_coinbase,
+                coinbase_root: stored.coinbase_root,
+            });
+            outputs.push(stored.tx_out);
         }
         let transaction = Transaction {
             version: tx_metadata.version,
@@ -1070,7 +1098,7 @@ impl Store {
             input: inputs,
             output: outputs,
         };
-        Ok(transaction)
+        Ok((transaction, output_origins))
     }
 
     /// Batch load `TxMetadata` for a list of txids via a single
