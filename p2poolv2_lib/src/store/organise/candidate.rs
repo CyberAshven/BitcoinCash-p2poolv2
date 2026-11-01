@@ -680,7 +680,7 @@ impl Store {
         })?;
 
         if self.is_confirmed(branch_point) {
-            self.reorg_candidate_from_confirmed(&branch, batch)
+            self.reorg_candidate_from_confirmed(&branch, top_candidate, batch)
         } else {
             self.reorg_candidate_from_candidate(&branch, top_candidate, batch)
         }
@@ -820,29 +820,54 @@ impl Store {
             StoreError::NotFound("Empty branch in reorg_candidate_from_candidate.".into())
         })?;
         let reorged_out_chain = self.get_candidates_chain(branch_point, top_candidate)?;
-        for (height, uncandidate) in &reorged_out_chain {
-            self.delete_candidate_entry(*height, batch);
-            let mut metadata = self.get_block_metadata(uncandidate)?;
-            metadata.chain = ChainMembership::None;
-            self.update_block_metadata(uncandidate, &metadata, batch)?;
-        }
+        self.rewind_candidate_entries(&reorged_out_chain, batch)?;
 
         self.write_branch_as_candidates(branch, batch)
     }
 
     /// Reorg when the branch point is on the confirmed chain.
     ///
-    /// No old candidate entries need removal. Writes all branch
-    /// members above the confirmed branch point as candidates.
+    /// Removes old candidate entries above the confirmed branch point:
+    /// candidates run ahead of the confirmed tip, and one left marked
+    /// Candidate would later be taken for a branch point. Then writes all
+    /// branch members above the confirmed branch point as candidates.
     fn reorg_candidate_from_confirmed(
         &self,
         branch: &VecDeque<BlockHash>,
+        top_candidate: Option<&TopResult>,
         batch: &mut rocksdb::WriteBatch,
     ) -> Result<(Height, Chain), StoreError> {
+        let branch_point = branch.front().ok_or_else(|| {
+            StoreError::NotFound("Empty branch in reorg_candidate_from_confirmed.".into())
+        })?;
+        let mut reorged_out_chain = self.get_candidates_chain(branch_point, top_candidate)?;
+        reorged_out_chain.retain(|(_, candidate)| candidate != branch_point);
+        self.rewind_candidate_entries(&reorged_out_chain, batch)?;
+
         let mut entries = branch.iter();
         entries.next(); // skip the confirmed branch point
         let above_confirmed: VecDeque<BlockHash> = entries.copied().collect();
         self.write_branch_as_candidates(&above_confirmed, batch)
+    }
+
+    /// Take `reorged_out_chain` off the candidate chain: drop each candidate
+    /// index entry and clear the chain membership of each block that is only
+    /// a candidate. A confirmed block keeps its membership, since the
+    /// candidate chain coexists with the confirmed chain.
+    fn rewind_candidate_entries(
+        &self,
+        reorged_out_chain: &Chain,
+        batch: &mut rocksdb::WriteBatch,
+    ) -> Result<(), StoreError> {
+        for (height, uncandidate) in reorged_out_chain {
+            self.delete_candidate_entry(*height, batch);
+            let mut metadata = self.get_block_metadata(uncandidate)?;
+            if metadata.chain == ChainMembership::Candidate {
+                metadata.chain = ChainMembership::None;
+                self.update_block_metadata(uncandidate, &metadata, batch)?;
+            }
+        }
+        Ok(())
     }
 
     /// Write a sequence of blockhashes as candidate entries, updating
