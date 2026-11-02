@@ -18,6 +18,16 @@ browser's Basic challenge only when the request already sent credentials,
 so the WASM app's probes fail silently to that indicator instead of
 raising the login dialog.
 
+`safa claimer` no longer stops for good when chipnet replaces the block it
+last checked. It remembered the tip of every pass and failed closed when
+that block changed, even with the vault still unspent, so one ordinary
+reorg at 330144 stopped the live tSAFA claimer from 2026-10-30 until an
+operator started a fresh journal. The remembered block only matters when
+the claimer searches blocks for the vault's spender. With the vault unspent
+or its spender in the mempool, the claimer now moves that block to the new
+tip; when it has to search blocks, a changed block still stops claims for
+the operator to review.
+
 The node's Docker image builds again. `p2poolv2_node` depends on
 `p2poolv2_electrum` since the upstream merge, but the Dockerfile copied
 only that crate's `Cargo.toml` and `lib.rs`, so the image build failed with

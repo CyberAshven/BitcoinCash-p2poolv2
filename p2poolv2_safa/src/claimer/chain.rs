@@ -309,7 +309,9 @@ async fn block_spender(
 /// Return the current unspent vault, following every output-0 successor first.
 /// An absent vault means its spender is not visible yet; the verified lineage
 /// still lets the caller reconcile a pending transaction seen along the way.
-/// A changed chain scan anchor fails closed for operator-reviewed recovery.
+/// The chain scan anchor only guards the block search for a confirmed spender,
+/// so a reorg under an unspent vault moves the anchor to the new tip. A changed
+/// anchor before that block search fails closed for operator-reviewed recovery.
 pub(super) async fn follow_vault(
     client: &impl ChainRpc,
     covenant: &Covenant,
@@ -329,7 +331,6 @@ async fn follow_with_rpc(
 ) -> Result<Followed, String> {
     let mut transactions = Vec::with_capacity(4);
     loop {
-        check_scan_anchor(client, journal, tip).await?;
         let output: Value = request(
             client,
             "gettxout",
@@ -354,7 +355,10 @@ async fn follow_with_rpc(
         }
         let spender = match mempool_spender(client, &journal.vault).await? {
             Some(transaction) => Some(transaction),
-            None => block_spender(client, journal, tip).await?,
+            None => {
+                check_scan_anchor(client, journal, tip).await?;
+                block_spender(client, journal, tip).await?
+            }
         };
         if let Some(transaction) = spender {
             let next_point = transaction_point(&transaction)?;
@@ -669,7 +673,6 @@ mod tests {
                 ("getrawmempool", vec![], json!([])),
                 ("getblockhash", vec![json!(99)], json!("block-99")),
                 ("getblock", vec![json!("block-99"), json!(2)], block.clone()),
-                ("getblockhash", vec![json!(99)], json!("block-99")),
                 (
                     "gettxout",
                     vec![json!("22".repeat(32)), json!(0), json!(true)],
@@ -677,8 +680,8 @@ mod tests {
                 ),
                 ("getrawmempool", vec![], json!([])),
                 ("getblockhash", vec![json!(99)], json!("block-99")),
-                ("getblock", vec![json!("block-99"), json!(2)], block),
                 ("getblockhash", vec![json!(99)], json!("block-99")),
+                ("getblock", vec![json!("block-99"), json!(2)], block),
                 (
                     "gettxout",
                     vec![json!("33".repeat(32)), json!(0), json!(true)],
@@ -745,7 +748,6 @@ mod tests {
                     vec![json!("22".repeat(32)), json!(true)],
                     spender,
                 ),
-                ("getblockhash", vec![json!(99)], json!("birth-hash")),
                 (
                     "gettxout",
                     vec![json!("22".repeat(32)), json!(0), json!(true)],
@@ -811,22 +813,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reorged_scan_anchor_fails_closed() {
+    async fn reorged_scan_anchor_fails_closed_before_a_block_search() {
         let directory = tempfile::tempdir().unwrap();
         let point = VaultPoint {
             txid: "11".repeat(32),
             vout: 3,
         };
         let mut journal = Journal::load(&directory.path().join("journal.json"), &point).unwrap();
+        journal.thread = Some(3);
         journal.scan_height = Some(100);
         journal.scan_hash = Some("old-tip".into());
         let covenant = create_covenant("chipnet", 4, 84_000_000_000).unwrap();
         let rpc = QueuedRpc {
-            responses: RefCell::new(VecDeque::from([(
-                "getblockhash",
-                vec![json!(100)],
-                json!("new-tip"),
-            )])),
+            responses: RefCell::new(VecDeque::from([
+                (
+                    "gettxout",
+                    vec![json!(point.txid), json!(3), json!(true)],
+                    json!(null),
+                ),
+                ("getrawmempool", vec![], json!([])),
+                ("getblockhash", vec![json!(100)], json!("new-tip")),
+            ])),
         };
         assert!(
             follow_with_rpc(&rpc, &covenant, &"aa".repeat(32), &mut journal, 100)
@@ -835,6 +842,47 @@ mod tests {
                 .contains("anchor changed")
         );
         assert_eq!(journal.vault, point);
+        assert!(rpc.responses.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reorged_scan_anchor_under_an_unspent_vault_moves_to_the_tip() {
+        let directory = tempfile::tempdir().unwrap();
+        let point = VaultPoint {
+            txid: "11".repeat(32),
+            vout: 0,
+        };
+        let mut journal = Journal::load(&directory.path().join("journal.json"), &point).unwrap();
+        journal.thread = Some(3);
+        journal.scan_height = Some(100);
+        journal.scan_hash = Some("old-tip".into());
+        let covenant = create_covenant("chipnet", 4, 84_000_000_000).unwrap();
+        let output = json!({
+            "value": 0.02, "scriptPubKey": {"hex": hex::encode(&covenant.locking_bytecode)},
+            "tokenData": {"category": "aa".repeat(32), "amount": "525000000000000", "nft": {
+                "capability": "mutable", "commitment": "0300000011090500ffff001dba7d451a"
+            }}
+        });
+        let rpc = QueuedRpc {
+            responses: RefCell::new(VecDeque::from([
+                (
+                    "gettxout",
+                    vec![json!(point.txid), json!(0), json!(true)],
+                    output,
+                ),
+                ("getblockhash", vec![json!(101)], json!("new-tip")),
+            ])),
+        };
+        assert!(
+            follow_with_rpc(&rpc, &covenant, &"aa".repeat(32), &mut journal, 101)
+                .await
+                .unwrap()
+                .vault
+                .is_some()
+        );
+        assert_eq!(journal.vault, point);
+        assert_eq!(journal.scan_height, Some(101));
+        assert_eq!(journal.scan_hash.as_deref(), Some("new-tip"));
         assert!(rpc.responses.borrow().is_empty());
     }
 }

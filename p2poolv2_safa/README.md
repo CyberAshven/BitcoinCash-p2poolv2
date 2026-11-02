@@ -335,9 +335,13 @@ can hold its journal lock at a time. Complete log lines advance the offset;
 a shrinking log resets it to zero after rotation, and win identities
 prevent duplicate claims. Each pass reads up to 8 MiB, draining an oversized
 malformed line to its next newline if needed; the journal has a
-64 MiB safety limit. Keep the journal across ordinary restarts. A changed
-block scan anchor stops claims until the operator reviews the reorg and
-starts a fresh journal from a verified current vault.
+64 MiB safety limit. Keep the journal across ordinary restarts. The block
+scan anchor only guards the search for a confirmed spender of the vault.
+While the vault is unspent, or its spender is in the mempool, a reorg just
+moves the anchor to the current tip. When the vault is spent and its
+spender is not in the mempool, a changed anchor stops claims until the
+operator reviews the reorg and starts a fresh journal from a verified
+current vault.
 
 Every event is one JSON line on stdout: vault following, state writes,
 skipped/dropped wins, built claims, broadcasts and rejections. Built claim
