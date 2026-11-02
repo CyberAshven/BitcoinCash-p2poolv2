@@ -101,25 +101,59 @@ expressed, so it fails at the payee counts BCH should reach. A covenant
 that computes tree amounts from weights would fix that, but it is a
 redesign of the hybrid payout. Not recommended.
 
-**B. A request/response extension.** For each template, the client asks
-the pool for its exact coinbase outputs, and the pool answers with the
-bytes `/jd_prepare` already builds:
+**B. A request/response extension, shaped like the earlier drafts.**
+Upstream proposed this shape twice before 0x0003, and closed both in its
+favour:
 
-- The client sends the mining job token, the template's revenue, height,
-  previous block hash, bits and its own scriptSig prefix.
-- The pool answers with the exact output vector, or an error such as a
-  stale token or a mismatched tip.
-- The pool also says when the share chain moves, so the client allocates a
-  new token and asks again, and how many coinbase bytes it needs, for the
-  client's `CoinbaseOutputConstraints`.
+- [sv2-spec PR #195](https://github.com/stratum-mining/sv2-spec/pull/195)
+  (warioishere, "Dynamic Coinbase Outputs", closed 2026-07-29) defined
+  `RequestCoinbaseOutputs`. The client sends its token, the template's
+  `prev_hash` and the revenue it gives the pool, and gets the exact outputs
+  back. It may ask ahead for a predicted next `prev_hash`. In its review
+  TheBlueMatt asked for this shape: "Is it not simpler to eat the
+  round-trip?"
+- [sv2-spec PR #202](https://github.com/stratum-mining/sv2-spec/pull/202)
+  (GitGab19, "non-custodial pool payouts", closed 2026-07-28) defined
+  `RequestPayoutOutputs`: token and `available_payout_value` in, an output
+  vector summing exactly to that value out, single use per declared job,
+  sized by the reservation made at token allocation, with a
+  `stale-payout-outputs` error.
+
+Option B takes #202's messages, single use, reservation and stale error
+as they are, so `/jd_prepare`'s bytes travel over the Job Declaration
+connection. P2Pool's allocation already returns zero-value outputs that
+reserve the coinbase space for `CoinbaseOutputConstraints`. It adds three
+things P2Pool needs:
+
+- **Request fields:** height, previous block hash and bits, which anchor
+  the PPLNS window and the paying block's difficulty, and the client's
+  scriptSig prefix, which the share commitment binds.
+- **Exact placement:** #202 validates the outputs as an unordered set and
+  lets the client add its own. A P2Pool share needs the returned vector as
+  the coinbase's whole output list, in order (merge-mining commitment
+  first, share commitment last), paying the whole revenue. A flag in the
+  success reply says so. BCH has no witness commitment, so a template
+  needs no output of its own and a client can always meet it.
+- **A push when the share chain moves,** so the client asks again before
+  it mines on an old share. #202 only tells it at its next declaration.
 
 No share-chain rule changes, and the share commitment, the payout tree and
-the 10-second updates all work as they do for Pickaxe today. It costs one
-round trip per template and per share-chain move, and the client trusts
-the pool's arithmetic; any node can still check a share's coinbase against
-its own share chain. The wording can stay pool-neutral: "the pool computes
-the coinbase outputs for the client's template", which suits any pool whose
-outputs depend on the template.
+the 10-second updates all work as they do for Pickaxe today. The client
+trusts the pool's arithmetic; any node can still check a share's coinbase
+against its own share chain.
+
+**The round trip.** Upstream chose pushed weights to save one round trip
+per declared job. For P2Pool that round trip cannot be avoided: the payout
+tree and the share commitment depend on the template's revenue and the
+client's scriptSig prefix, so the outputs cannot exist before the pool
+sees them, and the share chain moves every 10 seconds anyway. The cost is
+also small next to what a job already costs. Full-Template sends
+`DeclareMiningJob` and Coinbase-only sends `SetCustomMiningJob`, each a
+round trip of its own. The client keeps hashing its current job until the
+new outputs arrive, and can ask ahead as #195 allowed. On a node runner's
+own P2Pool node it is a local call. So the blockers in section 3 are the
+case for keeping a request/response path beside 0x0003, for pools whose
+outputs weights cannot express.
 
 | | A: 0x0003 | B: request/response |
 |---|---|---|
@@ -127,8 +161,8 @@ outputs depend on the template.
 | Payout tree (large windows) | Not expressible | Works |
 | Share commitment | Per connection, prefix unbound | As today |
 | Round trips | None per template | One per template |
-| Standard | Proposed, approved, not merged | New; needs an allocated id |
-| Client code | 0x0003 | This extension |
+| Standard | Proposed, approved, not merged | The shape of closed drafts #195 and #202; needs an id |
+| Client code | 0x0003 | #202's messages plus three additions |
 
 **Changing 0x0003 instead.** A decentralized pool would need three changes
 in sv2-spec PR #203: `pool_payout` allowed to be any payee the
@@ -136,14 +170,15 @@ distribution names, so nothing is held in custody; pool-placed zero-value
 outputs before the payouts and at the end, for the two commitments; and
 updates on every share. Even then, the payout tree and the share
 commitment depend on each template, so the pool has to see the template
-before the outputs exist. That is option B's model, and it could be
-proposed to #203 as a second, pool-computed mode. Writing it up is
-possible; posting anything upstream is the owner's call.
+before the outputs exist. That is option B's model: #202 with its three
+additions could be proposed to #203 as a second, pool-computed mode.
+Writing it up is possible; posting anything upstream is the owner's call.
 
-**Cost to kth.** Under B, kth's Job Declaration client implements an
-extension that only P2Pool offers until another pool or the spec adopts
-it: one request per template and one stale notice to handle, beside
-0x0003 if kth also supports that.
+**Cost to kth.** Under B, kth's Job Declaration client implements #202's
+messages with the three additions, beside 0x0003 if kth also supports
+that: one request per template and one push to handle. It is one
+spec-shaped extension rather than a P2Pool-only protocol, but until the
+spec takes the shape back, only P2Pool offers it.
 
 ## 6. Recommendation
 
@@ -154,12 +189,13 @@ client gets one more source of outputs: ask the pool per template.
 
 Before building:
 
-- **Extension id.** SV2 reserves `0x4000`–`0x7fff` for experimental
-  extensions that must not ship in production equipment; a production id
-  is allocated through stratumprotocol.org. Chipnet tests can use an
-  experimental id; asking for an allocation is the owner's call.
-- **Messages.** Exact fields and error codes, following the Job
-  Declaration and 0x0003 conventions, and whether both the Job Declaration
-  and Mining connections negotiate it, as 0x0003 requires.
+- **Extension id.** #195 and #202 both used `0x0003`, which #203 now
+  holds. SV2 reserves `0x4000`–`0x7fff` for experimental extensions that
+  must not ship in production equipment; a production id is allocated
+  through stratumprotocol.org. Chipnet tests can use an experimental id;
+  asking for an allocation is the owner's call.
+- **Messages.** The exact layout of the three additions and their error
+  codes, and whether both the Job Declaration and Mining connections
+  negotiate it, as 0x0003 requires.
 - **Evidence.** A chipnet run in which a standard client, given only this
   extension, gets shares accepted in both Job Declaration modes.
