@@ -32,6 +32,7 @@
 //! computed-class check keeps it that way.
 
 use super::assets;
+use super::chart::ChartBlock;
 use super::history::Sample;
 use super::pages::{
     self, BlockView, BlocksView, FoundBlockRow, MinerRow, MinerView, MinersView, Overview, Paging,
@@ -405,6 +406,13 @@ fn share_row(is_uncle: bool) -> ShareRow {
 }
 
 fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockRow>) -> String {
+    let chart_blocks: Vec<ChartBlock> = blocks
+        .iter()
+        .map(|block| ChartBlock {
+            height: block.height,
+            time: block.time,
+        })
+        .collect();
     pages::overview(&Overview {
         site: site(),
         now: 1_000,
@@ -427,6 +435,8 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         pool_on: true,
         node_on: false,
         network_on: false,
+        blocks_on: true,
+        chart_blocks,
     })
     .into_string()
 }

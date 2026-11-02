@@ -32,6 +32,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use bitcoin::{BlockHash, Target};
+use chart::ChartBlock;
 use history::{HashrateHistory, is_block, newest_shares, pool_hashrate, work_from_bits};
 use maud::Markup;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
@@ -39,7 +40,7 @@ use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::address_display::payout_address_string;
 use pages::{
     BlockView, BlocksView, FoundBlockRow, MinerRow, MinerView, MinersView, Overview, PAGE_SIZE,
-    Paging, ShareRow, ShareView, SharesView, Site, WorkerRow,
+    Paging, ShareRow, ShareView, SharesView, Site, WorkerRow, range_window_secs,
 };
 use serde::Deserialize;
 use std::str::FromStr;
@@ -144,9 +145,10 @@ fn error_page(state: &AppState, error: ApiError) -> Response {
 }
 
 /// A `?page=` query, counted from 1, plus the overview's `?auto=` toggle,
-/// `?range=` chart window and the `?pool=`/`?node=`/`?network` chart series
-/// toggles (a pool/node series is hidden when its parameter is `0`; the
-/// network series shows only for `network=1`, it being opt-in).
+/// `?range=` chart window and the `?pool=`/`?node=`/`?network`/`?blocks`
+/// chart series toggles (a pool/node/blocks series is hidden when its
+/// parameter is `0`; the network series shows only for `network=1`, it
+/// being opt-in).
 #[derive(Deserialize)]
 struct PageQuery {
     page: Option<usize>,
@@ -155,6 +157,7 @@ struct PageQuery {
     pool: Option<String>,
     node: Option<String>,
     network: Option<String>,
+    blocks: Option<String>,
 }
 
 /// Whether the share `blockhash` met its own Bitcoin Cash block target.
@@ -348,6 +351,7 @@ async fn overview(
     let pool_on = pages::series_on(query.pool.as_deref());
     let node_on = pages::series_on(query.node.as_deref());
     let network_on = pages::network_on(query.network.as_deref());
+    let blocks_on = pages::series_on(query.blocks.as_deref());
     let now = unix_now();
     let chain = read_store(state, move |state| {
         (
@@ -388,6 +392,19 @@ async fn overview(
     let pool_hashrate =
         pool_hashrate.or_else(|| samples.iter().rev().find_map(|sample| sample.pool));
     let blocks_found = blocks.len();
+    // The chart's diamonds: found blocks inside the requested range, oldest
+    // first. A block outside the sample history (a restart gap, or a page
+    // opened right after one) is skipped by the chart rather than drawn
+    // left of the axis.
+    let window_start = now.saturating_sub(range_window_secs(range_key));
+    let chart_blocks: Vec<ChartBlock> = blocks
+        .iter()
+        .filter(|block| u64::from(block.time) >= window_start)
+        .map(|block| ChartBlock {
+            height: block.height,
+            time: block.time,
+        })
+        .collect();
     html(pages::overview(&Overview {
         site: site(state),
         now,
@@ -410,6 +427,8 @@ async fn overview(
         pool_on,
         node_on,
         network_on,
+        blocks_on,
+        chart_blocks,
     }))
 }
 

@@ -34,6 +34,14 @@ const PAD_BOTTOM: f64 = 26.0;
 const MAX_DECADES: i32 = 9;
 /// Horizontal width of one hit zone, in viewBox units.
 const STEP_PX: f64 = 8.0;
+/// Edge length of a found-block marker (the green diamond), in viewBox
+/// units. CSS grows it to 1.7x when a hovered zone reaches it.
+const CUBE_SIZE: f64 = 5.6;
+/// Half the marker's diagonal: the reach a zone must cover for its strip to
+/// count as overlapping the marker (half the strip plus this is the reach
+/// test), shared by the tooltip's Block rows and the markers' `data-zone`
+/// grow tags.
+const CUBE_HALF_DIAG: f64 = CUBE_SIZE * std::f64::consts::SQRT_2 / 2.0;
 /// Intermediate x-axis ticks between the start/end edge labels.
 const X_TICK_COUNT: u32 = 4;
 /// Horizontal room each edge label claims, in viewBox units; a tick closer
@@ -77,6 +85,17 @@ struct DrawnMarkup {
     area: Markup,
     polyline: Markup,
     dots: Vec<Markup>,
+}
+
+/// A block the pool found, as the chart needs it: a diamond marker on the
+/// pool line and a `Block height` row in the tooltip of any zone whose strip
+/// reaches the marker.
+#[derive(Clone, Copy)]
+pub(crate) struct ChartBlock {
+    /// Bitcoin Cash height, shown in the tooltip row.
+    pub(crate) height: u64,
+    /// Unix seconds of the block header, placed on the time axis.
+    pub(crate) time: u32,
 }
 
 /// Average `points` down to at most `max` points, one per equal slice of
@@ -128,10 +147,17 @@ fn log_domain(values: impl Iterator<Item = f64>) -> (i32, i32) {
 /// tooltips; `format_tick` labels intermediate x-axis ticks; `format_edge`
 /// labels the start/end of the x axis. With no points at all it shows a
 /// note instead of an empty frame.
+///
+/// `blocks` are the pool's found blocks, drawn as green diamonds on the
+/// pool line and named in the tooltip of every hit zone whose strip reaches
+/// a marker; a block outside the plotted window (possible when a page's
+/// sample history is shorter than its range) is skipped rather than drawn
+/// off the axis.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn line_chart(
     title: &str,
     series: &[Series],
+    blocks: &[ChartBlock],
     format_value: fn(f64) -> String,
     format_time: fn(u64) -> String,
     format_tick: fn(u64) -> String,
@@ -252,10 +278,30 @@ pub(crate) fn line_chart(
         .find(|(line, _)| line.class == "network")
         .map(|(_, points)| points.as_slice())
         .unwrap_or(&[]);
+    // Blocks in the plotted window, each snapped to the pool line at its
+    // time (node, then network, as fallbacks) for its diamond's height,
+    // with its marker's centre already placed. Only blocks older than the
+    // plotted run itself fall outside and are skipped rather than drawn
+    // left of the axis.
+    let window_blocks: Vec<(ChartBlock, f64, f64)> = blocks
+        .iter()
+        .filter_map(|block| {
+            let time = u64::from(block.time);
+            if time < start || time > end {
+                return None;
+            }
+            let points = [pool_points, local_points, network_points]
+                .into_iter()
+                .find(|series| !series.is_empty())?;
+            let (_, sample_value) = nearest_point(points, time as f64)?;
+            Some((*block, x(time), y(sample_value)))
+        })
+        .collect();
     let zones = hit_zones(
         pool_points,
         local_points,
         network_points,
+        &window_blocks,
         start,
         end,
         span,
@@ -263,6 +309,35 @@ pub(crate) fn line_chart(
         format_value,
         format_time,
     );
+    // The found-block diamonds, in window order, carrying the zone numbers
+    // whose strips reach them (pages.css grows a marker on any of its
+    // tagged zones' hover). Emitted between the series dots and the tracers,
+    // so a hovered tracer never covers a marker, and after the gridlines, so
+    // a marker never dims under them.
+    let cubes: Vec<Markup> = window_blocks
+        .iter()
+        .map(|(block, cx, cy)| {
+            let zones_of_block: Vec<usize> = zones
+                .iter()
+                .filter(|zone| zone.blocks.contains(&block.height))
+                .map(|zone| zone.zone)
+                .collect();
+            html! {
+                rect class="cube" data-zone=[(!zones_of_block.is_empty())
+                        .then(|| zones_of_block
+                            .iter()
+                            .map(usize::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" "))]
+                    x=(format!("{:.1}", cx - CUBE_SIZE / 2.0))
+                    y=(format!("{:.1}", cy - CUBE_SIZE / 2.0))
+                    width=(format!("{CUBE_SIZE:.1}")) height=(format!("{CUBE_SIZE:.1}"))
+                    transform=(format!("rotate(45 {cx:.1} {cy:.1})")) {
+                    title { "Block " (block.height) " \u{b7} " (format_time(u64::from(block.time))) }
+                }
+            }
+        })
+        .collect();
     // Tracer circles live inside the svg, after the series, keyed to each
     // zone's nth-child index so pages.css can reveal them per hover.
     let tracers: Vec<Markup> = zones
@@ -317,6 +392,9 @@ pub(crate) fn line_chart(
                         (dot.clone())
                     }
                 }
+                @for cube in &cubes {
+                    (cube.clone())
+                }
                 @for tracer in &tracers {
                     (tracer.clone())
                 }
@@ -353,6 +431,10 @@ struct HitZone {
     pool_nearest: Option<(u64, f64)>,
     local_nearest: Option<(u64, f64)>,
     network_nearest: Option<(u64, f64)>,
+    /// In-window blocks whose marker this zone's strip reaches: their
+    /// heights ride into the tip as `Block height` rows, and the same reach
+    /// tags the markers with this zone number for the hover grow.
+    blocks: Vec<u64>,
 }
 
 /// The hit zones tiling the plot, one per `STEP_PX` step of `fx`.
@@ -361,6 +443,7 @@ fn hit_zones(
     pool_points: &[(u64, f64)],
     local_points: &[(u64, f64)],
     network_points: &[(u64, f64)],
+    window_blocks: &[(ChartBlock, f64, f64)],
     start: u64,
     _end: u64,
     span: f64,
@@ -411,6 +494,22 @@ fn hit_zones(
                     format_value(value)
                 ));
             }
+            // Blocks whose marker this strip reaches: half the strip plus
+            // the marker's half-diagonal. Their heights ride into the tip
+            // (two nearby blocks then both show, since both diamonds sit
+            // under the cursor), and the same reach tags the markers below
+            // so pages.css can grow them on the same hover -- one reach test
+            // for both effects.
+            let blocks: Vec<u64> = window_blocks
+                .iter()
+                .filter(|(_, cx, _)| (cx - fx).abs() <= STEP_PX / 2.0 + CUBE_HALF_DIAG)
+                .map(|(block, _, _)| block.height)
+                .collect();
+            for height in &blocks {
+                rows.push(format!(
+                    "<span class=\"key blocks\">Block</span> <b>{height}</b>"
+                ));
+            }
             for (index, row) in rows.iter().enumerate() {
                 tip.push_str(row);
                 if index + 1 < rows.len() {
@@ -425,6 +524,7 @@ fn hit_zones(
                 pool_nearest,
                 local_nearest,
                 network_nearest,
+                blocks,
             }
         })
         .collect()
@@ -463,7 +563,7 @@ mod tests {
 
     #[test]
     fn an_empty_chart_shows_a_note() {
-        let markup = line_chart("Hashrate", &[], value, time, time, time).into_string();
+        let markup = line_chart("Hashrate", &[], &[], value, time, time, time).into_string();
         assert!(markup.contains("Collecting data"));
         assert!(!markup.contains("<svg"));
     }
@@ -485,6 +585,7 @@ mod tests {
                 class: "pool",
                 points: vec![(100, 10.0), (160, 20.0)],
             }],
+            &[],
             value,
             time,
             time,
@@ -506,6 +607,7 @@ mod tests {
                 class: "pool",
                 points: vec![(100, 10.0), (160, 20.0)],
             }],
+            &[],
             value,
             time,
             time,
@@ -534,6 +636,7 @@ mod tests {
                     points: vec![(100, 5.0)],
                 },
             ],
+            &[],
             value,
             time,
             time,
@@ -571,6 +674,7 @@ mod tests {
                 class: "pool",
                 points: vec![(100, 10.0), (160, 20.0)],
             }],
+            &[],
             value,
             time,
             time,
@@ -623,6 +727,7 @@ mod tests {
                 class: "pool",
                 points: vec![(100, 10.0), (160, 20.0)],
             }],
+            &[],
             value,
             time,
             time,
@@ -652,6 +757,7 @@ mod tests {
                     points: vec![(100, 4.0e6), (160, 5.0e6)],
                 },
             ],
+            &[],
             value,
             time,
             time,
@@ -690,6 +796,7 @@ mod tests {
                     points: vec![(100, 5.0)],
                 },
             ],
+            &[],
             value,
             time,
             time,
@@ -704,6 +811,181 @@ mod tests {
     }
 
     #[test]
+    fn a_chart_draws_found_blocks_as_rotated_diamonds_on_the_pool_line() {
+        let markup = line_chart(
+            "Hashrate",
+            &[Series {
+                label: "Pool",
+                class: "pool",
+                points: vec![(100, 10.0), (200, 10.0)],
+            }],
+            &[ChartBlock {
+                height: 42,
+                time: 150,
+            }],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        let cube = markup.find("class=\"cube\"").expect("a diamond is drawn");
+        let svg_end = markup.find("</svg>").expect("the svg ends");
+        let hit = markup
+            .find("class=\"chart-hit\"")
+            .expect("hit zones follow");
+        assert!(
+            cube < svg_end && svg_end < hit,
+            "cubes sit inside the svg, before the strips"
+        );
+        let diamond = &markup[cube..svg_end];
+        // A 5.6 px square centred at x(150) = 76 + 316 on the pool line's
+        // y = 214, rotated into a diamond about that centre.
+        assert!(diamond.contains("x=\"389.2\""));
+        assert!(diamond.contains("y=\"211.2\""));
+        assert!(diamond.contains("width=\"5.6\" height=\"5.6\""));
+        assert!(diamond.contains("transform=\"rotate(45 392.0 214.0)\""));
+        assert!(diamond.contains("Block 42 \u{b7} t150"));
+    }
+
+    #[test]
+    fn a_found_block_diamond_names_the_hit_strips_that_reach_it() {
+        let markup = line_chart(
+            "Hashrate",
+            &[Series {
+                label: "Pool",
+                class: "pool",
+                points: vec![(100, 10.0), (200, 10.0)],
+            }],
+            &[ChartBlock {
+                height: 42,
+                time: 150,
+            }],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        // Marker centre at x = 392; strips at x = 388 and x = 396 are
+        // within half a strip plus the marker's half-diagonal, and carry
+        // zone numbers 41 and 42 (the svg is child 1, so strip i is i + 2).
+        assert!(markup.contains("data-zone=\"41 42\""));
+    }
+
+    #[test]
+    fn a_hit_zone_names_a_reaching_block_as_a_tooltip_row() {
+        let markup = line_chart(
+            "Hashrate",
+            &[Series {
+                label: "Pool",
+                class: "pool",
+                points: vec![(100, 10.0), (200, 10.0)],
+            }],
+            &[ChartBlock {
+                height: 42,
+                time: 150,
+            }],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        assert!(
+            markup.contains("<span class=\"key blocks\">Block</span> <b>42</b>"),
+            "the reaching strip's tip carries the block row"
+        );
+    }
+
+    #[test]
+    fn two_blocks_under_one_cursor_both_show_in_that_tip() {
+        let markup = line_chart(
+            "Hashrate",
+            &[Series {
+                label: "Pool",
+                class: "pool",
+                points: vec![(100, 10.0), (200, 10.0)],
+            }],
+            &[
+                ChartBlock {
+                    height: 42,
+                    time: 150,
+                },
+                ChartBlock {
+                    height: 43,
+                    time: 151,
+                },
+            ],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        // Strip 42 sits at x = 396, within reach of both markers (x = 392
+        // and x = 398.32), so its tip names both blocks.
+        let strip = markup
+            .find("data-left=\"55.000000%")
+            .expect("strip 42 exists");
+        let after = markup[strip + 1..]
+            .find("data-left=\"")
+            .map(|offset| strip + 1 + offset)
+            .unwrap_or(markup.len());
+        let tip = &markup[strip..after];
+        assert!(tip.contains("<span class=\"key blocks\">Block</span> <b>42</b>"));
+        assert!(tip.contains("<span class=\"key blocks\">Block</span> <b>43</b>"));
+    }
+
+    #[test]
+    fn a_block_older_than_the_plotted_run_is_skipped() {
+        let markup = line_chart(
+            "Hashrate",
+            &[Series {
+                label: "Pool",
+                class: "pool",
+                points: vec![(200, 10.0), (300, 10.0)],
+            }],
+            &[ChartBlock {
+                height: 42,
+                time: 150,
+            }],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        assert!(!markup.contains("class=\"cube\""));
+        assert!(!markup.contains("Block 42"));
+    }
+
+    #[test]
+    fn a_chart_draws_diamonds_before_tracers_inside_the_svg() {
+        let markup = line_chart(
+            "Hashrate",
+            &[Series {
+                label: "Pool",
+                class: "pool",
+                points: vec![(100, 10.0), (200, 10.0)],
+            }],
+            &[ChartBlock {
+                height: 42,
+                time: 150,
+            }],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        let cube = markup.find("class=\"cube\"").expect("a diamond is drawn");
+        let tracer = markup.find("class=\"tracer").expect("a tracer is drawn");
+        let svg_end = markup.find("</svg>").expect("the svg ends");
+        assert!(cube < tracer && tracer < svg_end);
+    }
+
+    #[test]
     fn chart_text_is_escaped() {
         let markup = line_chart(
             "<b>",
@@ -712,6 +994,7 @@ mod tests {
                 class: "pool",
                 points: vec![(100, 1.0)],
             }],
+            &[],
             |_| "<x".to_string(),
             time,
             time,
