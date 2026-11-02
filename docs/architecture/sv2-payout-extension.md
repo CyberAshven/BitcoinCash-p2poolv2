@@ -1,7 +1,9 @@
 # Proposal: P2Pool payouts for standard SV2 Job Declaration clients
 
-**Status: proposal, 2026-11-03. Nothing is built.** Option B below changes
-no share-chain rule. Option A would change several and is not recommended.
+**Status: option B approved by the owner on 2026-11-03, specified in
+section 7; not built yet.** It changes no share-chain rule. Option A would
+change several and is not recommended. Nothing is posted on sv2-spec
+without the owner's OK.
 
 ## 1. Goal
 
@@ -180,22 +182,161 @@ that: one request per template and one push to handle. It is one
 spec-shaped extension rather than a P2Pool-only protocol, but until the
 spec takes the shape back, only P2Pool offers it.
 
-## 6. Recommendation
+## 6. Decision
 
-Build B. Option A would change four share-chain rules and still break at
-BCH scale; option B changes none. On the kth side, the row 24 job engine
-already takes its coinbase outputs as an input, so its Job Declaration
-client gets one more source of outputs: ask the pool per template.
+The owner chose B on 2026-11-03, on three conditions: node native,
+decentralized, censorship resistant. Option A would change four
+share-chain rules and still break at BCH scale; option B changes none. On
+the kth side, the row 24 job engine already takes its coinbase outputs as
+an input, so its Job Declaration client gets one more source of outputs:
+ask the pool per template.
 
-Before building:
+Building a standard client also needs a fourth addition to #202. A P2Pool
+share fixes the coinbase's version (2), input sequence (`0xfffffffe`) and
+lock time (height − 1), which a client would otherwise choose itself, so
+the success reply states them.
 
-- **Extension id.** #195 and #202 both used `0x0003`, which #203 now
-  holds. SV2 reserves `0x4000`–`0x7fff` for experimental extensions that
-  must not ship in production equipment; a production id is allocated
-  through stratumprotocol.org. Chipnet tests can use an experimental id;
-  asking for an allocation is the owner's call.
-- **Messages.** The exact layout of the three additions and their error
-  codes, and whether both the Job Declaration and Mining connections
-  negotiate it, as 0x0003 requires.
-- **Evidence.** A chipnet run in which a standard client, given only this
-  extension, gets shares accepted in both Job Declaration modes.
+## 7. Specification
+
+The wording is pool-neutral, so any pool that pays miners directly from
+the coinbase can serve it. Section 7.5 says how a P2Pool node answers.
+
+### 7.1 Negotiation
+
+Extension type **`0x5052`**, "Requested Payout Outputs", from SV2's
+experimental range `0x4000`–`0x7fff`. Experimental ids must not ship in
+production equipment; a production id is allocated through
+stratumprotocol.org, and asking for one is the owner's call. #195 and
+#202 used `0x0003`, which #203 now holds.
+
+The client asks for it with `RequestExtensions` (extension `0x0001`) on
+its Job Declaration connection, in both modes. The Mining connection
+needs nothing new: the custom job is a standard `SetCustomMiningJob`.
+
+### 7.2 Allocation
+
+- `AllocateMiningJobToken.user_identifier` names whom the outputs pay, in
+  the pool's format. The token remembers it.
+- `AllocateMiningJobToken.Success.coinbase_tx_outputs` reserves the
+  coinbase space, as in base Job Declaration and #202: zero-value outputs
+  whose serialized size bounds every later set for that token, for the
+  client's `CoinbaseOutputConstraints`.
+
+### 7.3 Messages
+
+| Type | `channel_msg_bit` | Message | Direction |
+|---|---|---|---|
+| `0x00` | 0 | `RequestPayoutOutputs` | client to pool |
+| `0x01` | 0 | `RequestPayoutOutputs.Success` | pool to client |
+| `0x02` | 0 | `RequestPayoutOutputs.Error` | pool to client |
+| `0x03` | 0 | `PayoutOutputsStale` | pool to client |
+
+Every frame carries `extension_type = 0x5052`.
+
+`RequestPayoutOutputs`, #202's message with the template fields added:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `request_id` | U32 | Echoed in the reply |
+| `mining_job_token` | B0_255 | From `AllocateMiningJobToken.Success` |
+| `available_payout_value` | U64 | Satoshis the set pays out |
+| `height` | U32 | The template's block height |
+| `prev_hash` | U256 | The template's previous block hash |
+| `nbits` | U32 | The template's compact target |
+| `coinbase_prefix` | B0_255 | The coinbase scriptSig before the extranonce, exactly as the job will declare it |
+
+`RequestPayoutOutputs.Success`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `request_id` | U32 | From the request |
+| `flags` | U32 | Bit 0, `EXACT_OUTPUTS` (section 7.4); other bits zero |
+| `coinbase_tx_version` | U32 | Required coinbase version when `EXACT_OUTPUTS` is set |
+| `coinbase_tx_input_nSequence` | U32 | Required input sequence when `EXACT_OUTPUTS` is set |
+| `coinbase_tx_locktime` | U32 | Required lock time when `EXACT_OUTPUTS` is set |
+| `coinbase_tx_outputs` | B0_64K | A CompactSize count, then that many serialized outputs, as in `SetCustomMiningJob` |
+
+`RequestPayoutOutputs.Error`: `request_id` (U32) and `error_code`
+(STR0_255). `PayoutOutputsStale` has no fields.
+
+### 7.4 Rules
+
+- **One set per job.** The client asks after it has a token and a
+  template, before each `DeclareMiningJob` or `SetCustomMiningJob`, and
+  uses a set for one job only, as in #202. It keeps hashing its current
+  job while it waits, and may ask ahead for a predicted template, as #195
+  allowed.
+- **Without `EXACT_OUTPUTS`,** #202's rules apply: the outputs sum to
+  `available_payout_value`, the coinbase must contain every one of them,
+  order does not matter, and the client may add outputs the base protocol
+  allows.
+- **With `EXACT_OUTPUTS`,** the coinbase's outputs are exactly these, in
+  this order, with no others. Its version, input sequence and lock time
+  are the ones given, and its scriptSig is `coinbase_prefix` followed
+  directly by the extranonce. `available_payout_value` must equal the
+  template's `coinbase_tx_value_remaining`. A client whose template needs
+  outputs of its own cannot use the set and moves to its next pool.
+- **Validation.** The pool rejects a declared or custom job whose coinbase
+  differs from the set, with `invalid-payout-outputs`. It may recompute
+  the set rather than store it; a token is used for one job.
+- **Staleness.** When the pool's payouts move, it sends
+  `PayoutOutputsStale`. Sets for tokens allocated before it are stale: the
+  client allocates a new token and asks again. A job built on a stale set
+  may be rejected with `stale-payout-outputs`.
+- **Errors.** `invalid-mining-job-token`, `stale-payout-outputs` (the token
+  or the template no longer matches what the pool can pay),
+  `invalid-request`, `payout-outputs-too-large` and
+  `payout-outputs-unavailable`. Every refusal is an ordinary SV2 error, and
+  the client fails over to its next pool, ending in solo mining.
+
+### 7.5 How a P2Pool node answers
+
+- **Identity.** `user_identifier` is a mining identity, as for a mining
+  channel ([Miner options](../miner-options.md)): the payout CashAddr,
+  then `p2p=` with the share address and an optional `donation=`. The
+  mining channel that installs the job must use the same identity.
+- **Outputs.** The PPLNS window at the token's share-chain anchor, paid
+  out of `available_payout_value` at the template's height, previous hash
+  and bits, with the share commitment over `coinbase_prefix`: the bytes
+  `/jd_prepare` builds. That is the exact empty merge-mining commitment as
+  output 0, the PPLNS outputs, padding, and the share commitment last.
+  `EXACT_OUTPUTS` is always set, with version 2, sequence `0xfffffffe` and
+  lock time height − 1.
+- **Staleness.** The node sends `PayoutOutputsStale` whenever the share it
+  anchors new tokens on changes, about every 10 seconds.
+- **Anyone can check it.** The outputs are a function of the share chain,
+  the request and the identity, so every honest node holding the share
+  chain gives the same answer, and anyone holding it can recompute one.
+  A miner who doubts a node switches to another or runs their own.
+- **Merge-mined tokens** still need Full-Template with the leaves in
+  `excess_data` ([BCH P2Pool Job Declaration](../bch-job-declaration.md));
+  this extension serves the exact empty commitment.
+
+### 7.6 Node native, private, censorship resistant
+
+- **In-band.** The messages travel on the Noise-encrypted Job Declaration
+  connection: no HTTP, no sidecar, nothing between the node and the pool.
+  `/jd_prepare` stays for clients that already use it.
+- **No transactions.** The request carries none, so in Coinbase-only mode
+  the pool learns nothing of the miner's transaction set. Full-Template
+  reveals what base Job Declaration already reveals.
+- **What the pool learns:** the token, the template's height, previous
+  hash and bits (public anyway), the scriptSig prefix, and the revenue,
+  which hints at the template's total fees.
+- **Answer or refuse.** The pool chooses no transactions and cannot change
+  the client's template; a refusal moves the client to its next pool.
+
+### 7.7 Known limit
+
+`coinbase_tx_outputs` is a B0_64K field here and in `SetCustomMiningJob`,
+so a declared coinbase carries at most 65,535 bytes of outputs, about
+1,900 P2PKH payees. A share without tokens pays every payee directly up to
+BCH's 1,000,000-byte transaction limit, so past about 1,900 payees a
+declared job cannot carry its set and gets `payout-outputs-too-large`, as
+`/jd_prepare` already refuses it. Lifting that needs a share-chain rule,
+such as a declared-job limit at which the payout tree takes over; that is
+a later decision for the owner.
+
+Evidence before this is called done: a chipnet run in which a standard
+client, using only this extension, gets custom jobs accepted and shares
+credited in both Job Declaration modes.
