@@ -7,7 +7,6 @@
 //! A view over the same [`HashrateHistory`] the server-rendered dashboard
 //! draws, so both show the same numbers. No sampling happens here.
 
-use crate::api::dashboard::connected_miners;
 use crate::api::dashboard::history::{self, HashrateHistory, Sample};
 use crate::api::error::ApiError;
 use crate::api::server::AppState;
@@ -18,7 +17,6 @@ use axum::{
 };
 use p2poolv2_lib::store::hashrate_samples::RETENTION_SECS;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Default window: one hour. Maximum: the store's 30-day retention, from
@@ -113,21 +111,24 @@ async fn hashrate(
     let current = match samples.last() {
         Some(newest) => HashratePoint::from(newest),
         None => {
-            // Before the first sample: read pool, local and network now. The
-            // store read is synchronous, so keep it off the async workers.
+            // Before the first sample: read pool and network live (the
+            // store read is synchronous, so keep it off the async workers)
+            // and the local rate from the metrics actor's window.
             let app = Arc::clone(&state.app);
             let now = history::unix_now();
-            let connected: HashSet<String> = connected_miners(&app).await;
-            let (pool, local) = tokio::task::spawn_blocking(move || {
+            let local = state
+                .app
+                .metrics_handle
+                .get_metrics()
+                .await
+                .local_submission_hashrate(now);
+            let pool = tokio::task::spawn_blocking(move || {
                 let shares = history::newest_shares(&app, history::POOL_HASHRATE_SHARES);
                 let points: Vec<(u32, bitcoin::CompactTarget)> = shares
                     .iter()
                     .map(|share| (share.timestamp, share.bits))
                     .collect();
-                (
-                    history::share_chain_hashrate(&points, now),
-                    history::local_chain_hashrate(&app, &shares, &connected),
-                )
+                history::share_chain_hashrate(&points, now)
             })
             .await
             .unwrap_or_default();

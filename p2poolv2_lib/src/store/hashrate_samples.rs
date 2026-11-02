@@ -29,9 +29,9 @@ pub struct HashrateSample {
     pub time: u64,
     /// The whole pool, from the share chain.
     pub pool: Option<f64>,
-    /// This node's miners, from the share chain work of shares submitted
-    /// by miners connected to this node (at least one active worker), in
-    /// the same window as the pool.
+    /// This node's hashrate: the work of this node's accepted submissions
+    /// in the trailing ten minutes over that window's span (p2poolv1's
+    /// local hash rate), sampled at the API's cadence.
     pub local: Option<f64>,
     /// The Bitcoin Cash network, from the block template's difficulty.
     pub network: Option<f64>,

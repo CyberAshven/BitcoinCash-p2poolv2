@@ -42,7 +42,6 @@ use pages::{
     Paging, ShareRow, ShareView, SharesView, Site, WorkerRow,
 };
 use serde::Deserialize;
-use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -294,22 +293,6 @@ pub(crate) async fn local_miners(state: &AppState) -> Vec<MinerRow> {
     miners
 }
 
-/// The payout addresses of miners on this node with at least one active
-/// worker, as [`local_miners`] lists them. Unlike [`local_miners`], a miner
-/// whose workers have all gone inactive (or expired) is left out: it may
-/// still show a historical row on the miners page (grace periods), but it
-/// is not connected now and its share-chain work should not count toward
-/// the local hashrate.
-pub(crate) async fn connected_miners(state: &AppState) -> HashSet<String> {
-    let metrics = state.metrics_handle.get_metrics().await;
-    metrics
-        .users
-        .iter()
-        .filter(|(_, user)| user.any_active_workers())
-        .map(|(address, _)| address.clone())
-        .collect()
-}
-
 /// How many of `miners` have a worker online, and how many workers are
 /// online in all.
 pub(crate) fn online_counts(miners: &[MinerRow]) -> (usize, usize) {
@@ -388,16 +371,20 @@ async fn overview(
         .or_else(|| samples.iter().rev().find_map(|sample| sample.network));
     let network_difficulty = live_network_difficulty
         .or_else(|| network_hashrate.map(history::difficulty_from_network_hashrate));
-    let local_hashrate = samples.iter().rev().find_map(|sample| sample.local);
+    // The metrics read comes before both local and pool, so the two cards
+    // take theirs the same way: live first, then the newest non-null sample.
+    let metrics = state.metrics_handle.get_metrics().await;
+    // The local rate from the metrics actor's sliding window of accepted
+    // submissions (the pre-sample fallback keeps a value on the card).
+    let local_hashrate = metrics
+        .local_submission_hashrate(now)
+        .or_else(|| samples.iter().rev().find_map(|sample| sample.local));
     // Harmonize with the pool KPI: fall back to the newest non-null sample
     // when the live recompute has too few shares to form a span, so both
     // cards show a value (or both show the dash) together.
     let pool_hashrate =
         pool_hashrate.or_else(|| samples.iter().rev().find_map(|sample| sample.pool));
-    let local_hashrate =
-        local_hashrate.or_else(|| samples.iter().rev().find_map(|sample| sample.local));
     let blocks_found = blocks.len();
-    let metrics = state.metrics_handle.get_metrics().await;
     html(pages::overview(&Overview {
         site: site(state),
         now,
@@ -1300,50 +1287,6 @@ mod tests {
             "bchtest:qpayout",
             Some("bchtest:qpayout")
         ));
-    }
-
-    #[tokio::test]
-    async fn connected_miners_lists_a_miner_with_an_active_worker() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        state
-            .metrics_handle
-            .increment_worker_count("bchtest:qrx".to_string(), "rig".to_string())
-            .await
-            .expect("authorize worker");
-        let share = SimplePplnsShare {
-            user_id: 1,
-            difficulty: 100,
-            btcaddress: Some("bchtest:qrx".to_string()),
-            workername: Some("rig".to_string()),
-            n_time: 1_000,
-            job_id: "job".to_string(),
-            extranonce2: "extra".to_string(),
-            nonce: "nonce".to_string(),
-        };
-        state
-            .metrics_handle
-            .record_share_accepted(share, 110)
-            .await
-            .expect("record share");
-        let connected = connected_miners(&state).await;
-        assert!(connected.contains("bchtest:qrx"));
-    }
-
-    #[tokio::test]
-    async fn connected_miners_leaves_out_a_miner_without_an_active_worker() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        state
-            .metrics_handle
-            .increment_worker_count("bchtest:qrl".to_string(), "rig".to_string())
-            .await
-            .expect("authorize worker");
-        state
-            .metrics_handle
-            .decrement_worker_count(Some("bchtest:qrl".to_string()), "rig".to_string())
-            .await
-            .expect("disconnect worker");
-        let connected = connected_miners(&state).await;
-        assert!(!connected.contains("bchtest:qrl"));
     }
 
     #[tokio::test]

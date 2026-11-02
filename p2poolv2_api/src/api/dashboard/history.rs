@@ -12,10 +12,9 @@
 
 use crate::api::server::AppState;
 use bitcoin::{CompactTarget, Target};
-use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::store::dag_store::ShareInfo;
 use p2poolv2_lib::store::hashrate_samples::{HashrateSample, RETENTION_SECS};
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::MissedTickBehavior;
@@ -37,7 +36,7 @@ pub(crate) const POOL_HASHRATE_SHARES: u32 = 120;
 /// collapse the reported hashrate by orders of magnitude. When that filter
 /// would leave fewer than two shares -- a gap longer than this between
 /// confirmed shares -- the two newest shares are used instead, so the span
-/// never collapses to zero and both rates stay known together.
+/// never collapses to zero.
 pub(crate) const MAX_SHARE_GAP_SECS: u32 = 3600;
 
 /// Expected seconds between Bitcoin Cash blocks, for network hashrate.
@@ -221,59 +220,6 @@ pub(crate) fn pool_hashrate(state: &AppState, now: u64) -> Option<f64> {
     share_chain_hashrate(&points, now)
 }
 
-/// This node's hashrate: the work of shares in the newest confirmed window
-/// submitted by miners connected to this node, over the same time span as
-/// the pool hashrate.
-///
-/// `connected` holds the payout and share chain addresses of those miners,
-/// as [`crate::api::dashboard::connected_miners`] spells them. Shares older
-/// than [`MAX_SHARE_GAP_SECS`] before the newest share are dropped (as in
-/// [`share_chain_hashrate`]) so both rates share one span; when that filter
-/// would leave fewer than two shares, the two newest shares are used
-/// instead, so both rates stay known together. The oldest share
-/// of the kept window only opens the span; its work is never counted, even
-/// when it belongs to a connected miner. `None` with fewer than two shares
-/// or no time between the oldest and the newest.
-pub(crate) fn local_chain_hashrate(
-    state: &AppState,
-    shares: &[ShareInfo],
-    connected: &HashSet<String>,
-) -> Option<f64> {
-    let newest = shares.iter().max_by_key(|share| share.timestamp)?;
-    let mut kept: Vec<&ShareInfo> = shares
-        .iter()
-        .filter(|share| newest.timestamp.saturating_sub(share.timestamp) <= MAX_SHARE_GAP_SECS)
-        .collect();
-    if kept.len() < 2 {
-        let mut window: Vec<&ShareInfo> = shares.iter().collect();
-        window.sort_unstable_by_key(|left| std::cmp::Reverse(left.timestamp));
-        window.truncate(2);
-        kept = window;
-    }
-    let oldest = kept.iter().min_by_key(|share| share.timestamp)?;
-    let span = newest
-        .timestamp
-        .checked_sub(oldest.timestamp)
-        .filter(|span| *span > 0)?;
-    let work: f64 = kept
-        .iter()
-        .filter(|share| {
-            if std::ptr::eq(*share, oldest) {
-                return false;
-            }
-            let display = ShareInfoDisplay::from_share_info(
-                share,
-                Some(state.app_config.network),
-                state.app_config.cash_network,
-            );
-            connected.contains(&display.miner_bitcoin_address)
-                || connected.contains(&display.miner_address)
-        })
-        .map(|share| work_from_bits(share.bits))
-        .sum();
-    Some(work / f64::from(span))
-}
-
 /// Record one sample.
 async fn tick(state: &Arc<AppState>, history: &Arc<HashrateHistory>) {
     let time = unix_now();
@@ -281,29 +227,30 @@ async fn tick(state: &Arc<AppState>, history: &Arc<HashrateHistory>) {
         .tracker_handle
         .get_network_difficulty()
         .map(network_hashrate);
-
-    let connected: HashSet<String> = crate::api::dashboard::connected_miners(state).await;
+    // This node's hashrate from the metrics actor's sliding window of
+    // accepted submissions: an async channel read, before the store read.
+    let local = state
+        .metrics_handle
+        .get_metrics()
+        .await
+        .local_submission_hashrate(time);
 
     // The store is read synchronously; keep that off the async workers.
     let blocking_state = Arc::clone(state);
-    let blocking_connected = connected.clone();
-    let (pool, local) = match tokio::task::spawn_blocking(move || {
+    let pool = match tokio::task::spawn_blocking(move || {
         let shares = newest_shares(&blocking_state, POOL_HASHRATE_SHARES);
         let points: Vec<(u32, CompactTarget)> = shares
             .iter()
             .map(|share| (share.timestamp, share.bits))
             .collect();
-        (
-            share_chain_hashrate(&points, time),
-            local_chain_hashrate(&blocking_state, &shares, &blocking_connected),
-        )
+        share_chain_hashrate(&points, time)
     })
     .await
     {
         Ok(result) => result,
         Err(error) => {
             warn!("Dashboard sampler could not read the share chain: {error}");
-            (None, None)
+            None
         }
     };
 
@@ -392,67 +339,10 @@ pub(crate) async fn run_sampler(state: Arc<AppState>, history: Weak<HashrateHist
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::server::{AppConfig, AppState};
-    use bitcoin::hashes::Hash;
-    use p2poolv2_lib::accounting::stats::metrics;
-    use p2poolv2_lib::address::share_owner::ShareOwner;
-    use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
-    use p2poolv2_lib::node::actor::NodeHandle;
-    use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
-    use p2poolv2_lib::test_utils::setup_test_chain_store_handle;
-    use std::str::FromStr;
 
     /// Bits of a difficulty-1 target.
     fn difficulty_one() -> CompactTarget {
         CompactTarget::from_consensus(0x1d00ffff)
-    }
-
-    /// The miner payout address every [`share_at`] share carries, which
-    /// [`ShareInfoDisplay`] spells for any network.
-    const CONNECTED_PAYOUT: &str = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
-
-    /// A difficulty-1 share at `time` from [`CONNECTED_PAYOUT`].
-    fn share_at(time: u32) -> ShareInfo {
-        ShareInfo {
-            blockhash: bitcoin::BlockHash::all_zeros(),
-            prev_blockhash: bitcoin::BlockHash::all_zeros(),
-            height: 1,
-            miner_bitcoin_address: bitcoin::Address::from_str(CONNECTED_PAYOUT)
-                .expect("valid address")
-                .assume_checked()
-                .into(),
-            miner_address: ShareOwner::CashP2pkh([0x11; 20]),
-            timestamp: time,
-            bits: difficulty_one(),
-            uncles: Vec::new(),
-        }
-    }
-
-    /// An AppState whose only meaningful field here is `app_config`.
-    /// [`local_chain_hashrate`] never touches the rest of the struct.
-    async fn state() -> AppState {
-        let (chain_store_handle, _store_dir) = setup_test_chain_store_handle(false).await;
-        let metrics_dir = tempfile::tempdir().expect("metrics tempdir");
-        let metrics_handle =
-            metrics::start_metrics(metrics_dir.path().to_str().expect("path").to_string())
-                .await
-                .expect("start metrics");
-        AppState {
-            app_config: AppConfig {
-                pool_signature_length: 0,
-                network: bitcoin::Network::Bitcoin,
-                cash_network: None,
-                cors_allowed: false,
-            },
-            chain_store_handle,
-            metrics_handle,
-            tracker_handle: start_tracker_actor(),
-            node_handle: NodeHandle::new_for_test(),
-            monitoring_event_sender: create_monitoring_event_channel().0,
-            auth_user: None,
-            auth_token: None,
-            pplns_window: None,
-        }
     }
 
     #[test]
@@ -604,93 +494,6 @@ mod tests {
     fn difficulty_from_network_hashrate_inverts_the_rate_estimate() {
         let rate = network_hashrate(600.0);
         assert!((difficulty_from_network_hashrate(rate) - 600.0).abs() < 1e-9);
-    }
-
-    #[tokio::test]
-    async fn local_chain_hashrate_sums_connected_work_over_pool_span() {
-        let connected: HashSet<String> = [CONNECTED_PAYOUT.to_string()].into_iter().collect();
-        // Three difficulty-1 shares over 20 seconds from one connected miner.
-        let shares = [share_at(1_000), share_at(1_010), share_at(1_020)];
-        let rate = local_chain_hashrate(&state().await, &shares, &connected).unwrap();
-        assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 20.0).abs() < 1.0);
-    }
-
-    #[tokio::test]
-    async fn local_chain_hashrate_is_zero_when_no_miner_is_connected() {
-        let connected: HashSet<String> = HashSet::new();
-        let shares = [share_at(1_000), share_at(1_010), share_at(1_020)];
-        assert_eq!(
-            local_chain_hashrate(&state().await, &shares, &connected),
-            Some(0.0)
-        );
-    }
-
-    #[tokio::test]
-    async fn local_chain_hashrate_drops_shares_far_older_than_the_newest() {
-        let connected: HashSet<String> = [CONNECTED_PAYOUT.to_string()].into_iter().collect();
-        // The seed share at t=1_000 sits more than MAX_SHARE_GAP_SECS
-        // before the newest and is dropped. Of the kept recent shares,
-        // the oldest only opens the span; the two newer shares contribute
-        // work over the 10 s span.
-        let shares = [
-            share_at(1_000),
-            share_at(1_000 + MAX_SHARE_GAP_SECS + 1),
-            share_at(1_000 + MAX_SHARE_GAP_SECS + 6),
-            share_at(1_000 + MAX_SHARE_GAP_SECS + 11),
-        ];
-        let rate = local_chain_hashrate(&state().await, &shares, &connected).unwrap();
-        assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 10.0).abs() < 1.0);
-    }
-
-    #[tokio::test]
-    async fn local_chain_hashrate_needs_two_shares_and_a_span() {
-        let connected: HashSet<String> = [CONNECTED_PAYOUT.to_string()].into_iter().collect();
-        assert_eq!(local_chain_hashrate(&state().await, &[], &connected), None);
-        assert_eq!(
-            local_chain_hashrate(&state().await, &[share_at(1_000)], &connected),
-            None
-        );
-        assert_eq!(
-            local_chain_hashrate(
-                &state().await,
-                &[share_at(1_000), share_at(1_000)],
-                &connected
-            ),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn local_chain_hashrate_uses_the_two_newest_when_the_gap_filter_would_leave_one() {
-        let connected: HashSet<String> = [CONNECTED_PAYOUT.to_string()].into_iter().collect();
-        // The newest share sits more than MAX_SHARE_GAP_SECS after the
-        // previous one, so the filter would keep only the newest and the
-        // span would collapse to zero. The two newest are used instead.
-        let gap = MAX_SHARE_GAP_SECS + 3750;
-        let shares = [share_at(1_000), share_at(1_000 + gap)];
-        let rate = local_chain_hashrate(&state().await, &shares, &connected).unwrap();
-        assert!((rate - HASHES_PER_DIFFICULTY / f64::from(gap)).abs() < 1.0);
-    }
-
-    #[tokio::test]
-    async fn local_chain_hashrate_skips_the_oldest_shares_work() {
-        // The oldest share is connected but its work is outside the span;
-        // only the two newer shares count.
-        let connected: HashSet<String> = [CONNECTED_PAYOUT.to_string()].into_iter().collect();
-        let shares = [share_at(1_000), share_at(1_010), share_at(1_020)];
-        let rate = local_chain_hashrate(&state().await, &shares, &connected).unwrap();
-        assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 20.0).abs() < 1.0);
-    }
-
-    #[tokio::test]
-    async fn local_chain_hashrate_does_not_depend_on_order() {
-        let connected: HashSet<String> = [CONNECTED_PAYOUT.to_string()].into_iter().collect();
-        let ordered = [share_at(1_000), share_at(1_030)];
-        let reversed = [share_at(1_030), share_at(1_000)];
-        assert_eq!(
-            local_chain_hashrate(&state().await, &ordered, &connected),
-            local_chain_hashrate(&state().await, &reversed, &connected)
-        );
     }
 
     #[test]

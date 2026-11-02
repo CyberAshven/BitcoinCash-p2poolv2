@@ -325,9 +325,11 @@ where unknown at that time.
 
 - `pool_hashrate`: share chain work of the newest confirmed shares over
   their time span; the same on every node.
-- `local_hashrate`: share chain work of shares from miners connected to
-  this node, over the same span; the difference from `pool_hashrate` is
-  other nodes' miners.
+- `local_hashrate`: this node's accepted submissions in the trailing ten
+  minutes over that window's span (p2poolv1's local hash rate); `null`
+  before the first share since the node started. The difference from
+  `pool_hashrate` is the other nodes' work plus shares older than the
+  ten-minute window.
 - `network_hashrate`: template difficulty × 2^32 / 600.
 
 The top-level values are the newest sample (read live before the first one).
