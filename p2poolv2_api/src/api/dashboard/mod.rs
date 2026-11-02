@@ -144,8 +144,9 @@ fn error_page(state: &AppState, error: ApiError) -> Response {
 }
 
 /// A `?page=` query, counted from 1, plus the overview's `?auto=` toggle,
-/// `?range=` chart window and the `?pool=`/`?node=` chart series toggles
-/// (a series is hidden when its parameter is `0`).
+/// `?range=` chart window and the `?pool=`/`?node=`/`?network` chart series
+/// toggles (a pool/node series is hidden when its parameter is `0`; the
+/// network series shows only for `network=1`, it being opt-in).
 #[derive(Deserialize)]
 struct PageQuery {
     page: Option<usize>,
@@ -153,6 +154,7 @@ struct PageQuery {
     range: Option<String>,
     pool: Option<String>,
     node: Option<String>,
+    network: Option<String>,
 }
 
 /// Whether the share `blockhash` met its own Bitcoin Cash block target.
@@ -345,6 +347,7 @@ async fn overview(
     let range_key = pages::normalize_range(query.range.as_deref());
     let pool_on = pages::series_on(query.pool.as_deref());
     let node_on = pages::series_on(query.node.as_deref());
+    let network_on = pages::network_on(query.network.as_deref());
     let now = unix_now();
     let chain = read_store(state, move |state| {
         (
@@ -406,6 +409,7 @@ async fn overview(
         range_key,
         pool_on,
         node_on,
+        network_on,
     }))
 }
 

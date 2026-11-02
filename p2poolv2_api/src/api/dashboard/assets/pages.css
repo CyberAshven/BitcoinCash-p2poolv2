@@ -166,9 +166,9 @@ tr.uncle-row {
   flex-shrink: 0;
 }
 
-/* Pool/Node series toggles: their own row under the hashrate heading, so the
-   stateless links can flip ?pool=0/?node=0 (server) or toggle the signals
-   (wasm) without a script. */
+/* Pool/Node/Network series toggles: their own row under the hashrate heading,
+   so the stateless links can flip ?pool=0/?node=0/?network=1 (server) or
+   toggle the signals (wasm) without a script. The network line is opt-in. */
 .series-toggles {
   display: flex;
   gap: 0.4rem;
@@ -210,6 +210,9 @@ tr.uncle-row {
 }
 .series-toggles .legend-dot.local {
   background: #22d3ee;
+}
+.series-toggles .legend-dot.network {
+  background: #8b5cf6;
 }
 .series-toggles .legend-chip.off {
   opacity: 0.45;
@@ -257,6 +260,14 @@ tr.uncle-row {
 .chart-wrap .key.local {
   fill: #22d3ee;
   color: #22d3ee;
+}
+.chart-wrap .line.network {
+  stroke: #8b5cf6;
+}
+.chart-wrap .dot.network,
+.chart-wrap .key.network {
+  fill: #8b5cf6;
+  color: #8b5cf6;
 }
 .chart-wrap figcaption {
   display: flex;
@@ -444,6 +455,11 @@ tr.uncle-row {
   fill: #22d3ee;
   stroke: #22d3ee;
   filter: drop-shadow(0 0 1px #22d3ee) drop-shadow(0 0 3px #22d3ee);
+}
+.chart-wrap .tracer.network {
+  fill: #8b5cf6;
+  stroke: #8b5cf6;
+  filter: drop-shadow(0 0 1px #8b5cf6) drop-shadow(0 0 3px #8b5cf6);
 }
 .chart-wrap figure:has(.chart-hit:nth-child(2):hover) .tracer[data-zone="2"] { opacity: 1; }
 .chart-wrap figure:has(.chart-hit:nth-child(3):hover) .tracer[data-zone="3"] { opacity: 1; }

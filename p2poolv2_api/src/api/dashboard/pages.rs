@@ -79,17 +79,27 @@ pub(crate) fn series_on(value: Option<&str>) -> bool {
     value != Some("0")
 }
 
-/// The query fragment carrying the two chart series toggles, with the hidden
-/// state only: `""` when both series show, `&pool=0`, `&node=0` or both when
-/// a series is off. The links that must survive a click (range buttons, the
-/// auto-refresh toggle) append it to keep the state.
-pub(crate) fn series_q(pool_on: bool, node_on: bool) -> String {
+/// The network series toggle: unlike Pool and Node, the network line is
+/// opt-in, so it shows only for `?network=1` and a missing (or any other)
+/// parameter keeps the default URL clean.
+pub(crate) fn network_on(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// The query fragment carrying the three chart series toggles: pool and node
+/// carry their turns off, network carries its turn on (it is opt-in), so
+/// `""` is the default state. The links that must survive a click (range
+/// buttons, the auto-refresh toggle) append it to keep the state.
+pub(crate) fn series_q(pool_on: bool, node_on: bool, network_on: bool) -> String {
     let mut query = String::new();
     if !pool_on {
         query.push_str("&pool=0");
     }
     if !node_on {
         query.push_str("&node=0");
+    }
+    if network_on {
+        query.push_str("&network=1");
     }
     query
 }
@@ -232,6 +242,8 @@ pub(crate) struct Overview {
     pub(crate) pool_on: bool,
     /// Whether this node's line shows, from `?node=0`.
     pub(crate) node_on: bool,
+    /// Whether the network line shows, from `?network=1` (opt-in).
+    pub(crate) network_on: bool,
 }
 
 /// The found blocks page.
@@ -508,11 +520,18 @@ fn range_buttons(range_key: &str, auto: Auto, series_arg: &str) -> Markup {
     }
 }
 
-/// The Pool/Node chart series toggles: their own row under the hashrate
-/// heading, stateless links that flip `?pool=0`/`?node=0` while keeping the
-/// range and auto-refresh parameters. A hidden series shows `off`; the dot
-/// carries the line's colour, the only difference between the two chips.
-fn series_toggles(pool_on: bool, node_on: bool, range_key: &str, auto: Auto) -> Markup {
+/// The Pool/Node/Network chart series toggles: their own row under the
+/// hashrate heading, stateless links that flip `?pool=0`/`?node=0`/`?network=1`
+/// while keeping the range and auto-refresh parameters. A hidden series shows
+/// `off`; the dot carries the line's colour, the only difference between the
+/// three chips.
+fn series_toggles(
+    pool_on: bool,
+    node_on: bool,
+    network_on: bool,
+    range_key: &str,
+    auto: Auto,
+) -> Markup {
     let auto_query = if matches!(auto, Auto::Off) {
         "&auto=off"
     } else {
@@ -522,13 +541,18 @@ fn series_toggles(pool_on: bool, node_on: bool, range_key: &str, auto: Auto) -> 
         span.series-toggles role="group" aria-label="Chart series" {
             a.legend-chip.off[!pool_on] role="button" aria-pressed=(pool_on.to_string())
                 href=(format!("/dashboard?range={range_key}{auto_query}{}",
-                    series_q(!pool_on, node_on))) {
+                    series_q(!pool_on, node_on, network_on))) {
                 span.legend-dot.pool {} "Pool"
             }
             a.legend-chip.off[!node_on] role="button" aria-pressed=(node_on.to_string())
                 href=(format!("/dashboard?range={range_key}{auto_query}{}",
-                    series_q(pool_on, !node_on))) {
+                    series_q(pool_on, !node_on, network_on))) {
                 span.legend-dot.local {} "Node"
+            }
+            a.legend-chip.off[!network_on] role="button" aria-pressed=(network_on.to_string())
+                href=(format!("/dashboard?range={range_key}{auto_query}{}",
+                    series_q(pool_on, node_on, !network_on))) {
+                span.legend-dot.network {} "Network"
             }
         }
     }
@@ -734,7 +758,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         .rev()
         .copied()
         .collect();
-    let mut shown = Vec::with_capacity(2);
+    let mut shown = Vec::with_capacity(3);
     if view.pool_on {
         shown.push(Series {
             label: "Pool",
@@ -749,7 +773,14 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             points: series(&samples, |sample| sample.local),
         });
     }
-    // Both toggles off: a note about the toggles, not the "first points"
+    if view.network_on {
+        shown.push(Series {
+            label: "Network",
+            class: "network",
+            points: series(&samples, |sample| sample.network),
+        });
+    }
+    // All toggles off: a note about the toggles, not the "first points"
     // note the chart shows before any sample arrives.
     let chart = if shown.is_empty() {
         html! {
@@ -765,7 +796,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             fmt_hour_edge,
         )
     };
-    let series_arg = series_q(view.pool_on, view.node_on);
+    let series_arg = series_q(view.pool_on, view.node_on, view.network_on);
     let last_block = view.blocks.first().map(|block| block.time);
     let body = html! {
         div.kpi-grid {
@@ -787,7 +818,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         }
         div.panel {
             h2.hashrate-head { "Hashrate" (range_buttons(view.range_key, view.auto, &series_arg)) }
-            (series_toggles(view.pool_on, view.node_on, view.range_key, view.auto))
+            (series_toggles(view.pool_on, view.node_on, view.network_on, view.range_key, view.auto))
             div.chart-wrap { (chart) }
         }
         div.panel {
@@ -1363,6 +1394,7 @@ mod tests {
             range_key: normalize_range(None),
             pool_on: true,
             node_on: true,
+            network_on: false,
         }
     }
 
@@ -1431,16 +1463,30 @@ mod tests {
     }
 
     #[test]
+    fn the_network_series_shows_only_when_its_parameter_asks_for_it() {
+        assert!(!network_on(None));
+        assert!(!network_on(Some("0")));
+        assert!(!network_on(Some("bogus")));
+        assert!(network_on(Some("1")));
+    }
+
+    #[test]
     fn the_series_query_lists_only_the_hidden_series() {
-        assert_eq!(series_q(true, true), "");
-        assert_eq!(series_q(false, true), "&pool=0");
-        assert_eq!(series_q(true, false), "&node=0");
-        assert_eq!(series_q(false, false), "&pool=0&node=0");
+        assert_eq!(series_q(true, true, false), "");
+        assert_eq!(series_q(false, true, false), "&pool=0");
+        assert_eq!(series_q(true, false, false), "&node=0");
+        assert_eq!(series_q(false, false, false), "&pool=0&node=0");
+    }
+
+    #[test]
+    fn the_series_query_carries_the_network_turn_on() {
+        assert_eq!(series_q(true, true, true), "&network=1");
+        assert_eq!(series_q(false, false, true), "&pool=0&node=0&network=1");
     }
 
     #[test]
     fn the_series_toggles_link_both_states_without_script() {
-        let both_on = series_toggles(true, true, "24h", Auto::On).into_string();
+        let both_on = series_toggles(true, true, false, "24h", Auto::On).into_string();
         assert!(both_on.contains("aria-label=\"Chart series\""));
         assert!(both_on.contains("class=\"legend-chip\" role=\"button\" aria-pressed=\"true\""));
         assert!(both_on.contains("span class=\"legend-dot pool\""));
@@ -1448,7 +1494,7 @@ mod tests {
         assert!(both_on.contains("/dashboard?range=24h&amp;pool=0"));
         assert!(both_on.contains("/dashboard?range=24h&amp;node=0"));
         // Each chip flips only its own series, keeping the other's state.
-        let pool_hidden = series_toggles(false, true, "1h", Auto::Off).into_string();
+        let pool_hidden = series_toggles(false, true, false, "1h", Auto::Off).into_string();
         assert!(
             pool_hidden
                 .contains("class=\"legend-chip off\" role=\"button\" aria-pressed=\"false\"")
@@ -1456,9 +1502,24 @@ mod tests {
         assert!(pool_hidden.contains("/dashboard?range=1h&amp;auto=off\""));
         assert!(pool_hidden.contains("/dashboard?range=1h&amp;auto=off&amp;pool=0&amp;node=0"));
         assert!(!pool_hidden.contains("pool=0\""));
-        let both_hidden = series_toggles(false, false, "24h", Auto::On).into_string();
+        let both_hidden = series_toggles(false, false, false, "24h", Auto::On).into_string();
         assert!(both_hidden.contains("legend-chip off"));
         assert!(both_hidden.contains("aria-pressed=\"false\""));
+    }
+
+    #[test]
+    fn the_network_toggle_links_both_states_without_script() {
+        let hidden = series_toggles(true, true, false, "24h", Auto::On).into_string();
+        assert!(hidden.contains("span class=\"legend-dot network\""));
+        assert!(
+            hidden.contains("aria-pressed=\"false\" href=\"/dashboard?range=24h&amp;network=1\"")
+        );
+        // Shown: the network chip drops its own turn-on, while the other
+        // chips keep it so the flip does not lose it.
+        let shown = series_toggles(true, true, true, "24h", Auto::On).into_string();
+        assert!(shown.contains("span class=\"legend-dot network\""));
+        assert!(shown.contains("aria-pressed=\"true\" href=\"/dashboard?range=24h\""));
+        assert!(shown.contains("href=\"/dashboard?range=24h&amp;pool=0&amp;network=1\""));
     }
 
     #[test]
@@ -1605,14 +1666,45 @@ mod tests {
     }
 
     #[test]
-    fn the_overview_lists_both_series_toggles_by_default() {
+    fn the_overview_lists_all_three_series_toggles_by_default() {
         let page = overview(&empty_overview()).into_string();
         assert!(page.contains("series-toggles"));
         assert!(page.contains("legend-dot pool"));
         assert!(page.contains("legend-dot local"));
-        assert!(!page.contains("legend-chip off"));
+        assert!(page.contains("legend-dot network"));
+        // Pool and Node show; the network line is opt-in, so only its chip is off.
+        assert!(page.contains("class=\"legend-chip\" role=\"button\" aria-pressed=\"true\""));
+        assert!(page.contains("class=\"legend-chip off\" role=\"button\" aria-pressed=\"false\""));
         assert!(page.contains("href=\"/dashboard?range=24h&amp;pool=0\""));
         assert!(page.contains("href=\"/dashboard?range=24h&amp;node=0\""));
+        assert!(page.contains("href=\"/dashboard?range=24h&amp;network=1\""));
+    }
+
+    #[test]
+    fn showing_the_network_series_draws_its_line_and_chips() {
+        let mut view = empty_overview();
+        view.samples = vec![
+            Sample {
+                time: 1_000,
+                pool: Some(100.0),
+                local: Some(50.0),
+                network: Some(4.0e6),
+            },
+            Sample {
+                time: 1_060,
+                pool: Some(200.0),
+                local: Some(60.0),
+                network: Some(5.0e6),
+            },
+        ];
+        view.network_on = true;
+        let page = overview(&view).into_string();
+        assert!(page.contains("polyline class=\"line network\""));
+        assert!(page.contains("class=\"area network\""));
+        assert!(page.contains("tracer network"));
+        // The network chip drops its own turn-on; the others keep it.
+        assert!(page.contains("href=\"/dashboard?range=24h\""));
+        assert!(page.contains("href=\"/dashboard?range=24h&amp;network=1\""));
     }
 
     #[test]
@@ -1644,10 +1736,11 @@ mod tests {
     }
 
     #[test]
-    fn hiding_both_series_shows_the_legend_note() {
+    fn hiding_all_series_shows_the_legend_note() {
         let mut view = empty_overview();
         view.pool_on = false;
         view.node_on = false;
+        view.network_on = false;
         let page = overview(&view).into_string();
         assert!(page.contains("All series hidden. Click a legend chip to show one."));
         assert!(!page.contains("<svg"));

@@ -11,6 +11,12 @@
 //! sample vertex, revealed by the same hover, so a dot snaps along each line
 //! under the cursor. Series are averaged down to a bounded number of points,
 //! so a page stays small however long the history is.
+//!
+//! The value axis is log10: the network hashrate line (TH/s) shares the plot
+//! with the pool (GH/s) and node (MH/s) lines, and a linear axis would
+//! flatten the smaller ones to the baseline. Gridlines land on whole decades
+//! (1 H/s, 10 H/s, ...), capped at MAX_DECADES so a stray near-zero sample
+//! cannot crowd them.
 
 use maud::{Markup, PreEscaped, html};
 
@@ -23,7 +29,9 @@ const PAD_LEFT: f64 = 76.0;
 const PAD_RIGHT: f64 = 12.0;
 const PAD_TOP: f64 = 12.0;
 const PAD_BOTTOM: f64 = 26.0;
-const GRID_LINES: u32 = 4;
+/// Widest log10 band (decades) the value axis spans: the floor moves up
+/// toward the top and out-of-band points clamp to it.
+const MAX_DECADES: i32 = 9;
 /// Horizontal width of one hit zone, in viewBox units.
 const STEP_PX: f64 = 8.0;
 /// Intermediate x-axis ticks between the start/end edge labels.
@@ -49,6 +57,7 @@ fn nice_time_step(span: f64) -> u64 {
 fn area_color(class: &str) -> &'static str {
     match class {
         "local" => "#22d3ee",
+        "network" => "#8b5cf6",
         _ => "#0ac18e",
     }
 }
@@ -88,7 +97,32 @@ pub(crate) fn downsample(points: &[(u64, f64)], max: usize) -> Vec<(u64, f64)> {
         .collect()
 }
 
-/// A line chart of `series` over their common time range, values from zero.
+/// The whole-decade log10 domain `[floor, top]` covering `values`: rounded
+/// out to whole decades so gridlines land on 1 H/s, 10 H/s, ... At least two
+/// decades, so one gridline is never all, and at most [`MAX_DECADES`], so a
+/// stray near-zero sample raises the floor instead of crowding the band.
+/// Non-positive values are ignored; with none left the default band is used.
+fn log_domain(values: impl Iterator<Item = f64>) -> (i32, i32) {
+    let mut floor = f64::INFINITY;
+    let mut top = f64::NEG_INFINITY;
+    for value in values.filter(|value| *value > 0.0) {
+        floor = floor.min(value.log10().floor());
+        top = top.max(value.log10().ceil());
+    }
+    if !floor.is_finite() {
+        return (0, 1);
+    }
+    let top = if top <= floor { floor + 1.0 } else { top };
+    let (floor, top) = (floor as i32, top as i32);
+    if top - floor > MAX_DECADES {
+        (top - MAX_DECADES, top)
+    } else {
+        (floor, top)
+    }
+}
+
+/// A line chart of `series` over their common time range on a log10 value
+/// axis over the drawn points' decades.
 ///
 /// `format_value` labels the value axis and tooltips; `format_time` labels
 /// tooltips; `format_tick` labels intermediate x-axis ticks; `format_edge`
@@ -118,12 +152,24 @@ pub(crate) fn line_chart(
         };
     };
     let span = (end.saturating_sub(start)).max(1) as f64;
-    let top = all().map(|(_, value)| *value).fold(0.0_f64, f64::max);
-    let top = if top > 0.0 { top * 1.1 } else { 1.0 };
+    // Whole decades over the drawn points, so the gridlines land on 1 H/s,
+    // 10 H/s, ... and `format_value` names each one. Non-positive samples
+    // (the pool series sitting at zero) clamp to the floor decade.
+    let (log_floor, log_top) = log_domain(all().map(|(_, value)| *value));
     let plot_width = WIDTH - PAD_LEFT - PAD_RIGHT;
     let plot_height = HEIGHT - PAD_TOP - PAD_BOTTOM;
     let x = |time: u64| PAD_LEFT + (time.saturating_sub(start)) as f64 / span * plot_width;
-    let y = |value: f64| PAD_TOP + plot_height - value / top * plot_height;
+    let y = |value: f64| {
+        let decade = if value > 0.0 {
+            value
+                .log10()
+                .clamp(f64::from(log_floor), f64::from(log_top))
+        } else {
+            f64::from(log_floor)
+        };
+        PAD_TOP + plot_height
+            - (decade - f64::from(log_floor)) / f64::from(log_top - log_floor) * plot_height
+    };
     let baseline = PAD_TOP + plot_height;
 
     let series_markup: Vec<DrawnMarkup> = drawn
@@ -201,9 +247,15 @@ pub(crate) fn line_chart(
         .find(|(line, _)| line.class == "local")
         .map(|(_, points)| points.as_slice())
         .unwrap_or(&[]);
+    let network_points: &[(u64, f64)] = drawn
+        .iter()
+        .find(|(line, _)| line.class == "network")
+        .map(|(_, points)| points.as_slice())
+        .unwrap_or(&[]);
     let zones = hit_zones(
         pool_points,
         local_points,
+        network_points,
         start,
         end,
         span,
@@ -216,12 +268,15 @@ pub(crate) fn line_chart(
     let tracers: Vec<Markup> = zones
         .iter()
         .flat_map(|zone| {
-            let mut circles = Vec::with_capacity(2);
+            let mut circles = Vec::with_capacity(3);
             if let Some((time, value)) = zone.pool_nearest {
                 circles.push(tracer_circle("pool", zone.zone, x(time), y(value)));
             }
             if let Some((time, value)) = zone.local_nearest {
                 circles.push(tracer_circle("local", zone.zone, x(time), y(value)));
+            }
+            if let Some((time, value)) = zone.network_nearest {
+                circles.push(tracer_circle("network", zone.zone, x(time), y(value)));
             }
             circles
         })
@@ -234,8 +289,8 @@ pub(crate) fn line_chart(
                     (series.grad.clone())
                     (series.area.clone())
                 }
-                @for step in 0..=GRID_LINES {
-                    @let value = top * f64::from(step) / f64::from(GRID_LINES);
+                @for decade in log_floor..=log_top {
+                    @let value = 10.0_f64.powi(decade);
                     @let line_y = format!("{:.1}", y(value));
                     line.grid x1=(PAD_LEFT) x2=(WIDTH - PAD_RIGHT) y1=(line_y) y2=(line_y) {}
                     text.axis x=(PAD_LEFT - 6.0) y=(line_y) text-anchor="end" dominant-baseline="middle" {
@@ -297,6 +352,7 @@ struct HitZone {
     zone: usize,
     pool_nearest: Option<(u64, f64)>,
     local_nearest: Option<(u64, f64)>,
+    network_nearest: Option<(u64, f64)>,
 }
 
 /// The hit zones tiling the plot, one per `STEP_PX` step of `fx`.
@@ -304,6 +360,7 @@ struct HitZone {
 fn hit_zones(
     pool_points: &[(u64, f64)],
     local_points: &[(u64, f64)],
+    network_points: &[(u64, f64)],
     start: u64,
     _end: u64,
     span: f64,
@@ -318,6 +375,7 @@ fn hit_zones(
             let time_at = start as f64 + ((fx - PAD_LEFT) / plot_width) * span;
             let pool_nearest = nearest_point(pool_points, time_at);
             let local_nearest = nearest_point(local_points, time_at);
+            let network_nearest = nearest_point(network_points, time_at);
             let at_class = if fx > WIDTH / 2.0 {
                 "at-left"
             } else {
@@ -328,20 +386,36 @@ fn hit_zones(
             // so it still reads right with the pool line toggled off.
             let header_time = pool_nearest
                 .or(local_nearest)
+                .or(network_nearest)
                 .map_or(start, |(time, _)| time);
             tip.push_str(&format_time(header_time));
             tip.push_str("</b><br>");
+            // Pool, Node then Network; a hidden series leaves no row, and a
+            // row other than the last ends with the line break.
+            let mut rows = Vec::with_capacity(3);
             if let Some((_, value)) = pool_nearest {
-                tip.push_str(&format!(
-                    "<span class=\"key pool\">Pool</span> <b>{}</b><br>",
+                rows.push(format!(
+                    "<span class=\"key pool\">Pool</span> <b>{}</b>",
                     format_value(value)
                 ));
             }
             if let Some((_, value)) = local_nearest {
-                tip.push_str(&format!(
+                rows.push(format!(
                     "<span class=\"key local\">Node</span> <b>{}</b>",
                     format_value(value)
                 ));
+            }
+            if let Some((_, value)) = network_nearest {
+                rows.push(format!(
+                    "<span class=\"key network\">Network</span> <b>{}</b>",
+                    format_value(value)
+                ));
+            }
+            for (index, row) in rows.iter().enumerate() {
+                tip.push_str(row);
+                if index + 1 < rows.len() {
+                    tip.push_str("<br>");
+                }
             }
             HitZone {
                 left: fx / WIDTH * 100.0,
@@ -350,6 +424,7 @@ fn hit_zones(
                 zone: index + 2,
                 pool_nearest,
                 local_nearest,
+                network_nearest,
             }
         })
         .collect()
@@ -511,9 +586,92 @@ mod tests {
         assert_eq!(zones.first().copied(), Some(2));
         assert_eq!(zones.last().copied(), Some(81));
         assert!(
-            markup.contains("data-zone=\"2\" cx=\"76.0\" cy=\"122.2\" r=\"1.5\""),
-            "tracer sits at the nearest vertex with radius 1.5"
+            markup.contains("data-zone=\"2\" cx=\"76.0\" cy=\"214.0\" r=\"1.5\""),
+            "tracer sits at the nearest vertex (the floor decade, on the \
+             baseline) with radius 1.5"
         );
+    }
+
+    #[test]
+    fn log_domains_round_out_to_whole_decades() {
+        assert_eq!(log_domain([10.0, 20.0].into_iter()), (1, 2));
+        assert_eq!(log_domain([4.0e6, 5.0e6].into_iter()), (6, 7));
+        assert_eq!(log_domain([0.4].into_iter()), (-1, 0));
+        assert_eq!(log_domain([1.0].into_iter()), (0, 1));
+    }
+
+    #[test]
+    fn a_log_domain_never_defaults_below_two_decades() {
+        assert_eq!(log_domain(std::iter::empty()), (0, 1));
+        assert_eq!(log_domain([0.0, -5.0].into_iter()), (0, 1));
+        assert_eq!(log_domain([7.0].into_iter()), (0, 1));
+    }
+
+    #[test]
+    fn a_log_domain_caps_its_band_at_nine_decades() {
+        // A stray near-zero sample raises the floor instead of stretching.
+        assert_eq!(log_domain([1.0e15, 1.0e-3].into_iter()), (6, 15));
+        assert_eq!(log_domain([2.0e-9, 3.0].into_iter()), (-8, 1));
+    }
+
+    #[test]
+    fn a_chart_labels_its_gridlines_with_whole_decades() {
+        let markup = line_chart(
+            "Hashrate",
+            &[Series {
+                label: "Pool",
+                class: "pool",
+                points: vec![(100, 10.0), (160, 20.0)],
+            }],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        assert!(
+            markup.contains(">10</text>") && markup.contains(">100</text>"),
+            "gridlines land on 10 and 100"
+        );
+        assert!(!markup.contains(">15</text>"), "no fractional decades");
+    }
+
+    #[test]
+    fn a_chart_draws_the_network_series_with_tracers_and_tooltip_rows() {
+        let markup = line_chart(
+            "Hashrate",
+            &[
+                Series {
+                    label: "Pool",
+                    class: "pool",
+                    points: vec![(100, 10.0), (160, 20.0)],
+                },
+                Series {
+                    label: "Network",
+                    class: "network",
+                    points: vec![(100, 4.0e6), (160, 5.0e6)],
+                },
+            ],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        assert_eq!(markup.matches("class=\"tracer network\"").count(), 80);
+        assert!(markup.contains("polyline class=\"line network\""));
+        assert!(markup.contains("class=\"area network\""));
+        assert!(markup.contains("<title>Network: 4000000 at t100</title>"));
+        assert!(markup.contains("<span class=\"key network\">Network</span> <b>5000000</b>"));
+        // The tooltip reads Pool then Network.
+        assert!(markup.contains("<span class=\"key pool\">Pool</span>"));
+        let network_row = markup
+            .find("<span class=\"key network\">")
+            .expect("network row drawn");
+        let pool_row = markup
+            .find("<span class=\"key pool\">")
+            .expect("pool row drawn");
+        assert!(pool_row < network_row, "pool row comes first");
     }
 
     #[test]

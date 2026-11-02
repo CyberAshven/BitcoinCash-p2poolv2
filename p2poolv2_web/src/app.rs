@@ -99,6 +99,13 @@ pub fn stored_flag(key: &str) -> bool {
     stored(local_storage(), key).as_deref() != Some("0")
 }
 
+/// A stored opt-in flag under `key`: on only when it was stored as `"1"`,
+/// so a missing key (the first visit) keeps the default off -- the network
+/// series, opt-in on every dashboard.
+pub fn stored_opt_in_flag(key: &str) -> bool {
+    stored(local_storage(), key).as_deref() == Some("1")
+}
+
 /// Initial connection: `?api=` in the page URL, then the saved base, then the
 /// page's own origin (the node serving the app from `web_root`). The
 /// password lives only in session storage, so it is gone when the tab closes;

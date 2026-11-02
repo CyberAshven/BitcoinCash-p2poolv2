@@ -198,15 +198,19 @@ pub fn OverviewPage() -> impl IntoView {
     // The chart's zoomed window; `None` shows everything. The header's
     // reset button clears it while a zoom is active.
     let zoom = RwSignal::new(None::<(f64, f64)>);
-    // The two chart series, persisted like the range so a reload keeps them.
+    // The three chart series, persisted like the range so a reload keeps
+    // them; the network line is opt-in, so it starts from its own flag.
     let pool_visible = RwSignal::new(crate::app::stored_flag("p2pool.pool-visible"));
     let local_visible = RwSignal::new(crate::app::stored_flag("p2pool.local-visible"));
-    // The chips write the flip back so the next visit keeps it.
+    let network_visible = RwSignal::new(crate::app::stored_opt_in_flag("p2pool.network-visible"));
+    // The chips write the flip back so the next visit keeps it. `"1"`/`"0"`
+    // suits both flags: [stored_flag] reads only `"0"` as off, and
+    // [stored_opt_in_flag] reads only `"1"` as on.
     let flip = |signal: RwSignal<bool>, key: &'static str| {
         move |_| {
             let next = !signal.get_untracked();
             signal.set(next);
-            let stored = if next { "" } else { "0" };
+            let stored = if next { "1" } else { "0" };
             crate::app::store(crate::app::local_storage(), key, stored);
         }
     };
@@ -401,6 +405,7 @@ pub fn OverviewPage() -> impl IntoView {
                 label=label
                 pool_visible=pool_visible
                 local_visible=local_visible
+                network_visible=network_visible
             />
         }
     };
@@ -426,6 +431,16 @@ pub fn OverviewPage() -> impl IntoView {
                 >
                     <span class="legend-dot local"></span>
                     "Node"
+                </button>
+                <button
+                    class="legend-chip"
+                    class:off=move || !network_visible.get()
+                    type="button"
+                    aria-pressed=move || network_visible.get().to_string()
+                    on:click=flip(network_visible, "p2pool.network-visible")
+                >
+                    <span class="legend-dot network"></span>
+                    "Network"
                 </button>
             </span>
         }

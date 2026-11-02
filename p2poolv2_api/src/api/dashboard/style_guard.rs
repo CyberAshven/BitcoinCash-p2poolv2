@@ -426,6 +426,7 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         range_key: pages::normalize_range(None),
         pool_on: true,
         node_on: false,
+        network_on: false,
     })
     .into_string()
 }
