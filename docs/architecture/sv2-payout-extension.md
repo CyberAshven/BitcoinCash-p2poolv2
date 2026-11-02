@@ -49,6 +49,8 @@ dust limit; the pool recomputes and compares.
 
 | Point | 0x0003 | P2Pool today | Verdict |
 |---|---|---|---|
+| Custody | The first output is pool-controlled and absorbs rounding, dust and miners left out of the distribution | No operator; every payee is paid directly | Conflict: P2Pool could only publish a miner's own output as `pool_payout`, which keeps payouts direct but breaks the extension's "controlled by Pool" |
+| Who sets the split | "The Pool dictates scripts and weights" | The share chain does, and every peer rebuilds it | Fits if a P2Pool node publishes the share chain's split; a client alone still cannot check it, under either option |
 | Donation and fee | Weights in one split | Already weights in one split on BCH | Fits, no change |
 | Dust | Drops a payout below its `dust_limits[i]` | Pays every payee | Fits: the pool publishes dust limit 0 |
 | Rounding remainder | To `pool_payout`, the first output | To the largest payee, the last | Same amounts if the largest payee (or the tree output) is published as `pool_payout`; only its position moves (section 4) |
@@ -58,6 +60,14 @@ dust limit; the pool recomputes and compares.
 | Update rate | MUST NOT publish per share; the client uses a new distribution only for later jobs | New split and previous share every share, about 10 seconds | Conflict: publishing less often makes clients mine on old shares, which end as uncles or orphans |
 | Payout tree | Fixed output scripts, weights only | The tree output's script holds its exact value and outputs, which depend on the template's revenue | Blocker: no distribution can express it. It applies past about 29,400 P2PKH payees on a share without tokens, the scale BCH is built for |
 | Client outputs | The client may append zero-value outputs | Validators reject any extra output | Rule change |
+| Witness commitment | Kept last, from the template provider | BCH has none | No effect |
+
+The update rule is judged on BCH's share timing, not on the extension's
+reason for it (churn at a centralized pool). A new share every 10 seconds
+moves the previous share every miner must build on. A client that keeps
+an old distribution until its next template mines shares on an old
+previous share, and those end as uncles, paid 9/10, or as orphans, paid
+nothing.
 
 ## 4. Worked example: the remainder
 
@@ -85,8 +95,8 @@ change; the order, the weight size, the share commitment and the tree do.
 
 **A. Adopt 0x0003.** Four rule changes: output order, 64-bit weights, a
 commitment that no longer binds the scriptSig prefix, and tolerating client
-outputs. Two departures from the extension's intent: a distribution per
-connection, and one per share. Even then the payout tree cannot be
+outputs. Three departures from the extension's text: a miner's output as
+`pool_payout`, a distribution per connection, and one per share. Even then the payout tree cannot be
 expressed, so it fails at the payee counts BCH should reach. A covenant
 that computes tree amounts from weights would fix that, but it is a
 redesign of the hybrid payout. Not recommended.
@@ -119,6 +129,21 @@ outputs depend on the template.
 | Round trips | None per template | One per template |
 | Standard | Proposed, approved, not merged | New; needs an allocated id |
 | Client code | 0x0003 | This extension |
+
+**Changing 0x0003 instead.** A decentralized pool would need three changes
+in sv2-spec PR #203: `pool_payout` allowed to be any payee the
+distribution names, so nothing is held in custody; pool-placed zero-value
+outputs before the payouts and at the end, for the two commitments; and
+updates on every share. Even then, the payout tree and the share
+commitment depend on each template, so the pool has to see the template
+before the outputs exist. That is option B's model, and it could be
+proposed to #203 as a second, pool-computed mode. Writing it up is
+possible; posting anything upstream is the owner's call.
+
+**Cost to kth.** Under B, kth's Job Declaration client implements an
+extension that only P2Pool offers until another pool or the spec adopts
+it: one request per template and one stale notice to handle, beside
+0x0003 if kth also supports that.
 
 ## 6. Recommendation
 
