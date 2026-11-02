@@ -267,13 +267,14 @@ impl ChainStoreHandle {
         self.store_handle.store().get_tx_with_output_origins(txid)
     }
 
-    /// Get the hash of every stored block that contains `txid`, confirmed
-    /// or not. Empty when the txid is unknown.
-    pub fn get_blockhashes_for_txid(
+    /// The confirmed block containing `txid`, with its height, or `None`
+    /// when no confirmed block contains it. See
+    /// `Store::get_confirmed_block_for_txid`.
+    pub fn get_confirmed_block_for_txid(
         &self,
         txid: &bitcoin::Txid,
-    ) -> Result<Vec<BlockHash>, StoreError> {
-        self.store_handle.store().get_blockhashes_for_txid(txid)
+    ) -> Result<Option<(BlockHash, u32)>, StoreError> {
+        self.store_handle.store().get_confirmed_block_for_txid(txid)
     }
 
     /// Check whether a share block exists without deserializing it.
@@ -1216,7 +1217,7 @@ mockall::mock! {
         pub fn are_all_txids_confirmed(&self, txids: &[bitcoin::Txid]) -> Result<bool, StoreError>;
         pub fn get_share_transactions(&self, share_hash: &BlockHash) -> Result<Vec<ShareTransaction>, StoreError>;
         pub fn get_tx_with_output_origins(&self, txid: &bitcoin::Txid) -> Result<(bitcoin::Transaction, Vec<OutputOrigin>), StoreError>;
-        pub fn get_blockhashes_for_txid(&self, txid: &bitcoin::Txid) -> Result<Vec<BlockHash>, StoreError>;
+        pub fn get_confirmed_block_for_txid(&self, txid: &bitcoin::Txid) -> Result<Option<(BlockHash, u32)>, StoreError>;
         pub fn share_block_exists(&self, blockhash: &BlockHash) -> bool;
         pub fn first_existing_share_header(&self, blockhashes: &[BlockHash]) -> Option<BlockHash>;
         pub fn get_share(&self, share_hash: &BlockHash) -> Option<ShareBlock>;

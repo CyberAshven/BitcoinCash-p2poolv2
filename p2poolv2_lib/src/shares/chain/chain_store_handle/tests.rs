@@ -4,7 +4,7 @@ use crate::store::Store;
 use crate::store::writer::StoreError;
 use crate::test_utils::{
     TestShareBlockBuilder, build_confirmed_test_chain, genesis_for_tests,
-    setup_test_chain_store_handle,
+    setup_test_chain_store_handle, test_funding_transaction,
 };
 use bitcoin::BlockHash;
 use bitcoin::hashes::Hash;
@@ -1215,4 +1215,58 @@ async fn test_prune_block_bodies_if_due_skips_when_not_current() {
             .store()
             .share_block_exists(&blocks[1].block_hash())
     );
+}
+
+#[tokio::test]
+async fn test_get_confirmed_block_for_txid_returns_block_and_height() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let blocks = build_confirmed_test_chain(&chain_store_handle, 3).await;
+    let coinbase_txid = blocks[2].transactions[0].0.compute_txid();
+
+    let confirmed = chain_store_handle
+        .get_confirmed_block_for_txid(&coinbase_txid)
+        .unwrap();
+
+    assert_eq!(confirmed, Some((blocks[2].block_hash(), 2)));
+}
+
+/// The block is stored and on the candidate chain, so it has metadata,
+/// but is never confirmed, as an uncle or fork block would be. Its
+/// transactions have no confirmed block.
+#[tokio::test]
+async fn test_get_confirmed_block_for_txid_ignores_unconfirmed_block() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let blocks = build_confirmed_test_chain(&chain_store_handle, 2).await;
+    let unconfirmed = TestShareBlockBuilder::new()
+        .prev_share_blockhash(blocks[2].block_hash().to_string())
+        .add_transaction(test_funding_transaction(99))
+        .build();
+    chain_store_handle
+        .add_share_block_and_organise_header(unconfirmed.clone())
+        .await
+        .unwrap();
+    assert!(
+        chain_store_handle
+            .store_handle()
+            .store()
+            .share_block_exists(&unconfirmed.block_hash())
+    );
+
+    let confirmed = chain_store_handle
+        .get_confirmed_block_for_txid(&unconfirmed.transactions[0].0.compute_txid())
+        .unwrap();
+
+    assert_eq!(confirmed, None);
+}
+
+#[tokio::test]
+async fn test_get_confirmed_block_for_txid_unknown_txid_is_none() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    build_confirmed_test_chain(&chain_store_handle, 2).await;
+
+    let confirmed = chain_store_handle
+        .get_confirmed_block_for_txid(&bitcoin::Txid::from_byte_array([9; 32]))
+        .unwrap();
+
+    assert_eq!(confirmed, None);
 }

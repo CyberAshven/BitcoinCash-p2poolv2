@@ -107,8 +107,7 @@ fn test_get_tx_with_output_origins_reports_coinbase_root_at_block_height() {
     store.commit_batch(batch).unwrap();
     let coinbase_txid = metadata[0].txid;
 
-    let (transaction, output_origins) =
-        store.get_tx_with_output_origins(&coinbase_txid).unwrap();
+    let (transaction, output_origins) = store.get_tx_with_output_origins(&coinbase_txid).unwrap();
 
     assert_eq!(transaction, block.transactions[0].0);
     assert_eq!(output_origins.len(), transaction.output.len());
