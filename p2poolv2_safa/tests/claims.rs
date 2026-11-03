@@ -718,6 +718,35 @@ fn thread_63_claims_last_thread_and_eases_target() {
     accepts(&scenario.claim);
 }
 #[test]
+fn two_threads_back_to_back_claim_hardens_target() {
+    let mut options = ScenarioOptions {
+        covenant: safa::create_covenant("chipnet", 2, 42_000_000_000).unwrap(),
+        ..Default::default()
+    };
+    options.state.thread = 0;
+    options.state.height = block_height() - 1;
+    options.state.target_bits = 0x1f00_ffff;
+    let scenario = scenario(options).unwrap();
+    accepts(&scenario.claim);
+    let expected = safa::expand_token_target(0x1f00_ffff)
+        .unwrap()
+        .mul(&number(7500))
+        .div_mod(&number(10000))
+        .0;
+    assert_eq!(
+        scenario.claim.plan.target_bits,
+        safa::encode_token_target(&expected).unwrap()
+    );
+}
+#[test]
+fn chipnet_one_thread_refused() {
+    assert!(safa::create_covenant("chipnet", 1, 42_000_000_000).is_err());
+}
+#[test]
+fn mainnet_one_thread_refused() {
+    assert!(safa::create_covenant("mainnet", 1, 42_000_000_000).is_err());
+}
+#[test]
 fn chipnet_64_threads_refused() {
     assert!(safa::create_covenant("chipnet", 64, 42_000_000_000).is_err());
 }

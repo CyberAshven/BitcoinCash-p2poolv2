@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The SAFA tools refuse a one-thread deployment. A thread takes at most one
+claim per block, so with one thread the covenant's easing factor is never
+below 1 and the token target could only stay or get easier, never harder;
+in the BCH 2026 VM a claim in the block after the last kept a one-thread
+target unchanged, while two threads hardened it ×0.75. `create_covenant`,
+`safa params` and `safa genesis` now take 2 to 63 threads; the target
+arithmetic (`claim_target_bits`) still covers every thread count, so it
+keeps matching any covenant already deployed. The parity case
+`params-one-thread-zero` is regenerated at two threads by the Rust CLI,
+which its note says. No change for deployments with 2 or more threads, such
+as tSAFA's 4.
+
 `safa claimer` no longer stops for good when chipnet replaces the block it
 last checked. It remembered the tip of every pass and failed closed when
 that block changed, even with the vault still unspent, so one ordinary

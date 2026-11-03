@@ -11,7 +11,9 @@ use libauth::{
     create_virtual_machine_bch_2026, locking_bytecode_to_cash_address,
 };
 
-use crate::{CLAIM_FIXED_BYTES, MAX_THREADS, hash256, max_token_target, pow_limit, set_compact};
+use crate::{
+    CLAIM_FIXED_BYTES, MAX_THREADS, MIN_THREADS, hash256, max_token_target, pow_limit, set_compact,
+};
 
 pub const SOURCE: &str = include_str!("../safa.cash");
 const MAIN_MARKER: &str = "// == main ==";
@@ -144,9 +146,9 @@ fn push_prefix_length(length: usize) -> usize {
 /// Compile a deployment, iterating until its size-dependent fee constant settles.
 pub fn create_covenant(network: &str, threads: u32, virtual_sats: u64) -> Result<Covenant, String> {
     let library = library_source(network)?;
-    if !(1..=MAX_THREADS).contains(&threads) {
+    if !(MIN_THREADS..=MAX_THREADS).contains(&threads) {
         return Err(format!(
-            "threads must be an integer from 1 to {MAX_THREADS}"
+            "threads must be an integer from {MIN_THREADS} to {MAX_THREADS}"
         ));
     }
     if virtual_sats > (1u64 << 62) {
