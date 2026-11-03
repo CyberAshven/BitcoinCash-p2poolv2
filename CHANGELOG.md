@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`dial_peers` may name a peer by host name (`/dns4/`, `/dns6/`, `/dns/`), as
+an operator running a public node is likely to publish it. The node's
+transport was TCP only, so such an address failed with "Multiaddr is not
+supported" and the node never connected; it is now libp2p's DNS transport
+over TCP, which resolves the name on every dial, reconnects included. A
+two-node test dials a peer as `/dns4/localhost/...`: no peers before, a
+connection after. No share-chain rule changes.
+
 `safa claimer` no longer stops for good when chipnet replaces the block it
 last checked. It remembered the tip of every pass and failed closed when
 that block changed, even with the vault still unspent, so one ordinary

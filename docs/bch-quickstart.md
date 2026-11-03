@@ -96,12 +96,22 @@ Found blocks go to this node, and also to any extra BCHN nodes you list as
 `[[submit_nodes]]` tables (`url`, `username`, `password`), so a block does
 not depend on one node.
 
-Under `[network]`, list the share chain peers to join in `dial_peers`, for
-example `dial_peers = ["/ip4/203.0.113.1/tcp/6884"]`. A Bitcoin Cash node
+Under `[network]`, list the share chain peers to join in `dial_peers`, by
+IP address or host name, for example
+`dial_peers = ["/ip4/203.0.113.1/tcp/6884", "/dns4/pool.example.com/tcp/6884"]`.
+A host name is looked up again on every dial, so a peer behind a changing
+address (dynamic DNS) stays reachable. A Bitcoin Cash node
 never uses DNS seeds: the seeds built into P2Poolv2 are Bitcoin nodes, and
 there are no Bitcoin Cash seeds yet. `dns_seed` is ignored and always off on
 `chain = "bitcoin-cash"`, so without `dial_peers` the node only waits for
 peers to dial it.
+
+To run a node that others join, keep `listen_address` on all interfaces
+(`/ip4/0.0.0.0/tcp/6884`), let TCP port 6884 in through the firewall (and
+the router, if the node is behind one), and publish its address as
+`/dns4/<host name>/tcp/6884` or `/ip4/<public IP>/tcp/6884`. Joining nodes
+put that address in their `dial_peers`; once connected they also learn
+other peers from it.
 
 ### Donation and pool fee
 
