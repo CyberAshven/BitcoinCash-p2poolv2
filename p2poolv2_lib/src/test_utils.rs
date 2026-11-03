@@ -89,6 +89,8 @@ use crate::stratum::server::StratumContext;
 #[cfg(test)]
 use crate::stratum::session::{EXTRANONCE1_SIZE, EXTRANONCE2_SIZE};
 #[cfg(test)]
+use crate::stratum::sv2::payout_outputs::{RequestPayoutOutputs, RequestPayoutOutputsSuccess};
+#[cfg(test)]
 use crate::stratum::sv2::{Declaration, DeclaredJob, encode_message};
 #[cfg(test)]
 use crate::stratum::sv2::{NoiseTransport, Sv2Message, decode_plain_frames};
@@ -266,6 +268,16 @@ impl TestSv2Client {
 
     /// Read the expected message, allowing unsolicited mining job notifications.
     pub(crate) async fn receive(&mut self, expected_type: u8) -> Vec<u8> {
+        self.receive_extension(0, expected_type).await
+    }
+
+    /// Read the expected message of `extension_type`, 0 for the base
+    /// protocol, allowing unsolicited mining job notifications.
+    pub(crate) async fn receive_extension(
+        &mut self,
+        extension_type: u16,
+        expected_type: u8,
+    ) -> Vec<u8> {
         timeout(Duration::from_secs(5), async {
             loop {
                 self.stream
@@ -276,19 +288,25 @@ impl TestSv2Client {
                 match self.decoder.next_transport_frame(state).unwrap() {
                     Decrypted::Frame(mut frame, state) => {
                         self.decrypt = Some(state);
-                        if frame.header().msg_type() == expected_type {
+                        let header = frame.header();
+                        if header.ext_type_without_channel_msg() == extension_type
+                            && header.msg_type() == expected_type
+                        {
                             return frame.payload().to_vec();
                         }
                         assert!(
-                            matches!(
-                                frame.header().msg_type(),
-                                MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH
-                                    | MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB
-                                    | MESSAGE_TYPE_NEW_MINING_JOB
-                                    | MESSAGE_TYPE_SET_TARGET
-                            ),
-                            "unexpected SV2 message {} while waiting for {expected_type}",
-                            frame.header().msg_type()
+                            header.ext_type_without_channel_msg() == 0
+                                && matches!(
+                                    header.msg_type(),
+                                    MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH
+                                        | MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB
+                                        | MESSAGE_TYPE_NEW_MINING_JOB
+                                        | MESSAGE_TYPE_SET_TARGET
+                                ),
+                            "unexpected SV2 message {:#06x}/{} while waiting for \
+                             {extension_type:#06x}/{expected_type}",
+                            header.ext_type_without_channel_msg(),
+                            header.msg_type()
                         );
                     }
                     Decrypted::Incomplete(_, state) => self.decrypt = Some(state),
@@ -740,11 +758,45 @@ fn test_bch_prepared_with_weights(
 fn test_bch_prepared_with_weights_and_cuts(
     template: BlockTemplate,
     weights: HashMap<PayoutAddress, u128>,
+    donation: (Option<PayoutAddress>, Option<u16>),
+    fee: (Option<PayoutAddress>, Option<u16>),
+    merge_tokens: Option<Arc<TokenSet>>,
+) -> Arc<PreparedNotifyParams> {
+    test_bch_prepared_on(
+        BlockHash::from_byte_array([0x33; 32]),
+        template,
+        weights,
+        donation,
+        fee,
+        merge_tokens,
+    )
+}
+
+/// [`test_bch_prepared`] built on the share `anchor` instead: the params a
+/// node publishes for the same template once a new share arrives.
+#[cfg(test)]
+pub(crate) fn test_bch_prepared_on_anchor(anchor: BlockHash) -> Arc<PreparedNotifyParams> {
+    let prepared = test_bch_prepared();
+    test_bch_prepared_on(
+        anchor,
+        prepared.template().as_ref().clone(),
+        prepared.pplns_weights().unwrap().clone(),
+        (None, None),
+        (None, None),
+        None,
+    )
+}
+
+/// [`test_bch_prepared_with_weights_and_cuts`] on the share `anchor`.
+#[cfg(any(test, feature = "test-utils"))]
+fn test_bch_prepared_on(
+    anchor: BlockHash,
+    template: BlockTemplate,
+    weights: HashMap<PayoutAddress, u128>,
     (donation_address, donation): (Option<PayoutAddress>, Option<u16>),
     (fee_address, fee): (Option<PayoutAddress>, Option<u16>),
     merge_tokens: Option<Arc<TokenSet>>,
 ) -> Arc<PreparedNotifyParams> {
-    let anchor = BlockHash::from_byte_array([0x33; 32]);
     let payout_split =
         PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, merge_tokens.is_some());
     let outputs = build_pplns_outputs(
@@ -953,6 +1005,116 @@ pub(crate) fn test_bch_custom_job_with_leaves(
             declaration: full.then_some(declaration),
         },
     )
+}
+
+/// The `RequestPayoutOutputs` payload a Job Declaration client sends for
+/// `token` before declaring a job on `template`: the template's height,
+/// previous block hash and bits, the `value` its coinbase pays out, and its
+/// own scriptSig `prefix`.
+#[cfg(test)]
+pub(crate) fn test_payout_outputs_request(
+    request_id: u32,
+    token: &[u8],
+    template: &BlockTemplate,
+    value: u64,
+    prefix: &[u8],
+) -> Vec<u8> {
+    let prev_hash = BlockHash::from_str(&template.previousblockhash)
+        .unwrap()
+        .to_byte_array();
+    binary_sv2::to_bytes(RequestPayoutOutputs {
+        request_id,
+        mining_job_token: B0255::new(token).unwrap(),
+        available_payout_value: value,
+        height: template.height,
+        prev_hash: U256::new(&prev_hash).unwrap(),
+        nbits: CompactTarget::from_unprefixed_hex(&template.bits)
+            .unwrap()
+            .to_consensus(),
+        coinbase_prefix: B0255::new(prefix).unwrap(),
+    })
+    .unwrap()
+}
+
+/// The `SetCustomMiningJob` a Job Declaration client that knows nothing of
+/// P2Pool's coinbase builds from `success`, a `RequestPayoutOutputs.Success`:
+/// the reply's coinbase version, input sequence, lock time and outputs, its
+/// own scriptSig `prefix`, and its template's header fields with the Merkle
+/// path over its own `transactions`.
+#[cfg(test)]
+pub(crate) fn test_custom_job_from_payout_outputs(
+    success: &RequestPayoutOutputsSuccess,
+    token: &[u8],
+    template: &BlockTemplate,
+    prefix: &[u8],
+    transactions: &[Transaction],
+) -> Vec<u8> {
+    let mut selected = template.clone();
+    selected.light = None;
+    selected.transactions = transactions
+        .iter()
+        .map(|transaction| TemplateTransaction {
+            data: hex::encode(serialize(transaction)),
+            txid: transaction.compute_txid().to_string(),
+            hash: transaction.compute_wtxid().to_string(),
+            depends: vec![],
+            fee: 0,
+            sigops: 0,
+            weight: 0,
+        })
+        .collect();
+    let path_hashes = build_merkle_branches_for_template(&selected)
+        .unwrap()
+        .into_iter()
+        .map(|hash| hash.to_byte_array())
+        .collect::<Vec<_>>();
+    let path = path_hashes
+        .iter()
+        .map(|hash| U256::new(hash).unwrap())
+        .collect();
+    let prev_hash = BlockHash::from_str(&template.previousblockhash)
+        .unwrap()
+        .to_byte_array();
+    binary_sv2::to_bytes(SetCustomMiningJob {
+        channel_id: 1,
+        request_id: 9,
+        token: B0255::new(token).unwrap(),
+        version: template.version as u32,
+        prev_hash: U256::new(&prev_hash).unwrap(),
+        min_ntime: template.curtime,
+        nbits: CompactTarget::from_unprefixed_hex(&template.bits)
+            .unwrap()
+            .to_consensus(),
+        coinbase_tx_version: success.coinbase_tx_version,
+        coinbase_prefix: B0255::new(prefix).unwrap(),
+        coinbase_tx_input_n_sequence: success.coinbase_tx_input_n_sequence,
+        coinbase_tx_outputs: success.coinbase_tx_outputs,
+        coinbase_tx_locktime: success.coinbase_tx_locktime,
+        merkle_path: Seq0255::new(path).unwrap(),
+    })
+    .unwrap()
+}
+
+/// The coinbase prefix and suffix around a 12-byte extranonce that a Job
+/// Declaration client declares for `request`, as SV2 lays a coinbase out:
+/// the version, one null-outpoint input whose scriptSig is the request's
+/// prefix then the extranonce, the sequence, the outputs and the lock time.
+#[cfg(test)]
+pub(crate) fn test_declared_coinbase_parts(request: &SetCustomMiningJob) -> (Vec<u8>, Vec<u8>) {
+    let script_prefix = request.coinbase_prefix.as_bytes();
+    let mut prefix = Vec::with_capacity(42 + script_prefix.len());
+    prefix.extend_from_slice(&request.coinbase_tx_version.to_le_bytes());
+    prefix.push(1);
+    prefix.extend_from_slice(&[0; 32]);
+    prefix.extend_from_slice(&u32::MAX.to_le_bytes());
+    prefix.push(u8::try_from(script_prefix.len() + 12).unwrap());
+    prefix.extend_from_slice(script_prefix);
+    let outputs = request.coinbase_tx_outputs.as_bytes();
+    let mut suffix = Vec::with_capacity(8 + outputs.len());
+    suffix.extend_from_slice(&request.coinbase_tx_input_n_sequence.to_le_bytes());
+    suffix.extend_from_slice(outputs);
+    suffix.extend_from_slice(&request.coinbase_tx_locktime.to_le_bytes());
+    (prefix, suffix)
 }
 
 /// A mined regtest parent of a declared job committing two tokens at output

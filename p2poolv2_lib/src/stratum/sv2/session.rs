@@ -9,19 +9,24 @@
 //! presented on the second.
 
 use super::custom_job::declared_leaves;
+use super::payout_outputs::{
+    INVALID_MINING_JOB_TOKEN, PAYOUT_OUTPUTS_UNAVAILABLE, PayoutIdentity, REQUEST_PAYOUT_OUTPUTS,
+    RequestPayoutOutputs, answer_frame, prepare_payout_outputs, stale_frame,
+};
 use super::sort_ctor;
 use crate::shares::auxpow::Disclosure;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::stratum::parse_password::{
     log_unknown_options, parse_miner_donation, split_user_identity,
 };
+use crate::stratum::work::coinbase::declared_reservation_outputs;
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use binary_sv2::{B064K, B0255, Deserialize, Seq064K, Str0255};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::rand::random;
-use bitcoin::{Transaction, TxOut};
+use bitcoin::{BlockHash, Transaction, TxOut};
 use codec_sv2::{Decoded, Decoder, Encoder};
 use common_messages_sv2::{
     MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
@@ -51,7 +56,7 @@ use mining_sv2::{
     MESSAGE_TYPE_UPDATE_CHANNEL, MESSAGE_TYPE_UPDATE_CHANNEL_ERROR, SetCustomMiningJob,
     SetCustomMiningJobError,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -64,6 +69,10 @@ const WORK_SELECTION_FLAG: u32 = 0b10;
 const MAX_JOB_TOKENS: usize = 64;
 const TOKEN_LIFETIME: Duration = Duration::from_secs(120);
 const MAX_DECLARED_TRANSACTION_BYTES: usize = 64 * 1024 * 1024;
+/// Open tokens one connection may hold requested payout outputs for, as it
+/// may hold eight pending declarations. A client asks once per job, just
+/// before declaring it, so a ninth is not following the extension.
+const MAX_PAYOUT_SETS: usize = 8;
 
 /// Which Job Declaration mode a connection negotiated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +110,37 @@ impl PoolTransactionCache {
     pub(crate) fn clear_prepared(&self) {
         *self.prepared.write().expect("pool prepared template lock") = None;
     }
+
+    /// The share new tokens are anchored on, while a template is published.
+    fn anchor(&self) -> Option<BlockHash> {
+        self.prepared
+            .read()
+            .expect("pool prepared template lock")
+            .as_ref()
+            .map(|prepared| prepared.prev_share_blockhash())
+    }
+
+    /// What new tokens' payouts rest on, while a template is published
+    /// (`payout_basis`).
+    fn payout_basis(&self) -> Option<PayoutBasis> {
+        self.prepared
+            .read()
+            .expect("pool prepared template lock")
+            .as_deref()
+            .map(payout_basis)
+    }
+}
+
+/// The share and the BCH block a token's payouts rest on. A token allocated
+/// on another pair answers `stale-payout-outputs`, so a change of either
+/// sends `PayoutOutputsStale`.
+type PayoutBasis = (BlockHash, String);
+
+fn payout_basis(prepared: &PreparedNotifyParams) -> PayoutBasis {
+    (
+        prepared.prev_share_blockhash(),
+        prepared.template().previousblockhash.clone(),
+    )
 }
 
 impl Default for PoolTransactionCache {
@@ -139,6 +179,9 @@ pub(crate) struct Declaration {
 struct JobToken {
     allocated: Instant,
     prepared: Option<Arc<PreparedNotifyParams>>,
+    /// Whom the token's requested payout outputs pay; `None` when its
+    /// `user_identifier` names no payout address and share owner.
+    identity: Option<PayoutIdentity>,
     state: TokenState,
 }
 
@@ -179,6 +222,13 @@ impl JobRegistry {
     fn expire_tokens(&mut self) {
         self.tokens
             .retain(|_, token| token.allocated.elapsed() < TOKEN_LIFETIME);
+    }
+
+    /// `token` while it is open: allocated, and neither declared nor used.
+    fn open_token(&self, token: &[u8]) -> Option<&JobToken> {
+        self.tokens
+            .get(token)
+            .filter(|token| matches!(token.state, TokenState::Open { .. }))
     }
 
     /// Claim a token exactly once; an invalid custom job needs a new allocation.
@@ -248,6 +298,15 @@ pub struct Sv2Connection {
     /// Request ids are chosen by each client, so two connections can use the
     /// same one; the token is looked up here, never across the registry.
     pending_declarations: HashMap<u32, Vec<u8>>,
+    /// The connection negotiated the requested payout outputs extension
+    /// (`0x5052`, `super::payout_outputs`).
+    payout_outputs: bool,
+    /// The share and BCH block new tokens rested on when this connection was
+    /// last told, by the grant or by `PayoutOutputsStale`.
+    payout_basis: Option<PayoutBasis>,
+    /// Open tokens this connection was given payout outputs for since then,
+    /// at most [`MAX_PAYOUT_SETS`].
+    payout_sets: HashSet<Vec<u8>>,
 }
 
 impl Sv2Connection {
@@ -261,6 +320,9 @@ impl Sv2Connection {
             mining: false,
             work_selection: false,
             pending_declarations: HashMap::with_capacity(4),
+            payout_outputs: false,
+            payout_basis: None,
+            payout_sets: HashSet::with_capacity(MAX_PAYOUT_SETS),
         }
     }
 
@@ -308,6 +370,88 @@ impl Sv2Connection {
             .take_job(token)
     }
 
+    /// Grant the requested payout outputs extension (`0x5052`) to a Job
+    /// Declaration connection on a Bitcoin Cash node, the only one whose
+    /// tokens carry P2Pool job terms. Returns whether it was granted.
+    pub(crate) fn grant_payout_outputs(&mut self) -> bool {
+        let registry = self.registry.lock().expect("job registry lock");
+        if self.mode.is_none() || registry.merge_mining.is_none() {
+            return false;
+        }
+        self.payout_basis = registry.cache.payout_basis();
+        drop(registry);
+        self.payout_outputs = true;
+        true
+    }
+
+    /// Whether this connection negotiated the requested payout outputs.
+    pub(crate) fn has_payout_outputs(&self) -> bool {
+        self.payout_outputs
+    }
+
+    /// Answer a requested payout outputs message on a connection that
+    /// negotiated the extension. A client sends only `RequestPayoutOutputs`;
+    /// any other message of the extension closes the connection, and so does
+    /// a request for a token past [`MAX_PAYOUT_SETS`], as a declaration past
+    /// its limit does. Every other refusal is a `RequestPayoutOutputs.Error`.
+    pub(crate) fn handle_payout_outputs(
+        &mut self,
+        message_type: u8,
+        payload: &mut [u8],
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if message_type != REQUEST_PAYOUT_OUTPUTS {
+            return Err(format!(
+                "unsupported requested payout outputs message type {message_type}"
+            ));
+        }
+        let request =
+            RequestPayoutOutputs::from_bytes(payload).map_err(|error| error.to_string())?;
+        let token = request.mining_job_token.as_bytes().to_vec();
+        let mut registry = self.registry.lock().expect("job registry lock");
+        registry.expire_tokens();
+        self.payout_sets
+            .retain(|token| registry.open_token(token).is_some());
+        if self.payout_sets.len() >= MAX_PAYOUT_SETS && !self.payout_sets.contains(&token) {
+            return Err("payout output request limit reached".into());
+        }
+        let terms = registry
+            .open_token(&token)
+            .map(|open| (open.prepared.clone(), open.identity.clone()));
+        let anchor = registry.cache.anchor();
+        drop(registry);
+        // The build runs outside the registry lock: a large window's payouts
+        // must not hold up other connections' tokens.
+        let answer = match terms {
+            None => Err(INVALID_MINING_JOB_TOKEN),
+            Some((None, _)) => Err(PAYOUT_OUTPUTS_UNAVAILABLE),
+            Some((Some(prepared), identity)) => {
+                prepare_payout_outputs(&request, &prepared, identity.as_ref(), anchor)
+            }
+        };
+        if answer.is_ok() {
+            self.payout_sets.insert(token);
+        }
+        Ok(vec![answer_frame(&request, answer)?])
+    }
+
+    /// What a newly published template sends on this connection:
+    /// `PayoutOutputsStale` when it negotiated the requested payout outputs
+    /// and new tokens now rest on another share or BCH block. The sets given
+    /// for earlier tokens are stale from then on, and no longer count towards
+    /// [`MAX_PAYOUT_SETS`].
+    pub(crate) fn on_template(
+        &mut self,
+        prepared: &PreparedNotifyParams,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let basis = Some(payout_basis(prepared));
+        if !self.payout_outputs || self.payout_basis == basis {
+            return Ok(Vec::new());
+        }
+        self.payout_basis = basis;
+        self.payout_sets.clear();
+        Ok(vec![stale_frame()?])
+    }
+
     /// Handle one setup, Job Declaration, or custom-job message.
     pub fn handle_message(
         &mut self,
@@ -326,6 +470,7 @@ impl Sv2Connection {
                 self.on_allocate(
                     request.request_id,
                     &request.user_identifier.as_utf8_or_hex(),
+                    None,
                 )
             }
             MESSAGE_TYPE_DECLARE_MINING_JOB => {
@@ -400,6 +545,7 @@ impl Sv2Connection {
                 self.mining = true;
                 self.work_selection = has_work_selection(setup.flags);
                 self.mode = None;
+                self.payout_outputs = false;
                 self.respond(
                     SetupConnectionSuccess {
                         used_version,
@@ -423,13 +569,20 @@ impl Sv2Connection {
     /// node's own without one. The channel that later mines the job must
     /// choose the same donation (`MiningChannels::install_custom_job`).
     ///
+    /// The token remembers `identity`, the payout address and share owner
+    /// `user_identifier` names as a mining channel's identity, which its
+    /// requested payout outputs pay (`super::payout_outputs`). Without one
+    /// the token is allocated all the same, and a request for its outputs
+    /// is answered `invalid-request`.
+    ///
     /// The Job Declaration Protocol has no error reply to this message, so a
     /// bad `donation=` value, or one on a node without a Bitcoin Cash share
     /// chain, closes the connection with the reason in the node's log.
-    fn on_allocate(
+    pub(crate) fn on_allocate(
         &mut self,
         request_id: u32,
         user_identifier: &str,
+        identity: Option<PayoutIdentity>,
     ) -> Result<Vec<Vec<u8>>, String> {
         let mode = self.mode.ok_or("job token requested before setup")?;
         let (_, options) = split_user_identity(user_identifier);
@@ -470,7 +623,7 @@ impl Sv2Connection {
                 )
                 .map_err(|error| error.to_string())?;
             let tree_script = payouts.tree_output().map(|output| output.script_pubkey);
-            let outputs = payouts
+            let mut outputs = payouts
                 .outputs
                 .iter()
                 .map(|pair| pair.address.script_pubkey())
@@ -480,6 +633,14 @@ impl Sv2Connection {
                     script_pubkey,
                 })
                 .collect::<Vec<_>>();
+            if self.payout_outputs {
+                // The requested payout outputs answer the whole output list,
+                // so its reservation holds output 0, the padding and the
+                // commitment as well, each at its largest.
+                let (output_zero, tail) = declared_reservation_outputs();
+                outputs.insert(0, output_zero);
+                outputs.extend(tail);
+            }
             let token = prepared
                 .mining_job_token(random(), SystemTimeProvider.seconds_since_epoch() as u32)
                 .map_err(|error| error.to_string())?;
@@ -492,6 +653,7 @@ impl Sv2Connection {
             JobToken {
                 allocated: Instant::now(),
                 prepared,
+                identity,
                 state: TokenState::Open { mode },
             },
         );

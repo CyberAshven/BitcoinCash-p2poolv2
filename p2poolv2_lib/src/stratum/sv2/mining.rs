@@ -24,6 +24,7 @@
 //! `bchtest:qq...,p2p=tp2pool...` on chipnet.
 
 use super::custom_job::validate_custom_job;
+use super::payout_outputs::PayoutIdentity;
 use super::session::DeclaredJob;
 use super::session::{encode_extension_frame, encode_frame, string_field};
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
@@ -756,6 +757,31 @@ impl MiningChannels {
             frames.extend(self.job_frames(channel_id, &prepared)?);
         }
         Ok(frames)
+    }
+
+    /// The payout address and share owner a channel opened with
+    /// `user_identity` mines for, by the rules [`Self::open`] applies: the
+    /// payout address before the worker, and the owner from `p2p=` or the
+    /// node's configured share address. `None` when either is missing or
+    /// refused, as the channel would be. A Job Declaration token remembers
+    /// it for the payout outputs it is asked for (`super::payout_outputs`).
+    pub(crate) fn payout_identity(&self, user_identity: &str) -> Option<PayoutIdentity> {
+        let (username, options) = split_user_identity(user_identity);
+        let validated = validate_username::validate_for_chain(
+            username,
+            self.ctx.validate_addresses,
+            self.ctx.network,
+            self.ctx.share_chain,
+            self.ctx
+                .bch_share_network
+                .map(BitcoinCashNetwork::from_share_network),
+        )
+        .ok()?;
+        let owner = self.resolve_share_owner(options).ok().flatten()?;
+        Some(PayoutIdentity {
+            payout: validated.parsed_address?,
+            owner,
+        })
     }
 
     /// Owner of a channel's shares from the node's configured share address

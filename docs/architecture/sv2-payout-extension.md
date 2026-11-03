@@ -1,9 +1,10 @@
 # Proposal: P2Pool payouts for standard SV2 Job Declaration clients
 
 **Status: option B approved by the owner on 2026-11-03, specified in
-section 7; not built yet.** It changes no share-chain rule. Option A would
-change several and is not recommended. Nothing is posted on sv2-spec
-without the owner's OK.
+section 7. The pool side is built (`stratum::sv2::payout_outputs`); the
+chipnet evidence at the end of section 7 is not done yet.** It changes no
+share-chain rule. Option A would change several and is not recommended.
+Nothing is posted on sv2-spec without the owner's OK.
 
 ## 1. Goal
 
@@ -120,6 +121,13 @@ favour:
   vector summing exactly to that value out, single use per declared job,
   sized by the reservation made at token allocation, with a
   `stale-payout-outputs` error.
+
+One pool built the first shape: Blitzpool implements #195's
+`RequestCoinbaseOutputs` in TypeScript on an open, unmerged branch
+([warioishere/blitzpool PR #115](https://github.com/warioishere/blitzpool/pull/115),
+last updated 2026-06-10). For #202 there is only its author's comment of
+2026-06-25 that Blitzpool runs that spec; no code for `RequestPayoutOutputs`
+was found.
 
 Option B takes #202's messages, single use, reservation and stale error
 as they are, so `/jd_prepare`'s bytes travel over the Job Declaration
@@ -271,23 +279,29 @@ Every frame carries `extension_type = 0x5052`.
   order does not matter, and the client may add outputs the base protocol
   allows.
 - **With `EXACT_OUTPUTS`,** the coinbase's outputs are exactly these, in
-  this order, with no others. Its version, input sequence and lock time
+  this order. Only a witness commitment, on a chain that has one, may
+  follow them; BCH has none. Its version, input sequence and lock time
   are the ones given, and its scriptSig is `coinbase_prefix` followed
   directly by the extranonce. `available_payout_value` must equal the
   template's `coinbase_tx_value_remaining`. A client whose template needs
-  outputs of its own cannot use the set and moves to its next pool.
+  other outputs of its own cannot use the set and moves to its next pool.
 - **Validation.** The pool rejects a declared or custom job whose coinbase
-  differs from the set, with `invalid-payout-outputs`. It may recompute
-  the set rather than store it; a token is used for one job.
+  differs from the set, with its usual `DeclareMiningJob.Error` or
+  `SetCustomMiningJob.Error`. It may recompute the set rather than store
+  it; a token is used for one job.
 - **Staleness.** When the pool's payouts move, it sends
   `PayoutOutputsStale`. Sets for tokens allocated before it are stale: the
-  client allocates a new token and asks again. A job built on a stale set
-  may be rejected with `stale-payout-outputs`.
+  client allocates a new token and asks again. A request or job on a stale
+  token may get `stale-payout-outputs`, which is an honest race, not a
+  refusal: the client asks again with a new token, as 0x0003 treats its own
+  stale code. Only `stale-payout-outputs` for a token allocated after the
+  last `PayoutOutputsStale`, again and again, counts as a refusal.
 - **Errors.** `invalid-mining-job-token`, `stale-payout-outputs` (the token
   or the template no longer matches what the pool can pay),
   `invalid-request`, `payout-outputs-too-large` and
-  `payout-outputs-unavailable`. Every refusal is an ordinary SV2 error, and
-  the client fails over to its next pool, ending in solo mining.
+  `payout-outputs-unavailable`. Apart from the stale race above, every
+  refusal is an ordinary SV2 error, and the client fails over to its next
+  pool, ending in solo mining.
 
 ### 7.5 How a P2Pool node answers
 
@@ -301,9 +315,15 @@ Every frame carries `extension_type = 0x5052`.
   `/jd_prepare` builds. That is the exact empty merge-mining commitment as
   output 0, the PPLNS outputs, padding, and the share commitment last.
   `EXACT_OUTPUTS` is always set, with version 2, sequence `0xfffffffe` and
-  lock time height − 1.
+  lock time height − 1. A job that differs is refused as any declared job
+  is, for example `invalid-pplns-outputs` or `invalid-coinbase-layout`.
+- **Reservation.** On a connection that negotiated the extension, the
+  allocation's zero-value outputs list output 0, the payout scripts, the
+  largest padding and the commitment, so they bound every answered set.
+  Other connections get the payout scripts alone, as before.
 - **Staleness.** The node sends `PayoutOutputsStale` whenever the share it
-  anchors new tokens on changes, about every 10 seconds.
+  anchors new tokens on, or the BCH block its template builds on, changes:
+  about every 10 seconds.
 - **Anyone can check it.** The outputs are a function of the share chain,
   the request and the identity, so every honest node holding the share
   chain gives the same answer, and anyone holding it can recompute one.
