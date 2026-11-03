@@ -203,6 +203,9 @@ pub fn OverviewPage() -> impl IntoView {
     let pool_visible = RwSignal::new(crate::app::stored_flag("p2pool.pool-visible"));
     let local_visible = RwSignal::new(crate::app::stored_flag("p2pool.local-visible"));
     let network_visible = RwSignal::new(crate::app::stored_opt_in_flag("p2pool.network-visible"));
+    // The found-block diamonds, on by default like the pool and node
+    // series: [stored_flag] reads only `"0"` as off.
+    let blocks_visible = RwSignal::new(crate::app::stored_flag("p2pool.blocks-visible"));
     // The chips write the flip back so the next visit keeps it. `"1"`/`"0"`
     // suits both flags: [stored_flag] reads only `"0"` as off, and
     // [stored_opt_in_flag] reads only `"1"` as on.
@@ -245,6 +248,31 @@ pub fn OverviewPage() -> impl IntoView {
     let history = Memo::new(move |_| {
         loaded(&hashrate, |hashrate| {
             capped_history(hashrate.history.clone())
+        })
+        .unwrap_or_default()
+    });
+    // The found blocks inside the chart's window, oldest first, for the
+    // diamonds. The window is the selected range around the now-ticking
+    // clock (a tick re-filters so aging blocks drop off, as the sample
+    // window does); a zoom is left to the chart, which drops blocks
+    // outside its own frame when it snaps them to the line.
+    let chart_blocks = Memo::new(move |_| {
+        let seconds = window.get();
+        let now = clock.get();
+        loaded(&blocks, |blocks| {
+            blocks
+                .iter()
+                .filter(|block| {
+                    block.bitcoin_time >= now.saturating_sub(seconds) && block.bitcoin_time <= now
+                })
+                .map(|block| FoundBlock {
+                    bitcoin_height: block.bitcoin_height,
+                    bitcoin_blockhash: block.bitcoin_blockhash.clone(),
+                    share_blockhash: block.share_blockhash.clone(),
+                    bitcoin_time: block.bitcoin_time,
+                    miner_bitcoin_address: block.miner_bitcoin_address.clone(),
+                })
+                .collect::<Vec<FoundBlock>>()
         })
         .unwrap_or_default()
     });
@@ -401,11 +429,13 @@ pub fn OverviewPage() -> impl IntoView {
         view! {
             <HashrateChart
                 history=history
+                blocks=chart_blocks
                 range=zoom
                 label=label
                 pool_visible=pool_visible
                 local_visible=local_visible
                 network_visible=network_visible
+                blocks_visible=blocks_visible
             />
         }
     };
@@ -441,6 +471,16 @@ pub fn OverviewPage() -> impl IntoView {
                 >
                     <span class="legend-dot network"></span>
                     "Network"
+                </button>
+                <button
+                    class="legend-chip"
+                    class:off=move || !blocks_visible.get()
+                    type="button"
+                    aria-pressed=move || blocks_visible.get().to_string()
+                    on:click=flip(blocks_visible, "p2pool.blocks-visible")
+                >
+                    <span class="legend-dot blocks"></span>
+                    "Blocks"
                 </button>
             </span>
         }

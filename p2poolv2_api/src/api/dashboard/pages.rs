@@ -811,10 +811,17 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             p.empty { "All series hidden. Click a legend chip to show one." }
         }
     } else {
+        // The chip's turn-off reaches the chart as an empty list: no
+        // diamonds and no Block rows, as the replica does for `?blocks=0`.
+        let chart_blocks: &[ChartBlock] = if view.blocks_on {
+            &view.chart_blocks
+        } else {
+            &[]
+        };
         line_chart(
             &format!("Hashrate over the last {period}"),
             &shown,
-            &view.chart_blocks,
+            chart_blocks,
             fmt_hashrate,
             fmt_day_time,
             fmt_hour_tick,
@@ -1806,6 +1813,39 @@ mod tests {
         assert!(page.contains("All series hidden. Click a legend chip to show one."));
         assert!(!page.contains("<svg"));
         assert!(!page.contains("Collecting data"));
+    }
+
+    #[test]
+    fn the_blocks_turn_off_drops_the_diamonds_from_the_chart() {
+        let mut view = empty_overview();
+        view.samples = vec![
+            Sample {
+                time: 940,
+                pool: Some(100.0),
+                local: Some(50.0),
+                network: None,
+            },
+            Sample {
+                time: 1_060,
+                pool: Some(200.0),
+                local: Some(60.0),
+                network: None,
+            },
+        ];
+        view.chart_blocks = vec![ChartBlock {
+            height: 42,
+            time: 1_000,
+        }];
+        view.blocks_on = true;
+        let shown = overview(&view).into_string();
+        assert!(shown.contains("class=\"cube\""));
+        assert!(shown.contains("Block 42 \u{b7}"));
+        // The chip's turn-off empties the chart's block list: no marker
+        // and no tooltip row survive it, as in the replica.
+        view.blocks_on = false;
+        let hidden = overview(&view).into_string();
+        assert!(!hidden.contains("class=\"cube\""));
+        assert!(!hidden.contains("Block 42"));
     }
 
     #[test]

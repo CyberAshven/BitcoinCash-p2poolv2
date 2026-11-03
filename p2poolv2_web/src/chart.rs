@@ -10,7 +10,10 @@
 //! figure carries CSS-only hit zones (`.chart-hit`) whose styled tip names
 //! the nearest sample. Each zone also hides tracer circles (`.tracer`) at
 //! that nearest sample, which `pages.css` reveals while the zone's strip is
-//! hovered, as the node's chart does. The value axis is log10 over whole
+//! hovered, as the node's chart does. Found blocks ride the pool line as
+//! green diamonds, named in every tooltip whose strip reaches one, and the
+//! Blocks chip turns them off as the node's `?blocks=0` does. The value
+//! axis is log10 over whole
 //! decades (capped at MAX_DECADES), as the node's chart draws it, so the
 //! network hashrate line (TH/s) shares the plot with the pool (GH/s) and
 //! node (MH/s) lines without flattening them. The geometry is pure and unit
@@ -18,7 +21,7 @@
 //! wheel zooms around the cursor, dragging selects a range to zoom into, and
 //! double-click resets.
 
-use crate::api::HashratePoint;
+use crate::api::{FoundBlock, HashratePoint};
 use crate::format::{fmt_day_time, fmt_hashrate};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -36,6 +39,12 @@ const PAD_BOTTOM: f64 = 26.0;
 const MAX_DECADES: i32 = 9;
 /// Horizontal width of one hit zone, in viewBox units.
 const STEP_PX: f64 = 8.0;
+/// Edge of one found-block diamond (a square rotated 45 degrees), in
+/// viewBox units, as on the node's chart.
+const CUBE_SIZE: f64 = 5.6;
+/// Half the diamond's diagonal: its reach past the centre, in viewBox
+/// units. A hit strip half that wide plus this reaches a marker.
+const CUBE_HALF_DIAG: f64 = CUBE_SIZE * std::f64::consts::SQRT_2 / 2.0;
 /// Narrowest zoom, in seconds: samples land once a minute, and a window
 /// of three keeps at least two in view so the lines always draw (a
 /// polyline of one point paints nothing).
@@ -130,13 +139,62 @@ impl Frame {
     }
 }
 
-/// What one render draws: each series' points and the frame around them.
+/// A found block drawn as a diamond: its height for the `<title>`, its
+/// time (seconds) clamped into the frame, and the marker's centre in
+/// viewBox units. Blocks outside the drawn window are dropped rather
+/// than drawn off the axis, as on the node's chart.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlottedBlock {
+    pub height: u64,
+    pub time: f64,
+    pub cx: f64,
+    pub cy: f64,
+}
+
+/// The found blocks of `blocks` inside `frame`, each snapped to the
+/// pool line at its time (node, then network, as fallbacks) for its
+/// height. `blocks` is skipped as a whole when no series is drawn:
+/// there is no line to snap to.
+fn window_blocks(
+    blocks: &[FoundBlock],
+    frame: &Frame,
+    pool: &[(u64, f64)],
+    local: &[(u64, f64)],
+    network: &[(u64, f64)],
+) -> Vec<PlottedBlock> {
+    let Some(points) = [pool, local, network]
+        .into_iter()
+        .find(|series| !series.is_empty())
+    else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter_map(|block| {
+            let time = block.bitcoin_time as f64;
+            if !(frame.start..=frame.end).contains(&time) {
+                return None;
+            }
+            let (_, value) = nearest(points, time)?;
+            Some(PlottedBlock {
+                height: block.bitcoin_height,
+                time,
+                cx: frame.x(time),
+                cy: frame.y(value),
+            })
+        })
+        .collect()
+}
+
+/// What one render draws: each series' points, the frame around them and
+/// the found blocks marked on it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Drawn {
     pub frame: Frame,
     pub pool: Vec<(u64, f64)>,
     pub local: Vec<(u64, f64)>,
     pub network: Vec<(u64, f64)>,
+    pub blocks: Vec<PlottedBlock>,
 }
 
 /// One series of `history` within `range` (all of it for `None`), averaged
@@ -183,9 +241,12 @@ fn log_domain(values: impl Iterator<Item = f64>) -> (i32, i32) {
 /// The chart for `history` zoomed to `range`, or `None` when there is
 /// nothing to draw. The value axis spans the drawn points' whole decades,
 /// as on the node's chart. A series turned off contributes no points, so
-/// the frame rescales to what is actually shown.
+/// the frame rescales to what is actually shown. `blocks` are the found
+/// blocks marked as diamonds inside the frame; one outside it (a zoom or
+/// a shorter history) is dropped rather than drawn off the axis.
 pub fn draw(
     history: &[HashratePoint],
+    blocks: &[FoundBlock],
     range: Option<(f64, f64)>,
     pool_on: bool,
     local_on: bool,
@@ -211,16 +272,19 @@ pub fn draw(
     let last = all().map(|(time, _)| *time).max()?;
     let (start, end) = range.unwrap_or((first as f64, last as f64));
     let (log_floor, log_top) = log_domain(all().map(|(_, value)| *value));
+    let frame = Frame {
+        start,
+        end,
+        log_floor,
+        log_top,
+    };
+    let blocks = window_blocks(blocks, &frame, &pool, &local, &network);
     Some(Drawn {
-        frame: Frame {
-            start,
-            end,
-            log_floor,
-            log_top,
-        },
+        frame,
         pool,
         local,
         network,
+        blocks,
     })
 }
 
@@ -431,6 +495,10 @@ struct HitZone {
     pool_nearest: Option<(u64, f64)>,
     local_nearest: Option<(u64, f64)>,
     network_nearest: Option<(u64, f64)>,
+    /// In-window blocks whose marker this zone's strip reaches: their
+    /// heights ride into the tip as `Block height` rows, and the same
+    /// reach tags the markers with this zone number for the hover grow.
+    blocks: Vec<u64>,
 }
 
 /// The hit zones tiling the plot, one per `STEP_PX` step of `fx`.
@@ -438,6 +506,7 @@ fn hit_zones(
     pool: &[(u64, f64)],
     local: &[(u64, f64)],
     network: &[(u64, f64)],
+    window_blocks: &[PlottedBlock],
     frame: &Frame,
 ) -> Vec<HitZone> {
     let plot_width = WIDTH - PAD_LEFT - PAD_RIGHT;
@@ -454,12 +523,22 @@ fn hit_zones(
         } else {
             "at-right"
         };
+        // Blocks whose marker this strip reaches: half the strip plus the
+        // marker's half-diagonal. Their heights ride into the tip (two
+        // nearby blocks then both show), and the same reach tags the
+        // markers so pages.css can grow them on the same hover.
+        let blocks: Vec<u64> = window_blocks
+            .iter()
+            .filter(|block| (block.cx - fx).abs() <= STEP_PX / 2.0 + CUBE_HALF_DIAG)
+            .map(|block| block.height)
+            .collect();
         zones.push(HitZone {
             at_class,
             zone: index + 2,
             pool_nearest,
             local_nearest,
             network_nearest,
+            blocks,
         });
     }
     zones
@@ -468,15 +547,18 @@ fn hit_zones(
 /// The hashrate chart over `history`, oldest first. `label` names it for
 /// screen readers, as the node's chart does. `range` is the zoomed window
 /// the chart draws; `None` shows everything, and the page's reset button
-/// in the header clears it.
+/// in the header clears it. `blocks` are the found blocks drawn as
+/// diamonds on the pool line; the Blocks chip turns them off.
 #[component]
 pub fn HashrateChart(
     #[prop(into)] history: Signal<Vec<HashratePoint>>,
+    #[prop(into)] blocks: Signal<Vec<FoundBlock>>,
     range: RwSignal<Option<(f64, f64)>>,
     label: &'static str,
     #[prop(into)] pool_visible: Signal<bool>,
     #[prop(into)] local_visible: Signal<bool>,
     #[prop(into)] network_visible: Signal<bool>,
+    #[prop(into)] blocks_visible: Signal<bool>,
 ) -> impl IntoView {
     let hover = RwSignal::new(None::<f64>);
     let drag_start = RwSignal::new(None::<f64>);
@@ -487,7 +569,9 @@ pub fn HashrateChart(
             local_visible.get(),
             network_visible.get(),
         );
-        history.with(|points| draw(points, range.get(), pool_on, local_on, network_on))
+        history.with(|points| {
+            blocks.with(|found| draw(points, found, range.get(), pool_on, local_on, network_on))
+        })
     });
     let bounds = move || {
         history.with_untracked(|points| match (points.first(), points.last()) {
@@ -545,6 +629,7 @@ pub fn HashrateChart(
             pool,
             local,
             network,
+            blocks,
         }) = drawn.get()
         else {
             return view! {
@@ -553,6 +638,14 @@ pub fn HashrateChart(
                 </p>
             }
             .into_any();
+        };
+        // The chip's turn-off empties the block list before the zones are
+        // built, so no marker and no tooltip row survive it, as the node's
+        // `?blocks=0` does.
+        let blocks = if blocks_visible.get() {
+            blocks
+        } else {
+            Vec::new()
         };
         // One gridline per decade of the log band: 1 H/s, 10 H/s, ...
         let grid = (frame.log_floor..=frame.log_top)
@@ -624,7 +717,47 @@ pub fn HashrateChart(
             </text>
             {ticks}
         };
-        let zones = hit_zones(&pool, &local, &network, &frame);
+        let zones = hit_zones(&pool, &local, &network, &blocks, &frame);
+        // The found-block diamonds, in window order, carrying the zone
+        // numbers whose strips reach them (pages.css grows a marker on any
+        // of its tagged zones' hover). Drawn between the series dots and the
+        // tracers, so a hovered tracer never covers a marker, and after the
+        // gridlines, so a marker never dims under them.
+        let cubes = blocks
+            .iter()
+            .map(|block| {
+                let tagged: Vec<usize> = zones
+                    .iter()
+                    .filter(|zone| zone.blocks.contains(&block.height))
+                    .map(|zone| zone.zone)
+                    .collect();
+                let data_zone = (!tagged.is_empty()).then(|| {
+                    tagged
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                });
+                let title = format!(
+                    "Block {} \u{b7} {}",
+                    block.height,
+                    fmt_day_time(block.time as u64)
+                );
+                view! {
+                    <rect
+                        class="cube"
+                        data-zone=data_zone
+                        x=format!("{:.1}", block.cx - CUBE_SIZE / 2.0)
+                        y=format!("{:.1}", block.cy - CUBE_SIZE / 2.0)
+                        width=format!("{CUBE_SIZE:.1}")
+                        height=format!("{CUBE_SIZE:.1}")
+                        transform=format!("rotate(45 {:.1} {:.1})", block.cx, block.cy)
+                    >
+                        {title}
+                    </rect>
+                }
+            })
+            .collect_view();
         // A hidden series has no points, but skip its gradient too.
         view! {
             <figure
@@ -650,6 +783,7 @@ pub fn HashrateChart(
                     {pool_shown.then(|| pool_line(&pool, &frame))}
                     {local_shown.then(|| local_line(&local, &frame))}
                     {network_shown.then(|| network_line(&network, &frame))}
+                    {cubes}
                     {selection}
                     {zones
                         .iter()
@@ -717,9 +851,23 @@ pub fn HashrateChart(
                         let network_row = zone.network_nearest.map(|(_, value)| view! {
                             <span class="key network">"Network"</span> <b>{fmt_hashrate(value)}</b>
                         });
+                        // Blocks whose marker this strip reaches: after
+                        // Network, one row each (two nearby blocks then
+                        // both show, since both diamonds sit under the
+                        // cursor).
+                        let block_rows = zone
+                            .blocks
+                            .iter()
+                            .map(|height| {
+                                view! {
+                                    <span class="key blocks">"Block"</span> <b>{height.to_string()}</b>
+                                }
+                            })
+                            .collect::<Vec<_>>();
                         let rows: Vec<_> = [pool_row, local_row, network_row]
                             .into_iter()
                             .flatten()
+                            .chain(block_rows)
                             .collect();
                         let row_count = rows.len();
                         let body = (0..row_count)
@@ -779,6 +927,16 @@ mod tests {
         }
     }
 
+    fn block(height: u64, time: u64) -> FoundBlock {
+        FoundBlock {
+            bitcoin_height: height,
+            bitcoin_blockhash: "00".to_string(),
+            share_blockhash: "00".to_string(),
+            bitcoin_time: time,
+            miner_bitcoin_address: "bchtest:qtest".to_string(),
+        }
+    }
+
     #[test]
     fn test_downsample_keeps_short_series_and_averages_long_ones() {
         let short = vec![(1, 1.0), (2, 3.0)];
@@ -796,18 +954,18 @@ mod tests {
             point(100, 50.0, Some(800.0)),
             point(200, 20.0, None),
         ];
-        let drawn = draw(&history, None, true, true, false).unwrap();
+        let drawn = draw(&history, &[], None, true, true, false).unwrap();
         assert_eq!((drawn.frame.start, drawn.frame.end), (0.0, 200.0));
         // 10 H/s up to 800 H/s: whole decades, one gridline each.
         assert_eq!((drawn.frame.log_floor, drawn.frame.log_top), (1, 3));
         assert_eq!(drawn.local, vec![(100, 800.0)]);
-        let zoomed = draw(&history, Some((150.0, 200.0)), true, true, false).unwrap();
+        let zoomed = draw(&history, &[], Some((150.0, 200.0)), true, true, false).unwrap();
         assert_eq!(
             (zoomed.frame.log_floor, zoomed.frame.log_top),
             (1, 2),
             "the zoomed window only holds the pool's 20.0"
         );
-        assert!(draw(&[], None, true, true, false).is_none());
+        assert!(draw(&[], &[], None, true, true, false).is_none());
     }
 
     #[test]
@@ -817,17 +975,17 @@ mod tests {
             point(100, 50.0, Some(800.0)),
             point(200, 20.0, None),
         ];
-        let pool_only = draw(&history, None, true, false, false).unwrap();
+        let pool_only = draw(&history, &[], None, true, false, false).unwrap();
         // The node's 800.0 no longer sets the band; the pool's 10..50 does.
         assert_eq!((pool_only.frame.log_floor, pool_only.frame.log_top), (1, 2));
         assert!(pool_only.local.is_empty());
-        let node_only = draw(&history, None, false, true, false).unwrap();
+        let node_only = draw(&history, &[], None, false, true, false).unwrap();
         assert!(node_only.pool.is_empty());
         assert_eq!(node_only.local, vec![(100, 800.0)]);
         assert_eq!((node_only.frame.log_floor, node_only.frame.log_top), (2, 3));
         // All off: nothing to draw, which the component turns into its
         // "All series hidden" note.
-        assert!(draw(&history, None, false, false, false).is_none());
+        assert!(draw(&history, &[], None, false, false, false).is_none());
     }
 
     #[test]
@@ -836,11 +994,11 @@ mod tests {
             network_point(0, 10.0, 4.0e6),
             network_point(60, 20.0, 5.0e6),
         ];
-        let shown = draw(&history, None, true, true, true).unwrap();
+        let shown = draw(&history, &[], None, true, true, true).unwrap();
         assert_eq!(shown.network, vec![(0, 4.0e6), (60, 5.0e6)]);
         // 4-5 MH/s together with 10-20 H/s: five decades apart, not flattened.
         assert_eq!((shown.frame.log_floor, shown.frame.log_top), (1, 7));
-        let hidden = draw(&history, None, true, true, false).unwrap();
+        let hidden = draw(&history, &[], None, true, true, false).unwrap();
         assert!(hidden.network.is_empty());
         assert_eq!((hidden.frame.log_floor, hidden.frame.log_top), (1, 2));
     }
@@ -867,7 +1025,7 @@ mod tests {
             .map(|minute| point(minute * 60, 1.0, None))
             .collect();
         assert_eq!(
-            draw(&day, None, true, true, false).unwrap().pool.len(),
+            draw(&day, &[], None, true, true, false).unwrap().pool.len(),
             MAX_POINTS
         );
     }
@@ -894,7 +1052,15 @@ mod tests {
             .map(|minute| point(minute * 60, 2.0, Some(1.0)))
             .collect();
         // Worst-case alignment: the window starts just after a sample.
-        let drawn = draw(&history, Some((5.0, 5.0 + MIN_SPAN)), true, true, false).unwrap();
+        let drawn = draw(
+            &history,
+            &[],
+            Some((5.0, 5.0 + MIN_SPAN)),
+            true,
+            true,
+            false,
+        )
+        .unwrap();
         assert!(drawn.pool.len() >= 2, "pool line has two points to draw");
         assert!(drawn.local.len() >= 2, "node line has two points to draw");
     }
@@ -943,7 +1109,7 @@ mod tests {
             log_floor: 1,
             log_top: 2,
         };
-        let zones = hit_zones(&pool, &local, &[], &frame);
+        let zones = hit_zones(&pool, &local, &[], &[], &frame);
         assert_eq!(zones.len(), 80);
         assert_eq!(zones.first().map(|zone| zone.zone), Some(2));
         assert_eq!(zones.last().map(|zone| zone.zone), Some(81));
@@ -961,7 +1127,7 @@ mod tests {
             log_floor: 1,
             log_top: 2,
         };
-        let zones = hit_zones(&pool, &local, &[], &frame);
+        let zones = hit_zones(&pool, &local, &[], &[], &frame);
         assert_eq!(zones[0].pool_nearest, Some((100, 10.0)));
         assert_eq!(zones[0].local_nearest, Some((100, 5.0)));
         assert_eq!(zones[0].at_class, "at-right");
@@ -978,7 +1144,7 @@ mod tests {
             log_floor: 1,
             log_top: 2,
         };
-        let zones = hit_zones(&pool, &local, &[], &frame);
+        let zones = hit_zones(&pool, &local, &[], &[], &frame);
         assert_eq!(zones[0].pool_nearest, Some((100, 10.0)));
         assert_eq!(zones[0].local_nearest, Some((100, 5.0)));
         assert_eq!(zones[79].pool_nearest, Some((160, 20.0)));
@@ -996,8 +1162,120 @@ mod tests {
             log_floor: 1,
             log_top: 7,
         };
-        let zones = hit_zones(&pool, &[], &network, &frame);
+        let zones = hit_zones(&pool, &[], &network, &[], &frame);
         assert_eq!(zones[0].network_nearest, Some((100, 4.0e6)));
         assert_eq!(zones[79].network_nearest, Some((160, 5.0e6)));
+    }
+
+    #[test]
+    fn test_draw_marks_the_blocks_inside_the_frame_only() {
+        let history = [point(100, 10.0, None), point(160, 20.0, None)];
+        let found = [block(40, 50), block(42, 150), block(43, 200)];
+        let drawn = draw(&history, &found, None, true, false, false).unwrap();
+        let heights: Vec<u64> = drawn.blocks.iter().map(|marked| marked.height).collect();
+        assert_eq!(heights, vec![42], "only the in-frame block is marked");
+    }
+
+    #[test]
+    fn test_a_zoomed_frame_drops_blocks_outside_its_window() {
+        let history = [point(100, 10.0, None), point(200, 20.0, None)];
+        let found = [block(42, 150), block(43, 190)];
+        let drawn = draw(&history, &found, Some((160.0, 200.0)), true, false, false).unwrap();
+        let heights: Vec<u64> = drawn.blocks.iter().map(|marked| marked.height).collect();
+        assert_eq!(heights, vec![43], "the zoomed window keeps only 43");
+    }
+
+    #[test]
+    fn test_a_marked_block_centers_on_the_pool_line() {
+        let history = [
+            point(100, 10.0, None),
+            point(150, 10.0, None),
+            point(200, 10.0, None),
+        ];
+        let found = [block(42, 150)];
+        let drawn = draw(&history, &found, None, true, false, false).unwrap();
+        let marked = &drawn.blocks[0];
+        assert_eq!(marked.cx, drawn.frame.x(150.0));
+        assert_eq!(marked.cy, drawn.frame.y(10.0), "snapped to the pool value");
+    }
+
+    #[test]
+    fn test_a_marked_block_falls_back_to_the_node_line_without_pool() {
+        let history = [
+            point(100, 10.0, Some(1.0e6)),
+            point(150, 10.0, Some(1.0e6)),
+            point(200, 10.0, Some(1.0e6)),
+        ];
+        let found = [block(42, 150)];
+        let drawn = draw(&history, &found, None, false, true, false).unwrap();
+        let marked = &drawn.blocks[0];
+        assert_eq!(marked.cy, drawn.frame.y(1.0e6));
+    }
+
+    #[test]
+    fn test_no_drawn_series_marks_no_blocks() {
+        let history = [point(100, 10.0, None), point(200, 20.0, None)];
+        let found = [block(42, 150)];
+        let drawn = draw(&history, &found, None, false, false, false);
+        assert!(drawn.is_none(), "no series means nothing to draw at all");
+    }
+
+    #[test]
+    fn test_hit_zones_name_the_strips_that_reach_a_marker() {
+        let pool = vec![(100, 10.0), (200, 10.0)];
+        let frame = Frame {
+            start: 100.0,
+            end: 200.0,
+            log_floor: 1,
+            log_top: 2,
+        };
+        let marked = vec![PlottedBlock {
+            height: 42,
+            time: 150.0,
+            cx: 392.0,
+            cy: 214.0,
+        }];
+        let zones = hit_zones(&pool, &[], &[], &marked, &frame);
+        // Strips at x = 388 (zone 41) and x = 396 (zone 42) are within
+        // half a strip plus the marker's half-diagonal of the centre at
+        // x = 392; the neighbours at 380 and 404 are not.
+        assert_eq!(zones[39].blocks, vec![42]);
+        assert_eq!(zones[40].blocks, vec![42]);
+        assert!(zones[38].blocks.is_empty());
+        assert!(zones[41].blocks.is_empty());
+        // The reverse map the cube's data-zone is built from: both zones.
+        let tagged: Vec<usize> = zones
+            .iter()
+            .filter(|zone| zone.blocks.contains(&42))
+            .map(|zone| zone.zone)
+            .collect();
+        assert_eq!(tagged, vec![41, 42]);
+    }
+
+    #[test]
+    fn test_two_blocks_under_one_strip_both_ride_into_its_tip() {
+        let pool = vec![(100, 10.0), (200, 10.0)];
+        let frame = Frame {
+            start: 100.0,
+            end: 200.0,
+            log_floor: 1,
+            log_top: 2,
+        };
+        let marked = vec![
+            PlottedBlock {
+                height: 42,
+                time: 150.0,
+                cx: 392.0,
+                cy: 214.0,
+            },
+            PlottedBlock {
+                height: 43,
+                time: 151.0,
+                cx: 398.3,
+                cy: 214.0,
+            },
+        ];
+        let zones = hit_zones(&pool, &[], &[], &marked, &frame);
+        assert_eq!(zones[40].blocks, vec![42, 43], "strip x = 396 reaches both");
     }
 }
