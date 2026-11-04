@@ -12,8 +12,8 @@ PPLNS payout.
 
 The sim mines Bitcoin Cash: every node config sets `chain = "bitcoin-cash"`
 and `bitcoin_cash_network = "regtest"`, and the node is Bitcoin Cash Node
-(BCHN). Everything below assumes a Unix shell (the harness signals nodes with
-`kill` and finds them with `pgrep`) and that you start from the repo root:
+(BCHN). The commands below assume a Unix shell and that you start from the
+repo root. The harness also runs on Windows; see the prerequisites.
 
 ```sh
 cd ~/code/p2poolv2
@@ -51,7 +51,13 @@ from its release tarball
 version and SHA-256 sums CI uses are pinned in `docker/bchn/Dockerfile`), so
 its `bitcoind` and `bitcoin-cli` are on your `PATH`. BCHN's daemon is called
 `bitcoind` like Bitcoin Core's; a Bitcoin Core node will not do, and the
-harness refuses one. Check it's up:
+harness refuses one.
+
+The harness also runs on Windows with BCHN's Windows release (`bitcoind.exe`
+and `bitcoin-cli.exe` on `PATH`). On Windows, nodes are stopped with a forced
+`taskkill` rather than a graceful TERM.
+
+Check it's up:
 
 ```sh
 B getblockchaininfo | jq '{chain, blocks}'

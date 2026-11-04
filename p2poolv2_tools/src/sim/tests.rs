@@ -42,6 +42,27 @@ fn node_count_of_missing_directory_is_zero() {
 }
 
 #[test]
+fn process_pattern_matches_a_node_config_path() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let run_dir = RunDir::new(directory.path());
+    let config = run_dir.node_config(0).display().to_string();
+    let joined = directory.path().join("node-").display().to_string();
+    assert!(
+        config.starts_with(&joined),
+        "{config} does not start with {joined}"
+    );
+    let pattern = run_dir.process_pattern();
+    assert!(
+        regex::Regex::new(&pattern)
+            .expect("pattern")
+            .is_match(&config),
+        "{pattern} did not match {config}"
+    );
+    #[cfg(not(windows))]
+    assert_eq!(pattern, format!("{}/node-", directory.path().display()));
+}
+
+#[test]
 fn check_scenario_rejects_unknown_names() {
     assert!(check_scenario("restart-fast").is_ok());
     assert!(check_scenario("restart-slow").is_err());
