@@ -10,7 +10,7 @@
 
 use crate::accounting::payout::sharechain_pplns::pplns_window::PRUNE_INTERVAL;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
-use crate::config::PoolMode;
+use crate::config::{BitcoinCashNetwork, PoolMode};
 use crate::pool_difficulty::AsertParent;
 use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{
@@ -63,6 +63,9 @@ fn is_tip_current(tip_time: u32, now_secs: u64) -> bool {
 pub struct ChainStoreHandle {
     store_handle: StoreHandle,
     network: bitcoin::Network,
+    /// The Bitcoin Cash network, which `network` cannot name: chipnet and
+    /// scalenet are both `Testnet`. `None` on Bitcoin.
+    bitcoin_cash_network: Option<BitcoinCashNetwork>,
 }
 
 impl ChainStoreHandle {
@@ -71,7 +74,18 @@ impl ChainStoreHandle {
         Self {
             store_handle,
             network,
+            bitcoin_cash_network: None,
         }
+    }
+
+    /// Name the Bitcoin Cash network this share chain belongs to; `None`
+    /// on Bitcoin.
+    pub fn with_bitcoin_cash_network(
+        mut self,
+        bitcoin_cash_network: Option<BitcoinCashNetwork>,
+    ) -> Self {
+        self.bitcoin_cash_network = bitcoin_cash_network;
+        self
     }
 
     /// Initialise the chain from an existing store or set up genesis.
@@ -169,6 +183,11 @@ impl ChainStoreHandle {
     /// Get the network type.
     pub fn network(&self) -> bitcoin::Network {
         self.network
+    }
+
+    /// The Bitcoin Cash network, or `None` on Bitcoin.
+    pub fn bitcoin_cash_network(&self) -> Option<BitcoinCashNetwork> {
+        self.bitcoin_cash_network
     }
 
     // ========================================================================

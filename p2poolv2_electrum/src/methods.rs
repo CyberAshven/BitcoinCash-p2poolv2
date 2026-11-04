@@ -10,9 +10,6 @@
 
 use crate::protocol::{INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, NOT_SYNCED, RpcError};
 use bitcoin::consensus::encode::serialize_hex;
-use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::{
-    COINBASE_MATURITY, PAYOUT_DEPTH, PRUNE_DEPTH,
-};
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::store::writer::StoreError;
 use serde_json::{Value, json};
@@ -160,10 +157,19 @@ fn parse_protocol_version(version: &str) -> Option<Vec<u32>> {
 /// `server.features`: the standard Electrum fields plus a `p2pool` object
 /// with the network and the depths a wallet needs to judge output maturity
 /// and expiry without hardcoding consensus constants.
+///
+/// A Bitcoin Cash node names its own network (`bitcoin::Network` calls
+/// chipnet and scalenet both testnet), and the depths are the store's, so
+/// they are Bitcoin Cash's on a Bitcoin Cash node.
 fn server_features(chain_store_handle: &ChainStoreHandle) -> Result<Value, RpcError> {
     let genesis_hash = chain_store_handle
         .get_genesis_blockhash()
         .ok_or_else(|| RpcError::new(INTERNAL_ERROR, "share chain genesis is not stored"))?;
+    let network = match chain_store_handle.bitcoin_cash_network() {
+        Some(bitcoin_cash_network) => bitcoin_cash_network.name().to_string(),
+        None => chain_store_handle.network().to_string(),
+    };
+    let depths = chain_store_handle.store_handle().store().depths();
     Ok(json!({
         "genesis_hash": genesis_hash.to_string(),
         "hosts": {},
@@ -173,10 +179,10 @@ fn server_features(chain_store_handle: &ChainStoreHandle) -> Result<Value, RpcEr
         "hash_function": "sha256",
         "pruning": null,
         "p2pool": {
-            "network": chain_store_handle.network().to_string(),
-            "payout_depth": PAYOUT_DEPTH,
-            "coinbase_maturity": COINBASE_MATURITY,
-            "prune_depth": PRUNE_DEPTH,
+            "network": network,
+            "payout_depth": depths.payout_depth,
+            "coinbase_maturity": depths.coinbase_maturity,
+            "prune_depth": depths.prune_depth(),
         },
     }))
 }
@@ -257,9 +263,15 @@ mod tests {
     use super::*;
     use crate::test_utils::build_current_test_chain;
     use bitcoin::consensus::encode::deserialize_hex;
+    use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::{
+        BCH_COINBASE_MATURITY, BCH_PAYOUT_DEPTH, COINBASE_MATURITY, ChainDepths, PAYOUT_DEPTH,
+        PRUNE_DEPTH,
+    };
+    use p2poolv2_lib::config::BitcoinCashNetwork;
     use p2poolv2_lib::shares::share_block::ShareHeader;
     use p2poolv2_lib::test_utils::{
-        build_confirmed_test_chain, genesis_for_tests, setup_test_chain_store_handle,
+        build_confirmed_test_chain, genesis_for_tests, setup_test_bitcoin_cash_chain_store_handle,
+        setup_test_chain_store_handle,
     };
 
     #[test]
@@ -416,6 +428,25 @@ mod tests {
                 "payout_depth": PAYOUT_DEPTH,
                 "coinbase_maturity": COINBASE_MATURITY,
                 "prune_depth": PRUNE_DEPTH,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn features_report_bitcoin_cash_network_and_depths() {
+        let (chain_store_handle, _store_dir) =
+            setup_test_bitcoin_cash_chain_store_handle(BitcoinCashNetwork::Chipnet).await;
+        build_confirmed_test_chain(&chain_store_handle, 2).await;
+
+        let features = dispatch(&chain_store_handle, "server.features", &json!([])).unwrap();
+
+        assert_eq!(
+            features["p2pool"],
+            json!({
+                "network": "chipnet",
+                "payout_depth": BCH_PAYOUT_DEPTH,
+                "coinbase_maturity": BCH_COINBASE_MATURITY,
+                "prune_depth": ChainDepths::BITCOIN_CASH.prune_depth(),
             })
         );
     }

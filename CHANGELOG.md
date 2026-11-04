@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The Electrum server reads the share chain: upstream's 43ddd7d4 (chain
+store handle wired in, `blockchain.*` methods answered only once the node
+is synced) and 6fcf5e72 (`blockchain.block.header`) are ported unchanged.
+On a Bitcoin Cash node `server.features` names the configured network and
+reports Bitcoin Cash's depths; upstream's reports a chipnet node as
+`testnet` with Bitcoin's coinbase maturity of 6048. No share-chain rule
+changes.
+
 A Hydrapool-mode node starts again after the share-chain genesis changes
 between releases. Hydrapool keeps no share chain beyond genesis, but startup
 refused any store built on another genesis. `init_for_mode`, ported from
