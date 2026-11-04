@@ -213,9 +213,15 @@ the coinbase can serve it. Section 7.5 says how a P2Pool node answers.
 
 Extension type **`0x5052`**, "Requested Payout Outputs", from SV2's
 experimental range `0x4000`–`0x7fff`. Experimental ids must not ship in
-production equipment; a production id is allocated through
-stratumprotocol.org, and asking for one is the owner's call. #195 and
-#202 used `0x0003`, which #203 now holds.
+production equipment. #195 and #202 used `0x0003`, which #203 now holds.
+
+#203's author declined folding this into #203, so on 2026-11-04, at the
+owner's request, the extension was proposed on its own as
+[sv2-spec PR #249](https://github.com/stratum-mining/sv2-spec/pull/249),
+`extensions/0x0004-requested-payout-outputs.md`, with id `0x0004`. Its
+messages, fields and rules are the ones below; only the id differs.
+P2Pool keeps `0x5052` until #249 merges, then moves to the id it is
+given, and follows #249 if review changes a message.
 
 The client asks for it with `RequestExtensions` (extension `0x0001`) on
 its Job Declaration connection, in both modes. The Mining connection
