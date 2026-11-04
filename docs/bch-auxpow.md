@@ -472,7 +472,10 @@ repository's Rust tests in the VM. A chipnet test token (tSAFA) is
 prepared but not deployed. The v1 variant passed a real regtest withdrawal
 on 2026-10-16; the v2 covenant has not yet run against BCHN.
 
-Deployment compilation and the genesis CLI accept only 1 to 63 threads.
+Deployment compilation and the genesis CLI accept only 2 to 63 threads.
+With one thread a claim's age is at least one block, so the easing factor
+is never below 1 and the target can never harden; two threads are the
+fewest that harden it (×0.75 for back-to-back claims).
 At 288 or more, the age cap prevents the target from ever easing above its
 previous value. The stricter bound preserves room to recover before that
 cap. Both fixes must precede genesis because the deployed covenant is

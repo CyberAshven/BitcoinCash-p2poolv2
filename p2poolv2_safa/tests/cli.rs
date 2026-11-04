@@ -29,8 +29,8 @@ fn parity_params_mainnet() {
 }
 
 #[test]
-fn parity_params_one_thread_zero_virtual_satoshis() {
-    assert_cli_case("params-one-thread-zero");
+fn parity_params_two_threads_zero_virtual_satoshis() {
+    assert_cli_case("params-two-threads-zero");
 }
 
 #[test]
@@ -408,6 +408,36 @@ fn genesis_rejects_funding_outpoint_other_than_zero() {
         String::from_utf8(output.stderr)
             .unwrap()
             .contains("output 0")
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn genesis_rejects_one_thread_before_reading_funding() {
+    let output = run_cli_json(
+        "genesis",
+        &[json!({ "network": "chipnet", "threads": 1, "virtual_sats": "84000000000" })],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("from 2 to 63")
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn params_rejects_one_thread() {
+    let output = run_cli_json(
+        "params",
+        &[json!({ "network": "chipnet", "threads": 1, "virtual_sats": "84000000000" })],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("from 2 to 63")
     );
     assert!(output.stdout.is_empty());
 }
