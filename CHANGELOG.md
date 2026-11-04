@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A Hydrapool-mode node starts again after the share-chain genesis changes
+between releases. Hydrapool keeps no share chain beyond genesis, but startup
+refused any store built on another genesis. `init_for_mode`, ported from
+upstream's a45c27a7, replaces the genesis in Hydrapool mode and keeps the
+refusal in P2Pool mode. Unlike upstream, it replaces only a store whose
+confirmed chain is the old genesis alone: with a confirmed share above it,
+the node still refuses, because the replacement would fail inside
+`setup_genesis` after switching the in-memory genesis ("Incorrect
+confirmation"). No share-chain rule changes.
+
 `dial_peers` may name a peer by host name (`/dns4/`, `/dns6/`, `/dns/`), as
 an operator running a public node is likely to publish it. The node's
 transport was TCP only, so such an address failed with "Multiaddr is not
