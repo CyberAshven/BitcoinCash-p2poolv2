@@ -110,11 +110,10 @@ const NETWORKS: &[&str] = &["mainnet", "chipnet", "regtest"];
 const CHAINS: &[&str] = &["bitcoin-cash", "bitcoin"];
 const SHARE_CHAINS: &[&str] = &["main", "mini"];
 const TEMPLATE_SOURCES: &[&str] = &["rpc", "rpc_light", "sv2"];
-const MODES: &[&str] = &["p2poolv2", "hydrapool"];
 const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 
 /// The settings listed, in order.
-pub const FIELDS: [FieldSpec; 45] = [
+pub const FIELDS: [FieldSpec; 44] = [
     // The network switch and the chain come first: they decide the rest.
     optional(
         "stratum",
@@ -292,13 +291,6 @@ pub const FIELDS: [FieldSpec; 45] = [
         "Wait for the share chain to catch up before taking miners",
         ValueKind::Boolean,
         Some("true"),
-    ),
-    optional(
-        "stratum",
-        "mode",
-        "p2poolv2 (share chain) or hydrapool (standalone PPLNS)",
-        ValueKind::Choice(MODES),
-        Some("p2poolv2"),
     ),
     required(
         "bitcoinrpc",
