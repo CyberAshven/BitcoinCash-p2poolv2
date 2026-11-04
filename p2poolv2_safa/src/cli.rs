@@ -13,9 +13,9 @@ use libauth::runtime::number::number_to_string;
 use serde_json::{Value, json};
 
 use crate::{
-    BuiltClaim, Covenant, Funding, GenesisOptions, MAX_THREADS, Outpoint, Split, Vault,
-    build_claim, build_genesis, claim_leaf, create_covenant, from_hex, hash256, vault_address,
-    verify_transaction,
+    BuiltClaim, Covenant, Funding, GenesisOptions, MAX_THREADS, MIN_THREADS, Outpoint, Split,
+    Vault, build_claim, build_genesis, claim_leaf, create_covenant, from_hex, hash256,
+    vault_address, verify_transaction,
 };
 
 pub const USAGE: &str = "usage: safa params deployment.json | leaf deployment.json job.json | work deployment.json job.json | unlock deployment.json claim.json | claim deployment.json claim.json | genesis genesis.json | verify deployment.json claim.json | claimer claimer.json [--once] [--dry-run]";
@@ -268,9 +268,9 @@ fn genesis(input: &Value) -> Result<Value, String> {
         return Err("genesis is prepared for chipnet only".into());
     }
     let threads = integer(&input["threads"], "threads")?;
-    if threads == 0 || threads > MAX_THREADS {
+    if !(MIN_THREADS..=MAX_THREADS).contains(&threads) {
         return Err(format!(
-            "threads must be an integer from 1 to {MAX_THREADS}"
+            "threads must be an integer from {MIN_THREADS} to {MAX_THREADS}"
         ));
     }
     let covenant = covenant_of(input)?;

@@ -10,6 +10,7 @@
 
 use crate::accounting::payout::sharechain_pplns::pplns_window::PRUNE_INTERVAL;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
+use crate::config::PoolMode;
 use crate::pool_difficulty::AsertParent;
 use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{
@@ -110,6 +111,53 @@ impl ChainStoreHandle {
             ))),
             Err(StoreError::NotFound(_)) => self.add_share_block(genesis_block).await,
             Err(error) => Err(error),
+        }
+    }
+
+    /// Initialise the chain for the node's pool mode.
+    ///
+    /// P2Poolv2 mode uses `init_or_setup_genesis`, failing with
+    /// `StoreError::GenesisMismatch` on a store built on another share
+    /// chain. Hydrapool mode keeps no share chain beyond genesis, so a
+    /// genesis change between releases must not stop the pool from
+    /// upgrading: it uses `init_or_replace_genesis` instead.
+    pub async fn init_for_mode(
+        &self,
+        genesis_block: ShareBlock,
+        mode: PoolMode,
+    ) -> Result<(), StoreError> {
+        match mode {
+            PoolMode::Hydrapool => self.init_or_replace_genesis(genesis_block).await,
+            PoolMode::P2poolv2 => self.init_or_setup_genesis(genesis_block).await,
+        }
+    }
+
+    /// Initialise the chain like `init_or_setup_genesis`, but replace the
+    /// genesis of a store built on another share chain instead of failing.
+    ///
+    /// The replacement genesis is confirmed at height 0; the old genesis
+    /// stays in the store unreferenced by the confirmed chain.
+    ///
+    /// Replacement happens only when that old genesis is the whole
+    /// confirmed chain. A confirmed share above height 0 means the store
+    /// was used as a real share chain, so the original
+    /// `StoreError::GenesisMismatch` is returned and nothing is written.
+    /// The tip is read first: `setup_genesis` sets the in-memory genesis
+    /// before its writes, and a failure after that would leave the node
+    /// half-switched.
+    async fn init_or_replace_genesis(&self, genesis_block: ShareBlock) -> Result<(), StoreError> {
+        match self.init_or_setup_genesis(genesis_block.clone()).await {
+            Err(StoreError::GenesisMismatch(reason)) => match self.get_tip_height()? {
+                Some(0) => {
+                    warn!(
+                        "Using share chain genesis {}: {reason}",
+                        genesis_block.block_hash()
+                    );
+                    self.store_handle.setup_genesis(genesis_block).await
+                }
+                _ => Err(StoreError::GenesisMismatch(reason)),
+            },
+            result => result,
         }
     }
 
@@ -1177,6 +1225,7 @@ mockall::mock! {
         pub fn is_confirmed_or_confirmed_uncle(&self, blockhash: &BlockHash) -> bool;
         pub fn get_btcaddresses_for_user_ids(&self, user_ids: &[u64]) -> Result<Vec<(u64, String)>, StoreError>;
         pub async fn init_or_setup_genesis(&self, genesis_block: ShareBlock) -> Result<(), StoreError>;
+        pub async fn init_for_mode(&self, genesis_block: ShareBlock, mode: PoolMode) -> Result<(), StoreError>;
         pub async fn organise_header(&self, header: ShareHeader) -> Result<Option<u32>, StoreError>;
         pub async fn organise_block(&self) -> Result<Option<u32>, StoreError>;
         pub async fn mark_invalid(&self, blockhash: BlockHash) -> Result<(), StoreError>;

@@ -18,6 +18,36 @@ browser's Basic challenge only when the request already sent credentials,
 so the WASM app's probes fail silently to that indicator instead of
 raising the login dialog.
 
+A Hydrapool-mode node starts again after the share-chain genesis changes
+between releases. Hydrapool keeps no share chain beyond genesis, but startup
+refused any store built on another genesis. `init_for_mode`, ported from
+upstream's a45c27a7, replaces the genesis in Hydrapool mode and keeps the
+refusal in P2Pool mode. Unlike upstream, it replaces only a store whose
+confirmed chain is the old genesis alone: with a confirmed share above it,
+the node still refuses, because the replacement would fail inside
+`setup_genesis` after switching the in-memory genesis ("Incorrect
+confirmation"). No share-chain rule changes.
+
+`dial_peers` may name a peer by host name (`/dns4/`, `/dns6/`, `/dns/`), as
+an operator running a public node is likely to publish it. The node's
+transport was TCP only, so such an address failed with "Multiaddr is not
+supported" and the node never connected; it is now libp2p's DNS transport
+over TCP, which resolves the name on every dial, reconnects included. A
+two-node test dials a peer as `/dns4/localhost/...`: no peers before, a
+connection after. No share-chain rule changes.
+
+The SAFA tools refuse a one-thread deployment. A thread takes at most one
+claim per block, so with one thread the covenant's easing factor is never
+below 1 and the token target could only stay or get easier, never harder;
+in the BCH 2026 VM a claim in the block after the last kept a one-thread
+target unchanged, while two threads hardened it ×0.75. `create_covenant`,
+`safa params` and `safa genesis` now take 2 to 63 threads; the target
+arithmetic (`claim_target_bits`) still covers every thread count, so it
+keeps matching any covenant already deployed. The parity case
+`params-one-thread-zero` is regenerated at two threads by the Rust CLI,
+which its note says. No change for deployments with 2 or more threads, such
+as tSAFA's 4.
+
 `safa claimer` no longer stops for good when chipnet replaces the block it
 last checked. It remembered the tip of every pass and failed closed when
 that block changed, even with the vault still unspent, so one ordinary

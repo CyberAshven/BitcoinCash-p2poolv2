@@ -30,6 +30,11 @@ pub const OUTPUT_SATS: u64 = 800;
 /// Split payouts below this AMM value remain with the miner.
 pub const MIN_SHARE_SATS: u64 = 1_000;
 pub const EASE_CAP: u32 = 288;
+/// The fewest threads a deployment may have. A thread takes at most one
+/// claim per block, so the blocks since its last claim are at least 1, and
+/// with one thread the easing factor `min(dh, 288) * 5000 / threads + 5000`
+/// is then at least 10000: the target could ease but never harden.
+pub const MIN_THREADS: u32 = 2;
 pub const MAX_THREADS: u32 = 63;
 pub const FALLBACK_DELTA: u32 = 4_032;
 pub const MAX_PAYOUT_SCRIPT_BYTES: usize = 35;
