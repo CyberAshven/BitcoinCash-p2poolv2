@@ -25,6 +25,14 @@ the node still refuses, because the replacement would fail inside
 `setup_genesis` after switching the in-memory genesis ("Incorrect
 confirmation"). No share-chain rule changes.
 
+A node no longer stops when a share transaction's stored rows are missing,
+for example after the pruner deletes them between two reads. `get_tx`
+unwrapped each input and output row, and release builds abort on panic, so
+the whole node stopped; it now returns `NotFound`, as upstream's 0f15c131
+does. `get_share` returns None when any of the share's transactions cannot
+be rebuilt, instead of returning the share with that transaction silently
+left out. No share-chain rule changes.
+
 `dial_peers` may name a peer by host name (`/dns4/`, `/dns6/`, `/dns/`), as
 an operator running a public node is likely to publish it. The node's
 transport was TCP only, so such an address failed with "Multiaddr is not
