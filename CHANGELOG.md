@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The Electrum server answers `blockchain.transaction.get` for confirmed
+share chain transactions, raw or verbose: upstream's 0f15c131 (output
+origins in `get_tx`) and d199e07e are ported. On a Bitcoin Cash node the
+verbose form has no `vsize` or `weight`, as Bitcoin Cash Node's has none; a
+P2PKH share output shows its CashAddr share address (`tp2pool:` on
+chipnet); and the spendable heights use Bitcoin Cash's depths. An output
+whose coinbase root is unknown reports null heights. No share-chain rule
+changes.
+
 The Electrum server reads the share chain: upstream's 43ddd7d4 (chain
 store handle wired in, `blockchain.*` methods answered only once the node
 is synced) and 6fcf5e72 (`blockchain.block.header`) are ported unchanged.

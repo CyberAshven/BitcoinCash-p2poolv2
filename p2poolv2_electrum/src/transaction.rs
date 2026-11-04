@@ -11,9 +11,9 @@ use crate::script::script_pubkey_json;
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::hex::DisplayHex;
 use bitcoin::{BlockHash, Network, Transaction, TxIn, TxOut, Txid};
-use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::{
-    COINBASE_MATURITY, PAYOUT_DEPTH,
-};
+use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
+use p2poolv2_lib::address::bch_share::BchShareNetwork;
+use p2poolv2_lib::config::BitcoinCashNetwork;
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::store::transaction_store::{CoinbaseRoot, OutputOrigin};
 use p2poolv2_lib::store::writer::StoreError;
@@ -62,11 +62,17 @@ pub(crate) fn transaction_get(
             error => store_read_error(error),
         })?;
     if verbose {
+        let depths = chain_store_handle.store_handle().store().depths();
+        let cash_network = chain_store_handle
+            .bitcoin_cash_network()
+            .map(BitcoinCashNetwork::share_network);
         Ok(verbose_transaction(
             &transaction,
             &output_origins,
             &location,
             chain_store_handle.network(),
+            cash_network,
+            depths,
         ))
     } else {
         Ok(Value::from(serialize_hex(&transaction)))
@@ -129,11 +135,17 @@ fn transaction_not_found(txid: &Txid) -> RpcError {
 /// object per output (see `output_json`) and `p2pool_tip_height`, the
 /// confirmed tip those heights are to be compared against (as tip + 1, the
 /// next block).
+///
+/// On a Bitcoin Cash node (`cash_network` is `Some`) the object has no
+/// `vsize` or `weight`, as Bitcoin Cash Node's has none: Bitcoin Cash has
+/// no SegWit. `hash` stays, equal to the txid.
 fn verbose_transaction(
     transaction: &Transaction,
     output_origins: &[OutputOrigin],
     location: &ConfirmedTxLocation,
     network: Network,
+    cash_network: Option<BchShareNetwork>,
+    depths: ChainDepths,
 ) -> Value {
     let is_coinbase = transaction.is_coinbase();
     let inputs: Vec<Value> = transaction
@@ -146,9 +158,11 @@ fn verbose_transaction(
         .iter()
         .zip(output_origins)
         .enumerate()
-        .map(|(index, (output, origin))| output_json(index, output, *origin, network))
+        .map(|(index, (output, origin))| {
+            output_json(index, output, *origin, network, cash_network, depths)
+        })
         .collect();
-    json!({
+    let mut rendered = json!({
         "txid": transaction.compute_txid().to_string(),
         "hash": transaction.compute_wtxid().to_string(),
         "version": transaction.version.0,
@@ -164,7 +178,14 @@ fn verbose_transaction(
         "time": location.header_time,
         "blocktime": location.header_time,
         "p2pool_tip_height": location.tip_height,
-    })
+    });
+    if cash_network.is_some()
+        && let Some(fields) = rendered.as_object_mut()
+    {
+        fields.remove("vsize");
+        fields.remove("weight");
+    }
+    rendered
 }
 
 /// A bitcoind `vin` entry. A coinbase input shows its script as
@@ -205,26 +226,37 @@ fn input_json(input: &TxIn, is_coinbase: bool) -> Value {
 ///   for a coinbase output; null otherwise, as only coinbase outputs
 ///   mature.
 ///
+/// Both depths are the store's `depths`, so a Bitcoin Cash node uses its
+/// own (`BCH_PAYOUT_DEPTH`, `BCH_COINBASE_MATURITY`).
+///
 /// An output whose coinbase root is `Unknown` (an input was missing when
 /// it was stored) has all three heights null: `check_prevouts` never lets
 /// it be spent.
-fn output_json(index: usize, output: &TxOut, origin: OutputOrigin, network: Network) -> Value {
+fn output_json(
+    index: usize,
+    output: &TxOut,
+    origin: OutputOrigin,
+    network: Network,
+    cash_network: Option<BchShareNetwork>,
+    depths: ChainDepths,
+) -> Value {
     let coinbase_root_height = match origin.coinbase_root {
         CoinbaseRoot::Height(height) => Some(u64::from(height)),
         CoinbaseRoot::Unknown => None,
     };
     let first_spendable_height = coinbase_root_height
         .filter(|_| origin.is_coinbase)
-        .map(|height| height + COINBASE_MATURITY as u64);
+        .map(|height| height + depths.coinbase_maturity as u64);
     json!({
         "value": output.value.to_btc(),
         "n": index,
-        "scriptPubKey": script_pubkey_json(&output.script_pubkey, network),
+        "scriptPubKey": script_pubkey_json(&output.script_pubkey, network, cash_network),
         "p2pool": {
             "coinbase": origin.is_coinbase,
             "coinbase_root_height": coinbase_root_height,
             "first_spendable_height": first_spendable_height,
-            "last_spendable_height": coinbase_root_height.map(|height| height + PAYOUT_DEPTH as u64),
+            "last_spendable_height": coinbase_root_height
+                .map(|height| height + depths.payout_depth as u64),
         },
     })
 }
@@ -237,12 +269,17 @@ mod tests {
     use crate::test_utils::build_current_test_chain;
     use bitcoin::hashes::Hash;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Witness};
+    use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::{
+        BCH_COINBASE_MATURITY, BCH_PAYOUT_DEPTH, COINBASE_MATURITY, PAYOUT_DEPTH,
+    };
     use p2poolv2_lib::address::Address;
-    use p2poolv2_lib::address::share_owner::ShareOwner;
+    use p2poolv2_lib::address::share_owner::{self, ShareOwner};
     use p2poolv2_lib::test_utils::{
-        TestShareBlockBuilder, build_confirmed_test_chain, make_test_share_address,
+        TestShareBlockBuilder, build_confirmed_test_chain, confirm_test_block, genesis_for_tests,
+        make_test_share_address, setup_test_bitcoin_cash_chain_store_handle,
         setup_test_chain_store_handle, test_funding_transaction,
     };
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[tokio::test]
     async fn raw_returns_hex_of_confirmed_transaction() {
@@ -324,6 +361,67 @@ mod tests {
             .iter()
             .any(|output| output["scriptPubKey"]["addresses"] == json!([miner_address]));
         assert!(pays_miner, "no output pays {miner_address}: {verbose}");
+    }
+
+    /// A chipnet node: no SegWit size fields, the P2PKH share owner spelled
+    /// as its `tp2pool:` address, and spendability from Bitcoin Cash's
+    /// 100-share maturity.
+    #[tokio::test]
+    async fn verbose_coinbase_on_bitcoin_cash_reports_share_address_and_maturity() {
+        let (chain_store_handle, _store_dir) =
+            setup_test_bitcoin_cash_chain_store_handle(BitcoinCashNetwork::Chipnet).await;
+        let genesis = genesis_for_tests();
+        chain_store_handle
+            .init_or_setup_genesis(genesis.clone())
+            .await
+            .unwrap();
+        let owner = ShareOwner::CashP2pkh([0x22; 20]);
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+        let block = TestShareBlockBuilder::new()
+            .prev_share_blockhash(genesis.block_hash().to_string())
+            .time(now_secs)
+            .share_owner(owner)
+            .add_transaction(test_funding_transaction(1))
+            .build();
+        confirm_test_block(&chain_store_handle, &block).await;
+        let coinbase = &block.transactions[0].0;
+        let share_address = share_owner::to_address_string(
+            &owner,
+            Network::Testnet,
+            Some(BchShareNetwork::Chipnet),
+        );
+
+        let verbose = dispatch(
+            &chain_store_handle,
+            "blockchain.transaction.get",
+            &json!([coinbase.compute_txid().to_string(), true]),
+        )
+        .unwrap();
+
+        assert!(verbose.get("vsize").is_none());
+        assert!(verbose.get("weight").is_none());
+        assert_eq!(verbose["hash"], verbose["txid"]);
+        assert!(share_address.starts_with("tp2pool:"));
+        assert_eq!(
+            verbose["vout"][0]["scriptPubKey"]["type"],
+            json!("pubkeyhash")
+        );
+        assert_eq!(
+            verbose["vout"][0]["scriptPubKey"]["addresses"],
+            json!([share_address])
+        );
+        assert_eq!(
+            verbose["vout"][0]["p2pool"],
+            json!({
+                "coinbase": true,
+                "coinbase_root_height": 1,
+                "first_spendable_height": 1 + BCH_COINBASE_MATURITY,
+                "last_spendable_height": 1 + BCH_PAYOUT_DEPTH,
+            })
+        );
     }
 
     /// The block is stored and on the candidate chain, so it has metadata,
@@ -437,7 +535,14 @@ mod tests {
             coinbase_root: CoinbaseRoot::Height(5),
         };
 
-        let rendered = output_json(3, &output, origin, Network::Signet);
+        let rendered = output_json(
+            3,
+            &output,
+            origin,
+            Network::Signet,
+            None,
+            ChainDepths::BITCOIN,
+        );
 
         assert_eq!(rendered["n"], json!(3));
         assert_eq!(rendered["value"], json!(1.5));
