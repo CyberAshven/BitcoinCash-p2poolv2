@@ -9,8 +9,9 @@
 listen_address = "/ip4/0.0.0.0/tcp/6884"
 # Share chain peers to dial at startup and keep reconnecting to. A Bitcoin
 # Cash node finds peers only here: there are no Bitcoin Cash DNS seeds yet,
-# and dns_seed is ignored and always off on chain = "bitcoin-cash".
-# dial_peers = ["/ip4/203.0.113.1/tcp/6884"]
+# and dns_seed is ignored and always off on chain = "bitcoin-cash". A peer
+# is an IP address or a host name, which is looked up again on every dial.
+# dial_peers = ["/ip4/203.0.113.1/tcp/6884", "/dns4/pool.example.com/tcp/6884"]
 max_pending_incoming = 10
 max_pending_outgoing = 10
 max_established_incoming = 50

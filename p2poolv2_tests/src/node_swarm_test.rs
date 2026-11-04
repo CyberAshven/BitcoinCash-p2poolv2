@@ -184,6 +184,114 @@ async fn test_three_nodes_connectivity() {
         .expect("Failed to shutdown node 3");
 }
 
+/// A node reaches a peer named by host name in `dial_peers`, as a public
+/// node's operator is likely to publish it: `/dns4/localhost/tcp/...`.
+#[test_log::test(tokio::test)]
+async fn test_node_dials_peer_by_dns_name() {
+    let config1 = common::default_test_config()
+        .with_listen_address("/ip4/127.0.0.1/tcp/7887".to_string())
+        .with_store_path("test_chain_dns_1.db".to_string());
+    let config2 = common::default_test_config()
+        .with_listen_address("/ip4/127.0.0.1/tcp/7888".to_string())
+        .with_store_path("test_chain_dns_2.db".to_string())
+        .with_dial_peers(vec!["/dns4/localhost/tcp/7887".to_string()]);
+
+    let temp_dir1 = tempdir().unwrap();
+    let temp_dir2 = tempdir().unwrap();
+
+    let store1 =
+        Arc::new(Store::new(temp_dir1.path().to_str().unwrap().to_string(), false).unwrap());
+    let (write_tx1, write_rx1) = write_channel();
+    let store_writer1 = StoreWriter::new(store1.clone(), write_rx1);
+    tokio::task::spawn_blocking(move || store_writer1.run());
+    let store_handle1 = StoreHandle::new(store1, write_tx1);
+    let chain_store_handle1 = ChainStoreHandle::new(store_handle1, config1.stratum.network);
+    chain_store_handle1
+        .init_or_setup_genesis(
+            ShareBlock::build_genesis_for_network(config1.stratum.network).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let store2 =
+        Arc::new(Store::new(temp_dir2.path().to_str().unwrap().to_string(), false).unwrap());
+    let (write_tx2, write_rx2) = write_channel();
+    let store_writer2 = StoreWriter::new(store2.clone(), write_rx2);
+    tokio::task::spawn_blocking(move || store_writer2.run());
+    let store_handle2 = StoreHandle::new(store2, write_tx2);
+    let chain_store_handle2 = ChainStoreHandle::new(store_handle2, config2.stratum.network);
+    chain_store_handle2
+        .init_or_setup_genesis(
+            ShareBlock::build_genesis_for_network(config2.stratum.network).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let (_shares_tx_1, shares_rx_1) = tokio::sync::mpsc::channel::<Emission>(10);
+    let (_shares_tx_2, shares_rx_2) = tokio::sync::mpsc::channel::<Emission>(10);
+
+    let stats_dir1 = tempfile::tempdir().unwrap();
+    let stats_dir2 = tempfile::tempdir().unwrap();
+    let metrics1 = metrics::start_metrics(stats_dir1.path().to_str().unwrap().to_string())
+        .await
+        .unwrap();
+    let metrics2 = metrics::start_metrics(stats_dir2.path().to_str().unwrap().to_string())
+        .await
+        .unwrap();
+
+    let (monitoring_tx1, _monitoring_rx1) = create_monitoring_event_channel();
+    let (notify_tx1, _notify_rx1) = tokio::sync::mpsc::channel::<NotifyCmd>(10);
+    let (node1_handle, _stop_rx1) = NodeHandle::new(
+        config1,
+        chain_store_handle1,
+        shares_rx_1,
+        metrics1,
+        monitoring_tx1,
+        notify_tx1,
+        Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
+        None,
+    )
+    .await
+    .expect("Failed to create node 1");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (monitoring_tx2, _monitoring_rx2) = create_monitoring_event_channel();
+    let (notify_tx2, _notify_rx2) = tokio::sync::mpsc::channel::<NotifyCmd>(10);
+    let (node2_handle, _stop_rx2) = NodeHandle::new(
+        config2,
+        chain_store_handle2,
+        shares_rx_2,
+        metrics2,
+        monitoring_tx2,
+        notify_tx2,
+        Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
+        None,
+    )
+    .await
+    .expect("Failed to create node 2");
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let peers1 = node1_handle
+        .get_peers()
+        .await
+        .expect("Failed to get peers from node 1");
+    let peers2 = node2_handle
+        .get_peers()
+        .await
+        .expect("Failed to get peers from node 2");
+
+    assert_eq!(peers1.len(), 1, "Node 1 should have node 2 as its peer");
+    assert_eq!(peers2.len(), 1, "Node 2 should reach node 1 by name");
+
+    node1_handle
+        .shutdown()
+        .await
+        .expect("Failed to shutdown node 1");
+    node2_handle
+        .shutdown()
+        .await
+        .expect("Failed to shutdown node 2");
+}
+
 /// Load share blocks from the share_sync fixture file.
 ///
 /// Returns a vector of ShareBlock ordered by chain height (genesis first).

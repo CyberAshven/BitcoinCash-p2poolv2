@@ -175,7 +175,18 @@ impl Node {
             }
         };
 
-        let transport = libp2p::tcp::Transport::<libp2p::tcp::tokio::Tcp>::new(tcp_config.clone())
+        // DNS over TCP, so dial_peers may name a peer by host name
+        // (/dns4/, /dns6/, /dns/), resolved again on every dial.
+        let tcp_transport = libp2p::tcp::Transport::<libp2p::tcp::tokio::Tcp>::new(tcp_config);
+        let dns_tcp_transport = match libp2p::dns::tokio::Transport::system(tcp_transport) {
+            Ok(transport) => transport,
+            Err(err) => {
+                error!("Failed to read the system DNS configuration: {}", err);
+                return Err(Box::new(err));
+            }
+        };
+
+        let transport = dns_tcp_transport
             .upgrade(libp2p::core::upgrade::Version::V1)
             .authenticate(noise_config)
             .multiplex(libp2p::yamux::Config::default())

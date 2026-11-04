@@ -47,8 +47,10 @@ Kademlia for peer discovery, Identify, Ping, and a request-response protocol
 for share announcements, headers, blocks and share transactions.
 
 Bitcoin Cash has no P2Poolv2 DNS seeds yet: a new node needs at least one
-peer in `[network] dial_peers`, and listens on port 6884 by default
-([Requirements](requirements.md#ports)).
+peer in `[network] dial_peers`, given by IP address (`/ip4/`, `/ip6/`) or
+host name (`/dns4/`, `/dns6/`, `/dns/`), and listens on port 6884 by default
+([Requirements](requirements.md#ports)). The transport resolves a host name
+through the system's DNS configuration on every dial, reconnects included.
 
 Take seven nodes, A to G, connected in a mesh. Several links carry shares
 at once, because more than one node can find a share at the same time:
