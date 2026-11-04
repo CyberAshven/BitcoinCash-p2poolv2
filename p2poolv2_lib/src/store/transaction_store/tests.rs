@@ -43,6 +43,58 @@ fn test_transaction_store_should_succeed() {
     }
 }
 
+/// A pruner can delete a transaction's rows between the `Tx` read and
+/// the output reads; that must surface as an error, never a panic.
+#[test]
+fn test_get_tx_returns_not_found_when_output_row_missing() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+    let block = TestShareBlockBuilder::new().build();
+    let mut batch = Store::get_write_batch();
+    let metadata = store
+        .add_sharechain_txs(&block.transactions, 1, &mut batch)
+        .unwrap();
+    store.commit_batch(batch).unwrap();
+    let txid = metadata[0].txid;
+    let outputs_cf = store.db.cf_handle(&ColumnFamily::Outputs).unwrap();
+    store
+        .db
+        .delete_cf(&outputs_cf, outpoint_key(&txid, 0))
+        .unwrap();
+
+    let result = store.get_tx(&txid);
+
+    assert!(
+        matches!(result, Err(StoreError::NotFound(_))),
+        "unexpected: {result:?}"
+    );
+}
+
+#[test]
+fn test_get_tx_returns_not_found_when_input_row_missing() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+    let block = TestShareBlockBuilder::new().build();
+    let mut batch = Store::get_write_batch();
+    let metadata = store
+        .add_sharechain_txs(&block.transactions, 1, &mut batch)
+        .unwrap();
+    store.commit_batch(batch).unwrap();
+    let txid = metadata[0].txid;
+    let inputs_cf = store.db.cf_handle(&ColumnFamily::Inputs).unwrap();
+    store
+        .db
+        .delete_cf(&inputs_cf, outpoint_key(&txid, 0))
+        .unwrap();
+
+    let result = store.get_tx(&txid);
+
+    assert!(
+        matches!(result, Err(StoreError::NotFound(_))),
+        "unexpected: {result:?}"
+    );
+}
+
 #[test]
 fn test_get_txs_returns_empty_for_empty_input() {
     let temp_dir = tempdir().unwrap();
