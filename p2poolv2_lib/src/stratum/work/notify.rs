@@ -287,8 +287,10 @@ pub enum NotifyCmd {
     /// Withdraw mining work until the next template.
     ///
     /// Sent by the template poller once the node has given no template for
-    /// [`LOST_CONTACT_AFTER`]: the latest one may no longer build on the
-    /// node's tip, so mining connections close and no Job Declaration token
+    /// [`LOST_CONTACT_AFTER`], and by the Template Provider client once no
+    /// provider connection has published one for as long: the latest
+    /// template may no longer build on the node's tip, so mining
+    /// connections close and no Job Declaration token
     /// is allocated, rather than miners hashing work that cannot pay. The
     /// next template publishes work again, with clean jobs.
     Withdraw,
@@ -442,7 +444,7 @@ pub async fn start_notify(
             NotifyCmd::Withdraw => {
                 if latest_template.take().is_some() {
                     warn!(
-                        "Withdrawing mining work: the node has given no template for {} seconds; waiting for one",
+                        "Withdrawing mining work: no template for {} seconds; waiting for one",
                         LOST_CONTACT_AFTER.as_secs()
                     );
                     notify_context.pool_transactions.clear_prepared();
