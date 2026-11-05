@@ -22,13 +22,15 @@ use crate::stratum::parse_password::{
     log_unknown_options, parse_miner_donation, split_user_identity,
 };
 use crate::stratum::work::coinbase::declared_reservation_outputs;
+use crate::stratum::work::gbt::{compute_merkle_branches, compute_merkle_root_from_branches};
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use binary_sv2::{B064K, B0255, Deserialize, Seq064K, Str0255};
+use bitcoin::block::{Header, Version};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::rand::random;
-use bitcoin::{BlockHash, Transaction, TxOut};
+use bitcoin::{Block, BlockHash, CompactTarget, Target, Transaction, TxMerkleNode, TxOut};
 use codec_sv2::{Decoded, Decoder, Encoder};
 use common_messages_sv2::{
     MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
@@ -39,6 +41,7 @@ use framing_sv2::framing::MessageFrame;
 #[cfg(test)]
 use framing_sv2::framing::SerializedFrame;
 use framing_sv2::header::Header as FrameHeader;
+use ipnet::IpNet;
 use job_declaration_sv2::{
     AllocateMiningJobToken, AllocateMiningJobTokenSuccess, DeclareMiningJob, DeclareMiningJobError,
     DeclareMiningJobSuccess, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
@@ -46,7 +49,8 @@ use job_declaration_sv2::{
     MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN_SUCCESS, MESSAGE_TYPE_DECLARE_MINING_JOB,
     MESSAGE_TYPE_DECLARE_MINING_JOB_ERROR, MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS,
     MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
-    ProvideMissingTransactions, ProvideMissingTransactionsSuccess,
+    MESSAGE_TYPE_PUSH_SOLUTION, ProvideMissingTransactions, ProvideMissingTransactionsSuccess,
+    PushSolution,
 };
 use mining_sv2::{
     MESSAGE_TYPE_CLOSE_CHANNEL, MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
@@ -58,9 +62,12 @@ use mining_sv2::{
     MESSAGE_TYPE_UPDATE_CHANNEL, MESSAGE_TYPE_UPDATE_CHANNEL_ERROR, SetCustomMiningJob,
     SetCustomMiningJobError,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+use tracing::debug;
 
 const PROTOCOL_VERSION: u16 = 2;
 /// The error a declaration whose coinbase the node refuses gets, as
@@ -68,6 +75,9 @@ const PROTOCOL_VERSION: u16 = 2;
 /// canonical, or do not make output 0's root.
 const INVALID_COINBASE_TX: &str = "invalid-coinbase-tx";
 const WORK_SELECTION_FLAG: u32 = 0b10;
+/// `SetupConnection` flag `DECLARE_TX_DATA` of the Job Declaration
+/// Protocol: the client reveals its transactions (Full-Template mode).
+const DECLARE_TX_DATA_FLAG: u32 = 0b1;
 const MAX_JOB_TOKENS: usize = 64;
 const TOKEN_LIFETIME: Duration = Duration::from_secs(120);
 const MAX_DECLARED_TRANSACTION_BYTES: usize = 64 * 1024 * 1024;
@@ -85,6 +95,13 @@ const MAX_PAYOUT_SETS: usize = 8;
 /// would get the same answer. Unlike [`MAX_PAYOUT_SETS`], this does not
 /// close the connection.
 const MAX_VERIFY_PAYOUTS_PER_SECOND: u32 = 4;
+/// Full-Template declarations a connection keeps for `PushSolution`, all
+/// on the latest template's previous block.
+const MAX_SOLVABLE_JOBS: usize = 4;
+/// Bytes of declarations all connections keep for `PushSolution`, beside
+/// `MAX_DECLARED_TRANSACTION_BYTES` for the tokens: a kept declaration
+/// outlives its token.
+const MAX_SOLVABLE_BYTES: usize = MAX_DECLARED_TRANSACTION_BYTES;
 
 /// Which Job Declaration mode a connection negotiated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,11 +221,136 @@ pub(crate) struct DeclaredJob {
     pub declaration: Option<Declaration>,
 }
 
+/// A Full-Template declaration a connection made, kept after
+/// `SetCustomMiningJob` takes its token, so the block a `PushSolution`
+/// reports can be rebuilt from it.
+struct SolvableJob {
+    /// The previous block of the template the token was allocated against,
+    /// which every declared job builds on.
+    prev_hash: BlockHash,
+    /// That template's target. A pushed header must meet it, so a client
+    /// cannot make the node submit blocks without network-difficulty work.
+    target: Target,
+    prefix: Vec<u8>,
+    suffix: Vec<u8>,
+    /// The declared transactions, in CTOR.
+    transactions: Arc<Vec<Transaction>>,
+    /// The coinbase's merkle branch over `transactions`.
+    merkle_branches: Vec<TxMerkleNode>,
+    /// This job's share of `MAX_SOLVABLE_BYTES`, given back when it is
+    /// dropped.
+    _reserved: SolvableBytes,
+}
+
+/// Bytes reserved from a registry's `MAX_SOLVABLE_BYTES` budget, given back
+/// on drop.
+struct SolvableBytes {
+    budget: Arc<AtomicUsize>,
+    bytes: usize,
+}
+
+impl SolvableBytes {
+    /// Reserve `bytes` from `budget`, or `None` when they do not fit.
+    /// Callers reserve under the registry lock; releases may run at any
+    /// time, and only make room.
+    fn reserve(budget: &Arc<AtomicUsize>, bytes: usize) -> Option<Self> {
+        let used = budget.fetch_add(bytes, Ordering::SeqCst);
+        if used.saturating_add(bytes) > MAX_SOLVABLE_BYTES {
+            budget.fetch_sub(bytes, Ordering::SeqCst);
+            return None;
+        }
+        Some(Self {
+            budget: Arc::clone(budget),
+            bytes,
+        })
+    }
+}
+
+impl Drop for SolvableBytes {
+    fn drop(&mut self) {
+        self.budget.fetch_sub(self.bytes, Ordering::SeqCst);
+    }
+}
+
+impl SolvableJob {
+    /// The job for `declaration` and `transactions` on `prepared`'s
+    /// template, or `None` when the template's previous block or bits do
+    /// not parse, or `budget` has no room for it.
+    fn new(
+        prepared: &PreparedNotifyParams,
+        declaration: &Declaration,
+        transactions: Arc<Vec<Transaction>>,
+        budget: &Arc<AtomicUsize>,
+    ) -> Option<Self> {
+        let template = prepared.template();
+        let prev_hash = template.previousblockhash.parse().ok()?;
+        let bits = CompactTarget::from_unprefixed_hex(&template.bits).ok()?;
+        let bytes = transactions
+            .iter()
+            .map(Transaction::total_size)
+            .sum::<usize>()
+            + declaration.prefix.len()
+            + declaration.suffix.len();
+        let reserved = SolvableBytes::reserve(budget, bytes)?;
+        let txids = transactions
+            .iter()
+            .map(|transaction| transaction.compute_txid().to_raw_hash())
+            .collect();
+        let merkle_branches = compute_merkle_branches(txids)
+            .into_iter()
+            .map(TxMerkleNode::from_raw_hash)
+            .collect();
+        Some(Self {
+            prev_hash,
+            target: Target::from_compact(bits),
+            prefix: declaration.prefix.clone(),
+            suffix: declaration.suffix.clone(),
+            transactions,
+            merkle_branches,
+            _reserved: reserved,
+        })
+    }
+
+    /// The block `push` reports for this job, when its coinbase decodes and
+    /// its header meets the template's target.
+    fn block(&self, push: &PushSolution) -> Option<Block> {
+        let extranonce = push.extranonce.as_bytes();
+        let mut raw = Vec::with_capacity(self.prefix.len() + extranonce.len() + self.suffix.len());
+        raw.extend_from_slice(&self.prefix);
+        raw.extend_from_slice(extranonce);
+        raw.extend_from_slice(&self.suffix);
+        let coinbase: Transaction = deserialize(&raw).ok()?;
+        let header = Header {
+            version: Version::from_consensus(push.version as i32),
+            prev_blockhash: self.prev_hash,
+            merkle_root: compute_merkle_root_from_branches(
+                coinbase.compute_txid(),
+                &self.merkle_branches,
+            ),
+            time: push.ntime,
+            bits: CompactTarget::from_consensus(push.nbits),
+            nonce: push.nonce,
+        };
+        if !self.target.is_met_by(header.block_hash()) {
+            return None;
+        }
+        let mut txdata = Vec::with_capacity(self.transactions.len() + 1);
+        txdata.push(coinbase);
+        txdata.extend(self.transactions.iter().cloned());
+        Some(Block { header, txdata })
+    }
+}
+
 /// Tokens and the transaction set each one mines.
 pub struct JobRegistry {
     cache: PoolTransactionCache,
     merge_mining: Option<MergeMiningCommitment>,
     tokens: HashMap<Vec<u8>, JobToken>,
+    /// Client addresses Coinbase-Only declarations are taken from; `None`
+    /// takes them from every client.
+    coinbase_only_from: Option<Vec<IpNet>>,
+    /// Bytes of declarations the connections keep for `PushSolution`.
+    solvable_bytes: Arc<AtomicUsize>,
 }
 
 impl JobRegistry {
@@ -220,6 +362,30 @@ impl JobRegistry {
             cache,
             merge_mining,
             tokens: HashMap::with_capacity(8),
+            coinbase_only_from: None,
+            solvable_bytes: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Take Coinbase-Only declarations only from clients in `networks`.
+    /// A Coinbase-Only declarator's shares are credited on transactions the
+    /// node never sees, so a node offers it only to clients it trusts.
+    pub(crate) fn with_coinbase_only_from(mut self, networks: Vec<IpNet>) -> Self {
+        self.coinbase_only_from = Some(networks);
+        self
+    }
+
+    /// Whether a client at `peer` may declare Coinbase-Only jobs. An
+    /// IPv4-mapped IPv6 address counts as its IPv4 address. Without a known
+    /// address only a node with no allowlist takes it.
+    fn takes_coinbase_only_from(&self, peer: Option<IpAddr>) -> bool {
+        match (&self.coinbase_only_from, peer) {
+            (None, _) => true,
+            (Some(networks), Some(peer)) => {
+                let peer = peer.to_canonical();
+                networks.iter().any(|network| network.contains(&peer))
+            }
+            (Some(_), None) => false,
         }
     }
 
@@ -305,6 +471,9 @@ pub struct Sv2Connection {
     mode: Option<JobDeclarationMode>,
     mining: bool,
     work_selection: bool,
+    /// The client's address, which decides whether it may declare
+    /// Coinbase-Only jobs.
+    peer: Option<IpAddr>,
     /// Full-Template declarations made on this connection that still wait
     /// for `ProvideMissingTransactionsSuccess`, by the client's request id.
     /// Request ids are chosen by each client, so two connections can use the
@@ -325,6 +494,9 @@ pub struct Sv2Connection {
     verify_window: Instant,
     /// A verify is inside [`Self::handle_verify_payout_outputs`].
     verify_outstanding: bool,
+    /// This connection's latest Full-Template declarations, newest last,
+    /// for `PushSolution`.
+    solvable_jobs: VecDeque<SolvableJob>,
 }
 
 impl Sv2Connection {
@@ -337,6 +509,7 @@ impl Sv2Connection {
             mode: None,
             mining: false,
             work_selection: false,
+            peer: None,
             pending_declarations: HashMap::with_capacity(4),
             payout_outputs: false,
             payout_basis: None,
@@ -344,7 +517,14 @@ impl Sv2Connection {
             verify_count: 0,
             verify_window: Instant::now(),
             verify_outstanding: false,
+            solvable_jobs: VecDeque::with_capacity(MAX_SOLVABLE_JOBS),
         }
+    }
+
+    /// The connection of a client at `peer`.
+    pub(crate) fn with_peer(mut self, peer: IpAddr) -> Self {
+        self.peer = Some(peer);
+        self
     }
 
     /// Accept `incoming` and return the response frames it completed.
@@ -568,6 +748,9 @@ impl Sv2Connection {
                     SetCustomMiningJob::from_bytes(payload).map_err(|error| error.to_string())?;
                 self.on_custom_job(&request)
             }
+            // The listener submits the block (`server::handle_messages`);
+            // here it is only rebuilt.
+            MESSAGE_TYPE_PUSH_SOLUTION => self.push_solution(payload).map(|_| Vec::new()),
             _ => Err(format!(
                 "unsupported Stratum V2 message type {message_type}"
             )),
@@ -592,6 +775,25 @@ impl Sv2Connection {
                 } else {
                     JobDeclarationMode::CoinbaseOnly
                 };
+                // Coinbase-Only only from clients the operator lists; the
+                // error names the flag the client must set (sv2-spec 3.x).
+                if mode == JobDeclarationMode::CoinbaseOnly
+                    && !self
+                        .registry
+                        .lock()
+                        .expect("job registry lock")
+                        .takes_coinbase_only_from(self.peer)
+                {
+                    self.mode = None;
+                    self.mining = false;
+                    return self.respond(
+                        SetupConnectionError {
+                            flags: DECLARE_TX_DATA_FLAG,
+                            error_code: string_field("unsupported-feature-flags")?,
+                        },
+                        MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
+                    );
+                }
                 self.mode = Some(mode);
                 self.mining = false;
                 self.work_selection = false;
@@ -903,12 +1105,24 @@ impl Sv2Connection {
         } else {
             new_token_bytes = random::<[u8; 32]>().to_vec();
         }
+        let transactions = Arc::new(transactions);
+        let solvable = job_token.prepared.as_deref().and_then(|prepared| {
+            SolvableJob::new(
+                prepared,
+                &declaration,
+                Arc::clone(&transactions),
+                &registry.solvable_bytes,
+            )
+        });
         job_token.state = TokenState::Ready {
-            transactions: Arc::new(transactions),
+            transactions,
             declaration,
         };
         registry.tokens.insert(new_token_bytes.clone(), job_token);
         drop(registry);
+        if let Some(job) = solvable {
+            self.keep_solvable(job);
+        }
         self.respond(
             DeclareMiningJobSuccess {
                 request_id: request.request_id,
@@ -916,6 +1130,43 @@ impl Sv2Connection {
             },
             MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS,
         )
+    }
+
+    /// Keep `job` for `PushSolution`: only jobs on its previous block, at
+    /// most `MAX_SOLVABLE_JOBS`, the oldest dropped first.
+    fn keep_solvable(&mut self, job: SolvableJob) {
+        self.solvable_jobs
+            .retain(|kept| kept.prev_hash == job.prev_hash);
+        if self.solvable_jobs.len() == MAX_SOLVABLE_JOBS {
+            self.solvable_jobs.pop_front();
+        }
+        self.solvable_jobs.push_back(job);
+    }
+
+    /// The block a `PushSolution` in `payload` reports (sv2-spec 6.4.9),
+    /// rebuilt from the newest of this connection's Full-Template
+    /// declarations it solves.
+    ///
+    /// `None`, with the connection kept, when none does: a Coinbase-Only
+    /// declarator, whose transactions the node never saw, a job on another
+    /// previous block, or a header short of the template's target. The
+    /// message has no answer. A connection that never set up Job
+    /// Declaration, or a payload that does not decode, is an error.
+    pub(crate) fn push_solution(&mut self, payload: &mut [u8]) -> Result<Option<Block>, String> {
+        if self.mode.is_none() {
+            return Err("PushSolution requires a Job Declaration connection".to_string());
+        }
+        let push = PushSolution::from_bytes(payload).map_err(|error| error.to_string())?;
+        let block = self
+            .solvable_jobs
+            .iter()
+            .rev()
+            .filter(|job| job.prev_hash.as_byte_array().as_slice() == push.prev_hash.as_bytes())
+            .find_map(|job| job.block(&push));
+        if block.is_none() {
+            debug!("PushSolution solves none of this connection's Full-Template declarations");
+        }
+        Ok(block)
     }
 
     fn on_custom_job(&mut self, request: &SetCustomMiningJob) -> Result<Vec<Vec<u8>>, String> {

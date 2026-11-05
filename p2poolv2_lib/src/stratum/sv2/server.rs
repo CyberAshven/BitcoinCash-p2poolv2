@@ -26,16 +26,20 @@ use crate::stratum::merge_disclosure::{
 use crate::stratum::server::StratumContext;
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use binary_sv2::Deserialize;
-use job_declaration_sv2::{AllocateMiningJobToken, MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN};
+use ipnet::IpNet;
+use job_declaration_sv2::{
+    AllocateMiningJobToken, MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN, MESSAGE_TYPE_PUSH_SOLUTION,
+};
 use mining_sv2::{MESSAGE_TYPE_SET_CUSTOM_MINING_JOB, SetCustomMiningJob};
 use std::future;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::time::timeout;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Time a client has to complete the Noise handshake after connecting.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -77,7 +81,7 @@ pub async fn bind(hostname: &str, port: u16) -> Result<TcpListener, std::io::Err
 /// Each connection holds a permit from `connection_limit`, the semaphore the
 /// SV1 server takes its own permits from, so the two ports share one
 /// connection cap. A connection arriving with no permit left is closed.
-#[allow(clippy::too_many_arguments)] // wiring constructor: each parameter is a distinct collaborator, a params struct would only move the list
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve<ShutdownSignal>(
     listener: TcpListener,
     connection_limit: Arc<Semaphore>,
@@ -86,14 +90,15 @@ pub(crate) async fn serve<ShutdownSignal>(
     mining: Option<Sv2Mining>,
     authority: Option<Sv2Authority>,
     anchor_weights: Option<Arc<dyn AnchorWeights>>,
+    coinbase_only_from: Vec<IpNet>,
     mut shutdown: watch::Receiver<ShutdownSignal>,
 ) where
     ShutdownSignal: Send + Sync + 'static,
 {
-    let registry = Arc::new(Mutex::new(JobRegistry::new(
-        pool_transactions,
-        merge_mining,
-    )));
+    let registry = Arc::new(Mutex::new(
+        JobRegistry::new(pool_transactions, merge_mining)
+            .with_coinbase_only_from(coinbase_only_from),
+    ));
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -113,6 +118,7 @@ pub(crate) async fn serve<ShutdownSignal>(
                         });
                         tokio::spawn(handle_connection(
                             stream,
+                            peer.ip(),
                             permit,
                             Arc::clone(&registry),
                             connection_mining,
@@ -135,8 +141,10 @@ pub(crate) async fn serve<ShutdownSignal>(
 /// this returns. A Noise handshake that does not finish within
 /// [`HANDSHAKE_TIMEOUT`] closes the connection, so an idle socket cannot
 /// hold a permit before it has proven it speaks SV2.
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection<ShutdownSignal>(
     mut stream: TcpStream,
+    peer: IpAddr,
     _permit: OwnedSemaphorePermit,
     registry: Arc<Mutex<JobRegistry>>,
     mining: Option<Sv2Mining>,
@@ -165,7 +173,7 @@ async fn handle_connection<ShutdownSignal>(
         }
         None => None,
     };
-    let mut connection = Sv2Connection::new(registry);
+    let mut connection = Sv2Connection::new(registry).with_peer(peer);
     let (mut template_rx, mut channels) = match mining {
         Some(services) => (
             Some(services.template_rx),
@@ -359,6 +367,17 @@ async fn handle_messages(
                 .as_deref()
                 .and_then(|channels| channels.payout_identity(&user_identifier));
             connection.on_allocate(request.request_id, &user_identifier, identity)?
+        } else if message_type == MESSAGE_TYPE_PUSH_SOLUTION {
+            if let Some(block) = connection.push_solution(&mut payload)? {
+                match channels.as_deref() {
+                    Some(channels) => channels.submit_pushed_solution(block).await,
+                    None => warn!(
+                        "PushSolution for block {} on a listener without mining: not submitted",
+                        block.block_hash()
+                    ),
+                }
+            }
+            Vec::new()
         } else if is_mining_channel_message(message_type) {
             let channels = match (channels.as_mut(), connection.is_mining()) {
                 (Some(channels), true) => channels,

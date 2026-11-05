@@ -282,7 +282,19 @@ impl TestSv2Client {
         extension_type: u16,
         expected_type: u8,
     ) -> Vec<u8> {
-        timeout(Duration::from_secs(5), async {
+        self.receive_extension_within(Duration::from_secs(5), extension_type, expected_type)
+            .await
+    }
+
+    /// `receive_extension`, waiting up to `wait` for a message a peer sends
+    /// on its own, such as a push after the next share.
+    pub(crate) async fn receive_extension_within(
+        &mut self,
+        wait: Duration,
+        extension_type: u16,
+        expected_type: u8,
+    ) -> Vec<u8> {
+        timeout(wait, async {
             loop {
                 self.stream
                     .read_exact(self.decoder.writable())
@@ -562,6 +574,12 @@ pub fn bch_template_transaction(index: u32) -> TemplateTransaction {
         sigops: 0,
         weight: 0,
     }
+}
+
+/// The default `sv2_coinbase_only_from`: this computer only.
+#[cfg(test)]
+pub(crate) fn test_coinbase_only_from() -> Vec<ipnet::IpNet> {
+    vec!["127.0.0.0/8".parse().unwrap(), "::1/128".parse().unwrap()]
 }
 
 /// A BCH payout snapshot with distinct weights.
@@ -1454,6 +1472,11 @@ pub fn test_funding_transaction(value: u64) -> bitcoin::Transaction {
 /// block holds a transaction no other block has, and a one-node coinbase
 /// merkle branch of byte `h`, so every block's stored branch is distinct
 /// and non-empty. Returns the blocks indexed by height, genesis at 0.
+///
+/// Block `h` is stamped `1_700_000_000 + h` (November 2023), far older than
+/// `MAX_TIP_AGE_SECS`, so `ChainStoreHandle::is_current()` is false on this
+/// chain: the node counts as still syncing. Tests that need a current tip
+/// must stamp blocks near the system clock instead.
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn build_confirmed_test_chain(
     chain_store_handle: &ChainStoreHandle,

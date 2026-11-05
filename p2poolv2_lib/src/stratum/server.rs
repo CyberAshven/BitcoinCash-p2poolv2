@@ -37,6 +37,7 @@ use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_w
 use crate::stratum::work::tracker::JobTracker;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoindrpc::{BitcoinRpcConfig, BitcoindRpcClient};
+use ipnet::IpNet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -102,6 +103,9 @@ pub struct Sv2Listener {
     /// PPLNS weights at another node's anchor, for `VerifyPayoutOutputs`.
     /// `None` when this node does not pay from the share-chain window.
     pub anchor_weights: Option<Arc<dyn AnchorWeights>>,
+    /// Client addresses a Job Declaration connection may use Coinbase-Only
+    /// mode from (`sv2_coinbase_only_from`).
+    pub coinbase_only_from: Vec<IpNet>,
 }
 
 /// Builder for StratumServer to avoid dependency on StratumConfig
@@ -457,6 +461,7 @@ impl StratumServer {
                 Some(mining),
                 sv2.authority,
                 sv2.anchor_weights,
+                sv2.coinbase_only_from,
                 sv2_stop_receiver,
             ));
         }

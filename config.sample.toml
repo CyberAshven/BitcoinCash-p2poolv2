@@ -47,6 +47,11 @@ bitcoin_cash_network = "chipnet"
 bch_share_chain = "mini"
 hostname = "0.0.0.0"
 port = 3333
+# Set true once dial_peers lists a node of a running share chain, so miners
+# connect only after this node has synced it. A new share chain never looks
+# current, so leave it false when you start one: with true, the first node's
+# Stratum port never opens.
+wait_for_chain_sync = false
 # Difficulty a new miner starts at, and the lowest vardiff gives one. A
 # miner's difficulty never goes above the share difficulty of its job (4 on
 # the mini chain at its easiest), so small values suit chipnet's CPU miners
@@ -131,6 +136,13 @@ zmqpubhashblock = "tcp://127.0.0.1:28332"
 # sv2_authority_secret_key = "..."
 # Seconds each Noise certificate stays valid. Default 3600.
 # sv2_cert_validity_secs = 3600
+# Clients that may declare Coinbase-Only Job Declaration jobs, as IP
+# addresses or CIDR ranges. In that mode the node credits shares on a block
+# whose transactions it never sees, so by default only this computer may use
+# it. Full-Template declarations, whose templates the node checks, are taken
+# from every client. Add your own declarator, for example its Tailscale
+# address; [] refuses Coinbase-Only, ["0.0.0.0/0", "::/0"] takes it from all.
+# sv2_coinbase_only_from = ["127.0.0.0/8", "::1/128"]
 # Where block templates come from. Default "rpc": getblocktemplate from the
 # node in [bitcoinrpc]. "rpc_light" asks that node for light templates
 # (getblocktemplatelight): the node keeps the transactions and sends their

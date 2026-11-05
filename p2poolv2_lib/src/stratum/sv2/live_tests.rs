@@ -2,11 +2,13 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Explicit opt-in checks against two disposable BCHN regtest nodes.
+//! Explicit opt-in checks against two disposable BCHN regtest nodes, and
+//! against a running node's Stratum V2 port.
 
 use super::payout_outputs::{
-    EXACT_OUTPUTS, PAYOUT_OUTPUTS_EXTENSION, REQUEST_PAYOUT_OUTPUTS,
-    REQUEST_PAYOUT_OUTPUTS_SUCCESS, RequestPayoutOutputsSuccess,
+    EXACT_OUTPUTS, PAYOUT_OUTPUTS_EXTENSION, PAYOUT_OUTPUTS_STALE, REQUEST_PAYOUT_OUTPUTS,
+    REQUEST_PAYOUT_OUTPUTS_ERROR, REQUEST_PAYOUT_OUTPUTS_SUCCESS, RequestPayoutOutputsError,
+    RequestPayoutOutputsSuccess,
 };
 use super::session::encode_extension_frame;
 use super::{PoolTransactionCache, Sv2Mining, bind, serve};
@@ -22,14 +24,14 @@ use crate::stratum::work::block_template::BlockTemplate;
 use crate::test_utils::{
     TestSv2Client, test_bch_custom_coinbase, test_bch_custom_job_with_aux,
     test_bch_prepared_for_template, test_bch_solve_custom_job, test_bch_stratum_context,
-    test_custom_job_from_payout_outputs, test_declared_coinbase_parts, test_payout_outputs_request,
-    test_sv2_authority, test_sv2_setup,
+    test_coinbase_only_from, test_custom_job_from_payout_outputs, test_declared_coinbase_parts,
+    test_payout_outputs_request, test_sv2_authority, test_sv2_setup,
 };
 use binary_sv2::{B016M, B032, B064K, B0255, Deserialize, Seq064K, U256};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash;
 use bitcoin::script::Builder;
-use bitcoin::{Address, Amount, Block, BlockHash, Network, PubkeyHash, Transaction};
+use bitcoin::{Address, Amount, Block, BlockHash, Network, PubkeyHash, Transaction, TxOut};
 use bitcoindrpc::BitcoindRpcClient;
 use common_messages_sv2::{
     MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol,
@@ -46,9 +48,9 @@ use mining_sv2::{
     MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH, MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
     MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
     MESSAGE_TYPE_SET_CUSTOM_MINING_JOB, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS,
-    MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS,
+    MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS, NewExtendedMiningJob,
     OpenExtendedMiningChannel, OpenExtendedMiningChannelSuccess, SetCustomMiningJob,
-    SetCustomMiningJobSuccess, SubmitSharesExtended, SubmitSharesSuccess,
+    SetCustomMiningJobSuccess, SetNewPrevHash, SubmitSharesExtended, SubmitSharesSuccess,
 };
 use p2poolv2_config::DEFAULT_VERSION_MASK;
 use p2poolv2_wallet::bch_share::{BchShareNetwork, encode_payout_address};
@@ -136,6 +138,7 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
         }),
         Some(authority),
         None,
+        test_coinbase_only_from(),
         shutdown_receiver,
     ));
     let mut mining = TestSv2Client::connect(address, authority.public_key).await;
@@ -632,6 +635,7 @@ async fn bchn_jobs_on_requested_payout_outputs_reach_both_real_nodes() {
         }),
         Some(authority),
         None,
+        test_coinbase_only_from(),
         shutdown_receiver,
     ));
     let mut mining = TestSv2Client::connect(address, authority.public_key).await;
@@ -1004,4 +1008,304 @@ async fn bchn_jobs_on_requested_payout_outputs_reach_both_real_nodes() {
     .unwrap()
     .unwrap();
     drop(permits);
+}
+
+/// A Job Declaration client's view of a running node: the template fields it
+/// would take from its own Bitcoin Cash node, here read from the running
+/// node's extended job so the check needs no RPC login.
+struct RunningJob {
+    template: BlockTemplate,
+    channel_id: u32,
+}
+
+/// Open an extended channel on a running node and turn its first job into
+/// the template fields a Job Declaration client sends: version, previous
+/// block hash, bits, time and height (the BIP34 push of the job's coinbase).
+/// No transactions: the client declares an empty block, so its coinbase pays
+/// out the block subsidy alone, not the fees in the node's job.
+async fn running_node_job(mining: &mut TestSv2Client, identity: &str) -> RunningJob {
+    mining
+        .send_message(
+            MESSAGE_TYPE_SETUP_CONNECTION,
+            test_sv2_setup(Protocol::MiningProtocol, 2),
+        )
+        .await;
+    mining.receive(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS).await;
+    mining
+        .send_message(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            OpenExtendedMiningChannel {
+                request_id: 1,
+                user_identity: identity.try_into().unwrap(),
+                nominal_hash_rate: 1.0,
+                max_target: U256::new(&[0xff; 32]).unwrap(),
+                min_extranonce_size: 8,
+            },
+        )
+        .await;
+    let mut open_payload = mining
+        .receive(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
+        .await;
+    let opened = OpenExtendedMiningChannelSuccess::from_bytes(&mut open_payload).unwrap();
+    let extranonce_size =
+        opened.extranonce_prefix.as_bytes().len() + usize::from(opened.extranonce_size);
+    let mut job_payload = mining.receive(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB).await;
+    let job = NewExtendedMiningJob::from_bytes(&mut job_payload).unwrap();
+    let mut prev_payload = mining.receive(MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH).await;
+    let prev = SetNewPrevHash::from_bytes(&mut prev_payload).unwrap();
+    let mut coinbase = job.coinbase_tx_prefix.as_bytes().to_vec();
+    coinbase.extend(std::iter::repeat_n(0, extranonce_size));
+    coinbase.extend_from_slice(job.coinbase_tx_suffix.as_bytes());
+    let coinbase: Transaction = deserialize(&coinbase).unwrap();
+    let script_sig = coinbase.input[0].script_sig.as_bytes();
+    let height_length = usize::from(script_sig[0]);
+    let mut height_bytes = [0u8; 4];
+    height_bytes[..height_length].copy_from_slice(&script_sig[1..=height_length]);
+    let height = u32::from_le_bytes(height_bytes);
+    let subsidy = 5_000_000_000_u64 >> (height / 210_000);
+    let prev_hash = BlockHash::from_byte_array(prev.prev_hash.as_ref().try_into().unwrap());
+    let template = serde_json::from_value(json!({
+        "version": job.version,
+        "previousblockhash": prev_hash.to_string(),
+        "transactions": [],
+        "coinbaseaux": {},
+        "coinbasevalue": subsidy,
+        "longpollid": "",
+        "target": "",
+        "mintime": prev.min_ntime,
+        "mutable": [],
+        "noncerange": "00000000ffffffff",
+        "sigoplimit": 0,
+        "sizelimit": 0,
+        "curtime": prev.min_ntime,
+        "bits": format!("{:08x}", prev.nbits),
+        "height": height,
+    }))
+    .unwrap();
+    RunningJob {
+        template,
+        channel_id: opened.channel_id,
+    }
+}
+
+/// The authority key the node's operator publishes, in the reference
+/// implementation's text form: Base58Check of version `[1, 0]` and the
+/// 32-byte x-only key.
+fn published_authority_key(text: &str) -> [u8; 32] {
+    let bytes = bitcoin::base58::decode_check(text).unwrap();
+    assert_eq!(bytes[..2], [1, 0], "not a Stratum V2 public key");
+    bytes[2..].try_into().unwrap()
+}
+
+#[tokio::test]
+#[ignore = "talks to a running node's Stratum V2 port; see docs/bch-job-declaration.md"]
+async fn a_running_node_serves_requested_payout_outputs() {
+    let address: SocketAddr = env::var("P2POOL_SV2_ADDRESS")
+        .expect("set P2POOL_SV2_ADDRESS")
+        .parse()
+        .unwrap();
+    let authority = published_authority_key(
+        &env::var("P2POOL_SV2_AUTHORITY_KEY").expect("set P2POOL_SV2_AUTHORITY_KEY"),
+    );
+    // "<payout address>.<worker>,p2p=<share address>", as a miner sends it.
+    let identity = env::var("P2POOL_SV2_IDENTITY").expect("set P2POOL_SV2_IDENTITY");
+
+    let mut mining = TestSv2Client::connect(address, authority).await;
+    let job = running_node_job(&mut mining, &identity).await;
+    let template = job.template;
+    let prefix = Builder::new()
+        .push_int(i64::from(template.height))
+        .push_slice(b"standard client")
+        .into_bytes();
+    let extensions = encode_extension_frame(
+        EXTENSIONS_NEGOTIATION,
+        REQUEST_EXTENSIONS,
+        false,
+        &extensions_payload(1, &[PAYOUT_OUTPUTS_EXTENSION]),
+    )
+    .unwrap();
+    let mut jdc = TestSv2Client::connect(address, authority).await;
+    jdc.send_message(
+        MESSAGE_TYPE_SETUP_CONNECTION,
+        test_sv2_setup(Protocol::JobDeclarationProtocol, 1),
+    )
+    .await;
+    jdc.receive(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS).await;
+    jdc.send(extensions).await;
+    assert_eq!(
+        jdc.receive_extension(EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS_SUCCESS)
+            .await,
+        extensions_payload(1, &[PAYOUT_OUTPUTS_EXTENSION])
+    );
+    let token = allocate_token(&mut jdc, 2, &identity).await;
+
+    // A request naming a block the node is not building on is refused.
+    let mut stale = template.clone();
+    stale.previousblockhash = BlockHash::all_zeros().to_string();
+    jdc.send(
+        encode_extension_frame(
+            PAYOUT_OUTPUTS_EXTENSION,
+            REQUEST_PAYOUT_OUTPUTS,
+            false,
+            &test_payout_outputs_request(3, &token, &stale, template.coinbasevalue, &prefix),
+        )
+        .unwrap(),
+    )
+    .await;
+    let mut refused_payload = jdc
+        .receive_extension(PAYOUT_OUTPUTS_EXTENSION, REQUEST_PAYOUT_OUTPUTS_ERROR)
+        .await;
+    let refused = RequestPayoutOutputsError::from_bytes(&mut refused_payload).unwrap();
+    println!(
+        "{}",
+        json!({"step": "refused", "prev_hash": stale.previousblockhash, "error_code": String::from_utf8_lossy(refused.error_code.as_bytes())})
+    );
+
+    let mut success_payload = request_payout_outputs(&mut jdc, 4, &token, &template, &prefix).await;
+    let success = RequestPayoutOutputsSuccess::from_bytes(&mut success_payload).unwrap();
+    let outputs: Vec<TxOut> = deserialize(success.coinbase_tx_outputs.as_bytes()).unwrap();
+    assert_eq!(success.flags, EXACT_OUTPUTS);
+    assert_eq!(success.coinbase_tx_locktime, template.height - 1);
+    assert_eq!(
+        outputs
+            .iter()
+            .map(|output| output.value.to_sat())
+            .sum::<u64>(),
+        template.coinbasevalue
+    );
+    println!(
+        "{}",
+        json!({"step": "answered", "height": template.height, "prev_hash": template.previousblockhash, "value": template.coinbasevalue, "outputs": describe_outputs(&outputs)})
+    );
+
+    // Declare an empty block on the answered outputs, then install it.
+    let mut request_bytes =
+        test_custom_job_from_payout_outputs(&success, &token, &template, &prefix, &[]);
+    let mut request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    request.channel_id = job.channel_id;
+    let (coinbase_prefix, coinbase_suffix) = test_declared_coinbase_parts(&request);
+    jdc.send_message(
+        MESSAGE_TYPE_DECLARE_MINING_JOB,
+        DeclareMiningJob {
+            request_id: 5,
+            mining_job_token: B0255::new(&token).unwrap(),
+            version: request.version,
+            coinbase_tx_prefix: B064K::new(&coinbase_prefix).unwrap(),
+            coinbase_tx_suffix: B064K::new(&coinbase_suffix).unwrap(),
+            wtxid_list: Seq064K::new(vec![]).unwrap(),
+            excess_data: B064K::new(&[]).unwrap(),
+        },
+    )
+    .await;
+    // The node asks for every declared transaction; there are none.
+    let mut missing_payload = jdc.receive(MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS).await;
+    let missing = ProvideMissingTransactions::from_bytes(&mut missing_payload).unwrap();
+    assert_eq!(missing.request_id, 5);
+    assert!(missing.unknown_tx_position_list.is_empty());
+    jdc.send_message(
+        MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
+        ProvideMissingTransactionsSuccess {
+            request_id: 5,
+            transaction_list: Seq064K::new(vec![]).unwrap(),
+        },
+    )
+    .await;
+    let mut accepted_payload = jdc.receive(MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS).await;
+    let accepted = DeclareMiningJobSuccess::from_bytes(&mut accepted_payload).unwrap();
+    request.token = B0255::new(accepted.new_mining_job_token.as_bytes()).unwrap();
+    mining
+        .send_message(MESSAGE_TYPE_SET_CUSTOM_MINING_JOB, request.clone())
+        .await;
+    let mut installed_payload = mining
+        .receive(MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS)
+        .await;
+    let installed = SetCustomMiningJobSuccess::from_bytes(&mut installed_payload).unwrap();
+    println!(
+        "{}",
+        json!({"step": "installed", "declare_request_id": accepted.request_id, "job_id": installed.job_id})
+    );
+
+    // The next share or block makes the answer stale; the node says so, and
+    // a fresh token gets the new outputs.
+    jdc.receive_extension_within(
+        Duration::from_secs(120),
+        PAYOUT_OUTPUTS_EXTENSION,
+        PAYOUT_OUTPUTS_STALE,
+    )
+    .await;
+    let mut current = TestSv2Client::connect(address, authority).await;
+    let current_template = running_node_job(&mut current, &identity).await.template;
+    let fresh_prefix = Builder::new()
+        .push_int(i64::from(current_template.height))
+        .push_slice(b"standard client")
+        .into_bytes();
+    let fresh_token = allocate_token(&mut jdc, 6, &identity).await;
+    let mut fresh_payload =
+        request_payout_outputs(&mut jdc, 7, &fresh_token, &current_template, &fresh_prefix).await;
+    let fresh = RequestPayoutOutputsSuccess::from_bytes(&mut fresh_payload).unwrap();
+    let fresh_outputs: Vec<TxOut> = deserialize(fresh.coinbase_tx_outputs.as_bytes()).unwrap();
+    assert_ne!(fresh_outputs, outputs);
+    println!(
+        "{}",
+        json!({"step": "stale-then-fresh", "height": current_template.height, "prev_hash": current_template.previousblockhash, "outputs": describe_outputs(&fresh_outputs)})
+    );
+}
+
+/// Allocate a mining job token for `identity` on a Job Declaration connection.
+async fn allocate_token(jdc: &mut TestSv2Client, request_id: u32, identity: &str) -> Vec<u8> {
+    jdc.send_message(
+        MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN,
+        AllocateMiningJobToken {
+            request_id,
+            user_identifier: identity.try_into().unwrap(),
+        },
+    )
+    .await;
+    let mut payload = jdc
+        .receive(MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN_SUCCESS)
+        .await;
+    AllocateMiningJobTokenSuccess::from_bytes(&mut payload)
+        .unwrap()
+        .mining_job_token
+        .as_bytes()
+        .to_vec()
+}
+
+/// Ask for the outputs of `token` on `template`, paying out the template's
+/// whole coinbase value. Returns the `RequestPayoutOutputs.Success` payload.
+async fn request_payout_outputs(
+    jdc: &mut TestSv2Client,
+    request_id: u32,
+    token: &[u8],
+    template: &BlockTemplate,
+    prefix: &[u8],
+) -> Vec<u8> {
+    jdc.send(
+        encode_extension_frame(
+            PAYOUT_OUTPUTS_EXTENSION,
+            REQUEST_PAYOUT_OUTPUTS,
+            false,
+            &test_payout_outputs_request(
+                request_id,
+                token,
+                template,
+                template.coinbasevalue,
+                prefix,
+            ),
+        )
+        .unwrap(),
+    )
+    .await;
+    jdc.receive_extension(PAYOUT_OUTPUTS_EXTENSION, REQUEST_PAYOUT_OUTPUTS_SUCCESS)
+        .await
+}
+
+/// Each output's value and script, in order.
+fn describe_outputs(outputs: &[TxOut]) -> Value {
+    outputs
+        .iter()
+        .map(|output| {
+            json!({"value": output.value.to_sat(), "script": output.script_pubkey.to_hex_string()})
+        })
+        .collect()
 }

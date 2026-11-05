@@ -19,6 +19,17 @@ below its tip before touching the PPLNS window. The extension spec now
 publishes the job token layout and the share commitment derivation, so a
 client can check the commitment output itself. No share-chain rule changes.
 
+A node takes Stratum V2 Coinbase-Only Job Declaration only from the client
+addresses in `[stratum] sv2_coinbase_only_from` (IP addresses or CIDR
+ranges), by default this computer (`127.0.0.0/8`, `::1/128`). In that mode
+the node credits shares on a block whose transactions it never sees, so a
+declarator that withholds its blocks costs the other miners; until now any
+client could use it. Full-Template declarations are taken from every
+client. A refused client gets `SetupConnection.Error`
+`unsupported-feature-flags` with the `DECLARE_TX_DATA` flag it must set.
+`[]` refuses Coinbase-Only from everyone; `["0.0.0.0/0", "::/0"]` restores
+the old behaviour. No share-chain rule changes.
+
 A standard SV2 Job Declaration client can get a job's exact coinbase
 outputs on its Job Declaration connection, without `/jd_prepare`. A Bitcoin
 Cash node grants the experimental extension `0x5052`, "Requested Payout
@@ -36,6 +47,67 @@ the commitment as well as the payout scripts. In a test, a client that builds
 its jobs from the reply alone gets them installed and mines a share in both
 Job Declaration modes. No share-chain rule changes, and `/jd_prepare` is
 unchanged.
+
+A Stratum V2 share for a job on the BCH block a new tip just replaced is
+taken again. On a new tip a channel dropped all its jobs, so the share that
+found the block often lost its credit: a Job Declaration client's
+`PushSolution`, or BCHN's ZMQ notification of that block, brings the new
+template before the share arrives, and the share was refused as
+`invalid-job-id` (seen in Knuth's end-to-end run). A channel now keeps the
+jobs of the tip it leaves and drops older ones, as the share chain still
+pays shares one BCH block off the paying share's chain. A share for a job
+the channel gave out and has since dropped is `stale-share`; only an id it
+never gave out is `invalid-job-id`. No share-chain rule changes.
+
+The Stratum V2 Job Declaration server handles `PushSolution` (spec
+6.4.9). It answered the message with "unsupported Stratum V2 message type
+96" and closed the connection, which sends a Job Declaration client to its
+fallback. A Full-Template connection now keeps its last four declarations
+on the current previous block, within 64 MiB across all connections. It
+rebuilds the block a `PushSolution`
+reports from the declared coinbase and transactions, and submits it to
+BCHN and the extra submit nodes when the header meets the template's
+target. Any other `PushSolution` is ignored, and the connection stays open.
+No share-chain rule changes.
+
+`config.sample.toml` sets `wait_for_chain_sync = false`, and the
+quickstart says when to set it. Without the line the node waits for a
+share chain tip under 5 minutes old before opening its Stratum port, and
+the first node of a new share chain, or any node on regtest, never has
+one: following the quickstart, the port never opened. Set it to `true` once
+`dial_peers` lists a node of a running share chain, as the Umbrel packages
+already say. The quickstart also says to mine one block on a new regtest
+chain first: BCHN reports `initialblockdownload` while its tip is the 2011
+genesis block, and the node waits for it. No code or share-chain rule
+changes.
+
+Calls to BCHN no longer fail on a connection BCHN has just closed. The RPC
+client kept idle connections for 90 s, and BCHN closes one idle for
+`-rpcservertimeout`, 30 s by default, counted from the last request it
+read. The payout tree executor reads BCHN's tip every 30 s, so its call
+often went out on a connection BCHN was closing at that moment, and the
+executor missed the tip (`error sending request for url`). Idle connections
+are now dropped after 20 s, and a call whose connection breaks after it went
+out and before any answer is sent once more on a new connection. A refused
+connection or a timeout is not sent again. No share-chain rule changes.
+
+A job a miner declares over SV2 no longer becomes the node's latest job.
+Declared jobs took their tracker id from the same counter as the node's own
+jobs, so the latest one was often a declared job, whose coinbase has the
+miner's layout: the coinbase metrics then failed with "Bad outputs in
+coinbase2" (seen in an end-to-end run with a Job Declaration client), and
+the network difficulty and `/jd_prepare` read the declared job instead of
+the node's own. Declared jobs now take ids from their own range, above every
+id the node's own jobs use. No share-chain rule changes.
+
+The Electrum server answers `blockchain.transaction.get` for confirmed
+share chain transactions, raw or verbose: upstream's 0f15c131 (output
+origins in `get_tx`) and d199e07e are ported. On a Bitcoin Cash node the
+verbose form has no `vsize` or `weight`, as Bitcoin Cash Node's has none; a
+P2PKH share output shows its CashAddr share address (`tp2pool:` on
+chipnet); and the spendable heights use Bitcoin Cash's depths. An output
+whose coinbase root is unknown reports null heights. No share-chain rule
+changes.
 
 The sim harness runs on Windows. Node configs escaped no paths, so a
 Windows store path (`\s...`) broke the TOML and the nodes exited before
