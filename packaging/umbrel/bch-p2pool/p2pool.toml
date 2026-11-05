@@ -57,10 +57,8 @@ bch_share_chain = "mini"
 # Stratum password. There is deliberately no default.
 # miner_address = "p2pool:q..."
 
-# Required to parse, but a share chain node never pays it: only Hydrapool
-# mode does, with the reward of blocks found before the first shares. This is
-# the P2Poolv2 Bitcoin Cash donation address. Put your own bitcoincash:
-# address here before switching to Hydrapool.
+# Required to parse, but a share chain node never pays it. This is the
+# P2Poolv2 Bitcoin Cash donation address.
 bootstrap_address = "bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k"
 
 # Every Bitcoin Cash node donates 1% (100 basis points) of each block it

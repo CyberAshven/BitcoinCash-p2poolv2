@@ -86,7 +86,7 @@ p2poolv2_bitcoin_cash_network: "chipnet"
 p2poolv2_bch_share_chain: "main"
 
 # CashAddr for this network (bitcoincash:, bchtest: or bchreg:). Required by
-# the config; only Hydrapool mode pays it.
+# the config; a share chain node never pays it.
 p2poolv2_bootstrap_address: ""
 # Share address owning every share this node mines (p2pool:, tp2pool: or
 # rp2pool:), from `p2poolv2_cli bch-share-address`. Leave unset when each

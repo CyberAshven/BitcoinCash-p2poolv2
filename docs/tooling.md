@@ -248,6 +248,7 @@ They behave as the scripts did, with these deliberate exceptions:
   was cleared before it could be shown. Its symbols are ASCII.
 - `pool-diagnose` counts threads, file descriptors and the process's TCP
   connections from `/proc` (the script's `ps -T | wc -l` counted the header),
-  and takes `--process` for a name other than `hydrapool`.
+  and looks for the node's `p2poolv2` process (the script looked for
+  `hydrapool`); `--process` names another.
 - `share-lifecycle` lays two logs out at the width in `--width`, `COLUMNS`
   or the terminal's, else 160.

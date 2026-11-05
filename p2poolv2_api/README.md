@@ -307,8 +307,7 @@ same shape with `"address_type": "share"`, and each share's
 - `400` -- `address` missing, malformed or for another network, or
   `limit` out of range:
   `{"error": "Invalid address 'bitcoincash:qq...': not a share address (...) nor a payout address (...)"}`
-- `404` -- the node does not pay from the share chain PPLNS window
-  (Hydrapool mode), or it has no share chain yet.
+- `404` -- the node has no share chain yet.
 - `503` -- the node's PPLNS window is not loaded yet, or the anchor is
   deeper than its window cache reaches.
 

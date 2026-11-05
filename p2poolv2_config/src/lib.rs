@@ -238,6 +238,17 @@ pub enum BchShareChain {
 }
 
 impl BitcoinCashNetwork {
+    /// The network's name as `bitcoin_cash_network` spells it: "mainnet",
+    /// "chipnet", "regtest" or "scalenet".
+    pub fn name(self) -> &'static str {
+        match self {
+            BitcoinCashNetwork::Mainnet => "mainnet",
+            BitcoinCashNetwork::Chipnet => "chipnet",
+            BitcoinCashNetwork::Regtest => "regtest",
+            BitcoinCashNetwork::Scalenet => "scalenet",
+        }
+    }
+
     /// Human-readable prefix covered by the CashAddr checksum.
     pub fn cashaddr_prefix(self) -> &'static str {
         match self {
