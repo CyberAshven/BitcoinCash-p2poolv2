@@ -656,5 +656,22 @@ or generated. The library side is `shares::bch_htlc` (template),
   executes the contract's bytes opcode by opcode, and both verdicts agree.
   End-to-end tests (`p2poolv2_tests/src/share_trading_test.rs`) run a
   whole trade, a refund and an immature lock through the real store and
-  validator. BCHN itself has not executed these scripts yet; a regtest run
-  with `testmempoolaccept` should precede mainnet use.
+  validator.
+- **BCHN.** On 2026-11-05 BCHN 29.2.0 on regtest ran the Bitcoin Cash leg
+  with `p2poolv2_cli` from alpha `b9aa34f6`, each transaction checked with
+  `testmempoolaccept` before it was broadcast:
+  - **Trade.** The buyer's lock confirmed as a P2SH32 output, and the
+    seller's Schnorr claim with the secret confirmed. `extract-secret` read
+    the secret back from the confirmed claim.
+  - **Refund.** On a second lock, the buyer's refund was refused as
+    `bad-txns-nonfinal` at three blocks and at one block below the refund
+    height. It was accepted at the refund height and confirmed.
+  - **Forged claims.** BCHN refused the valid claim edited to carry a
+    wrong secret, and edited to carry the buyer's public key, both with
+    `mandatory-script-verify-flag-failed` (`OP_EQUALVERIFY`). The CLI
+    itself refuses to sign either (`WrongSecret`, `WrongKey`).
+
+  The share-chain contract for the same keys, hash and height is the same
+  bytes, so BCHN has run the script the share chain uses. On the share
+  chain, P2Pool's interpreter runs it against share heights. No live node
+  has run the share leg yet.
