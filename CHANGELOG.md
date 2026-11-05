@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The Stratum V2 Job Declaration server handles `PushSolution` (spec
+6.4.9). It answered the message with "unsupported Stratum V2 message type
+96" and closed the connection, which sends a Job Declaration client to its
+fallback. A Full-Template connection now keeps its last four declarations
+on the current previous block, within 64 MiB across all connections. It
+rebuilds the block a `PushSolution`
+reports from the declared coinbase and transactions, and submits it to
+BCHN and the extra submit nodes when the header meets the template's
+target. Any other `PushSolution` is ignored, and the connection stays open.
+No share-chain rule changes.
+
 `config.sample.toml` sets `wait_for_chain_sync = false`, and the
 quickstart says when to set it. Without the line the node waits for a
 share chain tip under 5 minutes old before opening its Stratum port, and
