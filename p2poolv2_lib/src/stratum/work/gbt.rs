@@ -11,7 +11,66 @@ use bitcoin::hashes::{Hash, sha256d};
 use bitcoindrpc::{BitcoinRpcConfig, BitcoindRpcClient};
 use serde_json::json;
 use std::sync::Arc;
-use tracing::{debug, error, instrument, warn};
+use std::time::{Duration, Instant};
+use tracing::{debug, error, info, instrument, warn};
+
+/// How long the node may give no template before mining work is withdrawn
+/// ([`NotifyCmd::Withdraw`]): the 60 seconds P2Pool v1 waits before it
+/// answers miners "lost contact with bitcoind". Past it, the latest template
+/// may no longer build on the node's tip. Polls come every 10 seconds, so
+/// this is six failed fetches in a row.
+pub(crate) const LOST_CONTACT_AFTER: Duration = Duration::from_secs(60);
+
+/// When the node last gave a template, and whether mining work is withdrawn
+/// for want of one.
+#[derive(Debug)]
+struct TemplateContact {
+    last_template: Instant,
+    withdrawn: bool,
+}
+
+impl TemplateContact {
+    /// Contact as of `now`: the task starts right after the node answered at
+    /// startup.
+    fn new(now: Instant) -> Self {
+        Self {
+            last_template: now,
+            withdrawn: false,
+        }
+    }
+
+    /// A template arrived at `now`. Returns whether work was withdrawn until
+    /// now.
+    fn received(&mut self, now: Instant) -> bool {
+        self.last_template = now;
+        std::mem::take(&mut self.withdrawn)
+    }
+
+    /// A fetch failed at `now`. Returns whether to withdraw work: once, when
+    /// the node has given no template for [`LOST_CONTACT_AFTER`].
+    fn failed(&mut self, now: Instant) -> bool {
+        if self.withdrawn || now.duration_since(self.last_template) < LOST_CONTACT_AFTER {
+            return false;
+        }
+        self.withdrawn = true;
+        true
+    }
+}
+
+/// Withdraw mining work if `contact` says the node has given no template for
+/// too long.
+async fn withdraw_if_lost(contact: &mut TemplateContact, result_tx: &NotifySender) {
+    if contact.failed(Instant::now()) && result_tx.send(NotifyCmd::Withdraw).await.is_err() {
+        error!("Failed to send the work withdrawal to channel");
+    }
+}
+
+/// Note a template's arrival in `contact`, logging the end of a withdrawal.
+fn note_template(contact: &mut TemplateContact) {
+    if contact.received(Instant::now()) {
+        info!("The node gives templates again; mining work is published");
+    }
+}
 
 #[cfg(test)]
 const GBT_NO_TRANSACTIONS_FIXTURE: &str =
@@ -381,12 +440,14 @@ pub async fn start_gbt(
         // avoid spamming if it is taking longer than [poll_internal]
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut light_log = light_templates.then(LightTemplateLog::default);
+        let mut contact = TemplateContact::new(Instant::now());
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     match fetch_template(&bitcoind, network, chain, light_log.as_mut()).await {
                         Ok(Some(template)) => {
+                            note_template(&mut contact);
                             if result_tx
                                 .send(NotifyCmd::SendToAll {
                                     template: Arc::new(template),
@@ -397,9 +458,10 @@ pub async fn start_gbt(
                                 error!("Failed to send block template to channel");
                             }
                         }
-                        Ok(None) => {}
+                        Ok(None) => withdraw_if_lost(&mut contact, &result_tx).await,
                         Err(e) => {
                             error!("Error polling block template: {}", e);
+                            withdraw_if_lost(&mut contact, &result_tx).await;
                         }
                     }
                 }
@@ -409,6 +471,7 @@ pub async fn start_gbt(
                             debug!("Received ZMQ block notification");
                             match fetch_template(&bitcoind, network, chain, light_log.as_mut()).await {
                                 Ok(Some(template)) => {
+                                    note_template(&mut contact);
                                     if result_tx
                                         .send(NotifyCmd::SendToAll {
                                             template: Arc::new(template),
@@ -420,12 +483,13 @@ pub async fn start_gbt(
                                     }
                                     interval.reset();
                                 }
-                                Ok(None) => {}
+                                Ok(None) => withdraw_if_lost(&mut contact, &result_tx).await,
                                 Err(e) => {
                                     error!(
                                         "Error getting block template after ZMQ notification: {}",
                                         e
                                     );
+                                    withdraw_if_lost(&mut contact, &result_tx).await;
                                 }
                             }
                         }
@@ -961,6 +1025,45 @@ mod gbt_server_tests {
     use super::*;
     use bitcoindrpc::test_utils::{mock_method, setup_mock_bitcoin_rpc};
     use tokio::sync::mpsc;
+
+    /// Failed fetches within a minute of the last template keep the work;
+    /// the first failure a minute after it withdraws the work, once.
+    #[test]
+    fn work_is_withdrawn_once_a_minute_after_the_last_template() {
+        let start = Instant::now();
+        let mut contact = TemplateContact::new(start);
+
+        assert!(!contact.failed(start + Duration::from_secs(10)));
+        assert!(!contact.failed(start + LOST_CONTACT_AFTER - Duration::from_millis(1)));
+        assert!(contact.failed(start + LOST_CONTACT_AFTER));
+        assert!(!contact.failed(start + LOST_CONTACT_AFTER + Duration::from_secs(10)));
+        assert!(!contact.failed(start + Duration::from_secs(3_600)));
+    }
+
+    /// A template ends a withdrawal, reported once, and restarts the minute.
+    #[test]
+    fn a_template_ends_the_withdrawal_and_restarts_the_minute() {
+        let start = Instant::now();
+        let mut contact = TemplateContact::new(start);
+        assert!(contact.failed(start + LOST_CONTACT_AFTER));
+
+        let back = start + Duration::from_secs(600);
+        assert!(contact.received(back));
+        assert!(!contact.received(back + Duration::from_secs(10)));
+        assert!(!contact.failed(back + Duration::from_secs(30)));
+        assert!(contact.failed(back + Duration::from_secs(10) + LOST_CONTACT_AFTER));
+    }
+
+    /// A template within the minute keeps work without a withdrawal to end.
+    #[test]
+    fn a_template_within_the_minute_reports_no_withdrawal() {
+        let start = Instant::now();
+        let mut contact = TemplateContact::new(start);
+        assert!(!contact.failed(start + Duration::from_secs(50)));
+
+        assert!(!contact.received(start + Duration::from_secs(55)));
+        assert!(!contact.failed(start + Duration::from_secs(70)));
+    }
 
     #[tokio::test]
     async fn test_start_gbt_trigger_from_timeout() {
