@@ -34,6 +34,14 @@ reports from the declared coinbase and transactions, and submits it to
 BCHN and the extra submit nodes when the header meets the template's
 target. Any other `PushSolution` is ignored, and the connection stays open.
 No share-chain rule changes.
+A job a miner declares over SV2 no longer becomes the node's latest job.
+Declared jobs took their tracker id from the same counter as the node's own
+jobs, so the latest one was often a declared job, whose coinbase has the
+miner's layout: the coinbase metrics then failed with "Bad outputs in
+coinbase2" (seen in an end-to-end run with a Job Declaration client), and
+the network difficulty and `/jd_prepare` read the declared job instead of
+the node's own. Declared jobs now take ids from their own range, above every
+id the node's own jobs use. No share-chain rule changes.
 
 The sim harness runs on Windows. Node configs escaped no paths, so a
 Windows store path (`\s...`) broke the TOML and the nodes exited before

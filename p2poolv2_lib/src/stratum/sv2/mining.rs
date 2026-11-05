@@ -293,7 +293,7 @@ impl MiningChannels {
             channel.jobs.clear();
         }
         channel.last_tip = Some(tip);
-        let tracker_job_id = self.ctx.tracker_handle.get_next_job_id();
+        let tracker_job_id = self.ctx.tracker_handle.get_next_declared_job_id();
         self.ctx
             .tracker_handle
             .insert_job_details(tracker_job_id, job);
