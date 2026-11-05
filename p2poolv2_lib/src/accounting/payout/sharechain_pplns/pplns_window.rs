@@ -423,7 +423,7 @@ pub const BCH_PER_SHARE_CUTS_RULE_TAG: &str = "cuts-per-share";
 /// the last resort (`ResolvedWindow::pays`): nothing while any other share
 /// or uncle in the window is paid. A node paying genesis beside mined work
 /// builds another coinbase whenever genesis is in the window, from a new
-/// chain's first share until genesis leaves it.
+/// chain's second share until genesis leaves it.
 pub const BCH_GENESIS_LAST_RESORT_RULE_TAG: &str = "genesis-last-resort";
 
 /// What a share's base weight, before `DIFFICULTY_SCALE` and the uncle
@@ -555,8 +555,9 @@ impl ResolvedWindow {
     /// payee of last resort (`BCH_GENESIS_LAST_RESORT_RULE_TAG`): paid only
     /// when no other share or uncle in the window is. Its key is a NUMS key
     /// no one can spend, so any weight it takes beside mined work is lost.
-    /// It is still paid when nothing else is, so the chain's first share and
-    /// a window whose work is all off the paying chain keep a payee.
+    /// It is still paid when nothing else is, so the share built right on
+    /// genesis and a window whose work is all off the paying chain keep a
+    /// payee.
     fn pays(&self, bch_prev: &BlockHash) -> bool {
         self.paid_bch_prevs.as_ref().is_none_or(|paid_bch_prevs| {
             if *bch_prev == BlockHash::all_zeros() {
