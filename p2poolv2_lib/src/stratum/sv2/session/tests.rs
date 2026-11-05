@@ -5,6 +5,10 @@ use crate::config::Chain;
 use crate::shares::chain::chain_store_handle::{ConfirmedHeaderResult, MockChainStoreHandle};
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::store::writer::StoreError;
+use crate::stratum::sv2::large_templates::{
+    LARGE_TEMPLATES_EXTENSION, PROVIDE_MISSING_TRANSACTIONS_POSITIONS,
+    ProvideMissingTransactionsPositions,
+};
 use crate::stratum::sv2::payout_outputs::{
     INVALID_MINING_JOB_TOKEN, REQUEST_PAYOUT_OUTPUTS_ERROR, REQUEST_PAYOUT_OUTPUTS_SUCCESS,
     RequestPayoutOutputsError, RequestPayoutOutputsSuccess, UNKNOWN_ANCHOR,
@@ -1652,4 +1656,282 @@ fn a_refused_coinbase_only_client_can_set_up_again_as_full_template() {
     );
 
     assert_eq!(reply_type(&again[0]), MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
+}
+
+/// A registry whose published template builds a block of `size_limit` bytes.
+fn registry_with_size_limit(size_limit: u64) -> Arc<Mutex<JobRegistry>> {
+    let mut template = test_bch_prepared().template().as_ref().clone();
+    template.sizelimit = size_limit;
+    let cache = PoolTransactionCache::new();
+    cache.set_prepared(test_bch_prepared_for_template(template));
+    Arc::new(Mutex::new(JobRegistry::new(
+        cache,
+        Some(MergeMiningCommitment::empty()),
+    )))
+}
+
+/// A Full-Template Job Declaration connection on `shared` with a token
+/// allocated, and large templates negotiated when `large`.
+fn large_template_declarator(
+    shared: &Arc<Mutex<JobRegistry>>,
+    large: bool,
+) -> (Sv2Connection, Vec<u8>) {
+    let mut connection = Sv2Connection::new(Arc::clone(shared));
+    accept_message(
+        &mut connection,
+        setup(1, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    if large {
+        assert!(connection.grant_large_templates());
+    }
+    let allocate = accept_message(
+        &mut connection,
+        AllocateMiningJobToken {
+            user_identifier: "miner".try_into().unwrap(),
+            request_id: 1,
+        },
+        MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN,
+    );
+    let mut payload = response_payload(&allocate[0]);
+    let token = AllocateMiningJobTokenSuccess::from_bytes(&mut payload)
+        .unwrap()
+        .mining_job_token
+        .as_bytes()
+        .to_vec();
+    (connection, token)
+}
+
+fn wtxid_bytes(transactions: &[Transaction]) -> Vec<[u8; 32]> {
+    transactions
+        .iter()
+        .map(|transaction| transaction.compute_wtxid().to_byte_array())
+        .collect()
+}
+
+/// Send `ids` as one `DeclareMiningJob.Transactions` page of declaration 2.
+fn send_page(connection: &mut Sv2Connection, ids: &[[u8; 32]]) -> Result<Vec<Vec<u8>>, String> {
+    let txids = ids
+        .iter()
+        .map(|id| U256::new(id.as_slice()).unwrap())
+        .collect::<Vec<_>>();
+    let mut payload = binary_sv2::to_bytes(DeclareMiningJobTransactions {
+        request_id: 2,
+        txid_list: Seq064K::new(txids).unwrap(),
+    })
+    .unwrap();
+    connection.handle_large_templates(DECLARE_MINING_JOB_TRANSACTIONS, &mut payload)
+}
+
+/// Declare, as request 2 on `token`, a job whose core list is `ids`.
+fn declare(
+    connection: &mut Sv2Connection,
+    token: &[u8],
+    ids: &[[u8; 32]],
+) -> Result<Vec<Vec<u8>>, String> {
+    let wtxids = ids
+        .iter()
+        .map(|id| U256::new(id.as_slice()).unwrap())
+        .collect::<Vec<_>>();
+    let frame = encode_message(
+        DeclareMiningJob {
+            request_id: 2,
+            mining_job_token: B0255::new(token).unwrap(),
+            version: 1,
+            coinbase_tx_prefix: B064K::new(&pushed_coinbase_prefix()).unwrap(),
+            coinbase_tx_suffix: B064K::new(&empty_commitment_suffix()).unwrap(),
+            wtxid_list: Seq064K::new(wtxids).unwrap(),
+            excess_data: B064K::new(&[]).unwrap(),
+        },
+        MESSAGE_TYPE_DECLARE_MINING_JOB,
+    )
+    .unwrap();
+    connection.accept(&frame)
+}
+
+/// Reveal `transactions` for declaration 2.
+fn reveal(
+    connection: &mut Sv2Connection,
+    transactions: &[Transaction],
+) -> Result<Vec<Vec<u8>>, String> {
+    let serialized = transactions.iter().map(serialize).collect::<Vec<_>>();
+    let revealed = serialized
+        .iter()
+        .map(|bytes| B016M::new(bytes.as_slice()).unwrap())
+        .collect::<Vec<_>>();
+    let frame = encode_message(
+        ProvideMissingTransactionsSuccess {
+            request_id: 2,
+            transaction_list: Seq064K::new(revealed).unwrap(),
+        },
+        MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
+    )
+    .unwrap();
+    connection.accept(&frame)
+}
+
+/// The positions a missing-transactions request in `frame` asks for, by
+/// either form: the core `ProvideMissingTransactions` or `0x4C54`'s
+/// `ProvideMissingTransactions.Positions`.
+fn requested_positions(frame: &[u8]) -> (bool, Vec<u32>) {
+    let extension = u16::from_le_bytes([frame[0], frame[1]]) & 0x7fff;
+    let mut payload = frame[6..].to_vec();
+    if extension == LARGE_TEMPLATES_EXTENSION {
+        assert_eq!(frame[2], PROVIDE_MISSING_TRANSACTIONS_POSITIONS);
+        let request = ProvideMissingTransactionsPositions::from_bytes(&mut payload).unwrap();
+        assert_eq!(request.request_id, 2);
+        (true, request.unknown_tx_position_list.into_inner())
+    } else {
+        assert_eq!(frame[2], MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS);
+        let request = ProvideMissingTransactions::from_bytes(&mut payload).unwrap();
+        assert_eq!(request.request_id, 2);
+        (
+            false,
+            request
+                .unknown_tx_position_list
+                .into_inner()
+                .into_iter()
+                .map(u32::from)
+                .collect(),
+        )
+    }
+}
+
+#[test]
+fn large_templates_go_only_to_full_template_declarators() {
+    for (flags, protocol, granted) in [
+        (1, Protocol::JobDeclarationProtocol, true),
+        (0, Protocol::JobDeclarationProtocol, false),
+        (0, Protocol::MiningProtocol, false),
+    ] {
+        let mut connection = Sv2Connection::new(registry());
+        accept_message(
+            &mut connection,
+            setup(flags, protocol),
+            MESSAGE_TYPE_SETUP_CONNECTION,
+        );
+        assert_eq!(connection.grant_large_templates(), granted);
+        assert_eq!(connection.has_large_templates(), granted);
+    }
+}
+
+/// A declaration of more than 65,535 transactions: a page, then the core
+/// list. The node asks for the next 65,535 from where the replies stopped,
+/// one request at a time: with the core request while every position fits a
+/// u16, and with `0x02` past that. It takes partial replies and asks again.
+#[test]
+fn a_large_template_is_asked_for_in_batches_and_takes_partial_replies() {
+    let shared = registry();
+    let (mut connection, token) = large_template_declarator(&shared, true);
+    let count = MAX_IDS_PER_MESSAGE + 2_000;
+    let transactions = (0..count as u32)
+        .map(transaction_with_lock)
+        .collect::<Vec<_>>();
+    let ids = wtxid_bytes(&transactions);
+
+    assert!(
+        send_page(&mut connection, &ids[..MAX_IDS_PER_MESSAGE])
+            .unwrap()
+            .is_empty()
+    );
+    let asked = declare(&mut connection, &token, &ids[MAX_IDS_PER_MESSAGE..]).unwrap();
+    let (extension, positions) = requested_positions(&asked[0]);
+    assert!(!extension);
+    assert_eq!(
+        positions,
+        (0..MAX_IDS_PER_MESSAGE as u32).collect::<Vec<_>>()
+    );
+
+    // A partial reply: the next batch, from 40,000, crosses u16 positions.
+    let asked = reveal(&mut connection, &transactions[..40_000]).unwrap();
+    let (extension, positions) = requested_positions(&asked[0]);
+    assert!(extension);
+    assert_eq!(positions, (40_000..count as u32).collect::<Vec<_>>());
+
+    // Another partial reply: the node asks for what is left.
+    let asked = reveal(&mut connection, &transactions[40_000..60_000]).unwrap();
+    let (extension, positions) = requested_positions(&asked[0]);
+    assert!(extension);
+    assert_eq!(positions, (60_000..count as u32).collect::<Vec<_>>());
+
+    let done = reveal(&mut connection, &transactions[60_000..]).unwrap();
+    assert_eq!(
+        reply_type(&done[0]),
+        MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS
+    );
+    let mut payload = response_payload(&done[0]);
+    let accepted = DeclareMiningJobSuccess::from_bytes(&mut payload).unwrap();
+    let stored = shared
+        .lock()
+        .unwrap()
+        .transactions_for_token(accepted.new_mining_job_token.as_bytes())
+        .unwrap();
+    let mut expected = transactions;
+    sort_ctor(&mut expected);
+    assert_eq!(stored, expected);
+}
+
+#[test]
+fn a_partial_reply_without_large_templates_closes_the_connection() {
+    let shared = registry();
+    let (mut connection, token) = large_template_declarator(&shared, false);
+    let transactions = (0..3).map(transaction_with_lock).collect::<Vec<_>>();
+    declare(&mut connection, &token, &wtxid_bytes(&transactions)).unwrap();
+
+    assert!(reveal(&mut connection, &transactions[..2]).is_err());
+}
+
+#[test]
+fn an_empty_reply_to_a_request_closes_the_connection() {
+    let shared = registry();
+    let (mut connection, token) = large_template_declarator(&shared, true);
+    let transactions = (0..3).map(transaction_with_lock).collect::<Vec<_>>();
+    declare(&mut connection, &token, &wtxid_bytes(&transactions)).unwrap();
+
+    assert!(reveal(&mut connection, &[]).is_err());
+}
+
+/// A block of 650 bytes holds at most ten 65-byte transactions.
+#[test]
+fn pages_past_the_size_limit_close_the_connection() {
+    let shared = registry_with_size_limit(650);
+    let (mut connection, _token) = large_template_declarator(&shared, true);
+    let ids = wtxid_bytes(&(0..11).map(transaction_with_lock).collect::<Vec<_>>());
+
+    assert!(send_page(&mut connection, &ids[..10]).is_ok());
+    assert!(send_page(&mut connection, &ids[10..]).is_err());
+}
+
+#[test]
+fn a_declaration_past_the_size_limit_closes_the_connection() {
+    let shared = registry_with_size_limit(650);
+    let (mut connection, token) = large_template_declarator(&shared, true);
+    let ids = wtxid_bytes(&(0..11).map(transaction_with_lock).collect::<Vec<_>>());
+
+    send_page(&mut connection, &ids[..6]).unwrap();
+
+    assert!(declare(&mut connection, &token, &ids[6..]).is_err());
+}
+
+#[test]
+fn a_page_after_its_declaration_closes_the_connection() {
+    let shared = registry();
+    let (mut connection, token) = large_template_declarator(&shared, true);
+    let ids = wtxid_bytes(&(0..3).map(transaction_with_lock).collect::<Vec<_>>());
+    declare(&mut connection, &token, &ids).unwrap();
+
+    assert!(send_page(&mut connection, &ids).is_err());
+}
+
+/// The declared transaction memory follows the published template's size
+/// limit, from a 64 MiB floor.
+#[test]
+fn the_declared_memory_bound_follows_the_block_size_limit() {
+    let floor = registry_with_size_limit(32_000_000);
+    assert_eq!(
+        floor.lock().unwrap().declared_byte_limit(),
+        DECLARED_TRANSACTION_BYTES_FLOOR
+    );
+    let raised = registry_with_size_limit(256_000_000);
+    assert_eq!(raised.lock().unwrap().declared_byte_limit(), 512_000_000);
 }

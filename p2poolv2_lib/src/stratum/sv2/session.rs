@@ -9,6 +9,10 @@
 //! presented on the second.
 
 use super::custom_job::declared_leaves;
+use super::large_templates::{
+    DECLARE_MINING_JOB_TRANSACTIONS, DeclareMiningJobTransactions, MAX_IDS_PER_MESSAGE,
+    max_declared_transactions, positions_frame,
+};
 use super::payout_outputs::{
     INVALID_MINING_JOB_TOKEN, PAYOUT_OUTPUTS_UNAVAILABLE, PayoutIdentity, REQUEST_PAYOUT_OUTPUTS,
     RequestPayoutOutputs, VERIFY_RATE_LIMITED, VerifyPayoutOutputs, answer_frame,
@@ -80,7 +84,15 @@ const WORK_SELECTION_FLAG: u32 = 0b10;
 const DECLARE_TX_DATA_FLAG: u32 = 0b1;
 const MAX_JOB_TOKENS: usize = 64;
 const TOKEN_LIFETIME: Duration = Duration::from_secs(120);
-const MAX_DECLARED_TRANSACTION_BYTES: usize = 64 * 1024 * 1024;
+/// The least declared transaction memory a registry allows: twice the
+/// 32 MB floor of Bitcoin Cash's block size limit, to the next MiB power.
+const DECLARED_TRANSACTION_BYTES_FLOOR: usize = 64 * 1024 * 1024;
+/// Blocks' worth of declared transactions a registry may hold, at the
+/// published template's size limit, when that is above the floor.
+const DECLARED_TEMPLATES: usize = 2;
+/// Request ids one connection may hold large-template pages for, as it may
+/// hold eight pending declarations.
+const MAX_PAGED_DECLARATIONS: usize = 8;
 /// Open tokens one connection may hold requested payout outputs for, as it
 /// may hold eight pending declarations. A client asks once per job, just
 /// before declaring it, so a ninth is not following the extension.
@@ -98,10 +110,6 @@ const MAX_VERIFY_PAYOUTS_PER_SECOND: u32 = 4;
 /// Full-Template declarations a connection keeps for `PushSolution`, all
 /// on the latest template's previous block.
 const MAX_SOLVABLE_JOBS: usize = 4;
-/// Bytes of declarations all connections keep for `PushSolution`, beside
-/// `MAX_DECLARED_TRANSACTION_BYTES` for the tokens: a kept declaration
-/// outlives its token.
-const MAX_SOLVABLE_BYTES: usize = MAX_DECLARED_TRANSACTION_BYTES;
 
 /// Which Job Declaration mode a connection negotiated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +157,15 @@ impl PoolTransactionCache {
             .map(|prepared| prepared.prev_share_blockhash())
     }
 
+    /// The size limit of the block the published template builds, in bytes.
+    fn size_limit(&self) -> Option<u64> {
+        self.prepared
+            .read()
+            .expect("pool prepared template lock")
+            .as_ref()
+            .map(|prepared| prepared.template().sizelimit)
+    }
+
     /// What new tokens' payouts rest on, while a template is published
     /// (`payout_basis`).
     fn payout_basis(&self) -> Option<PayoutBasis> {
@@ -186,6 +203,12 @@ enum TokenState {
         request_id: u32,
         wtxids: Vec<[u8; 32]>,
         declaration: Declaration,
+        /// The transactions revealed so far, in declared order: the first
+        /// `received.len()` of `wtxids`.
+        received: Vec<Transaction>,
+        /// How many transactions, from `received.len()`, the outstanding
+        /// request asks for. There is one request at a time.
+        requested: usize,
     },
     /// Transactions in CTOR, ready to mine.
     Ready {
@@ -237,25 +260,27 @@ struct SolvableJob {
     transactions: Arc<Vec<Transaction>>,
     /// The coinbase's merkle branch over `transactions`.
     merkle_branches: Vec<TxMerkleNode>,
-    /// This job's share of `MAX_SOLVABLE_BYTES`, given back when it is
+    /// This job's share of the kept-declaration budget, given back when it is
     /// dropped.
     _reserved: SolvableBytes,
 }
 
-/// Bytes reserved from a registry's `MAX_SOLVABLE_BYTES` budget, given back
-/// on drop.
+/// Bytes reserved from a registry's budget for declarations kept for
+/// `PushSolution`, given back on drop. The budget is as large as the
+/// tokens' own (`JobRegistry::declared_byte_limit`): a kept declaration
+/// outlives its token.
 struct SolvableBytes {
     budget: Arc<AtomicUsize>,
     bytes: usize,
 }
 
 impl SolvableBytes {
-    /// Reserve `bytes` from `budget`, or `None` when they do not fit.
-    /// Callers reserve under the registry lock; releases may run at any
-    /// time, and only make room.
-    fn reserve(budget: &Arc<AtomicUsize>, bytes: usize) -> Option<Self> {
+    /// Reserve `bytes` from `budget`, or `None` when they would take it past
+    /// `limit`. Callers reserve under the registry lock; releases may run at
+    /// any time, and only make room.
+    fn reserve(budget: &Arc<AtomicUsize>, bytes: usize, limit: usize) -> Option<Self> {
         let used = budget.fetch_add(bytes, Ordering::SeqCst);
-        if used.saturating_add(bytes) > MAX_SOLVABLE_BYTES {
+        if used.saturating_add(bytes) > limit {
             budget.fetch_sub(bytes, Ordering::SeqCst);
             return None;
         }
@@ -275,12 +300,13 @@ impl Drop for SolvableBytes {
 impl SolvableJob {
     /// The job for `declaration` and `transactions` on `prepared`'s
     /// template, or `None` when the template's previous block or bits do
-    /// not parse, or `budget` has no room for it.
+    /// not parse, or `budget` has no room for it within `limit` bytes.
     fn new(
         prepared: &PreparedNotifyParams,
         declaration: &Declaration,
         transactions: Arc<Vec<Transaction>>,
         budget: &Arc<AtomicUsize>,
+        limit: usize,
     ) -> Option<Self> {
         let template = prepared.template();
         let prev_hash = template.previousblockhash.parse().ok()?;
@@ -291,7 +317,7 @@ impl SolvableJob {
             .sum::<usize>()
             + declaration.prefix.len()
             + declaration.suffix.len();
-        let reserved = SolvableBytes::reserve(budget, bytes)?;
+        let reserved = SolvableBytes::reserve(budget, bytes, limit)?;
         let txids = transactions
             .iter()
             .map(|transaction| transaction.compute_txid().to_raw_hash())
@@ -455,11 +481,30 @@ impl JobRegistry {
                 TokenState::AwaitingTransactions {
                     wtxids,
                     declaration,
+                    received,
                     ..
-                } => wtxids.len() * 32 + declaration.prefix.len() + declaration.suffix.len(),
+                } => {
+                    wtxids.len() * 32
+                        + declaration.prefix.len()
+                        + declaration.suffix.len()
+                        + received.iter().map(Transaction::total_size).sum::<usize>()
+                }
                 _ => 0,
             })
             .sum()
+    }
+
+    /// The declared transaction memory this registry allows:
+    /// `DECLARED_TEMPLATES` blocks at the published template's size limit,
+    /// and at least `DECLARED_TRANSACTION_BYTES_FLOOR`. It follows the block
+    /// size limit, as ABLA raises it.
+    fn declared_byte_limit(&self) -> usize {
+        let blocks = self
+            .cache
+            .size_limit()
+            .and_then(|limit| usize::try_from(limit).ok())
+            .map_or(0, |limit| limit.saturating_mul(DECLARED_TEMPLATES));
+        blocks.max(DECLARED_TRANSACTION_BYTES_FLOOR)
     }
 }
 
@@ -497,6 +542,12 @@ pub struct Sv2Connection {
     /// This connection's latest Full-Template declarations, newest last,
     /// for `PushSolution`.
     solvable_jobs: VecDeque<SolvableJob>,
+    /// The connection negotiated the large templates extension (`0x4C54`,
+    /// `super::large_templates`).
+    large_templates: bool,
+    /// Transaction ids paged with `DeclareMiningJob.Transactions` ahead of
+    /// their `DeclareMiningJob`, by request id.
+    declared_pages: HashMap<u32, Vec<[u8; 32]>>,
 }
 
 impl Sv2Connection {
@@ -518,6 +569,8 @@ impl Sv2Connection {
             verify_window: Instant::now(),
             verify_outstanding: false,
             solvable_jobs: VecDeque::with_capacity(MAX_SOLVABLE_JOBS),
+            large_templates: false,
+            declared_pages: HashMap::new(),
         }
     }
 
@@ -569,6 +622,109 @@ impl Sv2Connection {
             .lock()
             .expect("job registry lock")
             .take_job(token)
+    }
+
+    /// Grant the large templates extension (`0x4C54`) to a Full-Template Job
+    /// Declaration connection on a Bitcoin Cash node, whose block size limit
+    /// standard Job Declaration cannot carry. Returns whether it was
+    /// granted.
+    pub(crate) fn grant_large_templates(&mut self) -> bool {
+        let bitcoin_cash = self
+            .registry
+            .lock()
+            .expect("job registry lock")
+            .merge_mining
+            .is_some();
+        if self.mode != Some(JobDeclarationMode::FullTemplate) || !bitcoin_cash {
+            return false;
+        }
+        self.large_templates = true;
+        true
+    }
+
+    /// Whether this connection negotiated the large templates extension.
+    pub(crate) fn has_large_templates(&self) -> bool {
+        self.large_templates
+    }
+
+    /// Take a large templates message on a connection that negotiated the
+    /// extension. A client sends only `DeclareMiningJob.Transactions`, which
+    /// has no answer; any other message of the extension closes the
+    /// connection, and so does a page past the bounds.
+    pub(crate) fn handle_large_templates(
+        &mut self,
+        message_type: u8,
+        payload: &mut [u8],
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if message_type != DECLARE_MINING_JOB_TRANSACTIONS {
+            return Err(format!(
+                "unsupported large templates message type {message_type}"
+            ));
+        }
+        let page = DeclareMiningJobTransactions::from_bytes(payload)
+            .map_err(|error| format!("{error:?}"))?;
+        self.on_transactions_page(&page)?;
+        Ok(Vec::new())
+    }
+
+    /// Buffer a page of declared transaction ids for the `DeclareMiningJob`
+    /// with the same request id. A page for a request id already declared,
+    /// for a ninth request id, or that takes the list past the most
+    /// transactions a block at the published template's size limit can
+    /// hold, closes the connection.
+    fn on_transactions_page(&mut self, page: &DeclareMiningJobTransactions) -> Result<(), String> {
+        if self.pending_declarations.contains_key(&page.request_id) {
+            return Err("transaction page after its DeclareMiningJob".to_string());
+        }
+        let size_limit = self
+            .registry
+            .lock()
+            .expect("job registry lock")
+            .cache
+            .size_limit()
+            .ok_or("transaction page with no template")?;
+        if !self.declared_pages.contains_key(&page.request_id)
+            && self.declared_pages.len() >= MAX_PAGED_DECLARATIONS
+        {
+            return Err("transaction page limit reached".to_string());
+        }
+        let ids = self.declared_pages.entry(page.request_id).or_default();
+        if ids.len() + page.txid_list.len() > max_declared_transactions(size_limit) {
+            return Err("declared transactions past the block size limit".to_string());
+        }
+        ids.extend(page.txid_list.iter().map(|txid| {
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(txid.as_bytes());
+            bytes
+        }));
+        Ok(())
+    }
+
+    /// The request for the `count` declared transactions from `start` of
+    /// the declaration `request_id`: the core `ProvideMissingTransactions`
+    /// when every position fits a `u16`, else
+    /// `ProvideMissingTransactions.Positions`.
+    fn missing_transactions_request(
+        &mut self,
+        request_id: u32,
+        start: usize,
+        count: usize,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let end = start + count;
+        if end <= usize::from(u16::MAX) + 1 {
+            let positions = (start..end)
+                .map(|position| u16::try_from(position).expect("checked above"))
+                .collect::<Vec<_>>();
+            return self.respond(
+                ProvideMissingTransactions {
+                    request_id,
+                    unknown_tx_position_list: Seq064K::new(positions)
+                        .map_err(|error| error.to_string())?,
+                },
+                MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS,
+            );
+        }
+        Ok(vec![positions_frame(request_id, start, count)?])
     }
 
     /// Grant the requested payout outputs extension (`0x5052`) to a Job
@@ -951,6 +1107,12 @@ impl Sv2Connection {
     }
 
     fn on_declare(&mut self, request: &DeclareMiningJob) -> Result<Vec<Vec<u8>>, String> {
+        // Pages of a large template come before their DeclareMiningJob and
+        // end with it, whatever the answer.
+        let paged = self
+            .declared_pages
+            .remove(&request.request_id)
+            .unwrap_or_default();
         if self.mode != Some(JobDeclarationMode::FullTemplate) {
             return self.declare_error(
                 request.request_id,
@@ -969,19 +1131,24 @@ impl Sv2Connection {
                 ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
             );
         }
-        let state = registry.tokens.get(&token).map(|token| &token.state);
-        if !matches!(
-            state,
-            Some(TokenState::Open {
-                mode: JobDeclarationMode::FullTemplate
-            })
-        ) {
+        let Some(job_token) = registry.tokens.get(&token).filter(|token| {
+            matches!(
+                token.state,
+                TokenState::Open {
+                    mode: JobDeclarationMode::FullTemplate
+                }
+            )
+        }) else {
             drop(registry);
             return self.declare_error(
                 request.request_id,
                 ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN,
             );
-        }
+        };
+        let size_limit = job_token
+            .prepared
+            .as_ref()
+            .map(|prepared| prepared.template().sizelimit);
         // A Bitcoin Cash declaration discloses the token leaves behind its
         // output 0 in excess_data, so the node can check, when the job is
         // installed, that they pay its fee and the miner's donation.
@@ -1003,31 +1170,27 @@ impl Sv2Connection {
         } else {
             Disclosure::default()
         };
-        let wtxids = request
-            .wtxid_list
-            .iter()
-            .map(|wtxid| {
-                let mut bytes = [0u8; 32];
-                bytes.copy_from_slice(wtxid.as_bytes());
-                bytes
-            })
-            .collect::<Vec<_>>();
-        // shortcut: one response reveals every transaction; add cache negotiation for larger frames.
-        let positions = (0..wtxids.len())
-            .map(|index| {
-                u16::try_from(index)
-                    .map_err(|_| "declaration has more transactions than u16".to_string())
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        let mut wtxids = paged;
+        wtxids.extend(request.wtxid_list.iter().map(|wtxid| {
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(wtxid.as_bytes());
+            bytes
+        }));
+        if size_limit.is_some_and(|limit| wtxids.len() > max_declared_transactions(limit)) {
+            return Err("declared transactions past the block size limit".into());
+        }
         if self.pending_declarations.len() >= 8
             || registry.declared_bytes()
                 + wtxids.len() * 32
                 + request.coinbase_tx_prefix.as_bytes().len()
                 + request.coinbase_tx_suffix.as_bytes().len()
-                > MAX_DECLARED_TRANSACTION_BYTES
+                > registry.declared_byte_limit()
         {
             return Err("job declaration limit reached".into());
         }
+        // The node holds no transactions of its own, so it asks for all of
+        // them, a batch at a time.
+        let first = wtxids.len().min(MAX_IDS_PER_MESSAGE);
         registry
             .tokens
             .get_mut(&token)
@@ -1041,19 +1204,22 @@ impl Sv2Connection {
                 suffix: request.coinbase_tx_suffix.as_bytes().to_vec(),
                 disclosure,
             },
+            received: Vec::new(),
+            requested: first,
         };
         drop(registry);
         self.pending_declarations.insert(request.request_id, token);
-        self.respond(
-            ProvideMissingTransactions {
-                request_id: request.request_id,
-                unknown_tx_position_list: Seq064K::new(positions)
-                    .map_err(|error| error.to_string())?,
-            },
-            MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS,
-        )
+        self.missing_transactions_request(request.request_id, 0, first)
     }
 
+    /// Take a `ProvideMissingTransactions.Success`.
+    ///
+    /// It must hold the transactions the outstanding request asked for, in
+    /// order. On a connection that negotiated large templates it may hold
+    /// only a prefix of them, the longest that fit one frame, but at least
+    /// one; the node then asks for the rest. Once every declared
+    /// transaction has arrived, they are sorted into CTOR and the token is
+    /// ready.
     fn on_transactions(
         &mut self,
         request: &ProvideMissingTransactionsSuccess,
@@ -1062,43 +1228,83 @@ impl Sv2Connection {
             .pending_declarations
             .remove(&request.request_id)
             .ok_or("transactions arrived with no open declaration")?;
+        let large_templates = self.large_templates;
         let mut registry = self.registry.lock().expect("job registry lock");
         registry.expire_tokens();
-        let (wtxids, declaration) = match registry.tokens.get(&token).map(|token| &token.state) {
-            Some(TokenState::AwaitingTransactions {
-                request_id,
-                wtxids,
-                declaration,
-            }) if *request_id == request.request_id => (wtxids.clone(), declaration.clone()),
-            _ => return Err("transactions arrived with no open declaration".to_string()),
+        let byte_limit = registry.declared_byte_limit();
+        let declared_elsewhere = registry.declared_bytes();
+        let job_token = registry
+            .tokens
+            .get_mut(&token)
+            .ok_or("transactions arrived with no open declaration")?;
+        let size_limit = job_token
+            .prepared
+            .as_ref()
+            .map(|prepared| prepared.template().sizelimit);
+        let TokenState::AwaitingTransactions {
+            request_id,
+            wtxids,
+            received,
+            requested,
+            ..
+        } = &mut job_token.state
+        else {
+            return Err("transactions arrived with no open declaration".to_string());
         };
-        if request.transaction_list.len() != wtxids.len() {
-            return Err("transaction list length does not match the declaration".to_string());
+        if *request_id != request.request_id {
+            return Err("transactions arrived with no open declaration".to_string());
         }
-        let mut transactions = Vec::with_capacity(wtxids.len());
-        for (index, raw) in request.transaction_list.iter().enumerate() {
+        let count = request.transaction_list.len();
+        let partial = count < *requested;
+        if count > *requested || (partial && (!large_templates || count == 0)) {
+            return Err("transaction list length does not match the request".to_string());
+        }
+        let mut revealed_bytes = 0usize;
+        for raw in request.transaction_list.iter() {
             let transaction: Transaction =
                 deserialize(raw.as_bytes()).map_err(|error| error.to_string())?;
             let wtxid = transaction.compute_wtxid().to_byte_array();
-            if wtxid != wtxids[index] {
+            if wtxid != wtxids[received.len()] {
                 return Err("revealed transaction does not match its declared wtxid".to_string());
             }
-            transactions.push(transaction);
+            revealed_bytes += transaction.total_size();
+            received.push(transaction);
         }
-        sort_ctor(&mut transactions);
-        if registry.declared_bytes()
-            + transactions
-                .iter()
-                .map(Transaction::total_size)
-                .sum::<usize>()
-            > MAX_DECLARED_TRANSACTION_BYTES
+        let received_bytes = received.iter().map(Transaction::total_size).sum::<usize>();
+        if declared_elsewhere + revealed_bytes > byte_limit
+            || size_limit
+                .and_then(|limit| usize::try_from(limit).ok())
+                .is_some_and(|limit| received_bytes > limit)
         {
             return Err("declared transaction memory limit reached".into());
+        }
+        if received.len() < wtxids.len() {
+            let start = received.len();
+            let next = (wtxids.len() - start).min(MAX_IDS_PER_MESSAGE);
+            *requested = next;
+            let request_id = *request_id;
+            drop(registry);
+            self.pending_declarations.insert(request_id, token);
+            return self.missing_transactions_request(request_id, start, next);
         }
         let mut job_token = registry
             .tokens
             .remove(&token)
             .ok_or("expired-mining-job-token")?;
+        let TokenState::AwaitingTransactions {
+            received: mut transactions,
+            declaration,
+            ..
+        } = std::mem::replace(
+            &mut job_token.state,
+            TokenState::Open {
+                mode: JobDeclarationMode::FullTemplate,
+            },
+        )
+        else {
+            unreachable!("the token was checked to await transactions above");
+        };
+        sort_ctor(&mut transactions);
         let mut new_token_bytes = token;
         if registry.merge_mining.is_some() {
             new_token_bytes[1..33].copy_from_slice(&random::<[u8; 32]>());
@@ -1106,12 +1312,14 @@ impl Sv2Connection {
             new_token_bytes = random::<[u8; 32]>().to_vec();
         }
         let transactions = Arc::new(transactions);
+        let solvable_limit = registry.declared_byte_limit();
         let solvable = job_token.prepared.as_deref().and_then(|prepared| {
             SolvableJob::new(
                 prepared,
                 &declaration,
                 Arc::clone(&transactions),
                 &registry.solvable_bytes,
+                solvable_limit,
             )
         });
         job_token.state = TokenState::Ready {
