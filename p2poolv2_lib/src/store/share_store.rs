@@ -283,7 +283,8 @@ impl Store {
     /// Get a share from the store by reconstructing it from the Header CF
     /// and transaction CFs.
     ///
-    /// Returns None if the header, txids or bitcoin coinbase are missing.
+    /// Returns None if the header, txids or bitcoin coinbase are missing,
+    /// or any transaction cannot be reconstructed.
     pub fn get_share(&self, blockhash: &BlockHash) -> Option<ShareBlock> {
         let header = match self.get_share_header(blockhash) {
             Ok(Some(header)) => header,
@@ -294,6 +295,7 @@ impl Store {
         }
         let transactions: Vec<ShareTransaction> = self
             .get_txs_for_blockhash(blockhash)
+            .ok()?
             .into_iter()
             .map(ShareTransaction)
             .collect();

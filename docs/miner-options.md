@@ -131,9 +131,8 @@ miner chooses that fraction for themselves, on any P2Pool node:
   refused at authorize with a message saying why; the node never falls back
   to its own donation. The same value given twice is accepted; two different
   values are refused.
-- Only a Bitcoin Cash node in P2Pool mode can honour the choice. A node in
-  Hydrapool mode, or a Bitcoin node, refuses a login that carries
-  `donation=`; leave it out to mine there.
+- Only a Bitcoin Cash node can honour the choice. A Bitcoin node refuses a
+  login that carries `donation=`; leave it out to mine there.
 
 ### Examples
 

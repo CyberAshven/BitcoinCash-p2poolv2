@@ -143,6 +143,16 @@ fn bchn_mines_without_peers() {
 }
 
 #[test]
+fn bchn_daemon_flag_follows_the_platform() {
+    let arguments = bitcoind_arguments(&nightly_settings());
+    let daemon = arguments.iter().any(|argument| argument == "-daemon");
+    #[cfg(windows)]
+    assert!(!daemon);
+    #[cfg(not(windows))]
+    assert!(daemon);
+}
+
+#[test]
 fn bchn_fallback_fee_is_one_sat_per_byte() {
     let arguments = bitcoind_arguments(&nightly_settings());
 

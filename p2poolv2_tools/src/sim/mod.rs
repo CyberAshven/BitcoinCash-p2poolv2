@@ -70,8 +70,25 @@ impl RunDir {
     /// The `pgrep -f` pattern that matches this swarm's node processes: their
     /// command line names a config in this directory. Matching on the path
     /// leaves an unrelated single-node run alone.
+    ///
+    /// The prefix is `node-` joined the way [`Self::node_config`] joins
+    /// `node-<index>.toml`. On Unix that is still `{dir}/node-`. On Windows
+    /// the join uses `\`, and each one is doubled: the pattern is a regular
+    /// expression, so `\s` in a path such as `\sim` would otherwise be
+    /// whitespace.
     pub fn process_pattern(&self) -> String {
-        format!("{}/node-", self.path.display())
+        #[cfg(windows)]
+        {
+            self.path
+                .join("node-")
+                .display()
+                .to_string()
+                .replace('\\', "\\\\")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("{}/node-", self.path.display())
+        }
     }
 
     /// Number of node configs (`node-*.toml`) in the directory: the swarm
