@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Calls to BCHN no longer fail on a connection BCHN has just closed. The RPC
+client kept idle connections for 90 s, and BCHN closes one idle for
+`-rpcservertimeout`, 30 s by default, counted from the last request it
+read. The payout tree executor reads BCHN's tip every 30 s, so its call
+often went out on a connection BCHN was closing at that moment, and the
+executor missed the tip (`error sending request for url`). Idle connections
+are now dropped after 20 s, and a call whose connection breaks after it went
+out and before any answer is sent once more on a new connection. A refused
+connection or a timeout is not sent again. No share-chain rule changes.
+
 A job a miner declares over SV2 no longer becomes the node's latest job.
 Declared jobs took their tracker id from the same counter as the node's own
 jobs, so the latest one was often a declared job, whose coinbase has the
