@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Sorting transactions into canonical order (CTOR) hashes each transaction
+once. The sort computed each transaction's id inside every comparison, so a
+Job Declaration of 67,535 transactions hashed about two million times
+instead of 67,535, and the large-template test took 46 s in a debug build,
+past CI's 30 s limit. It now takes 4 s. The order is the same. No
+share-chain rule changes.
+
 A Full-Template Job Declaration can carry any template Bitcoin Cash's block
 size limit allows. Standard Job Declaration lists at most 65,535
 transactions and asks for them by `u16` position, and one reply must fit a
