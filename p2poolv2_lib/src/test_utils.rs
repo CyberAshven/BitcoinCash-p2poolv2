@@ -280,7 +280,19 @@ impl TestSv2Client {
         extension_type: u16,
         expected_type: u8,
     ) -> Vec<u8> {
-        timeout(Duration::from_secs(5), async {
+        self.receive_extension_within(Duration::from_secs(5), extension_type, expected_type)
+            .await
+    }
+
+    /// `receive_extension`, waiting up to `wait` for a message a peer sends
+    /// on its own, such as a push after the next share.
+    pub(crate) async fn receive_extension_within(
+        &mut self,
+        wait: Duration,
+        extension_type: u16,
+        expected_type: u8,
+    ) -> Vec<u8> {
+        timeout(wait, async {
             loop {
                 self.stream
                     .read_exact(self.decoder.writable())

@@ -410,3 +410,53 @@ block 105, `29eb5fcd…2f0b`):
 The Coinbase-Only value includes the private transaction's 219-satoshi fee.
 This is regtest evidence with this repository's test client; the chipnet run
 with an independent client that the proposal asks for is still open.
+
+### On a running node
+
+The ignored `a_running_node_serves_requested_payout_outputs` test is a Job
+Declaration client for a node that is already running. It needs no RPC login,
+only the node's Stratum V2 address, its published authority key and a mining
+identity:
+
+```sh
+P2POOL_SV2_ADDRESS=127.0.0.1:3336 \
+P2POOL_SV2_AUTHORITY_KEY=9b... \
+P2POOL_SV2_IDENTITY='bchtest:q....worker,p2p=tp2pool:q...' \
+cargo test -p p2poolv2_lib --lib a_running_node_serves_requested_payout_outputs -- --ignored --nocapture
+```
+
+It takes the template fields (version, previous block, bits, time, height)
+from the node's own extended job and declares an empty block, so its coinbase
+pays out the block subsidy alone. It then checks five things in turn:
+
+1. A request naming a block the node is not building on is refused.
+2. The outputs answered for the current block pay out the whole value with
+   `EXACT_OUTPUTS` and lock time `height - 1`.
+3. A Full-Template job on those outputs is declared, and it is installed with
+   `SetCustomMiningJob`. The node has its BCHN check the block proposal
+   first.
+4. The next share or block brings `PayoutOutputsStale`.
+5. A fresh token then gets the new outputs.
+
+It submits no shares.
+
+Run on 2026-11-05 at 13:16 UTC against the chipnet pool's node1, built from
+`ef59b72b`, with its templates from a BCHN 29.1.0 chipnet node; it passed in
+9.7 seconds. The test address is this repository's
+`bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr`.
+
+- **Refused:** a previous block of all zeros got `stale-payout-outputs`.
+- **Answered:** chipnet height 331011, previous block
+  `00000000000013f305ba63f37306cac43552a10c3eb487532df847a2c355734e`, 2,500,000,000
+  satoshis in six outputs, in this order:
+  - the empty merge-mining commitment;
+  - three PPLNS payees (1,194,333, 25,000,000 and 2,473,805,667 satoshis);
+  - the padding;
+  - the share commitment.
+- **Installed:** the declaration was accepted and the job installed as job 2.
+- **Stale, then fresh:** the next share pushed `PayoutOutputsStale` within 10
+  seconds. The fresh token's outputs paid 1,195,200, 25,000,000 and
+  2,473,804,800 satoshis, under a new share commitment.
+
+This was this repository's client against a real chipnet pool. Shares credited
+through an independent `0x5052` client still need a miner behind one.
