@@ -18,8 +18,9 @@ use crate::stratum::work::tracker::start_tracker_actor;
 use crate::test_utils::{
     TestSv2Client, bch_template_transaction, test_bch_custom_job, test_bch_custom_job_with_leaves,
     test_bch_prepared, test_bch_prepared_on_anchor, test_bch_prepared_with_cuts,
-    test_bch_solve_custom_job, test_bch_stratum_context, test_custom_job_from_payout_outputs,
-    test_declared_coinbase_parts, test_payout_outputs_request, test_sv2_authority, test_sv2_setup,
+    test_bch_solve_custom_job, test_bch_stratum_context, test_coinbase_only_from,
+    test_custom_job_from_payout_outputs, test_declared_coinbase_parts, test_payout_outputs_request,
+    test_sv2_authority, test_sv2_setup,
 };
 use crate::test_utils::{make_test_share_address, setup_test_chain_store_handle};
 use binary_sv2::U256;
@@ -79,6 +80,7 @@ async fn withdrawing_work_closes_the_sv2_connection() {
     let (_shutdown_sender, shutdown) = watch::channel(());
     let connection = tokio::spawn(handle_connection(
         stream,
+        std::net::Ipv4Addr::LOCALHOST.into(),
         permit,
         registry,
         Some(Sv2Mining {
@@ -151,6 +153,7 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
             template_rx,
         }),
         Some(authority),
+        test_coinbase_only_from(),
         shutdown_receiver,
     ));
     let mut mining = TestSv2Client::connect(address, authority.public_key).await;
@@ -573,6 +576,7 @@ async fn a_standard_client_mines_on_requested_payout_outputs_in_both_modes() {
             template_rx,
         }),
         Some(authority),
+        test_coinbase_only_from(),
         shutdown_receiver,
     ));
     let payout = bitcoin::Address::p2pkh(
@@ -937,6 +941,7 @@ async fn a_moved_anchor_pushes_payout_outputs_stale_and_refuses_earlier_tokens()
             template_rx,
         }),
         Some(authority),
+        test_coinbase_only_from(),
         shutdown_receiver,
     ));
     let payout = bitcoin::Address::p2pkh(
@@ -1116,6 +1121,7 @@ async fn disconnect_releases_the_authorized_worker_and_connection_permit() {
     let (_shutdown_sender, shutdown_rx) = watch::channel(());
     let connection = tokio::spawn(handle_connection(
         stream,
+        std::net::Ipv4Addr::LOCALHOST.into(),
         permit,
         Arc::clone(&registry),
         Some(Sv2Mining {
@@ -1472,6 +1478,7 @@ async fn noise_listener_answers_setup_connection_to_a_client_pinning_its_key() {
         None,
         None,
         Some(authority),
+        test_coinbase_only_from(),
         shutdown_receiver,
     ));
 
@@ -1501,6 +1508,7 @@ async fn a_client_pinning_another_authority_key_rejects_the_handshake() {
         None,
         None,
         Some(authority),
+        test_coinbase_only_from(),
         shutdown_receiver,
     ));
 
@@ -1538,6 +1546,7 @@ async fn served_listener_answers_setup_connection() {
         Some(MergeMiningCommitment::empty()),
         None,
         None,
+        test_coinbase_only_from(),
         shutdown_receiver,
     ));
 
@@ -1584,6 +1593,7 @@ async fn a_connection_over_the_shared_limit_is_closed() {
         Some(MergeMiningCommitment::empty()),
         None,
         None,
+        test_coinbase_only_from(),
         shutdown_receiver,
     ));
 

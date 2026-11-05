@@ -24,8 +24,8 @@ use crate::stratum::work::block_template::BlockTemplate;
 use crate::test_utils::{
     TestSv2Client, test_bch_custom_coinbase, test_bch_custom_job_with_aux,
     test_bch_prepared_for_template, test_bch_solve_custom_job, test_bch_stratum_context,
-    test_custom_job_from_payout_outputs, test_declared_coinbase_parts, test_payout_outputs_request,
-    test_sv2_authority, test_sv2_setup,
+    test_coinbase_only_from, test_custom_job_from_payout_outputs, test_declared_coinbase_parts,
+    test_payout_outputs_request, test_sv2_authority, test_sv2_setup,
 };
 use binary_sv2::{B016M, B032, B064K, B0255, Deserialize, Seq064K, U256};
 use bitcoin::consensus::{deserialize, serialize};
@@ -137,6 +137,7 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
             template_rx,
         }),
         Some(authority),
+        test_coinbase_only_from(),
         shutdown_receiver,
     ));
     let mut mining = TestSv2Client::connect(address, authority.public_key).await;
@@ -632,6 +633,7 @@ async fn bchn_jobs_on_requested_payout_outputs_reach_both_real_nodes() {
             template_rx,
         }),
         Some(authority),
+        test_coinbase_only_from(),
         shutdown_receiver,
     ));
     let mut mining = TestSv2Client::connect(address, authority.public_key).await;

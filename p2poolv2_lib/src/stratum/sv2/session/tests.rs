@@ -1297,3 +1297,100 @@ fn kept_declarations_hold_their_bytes_until_the_connection_closes() {
     drop(connection);
     assert_eq!(budget.load(Ordering::SeqCst), 0);
 }
+
+/// A registry that takes Coinbase-Only declarations from `networks` only.
+fn registry_taking_coinbase_only_from(networks: &[&str]) -> Arc<Mutex<JobRegistry>> {
+    let cache = PoolTransactionCache::new();
+    cache.set_prepared(test_bch_prepared());
+    Arc::new(Mutex::new(
+        JobRegistry::new(cache, Some(MergeMiningCommitment::empty())).with_coinbase_only_from(
+            networks
+                .iter()
+                .map(|network| network.parse().unwrap())
+                .collect(),
+        ),
+    ))
+}
+
+/// Set up Job Declaration from `peer` with `flags`, and return the reply.
+fn job_declaration_setup_from(
+    registry: Arc<Mutex<JobRegistry>>,
+    peer: &str,
+    flags: u32,
+) -> (Sv2Connection, Vec<u8>) {
+    let mut connection = Sv2Connection::new(registry).with_peer(peer.parse().unwrap());
+    let reply = accept_message(
+        &mut connection,
+        setup(flags, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    (connection, reply[0].clone())
+}
+
+#[test]
+fn coinbase_only_is_refused_from_a_client_off_the_allowlist() {
+    let registry = registry_taking_coinbase_only_from(&["127.0.0.0/8", "::1/128"]);
+
+    let (connection, reply) = job_declaration_setup_from(registry, "203.0.113.7", 0);
+
+    assert_eq!(reply_type(&reply), MESSAGE_TYPE_SETUP_CONNECTION_ERROR);
+    let mut payload = response_payload(&reply);
+    let refused = SetupConnectionError::from_bytes(&mut payload).unwrap();
+    assert_eq!(
+        refused.error_code.as_utf8_or_hex(),
+        "unsupported-feature-flags"
+    );
+    assert_eq!(refused.flags, DECLARE_TX_DATA_FLAG);
+    assert!(!connection.is_set_up());
+}
+
+#[test]
+fn coinbase_only_is_taken_from_the_allowlist() {
+    for peer in ["127.0.0.1", "::1", "::ffff:127.0.0.1", "100.64.0.9"] {
+        let registry =
+            registry_taking_coinbase_only_from(&["127.0.0.0/8", "::1/128", "100.64.0.9/32"]);
+
+        let (connection, reply) = job_declaration_setup_from(registry, peer, 0);
+
+        assert_eq!(
+            reply_type(&reply),
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+            "{peer}"
+        );
+        assert!(connection.is_set_up());
+    }
+}
+
+#[test]
+fn full_template_is_taken_from_every_client() {
+    let registry = registry_taking_coinbase_only_from(&[]);
+
+    let (connection, reply) = job_declaration_setup_from(registry, "203.0.113.7", 1);
+
+    assert_eq!(reply_type(&reply), MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
+    assert!(connection.is_set_up());
+}
+
+#[test]
+fn an_empty_allowlist_refuses_coinbase_only_even_from_loopback() {
+    let registry = registry_taking_coinbase_only_from(&[]);
+
+    let (_, reply) = job_declaration_setup_from(registry, "127.0.0.1", 0);
+
+    assert_eq!(reply_type(&reply), MESSAGE_TYPE_SETUP_CONNECTION_ERROR);
+}
+
+#[test]
+fn a_refused_coinbase_only_client_can_set_up_again_as_full_template() {
+    let registry = registry_taking_coinbase_only_from(&["127.0.0.0/8"]);
+    let (mut connection, reply) = job_declaration_setup_from(registry, "203.0.113.7", 0);
+    assert_eq!(reply_type(&reply), MESSAGE_TYPE_SETUP_CONNECTION_ERROR);
+
+    let again = accept_message(
+        &mut connection,
+        setup(1, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+
+    assert_eq!(reply_type(&again[0]), MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
+}

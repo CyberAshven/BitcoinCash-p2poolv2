@@ -2756,6 +2756,7 @@ dependencies = [
  "bitcoin",
  "bitcoindrpc",
  "config",
+ "ipnet",
  "p2poolv2_wallet",
  "serde",
 ]
@@ -2779,6 +2780,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "ipnet",
  "job_declaration_sv2",
  "k256",
  "libp2p",

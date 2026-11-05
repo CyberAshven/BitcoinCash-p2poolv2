@@ -25,11 +25,13 @@ use crate::stratum::merge_disclosure::{
 use crate::stratum::server::StratumContext;
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use binary_sv2::Deserialize;
+use ipnet::IpNet;
 use job_declaration_sv2::{
     AllocateMiningJobToken, MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN, MESSAGE_TYPE_PUSH_SOLUTION,
 };
 use mining_sv2::{MESSAGE_TYPE_SET_CUSTOM_MINING_JOB, SetCustomMiningJob};
 use std::future;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -76,6 +78,7 @@ pub async fn bind(hostname: &str, port: u16) -> Result<TcpListener, std::io::Err
 /// Each connection holds a permit from `connection_limit`, the semaphore the
 /// SV1 server takes its own permits from, so the two ports share one
 /// connection cap. A connection arriving with no permit left is closed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve<ShutdownSignal>(
     listener: TcpListener,
     connection_limit: Arc<Semaphore>,
@@ -83,14 +86,15 @@ pub(crate) async fn serve<ShutdownSignal>(
     merge_mining: Option<MergeMiningCommitment>,
     mining: Option<Sv2Mining>,
     authority: Option<Sv2Authority>,
+    coinbase_only_from: Vec<IpNet>,
     mut shutdown: watch::Receiver<ShutdownSignal>,
 ) where
     ShutdownSignal: Send + Sync + 'static,
 {
-    let registry = Arc::new(Mutex::new(JobRegistry::new(
-        pool_transactions,
-        merge_mining,
-    )));
+    let registry = Arc::new(Mutex::new(
+        JobRegistry::new(pool_transactions, merge_mining)
+            .with_coinbase_only_from(coinbase_only_from),
+    ));
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -110,6 +114,7 @@ pub(crate) async fn serve<ShutdownSignal>(
                         });
                         tokio::spawn(handle_connection(
                             stream,
+                            peer.ip(),
                             permit,
                             Arc::clone(&registry),
                             connection_mining,
@@ -133,6 +138,7 @@ pub(crate) async fn serve<ShutdownSignal>(
 /// hold a permit before it has proven it speaks SV2.
 async fn handle_connection<ShutdownSignal>(
     mut stream: TcpStream,
+    peer: IpAddr,
     _permit: OwnedSemaphorePermit,
     registry: Arc<Mutex<JobRegistry>>,
     mining: Option<Sv2Mining>,
@@ -160,7 +166,7 @@ async fn handle_connection<ShutdownSignal>(
         }
         None => None,
     };
-    let mut connection = Sv2Connection::new(registry);
+    let mut connection = Sv2Connection::new(registry).with_peer(peer);
     let (mut template_rx, mut channels) = match mining {
         Some(services) => (
             Some(services.template_rx),
