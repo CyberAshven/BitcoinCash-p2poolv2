@@ -96,6 +96,106 @@ fn test_get_tx_returns_not_found_when_input_row_missing() {
 }
 
 #[test]
+fn test_get_tx_with_output_origins_reports_coinbase_root_at_block_height() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+    let block = TestShareBlockBuilder::new().build();
+    let mut batch = Store::get_write_batch();
+    let metadata = store
+        .add_sharechain_txs(&block.transactions, 7, &mut batch)
+        .unwrap();
+    store.commit_batch(batch).unwrap();
+    let coinbase_txid = metadata[0].txid;
+
+    let (transaction, output_origins) = store.get_tx_with_output_origins(&coinbase_txid).unwrap();
+
+    assert_eq!(transaction, block.transactions[0].0);
+    assert_eq!(output_origins.len(), transaction.output.len());
+    assert_eq!(
+        output_origins[0],
+        OutputOrigin {
+            is_coinbase: true,
+            coinbase_root: CoinbaseRoot::Height(7),
+        }
+    );
+}
+
+/// A spending transaction's outputs are not coinbase and inherit the
+/// coinbase root of their inputs, not the spending block's height:
+/// trading a share does not reset its expiry.
+#[test]
+fn test_get_tx_with_output_origins_reports_inherited_root_for_spending_tx() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+    let script_true = bitcoin::Script::builder()
+        .push_opcode(bitcoin::opcodes::all::OP_PUSHNUM_1)
+        .into_script();
+    let funding_tx = Transaction {
+        version: bitcoin::transaction::Version(1),
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::new(bitcoin::Txid::all_zeros(), u32::MAX),
+            sequence: bitcoin::Sequence::default(),
+            witness: bitcoin::Witness::default(),
+            script_sig: script_true.clone(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1_000_000),
+            script_pubkey: script_true.clone(),
+        }],
+    };
+    let funding_txid = funding_tx.compute_txid();
+    let mut batch = rocksdb::WriteBatch::default();
+    store
+        .add_sharechain_txs(&[ShareTransaction(funding_tx)], 1, &mut batch)
+        .unwrap();
+    store.db.write(batch).unwrap();
+    let spending_tx = Transaction {
+        version: bitcoin::transaction::Version(2),
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::new(funding_txid, 0),
+            sequence: bitcoin::Sequence::default(),
+            witness: bitcoin::Witness::from_slice(&[vec![0x01, 0x02], vec![0x03]]),
+            script_sig: bitcoin::ScriptBuf::new(),
+        }],
+        output: vec![
+            bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(600_000),
+                script_pubkey: script_true.clone(),
+            },
+            bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(400_000),
+                script_pubkey: script_true.clone(),
+            },
+        ],
+    };
+    let spending_txid = spending_tx.compute_txid();
+    let mut batch = rocksdb::WriteBatch::default();
+    store
+        .add_sharechain_txs(&[ShareTransaction(spending_tx.clone())], 2, &mut batch)
+        .unwrap();
+    store.db.write(batch).unwrap();
+
+    let (stored_tx, output_origins) = store.get_tx_with_output_origins(&spending_txid).unwrap();
+
+    assert_eq!(stored_tx, spending_tx);
+    assert_eq!(
+        output_origins,
+        vec![
+            OutputOrigin {
+                is_coinbase: false,
+                coinbase_root: CoinbaseRoot::Height(1),
+            },
+            OutputOrigin {
+                is_coinbase: false,
+                coinbase_root: CoinbaseRoot::Height(1),
+            },
+        ]
+    );
+}
+
+#[test]
 fn test_get_txs_returns_empty_for_empty_input() {
     let temp_dir = tempdir().unwrap();
     let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();

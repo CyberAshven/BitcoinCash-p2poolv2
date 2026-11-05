@@ -16,6 +16,15 @@ the network difficulty and `/jd_prepare` read the declared job instead of
 the node's own. Declared jobs now take ids from their own range, above every
 id the node's own jobs use. No share-chain rule changes.
 
+The Electrum server answers `blockchain.transaction.get` for confirmed
+share chain transactions, raw or verbose: upstream's 0f15c131 (output
+origins in `get_tx`) and d199e07e are ported. On a Bitcoin Cash node the
+verbose form has no `vsize` or `weight`, as Bitcoin Cash Node's has none; a
+P2PKH share output shows its CashAddr share address (`tp2pool:` on
+chipnet); and the spendable heights use Bitcoin Cash's depths. An output
+whose coinbase root is unknown reports null heights. No share-chain rule
+changes.
+
 The sim harness runs on Windows. Node configs escaped no paths, so a
 Windows store path (`\s...`) broke the TOML and the nodes exited before
 logging; the swarm's process pattern joined with `/` while node configs use
