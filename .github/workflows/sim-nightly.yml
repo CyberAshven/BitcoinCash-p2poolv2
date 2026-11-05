@@ -227,8 +227,8 @@ jobs:
             -rpcuser=p2pool -rpcpassword=p2pool -rpcwait getblockchaininfo
 
       # Do not enable sim here: this job exercises production payout rules.
-      # Both ignored tests mine on the same node, so nextest must serialize them.
-      - name: Run the payout tree tests against BCHN
+      # The ignored tests all mine on the same node, so nextest must serialize them.
+      - name: Run the payout tree and per-share donation tests against BCHN
         env:
           P2POOL_TEST_BCHN_RPC_URL: http://127.0.0.1:18443
           P2POOL_TEST_BCHN_RPC_USER: p2pool

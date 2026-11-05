@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The Bitcoin Cash per-share donation has regtest tests against BCHN, which
+the nightly workflow runs with the payout tree tests
+(`per_share_donation_bchn_test`). Each mines a block whose coinbase the
+window splits and checks every payee in the coinbase BCHN stored. A block
+found before any share-chain share pays the genesis key the whole value
+and the donation key nothing. Miner shares at the default 1% pay the key
+each share's own cut, which is short of 1% of the block by genesis's
+weight: a regtest window always holds genesis. Shares mined with
+`donation=0.5`, `donation=0` and no choice give the key 50, 0 and 100
+basis points of their own parts. A unit test checks that the outputs a Job
+Declaration client requests (`0x5052`) pay the donation key what the
+node's own job on the same window pays. `TestShareBlockBuilder` can commit
+a share's donation and fee. Tests only; no share-chain rule changes.
+
 A Job Declaration client no longer has to trust one node for its payout
 outputs. `VerifyPayoutOutputs` (`0x04` in extension `0x5052`) asks a second
 node, which did not issue the token, to recompute the outputs from the
