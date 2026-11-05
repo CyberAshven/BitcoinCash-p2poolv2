@@ -151,11 +151,6 @@ impl JobTracker {
 
     /// Install a fully validated job and initialize its duplicate tracking.
     pub(crate) fn insert_job_details(&self, job_id: JobId, details: JobDetails) {
-        if let Ok(compact_target) =
-            bitcoin::pow::CompactTarget::from_unprefixed_hex(&details.blocktemplate.bits)
-        {
-            self.set_network_bits(compact_target);
-        }
         self.job_details.insert(job_id, details);
         self.job_shares
             .insert(job_id, Vec::with_capacity(EXPECTED_SHARES_PER_JOB));
@@ -187,9 +182,12 @@ impl JobTracker {
 
     /// Record the newest block template's `bits`.
     ///
-    /// Called for every prepared template (and every inserted job), so the
-    /// network difficulty tracks the template feed even when no miner is
-    /// connected to receive a job and the job map has been cleaned out.
+    /// Called for every template this node prepares, so the network
+    /// difficulty tracks the template feed even when no miner is connected
+    /// to receive a job and the job map has been cleaned out. Inserting a
+    /// job does not call it: a job a miner declares over SV2 carries the
+    /// miner's `bits`, which can be a block behind the node's newest
+    /// template, and must not replace them.
     pub fn set_network_bits(&self, bits: CompactTarget) {
         let mut slot = self
             .latest_network_bits
@@ -221,7 +219,7 @@ impl JobTracker {
 
     /// Current bitcoin network difficulty derived from the newest block
     /// template's `bits` ([`Self::set_network_bits`], refreshed on every
-    /// prepared template and job insert). Returns None until the first
+    /// prepared template). Returns None until the first
     /// template arrives. Uses the mainnet-relative difficulty
     /// (`difficulty_float`) so it shares units with the pool's truediffone
     /// share difficulties. This lets Grafana divide work by this value.
@@ -364,32 +362,51 @@ mod tests {
     async fn test_get_network_difficulty() {
         let tracker = start_tracker_actor();
 
-        // No job inserted yet -> no difficulty available
+        // No template prepared yet -> no difficulty available
         assert!(tracker.get_network_difficulty().is_none());
 
         let template_str = include_str!(
             "../../../../../p2poolv2_tests/test_data/gbt/signet/gbt-no-transactions.json"
         );
         let template: BlockTemplate = serde_json::from_str(template_str).unwrap();
-        let expected = bitcoin::Target::from_compact(
-            bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap(),
-        )
-        .difficulty_float();
+        let bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap();
+        let expected = bitcoin::Target::from_compact(bits).difficulty_float();
 
-        let job_id = tracker.get_next_job_id();
+        tracker.set_network_bits(bits);
+
+        let difficulty = tracker.get_network_difficulty().unwrap();
+        assert_eq!(difficulty, expected);
+        assert!(difficulty > 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_declared_job_does_not_move_the_network_difficulty() {
+        let tracker = start_tracker_actor();
+
+        let template_str = include_str!(
+            "../../../../../p2poolv2_tests/test_data/gbt/signet/gbt-no-transactions.json"
+        );
+        let template: BlockTemplate = serde_json::from_str(template_str).unwrap();
+        let own_bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap();
+        tracker.set_network_bits(own_bits);
+        let expected = bitcoin::Target::from_compact(own_bits).difficulty_float();
+
+        // A miner declares a job on the block before, with other bits.
+        let mut declared_template = template.clone();
+        declared_template.bits = format!("{:08x}", own_bits.to_consensus() + 1);
+        let declared_id = tracker.get_next_declared_job_id();
         tracker.insert_job(
-            Arc::new(template),
+            Arc::new(declared_template),
             "cb1".to_string(),
             "cb2".to_string(),
             Some(create_test_commitment()),
             TEST_COINBASE_NSECS,
             vec![],
-            job_id,
+            declared_id,
         );
 
-        let difficulty = tracker.get_network_difficulty().unwrap();
-        assert_eq!(difficulty, expected);
-        assert!(difficulty > 0.0);
+        assert!(tracker.get_job(declared_id).is_some());
+        assert_eq!(tracker.get_network_difficulty(), Some(expected));
     }
 
     #[tokio::test]
@@ -400,11 +417,10 @@ mod tests {
             "../../../../../p2poolv2_tests/test_data/gbt/signet/gbt-no-transactions.json"
         );
         let template: BlockTemplate = serde_json::from_str(template_str).unwrap();
-        let expected = bitcoin::Target::from_compact(
-            bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap(),
-        )
-        .difficulty_float();
+        let bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap();
+        let expected = bitcoin::Target::from_compact(bits).difficulty_float();
 
+        tracker.set_network_bits(bits);
         let job_id = tracker.get_next_job_id();
         tracker.insert_job(
             Arc::new(template),
