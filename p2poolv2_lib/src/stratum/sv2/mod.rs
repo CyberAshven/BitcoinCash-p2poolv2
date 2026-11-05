@@ -57,8 +57,11 @@ use bitcoin::hashes::Hash;
 ///
 /// Bitcoin Cash compares the transaction id the way it is shown, which is the
 /// reverse of the internal hash bytes. The coinbase is not part of this list.
+///
+/// Each transaction is hashed once: a key computed in every comparison
+/// hashed a declaration of 67,535 transactions about two million times.
 pub fn sort_ctor(transactions: &mut [Transaction]) {
-    transactions.sort_by_key(ctor_key);
+    transactions.sort_by_cached_key(ctor_key);
 }
 
 fn ctor_key(transaction: &Transaction) -> [u8; 32] {
