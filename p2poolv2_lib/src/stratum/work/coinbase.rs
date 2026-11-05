@@ -31,7 +31,7 @@ pub(crate) const EXTRANONCE_SEPARATOR: [u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE]
     [1u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE];
 
 /// Length of the sequence bytes in coinbase
-const SEQUENCE_LENGTH: usize = 4;
+pub(crate) const SEQUENCE_LENGTH: usize = 4;
 
 /// Length of the lock time bytes in coinbase
 pub(crate) const LOCKTIME_LENGTH: usize = 4;
@@ -210,6 +210,21 @@ fn padding_output(padding_length: usize) -> TxOut {
             .push_slice(padding)
             .into_script(),
     }
+}
+
+/// The zero-value outputs a declared coinbase carries beside its PPLNS
+/// payouts, each at its largest: output 0 with the exact empty merge-mining
+/// commitment, then the largest padding and the commitment. A Job
+/// Declaration token reserves room for them for a client of the requested
+/// payout outputs extension, whose answer carries them.
+pub(crate) fn declared_reservation_outputs() -> (TxOut, [TxOut; 2]) {
+    (
+        MergeMiningCommitment::empty().output(),
+        [
+            padding_output(SHA256_BLOCK_SIZE - 1),
+            commitment_output(&sha256::Hash::all_zeros()),
+        ],
+    )
 }
 
 /// Bytes of padding that bring `unpadded_prefix_length` up to the next

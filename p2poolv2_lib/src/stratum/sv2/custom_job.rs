@@ -30,6 +30,13 @@ use p2poolv2_wallet::share_owner::ShareOwner;
 use std::str::FromStr;
 use std::sync::Arc;
 
+/// The version of a declared BCH coinbase.
+pub(crate) const DECLARED_COINBASE_VERSION: u32 = 2;
+
+/// The sequence of a declared BCH coinbase's input. Its lock time is the
+/// block height less one.
+pub(crate) const DECLARED_COINBASE_SEQUENCE: u32 = 0xffff_fffe;
+
 /// The leaves a Full-Template declaration discloses for its coinbase, read
 /// from `DeclareMiningJob.excess_data` (`CTMD` v2, as Pickaxe's Job
 /// Declaration client sends them): exactly one canonical disclosure whose
@@ -142,8 +149,8 @@ pub(crate) fn validate_custom_job(
     {
         return Err("invalid-header".into());
     }
-    if request.coinbase_tx_version != 2
-        || request.coinbase_tx_input_n_sequence != 0xffff_fffe
+    if request.coinbase_tx_version != DECLARED_COINBASE_VERSION
+        || request.coinbase_tx_input_n_sequence != DECLARED_COINBASE_SEQUENCE
         || request.coinbase_tx_locktime != original.height.checked_sub(1).ok_or("invalid-height")?
     {
         return Err("invalid-coinbase-layout".into());

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A standard SV2 Job Declaration client can get a job's exact coinbase
+outputs on its Job Declaration connection, without `/jd_prepare`. A Bitcoin
+Cash node grants the experimental extension `0x5052`, "Requested Payout
+Outputs" (section 7 of `docs/architecture/sv2-payout-extension.md`), on Job
+Declaration connections. `RequestPayoutOutputs` names a token, the
+template's revenue, height, previous hash and bits, and the client's
+scriptSig prefix; the node answers with the bytes `/jd_prepare` builds,
+from the same builder, and the coinbase version, sequence and lock time to
+use. `AllocateMiningJobToken.user_identifier` is now read as a mining
+identity, and the token remembers its payout address and share owner. A
+connection that negotiated the extension gets `PayoutOutputsStale` when the
+share new tokens are anchored on, or the BCH block their template builds
+on, changes, and its allocations reserve room for output 0, the padding and
+the commitment as well as the payout scripts. In a test, a client that builds
+its jobs from the reply alone gets them installed and mines a share in both
+Job Declaration modes. No share-chain rule changes, and `/jd_prepare` is
+unchanged.
+
 A Stratum V2 share for a job on the BCH block a new tip just replaced is
 taken again. On a new tip a channel dropped all its jobs, so the share that
 found the block often lost its credit: a Job Declaration client's
