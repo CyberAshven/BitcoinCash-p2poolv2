@@ -205,8 +205,8 @@ bootstrap_address = "bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k"
 ```
 
 `bootstrap_address` only has to parse for the network: a share chain node
-never pays it (only Hydrapool mode does). The sample value is the P2Poolv2
-Bitcoin Cash donation address.
+never pays it. The sample value is the P2Poolv2 Bitcoin Cash donation
+address.
 
 ## Ports
 

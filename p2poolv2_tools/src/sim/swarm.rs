@@ -201,6 +201,20 @@ pub struct NodeIdentity<'a> {
     pub shape: &'a NodeShape,
 }
 
+/// `value` escaped for a TOML basic string: `\` and `"` become `\\` and
+/// `\"`. A Windows path otherwise fails to parse (`\s` in `\sim` is not a
+/// TOML escape) and the node exits without loading its config.
+fn toml_basic_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character == '\\' || character == '"' {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 /// The config of one node.
 pub fn node_config(settings: &SwarmSettings, node: &NodeIdentity<'_>) -> String {
     let index = node.index;
@@ -208,9 +222,9 @@ pub fn node_config(settings: &SwarmSettings, node: &NodeIdentity<'_>) -> String 
     let stratum_port = settings.base_stratum + index as u32;
     let api_port = settings.base_api + index as u32;
     let enabled = settings.late_miner != Some(index);
-    let share_address = share_address(index);
-    let run_dir = settings.run_dir.path().display().to_string();
-    let store = settings.run_dir.node_store(index).display().to_string();
+    let share_address = toml_basic_string(&share_address(index));
+    let run_dir = toml_basic_string(&settings.run_dir.path().display().to_string());
+    let store = toml_basic_string(&settings.run_dir.node_store(index).display().to_string());
     let mut config = String::with_capacity(2048);
     let _ = write!(
         config,
@@ -276,14 +290,15 @@ asert_anchor_time = {anchor}
 network_hashrate = {network_hashrate}
 ideal_block_time_secs = {block_time}
 "#,
+        // `dial` is already a TOML fragment (`"/ip4/..."`), not one string.
         dial = dial_peers(settings, index),
-        miner = settings.miner_address,
-        zmq = settings.zmq,
-        prefix = settings.pool_signature_prefix,
-        rpc_url = settings.rpc.url,
-        rpc_user = settings.rpc.user,
-        rpc_password = settings.rpc.password,
-        payout = node.payout_address,
+        miner = toml_basic_string(&settings.miner_address),
+        zmq = toml_basic_string(&settings.zmq),
+        prefix = toml_basic_string(&settings.pool_signature_prefix),
+        rpc_url = toml_basic_string(&settings.rpc.url),
+        rpc_user = toml_basic_string(&settings.rpc.user),
+        rpc_password = toml_basic_string(&settings.rpc.password),
+        payout = toml_basic_string(node.payout_address),
         hashrate = node.shape.hashrate,
         shares_per_block = settings.shares_per_block,
         seed = index + 1,

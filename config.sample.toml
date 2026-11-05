@@ -57,18 +57,14 @@ minimum_difficulty = 1
 # mining.suggest_difficulty. Default 4294967296 (2^32), about 5.5 EH/s at one
 # share every 3.33 seconds.
 # maximum_difficulty = 4294967296
-# Pool operating mode: "p2poolv2" (share chain) or "hydrapool"
-# (standalone PPLNS, no share chain). Default p2poolv2.
-# mode = "p2poolv2"
 # Share address owning every share this node mines: a CashAddr share address
 # (p2pool: on mainnet, tp2pool: on chipnet, sp2pool: on scalenet, rp2pool: on
 # regtest), not a payout address. Make one from your own wallet's P2PKH
 # address with `p2poolv2_cli bch-share-address --network chipnet bchtest:q...`.
-# In p2poolv2 mode a share needs an owner, so a miner that does not send
+# A share needs an owner, so a miner that does not send
 # p2p=<share address> in its stratum password gets this address instead.
 # Leave it unset only if every one of your miners sends p2p=; otherwise
 # they are rejected at authorize.
-# Not valid with mode = "hydrapool", which has no share chain.
 #
 # Set this to YOUR OWN share address before enabling it. There is
 # deliberately no default: any address published here would own the shares

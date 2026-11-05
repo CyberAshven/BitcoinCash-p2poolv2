@@ -48,9 +48,6 @@ minimum_difficulty = 100
 # mining.suggest_difficulty. Default 4294967296 (2^32), about 5.5 EH/s at one
 # share every 3.33 seconds.
 # maximum_difficulty = 4294967296
-# Pool operating mode: "p2poolv2" (share chain) or "hydrapool"
-# (standalone PPLNS, no share chain). Default p2poolv2.
-# mode = "p2poolv2"
 
 # Bitcoin Cash: templates without SegWit rules, CashAddr payout addresses,
 # canonical transaction order.
@@ -70,9 +67,8 @@ bch_share_chain = "mini"
 # shares of everyone who copied this file.
 # miner_address = "rp2pool:q..."
 
-# A CashAddr for this network. Only Hydrapool mode pays it; a share chain
-# node needs one that parses. chipnet or mainnet: use your own bchtest: or
-# bitcoincash: address.
+# A CashAddr for this network. A share chain node never pays it, but it must
+# parse. chipnet or mainnet: use your own bchtest: or bitcoincash: address.
 bootstrap_address = "bchreg:qqzldt8u5mafprrw6uljppyqg30uhl97ey890dqm34"
 
 # Every Bitcoin Cash node donates 1% (100 basis points) of each block it
