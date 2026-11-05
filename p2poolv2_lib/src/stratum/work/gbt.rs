@@ -272,8 +272,7 @@ pub fn compute_merkle_root_from_branches(
 }
 
 /// Compute merkle branch from coinbase transaction and BlockTemplate's transactions
-#[allow(dead_code)]
-fn compute_merkle_branches(input_txids: Vec<sha256d::Hash>) -> Vec<sha256d::Hash> {
+pub(crate) fn compute_merkle_branches(input_txids: Vec<sha256d::Hash>) -> Vec<sha256d::Hash> {
     let mut txids = input_txids.clone();
     let mut merkle_branches = Vec::new();
     while !txids.is_empty() {

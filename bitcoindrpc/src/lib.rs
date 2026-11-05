@@ -9,6 +9,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tracing::{debug, error};
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -63,6 +64,12 @@ const RPC_IN_WARMUP: i32 = -28;
 
 /// `RPC_METHOD_NOT_FOUND`: the node has no RPC of that name.
 const RPC_METHOD_NOT_FOUND: i32 = -32601;
+
+/// How long an idle connection to the node is kept for reuse. BCHN and
+/// Bitcoin Core close an RPC connection idle for `-rpcservertimeout`, 30 s by
+/// default. A connection kept that long can be reused just as the node
+/// closes it, and the request sent on it then fails.
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Error type for the BitcoindRpcClient
 #[derive(Debug)]
@@ -263,6 +270,7 @@ impl BitcoindRpcClient {
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
+            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
             .build()
             .map_err(|e| BitcoindRpcError::Other(format!("Failed to create HTTP client: {e}")))?;
 
@@ -271,6 +279,27 @@ impl BitcoindRpcClient {
             url: url.to_string(),
             request_id: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// Post `request`, and post it once more on a new connection when the
+    /// connection broke after it went out and before any answer came back.
+    ///
+    /// That is how a kept-alive connection the node closes as idle at that
+    /// moment fails. The node did not read a request sent on such a
+    /// connection, so sending it again runs it once. A refused connection
+    /// or a timeout is not sent again.
+    async fn send(
+        &self,
+        method: &str,
+        request: &JsonRpcRequest,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        match self.client.post(&self.url).json(request).send().await {
+            Err(error) if error.is_request() && !error.is_connect() && !error.is_timeout() => {
+                debug!("Sending {method} again, the connection broke before an answer: {error}");
+                self.client.post(&self.url).json(request).send().await
+            }
+            sent => sent,
+        }
     }
 
     pub async fn request<T: serde::de::DeserializeOwned>(
@@ -286,7 +315,7 @@ impl BitcoindRpcClient {
             id,
         };
 
-        let response = match self.client.post(&self.url).json(&request).send().await {
+        let response = match self.send(method, &request).await {
             Ok(resp) => resp,
             Err(e) => {
                 let status_code = e.status().map(|s| s.as_u16());
