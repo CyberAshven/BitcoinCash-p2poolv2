@@ -4,6 +4,7 @@
 
 use super::block_template::BlockTemplate;
 use super::error::WorkError;
+use super::gbt::LOST_CONTACT_AFTER;
 use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::PayoutSplit;
 use crate::accounting::payout::payout_distribution::{PayoutDistribution, build_pplns_outputs};
@@ -283,6 +284,14 @@ pub enum NotifyCmd {
     /// changed and miners need updated work, and also we avoid uncles
     /// while miners build on previous blockhash
     NewNotify,
+    /// Withdraw mining work until the next template.
+    ///
+    /// Sent by the template poller once the node has given no template for
+    /// [`LOST_CONTACT_AFTER`]: the latest one may no longer build on the
+    /// node's tip, so mining connections close and no Job Declaration token
+    /// is allocated, rather than miners hashing work that cannot pay. The
+    /// next template publishes work again, with clean jobs.
+    Withdraw,
 }
 
 /// Sender half of the notify command channel.
@@ -428,6 +437,22 @@ pub async fn start_notify(
                     }
                 } else {
                     debug!("NewNotify received but no template available yet");
+                }
+            }
+            NotifyCmd::Withdraw => {
+                if latest_template.take().is_some() {
+                    warn!(
+                        "Withdrawing mining work: the node has given no template for {} seconds; waiting for one",
+                        LOST_CONTACT_AFTER.as_secs()
+                    );
+                    notify_context.pool_transactions.clear_prepared();
+                    if template_tx.send(None).is_err() {
+                        error!(
+                            "Failed to withdraw work, shutting down: all template receivers dropped"
+                        );
+                        return;
+                    }
+                    work_available = false;
                 }
             }
         }
@@ -699,6 +724,116 @@ mod tests {
             prepared.template().previousblockhash,
             template.previousblockhash
         );
+        let tracker = start_tracker_actor();
+        let notify: Notify = serde_json::from_str(
+            &build_notify_from_prepared(&prepared, None, None, &tracker).unwrap(),
+        )
+        .unwrap();
+        assert!(notify.params.clean_jobs);
+        drop(notify_tx);
+        task_handle.await.unwrap();
+    }
+
+    /// The poller's withdrawal, once the node has given no template for a
+    /// minute, withdraws the published work. A new share cannot republish
+    /// the old template, and the node's next template brings work back with
+    /// clean jobs.
+    #[tokio::test]
+    async fn test_start_notify_withdraws_work_until_the_node_gives_a_template() {
+        let (template_tx, mut template_rx) = watch::channel(None);
+        let (notify_tx, notify_rx) = mpsc::channel(10);
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let genesis = genesis_for_tests();
+        let genesis_hash = genesis.block_hash();
+        let genesis_header = genesis.header.clone();
+        chain_store_handle
+            .expect_get_mining_base_and_uncles()
+            .returning(move || Ok((genesis_hash, vec![])));
+        chain_store_handle.expect_get_asert_parent().returning(|_| {
+            let header = genesis_for_tests().header;
+            Ok(AsertParent::from_header(&header, 0, header.time))
+        });
+        chain_store_handle
+            .expect_get_share_header()
+            .returning(|_| Ok(genesis_for_tests().header));
+        let pool_difficulty =
+            pool_difficulty::PoolDifficulty::new(genesis_header.bits, genesis_header.time, 0);
+        let mut config = StratumConfig::new_for_test_default().parse().unwrap();
+        config.chain = crate::config::Chain::BitcoinCash;
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Regtest);
+        let address = PayoutAddress::from(Address::p2pkh(
+            bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+            Network::Regtest,
+        ));
+        let mut payout = MockPayoutDistribution::default();
+        payout.expect_pplns_weights().returning(|| None);
+        payout
+            .expect_get_output_distribution()
+            .returning(move |_, _, _, amount, _| {
+                Ok(CoinbasePayouts::direct(vec![OutputPair {
+                    address: address.clone(),
+                    amount,
+                }]))
+            });
+        let task_handle = tokio::spawn(async move {
+            start_notify(
+                notify_rx,
+                template_tx,
+                chain_store_handle,
+                &config,
+                Box::new(payout),
+                pool_difficulty,
+                PoolTransactionCache::new(),
+                None,
+                start_tracker_actor(),
+            )
+            .await;
+        });
+        let template: BlockTemplate = serde_json::from_str(include_str!(
+            "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+        ))
+        .unwrap();
+        let wait = std::time::Duration::from_secs(5);
+        notify_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::new(template.clone()),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(wait, template_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(template_rx.borrow_and_update().is_some());
+
+        notify_tx.send(NotifyCmd::Withdraw).await.unwrap();
+        tokio::time::timeout(wait, template_rx.changed())
+            .await
+            .expect("the withdrawal must reach the miners")
+            .unwrap();
+        assert!(template_rx.borrow_and_update().is_none());
+
+        notify_tx.send(NotifyCmd::NewNotify).await.unwrap();
+        notify_tx.send(NotifyCmd::Withdraw).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(500), template_rx.changed())
+                .await
+                .is_err(),
+            "a new share or a second withdrawal must not publish anything"
+        );
+        assert!(!task_handle.is_finished());
+
+        notify_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::new(template.clone()),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(wait, template_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = template_rx.borrow_and_update().clone().unwrap();
         let tracker = start_tracker_actor();
         let notify: Notify = serde_json::from_str(
             &build_notify_from_prepared(&prepared, None, None, &tracker).unwrap(),

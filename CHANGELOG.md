@@ -20,6 +20,20 @@ being refused. A node on the old rule builds another coinbase while genesis is i
 the window, so the two do not peer, and existing share chains start again on
 a fresh store. Bitcoin is unchanged.
 
+A node withdraws mining work once its Bitcoin Cash node has given no
+template for 60 seconds, as P2Pool v1 stops giving work 60 seconds after
+it last heard from bitcoind ("lost contact with bitcoind"). Until now a
+node that lost its BCHN kept handing out its last template: on 2026-11-05
+the chipnet pool lost the Start9 BCHN for over three hours, and its
+miners kept hashing a template whose BCH tip had moved on. Now the
+template poller withdraws the work after a minute without a template:
+SV1 and SV2 mining connections close, so miners can fail over to a backup
+pool, and no Job Declaration token is allocated. The next template
+publishes work again, with clean jobs. Polls come every 10 seconds, so a
+single failed poll never withdraws work. The Stratum V2 Template Provider
+source (`template_source = "sv2"`) is unchanged. No share-chain rule
+changes.
+
 The Bitcoin Cash per-share donation has regtest tests against BCHN, which
 the nightly workflow runs with the payout tree tests
 (`per_share_donation_bchn_test`). Each mines a block whose coinbase the
