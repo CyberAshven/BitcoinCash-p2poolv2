@@ -42,6 +42,15 @@ coinbase2" (seen in an end-to-end run with a Job Declaration client), and
 the network difficulty and `/jd_prepare` read the declared job instead of
 the node's own. Declared jobs now take ids from their own range, above every
 id the node's own jobs use. No share-chain rule changes.
+Calls to BCHN no longer fail on a connection BCHN has just closed. The RPC
+client kept idle connections for 90 s, and BCHN closes one idle for
+`-rpcservertimeout`, 30 s by default, counted from the last request it
+read. The payout tree executor reads BCHN's tip every 30 s, so its call
+often went out on a connection BCHN was closing at that moment, and the
+executor missed the tip (`error sending request for url`). Idle connections
+are now dropped after 20 s, and a call whose connection breaks after it went
+out and before any answer is sent once more on a new connection. A refused
+connection or a timeout is not sent again. No share-chain rule changes.
 
 The sim harness runs on Windows. Node configs escaped no paths, so a
 Windows store path (`\s...`) broke the TOML and the nodes exited before
