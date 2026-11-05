@@ -21,9 +21,11 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Base64 `user:password`, or `None` when no user is set.
+    /// Base64 `user:password`, or `None` when either half is missing. A
+    /// leftover user with no password (the password is session-only) must
+    /// not become a half-empty token the node would refuse.
     pub fn credentials(&self) -> Option<String> {
-        if self.user.is_empty() {
+        if self.user.is_empty() || self.password.is_empty() {
             return None;
         }
         Some(
@@ -52,6 +54,7 @@ impl Connection {
     /// message to show, as the node's own pages would word it.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
         let mut request = gloo_net::http::Request::get(&format!("{}{path}", self.base));
+        request = request.header("X-Requested-With", "XMLHttpRequest");
         if let Some(token) = self.credentials() {
             request = request.header("Authorization", &format!("Basic {token}"));
         }
@@ -61,6 +64,25 @@ impl Connection {
             return Err(error_message(response.status(), &body, path));
         }
         decode(&body, path)
+    }
+
+    /// True when the node still answers 401 on `path` with these credentials:
+    /// the login is wrong or missing, not the socket. The marker header keeps
+    /// the challenge off this probe, so no browser login dialog opens over
+    /// the feed's own `unauthorized` state.
+    pub async fn refused(&self, path: &str) -> bool {
+        if self.credentials().is_none() {
+            return false;
+        }
+        let mut request = gloo_net::http::Request::get(&format!("{}{path}", self.base));
+        request = request.header("X-Requested-With", "XMLHttpRequest");
+        if let Some(token) = self.credentials() {
+            request = request.header("Authorization", &format!("Basic {token}"));
+        }
+        match request.send().await {
+            Ok(response) => response.status() == 401,
+            Err(_) => false,
+        }
     }
 }
 
@@ -122,6 +144,7 @@ pub struct HashratePoint {
     pub time: u64,
     pub pool_hashrate: Option<f64>,
     pub local_hashrate: Option<f64>,
+    pub network_hashrate: Option<f64>,
 }
 
 /// `/hashrate?window=`.
@@ -130,6 +153,9 @@ pub struct Hashrate {
     pub pool_hashrate: Option<f64>,
     pub local_hashrate: Option<f64>,
     pub network_hashrate: Option<f64>,
+    /// Current pool share difficulty (the newest prepared notify's ASERT
+    /// target, in the share chain's units). None until the first notify.
+    pub share_difficulty: Option<f64>,
     /// Oldest first.
     pub history: Vec<HashratePoint>,
 }
@@ -258,13 +284,33 @@ pub struct LocalMiner {
 
 /// `/miners?page=` or `/miners?address=`.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Miners {
     pub miners_online: usize,
     pub workers_online: usize,
     pub page: usize,
     pub pages: usize,
     pub page_size: usize,
+    /// Shares the pool accepted since the node started, node-wide.
+    pub accepted_shares_total: u64,
+    /// Shares the pool rejected since the node started, node-wide.
+    pub rejected_shares_total: u64,
     pub miners: Vec<LocalMiner>,
+}
+
+impl Default for Miners {
+    fn default() -> Self {
+        Self {
+            miners_online: 0,
+            workers_online: 0,
+            page: 1,
+            pages: 1,
+            page_size: 0,
+            accepted_shares_total: 0,
+            rejected_shares_total: 0,
+            miners: Vec::new(),
+        }
+    }
 }
 
 /// A `/ws` frame: `{"topic":"Share","data":{...}}`.
@@ -297,6 +343,17 @@ mod tests {
             user: String::new(),
             password: "pw".into(),
         };
+        assert_eq!(connection.websocket_url(), "ws://127.0.0.1:46884/ws");
+    }
+
+    #[test]
+    fn test_websocket_url_without_a_password_is_bare() {
+        let connection = Connection {
+            base: "http://127.0.0.1:46884".into(),
+            user: "admin".into(),
+            password: String::new(),
+        };
+        assert_eq!(connection.credentials(), None);
         assert_eq!(connection.websocket_url(), "ws://127.0.0.1:46884/ws");
     }
 
@@ -360,11 +417,24 @@ mod tests {
     #[test]
     fn test_miners_page_parses() {
         let body = r#"{"miners_online":1,"workers_online":2,"total":1,"page":1,"pages":1,
-            "page_size":25,"miners":[{"address":"bchtest:q","workers":[{"name":"rig",
+            "page_size":25,"accepted_shares_total":3,"rejected_shares_total":1,
+            "miners":[{"address":"bchtest:q","workers":[{"name":"rig",
             "active":true,"accepted_work":10,"best_share":5,"last_share_at":9}],
             "accepted_work":10,"best_share":5,"last_share_at":9,"payout_fraction":null}]}"#;
         let miners: Miners = serde_json::from_str(body).unwrap();
+        assert_eq!(miners.accepted_shares_total, 3);
+        assert_eq!(miners.rejected_shares_total, 1);
         assert_eq!(miners.miners[0].workers[0].name, "rig");
         assert_eq!(miners.miners[0].payout_fraction, None);
+    }
+
+    #[test]
+    fn test_miners_page_parses_without_the_share_totals() {
+        // A node older than these fields still answers the WASM app.
+        let body = r#"{"miners_online":1,"workers_online":2,"total":1,"page":1,"pages":1,
+            "page_size":25,"miners":[]}"#;
+        let miners: Miners = serde_json::from_str(body).unwrap();
+        assert_eq!(miners.accepted_shares_total, 0);
+        assert_eq!(miners.rejected_shares_total, 0);
     }
 }

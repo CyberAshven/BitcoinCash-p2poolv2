@@ -8,11 +8,12 @@
 //! here without a script: every page has the same menu bar, a search box and
 //! a trail back to the overview, its pop-ups are pages of their own, long
 //! tables are split into pages with links, and a miner's workers open with
-//! an HTML `<details>`. The overview refreshes itself with a meta refresh and
-//! chart tooltips are SVG titles. Every value is escaped by maud.
+//! an HTML `<details>`. The overview reloads every 30 seconds unless `?auto=off`
+//! pauses it, and chart tooltips are hit zones with styled tips plus SVG titles.
+//! Every value is escaped by maud.
 
 use super::assets;
-use super::chart::{Series, line_chart};
+use super::chart::{ChartBlock, Series, line_chart};
 use super::history::Sample;
 use crate::api::endpoints::miner::MinerResponse;
 use crate::api::endpoints::share::ShareLookupOutput;
@@ -20,11 +21,101 @@ use bitcoin::BlockHash;
 use maud::{DOCTYPE, Markup, html};
 use serde::Serialize;
 
-/// Seconds between refreshes of the overview page.
+/// Seconds between refreshes of the overview page while auto is on.
 pub(crate) const OVERVIEW_REFRESH_SECONDS: u32 = 30;
+
+/// Hashrate chart time ranges, keyed by the `?range=` query value.
+/// `(query key, button label, newest samples kept, period word for titles)`.
+/// The node reads its full 30-day ring and count-slices it, so no window
+/// seconds are needed here (unlike the replica, which fetches `/hashrate`).
+const RANGES: [(&str, &str, usize, u64, &str); 4] = [
+    ("1h", "Hour", 60, 3600, "hour"),
+    ("24h", "Day", 1440, 86400, "day"),
+    ("1w", "Week", 10080, 604800, "week"),
+    ("1m", "Month", 43200, 2592000, "month"),
+];
+
+/// The `?range=` key's window in seconds: found blocks at least this old
+/// fall outside the chart's window and are not drawn on it.
+pub(crate) fn range_window_secs(range_key: &str) -> u64 {
+    RANGES
+        .iter()
+        .find(|(key, ..)| *key == range_key)
+        .map_or_else(|| RANGES[1].3, |(_, _, _, window_secs, _)| *window_secs)
+}
+
+/// The range shown when `?range=` is missing or names no known range.
+const DEFAULT_RANGE: &str = "24h";
+
+/// `value` if it names a range in [`RANGES`], otherwise [`DEFAULT_RANGE`].
+/// Returns a key from the static table, so the lifetime is `'static`.
+pub(crate) fn normalize_range(value: Option<&str>) -> &'static str {
+    RANGES
+        .iter()
+        .find(|(key, ..)| Some(*key) == value)
+        .map(|(key, ..)| *key)
+        .unwrap_or(DEFAULT_RANGE)
+}
+
+/// The overview's stateless auto-refresh toggle, read from `?auto=`:
+/// `?auto=on` (the default) or `?auto=off`. On page 1 with `Auto::On` the
+/// overview's head carries a 30 second meta refresh; the header shows the
+/// matching button, or a hidden same-width slot when this page is not the
+/// overview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Auto {
+    On,
+    Off,
+}
+
+impl Auto {
+    /// A missing `?auto=` parameter or any value other than `off` selects
+    /// `Auto::On`; only `?auto=off` selects `Auto::Off`.
+    pub(crate) fn from_query(auto: Option<&str>) -> Auto {
+        match auto {
+            Some("off") => Auto::Off,
+            _ => Auto::On,
+        }
+    }
+}
 
 /// Rows on one page of a long table.
 pub(crate) const PAGE_SIZE: usize = 25;
+
+/// A chart series toggle from its query parameter: only `?pool=0`/`?node=0`
+/// hides the series, anything else (including a missing parameter) shows it.
+pub(crate) fn series_on(value: Option<&str>) -> bool {
+    value != Some("0")
+}
+
+/// The network series toggle: unlike Pool and Node, the network line is
+/// opt-in, so it shows only for `?network=1` and a missing (or any other)
+/// parameter keeps the default URL clean.
+pub(crate) fn network_on(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// The query fragment carrying the four chart series toggles: pool, node
+/// and the found-block diamonds carry their turns off, network carries its
+/// turn on (it is opt-in), so `""` is the default state. The links that
+/// must survive a click (range buttons, the auto-refresh toggle) append it
+/// to keep the state.
+pub(crate) fn series_q(pool_on: bool, node_on: bool, network_on: bool, blocks_on: bool) -> String {
+    let mut query = String::new();
+    if !pool_on {
+        query.push_str("&pool=0");
+    }
+    if !node_on {
+        query.push_str("&node=0");
+    }
+    if network_on {
+        query.push_str("&network=1");
+    }
+    if !blocks_on {
+        query.push_str("&blocks=0");
+    }
+    query
+}
 
 /// What every page shows about the node it is served by. `/network` serves
 /// it as JSON for frontends such as `p2poolv2_web`.
@@ -34,6 +125,9 @@ pub(crate) struct Site {
     pub(crate) network: String,
     /// The short name in the header badge, for example "chipnet".
     pub(crate) badge: String,
+    /// Whether the node has an API login, so the header offers the Admin
+    /// button that leads to `/dashboard/signin`.
+    pub(crate) auth: bool,
 }
 
 /// The menu bar's pages.
@@ -135,16 +229,39 @@ pub(crate) struct Overview {
     pub(crate) local_hashrate: Option<f64>,
     pub(crate) network_hashrate: Option<f64>,
     pub(crate) network_difficulty: Option<f64>,
+    /// Current pool share difficulty (the newest prepared notify's ASERT
+    /// target, in the share chain's units), read live from the job tracker.
+    pub(crate) share_difficulty: Option<f64>,
     pub(crate) miners_online: usize,
     pub(crate) workers_online: usize,
+    /// Shares the pool accepted since the node started, node-wide.
+    pub(crate) accepted_shares_total: u64,
+    /// Shares the pool rejected since the node started, node-wide.
+    pub(crate) rejected_shares_total: u64,
     pub(crate) samples: Vec<Sample>,
     /// Blocks the pool found in all.
     pub(crate) blocks_found: usize,
     /// The newest of them, newest first.
     pub(crate) blocks: Vec<FoundBlockRow>,
-    /// This page of the share chain, newest first.
+    /// The newest confirmed shares, newest first, uncles under the share that
+    /// includes them, at most `super::OVERVIEW_SHARES` heights.
     pub(crate) shares: Vec<ShareRow>,
-    pub(crate) shares_paging: Paging,
+    /// The overview's stateless auto-refresh toggle, from `?auto=`.
+    pub(crate) auto: Auto,
+    /// The normalized `?range=` key selecting the chart window, from
+    /// [`normalize_range`].
+    pub(crate) range_key: &'static str,
+    /// Whether the pool line shows, from `?pool=0`.
+    pub(crate) pool_on: bool,
+    /// Whether this node's line shows, from `?node=0`.
+    pub(crate) node_on: bool,
+    /// Whether the network line shows, from `?network=1` (opt-in).
+    pub(crate) network_on: bool,
+    /// Whether the found-block diamonds show, from `?blocks=0`.
+    pub(crate) blocks_on: bool,
+    /// The pool's found blocks inside the chart's window, for the chart's
+    /// diamonds and Block tooltip rows.
+    pub(crate) chart_blocks: Vec<ChartBlock>,
 }
 
 /// The found blocks page.
@@ -153,6 +270,16 @@ pub(crate) struct BlocksView {
     pub(crate) now: u64,
     pub(crate) blocks_found: usize,
     pub(crate) blocks: Vec<FoundBlockRow>,
+    pub(crate) paging: Paging,
+}
+
+/// The shares page: one page of the whole confirmed share chain.
+pub(crate) struct SharesView {
+    pub(crate) site: Site,
+    pub(crate) now: u64,
+    pub(crate) tip_height: Option<u32>,
+    /// This page of the share chain, newest first.
+    pub(crate) shares: Vec<ShareRow>,
     pub(crate) paging: Paging,
 }
 
@@ -221,7 +348,7 @@ const UNITS: [&str; 7] = ["", "k", "M", "G", "T", "P", "E"];
 
 /// `value` scaled to a unit prefix, three significant digits.
 fn with_prefix(value: f64) -> (f64, &'static str) {
-    let mut scaled = value;
+    let mut scaled = if value == 0.0 { 0.0 } else { value };
     let mut unit = 0;
     while scaled.abs() >= 1000.0 && unit + 1 < UNITS.len() {
         scaled /= 1000.0;
@@ -230,7 +357,13 @@ fn with_prefix(value: f64) -> (f64, &'static str) {
     (scaled, UNITS[unit])
 }
 
+/// Three significant digits, never printing a negative zero.
 fn three_digits(value: f64) -> String {
+    let value = if value < 0.0 && value.abs() < 0.005 {
+        0.0
+    } else {
+        value
+    };
     if value.abs() >= 100.0 {
         format!("{value:.0}")
     } else if value.abs() >= 10.0 {
@@ -267,6 +400,21 @@ pub(crate) fn fmt_day_time(unix: u64) -> String {
         .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
         .map(|time| time.format("%b %-d %H:%M UTC").to_string())
         .unwrap_or_else(|| unix.to_string())
+}
+
+/// Time only, no date: the x-axis edge labels of a range-sliced chart.
+pub(crate) fn fmt_hour_edge(unix: u64) -> String {
+    i64::try_from(unix)
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .map(|time| time.format("%H:%M").to_string())
+        .unwrap_or_else(|| unix.to_string())
+}
+
+/// Intermediate x-axis labels: hour of day, with minutes when the tick step
+/// is finer than an hour (the 1h view uses 10-15 min ticks).
+pub(crate) fn fmt_hour_tick(unix: u64) -> String {
+    fmt_hour_edge(unix)
 }
 
 pub(crate) fn fmt_ago(now: u64, then: u64) -> String {
@@ -369,6 +517,71 @@ fn stat(key: &str, value: Markup) -> Markup {
     html! { div.stat-item { div.k { (key) } div.v { (value) } } }
 }
 
+/// The hashrate chart's Hour/Day/Week/Month buttons, plain links with no
+/// script. The active range carries `active-nav` and `aria-current`. When
+/// auto-refresh is off the links keep `?auto=off`, and `series_arg` keeps the
+/// chart series toggles.
+fn range_buttons(range_key: &str, auto: Auto, series_arg: &str) -> Markup {
+    let auto_query = if matches!(auto, Auto::Off) {
+        "&auto=off"
+    } else {
+        ""
+    };
+    html! {
+        span.range-group aria-label="Chart time range" {
+            @for (key, label, _, _, _) in RANGES {
+                a.outline.header-btn.active-nav[key == range_key] role="button"
+                    href=(format!("/dashboard?range={key}{auto_query}{series_arg}"))
+                    aria-current=[(key == range_key).then_some("true")] { (label) }
+            }
+        }
+    }
+}
+
+/// The Pool/Node/Network/Blocks chart series toggles: their own row under
+/// the hashrate heading, stateless links that flip `?pool=0`/`?node=0`/
+/// `?network=1`/`?blocks=0` while keeping the range and auto-refresh
+/// parameters. A hidden series shows `off`; the dot carries the line's
+/// colour (the blocks dot wears the marker's diamond shape).
+fn series_toggles(
+    pool_on: bool,
+    node_on: bool,
+    network_on: bool,
+    blocks_on: bool,
+    range_key: &str,
+    auto: Auto,
+) -> Markup {
+    let auto_query = if matches!(auto, Auto::Off) {
+        "&auto=off"
+    } else {
+        ""
+    };
+    html! {
+        span.series-toggles role="group" aria-label="Chart series" {
+            a.legend-chip.off[!pool_on] role="button" aria-pressed=(pool_on.to_string())
+                href=(format!("/dashboard?range={range_key}{auto_query}{}",
+                    series_q(!pool_on, node_on, network_on, blocks_on))) {
+                span.legend-dot.pool {} "Pool"
+            }
+            a.legend-chip.off[!node_on] role="button" aria-pressed=(node_on.to_string())
+                href=(format!("/dashboard?range={range_key}{auto_query}{}",
+                    series_q(pool_on, !node_on, network_on, blocks_on))) {
+                span.legend-dot.local {} "Node"
+            }
+            a.legend-chip.off[!network_on] role="button" aria-pressed=(network_on.to_string())
+                href=(format!("/dashboard?range={range_key}{auto_query}{}",
+                    series_q(pool_on, node_on, !network_on, blocks_on))) {
+                span.legend-dot.network {} "Network"
+            }
+            a.legend-chip.off[!blocks_on] role="button" aria-pressed=(blocks_on.to_string())
+                href=(format!("/dashboard?range={range_key}{auto_query}{}",
+                    series_q(pool_on, node_on, network_on, !blocks_on))) {
+                span.legend-dot.blocks {} "Blocks"
+            }
+        }
+    }
+}
+
 /// Previous and next links for a long table. `base` is the page's URL
 /// without its `page` parameter.
 pub(crate) fn pager(base: &str, paging: Paging) -> Markup {
@@ -391,14 +604,21 @@ pub(crate) fn pager(base: &str, paging: Paging) -> Markup {
 }
 
 /// The page frame: head, menu bar, search, trail and footer around `body`.
+/// `series_arg` is [`series_q`] for the overview, so the auto-refresh links
+/// keep the chart series toggles; empty elsewhere.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn layout(
     site: &Site,
     title: &str,
     tab: Tab,
     trail: &[Crumb],
     refresh: Option<u32>,
+    auto: Option<Auto>,
+    range_key: Option<&str>,
+    series_arg: &str,
     body: Markup,
 ) -> Markup {
+    let range_query = range_key.map_or(String::new(), |key| format!("&range={key}"));
     html! {
         (DOCTYPE)
         html lang="en" data-theme="dark" {
@@ -438,11 +658,36 @@ pub(crate) fn layout(
                             }
                         }
                         ul.header-right {
+                            @match auto {
+                                Some(Auto::On) => {
+                                    li {
+                                        a.outline.header-btn.refresh-main.auto-on role="button"
+                                            href=(format!("/dashboard?auto=off{range_query}{series_arg}"))
+                                            title="Turn off 30s auto-refresh" { "Auto on" }
+                                    }
+                                }
+                                Some(Auto::Off) => {
+                                    li {
+                                        a.outline.header-btn.refresh-main.auto-paused role="button"
+                                            href=(format!("/dashboard?auto=on{range_query}{series_arg}"))
+                                            title="Turn on 30s auto-refresh" { "Auto off" }
+                                    }
+                                }
+                                None => {
+                                    li.auto-slot aria-hidden="true" {}
+                                }
+                            }
                             li {
                                 form.header-search action="/dashboard/search" method="get" role="search" {
                                     input type="search" name="q" placeholder="Miner address or share hash"
                                         aria-label="Miner address or share hash" required;
                                     button.outline.header-btn type="submit" { "Search" }
+                                }
+                            }
+                            @if site.auth {
+                                li {
+                                    a.outline.header-btn role="button" href="/dashboard/signin"
+                                        title="Sign in to the node's own routes" { "Admin" }
                                 }
                             }
                         }
@@ -525,42 +770,87 @@ fn blocks_table(now: u64, blocks: &[FoundBlockRow]) -> Markup {
 }
 
 pub(crate) fn overview(view: &Overview) -> Markup {
-    let chart = line_chart(
-        "Hashrate over the last day",
-        &[
-            Series {
-                label: "Pool",
-                class: "pool",
-                points: series(&view.samples, |sample| sample.pool),
-            },
-            Series {
-                label: "This node",
-                class: "local",
-                points: series(&view.samples, |sample| sample.local),
-            },
-        ],
-        fmt_hashrate,
-        fmt_day_time,
-    );
+    let (_, _, max_samples, _, period) = *RANGES
+        .iter()
+        .find(|(key, ..)| *key == view.range_key)
+        .unwrap_or(&RANGES[1]);
+    let samples: Vec<Sample> = view
+        .samples
+        .iter()
+        .rev()
+        .take(max_samples)
+        .rev()
+        .copied()
+        .collect();
+    let mut shown = Vec::with_capacity(3);
+    if view.pool_on {
+        shown.push(Series {
+            label: "Pool",
+            class: "pool",
+            points: series(&samples, |sample| sample.pool),
+        });
+    }
+    if view.node_on {
+        shown.push(Series {
+            label: "This node",
+            class: "local",
+            points: series(&samples, |sample| sample.local),
+        });
+    }
+    if view.network_on {
+        shown.push(Series {
+            label: "Network",
+            class: "network",
+            points: series(&samples, |sample| sample.network),
+        });
+    }
+    // All toggles off: a note about the toggles, not the "first points"
+    // note the chart shows before any sample arrives.
+    let chart = if shown.is_empty() {
+        html! {
+            p.empty { "All series hidden. Click a legend chip to show one." }
+        }
+    } else {
+        // The chip's turn-off reaches the chart as an empty list: no
+        // diamonds and no Block rows, as the replica does for `?blocks=0`.
+        let chart_blocks: &[ChartBlock] = if view.blocks_on {
+            &view.chart_blocks
+        } else {
+            &[]
+        };
+        line_chart(
+            &format!("Hashrate over the last {period}"),
+            &shown,
+            chart_blocks,
+            fmt_hashrate,
+            fmt_day_time,
+            fmt_hour_tick,
+            fmt_hour_edge,
+        )
+    };
+    let series_arg = series_q(view.pool_on, view.node_on, view.network_on, view.blocks_on);
     let last_block = view.blocks.first().map(|block| block.time);
     let body = html! {
         div.kpi-grid {
             (kpi_card("Pool hashrate", optional(view.pool_hashrate, fmt_hashrate), "kpi-value-green", None,
-                &["From the newest shares on the share chain".to_string()]))
-            (kpi_card("This node", optional(view.local_hashrate, fmt_hashrate), "kpi-value-local", Some("/dashboard/miners"),
-                &[format!("{} miners, {} workers online", view.miners_online, view.workers_online)]))
-            (kpi_card("Network hashrate (BCH)", optional(view.network_hashrate, fmt_hashrate), "kpi-value-net", None,
+                &["Confirmed shares, last hour".to_string()]))
+            (kpi_card("Node hashrate", optional(view.local_hashrate, fmt_hashrate), "kpi-value-local", Some("/dashboard/miners"),
+                &[format!("{} miners, {} workers online", view.miners_online, view.workers_online),
+                  format!("{} rejected of {} shares", view.rejected_shares_total, view.accepted_shares_total)]))
+            (kpi_card("network hashrate", optional(view.network_hashrate, fmt_hashrate), "kpi-value-net", None,
                 &[format!("Difficulty {}", optional(view.network_difficulty, fmt_difficulty)),
-                  "Estimated from difficulty, 10-minute blocks".to_string()]))
+                  "Est. from diff. 10-min blocks".to_string()]))
             (kpi_card("Share chain height",
-                view.tip_height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string()), "", None, &[]))
-            (kpi_card("Blocks found", view.blocks_found.to_string(), "", Some("/dashboard/blocks"),
+                view.tip_height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string()), "", None,
+                &[format!("Difficulty {}", optional(view.share_difficulty, fmt_difficulty))]))
+            (kpi_card("Blocks found", view.blocks_found.to_string(), "kpi-value-green", Some("/dashboard/blocks"),
                 &[last_block
                     .map(|time| format!("Last {}", fmt_ago(view.now, u64::from(time))))
                     .unwrap_or_else(|| "None yet".to_string())]))
         }
         div.panel {
-            h2 { "Hashrate" span.panel-note { "one sample a minute, the last day" } }
+            h2.hashrate-head { "Hashrate" (range_buttons(view.range_key, view.auto, &series_arg)) }
+            (series_toggles(view.pool_on, view.node_on, view.network_on, view.blocks_on, view.range_key, view.auto))
             div.chart-wrap { (chart) }
         }
         div.panel {
@@ -607,12 +897,22 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                         }
                     }
                 }
-                (pager("/dashboard", view.shares_paging))
+                div.panel-more { a href="/dashboard/shares" { "More found shares →" } }
             }
         }
     };
-    let refresh = (view.shares_paging.page == 1).then_some(OVERVIEW_REFRESH_SECONDS);
-    layout(&view.site, "Dashboard", Tab::Dashboard, &[], refresh, body)
+    let refresh = matches!(view.auto, Auto::On).then_some(OVERVIEW_REFRESH_SECONDS);
+    layout(
+        &view.site,
+        "Dashboard",
+        Tab::Dashboard,
+        &[],
+        refresh,
+        Some(view.auto),
+        Some(view.range_key),
+        &series_arg,
+        body,
+    )
 }
 
 pub(crate) fn blocks(view: &BlocksView) -> Markup {
@@ -633,6 +933,63 @@ pub(crate) fn blocks(view: &BlocksView) -> Markup {
         Tab::Blocks,
         &[dashboard_crumb(), Crumb::here("Blocks")],
         None,
+        None,
+        None,
+        "",
+        body,
+    )
+}
+
+pub(crate) fn shares(view: &SharesView) -> Markup {
+    let body = html! {
+        div.panel {
+            h2 {
+                "Recent shares"
+                span.panel-note {
+                    "newest first, uncles under the share that includes them"
+                    @if let Some(tip) = view.tip_height { " · tip " (tip) }
+                }
+            }
+            @if view.shares.is_empty() {
+                p.empty-state {
+                    @if view.tip_height.is_none() { "No confirmed shares yet. Point a miner at this node's stratum port to get started." }
+                    @else { "No shares on this page." }
+                }
+            } @else {
+                div.table-wrap {
+                    table.table {
+                        thead { tr { th { "Height" } th { "Share hash" } th { "Type" } th { "Miner (payout)" } th { "Share owner" } th { "Time" } th { "Difficulty" } } }
+                        tbody {
+                            @for row in &view.shares {
+                                tr.uncle-row[row.is_uncle] {
+                                    td { (row.height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string())) }
+                                    td { (share_link(&row.blockhash)) }
+                                    td {
+                                        @if row.is_uncle { "uncle" } @else { "share" }
+                                        @if row.is_block { " " span.badge-block { "block" } }
+                                    }
+                                    td { (miner_link(&row.payout_address)) }
+                                    td { (miner_link(&row.share_address)) }
+                                    (ago_cell(view.now, u64::from(row.time)))
+                                    td.mono { (optional(row.difficulty, fmt_difficulty)) }
+                                }
+                            }
+                        }
+                    }
+                }
+                (pager("/dashboard/shares", view.paging))
+            }
+        }
+    };
+    layout(
+        &view.site,
+        "Shares",
+        Tab::None,
+        &[dashboard_crumb(), Crumb::here("Shares")],
+        None,
+        None,
+        None,
+        "",
         body,
     )
 }
@@ -670,6 +1027,9 @@ pub(crate) fn block(view: &BlockView) -> Markup {
             Crumb::here(format!("Block {}", block.height)),
         ],
         None,
+        None,
+        None,
+        "",
         body,
     )
 }
@@ -739,6 +1099,9 @@ pub(crate) fn miners(view: &MinersView) -> Markup {
         Tab::Miners,
         &[dashboard_crumb(), Crumb::here("Miners")],
         None,
+        None,
+        None,
+        "",
         body,
     )
 }
@@ -819,6 +1182,9 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
             Crumb::here(short(&report.address)),
         ],
         None,
+        None,
+        None,
+        "",
         body,
     )
 }
@@ -882,6 +1248,9 @@ pub(crate) fn share(view: &ShareView) -> Markup {
             Crumb::here(format!("Share {}", short(&share.blockhash))),
         ],
         None,
+        None,
+        None,
+        "",
         body,
     )
 }
@@ -920,8 +1289,11 @@ pub(crate) fn help(site: &Site) -> Markup {
                     li { code { "/chain_info" } ", " code { "/shares" } ", " code { "/share?hash=" } ", " code { "/share_headers" } }
                     li { code { "/miner?address=" } ": a miner's shares and its part of the next payout" }
                     li { code { "/pplns_shares" } ", " code { "/candidates" } ", " code { "/dag" } ", " code { "/transaction" } }
-                    li { code { "/hashrate" } ", " code { "/found_blocks" } ", " code { "/miners" } ", " code { "/network" } }
-                    li { code { "/metrics" } " (Prometheus) and " code { "/peers" } ": always behind the API login" }
+                    li { code { "/hashrate" } ", " code { "/found_blocks" } ", " code { "/miners" } ", " code { "/network" }
+                        ", " code { "/peers" } }
+                    li { code { "/metrics" } " (Prometheus), " code { "/blocked_ips" }
+                        ", " code { "/jd_prepare" } " and " code { "/share_transaction" }
+                        ": always behind the API login" }
                 }
             }
             div.help-section {
@@ -929,6 +1301,17 @@ pub(crate) fn help(site: &Site) -> Markup {
                 p {
                     "This node renders these pages in Rust, from the same store and PPLNS window the API reads. "
                     "They load no scripts. The design is CashDragon0's."
+                }
+            }
+            div.help-section {
+                h3 { "Admin sign in and out" }
+                p {
+                    "The Admin button in the header opens " code { "/dashboard/signin" }
+                    ". Your browser asks for the API login; the page then lists what that login unlocks."
+                }
+                p {
+                    "To sign out, submit any wrong password once at that prompt: the browser replaces the "
+                    "saved login, and the dashboard keeps serving the public pages."
                 }
             }
         }
@@ -939,6 +1322,49 @@ pub(crate) fn help(site: &Site) -> Markup {
         Tab::Help,
         &[dashboard_crumb(), Crumb::here("Help")],
         None,
+        None,
+        None,
+        "",
+        body,
+    )
+}
+
+/// The landing page behind the API login: what the Admin button opens.
+pub(crate) fn signin(site: &Site) -> Markup {
+    let body = html! {
+        div.panel {
+            div.help-section {
+                h3 { "Signed in" }
+                p {
+                    "Your browser holds the node's API login, so the operator routes below answer "
+                    "without another prompt."
+                }
+                ul {
+                    li { code { "/metrics" } ": the Prometheus exposition." }
+                    li { code { "/blocked_ips" } ": read, block and unblock peer IPs." }
+                    li { code { "/jd_prepare" } " and " code { "/share_transaction" }
+                        ": the node's own controls, by POST." }
+                }
+            }
+            div.help-section {
+                h3 { "Sign out" }
+                p {
+                    "Submit any wrong password at the next prompt: the browser replaces the saved "
+                    "login, and every visitor is back to the public pages only."
+                }
+            }
+            p { a class="back-link" href="/dashboard" { "Back to the dashboard" } }
+        }
+    };
+    layout(
+        site,
+        "Admin",
+        Tab::None,
+        &[dashboard_crumb(), Crumb::here("Admin")],
+        None,
+        None,
+        None,
+        "",
         body,
     )
 }
@@ -959,6 +1385,9 @@ pub(crate) fn error(site: &Site, message: &str) -> Markup {
         Tab::None,
         &[dashboard_crumb(), Crumb::here("Not available")],
         None,
+        None,
+        None,
+        "",
         body,
     )
 }
@@ -971,6 +1400,7 @@ mod tests {
         Site {
             network: "Bitcoin Cash chipnet".to_string(),
             badge: "chipnet".to_string(),
+            auth: true,
         }
     }
 
@@ -983,13 +1413,22 @@ mod tests {
             local_hashrate: None,
             network_hashrate: None,
             network_difficulty: None,
+            share_difficulty: None,
             miners_online: 0,
             workers_online: 0,
+            accepted_shares_total: 0,
+            rejected_shares_total: 0,
             samples: Vec::new(),
             blocks_found: 0,
             blocks: Vec::new(),
             shares: Vec::new(),
-            shares_paging: Paging::of(None, 0),
+            auto: Auto::On,
+            range_key: normalize_range(None),
+            pool_on: true,
+            node_on: true,
+            network_on: false,
+            blocks_on: true,
+            chart_blocks: Vec::new(),
         }
     }
 
@@ -1002,9 +1441,153 @@ mod tests {
     }
 
     #[test]
+    fn auto_defaults_to_on_without_a_query_parameter() {
+        assert_eq!(Auto::from_query(None), Auto::On);
+        assert_eq!(Auto::from_query(Some("on")), Auto::On);
+        assert_eq!(Auto::from_query(Some("off")), Auto::Off);
+        assert_eq!(Auto::from_query(Some("bogus")), Auto::On);
+    }
+
+    #[test]
+    fn hashrates_print_negative_zero_as_zero() {
+        assert_eq!(fmt_hashrate(-0.0), "0.00 H/s");
+        assert_eq!(fmt_hashrate(-0.001), "0.00 H/s");
+    }
+
+    #[test]
     fn difficulties_use_unit_prefixes() {
         assert_eq!(fmt_difficulty(665_151.95), "665k");
         assert_eq!(fmt_difficulty(4.5), "4.50");
+    }
+
+    #[test]
+    fn difficulties_print_negative_zero_as_zero() {
+        assert_eq!(fmt_difficulty(-0.0), "0.00");
+        assert_eq!(fmt_difficulty(-0.001), "0.00");
+    }
+
+    #[test]
+    fn ranges_normalize_to_their_table_or_the_default() {
+        assert_eq!(normalize_range(None), "24h");
+        assert_eq!(normalize_range(Some("1h")), "1h");
+        assert_eq!(normalize_range(Some("bogus")), "24h");
+    }
+
+    #[test]
+    fn the_range_buttons_mark_the_active_range_without_script() {
+        let markup = range_buttons("1h", Auto::On, "").into_string();
+        assert!(markup.contains("aria-label=\"Chart time range\""));
+        assert!(markup.contains(
+            "class=\"outline header-btn active-nav\" role=\"button\" href=\"/dashboard?range=1h\" aria-current=\"true\">Hour</a>"
+        ));
+        assert!(markup.contains("href=\"/dashboard?range=24h\">Day</a>"));
+        assert!(!markup.contains("auto="));
+        let paused = range_buttons("24h", Auto::Off, "").into_string();
+        assert!(paused.contains("href=\"/dashboard?range=1h&amp;auto=off\""));
+        let toggled = range_buttons("24h", Auto::On, "&pool=0").into_string();
+        assert!(toggled.contains("href=\"/dashboard?range=1h&amp;pool=0\""));
+    }
+
+    #[test]
+    fn a_series_is_off_only_when_its_parameter_says_so() {
+        assert!(series_on(None));
+        assert!(series_on(Some("1")));
+        assert!(series_on(Some("bogus")));
+        assert!(!series_on(Some("0")));
+    }
+
+    #[test]
+    fn the_network_series_shows_only_when_its_parameter_asks_for_it() {
+        assert!(!network_on(None));
+        assert!(!network_on(Some("0")));
+        assert!(!network_on(Some("bogus")));
+        assert!(network_on(Some("1")));
+    }
+
+    #[test]
+    fn the_series_query_lists_only_the_hidden_series() {
+        assert_eq!(series_q(true, true, false, true), "");
+        assert_eq!(series_q(false, true, false, true), "&pool=0");
+        assert_eq!(series_q(true, false, false, true), "&node=0");
+        assert_eq!(series_q(false, false, false, true), "&pool=0&node=0");
+    }
+
+    #[test]
+    fn the_series_query_carries_the_network_turn_on() {
+        assert_eq!(series_q(true, true, true, true), "&network=1");
+        assert_eq!(
+            series_q(false, false, true, true),
+            "&pool=0&node=0&network=1"
+        );
+    }
+
+    #[test]
+    fn the_series_toggles_link_both_states_without_script() {
+        let both_on = series_toggles(true, true, false, true, "24h", Auto::On).into_string();
+        assert!(both_on.contains("aria-label=\"Chart series\""));
+        assert!(both_on.contains("class=\"legend-chip\" role=\"button\" aria-pressed=\"true\""));
+        assert!(both_on.contains("span class=\"legend-dot pool\""));
+        assert!(both_on.contains("span class=\"legend-dot local\""));
+        assert!(both_on.contains("/dashboard?range=24h&amp;pool=0"));
+        assert!(both_on.contains("/dashboard?range=24h&amp;node=0"));
+        // Each chip flips only its own series, keeping the other's state.
+        let pool_hidden = series_toggles(false, true, false, true, "1h", Auto::Off).into_string();
+        assert!(
+            pool_hidden
+                .contains("class=\"legend-chip off\" role=\"button\" aria-pressed=\"false\"")
+        );
+        assert!(pool_hidden.contains("/dashboard?range=1h&amp;auto=off\""));
+        assert!(pool_hidden.contains("/dashboard?range=1h&amp;auto=off&amp;pool=0&amp;node=0"));
+        assert!(!pool_hidden.contains("pool=0\""));
+        let both_hidden = series_toggles(false, false, false, true, "24h", Auto::On).into_string();
+        assert!(both_hidden.contains("legend-chip off"));
+        assert!(both_hidden.contains("aria-pressed=\"false\""));
+    }
+
+    #[test]
+    fn the_network_toggle_links_both_states_without_script() {
+        let hidden = series_toggles(true, true, false, true, "24h", Auto::On).into_string();
+        assert!(hidden.contains("span class=\"legend-dot network\""));
+        assert!(
+            hidden.contains("aria-pressed=\"false\" href=\"/dashboard?range=24h&amp;network=1\"")
+        );
+        // Shown: the network chip drops its own turn-on, while the other
+        // chips keep it so the flip does not lose it.
+        let shown = series_toggles(true, true, true, true, "24h", Auto::On).into_string();
+        assert!(shown.contains("span class=\"legend-dot network\""));
+        assert!(shown.contains("aria-pressed=\"true\" href=\"/dashboard?range=24h\""));
+        assert!(shown.contains("href=\"/dashboard?range=24h&amp;pool=0&amp;network=1\""));
+    }
+
+    #[test]
+    fn the_series_query_carries_the_blocks_turn_off() {
+        assert_eq!(series_q(true, true, false, false), "&blocks=0");
+        assert_eq!(series_q(false, true, false, false), "&pool=0&blocks=0");
+    }
+
+    #[test]
+    fn the_blocks_toggle_links_both_states_without_script() {
+        let shown = series_toggles(true, true, false, true, "24h", Auto::On).into_string();
+        assert!(shown.contains("span class=\"legend-dot blocks\""));
+        assert!(shown.contains(">Blocks</a>"));
+        // Shown: the chip links its own turn-off, keeping the other series
+        // as they are.
+        assert!(shown.contains("aria-pressed=\"true\" href=\"/dashboard?range=24h&amp;blocks=0\""));
+        // Hidden: the chip links back to the clean URL and marks itself off.
+        let hidden = series_toggles(true, true, false, false, "24h", Auto::On).into_string();
+        assert!(hidden.contains("class=\"legend-chip off\""));
+        assert!(hidden.contains("aria-pressed=\"false\" href=\"/dashboard?range=24h\""));
+    }
+
+    #[test]
+    fn range_windows_match_the_range_buttons() {
+        assert_eq!(range_window_secs("1h"), 3600);
+        assert_eq!(range_window_secs("24h"), 86400);
+        assert_eq!(range_window_secs("1w"), 604800);
+        assert_eq!(range_window_secs("1m"), 2592000);
+        // An unknown range falls back with the normalized key itself, so
+        // the window always matches the chart the page draws.
+        assert_eq!(range_window_secs(DEFAULT_RANGE), 86400);
     }
 
     #[test]
@@ -1080,19 +1663,65 @@ mod tests {
             "<b>x</b>",
             Tab::Blocks,
             &[dashboard_crumb(), Crumb::here("Blocks")],
-            Some(30),
+            None,
+            None,
+            None,
+            "",
             html! { p { "hi" } },
         )
         .into_string();
         assert!(!page.contains("<script"));
+        assert!(!page.contains("http-equiv"));
         assert!(page.contains("&lt;b&gt;x&lt;/b&gt;"));
-        assert!(page.contains("http-equiv=\"refresh\""));
         assert!(page.contains(
             "class=\"outline header-btn active-nav\" role=\"button\" href=\"/dashboard/blocks\" aria-current=\"page\""
         ));
         assert!(page.contains("aria-label=\"breadcrumb\""));
         assert!(page.contains("action=\"/dashboard/search\""));
+        assert!(page.contains("href=\"/dashboard/signin\""));
+        assert!(page.contains(">Admin</a>"));
         assert!(page.contains(&assets::href("dashboard.css")));
+    }
+
+    #[test]
+    fn the_admin_button_is_absent_without_an_api_login() {
+        let page = layout(
+            &Site {
+                network: "Bitcoin Cash chipnet".to_string(),
+                badge: "chipnet".to_string(),
+                auth: false,
+            },
+            "Dashboard",
+            Tab::Dashboard,
+            &[],
+            None,
+            None,
+            None,
+            "",
+            html! { p { "hi" } },
+        )
+        .into_string();
+        assert!(!page.contains("/dashboard/signin"));
+        assert!(!page.contains(">Admin</a>"));
+    }
+
+    #[test]
+    fn the_signin_page_lists_the_protected_routes_without_script() {
+        let page = signin(&site()).into_string();
+        assert!(!page.contains("<script"));
+        assert!(page.contains("Sign in"));
+        assert!(page.contains("/metrics"));
+        assert!(page.contains("/jd_prepare"));
+        assert!(page.contains("wrong password"));
+        assert!(page.contains("Back to the dashboard"));
+    }
+
+    #[test]
+    fn the_help_page_explains_signing_in_and_out() {
+        let page = help(&site()).into_string();
+        assert!(!page.contains("<script"));
+        assert!(page.contains("/dashboard/signin"));
+        assert!(page.contains("wrong password"));
     }
 
     #[test]
@@ -1102,6 +1731,121 @@ mod tests {
         assert!(page.contains("Collecting data"));
         assert!(page.contains("has not found a Bitcoin Cash block yet"));
         assert!(!page.contains("<script"));
+    }
+
+    #[test]
+    fn the_overview_lists_all_three_series_toggles_by_default() {
+        let page = overview(&empty_overview()).into_string();
+        assert!(page.contains("series-toggles"));
+        assert!(page.contains("legend-dot pool"));
+        assert!(page.contains("legend-dot local"));
+        assert!(page.contains("legend-dot network"));
+        // Pool and Node show; the network line is opt-in, so only its chip is off.
+        assert!(page.contains("class=\"legend-chip\" role=\"button\" aria-pressed=\"true\""));
+        assert!(page.contains("class=\"legend-chip off\" role=\"button\" aria-pressed=\"false\""));
+        assert!(page.contains("href=\"/dashboard?range=24h&amp;pool=0\""));
+        assert!(page.contains("href=\"/dashboard?range=24h&amp;node=0\""));
+        assert!(page.contains("href=\"/dashboard?range=24h&amp;network=1\""));
+    }
+
+    #[test]
+    fn showing_the_network_series_draws_its_line_and_chips() {
+        let mut view = empty_overview();
+        view.samples = vec![
+            Sample {
+                time: 1_000,
+                pool: Some(100.0),
+                local: Some(50.0),
+                network: Some(4.0e6),
+            },
+            Sample {
+                time: 1_060,
+                pool: Some(200.0),
+                local: Some(60.0),
+                network: Some(5.0e6),
+            },
+        ];
+        view.network_on = true;
+        let page = overview(&view).into_string();
+        assert!(page.contains("polyline class=\"line network\""));
+        assert!(page.contains("class=\"area network\""));
+        assert!(page.contains("tracer network"));
+        // The network chip drops its own turn-on; the others keep it.
+        assert!(page.contains("href=\"/dashboard?range=24h\""));
+        assert!(page.contains("href=\"/dashboard?range=24h&amp;network=1\""));
+    }
+
+    #[test]
+    fn hiding_a_series_drops_it_from_the_chart() {
+        let mut view = empty_overview();
+        view.samples = vec![
+            Sample {
+                time: 1_000,
+                pool: Some(100.0),
+                local: Some(50.0),
+                network: None,
+            },
+            Sample {
+                time: 1_060,
+                pool: Some(200.0),
+                local: Some(60.0),
+                network: None,
+            },
+        ];
+        view.pool_on = false;
+        let page = overview(&view).into_string();
+        assert!(page.contains("polyline class=\"line local\""));
+        assert!(!page.contains("polyline class=\"line pool\""));
+        assert!(!page.contains("class=\"area pool\""));
+        assert!(!page.contains("tracer pool"));
+        assert!(page.contains("class=\"legend-chip off\""));
+        assert!(page.contains("href=\"/dashboard?range=24h\""));
+        assert!(!page.contains("Collecting data"));
+    }
+
+    #[test]
+    fn hiding_all_series_shows_the_legend_note() {
+        let mut view = empty_overview();
+        view.pool_on = false;
+        view.node_on = false;
+        view.network_on = false;
+        let page = overview(&view).into_string();
+        assert!(page.contains("All series hidden. Click a legend chip to show one."));
+        assert!(!page.contains("<svg"));
+        assert!(!page.contains("Collecting data"));
+    }
+
+    #[test]
+    fn the_blocks_turn_off_drops_the_diamonds_from_the_chart() {
+        let mut view = empty_overview();
+        view.samples = vec![
+            Sample {
+                time: 940,
+                pool: Some(100.0),
+                local: Some(50.0),
+                network: None,
+            },
+            Sample {
+                time: 1_060,
+                pool: Some(200.0),
+                local: Some(60.0),
+                network: None,
+            },
+        ];
+        view.chart_blocks = vec![ChartBlock {
+            height: 42,
+            time: 1_000,
+        }];
+        view.blocks_on = true;
+        let shown = overview(&view).into_string();
+        assert!(shown.contains("class=\"cube\""));
+        assert!(shown.contains("Block 42 \u{b7}"));
+        // The chip's turn-off empties the chart's block list: no marker
+        // and no tooltip row survive it, as in the replica.
+        view.blocks_on = false;
+        let hidden = overview(&view).into_string();
+        assert!(!hidden.contains("class=\"cube\""));
+        assert!(!hidden.contains("Block 42"));
     }
 
     #[test]
@@ -1129,5 +1873,112 @@ mod tests {
         let page = help(&site()).into_string();
         assert!(page.contains("p2p=&lt;share chain address&gt;"));
         assert!(page.contains("CashDragon0"));
+    }
+
+    #[test]
+    fn the_this_node_card_notes_the_rejected_shares() {
+        let mut view = empty_overview();
+        view.accepted_shares_total = 10;
+        view.rejected_shares_total = 3;
+        let page = overview(&view).into_string();
+        let pool_card = page.split("kpi-label\">Pool hashrate").nth(1).unwrap();
+        let pool_card = pool_card.split("kpi-card").next().unwrap();
+        assert!(!pool_card.contains("rejected of"));
+        assert!(pool_card.contains("Confirmed shares, last hour"));
+        let node_card = page.split("kpi-label\">Node hashrate").nth(1).unwrap();
+        let node_card = node_card.split("kpi-card").next().unwrap();
+        assert!(node_card.contains("3 rejected of 10 shares"));
+    }
+
+    #[test]
+    fn the_share_chain_height_card_notes_the_share_difficulty() {
+        let mut view = empty_overview();
+        view.tip_height = Some(30);
+        view.share_difficulty = Some(73.0);
+        let page = overview(&view).into_string();
+        let card = page.split("kpi-label\">Share chain height").nth(1).unwrap();
+        let card = card.split("kpi-card").next().unwrap();
+        assert!(card.contains("Difficulty 73"));
+    }
+
+    #[test]
+    fn the_share_chain_height_card_shows_a_dash_before_the_first_notify() {
+        let mut view = empty_overview();
+        view.tip_height = Some(30);
+        view.share_difficulty = None;
+        let page = overview(&view).into_string();
+        let card = page.split("kpi-label\">Share chain height").nth(1).unwrap();
+        let card = card.split("kpi-card").next().unwrap();
+        assert!(card.contains("Difficulty —"));
+    }
+
+    #[test]
+    fn the_blocks_found_card_values_it_green() {
+        let page = overview(&empty_overview()).into_string();
+        let card = page.split("kpi-label\">Blocks found").nth(1).unwrap();
+        let card = card.split("kpi-card").next().unwrap();
+        assert!(card.contains("kpi-value kpi-value-green"));
+    }
+
+    #[test]
+    fn the_overview_recent_shares_link_to_the_shares_page_instead_of_a_pager() {
+        let mut view = empty_overview();
+        view.tip_height = Some(30);
+        view.shares = vec![ShareRow {
+            height: Some(30),
+            blockhash: "ab".to_string(),
+            time: 900,
+            payout_address: "bchtest:qpayout".to_string(),
+            share_address: "tp2pool:qowner".to_string(),
+            difficulty: Some(4.0),
+            is_uncle: false,
+            is_block: false,
+        }];
+        let page = overview(&view).into_string();
+        assert!(page.contains("href=\"/dashboard/shares\""));
+        assert!(page.contains("More found shares"));
+        assert!(!page.contains("page="));
+        assert!(!page.contains("Previous"));
+    }
+
+    #[test]
+    fn the_shares_page_lists_the_chain_with_a_pager() {
+        let view = SharesView {
+            site: site(),
+            now: 1_000,
+            tip_height: Some(30),
+            shares: vec![ShareRow {
+                height: Some(30),
+                blockhash: "ab".to_string(),
+                time: 900,
+                payout_address: "bchtest:qpayout".to_string(),
+                share_address: "tp2pool:qowner".to_string(),
+                difficulty: Some(4.0),
+                is_uncle: false,
+                is_block: false,
+            }],
+            paging: Paging { page: 2, pages: 3 },
+        };
+        let page = shares(&view).into_string();
+        assert!(page.contains("<td>30</td>"));
+        assert!(page.contains("Page 2 of 3"));
+        assert!(page.contains("/dashboard/shares?page=1"));
+        assert!(page.contains("/dashboard/shares?page=3"));
+        assert!(page.contains("tip 30"));
+        assert!(!page.contains("<script"));
+    }
+
+    #[test]
+    fn the_shares_page_without_a_chain_says_so() {
+        let view = SharesView {
+            site: site(),
+            now: 1_000,
+            tip_height: None,
+            shares: Vec::new(),
+            paging: Paging { page: 1, pages: 1 },
+        };
+        let page = shares(&view).into_string();
+        assert!(page.contains("No confirmed shares yet."));
+        assert!(!page.contains("Previous"));
     }
 }

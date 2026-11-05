@@ -128,7 +128,8 @@ impl ApiClient {
     }
 
     /// The node's share chain peers, at most [`MAX_SHARE_CHAIN_PEERS`].
-    /// `/peers` always needs the API login when the node has one.
+    /// `/peers` needs the API login when the node has one and is not
+    /// `public_dashboard`.
     pub async fn peers(&self) -> Result<Vec<Peer>, String> {
         let mut peers: Vec<Peer> = self.get("/peers").await?;
         peers.truncate(MAX_SHARE_CHAIN_PEERS);

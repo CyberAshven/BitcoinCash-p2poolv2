@@ -13,6 +13,7 @@ mod overview;
 mod search;
 mod settings;
 mod share;
+mod shares;
 
 pub use blocks::{BlockPage, BlocksPage};
 pub use help::HelpPage;
@@ -21,3 +22,4 @@ pub use overview::OverviewPage;
 pub use search::SearchPage;
 pub use settings::SettingsPage;
 pub use share::SharePage;
+pub use shares::SharesPage;

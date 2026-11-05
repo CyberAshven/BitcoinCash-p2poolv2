@@ -28,7 +28,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 subtle = "2"
-tower-http = { version = "0.7", features = ["cors", "fs"] }
+tower-http = { version = "0.7", features = ["cors", "fs", "compression-gzip"] }
 maud = "0.27"
 
 [dev-dependencies]

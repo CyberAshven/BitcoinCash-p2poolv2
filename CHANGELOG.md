@@ -20,6 +20,17 @@ being refused. A node on the old rule builds another coinbase while genesis is i
 the window, so the two do not peer, and existing share chains start again on
 a fresh store. Bitcoin is unchanged.
 
+`public_dashboard` now also opens `GET /peers` and a tokenless `/ws`
+connection (a bad `/ws` token is still 401); `/metrics`, `/blocked_ips`
+and `/jd_prepare` keep the API login. The peer list moved from the node's
+own routes to the share chain routes, and `/ws` no longer needs a token
+on a public node. The WASM dashboard no longer sends a half-empty
+`?token=` when only the session password is gone, and its header feed
+says `unauthorized` when the node refuses the login. A 401 carries the
+browser's Basic challenge only when the request already sent credentials,
+so the WASM app's probes fail silently to that indicator instead of
+raising the login dialog.
+
 A Job Declaration client no longer has to trust one node for its payout
 outputs. `VerifyPayoutOutputs` (`0x04` in extension `0x5052`) asks a second
 node, which did not issue the token, to recompute the outputs from the
