@@ -157,8 +157,8 @@ p2poolv2_api_auth_user: ""
 p2poolv2_api_auth_token: ""
 p2poolv2_api_cors_allowed: false
 # Open the dashboard, the web_root frontend and the read-only share chain
-# routes to anyone (a public node); /metrics, /peers, /blocked_ips and
-# /jd_prepare keep the login.
+# routes (including GET /peers and a tokenless /ws connection) to anyone
+# (a public node); /metrics, /blocked_ips and /jd_prepare keep the login.
 p2poolv2_api_public_dashboard: false
 # Folder with a self-hosted frontend build to serve.
 # p2poolv2_api_web_root: "/srv/p2pool-frontend"

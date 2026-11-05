@@ -16,7 +16,7 @@ pub mod payout;
 pub mod payout_rights;
 pub mod pplns_window;
 
-pub use payout::Payout;
+pub use payout::{AnchorWeights, Payout, ShareChainWeights};
 #[cfg(test)]
 pub use pplns_window::MockPplnsWindow;
 pub use pplns_window::PplnsWindow;

@@ -187,7 +187,7 @@ jobs:
           shared-key: payout-tree-production
 
       - name: Install latest nextest release
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: nextest
 
@@ -227,8 +227,8 @@ jobs:
             -rpcuser=p2pool -rpcpassword=p2pool -rpcwait getblockchaininfo
 
       # Do not enable sim here: this job exercises production payout rules.
-      # Both ignored tests mine on the same node, so nextest must serialize them.
-      - name: Run the payout tree tests against BCHN
+      # The ignored tests all mine on the same node, so nextest must serialize them.
+      - name: Run the payout tree and per-share donation tests against BCHN
         env:
           P2POOL_TEST_BCHN_RPC_URL: http://127.0.0.1:18443
           P2POOL_TEST_BCHN_RPC_USER: p2pool

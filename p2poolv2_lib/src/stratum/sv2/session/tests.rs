@@ -1,21 +1,34 @@
 use super::*;
+use crate::accounting::payout::sharechain_pplns::PplnsWindow;
+use crate::accounting::payout::{AnchorWeights, ShareChainWeights};
+use crate::config::Chain;
+use crate::shares::chain::chain_store_handle::{ConfirmedHeaderResult, MockChainStoreHandle};
+use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
+use crate::store::writer::StoreError;
 use crate::stratum::sv2::large_templates::{
     LARGE_TEMPLATES_EXTENSION, PROVIDE_MISSING_TRANSACTIONS_POSITIONS,
     ProvideMissingTransactionsPositions,
 };
 use crate::stratum::sv2::payout_outputs::{
-    REQUEST_PAYOUT_OUTPUTS_ERROR, REQUEST_PAYOUT_OUTPUTS_SUCCESS, RequestPayoutOutputsError,
-    RequestPayoutOutputsSuccess,
+    INVALID_MINING_JOB_TOKEN, REQUEST_PAYOUT_OUTPUTS_ERROR, REQUEST_PAYOUT_OUTPUTS_SUCCESS,
+    RequestPayoutOutputsError, RequestPayoutOutputsSuccess, UNKNOWN_ANCHOR,
+    VERIFY_PAYOUT_OUTPUTS_ERROR, VERIFY_PAYOUT_OUTPUTS_SUCCESS, VERIFY_RATE_LIMITED,
 };
 use crate::test_utils::{
-    test_bch_prepared, test_bch_prepared_for_template, test_payout_outputs_request,
+    TestShareBlockBuilder, test_bch_prepared, test_bch_prepared_anchored,
+    test_bch_prepared_for_template, test_payout_outputs_request,
+    test_verify_payout_outputs_request,
 };
 use binary_sv2::{B016M, U256};
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::serialize;
 use bitcoin::script::Builder;
 use bitcoin::transaction::{Sequence, TxIn, TxOut, Version};
-use bitcoin::{Amount, OutPoint, ScriptBuf, Witness};
+use bitcoin::{Amount, CompactTarget, Network, OutPoint, ScriptBuf, Witness, Work};
+use p2poolv2_wallet::payout_address::PayoutAddress;
+use p2poolv2_wallet::share_owner::ShareOwner;
+use std::str::FromStr;
+use std::sync::RwLock;
 
 #[test]
 fn withdrawing_the_template_clears_job_declaration_work() {
@@ -1045,6 +1058,252 @@ fn a_new_bch_block_on_the_same_share_pushes_payout_outputs_stale() {
     assert!(connection.on_template(&next).unwrap().is_empty());
 }
 
+fn requesting_identity() -> PayoutIdentity {
+    PayoutIdentity {
+        payout: bitcoin::Address::p2pkh(
+            bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+            Network::Regtest,
+        )
+        .into(),
+        owner: ShareOwner::CashP2pkh([0x22; 20]),
+    }
+}
+
+/// One confirmed share, paid to a regtest P2PKH, on its own window and store.
+fn bch_window_holding(header: &crate::shares::share_block::ShareHeader) -> ShareChainWeights {
+    let tip = header.block_hash();
+    let stored = vec![ConfirmedHeaderResult {
+        height: 0,
+        blockhash: tip,
+        header: header.clone(),
+    }];
+    let mut store = MockChainStoreHandle::default();
+    store.expect_get_chain_tip().returning(move || Ok(tip));
+    store.expect_get_tip_height().returning(|| Ok(Some(0)));
+    store.expect_get_block_metadata().returning(|_| {
+        Ok(BlockMetadata {
+            expected_height: Some(0),
+            chain_work: Work::from_le_bytes([0u8; 32]),
+            status: Status::BlockValid,
+            chain: ChainMembership::Confirmed,
+        })
+    });
+    store
+        .expect_get_confirmed_headers_in_range()
+        .returning(move |_, _| Ok(stored.clone()));
+    let window = Arc::new(RwLock::new(
+        PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash),
+    ));
+    window
+        .write()
+        .expect("PPLNS window lock")
+        .update(&store)
+        .expect("the share loads");
+    ShareChainWeights::new(window, store)
+}
+
+/// Node A issues a token on a snapshot of its window. Node B, with its own
+/// store of the same share, answers `VerifyPayoutOutputs` for that token.
+fn issuer_and_verifier_frames() -> (Vec<u8>, Vec<u8>) {
+    let payout = PayoutAddress::from(bitcoin::Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x44; 20]),
+        Network::Regtest,
+    ));
+    let header = TestShareBlockBuilder::new()
+        .prev_share_blockhash(BlockHash::all_zeros().to_string())
+        .payout_address(payout)
+        .share_owner(ShareOwner::CashP2pkh([0x44; 20]))
+        .build()
+        .header;
+    let anchor = header.block_hash();
+    let issuer_window = bch_window_holding(&header);
+    let verifier_window = bch_window_holding(&header);
+    let fixture = test_bch_prepared();
+    let template = fixture.template();
+    let nbits = CompactTarget::from_unprefixed_hex(&template.bits)
+        .unwrap()
+        .to_consensus();
+    let prev_hash = BlockHash::from_str(&template.previousblockhash).unwrap();
+    let weights = issuer_window
+        .weights_at(anchor, nbits, prev_hash)
+        .expect("the issuer's window pays the share");
+    let prepared = test_bch_prepared_anchored(anchor, weights);
+    let template = &prepared.template().clone();
+    let prefix = Builder::new()
+        .push_int(i64::from(template.height))
+        .into_bytes();
+    let identity = requesting_identity();
+    let cache = PoolTransactionCache::new();
+    cache.set_prepared(prepared);
+    let mut issuer = Sv2Connection::new(Arc::new(Mutex::new(JobRegistry::new(
+        cache,
+        Some(MergeMiningCommitment::empty()),
+    ))));
+    accept_message(
+        &mut issuer,
+        setup(0, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    assert!(issuer.grant_payout_outputs());
+    let allocated = issuer
+        .on_allocate(1, "miner", Some(identity.clone()))
+        .unwrap();
+    let mut payload = response_payload(&allocated[0]);
+    let allocated = AllocateMiningJobTokenSuccess::from_bytes(&mut payload).unwrap();
+    let token = allocated.mining_job_token.as_bytes().to_vec();
+    let mut request =
+        test_payout_outputs_request(11, &token, template, template.coinbasevalue, &prefix);
+    let issued = issuer
+        .handle_payout_outputs(REQUEST_PAYOUT_OUTPUTS, &mut request)
+        .unwrap();
+    let mut verify = test_verify_payout_outputs_request(
+        11,
+        &token,
+        "miner",
+        template,
+        template.coinbasevalue,
+        &prefix,
+    );
+    let verified = Sv2Connection::new(registry())
+        .handle_verify_payout_outputs(
+            &mut verify,
+            |_| Some(identity.clone()),
+            Some(&verifier_window),
+        )
+        .unwrap();
+    (issued[0].clone(), verified[0].clone())
+}
+
+/// Two nodes, each with its own store of the same share chain: the issuer's
+/// `RequestPayoutOutputs.Success` payload is the verifier's
+/// `VerifyPayoutOutputs.Success` payload.
+#[test]
+fn a_second_node_recomputes_the_issuing_nodes_outputs() {
+    let (issued, verified) = issuer_and_verifier_frames();
+
+    assert_eq!(issued[2], REQUEST_PAYOUT_OUTPUTS_SUCCESS);
+    assert_eq!(verified[2], VERIFY_PAYOUT_OUTPUTS_SUCCESS);
+    assert_eq!(response_payload(&issued), response_payload(&verified));
+}
+
+/// The comparison a client makes: the two success payloads, byte for byte.
+/// Changing one output of the issuer's set makes them differ.
+#[test]
+fn a_changed_output_does_not_match_the_second_node() {
+    let (issued, verified) = issuer_and_verifier_frames();
+    assert_eq!(issued[2], REQUEST_PAYOUT_OUTPUTS_SUCCESS);
+    assert_eq!(verified[2], VERIFY_PAYOUT_OUTPUTS_SUCCESS);
+    let issuer_outputs = response_payload(&issued);
+    let verifier_outputs = response_payload(&verified);
+    assert_eq!(issuer_outputs, verifier_outputs);
+
+    let mut changed = issuer_outputs.clone();
+    let last = changed.len() - 1;
+    changed[last] ^= 0xff;
+    assert_ne!(changed, verifier_outputs);
+}
+
+/// A verifier that does not hold the token's anchor share answers
+/// `unknown-anchor`, and the connection stays up.
+#[test]
+fn a_node_without_the_anchor_answers_unknown_anchor() {
+    let prepared = test_bch_prepared();
+    let template = prepared.template();
+    let token = prepared
+        .mining_job_token([0x11; 32], template.curtime)
+        .unwrap();
+    let prefix = Builder::new()
+        .push_int(i64::from(template.height))
+        .into_bytes();
+    let mut request = test_verify_payout_outputs_request(
+        3,
+        &token,
+        "miner",
+        template,
+        template.coinbasevalue,
+        &prefix,
+    );
+    let mut store = MockChainStoreHandle::default();
+    store
+        .expect_get_block_metadata()
+        .returning(|_| Err(StoreError::NotFound("not found".into())));
+    let window = Arc::new(RwLock::new(
+        PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash),
+    ));
+    let weights = ShareChainWeights::new(window, store);
+    let identity = requesting_identity();
+
+    let answered = Sv2Connection::new(registry())
+        .handle_verify_payout_outputs(&mut request, |_| Some(identity.clone()), Some(&weights))
+        .unwrap();
+
+    assert_eq!(answered[0][2], VERIFY_PAYOUT_OUTPUTS_ERROR);
+    let mut payload = response_payload(&answered[0]);
+    let error = RequestPayoutOutputsError::from_bytes(&mut payload).unwrap();
+    assert_eq!(error.error_code.as_utf8_or_hex(), UNKNOWN_ANCHOR);
+}
+
+/// A token that does not decode is `invalid-mining-job-token`.
+#[test]
+fn a_token_that_does_not_decode_is_invalid_mining_job_token() {
+    let prepared = test_bch_prepared();
+    let template = prepared.template();
+    let mut request = test_verify_payout_outputs_request(
+        4,
+        &[0x00; 33],
+        "miner",
+        template,
+        template.coinbasevalue,
+        &[],
+    );
+    let identity = requesting_identity();
+
+    let answered = Sv2Connection::new(registry())
+        .handle_verify_payout_outputs(&mut request, |_| Some(identity.clone()), None)
+        .unwrap();
+
+    assert_eq!(answered[0][2], VERIFY_PAYOUT_OUTPUTS_ERROR);
+    let mut payload = response_payload(&answered[0]);
+    let error = RequestPayoutOutputsError::from_bytes(&mut payload).unwrap();
+    assert_eq!(error.error_code.as_utf8_or_hex(), INVALID_MINING_JOB_TOKEN);
+}
+
+/// Four verifies in a second are answered. The next is `verify-rate-limited`,
+/// and the connection stays up.
+#[test]
+fn a_verify_past_the_connection_budget_is_rate_limited() {
+    let prepared = test_bch_prepared();
+    let template = prepared.template();
+    let mut connection = Sv2Connection::new(registry());
+    let verify = |connection: &mut Sv2Connection, request_id: u32| {
+        let mut request = test_verify_payout_outputs_request(
+            request_id,
+            &[0x00; 33],
+            "miner",
+            template,
+            template.coinbasevalue,
+            &[],
+        );
+        connection
+            .handle_verify_payout_outputs(&mut request, |_| None, None)
+            .unwrap()
+    };
+    for request_id in 1..=MAX_VERIFY_PAYOUTS_PER_SECOND {
+        let answered = verify(&mut connection, request_id);
+        assert_eq!(answered[0][2], VERIFY_PAYOUT_OUTPUTS_ERROR);
+        let mut payload = response_payload(&answered[0]);
+        let error = RequestPayoutOutputsError::from_bytes(&mut payload).unwrap();
+        assert_eq!(error.error_code.as_utf8_or_hex(), INVALID_MINING_JOB_TOKEN);
+    }
+
+    let answered = verify(&mut connection, MAX_VERIFY_PAYOUTS_PER_SECOND + 1);
+
+    assert_eq!(answered[0][2], VERIFY_PAYOUT_OUTPUTS_ERROR);
+    let mut payload = response_payload(&answered[0]);
+    let error = RequestPayoutOutputsError::from_bytes(&mut payload).unwrap();
+    assert_eq!(error.error_code.as_utf8_or_hex(), VERIFY_RATE_LIMITED);
+}
+
 /// The extranonce a pushed solution's coinbase carries in these tests: the
 /// whole scriptSig of the declared coinbase.
 static PUSHED_EXTRANONCE: [u8; 8] = [7; 8];
@@ -1300,6 +1559,103 @@ fn kept_declarations_hold_their_bytes_until_the_connection_closes() {
     assert_eq!(budget.load(Ordering::SeqCst), declared_bytes);
     drop(connection);
     assert_eq!(budget.load(Ordering::SeqCst), 0);
+}
+
+/// A registry that takes Coinbase-Only declarations from `networks` only.
+fn registry_taking_coinbase_only_from(networks: &[&str]) -> Arc<Mutex<JobRegistry>> {
+    let cache = PoolTransactionCache::new();
+    cache.set_prepared(test_bch_prepared());
+    Arc::new(Mutex::new(
+        JobRegistry::new(cache, Some(MergeMiningCommitment::empty())).with_coinbase_only_from(
+            networks
+                .iter()
+                .map(|network| network.parse().unwrap())
+                .collect(),
+        ),
+    ))
+}
+
+/// Set up Job Declaration from `peer` with `flags`, and return the reply.
+fn job_declaration_setup_from(
+    registry: Arc<Mutex<JobRegistry>>,
+    peer: &str,
+    flags: u32,
+) -> (Sv2Connection, Vec<u8>) {
+    let mut connection = Sv2Connection::new(registry).with_peer(peer.parse().unwrap());
+    let reply = accept_message(
+        &mut connection,
+        setup(flags, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    (connection, reply[0].clone())
+}
+
+#[test]
+fn coinbase_only_is_refused_from_a_client_off_the_allowlist() {
+    let registry = registry_taking_coinbase_only_from(&["127.0.0.0/8", "::1/128"]);
+
+    let (connection, reply) = job_declaration_setup_from(registry, "203.0.113.7", 0);
+
+    assert_eq!(reply_type(&reply), MESSAGE_TYPE_SETUP_CONNECTION_ERROR);
+    let mut payload = response_payload(&reply);
+    let refused = SetupConnectionError::from_bytes(&mut payload).unwrap();
+    assert_eq!(
+        refused.error_code.as_utf8_or_hex(),
+        "unsupported-feature-flags"
+    );
+    assert_eq!(refused.flags, DECLARE_TX_DATA_FLAG);
+    assert!(!connection.is_set_up());
+}
+
+#[test]
+fn coinbase_only_is_taken_from_the_allowlist() {
+    for peer in ["127.0.0.1", "::1", "::ffff:127.0.0.1", "100.64.0.9"] {
+        let registry =
+            registry_taking_coinbase_only_from(&["127.0.0.0/8", "::1/128", "100.64.0.9/32"]);
+
+        let (connection, reply) = job_declaration_setup_from(registry, peer, 0);
+
+        assert_eq!(
+            reply_type(&reply),
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+            "{peer}"
+        );
+        assert!(connection.is_set_up());
+    }
+}
+
+#[test]
+fn full_template_is_taken_from_every_client() {
+    let registry = registry_taking_coinbase_only_from(&[]);
+
+    let (connection, reply) = job_declaration_setup_from(registry, "203.0.113.7", 1);
+
+    assert_eq!(reply_type(&reply), MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
+    assert!(connection.is_set_up());
+}
+
+#[test]
+fn an_empty_allowlist_refuses_coinbase_only_even_from_loopback() {
+    let registry = registry_taking_coinbase_only_from(&[]);
+
+    let (_, reply) = job_declaration_setup_from(registry, "127.0.0.1", 0);
+
+    assert_eq!(reply_type(&reply), MESSAGE_TYPE_SETUP_CONNECTION_ERROR);
+}
+
+#[test]
+fn a_refused_coinbase_only_client_can_set_up_again_as_full_template() {
+    let registry = registry_taking_coinbase_only_from(&["127.0.0.0/8"]);
+    let (mut connection, reply) = job_declaration_setup_from(registry, "203.0.113.7", 0);
+    assert_eq!(reply_type(&reply), MESSAGE_TYPE_SETUP_CONNECTION_ERROR);
+
+    let again = accept_message(
+        &mut connection,
+        setup(1, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+
+    assert_eq!(reply_type(&again[0]), MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
 }
 
 /// A registry whose published template builds a block of `size_limit` bytes.

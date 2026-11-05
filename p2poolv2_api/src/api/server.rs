@@ -33,6 +33,7 @@ use std::sync::RwLock;
 use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::oneshot;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, trace, warn};
@@ -76,9 +77,10 @@ impl FromRef<AppState> for AppConfig {
 /// What the API serves browsers besides the JSON routes.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WebOptions {
-    /// Serve the dashboard, the `web_root` frontend and the read-only share
-    /// chain routes they read without a login. The node's own routes keep
-    /// their authentication.
+    /// Serve the dashboard, the `web_root` frontend, the read-only share
+    /// chain routes (including `GET /peers`) and a tokenless `/ws`
+    /// connection without a login. The node's own routes keep their
+    /// authentication.
     pub(crate) public: bool,
     /// A folder holding a self-hosted frontend's build, served for every
     /// path no API route takes. Paths it lacks get its `index.html`, so a
@@ -94,7 +96,8 @@ pub struct PplnsQuery {
 }
 
 /// Build the axum router with REST routes (protected by auth middleware)
-/// and the WebSocket route (which handles its own auth via query param).
+/// and the WebSocket route (which handles its own auth via query param,
+/// or none on a public node).
 ///
 /// The dashboard gets an empty history no sampler fills; the API server
 /// uses [`build_router_with_history`] with a sampled one.
@@ -108,10 +111,18 @@ fn build_router(app_state: Arc<AppState>, app_config: AppConfig) -> Router {
     )
 }
 
-/// Add a Basic challenge to a 401, so a browser opening a protected page
-/// such as the dashboard shows its own login prompt.
-async fn add_basic_challenge(mut response: Response) -> Response {
+/// Add a Basic challenge to a 401, so a browser that already sent
+/// credentials (a superseded login the dialog resubmits) shows its own
+/// login prompt again. A request with no `Authorization`, and the WASM
+/// app's probes marked with `X-Requested-With`, get the bare 401: a
+/// challenge there would raise the dialog over the app's own error state.
+async fn add_basic_challenge(request: Request, next: Next) -> Response {
+    let sent_credentials = request.headers().contains_key(header::AUTHORIZATION);
+    let marked_script = request.headers().contains_key("x-requested-with");
+    let mut response = next.run(request).await;
     if response.status() == StatusCode::UNAUTHORIZED
+        && sent_credentials
+        && !marked_script
         && !response.headers().contains_key(header::WWW_AUTHENTICATE)
     {
         response.headers_mut().insert(
@@ -152,7 +163,8 @@ pub(crate) fn build_router_with_history(
         Ok(res)
     }
 
-    // Share chain data and the pages built on it: what a public node opens.
+    // Share chain data, the peer list and the pages built on them: what a
+    // public node opens.
     let share_chain_routes = Router::new()
         .route("/health", get(health_check))
         .route("/pplns_shares", get(pplns_shares))
@@ -172,20 +184,26 @@ pub(crate) fn build_router_with_history(
         .route("/payout_tree", get(endpoints::payout_trees::payout_tree))
         .route("/miners", get(endpoints::miners::miners))
         .route("/network", get(endpoints::network::network))
+        .route("/peers", get(peers))
         .merge(endpoints::hashrate::router(
             app_state.clone(),
             history.clone(),
         ))
-        .merge(dashboard::router(app_state.clone(), history));
-    let share_chain_routes = match web.web_root {
+        .merge(dashboard::router(app_state.clone(), history.clone()));
+    let share_chain_routes = match web.web_root.clone() {
         Some(web_root) => {
             let index = ServeFile::new(web_root.join("index.html"));
             share_chain_routes.fallback_service(ServeDir::new(web_root).fallback(index))
         }
         None => share_chain_routes.route("/", get(|| async { Redirect::to("/dashboard") })),
     };
+    // Gzip the public pages and the dist files behind them. The layer wraps
+    // only these routes, so the WebSocket upgrade on /ws stays untouched.
+    let share_chain_routes = share_chain_routes.layer(CompressionLayer::new());
 
-    // The node's own state and controls, always behind the login.
+    // The node's own state and controls, always behind the login. The Admin
+    // button's landing page joins them: it opens with the login too, so a
+    // public dashboard does not hand it out anonymously.
     let mut authenticated_routes = Router::new()
         .route(
             "/jd_prepare",
@@ -198,14 +216,14 @@ pub(crate) fn build_router_with_history(
             )),
         )
         .route("/metrics", get(metrics))
-        .route("/peers", get(peers))
         .route("/blocked_ips", get(get_blocked_ips))
         .route("/blocked_ips", post(block_ip))
-        .route("/blocked_ips", delete(unblock_ip));
+        .route("/blocked_ips", delete(unblock_ip))
+        .merge(dashboard::signin_route(app_state.clone(), history.clone()));
 
-    // Routes that handle their own auth: the WebSocket validates credentials
-    // via query param in its handler. A public node's share chain routes
-    // join them.
+    // Routes that handle their own auth: the WebSocket takes its credentials
+    // from the query param in its handler, and on a public node accepts a
+    // connection with no token. A public node's share chain routes join them.
     let mut unauthenticated_routes = Router::new().route("/ws", get(websocket_handler));
     if web.public {
         unauthenticated_routes = unauthenticated_routes.merge(share_chain_routes);
@@ -217,7 +235,7 @@ pub(crate) fn build_router_with_history(
             app_state.clone(),
             auth_middleware,
         ))
-        .layer(middleware::map_response(add_basic_challenge));
+        .layer(middleware::from_fn(add_basic_challenge));
 
     let mut router = authenticated_routes
         .merge(unauthenticated_routes)
@@ -227,7 +245,10 @@ pub(crate) fn build_router_with_history(
         router = router.layer(CorsLayer::permissive())
     }
 
-    router.layer(Extension(app_config)).with_state(app_state)
+    router
+        .layer(Extension(app_config))
+        .layer(Extension(web))
+        .with_state(app_state)
 }
 
 /// Start the API server and return a shutdown channel and the actual bound port.
@@ -274,6 +295,20 @@ pub async fn start_api_server(
     // The dashboard's history, filled once a minute. The sampler holds it
     // weakly and is aborted when the server stops, so neither outlives it.
     let history = Arc::new(dashboard::history::HashrateHistory::default());
+    // Load what the store kept across restarts before the sampler's first
+    // tick: `interval` fires immediately, so anything queued after this
+    // spawn could land behind the load and be overwritten. The load runs
+    // off the async workers; a store failure only leaves the history empty,
+    // which the sampler then fills as usual.
+    let load_state = app_state.clone();
+    let load_history = Arc::clone(&history);
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        dashboard::history::reload_persisted_blocking(&load_state, &load_history);
+    })
+    .await
+    {
+        warn!("Hashrate history load task failed: {error}");
+    }
     let sampler = tokio::spawn(dashboard::history::run_sampler(
         app_state.clone(),
         Arc::downgrade(&history),
@@ -337,7 +372,13 @@ const P2P_HEALTH_TIMEOUT: Duration = Duration::from_secs(1);
 
 async fn metrics(State(state): State<Arc<AppState>>) -> String {
     //  Get base metrics
-    let pool_metrics = state.metrics_handle.get_metrics().await;
+    let mut pool_metrics = state.metrics_handle.get_metrics().await;
+    // The metrics actor never writes the pool difficulty; the live value is
+    // the newest prepared notify's target, read here at scrape time so the
+    // gauge is not stuck at 0. `None` until the first notify is built.
+    if let Some(pool_difficulty) = state.tracker_handle.get_pool_difficulty() {
+        pool_metrics.pool_difficulty = pool_difficulty;
+    }
     let mut exposition = pool_metrics.get_exposition();
 
     if let Some(coinbase_distribution) = parse_coinbase::get_distribution(

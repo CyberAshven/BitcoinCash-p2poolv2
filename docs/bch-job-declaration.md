@@ -106,6 +106,24 @@ This mode retains the protocol's withholding and hidden-invalid-work risk.
 A Coinbase-Only job declares no leaves, so it merge-mines no token: its
 output 0 must be the exact empty commitment.
 
+**Which clients may use Coinbase-Only.** A Coinbase-Only declarator's
+shares are credited on a block whose transactions the node never sees
+(`block_available = false`). PPLNS here weights shares by difficulty, so a
+declarator that never lets a block through costs the other miners their
+share of it. That is sabotage of the block-withholding kind, not theft
+(sv2-spec 6.3.1; Delving Bitcoin "PPLNS with job declaration";
+jtoomim/p2pool#21). So a node takes Coinbase-Only declarations only from the
+client addresses in `[stratum] sv2_coinbase_only_from`. Each entry is an IP
+address or a CIDR range, and the default is this computer
+(`["127.0.0.0/8", "::1/128"]`). Add your own declarator, for example the
+Tailscale address of your own Knuth node. `[]` refuses Coinbase-Only from
+everyone, and `["0.0.0.0/0", "::/0"]` takes it from everyone. An IPv4-mapped
+IPv6 address counts as its IPv4 address. Full-Template declarations are
+taken from every client, since the node checks their templates. A refused client gets
+`SetupConnection.Error` with error code `unsupported-feature-flags` and
+`flags` set to `DECLARE_TX_DATA` (`0x1`), the flag it must set (sv2-spec
+3.x). It may set up again in Full-Template mode on the same connection.
+
 Once a job is active, its target and credited difficulty remain fixed.
 Vardiff and `UpdateChannel` change later jobs. Device maximum targets apply
 when each job is assigned; zero maximum targets are rejected.
@@ -355,7 +373,9 @@ PPLNS outputs, padding, and the share commitment last. `EXACT_OUTPUTS` is
 always set, with version 2, sequence `0xfffffffe` and lock time
 `height - 1`. The coinbase carries these outputs and no others, and its
 scriptSig is the prefix followed by the extranonce. The job is then
-validated as any other declared job.
+validated as any other declared job. A client asks a second node for those
+same bytes with `VerifyPayoutOutputs`; section 7.9 of the proposal gives
+that message, and its success payload is the same bytes.
 
 An unknown, expired or used token gets `invalid-mining-job-token`. A token
 anchored on an earlier share, or a request for another height, previous hash
@@ -410,3 +430,53 @@ block 105, `29eb5fcd…2f0b`):
 The Coinbase-Only value includes the private transaction's 219-satoshi fee.
 This is regtest evidence with this repository's test client; the chipnet run
 with an independent client that the proposal asks for is still open.
+
+### On a running node
+
+The ignored `a_running_node_serves_requested_payout_outputs` test is a Job
+Declaration client for a node that is already running. It needs no RPC login,
+only the node's Stratum V2 address, its published authority key and a mining
+identity:
+
+```sh
+P2POOL_SV2_ADDRESS=127.0.0.1:3336 \
+P2POOL_SV2_AUTHORITY_KEY=9b... \
+P2POOL_SV2_IDENTITY='bchtest:q....worker,p2p=tp2pool:q...' \
+cargo test -p p2poolv2_lib --lib a_running_node_serves_requested_payout_outputs -- --ignored --nocapture
+```
+
+It takes the template fields (version, previous block, bits, time, height)
+from the node's own extended job and declares an empty block, so its coinbase
+pays out the block subsidy alone. It then checks five things in turn:
+
+1. A request naming a block the node is not building on is refused.
+2. The outputs answered for the current block pay out the whole value with
+   `EXACT_OUTPUTS` and lock time `height - 1`.
+3. A Full-Template job on those outputs is declared, and it is installed with
+   `SetCustomMiningJob`. The node has its BCHN check the block proposal
+   first.
+4. The next share or block brings `PayoutOutputsStale`.
+5. A fresh token then gets the new outputs.
+
+It submits no shares.
+
+Run on 2026-11-05 at 13:16 UTC against the chipnet pool's node1, built from
+`ef59b72b`, with its templates from a BCHN 29.1.0 chipnet node; it passed in
+9.7 seconds. The test address is this repository's
+`bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr`.
+
+- **Refused:** a previous block of all zeros got `stale-payout-outputs`.
+- **Answered:** chipnet height 331011, previous block
+  `00000000000013f305ba63f37306cac43552a10c3eb487532df847a2c355734e`, 2,500,000,000
+  satoshis in six outputs, in this order:
+  - the empty merge-mining commitment;
+  - three PPLNS payees (1,194,333, 25,000,000 and 2,473,805,667 satoshis);
+  - the padding;
+  - the share commitment.
+- **Installed:** the declaration was accepted and the job installed as job 2.
+- **Stale, then fresh:** the next share pushed `PayoutOutputsStale` within 10
+  seconds. The fresh token's outputs paid 1,195,200, 25,000,000 and
+  2,473,804,800 satoshis, under a new share commitment.
+
+This was this repository's client against a real chipnet pool. Shares credited
+through an independent `0x5052` client still need a miner behind one.

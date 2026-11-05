@@ -113,7 +113,7 @@ struct FilteredPoolMetrics<'a> {
 
 impl Serialize for FilteredPoolMetrics<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut state = serializer.serialize_struct("PoolMetrics", 9)?;
+        let mut state = serializer.serialize_struct("PoolMetrics", 8)?;
         state.serialize_field("start_time", &self.metrics.start_time)?;
         state.serialize_field("lastupdate", &self.metrics.lastupdate)?;
         state.serialize_field("accepted_total", &self.metrics.accepted_total)?;
@@ -131,7 +131,6 @@ impl Serialize for FilteredPoolMetrics<'_> {
                 current_time: self.current_time,
             },
         )?;
-        state.serialize_field("pool_difficulty", &self.metrics.pool_difficulty)?;
         state.end()
     }
 }
@@ -251,7 +250,6 @@ mod tests {
             best_share: 0,
             best_share_ever: 0,
             users: HashMap::with_capacity(100),
-            pool_difficulty: 500000,
             work_since_last_block: 0.0,
             ..Default::default()
         };
@@ -264,6 +262,8 @@ mod tests {
         let loaded_stats = load_pool_local_stats(log_dir);
         assert!(loaded_stats.is_ok());
 
+        // `pool_difficulty` is runtime-only: both sides keep their default
+        // (0.0), so the roundtrip still proves the persisted fields survive.
         let loaded_stats = loaded_stats.unwrap();
         assert_eq!(pool_stats, loaded_stats);
     }
@@ -298,7 +298,6 @@ mod tests {
             best_share: 0,
             best_share_ever: 0,
             users: HashMap::with_capacity(100),
-            pool_difficulty: 500000,
             work_since_last_block: 0.0,
             ..Default::default()
         };

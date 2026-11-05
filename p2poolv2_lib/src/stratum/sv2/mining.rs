@@ -148,6 +148,8 @@ struct ChannelJob {
     tracker_job_id: JobId,
     target: Target,
     difficulty: u64,
+    /// Parent and nbits the job builds on.
+    tip: (BlockHash, u32),
 }
 
 struct Channel {
@@ -166,7 +168,33 @@ struct Channel {
 }
 
 impl Channel {
-    fn insert_job(&mut self, tracker_job_id: JobId) -> u32 {
+    /// Move the channel to `tip`, and return whether it is new.
+    ///
+    /// On a new tip the jobs of the tip it leaves stay valid, and older ones
+    /// go. A share on the previous BCH block is still paid on the share
+    /// chain, which takes shares one block off the paying share's chain
+    /// (`bch-prev-1off`), and the share that found the block that moved the
+    /// tip arrives after it: a Job Declaration client's `PushSolution`, or
+    /// BCHN's ZMQ notification, can bring the new template first.
+    fn move_to_tip(&mut self, tip: (BlockHash, u32)) -> bool {
+        if self.last_tip == Some(tip) {
+            return false;
+        }
+        let previous = self.last_tip;
+        self.jobs.retain(|_, job| Some(job.tip) == previous);
+        self.last_tip = Some(tip);
+        true
+    }
+
+    /// Whether this channel gave out `job_id`, now or before. Ids count up
+    /// from 1 and wrap, so one issued less than half the id space ago is
+    /// behind `next_job_id`.
+    fn issued(&self, job_id: u32) -> bool {
+        let age = self.next_job_id.wrapping_sub(job_id);
+        age != 0 && age <= u32::MAX / 2
+    }
+
+    fn insert_job(&mut self, tracker_job_id: JobId, tip: (BlockHash, u32)) -> u32 {
         let job_id = self.next_job_id;
         self.next_job_id = self.next_job_id.wrapping_add(1);
         let target =
@@ -181,6 +209,7 @@ impl Channel {
                 tracker_job_id,
                 target,
                 difficulty,
+                tip,
             },
         );
         while self.jobs.len() > MAX_CHANNEL_JOBS {
@@ -289,15 +318,12 @@ impl MiningChannels {
         let prev_hash = BlockHash::from_str(&job.blocktemplate.previousblockhash)
             .map_err(|error| error.to_string())?;
         let tip = (prev_hash, request.nbits);
-        if channel.last_tip != Some(tip) {
-            channel.jobs.clear();
-        }
-        channel.last_tip = Some(tip);
+        channel.move_to_tip(tip);
         let tracker_job_id = self.ctx.tracker_handle.get_next_declared_job_id();
         self.ctx
             .tracker_handle
             .insert_job_details(tracker_job_id, job);
-        let job_id = channel.insert_job(tracker_job_id);
+        let job_id = channel.insert_job(tracker_job_id, tip);
         Ok(vec![encode_frame(
             SetCustomMiningJobSuccess {
                 channel_id: request.channel_id,
@@ -899,12 +925,8 @@ impl MiningChannels {
             BlockHash::from_str(&template.previousblockhash).map_err(|error| error.to_string())?;
         let nbits = u32::from_str_radix(&template.bits, 16).map_err(|error| error.to_string())?;
         let version = template.version as u32;
-        let new_prev_hash = channel.last_tip != Some((prev_hash, nbits));
-        if new_prev_hash {
-            channel.jobs.clear();
-        }
-        let channel_job_id = channel.insert_job(tracker_job_id);
-        channel.last_tip = Some((prev_hash, nbits));
+        let new_prev_hash = channel.move_to_tip((prev_hash, nbits));
+        let channel_job_id = channel.insert_job(tracker_job_id, (prev_hash, nbits));
         let min_ntime = if new_prev_hash {
             Sv2Option::new(None)
         } else {
@@ -978,6 +1000,11 @@ impl MiningChannels {
             return submit_error(&submission, "invalid-channel-id");
         };
         let Some(channel_job) = channel.jobs.get(&submission.job_id).copied() else {
+            // A job this channel gave out and has since dropped, two BCH
+            // blocks back, is stale; an id it never gave out is invalid.
+            if channel.issued(submission.job_id) {
+                return submit_error(&submission, "stale-share");
+            }
             return submit_error(&submission, "invalid-job-id");
         };
         let tracker_job_id = channel_job.tracker_job_id;

@@ -27,6 +27,13 @@ configured on the server, the token parameter is not required.
 Use the `p2poolv2_cli gen-auth` command to generate a salted HMAC
 token suitable for the config file.
 
+A `401` carries `WWW-Authenticate: Basic` only when the request already
+sent an `Authorization` header and is not marked with
+`X-Requested-With`. A browser navigating to a protected page with no
+saved login lands on the bare `401` body without the native login
+dialog, and the WASM dashboard's marked probes stay silent and drive
+their own `unauthorized` indicator.
+
 ## Endpoints
 
 - [GET /dashboard](#get-dashboard) -- Monitoring dashboard (no auth required)
@@ -307,16 +314,21 @@ same shape with `"address_type": "share"`, and each share's
 ### GET /hashrate
 
 The node's hashrate history as JSON: the same once-a-minute samples (kept
-for one day) the server-rendered `/dashboard` draws. Values are hashes per
-second, `null` where unknown at that time.
+for 30 days, and persisted in the store across restarts) the
+server-rendered `/dashboard` draws. Values are hashes per second, `null`
+where unknown at that time.
 
 | Parameter | Default | Range | Meaning |
 |---|---|---|---|
-| `window` | 3600 | 60..=86400 | Seconds of history, ending at the newest sample |
+| `window` | 3600 | 60..=2592000 | Seconds of history, ending at the newest sample |
 
 - `pool_hashrate`: share chain work of the newest confirmed shares over
   their time span; the same on every node.
-- `local_hashrate`: this node's accepted stratum difficulty between samples.
+- `local_hashrate`: this node's accepted submissions in the trailing ten
+  minutes over that window's span (p2poolv1's local hash rate); `null`
+  before the first share since the node started. The difference from
+  `pool_hashrate` is the other nodes' work plus shares older than the
+  ten-minute window.
 - `network_hashrate`: template difficulty × 2^32 / 600.
 
 The top-level values are the newest sample (read live before the first one).
@@ -385,6 +397,9 @@ Returns the list of currently connected peers.
 
 **Response:** JSON array of objects with a `peer_id` string field.
 
+**Authentication:** When auth is configured, this needs the API login
+unless `public_dashboard` is set.
+
 ### GET /pplns_shares
 
 Returns PPLNS (Pay Per Last N Shares) accounting data with optional
@@ -406,7 +421,9 @@ JSON messages as events occur.
 
 **Authentication:** When auth is configured, pass credentials as a
 query parameter: `ws://host:port/ws?token=<base64(user:password)>`.
-Returns HTTP 401 if credentials are missing or invalid.
+A public node (`public_dashboard`) accepts the connection with no token;
+any other node without a token, or a bad token on any node, returns
+HTTP 401.
 
 **Subscription protocol:**
 
@@ -483,7 +500,9 @@ HTTP status codes used:
 
 - `400` -- Bad request (invalid parameters)
 - `404` -- Resource not found
-- `401` -- Unauthorized (missing or invalid credentials)
+- `401` -- Unauthorized (missing or invalid credentials); the Basic
+  challenge follows only the conditions in
+  [Authentication](#authentication)
 - `500` -- Internal server error
 - `503` -- Not ready yet (for example the PPLNS window is still loading)
 

@@ -136,6 +136,13 @@ zmqpubhashblock = "tcp://127.0.0.1:28332"
 # sv2_authority_secret_key = "..."
 # Seconds each Noise certificate stays valid. Default 3600.
 # sv2_cert_validity_secs = 3600
+# Clients that may declare Coinbase-Only Job Declaration jobs, as IP
+# addresses or CIDR ranges. In that mode the node credits shares on a block
+# whose transactions it never sees, so by default only this computer may use
+# it. Full-Template declarations, whose templates the node checks, are taken
+# from every client. Add your own declarator, for example its Tailscale
+# address; [] refuses Coinbase-Only, ["0.0.0.0/0", "::/0"] takes it from all.
+# sv2_coinbase_only_from = ["127.0.0.0/8", "::1/128"]
 # Where block templates come from. Default "rpc": getblocktemplate from the
 # node in [bitcoinrpc]. "rpc_light" asks that node for light templates
 # (getblocktemplatelight): the node keeps the transactions and sends their
@@ -215,10 +222,11 @@ port = 46884
 # auth_password = "your_password"
 # Enable permissive CORS (careful with this; allows any origin)
 # cors_allowed = false
-# Show the dashboard (/dashboard), the web_root frontend and the read-only
-# share chain routes they read to anyone who can reach this port, for a
-# public node. /metrics, /peers, /blocked_ips and /jd_prepare keep requiring
-# auth_user. Default false: everything asks for the API login.
+# Show the dashboard (/dashboard), the web_root frontend, the read-only
+# share chain routes (including GET /peers and a tokenless /ws connection)
+# they read to anyone who can reach this port, for a public node. /metrics,
+# /blocked_ips and /jd_prepare keep requiring auth_user. Default false:
+# everything asks for the API login.
 # public_dashboard = false
 # Serve a self-hosted frontend: a folder with its build (index.html plus its
 # files, from TypeScript, Rust/WASM or anything that builds to static files).

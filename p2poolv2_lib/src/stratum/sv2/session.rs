@@ -15,9 +15,11 @@ use super::large_templates::{
 };
 use super::payout_outputs::{
     INVALID_MINING_JOB_TOKEN, PAYOUT_OUTPUTS_UNAVAILABLE, PayoutIdentity, REQUEST_PAYOUT_OUTPUTS,
-    RequestPayoutOutputs, answer_frame, prepare_payout_outputs, stale_frame,
+    RequestPayoutOutputs, VERIFY_RATE_LIMITED, VerifyPayoutOutputs, answer_frame,
+    prepare_payout_outputs, stale_frame, verify_answer_frame, verify_payout_outputs,
 };
 use super::sort_ctor;
+use crate::accounting::payout::AnchorWeights;
 use crate::shares::auxpow::Disclosure;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::stratum::parse_password::{
@@ -43,6 +45,7 @@ use framing_sv2::framing::MessageFrame;
 #[cfg(test)]
 use framing_sv2::framing::SerializedFrame;
 use framing_sv2::header::Header as FrameHeader;
+use ipnet::IpNet;
 use job_declaration_sv2::{
     AllocateMiningJobToken, AllocateMiningJobTokenSuccess, DeclareMiningJob, DeclareMiningJobError,
     DeclareMiningJobSuccess, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
@@ -64,6 +67,7 @@ use mining_sv2::{
     SetCustomMiningJobError,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -75,6 +79,9 @@ const PROTOCOL_VERSION: u16 = 2;
 /// canonical, or do not make output 0's root.
 const INVALID_COINBASE_TX: &str = "invalid-coinbase-tx";
 const WORK_SELECTION_FLAG: u32 = 0b10;
+/// `SetupConnection` flag `DECLARE_TX_DATA` of the Job Declaration
+/// Protocol: the client reveals its transactions (Full-Template mode).
+const DECLARE_TX_DATA_FLAG: u32 = 0b1;
 const MAX_JOB_TOKENS: usize = 64;
 const TOKEN_LIFETIME: Duration = Duration::from_secs(120);
 /// The least declared transaction memory a registry allows: twice the
@@ -90,6 +97,16 @@ const MAX_PAGED_DECLARATIONS: usize = 8;
 /// may hold eight pending declarations. A client asks once per job, just
 /// before declaring it, so a ninth is not following the extension.
 const MAX_PAYOUT_SETS: usize = 8;
+/// `VerifyPayoutOutputs` answers one connection may compute in one second.
+///
+/// A client verifies a job once, and may retry a few `unknown-anchor`
+/// answers while a share propagates, so four a second is a short burst
+/// rather than a walk it can keep the node on. One more is answered
+/// `verify-rate-limited` and the connection stays up. The handler does not
+/// await, so a second verify cannot be in progress; one that re-entered
+/// would get the same answer. Unlike [`MAX_PAYOUT_SETS`], this does not
+/// close the connection.
+const MAX_VERIFY_PAYOUTS_PER_SECOND: u32 = 4;
 /// Full-Template declarations a connection keeps for `PushSolution`, all
 /// on the latest template's previous block.
 const MAX_SOLVABLE_JOBS: usize = 4;
@@ -355,6 +372,9 @@ pub struct JobRegistry {
     cache: PoolTransactionCache,
     merge_mining: Option<MergeMiningCommitment>,
     tokens: HashMap<Vec<u8>, JobToken>,
+    /// Client addresses Coinbase-Only declarations are taken from; `None`
+    /// takes them from every client.
+    coinbase_only_from: Option<Vec<IpNet>>,
     /// Bytes of declarations the connections keep for `PushSolution`.
     solvable_bytes: Arc<AtomicUsize>,
 }
@@ -368,7 +388,30 @@ impl JobRegistry {
             cache,
             merge_mining,
             tokens: HashMap::with_capacity(8),
+            coinbase_only_from: None,
             solvable_bytes: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Take Coinbase-Only declarations only from clients in `networks`.
+    /// A Coinbase-Only declarator's shares are credited on transactions the
+    /// node never sees, so a node offers it only to clients it trusts.
+    pub(crate) fn with_coinbase_only_from(mut self, networks: Vec<IpNet>) -> Self {
+        self.coinbase_only_from = Some(networks);
+        self
+    }
+
+    /// Whether a client at `peer` may declare Coinbase-Only jobs. An
+    /// IPv4-mapped IPv6 address counts as its IPv4 address. Without a known
+    /// address only a node with no allowlist takes it.
+    fn takes_coinbase_only_from(&self, peer: Option<IpAddr>) -> bool {
+        match (&self.coinbase_only_from, peer) {
+            (None, _) => true,
+            (Some(networks), Some(peer)) => {
+                let peer = peer.to_canonical();
+                networks.iter().any(|network| network.contains(&peer))
+            }
+            (Some(_), None) => false,
         }
     }
 
@@ -473,6 +516,9 @@ pub struct Sv2Connection {
     mode: Option<JobDeclarationMode>,
     mining: bool,
     work_selection: bool,
+    /// The client's address, which decides whether it may declare
+    /// Coinbase-Only jobs.
+    peer: Option<IpAddr>,
     /// Full-Template declarations made on this connection that still wait
     /// for `ProvideMissingTransactionsSuccess`, by the client's request id.
     /// Request ids are chosen by each client, so two connections can use the
@@ -487,6 +533,12 @@ pub struct Sv2Connection {
     /// Open tokens this connection was given payout outputs for since then,
     /// at most [`MAX_PAYOUT_SETS`].
     payout_sets: HashSet<Vec<u8>>,
+    /// `VerifyPayoutOutputs` answers admitted since [`Self::verify_window`].
+    verify_count: u32,
+    /// Start of the one-second verify budget.
+    verify_window: Instant,
+    /// A verify is inside [`Self::handle_verify_payout_outputs`].
+    verify_outstanding: bool,
     /// This connection's latest Full-Template declarations, newest last,
     /// for `PushSolution`.
     solvable_jobs: VecDeque<SolvableJob>,
@@ -508,14 +560,24 @@ impl Sv2Connection {
             mode: None,
             mining: false,
             work_selection: false,
+            peer: None,
             pending_declarations: HashMap::with_capacity(4),
             payout_outputs: false,
             payout_basis: None,
             payout_sets: HashSet::with_capacity(MAX_PAYOUT_SETS),
+            verify_count: 0,
+            verify_window: Instant::now(),
+            verify_outstanding: false,
             solvable_jobs: VecDeque::with_capacity(MAX_SOLVABLE_JOBS),
             large_templates: false,
             declared_pages: HashMap::new(),
         }
+    }
+
+    /// The connection of a client at `peer`.
+    pub(crate) fn with_peer(mut self, peer: IpAddr) -> Self {
+        self.peer = Some(peer);
+        self
     }
 
     /// Accept `incoming` and return the response frames it completed.
@@ -685,8 +747,9 @@ impl Sv2Connection {
     }
 
     /// Answer a requested payout outputs message on a connection that
-    /// negotiated the extension. A client sends only `RequestPayoutOutputs`;
-    /// any other message of the extension closes the connection, and so does
+    /// negotiated the extension. A client sends `RequestPayoutOutputs`;
+    /// `VerifyPayoutOutputs` is [`Self::handle_verify_payout_outputs`]. Any
+    /// other message of the extension closes the connection, and so does
     /// a request for a token past [`MAX_PAYOUT_SETS`], as a declaration past
     /// its limit does. Every other refusal is a `RequestPayoutOutputs.Error`.
     pub(crate) fn handle_payout_outputs(
@@ -727,6 +790,64 @@ impl Sv2Connection {
             self.payout_sets.insert(token);
         }
         Ok(vec![answer_frame(&request, answer)?])
+    }
+
+    /// Answer `VerifyPayoutOutputs` (`0x04`).
+    ///
+    /// The token is another node's. Nothing is allocated and the job
+    /// registry is not taken. `identity_of` resolves `user_identifier` the
+    /// way `AllocateMiningJobToken` does. `weights` is this node's window;
+    /// `None` (a node that does not pay from the share chain) is
+    /// `payout-outputs-unavailable`. A malformed payload still closes the
+    /// connection. A verify past [`MAX_VERIFY_PAYOUTS_PER_SECOND`], or one
+    /// started while another is in this function, is `verify-rate-limited`
+    /// and does not close the connection.
+    pub(crate) fn handle_verify_payout_outputs(
+        &mut self,
+        payload: &mut [u8],
+        identity_of: impl Fn(&str) -> Option<PayoutIdentity>,
+        weights: Option<&dyn AnchorWeights>,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let request =
+            VerifyPayoutOutputs::from_bytes(payload).map_err(|error| error.to_string())?;
+        if !self.admit_verify() {
+            return Ok(vec![verify_answer_frame(
+                request.request_id,
+                request.height,
+                Err(VERIFY_RATE_LIMITED),
+            )?]);
+        }
+        let identity = identity_of(&request.user_identifier.as_utf8_or_hex());
+        let answer = verify_payout_outputs(&request, identity.as_ref(), weights);
+        self.verify_outstanding = false;
+        Ok(vec![verify_answer_frame(
+            request.request_id,
+            request.height,
+            answer,
+        )?])
+    }
+
+    /// Whether this connection may run a verify now.
+    ///
+    /// Admits at most one at a time and at most
+    /// [`MAX_VERIFY_PAYOUTS_PER_SECOND`] in the current second. An admission
+    /// sets [`Self::verify_outstanding`]; the caller clears it when the
+    /// verify returns. A refusal spends nothing.
+    fn admit_verify(&mut self) -> bool {
+        if self.verify_outstanding {
+            return false;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.verify_window) >= Duration::from_secs(1) {
+            self.verify_window = now;
+            self.verify_count = 0;
+        }
+        if self.verify_count >= MAX_VERIFY_PAYOUTS_PER_SECOND {
+            return false;
+        }
+        self.verify_count += 1;
+        self.verify_outstanding = true;
+        true
     }
 
     /// What a newly published template sends on this connection:
@@ -810,6 +931,25 @@ impl Sv2Connection {
                 } else {
                     JobDeclarationMode::CoinbaseOnly
                 };
+                // Coinbase-Only only from clients the operator lists; the
+                // error names the flag the client must set (sv2-spec 3.x).
+                if mode == JobDeclarationMode::CoinbaseOnly
+                    && !self
+                        .registry
+                        .lock()
+                        .expect("job registry lock")
+                        .takes_coinbase_only_from(self.peer)
+                {
+                    self.mode = None;
+                    self.mining = false;
+                    return self.respond(
+                        SetupConnectionError {
+                            flags: DECLARE_TX_DATA_FLAG,
+                            error_code: string_field("unsupported-feature-flags")?,
+                        },
+                        MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
+                    );
+                }
                 self.mode = Some(mode);
                 self.mining = false;
                 self.work_selection = false;

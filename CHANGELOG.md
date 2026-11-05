@@ -22,6 +22,71 @@ transactions, and declared transaction memory is bounded by two blocks at
 the template's size limit (at least 64 MiB), replacing the fixed 64 MiB.
 Standard declarations are unchanged. No share-chain rule changes.
 
+A node withdraws mining work once its Bitcoin Cash node has given no
+template for 60 seconds, as P2Pool v1 stops giving work 60 seconds after
+it last heard from bitcoind ("lost contact with bitcoind"). Until now a
+node that lost its BCHN kept handing out its last template: on 2026-11-05
+the chipnet pool lost the Start9 BCHN for over three hours, and its
+miners kept hashing a template whose BCH tip had moved on. Now the
+template poller withdraws the work after a minute without a template:
+SV1 and SV2 mining connections close, so miners can fail over to a backup
+pool, and no Job Declaration token is allocated. The next template
+publishes work again, with clean jobs. Polls come every 10 seconds, so a
+single failed poll never withdraws work. The Stratum V2 Template Provider
+source (`template_source = "sv2"`) is unchanged. No share-chain rule
+changes.
+
+The Bitcoin Cash per-share donation has regtest tests against BCHN, which
+the nightly workflow runs with the payout tree tests
+(`per_share_donation_bchn_test`). Each mines a block whose coinbase the
+window splits and checks every payee in the coinbase BCHN stored. A block
+found before any share-chain share pays the genesis key the whole value
+and the donation key nothing. Miner shares at the default 1% pay the key
+each share's own cut, short of 1% of the block by genesis's weight where
+genesis is paid beside them. The tests build the window without the BCH
+chain rule (`with_bch_header_rules`), which decides whether genesis is
+paid beside other shares; the cuts are split the same either way. Shares
+mined with `donation=0.5`, `donation=0` and no choice give the key 50, 0
+and 100 basis points of their own parts. A unit test checks that the
+outputs a Job Declaration client requests (`0x5052`) pay the donation key
+what the node's own job on the same window pays. `TestShareBlockBuilder`
+can commit a share's donation and fee. Tests only; no share-chain rule
+changes.
+
+`public_dashboard` now also opens `GET /peers` and a tokenless `/ws`
+connection (a bad `/ws` token is still 401); `/metrics`, `/blocked_ips`
+and `/jd_prepare` keep the API login. The peer list moved from the node's
+own routes to the share chain routes, and `/ws` no longer needs a token
+on a public node. The WASM dashboard no longer sends a half-empty
+`?token=` when only the session password is gone, and its header feed
+says `unauthorized` when the node refuses the login. A 401 carries the
+browser's Basic challenge only when the request already sent credentials,
+so the WASM app's probes fail silently to that indicator instead of
+raising the login dialog.
+
+A Job Declaration client no longer has to trust one node for its payout
+outputs. `VerifyPayoutOutputs` (`0x04` in extension `0x5052`) asks a second
+node, which did not issue the token, to recompute the outputs from the
+token, the client's identity and the template fields at the token's
+anchor; it answers the same bytes `RequestPayoutOutputs.Success` carries,
+or `unknown-anchor` when it does not hold that share. The node keeps no
+state for it, allows each connection one verify at a time and four a
+second (`verify-rate-limited`), and refuses anchors more than 100 shares
+below its tip before touching the PPLNS window. The extension spec now
+publishes the job token layout and the share commitment derivation, so a
+client can check the commitment output itself. No share-chain rule changes.
+
+A node takes Stratum V2 Coinbase-Only Job Declaration only from the client
+addresses in `[stratum] sv2_coinbase_only_from` (IP addresses or CIDR
+ranges), by default this computer (`127.0.0.0/8`, `::1/128`). In that mode
+the node credits shares on a block whose transactions it never sees, so a
+declarator that withholds its blocks costs the other miners; until now any
+client could use it. Full-Template declarations are taken from every
+client. A refused client gets `SetupConnection.Error`
+`unsupported-feature-flags` with the `DECLARE_TX_DATA` flag it must set.
+`[]` refuses Coinbase-Only from everyone; `["0.0.0.0/0", "::/0"]` restores
+the old behaviour. No share-chain rule changes.
+
 A standard SV2 Job Declaration client can get a job's exact coinbase
 outputs on its Job Declaration connection, without `/jd_prepare`. A Bitcoin
 Cash node grants the experimental extension `0x5052`, "Requested Payout
@@ -39,6 +104,17 @@ the commitment as well as the payout scripts. In a test, a client that builds
 its jobs from the reply alone gets them installed and mines a share in both
 Job Declaration modes. No share-chain rule changes, and `/jd_prepare` is
 unchanged.
+
+A Stratum V2 share for a job on the BCH block a new tip just replaced is
+taken again. On a new tip a channel dropped all its jobs, so the share that
+found the block often lost its credit: a Job Declaration client's
+`PushSolution`, or BCHN's ZMQ notification of that block, brings the new
+template before the share arrives, and the share was refused as
+`invalid-job-id` (seen in Knuth's end-to-end run). A channel now keeps the
+jobs of the tip it leaves and drops older ones, as the share chain still
+pays shares one BCH block off the paying share's chain. A share for a job
+the channel gave out and has since dropped is `stale-share`; only an id it
+never gave out is `invalid-job-id`. No share-chain rule changes.
 
 The Stratum V2 Job Declaration server handles `PushSolution` (spec
 6.4.9). It answered the message with "unsupported Stratum V2 message type
@@ -60,6 +136,7 @@ one: following the quickstart, the port never opened. Set it to `true` once
 already say. The quickstart also says to mine one block on a new regtest
 chain first: BCHN reports `initialblockdownload` while its tip is the 2011
 genesis block, and the node waits for it. No code or share-chain rule
+changes.
 
 Calls to BCHN no longer fail on a connection BCHN has just closed. The RPC
 client kept idle connections for 90 s, and BCHN closes one idle for

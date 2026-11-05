@@ -20,6 +20,7 @@ config.toml
 !.cargo/config.toml
 config-dev.toml
 config-*-copy.toml
+config-node2.toml
 # The cargo aliases for the developer tools (docs/tooling.md) are not a node
 # config.
 !/.cargo/config.toml
@@ -53,3 +54,4 @@ perf.data
 # Local node run logs
 node-start.log
 node-start.log.prev
+node2-start.log

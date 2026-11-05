@@ -45,6 +45,10 @@ pub(crate) struct MinersResponse {
     pub pages: usize,
     /// Most miners on a page.
     pub page_size: usize,
+    /// Shares this node's pool accepted since the node started, node-wide.
+    pub accepted_shares_total: u64,
+    /// Shares this node's pool rejected since the node started, node-wide.
+    pub rejected_shares_total: u64,
     /// This page's miners by accepted work, most first, with their workers.
     pub miners: Vec<MinerRow>,
 }
@@ -56,6 +60,7 @@ pub(crate) async fn miners(
 ) -> Json<MinersResponse> {
     let all = local_miners(&state).await;
     let (miners_online, workers_online) = online_counts(&all);
+    let metrics = state.metrics_handle.get_metrics().await;
     let typed = query
         .address
         .as_deref()
@@ -82,6 +87,8 @@ pub(crate) async fn miners(
         page: paging.page,
         pages: paging.pages,
         page_size: PAGE_SIZE,
+        accepted_shares_total: metrics.accepted_total,
+        rejected_shares_total: metrics.rejected_total,
         miners,
     })
 }

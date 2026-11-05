@@ -285,7 +285,7 @@ mod tests {
             rejected_total: 5,
             best_share: 500,
             best_share_ever: 500,
-            pool_difficulty: 1000,
+            pool_difficulty: 1000.0,
             start_time: 1234567890,
             lastupdate: Some(1234567900),
             ..Default::default()

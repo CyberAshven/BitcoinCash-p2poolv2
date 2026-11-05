@@ -91,7 +91,9 @@ use crate::stratum::server::StratumContext;
 #[cfg(test)]
 use crate::stratum::session::{EXTRANONCE1_SIZE, EXTRANONCE2_SIZE};
 #[cfg(test)]
-use crate::stratum::sv2::payout_outputs::{RequestPayoutOutputs, RequestPayoutOutputsSuccess};
+use crate::stratum::sv2::payout_outputs::{
+    RequestPayoutOutputs, RequestPayoutOutputsSuccess, VerifyPayoutOutputs,
+};
 #[cfg(test)]
 use crate::stratum::sv2::{Declaration, DeclaredJob, encode_message};
 #[cfg(test)]
@@ -125,7 +127,7 @@ use crate::stratum::work::tracker::start_tracker_actor;
 #[cfg(test)]
 use crate::stratum::work::tracker::{JobDetails, JobId};
 #[cfg(test)]
-use binary_sv2::{B064K, B0255, Deserialize, GetSize, Seq0255, Serialize, U256};
+use binary_sv2::{B064K, B0255, Deserialize, GetSize, Seq0255, Serialize, Str0255, U256};
 #[cfg(any(test, feature = "test-utils"))]
 use bitcoin::TxMerkleNode;
 #[cfg(test)]
@@ -280,7 +282,19 @@ impl TestSv2Client {
         extension_type: u16,
         expected_type: u8,
     ) -> Vec<u8> {
-        timeout(Duration::from_secs(5), async {
+        self.receive_extension_within(Duration::from_secs(5), extension_type, expected_type)
+            .await
+    }
+
+    /// `receive_extension`, waiting up to `wait` for a message a peer sends
+    /// on its own, such as a push after the next share.
+    pub(crate) async fn receive_extension_within(
+        &mut self,
+        wait: Duration,
+        extension_type: u16,
+        expected_type: u8,
+    ) -> Vec<u8> {
+        timeout(wait, async {
             loop {
                 self.stream
                     .read_exact(self.decoder.writable())
@@ -562,6 +576,12 @@ pub fn bch_template_transaction(index: u32) -> TemplateTransaction {
     }
 }
 
+/// The default `sv2_coinbase_only_from`: this computer only.
+#[cfg(test)]
+pub(crate) fn test_coinbase_only_from() -> Vec<ipnet::IpNet> {
+    vec!["127.0.0.0/8".parse().unwrap(), "::1/128".parse().unwrap()]
+}
+
 /// A BCH payout snapshot with distinct weights.
 #[cfg(any(test, feature = "test-utils"))]
 pub fn test_bch_prepared() -> Arc<PreparedNotifyParams> {
@@ -757,7 +777,7 @@ fn test_bch_prepared_with_weights(
 /// given donation and fee, each an address and basis points, and
 /// merge-mining `merge_tokens` for every miner when given.
 #[cfg(any(test, feature = "test-utils"))]
-fn test_bch_prepared_with_weights_and_cuts(
+pub(crate) fn test_bch_prepared_with_weights_and_cuts(
     template: BlockTemplate,
     weights: HashMap<PayoutAddress, u128>,
     donation: (Option<PayoutAddress>, Option<u16>),
@@ -772,6 +792,21 @@ fn test_bch_prepared_with_weights_and_cuts(
         fee,
         merge_tokens,
     )
+}
+
+/// [`test_bch_prepared`] built on the share `anchor` with `weights` instead
+/// of the fixture's two payees: the snapshot a node stores for a token once
+/// it has computed the window at that share.
+#[cfg(test)]
+pub(crate) fn test_bch_prepared_anchored(
+    anchor: BlockHash,
+    weights: HashMap<PayoutAddress, u128>,
+) -> Arc<PreparedNotifyParams> {
+    let template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    test_bch_prepared_on(anchor, template, weights, (None, None), (None, None), None)
 }
 
 /// [`test_bch_prepared`] built on the share `anchor` instead: the params a
@@ -1027,6 +1062,37 @@ pub(crate) fn test_payout_outputs_request(
     binary_sv2::to_bytes(RequestPayoutOutputs {
         request_id,
         mining_job_token: B0255::new(token).unwrap(),
+        available_payout_value: value,
+        height: template.height,
+        prev_hash: U256::new(&prev_hash).unwrap(),
+        nbits: CompactTarget::from_unprefixed_hex(&template.bits)
+            .unwrap()
+            .to_consensus(),
+        coinbase_prefix: B0255::new(prefix).unwrap(),
+    })
+    .unwrap()
+}
+
+/// The `VerifyPayoutOutputs` payload a client sends a second node for
+/// `token`, which another node issued to `user_identifier`. The remaining
+/// fields are the ones [`test_payout_outputs_request`] sends the issuer.
+#[cfg(test)]
+pub(crate) fn test_verify_payout_outputs_request(
+    request_id: u32,
+    token: &[u8],
+    user_identifier: &str,
+    template: &BlockTemplate,
+    value: u64,
+    prefix: &[u8],
+) -> Vec<u8> {
+    let prev_hash = BlockHash::from_str(&template.previousblockhash)
+        .unwrap()
+        .to_byte_array();
+    let user_identifier: Str0255 = user_identifier.try_into().unwrap();
+    binary_sv2::to_bytes(VerifyPayoutOutputs {
+        request_id,
+        mining_job_token: B0255::new(token).unwrap(),
+        user_identifier,
         available_payout_value: value,
         height: template.height,
         prev_hash: U256::new(&prev_hash).unwrap(),
@@ -2048,6 +2114,18 @@ pub struct TestShareBlockBuilder {
     nonce: Option<u32>,
     bits: Option<CompactTarget>,
     time: Option<u32>,
+    cuts: TestShareCuts,
+}
+
+/// The donation and fee a test share commits, in its header and in the
+/// share commitment its coinbase carries, as a mined share does.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, Default)]
+struct TestShareCuts {
+    donation_address: Option<PayoutAddress>,
+    donation: Option<u16>,
+    fee_address: Option<PayoutAddress>,
+    fee: Option<u16>,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -2116,6 +2194,22 @@ impl TestShareBlockBuilder {
         self
     }
 
+    /// Commit a donation of `basis_points` to `address`, as a share mined
+    /// with that donation does.
+    pub fn donation(mut self, address: PayoutAddress, basis_points: u16) -> Self {
+        self.cuts.donation_address = Some(address);
+        self.cuts.donation = Some(basis_points);
+        self
+    }
+
+    /// Commit a fee of `basis_points` to `address`, as a share mined on a
+    /// node taking that fee does.
+    pub fn fee(mut self, address: PayoutAddress, basis_points: u16) -> Self {
+        self.cuts.fee_address = Some(address);
+        self.cuts.fee = Some(basis_points);
+        self
+    }
+
     pub fn with_easy_target(self) -> Self {
         let easy_target = bitcoin::CompactTarget::from_consensus(0x2100ffff);
         self.bits(easy_target)
@@ -2163,6 +2257,7 @@ impl TestShareBlockBuilder {
             self.nonce,
             self.bits,
             self.time,
+            self.cuts,
         )
     }
 }
@@ -2233,6 +2328,7 @@ fn test_share_block(
     nonce: Option<u32>,
     bits: Option<CompactTarget>,
     time: Option<u32>,
+    cuts: TestShareCuts,
 ) -> ShareBlock {
     let share_bits = bits.unwrap_or(CompactTarget::from_consensus(
         0x01e0377ae * work.unwrap_or(1),
@@ -2265,10 +2361,10 @@ fn test_share_block(
                 share_witness_root: compute_witness_root(&other_share_transactions),
                 bits: share_bits,
                 time: share_time,
-                donation_address: None,
-                donation: None,
-                fee_address: None,
-                fee: None,
+                donation_address: cuts.donation_address.clone(),
+                donation: cuts.donation,
+                fee_address: cuts.fee_address.clone(),
+                fee: cuts.fee,
                 bch_coinbase: None,
                 pool_merge_mining: None,
                 share_version: crate::shares::share_version::ShareVersion::CURRENT,
@@ -2337,10 +2433,10 @@ fn test_share_block(
         bitcoin_header,
         time: share_time,
         bits: share_bits,
-        donation_address: None,
-        donation: None,
-        fee_address: None,
-        fee: None,
+        donation_address: cuts.donation_address,
+        donation: cuts.donation,
+        fee_address: cuts.fee_address,
+        fee: cuts.fee,
         bitcoin_height: 1,
         coinbase_proof,
         bch_coinbase: None,
