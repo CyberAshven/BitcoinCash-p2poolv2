@@ -503,12 +503,89 @@ async fn test_miner_route_with_auth_reaches_the_handler() {
     assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
 }
 
+/// The Admin landing page sits with the node's own routes: a bare visit is
+/// a 401 with no challenge, the styled page comes with the login.
+#[tokio::test]
+async fn test_signin_route_is_behind_the_api_login() {
+    use tower::ServiceExt;
+
+    let (state, _temp_dir, base64_credentials) = build_auth_test_state().await;
+    let app = build_router(state.clone(), state.app_config.clone());
+
+    let request = http::Request::builder()
+        .uri("/dashboard/signin")
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+    assert!(!response.headers().contains_key("www-authenticate"));
+
+    let request = http::Request::builder()
+        .uri("/dashboard/signin")
+        .header("Authorization", format!("Basic {base64_credentials}"))
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+}
+
+/// A 401 for a login the browser resubmitted carries the Basic challenge,
+/// so the dialog can open again with corrected credentials.
+#[tokio::test]
+async fn test_wrong_credentials_get_a_basic_challenge() {
+    use tower::ServiceExt;
+
+    let (state, _temp_dir, _base64_credentials) = build_auth_test_state().await;
+    let app = build_router(state.clone(), state.app_config.clone());
+
+    let request = http::Request::builder()
+        .uri("/health")
+        .header("Authorization", "Basic dGVzdHVzZXI6d3JvbmctcGFzc3dvcmQ=")
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+    assert!(response.headers().contains_key("www-authenticate"));
+}
+
+/// The WASM app's probe marks its requests; they get the bare 401, so no
+/// login dialog opens over the app's own `unauthorized` indicator.
+#[tokio::test]
+async fn test_marked_script_credentials_get_no_challenge() {
+    use tower::ServiceExt;
+
+    let (state, _temp_dir, _base64_credentials) = build_auth_test_state().await;
+    let app = build_router(state.clone(), state.app_config.clone());
+
+    let request = http::Request::builder()
+        .uri("/metrics")
+        .header("Authorization", "Basic dGVzdHVzZXI6d3JvbmctcGFzc3dvcmQ=")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+    assert!(!response.headers().contains_key("www-authenticate"));
+}
+
 /// Start a real HTTP server on a random port and return (base_url, shutdown_tx).
 ///
 /// WebSocket upgrade tests need a real TCP connection because axum's
 /// WebSocketUpgrade extractor rejects non-upgradeable requests with 426.
 async fn start_test_server(state: Arc<AppState>) -> (String, oneshot::Sender<()>) {
-    let app = build_router(state.clone(), state.app_config.clone());
+    start_test_server_with_web(state, WebOptions::default()).await
+}
+
+async fn start_test_server_with_web(
+    state: Arc<AppState>,
+    web: WebOptions,
+) -> (String, oneshot::Sender<()>) {
+    let app = build_router_with_history(
+        state.clone(),
+        state.app_config.clone(),
+        Arc::new(dashboard::history::HashrateHistory::default()),
+        web,
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -532,6 +609,57 @@ async fn test_ws_without_token_returns_401() {
 
     let response = reqwest::Client::new()
         .get(format!("{base_url}/ws"))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 401);
+}
+
+#[tokio::test]
+async fn test_ws_without_token_on_public_node_upgrades() {
+    let (state, _temp_dir, _base64_credentials) = build_auth_test_state().await;
+    let (base_url, _shutdown_tx) = start_test_server_with_web(
+        state,
+        WebOptions {
+            public: true,
+            web_root: None,
+        },
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{base_url}/ws"))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 101);
+}
+
+#[tokio::test]
+async fn test_ws_with_bad_token_on_public_node_returns_401() {
+    let (state, _temp_dir, _base64_credentials) = build_auth_test_state().await;
+    let (base_url, _shutdown_tx) = start_test_server_with_web(
+        state,
+        WebOptions {
+            public: true,
+            web_root: None,
+        },
+    )
+    .await;
+
+    let bad_token = base64::engine::general_purpose::STANDARD.encode("testuser:wrong-password");
+    let response = reqwest::Client::new()
+        .get(format!("{base_url}/ws?token={bad_token}"))
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
         .header("Sec-WebSocket-Version", "13")
@@ -646,6 +774,32 @@ async fn get_json(app: Router, uri: &str) -> (http::StatusCode, serde_json::Valu
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+#[tokio::test]
+async fn test_peers_route_opens_on_public_node_without_auth() {
+    let (state, _temp_dir, _base64_credentials) = build_auth_test_state().await;
+    let app = build_router_with_history(
+        state.clone(),
+        state.app_config.clone(),
+        Arc::new(dashboard::history::HashrateHistory::default()),
+        WebOptions {
+            public: true,
+            web_root: None,
+        },
+    );
+
+    let (status, _) = get_json(app, "/peers").await;
+    assert_eq!(status, http::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_peers_route_without_auth_returns_401_on_private_node() {
+    let (state, _temp_dir, _base64_credentials) = build_auth_test_state().await;
+    let app = build_router(state.clone(), state.app_config.clone());
+
+    let (status, _) = get_json(app, "/peers").await;
+    assert_eq!(status, http::StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

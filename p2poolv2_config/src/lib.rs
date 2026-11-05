@@ -1380,9 +1380,10 @@ pub struct ApiConfig {
     #[serde(default)]
     pub cors_allowed: bool,
     /// Serve the dashboard, a `web_root` frontend and the read-only share
-    /// chain routes they read without the API's authentication, for a
-    /// public node. The node's own routes (`/metrics`, `/peers`,
-    /// `/blocked_ips`, `/jd_prepare`) keep requiring `auth_user`.
+    /// chain routes (including `GET /peers` and a tokenless `/ws`
+    /// connection) they read without the API's authentication, for a
+    /// public node. The node's own routes (`/metrics`, `/blocked_ips`,
+    /// `/jd_prepare`) keep requiring `auth_user`.
     #[serde(default)]
     pub public_dashboard: bool,
     /// A folder holding a self-hosted frontend's build, served for every

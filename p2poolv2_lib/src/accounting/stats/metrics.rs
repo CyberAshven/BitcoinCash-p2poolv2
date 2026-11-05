@@ -6,7 +6,7 @@ use crate::accounting::stats::pool_local_stats::load_pool_local_stats;
 use crate::accounting::stats::user::User;
 use crate::accounting::{payout::simple_pplns::SimplePplnsShare, stats::pool_local_stats};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::SystemTime;
 use tokio::sync::{mpsc, oneshot};
 use tracing::error;
@@ -14,6 +14,20 @@ use tracing::error;
 const METRICS_MESSAGE_BUFFER_SIZE: usize = 1000;
 pub const INITIAL_USER_MAP_CAPACITY: usize = 1000;
 const METRICS_SAVE_INTERVAL: u64 = 5;
+/// The sliding window the local (this node's miners) hashrate is computed
+/// over, in seconds: ten minutes, matching p2poolv1's local hash rate.
+const SUBMISSION_WINDOW_SECS: u64 = 600;
+/// Hashes a difficulty-1 share takes on average (2^32).
+const HASHES_PER_DIFFICULTY: f64 = 4_294_967_296.0;
+
+/// One accepted share in the sliding window the local hashrate reads.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct WorkDatum {
+    /// Unix seconds the share was accepted.
+    at: u64,
+    /// The share's work, in hashes: difficulty x HASHES_PER_DIFFICULTY.
+    work: f64,
+}
 /// Represents the metrics for the P2Poolv2 pool, we derive the stats every five minutes from this
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PoolMetrics {
@@ -33,8 +47,13 @@ pub struct PoolMetrics {
     pub best_share_ever: u64,
     /// User metrics
     pub users: HashMap<String, User>,
-    /// Current pool difficulty
-    pub pool_difficulty: u64,
+    /// Current pool share difficulty in the share chain's units
+    /// (`difficulty_float` of the newest prepared notify's target). The
+    /// metrics actor never writes it: `/metrics` fills it from
+    /// `JobTracker::get_pool_difficulty` at scrape time, so it is 0.0
+    /// until the first notify is built. Runtime-only (not persisted).
+    #[serde(default)]
+    pub pool_difficulty: f64,
     /// Confirmed sharechain pool difficulty since the last bitcoin block was
     /// found; reset to zero on each block find. Numerator of the block effort
     /// metric (`work_since_last_block / network_difficulty`). Runtime-only (not
@@ -52,6 +71,12 @@ pub struct PoolMetrics {
     /// error, a time-out or a busy node, by node label. Runtime only.
     #[serde(skip)]
     pub found_block_submit_retries: BTreeMap<String, u64>,
+    /// Accepted shares in the trailing [`SUBMISSION_WINDOW_SECS`] seconds,
+    /// oldest first, the local hashrate is computed from. Runtime only
+    /// (not persisted): a restart starts empty, so the local hashrate
+    /// reads as unknown until the first share arrives.
+    #[serde(skip)]
+    pub submission_window: VecDeque<WorkDatum>,
 }
 
 impl Default for PoolMetrics {
@@ -68,10 +93,11 @@ impl Default for PoolMetrics {
             best_share: 0,
             best_share_ever: 0,
             users: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
-            pool_difficulty: 0,
+            pool_difficulty: 0.0,
             work_since_last_block: 0.0,
             found_block_submissions: BTreeMap::new(),
             found_block_submit_retries: BTreeMap::new(),
+            submission_window: VecDeque::new(),
         }
     }
 }
@@ -87,6 +113,32 @@ impl PoolMetrics {
             users: pool_stats.users,
             ..Default::default()
         })
+    }
+
+    /// This node's hashrate from accepted submissions in the trailing
+    /// [`SUBMISSION_WINDOW_SECS`] seconds, in hashes per second. This is
+    /// p2poolv1's local hash rate: the work submitted in the window over
+    /// the window's span, which is the full ten minutes once the window is
+    /// that old and the time since the first kept share before that.
+    /// `None` with no shares in the window, or no time between the first
+    /// kept share and `now` (the dash, not zero).
+    pub fn local_submission_hashrate(&self, now: u64) -> Option<f64> {
+        let cutoff = now.saturating_sub(SUBMISSION_WINDOW_SECS);
+        let mut first: Option<u64> = None;
+        let mut work = 0.0;
+        for datum in &self.submission_window {
+            if datum.at < cutoff {
+                continue;
+            }
+            first = Some(first.map_or(datum.at, |earliest: u64| earliest.min(datum.at)));
+            work += datum.work;
+        }
+        let first = first?;
+        let span = now.saturating_sub(first).min(SUBMISSION_WINDOW_SECS);
+        if span == 0 {
+            return None;
+        }
+        Some(work / span as f64)
     }
 }
 
@@ -276,6 +328,19 @@ impl MetricsActor {
         self.metrics.lastupdate = Some(current_unix_timestamp);
         self.metrics.best_share = self.metrics.best_share.max(truediff);
         self.metrics.best_share_ever = self.metrics.best_share_ever.max(truediff);
+        let cutoff = current_unix_timestamp.saturating_sub(SUBMISSION_WINDOW_SECS);
+        while self
+            .metrics
+            .submission_window
+            .front()
+            .is_some_and(|datum| datum.at < cutoff)
+        {
+            self.metrics.submission_window.pop_front();
+        }
+        self.metrics.submission_window.push_back(WorkDatum {
+            at: current_unix_timestamp,
+            work: difficulty as f64 * HASHES_PER_DIFFICULTY,
+        });
         if let Some(user) = self.metrics.users.get_mut(&btcaddress) {
             user.record_share(&workername, difficulty, truediff, current_unix_timestamp);
         }
@@ -577,6 +642,78 @@ pub async fn start_metrics(log_dir: String) -> Result<MetricsHandle, std::io::Er
 mod tests {
     use super::*;
     use crate::accounting::stats::pool_local_stats::save_pool_local_stats;
+
+    /// A metrics with `work` pushed at `at` on its submission window.
+    fn window_of(at: u64, work: f64) -> PoolMetrics {
+        let mut metrics = PoolMetrics::default();
+        metrics.submission_window.push_back(WorkDatum { at, work });
+        metrics
+    }
+
+    #[test]
+    fn local_submission_hashrate_sums_the_trailing_ten_minutes_of_work() {
+        let metrics = PoolMetrics {
+            submission_window: [
+                WorkDatum {
+                    at: 1_000,
+                    work: HASHES_PER_DIFFICULTY,
+                },
+                WorkDatum {
+                    at: 1_010,
+                    work: HASHES_PER_DIFFICULTY,
+                },
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let rate = metrics.local_submission_hashrate(1_020).unwrap();
+        assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 20.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn local_submission_hashrate_ignores_work_older_than_ten_minutes() {
+        // The t=1_000 share falls outside the ten minutes ending at t=3_000;
+        // only the t=2_500 share counts, over the span from t=2_500 to now.
+        let metrics = PoolMetrics {
+            submission_window: [
+                WorkDatum {
+                    at: 1_000,
+                    work: HASHES_PER_DIFFICULTY,
+                },
+                WorkDatum {
+                    at: 2_500,
+                    work: HASHES_PER_DIFFICULTY,
+                },
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let rate = metrics.local_submission_hashrate(3_000).unwrap();
+        assert!((rate - HASHES_PER_DIFFICULTY / 500.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn local_submission_hashrate_is_none_with_no_shares() {
+        assert_eq!(
+            PoolMetrics::default().local_submission_hashrate(1_000),
+            None
+        );
+    }
+
+    #[test]
+    fn local_submission_hashrate_is_none_when_the_span_is_zero() {
+        let metrics = window_of(1_000, HASHES_PER_DIFFICULTY);
+        assert_eq!(metrics.local_submission_hashrate(1_000), None);
+    }
+
+    #[test]
+    fn local_submission_hashrate_divides_by_the_elapsed_time_before_ten_minutes() {
+        // The window is younger than ten minutes: the span is from the
+        // first share to now, not the full ten minutes.
+        let metrics = window_of(1_000, 2.0 * HASHES_PER_DIFFICULTY);
+        let rate = metrics.local_submission_hashrate(1_010).unwrap();
+        assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 10.0).abs() < 1.0);
+    }
 
     #[test]
     fn shared_worker_stays_active_until_the_last_connection_closes() {

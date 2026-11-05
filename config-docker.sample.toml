@@ -143,8 +143,9 @@ port = 46884
 # `p2poolv2_cli gen-auth <user> <password>`.
 # auth_user = "admin"
 # auth_token = "..."
-# Open the dashboard and read-only share chain routes to anyone; /metrics,
-# /peers, /blocked_ips and /jd_prepare keep the login.
+# Open the dashboard, read-only share chain routes (including GET /peers
+# and a tokenless /ws connection) to anyone; /metrics, /blocked_ips and
+# /jd_prepare keep the login.
 # public_dashboard = false
 # Serve a self-hosted frontend build from this folder.
 # web_root = "/srv/p2pool-frontend"

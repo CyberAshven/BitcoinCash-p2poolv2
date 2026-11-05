@@ -65,8 +65,8 @@ the node config names. The tool calls only `getblockchaininfo`,
 `getnetworkinfo`, `getmempoolinfo`, `getpeerinfo` and `getmininginfo`.
 
 For a node on another machine, use a copy of its config with
-`[api] hostname` set to that machine. `/peers` always needs the API login
-when the node has one, also with `public_dashboard = true`.
+`[api] hostname` set to that machine. `/peers` needs the API login when
+the node has one, unless `public_dashboard` is set.
 
 Settings live in `p2poolv2_tui/settings.toml` under `$XDG_CONFIG_HOME` or
 `~/.config` on Linux, `~/Library/Application Support` on macOS and

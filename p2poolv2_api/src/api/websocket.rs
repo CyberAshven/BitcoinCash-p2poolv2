@@ -5,14 +5,16 @@
 //! WebSocket handler for real-time monitoring event subscriptions.
 //!
 //! Clients connect to `/ws` and send subscribe/unsubscribe messages to
-//! choose which event topics they receive. Authentication is validated
-//! before the WebSocket upgrade via a `?token=` query parameter.
+//! choose which event topics they receive. When auth is configured, a token
+//! is validated before the WebSocket upgrade via a `?token=` query
+//! parameter; a public node (`public_dashboard`) accepts a connection with
+//! no token, while a bad token is still refused.
 
 use crate::api::auth::validate_credentials;
-use crate::api::server::AppState;
+use crate::api::server::{AppState, WebOptions};
 use axum::{
     extract::ws::{Message, WebSocket},
-    extract::{Query, State, WebSocketUpgrade},
+    extract::{Extension, Query, State, WebSocketUpgrade},
     http::StatusCode,
     response::Response,
 };
@@ -69,17 +71,20 @@ fn event_matches_subscriptions(event: &MonitoringEvent, subscriptions: &HashSet<
 
 /// Axum handler for WebSocket upgrade requests.
 ///
-/// Validates authentication (if configured) before upgrading. Returns
-/// HTTP 401 if credentials are invalid or missing when auth is required.
+/// Validates authentication (if configured) before upgrading, except on a
+/// public node with no token at all. Returns HTTP 401 if credentials are
+/// invalid, or missing when auth is required.
 pub(crate) async fn websocket_handler(
     State(state): State<Arc<AppState>>,
+    Extension(web): Extension<WebOptions>,
     Query(query): Query<WsQuery>,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
-    // Validate authentication before upgrade
     if let (Some(expected_user), Some(expected_token)) = (&state.auth_user, &state.auth_token) {
         let token = query.token.as_deref().unwrap_or("");
-        validate_credentials(token, expected_user, expected_token)?;
+        if !(web.public && token.is_empty()) {
+            validate_credentials(token, expected_user, expected_token)?;
+        }
     }
 
     let monitoring_event_sender = state.monitoring_event_sender.clone();

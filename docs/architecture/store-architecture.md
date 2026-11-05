@@ -33,7 +33,7 @@ A dedicated blocking thread that processes all database write operations sequent
 - Synchronous `run()` method with blocking `recv()` on command channel
 - Uses `std::sync::mpsc` for command channel (sync send, blocking recv)
 - Uses `tokio::sync::oneshot` for reply channels (clients can `.await` without blocking)
-- Fire-and-forget commands (chain tip updates) don't need responses
+- Fire-and-forget commands (chain tip updates, hashrate samples) don't need responses
 
 ```rust
 pub struct StoreWriter {

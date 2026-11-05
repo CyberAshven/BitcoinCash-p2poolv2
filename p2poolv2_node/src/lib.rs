@@ -316,6 +316,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let (stratum_shutdown_tx, stratum_shutdown_rx) = tokio::sync::oneshot::channel();
     let (notify_tx, notify_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
     let tracker_handle = start_tracker_actor();
+    let tracker_handle_for_notify = tracker_handle.clone();
 
     // On Bitcoin Cash each new template's previous block is learned before
     // the notifier builds jobs on it (mining on the current chain).
@@ -472,6 +473,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             pool_difficulty_for_notify,
             notify_transactions,
             notify_share_transaction_pool,
+            tracker_handle_for_notify,
         )
         .await;
         if *exit_receiver_notify.borrow() == ShutdownReason::None {

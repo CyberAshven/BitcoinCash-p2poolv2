@@ -12,7 +12,7 @@ use crate::layout::{Footer, Header, PageFrame, Trail};
 use crate::route::{PAGE_SIZE, Route};
 use crate::views::{
     BlockPage, BlocksPage, HelpPage, MinerPage, MinersPage, OverviewPage, SearchPage, SettingsPage,
-    SharePage,
+    SharePage, SharesPage,
 };
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::{Message, futures::WebSocket};
@@ -20,8 +20,8 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::cmp::Reverse;
 
-/// Milliseconds between polls of the REST endpoints, as often as the node's
-/// overview refreshes itself.
+/// Milliseconds between polls of the REST endpoints; its own interval, not
+/// the node's (which no longer meta-refreshes).
 const REFRESH_MS: u32 = 30_000;
 
 /// Milliseconds before the live feed reconnects.
@@ -33,6 +33,8 @@ pub enum Feed {
     Connecting,
     Live,
     Offline,
+    /// The node refused the credentials; the socket never opened.
+    Unauthorized,
 }
 
 /// What every view reads.
@@ -66,19 +68,24 @@ fn unix_now() -> u64 {
     (milliseconds / 1000.0) as u64
 }
 
-fn local_storage() -> Option<web_sys::Storage> {
+/// The browser's local storage, when it is available.
+pub fn local_storage() -> Option<web_sys::Storage> {
     window().local_storage().ok()?
 }
 
-fn session_storage() -> Option<web_sys::Storage> {
+/// The browser's session storage, when it is available.
+pub fn session_storage() -> Option<web_sys::Storage> {
     window().session_storage().ok()?
 }
 
-fn stored(storage: Option<web_sys::Storage>, key: &str) -> Option<String> {
+/// `key`'s stored value, or `None` when it was never stored (or storage is
+/// unavailable).
+pub fn stored(storage: Option<web_sys::Storage>, key: &str) -> Option<String> {
     storage?.get_item(key).ok()?
 }
 
-fn store(storage: Option<web_sys::Storage>, key: &str, value: &str) {
+/// Save `value` under `key`; a refused write is logged, not fatal.
+pub fn store(storage: Option<web_sys::Storage>, key: &str, value: &str) {
     if let Some(storage) = storage
         && storage.set_item(key, value).is_err()
     {
@@ -86,9 +93,24 @@ fn store(storage: Option<web_sys::Storage>, key: &str, value: &str) {
     }
 }
 
+/// A stored on/off flag under `key`: only the exact string `"0"` reads as
+/// off, so a missing key (the first visit) shows the value.
+pub fn stored_flag(key: &str) -> bool {
+    stored(local_storage(), key).as_deref() != Some("0")
+}
+
+/// A stored opt-in flag under `key`: on only when it was stored as `"1"`,
+/// so a missing key (the first visit) keeps the default off -- the network
+/// series, opt-in on every dashboard.
+pub fn stored_opt_in_flag(key: &str) -> bool {
+    stored(local_storage(), key).as_deref() == Some("1")
+}
+
 /// Initial connection: `?api=` in the page URL, then the saved base, then the
 /// page's own origin (the node serving the app from `web_root`). The
-/// password lives only in session storage, so it is gone when the tab closes.
+/// password lives only in session storage, so it is gone when the tab closes;
+/// a user left in local storage without that password is dropped too, so the
+/// next visit opens `/ws` bare instead of sending an empty password.
 fn initial_connection() -> Connection {
     let location = window().location();
     let origin = location.origin().unwrap_or_default();
@@ -101,10 +123,16 @@ fn initial_connection() -> Connection {
     let base = from_query
         .or_else(|| stored(local_storage(), "p2pool.api"))
         .unwrap_or(origin);
+    let password = stored(session_storage(), "p2pool.password").unwrap_or_default();
+    let user = if password.is_empty() {
+        String::new()
+    } else {
+        stored(local_storage(), "p2pool.user").unwrap_or_default()
+    };
     Connection {
         base: base.trim_end_matches('/').to_string(),
-        user: stored(local_storage(), "p2pool.user").unwrap_or_default(),
-        password: stored(session_storage(), "p2pool.password").unwrap_or_default(),
+        user,
+        password,
     }
 }
 
@@ -202,7 +230,8 @@ pub fn App() -> impl IntoView {
         <main class="container">
             <Trail />
             {move || match ctx.route.get() {
-                Route::Dashboard { page } => view! { <OverviewPage page=page /> }.into_any(),
+                Route::Dashboard { page: _ } => view! { <OverviewPage /> }.into_any(),
+                Route::Shares { page } => view! { <SharesPage page=page /> }.into_any(),
                 Route::Blocks { page } => view! { <BlocksPage page=page /> }.into_any(),
                 Route::Block(hash) => view! { <BlockPage hash=hash /> }.into_any(),
                 Route::Miners { page } => view! { <MinersPage page=page /> }.into_any(),
@@ -248,6 +277,16 @@ pub fn push_live_share(shares: &mut Vec<Share>, share: Share) {
     shares.retain(|kept| kept.height < share.height);
     shares.insert(0, share);
     shares.truncate(PAGE_SIZE);
+}
+
+/// Why the feed is down: the node still refuses these credentials on an
+/// authenticated route, or the socket failed for another reason. Skipped
+/// when there is no password to refuse (a public node then opens `/ws` bare).
+async fn feed_outage(connection: &Connection) -> Feed {
+    if connection.refused("/metrics").await {
+        return Feed::Unauthorized;
+    }
+    Feed::Offline
 }
 
 /// Keep `recent` filled: seed it from `/shares`, then add `/ws` share
@@ -299,7 +338,7 @@ fn start_live_feed(ctx: Ctx) {
                         }
                     }
                 }
-                live.set(Feed::Offline);
+                live.set(feed_outage(&current).await);
                 gloo_timers::future::TimeoutFuture::new(RECONNECT_MS).await;
             }
         });

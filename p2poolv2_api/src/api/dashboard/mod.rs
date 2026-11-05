@@ -11,7 +11,8 @@
 //! link to each other, search is a plain form, and long tables have pages.
 //! The routes sit behind the API's authentication unless
 //! `[api] public_dashboard` opens them: a node with `auth_user` set answers
-//! with a Basic challenge, which browsers turn into their own login prompt.
+//! a 401 that already carried credentials with a Basic challenge, which
+//! browsers turn into their own login prompt.
 
 pub(crate) mod assets;
 pub(crate) mod chart;
@@ -31,6 +32,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use bitcoin::{BlockHash, Target};
+use chart::ChartBlock;
 use history::{HashrateHistory, is_block, newest_shares, pool_hashrate, work_from_bits};
 use maud::Markup;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
@@ -38,7 +40,7 @@ use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::address_display::payout_address_string;
 use pages::{
     BlockView, BlocksView, FoundBlockRow, MinerRow, MinerView, MinersView, Overview, PAGE_SIZE,
-    Paging, ShareRow, ShareView, Site, WorkerRow,
+    Paging, ShareRow, ShareView, SharesView, Site, WorkerRow, range_window_secs,
 };
 use serde::Deserialize;
 use std::str::FromStr;
@@ -51,6 +53,10 @@ const MINER_HASHRATE_SHARES: u32 = 500;
 /// Found blocks the overview lists; the blocks page has them all.
 const RECENT_BLOCKS: usize = 5;
 
+/// Confirmed share heights the overview's Recent shares panel lists; the
+/// shares page has them all, [`pages::PAGE_SIZE`] per page.
+const OVERVIEW_SHARES: usize = 5;
+
 /// What the dashboard handlers share: the API's state and the history its
 /// sampler fills.
 pub(crate) struct DashboardState {
@@ -59,10 +65,13 @@ pub(crate) struct DashboardState {
 }
 
 /// The dashboard's routes, ready to merge into the API's share chain
-/// routes.
+/// routes. The Admin button's `/dashboard/signin` landing page is not among
+/// them: it opens with the node's login, so [`signin_route`] carries it to
+/// the authenticated side instead.
 pub(crate) fn router(app: Arc<AppState>, history: Arc<HashrateHistory>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/dashboard", get(overview))
+        .route("/dashboard/shares", get(shares))
         .route("/dashboard/blocks", get(blocks))
         .route("/dashboard/block/{hash}", get(block))
         .route("/dashboard/miners", get(miners))
@@ -71,6 +80,17 @@ pub(crate) fn router(app: Arc<AppState>, history: Arc<HashrateHistory>) -> Route
         .route("/dashboard/help", get(help))
         .route("/dashboard/search", get(search))
         .route("/dashboard/assets/{name}", get(assets::serve))
+        .with_state(Arc::new(DashboardState { app, history }))
+}
+
+/// The Admin button's `/dashboard/signin` landing page, a route the API
+/// joins to its authenticated routes so it opens with the node's login.
+pub(crate) fn signin_route(
+    app: Arc<AppState>,
+    history: Arc<HashrateHistory>,
+) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/dashboard/signin", get(signin))
         .with_state(Arc::new(DashboardState { app, history }))
 }
 
@@ -87,6 +107,7 @@ pub(crate) fn site(state: &AppState) -> Site {
     Site {
         network,
         badge: badge.to_string(),
+        auth: state.auth_user.is_some(),
     }
 }
 
@@ -123,10 +144,20 @@ fn error_page(state: &AppState, error: ApiError) -> Response {
     (status, html(pages::error(&site(state), &message))).into_response()
 }
 
-/// A `?page=` query, counted from 1.
+/// A `?page=` query, counted from 1, plus the overview's `?auto=` toggle,
+/// `?range=` chart window and the `?pool=`/`?node=`/`?network`/`?blocks`
+/// chart series toggles (a pool/node/blocks series is hidden when its
+/// parameter is `0`; the network series shows only for `network=1`, it
+/// being opt-in).
 #[derive(Deserialize)]
 struct PageQuery {
     page: Option<usize>,
+    auto: Option<String>,
+    range: Option<String>,
+    pool: Option<String>,
+    node: Option<String>,
+    network: Option<String>,
+    blocks: Option<String>,
 }
 
 /// Whether the share `blockhash` met its own Bitcoin Cash block target.
@@ -142,15 +173,22 @@ fn share_found_a_block(state: &AppState, blockhash: &BlockHash) -> bool {
 }
 
 /// One page of the confirmed share chain, newest first, each share followed
-/// by the uncles it includes, with the tip height.
-fn share_page(state: &AppState, page: Option<usize>) -> (Option<u32>, Paging, Vec<ShareRow>) {
+/// by the uncles it includes, with the tip height. `window` is how many
+/// heights a page spans: [`OVERVIEW_SHARES`] for the overview's Recent
+/// shares, `pages::PAGE_SIZE` for the shares page.
+fn share_page(
+    state: &AppState,
+    page: Option<usize>,
+    window: usize,
+) -> (Option<u32>, Paging, Vec<ShareRow>) {
     let Ok(Some(tip)) = state.chain_store_handle.get_tip_height() else {
         return (None, Paging::of(None, 0), Vec::new());
     };
     let paging = Paging::of(page, tip as usize + 1);
-    let skipped = u32::try_from((paging.page - 1) * PAGE_SIZE).unwrap_or(u32::MAX);
+    let skipped = u32::try_from((paging.page - 1) * window).unwrap_or(u32::MAX);
     let newest = tip.saturating_sub(skipped);
-    let oldest = newest.saturating_sub(PAGE_SIZE as u32 - 1);
+    let span = u32::try_from(window.saturating_sub(1)).unwrap_or(u32::MAX);
+    let oldest = newest.saturating_sub(span);
     let shares = state
         .chain_store_handle
         .store_handle()
@@ -158,7 +196,7 @@ fn share_page(state: &AppState, page: Option<usize>) -> (Option<u32>, Paging, Ve
         .query_shares(oldest, newest)
         .unwrap_or_default();
     let mut rows = Vec::with_capacity(shares.len());
-    for share in shares.iter().rev() {
+    for share in shares.iter() {
         let display = ShareInfoDisplay::from_share_info(
             share,
             Some(state.app_config.network),
@@ -308,39 +346,89 @@ async fn overview(
     Query(query): Query<PageQuery>,
 ) -> Response {
     let state = &dashboard.app;
+    let auto = pages::Auto::from_query(query.auto.as_deref());
+    let range_key = pages::normalize_range(query.range.as_deref());
+    let pool_on = pages::series_on(query.pool.as_deref());
+    let node_on = pages::series_on(query.node.as_deref());
+    let network_on = pages::network_on(query.network.as_deref());
+    let blocks_on = pages::series_on(query.blocks.as_deref());
+    let now = unix_now();
     let chain = read_store(state, move |state| {
         (
-            share_page(state, query.page),
-            pool_hashrate(state),
+            share_page(state, None, OVERVIEW_SHARES),
+            pool_hashrate(state, now),
             found_blocks(state),
         )
     })
     .await;
-    let ((tip_height, shares_paging, shares), pool_hashrate, blocks) = match chain {
+    let ((tip_height, _, shares), pool_hashrate, blocks) = match chain {
         Ok(chain) => chain,
         Err(error) => return error_page(state, error),
     };
-    let (miners_online, workers_online) = online_counts(&local_miners(state).await);
-    let network_difficulty = state.tracker_handle.get_network_difficulty();
+    let miners = local_miners(state).await;
+    let (miners_online, workers_online) = online_counts(&miners);
     let samples = dashboard.history.samples();
-    let local_hashrate = samples.iter().rev().find_map(|sample| sample.local);
+    let live_network_difficulty = state.tracker_handle.get_network_difficulty();
+    // Mirror the wasm dashboard: when the live template feed has not
+    // produced a difficulty yet, fall back to the newest sampled network
+    // hashrate and invert it back to a difficulty, so the card never goes
+    // blank while samples still carry a value.
+    let network_hashrate = live_network_difficulty
+        .map(history::network_hashrate)
+        .or_else(|| samples.iter().rev().find_map(|sample| sample.network));
+    let network_difficulty = live_network_difficulty
+        .or_else(|| network_hashrate.map(history::difficulty_from_network_hashrate));
+    // The metrics read comes before both local and pool, so the two cards
+    // take theirs the same way: live first, then the newest non-null sample.
+    let metrics = state.metrics_handle.get_metrics().await;
+    // The local rate from the metrics actor's sliding window of accepted
+    // submissions (the pre-sample fallback keeps a value on the card).
+    let local_hashrate = metrics
+        .local_submission_hashrate(now)
+        .or_else(|| samples.iter().rev().find_map(|sample| sample.local));
+    // Harmonize with the pool KPI: fall back to the newest non-null sample
+    // when the live recompute has too few shares to form a span, so both
+    // cards show a value (or both show the dash) together.
+    let pool_hashrate =
+        pool_hashrate.or_else(|| samples.iter().rev().find_map(|sample| sample.pool));
     let blocks_found = blocks.len();
-
+    // The chart's diamonds: found blocks inside the requested range, oldest
+    // first. A block outside the sample history (a restart gap, or a page
+    // opened right after one) is skipped by the chart rather than drawn
+    // left of the axis.
+    let window_start = now.saturating_sub(range_window_secs(range_key));
+    let chart_blocks: Vec<ChartBlock> = blocks
+        .iter()
+        .filter(|block| u64::from(block.time) >= window_start)
+        .map(|block| ChartBlock {
+            height: block.height,
+            time: block.time,
+        })
+        .collect();
     html(pages::overview(&Overview {
         site: site(state),
-        now: unix_now(),
+        now,
         tip_height,
         pool_hashrate,
         local_hashrate,
-        network_hashrate: network_difficulty.map(history::network_hashrate),
+        network_hashrate,
         network_difficulty,
+        share_difficulty: state.tracker_handle.get_pool_difficulty(),
         miners_online,
         workers_online,
+        accepted_shares_total: metrics.accepted_total,
+        rejected_shares_total: metrics.rejected_total,
         samples,
         blocks_found,
         blocks: blocks.into_iter().take(RECENT_BLOCKS).collect(),
         shares,
-        shares_paging,
+        auto,
+        range_key,
+        pool_on,
+        node_on,
+        network_on,
+        blocks_on,
+        chart_blocks,
     }))
 }
 
@@ -365,6 +453,25 @@ async fn blocks(
         now: unix_now(),
         blocks_found,
         blocks,
+        paging,
+    }))
+}
+
+async fn shares(
+    State(dashboard): State<Arc<DashboardState>>,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    let state = &dashboard.app;
+    let (tip_height, paging, shares) =
+        match read_store(state, move |state| share_page(state, query.page, PAGE_SIZE)).await {
+            Ok(page) => page,
+            Err(error) => return error_page(state, error),
+        };
+    html(pages::shares(&SharesView {
+        site: site(state),
+        now: unix_now(),
+        tip_height,
+        shares,
         paging,
     }))
 }
@@ -521,6 +628,10 @@ async fn help(State(dashboard): State<Arc<DashboardState>>) -> Response {
     html(pages::help(&site(&dashboard.app)))
 }
 
+pub(crate) async fn signin(State(dashboard): State<Arc<DashboardState>>) -> Response {
+    html(pages::signin(&site(&dashboard.app)))
+}
+
 #[derive(Deserialize)]
 struct SearchQuery {
     q: Option<String>,
@@ -584,446 +695,4 @@ async fn search(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api::server::{AppConfig, WebOptions, build_router_with_history};
-    use axum::body::Body;
-    use axum::http::{HeaderMap, Request, header};
-    use p2poolv2_lib::accounting::stats::metrics;
-    use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
-    use p2poolv2_lib::node::actor::NodeHandle;
-    use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
-    use p2poolv2_lib::test_utils::{genesis_for_tests, setup_test_chain_store_handle};
-    use tower::ServiceExt;
-
-    async fn build_state(
-        auth: Option<(&str, &str)>,
-        cash_network: Option<BchShareNetwork>,
-    ) -> (Arc<AppState>, tempfile::TempDir, tempfile::TempDir) {
-        let (chain_store_handle, store_dir) = setup_test_chain_store_handle(true).await;
-        let metrics_dir = tempfile::tempdir().unwrap();
-        let metrics_handle =
-            metrics::start_metrics(metrics_dir.path().to_str().unwrap().to_string())
-                .await
-                .unwrap();
-        let state = Arc::new(AppState {
-            app_config: AppConfig {
-                pool_signature_length: 0,
-                network: bitcoin::Network::Signet,
-                cash_network,
-                cors_allowed: false,
-            },
-            chain_store_handle,
-            metrics_handle,
-            tracker_handle: start_tracker_actor(),
-            node_handle: NodeHandle::new_for_test(),
-            monitoring_event_sender: create_monitoring_event_channel().0,
-            auth_user: auth.map(|(user, _)| user.to_string()),
-            auth_token: auth.map(|(_, token)| token.to_string()),
-            pplns_window: None,
-        });
-        (state, store_dir, metrics_dir)
-    }
-
-    async fn get(state: &Arc<AppState>, uri: &str) -> (StatusCode, String, HeaderMap) {
-        get_with(state, uri, WebOptions::default()).await
-    }
-
-    async fn get_with(
-        state: &Arc<AppState>,
-        uri: &str,
-        web: WebOptions,
-    ) -> (StatusCode, String, HeaderMap) {
-        let app = build_router_with_history(
-            Arc::clone(state),
-            state.app_config.clone(),
-            Arc::new(HashrateHistory::default()),
-            web,
-        );
-        let response = app
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        let status = response.status();
-        let headers = response.headers().clone();
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        (
-            status,
-            String::from_utf8_lossy(&bytes).into_owned(),
-            headers,
-        )
-    }
-
-    fn public() -> WebOptions {
-        WebOptions {
-            public: true,
-            web_root: None,
-        }
-    }
-
-    /// A frontend build: an index page and a WebAssembly module.
-    fn frontend() -> tempfile::TempDir {
-        let web_root = tempfile::tempdir().unwrap();
-        std::fs::write(web_root.path().join("index.html"), "<p>frontend</p>").unwrap();
-        std::fs::write(web_root.path().join("app.wasm"), b"\0asm").unwrap();
-        web_root
-    }
-
-    #[tokio::test]
-    async fn the_overview_is_html_without_script() {
-        let (state, _store, _metrics) = build_state(None, Some(BchShareNetwork::Chipnet)).await;
-        let (status, body, _) = get(&state, "/dashboard").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.starts_with("<!DOCTYPE html>"));
-        assert!(body.contains("Bitcoin Cash chipnet"));
-        assert!(body.contains("Share chain height"));
-        assert!(!body.contains("<script"));
-    }
-
-    #[tokio::test]
-    async fn a_known_share_has_a_page() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let genesis_block = genesis_for_tests();
-        let genesis = genesis_block.block_hash();
-        state
-            .chain_store_handle
-            .init_or_setup_genesis(genesis_block)
-            .await
-            .unwrap();
-        let (status, body, _) = get(&state, &format!("/dashboard/share/{genesis}")).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains(&genesis.to_string()));
-        assert!(body.contains("Bitcoin Cash header"));
-    }
-
-    #[tokio::test]
-    async fn a_bad_share_hash_is_a_400_page() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let (status, body, _) = get(&state, "/dashboard/share/not-a-hash").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.contains("Not a share hash"));
-    }
-
-    #[tokio::test]
-    async fn an_unknown_share_is_a_404_page() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let missing = "00".repeat(32);
-        let (status, _, _) = get(&state, &format!("/dashboard/share/{missing}")).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn the_miner_page_needs_an_address() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let (status, body, _) = get(&state, "/dashboard/miner?address=").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.contains("Enter a payout or share chain address."));
-    }
-
-    #[tokio::test]
-    async fn a_node_with_credentials_challenges_the_browser() {
-        let (state, _store, _metrics) = build_state(Some(("operator", "secret-token")), None).await;
-        let (status, _, headers) = get(&state, "/dashboard").await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let challenge = headers.get(header::WWW_AUTHENTICATE).unwrap();
-        assert!(challenge.to_str().unwrap().starts_with("Basic"));
-    }
-
-    #[tokio::test]
-    async fn a_public_node_opens_its_share_chain_but_not_its_own_routes() {
-        let (state, _store, _metrics) = build_state(Some(("operator", "secret-token")), None).await;
-        let (status, body, _) = get_with(&state, "/dashboard", public()).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("Share chain height"));
-        // A bad address is the handler's 400, not the login's 401.
-        let (status, _, _) = get_with(&state, "/miner?address=not-an-address", public()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        for own_route in ["/metrics", "/peers", "/blocked_ips", "/jd_prepare"] {
-            let (status, _, headers) = get_with(&state, own_route, public()).await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED, "{own_route}");
-            assert!(headers.contains_key(header::WWW_AUTHENTICATE));
-        }
-    }
-
-    #[tokio::test]
-    async fn the_root_opens_the_dashboard_without_a_frontend() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let (status, _, headers) = get(&state, "/").await;
-        assert!(status.is_redirection());
-        assert_eq!(headers.get(header::LOCATION).unwrap(), "/dashboard");
-    }
-
-    #[tokio::test]
-    async fn a_web_root_serves_its_frontend_beside_the_api() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let web_root = frontend();
-        let web = || WebOptions {
-            public: false,
-            web_root: Some(web_root.path().to_path_buf()),
-        };
-        let (status, body, _) = get_with(&state, "/", web()).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, "<p>frontend</p>");
-        let (status, _, headers) = get_with(&state, "/app.wasm", web()).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            headers.get(header::CONTENT_TYPE).unwrap(),
-            "application/wasm"
-        );
-        // A path of the frontend's own routing gets its index page.
-        let (status, body, _) = get_with(&state, "/miners/someone", web()).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, "<p>frontend</p>");
-        // The API and the built-in dashboard keep their paths.
-        let (_, body, _) = get_with(&state, "/health", web()).await;
-        assert_eq!(body, "OK");
-        let (_, body, _) = get_with(&state, "/dashboard", web()).await;
-        assert!(body.contains("Share chain height"));
-    }
-
-    #[tokio::test]
-    async fn a_web_root_follows_the_login() {
-        let (state, _store, _metrics) = build_state(Some(("operator", "secret-token")), None).await;
-        let web_root = frontend();
-        let web = |public| WebOptions {
-            public,
-            web_root: Some(web_root.path().to_path_buf()),
-        };
-        let (status, _, headers) = get_with(&state, "/", web(false)).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(headers.contains_key(header::WWW_AUTHENTICATE));
-        let (status, body, _) = get_with(&state, "/", web(true)).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, "<p>frontend</p>");
-    }
-
-    #[tokio::test]
-    async fn the_old_static_files_are_gone() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let (status, _, _) = get(&state, "/static/dashboard.js").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn every_page_has_the_menu_and_no_script() {
-        let (state, _store, _metrics) = build_state(None, Some(BchShareNetwork::Chipnet)).await;
-        for path in [
-            "/dashboard",
-            "/dashboard/blocks",
-            "/dashboard/miners",
-            "/dashboard/help",
-        ] {
-            let (status, body, _) = get(&state, path).await;
-            assert_eq!(status, StatusCode::OK, "{path}");
-            assert!(body.contains("class=\"site-header\""), "{path}");
-            assert!(body.contains("action=\"/dashboard/search\""), "{path}");
-            assert!(body.contains("aria-current=\"page\""), "{path}");
-            assert!(!body.contains("<script"), "{path}");
-        }
-    }
-
-    #[tokio::test]
-    async fn the_assets_are_served_from_the_binary() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let (status, body, headers) = get(&state, "/dashboard/assets/dashboard.css").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            headers
-                .get(header::CONTENT_TYPE)
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .starts_with("text/css")
-        );
-        assert!(body.contains(".kpi-card"));
-        let (status, _, _) = get(&state, "/dashboard/assets/pico.min.css").await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, _, _) = get(&state, "/dashboard/assets/dashboard.js").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn search_opens_a_share_or_a_miner() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let genesis_block = genesis_for_tests();
-        let genesis = genesis_block.block_hash();
-        state
-            .chain_store_handle
-            .init_or_setup_genesis(genesis_block)
-            .await
-            .unwrap();
-        let (status, _, headers) = get(&state, &format!("/dashboard/search?q={genesis}")).await;
-        assert!(status.is_redirection());
-        assert_eq!(
-            headers.get(header::LOCATION).unwrap(),
-            &format!("/dashboard/share/{genesis}")
-        );
-        let (status, _, headers) = get(&state, "/dashboard/search?q=+tb1qexample+").await;
-        assert!(status.is_redirection());
-        assert_eq!(
-            headers.get(header::LOCATION).unwrap(),
-            "/dashboard/miner?address=tb1qexample"
-        );
-        let (status, body, _) = get(&state, "/dashboard/search?q=").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.contains("Enter a miner address"));
-        let missing = "11".repeat(32);
-        let (status, _, _) = get(&state, &format!("/dashboard/search?q={missing}")).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn a_share_page_leads_back_to_its_miner() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let genesis_block = genesis_for_tests();
-        let genesis = genesis_block.block_hash();
-        state
-            .chain_store_handle
-            .init_or_setup_genesis(genesis_block)
-            .await
-            .unwrap();
-        let (_, body, _) = get(&state, &format!("/dashboard/share/{genesis}")).await;
-        assert!(body.contains("aria-label=\"breadcrumb\""));
-        assert!(body.contains("href=\"/dashboard/miner?address="));
-        assert!(body.contains("href=\"/dashboard/miners\""));
-    }
-
-    #[tokio::test]
-    async fn an_unknown_block_is_a_404_page() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let (status, body, _) = get(&state, &format!("/dashboard/block/{}", "22".repeat(32))).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(body.contains("has not found a block"));
-        let (status, _, _) = get(&state, "/dashboard/block/nope").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn the_network_is_named_as_the_header_names_it() {
-        let (state, _store, _metrics) = build_state(None, Some(BchShareNetwork::Chipnet)).await;
-        let (status, body, _) = get(&state, "/network").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            body,
-            r#"{"network":"Bitcoin Cash chipnet","badge":"chipnet"}"#
-        );
-    }
-
-    #[tokio::test]
-    async fn the_miners_page_is_served_as_json() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let (status, body, _) = get(&state, "/miners?page=3").await;
-        assert_eq!(status, StatusCode::OK);
-        let miners: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(miners["miners_online"], 0);
-        assert_eq!(miners["workers_online"], 0);
-        assert_eq!(miners["total"], 0);
-        assert_eq!(miners["page"], 1);
-        assert_eq!(miners["pages"], 1);
-        assert_eq!(miners["page_size"], PAGE_SIZE);
-        assert_eq!(miners["miners"], serde_json::json!([]));
-    }
-
-    #[tokio::test]
-    async fn a_public_node_opens_the_miners_and_the_network() {
-        let (state, _store, _metrics) = build_state(Some(("operator", "secret-token")), None).await;
-        let (status, _, _) = get_with(&state, "/miners", public()).await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, _, _) = get_with(&state, "/network", public()).await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, _, _) = get(&state, "/miners").await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-    }
-
-    #[test]
-    fn a_miner_row_serializes_as_the_wasm_app_reads_it() {
-        // p2poolv2_web's `LocalMiner` and `Worker` decode these names.
-        let row = MinerRow {
-            address: "bchtest:q".to_string(),
-            workers: vec![WorkerRow {
-                name: "rig".to_string(),
-                active: true,
-                accepted_work: 10,
-                best_share: 5,
-                last_share_at: 9,
-            }],
-            accepted_work: 10,
-            best_share: 5,
-            last_share_at: 9,
-            payout_fraction: None,
-        };
-        assert_eq!(
-            serde_json::to_value(&row).unwrap(),
-            serde_json::json!({
-                "address": "bchtest:q",
-                "workers": [{
-                    "name": "rig",
-                    "active": true,
-                    "accepted_work": 10,
-                    "best_share": 5,
-                    "last_share_at": 9
-                }],
-                "accepted_work": 10,
-                "best_share": 5,
-                "last_share_at": 9,
-                "payout_fraction": null
-            })
-        );
-    }
-
-    #[test]
-    fn online_counts_count_active_workers() {
-        let miner = |active: &[bool]| MinerRow {
-            address: "bchtest:q".to_string(),
-            workers: active
-                .iter()
-                .map(|active| WorkerRow {
-                    name: "rig".to_string(),
-                    active: *active,
-                    accepted_work: 1,
-                    best_share: 1,
-                    last_share_at: 1,
-                })
-                .collect(),
-            accepted_work: 1,
-            best_share: 1,
-            last_share_at: 1,
-            payout_fraction: None,
-        };
-        let miners = [miner(&[true, false, true]), miner(&[false]), miner(&[])];
-        assert_eq!(online_counts(&miners), (1, 2));
-    }
-
-    #[test]
-    fn a_looked_up_miner_matches_either_spelling() {
-        let miner = MinerRow {
-            address: "qpayout".to_string(),
-            workers: Vec::new(),
-            accepted_work: 0,
-            best_share: 0,
-            last_share_at: 0,
-            payout_fraction: None,
-        };
-        assert!(is_looked_up_miner(&miner, "qpayout", None));
-        assert!(is_looked_up_miner(
-            &miner,
-            "bchtest:qpayout",
-            Some("qpayout")
-        ));
-        assert!(!is_looked_up_miner(
-            &miner,
-            "bchtest:qpayout",
-            Some("bchtest:qpayout")
-        ));
-    }
-
-    #[tokio::test]
-    async fn the_overview_clamps_its_page() {
-        let (state, _store, _metrics) = build_state(None, None).await;
-        let (status, body, _) = get(&state, "/dashboard?page=999").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("No confirmed shares yet."));
-    }
-}
+mod tests;
