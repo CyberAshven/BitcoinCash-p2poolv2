@@ -12,8 +12,8 @@ use std::io;
 use crate::accounting::payout::coinbase_budget::bch_payout_rule_tag;
 use crate::accounting::payout::sharechain_pplns::payout_rights::BCH_PAYOUT_HOLDER_RULE_TAG;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
-    BCH_COINBASE_MATURITY, BCH_PER_SHARE_CUTS_RULE_TAG, BCH_PPLNS_WINDOW_BLOCKS,
-    BCH_WORK_WEIGHT_RULE_TAG, bch_depth_rule_tag,
+    BCH_COINBASE_MATURITY, BCH_GENESIS_LAST_RESORT_RULE_TAG, BCH_PER_SHARE_CUTS_RULE_TAG,
+    BCH_PPLNS_WINDOW_BLOCKS, BCH_WORK_WEIGHT_RULE_TAG, bch_depth_rule_tag,
 };
 use crate::config::Chain;
 use crate::node::messages::{MAX_P2P_MESSAGE_SIZE, Message, RawMessage};
@@ -106,11 +106,19 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// the alpha: it changes the share messages themselves, which now carry
 /// Bitcoin Cash headers a node before it cannot read, so it ships as a flag
 /// day with its own last segment. Later rule changes go through the vote.
+///
+/// Paying the genesis share only as the last resort
+/// (`BCH_GENESIS_LAST_RESORT_RULE_TAG`, 2026-11-05) is the owner's second
+/// exception, also a flag day with its own segment. It changes a coinbase
+/// only while genesis is in the window, in a new chain's first hours, and a
+/// vote cannot switch a chain before its parent is
+/// `SHARE_VERSION_VOTE_DEPTH` shares high, three days, by when genesis has
+/// left every window.
 fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
         Chain::BitcoinCash => Some(format!(
-            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_PER_SHARE_CUTS_RULE_TAG}/{BCH_UNCLE_ONCE_RULE_TAG}/{BCH_SHARE_BODY_RULE_TAG}/{BCH_PAYOUT_SCRIPT_RULE_TAG}/{}/{}/{}/{BCH_NO_SEGWIT_RULE_TAG}/{BCH_WORK_WEIGHT_RULE_TAG}/{BCH_MERGE_MINING_RULE_TAG}/{BCH_SHARE_VERSION_RULE_TAG}/{BCH_CURRENT_CHAIN_RULE_TAG}",
+            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_PER_SHARE_CUTS_RULE_TAG}/{BCH_UNCLE_ONCE_RULE_TAG}/{BCH_SHARE_BODY_RULE_TAG}/{BCH_PAYOUT_SCRIPT_RULE_TAG}/{}/{}/{}/{BCH_NO_SEGWIT_RULE_TAG}/{BCH_WORK_WEIGHT_RULE_TAG}/{BCH_MERGE_MINING_RULE_TAG}/{BCH_SHARE_VERSION_RULE_TAG}/{BCH_CURRENT_CHAIN_RULE_TAG}/{BCH_GENESIS_LAST_RESORT_RULE_TAG}",
             bch_payout_rule_tag(),
             bch_merkle_rule_tag(),
             bch_depth_rule_tag(),
@@ -384,7 +392,7 @@ mod tests {
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/1.0.0"
             )
         );
     }
@@ -456,10 +464,26 @@ mod tests {
             .unwrap()
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
-        let before = current.replace("/bch-prev-1off/", "/");
+        let before = current.replace("/bch-prev-1off/genesis-last-resort/", "/");
 
         assert_ne!(current, before);
         assert!(before.ends_with("/version-vote/1.0.0"), "{before}");
+    }
+
+    /// A chipnet node from before the genesis share became the payee of last
+    /// resort derived the string ending `.../bch-prev-1off/1.0.0`. It pays
+    /// genesis beside mined work while genesis is in the window, so the new
+    /// string differs and the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_genesis_last_resort() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+            .unwrap()
+            .block_hash();
+        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current.replace("/genesis-last-resort/", "/");
+
+        assert_ne!(current, before);
+        assert!(before.ends_with("/bch-prev-1off/1.0.0"), "{before}");
     }
 
     /// A chipnet node from before the one-nephew uncle rule derived
@@ -550,7 +574,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/kad/1.0.0"
             )
         );
     }

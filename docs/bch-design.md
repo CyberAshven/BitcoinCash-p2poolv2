@@ -362,6 +362,15 @@ Observed:
   about one block's work of real shares before a block is likely, so the
   genesis share's weight is negligible, but it is not zero until it leaves
   the window.
+- Since 2026-11-05 (`genesis-last-resort`) genesis is paid only when no
+  other share or uncle in the window is. The weight it took was not
+  negligible in practice: a block whose window held only work off its BCH
+  chain paid genesis all of it, and the chipnet NUMS address
+  `bchtest:qqmt9aztcrcms0aulp6v809n8fmgfx4dmgauqtmaxr` (hash160
+  `36b2f44bc0f1b83fbcf874c3bcb33a76849aadda`) holds 46.7 tBCH from the first
+  hours of each share chain. Genesis still takes the payout when nothing else
+  is paid, so a chain's first share has a payee and the case above is
+  unchanged.
 
 Header check. On regtest about half of all hashes meet the block target, so
 a block BCHN accepts does not by itself show that the node rebuilt the
