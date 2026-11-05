@@ -1115,6 +1115,155 @@ async fn templates_flow_from_an_unencrypted_provider_and_solutions_flow_back() {
     );
 }
 
+/// A node RPC that answers the template's parent lookup, as often as asked.
+async fn parent_lookup_rpc(fixture: &BlockTemplate) -> MockServer {
+    let rpc = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_partial_json(serde_json::json!({
+            "method": "getblockheader",
+            "params": [fixture.previousblockhash, true],
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": {"height": fixture.height - 1},
+            "error": null,
+            "id": 0,
+        })))
+        .mount(&rpc)
+        .await;
+    rpc
+}
+
+/// Accept one unencrypted provider connection on `listener`, set it up and
+/// give it `fixture` as template `template_id`. Returns the open connection.
+async fn serve_one_template(
+    listener: &TcpListener,
+    fixture: &BlockTemplate,
+    template_id: u64,
+) -> TestSv2Server {
+    let mut server = TestSv2Server::accept(listener, None).await;
+    server.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
+    server
+        .send_message(
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+            SetupConnectionSuccess {
+                used_version: 2,
+                flags: 0,
+            },
+        )
+        .await;
+    server
+        .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
+        .await;
+    server
+        .send_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            test_tdp_new_template(template_id, true, fixture),
+        )
+        .await;
+    server
+        .send_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            test_tdp_set_new_prev_hash(template_id, fixture),
+        )
+        .await;
+    server.receive(MESSAGE_TYPE_REQUEST_TRANSACTION_DATA).await;
+    server
+        .send_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            test_tdp_transaction_data(template_id, fixture),
+        )
+        .await;
+    server
+}
+
+/// Start the provider client on `listener`'s address with `lost_contact_after`.
+fn start_keep_connected(
+    listener: &TcpListener,
+    rpc: &MockServer,
+    lost_contact_after: Duration,
+) -> mpsc::Receiver<NotifyCmd> {
+    let provider = TemplateProvider {
+        address: listener.local_addr().unwrap().to_string(),
+        authority_public_key: None,
+        network: BitcoinCashNetwork::Chipnet,
+    };
+    let bitcoind = BitcoindRpcClient::new(&rpc.uri(), "user", "pass").unwrap();
+    let (notify_tx, notify_rx) = mpsc::channel(8);
+    tokio::spawn(async move {
+        keep_connected(&provider, &bitcoind, &notify_tx, lost_contact_after).await;
+    });
+    notify_rx
+}
+
+/// A provider that published a template and then went away: once no
+/// connection has published for the limit, mining work is withdrawn, once.
+/// Reconnection attempts in between do not keep the work.
+#[tokio::test]
+async fn work_is_withdrawn_once_the_provider_is_gone_past_the_limit() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let rpc = parent_lookup_rpc(&fixture).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let limit = Duration::from_secs(2);
+    let mut notify_rx = start_keep_connected(&listener, &rpc, limit);
+
+    let server = serve_one_template(&listener, &fixture, 41).await;
+    let Some(NotifyCmd::SendToAll { .. }) = timeout(Duration::from_secs(5), notify_rx.recv())
+        .await
+        .unwrap()
+    else {
+        panic!("expected the provider's template");
+    };
+    drop(server);
+    drop(listener);
+    let gone = Instant::now();
+
+    let Some(NotifyCmd::Withdraw) = timeout(Duration::from_secs(10), notify_rx.recv())
+        .await
+        .expect("work must be withdrawn once the provider is gone past the limit")
+    else {
+        panic!("expected a withdrawal");
+    };
+    assert!(gone.elapsed() >= limit - Duration::from_millis(100));
+    assert!(
+        timeout(Duration::from_secs(4), notify_rx.recv())
+            .await
+            .is_err(),
+        "the work is withdrawn once"
+    );
+}
+
+/// A provider that comes back and publishes within the limit keeps the work.
+#[tokio::test]
+async fn a_provider_back_within_the_limit_keeps_the_work() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let rpc = parent_lookup_rpc(&fixture).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut notify_rx = start_keep_connected(&listener, &rpc, Duration::from_secs(4));
+
+    let first = serve_one_template(&listener, &fixture, 41).await;
+    let Some(NotifyCmd::SendToAll { .. }) = timeout(Duration::from_secs(5), notify_rx.recv())
+        .await
+        .unwrap()
+    else {
+        panic!("expected the provider's template");
+    };
+    drop(first);
+
+    let _second = serve_one_template(&listener, &fixture, 42).await;
+    let Some(NotifyCmd::SendToAll { .. }) = timeout(Duration::from_secs(5), notify_rx.recv())
+        .await
+        .unwrap()
+    else {
+        panic!("expected the provider's template after reconnecting");
+    };
+    assert!(
+        timeout(Duration::from_secs(6), notify_rx.recv())
+            .await
+            .is_err(),
+        "an open connection keeps the work however quiet it is"
+    );
+}
+
 #[tokio::test]
 async fn a_noise_provider_signed_by_the_pinned_key_sends_templates() {
     let fixture: BlockTemplate = serde_json::from_str(REGTEST_TEMPLATE).unwrap();
