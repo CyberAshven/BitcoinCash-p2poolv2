@@ -2,7 +2,8 @@ use super::*;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
-use crate::test_utils::TestShareBlockBuilder;
+use crate::store::transaction_store::outpoint_key;
+use crate::test_utils::{TestShareBlockBuilder, test_funding_transaction};
 use bitcoin::TxMerkleNode;
 use bitcoin::Work;
 use bitcoin::hashes::Hash;
@@ -432,6 +433,31 @@ fn test_store_share_block_with_transactions_should_retreive_txs() {
     let share = result.unwrap();
     assert_eq!(share.transactions.len(), num_txs);
     assert_eq!(share.transactions, txs);
+}
+
+#[test]
+fn test_get_share_returns_none_when_transaction_output_row_missing() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+    let mut transaction = test_funding_transaction(1_000);
+    transaction.input[0].previous_output.vout = 0;
+    let txid = transaction.compute_txid();
+    let block = TestShareBlockBuilder::new()
+        .add_transaction(transaction)
+        .build();
+    let blockhash = block.block_hash();
+    let mut batch = Store::get_write_batch();
+    store.add_share_block(&block, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+    assert_eq!(store.get_share(&blockhash).unwrap(), block);
+
+    let outputs_cf = store.db.cf_handle(&ColumnFamily::Outputs).unwrap();
+    store
+        .db
+        .delete_cf(&outputs_cf, outpoint_key(&txid, 0).as_bytes())
+        .unwrap();
+
+    assert!(store.get_share(&blockhash).is_none());
 }
 
 #[test]

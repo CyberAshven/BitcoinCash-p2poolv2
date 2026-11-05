@@ -19,6 +19,41 @@ graceful signal without `unsafe`), and BCHN is spawned in the background on
 Windows. `cargo sim nightly deep-fork-refused` passes on Windows with BCHN
 29.2.0 and no workarounds. Linux and macOS are unchanged.
 
+A node no longer stops when a share transaction's stored rows are missing,
+for example after the pruner deletes them between two reads. `get_tx`
+unwrapped each input and output row, and release builds abort on panic, so
+the whole node stopped; it now returns `NotFound`, as upstream's 0f15c131
+does. `get_share` returns None when any of the share's transactions cannot
+be rebuilt, instead of returning the share with that transaction silently
+left out. No share-chain rule changes.
+
+The Electrum server reads the share chain: upstream's 43ddd7d4 (chain
+store handle wired in, `blockchain.*` methods answered only once the node
+is synced) and 6fcf5e72 (`blockchain.block.header`) are ported unchanged.
+On a Bitcoin Cash node `server.features` names the configured network and
+reports Bitcoin Cash's depths; upstream's reports a chipnet node as
+`testnet` with Bitcoin's coinbase maturity of 6048. No share-chain rule
+changes.
+
+The configs, packaging, TUI config editor and docs offer only P2Pool mode.
+Hydrapool mode (standalone PPLNS, no share chain) came with upstream and its
+code stays as upstream has it, so `mode = "hydrapool"` still parses, but
+nothing an operator reads offers it: the `mode` lines are gone from the
+sample configs and the TUI editor, and `bootstrap_address` is described as
+required to parse and never paid by a share chain node. `pool-diagnose`
+looks for the `p2poolv2` process by default; the script it replaced looked
+for `hydrapool`. No share-chain rule changes.
+
+A Hydrapool-mode node starts again after the share-chain genesis changes
+between releases. Hydrapool keeps no share chain beyond genesis, but startup
+refused any store built on another genesis. `init_for_mode`, ported from
+upstream's a45c27a7, replaces the genesis in Hydrapool mode and keeps the
+refusal in P2Pool mode. Unlike upstream, it replaces only a store whose
+confirmed chain is the old genesis alone: with a confirmed share above it,
+the node still refuses, because the replacement would fail inside
+`setup_genesis` after switching the in-memory genesis ("Incorrect
+confirmation"). No share-chain rule changes.
+
 `dial_peers` may name a peer by host name (`/dns4/`, `/dns6/`, `/dns/`), as
 an operator running a public node is likely to publish it. The node's
 transport was TCP only, so such an address failed with "Multiaddr is not
