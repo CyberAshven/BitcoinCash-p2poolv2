@@ -16,6 +16,10 @@ pub mod parse_coinbase;
 
 const MAX_JOB_AGE_SECS: u64 = 15 * 60; // 15 minutes
 const EXPECTED_SHARES_PER_JOB: usize = 4; // new jobs are created every 10s. Target share period 3s.
+/// First id a declared job gets ([`JobTracker::get_next_declared_job_id`]):
+/// above every id this node's own jobs take, which start from the
+/// nanoseconds since 1970 (below 2^63 until the year 2262).
+const DECLARED_JOB_ID_BASE: u64 = 1 << 63;
 
 /// The job id sent to miners.
 /// A job id matches a block template.
@@ -76,6 +80,8 @@ pub struct JobTracker {
     /// making linear scan faster than hash lookups with far less memory overhead.
     job_shares: DashMap<JobId, Vec<BlockHash>>,
     latest_job_id: AtomicU64,
+    /// Ids for jobs miners declare, apart from `latest_job_id`.
+    declared_job_id: AtomicU64,
 }
 
 impl JobTracker {
@@ -89,6 +95,7 @@ impl JobTracker {
             job_details: DashMap::new(),
             job_shares: DashMap::new(),
             latest_job_id: AtomicU64::new(timestamp),
+            declared_job_id: AtomicU64::new(DECLARED_JOB_ID_BASE),
         }
     }
 
@@ -141,6 +148,15 @@ impl JobTracker {
     /// Get the latest job id without incrementing
     pub fn get_latest_job_id(&self) -> JobId {
         JobId(self.latest_job_id.load(Ordering::SeqCst))
+    }
+
+    /// The next id for a job a miner declared (an SV2 custom job). Declared
+    /// ids come from their own range, so a declared job never becomes
+    /// [`Self::get_latest_job_id`]: the latest job stays the latest one this
+    /// node built, which its coinbase metrics, network difficulty and
+    /// `/jd_prepare` read with this node's coinbase layout.
+    pub fn get_next_declared_job_id(&self) -> JobId {
+        JobId(self.declared_job_id.fetch_add(1, Ordering::SeqCst))
     }
 
     /// Get job details by job id
@@ -229,6 +245,20 @@ pub fn start_tracker_actor() -> Arc<JobTracker> {
 mod tests {
     use super::*;
     use crate::test_utils::{TEST_COINBASE_NSECS, create_test_commitment};
+
+    #[test]
+    fn test_declared_job_ids_do_not_move_the_latest_job() {
+        let tracker = JobTracker::new();
+        let own = tracker.get_next_job_id();
+
+        let declared = tracker.get_next_declared_job_id();
+        let declared2 = tracker.get_next_declared_job_id();
+
+        assert_eq!(tracker.get_latest_job_id(), own);
+        assert_eq!(declared.0, DECLARED_JOB_ID_BASE);
+        assert_eq!(declared2.0, DECLARED_JOB_ID_BASE + 1);
+        assert!(own.0 < DECLARED_JOB_ID_BASE);
+    }
 
     #[test]
     fn test_job_id_generation() {
