@@ -260,6 +260,102 @@ fn requested_outputs_are_the_bytes_jd_prepare_builds() {
     );
 }
 
+/// With per-share cuts the donation key is a payee in the window's weights
+/// (`BCH_PER_SHARE_CUTS_RULE_TAG`). The outputs a Job Declaration client
+/// requests split those same weights, so they pay the key, and every other
+/// payee, exactly what the node's own job on the same window pays, though
+/// the node passes its own 1% donation and fee as the notifier does.
+#[tokio::test]
+async fn requested_outputs_pay_the_per_share_donation_the_nodes_own_job_pays() {
+    use crate::config::{BitcoinCashNetwork, bitcoin_cash_donation_address};
+    use crate::stratum::work::difficulty::validate::build_coinbase_from_components;
+    use crate::stratum::work::prepared_notify::insert_miner_job;
+    use crate::stratum::work::tracker::start_tracker_actor;
+    use crate::test_utils::test_bch_prepared_with_weights_and_cuts;
+    use std::collections::HashMap;
+
+    let donation_key = bitcoin_cash_donation_address(BitcoinCashNetwork::Regtest);
+    let payee = |seed: u8| {
+        PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([seed; 20]),
+            Network::Regtest,
+        ))
+    };
+    // Two equal shares committing 1% each and genesis committing none, in
+    // the window's units of 1 / 10^8 of a weight.
+    let weights = HashMap::from([
+        (payee(1), 9_900 * 10_000),
+        (payee(2), 9_900 * 10_000),
+        (payee(3), 100_000_000),
+        (donation_key.clone(), 2 * 100 * 10_000),
+    ]);
+    let fee_address = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0xfe; 20]),
+        Network::Regtest,
+    ));
+    let prepared = test_bch_prepared_with_weights_and_cuts(
+        test_bch_prepared().template().as_ref().clone(),
+        weights,
+        (Some(donation_key.clone()), Some(100)),
+        (Some(fee_address.clone()), Some(100)),
+        None,
+    );
+    let template = prepared.template();
+    let value = template.coinbasevalue;
+
+    let tracker = start_tracker_actor();
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payee(1)),
+        Some(ShareOwner::CashP2pkh([1; 20])),
+        &tracker,
+    );
+    let job = tracker.get_job(job_id).unwrap();
+    let own = build_coinbase_from_components(
+        &job.coinbase1,
+        "00000000",
+        "0000000000000000",
+        &job.coinbase2,
+    )
+    .unwrap()
+    .output;
+
+    let token = prepared
+        .mining_job_token([0x11; 32], template.curtime)
+        .unwrap();
+    let prefix = Builder::new()
+        .push_int(i64::from(template.height))
+        .push_slice(b"miner")
+        .into_bytes();
+    let mut request_bytes = test_payout_outputs_request(1, &token, template, value, &prefix);
+    let request = RequestPayoutOutputs::from_bytes(&mut request_bytes).unwrap();
+    let identity = PayoutIdentity {
+        payout: payee(2),
+        owner: ShareOwner::CashP2pkh([2; 20]),
+    };
+    let answered = prepare_payout_outputs(
+        &request,
+        &prepared,
+        Some(&identity),
+        Some(prepared.prev_share_blockhash()),
+    )
+    .unwrap();
+    let requested: Vec<TxOut> = deserialize(answered.outputs()).unwrap();
+
+    let payouts = |outputs: &[TxOut]| -> HashMap<bitcoin::ScriptBuf, u64> {
+        outputs
+            .iter()
+            .filter(|output| !output.script_pubkey.is_op_return())
+            .map(|output| (output.script_pubkey.clone(), output.value.to_sat()))
+            .collect()
+    };
+    let own_payouts = payouts(&own);
+    assert_eq!(payouts(&requested), own_payouts);
+    assert_eq!(own_payouts[&donation_key.script_pubkey()], value / 150);
+    assert_eq!(own_payouts.len(), 4);
+    assert!(!own_payouts.contains_key(&fee_address.script_pubkey()));
+}
+
 /// A client that builds its custom job from the reply alone, with the prefix
 /// it asked for, gets it validated; the reply says exact outputs, version 2,
 /// sequence `0xfffffffe` and the height less one.

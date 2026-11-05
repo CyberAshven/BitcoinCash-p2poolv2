@@ -20,6 +20,23 @@ being refused. A node on the old rule builds another coinbase while genesis is i
 the window, so the two do not peer, and existing share chains start again on
 a fresh store. Bitcoin is unchanged.
 
+The Bitcoin Cash per-share donation has regtest tests against BCHN, which
+the nightly workflow runs with the payout tree tests
+(`per_share_donation_bchn_test`). Each mines a block whose coinbase the
+window splits and checks every payee in the coinbase BCHN stored. A block
+found before any share-chain share pays the genesis key the whole value
+and the donation key nothing. Miner shares at the default 1% pay the key
+each share's own cut, short of 1% of the block by genesis's weight where
+genesis is paid beside them. The tests build the window without the BCH
+chain rule (`with_bch_header_rules`), which decides whether genesis is
+paid beside other shares; the cuts are split the same either way. Shares
+mined with `donation=0.5`, `donation=0` and no choice give the key 50, 0
+and 100 basis points of their own parts. A unit test checks that the
+outputs a Job Declaration client requests (`0x5052`) pay the donation key
+what the node's own job on the same window pays. `TestShareBlockBuilder`
+can commit a share's donation and fee. Tests only; no share-chain rule
+changes.
+
 `public_dashboard` now also opens `GET /peers` and a tokenless `/ws`
 connection (a bad `/ws` token is still 401); `/metrics`, `/blocked_ips`
 and `/jd_prepare` keep the API login. The peer list moved from the node's
