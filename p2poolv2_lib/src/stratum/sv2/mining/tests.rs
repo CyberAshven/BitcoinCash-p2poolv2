@@ -2789,3 +2789,102 @@ async fn a_winning_share_on_an_extended_channel_gets_its_win_proof() {
     assert_eq!(win[42 + length], 69);
     assert_eq!(win[43 + length..], tokens.entries[0].split.preimage());
 }
+
+/// The test template on another parent block.
+fn prepared_on_parent(parent: u8) -> Arc<PreparedNotifyParams> {
+    let mut template = test_bch_prepared().template().as_ref().clone();
+    template.previousblockhash = BlockHash::from_byte_array([parent; 32]).to_string();
+    test_bch_prepared_for_template(template)
+}
+
+/// The job id of the `NewExtendedMiningJob` among `frames`.
+fn extended_job_id(frames: &[Vec<u8>]) -> u32 {
+    let frame = frames
+        .iter()
+        .find(|frame| frame_type(frame) == MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
+        .unwrap();
+    let mut job_payload = payload(frame);
+    NewExtendedMiningJob::from_bytes(&mut job_payload)
+        .unwrap()
+        .job_id
+}
+
+/// The `SubmitShares.Error` code a share for `job_id` with a 4-byte
+/// extranonce gets. The extranonce size is checked only once the job is
+/// found, so `bad-extranonce-size` means the channel still holds the job.
+async fn short_extranonce_reply(
+    channels: &mut MiningChannels,
+    channel_id: u32,
+    job_id: u32,
+) -> String {
+    let mut submit = payload(
+        &encode_message(
+            SubmitSharesExtended {
+                channel_id,
+                sequence_number: 1,
+                job_id,
+                nonce: 1,
+                ntime: test_bch_prepared().template().curtime,
+                version: 0x2000_0000,
+                extranonce: B032::new(&[0u8; 4]).unwrap(),
+            },
+            MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED,
+        )
+        .unwrap(),
+    );
+    let reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut submit, None)
+        .await
+        .unwrap();
+    let mut reply_payload = payload(&reply[0]);
+    SubmitSharesError::from_bytes(&mut reply_payload)
+        .unwrap()
+        .error_code
+        .as_utf8_or_hex()
+}
+
+/// On a new BCH tip a channel keeps the jobs of the tip it leaves: the share
+/// that found the block that moved the tip can arrive after the new
+/// template. Jobs two tips back are stale, and an id the channel never gave
+/// out stays invalid.
+#[tokio::test]
+async fn a_new_tip_keeps_the_previous_tips_jobs_and_older_ones_are_stale() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let mut open = open_extended_request(&bch_identity());
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(prepared_on_parent(0x31)),
+        )
+        .await
+        .unwrap();
+    let mut success_payload = payload(&opened[0]);
+    let channel_id = OpenExtendedMiningChannelSuccess::from_bytes(&mut success_payload)
+        .unwrap()
+        .channel_id;
+    let first = extended_job_id(&opened);
+
+    let second = extended_job_id(&channels.on_template(&prepared_on_parent(0x32)));
+
+    assert_eq!(
+        short_extranonce_reply(&mut channels, channel_id, first).await,
+        ERROR_CODE_SUBMIT_SHARES_BAD_EXTRANONCE_SIZE
+    );
+
+    channels.on_template(&prepared_on_parent(0x33));
+
+    assert_eq!(
+        short_extranonce_reply(&mut channels, channel_id, second).await,
+        ERROR_CODE_SUBMIT_SHARES_BAD_EXTRANONCE_SIZE
+    );
+    assert_eq!(
+        short_extranonce_reply(&mut channels, channel_id, first).await,
+        "stale-share"
+    );
+    assert_eq!(
+        short_extranonce_reply(&mut channels, channel_id, first + 1_000).await,
+        "invalid-job-id"
+    );
+}
