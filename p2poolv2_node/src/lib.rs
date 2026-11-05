@@ -235,8 +235,13 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         }
     });
 
+    let bitcoin_cash_network = match config.stratum.chain {
+        Chain::BitcoinCash => config.stratum.bitcoin_cash_network,
+        Chain::Bitcoin => None,
+    };
     let store_handle = StoreHandle::new(store.clone(), write_tx);
-    let chain_store_handle = ChainStoreHandle::new(store_handle, config.stratum.network);
+    let chain_store_handle = ChainStoreHandle::new(store_handle, config.stratum.network)
+        .with_bitcoin_cash_network(bitcoin_cash_network);
 
     if let Err(e) = chain_store_handle
         .init_for_mode(genesis.clone(), config.stratum.mode)
@@ -259,10 +264,6 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     // A Bitcoin Cash node mines only for BCHN on the configured network: the
     // chain name is checked before waiting for the node to sync, and a block
     // only Bitcoin Cash has once it has synced.
-    let bitcoin_cash_network = match config.stratum.chain {
-        Chain::BitcoinCash => config.stratum.bitcoin_cash_network,
-        Chain::Bitcoin => None,
-    };
     if let Some(network) = bitcoin_cash_network
         && let Err(error) =
             preflight::verify_bitcoin_cash_chain_name(&config.bitcoinrpc, network).await
@@ -646,6 +647,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         );
         Some(start_electrum_server(
             config.electrum.clone(),
+            chain_store_handle.clone(),
             electrum_shutdown.clone(),
         ))
     } else {
