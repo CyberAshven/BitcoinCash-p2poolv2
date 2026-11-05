@@ -56,6 +56,7 @@ one: following the quickstart, the port never opened. Set it to `true` once
 already say. The quickstart also says to mine one block on a new regtest
 chain first: BCHN reports `initialblockdownload` while its tip is the 2011
 genesis block, and the node waits for it. No code or share-chain rule
+changes.
 
 Calls to BCHN no longer fail on a connection BCHN has just closed. The RPC
 client kept idle connections for 90 s, and BCHN closes one idle for
