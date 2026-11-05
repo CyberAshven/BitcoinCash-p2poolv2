@@ -366,6 +366,48 @@ pub(crate) async fn submit_found_block(
     Ok(())
 }
 
+/// Submit a block a Job Declaration client reported with `PushSolution`,
+/// rebuilt from its Full-Template declaration, to the node and the extra
+/// nodes, as `submit_found_block` does.
+///
+/// Nothing is recorded as found here: the client's share, when it sends one
+/// on its Mining connection, goes through `submit_found_block`, and this
+/// node may already have submitted the same block there (the node then
+/// answers `duplicate`).
+pub(crate) async fn submit_pushed_block(stratum_context: &StratumContext, block: Block) {
+    #[cfg(not(feature = "sim"))]
+    {
+        info!(
+            "Submitting BCH block {} from a Job Declaration PushSolution",
+            block.block_hash()
+        );
+        let block = Arc::new(block);
+        let submitter = &stratum_context.found_block_submitter;
+        spawn_extra_node_submissions(
+            &block,
+            &submitter.extra_nodes,
+            &stratum_context.metrics,
+            submitter.retry,
+            None,
+        );
+        let result = submit_to_primary_node(
+            &block,
+            None,
+            &stratum_context.bitcoindrpc_client,
+            &stratum_context.metrics,
+            &submitter.retry,
+        )
+        .await;
+        if result.node_has_block() {
+            request_template_refresh(stratum_context);
+        }
+    }
+    #[cfg(feature = "sim")]
+    {
+        let _ = (stratum_context, block);
+    }
+}
+
 /// Describe the locally mined share for a later positive BCHN verdict.
 /// Constructing this record alone never publishes a found block.
 #[cfg(not(feature = "sim"))]

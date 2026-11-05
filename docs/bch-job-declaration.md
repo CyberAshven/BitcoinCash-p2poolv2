@@ -61,6 +61,22 @@ Only a null proposal result permits installation. A successful response
 contains the installed channel job id; shares can be submitted immediately.
 The pool can broadcast a complete found block in this mode.
 
+**PushSolution.** A Full-Template client that finds a block also sends
+`PushSolution` on its Job Declaration connection (spec 6.4.9). The
+connection keeps its last four Full-Template declarations on the current
+previous block. All connections together keep at most 64 MiB of them, on
+top of the 64 MiB the tokens may hold, since a kept declaration outlives
+its token. For a `PushSolution`, it rebuilds the coinbase as declared
+prefix, pushed extranonce and declared suffix, adds the declared
+transactions in CTOR, and checks that the header meets the target of the
+template the token was allocated against. If so, it submits the block to
+BCHN and every `[[submit_nodes]]` entry. When the share also arrived on the
+Mining connection, the node submits the block twice, and BCHN answers
+`duplicate` the second time. A `PushSolution` that solves none of the
+connection's declarations is ignored. That includes one from a
+Coinbase-Only client, whose transactions the node never saw. The
+connection stays open either way; the message has no answer.
+
 **Declared token leaves.** A Full-Template declaration whose output 0 is a
 token root discloses the leaves behind it in `DeclareMiningJob.excess_data`,
 in Pickaxe's `CTMD` v2 ([Disclosure to
