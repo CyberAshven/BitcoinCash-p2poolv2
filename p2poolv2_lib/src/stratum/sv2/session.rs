@@ -11,9 +11,11 @@
 use super::custom_job::declared_leaves;
 use super::payout_outputs::{
     INVALID_MINING_JOB_TOKEN, PAYOUT_OUTPUTS_UNAVAILABLE, PayoutIdentity, REQUEST_PAYOUT_OUTPUTS,
-    RequestPayoutOutputs, answer_frame, prepare_payout_outputs, stale_frame,
+    RequestPayoutOutputs, VERIFY_RATE_LIMITED, VerifyPayoutOutputs, answer_frame,
+    prepare_payout_outputs, stale_frame, verify_answer_frame, verify_payout_outputs,
 };
 use super::sort_ctor;
+use crate::accounting::payout::AnchorWeights;
 use crate::shares::auxpow::Disclosure;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::stratum::parse_password::{
@@ -83,6 +85,16 @@ const MAX_DECLARED_TRANSACTION_BYTES: usize = 64 * 1024 * 1024;
 /// may hold eight pending declarations. A client asks once per job, just
 /// before declaring it, so a ninth is not following the extension.
 const MAX_PAYOUT_SETS: usize = 8;
+/// `VerifyPayoutOutputs` answers one connection may compute in one second.
+///
+/// A client verifies a job once, and may retry a few `unknown-anchor`
+/// answers while a share propagates, so four a second is a short burst
+/// rather than a walk it can keep the node on. One more is answered
+/// `verify-rate-limited` and the connection stays up. The handler does not
+/// await, so a second verify cannot be in progress; one that re-entered
+/// would get the same answer. Unlike [`MAX_PAYOUT_SETS`], this does not
+/// close the connection.
+const MAX_VERIFY_PAYOUTS_PER_SECOND: u32 = 4;
 /// Full-Template declarations a connection keeps for `PushSolution`, all
 /// on the latest template's previous block.
 const MAX_SOLVABLE_JOBS: usize = 4;
@@ -476,6 +488,12 @@ pub struct Sv2Connection {
     /// Open tokens this connection was given payout outputs for since then,
     /// at most [`MAX_PAYOUT_SETS`].
     payout_sets: HashSet<Vec<u8>>,
+    /// `VerifyPayoutOutputs` answers admitted since [`Self::verify_window`].
+    verify_count: u32,
+    /// Start of the one-second verify budget.
+    verify_window: Instant,
+    /// A verify is inside [`Self::handle_verify_payout_outputs`].
+    verify_outstanding: bool,
     /// This connection's latest Full-Template declarations, newest last,
     /// for `PushSolution`.
     solvable_jobs: VecDeque<SolvableJob>,
@@ -496,6 +514,9 @@ impl Sv2Connection {
             payout_outputs: false,
             payout_basis: None,
             payout_sets: HashSet::with_capacity(MAX_PAYOUT_SETS),
+            verify_count: 0,
+            verify_window: Instant::now(),
+            verify_outstanding: false,
             solvable_jobs: VecDeque::with_capacity(MAX_SOLVABLE_JOBS),
         }
     }
@@ -570,8 +591,9 @@ impl Sv2Connection {
     }
 
     /// Answer a requested payout outputs message on a connection that
-    /// negotiated the extension. A client sends only `RequestPayoutOutputs`;
-    /// any other message of the extension closes the connection, and so does
+    /// negotiated the extension. A client sends `RequestPayoutOutputs`;
+    /// `VerifyPayoutOutputs` is [`Self::handle_verify_payout_outputs`]. Any
+    /// other message of the extension closes the connection, and so does
     /// a request for a token past [`MAX_PAYOUT_SETS`], as a declaration past
     /// its limit does. Every other refusal is a `RequestPayoutOutputs.Error`.
     pub(crate) fn handle_payout_outputs(
@@ -612,6 +634,64 @@ impl Sv2Connection {
             self.payout_sets.insert(token);
         }
         Ok(vec![answer_frame(&request, answer)?])
+    }
+
+    /// Answer `VerifyPayoutOutputs` (`0x04`).
+    ///
+    /// The token is another node's. Nothing is allocated and the job
+    /// registry is not taken. `identity_of` resolves `user_identifier` the
+    /// way `AllocateMiningJobToken` does. `weights` is this node's window;
+    /// `None` (a node that does not pay from the share chain) is
+    /// `payout-outputs-unavailable`. A malformed payload still closes the
+    /// connection. A verify past [`MAX_VERIFY_PAYOUTS_PER_SECOND`], or one
+    /// started while another is in this function, is `verify-rate-limited`
+    /// and does not close the connection.
+    pub(crate) fn handle_verify_payout_outputs(
+        &mut self,
+        payload: &mut [u8],
+        identity_of: impl Fn(&str) -> Option<PayoutIdentity>,
+        weights: Option<&dyn AnchorWeights>,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let request =
+            VerifyPayoutOutputs::from_bytes(payload).map_err(|error| error.to_string())?;
+        if !self.admit_verify() {
+            return Ok(vec![verify_answer_frame(
+                request.request_id,
+                request.height,
+                Err(VERIFY_RATE_LIMITED),
+            )?]);
+        }
+        let identity = identity_of(&request.user_identifier.as_utf8_or_hex());
+        let answer = verify_payout_outputs(&request, identity.as_ref(), weights);
+        self.verify_outstanding = false;
+        Ok(vec![verify_answer_frame(
+            request.request_id,
+            request.height,
+            answer,
+        )?])
+    }
+
+    /// Whether this connection may run a verify now.
+    ///
+    /// Admits at most one at a time and at most
+    /// [`MAX_VERIFY_PAYOUTS_PER_SECOND`] in the current second. An admission
+    /// sets [`Self::verify_outstanding`]; the caller clears it when the
+    /// verify returns. A refusal spends nothing.
+    fn admit_verify(&mut self) -> bool {
+        if self.verify_outstanding {
+            return false;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.verify_window) >= Duration::from_secs(1) {
+            self.verify_window = now;
+            self.verify_count = 0;
+        }
+        if self.verify_count >= MAX_VERIFY_PAYOUTS_PER_SECOND {
+            return false;
+        }
+        self.verify_count += 1;
+        self.verify_outstanding = true;
+        true
     }
 
     /// What a newly published template sends on this connection:

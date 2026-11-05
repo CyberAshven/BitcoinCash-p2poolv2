@@ -240,53 +240,107 @@ pub(crate) fn commitment_digest(
     hashes::sha256::Hash::hash(&serialized)
 }
 
+/// Terms a Bitcoin Cash job token carries, apart from the miner's identities.
+struct JobTokenTerms {
+    prev_share_blockhash: BlockHash,
+    uncles: Vec<BlockHash>,
+    bits: CompactTarget,
+    time: u32,
+    donation_address: Option<PayoutAddress>,
+    donation: u16,
+    fee_address: Option<PayoutAddress>,
+    fee: u16,
+    share_version: ShareVersion,
+}
+
+/// Decode a Bitcoin Cash job token's terms.
+///
+/// Any node can read one. The issuing node's registry is what tells that
+/// node the token is one it allocated. A token is one version byte
+/// (`BCH_JOB_TOKEN_VERSION`), a 32-byte nonce, then the share it anchors on:
+/// previous share hash, uncle count and uncles, share bits, time, optional
+/// donation address and amount, optional fee address and amount, and the
+/// share version. At most 255 bytes. More than [`MAX_UNCLES`] uncles, or
+/// bytes left over, is not a token.
+fn decode_job_token_terms(
+    token: &[u8],
+) -> Result<JobTokenTerms, bitcoin::consensus::encode::Error> {
+    let invalid = bitcoin::consensus::encode::Error::ParseFailed;
+    if token.len() < 33 || token.len() > 255 || token[0] != BCH_JOB_TOKEN_VERSION {
+        return Err(invalid("unknown BCH job token format"));
+    }
+    let mut reader = &token[33..];
+    let prev_share_blockhash = BlockHash::consensus_decode(&mut reader)?;
+    let uncle_count = VarInt::consensus_decode(&mut reader)?.0;
+    if uncle_count > MAX_UNCLES as u64 {
+        return Err(invalid("too many job token uncles"));
+    }
+    let uncles = (0..uncle_count)
+        .map(|_| BlockHash::consensus_decode(&mut reader))
+        .collect::<Result<Vec<_>, _>>()?;
+    let bits = CompactTarget::consensus_decode(&mut reader)?;
+    let time = u32::consensus_decode(&mut reader)?;
+    let donation_address = decode_optional_address(&mut reader)?;
+    let donation = u16::consensus_decode(&mut reader)?;
+    let fee_address = decode_optional_address(&mut reader)?;
+    let fee = u16::consensus_decode(&mut reader)?;
+    let share_version = ShareVersion::consensus_decode(&mut reader)?;
+    if !reader.is_empty() {
+        return Err(invalid("trailing BCH job token data"));
+    }
+    Ok(JobTokenTerms {
+        prev_share_blockhash,
+        uncles,
+        bits,
+        time,
+        donation_address,
+        donation,
+        fee_address,
+        fee,
+        share_version,
+    })
+}
+
 impl ShareCommitment {
-    /// Decode this pool's BCH job terms; authenticity is checked by the pool's token registry.
-    /// A declarator supplies its own identities; the coinbase value comes from
-    /// the coinbase the share block carries.
+    /// The share a Bitcoin Cash job token anchors on.
+    ///
+    /// The same decode as [`Self::from_mining_job_token`], without the
+    /// miner's identities: a node checking another node's token needs the
+    /// anchor before it knows whom the outputs pay.
+    pub(crate) fn mining_job_token_anchor(
+        token: &[u8],
+    ) -> Result<BlockHash, bitcoin::consensus::encode::Error> {
+        decode_job_token_terms(token).map(|terms| terms.prev_share_blockhash)
+    }
+
+    /// Decode a Bitcoin Cash job token onto `miner_bitcoin_address` and
+    /// `miner_address`.
+    ///
+    /// Any node can decode one. The issuing node's registry is what tells
+    /// that node the token is one it allocated. The witness root is the
+    /// empty one: a token carries no share transactions. The declared
+    /// coinbase is absent until the builder that spends the token sets it.
     pub fn from_mining_job_token(
         token: &[u8],
         miner_bitcoin_address: PayoutAddress,
         miner_address: p2poolv2_wallet::share_owner::ShareOwner,
     ) -> Result<Self, bitcoin::consensus::encode::Error> {
-        let invalid = bitcoin::consensus::encode::Error::ParseFailed;
-        if token.len() < 33 || token.len() > 255 || token[0] != BCH_JOB_TOKEN_VERSION {
-            return Err(invalid("unknown BCH job token format"));
-        }
-        let mut reader = &token[33..];
-        let prev_share_blockhash = BlockHash::consensus_decode(&mut reader)?;
-        let uncle_count = VarInt::consensus_decode(&mut reader)?.0;
-        if uncle_count > MAX_UNCLES as u64 {
-            return Err(invalid("too many job token uncles"));
-        }
-        let uncles = (0..uncle_count)
-            .map(|_| BlockHash::consensus_decode(&mut reader))
-            .collect::<Result<Vec<_>, _>>()?;
-        let bits = CompactTarget::consensus_decode(&mut reader)?;
-        let time = u32::consensus_decode(&mut reader)?;
-        let donation_address = decode_optional_address(&mut reader)?;
-        let donation = u16::consensus_decode(&mut reader)?;
-        let fee_address = decode_optional_address(&mut reader)?;
-        let fee = u16::consensus_decode(&mut reader)?;
-        let share_version = ShareVersion::consensus_decode(&mut reader)?;
-        if !reader.is_empty() {
-            return Err(invalid("trailing BCH job token data"));
-        }
+        let terms = decode_job_token_terms(token)?;
         Ok(Self {
-            prev_share_blockhash,
-            uncles,
+            prev_share_blockhash: terms.prev_share_blockhash,
+            uncles: terms.uncles,
             miner_bitcoin_address,
             miner_address,
             share_witness_root: compute_witness_root(&[]),
-            bits,
-            time,
-            donation_address,
-            donation: (donation > 0).then_some(donation),
-            fee_address,
-            fee: (fee > 0).then_some(fee),
+            bits: terms.bits,
+            time: terms.time,
+            donation_address: terms.donation_address,
+            donation: (terms.donation > 0).then_some(terms.donation),
+            fee_address: terms.fee_address,
+            fee: (terms.fee > 0).then_some(terms.fee),
             bch_coinbase: None,
             pool_merge_mining: None,
-            share_version,
+            share_version: terms.share_version,
         })
     }
 

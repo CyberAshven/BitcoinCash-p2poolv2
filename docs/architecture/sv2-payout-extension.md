@@ -208,6 +208,8 @@ the success reply states them.
 
 The wording is pool-neutral, so any pool that pays miners directly from
 the coinbase can serve it. Section 7.5 says how a P2Pool node answers.
+Sections 7.8 and 7.9 say how a client checks that answer, on its own and
+with a second node.
 
 ### 7.1 Negotiation
 
@@ -244,6 +246,9 @@ needs nothing new: the custom job is a standard `SetCustomMiningJob`.
 | `0x01` | 0 | `RequestPayoutOutputs.Success` | pool to client |
 | `0x02` | 0 | `RequestPayoutOutputs.Error` | pool to client |
 | `0x03` | 0 | `PayoutOutputsStale` | pool to client |
+| `0x04` | 0 | `VerifyPayoutOutputs` | client to pool |
+| `0x05` | 0 | `VerifyPayoutOutputs.Success` | pool to client |
+| `0x06` | 0 | `VerifyPayoutOutputs.Error` | pool to client |
 
 Every frame carries `extension_type = 0x5052`.
 
@@ -272,6 +277,27 @@ Every frame carries `extension_type = 0x5052`.
 
 `RequestPayoutOutputs.Error`: `request_id` (U32) and `error_code`
 (STR0_255). `PayoutOutputsStale` has no fields.
+
+`VerifyPayoutOutputs` asks a node that did not issue the token to
+recompute the outputs. `user_identifier` is the identity the client
+allocated the token with. The other fields are the `RequestPayoutOutputs`
+fields.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `request_id` | U32 | Echoed in the reply |
+| `mining_job_token` | B0_255 | A token another node issued |
+| `user_identifier` | STR0_255 | As `AllocateMiningJobToken.user_identifier` |
+| `available_payout_value` | U64 | Satoshis the set pays out |
+| `height` | U32 | The template's block height |
+| `prev_hash` | U256 | The template's previous block hash |
+| `nbits` | U32 | The template's compact target |
+| `coinbase_prefix` | B0_255 | The coinbase scriptSig before the extranonce, exactly as the job will declare it |
+
+`VerifyPayoutOutputs.Success` and `VerifyPayoutOutputs.Error` have the
+same fields as `RequestPayoutOutputs.Success` and
+`RequestPayoutOutputs.Error`. A client compares those payloads byte for
+byte. The message type is the only difference.
 
 ### 7.4 Rules
 
@@ -307,7 +333,9 @@ Every frame carries `extension_type = 0x5052`.
   `invalid-request`, `payout-outputs-too-large` and
   `payout-outputs-unavailable`. Apart from the stale race above, every
   refusal is an ordinary SV2 error, and the client fails over to its next
-  pool, ending in solo mining.
+  pool, ending in solo mining. `VerifyPayoutOutputs` uses those codes and
+  the ones in section 7.9. `unknown-anchor` and `verify-rate-limited` are
+  not a reason to leave the pool.
 
 ### 7.5 How a P2Pool node answers
 
@@ -331,9 +359,10 @@ Every frame carries `extension_type = 0x5052`.
   anchors new tokens on, or the BCH block its template builds on, changes:
   about every 10 seconds.
 - **Anyone can check it.** The outputs are a function of the share chain,
-  the request and the identity, so every honest node holding the share
-  chain gives the same answer, and anyone holding it can recompute one.
-  A miner who doubts a node switches to another or runs their own.
+  the request and the identity. Section 7.8 is the check a client does
+  itself, on the commitment output. Section 7.9 is the check a second node
+  does, on the whole set. A miner who doubts a node switches to another or
+  runs their own.
 - **Merge-mined tokens** still need Full-Template with the leaves in
   `excess_data` ([BCH P2Pool Job Declaration](../bch-job-declaration.md));
   this extension serves the exact empty commitment.
@@ -366,3 +395,131 @@ a later decision for the owner.
 Evidence before this is called done: a chipnet run in which a standard
 client, using only this extension, gets custom jobs accepted and shares
 credited in both Job Declaration modes.
+
+### 7.8 Job token and the local commitment check
+
+A Bitcoin Cash job token is at most 255 bytes. Any node can read one.
+The issuing node's registry is what tells that node it allocated the token.
+
+| Bytes | Content |
+|---|---|
+| 1 | Version. `2`. Anything else is not a token. |
+| 32 | Nonce. It is not part of the commitment hash. |
+| 32 | Previous share hash, the byte encoding a share header uses. |
+| compact size, then 32 each | Uncle count, then the uncle hashes. More than 3 uncles is not a token. |
+| 4 | Share bits, a compact target. |
+| 4 | Time, little-endian. |
+| 1, then an address or nothing | Donation address: `0` for none, or `1` and the address. The address is a network class (`0` mainnet, `1` test, `2` regtest) and then the script. This is not the address string. |
+| 2 | Donation in basis points. `0` when there is no donation. |
+| same as the donation | Fee address, then the fee in basis points. |
+| 8 | Share version: the rule version and the desired version, two little-endian `u32`. This build writes `1` and `1`. |
+
+Shorter than 33 bytes, or bytes left over after the share version, is not
+a token. The previous share, the uncles and the bits are the same bytes
+the commitment hashes as its prefix: the token bytes after the nonce,
+through the bits.
+
+The commitment hash is not the token. It is SHA256 of these bytes, in
+order. Integers are little-endian, the byte encoding a share header uses.
+
+1. The prefix: previous share hash, compact-size uncle count, uncle
+   hashes, share bits.
+2. The token's time.
+3. Donation, then fee. Each is a byte `0` (no address) or `1` followed by
+   the address's text as a compact-size length and its bytes, then the
+   basis points as a little-endian `u16` (`0` when there is no address).
+   The text is the address's display form: the Bitcoin spelling of its
+   hash under its network class, or CashAddr for a P2SH32 script. It is
+   not the network class and script the token stores.
+4. The share witness root: 32 zero bytes. A job token carries no share
+   transactions, and the root of that empty set is 32 zero bytes.
+5. For a Bitcoin Cash share owner (`CashP2pkh`): the byte `0x22`, then the
+   share version, two `u32`.
+6. The declared coinbase: the byte `0x21`, then the scriptSig prefix as a
+   compact size and its bytes, then the merge-mining commitment (32-byte
+   root, height byte, salt `u32`). The builder sets this before hashing.
+   This extension uses the exact empty commitment: 32 zero bytes, height
+   `0`, salt `0`. A hash that leaves this out will not match the output.
+7. No `0x23`. That tag is a pool-built token root, and a declared job has
+   none.
+8. The miner's payout: network class, then script, the same address
+   encoding the token uses for a donation. This is the payout
+   `user_identifier` names.
+9. The share owner `user_identifier` names. A Bitcoin Cash P2PKH owner is
+   the byte `0x20`, a length byte `20`, and the 20-byte hash.
+
+The last coinbase output carries that hash: value 0, script `OP_RETURN`,
+a 32-byte push, and the hash. A client rebuilds the hash from the token
+and the identities it allocated with, and checks that the last output is
+this one. That shows the set credits those identities. It does not show
+that the PPLNS split is the window's.
+
+### 7.9 Verifying another node's outputs
+
+`VerifyPayoutOutputs` is answered on a Job Declaration connection that
+negotiated `0x5052`, the same negotiation as `RequestPayoutOutputs`. The
+node stores nothing and allocates nothing. It decodes the token, resolves
+`user_identifier` the way it resolves `AllocateMiningJobToken.user_identifier`,
+and computes the PPLNS weights at the token's previous-share anchor. The
+paying block is the request's `nbits` and `prev_hash`, the same inputs
+share validation uses. It then builds with the same builder as
+`RequestPayoutOutputs`: the exact empty merge-mining commitment, and the
+success frame's version 2, sequence `0xfffffffe` and lock time of height
+minus one. The success payload is the bytes the issuing node would send
+for the same token, identity and fields. A client compares the two
+payloads byte for byte.
+
+The node answers `0x04` only. A client that sends `0x05` or `0x06` is
+closed, as it is for `0x01`, `0x02` and `0x03`. A `0x04` on a connection
+that did not negotiate the extension is closed as an unknown extension.
+
+Error codes, the same strings the other replies use:
+
+- `invalid-mining-job-token` — the token does not decode.
+- `invalid-request` — the identity does not resolve, the height is 0, or
+  the builders refuse the request (its revenue, scriptSig prefix or payouts).
+- `payout-outputs-too-large` — the outputs do not fit the coinbase or the
+  `B0_64K` field, as for a request.
+- `payout-outputs-unavailable` — the window at that anchor pays no one, or
+  this node does not pay from a share-chain window.
+- `unknown-anchor` — this node does not hold the anchor share, the anchor
+  is deeper than its window reaches, a read it needed for that anchor
+  failed, or the Bitcoin Cash header the window needs for that anchor is
+  not known yet. The client treats this as an honest race: it retries, or
+  asks another node. It is not agreement, and it is not a reason to leave
+  the pool.
+- `verify-rate-limited` — this connection's verify budget is spent. The
+  connection stays up.
+
+A malformed payload still closes the connection, as every other malformed
+message does. A well-formed verify past the budget does not.
+
+Limits, so one connection cannot make the node do unbounded work:
+
+- The SV2 field types already bound the token, the identity, the prefix
+  and the answer.
+- The token decode already refuses more than 3 uncles.
+- An anchor the node does not hold, or one more than 100 shares below its
+  confirmed tip, is `unknown-anchor` before the PPLNS window is touched. A
+  token anchors on its issuer's tip, so an honest verify names a share at
+  or near the verifier's tip. Within that depth the node computes the same
+  distribution it computes for a payout, and the paid set stops at the
+  window's own bound: the share-count cap, or three blocks of the paying
+  block's work on Bitcoin Cash when that difficulty is above 1.
+- One connection may have one verify in progress and at most 4 verifies in
+  a second. A client verifies a job once, and may retry a few
+  `unknown-anchor` answers while a share propagates. A ninth
+  `RequestPayoutOutputs` for a new token still closes the connection; this
+  budget does not.
+
+### 7.10 What the two checks trust
+
+The client asks the node that issued the token, and one other node that
+holds the same share chain. Matching success payloads means both computed
+the same outputs. The local check in section 7.8 shows the last output
+credits the identities the client asked for, including while it waits for
+the second node.
+
+Two nodes that collude can still agree on a false set. A client that
+hashes the first node's set before the second answer arrives is exposed
+for that one round trip. `unknown-anchor` is not a match.

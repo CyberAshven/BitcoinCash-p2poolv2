@@ -373,7 +373,9 @@ PPLNS outputs, padding, and the share commitment last. `EXACT_OUTPUTS` is
 always set, with version 2, sequence `0xfffffffe` and lock time
 `height - 1`. The coinbase carries these outputs and no others, and its
 scriptSig is the prefix followed by the extranonce. The job is then
-validated as any other declared job.
+validated as any other declared job. A client asks a second node for those
+same bytes with `VerifyPayoutOutputs`; section 7.9 of the proposal gives
+that message, and its success payload is the same bytes.
 
 An unknown, expired or used token gets `invalid-mining-job-token`. A token
 anchored on an earlier share, or a request for another height, previous hash

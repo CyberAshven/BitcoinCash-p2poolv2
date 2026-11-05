@@ -12,13 +12,15 @@ use crate::accounting::OutputPair;
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, append_payout_split};
 use crate::accounting::payout::payout_distribution::PayoutDistribution;
 use crate::accounting::payout::payout_tree::PayoutTree;
-use crate::accounting::payout::sharechain_pplns::pplns_window::{PayingBlock, PplnsWindow};
+use crate::accounting::payout::sharechain_pplns::pplns_window::{
+    PayingBlock, PplnsWindow, WindowError, bitcoin_block_difficulty,
+};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
-use bitcoin::{Amount, BlockHash};
+use bitcoin::{Amount, BlockHash, CompactTarget};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::HashMap;
 use std::error::Error;
@@ -147,6 +149,74 @@ impl PayoutDistribution for Payout {
         self.last_weights = Some(address_difficulty_map);
 
         Ok(tree)
+    }
+}
+
+/// PPLNS weights at a share-chain anchor, for a node recomputing another
+/// node's payout outputs.
+///
+/// The window's write lock is held only for
+/// [`PplnsWindow::get_distribution_from_start_hash`], the call share
+/// validation makes, and never together with the job registry lock.
+pub trait AnchorWeights: Send + Sync {
+    /// Weights `get_distribution_from_start_hash` pays at `anchor`.
+    ///
+    /// `nbits` and `prev_hash` are the paying block, as the request carries
+    /// them and as validation reads them from the share header.
+    fn weights_at(
+        &self,
+        anchor: BlockHash,
+        nbits: u32,
+        prev_hash: BlockHash,
+    ) -> Result<HashMap<PayoutAddress, u128>, WindowError>;
+
+    /// How many shares `anchor` is below the confirmed tip: 0 for the tip or
+    /// a candidate above it, `None` for a share this node does not hold.
+    /// Read from share metadata, without the window.
+    fn anchor_depth(&self, anchor: BlockHash) -> Option<u32>;
+}
+
+/// This node's window and store, shared by every connection that verifies
+/// a payout.
+pub struct ShareChainWeights {
+    window: Arc<RwLock<PplnsWindow>>,
+    store: ChainStoreHandle,
+}
+
+impl ShareChainWeights {
+    /// `window` is the one [`crate::accounting::payout::build_payout_for_mode`]
+    /// shares with the notifier and the validator. `store` is the node's.
+    pub fn new(window: Arc<RwLock<PplnsWindow>>, store: ChainStoreHandle) -> Self {
+        Self { window, store }
+    }
+}
+
+impl AnchorWeights for ShareChainWeights {
+    fn weights_at(
+        &self,
+        anchor: BlockHash,
+        nbits: u32,
+        prev_hash: BlockHash,
+    ) -> Result<HashMap<PayoutAddress, u128>, WindowError> {
+        let mut window = self
+            .window
+            .write()
+            .expect("PPLNS window lock poisoned on write");
+        let paying_block = PayingBlock::new(
+            bitcoin_block_difficulty(CompactTarget::from_consensus(nbits), window.network()),
+            prev_hash,
+        );
+        window.get_distribution_from_start_hash(anchor, paying_block, &self.store)
+    }
+
+    fn anchor_depth(&self, anchor: BlockHash) -> Option<u32> {
+        let anchor_height = self
+            .store
+            .get_block_metadata(&anchor)
+            .ok()?
+            .expected_height?;
+        let tip_height = self.store.get_tip_height().ok()??;
+        Some(tip_height.saturating_sub(anchor_height))
     }
 }
 

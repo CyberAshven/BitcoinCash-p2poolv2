@@ -137,6 +137,7 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
             template_rx,
         }),
         Some(authority),
+        None,
         test_coinbase_only_from(),
         shutdown_receiver,
     ));
@@ -633,6 +634,7 @@ async fn bchn_jobs_on_requested_payout_outputs_reach_both_real_nodes() {
             template_rx,
         }),
         Some(authority),
+        None,
         test_coinbase_only_from(),
         shutdown_receiver,
     ));

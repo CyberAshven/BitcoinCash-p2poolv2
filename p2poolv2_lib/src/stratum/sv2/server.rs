@@ -12,10 +12,11 @@
 
 use super::mining::{MiningChannels, custom_job_error, is_mining_channel_message};
 use super::noise::NoiseTransport;
-use super::payout_outputs::PAYOUT_OUTPUTS_EXTENSION;
+use super::payout_outputs::{PAYOUT_OUTPUTS_EXTENSION, VERIFY_PAYOUT_OUTPUTS};
 use super::session::{
     JobRegistry, PoolTransactionCache, Sv2Connection, Sv2Message, encode_extension_frame,
 };
+use crate::accounting::payout::AnchorWeights;
 use crate::config::Sv2Authority;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::stratum::merge_disclosure::{
@@ -72,8 +73,10 @@ pub async fn bind(hostname: &str, port: u16) -> Result<TcpListener, std::io::Err
 /// `None` when the listener only speaks Job Declaration. With `authority`,
 /// every connection must complete the Noise NX handshake signed by that key
 /// before any message; without it frames are unencrypted, which the
-/// specification allows only between local roles. A failed accept is logged
-/// and the listener keeps serving, as the SV1 server does.
+/// specification allows only between local roles. `anchor_weights` is the
+/// share-chain window a `VerifyPayoutOutputs` request is recomputed from;
+/// `None` when this node does not pay from that window. A failed accept is
+/// logged and the listener keeps serving, as the SV1 server does.
 ///
 /// Each connection holds a permit from `connection_limit`, the semaphore the
 /// SV1 server takes its own permits from, so the two ports share one
@@ -86,6 +89,7 @@ pub(crate) async fn serve<ShutdownSignal>(
     merge_mining: Option<MergeMiningCommitment>,
     mining: Option<Sv2Mining>,
     authority: Option<Sv2Authority>,
+    anchor_weights: Option<Arc<dyn AnchorWeights>>,
     coinbase_only_from: Vec<IpNet>,
     mut shutdown: watch::Receiver<ShutdownSignal>,
 ) where
@@ -119,6 +123,7 @@ pub(crate) async fn serve<ShutdownSignal>(
                             Arc::clone(&registry),
                             connection_mining,
                             authority,
+                            anchor_weights.clone(),
                             shutdown.clone(),
                         ));
                     }
@@ -136,6 +141,7 @@ pub(crate) async fn serve<ShutdownSignal>(
 /// this returns. A Noise handshake that does not finish within
 /// [`HANDSHAKE_TIMEOUT`] closes the connection, so an idle socket cannot
 /// hold a permit before it has proven it speaks SV2.
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection<ShutdownSignal>(
     mut stream: TcpStream,
     peer: IpAddr,
@@ -143,6 +149,7 @@ async fn handle_connection<ShutdownSignal>(
     registry: Arc<Mutex<JobRegistry>>,
     mining: Option<Sv2Mining>,
     authority: Option<Sv2Authority>,
+    anchor_weights: Option<Arc<dyn AnchorWeights>>,
     mut shutdown: watch::Receiver<ShutdownSignal>,
 ) {
     let mut noise = match authority {
@@ -193,6 +200,7 @@ async fn handle_connection<ShutdownSignal>(
                             &mut connection,
                             channels.as_mut(),
                             template_rx.as_ref(),
+                            anchor_weights.as_deref(),
                             messages,
                         )
                         .await
@@ -284,8 +292,9 @@ fn negotiate_extensions(
 /// on a listener with mining enabled; anything else is an error that closes
 /// the connection. The extension messages taken are the extensions
 /// negotiation's request (`negotiate_extensions`) and, on a connection that
-/// negotiated it, `RequestPayoutOutputs` (`super::payout_outputs`); a message
-/// of another extension closes the connection.
+/// negotiated it, `RequestPayoutOutputs` and `VerifyPayoutOutputs`
+/// (`super::payout_outputs`); a message of another extension closes the
+/// connection.
 ///
 /// An allocation's `user_identifier` is resolved here, as a mining channel's
 /// identity, so the token can remember whom its payout outputs pay.
@@ -293,6 +302,7 @@ async fn handle_messages(
     connection: &mut Sv2Connection,
     mut channels: Option<&mut MiningChannels>,
     template_rx: Option<&TemplateReceiver>,
+    anchor_weights: Option<&dyn AnchorWeights>,
     messages: Vec<Sv2Message>,
 ) -> Result<Vec<Vec<u8>>, String> {
     let mut frames = Vec::with_capacity(messages.len());
@@ -311,7 +321,20 @@ async fn handle_messages(
             continue;
         }
         if extension_type == PAYOUT_OUTPUTS_EXTENSION && connection.has_payout_outputs() {
-            frames.extend(connection.handle_payout_outputs(message_type, &mut payload)?);
+            if message_type == VERIFY_PAYOUT_OUTPUTS {
+                let identity_of = |user: &str| {
+                    channels
+                        .as_deref()
+                        .and_then(|channels| channels.payout_identity(user))
+                };
+                frames.extend(connection.handle_verify_payout_outputs(
+                    &mut payload,
+                    identity_of,
+                    anchor_weights,
+                )?);
+            } else {
+                frames.extend(connection.handle_payout_outputs(message_type, &mut payload)?);
+            }
             continue;
         }
         if extension_type != 0 {

@@ -91,7 +91,9 @@ use crate::stratum::server::StratumContext;
 #[cfg(test)]
 use crate::stratum::session::{EXTRANONCE1_SIZE, EXTRANONCE2_SIZE};
 #[cfg(test)]
-use crate::stratum::sv2::payout_outputs::{RequestPayoutOutputs, RequestPayoutOutputsSuccess};
+use crate::stratum::sv2::payout_outputs::{
+    RequestPayoutOutputs, RequestPayoutOutputsSuccess, VerifyPayoutOutputs,
+};
 #[cfg(test)]
 use crate::stratum::sv2::{Declaration, DeclaredJob, encode_message};
 #[cfg(test)]
@@ -125,7 +127,7 @@ use crate::stratum::work::tracker::start_tracker_actor;
 #[cfg(test)]
 use crate::stratum::work::tracker::{JobDetails, JobId};
 #[cfg(test)]
-use binary_sv2::{B064K, B0255, Deserialize, GetSize, Seq0255, Serialize, U256};
+use binary_sv2::{B064K, B0255, Deserialize, GetSize, Seq0255, Serialize, Str0255, U256};
 #[cfg(any(test, feature = "test-utils"))]
 use bitcoin::TxMerkleNode;
 #[cfg(test)]
@@ -792,6 +794,21 @@ fn test_bch_prepared_with_weights_and_cuts(
     )
 }
 
+/// [`test_bch_prepared`] built on the share `anchor` with `weights` instead
+/// of the fixture's two payees: the snapshot a node stores for a token once
+/// it has computed the window at that share.
+#[cfg(test)]
+pub(crate) fn test_bch_prepared_anchored(
+    anchor: BlockHash,
+    weights: HashMap<PayoutAddress, u128>,
+) -> Arc<PreparedNotifyParams> {
+    let template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    test_bch_prepared_on(anchor, template, weights, (None, None), (None, None), None)
+}
+
 /// [`test_bch_prepared`] built on the share `anchor` instead: the params a
 /// node publishes for the same template once a new share arrives.
 #[cfg(test)]
@@ -1045,6 +1062,37 @@ pub(crate) fn test_payout_outputs_request(
     binary_sv2::to_bytes(RequestPayoutOutputs {
         request_id,
         mining_job_token: B0255::new(token).unwrap(),
+        available_payout_value: value,
+        height: template.height,
+        prev_hash: U256::new(&prev_hash).unwrap(),
+        nbits: CompactTarget::from_unprefixed_hex(&template.bits)
+            .unwrap()
+            .to_consensus(),
+        coinbase_prefix: B0255::new(prefix).unwrap(),
+    })
+    .unwrap()
+}
+
+/// The `VerifyPayoutOutputs` payload a client sends a second node for
+/// `token`, which another node issued to `user_identifier`. The remaining
+/// fields are the ones [`test_payout_outputs_request`] sends the issuer.
+#[cfg(test)]
+pub(crate) fn test_verify_payout_outputs_request(
+    request_id: u32,
+    token: &[u8],
+    user_identifier: &str,
+    template: &BlockTemplate,
+    value: u64,
+    prefix: &[u8],
+) -> Vec<u8> {
+    let prev_hash = BlockHash::from_str(&template.previousblockhash)
+        .unwrap()
+        .to_byte_array();
+    let user_identifier: Str0255 = user_identifier.try_into().unwrap();
+    binary_sv2::to_bytes(VerifyPayoutOutputs {
+        request_id,
+        mining_job_token: B0255::new(token).unwrap(),
+        user_identifier,
         available_payout_value: value,
         height: template.height,
         prev_hash: U256::new(&prev_hash).unwrap(),
