@@ -27,6 +27,7 @@
 //! Provider and its blocks go back there (see `template_distribution`).
 
 mod custom_job;
+pub mod large_templates;
 #[cfg(all(test, not(feature = "sim")))]
 mod live_tests;
 mod mining;

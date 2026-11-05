@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A Full-Template Job Declaration can carry any template Bitcoin Cash's block
+size limit allows. Standard Job Declaration lists at most 65,535
+transactions and asks for them by `u16` position, and one reply must fit a
+16 MiB frame. This node asked for every transaction in one reply, so a
+declaration topped out at about 16 MiB, below BCH's 32 MB floor. A Bitcoin
+Cash node now grants the experimental extension `0x4C54` ("large
+templates", `docs/architecture/sv2-large-templates-extension.md`) to
+Full-Template connections. Declared ids may come in pages ahead of
+`DeclareMiningJob`, the node asks in batches of at most 65,535 (by `u32`
+position past `u16`), one request at a time, and a client may answer with
+the part that fits one frame. A declaration lists at most `size_limit / 65`
+transactions, and declared transaction memory is bounded by two blocks at
+the template's size limit (at least 64 MiB), replacing the fixed 64 MiB.
+Standard declarations are unchanged. No share-chain rule changes.
+
 A standard SV2 Job Declaration client can get a job's exact coinbase
 outputs on its Job Declaration connection, without `/jd_prepare`. A Bitcoin
 Cash node grants the experimental extension `0x5052`, "Requested Payout

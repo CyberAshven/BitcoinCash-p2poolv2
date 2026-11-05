@@ -10,6 +10,7 @@
 //! A Mining connection may also open standard and extended channels, which
 //! get a job for every template the SV1 server sees (see `super::mining`).
 
+use super::large_templates::LARGE_TEMPLATES_EXTENSION;
 use super::mining::{MiningChannels, custom_job_error, is_mining_channel_message};
 use super::noise::NoiseTransport;
 use super::payout_outputs::PAYOUT_OUTPUTS_EXTENSION;
@@ -251,7 +252,7 @@ fn negotiate_extensions(
     }
     let (request, asked) = requested_extensions(payload).ok_or("malformed RequestExtensions")?;
     let serves_mining = channels.is_some();
-    let mut granted = Vec::with_capacity(2);
+    let mut granted = Vec::with_capacity(3);
     if let Some(channels) = channels
         && asked.contains(&MERGE_DISCLOSURE_EXTENSION)
     {
@@ -263,6 +264,9 @@ fn negotiate_extensions(
         && connection.grant_payout_outputs()
     {
         granted.push(PAYOUT_OUTPUTS_EXTENSION);
+    }
+    if asked.contains(&LARGE_TEMPLATES_EXTENSION) && connection.grant_large_templates() {
+        granted.push(LARGE_TEMPLATES_EXTENSION);
     }
     Ok(vec![encode_extension_frame(
         EXTENSIONS_NEGOTIATION,
@@ -306,6 +310,10 @@ async fn handle_messages(
         }
         if extension_type == PAYOUT_OUTPUTS_EXTENSION && connection.has_payout_outputs() {
             frames.extend(connection.handle_payout_outputs(message_type, &mut payload)?);
+            continue;
+        }
+        if extension_type == LARGE_TEMPLATES_EXTENSION && connection.has_large_templates() {
+            frames.extend(connection.handle_large_templates(message_type, &mut payload)?);
             continue;
         }
         if extension_type != 0 {
