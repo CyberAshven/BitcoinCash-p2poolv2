@@ -12,6 +12,7 @@
 
 use super::mining::{MiningChannels, custom_job_error, is_mining_channel_message};
 use super::noise::NoiseTransport;
+use super::payout_outputs::PAYOUT_OUTPUTS_EXTENSION;
 use super::session::{
     JobRegistry, PoolTransactionCache, Sv2Connection, Sv2Message, encode_extension_frame,
 };
@@ -24,9 +25,13 @@ use crate::stratum::merge_disclosure::{
 use crate::stratum::server::StratumContext;
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use binary_sv2::Deserialize;
-use job_declaration_sv2::MESSAGE_TYPE_PUSH_SOLUTION;
+use ipnet::IpNet;
+use job_declaration_sv2::{
+    AllocateMiningJobToken, MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN, MESSAGE_TYPE_PUSH_SOLUTION,
+};
 use mining_sv2::{MESSAGE_TYPE_SET_CUSTOM_MINING_JOB, SetCustomMiningJob};
 use std::future;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -73,6 +78,7 @@ pub async fn bind(hostname: &str, port: u16) -> Result<TcpListener, std::io::Err
 /// Each connection holds a permit from `connection_limit`, the semaphore the
 /// SV1 server takes its own permits from, so the two ports share one
 /// connection cap. A connection arriving with no permit left is closed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve<ShutdownSignal>(
     listener: TcpListener,
     connection_limit: Arc<Semaphore>,
@@ -80,14 +86,15 @@ pub(crate) async fn serve<ShutdownSignal>(
     merge_mining: Option<MergeMiningCommitment>,
     mining: Option<Sv2Mining>,
     authority: Option<Sv2Authority>,
+    coinbase_only_from: Vec<IpNet>,
     mut shutdown: watch::Receiver<ShutdownSignal>,
 ) where
     ShutdownSignal: Send + Sync + 'static,
 {
-    let registry = Arc::new(Mutex::new(JobRegistry::new(
-        pool_transactions,
-        merge_mining,
-    )));
+    let registry = Arc::new(Mutex::new(
+        JobRegistry::new(pool_transactions, merge_mining)
+            .with_coinbase_only_from(coinbase_only_from),
+    ));
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -107,6 +114,7 @@ pub(crate) async fn serve<ShutdownSignal>(
                         });
                         tokio::spawn(handle_connection(
                             stream,
+                            peer.ip(),
                             permit,
                             Arc::clone(&registry),
                             connection_mining,
@@ -130,6 +138,7 @@ pub(crate) async fn serve<ShutdownSignal>(
 /// hold a permit before it has proven it speaks SV2.
 async fn handle_connection<ShutdownSignal>(
     mut stream: TcpStream,
+    peer: IpAddr,
     _permit: OwnedSemaphorePermit,
     registry: Arc<Mutex<JobRegistry>>,
     mining: Option<Sv2Mining>,
@@ -157,7 +166,7 @@ async fn handle_connection<ShutdownSignal>(
         }
         None => None,
     };
-    let mut connection = Sv2Connection::new(registry);
+    let mut connection = Sv2Connection::new(registry).with_peer(peer);
     let (mut template_rx, mut channels) = match mining {
         Some(services) => (
             Some(services.template_rx),
@@ -197,7 +206,14 @@ async fn handle_connection<ShutdownSignal>(
             }
             prepared = next_template(template_rx.as_mut()) => {
                 match (prepared, channels.as_mut()) {
-                    (Some(prepared), Some(channels)) => channels.on_template(&prepared),
+                    (Some(prepared), Some(channels)) => {
+                        let mut frames = channels.on_template(&prepared);
+                        match connection.on_template(&prepared) {
+                            Ok(stale) => frames.extend(stale),
+                            Err(_) => break,
+                        }
+                        frames
+                    }
                     (None, Some(_)) => break,
                     _ => Vec::new(),
                 }
@@ -224,11 +240,15 @@ async fn handle_connection<ShutdownSignal>(
 
 /// Answer a `RequestExtensions` (`0x0001`, `0x00`): grant the merge-mining
 /// disclosure extension (`0x4D4D`) when asked for on a connection with
-/// mining channels, and leave every other extension out of the answer. A
-/// request before `SetupConnection`, or one that is not exactly one request,
-/// closes the connection.
+/// mining channels, grant the requested payout outputs extension (`0x5052`)
+/// when asked for on a Job Declaration connection of a Bitcoin Cash node
+/// whose listener serves mining, and leave every other extension out of the
+/// answer. Without mining the node can neither resolve a token's identity
+/// nor watch templates for `PayoutOutputsStale`, so it does not offer
+/// `0x5052`. A request before `SetupConnection`, or one that is not exactly
+/// one request, closes the connection.
 fn negotiate_extensions(
-    connection: &Sv2Connection,
+    connection: &mut Sv2Connection,
     channels: Option<&mut MiningChannels>,
     payload: &[u8],
 ) -> Result<Vec<Vec<u8>>, String> {
@@ -236,13 +256,20 @@ fn negotiate_extensions(
         return Err("extensions requested before SetupConnection".to_string());
     }
     let (request, asked) = requested_extensions(payload).ok_or("malformed RequestExtensions")?;
-    let granted: Vec<u16> = match channels {
-        Some(channels) if asked.contains(&MERGE_DISCLOSURE_EXTENSION) => {
-            channels.grant_merge_disclosure();
-            vec![MERGE_DISCLOSURE_EXTENSION]
-        }
-        _ => Vec::new(),
-    };
+    let serves_mining = channels.is_some();
+    let mut granted = Vec::with_capacity(2);
+    if let Some(channels) = channels
+        && asked.contains(&MERGE_DISCLOSURE_EXTENSION)
+    {
+        channels.grant_merge_disclosure();
+        granted.push(MERGE_DISCLOSURE_EXTENSION);
+    }
+    if serves_mining
+        && asked.contains(&PAYOUT_OUTPUTS_EXTENSION)
+        && connection.grant_payout_outputs()
+    {
+        granted.push(PAYOUT_OUTPUTS_EXTENSION);
+    }
     Ok(vec![encode_extension_frame(
         EXTENSIONS_NEGOTIATION,
         REQUEST_EXTENSIONS_SUCCESS,
@@ -255,9 +282,13 @@ fn negotiate_extensions(
 ///
 /// Mining channel messages need a connection that set up the Mining Protocol
 /// on a listener with mining enabled; anything else is an error that closes
-/// the connection. The only extension message is the extensions
-/// negotiation's request (`negotiate_extensions`); a message of another
-/// extension closes the connection.
+/// the connection. The extension messages taken are the extensions
+/// negotiation's request (`negotiate_extensions`) and, on a connection that
+/// negotiated it, `RequestPayoutOutputs` (`super::payout_outputs`); a message
+/// of another extension closes the connection.
+///
+/// An allocation's `user_identifier` is resolved here, as a mining channel's
+/// identity, so the token can remember whom its payout outputs pay.
 async fn handle_messages(
     connection: &mut Sv2Connection,
     mut channels: Option<&mut MiningChannels>,
@@ -277,6 +308,10 @@ async fn handle_messages(
                 channels.as_deref_mut(),
                 &payload,
             )?);
+            continue;
+        }
+        if extension_type == PAYOUT_OUTPUTS_EXTENSION && connection.has_payout_outputs() {
+            frames.extend(connection.handle_payout_outputs(message_type, &mut payload)?);
             continue;
         }
         if extension_type != 0 {
@@ -301,6 +336,14 @@ async fn handle_messages(
             } else {
                 custom_job_error(&request, "mining-unavailable")?
             }
+        } else if message_type == MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN {
+            let request = AllocateMiningJobToken::from_bytes(&mut payload)
+                .map_err(|error| error.to_string())?;
+            let user_identifier = request.user_identifier.as_utf8_or_hex();
+            let identity = channels
+                .as_deref()
+                .and_then(|channels| channels.payout_identity(&user_identifier));
+            connection.on_allocate(request.request_id, &user_identifier, identity)?
         } else if message_type == MESSAGE_TYPE_PUSH_SOLUTION {
             if let Some(block) = connection.push_solution(&mut payload)? {
                 match channels.as_deref() {

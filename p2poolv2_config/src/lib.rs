@@ -9,11 +9,13 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
 use bitcoin::{Address, Network, PubkeyHash};
 use bitcoindrpc::BitcoinRpcConfig;
+use ipnet::IpNet;
 use p2poolv2_wallet::Address as ShareAddress;
 use p2poolv2_wallet::bch_share::{self, BchShareAddress, BchShareNetwork};
 pub use p2poolv2_wallet::payout_address::PayoutAddress;
 use serde::Deserialize;
 use std::marker::PhantomData;
+use std::net::IpAddr;
 use std::str::FromStr;
 
 /// Default version mask for BIP 323 version rolling.
@@ -440,6 +442,17 @@ pub struct StratumConfig<State = Raw> {
     /// Defaults to [`DEFAULT_SV2_CERT_VALIDITY_SECS`].
     #[serde(default)]
     pub sv2_cert_validity_secs: Option<u64>,
+    /// Client addresses a Stratum V2 Job Declaration connection may use
+    /// Coinbase-Only mode from, as IP addresses or CIDR ranges. In that mode
+    /// the node credits shares on a template it never sees, so by default
+    /// only this computer may use it (`127.0.0.0/8` and `::1`). Full-Template
+    /// declarations, whose templates the node checks, are taken from
+    /// anywhere. `[]` refuses Coinbase-Only from every client;
+    /// `["0.0.0.0/0", "::/0"]` takes it from every client. A refused client
+    /// gets `SetupConnection.Error` `unsupported-feature-flags` naming the
+    /// `DECLARE_TX_DATA` flag it must set.
+    #[serde(default = "default_sv2_coinbase_only_from")]
+    pub sv2_coinbase_only_from: Vec<String>,
     /// Where block templates come from. `rpc`, the default and what every
     /// existing configuration uses, asks the node in `[bitcoinrpc]`.
     /// `rpc_light` asks the same node for light templates, which leave the
@@ -502,6 +515,9 @@ pub struct StratumConfig<State = Raw> {
     /// The checked Template Provider, set when `template_source` is `sv2`.
     #[serde(skip)]
     pub template_provider: Option<TemplateProvider>,
+    /// `sv2_coinbase_only_from`, parsed.
+    #[serde(skip)]
+    pub sv2_coinbase_only_networks: Vec<IpNet>,
 
     #[serde(skip)]
     #[serde(default)]
@@ -698,6 +714,7 @@ impl StratumConfig<Raw> {
             self.template_provider_address.as_deref(),
             self.template_provider_authority_public_key.as_deref(),
         )?;
+        let sv2_coinbase_only_networks = parse_client_networks(&self.sv2_coinbase_only_from)?;
 
         Ok(StratumConfig {
             hostname: self.hostname,
@@ -725,6 +742,7 @@ impl StratumConfig<Raw> {
             sv2_authority_public_key: self.sv2_authority_public_key,
             sv2_authority_secret_key: self.sv2_authority_secret_key,
             sv2_cert_validity_secs: self.sv2_cert_validity_secs,
+            sv2_coinbase_only_from: self.sv2_coinbase_only_from,
             template_source: self.template_source,
             template_provider_address: self.template_provider_address,
             template_provider_authority_public_key: self.template_provider_authority_public_key,
@@ -742,6 +760,7 @@ impl StratumConfig<Raw> {
             bch_miner_address,
             sv2_authority,
             template_provider,
+            sv2_coinbase_only_networks,
             _state: PhantomData,
         })
     }
@@ -1157,6 +1176,7 @@ impl StratumConfig<Raw> {
             sv2_authority_public_key: None,
             sv2_authority_secret_key: None,
             sv2_cert_validity_secs: None,
+            sv2_coinbase_only_from: default_sv2_coinbase_only_from(),
             template_source: TemplateSource::Rpc,
             template_provider_address: None,
             template_provider_authority_public_key: None,
@@ -1174,6 +1194,7 @@ impl StratumConfig<Raw> {
             bch_miner_address: None,
             sv2_authority: None,
             template_provider: None,
+            sv2_coinbase_only_networks: Vec::new(),
             _state: PhantomData,
         }
     }
@@ -1288,6 +1309,28 @@ pub struct StoreConfig {
 
 fn default_wait_for_chain_sync() -> bool {
     true
+}
+
+/// This computer: IPv4 and IPv6 loopback.
+fn default_sv2_coinbase_only_from() -> Vec<String> {
+    vec!["127.0.0.0/8".to_string(), "::1/128".to_string()]
+}
+
+/// Parse client address ranges: each an IP address or a CIDR range.
+fn parse_client_networks(entries: &[String]) -> Result<Vec<IpNet>, ConfigError> {
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .parse::<IpNet>()
+                .or_else(|_| entry.parse::<IpAddr>().map(IpNet::from))
+                .map_err(|_| ConfigError {
+                    message: format!(
+                        "sv2_coinbase_only_from: {entry:?} is not an IP address or CIDR range"
+                    ),
+                })
+        })
+        .collect()
 }
 
 fn default_pplns_ttl_days() -> u64 {
@@ -3086,6 +3129,39 @@ mod sv2_authority_tests {
     /// key-utils crate: a secret key and the public key it derives.
     const SECRET_KEY: &str = "zmBEmPhqo3A92FkiLVvyCz6htc3e53ph3ZbD4ASqGaLjwnFLi";
     const PUBLIC_KEY: &str = "9bDuixKmZqAJnrmP746n8zU1wyAQRrus7th9dxnkPg6RzQvCnan";
+
+    #[test]
+    fn coinbase_only_is_taken_from_loopback_by_default() {
+        let config = StratumConfig::<Raw>::new_for_test_default()
+            .parse()
+            .unwrap();
+        let expected: Vec<IpNet> = vec!["127.0.0.0/8".parse().unwrap(), "::1/128".parse().unwrap()];
+        assert_eq!(config.sv2_coinbase_only_networks, expected);
+    }
+
+    #[test]
+    fn coinbase_only_clients_may_be_addresses_or_ranges() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.sv2_coinbase_only_from = vec!["100.64.0.9".to_string(), "10.0.0.0/8".to_string()];
+        let parsed = config.parse().unwrap();
+        let expected: Vec<IpNet> = vec![
+            "100.64.0.9/32".parse().unwrap(),
+            "10.0.0.0/8".parse().unwrap(),
+        ];
+        assert_eq!(parsed.sv2_coinbase_only_networks, expected);
+    }
+
+    #[test]
+    fn a_coinbase_only_client_that_is_not_an_address_is_rejected() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.sv2_coinbase_only_from = vec!["my-kth.example".to_string()];
+        let error = config.parse().unwrap_err();
+        assert!(
+            error.message.contains("sv2_coinbase_only_from"),
+            "{}",
+            error.message
+        );
+    }
 
     #[test]
     fn reference_implementation_key_pair_parses() {

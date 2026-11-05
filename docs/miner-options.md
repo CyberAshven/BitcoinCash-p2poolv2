@@ -197,6 +197,11 @@ password: x
   protocol has no error reply to `AllocateMiningJobToken`, so a bad
   `donation=` there closes the connection, with the reason in the node's
   log.
+- A client of the requested payout outputs extension gives
+  `AllocateMiningJobToken.user_identifier` the channel's whole identity:
+  the payout CashAddr, then `p2p=` and any `donation=`. The node pays the
+  outputs it answers to that payout address and share owner
+  ([Payout outputs on the Job Declaration connection](bch-job-declaration.md#payout-outputs-on-the-job-declaration-connection)).
 - `d=` and `th=` are not used on SV2. A channel starts at the difficulty its
   `nominal_hash_rate` calls for (within the node's minimum and maximum, or
   `start_difficulty` when the rate is 0), capped by the channel's

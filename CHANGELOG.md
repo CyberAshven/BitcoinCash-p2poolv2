@@ -18,6 +18,46 @@ browser's Basic challenge only when the request already sent credentials,
 so the WASM app's probes fail silently to that indicator instead of
 raising the login dialog.
 
+A node takes Stratum V2 Coinbase-Only Job Declaration only from the client
+addresses in `[stratum] sv2_coinbase_only_from` (IP addresses or CIDR
+ranges), by default this computer (`127.0.0.0/8`, `::1/128`). In that mode
+the node credits shares on a block whose transactions it never sees, so a
+declarator that withholds its blocks costs the other miners; until now any
+client could use it. Full-Template declarations are taken from every
+client. A refused client gets `SetupConnection.Error`
+`unsupported-feature-flags` with the `DECLARE_TX_DATA` flag it must set.
+`[]` refuses Coinbase-Only from everyone; `["0.0.0.0/0", "::/0"]` restores
+the old behaviour. No share-chain rule changes.
+
+A standard SV2 Job Declaration client can get a job's exact coinbase
+outputs on its Job Declaration connection, without `/jd_prepare`. A Bitcoin
+Cash node grants the experimental extension `0x5052`, "Requested Payout
+Outputs" (section 7 of `docs/architecture/sv2-payout-extension.md`), on Job
+Declaration connections. `RequestPayoutOutputs` names a token, the
+template's revenue, height, previous hash and bits, and the client's
+scriptSig prefix; the node answers with the bytes `/jd_prepare` builds,
+from the same builder, and the coinbase version, sequence and lock time to
+use. `AllocateMiningJobToken.user_identifier` is now read as a mining
+identity, and the token remembers its payout address and share owner. A
+connection that negotiated the extension gets `PayoutOutputsStale` when the
+share new tokens are anchored on, or the BCH block their template builds
+on, changes, and its allocations reserve room for output 0, the padding and
+the commitment as well as the payout scripts. In a test, a client that builds
+its jobs from the reply alone gets them installed and mines a share in both
+Job Declaration modes. No share-chain rule changes, and `/jd_prepare` is
+unchanged.
+
+A Stratum V2 share for a job on the BCH block a new tip just replaced is
+taken again. On a new tip a channel dropped all its jobs, so the share that
+found the block often lost its credit: a Job Declaration client's
+`PushSolution`, or BCHN's ZMQ notification of that block, brings the new
+template before the share arrives, and the share was refused as
+`invalid-job-id` (seen in Knuth's end-to-end run). A channel now keeps the
+jobs of the tip it leaves and drops older ones, as the share chain still
+pays shares one BCH block off the paying share's chain. A share for a job
+the channel gave out and has since dropped is `stale-share`; only an id it
+never gave out is `invalid-job-id`. No share-chain rule changes.
+
 The Stratum V2 Job Declaration server handles `PushSolution` (spec
 6.4.9). It answered the message with "unsupported Stratum V2 message type
 96" and closed the connection, which sends a Job Declaration client to its
@@ -38,6 +78,7 @@ one: following the quickstart, the port never opened. Set it to `true` once
 already say. The quickstart also says to mine one block on a new regtest
 chain first: BCHN reports `initialblockdownload` while its tip is the 2011
 genesis block, and the node waits for it. No code or share-chain rule
+changes.
 
 Calls to BCHN no longer fail on a connection BCHN has just closed. The RPC
 client kept idle connections for 90 s, and BCHN closes one idle for
