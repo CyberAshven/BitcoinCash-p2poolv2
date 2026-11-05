@@ -3,8 +3,9 @@ use crate::shares::auxpow::{SplitSlot, TokenSplit};
 use crate::stratum::work::block_template::LightJob;
 use crate::test_utils::{
     bch_template_transaction, test_bch_custom_job, test_bch_custom_job_with_leaves,
-    test_bch_declared_leaves, test_bch_prepared, test_bch_prepared_for_template,
-    test_bch_prepared_with_cuts, test_bch_prepared_with_tree_payees, test_merge_token_set,
+    test_bch_custom_job_with_share_bits, test_bch_declared_leaves, test_bch_prepared,
+    test_bch_prepared_for_template, test_bch_prepared_with_cuts, test_bch_prepared_with_share_bits,
+    test_bch_prepared_with_tree_payees, test_merge_token_set,
 };
 use binary_sv2::{B064K, Deserialize, Seq0255, U256};
 use bitcoin::Address;
@@ -31,6 +32,7 @@ fn a_full_declared_job_retains_the_tree_of_its_own_coinbase() {
         payout.into(),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
+        None,
     )
     .unwrap();
     let tree = job.payout_tree.unwrap();
@@ -65,6 +67,7 @@ fn full_job_uses_declared_transactions_and_proportional_fee_revenue() {
         payout.into(),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
+        None,
     )
     .unwrap();
     assert!(job.block_available);
@@ -120,6 +123,7 @@ fn full_job_on_a_light_template_drops_the_light_job() {
         payout.into(),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
+        None,
     )
     .unwrap();
     assert!(job.blocktemplate.light.is_none());
@@ -147,6 +151,7 @@ fn private_job_preserves_hidden_merkle_path_without_pool_transactions() {
         payout.into(),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
+        None,
     )
     .unwrap();
     assert!(!job.block_available);
@@ -179,7 +184,8 @@ fn full_job_rejects_wrong_merkle_path() {
             declared,
             payout.into(),
             ShareOwner::CashP2pkh([0x22; 20]),
-            DEFAULT_VERSION_MASK
+            DEFAULT_VERSION_MASK,
+            None,
         )
         .unwrap_err(),
         "invalid-merkle-path"
@@ -211,7 +217,8 @@ fn private_job_rejects_diverted_pplns_payment() {
             declared,
             payout.into(),
             ShareOwner::CashP2pkh([0x22; 20]),
-            DEFAULT_VERSION_MASK
+            DEFAULT_VERSION_MASK,
+            None,
         )
         .unwrap_err(),
         "invalid-pplns-outputs"
@@ -238,7 +245,8 @@ fn full_job_rejects_changed_declaration() {
             declared,
             payout.into(),
             ShareOwner::CashP2pkh([0x22; 20]),
-            DEFAULT_VERSION_MASK
+            DEFAULT_VERSION_MASK,
+            None,
         )
         .unwrap_err(),
         "declaration-mismatch"
@@ -275,6 +283,7 @@ fn validate_declared_leaves(
         value,
         leaves.commitment,
         leaves.disclosure(),
+        None,
     );
     let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
     validate_custom_job(
@@ -283,6 +292,7 @@ fn validate_declared_leaves(
         regtest_payout(0x22),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
+        None,
     )
 }
 
@@ -366,7 +376,193 @@ fn a_coinbase_only_job_cannot_carry_a_token_root() {
         regtest_payout(0x22),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
+        None,
     )
     .unwrap_err();
     assert!(reason.contains("Coinbase-only"), "{reason}");
+}
+
+/// A Coinbase-only job from a floor-aware declarator commits to the floor's
+/// bits in its digest, so the clamp raises the token's bits and the rebuilt
+/// coinbase still matches: the installed commitment carries the floor.
+#[test]
+fn a_coinbase_only_job_below_the_floor_is_installed_at_the_floor_bits() {
+    // The prepared share bits are far easier than difficulty 1285, so the
+    // clamp fires on every honest token-minted job on this fixture.
+    let prepared = test_bch_prepared();
+    let token = prepared
+        .mining_job_token([1; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) = test_bch_custom_job_with_share_bits(
+        prepared,
+        token,
+        vec![],
+        false,
+        5_000_000_000,
+        CompactTarget::from_consensus(0x1b330000),
+    );
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let (job, _) = validate_custom_job(
+        &request,
+        declared,
+        regtest_payout(0x22),
+        ShareOwner::CashP2pkh([0x22; 20]),
+        DEFAULT_VERSION_MASK,
+        Some(1285),
+    )
+    .unwrap();
+    let commitment = job.share_commitment.unwrap();
+    assert_eq!(commitment.bits, CompactTarget::from_consensus(0x1b330000));
+    assert!(Target::from_compact(commitment.bits) <= target_for_difficulty(1285));
+}
+
+/// A Full-Template job from a floor-aware declarator, same as above: its
+/// declaration prefix and suffix match the rebuilt coinbase because its
+/// digest already commits to the floor's bits.
+#[test]
+fn a_full_job_below_the_floor_is_installed_at_the_floor_bits() {
+    let prepared = test_bch_prepared();
+    let token = prepared
+        .mining_job_token([1; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) = test_bch_custom_job_with_share_bits(
+        prepared,
+        token,
+        vec![],
+        true,
+        5_000_000_000,
+        CompactTarget::from_consensus(0x1b330000),
+    );
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let (job, _) = validate_custom_job(
+        &request,
+        declared,
+        regtest_payout(0x22),
+        ShareOwner::CashP2pkh([0x22; 20]),
+        DEFAULT_VERSION_MASK,
+        Some(1285),
+    )
+    .unwrap();
+    assert_eq!(
+        job.share_commitment.unwrap().bits,
+        CompactTarget::from_consensus(0x1b330000)
+    );
+}
+
+/// A floor-unaware declarator commits its coinbase to the token's own
+/// below-floor bits, so the clamp changes the digest the node rebuilds and
+/// the job is rejected: a clamp fire on a declared job is a consensus-level
+/// rejection, not an elevation. The outputs comparison runs before the
+/// declaration comparison, so its reason is the one that surfaces.
+#[test]
+fn a_floor_unaware_full_job_below_the_floor_is_rejected() {
+    let prepared = test_bch_prepared();
+    let token = prepared
+        .mining_job_token([1; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) =
+        test_bch_custom_job(prepared, token, vec![], true, 5_000_000_000);
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    assert_eq!(
+        validate_custom_job(
+            &request,
+            declared,
+            regtest_payout(0x22),
+            ShareOwner::CashP2pkh([0x22; 20]),
+            DEFAULT_VERSION_MASK,
+            Some(1285),
+        )
+        .unwrap_err(),
+        "invalid-pplns-outputs"
+    );
+}
+
+/// A commitment at the floor target passes through unchanged: the clamp is a
+/// raise, never a rewrite, and a declaration built on the floor's bits stays
+/// consistent.
+#[test]
+fn a_full_job_at_the_floor_is_installed_unchanged() {
+    let prepared = test_bch_prepared_with_share_bits(CompactTarget::from_consensus(0x1b330000));
+    let token = prepared
+        .mining_job_token([1; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) =
+        test_bch_custom_job(prepared, token, vec![], true, 5_000_000_000);
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let (job, _) = validate_custom_job(
+        &request,
+        declared,
+        regtest_payout(0x22),
+        ShareOwner::CashP2pkh([0x22; 20]),
+        DEFAULT_VERSION_MASK,
+        Some(1285),
+    )
+    .unwrap();
+    let commitment = job.share_commitment.unwrap();
+    assert_eq!(commitment.bits, CompactTarget::from_consensus(0x1b330000));
+}
+
+/// A commitment harder than the floor passes through unchanged.
+#[test]
+fn a_full_job_above_the_floor_is_installed_unchanged() {
+    let prepared = test_bch_prepared_with_share_bits(CompactTarget::from_consensus(0x1b320000));
+    let token = prepared
+        .mining_job_token([1; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) =
+        test_bch_custom_job(prepared, token, vec![], true, 5_000_000_000);
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let (job, _) = validate_custom_job(
+        &request,
+        declared,
+        regtest_payout(0x22),
+        ShareOwner::CashP2pkh([0x22; 20]),
+        DEFAULT_VERSION_MASK,
+        Some(1285),
+    )
+    .unwrap();
+    let commitment = job.share_commitment.unwrap();
+    assert_eq!(commitment.bits, CompactTarget::from_consensus(0x1b320000));
+    assert!(Target::from_compact(commitment.bits) < target_for_difficulty(1285));
+}
+
+/// Without a configured floor the commitment keeps the token's bits exactly,
+/// as before the feature: the fixture's prepared bits pass through untouched.
+#[test]
+fn a_full_job_without_a_floor_keeps_its_token_bits() {
+    let prepared = test_bch_prepared();
+    let expected_bits = prepared.bits();
+    let token = prepared
+        .mining_job_token([1; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) =
+        test_bch_custom_job(prepared, token, vec![], true, 5_000_000_000);
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let (job, _) = validate_custom_job(
+        &request,
+        declared,
+        regtest_payout(0x22),
+        ShareOwner::CashP2pkh([0x22; 20]),
+        DEFAULT_VERSION_MASK,
+        None,
+    )
+    .unwrap();
+    assert_eq!(job.share_commitment.unwrap().bits, expected_bits);
+}
+
+/// The floor's compact encoding truncates, never rounds up: the decoded
+/// target is at or below the exact floor target, and the canonical encoding
+/// of `target_for_difficulty(1285)` is the one the clamp installs.
+#[test]
+fn the_floor_encoding_never_eases_the_floor() {
+    let floor = target_for_difficulty(10_000_000);
+    let encoded = floor.to_compact_lossy();
+    assert!(Target::from_compact(encoded) <= floor);
+    assert_eq!(encoded.to_consensus(), 0x1a01ad7d);
+    assert_eq!(
+        target_for_difficulty(1285)
+            .to_compact_lossy()
+            .to_consensus(),
+        0x1b330000
+    );
 }

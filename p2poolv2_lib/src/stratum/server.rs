@@ -7,7 +7,7 @@ use crate::accounting::payout::simple_pplns::share_worker::PplnsShareSender;
 use crate::accounting::stats::metrics;
 use crate::address::Address as P2PoolAddress;
 pub use crate::config::PoolMode;
-use crate::config::{Chain, Sv2Authority};
+use crate::config::{Chain, SharechainTierMode, Sv2Authority};
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::stratum::block_submit::FoundBlockSubmitter;
@@ -17,7 +17,7 @@ use crate::stratum::client_connections::ClientConnectionsHandle;
 #[mockall_double::double]
 use crate::stratum::client_connections::ClientConnectionsHandle;
 use crate::stratum::difficulty_adjuster::{
-    DifficultyAdjuster, DifficultyAdjusterTrait, share_difficulty_ceiling,
+    DifficultyAdjuster, DifficultyAdjusterTrait, share_difficulty_ceiling, tier_job_bits,
 };
 use crate::stratum::emission::EmissionSender;
 use crate::stratum::error::Error;
@@ -36,8 +36,10 @@ use crate::stratum::work::error::WorkError;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_with_job_id};
 use crate::stratum::work::tracker::JobTracker;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
+use bitcoin::CompactTarget;
 use bitcoindrpc::{BitcoinRpcConfig, BitcoindRpcClient};
 use ipnet::IpNet;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -71,6 +73,18 @@ pub struct StratumServer {
     pub bch_share_network: Option<p2poolv2_wallet::bch_share::BchShareNetwork>,
     /// Pool wide Bitcoin Cash share hash, when the operator configured one.
     pub cash_share: Option<[u8; 20]>,
+    /// Share-chain difficulty floor from `[stratum] sharechain_diff_floor`,
+    /// when the network configures one. Read on the SV2 job declaration path
+    /// to clamp a declared job's commitment to the floor.
+    pub sharechain_diff_floor: Option<u64>,
+    /// How jobs use the share-chain validation band from
+    /// `[stratum] sharechain_tier_mode`. `off` keeps every job on the
+    /// pool-wide ASERT basis; the on-modes compute a per-miner `tier_bits`.
+    pub sharechain_tier_mode: SharechainTierMode,
+    /// The share chain's easiest share target, the ceiling of the validation
+    /// band. Fed from `PoolDifficulty::target_ceiling` at node start, read
+    /// when the tier switch is on to keep the tier at or above the ceiling.
+    pub target_ceiling: CompactTarget,
     shutdown_rx: oneshot::Receiver<()>,
     connections_handle: ClientConnectionsHandle,
     emissions_tx: EmissionSender,
@@ -133,6 +147,9 @@ pub struct StratumServerBuilder {
     share_chain: Chain,
     bch_share_network: Option<p2poolv2_wallet::bch_share::BchShareNetwork>,
     cash_share: Option<[u8; 20]>,
+    sharechain_diff_floor: Option<u64>,
+    sharechain_tier_mode: SharechainTierMode,
+    target_ceiling: Option<CompactTarget>,
     sv2: Option<Sv2Listener>,
     template_refresh_tx: Option<mpsc::Sender<()>>,
     extra_submit_nodes: Vec<BitcoinRpcConfig>,
@@ -261,6 +278,29 @@ impl StratumServerBuilder {
         self
     }
 
+    /// Share-chain difficulty floor from `[stratum] sharechain_diff_floor`.
+    /// Unset means no floor, as on Bitcoin or a node without the key.
+    pub fn sharechain_diff_floor(mut self, sharechain_diff_floor: Option<u64>) -> Self {
+        self.sharechain_diff_floor = sharechain_diff_floor;
+        self
+    }
+
+    /// How jobs use the share-chain validation band from
+    /// `[stratum] sharechain_tier_mode`. `off`, the default, keeps every job
+    /// on the pool-wide ASERT basis.
+    pub fn sharechain_tier_mode(mut self, sharechain_tier_mode: SharechainTierMode) -> Self {
+        self.sharechain_tier_mode = sharechain_tier_mode;
+        self
+    }
+
+    /// The share chain's easiest share target, from
+    /// `PoolDifficulty::target_ceiling`. Read only when the tier switch is
+    /// on; defaults to the main chain's `MAX_POOL_TARGET`.
+    pub fn target_ceiling(mut self, target_ceiling: CompactTarget) -> Self {
+        self.target_ceiling = Some(target_ceiling);
+        self
+    }
+
     /// Serve Stratum V2 beside SV1. `None`, the default, opens no SV2 socket.
     pub fn sv2(mut self, sv2: Option<Sv2Listener>) -> Self {
         self.sv2 = sv2;
@@ -313,6 +353,11 @@ impl StratumServerBuilder {
             share_chain: self.share_chain,
             bch_share_network: self.bch_share_network,
             cash_share: self.cash_share,
+            sharechain_diff_floor: self.sharechain_diff_floor,
+            sharechain_tier_mode: self.sharechain_tier_mode,
+            target_ceiling: self.target_ceiling.unwrap_or(CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            )),
             chain_store_handle: self
                 .chain_store_handle
                 .ok_or("chain store handle is required")?,
@@ -544,6 +589,10 @@ impl StratumServer {
             share_chain: self.share_chain,
             bch_share_network: self.bch_share_network,
             cash_share: self.cash_share,
+            sharechain_diff_floor: self.sharechain_diff_floor,
+            sharechain_tier_mode: self.sharechain_tier_mode,
+            target_ceiling: self.target_ceiling,
+            tier_rx: metrics.subscribe_tiers(),
             template_refresh_tx: self.template_refresh_tx.clone(),
             merge_mining_logs: self.merge_mining_logs.clone(),
         }
@@ -660,6 +709,23 @@ pub(crate) struct StratumContext {
     pub bch_share_network: Option<p2poolv2_wallet::bch_share::BchShareNetwork>,
     /// Configured Bitcoin Cash share hash. None when each miner sends `p2p=`.
     pub cash_share: Option<[u8; 20]>,
+    /// Share-chain difficulty floor from `[stratum] sharechain_diff_floor`.
+    /// None on Bitcoin or when the network configures none. The SV2 job
+    /// declaration path clamps a declared job's commitment to it.
+    pub sharechain_diff_floor: Option<u64>,
+    /// How jobs use the share-chain validation band from
+    /// `[stratum] sharechain_tier_mode`. `off` keeps every job on the
+    /// pool-wide ASERT basis, the SV1 and SV2 job builders then compute no
+    /// tier bits.
+    pub sharechain_tier_mode: SharechainTierMode,
+    /// The share chain's easiest share target, the ceiling of the validation
+    /// band. Read when the tier switch is on, to keep a tier job's difficulty
+    /// at or above the ceiling.
+    pub target_ceiling: CompactTarget,
+    /// Latest per-miner hashrate-share snapshot (`w_i`) from the metrics
+    /// actor, read on the tier job paths. `borrow` gives the current map
+    /// without blocking or awaiting.
+    pub tier_rx: watch::Receiver<Arc<HashMap<String, f64>>>,
     /// Asks the template task for a new template right after a found block
     /// is submitted. None where no template task runs, as in most tests.
     /// Only read on the block submit path, which the `sim` feature compiles out.
@@ -737,7 +803,7 @@ where
             // Clone inside a block to ensure the watch Ref guard is dropped before await
             let prepared_template = { template_rx.borrow_and_update().clone() };
             if let Some(prepared) = prepared_template {
-                match job_lines(session, &prepared, is_hydrapool, &ctx.tracker_handle) {
+                match job_lines(session, &prepared, is_hydrapool, &ctx) {
                     Ok(job_lines) => {
                         debug!("Sending first notify after authorize");
                         if let Err(e) = writer.write_all(job_lines.as_bytes()).await {
@@ -780,7 +846,7 @@ where
                 } else if session.username.is_none() {
                     // Not yet authorized, skip building notify
                 } else if let Some(prepared) = prepared_template {
-                    match job_lines(session, &prepared, is_hydrapool, &ctx.tracker_handle) {
+                    match job_lines(session, &prepared, is_hydrapool, &ctx) {
                         Ok(job_lines) => {
                             debug!("Send notify in reponse to new template");
                             if let Err(e) = writer.write_all(job_lines.as_bytes()).await {
@@ -850,13 +916,19 @@ where
 }
 
 /// The lines that send `prepared` to an SV1 miner: its `mining.notify`,
-/// preceded by a `mining.set_difficulty` when the session difficulty was
-/// above the job's share difficulty and had to come down to it.
+/// preceded by a `mining.set_difficulty` when the session difficulty had to
+/// move to the job's difficulty, down to its share ceiling or up to its
+/// per-miner tier.
 ///
 /// A miner submits only hashes that meet its session difficulty, so a session
-/// above the share difficulty throws away hashes that are valid shares
+/// above the job's difficulty throws away hashes that are valid shares
 /// ([`share_difficulty_ceiling`]). Hydrapool mode has no share chain and
 /// clears the ceiling.
+///
+/// With `sharechain_tier_mode` on, the job carries the miner's tier bits
+/// ([`tier_job_bits`]) and the session comes up to the tier before the job.
+/// The tier needs a configured floor and a share chain, so Hydrapool sessions
+/// and contexts without a floor keep the pool-wide job.
 ///
 /// A miner whose login chose their own `donation=` gets the job at that
 /// donation (`PreparedNotifyParams::for_miner_donation`).
@@ -868,26 +940,65 @@ fn job_lines<D: DifficultyAdjusterTrait>(
     session: &mut Session<D>,
     prepared: &PreparedNotifyParams,
     is_hydrapool: bool,
-    tracker_handle: &JobTracker,
+    ctx: &StratumContext,
 ) -> Result<String, WorkError> {
     let miner_prepared = prepared.for_miner_donation(session.donation)?;
     let prepared = miner_prepared.as_deref().unwrap_or(prepared);
+    // The tier needs a share chain (not Hydrapool) and a configured floor to
+    // enforce; without a floor the band is the old equality pin and a tier job
+    // would be rejected.
+    let tier_bits = if is_hydrapool {
+        None
+    } else if let Some(floor) = ctx.sharechain_diff_floor {
+        let hashrate_share = session
+            .btcaddress
+            .as_deref()
+            .and_then(|address| ctx.tier_rx.borrow().get(address).copied())
+            .unwrap_or(0.0);
+        tier_job_bits(
+            ctx.sharechain_tier_mode,
+            floor,
+            prepared.bits(),
+            ctx.target_ceiling,
+            hashrate_share,
+        )
+    } else {
+        None
+    };
+    // The ceiling reads the same bits the commitment gets (F2).
+    let job_bits = tier_bits.unwrap_or(prepared.bits());
     let (commitment_address, share_address, ceiling) = if is_hydrapool {
         (None, None, None)
     } else {
         (
             session.parsed_address.as_ref(),
             session.share_owner,
-            share_difficulty_ceiling(prepared.bits()),
+            share_difficulty_ceiling(job_bits),
         )
     };
     let lowered = session
         .difficulty_adjuster
         .set_share_difficulty_ceiling(ceiling);
-    let (notify_json, job_id) =
-        build_notify_with_job_id(prepared, commitment_address, share_address, tracker_handle)?;
+    // The floor setter runs only with the tier on; with `off` this is today's
+    // ceiling-only path. Both setters get the same decoded job difficulty and
+    // their predicates are mutually exclusive, so at most one fires (design
+    // section 5.1).
+    let raised = if tier_bits.is_some() {
+        session
+            .difficulty_adjuster
+            .set_share_difficulty_floor(ceiling)
+    } else {
+        None
+    };
+    let (notify_json, job_id) = build_notify_with_job_id(
+        prepared,
+        commitment_address,
+        share_address,
+        tier_bits,
+        &ctx.tracker_handle,
+    )?;
     let mut lines = String::with_capacity(notify_json.len() + 1024);
-    if let Some(difficulty) = lowered {
+    if let Some(difficulty) = lowered.or(raised) {
         lines.push_str(&serialize_line(&Message::SetDifficulty(
             SetDifficultyNotification::new(difficulty),
         ))?);
@@ -895,7 +1006,8 @@ fn job_lines<D: DifficultyAdjusterTrait>(
     lines.push_str(&notify_json);
     lines.push('\n');
     if session.merge_disclosure
-        && let Some(tokens) = tracker_handle
+        && let Some(tokens) = ctx
+            .tracker_handle
             .get_job(job_id)
             .and_then(|job| job.merge_tokens)
     {
@@ -980,7 +1092,7 @@ mod stratum_server_tests {
     use super::*;
     use crate::stratum::messages::SimpleRequest;
     use crate::stratum::server;
-    use crate::stratum::work::tracker::start_tracker_actor;
+    use crate::stratum::work::tracker::{JobId, start_tracker_actor};
     use crate::test_utils::{TestShareBlockBuilder, setup_test_chain_store_handle};
     use crate::test_utils::{make_test_share_address, test_bch_prepared, test_bch_stratum_context};
     use crate::utils::time_provider::TestTimeProvider;
@@ -1148,6 +1260,15 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         // Run the handler
@@ -1278,6 +1399,15 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         // Run the handler
@@ -1369,6 +1499,15 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         // Run the handler
@@ -1458,6 +1597,15 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         // Run the handler
@@ -1566,6 +1714,15 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         // Spawn the handler in a separate task
@@ -1694,6 +1851,15 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         // Spawn the handler in a separate task
@@ -1812,6 +1978,15 @@ mod stratum_server_tests {
                 cash_share: None,
                 template_refresh_tx: None,
                 merge_mining_logs: None,
+                sharechain_diff_floor: None,
+                sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+                target_ceiling: bitcoin::CompactTarget::from_consensus(
+                    crate::shares::share_block::MAX_POOL_TARGET,
+                ),
+                tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                    std::collections::HashMap::new(),
+                ))
+                .1,
             };
 
             // wait for subscribe/authorize messages
@@ -1902,6 +2077,15 @@ mod stratum_server_tests {
                 cash_share: None,
                 template_refresh_tx: None,
                 merge_mining_logs: None,
+                sharechain_diff_floor: None,
+                sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+                target_ceiling: bitcoin::CompactTarget::from_consensus(
+                    crate::shares::share_block::MAX_POOL_TARGET,
+                ),
+                tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                    std::collections::HashMap::new(),
+                ))
+                .1,
             };
 
             let subscribe_message =
@@ -2048,6 +2232,15 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         // Pre-load a template before starting handle_connection
@@ -2184,6 +2377,15 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         // Start with no template - will send one after authorization
@@ -2330,6 +2532,15 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         let (template_tx, template_rx) = watch::channel(None);
@@ -2509,11 +2720,11 @@ mod stratum_server_tests {
     /// down to it, and the miner hears so before it gets the job.
     #[tokio::test]
     async fn job_lines_lower_a_session_above_the_share_difficulty_before_the_job() {
-        let tracker_handle = start_tracker_actor();
+        let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
         let prepared = create_test_prepared_notify();
         let mut session = Session::<DifficultyAdjuster>::new(1000, 1, None, DEFAULT_VERSION_MASK);
 
-        let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+        let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
 
         let messages: Vec<serde_json::Value> = lines
             .lines()
@@ -2528,11 +2739,11 @@ mod stratum_server_tests {
 
     #[tokio::test]
     async fn job_lines_send_only_the_job_to_a_session_at_the_share_difficulty() {
-        let tracker_handle = start_tracker_actor();
+        let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
         let prepared = create_test_prepared_notify();
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
 
-        let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+        let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
 
         assert_eq!(lines.lines().count(), 1);
         assert!(lines.contains("mining.notify"));
@@ -2541,24 +2752,202 @@ mod stratum_server_tests {
     /// Hydrapool has no share chain, so its sessions are not capped.
     #[tokio::test]
     async fn job_lines_leave_a_hydrapool_session_difficulty_alone() {
-        let tracker_handle = start_tracker_actor();
+        let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
         let prepared = create_test_prepared_notify();
         let mut session = Session::<DifficultyAdjuster>::new(1000, 1, None, DEFAULT_VERSION_MASK);
 
-        let lines = job_lines(&mut session, &prepared, true, &tracker_handle).unwrap();
+        let lines = job_lines(&mut session, &prepared, true, &ctx).unwrap();
 
         assert_eq!(lines.lines().count(), 1);
         assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 1000);
+    }
+
+    /// With the tier switch on, a miner whose tier is above its session
+    /// difficulty hears the new difficulty before the job that commits to it.
+    #[tokio::test]
+    async fn job_lines_raise_a_session_to_its_miner_tier_before_the_job() {
+        let (mut ctx, _emissions, _directories) =
+            test_bch_stratum_context("http://127.0.0.1:1").await;
+        ctx.sharechain_diff_floor = Some(1285);
+        ctx.sharechain_tier_mode = SharechainTierMode::Tier;
+        let prepared = create_test_prepared_notify();
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        session.parsed_address = Some(
+            bitcoin::Address::p2pkh(
+                bitcoin::PubkeyHash::from_byte_array([1; 20]),
+                bitcoin::Network::Regtest,
+            )
+            .into(),
+        );
+        session.share_owner = Some(p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh(
+            [0x22; 20],
+        ));
+
+        let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
+
+        let messages: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["method"], "mining.set_difficulty");
+        assert_eq!(messages[0]["params"][0], 1285);
+        assert_eq!(messages[1]["method"], "mining.notify");
+        assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 1285);
+        let job_id = u64::from_str_radix(messages[1]["params"][0].as_str().unwrap(), 16).unwrap();
+        let committed_bits = ctx
+            .tracker_handle
+            .get_job(JobId(job_id))
+            .unwrap()
+            .share_commitment
+            .unwrap()
+            .bits;
+        assert_eq!(committed_bits, CompactTarget::from_consensus(0x1b33_0000));
+    }
+
+    /// A miner above its tier comes down to it before the tier job.
+    #[tokio::test]
+    async fn job_lines_lower_a_session_above_its_miner_tier() {
+        let (mut ctx, _emissions, _directories) =
+            test_bch_stratum_context("http://127.0.0.1:1").await;
+        ctx.sharechain_diff_floor = Some(1285);
+        ctx.sharechain_tier_mode = SharechainTierMode::Tier;
+        let prepared = create_test_prepared_notify();
+        let mut session = Session::<DifficultyAdjuster>::new(5000, 1, None, DEFAULT_VERSION_MASK);
+
+        let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
+
+        let messages: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["method"], "mining.set_difficulty");
+        assert_eq!(messages[0]["params"][0], 1285);
+        assert_eq!(messages[1]["method"], "mining.notify");
+        assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 1285);
+    }
+
+    /// Hydrapool has no share chain, so the tier switch never touches its jobs.
+    #[tokio::test]
+    async fn job_lines_leave_a_hydrapool_session_alone_with_the_tier_switch_on() {
+        let (mut ctx, _emissions, _directories) =
+            test_bch_stratum_context("http://127.0.0.1:1").await;
+        ctx.sharechain_diff_floor = Some(1285);
+        ctx.sharechain_tier_mode = SharechainTierMode::Tier;
+        let prepared = create_test_prepared_notify();
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+
+        let lines = job_lines(&mut session, &prepared, true, &ctx).unwrap();
+
+        assert_eq!(lines.lines().count(), 1);
+        assert!(lines.contains("mining.notify"));
+        assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 1);
+        assert_eq!(session.difficulty_adjuster.share_difficulty_floor, None);
+    }
+
+    /// With the switch off the configured floor is not a tier: a session below
+    /// it stays there, and the job keeps the pool-wide bits.
+    #[tokio::test]
+    async fn job_lines_keep_the_share_difficulty_with_the_tier_switch_off() {
+        let (mut ctx, _emissions, _directories) =
+            test_bch_stratum_context("http://127.0.0.1:1").await;
+        ctx.sharechain_diff_floor = Some(1285);
+        let prepared = create_test_prepared_notify();
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+
+        let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
+
+        assert_eq!(lines.lines().count(), 1);
+        assert!(lines.contains("mining.notify"));
+        assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 1);
+    }
+
+    /// Under `uniform-floor` every miner gets `max(floor, D_ceiling)`,
+    /// whatever `w_i` the metrics publish.
+    #[tokio::test]
+    async fn job_lines_uniform_floor_ignores_the_miners_hashrate_share() {
+        let (mut ctx, _emissions, _directories) =
+            test_bch_stratum_context("http://127.0.0.1:1").await;
+        ctx.sharechain_diff_floor = Some(1285);
+        ctx.sharechain_tier_mode = SharechainTierMode::UniformFloor;
+        let (tier_tx, tier_rx) = watch::channel(Arc::new(HashMap::from([(
+            "miner-address".to_string(),
+            10.0,
+        )])));
+        ctx.tier_rx = tier_rx;
+        let prepared = create_test_prepared_notify();
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        session.btcaddress = Some("miner-address".to_string());
+
+        let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
+
+        let messages: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["method"], "mining.set_difficulty");
+        assert_eq!(messages[0]["params"][0], 1285);
+        assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 1285);
+        drop(tier_tx);
+    }
+
+    /// Under `tier` the job difficulty scales with the miner's `w_i`:
+    /// `floor` 1285 and `D_ceiling` 1164 give `10 * 1164 = 11640`.
+    #[tokio::test]
+    async fn job_lines_scale_the_tier_job_with_the_miners_hashrate_share() {
+        let (mut ctx, _emissions, _directories) =
+            test_bch_stratum_context("http://127.0.0.1:1").await;
+        ctx.sharechain_diff_floor = Some(1285);
+        ctx.sharechain_tier_mode = SharechainTierMode::Tier;
+        let (tier_tx, tier_rx) = watch::channel(Arc::new(HashMap::from([(
+            "miner-address".to_string(),
+            10.0,
+        )])));
+        ctx.tier_rx = tier_rx;
+        let prepared = create_test_prepared_notify();
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        session.btcaddress = Some("miner-address".to_string());
+
+        let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
+
+        let messages: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["method"], "mining.set_difficulty");
+        assert!(messages[0]["params"][0].as_u64().unwrap() >= 11640);
+        assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 11640);
+        drop(tier_tx);
+    }
+
+    /// A session already at its tier gets no set_difficulty before the job.
+    #[tokio::test]
+    async fn job_lines_send_only_the_job_to_a_session_settled_at_its_tier() {
+        let (mut ctx, _emissions, _directories) =
+            test_bch_stratum_context("http://127.0.0.1:1").await;
+        ctx.sharechain_diff_floor = Some(1285);
+        ctx.sharechain_tier_mode = SharechainTierMode::Tier;
+        let prepared = create_test_prepared_notify();
+        let mut session = Session::<DifficultyAdjuster>::new(1285, 1, None, DEFAULT_VERSION_MASK);
+
+        let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
+
+        assert_eq!(lines.lines().count(), 1);
+        assert!(lines.contains("mining.notify"));
+        assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 1285);
     }
 
     /// A `mining.suggest_difficulty` after a job cannot lift the session
     /// above that job's share difficulty.
     #[tokio::test]
     async fn a_suggested_difficulty_after_a_job_stays_at_the_share_difficulty() {
-        let tracker_handle = start_tracker_actor();
+        let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
         let prepared = create_test_prepared_notify();
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
-        job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+        job_lines(&mut session, &prepared, false, &ctx).unwrap();
 
         let constrained = session
             .difficulty_adjuster
@@ -2571,7 +2960,7 @@ mod stratum_server_tests {
     /// and to the node's own without a choice.
     #[tokio::test]
     async fn job_lines_carry_the_sessions_own_donation() {
-        let tracker_handle = start_tracker_actor();
+        let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
         let prepared = crate::test_utils::test_bch_prepared_with_cuts(Some(100), None, None);
         let committed_donation = |donation: Option<u16>| {
             let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
@@ -2586,10 +2975,10 @@ mod stratum_server_tests {
                 [0x22; 20],
             ));
             session.donation = donation;
-            let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+            let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
             let notify: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
             let job_id = u64::from_str_radix(notify["params"][0].as_str().unwrap(), 16).unwrap();
-            tracker_handle
+            ctx.tracker_handle
                 .get_job(crate::stratum::work::tracker::JobId(job_id))
                 .unwrap()
                 .share_commitment
@@ -2608,7 +2997,7 @@ mod stratum_server_tests {
     /// `CTMD` disclosure, which rebuilds that root, and each leaf's branch.
     #[tokio::test]
     async fn job_lines_disclose_the_job_s_leaves_to_a_miner_who_asked() {
-        let tracker_handle = start_tracker_actor();
+        let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
         let prepared = crate::test_utils::test_bch_prepared_with_tokens(
             crate::test_utils::test_merge_token_set(),
             Some(100),
@@ -2628,7 +3017,7 @@ mod stratum_server_tests {
         ));
         session.merge_disclosure = true;
 
-        let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+        let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
 
         let messages: Vec<serde_json::Value> = lines
             .lines()
@@ -2641,7 +3030,8 @@ mod stratum_server_tests {
         assert_eq!(leaves["method"], "pickaxe.merge_leaves");
         assert_eq!(leaves["params"][0], messages[0]["params"][0]);
         let job_id = u64::from_str_radix(messages[0]["params"][0].as_str().unwrap(), 16).unwrap();
-        let tokens = tracker_handle
+        let tokens = ctx
+            .tracker_handle
             .get_job(crate::stratum::work::tracker::JobId(job_id))
             .unwrap()
             .merge_tokens
@@ -2658,7 +3048,7 @@ mod stratum_server_tests {
     /// A miner who did not ask gets the notify alone.
     #[tokio::test]
     async fn job_lines_send_no_leaves_to_a_miner_who_did_not_ask() {
-        let tracker_handle = start_tracker_actor();
+        let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
         let prepared = crate::test_utils::test_bch_prepared_with_tokens(
             crate::test_utils::test_merge_token_set(),
             Some(100),
@@ -2677,7 +3067,7 @@ mod stratum_server_tests {
             [0x22; 20],
         ));
 
-        let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+        let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
 
         assert_eq!(lines.lines().count(), 1);
     }

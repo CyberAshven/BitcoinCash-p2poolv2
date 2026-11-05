@@ -440,6 +440,9 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let pool_difficulty_for_notify =
         PoolDifficulty::build(&chain_store_handle, stratum_config.chain)
             .expect("Failed to build pool difficulty");
+    // The share chain's easiest share target, for the tier job paths. Read
+    // here because the notifier owns `pool_difficulty_for_notify` below.
+    let target_ceiling = pool_difficulty_for_notify.target_ceiling();
 
     let pool_transactions = p2poolv2_lib::stratum::sv2::PoolTransactionCache::new();
     let cloned_stratum_config = stratum_config.clone();
@@ -565,6 +568,9 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             .share_chain(share_chain)
             .bch_share_network(bch_share_network)
             .cash_share(cash_share)
+            .sharechain_diff_floor(stratum_config.sharechain_diff_floor)
+            .sharechain_tier_mode(stratum_config.sharechain_tier_mode)
+            .target_ceiling(target_ceiling)
             .merge_mining_tokens(
                 stratum_config
                     .merge_mining_tokens

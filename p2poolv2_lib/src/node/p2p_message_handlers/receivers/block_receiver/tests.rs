@@ -429,6 +429,9 @@ async fn test_process_share_block_with_ready_parent_commits() {
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
     mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
+    mock_validator
         .expect_pool_difficulty()
         .return_const(pool_difficulty);
 
@@ -541,6 +544,9 @@ async fn test_process_share_block_invalid_uncles_dropped() {
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
     mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
+    mock_validator
         .expect_pool_difficulty()
         .return_const(pool_difficulty);
 
@@ -630,6 +636,9 @@ async fn test_process_share_block_with_an_invalid_timestamp_is_dropped() {
     pool_difficulty
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
     mock_validator
         .expect_pool_difficulty()
         .return_const(pool_difficulty);
@@ -765,6 +774,9 @@ async fn test_process_share_block_refused_below_prune_target_is_ok() {
     pool_difficulty
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
     mock_validator
         .expect_pool_difficulty()
         .return_const(pool_difficulty);
@@ -1382,6 +1394,9 @@ async fn test_process_share_block_already_header_valid_still_stores_body() {
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
     mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
+    mock_validator
         .expect_pool_difficulty()
         .return_const(pool_difficulty);
 
@@ -1464,6 +1479,9 @@ async fn test_process_share_block_asert_mismatch_dropped() {
         .expect_validate_uncles()
         .returning(|_, _| Ok(()));
     mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
+    mock_validator
         .expect_pool_difficulty()
         .return_const(mock_pool_difficulty);
 
@@ -1491,6 +1509,283 @@ async fn test_process_share_block_asert_mismatch_dropped() {
     // Block must NOT enter the store and validation must NOT be emitted.
     assert!(validation_rx.try_recv().is_err());
     assert_eq!(receiver.pending_count(), 0);
+}
+
+/// With a floor configured, `validate_asert` accepts a declared target
+/// sitting exactly at the floor: `0x1d000033` decodes to
+/// `MAX_ATTAINABLE_MAINNET / 1285` exactly. `calculate_target_clamped`
+/// has no expectation, proving the band path replaced the equality pin.
+#[test]
+fn test_validate_asert_accepts_share_at_the_floor() {
+    let parent_hash = BlockHash::from_byte_array([0xab; 32]);
+    let parent_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695790)
+        .build()
+        .header;
+
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store.expect_get_asert_parent().returning(move |_| {
+        Ok(AsertParent::from_header(
+            &parent_header,
+            0,
+            parent_header.time,
+        ))
+    });
+
+    let mut mock_pool_difficulty = PoolDifficulty::default();
+    mock_pool_difficulty
+        .expect_target_ceiling()
+        .return_const(CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ));
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(Some(1285));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(mock_pool_difficulty);
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _validation_rx) = validation_worker::create_validation_channel();
+    let receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    );
+
+    let mut block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(parent_hash.to_string())
+        .build();
+    block.header.bits = CompactTarget::from_consensus(0x1d000033);
+
+    receiver.validate_asert(&block).unwrap();
+}
+
+/// A declared target easier than the floor is rejected with the band
+/// message, before any proof-of-work check.
+#[test]
+fn test_validate_asert_rejects_share_below_the_floor() {
+    let parent_hash = BlockHash::from_byte_array([0xab; 32]);
+    let parent_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695790)
+        .build()
+        .header;
+
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store.expect_get_asert_parent().returning(move |_| {
+        Ok(AsertParent::from_header(
+            &parent_header,
+            0,
+            parent_header.time,
+        ))
+    });
+
+    let mut mock_pool_difficulty = PoolDifficulty::default();
+    mock_pool_difficulty
+        .expect_target_ceiling()
+        .return_const(CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ));
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(Some(1285));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(mock_pool_difficulty);
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _validation_rx) = validation_worker::create_validation_channel();
+    let receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    );
+
+    let mut block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(parent_hash.to_string())
+        .build();
+    block.header.bits = CompactTarget::from_consensus(0x1d000034);
+
+    let error = receiver.validate_asert(&block).unwrap_err();
+    assert!(error.to_string().contains("below the floor"), "{error}");
+    assert!(error.to_string().contains("1285"), "{error}");
+}
+
+/// A zero declared target is non-canonical and is rejected through the
+/// same band error shape.
+#[test]
+fn test_validate_asert_rejects_zero_declared_target() {
+    let parent_hash = BlockHash::from_byte_array([0xab; 32]);
+    let parent_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695790)
+        .build()
+        .header;
+
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store.expect_get_asert_parent().returning(move |_| {
+        Ok(AsertParent::from_header(
+            &parent_header,
+            0,
+            parent_header.time,
+        ))
+    });
+
+    let mut mock_pool_difficulty = PoolDifficulty::default();
+    mock_pool_difficulty
+        .expect_target_ceiling()
+        .return_const(CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ));
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(Some(1285));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(mock_pool_difficulty);
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _validation_rx) = validation_worker::create_validation_channel();
+    let receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    );
+
+    let mut block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(parent_hash.to_string())
+        .build();
+    block.header.bits = CompactTarget::from_consensus(0);
+
+    let error = receiver.validate_asert(&block).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("rejected by the difficulty band"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("zero"), "{error}");
+}
+
+/// With floor 1 against the main chain ceiling, the ceiling binds: a
+/// difficulty-1 header is rejected and the ceiling's own target passes.
+#[test]
+fn test_validate_asert_uses_the_ceiling_when_the_floor_is_easier() {
+    let parent_hash = BlockHash::from_byte_array([0xab; 32]);
+    let parent_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695790)
+        .build()
+        .header;
+
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store.expect_get_asert_parent().returning(move |_| {
+        Ok(AsertParent::from_header(
+            &parent_header,
+            0,
+            parent_header.time,
+        ))
+    });
+
+    let mut mock_pool_difficulty = PoolDifficulty::default();
+    mock_pool_difficulty
+        .expect_target_ceiling()
+        .return_const(CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ));
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(Some(1));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(mock_pool_difficulty);
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _validation_rx) = validation_worker::create_validation_channel();
+    let receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    );
+
+    let mut too_easy = TestShareBlockBuilder::new()
+        .prev_share_blockhash(parent_hash.to_string())
+        .build();
+    too_easy.header.bits = CompactTarget::from_consensus(0x1d00ffff);
+    let error = receiver.validate_asert(&too_easy).unwrap_err();
+    assert!(error.to_string().contains("below the floor"), "{error}");
+
+    let mut at_ceiling = TestShareBlockBuilder::new()
+        .prev_share_blockhash(parent_hash.to_string())
+        .build();
+    at_ceiling.header.bits =
+        CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET);
+    receiver.validate_asert(&at_ceiling).unwrap();
+}
+
+/// Without a floor, `validate_asert` keeps the equality pin against the
+/// ASERT-calculated target.
+#[test]
+fn test_validate_asert_uses_equality_pin_when_floor_is_unset() {
+    let parent_hash = BlockHash::from_byte_array([0xab; 32]);
+    let parent_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695790)
+        .build()
+        .header;
+
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store.expect_get_asert_parent().returning(move |_| {
+        Ok(AsertParent::from_header(
+            &parent_header,
+            0,
+            parent_header.time,
+        ))
+    });
+
+    let mut mock_pool_difficulty = PoolDifficulty::default();
+    mock_pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1d00ffff));
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(mock_pool_difficulty);
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _validation_rx) = validation_worker::create_validation_channel();
+    let receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    );
+
+    let mut block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(parent_hash.to_string())
+        .build();
+    block.header.bits = CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET);
+
+    let error = receiver.validate_asert(&block).unwrap_err();
+    assert!(error.to_string().contains("ASERT mismatch"), "{error}");
 }
 
 #[tokio::test]
@@ -1609,6 +1904,9 @@ async fn test_cascade_commits_child_when_parent_arrives() {
     pool_difficulty
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
     mock_validator
         .expect_pool_difficulty()
         .return_const(pool_difficulty);
@@ -1744,6 +2042,9 @@ async fn test_pending_block_re_received_with_ready_parent_is_processed() {
     pool_difficulty
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
     mock_validator
         .expect_pool_difficulty()
         .return_const(pool_difficulty);
@@ -1921,6 +2222,9 @@ async fn process_bch_block_with_prev(prev_known: bool) -> bool {
     pool_difficulty
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
     mock_validator
         .expect_pool_difficulty()
         .return_const(pool_difficulty);

@@ -395,6 +395,15 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         // Execute
@@ -493,6 +502,15 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         // Execute
@@ -632,6 +650,15 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         // Execute
@@ -736,6 +763,15 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         let messages = handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -801,6 +837,15 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         let messages = handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -868,6 +913,15 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         // Execute
@@ -939,6 +993,15 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         let result = handle_authorize(request, &mut session, ctx).await;
@@ -1019,6 +1082,15 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1073,6 +1145,15 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1125,6 +1206,15 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1181,6 +1271,15 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         let messages = handle_authorize(request, &mut session, ctx.clone())
@@ -1281,6 +1380,15 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1343,6 +1451,15 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         let messages = handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1417,6 +1534,15 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            sharechain_diff_floor: None,
+            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+            target_ceiling: bitcoin::CompactTarget::from_consensus(
+                crate::shares::share_block::MAX_POOL_TARGET,
+            ),
+            tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(
+                std::collections::HashMap::new(),
+            ))
+            .1,
         };
 
         let first = handle_authorize(

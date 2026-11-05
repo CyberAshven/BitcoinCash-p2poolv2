@@ -264,6 +264,7 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
         prepared.template().coinbasevalue,
         leaves.commitment,
         leaves.disclosure(),
+        None,
     );
     let declaration = declared.declaration.unwrap();
     let wtxid = selected.compute_wtxid().to_byte_array();
@@ -1111,6 +1112,13 @@ async fn disconnect_releases_the_authorized_worker_and_connection_permit() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
     let listener = bind("127.0.0.1", 0).await.unwrap();
     let address = listener.local_addr().unwrap();

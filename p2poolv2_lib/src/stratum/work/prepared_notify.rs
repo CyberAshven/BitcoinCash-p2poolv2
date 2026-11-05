@@ -410,6 +410,12 @@ impl PreparedNotifyParams {
     }
 
     /// Versioned BCH job terms, preceded by an unpredictable connection nonce.
+    ///
+    /// Deliberately pool-basis: the token embeds the pool-wide
+    /// `commitment_prefix`, and JD declarators declare against it. The
+    /// per-miner tier enters only through [`insert_miner_job`]; on a declared
+    /// job the floor clamp in `validate_custom_job` keeps the declared
+    /// commitment at or above the floor. Do not feed tier bits here.
     pub(crate) fn mining_job_token(
         &self,
         nonce: [u8; 32],
@@ -1035,15 +1041,27 @@ fn build_per_miner_coinbase2(
 /// share commitment digests it, and the job keeps the leaves for the
 /// miner's disclosure and wins. A job without a payout address carries the
 /// empty commitment.
+///
+/// `tier_bits` is the share difficulty this miner's job commits to when the
+/// variable-difficulty tier is on: it replaces `prepared.bits` in the stored
+/// commitment and in the coinbase digest, rebuilding the commitment prefix so
+/// the two agree. `None` -- the tier switch off, or Hydrapool (no share
+/// chain) -- uses the pool-wide `prepared.bits` and the pre-built prefix as is.
 pub(crate) fn insert_miner_job(
     prepared: &PreparedNotifyParams,
     miner_bitcoin_address: Option<&PayoutAddress>,
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
+    tier_bits: Option<CompactTarget>,
     tracker_handle: &JobTracker,
 ) -> (JobId, String) {
     let fresh_time = SystemTimeProvider.seconds_since_epoch() as u32;
 
     let nsecs = get_timestamp_bytes(&SystemTimeProvider);
+
+    // The share difficulty this miner's job commits to: its per-miner tier
+    // when one is assigned, else the pool-wide ASERT basis. `None` keeps
+    // today's behaviour, so the tier switch ships off (phase 1).
+    let job_bits = tier_bits.unwrap_or(prepared.bits);
 
     let merge_tokens = prepared
         .miner_token_job(miner_bitcoin_address)
@@ -1059,7 +1077,7 @@ pub(crate) fn insert_miner_job(
             miner_bitcoin_address: bitcoin_address.clone(),
             miner_address: share_address,
             share_witness_root: prepared.share_witness_root,
-            bits: prepared.bits,
+            bits: job_bits,
             time: fresh_time,
             donation_address: prepared.donation_address.clone(),
             donation: prepared.donation,
@@ -1072,17 +1090,30 @@ pub(crate) fn insert_miner_job(
         _ => None,
     };
 
-    // The hash the miner embeds in its bitcoin coinbase must be the hash of the
-    // commitment we store, so derive one from the other rather than building
-    // the same digest twice. A miner's token root follows the shared suffix,
-    // as `ShareCommitment::hash` digests it.
+    // The commitment hash the miner embeds in its bitcoin coinbase must be the
+    // hash of the commitment we store, so derive one from the other rather than
+    // building the same digest twice. A miner's token root follows the shared
+    // suffix, as `ShareCommitment::hash` digests it.
+    //
+    // The pre-built prefix carries the pool-wide ASERT basis; a per-miner tier
+    // changes the committed `bits`, which the prefix encodes, so rebuild it for
+    // that miner. With the tier off (`None`) the shared prefix is used as is.
+    let rebuilt_prefix;
+    let commitment_prefix: &[u8] = match tier_bits {
+        Some(bits) => {
+            rebuilt_prefix =
+                build_commitment_prefix(prepared.prev_share_blockhash, &prepared.uncles, bits);
+            &rebuilt_prefix
+        }
+        None => &prepared.commitment_prefix,
+    };
     let miner_suffix = pool_merge_mining.map(|commitment| {
         let mut suffix = prepared.commitment_suffix.clone();
         append_pool_merge_mining(&mut suffix, &commitment);
         suffix
     });
     let commitment_hash_hex = get_commitment_hex(
-        &prepared.commitment_prefix,
+        commitment_prefix,
         fresh_time,
         miner_suffix
             .as_deref()
@@ -1136,34 +1167,41 @@ pub(crate) fn insert_miner_job(
 /// Inserts the miner's job with [`insert_miner_job`] and overwrites the
 /// job id and coinbase2 placeholders in the pre-built JSON. The SV1 server
 /// uses [`build_notify_with_job_id`], which also gives the job's id.
+/// `tier_bits` is passed through to [`insert_miner_job`]: the miner's tier
+/// when the variable-difficulty switch is on, `None` otherwise.
 #[cfg(any(test, feature = "sim"))]
 pub(crate) fn build_notify_from_prepared(
     prepared: &PreparedNotifyParams,
     miner_bitcoin_address: Option<&PayoutAddress>,
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
+    tier_bits: Option<CompactTarget>,
     tracker_handle: &JobTracker,
 ) -> Result<String, WorkError> {
     build_notify_with_job_id(
         prepared,
         miner_bitcoin_address,
         miner_address,
+        tier_bits,
         tracker_handle,
     )
     .map(|(notify_json, _job_id)| notify_json)
 }
 
 /// [`build_notify_from_prepared`], also returning the id of the job it
-/// inserted, for what follows the notify (a miner's token leaves).
+/// inserted, for what follows the notify (a miner's token leaves). Carries
+/// the same `tier_bits` parameter through to [`insert_miner_job`].
 pub(crate) fn build_notify_with_job_id(
     prepared: &PreparedNotifyParams,
     miner_bitcoin_address: Option<&PayoutAddress>,
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
+    tier_bits: Option<CompactTarget>,
     tracker_handle: &JobTracker,
 ) -> Result<(String, JobId), WorkError> {
     let (job_id, coinbase2) = insert_miner_job(
         prepared,
         miner_bitcoin_address,
         miner_address,
+        tier_bits,
         tracker_handle,
     );
     let job_id_hex = format!("{job_id:016x}");

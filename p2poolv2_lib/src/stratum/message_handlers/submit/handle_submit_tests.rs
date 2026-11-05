@@ -36,6 +36,7 @@ async fn a_found_tree_is_stored_with_the_submitted_coinbase_and_share() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
         &ctx.tracker_handle,
     );
     let job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -84,6 +85,7 @@ async fn a_tree_job_without_a_share_commitment_is_kept_without_a_share() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
         &ctx.tracker_handle,
     );
     let mut job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -117,6 +119,7 @@ async fn a_bchn_accepted_submission_records_the_actual_share_and_resets_effort_o
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
         &context.tracker_handle,
     );
     let job = context.tracker_handle.get_job(job_id).unwrap();
@@ -191,6 +194,7 @@ async fn a_failed_tree_write_still_hands_the_block_off() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
         &ctx.tracker_handle,
     );
     let job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -227,6 +231,7 @@ async fn sv1_keeps_a_found_tree_even_when_the_share_pipeline_rejects_it() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
         &ctx.tracker_handle,
     );
     let job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -257,6 +262,7 @@ async fn a_private_declarators_tree_is_kept_before_waiting_for_its_broadcast() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
         &ctx.tracker_handle,
     );
     let mut job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -352,6 +358,13 @@ async fn test_handle_submit_meets_difficulty_should_submit() {
         cash_share: None,
         template_refresh_tx: Some(template_refresh_tx),
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -448,6 +461,13 @@ async fn test_handle_submit_a_meets_difficulty_should_submit() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let response = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -535,6 +555,13 @@ async fn test_handle_submit_with_version_rolling_meets_difficulty_should_submit(
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let response = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -632,6 +659,13 @@ async fn test_handle_submit_triggers_difficulty_adjustment() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -707,6 +741,13 @@ async fn test_handle_submit_with_stale_job_returns_error() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -777,6 +818,13 @@ async fn test_handle_submit_with_less_difficulty_than_session_is_rejected_but_em
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -849,6 +897,13 @@ async fn test_handle_submit_duplicate_share_is_rejected() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let message = handle_submit(submit.clone(), &mut session, ctx)
@@ -889,6 +944,13 @@ async fn test_handle_submit_duplicate_share_is_rejected() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let message2 = handle_submit(submit, &mut session, ctx2).await.unwrap();
@@ -959,6 +1021,13 @@ async fn test_handle_submit_accepts_low_difficulty_share_when_ignore_difficulty_
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1042,6 +1111,13 @@ async fn test_handle_submit_emits_coinbase_proof_of_share_coinbase() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1108,6 +1184,13 @@ async fn test_handle_submit_not_subscribed_returns_error() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1195,6 +1278,13 @@ async fn test_handle_submit_unknown_job_id_returns_invalid_jobid() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     // Verify the inserted job is properly registered
@@ -1300,6 +1390,13 @@ async fn test_handle_submit_validation_failure_returns_other_unknown_with_messag
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1389,6 +1486,13 @@ async fn test_handle_submit_bad_nonce_returns_error_not_panic() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1479,6 +1583,13 @@ async fn test_handle_submit_none_version_bits_returns_error_not_panic() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1547,6 +1658,13 @@ async fn test_handle_submit_unauthorized_returns_error() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1645,6 +1763,13 @@ async fn test_p2poolv2_mode_accepts_and_accounts_share_below_pool_difficulty_wit
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1737,6 +1862,13 @@ async fn test_hydrapool_mode_accepts_share_despite_hard_pool_difficulty() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1831,6 +1963,13 @@ async fn test_hydrapool_mode_does_not_store_share_below_session_difficulty() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1921,6 +2060,13 @@ async fn test_hydrapool_mode_ignore_difficulty_does_not_store_share_below_sessio
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -2004,6 +2150,13 @@ async fn a_winning_share_sends_its_miner_the_token_proof() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: Some(MergeMiningLogs::from_logs(leaves, wins)),
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -2077,6 +2230,13 @@ async fn a_winning_share_without_the_disclosure_sends_nothing_new() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();

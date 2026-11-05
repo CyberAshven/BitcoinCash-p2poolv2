@@ -6,14 +6,71 @@ use crate::accounting::stats::pool_local_stats::load_pool_local_stats;
 use crate::accounting::stats::user::User;
 use crate::accounting::{payout::simple_pplns::SimplePplnsShare, stats::pool_local_stats};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
-use std::time::SystemTime;
-use tokio::sync::{mpsc, oneshot};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::error;
 
 const METRICS_MESSAGE_BUFFER_SIZE: usize = 1000;
 pub const INITIAL_USER_MAP_CAPACITY: usize = 1000;
 const METRICS_SAVE_INTERVAL: u64 = 5;
+/// The sliding window the local (this node's miners) hashrate is computed
+/// over, in seconds: ten minutes, matching p2poolv1's local hash rate.
+const SUBMISSION_WINDOW_SECS: u64 = 600;
+/// Hashes a difficulty-1 share takes on average (2^32).
+const HASHES_PER_DIFFICULTY: f64 = 4_294_967_296.0;
+/// How often the actor publishes per-miner `w_i` to its watchers. The
+/// 600-second window moves on every accepted share, so a per-share publish
+/// would rebuild the O(miners) map continuously; a slow tick keeps the
+/// synchronous job builders' snapshot fresh enough for tier boundaries.
+pub const TIER_PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
+/// Publish-time EMA smoothing factor for a miner's `w_i`: the weight of each
+/// new raw sample in the published value. Raw `w_i` jitters on every share,
+/// which would flip stratum difficulty around a tier boundary; damping makes
+/// boundaries move only when the underlying hashpower share moves.
+pub const TIER_WEIGHT_SMOOTHING: f64 = 0.2;
+
+/// The current unix time in seconds, 0 before the epoch.
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+/// Hashrate of `window` from its work in the trailing
+/// [`SUBMISSION_WINDOW_SECS`] seconds, in hashes per second: the work over
+/// the span from the first kept share to `now`, which is the full ten minutes
+/// once the window is that old. `None` with no work in the window, or no time
+/// between the first kept share and `now` (the dash, not zero).
+fn window_hashrate(window: &VecDeque<WorkDatum>, now: u64) -> Option<f64> {
+    let cutoff = now.saturating_sub(SUBMISSION_WINDOW_SECS);
+    let mut first: Option<u64> = None;
+    let mut work = 0.0;
+    for datum in window {
+        if datum.at < cutoff {
+            continue;
+        }
+        first = Some(first.map_or(datum.at, |earliest: u64| earliest.min(datum.at)));
+        work += datum.work;
+    }
+    let first = first?;
+    let span = now.saturating_sub(first).min(SUBMISSION_WINDOW_SECS);
+    if span == 0 {
+        return None;
+    }
+    Some(work / span as f64)
+}
+
+/// One accepted share in the sliding window the local hashrate reads.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct WorkDatum {
+    /// Unix seconds the share was accepted.
+    at: u64,
+    /// The share's work, in hashes: difficulty x HASHES_PER_DIFFICULTY.
+    work: f64,
+}
 /// Represents the metrics for the P2Poolv2 pool, we derive the stats every five minutes from this
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PoolMetrics {
@@ -52,6 +109,12 @@ pub struct PoolMetrics {
     /// error, a time-out or a busy node, by node label. Runtime only.
     #[serde(skip)]
     pub found_block_submit_retries: BTreeMap<String, u64>,
+    /// Accepted shares in the trailing [`SUBMISSION_WINDOW_SECS`] seconds,
+    /// oldest first, the local hashrate is computed from. Runtime only
+    /// (not persisted): a restart starts empty, so the local hashrate
+    /// reads as unknown until the first share arrives.
+    #[serde(skip)]
+    pub submission_window: VecDeque<WorkDatum>,
 }
 
 impl Default for PoolMetrics {
@@ -72,6 +135,7 @@ impl Default for PoolMetrics {
             work_since_last_block: 0.0,
             found_block_submissions: BTreeMap::new(),
             found_block_submit_retries: BTreeMap::new(),
+            submission_window: VecDeque::new(),
         }
     }
 }
@@ -87,6 +151,17 @@ impl PoolMetrics {
             users: pool_stats.users,
             ..Default::default()
         })
+    }
+
+    /// This node's hashrate from accepted submissions in the trailing
+    /// [`SUBMISSION_WINDOW_SECS`] seconds, in hashes per second. This is
+    /// p2poolv1's local hash rate: the work submitted in the window over
+    /// the window's span, which is the full ten minutes once the window is
+    /// that old and the time since the first kept share before that.
+    /// `None` with no shares in the window, or no time between the first
+    /// kept share and `now` (the dash, not zero).
+    pub fn local_submission_hashrate(&self, now: u64) -> Option<f64> {
+        window_hashrate(&self.submission_window, now)
     }
 }
 
@@ -143,36 +218,120 @@ pub struct MetricsActor {
     metrics: PoolMetrics,
     receiver: mpsc::Receiver<MetricsMessage>,
     worker_connections: HashMap<(String, String), usize>,
+    /// Accepted-share windows per miner address, keyed by `btcaddress`, the
+    /// identity set at authorize. Actor-level state, not on `PoolMetrics`:
+    /// it is never scraped nor persisted, and it is pruned on the same
+    /// cutoff as the pool-wide window.
+    per_miner_windows: HashMap<String, VecDeque<WorkDatum>>,
+    /// Smoothed `w_i` per miner, carried between publishes so the EMA damps
+    /// tier boundaries instead of restarting at each sample.
+    smoothed_tiers: HashMap<String, f64>,
+    /// Publishes the per-miner hashrate-share snapshot the job builders
+    /// read synchronously through [`MetricsHandle::subscribe_tiers`].
+    tier_tx: watch::Sender<Arc<HashMap<String, f64>>>,
 }
 
 impl MetricsActor {
-    /// Create a new metrics actor with default metrics
-    pub fn new(receiver: mpsc::Receiver<MetricsMessage>) -> Self {
+    /// Create a new metrics actor with default metrics, publishing `w_i`
+    /// snapshots through `tier_tx`.
+    pub fn new(
+        receiver: mpsc::Receiver<MetricsMessage>,
+        tier_tx: watch::Sender<Arc<HashMap<String, f64>>>,
+    ) -> Self {
         Self {
             metrics: PoolMetrics::default(),
             receiver,
             worker_connections: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
+            per_miner_windows: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
+            smoothed_tiers: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
+            tier_tx,
         }
     }
 
-    /// Create a metrics actor with metrics loaded from the given log directory
+    /// Create a metrics actor with metrics loaded from the given log
+    /// directory, publishing `w_i` snapshots through `tier_tx`.
     pub fn with_existing_metrics(
         log_dir: &str,
         receiver: mpsc::Receiver<MetricsMessage>,
+        tier_tx: watch::Sender<Arc<HashMap<String, f64>>>,
     ) -> Result<Self, std::io::Error> {
         let metrics = PoolMetrics::load_existing(log_dir)?;
         Ok(Self {
             metrics,
             receiver,
             worker_connections: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
+            per_miner_windows: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
+            smoothed_tiers: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
+            tier_tx,
         })
     }
 
-    /// Start the actor's message handling loop
+    /// Start the actor's message handling loop, publishing the `w_i`
+    /// snapshot on a [`TIER_PUBLISH_INTERVAL`] cadence beside message
+    /// handling.
     pub async fn run(mut self) {
-        while let Some(msg) = self.receiver.recv().await {
-            self.handle_message(msg).await;
+        let mut publish_interval = tokio::time::interval(TIER_PUBLISH_INTERVAL);
+        // The first tick is immediate; consume it so publishes start on the
+        // cadence rather than before any share has been recorded.
+        publish_interval.tick().await;
+        loop {
+            tokio::select! {
+                message = self.receiver.recv() => match message {
+                    Some(message) => self.handle_message(message).await,
+                    None => break,
+                },
+                _ = publish_interval.tick() => self.publish_tiers(),
+            }
         }
+    }
+
+    /// Publish the smoothed per-miner hashrate share (`w_i`) snapshot.
+    fn publish_tiers(&mut self) {
+        let snapshot = self.tier_snapshot(unix_seconds());
+        // `send_replace` keeps the latest snapshot available to receivers
+        // that subscribe later, even while none is connected.
+        self.tier_tx.send_replace(Arc::new(snapshot));
+    }
+
+    /// Compute the smoothed per-miner hashrate share (`w_i`) snapshot at
+    /// `now`.
+    ///
+    /// `w_i = miner_hashrate / pool_hashrate` over the same trailing
+    /// [`SUBMISSION_WINDOW_SECS`] window the pool hashrate reads. A pool
+    /// with no work in its window yields an empty snapshot, so the tier
+    /// formula sees no miner above the floor and ceiling. New samples are
+    /// damped by [`TIER_WEIGHT_SMOOTHING`] so a miner's tier does not flip
+    /// on every share. Miners whose window holds no work in the trailing
+    /// window are dropped, along with their smoothing state; a miner with
+    /// only a fresh share (zero span) keeps its window but contributes no
+    /// sample this round.
+    fn tier_snapshot(&mut self, now: u64) -> HashMap<String, f64> {
+        let cutoff = now.saturating_sub(SUBMISSION_WINDOW_SECS);
+        self.per_miner_windows.retain(|_, window| {
+            while window.front().is_some_and(|datum| datum.at < cutoff) {
+                window.pop_front();
+            }
+            !window.is_empty()
+        });
+        self.smoothed_tiers
+            .retain(|address, _| self.per_miner_windows.contains_key(address));
+        let mut snapshot = HashMap::with_capacity(self.per_miner_windows.len());
+        if let Some(pool_hashrate) =
+            window_hashrate(&self.metrics.submission_window, now).filter(|hashrate| *hashrate > 0.0)
+        {
+            for (address, window) in &self.per_miner_windows {
+                if let Some(miner_hashrate) = window_hashrate(window, now) {
+                    let sample = miner_hashrate / pool_hashrate;
+                    let smoothed = match self.smoothed_tiers.get(address) {
+                        Some(previous) => previous + TIER_WEIGHT_SMOOTHING * (sample - previous),
+                        None => sample,
+                    };
+                    self.smoothed_tiers.insert(address.clone(), smoothed);
+                    snapshot.insert(address.clone(), smoothed);
+                }
+            }
+        }
+        snapshot
     }
 
     async fn handle_message(&mut self, msg: MetricsMessage) {
@@ -260,6 +419,10 @@ impl MetricsActor {
     }
 
     /// Update metrics from accepted share
+    ///
+    /// Pushes the share's work onto the pool-wide and the submitting
+    /// miner's trailing windows, both pruned to
+    /// [`SUBMISSION_WINDOW_SECS`].
     fn record_share_accepted(
         &mut self,
         btcaddress: String,
@@ -267,15 +430,34 @@ impl MetricsActor {
         difficulty: u64,
         truediff: u64,
     ) {
-        let current_unix_timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let current_unix_timestamp = unix_seconds();
         self.metrics.accepted_total += 1;
         self.metrics.accepted_difficulty_total += difficulty;
         self.metrics.lastupdate = Some(current_unix_timestamp);
         self.metrics.best_share = self.metrics.best_share.max(truediff);
         self.metrics.best_share_ever = self.metrics.best_share_ever.max(truediff);
+        let cutoff = current_unix_timestamp.saturating_sub(SUBMISSION_WINDOW_SECS);
+        while self
+            .metrics
+            .submission_window
+            .front()
+            .is_some_and(|datum| datum.at < cutoff)
+        {
+            self.metrics.submission_window.pop_front();
+        }
+        let datum = WorkDatum {
+            at: current_unix_timestamp,
+            work: difficulty as f64 * HASHES_PER_DIFFICULTY,
+        };
+        self.metrics.submission_window.push_back(datum);
+        let miner_window = self
+            .per_miner_windows
+            .entry(btcaddress.clone())
+            .or_default();
+        while miner_window.front().is_some_and(|datum| datum.at < cutoff) {
+            miner_window.pop_front();
+        }
+        miner_window.push_back(datum);
         if let Some(user) = self.metrics.users.get_mut(&btcaddress) {
             user.record_share(&workername, difficulty, truediff, current_unix_timestamp);
         }
@@ -366,9 +548,21 @@ impl MetricsActor {
 #[derive(Clone)]
 pub struct MetricsHandle {
     sender: mpsc::Sender<MetricsMessage>,
+    /// The actor's `w_i` snapshot publication, mirrored onto the handle so
+    /// job builders can subscribe synchronously.
+    tier_tx: watch::Sender<Arc<HashMap<String, f64>>>,
 }
 
 impl MetricsHandle {
+    /// Subscribe to the per-miner `w_i` snapshot the metrics actor
+    /// publishes: hashrate share keyed by `btcaddress`.
+    ///
+    /// The receiver reads the latest published snapshot with `borrow`; it
+    /// need not be driven to completion.
+    pub fn subscribe_tiers(&self) -> watch::Receiver<Arc<HashMap<String, f64>>> {
+        self.tier_tx.subscribe()
+    }
+
     /// Record an accepted share with the given difficulty
     pub async fn record_share_accepted(
         &self,
@@ -543,20 +737,23 @@ impl MetricsHandle {
 #[cfg(test)]
 pub(crate) fn spawn_test_metrics_handle() -> MetricsHandle {
     let (sender, receiver) = mpsc::channel(METRICS_MESSAGE_BUFFER_SIZE);
+    let (tier_tx, _tier_rx) = watch::channel(Arc::new(HashMap::new()));
+    let actor_tier_tx = tier_tx.clone();
     tokio::spawn(async move {
-        MetricsActor::new(receiver).run().await;
+        MetricsActor::new(receiver, actor_tier_tx).run().await;
     });
-    MetricsHandle { sender }
+    MetricsHandle { sender, tier_tx }
 }
 
 /// Construct a new metrics actor with existing metrics and return its handle
 pub async fn start_metrics(log_dir: String) -> Result<MetricsHandle, std::io::Error> {
     let (sender, receiver) = mpsc::channel(METRICS_MESSAGE_BUFFER_SIZE);
-    let actor = MetricsActor::with_existing_metrics(&log_dir, receiver)?;
+    let (tier_tx, _tier_rx) = watch::channel(Arc::new(HashMap::new()));
+    let actor = MetricsActor::with_existing_metrics(&log_dir, receiver, tier_tx.clone())?;
     tokio::spawn(async move {
         actor.run().await;
     });
-    let handle = MetricsHandle { sender };
+    let handle = MetricsHandle { sender, tier_tx };
     match pool_local_stats::start_stats_saver(
         handle.clone(),
         METRICS_SAVE_INTERVAL,
@@ -581,7 +778,8 @@ mod tests {
     #[test]
     fn shared_worker_stays_active_until_the_last_connection_closes() {
         let (_sender, receiver) = mpsc::channel(8);
-        let mut actor = MetricsActor::new(receiver);
+        let (tier_tx, _tier_rx) = watch::channel(Arc::new(HashMap::new()));
+        let mut actor = MetricsActor::new(receiver, tier_tx);
         actor.worker_authorized("miner".into(), "worker".into());
         actor.worker_authorized("miner".into(), "worker".into());
         actor.mark_worker_inactive(Some("miner".into()), "worker".into());
@@ -592,6 +790,117 @@ mod tests {
         actor.mark_worker_inactive(Some("miner".into()), "worker".into());
         actor.worker_authorized("miner".into(), "worker".into());
         assert!(actor.metrics.users["miner"].workers["worker"].active);
+    }
+
+    #[test]
+    fn tier_snapshot_prunes_per_miner_windows_older_than_the_submission_window() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let (tier_tx, _tier_rx) = watch::channel(Arc::new(HashMap::new()));
+        let mut actor = MetricsActor::new(receiver, tier_tx);
+        let now = unix_seconds();
+        actor.per_miner_windows.insert(
+            "stale".to_string(),
+            [WorkDatum {
+                at: now.saturating_sub(SUBMISSION_WINDOW_SECS + 100),
+                work: HASHES_PER_DIFFICULTY,
+            }]
+            .into(),
+        );
+        actor.record_share_accepted("fresh".to_string(), "worker".to_string(), 100, 100);
+        let snapshot = actor.tier_snapshot(now + 10);
+        assert!(!actor.per_miner_windows.contains_key("stale"));
+        assert!(!actor.smoothed_tiers.contains_key("stale"));
+        assert!(actor.per_miner_windows.contains_key("fresh"));
+        assert_eq!(snapshot["fresh"], 1.0);
+    }
+
+    #[test]
+    fn tier_snapshot_damps_a_step_with_the_smoothing_alpha() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let (tier_tx, _tier_rx) = watch::channel(Arc::new(HashMap::new()));
+        let mut actor = MetricsActor::new(receiver, tier_tx);
+        let now = unix_seconds();
+        let at = now.saturating_sub(10);
+        let first = WorkDatum {
+            at,
+            work: HASHES_PER_DIFFICULTY,
+        };
+        actor
+            .per_miner_windows
+            .insert("a".to_string(), [first].into());
+        actor
+            .per_miner_windows
+            .insert("b".to_string(), [first].into());
+        actor.metrics.submission_window.extend([first, first]);
+        let first_snapshot = actor.tier_snapshot(now);
+        assert!((first_snapshot["a"] - 0.5).abs() < 1e-9);
+
+        let step = WorkDatum {
+            at,
+            work: 3.0 * HASHES_PER_DIFFICULTY,
+        };
+        actor
+            .per_miner_windows
+            .get_mut("a")
+            .unwrap()
+            .push_back(step);
+        actor.metrics.submission_window.push_back(step);
+        let second_snapshot = actor.tier_snapshot(now);
+        // a is now 4 of 5 work units: 0.8 raw, damped to
+        // 0.5 + 0.2 * (0.8 - 0.5) = 0.56.
+        assert!((second_snapshot["a"] - 0.56).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tier_snapshot_is_empty_when_the_pool_has_no_work() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let (tier_tx, _tier_rx) = watch::channel(Arc::new(HashMap::new()));
+        let mut actor = MetricsActor::new(receiver, tier_tx);
+        let now = unix_seconds();
+        actor.per_miner_windows.insert(
+            "miner".to_string(),
+            [WorkDatum {
+                at: now.saturating_sub(10),
+                work: HASHES_PER_DIFFICULTY,
+            }]
+            .into(),
+        );
+        let snapshot = actor.tier_snapshot(now);
+        assert!(snapshot.is_empty());
+        assert!(actor.per_miner_windows.contains_key("miner"));
+    }
+
+    #[test]
+    fn tier_snapshot_is_empty_when_pool_hashrate_is_zero() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let (tier_tx, _tier_rx) = watch::channel(Arc::new(HashMap::new()));
+        let mut actor = MetricsActor::new(receiver, tier_tx);
+        let now = unix_seconds();
+        actor.metrics.submission_window.push_back(WorkDatum {
+            at: now.saturating_sub(10),
+            work: 0.0,
+        });
+        actor.per_miner_windows.insert(
+            "miner".to_string(),
+            [WorkDatum {
+                at: now.saturating_sub(10),
+                work: HASHES_PER_DIFFICULTY,
+            }]
+            .into(),
+        );
+        assert!(actor.tier_snapshot(now).is_empty());
+    }
+
+    #[test]
+    fn tier_snapshot_publishes_a_lone_miner_as_the_whole_pool() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let (tier_tx, _tier_rx) = watch::channel(Arc::new(HashMap::new()));
+        let mut actor = MetricsActor::new(receiver, tier_tx);
+        actor.record_share_accepted("miner".to_string(), "worker".to_string(), 100, 100);
+        // A later `now` gives both windows the same non-zero span; the lone
+        // miner is the whole pool.
+        let snapshot = actor.tier_snapshot(unix_seconds() + 10);
+        assert_eq!(snapshot["miner"], 1.0);
     }
 
     #[test]

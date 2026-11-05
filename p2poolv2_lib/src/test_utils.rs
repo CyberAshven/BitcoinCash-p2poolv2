@@ -53,7 +53,7 @@ use crate::address::Address as P2PoolAddress;
 #[cfg(test)]
 use crate::config::{Chain, PoolMode};
 #[cfg(test)]
-use crate::config::{StratumConfig, Sv2Authority};
+use crate::config::{Parsed, StratumConfig, Sv2Authority};
 #[cfg(test)]
 use crate::pool_difficulty::AsertParent;
 #[cfg(test)]
@@ -592,6 +592,34 @@ pub fn test_bch_prepared() -> Arc<PreparedNotifyParams> {
     test_bch_prepared_for_template(template)
 }
 
+/// A BCH payout snapshot like [`test_bch_prepared`] whose prepared share
+/// bits are `bits`: the basis every token's commitment is built on, so a
+/// caller can place a declared job above or below a difficulty floor.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_bch_prepared_with_share_bits(bits: CompactTarget) -> Arc<PreparedNotifyParams> {
+    let template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    let first = PayoutAddress::from(Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([1; 20]),
+        bitcoin::Network::Regtest,
+    ));
+    let second = PayoutAddress::from(Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([2; 20]),
+        bitcoin::Network::Regtest,
+    ));
+    let weights = HashMap::from([(first, 1), (second, 3)]);
+    test_bch_prepared_with_weights_and_cuts(
+        template,
+        weights,
+        (None, None),
+        (None, None),
+        None,
+        bits,
+    )
+}
+
 /// Allocated native token and BCH template for API/interoperability fixtures.
 #[cfg(any(test, feature = "test-utils"))]
 pub fn test_bch_job_token_and_template() -> (Vec<u8>, Arc<BlockTemplate>) {
@@ -650,6 +678,7 @@ pub fn test_bch_prepared_with_cuts(
         (donation_address, donation),
         (fee_address, fee),
         None,
+        CompactTarget::from_consensus(0x2100ffff),
     )
 }
 
@@ -715,6 +744,7 @@ pub fn test_bch_prepared_with_tokens(
         (donation_address, donation),
         (fee_address, fee),
         Some(tokens),
+        CompactTarget::from_consensus(0x2100ffff),
     )
 }
 
@@ -745,6 +775,7 @@ pub fn test_bch_prepared_with_tree_payees(payee_count: u32) -> Arc<PreparedNotif
         (None, None),
         (None, None),
         Some(test_merge_token_set()),
+        CompactTarget::from_consensus(0x2100ffff),
     )
 }
 
@@ -770,12 +801,20 @@ fn test_bch_prepared_with_weights(
     template: BlockTemplate,
     weights: HashMap<PayoutAddress, u128>,
 ) -> Arc<PreparedNotifyParams> {
-    test_bch_prepared_with_weights_and_cuts(template, weights, (None, None), (None, None), None)
+    test_bch_prepared_with_weights_and_cuts(
+        template,
+        weights,
+        (None, None),
+        (None, None),
+        None,
+        CompactTarget::from_consensus(0x2100ffff),
+    )
 }
 
 /// A BCH payout snapshot for `template` and `weights` on a node taking the
 /// given donation and fee, each an address and basis points, and
-/// merge-mining `merge_tokens` for every miner when given.
+/// merge-mining `merge_tokens` for every miner when given. `bits` is the
+/// prepared share bits, the basis of every token's commitment.
 #[cfg(any(test, feature = "test-utils"))]
 fn test_bch_prepared_with_weights_and_cuts(
     template: BlockTemplate,
@@ -783,6 +822,7 @@ fn test_bch_prepared_with_weights_and_cuts(
     donation: (Option<PayoutAddress>, Option<u16>),
     fee: (Option<PayoutAddress>, Option<u16>),
     merge_tokens: Option<Arc<TokenSet>>,
+    bits: CompactTarget,
 ) -> Arc<PreparedNotifyParams> {
     test_bch_prepared_on(
         BlockHash::from_byte_array([0x33; 32]),
@@ -791,6 +831,7 @@ fn test_bch_prepared_with_weights_and_cuts(
         donation,
         fee,
         merge_tokens,
+        bits,
     )
 }
 
@@ -806,7 +847,15 @@ pub(crate) fn test_bch_prepared_anchored(
         "../../bitcoindrpc/test_data/bchn-regtest-template.json"
     ))
     .unwrap();
-    test_bch_prepared_on(anchor, template, weights, (None, None), (None, None), None)
+    test_bch_prepared_on(
+        anchor,
+        template,
+        weights,
+        (None, None),
+        (None, None),
+        None,
+        CompactTarget::from_consensus(0x2100ffff),
+    )
 }
 
 /// [`test_bch_prepared`] built on the share `anchor` instead: the params a
@@ -821,6 +870,7 @@ pub(crate) fn test_bch_prepared_on_anchor(anchor: BlockHash) -> Arc<PreparedNoti
         (None, None),
         (None, None),
         None,
+        CompactTarget::from_consensus(0x2100ffff),
     )
 }
 
@@ -833,6 +883,7 @@ fn test_bch_prepared_on(
     (donation_address, donation): (Option<PayoutAddress>, Option<u16>),
     (fee_address, fee): (Option<PayoutAddress>, Option<u16>),
     merge_tokens: Option<Arc<TokenSet>>,
+    bits: CompactTarget,
 ) -> Arc<PreparedNotifyParams> {
     let payout_split =
         PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, merge_tokens.is_some());
@@ -851,7 +902,7 @@ fn test_bch_prepared_on(
             .pplns_weights(Some(weights))
             .payout_split(payout_split)
             .prev_share_blockhash(anchor)
-            .bits(CompactTarget::from_consensus(0x2100ffff))
+            .bits(bits)
             .donation_address(donation_address)
             .donation(donation)
             .fee_address(fee_address)
@@ -918,6 +969,37 @@ pub(crate) fn test_bch_custom_job(
         value,
         merge_mining,
         disclosure,
+        None,
+    )
+}
+
+/// A declared job like [`test_bch_custom_job`] whose client commits to
+/// `commitment_bits` before building its digest, as a floor-aware declarator
+/// does for a share-chain difficulty floor.
+#[cfg(test)]
+pub(crate) fn test_bch_custom_job_with_share_bits(
+    prepared: Arc<PreparedNotifyParams>,
+    token: Vec<u8>,
+    transactions: Vec<Transaction>,
+    full: bool,
+    value: u64,
+    commitment_bits: CompactTarget,
+) -> (Vec<u8>, DeclaredJob) {
+    let (merge_mining, disclosure) = if full {
+        let leaves = test_bch_declared_leaves(&token);
+        (leaves.commitment, leaves.disclosure())
+    } else {
+        (MergeMiningCommitment::empty(), Disclosure::default())
+    };
+    test_bch_custom_job_with_leaves(
+        prepared,
+        token,
+        transactions,
+        full,
+        value,
+        merge_mining,
+        disclosure,
+        Some(commitment_bits),
     )
 }
 
@@ -940,12 +1022,16 @@ pub(crate) fn test_bch_custom_job_with_aux(
         value,
         merge_mining,
         Disclosure::default(),
+        None,
     )
 }
 
 /// A declared job with a caller-selected auxiliary commitment and the
-/// leaves its declaration discloses.
+/// leaves its declaration discloses. `commitment_bits` overrides the
+/// commitment's share bits before the client digest is built, modelling a
+/// floor-aware declarator that commits to the bits the node's clamp installs.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)] // fixture builder: each parameter selects one part of the declared job
 pub(crate) fn test_bch_custom_job_with_leaves(
     prepared: Arc<PreparedNotifyParams>,
     token: Vec<u8>,
@@ -954,6 +1040,7 @@ pub(crate) fn test_bch_custom_job_with_leaves(
     value: u64,
     merge_mining: MergeMiningCommitment,
     disclosure: Disclosure,
+    commitment_bits: Option<CompactTarget>,
 ) -> (Vec<u8>, DeclaredJob) {
     let template = prepared.template();
     let payout = PayoutAddress::from(Address::p2pkh(
@@ -972,6 +1059,9 @@ pub(crate) fn test_bch_custom_job_with_leaves(
         merge_mining,
     };
     commitment.bch_coinbase = Some(descriptor.clone());
+    if let Some(bits) = commitment_bits {
+        commitment.bits = bits;
+    }
     let coinbase = build_declared_coinbase(
         &prepared.declared_outputs(value, &merge_mining).unwrap(),
         u64::from(template.height),
@@ -1231,6 +1321,18 @@ pub fn test_bch_auxpow() -> (AuxProof, TokenLeaf) {
     (proof, leaf)
 }
 
+/// A parsed Bitcoin Cash chipnet stratum config, the shape a chipnet node
+/// runs on after `Config::load`. Production derives the protocol-tag floor
+/// and other band values from it.
+#[cfg(test)]
+pub(crate) fn test_bch_chipnet_stratum_config() -> StratumConfig<Parsed> {
+    let mut config = StratumConfig::new_for_test_default();
+    config.chain = Chain::BitcoinCash;
+    config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+    config.bootstrap_address = "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t".to_string();
+    config.parse().unwrap()
+}
+
 /// Disposable BCH mining context; keep the returned directories alive until the test ends.
 #[cfg(test)]
 pub(crate) async fn test_bch_stratum_context(
@@ -1265,6 +1367,13 @@ pub(crate) async fn test_bch_stratum_context(
         cash_share: Some([0x22; 20]),
         template_refresh_tx: None,
         merge_mining_logs: None,
+        sharechain_diff_floor: None,
+        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
+        target_ceiling: bitcoin::CompactTarget::from_consensus(
+            crate::shares::share_block::MAX_POOL_TARGET,
+        ),
+        tier_rx: tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::new()))
+            .1,
     };
     (ctx, emissions_rx, [stats_dir, store_dir])
 }
@@ -1867,6 +1976,7 @@ pub fn build_pool_job_submit(tracker: &JobTracker, enonce1_hex: &str) -> SimpleR
         Some(ShareOwner::Taproot(
             make_test_share_address(1, bitcoin::Network::Signet).witness_program(),
         )),
+        None,
         tracker,
     )
     .unwrap();
@@ -1914,6 +2024,7 @@ pub fn build_token_win_submit(
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
         tracker,
     );
     let job = tracker.get_job(job_id).unwrap();

@@ -63,7 +63,12 @@ impl P2PoolBehaviour {
         // Initialise Kademlia
         let store = MemoryStore::new(local_key.public().to_peer_id());
         let mut kad_config = kad::Config::new(libp2p::StreamProtocol::try_from_owned(
-            kad_protocol_string(config.stratum.network, config.stratum.chain, genesis_hash),
+            kad_protocol_string(
+                config.stratum.network,
+                config.stratum.chain,
+                config.stratum.sharechain_diff_floor,
+                genesis_hash,
+            ),
         )?);
         kad_config.set_query_timeout(tokio::time::Duration::from_secs(60));
 
@@ -72,7 +77,12 @@ impl P2PoolBehaviour {
         kademlia_behaviour.set_mode(Some(kad::Mode::Server));
 
         let identify_config = identify::Config::new(
-            protocol_string(config.stratum.network, config.stratum.chain, genesis_hash),
+            protocol_string(
+                config.stratum.network,
+                config.stratum.chain,
+                config.stratum.sharechain_diff_floor,
+                genesis_hash,
+            ),
             local_key.public(),
         )
         .with_agent_version(format!("p2poolv2/{}", env!("CARGO_PKG_VERSION")))
@@ -101,6 +111,7 @@ impl P2PoolBehaviour {
                     P2PoolRequestResponseProtocol::new(
                         config.stratum.network,
                         config.stratum.chain,
+                        config.stratum.sharechain_diff_floor,
                         genesis_hash,
                     ),
                     ProtocolSupport::Full,

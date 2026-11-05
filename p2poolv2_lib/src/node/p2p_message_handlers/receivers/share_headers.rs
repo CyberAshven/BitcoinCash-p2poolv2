@@ -22,7 +22,9 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::{
     MIN_CUMULATIVE_CHAIN_WORK_MULTIPLIER, ShareHeader, is_terminal_blockhash,
 };
-use crate::shares::validation::{MTP_WINDOW, ShareValidator, ValidationError};
+use crate::shares::validation::{
+    MTP_WINDOW, ShareValidator, ValidationError, check_sharechain_band,
+};
 use crate::store::block_tx_metadata::BlockMetadata;
 use crate::store::dag_store::MAX_BLOCKS_PER_HEIGHT;
 use crate::store::writer::StoreError;
@@ -61,6 +63,13 @@ enum HeaderSyncError {
         block_hash: BlockHash,
         declared: u32,
         expected: u32,
+    },
+    /// A header's declared target fell outside the validation band
+    /// `[effective floor, infinity)` in its compact bits.
+    BelowFloor {
+        block_hash: BlockHash,
+        declared: u32,
+        floor: u64,
     },
     /// A header's timestamp breaks median time past or the future limit.
     InvalidTimestamp {
@@ -138,6 +147,16 @@ impl fmt::Display for HeaderSyncError {
                 write!(
                     formatter,
                     "ASERT mismatch for {block_hash}: declared bits {declared:#010x}, expected {expected:#010x}"
+                )
+            }
+            HeaderSyncError::BelowFloor {
+                block_hash,
+                declared,
+                floor,
+            } => {
+                write!(
+                    formatter,
+                    "Header {block_hash} declared bits {declared:#010x} below the sharechain difficulty floor {floor}"
                 )
             }
             HeaderSyncError::InvalidTimestamp { block_hash, error } => {
@@ -425,13 +444,25 @@ fn validate_dag_connectivity_and_difficulty(
         let parent =
             get_cached_asert_parent(&parent_hash, &mut asert_parent_cache, chain_store_handle)?;
 
-        let expected_bits = pool_difficulty.calculate_target_clamped(parent);
-        if header.bits != expected_bits {
-            return Err(HeaderSyncError::AsertMismatch {
-                block_hash: header.block_hash(),
-                declared: header.bits.to_consensus(),
-                expected: expected_bits.to_consensus(),
-            });
+        match share_validator.sharechain_diff_floor() {
+            Some(floor) => {
+                check_sharechain_band(header.bits, floor, pool_difficulty.target_ceiling())
+                    .map_err(|_rejection| HeaderSyncError::BelowFloor {
+                        block_hash: header.block_hash(),
+                        declared: header.bits.to_consensus(),
+                        floor,
+                    })?;
+            }
+            None => {
+                let expected_bits = pool_difficulty.calculate_target_clamped(parent);
+                if header.bits != expected_bits {
+                    return Err(HeaderSyncError::AsertMismatch {
+                        block_hash: header.block_hash(),
+                        declared: header.bits.to_consensus(),
+                        expected: expected_bits.to_consensus(),
+                    });
+                }
+            }
         }
 
         let header_height = parent.height + 1;

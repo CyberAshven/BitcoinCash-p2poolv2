@@ -5,6 +5,7 @@
 //! Validate the miner's BCH job before installing it in a mining channel.
 
 use super::session::DeclaredJob;
+use crate::pool_difficulty::target_for_difficulty;
 use crate::shares::auxpow::Disclosure;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::coinbase_proof::MAX_COINBASE_MERKLE_BRANCH_LENGTH;
@@ -23,7 +24,7 @@ use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoin::block::{Header, Version};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::{Hash, sha256d};
-use bitcoin::{Amount, Block, BlockHash, CompactTarget, TxMerkleNode, TxOut};
+use bitcoin::{Amount, Block, BlockHash, CompactTarget, Target, TxMerkleNode, TxOut};
 use mining_sv2::SetCustomMiningJob;
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
@@ -128,12 +129,19 @@ fn check_declared_tokens(
 
 /// Coinbase-only jobs deliberately do not reveal their transaction list.
 /// Their declarator must validate CTOR/consensus and broadcast found blocks.
+///
+/// `sharechain_diff_floor` is the network's configured share-chain difficulty
+/// floor, when it has one. A declared commitment below it is raised to the
+/// floor's compact encoding before its digest is built, so a miner's locally
+/// declared job stays floor-compliant; the truncating encoder guarantees the
+/// decoded difficulty is never below the floor.
 pub(crate) fn validate_custom_job(
     request: &SetCustomMiningJob,
     declared: DeclaredJob,
     payout: PayoutAddress,
     owner: ShareOwner,
     version_mask: i32,
+    sharechain_diff_floor: Option<u64>,
 ) -> Result<(JobDetails, Option<Block>), String> {
     let original = declared.prepared.template();
     let prev_hash =
@@ -181,6 +189,15 @@ pub(crate) fn validate_custom_job(
             .map_err(|error| error.to_string())?;
     commitment.bch_coinbase = Some(descriptor.clone());
     check_declared_tokens(&declared, &merge_mining, &commitment)?;
+    // Raise a below-floor commitment to the floor before the digest is built:
+    // the declared job's coinbase must commit to the clamped bits, and a
+    // declaration built on the token's own bits then mismatches below.
+    if let Some(floor) = sharechain_diff_floor {
+        let floor_target = target_for_difficulty(floor);
+        if Target::from_compact(commitment.bits) > floor_target {
+            commitment.bits = floor_target.to_compact_lossy();
+        }
+    }
     let distribution = declared
         .prepared
         .declared_outputs(value, &merge_mining)

@@ -650,6 +650,9 @@ async fn test_handle_response_share_headers() {
     mock_validator
         .expect_validate_header_timestamp()
         .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
     let mut pool_difficulty = PoolDifficulty::default();
     pool_difficulty
         .expect_calculate_target_clamped()

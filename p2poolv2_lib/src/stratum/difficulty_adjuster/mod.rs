@@ -9,7 +9,8 @@
 //! adjusts the difficulty to maintain an optimal share submission frequency.
 
 use crate::accounting::calc::{decay_time, sane_time_diff, time_bias};
-use crate::config::DEFAULT_MAXIMUM_DIFFICULTY;
+use crate::config::{DEFAULT_MAXIMUM_DIFFICULTY, SharechainTierMode};
+use crate::pool_difficulty::target_for_difficulty;
 use bitcoin::{CompactTarget, Network, Target};
 #[cfg(test)]
 use mockall::automock;
@@ -71,6 +72,74 @@ pub fn share_difficulty_ceiling(share_bits: CompactTarget) -> Option<u64> {
     )
 }
 
+/// Difficulty of the job a miner holding `hashrate_share` (its share `w_i` of
+/// the pool hashrate) gets, per the variable-share-difficulty formula:
+///
+/// `job_difficulty = max(floor, D_ceiling, round(w_i * D_asert_capped))`
+///
+/// with `D_asert_capped = max(D_asert, D_ceiling)`: the pool ASERT difficulty
+/// floored at the share ceiling, so a small miner is never asked for less
+/// than the chain's own difficulty. `asert_capped_bits` is the asert-capped
+/// share target and `ceiling_bits` the ceiling's, both in compact form and
+/// read as stratum difficulty by [`share_difficulty_ceiling`]. `floor` is the
+/// configured `sharechain_diff_floor`. The result is at least
+/// [`MINIMUM_SESSION_DIFFICULTY`], since difficulty 0 has no target.
+pub fn miner_tier_difficulty(
+    floor: u64,
+    asert_capped_bits: CompactTarget,
+    ceiling_bits: CompactTarget,
+    hashrate_share: f64,
+) -> u64 {
+    let ceiling = share_difficulty_ceiling(ceiling_bits).unwrap_or(MINIMUM_SESSION_DIFFICULTY);
+    let asert_capped = share_difficulty_ceiling(asert_capped_bits)
+        .unwrap_or(MINIMUM_SESSION_DIFFICULTY)
+        .max(ceiling);
+    let miner = (hashrate_share.max(0.0) * asert_capped as f64).round();
+    let miner = if miner >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        miner as u64
+    };
+    miner
+        .max(floor)
+        .max(ceiling)
+        .max(MINIMUM_SESSION_DIFFICULTY)
+}
+
+/// Share-chain job bits for a miner under the `sharechain_tier_mode` switch,
+/// or `None` when every job stays on the pool-wide ASERT basis (`off`).
+///
+/// `floor` is the configured `sharechain_diff_floor`, `asert_bits` the job's
+/// pool-wide ASERT share target and `ceiling_bits` the share chain's easiest
+/// share target ([`PoolDifficulty::target_ceiling`]). `hashrate_share` is the
+/// miner's published `w_i`, read from the metrics snapshot; `uniform-floor`
+/// ignores it and every miner gets `max(floor, D_ceiling)`.
+///
+/// The difficulty comes from [`miner_tier_difficulty`] and is encoded with the
+/// truncating [`Target::to_compact_lossy`], so the decoded job difficulty is
+/// never below the tier it was computed from (design section 3.3).
+///
+/// Callers short-circuit Hydrapool jobs before calling this: Hydrapool has no
+/// share chain, so its jobs must stay exactly as they are. A caller with no
+/// configured floor (Bitcoin, or a test context) has no band to enforce and
+/// must not call this either: with no floor the tier would only re-encode the
+/// pool basis.
+pub(crate) fn tier_job_bits(
+    mode: SharechainTierMode,
+    floor: u64,
+    asert_bits: CompactTarget,
+    ceiling_bits: CompactTarget,
+    hashrate_share: f64,
+) -> Option<CompactTarget> {
+    let hashrate_share = match mode {
+        SharechainTierMode::Off => return None,
+        SharechainTierMode::UniformFloor => 0.0,
+        SharechainTierMode::Tier => hashrate_share,
+    };
+    let difficulty = miner_tier_difficulty(floor, asert_bits, ceiling_bits, hashrate_share);
+    Some(target_for_difficulty(difficulty).to_compact_lossy())
+}
+
 /// DifficultyAdjuster implements the dynamic difficulty adjustment algorithm based on CKPool.
 ///
 /// It tracks client performance metrics and calculates the optimal difficulty setting
@@ -113,6 +182,12 @@ pub struct DifficultyAdjuster {
     /// it, whatever vardiff, the pool minimum or the miner asks for. `None`
     /// before the first job and in Hydrapool mode, which has no share chain.
     pub share_difficulty_ceiling: Option<u64>,
+    /// Per-miner tier difficulty of the latest job sent to this session, from
+    /// [`miner_tier_difficulty`]. Set from `sharechain_diff_floor` once the
+    /// tier switch is on (phase 2); the session difficulty never goes below
+    /// it, whatever vardiff or the pool minimum ask for. `None` while the
+    /// switch is off, so the clamp below is a no-op.
+    pub share_difficulty_floor: Option<u64>,
 }
 
 #[cfg_attr(test, automock)]
@@ -187,6 +262,13 @@ pub trait DifficultyAdjusterTrait {
     /// lowered, so the caller tells the miner before sending the job. `None`
     /// clears the ceiling (Hydrapool mode).
     fn set_share_difficulty_ceiling(&mut self, ceiling: Option<u64>) -> Option<u64>;
+
+    /// Record the per-miner tier difficulty of the job about to be sent (see
+    /// [`miner_tier_difficulty`]) and raise the session difficulty to it when
+    /// it is below. Returns the new session difficulty when it was raised, so
+    /// the caller tells the miner before sending the job. `None` clears the
+    /// floor, which is the tier switch off, so the clamp becomes a no-op.
+    fn set_share_difficulty_floor(&mut self, floor: Option<u64>) -> Option<u64>;
 }
 
 pub enum Dsps {
@@ -220,6 +302,7 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
             pool_maximum_difficulty,
             unaccounted_shares: 0,
             share_difficulty_ceiling: None,
+            share_difficulty_floor: None,
         }
     }
 
@@ -397,7 +480,8 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
     /// minimum when an operator configures them crossed. Once a job has been
     /// sent, the result is also at most that job's share difficulty
     /// ([`Self::share_difficulty_ceiling`]), which wins over the pool
-    /// minimum and the client's suggestion.
+    /// minimum and the client's suggestion, and at least its per-miner tier
+    /// difficulty ([`Self::share_difficulty_floor`]) when the tier is on.
     fn apply_difficulty_constraints(
         &self,
         calculated_diff: u64,
@@ -420,13 +504,19 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
             diff = diff.max(suggested);
         }
 
-        // Cap diff to pool maximum difficulty
+        // Cap diff to pool maximum difficulty, at least the tier floor. The
+        // tier floor wins over the pool maximum and the share ceiling when
+        // they are crossed, as it is what the tier formula asked for.
+        let tier_floor = self
+            .share_difficulty_floor
+            .unwrap_or(MINIMUM_SESSION_DIFFICULTY)
+            .max(MINIMUM_SESSION_DIFFICULTY);
         let maximum = self
             .pool_maximum_difficulty
             .unwrap_or(DEFAULT_MAXIMUM_DIFFICULTY)
             .min(self.share_difficulty_ceiling.unwrap_or(u64::MAX))
-            .max(MINIMUM_SESSION_DIFFICULTY);
-        diff.clamp(MINIMUM_SESSION_DIFFICULTY, maximum)
+            .max(tier_floor);
+        diff.clamp(tier_floor, maximum)
     }
 
     fn update_last_decay_timestamp(
@@ -519,6 +609,21 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
         self.old_difficulty = self.current_difficulty;
         self.current_difficulty = ceiling;
         Some(ceiling)
+    }
+
+    fn set_share_difficulty_floor(&mut self, floor: Option<u64>) -> Option<u64> {
+        self.share_difficulty_floor = floor;
+        let floor = floor?;
+        if self.current_difficulty >= floor {
+            return None;
+        }
+        debug!(
+            "Session difficulty {} is below the miner tier {floor}, raising it",
+            self.current_difficulty
+        );
+        self.old_difficulty = self.current_difficulty;
+        self.current_difficulty = floor;
+        Some(floor)
     }
 }
 
@@ -1289,5 +1394,187 @@ mod tests {
 
         assert_eq!(new_difficulty, None);
         assert_eq!(adjuster.get_current_difficulty(), 4);
+    }
+
+    #[test]
+    fn miner_tier_difficulty_of_a_share_below_the_ceiling_is_the_ceiling() {
+        // asert at difficulty 1, ceiling at 4: the asert-capped basis is 4, so
+        // a miner with no hashrate share still gets the ceiling.
+        assert_eq!(
+            miner_tier_difficulty(
+                1,
+                CompactTarget::from_consensus(0x1d00_ffff),
+                CompactTarget::from_consensus(0x1c38_4bd7),
+                0.0,
+            ),
+            4
+        );
+    }
+
+    #[test]
+    fn miner_tier_difficulty_of_a_large_miner_scales_with_its_hashrate_share() {
+        // Half the pool on an asert-capped basis of 1164 gets 582.
+        assert_eq!(
+            miner_tier_difficulty(
+                1,
+                CompactTarget::from_consensus(0x1b38_4bd7),
+                CompactTarget::from_consensus(0x1c38_4bd7),
+                0.5,
+            ),
+            582
+        );
+    }
+
+    #[test]
+    fn miner_tier_difficulty_of_a_small_miner_is_the_ceiling() {
+        // A tiny hashrate share scales below the ceiling, but `D_ceiling` is
+        // in the maximum, so the job stays at the share-chain difficulty.
+        assert_eq!(
+            miner_tier_difficulty(
+                1,
+                CompactTarget::from_consensus(0x1b38_4bd7),
+                CompactTarget::from_consensus(0x1c38_4bd7),
+                1e-9,
+            ),
+            4
+        );
+    }
+
+    #[test]
+    fn miner_tier_difficulty_of_a_configured_floor_wins_over_everything() {
+        assert_eq!(
+            miner_tier_difficulty(
+                10_000_000,
+                CompactTarget::from_consensus(0x1d00_ffff),
+                CompactTarget::from_consensus(0x1c38_4bd7),
+                0.5,
+            ),
+            10_000_000
+        );
+    }
+
+    #[test]
+    fn tier_job_bits_is_none_while_the_switch_is_off() {
+        assert_eq!(
+            tier_job_bits(
+                SharechainTierMode::Off,
+                1285,
+                CompactTarget::from_consensus(0x1d00_ffff),
+                CompactTarget::from_consensus(0x1b38_4bd7),
+                0.5,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn tier_job_bits_of_a_uniform_floor_encodes_max_of_floor_and_ceiling() {
+        // asert at difficulty 1, ceiling 1164: the capped basis is 1164 and
+        // the pool floor 1285 wins over it.
+        let bits = tier_job_bits(
+            SharechainTierMode::UniformFloor,
+            1285,
+            CompactTarget::from_consensus(0x1d00_ffff),
+            CompactTarget::from_consensus(0x1b38_4bd7),
+            0.5,
+        )
+        .unwrap();
+
+        assert_eq!(share_difficulty_ceiling(bits), Some(1285));
+    }
+
+    #[test]
+    fn tier_job_bits_ignores_the_hashrate_share_under_uniform_floor() {
+        let with_share = tier_job_bits(
+            SharechainTierMode::UniformFloor,
+            1285,
+            CompactTarget::from_consensus(0x1d00_ffff),
+            CompactTarget::from_consensus(0x1b38_4bd7),
+            0.5,
+        );
+        let without_share = tier_job_bits(
+            SharechainTierMode::UniformFloor,
+            1285,
+            CompactTarget::from_consensus(0x1d00_ffff),
+            CompactTarget::from_consensus(0x1b38_4bd7),
+            0.0,
+        );
+
+        assert_eq!(with_share, without_share);
+    }
+
+    #[test]
+    fn tier_job_bits_encodes_the_miner_tier_under_the_tier_mode() {
+        // Half the pool at an asert basis of 10,000 gets 5,000, which wins
+        // over the floor and the ceiling.
+        let bits = tier_job_bits(
+            SharechainTierMode::Tier,
+            1,
+            CompactTarget::from_consensus(0x1b06_8db2),
+            CompactTarget::from_consensus(0x1b38_4bd7),
+            0.5,
+        )
+        .unwrap();
+
+        assert_eq!(share_difficulty_ceiling(bits), Some(5000));
+    }
+
+    #[test]
+    fn tier_job_bits_of_a_large_miner_roundtrips_at_or_above_its_tier() {
+        // The encoder truncates, so the decoded difficulty drifts up, never
+        // down: the 10,000,000 floor encodes to 0x1a01ad7d, which decodes to
+        // 10,000,044 (design section 3.3, the never-easier rule).
+        let bits = tier_job_bits(
+            SharechainTierMode::Tier,
+            10_000_000,
+            CompactTarget::from_consensus(0x1d00_ffff),
+            CompactTarget::from_consensus(0x1b38_4bd7),
+            0.5,
+        )
+        .unwrap();
+
+        assert_eq!(share_difficulty_ceiling(bits), Some(10_000_044));
+    }
+
+    #[test]
+    fn raising_a_session_below_the_tier_floor_lifts_it() {
+        let mut adjuster = DifficultyAdjuster::new(1, 1, None);
+
+        assert_eq!(adjuster.set_share_difficulty_floor(Some(10)), Some(10));
+        assert_eq!(adjuster.get_current_difficulty(), 10);
+        assert_eq!(adjuster.old_difficulty, 1);
+    }
+
+    #[test]
+    fn a_session_at_or_above_the_tier_floor_is_left_alone() {
+        let mut adjuster = DifficultyAdjuster::new(10, 1, None);
+
+        assert_eq!(adjuster.set_share_difficulty_floor(Some(10)), None);
+        assert_eq!(adjuster.get_current_difficulty(), 10);
+    }
+
+    #[test]
+    fn clearing_the_tier_floor_leaves_the_session_alone() {
+        let mut adjuster = DifficultyAdjuster::new(1, 1, None);
+        adjuster.set_share_difficulty_floor(Some(10));
+        assert_eq!(adjuster.set_share_difficulty_floor(None), None);
+
+        assert_eq!(adjuster.get_current_difficulty(), 10);
+    }
+
+    #[test]
+    fn a_tier_floor_raises_the_constrained_difficulty() {
+        let mut adjuster = DifficultyAdjuster::new(1, 1, None);
+        adjuster.set_share_difficulty_floor(Some(10));
+
+        assert_eq!(adjuster.apply_difficulty_constraints(1, None), 10);
+    }
+
+    #[test]
+    fn a_tier_floor_wins_over_a_pool_maximum() {
+        let mut adjuster = DifficultyAdjuster::new(1, 1, Some(5));
+        adjuster.set_share_difficulty_floor(Some(10));
+
+        assert_eq!(adjuster.apply_difficulty_constraints(1, None), 10);
     }
 }

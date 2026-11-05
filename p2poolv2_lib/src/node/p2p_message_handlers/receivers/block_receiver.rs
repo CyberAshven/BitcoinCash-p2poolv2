@@ -11,7 +11,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::{ShareBlock, is_terminal_blockhash};
-use crate::shares::validation::{ShareValidator, stored_ancestor_times};
+use crate::shares::validation::{ShareValidator, check_sharechain_band, stored_ancestor_times};
 use crate::store::block_tx_metadata::Status;
 use crate::store::prune_blocks::prune_height_for_tip;
 use crate::store::writer::StoreError;
@@ -406,21 +406,43 @@ impl BlockReceiver {
     }
 
     /// ASERT difficulty check against the parent as stored.
+    ///
+    /// With a configured floor the declared target must fall in the
+    /// validation band `[effective floor, infinity)`; without one it must
+    /// equal the ASERT-calculated target, as before.
     fn validate_asert(&self, share_block: &ShareBlock) -> Result<(), Box<dyn Error + Send + Sync>> {
         let parent_hash = share_block.header.prev_share_blockhash;
         let parent = self.chain_store_handle.get_asert_parent(&parent_hash)?;
-        let expected_bits = self
-            .share_validator
-            .pool_difficulty()
-            .calculate_target_clamped(parent);
-        if share_block.header.bits != expected_bits {
-            let block_hash = share_block.block_hash();
-            return Err(format!(
-                "ASERT mismatch for {block_hash}: declared bits {:#010x}, expected {:#010x}",
-                share_block.header.bits.to_consensus(),
-                expected_bits.to_consensus()
-            )
-            .into());
+        match self.share_validator.sharechain_diff_floor() {
+            Some(floor) => {
+                check_sharechain_band(
+                    share_block.header.bits,
+                    floor,
+                    self.share_validator.pool_difficulty().target_ceiling(),
+                )
+                .map_err(|rejection| -> Box<dyn Error + Send + Sync> {
+                    format!(
+                        "Share block {} rejected by the difficulty band: {rejection}",
+                        share_block.block_hash()
+                    )
+                    .into()
+                })?;
+            }
+            None => {
+                let expected_bits = self
+                    .share_validator
+                    .pool_difficulty()
+                    .calculate_target_clamped(parent);
+                if share_block.header.bits != expected_bits {
+                    let block_hash = share_block.block_hash();
+                    return Err(format!(
+                        "ASERT mismatch for {block_hash}: declared bits {:#010x}, expected {:#010x}",
+                        share_block.header.bits.to_consensus(),
+                        expected_bits.to_consensus()
+                    )
+                    .into());
+                }
+            }
         }
         Ok(())
     }

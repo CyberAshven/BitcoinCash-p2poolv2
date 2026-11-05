@@ -204,6 +204,7 @@ async fn a_job_without_share_transactions_commits_to_the_empty_root() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([9; 20])),
+        None,
         &tracker,
     );
 
@@ -232,6 +233,7 @@ async fn coinbase_part_lengths_are_the_lengths_of_each_miners_job() {
                 &prepared,
                 Some(&payout),
                 Some(ShareOwner::CashP2pkh([byte; 20])),
+                None,
                 &tracker,
             );
             tracker.get_job(job_id).unwrap()
@@ -302,6 +304,7 @@ async fn test_build_notify_from_prepared_produces_valid_notify() {
         Some(p2poolv2_wallet::share_owner::ShareOwner::Taproot(
             make_test_share_address(1, bitcoin::Network::Signet).witness_program(),
         )),
+        None,
         &tracker_handle,
     )
     .expect("build_notify_from_prepared should succeed");
@@ -352,6 +355,7 @@ async fn test_commitment_hash_matches_struct_hash() {
         Some(p2poolv2_wallet::share_owner::ShareOwner::Taproot(
             make_test_share_address(1, bitcoin::Network::Signet).witness_program(),
         )),
+        None,
         &tracker_handle,
     )
     .expect("build_notify_from_prepared should succeed");
@@ -383,6 +387,76 @@ async fn test_commitment_hash_matches_struct_hash() {
     };
 
     assert_eq!(commitment.hash(), direct_commitment.hash());
+}
+
+/// A job whose miner has a tier commits to the tier's bits: the stored
+/// commitment carries them and its coinbase embeds the digest of that same
+/// commitment, prefix rebuilt from the tier bits.
+#[tokio::test]
+async fn a_tier_bits_job_commits_to_the_tier_bits() {
+    let prepared = test_bch_prepared();
+    let tracker_handle = start_tracker_actor();
+    let payout = regtest_payout(0x12);
+    let tier_bits = CompactTarget::from_consensus(0x1a000001);
+    assert_ne!(tier_bits, prepared.bits);
+
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        Some(tier_bits),
+        &tracker_handle,
+    );
+    let job = tracker_handle.get_job(job_id).unwrap();
+    let commitment = job.share_commitment.as_ref().unwrap();
+
+    assert_eq!(commitment.bits, tier_bits);
+    let coinbase = job_coinbase(&job);
+    assert_eq!(
+        coinbase.output.last().unwrap().script_pubkey.as_bytes()[2..],
+        commitment.hash().to_byte_array()
+    );
+}
+
+/// The tier's bits replace the pool-wide basis rather than riding beside it:
+/// the pool-bits job keeps `prepared.bits` and embeds its own commitment's
+/// digest, and the two commitments differ.
+#[tokio::test]
+async fn a_tier_bits_job_differs_from_the_pool_bits_job() {
+    let prepared = test_bch_prepared();
+    let tracker_handle = start_tracker_actor();
+    let payout = regtest_payout(0x12);
+    let owner = ShareOwner::CashP2pkh([0x22; 20]);
+
+    let (tier_job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(owner),
+        Some(CompactTarget::from_consensus(0x1a000001)),
+        &tracker_handle,
+    );
+    let (pool_job_id, _) =
+        insert_miner_job(&prepared, Some(&payout), Some(owner), None, &tracker_handle);
+    let tier_commitment = tracker_handle
+        .get_job(tier_job_id)
+        .unwrap()
+        .share_commitment
+        .unwrap();
+    let pool_job = tracker_handle.get_job(pool_job_id).unwrap();
+    let pool_commitment = pool_job.share_commitment.as_ref().unwrap();
+
+    assert_eq!(pool_commitment.bits, prepared.bits);
+    assert_ne!(tier_commitment.hash(), pool_commitment.hash());
+    let pool_coinbase = job_coinbase(&pool_job);
+    assert_eq!(
+        pool_coinbase
+            .output
+            .last()
+            .unwrap()
+            .script_pubkey
+            .as_bytes()[2..],
+        pool_commitment.hash().to_byte_array()
+    );
 }
 
 #[test]
@@ -550,7 +624,7 @@ async fn test_build_notify_from_prepared_with_none_address() {
         .build()
         .expect("build should succeed");
 
-    let notify_json = build_notify_from_prepared(&prepared, None, None, &tracker_handle)
+    let notify_json = build_notify_from_prepared(&prepared, None, None, None, &tracker_handle)
         .expect("build_notify_from_prepared with None address should succeed");
 
     // Verify the result is valid JSON
@@ -692,8 +766,10 @@ async fn each_miner_s_job_carries_the_root_of_their_own_leaves() {
     let owner = ShareOwner::CashP2pkh([0x22; 20]);
     let first = regtest_payout(0x12);
     let second = regtest_payout(0x34);
-    let (first_id, _) = insert_miner_job(&prepared, Some(&first), Some(owner), &tracker_handle);
-    let (second_id, _) = insert_miner_job(&prepared, Some(&second), Some(owner), &tracker_handle);
+    let (first_id, _) =
+        insert_miner_job(&prepared, Some(&first), Some(owner), None, &tracker_handle);
+    let (second_id, _) =
+        insert_miner_job(&prepared, Some(&second), Some(owner), None, &tracker_handle);
     let first_job = tracker_handle.get_job(first_id).unwrap();
     let second_job = tracker_handle.get_job(second_id).unwrap();
 
@@ -756,6 +832,7 @@ async fn a_miner_s_token_coinbase_is_the_one_a_validator_rebuilds() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
         &tracker_handle,
     );
     let job = tracker_handle.get_job(job_id).unwrap();
@@ -823,7 +900,7 @@ async fn a_job_without_a_payout_carries_the_empty_commitment() {
         None,
     );
     let tracker_handle = start_tracker_actor();
-    let (job_id, _) = insert_miner_job(&prepared, None, None, &tracker_handle);
+    let (job_id, _) = insert_miner_job(&prepared, None, None, None, &tracker_handle);
     let job = tracker_handle.get_job(job_id).unwrap();
     assert!(job.merge_tokens.is_none());
     assert_eq!(

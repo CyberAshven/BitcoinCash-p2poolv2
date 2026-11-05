@@ -31,6 +31,7 @@ use crate::node::payout_tree_executor::PayoutTreeSender;
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
+use crate::pool_difficulty::target_for_difficulty;
 use crate::shares::bch_asert::BchAsert;
 use crate::shares::bch_headers::BchHeaderRules;
 use crate::shares::bch_script;
@@ -334,6 +335,82 @@ fn check_median_time_past(share_time: u32, ancestor_times: &[u32]) -> Result<(),
     Ok(())
 }
 
+/// Why a declared share target fell outside the share chain validation band
+/// `[effective floor, infinity)`.
+///
+/// Returned by [`check_sharechain_band`] so each validation site can report
+/// the rejection in its own error shape.
+#[derive(Debug)]
+pub(crate) enum BandRejection {
+    /// The declared compact bits decode to [`Target::ZERO`]: a non-canonical
+    /// encoding (mantissa above `0x7fffff`, or zero). Always easier than any
+    /// floor, so it is rejected before any difficulty comparison.
+    ZeroTarget,
+    /// The declared target is easier than the effective floor.
+    BelowFloor {
+        /// The target the declared bits decode to.
+        declared: Target,
+        /// The effective floor: the stricter of the configured floor target
+        /// and the chain ceiling, in target space.
+        threshold: Target,
+        /// The configured floor difficulty, for the message.
+        floor: u64,
+    },
+}
+
+impl fmt::Display for BandRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BandRejection::ZeroTarget => {
+                write!(formatter, "Share declared target is zero")
+            }
+            BandRejection::BelowFloor {
+                declared,
+                threshold,
+                floor,
+            } => {
+                write!(
+                    formatter,
+                    "Share target {declared} is below the floor: difficulty floor {floor}, effective floor target {threshold}"
+                )
+            }
+        }
+    }
+}
+
+/// Check a declared share target against the share chain validation band
+/// `[effective floor, infinity)`.
+///
+/// The effective floor is the stricter of the configured floor and the chain
+/// ceiling, compared in target space as `min(target_for_difficulty(floor),
+/// Target::from_compact(ceiling))`: a larger target is easier, so a share
+/// passes when its declared target is at or below that threshold. The floor
+/// target is the exact integer division, never its compact encoding -- the
+/// encoding truncates the mantissa and would reject a share sitting exactly
+/// at the floor.
+///
+/// [`Target::ZERO`] is rejected first: bits 0 and a mantissa above `0x7fffff`
+/// decode to it, and accepting it would be the easiest possible share.
+pub(crate) fn check_sharechain_band(
+    declared_bits: CompactTarget,
+    floor: u64,
+    ceiling: CompactTarget,
+) -> Result<(), BandRejection> {
+    let declared_target = Target::from_compact(declared_bits);
+    if declared_target == Target::ZERO {
+        return Err(BandRejection::ZeroTarget);
+    }
+    let threshold_target = target_for_difficulty(floor).min(Target::from_compact(ceiling));
+    if declared_target > threshold_target {
+        return Err(BandRejection::BelowFloor {
+            declared: declared_target,
+            threshold: threshold_target,
+            floor,
+        });
+    }
+    Ok(())
+}
+
 /// The times of up to `MTP_WINDOW` stored ancestors ending at `parent_hash`,
 /// newest first, following each header's own parent pointer (not the
 /// confirmed index), so the answer holds on a fork too. Stops at genesis.
@@ -490,10 +567,12 @@ pub trait ShareValidator {
     /// Also validates that the advertised bits in the share header match
     /// the pool difficulty as computed by our node.
     ///
-    /// Looks up the parent share in the chain store to obtain its height, time,
-    /// bits and its own parent's time, then uses the stored pool difficulty to
-    /// calculate the expected target for this share. Returns an error if the bitcoin block hash does not
-    /// meet the calculated target.
+    /// Looks up the parent share in the chain store as a presence check, then
+    /// checks the share's declared target. On Bitcoin and on a Bitcoin Cash
+    /// validator without a configured floor the target must equal the
+    /// ASERT-calculated one; with a floor it must fall in the validation band
+    /// `[effective floor, infinity)`. Returns an error if the bitcoin block
+    /// hash does not meet the declared target.
     fn validate_with_pool_difficulty(
         &self,
         share_header: &ShareHeader,
@@ -668,6 +747,13 @@ pub trait ShareValidator {
     /// fresh PoolDifficulty on every batch.
     fn pool_difficulty(&self) -> &PoolDifficulty;
 
+    /// The configured Bitcoin Cash share-chain difficulty floor.
+    ///
+    /// `Some(floor)` switches header-sync and block-receipt validation from
+    /// the ASERT equality pin to the band `[effective floor, infinity)`.
+    /// `None` on Bitcoin and on a Bitcoin Cash validator without a floor.
+    fn sharechain_diff_floor(&self) -> Option<u64>;
+
     /// The rules a Bitcoin Cash header from a peer must pass, or `None` on
     /// a Bitcoin node, which ignores carried headers.
     fn bch_header_rules(&self) -> Option<BchHeaderRules>;
@@ -691,6 +777,14 @@ pub struct DefaultShareValidator {
     /// Bitcoin and the Bitcoin Cash main chain use `MAX_POOL_TARGET`. The mini
     /// chain uses its own easier ceiling so its genesis target is valid.
     target_ceiling: CompactTarget,
+    /// The Bitcoin Cash share-chain difficulty floor, when configured.
+    ///
+    /// `Some(floor)` on Bitcoin Cash switches the three ASERT sites from the
+    /// equality pin to the validation band `[effective floor, infinity)`,
+    /// where the effective floor is `max(floor, the ceiling's difficulty)` in
+    /// difficulty space. `None` on Bitcoin and on a Bitcoin Cash validator
+    /// without a configured floor keeps the equality rule.
+    sharechain_diff_floor: Option<u64>,
     /// The Bitcoin Cash network's ASERT parameters, for the format check of
     /// a token share's bitcoin header. `None` on Bitcoin and on regtest,
     /// which has no ASERT anchor.
@@ -727,6 +821,7 @@ impl DefaultShareValidator {
             time_provider,
             chain: Chain::Bitcoin,
             target_ceiling: CompactTarget::from_consensus(MAX_POOL_TARGET),
+            sharechain_diff_floor: None,
             bch_asert: None,
             bch_header_rules: None,
             payout_tree_sink: None,
@@ -935,6 +1030,16 @@ impl DefaultShareValidator {
     /// mini ceiling so shares on that chain are not rejected as too easy.
     pub fn with_target_ceiling(mut self, target_ceiling: CompactTarget) -> Self {
         self.target_ceiling = target_ceiling;
+        self
+    }
+
+    /// Set the Bitcoin Cash share-chain difficulty floor.
+    ///
+    /// `Some(floor)` selects the validation band at the three ASERT sites;
+    /// `None` keeps the equality pin. The default is `None`, matching
+    /// Bitcoin and a Bitcoin Cash node configured without a floor.
+    pub fn with_sharechain_diff_floor(mut self, sharechain_diff_floor: Option<u64>) -> Self {
+        self.sharechain_diff_floor = sharechain_diff_floor;
         self
     }
 
@@ -1865,6 +1970,10 @@ impl ShareValidator for DefaultShareValidator {
         &self.pool_difficulty
     }
 
+    fn sharechain_diff_floor(&self) -> Option<u64> {
+        self.sharechain_diff_floor
+    }
+
     fn bch_header_rules(&self) -> Option<BchHeaderRules> {
         self.bch_header_rules
     }
@@ -1887,22 +1996,29 @@ impl ShareValidator for DefaultShareValidator {
                 ))
             })?;
 
-        let calculated_target = self.pool_difficulty.calculate_target_clamped(parent);
-        let target = Target::from_compact(calculated_target);
-        let bitcoin_block_hash = share_header.bitcoin_header.block_hash();
-
-        // Ensure the advertised header bits match the calculated pool target.
-        if share_header.bits != calculated_target {
-            return Err(ValidationError::consensus(format!(
-                "Share header bits {:#010x} does not match calculated pool target {:#010x}",
-                share_header.bits.to_consensus(),
-                calculated_target.to_consensus()
-            )));
+        match self.sharechain_diff_floor {
+            Some(floor) => {
+                check_sharechain_band(share_header.bits, floor, self.target_ceiling)
+                    .map_err(|rejection| ValidationError::consensus(rejection.to_string()))?;
+            }
+            None => {
+                let calculated_target = self.pool_difficulty.calculate_target_clamped(parent);
+                // Ensure the advertised header bits match the calculated pool target.
+                if share_header.bits != calculated_target {
+                    return Err(ValidationError::consensus(format!(
+                        "Share header bits {:#010x} does not match calculated pool target {:#010x}",
+                        share_header.bits.to_consensus(),
+                        calculated_target.to_consensus()
+                    )));
+                }
+            }
         }
 
-        if !sim_overrides::pow_meets(target, bitcoin_block_hash) {
+        let declared_target = Target::from_compact(share_header.bits);
+        let bitcoin_block_hash = share_header.bitcoin_header.block_hash();
+        if !sim_overrides::pow_meets(declared_target, bitcoin_block_hash) {
             return Err(ValidationError::consensus(format!(
-                "Bitcoin block hash {bitcoin_block_hash} does not meet share target {target}"
+                "Bitcoin block hash {bitcoin_block_hash} does not meet share target {declared_target}"
             )));
         }
 
@@ -2230,6 +2346,8 @@ mockall::mock! {
         fn validate_block_size(&self, share: &ShareBlock) -> Result<(), ValidationError>;
 
         fn pool_difficulty(&self) -> &PoolDifficulty;
+
+        fn sharechain_diff_floor(&self) -> Option<u64>;
 
         fn bch_header_rules(&self) -> Option<BchHeaderRules>;
     }
@@ -4445,6 +4563,190 @@ mod tests {
         let result = validator_with(pool_difficulty)
             .validate_with_pool_difficulty(&header, &chain_store_handle);
         assert!(result.is_ok(), "Expected Ok but got: {:?}", result.err());
+    }
+
+    /// At difficulty 1285 the exact floor target is `0x33` shifted by 208
+    /// bits: `MAX_ATTAINABLE_MAINNET / 1285` divides exactly, and the
+    /// compact bits `0x1d000033` decode back to it, so a declared target
+    /// sitting exactly at the floor must pass.
+    #[test]
+    fn check_sharechain_band_accepts_declared_target_at_the_floor() {
+        let floor = 1285;
+        let ceiling = CompactTarget::from_consensus(MAX_POOL_TARGET);
+        let at_floor = CompactTarget::from_consensus(0x1d000033);
+        assert_eq!(
+            Target::from_compact(at_floor),
+            target_for_difficulty(floor),
+            "the test's bits must decode to the exact floor target"
+        );
+
+        check_sharechain_band(at_floor, floor, ceiling).unwrap();
+    }
+
+    /// One unit easier than the exact floor target is rejected as
+    /// `BelowFloor`, carrying the configured floor.
+    #[test]
+    fn check_sharechain_band_rejects_declared_target_easier_than_the_floor() {
+        let floor = 1285;
+        let ceiling = CompactTarget::from_consensus(MAX_POOL_TARGET);
+        let easier = CompactTarget::from_consensus(0x1d000034);
+
+        let rejection = check_sharechain_band(easier, floor, ceiling).unwrap_err();
+        match rejection {
+            BandRejection::BelowFloor {
+                floor: rejected_floor,
+                ..
+            } => assert_eq!(rejected_floor, floor),
+            BandRejection::ZeroTarget => panic!("expected BelowFloor, got ZeroTarget"),
+        }
+        assert!(rejection.to_string().contains("below the floor"));
+        assert!(rejection.to_string().contains("1285"));
+    }
+
+    /// A declared target harder than the floor passes: the band has no
+    /// upper bound on difficulty.
+    #[test]
+    fn check_sharechain_band_accepts_declared_target_harder_than_the_floor() {
+        let floor = 1285;
+        let ceiling = CompactTarget::from_consensus(MAX_POOL_TARGET);
+        let harder = CompactTarget::from_consensus(0x1d000032);
+
+        check_sharechain_band(harder, floor, ceiling).unwrap();
+    }
+
+    /// With floor 1 against the main chain ceiling, the ceiling is the
+    /// stricter bound: a difficulty-1 target is rejected even though it
+    /// meets the floor, and the ceiling's own target passes.
+    #[test]
+    fn check_sharechain_band_uses_the_ceiling_when_the_floor_is_easier() {
+        let floor = 1;
+        let ceiling = CompactTarget::from_consensus(MAX_POOL_TARGET);
+        let difficulty_one = CompactTarget::from_consensus(0x1d00ffff);
+        let ceiling_target = CompactTarget::from_consensus(MAX_POOL_TARGET);
+        assert!(Target::from_compact(difficulty_one) > Target::from_compact(ceiling_target));
+
+        let rejection = check_sharechain_band(difficulty_one, floor, ceiling).unwrap_err();
+        assert!(matches!(rejection, BandRejection::BelowFloor { .. }));
+        check_sharechain_band(ceiling_target, floor, ceiling).unwrap();
+    }
+
+    /// A floor whose target is stricter than the ceiling keeps binding:
+    /// the ceiling's own (easier) target is rejected.
+    #[test]
+    fn check_sharechain_band_keeps_a_floor_stricter_than_the_ceiling() {
+        let floor = 1285;
+        let ceiling = CompactTarget::from_consensus(MAX_POOL_TARGET);
+        let ceiling_target = CompactTarget::from_consensus(MAX_POOL_TARGET);
+
+        let rejection = check_sharechain_band(ceiling_target, floor, ceiling).unwrap_err();
+        assert!(matches!(rejection, BandRejection::BelowFloor { .. }));
+    }
+
+    /// Zero bits decode to `Target::ZERO` and are rejected before any
+    /// difficulty comparison.
+    #[test]
+    fn check_sharechain_band_rejects_zero_bits() {
+        let floor = 1285;
+        let ceiling = CompactTarget::from_consensus(MAX_POOL_TARGET);
+        let zero_bits = CompactTarget::from_consensus(0);
+
+        let rejection = check_sharechain_band(zero_bits, floor, ceiling).unwrap_err();
+        assert!(matches!(rejection, BandRejection::ZeroTarget));
+        assert!(rejection.to_string().contains("zero"));
+    }
+
+    /// A mantissa above `0x7fffff` is non-canonical and decodes to
+    /// `Target::ZERO`, so it is rejected like zero.
+    #[test]
+    fn check_sharechain_band_rejects_non_canonical_mantissa_bits() {
+        let floor = 1285;
+        let ceiling = CompactTarget::from_consensus(MAX_POOL_TARGET);
+        let non_canonical = CompactTarget::from_consensus(0x1d800000);
+        assert_eq!(Target::from_compact(non_canonical), Target::ZERO);
+
+        let rejection = check_sharechain_band(non_canonical, floor, ceiling).unwrap_err();
+        assert!(matches!(rejection, BandRejection::ZeroTarget));
+    }
+
+    /// With a floor configured, the validator rejects a declared target
+    /// below the floor before the proof-of-work check, so this runs with
+    /// or without the `sim` feature.
+    #[test]
+    fn test_validate_with_pool_difficulty_rejects_share_below_the_floor() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let mut pool_difficulty = PoolDifficulty::default();
+        let test_data = load_share_headers_test_data();
+        let mut header: ShareHeader =
+            serde_json::from_value(test_data["valid_header"].clone()).unwrap();
+        header.bits = CompactTarget::from_consensus(0x1d000034);
+
+        setup_pool_difficulty_mocks(
+            &mut chain_store_handle,
+            &mut pool_difficulty,
+            BlockHash::all_zeros(),
+            0x207FFFFF,
+        );
+
+        let error = validator_with(pool_difficulty)
+            .with_sharechain_diff_floor(Some(1285))
+            .validate_with_pool_difficulty(&header, &chain_store_handle)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("below the floor"), "{error}");
+        assert!(error.to_string().contains("1285"), "{error}");
+    }
+
+    /// A zero declared target is rejected by the band before the
+    /// proof-of-work check, so this runs with or without `sim`.
+    #[test]
+    fn test_validate_with_pool_difficulty_rejects_zero_declared_target() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let mut pool_difficulty = PoolDifficulty::default();
+        let test_data = load_share_headers_test_data();
+        let mut header: ShareHeader =
+            serde_json::from_value(test_data["valid_header"].clone()).unwrap();
+        header.bits = CompactTarget::from_consensus(0);
+
+        setup_pool_difficulty_mocks(
+            &mut chain_store_handle,
+            &mut pool_difficulty,
+            BlockHash::all_zeros(),
+            0x207FFFFF,
+        );
+
+        let error = validator_with(pool_difficulty)
+            .with_sharechain_diff_floor(Some(1285))
+            .validate_with_pool_difficulty(&header, &chain_store_handle)
+            .unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert!(error.to_string().contains("zero"), "{error}");
+    }
+
+    /// Acceptance through the full site-1 path is only possible under
+    /// `sim`, because the fixture's bitcoin header was mined for the easy
+    /// fixture target and no real proof of work meets any floor at or
+    /// above difficulty 1.
+    #[cfg(feature = "sim")]
+    #[test]
+    fn test_validate_with_pool_difficulty_accepts_share_at_the_floor() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let mut pool_difficulty = PoolDifficulty::default();
+        let test_data = load_share_headers_test_data();
+        let mut header: ShareHeader =
+            serde_json::from_value(test_data["valid_header"].clone()).unwrap();
+        header.bits = CompactTarget::from_consensus(0x1d000033);
+
+        setup_pool_difficulty_mocks(
+            &mut chain_store_handle,
+            &mut pool_difficulty,
+            BlockHash::all_zeros(),
+            0x207FFFFF,
+        );
+
+        validator_with(pool_difficulty)
+            .with_sharechain_diff_floor(Some(1285))
+            .validate_with_pool_difficulty(&header, &chain_store_handle)
+            .unwrap();
     }
 
     /// Build a transaction with a large script to produce a specific serialized size.

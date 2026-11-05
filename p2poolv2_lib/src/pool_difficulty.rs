@@ -57,6 +57,28 @@ fn u512_to_target(value: U512) -> Target {
     Target::from_le_bytes(bytes[..32].try_into().expect("slice is 32 bytes"))
 }
 
+/// Target for a stratum difficulty, as SV1 `mining.set_difficulty` means it:
+/// difficulty 1 is the mainnet difficulty-1 target, and difficulty 0 is
+/// treated as 1.
+///
+/// The division is exact: `Target::MAX_ATTAINABLE_MAINNET / difficulty` as a
+/// 256-bit integer, never the compact encoding of the result. The exact value
+/// makes `declared_target <= target_for_difficulty(floor)` equivalent, in both
+/// directions, to `target.difficulty() >= floor`; a compact round-trip would
+/// truncate the mantissa and reject a share sitting exactly at the floor.
+pub(crate) fn target_for_difficulty(difficulty: u64) -> Target {
+    let divisor = u128::from(difficulty.max(1));
+    let dividend = Target::MAX_ATTAINABLE_MAINNET.to_be_bytes();
+    let mut quotient = [0u8; 32];
+    let mut remainder: u128 = 0;
+    for (index, byte) in dividend.iter().enumerate() {
+        remainder = (remainder << 8) | u128::from(*byte);
+        quotient[index] = (remainder / divisor) as u8;
+        remainder %= divisor;
+    }
+    Target::from_be_bytes(quotient)
+}
+
 // ---------------------------------------------------------------------------
 // ASERT core algorithm
 // ---------------------------------------------------------------------------

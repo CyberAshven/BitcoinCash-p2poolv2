@@ -29,8 +29,10 @@ use super::session::DeclaredJob;
 use super::session::{encode_extension_frame, encode_frame, string_field};
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::config::{BitcoinCashNetwork, Chain, PoolMode};
+use crate::pool_difficulty::target_for_difficulty;
 use crate::stratum::difficulty_adjuster::{
     DifficultyAdjuster, DifficultyAdjusterTrait, TARGET_DRR, share_difficulty_ceiling,
+    tier_job_bits,
 };
 use crate::stratum::merge_disclosure::{
     JOB_LEAVES, MERGE_DISCLOSURE_EXTENSION, WIN_PROOF, job_leaves_payload, win_proof_payload,
@@ -276,14 +278,20 @@ impl MiningChannels {
             .session
             .share_owner
             .ok_or("authorized channel has no share owner")?;
-        let (job, proposal) =
-            match validate_custom_job(request, declared, payout, owner, self.version_mask) {
-                Ok(validated) => validated,
-                Err(reason) => {
-                    debug!("Rejected SV2 custom job: {reason}");
-                    return custom_job_error(request, "invalid-custom-job");
-                }
-            };
+        let (job, proposal) = match validate_custom_job(
+            request,
+            declared,
+            payout,
+            owner,
+            self.version_mask,
+            self.ctx.sharechain_diff_floor,
+        ) {
+            Ok(validated) => validated,
+            Err(reason) => {
+                debug!("Rejected SV2 custom job: {reason}");
+                return custom_job_error(request, "invalid-custom-job");
+            }
+        };
         if job
             .share_commitment
             .as_ref()
@@ -717,7 +725,9 @@ impl MiningChannels {
         session.user_id = Some(user_id);
         session.subscribed = true;
         // Open at or below the share difficulty of the job about to be sent,
-        // so the first job needs no `SetTarget` (see `job_frames`).
+        // so the first job needs no `SetTarget` (see `job_frames`). This
+        // reading is the pool-wide basis (`None` tier bits); `job_frames`
+        // re-clamps to the channel's own tier, so it is not the final ceiling.
         if let Some(prepared) = &current {
             session
                 .difficulty_adjuster
@@ -846,10 +856,11 @@ impl MiningChannels {
         }
     }
 
-    /// Share difficulty ceiling of jobs built on `prepared`: the session
-    /// difficulty a channel may have without losing share-chain shares (see
-    /// [`share_difficulty_ceiling`]). `None` in Hydrapool mode, which has no
-    /// share chain.
+    /// Share difficulty ceiling of jobs built on `prepared`'s pool-wide bits:
+    /// the session difficulty a channel may have without losing share-chain
+    /// shares (see [`share_difficulty_ceiling`]). `None` in Hydrapool mode,
+    /// which has no share chain. Used at channel open, which lands on the
+    /// pool basis; [`Self::job_frames`] re-clamps to the channel's tier.
     fn share_difficulty_ceiling(&self, prepared: &PreparedNotifyParams) -> Option<u64> {
         match self.ctx.mode {
             PoolMode::Hydrapool => None,
@@ -861,7 +872,11 @@ impl MiningChannels {
     ///
     /// When the channel's difficulty is above the job's share difficulty, it
     /// comes down to it first and a `SetTarget` precedes the job, so the
-    /// device throws away no hash that is a share-chain share.
+    /// device throws away no hash that is a share-chain share. With the
+    /// `sharechain_tier_mode` switch on, the job carries the miner's tier
+    /// bits and a channel below its tier is raised to it with the same
+    /// `SetTarget` treatment; at most one `SetTarget` precedes the job,
+    /// since the setters' predicates are mutually exclusive.
     /// Extended coinbase limits are checked before the channel or tracker
     /// changes; an unrepresentable job leaves the channel ready to retry.
     fn job_frames(
@@ -870,7 +885,6 @@ impl MiningChannels {
         prepared: &PreparedNotifyParams,
     ) -> Result<Vec<Vec<u8>>, String> {
         let is_hydrapool = self.ctx.mode == PoolMode::Hydrapool;
-        let ceiling = self.share_difficulty_ceiling(prepared);
         let channel = self
             .channels
             .get_mut(&channel_id)
@@ -884,13 +898,54 @@ impl MiningChannels {
             let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
             check_extended_job_fits(prefix_length, suffix_length)?;
         }
+        // Per-miner tier of the job, once the tier switch is on. Needs the
+        // share chain (not Hydrapool) and a configured floor: without a floor
+        // the band is the old equality pin and a tier job would be rejected.
+        // Inlined through the free functions because `self.channels` is
+        // mutably borrowed for `channel`.
+        let tier_bits = if is_hydrapool {
+            None
+        } else if let Some(floor) = self.ctx.sharechain_diff_floor {
+            let hashrate_share = channel
+                .session
+                .btcaddress
+                .as_deref()
+                .and_then(|address| self.ctx.tier_rx.borrow().get(address).copied())
+                .unwrap_or(0.0);
+            tier_job_bits(
+                self.ctx.sharechain_tier_mode,
+                floor,
+                prepared.bits(),
+                self.ctx.target_ceiling,
+                hashrate_share,
+            )
+        } else {
+            None
+        };
+        // The ceiling reads the same bits the commitment gets (F2).
+        let ceiling = if is_hydrapool {
+            None
+        } else {
+            share_difficulty_ceiling(tier_bits.unwrap_or(prepared.bits()))
+        };
         let mut frames = Vec::with_capacity(3);
-        if let Some(lowered) = channel
+        // Both setters get the same decoded job difficulty and their
+        // predicates are mutually exclusive, so at most one fires (design
+        // section 5.1); the miner hears it before the tier job.
+        let lowered = channel
             .session
             .difficulty_adjuster
-            .set_share_difficulty_ceiling(ceiling)
-        {
-            let target = target_for_difficulty(lowered)
+            .set_share_difficulty_ceiling(ceiling);
+        let raised = if tier_bits.is_some() {
+            channel
+                .session
+                .difficulty_adjuster
+                .set_share_difficulty_floor(ceiling)
+        } else {
+            None
+        };
+        if let Some(difficulty) = lowered.or(raised) {
+            let target = target_for_difficulty(difficulty)
                 .min(channel.max_target)
                 .to_le_bytes();
             frames.push(encode_frame(
@@ -913,6 +968,7 @@ impl MiningChannels {
             prepared,
             bitcoin_address,
             share_owner,
+            tier_bits,
             &self.ctx.tracker_handle,
         );
         let job = self
@@ -1179,22 +1235,6 @@ struct Submission {
     ntime: u32,
     version: u32,
     enonce2: Vec<u8>,
-}
-
-/// Target for a stratum difficulty, as SV1 `mining.set_difficulty` means it:
-/// difficulty 1 is the mainnet difficulty-1 target, and difficulty 0 is
-/// treated as 1.
-pub(crate) fn target_for_difficulty(difficulty: u64) -> Target {
-    let divisor = u128::from(difficulty.max(1));
-    let dividend = Target::MAX_ATTAINABLE_MAINNET.to_be_bytes();
-    let mut quotient = [0u8; 32];
-    let mut remainder: u128 = 0;
-    for (index, byte) in dividend.iter().enumerate() {
-        remainder = (remainder << 8) | u128::from(*byte);
-        quotient[index] = (remainder / divisor) as u8;
-        remainder %= divisor;
-    }
-    Target::from_be_bytes(quotient)
 }
 
 /// The `max_target` of an open request: a little-endian U256. A malformed

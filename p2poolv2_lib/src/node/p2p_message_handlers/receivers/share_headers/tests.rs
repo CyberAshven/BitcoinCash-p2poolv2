@@ -82,6 +82,9 @@ fn setup_minimum_difficulty_mock(mock_validator: &mut MockDefaultShareValidator)
     mock_validator
         .expect_validate_header_timestamp()
         .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
     let mut pool_difficulty = PoolDifficulty::default();
     pool_difficulty
         .expect_calculate_target_clamped()
@@ -473,6 +476,191 @@ async fn test_asert_mismatch_rejected() {
     );
 }
 
+/// With a floor configured, a header whose declared target sits exactly
+/// at the floor passes: `0x1d000033` decodes to `MAX_ATTAINABLE_MAINNET
+/// / 1285` exactly. `calculate_target_clamped` has no expectation, so the
+/// test also proves the band path replaced the equality pin.
+#[test]
+fn test_validate_header_chain_accepts_header_at_the_floor() {
+    let mut chain_store_handle = ChainStoreHandle::default();
+    setup_chain_validation_mocks(&mut chain_store_handle);
+
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(Some(1285));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_target_ceiling()
+        .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    let mut header = build_valid_test_header();
+    header.bits = CompactTarget::from_consensus(0x1d000033);
+
+    let result = validate_header_chain(
+        &share_header_batch_with_empty_branches(vec![header]),
+        &chain_store_handle,
+        &mock_validator,
+    );
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+}
+
+/// With a floor configured, a header whose declared target is easier
+/// than the floor is rejected as `BelowFloor`, before any ASERT or PoW
+/// comparison.
+#[test]
+fn test_validate_header_chain_rejects_header_below_the_floor() {
+    let mut chain_store_handle = ChainStoreHandle::default();
+    setup_chain_validation_mocks(&mut chain_store_handle);
+
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(Some(1285));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_target_ceiling()
+        .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    // The ceiling's own target is easier than the floor at 1285.
+    let header = build_valid_test_header();
+
+    let error = validate_header_chain(
+        &share_header_batch_with_empty_branches(vec![header]),
+        &chain_store_handle,
+        &mock_validator,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, HeaderSyncError::BelowFloor { .. }),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("below the sharechain difficulty floor 1285"),
+        "{error}"
+    );
+}
+
+/// A zero declared target is non-canonical and is rejected through the
+/// same `BelowFloor` header-sync error.
+#[test]
+fn test_validate_header_chain_rejects_zero_declared_target_below_floor() {
+    let mut chain_store_handle = ChainStoreHandle::default();
+    setup_chain_validation_mocks(&mut chain_store_handle);
+
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(Some(1285));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_target_ceiling()
+        .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    let mut header = build_valid_test_header();
+    header.bits = CompactTarget::from_consensus(0);
+
+    let error = validate_header_chain(
+        &share_header_batch_with_empty_branches(vec![header]),
+        &chain_store_handle,
+        &mock_validator,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, HeaderSyncError::BelowFloor { .. }),
+        "{error}"
+    );
+}
+
+/// With floor 1 against the main chain ceiling, the ceiling is the
+/// stricter bound: a difficulty-1 header is rejected even though it meets
+/// the floor, and the ceiling's own target passes.
+#[test]
+fn test_validate_header_chain_uses_the_ceiling_when_the_floor_is_easier() {
+    let mut chain_store_handle = ChainStoreHandle::default();
+    setup_chain_validation_mocks(&mut chain_store_handle);
+
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(Some(1));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_target_ceiling()
+        .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    let mut too_easy = build_valid_test_header();
+    too_easy.bits = CompactTarget::from_consensus(0x1d00ffff);
+    let error = validate_header_chain(
+        &share_header_batch_with_empty_branches(vec![too_easy]),
+        &chain_store_handle,
+        &mock_validator,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, HeaderSyncError::BelowFloor { .. }),
+        "{error}"
+    );
+
+    let at_ceiling = build_valid_test_header();
+    let result = validate_header_chain(
+        &share_header_batch_with_empty_branches(vec![at_ceiling]),
+        &chain_store_handle,
+        &mock_validator,
+    );
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+}
+
 #[test]
 fn test_validate_header_chain_accepts_single_header_linked_to_anchor() {
     let anchor = TestShareBlockBuilder::new().nonce(1).build();
@@ -550,6 +738,9 @@ fn test_validate_header_chain_checks_timestamps_against_batch_and_store_ancestor
         })
         .times(1)
         .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_sharechain_diff_floor()
+        .return_const(None);
     let mut pool_difficulty = PoolDifficulty::default();
     pool_difficulty
         .expect_calculate_target_clamped()
@@ -1310,6 +1501,18 @@ fn test_asert_mismatch_has_no_retry_depth() {
         block_hash: BlockHash::all_zeros(),
         declared: 0,
         expected: 1,
+    };
+    assert_eq!(error.retry_depth(600), None);
+}
+
+/// A declared target below the floor has no retry depth: no deeper
+/// getheaders can make the header's own bits valid.
+#[test]
+fn test_below_floor_has_no_retry_depth() {
+    let error = HeaderSyncError::BelowFloor {
+        block_hash: BlockHash::all_zeros(),
+        declared: 0x1d000034,
+        floor: 1285,
     };
     assert_eq!(error.retry_depth(600), None);
 }
