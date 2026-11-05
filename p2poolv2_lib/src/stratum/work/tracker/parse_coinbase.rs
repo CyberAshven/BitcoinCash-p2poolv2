@@ -210,6 +210,49 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// A job a miner declares (an SV2 custom job) carries its own coinbase
+    /// layout. It must not become the latest job the distribution reads:
+    /// the metrics keep showing this node's own job.
+    #[tokio::test]
+    async fn test_get_distribution_reads_own_job_after_a_declared_job() {
+        let tracker = start_tracker_actor();
+        let address = parse_address(
+            "tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d",
+            Network::Signet,
+        )
+        .unwrap();
+        let outputs = vec![TxOut {
+            value: Amount::from_str("49 BTC").unwrap(),
+            script_pubkey: address.script_pubkey(),
+        }];
+        let own_job_id = tracker.get_next_job_id();
+        tracker.insert_job(
+            Arc::new(create_test_template()),
+            "".to_string(),
+            create_valid_coinbase2(b"P2Poolv2", &outputs),
+            None,
+            TEST_COINBASE_NSECS,
+            vec![],
+            own_job_id,
+        );
+        let declared_job_id = tracker.get_next_declared_job_id();
+        tracker.insert_job(
+            Arc::new(create_test_template()),
+            "".to_string(),
+            "deadbeef".to_string(), // not this node's coinbase2 layout
+            None,
+            TEST_COINBASE_NSECS,
+            vec![],
+            declared_job_id,
+        );
+
+        let result = get_distribution(&tracker, 8, Network::Signet, None);
+
+        assert!(result.unwrap().contains(
+            "coinbase_output{index=\"0\",address=\"tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d\"} 4900000000"
+        ));
+    }
+
     #[tokio::test]
     async fn test_get_distribution_invalid_coinbase2_returns_none() {
         let tracker = start_tracker_actor();
