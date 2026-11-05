@@ -13,7 +13,10 @@ share chain tip under 5 minutes old before opening its Stratum port, and
 the first node of a new share chain, or any node on regtest, never has
 one: following the quickstart, the port never opened. Set it to `true` once
 `dial_peers` lists a node of a running share chain, as the Umbrel packages
-already say. No code or share-chain rule changes.
+already say. The quickstart also says to mine one block on a new regtest
+chain first: BCHN reports `initialblockdownload` while its tip is the 2011
+genesis block, and the node waits for it. No code or share-chain rule
+changes.
 
 The sim harness runs on Windows. Node configs escaped no paths, so a
 Windows store path (`\s...`) broke the TOML and the nodes exited before
