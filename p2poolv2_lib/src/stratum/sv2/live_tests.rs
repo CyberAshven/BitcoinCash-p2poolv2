@@ -135,6 +135,7 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
             template_rx,
         }),
         Some(authority),
+        None,
         shutdown_receiver,
     ));
     let mut mining = TestSv2Client::connect(address, authority.public_key).await;
@@ -630,6 +631,7 @@ async fn bchn_jobs_on_requested_payout_outputs_reach_both_real_nodes() {
             template_rx,
         }),
         Some(authority),
+        None,
         shutdown_receiver,
     ));
     let mut mining = TestSv2Client::connect(address, authority.public_key).await;

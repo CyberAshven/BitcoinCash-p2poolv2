@@ -12,6 +12,7 @@ use crate::config::{BitcoinCashNetwork, Chain, PoolMode};
 use crate::shares::bch_headers::BchHeaderRules;
 use payout_distribution::PayoutDistribution;
 use sharechain_pplns::pplns_window::PplnsWindow;
+pub use sharechain_pplns::{AnchorWeights, ShareChainWeights};
 use std::sync::{Arc, RwLock};
 
 const DEFAULT_SIMPLE_PPLNS_STEP_SIZE_SECONDS: u64 = 86_400;

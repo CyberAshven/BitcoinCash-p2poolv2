@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::accounting::payout::AnchorWeights;
 use crate::accounting::payout::simple_pplns::share_worker::PplnsShareSender;
 use crate::accounting::stats::metrics;
 use crate::address::Address as P2PoolAddress;
@@ -98,6 +99,9 @@ pub struct Sv2Listener {
     /// Authority keys for the Noise handshake. `None` serves unencrypted
     /// frames, which the specification allows only between local roles.
     pub authority: Option<Sv2Authority>,
+    /// PPLNS weights at another node's anchor, for `VerifyPayoutOutputs`.
+    /// `None` when this node does not pay from the share-chain window.
+    pub anchor_weights: Option<Arc<dyn AnchorWeights>>,
 }
 
 /// Builder for StratumServer to avoid dependency on StratumConfig
@@ -452,6 +456,7 @@ impl StratumServer {
                 sv2.merge_mining,
                 Some(mining),
                 sv2.authority,
+                sv2.anchor_weights,
                 sv2_stop_receiver,
             ));
         }

@@ -7,9 +7,10 @@ use crate::shares::share_commitment::ShareCommitment;
 use crate::stratum::block_submit::FoundBlockSubmitter;
 use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::sv2::payout_outputs::{
-    EXACT_OUTPUTS, PAYOUT_OUTPUTS_STALE, REQUEST_PAYOUT_OUTPUTS, REQUEST_PAYOUT_OUTPUTS_ERROR,
-    REQUEST_PAYOUT_OUTPUTS_SUCCESS, RequestPayoutOutputsError, RequestPayoutOutputsSuccess,
-    STALE_PAYOUT_OUTPUTS,
+    EXACT_OUTPUTS, INVALID_REQUEST, PAYOUT_OUTPUTS_STALE, REQUEST_PAYOUT_OUTPUTS,
+    REQUEST_PAYOUT_OUTPUTS_ERROR, REQUEST_PAYOUT_OUTPUTS_SUCCESS, RequestPayoutOutputsError,
+    RequestPayoutOutputsSuccess, STALE_PAYOUT_OUTPUTS, VERIFY_PAYOUT_OUTPUTS,
+    VERIFY_PAYOUT_OUTPUTS_ERROR,
 };
 use crate::stratum::sv2::session::encode_message;
 use crate::stratum::work::merge_tokens::{MergeMinedToken, TokenSet};
@@ -20,6 +21,7 @@ use crate::test_utils::{
     test_bch_prepared, test_bch_prepared_on_anchor, test_bch_prepared_with_cuts,
     test_bch_solve_custom_job, test_bch_stratum_context, test_custom_job_from_payout_outputs,
     test_declared_coinbase_parts, test_payout_outputs_request, test_sv2_authority, test_sv2_setup,
+    test_verify_payout_outputs_request,
 };
 use crate::test_utils::{make_test_share_address, setup_test_chain_store_handle};
 use binary_sv2::U256;
@@ -87,6 +89,7 @@ async fn withdrawing_work_closes_the_sv2_connection() {
             template_rx: receiver,
         }),
         None,
+        None,
         shutdown,
     ));
     templates.send(None).unwrap();
@@ -149,6 +152,7 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
             template_rx,
         }),
         Some(authority),
+        None,
         shutdown_receiver,
     ));
     let mut mining = TestSv2Client::connect(address, authority.public_key).await;
@@ -520,6 +524,7 @@ async fn a_standard_client_mines_on_requested_payout_outputs_in_both_modes() {
             template_rx,
         }),
         Some(authority),
+        None,
         shutdown_receiver,
     ));
     let payout = bitcoin::Address::p2pkh(
@@ -884,6 +889,7 @@ async fn a_moved_anchor_pushes_payout_outputs_stale_and_refuses_earlier_tokens()
             template_rx,
         }),
         Some(authority),
+        None,
         shutdown_receiver,
     ));
     let payout = bitcoin::Address::p2pkh(
@@ -1071,6 +1077,7 @@ async fn disconnect_releases_the_authorized_worker_and_connection_permit() {
             template_rx,
         }),
         None,
+        None,
         shutdown_rx,
     ));
     let setup = encode_message(
@@ -1171,9 +1178,15 @@ async fn a_mining_connection_is_granted_the_merge_mining_disclosure() {
         payload: extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION, 0x0002]),
     };
 
-    let frames = handle_messages(&mut connection, Some(&mut channels), None, vec![request])
-        .await
-        .unwrap();
+    let frames = handle_messages(
+        &mut connection,
+        Some(&mut channels),
+        None,
+        None,
+        vec![request],
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         frames,
@@ -1198,7 +1211,7 @@ async fn an_unknown_extension_request_is_answered_with_none() {
         payload: extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION]),
     };
 
-    let frames = handle_messages(&mut connection, None, None, vec![request])
+    let frames = handle_messages(&mut connection, None, None, None, vec![request])
         .await
         .unwrap();
 
@@ -1230,7 +1243,7 @@ async fn extension_messages_before_setup_or_unknown_close_the_connection() {
         payload: extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION]),
     };
     assert!(
-        handle_messages(&mut fresh, None, None, vec![request])
+        handle_messages(&mut fresh, None, None, None, vec![request])
             .await
             .is_err()
     );
@@ -1242,7 +1255,7 @@ async fn extension_messages_before_setup_or_unknown_close_the_connection() {
         payload: Vec::new(),
     };
     assert!(
-        handle_messages(&mut connection, None, None, vec![unknown])
+        handle_messages(&mut connection, None, None, None, vec![unknown])
             .await
             .is_err()
     );
@@ -1270,9 +1283,15 @@ async fn a_bch_job_declaration_connection_is_granted_requested_payout_outputs() 
         payload: extensions_payload(9, &[PAYOUT_OUTPUTS_EXTENSION]),
     };
 
-    let frames = handle_messages(&mut connection, Some(&mut channels), None, vec![request])
-        .await
-        .unwrap();
+    let frames = handle_messages(
+        &mut connection,
+        Some(&mut channels),
+        None,
+        None,
+        vec![request],
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         frames,
@@ -1301,7 +1320,7 @@ async fn requested_payout_outputs_are_not_granted_to_mining_or_bitcoin_connectio
         payload: extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION, PAYOUT_OUTPUTS_EXTENSION]),
     };
 
-    let mining_frames = handle_messages(&mut mining, Some(&mut channels), None, vec![both])
+    let mining_frames = handle_messages(&mut mining, Some(&mut channels), None, None, vec![both])
         .await
         .unwrap();
 
@@ -1336,6 +1355,7 @@ async fn requested_payout_outputs_are_not_granted_to_mining_or_bitcoin_connectio
     let bitcoin_frames = handle_messages(
         &mut bitcoin,
         Some(&mut bitcoin_channels),
+        None,
         None,
         vec![payout_outputs],
     )
@@ -1376,7 +1396,7 @@ async fn requested_payout_outputs_messages_outside_the_extension_close_the_conne
     };
 
     assert!(
-        handle_messages(&mut connection, None, None, vec![request])
+        handle_messages(&mut connection, None, None, None, vec![request])
             .await
             .unwrap_err()
             .contains("unsupported Stratum V2 extension 0x5052")
@@ -1389,10 +1409,78 @@ async fn requested_payout_outputs_messages_outside_the_extension_close_the_conne
         payload: Vec::new(),
     };
     assert!(
-        handle_messages(&mut connection, None, None, vec![stale])
+        handle_messages(&mut connection, None, None, None, vec![stale])
             .await
             .is_err()
     );
+}
+
+/// `user_identifier` is resolved by `MiningChannels::payout_identity`, the
+/// same way an allocation is. A string that is not a payout address is
+/// `invalid-request`, and the connection stays up.
+#[tokio::test]
+async fn an_unresolvable_verify_identity_is_invalid_request() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let registry = Arc::new(Mutex::new(JobRegistry::new(
+        PoolTransactionCache::new(),
+        Some(MergeMiningCommitment::empty()),
+    )));
+    let mut connection = Sv2Connection::new(registry);
+    let mut setup =
+        binary_sv2::to_bytes(test_sv2_setup(Protocol::JobDeclarationProtocol, 0)).unwrap();
+    connection
+        .handle_message(MESSAGE_TYPE_SETUP_CONNECTION, &mut setup)
+        .unwrap();
+    let negotiate = Sv2Message {
+        extension_type: EXTENSIONS_NEGOTIATION,
+        message_type: REQUEST_EXTENSIONS,
+        payload: extensions_payload(9, &[PAYOUT_OUTPUTS_EXTENSION]),
+    };
+    handle_messages(
+        &mut connection,
+        Some(&mut channels),
+        None,
+        None,
+        vec![negotiate],
+    )
+    .await
+    .unwrap();
+    assert!(connection.has_payout_outputs());
+    let prepared = test_bch_prepared();
+    let token = prepared
+        .mining_job_token([0x11; 32], prepared.template().curtime)
+        .unwrap();
+    let verify = Sv2Message {
+        extension_type: PAYOUT_OUTPUTS_EXTENSION,
+        message_type: VERIFY_PAYOUT_OUTPUTS,
+        payload: test_verify_payout_outputs_request(
+            4,
+            &token,
+            "not-an-address",
+            prepared.template(),
+            prepared.template().coinbasevalue,
+            &[],
+        ),
+    };
+
+    let frames = handle_messages(
+        &mut connection,
+        Some(&mut channels),
+        None,
+        None,
+        vec![verify],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(frames[0][2], VERIFY_PAYOUT_OUTPUTS_ERROR);
+    let mut payload = SerializedFrame::<Vec<u8>>::from_bytes(frames[0].clone())
+        .unwrap()
+        .payload()
+        .to_vec();
+    let error = RequestPayoutOutputsError::from_bytes(&mut payload).unwrap();
+    assert_eq!(error.error_code.as_utf8_or_hex(), INVALID_REQUEST);
 }
 
 #[tokio::test]
@@ -1419,6 +1507,7 @@ async fn noise_listener_answers_setup_connection_to_a_client_pinning_its_key() {
         None,
         None,
         Some(authority),
+        None,
         shutdown_receiver,
     ));
 
@@ -1448,6 +1537,7 @@ async fn a_client_pinning_another_authority_key_rejects_the_handshake() {
         None,
         None,
         Some(authority),
+        None,
         shutdown_receiver,
     ));
 
@@ -1483,6 +1573,7 @@ async fn served_listener_answers_setup_connection() {
         Arc::new(Semaphore::new(8)),
         PoolTransactionCache::new(),
         Some(MergeMiningCommitment::empty()),
+        None,
         None,
         None,
         shutdown_receiver,
@@ -1529,6 +1620,7 @@ async fn a_connection_over_the_shared_limit_is_closed() {
         Arc::new(Semaphore::new(0)),
         PoolTransactionCache::new(),
         Some(MergeMiningCommitment::empty()),
+        None,
         None,
         None,
         shutdown_receiver,
