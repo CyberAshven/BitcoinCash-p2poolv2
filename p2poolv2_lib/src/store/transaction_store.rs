@@ -153,6 +153,17 @@ impl Decodable for StoredTxOut {
     }
 }
 
+/// The coinbase ancestry the Outputs CF records for one output, which
+/// `bitcoin::TxOut` cannot carry. Spendability rules read these: a coinbase
+/// output needs `COINBASE_MATURITY`, and any output expires once its
+/// coinbase root falls more than `PAYOUT_DEPTH` below the spending block,
+/// or is `Unknown` (see `check_prevouts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputOrigin {
+    pub is_coinbase: bool,
+    pub coinbase_root: CoinbaseRoot,
+}
+
 /// A TxIn stored in the Inputs CF together with its witness.
 ///
 /// `bitcoin::TxIn::consensus_encode` does not include the witness
@@ -914,6 +925,39 @@ impl Store {
         }
     }
 
+    /// The confirmed block containing `txid`, with its height, or `None`
+    /// when no block on the confirmed chain contains it: the txid is
+    /// unknown, or only in uncle, fork or invalid blocks.
+    ///
+    /// At most one confirmed block can contain a txid, because the
+    /// confirmed chain rejects a repeated transaction. Reads `TxidsBlocks`
+    /// once, then the candidate blocks' metadata in one batch; metadata
+    /// carries both chain membership and height.
+    pub fn get_confirmed_block_for_txid(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(BlockHash, u32)>, StoreError> {
+        let blockhashes = self.get_blockhashes_for_txid(txid)?;
+        if blockhashes.is_empty() {
+            return Ok(None);
+        }
+        let confirmed = self
+            .get_block_metadata_batch(&blockhashes)?
+            .into_iter()
+            .find(|(_blockhash, metadata)| metadata.chain == ChainMembership::Confirmed);
+        match confirmed {
+            None => Ok(None),
+            Some((blockhash, metadata)) => {
+                let height = metadata.expected_height.ok_or_else(|| {
+                    StoreError::NotFound(format!(
+                        "No height in metadata for confirmed block {blockhash}"
+                    ))
+                })?;
+                Ok(Some((blockhash, height)))
+            }
+        }
+    }
+
     /// Batch-fetch blockhashes for all provided txids in a single multi_get_cf call.
     ///
     /// Returns a Vec parallel to the input: each entry is the list of
@@ -1021,16 +1065,32 @@ impl Store {
     ///
     /// Returns `NotFound` if the transaction, or any of its input or
     /// output rows, is missing (for example removed by the pruner after
-    /// the metadata read).
+    /// the metadata read). See `get_tx_with_output_origins`.
     pub fn get_tx(&self, txid: &bitcoin::Txid) -> Result<Transaction, StoreError> {
+        self.get_tx_with_output_origins(txid)
+            .map(|(transaction, _output_origins)| transaction)
+    }
+
+    /// Get a transaction together with each output's `OutputOrigin` (the
+    /// coinbase flag and `coinbase_root_height` that `Transaction` drops),
+    /// in output order.
+    ///
+    /// Loads the tx metadata, then each input (with its witness) and each
+    /// output row. Returns `NotFound` if any row is missing, so a prune
+    /// that interleaves with the reads surfaces as an error, never a panic.
+    pub fn get_tx_with_output_origins(
+        &self,
+        txid: &bitcoin::Txid,
+    ) -> Result<(Transaction, Vec<OutputOrigin>), StoreError> {
         let tx_metadata = self.get_tx_metadata(txid)?;
 
         debug!("Transaction metadata: {:?}", tx_metadata);
 
         let inputs_cf = self.db.cf_handle(&ColumnFamily::Inputs).unwrap();
         let outputs_cf = self.db.cf_handle(&ColumnFamily::Outputs).unwrap();
-        let mut inputs = Vec::new();
-        let mut outputs = Vec::new();
+        let mut inputs = Vec::with_capacity(tx_metadata.input_count as usize);
+        let mut outputs = Vec::with_capacity(tx_metadata.output_count as usize);
+        let mut output_origins = Vec::with_capacity(tx_metadata.output_count as usize);
 
         for i in 0..tx_metadata.input_count {
             let input_key = outpoint_key(txid, i);
@@ -1055,14 +1115,18 @@ impl Store {
                 .ok_or_else(|| {
                     StoreError::NotFound(format!("Output not found for {output_key}"))
                 })?;
-            let output = match encode::deserialize::<StoredTxOut>(&output) {
-                Ok(stored) => stored.tx_out,
+            let stored = match encode::deserialize::<StoredTxOut>(&output) {
+                Ok(stored) => stored,
                 Err(e) => {
                     tracing::error!("Error deserializing output: {e:?}");
                     return Err(e.into());
                 }
             };
-            outputs.push(output);
+            output_origins.push(OutputOrigin {
+                is_coinbase: stored.is_coinbase,
+                coinbase_root: stored.coinbase_root,
+            });
+            outputs.push(stored.tx_out);
         }
         let transaction = Transaction {
             version: tx_metadata.version,
@@ -1070,7 +1134,7 @@ impl Store {
             input: inputs,
             output: outputs,
         };
-        Ok(transaction)
+        Ok((transaction, output_origins))
     }
 
     /// Batch load `TxMetadata` for a list of txids via a single

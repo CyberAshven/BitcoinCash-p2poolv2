@@ -582,6 +582,73 @@ async fn an_unreachable_node_is_a_transient_transport_error() {
     assert!(result.unwrap_err().is_transient());
 }
 
+/// Read one HTTP request from `stream`, or `None` when the client closes the
+/// connection first.
+async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Option<()> {
+    use tokio::io::AsyncReadExt;
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buffer[..end]).to_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map_or(0, |value| value.trim().parse::<usize>().unwrap());
+            if buffer.len() >= end + 4 + length {
+                return Some(());
+            }
+        }
+        let read = stream.read(&mut chunk).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+}
+
+/// Answer a JSON-RPC call on `stream` with `result`, keeping it alive.
+async fn write_http_result(stream: &mut tokio::net::TcpStream, result: &str) {
+    use tokio::io::AsyncWriteExt;
+    let body = format!(r#"{{"result":"{result}","error":null,"id":0}}"#);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_call_on_a_connection_the_node_closes_is_sent_again() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let connections = Arc::new(AtomicU64::new(0));
+    let accepted = connections.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let number = accepted.fetch_add(1, Ordering::SeqCst) + 1;
+            tokio::spawn(async move {
+                // Each connection answers one call. The first is then closed
+                // as the next call arrives, unanswered: BCHN closing a
+                // kept-alive connection at its idle timeout just as a call
+                // goes out on it.
+                read_http_request(&mut stream).await.unwrap();
+                write_http_result(&mut stream, &format!("connection {number}")).await;
+                read_http_request(&mut stream).await;
+            });
+        }
+    });
+    let client = BitcoindRpcClient::new(&url, "p2pool", "p2pool").unwrap();
+
+    let first: String = client.request("getbestblockhash", vec![]).await.unwrap();
+    let second: Result<String, BitcoindRpcError> = client.request("getbestblockhash", vec![]).await;
+
+    assert_eq!(first, "connection 1");
+    assert_eq!(second.unwrap(), "connection 2");
+    assert_eq!(connections.load(Ordering::SeqCst), 2);
+}
+
 #[test]
 fn a_busy_node_is_transient() {
     let error = BitcoindRpcError::HttpError {
