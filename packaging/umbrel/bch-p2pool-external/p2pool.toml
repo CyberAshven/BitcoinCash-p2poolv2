@@ -66,11 +66,9 @@ zmqpubhashblock = "tcp://bchn.example:28332"
 # miner_address = "tp2pool:q..."
 
 # network: a bchtest: address on chipnet, a bitcoincash: address on mainnet.
-# Required to parse, but a share chain node never pays it: only Hydrapool
-# mode does, with the reward of blocks found before the first shares. This is
-# the P2Poolv2 Bitcoin Cash donation address; on mainnet it is
-# bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k. Put your own
-# address here before switching to Hydrapool.
+# Required to parse, but a share chain node never pays it. This is the
+# P2Poolv2 Bitcoin Cash donation address; on mainnet it is
+# bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k.
 bootstrap_address = "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2"
 
 # Every Bitcoin Cash node donates 1% (100 basis points) of each block it

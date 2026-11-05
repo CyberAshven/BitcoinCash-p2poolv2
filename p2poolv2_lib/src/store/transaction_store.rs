@@ -1008,17 +1008,20 @@ impl Store {
     /// Get transactions for a blockhash from the BlockTxids column
     /// family. Looks up the txids index, then reconstructs each
     /// transaction from the Tx/Inputs/Outputs CFs.
-    pub fn get_txs_for_blockhash(&self, blockhash: &BlockHash) -> Vec<Transaction> {
+    /// Returns an error if any transaction cannot be reconstructed.
+    pub fn get_txs_for_blockhash(
+        &self,
+        blockhash: &BlockHash,
+    ) -> Result<Vec<Transaction>, StoreError> {
         let txids = self.get_txids_for_blockhash(blockhash);
-        txids.0.iter().flat_map(|txid| self.get_tx(txid)).collect()
+        txids.0.iter().map(|txid| self.get_tx(txid)).collect()
     }
 
-    /// Get a transaction from the store using a provided txid
-    /// - Load tx metadata
-    /// - Load inputs
-    /// - Load outputs
-    /// - Deserialize inputs and outputs
-    /// - Return transaction
+    /// Get a transaction from the store using a provided txid.
+    ///
+    /// Returns `NotFound` if the transaction, or any of its input or
+    /// output rows, is missing (for example removed by the pruner after
+    /// the metadata read).
     pub fn get_tx(&self, txid: &bitcoin::Txid) -> Result<Transaction, StoreError> {
         let tx_metadata = self.get_tx_metadata(txid)?;
 
@@ -1033,9 +1036,8 @@ impl Store {
             let input_key = outpoint_key(txid, i);
             let input = self
                 .db
-                .get_cf::<&[u8]>(&inputs_cf, input_key.as_ref())
-                .unwrap()
-                .unwrap();
+                .get_cf::<&[u8]>(&inputs_cf, input_key.as_ref())?
+                .ok_or_else(|| StoreError::NotFound(format!("Input not found for {input_key}")))?;
             let input: bitcoin::TxIn = match encode::deserialize::<StoredTxIn>(&input) {
                 Ok(stored) => stored.tx_in,
                 Err(e) => {
@@ -1049,9 +1051,10 @@ impl Store {
             let output_key = outpoint_key(txid, i);
             let output = self
                 .db
-                .get_cf::<&[u8]>(&outputs_cf, output_key.as_ref())
-                .unwrap()
-                .unwrap();
+                .get_cf::<&[u8]>(&outputs_cf, output_key.as_ref())?
+                .ok_or_else(|| {
+                    StoreError::NotFound(format!("Output not found for {output_key}"))
+                })?;
             let output = match encode::deserialize::<StoredTxOut>(&output) {
                 Ok(stored) => stored.tx_out,
                 Err(e) => {

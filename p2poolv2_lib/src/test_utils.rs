@@ -4,6 +4,8 @@
 
 // Imports for setup_test_chain_store_handle (available with test-utils feature)
 #[cfg(any(test, feature = "test-utils"))]
+use crate::config::BitcoinCashNetwork;
+#[cfg(any(test, feature = "test-utils"))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::store::Store;
@@ -1297,6 +1299,30 @@ pub async fn setup_test_chain_store_handle(start_writer: bool) -> (ChainStoreHan
 
     let store_handle = StoreHandle::new(store, write_tx);
     let chain_handle = ChainStoreHandle::new(store_handle, bitcoin::Network::Signet);
+    (chain_handle, temp_dir)
+}
+
+/// Like `setup_test_chain_store_handle(true)`, for a Bitcoin Cash node on
+/// `network`: the store has Bitcoin Cash's depths and the handle names the
+/// network.
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn setup_test_bitcoin_cash_chain_store_handle(
+    network: BitcoinCashNetwork,
+) -> (ChainStoreHandle, TempDir) {
+    let temp_dir = tempdir().unwrap();
+    let store = Arc::new(
+        Store::new(temp_dir.path().to_str().unwrap().to_string(), false)
+            .unwrap()
+            .with_chain(crate::config::Chain::BitcoinCash),
+    );
+    let (write_tx, write_rx) = write_channel();
+
+    let store_writer = StoreWriter::new(store.clone(), write_rx);
+    tokio::task::spawn_blocking(move || store_writer.run());
+
+    let store_handle = StoreHandle::new(store, write_tx);
+    let chain_handle = ChainStoreHandle::new(store_handle, network.legacy_network())
+        .with_bitcoin_cash_network(Some(network));
     (chain_handle, temp_dir)
 }
 

@@ -25,7 +25,9 @@ use crate::stratum::merge_disclosure::{
 use crate::stratum::server::StratumContext;
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use binary_sv2::Deserialize;
-use job_declaration_sv2::{AllocateMiningJobToken, MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN};
+use job_declaration_sv2::{
+    AllocateMiningJobToken, MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN, MESSAGE_TYPE_PUSH_SOLUTION,
+};
 use mining_sv2::{MESSAGE_TYPE_SET_CUSTOM_MINING_JOB, SetCustomMiningJob};
 use std::future;
 use std::sync::{Arc, Mutex};
@@ -34,7 +36,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::time::timeout;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Time a client has to complete the Noise handshake after connecting.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -336,6 +338,17 @@ async fn handle_messages(
                 .as_deref()
                 .and_then(|channels| channels.payout_identity(&user_identifier));
             connection.on_allocate(request.request_id, &user_identifier, identity)?
+        } else if message_type == MESSAGE_TYPE_PUSH_SOLUTION {
+            if let Some(block) = connection.push_solution(&mut payload)? {
+                match channels.as_deref() {
+                    Some(channels) => channels.submit_pushed_solution(block).await,
+                    None => warn!(
+                        "PushSolution for block {} on a listener without mining: not submitted",
+                        block.block_hash()
+                    ),
+                }
+            }
+            Vec::new()
         } else if is_mining_channel_message(message_type) {
             let channels = match (channels.as_mut(), connection.is_mining()) {
                 (Some(channels), true) => channels,

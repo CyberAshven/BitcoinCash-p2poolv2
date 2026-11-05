@@ -24,6 +24,53 @@ the commitment as well as the payout scripts. In a test, a client that builds
 its jobs from the reply alone gets them installed and mines a share in both
 Job Declaration modes. No share-chain rule changes, and `/jd_prepare` is
 unchanged.
+The Stratum V2 Job Declaration server handles `PushSolution` (spec
+6.4.9). It answered the message with "unsupported Stratum V2 message type
+96" and closed the connection, which sends a Job Declaration client to its
+fallback. A Full-Template connection now keeps its last four declarations
+on the current previous block, within 64 MiB across all connections. It
+rebuilds the block a `PushSolution`
+reports from the declared coinbase and transactions, and submits it to
+BCHN and the extra submit nodes when the header meets the template's
+target. Any other `PushSolution` is ignored, and the connection stays open.
+No share-chain rule changes.
+
+The sim harness runs on Windows. Node configs escaped no paths, so a
+Windows store path (`\s...`) broke the TOML and the nodes exited before
+logging; the swarm's process pattern joined with `/` while node configs use
+`\`; processes were signalled and found with `kill` and `pgrep`; and BCHN
+was started with `-daemon`, which Windows BCHN refuses. Paths and strings
+in node configs are now TOML-escaped, the pattern is joined like the
+configs, Windows uses `tasklist`, `taskkill /F` and a PowerShell
+`Win32_Process` query (a forced stop: Windows console processes have no
+graceful signal without `unsafe`), and BCHN is spawned in the background on
+Windows. `cargo sim nightly deep-fork-refused` passes on Windows with BCHN
+29.2.0 and no workarounds. Linux and macOS are unchanged.
+
+A node no longer stops when a share transaction's stored rows are missing,
+for example after the pruner deletes them between two reads. `get_tx`
+unwrapped each input and output row, and release builds abort on panic, so
+the whole node stopped; it now returns `NotFound`, as upstream's 0f15c131
+does. `get_share` returns None when any of the share's transactions cannot
+be rebuilt, instead of returning the share with that transaction silently
+left out. No share-chain rule changes.
+
+The Electrum server reads the share chain: upstream's 43ddd7d4 (chain
+store handle wired in, `blockchain.*` methods answered only once the node
+is synced) and 6fcf5e72 (`blockchain.block.header`) are ported unchanged.
+On a Bitcoin Cash node `server.features` names the configured network and
+reports Bitcoin Cash's depths; upstream's reports a chipnet node as
+`testnet` with Bitcoin's coinbase maturity of 6048. No share-chain rule
+changes.
+
+The configs, packaging, TUI config editor and docs offer only P2Pool mode.
+Hydrapool mode (standalone PPLNS, no share chain) came with upstream and its
+code stays as upstream has it, so `mode = "hydrapool"` still parses, but
+nothing an operator reads offers it: the `mode` lines are gone from the
+sample configs and the TUI editor, and `bootstrap_address` is described as
+required to parse and never paid by a share chain node. `pool-diagnose`
+looks for the `p2poolv2` process by default; the script it replaced looked
+for `hydrapool`. No share-chain rule changes.
 
 A Hydrapool-mode node starts again after the share-chain genesis changes
 between releases. Hydrapool keeps no share chain beyond genesis, but startup

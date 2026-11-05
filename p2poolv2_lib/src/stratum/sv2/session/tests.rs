@@ -1039,4 +1039,259 @@ fn a_new_bch_block_on_the_same_share_pushes_payout_outputs_stale() {
         vec![stale_frame().unwrap()]
     );
     assert!(connection.on_template(&next).unwrap().is_empty());
+/// The extranonce a pushed solution's coinbase carries in these tests: the
+/// whole scriptSig of the declared coinbase.
+static PUSHED_EXTRANONCE: [u8; 8] = [7; 8];
+
+/// A declared coinbase's bytes before the extranonce: version, one input
+/// spending nothing, and the scriptSig's length.
+fn pushed_coinbase_prefix() -> Vec<u8> {
+    let mut prefix = 2u32.to_le_bytes().to_vec();
+    prefix.push(1);
+    prefix.extend([0; 32]);
+    prefix.extend(u32::MAX.to_le_bytes());
+    prefix.push(PUSHED_EXTRANONCE.len() as u8);
+    prefix
+}
+
+/// A Job Declaration connection on `shared` that declared `transactions`
+/// in Full-Template mode, with a coinbase of `pushed_coinbase_prefix`, an
+/// extranonce and the empty-commitment suffix.
+fn full_template_declarator(
+    shared: &Arc<Mutex<JobRegistry>>,
+    transactions: &[Transaction],
+) -> Sv2Connection {
+    let mut connection = Sv2Connection::new(Arc::clone(shared));
+    accept_message(
+        &mut connection,
+        setup(1, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    let allocate = accept_message(
+        &mut connection,
+        AllocateMiningJobToken {
+            user_identifier: "miner".try_into().unwrap(),
+            request_id: 1,
+        },
+        MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN,
+    );
+    let mut payload = response_payload(&allocate[0]);
+    let token = AllocateMiningJobTokenSuccess::from_bytes(&mut payload)
+        .unwrap()
+        .mining_job_token
+        .as_bytes()
+        .to_vec();
+    let wtxid_bytes = transactions
+        .iter()
+        .map(|transaction| transaction.compute_wtxid().to_byte_array())
+        .collect::<Vec<_>>();
+    let wtxids = wtxid_bytes
+        .iter()
+        .map(|wtxid| U256::new(wtxid.as_slice()).unwrap())
+        .collect::<Vec<_>>();
+    accept_message(
+        &mut connection,
+        DeclareMiningJob {
+            request_id: 2,
+            mining_job_token: B0255::new(&token).unwrap(),
+            version: 1,
+            coinbase_tx_prefix: B064K::new(&pushed_coinbase_prefix()).unwrap(),
+            coinbase_tx_suffix: B064K::new(&empty_commitment_suffix()).unwrap(),
+            wtxid_list: Seq064K::new(wtxids).unwrap(),
+            excess_data: B064K::new(&[]).unwrap(),
+        },
+        MESSAGE_TYPE_DECLARE_MINING_JOB,
+    );
+    let serialized = transactions.iter().map(serialize).collect::<Vec<_>>();
+    let revealed = serialized
+        .iter()
+        .map(|bytes| B016M::new(bytes.as_slice()).unwrap())
+        .collect::<Vec<_>>();
+    let success = accept_message(
+        &mut connection,
+        ProvideMissingTransactionsSuccess {
+            request_id: 2,
+            transaction_list: Seq064K::new(revealed).unwrap(),
+        },
+        MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
+    );
+    assert_eq!(
+        reply_type(&success[0]),
+        MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS
+    );
+    connection
+}
+
+/// The block a declarator of `transactions` finds with `nonce`, built here
+/// without the session's merkle branch: the coinbase from the declared
+/// prefix, the extranonce and the suffix, then the transactions in CTOR.
+fn expected_pushed_block(transactions: &[Transaction], nonce: u32) -> Block {
+    let mut raw = pushed_coinbase_prefix();
+    raw.extend(PUSHED_EXTRANONCE);
+    raw.extend(empty_commitment_suffix());
+    let coinbase: Transaction = deserialize(&raw).unwrap();
+    let mut sorted = transactions.to_vec();
+    sort_ctor(&mut sorted);
+    let template = test_bch_prepared().template().clone();
+    let mut block = Block {
+        header: Header {
+            version: bitcoin::block::Version::from_consensus(0x2000_0000),
+            prev_blockhash: template.previousblockhash.parse().unwrap(),
+            merkle_root: TxMerkleNode::all_zeros(),
+            time: template.curtime,
+            bits: CompactTarget::from_unprefixed_hex(&template.bits).unwrap(),
+            nonce,
+        },
+        txdata: std::iter::once(coinbase).chain(sorted).collect(),
+    };
+    block.header.merkle_root = block.compute_merkle_root().unwrap();
+    block
+}
+
+/// The first nonce from 0 whose header meets the template's target when
+/// `meets`, or misses it when not.
+fn pushed_nonce(transactions: &[Transaction], meets: bool) -> u32 {
+    (0..)
+        .find(|nonce| {
+            let header = expected_pushed_block(transactions, *nonce).header;
+            Target::from_compact(header.bits).is_met_by(header.block_hash()) == meets
+        })
+        .unwrap()
+}
+
+/// A `PushSolution` for `header`, whose previous block hash is `prev_hash`,
+/// with `PUSHED_EXTRANONCE`.
+fn push_solution_message<'a>(header: &Header, prev_hash: &'a [u8; 32]) -> PushSolution<'a> {
+    PushSolution {
+        extranonce: binary_sv2::B032::new(&PUSHED_EXTRANONCE).unwrap(),
+        prev_hash: U256::from(prev_hash),
+        nonce: header.nonce,
+        ntime: header.time,
+        nbits: header.bits.to_consensus(),
+        version: header.version.to_consensus() as u32,
+    }
+}
+
+/// A `PushSolution` payload for `header` with `PUSHED_EXTRANONCE`.
+fn push_solution_payload(header: &Header) -> Vec<u8> {
+    let prev_hash = header.prev_blockhash.to_byte_array();
+    let frame = encode_message(
+        push_solution_message(header, &prev_hash),
+        MESSAGE_TYPE_PUSH_SOLUTION,
+    )
+    .unwrap();
+    response_payload(&frame)
+}
+
+#[test]
+fn a_push_solution_rebuilds_the_declared_block() {
+    let shared = registry();
+    let transactions = vec![transaction_with_lock(1), transaction_with_lock(2)];
+    let mut connection = full_template_declarator(&shared, &transactions);
+    let expected = expected_pushed_block(&transactions, pushed_nonce(&transactions, true));
+
+    let mut payload = push_solution_payload(&expected.header);
+    let block = connection.push_solution(&mut payload).unwrap().unwrap();
+
+    assert_eq!(block, expected);
+    assert!(block.check_merkle_root());
+}
+
+#[test]
+fn a_push_solution_neither_answers_nor_closes_the_connection() {
+    let shared = registry();
+    let transactions = vec![transaction_with_lock(1)];
+    let mut connection = full_template_declarator(&shared, &transactions);
+    let solved = expected_pushed_block(&transactions, pushed_nonce(&transactions, true));
+
+    let prev_hash = solved.header.prev_blockhash.to_byte_array();
+    let frames = accept_message(
+        &mut connection,
+        push_solution_message(&solved.header, &prev_hash),
+        MESSAGE_TYPE_PUSH_SOLUTION,
+    );
+
+    assert!(frames.is_empty());
+    // The connection still takes Job Declaration messages.
+    let allocate = accept_message(
+        &mut connection,
+        AllocateMiningJobToken {
+            user_identifier: "miner".try_into().unwrap(),
+            request_id: 3,
+        },
+        MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN,
+    );
+    assert_eq!(
+        reply_type(&allocate[0]),
+        MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN_SUCCESS
+    );
+}
+
+#[test]
+fn a_push_solution_short_of_the_target_or_on_another_block_gives_no_block() {
+    let shared = registry();
+    let transactions = vec![transaction_with_lock(1)];
+    let mut connection = full_template_declarator(&shared, &transactions);
+    let short = expected_pushed_block(&transactions, pushed_nonce(&transactions, false));
+    let mut elsewhere = expected_pushed_block(&transactions, pushed_nonce(&transactions, true));
+    elsewhere.header.prev_blockhash = BlockHash::from_byte_array([9; 32]);
+
+    for header in [short.header, elsewhere.header] {
+        let mut payload = push_solution_payload(&header);
+        assert_eq!(connection.push_solution(&mut payload).unwrap(), None);
+    }
+}
+
+#[test]
+fn a_coinbase_only_push_solution_gives_no_block() {
+    let mut connection = Sv2Connection::new(registry());
+    accept_message(
+        &mut connection,
+        setup(0, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    let transactions = vec![transaction_with_lock(1)];
+    let solved = expected_pushed_block(&transactions, pushed_nonce(&transactions, true));
+
+    let mut payload = push_solution_payload(&solved.header);
+
+    assert_eq!(connection.push_solution(&mut payload).unwrap(), None);
+}
+
+#[test]
+fn a_push_solution_off_job_declaration_closes_the_connection() {
+    let mut connection = Sv2Connection::new(registry());
+    accept_message(
+        &mut connection,
+        setup(0, Protocol::MiningProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    let transactions = vec![transaction_with_lock(1)];
+    let solved = expected_pushed_block(&transactions, pushed_nonce(&transactions, true));
+    let prev_hash = solved.header.prev_blockhash.to_byte_array();
+    let frame = encode_message(
+        push_solution_message(&solved.header, &prev_hash),
+        MESSAGE_TYPE_PUSH_SOLUTION,
+    )
+    .unwrap();
+
+    assert!(connection.accept(&frame).is_err());
+}
+
+#[test]
+fn kept_declarations_hold_their_bytes_until_the_connection_closes() {
+    let shared = registry();
+    let transactions = vec![transaction_with_lock(1), transaction_with_lock(2)];
+    let declared_bytes = transactions
+        .iter()
+        .map(Transaction::total_size)
+        .sum::<usize>()
+        + pushed_coinbase_prefix().len()
+        + empty_commitment_suffix().len();
+    let connection = full_template_declarator(&shared, &transactions);
+    let budget = Arc::clone(&shared.lock().unwrap().solvable_bytes);
+
+    assert_eq!(budget.load(Ordering::SeqCst), declared_bytes);
+    drop(connection);
+    assert_eq!(budget.load(Ordering::SeqCst), 0);
 }
