@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`config.sample.toml` sets `wait_for_chain_sync = false`, and the
+quickstart says when to set it. Without the line the node waits for a
+share chain tip under 5 minutes old before opening its Stratum port, and
+the first node of a new share chain, or any node on regtest, never has
+one: following the quickstart, the port never opened. Set it to `true` once
+`dial_peers` lists a node of a running share chain, as the Umbrel packages
+already say. No code or share-chain rule changes.
+
 The sim harness runs on Windows. Node configs escaped no paths, so a
 Windows store path (`\s...`) broke the TOML and the nodes exited before
 logging; the swarm's process pattern joined with `/` while node configs use

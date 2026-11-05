@@ -106,6 +106,15 @@ there are no Bitcoin Cash seeds yet. `dns_seed` is ignored and always off on
 `chain = "bitcoin-cash"`, so without `dial_peers` the node only waits for
 peers to dial it.
 
+`wait_for_chain_sync` in `[stratum]` decides when the Stratum port opens.
+With `true`, the default when the line is missing, it opens only once the
+share chain tip is under 5 minutes old. A new share chain starts from a
+genesis share that is older than that, so the first node of a chain, and
+any node on regtest, must set it to `false`, or its Stratum port never
+opens. `config.sample.toml` sets `false`. Set `true` once `dial_peers` lists
+a node of a running share chain, so miners connect only after this node
+has caught up.
+
 To run a node that others join, keep `listen_address` on all interfaces
 (`/ip4/0.0.0.0/tcp/6884`), let TCP port 6884 in through the firewall (and
 the router, if the node is behind one), and publish its address as
