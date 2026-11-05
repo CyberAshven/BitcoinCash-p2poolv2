@@ -22,8 +22,12 @@ BCHN answers `getblocktemplate` with "Bitcoin is not connected!" until it has
 at least one peer, on regtest as well. On regtest, set
 `allowunconnectedmining=1`, BCHN's option for a node with no peers, or run a
 second BCHN node and connect the two. The Docker dev stack does the former
-(`docker/README.adoc`). Hardware, disk and ports are in
-[requirements.md](requirements.md).
+(`docker/README.adoc`). A new regtest chain holds only the genesis block,
+dated 2011, so BCHN reports `initialblockdownload` until it has a newer
+block, and P2Poolv2 waits for it (`Bitcoin node still syncing, checking
+again in 300s`). Mine one block before starting the node:
+`bitcoin-cli -regtest generatetoaddress 1 <bchreg: address>`. Hardware, disk
+and ports are in [requirements.md](requirements.md).
 
 BCHN fills templates only to `-percentblockmaxsize` of the block size limit
 (50% on mainnet by default). Leave it below 100%: the pool adds a coinbase
