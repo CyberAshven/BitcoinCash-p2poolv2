@@ -103,7 +103,7 @@ lowers a session that is above the job's share difficulty and sends
 is the share difficulty rounded down, so its target is never harder than the
 share target. P2Pool v1 did the same (see
 [What P2Pool v1 knew about Bitcoin Cash](p2pool-v1-bch-lessons.md), V8).
-Hydrapool mode has no share chain and no cap. Once the share chain's ASERT
+Once the share chain's ASERT
 has settled, vardiff's own choice stays below the share difficulty (an
 estimate: one submission every 3.3 s per connection against one share every
 10 s for the whole pool), so the cap binds mainly on explicit settings.

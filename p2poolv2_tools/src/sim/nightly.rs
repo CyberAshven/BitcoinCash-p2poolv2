@@ -18,6 +18,8 @@
 use crate::cargo_build::{BuildRequest, build, executable};
 use crate::env_vars;
 use crate::error::{ToolError, ToolResult};
+#[cfg(windows)]
+use crate::process::detach_from_terminal_signals;
 use crate::process::{ProcessTable, find_on_path};
 use crate::repo;
 use crate::sim::bitcoind::{Bitcoind, CallOutcome, RpcSettings, WALLET};
@@ -29,6 +31,8 @@ use crate::sim::{Exit, RunDir, check_scenario, log_message};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt::Write as _;
+#[cfg(windows)]
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -165,18 +169,25 @@ async fn ensure_bitcoind_running(
             .map_err(|error| ToolError::io("remove", datadir, error))?;
     }
     std::fs::create_dir_all(datadir).map_err(|error| ToolError::io("create", datadir, error))?;
-    let status = Command::new(bitcoind_binary)
-        .args(bitcoind_arguments(settings))
-        .stdin(Stdio::null())
-        .status()
-        .map_err(|error| {
-            Exit::failure(format!(
-                "cannot start {}: {error}",
-                bitcoind_binary.display()
-            ))
-        })?;
-    if !status.success() {
-        return Err(Exit::failure(format!("BCHN failed to start ({status})")));
+    // Windows BCHN rejects `-daemon`. Spawn it and let the RPC loop below
+    // decide when it is ready. Unix still waits for the daemonizing parent.
+    #[cfg(windows)]
+    spawn_bitcoind(bitcoind_binary, settings, datadir)?;
+    #[cfg(not(windows))]
+    {
+        let status = Command::new(bitcoind_binary)
+            .args(bitcoind_arguments(settings))
+            .stdin(Stdio::null())
+            .status()
+            .map_err(|error| {
+                Exit::failure(format!(
+                    "cannot start {}: {error}",
+                    bitcoind_binary.display()
+                ))
+            })?;
+        if !status.success() {
+            return Err(Exit::failure(format!("BCHN failed to start ({status})")));
+        }
     }
 
     const MAX_ATTEMPTS: u32 = 30;
@@ -194,18 +205,56 @@ async fn ensure_bitcoind_running(
 }
 
 /// The command line the nightly starts BCHN with.
+///
+/// Windows BCHN exits with "-daemon is not supported on this operating
+/// system", so that flag is Unix-only. On Windows `spawn_bitcoind` starts
+/// the same arguments in the foreground of a detached process.
 fn bitcoind_arguments(settings: &NightlySettings) -> Vec<String> {
-    vec![
+    let mut arguments = vec![
         "-regtest".to_string(),
         format!("-datadir={}", settings.bitcoind_datadir.display()),
-        "-daemon".to_string(),
+    ];
+    #[cfg(not(windows))]
+    arguments.push("-daemon".to_string());
+    arguments.extend([
         format!("-rpcport={REGTEST_RPC_PORT}"),
         format!("-rpcuser={}", settings.rpc.user),
         format!("-rpcpassword={}", settings.rpc.password),
         format!("-zmqpubhashblock={}", settings.zmq),
         format!("-fallbackfee={FALLBACK_FEE_PER_KB}"),
         "-allowunconnectedmining".to_string(),
-    ]
+    ]);
+    arguments
+}
+
+/// Windows BCHN has no `-daemon`. Leave the process running (dropping the
+/// child handle does not kill it), with stdout and stderr appended to
+/// `bitcoind.log` in the datadir. The readiness loop and the RPC `stop`
+/// are unchanged.
+#[cfg(windows)]
+fn spawn_bitcoind(binary: &Path, settings: &NightlySettings, datadir: &Path) -> Result<(), Exit> {
+    let log_path = datadir.join("bitcoind.log");
+    let output = File::options()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|error| ToolError::io("open", &log_path, error))?;
+    let errors = output
+        .try_clone()
+        .map_err(|error| ToolError::io("open", &log_path, error))?;
+    let mut command = Command::new(binary);
+    command
+        .args(bitcoind_arguments(settings))
+        .stdin(Stdio::null())
+        .stdout(output)
+        .stderr(errors);
+    // Same detach the swarm uses for nodes. On Windows it is a no-op
+    // (`process_group` is Unix-only).
+    detach_from_terminal_signals(&mut command);
+    let _child = command
+        .spawn()
+        .map_err(|error| Exit::failure(format!("cannot start {}: {error}", binary.display())))?;
+    Ok(())
 }
 
 /// Make sure the `p2pool` wallet is loaded and the chain is past coinbase
