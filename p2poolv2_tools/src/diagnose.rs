@@ -14,8 +14,9 @@ use crate::tcp_monitor::{TcpState, for_each_socket};
 use std::collections::HashSet;
 use std::process::{Command, Stdio};
 
-/// The process name the script looked for.
-pub const DEFAULT_PROCESS: &str = "hydrapool";
+/// The node's process name, the `p2poolv2` binary. The script looked for
+/// `hydrapool`.
+pub const DEFAULT_PROCESS: &str = "p2poolv2";
 
 /// This process and its parent (cargo, when run through the alias), whose
 /// command lines name the process being looked for.

@@ -121,7 +121,7 @@ sends each miner the job at their own donation; the node's `donation`
 cannot override the choice. The fee is still taken from what the donation
 leaves. A Job Declaration token carries the donation of its
 `user_identifier`, and the channel mining it must have chosen the same.
-Hydrapool mode and Bitcoin nodes build no such jobs and refuse the option.
+Bitcoin nodes build no such jobs and refuse the option.
 Miner-facing rules are in [miner-options.md](miner-options.md#donation).
 
 ## Checklist

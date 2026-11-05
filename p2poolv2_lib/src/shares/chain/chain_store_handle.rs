@@ -10,6 +10,7 @@
 
 use crate::accounting::payout::sharechain_pplns::pplns_window::PRUNE_INTERVAL;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
+use crate::config::{BitcoinCashNetwork, PoolMode};
 use crate::pool_difficulty::AsertParent;
 use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{
@@ -62,6 +63,9 @@ fn is_tip_current(tip_time: u32, now_secs: u64) -> bool {
 pub struct ChainStoreHandle {
     store_handle: StoreHandle,
     network: bitcoin::Network,
+    /// The Bitcoin Cash network, which `network` cannot name: chipnet and
+    /// scalenet are both `Testnet`. `None` on Bitcoin.
+    bitcoin_cash_network: Option<BitcoinCashNetwork>,
 }
 
 impl ChainStoreHandle {
@@ -70,7 +74,18 @@ impl ChainStoreHandle {
         Self {
             store_handle,
             network,
+            bitcoin_cash_network: None,
         }
+    }
+
+    /// Name the Bitcoin Cash network this share chain belongs to; `None`
+    /// on Bitcoin.
+    pub fn with_bitcoin_cash_network(
+        mut self,
+        bitcoin_cash_network: Option<BitcoinCashNetwork>,
+    ) -> Self {
+        self.bitcoin_cash_network = bitcoin_cash_network;
+        self
     }
 
     /// Initialise the chain from an existing store or set up genesis.
@@ -113,6 +128,53 @@ impl ChainStoreHandle {
         }
     }
 
+    /// Initialise the chain for the node's pool mode.
+    ///
+    /// P2Poolv2 mode uses `init_or_setup_genesis`, failing with
+    /// `StoreError::GenesisMismatch` on a store built on another share
+    /// chain. Hydrapool mode keeps no share chain beyond genesis, so a
+    /// genesis change between releases must not stop the pool from
+    /// upgrading: it uses `init_or_replace_genesis` instead.
+    pub async fn init_for_mode(
+        &self,
+        genesis_block: ShareBlock,
+        mode: PoolMode,
+    ) -> Result<(), StoreError> {
+        match mode {
+            PoolMode::Hydrapool => self.init_or_replace_genesis(genesis_block).await,
+            PoolMode::P2poolv2 => self.init_or_setup_genesis(genesis_block).await,
+        }
+    }
+
+    /// Initialise the chain like `init_or_setup_genesis`, but replace the
+    /// genesis of a store built on another share chain instead of failing.
+    ///
+    /// The replacement genesis is confirmed at height 0; the old genesis
+    /// stays in the store unreferenced by the confirmed chain.
+    ///
+    /// Replacement happens only when that old genesis is the whole
+    /// confirmed chain. A confirmed share above height 0 means the store
+    /// was used as a real share chain, so the original
+    /// `StoreError::GenesisMismatch` is returned and nothing is written.
+    /// The tip is read first: `setup_genesis` sets the in-memory genesis
+    /// before its writes, and a failure after that would leave the node
+    /// half-switched.
+    async fn init_or_replace_genesis(&self, genesis_block: ShareBlock) -> Result<(), StoreError> {
+        match self.init_or_setup_genesis(genesis_block.clone()).await {
+            Err(StoreError::GenesisMismatch(reason)) => match self.get_tip_height()? {
+                Some(0) => {
+                    warn!(
+                        "Using share chain genesis {}: {reason}",
+                        genesis_block.block_hash()
+                    );
+                    self.store_handle.setup_genesis(genesis_block).await
+                }
+                _ => Err(StoreError::GenesisMismatch(reason)),
+            },
+            result => result,
+        }
+    }
+
     /// Get direct access to the underlying store handle.
     pub fn store_handle(&self) -> &StoreHandle {
         &self.store_handle
@@ -121,6 +183,11 @@ impl ChainStoreHandle {
     /// Get the network type.
     pub fn network(&self) -> bitcoin::Network {
         self.network
+    }
+
+    /// The Bitcoin Cash network, or `None` on Bitcoin.
+    pub fn bitcoin_cash_network(&self) -> Option<BitcoinCashNetwork> {
+        self.bitcoin_cash_network
     }
 
     // ========================================================================
@@ -1177,6 +1244,7 @@ mockall::mock! {
         pub fn is_confirmed_or_confirmed_uncle(&self, blockhash: &BlockHash) -> bool;
         pub fn get_btcaddresses_for_user_ids(&self, user_ids: &[u64]) -> Result<Vec<(u64, String)>, StoreError>;
         pub async fn init_or_setup_genesis(&self, genesis_block: ShareBlock) -> Result<(), StoreError>;
+        pub async fn init_for_mode(&self, genesis_block: ShareBlock, mode: PoolMode) -> Result<(), StoreError>;
         pub async fn organise_header(&self, header: ShareHeader) -> Result<Option<u32>, StoreError>;
         pub async fn organise_block(&self) -> Result<Option<u32>, StoreError>;
         pub async fn mark_invalid(&self, blockhash: BlockHash) -> Result<(), StoreError>;

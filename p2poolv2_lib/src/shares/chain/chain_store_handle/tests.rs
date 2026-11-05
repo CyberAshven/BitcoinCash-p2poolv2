@@ -1,3 +1,4 @@
+use crate::config::PoolMode;
 use crate::pool_difficulty::AsertParent;
 use crate::store::Store;
 use crate::store::writer::StoreError;
@@ -43,6 +44,174 @@ async fn test_init_or_setup_genesis_rejects_store_built_on_another_chain() {
             .contains(&genesis.block_hash().to_string()),
         "error must name the genesis already in the store: {error}"
     );
+}
+
+/// Hydrapool must start on a store built on another share chain, so an
+/// upgrade across a genesis change does not stop the pool. The code's
+/// genesis replaces the stored one as the confirmed tip at height 0.
+#[tokio::test]
+async fn test_init_for_mode_hydrapool_replaces_genesis_of_another_chain() {
+    let (chain_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let genesis = genesis_for_tests();
+    chain_handle
+        .init_or_setup_genesis(genesis.clone())
+        .await
+        .unwrap();
+
+    let other_genesis = TestShareBlockBuilder::new().nonce(0xe9695792).build();
+    assert_ne!(other_genesis.block_hash(), genesis.block_hash());
+
+    chain_handle
+        .init_for_mode(other_genesis.clone(), PoolMode::Hydrapool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        chain_handle.get_confirmed_at_height(0).unwrap(),
+        other_genesis.block_hash()
+    );
+    assert_eq!(
+        chain_handle.get_chain_tip().unwrap(),
+        other_genesis.block_hash()
+    );
+    assert_eq!(chain_handle.get_tip_height().unwrap(), Some(0));
+    assert_eq!(
+        chain_handle.get_genesis_blockhash(),
+        Some(other_genesis.block_hash())
+    );
+}
+
+/// In Hydrapool mode, a store already on the code's genesis is
+/// initialised from the store, leaving the confirmed chain as it was.
+#[tokio::test]
+async fn test_init_for_mode_hydrapool_keeps_matching_genesis() {
+    let (chain_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let genesis = genesis_for_tests();
+    chain_handle
+        .init_or_setup_genesis(genesis.clone())
+        .await
+        .unwrap();
+
+    chain_handle
+        .init_for_mode(genesis.clone(), PoolMode::Hydrapool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        chain_handle.get_confirmed_at_height(0).unwrap(),
+        genesis.block_hash()
+    );
+    assert_eq!(chain_handle.get_chain_tip().unwrap(), genesis.block_hash());
+    assert_eq!(chain_handle.get_tip_height().unwrap(), Some(0));
+}
+
+/// An empty store in Hydrapool mode takes the same path as
+/// `init_or_setup_genesis`: there is no confirmed block at height 0,
+/// so the code's genesis is set up and confirmed there.
+#[tokio::test]
+async fn test_init_for_mode_hydrapool_sets_up_empty_store() {
+    let (chain_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let genesis = genesis_for_tests();
+
+    chain_handle
+        .init_for_mode(genesis.clone(), PoolMode::Hydrapool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        chain_handle.get_confirmed_at_height(0).unwrap(),
+        genesis.block_hash()
+    );
+    assert_eq!(chain_handle.get_chain_tip().unwrap(), genesis.block_hash());
+    assert_eq!(chain_handle.get_tip_height().unwrap(), Some(0));
+    assert_eq!(
+        chain_handle.get_genesis_blockhash(),
+        Some(genesis.block_hash())
+    );
+}
+
+/// P2Poolv2 mode must keep rejecting a store built on another share
+/// chain, since it would serve the old chain to peers on the new one.
+#[tokio::test]
+async fn test_init_for_mode_p2poolv2_rejects_store_built_on_another_chain() {
+    let (chain_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let genesis = genesis_for_tests();
+    chain_handle
+        .init_or_setup_genesis(genesis.clone())
+        .await
+        .unwrap();
+
+    let other_genesis = TestShareBlockBuilder::new().nonce(0xe9695792).build();
+    assert_ne!(other_genesis.block_hash(), genesis.block_hash());
+
+    let error = chain_handle
+        .init_for_mode(other_genesis, PoolMode::P2poolv2)
+        .await
+        .expect_err("store on another chain must be rejected");
+
+    assert!(
+        matches!(error, StoreError::GenesisMismatch(_)),
+        "expected GenesisMismatch, got {error:?}"
+    );
+    assert_eq!(
+        chain_handle.get_confirmed_at_height(0).unwrap(),
+        genesis.block_hash()
+    );
+    assert_eq!(chain_handle.get_chain_tip().unwrap(), genesis.block_hash());
+    assert_eq!(
+        chain_handle.get_genesis_blockhash(),
+        Some(genesis.block_hash())
+    );
+}
+
+/// Hydrapool replaces a store that holds only another genesis. A store
+/// with a confirmed share above that genesis was used as a real share
+/// chain, so the original mismatch is returned and the chain stays.
+#[tokio::test]
+async fn test_init_for_mode_hydrapool_rejects_confirmed_share_above_genesis() {
+    let (chain_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let blocks = build_confirmed_test_chain(&chain_handle, 1).await;
+    let genesis_hash = blocks[0].block_hash();
+    let height_1_hash = blocks[1].block_hash();
+    assert_eq!(chain_handle.get_tip_height().unwrap(), Some(1));
+    assert_eq!(
+        chain_handle.get_confirmed_at_height(0).unwrap(),
+        genesis_hash
+    );
+    assert_eq!(
+        chain_handle.get_confirmed_at_height(1).unwrap(),
+        height_1_hash
+    );
+    assert_eq!(chain_handle.get_genesis_blockhash(), Some(genesis_hash));
+
+    let other_genesis = TestShareBlockBuilder::new().nonce(0xe9695792).build();
+    assert_ne!(other_genesis.block_hash(), genesis_hash);
+    assert_ne!(other_genesis.block_hash(), height_1_hash);
+
+    let error = chain_handle
+        .init_for_mode(other_genesis, PoolMode::Hydrapool)
+        .await
+        .expect_err("a confirmed share above genesis must be rejected");
+
+    assert!(
+        matches!(error, StoreError::GenesisMismatch(_)),
+        "expected GenesisMismatch, got {error:?}"
+    );
+    assert!(
+        error.to_string().contains(&genesis_hash.to_string()),
+        "error must name the genesis already in the store: {error}"
+    );
+    assert_eq!(
+        chain_handle.get_confirmed_at_height(0).unwrap(),
+        genesis_hash
+    );
+    assert_eq!(
+        chain_handle.get_confirmed_at_height(1).unwrap(),
+        height_1_hash
+    );
+    assert_eq!(chain_handle.get_chain_tip().unwrap(), height_1_hash);
+    assert_eq!(chain_handle.get_tip_height().unwrap(), Some(1));
+    assert_eq!(chain_handle.get_genesis_blockhash(), Some(genesis_hash));
 }
 
 #[tokio::test]
