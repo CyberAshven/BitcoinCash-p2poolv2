@@ -33,8 +33,8 @@ use job_declaration_sv2::{
     DeclareMiningJobSuccess, MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN,
     MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN_SUCCESS, MESSAGE_TYPE_DECLARE_MINING_JOB,
     MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS,
-    MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS, ProvideMissingTransactions,
-    ProvideMissingTransactionsSuccess,
+    MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS, MESSAGE_TYPE_PUSH_SOLUTION,
+    ProvideMissingTransactions, ProvideMissingTransactionsSuccess, PushSolution,
 };
 use mining_sv2::{
     MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
@@ -112,7 +112,9 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
             ResponseTemplate::new(200)
                 .set_body_json(serde_json::json!({"result": null, "error": null, "id": 1})),
         )
-        .expect(if cfg!(feature = "sim") { 0 } else { 1 })
+        // The miner's share and the declarator's PushSolution each submit
+        // the Full-Template block.
+        .expect(if cfg!(feature = "sim") { 0 } else { 2 })
         .mount(&rpc)
         .await;
     // A node taking a 1% donation and a 1% fee, so a declarator's token
@@ -353,6 +355,45 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
         header.merkle_root
     );
 
+    // The declarator pushes the same solution, as sv2-spec 6.4.9 asks of a
+    // Full-Template client. The node rebuilds the block from the
+    // declaration, submits it, and keeps the connection: its next request
+    // is answered.
+    let mut full_extranonce = extranonce_prefix.clone();
+    full_extranonce.extend([0; 8]);
+    let prev_hash = header.prev_blockhash.to_byte_array();
+    declarator
+        .send(
+            encode_message(
+                PushSolution {
+                    extranonce: B032::new(&full_extranonce).unwrap(),
+                    prev_hash: U256::from(&prev_hash),
+                    nonce: header.nonce,
+                    ntime: header.time,
+                    nbits: header.bits.to_consensus(),
+                    version: custom.version,
+                },
+                MESSAGE_TYPE_PUSH_SOLUTION,
+            )
+            .unwrap(),
+        )
+        .await;
+    declarator
+        .send(
+            encode_message(
+                AllocateMiningJobToken {
+                    request_id: 5,
+                    user_identifier: "miner".try_into().unwrap(),
+                },
+                MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN,
+            )
+            .unwrap(),
+        )
+        .await;
+    declarator
+        .receive(MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN_SUCCESS)
+        .await;
+
     let mut private_declarator = TestSv2Client::connect(address, authority.public_key).await;
     private_declarator
         .send_pair(
@@ -436,9 +477,21 @@ async fn encrypted_bch_job_declaration_modes_install_mine_and_emit() {
         private_header.merkle_root
     );
     let received = rpc.received_requests().await.unwrap();
-    assert_eq!(received.len(), if cfg!(feature = "sim") { 1 } else { 2 });
+    assert_eq!(received.len(), if cfg!(feature = "sim") { 1 } else { 3 });
     let proposal: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
     assert_eq!(proposal["params"][0]["mode"], "proposal");
+    // The pushed block is the share's block, byte for byte.
+    let submitted = received[1..]
+        .iter()
+        .map(|request| serde_json::from_slice::<serde_json::Value>(&request.body).unwrap())
+        .map(|body| body["params"][0].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    if !cfg!(feature = "sim") {
+        assert_eq!(submitted.len(), 2);
+        assert_eq!(submitted[0], submitted[1]);
+        let block: bitcoin::Block = deserialize(&hex::decode(&submitted[1]).unwrap()).unwrap();
+        assert_eq!(block.header, header);
+    }
     drop(mining);
     drop(declarator);
     drop(private_declarator);

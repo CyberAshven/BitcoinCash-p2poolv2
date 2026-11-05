@@ -38,7 +38,7 @@ use crate::stratum::message_handlers::authorize_response::{
     resolve_cash_share, resolve_share_address,
 };
 use crate::stratum::message_handlers::submit::{
-    PoolShare, emit_pool_share, get_true_difficulty, submit_found_block,
+    PoolShare, emit_pool_share, get_true_difficulty, submit_found_block, submit_pushed_block,
 };
 use crate::stratum::parse_password::{
     donation_percent, extract_string_value, log_unknown_options, parse_password,
@@ -55,7 +55,7 @@ use crate::stratum::work::tracker::{JobDetails, JobId};
 use binary_sv2::{B032, B064K, Deserialize, Seq0255, Sv2Option, U256};
 use bitcoin::block::{Header, Version};
 use bitcoin::hashes::Hash;
-use bitcoin::{BlockHash, CompactTarget, Network, Target, TxMerkleNode};
+use bitcoin::{Block, BlockHash, CompactTarget, Network, Target, TxMerkleNode};
 use mining_sv2::{
     CloseChannel, ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED,
     ERROR_CODE_OPEN_MINING_CHANNEL_MAX_TARGET_OUT_OF_RANGE,
@@ -292,7 +292,7 @@ impl MiningChannels {
             channel.jobs.clear();
         }
         channel.last_tip = Some(tip);
-        let tracker_job_id = self.ctx.tracker_handle.get_next_job_id();
+        let tracker_job_id = self.ctx.tracker_handle.get_next_declared_job_id();
         self.ctx
             .tracker_handle
             .insert_job_details(tracker_job_id, job);
@@ -499,6 +499,12 @@ impl MiningChannels {
         {
             error!("Failed to record closed SV2 worker: {metrics_error}");
         }
+    }
+
+    /// Submit a block this connection's Job Declaration client pushed
+    /// (`Sv2Connection::push_solution`) to the node and the extra nodes.
+    pub(crate) async fn submit_pushed_solution(&self, block: Block) {
+        submit_pushed_block(&self.ctx, block).await;
     }
 
     /// Release every authorized worker when the connection ends.
