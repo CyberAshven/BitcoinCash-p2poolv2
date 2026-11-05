@@ -639,8 +639,9 @@ or generated. The library side is `shares::bch_htlc` (template),
   real P2P stack (`p2poolv2_tests/src/share_payout_rights_test.rs`,
   `share_transaction_relay_test.rs`). A job built with pool transactions
   commits to them and its found share passes the coinbase proof and body
-  checks (`handle_stratum_share`). Not yet run on chipnet, and no live node
-  has mined a share transaction yet.
+  checks (`handle_stratum_share`). Live sim nodes have mined a trade's
+  share transactions and paid the buyer (see "Live nodes" below). Not yet
+  run on chipnet.
 - **Partial rights.** A right is whole. Selling part of a share's payout
   needs a proportional rule, which the index above cannot bound (see "Why
   input i to output i").
@@ -656,5 +657,40 @@ or generated. The library side is `shares::bch_htlc` (template),
   executes the contract's bytes opcode by opcode, and both verdicts agree.
   End-to-end tests (`p2poolv2_tests/src/share_trading_test.rs`) run a
   whole trade, a refund and an immature lock through the real store and
-  validator. BCHN itself has not executed these scripts yet; a regtest run
-  with `testmempoolaccept` should precede mainnet use.
+  validator.
+- **BCHN.** On 2026-11-05 BCHN 29.2.0 on regtest ran the Bitcoin Cash leg
+  with `p2poolv2_cli` from alpha `b9aa34f6`, each transaction checked with
+  `testmempoolaccept` before it was broadcast:
+  - **Trade.** The buyer's lock confirmed as a P2SH32 output, and the
+    seller's Schnorr claim with the secret confirmed. `extract-secret` read
+    the secret back from the confirmed claim.
+  - **Refund.** On a second lock, the buyer's refund was refused as
+    `bad-txns-nonfinal` at three blocks and at one block below the refund
+    height. It was accepted at the refund height and confirmed.
+  - **Forged claims.** BCHN refused the valid claim edited to carry a
+    wrong secret, and edited to carry the buyer's public key, both with
+    `mandatory-script-verify-flag-failed` (`OP_EQUALVERIFY`). The CLI
+    itself refuses to sign either (`WrongSecret`, `WrongKey`).
+
+  The share-chain contract for the same keys, hash and height is the same
+  bytes, so BCHN has run the script the share chain uses. On the share
+  chain, P2Pool's interpreter runs it against share heights.
+- **Live nodes.** On 2026-11-05 two sim nodes from alpha `b9aa34f6`
+  (`sim_harness run-swarm 2`, a share every 3 s, a BCH block every 10
+  shares on average) ran the share leg against BCHN 29.2.0 on regtest. Sim
+  nodes skip proof of work and cap the window at 80 shares; the 100-share
+  maturity and the payout rules are the release ones.
+  - **Lock.** Node 0's share at height 68 paid its coinbase output, 10^8
+    units, to the seller's key. At 105 shares deep, the seller locked
+    40,000,000 units of it into the contract. Node 0 took the lock over
+    `transactions submit` and mined it in share 179, and node 1 accepted
+    that share.
+  - **Claim.** The buyer's claim with the secret went to node 1 and was
+    mined in share 184 on both nodes.
+  - **Payout.** The pool's next four BCH blocks (heights 126 to 129, paying
+    from shares 216 to 235) each paid the buyer's P2PKH address 0.58 to
+    0.61 BCH. Node 0's payout address got that much less. Block 130 paid
+    from share 250, when share 68 was 182 deep and out of the window (100
+    to 180 deep), and paid the buyer nothing.
+
+  Both nodes ended on the same tip with no warning or error in either log.
