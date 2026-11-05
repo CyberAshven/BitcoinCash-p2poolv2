@@ -16,14 +16,17 @@
 //! Every regtest block is at the proof-of-work limit, so its window falls
 //! back to the share cap and holds every mature share, genesis included
 //! (`MIN_SIZING_BLOCK_DIFFICULTY`), and the first 100 shares of a chain are
-//! always mature. Genesis commits no donation, so a regtest block never
-//! donates a whole 1%: its donation is short of 1% by genesis's weight. A
+//! always mature. Genesis commits no donation, so a block that pays genesis
+//! beside miner shares donates less than 1%, short by genesis's weight. A
 //! window without genesis is the unit test
 //! `test_bch_default_donation_is_paid_from_each_window_share`.
 //!
 //! The window is Bitcoin Cash's (`for_chain`) without the BCH chain rule
-//! (`with_bch_header_rules`): these shares carry no real BCH headers to
-//! check it against, as in `share_payout_rights_test`.
+//! (`with_bch_header_rules`) a node's window has: these shares carry no real
+//! BCH headers to check it against, as in `share_payout_rights_test`. That
+//! rule decides which window shares a block pays, genesis among them, not
+//! how a paid share's cut is split, so the shortfall above holds only where
+//! the rule pays genesis beside other shares.
 //!
 //! They need a BCHN regtest node and are ignored by default; the nightly
 //! sim workflow runs them with the payout tree tests:
@@ -286,10 +289,11 @@ async fn bchn_regtest_a_window_of_only_genesis_pays_genesis_alone() {
     }
 }
 
-/// Miner shares at the node's default donation, 1%, after genesis. The
-/// donation key is a payee whose amount is the sum of each share's own cut,
-/// short of 1% of the block by genesis's weight: three equal shares and
-/// genesis donate 3 / 4 of 1%. Each miner is paid its shares' work less
+/// Miner shares at the node's default donation, 1%, after genesis, in a
+/// window that pays genesis beside them. The donation key is a payee whose
+/// amount is the sum of each share's own cut, short of 1% of the block by
+/// genesis's weight: three equal shares and genesis donate 3 / 4 of 1%.
+/// Each miner is paid its shares' work less
 /// their cut, genesis its whole part, and the finding node's fee address
 /// nothing.
 #[tokio::test]
