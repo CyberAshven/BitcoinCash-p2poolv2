@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A node no longer stops when a share transaction's stored rows are missing,
+for example after the pruner deletes them between two reads. `get_tx`
+unwrapped each input and output row, and release builds abort on panic, so
+the whole node stopped; it now returns `NotFound`, as upstream's 0f15c131
+does. `get_share` returns None when any of the share's transactions cannot
+be rebuilt, instead of returning the share with that transaction silently
+left out. No share-chain rule changes.
+
 The Electrum server reads the share chain: upstream's 43ddd7d4 (chain
 store handle wired in, `blockchain.*` methods answered only once the node
 is synced) and 6fcf5e72 (`blockchain.block.header`) are ported unchanged.
