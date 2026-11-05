@@ -45,14 +45,14 @@ jobs:
           shared-key: fuzz-nightly
 
       - name: Restore decoder corpus
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: p2poolv2_lib/fuzz/corpus/wire_message_decode
           key: fuzz-corpus-${{ runner.os }}-wire_message_decode-v1-${{ github.run_id }}
           restore-keys: fuzz-corpus-${{ runner.os }}-wire_message_decode-v1-
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: cargo-fuzz
 
@@ -71,7 +71,7 @@ jobs:
 
       - name: Save decoder corpus
         if: always() && !cancelled()
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: p2poolv2_lib/fuzz/corpus/wire_message_decode
           key: fuzz-corpus-${{ runner.os }}-wire_message_decode-v1-${{ github.run_id }}-${{ github.run_attempt }}

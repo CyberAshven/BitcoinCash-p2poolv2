@@ -290,6 +290,18 @@ impl PreparedNotifyParams {
         self.donation
     }
 
+    /// The share these params build on: the share-chain anchor of every job
+    /// and Job Declaration token made from them.
+    pub(crate) fn prev_share_blockhash(&self) -> BlockHash {
+        self.prev_share_blockhash
+    }
+
+    /// Exact difficulty weights at [`Self::prev_share_blockhash`], which
+    /// [`Self::declared_outputs`] splits; `None` without a PPLNS snapshot.
+    pub(crate) fn pplns_weights(&self) -> Option<&HashMap<PayoutAddress, u128>> {
+        self.pplns_weights.as_deref()
+    }
+
     /// The params a miner mines when their login chose a donation of
     /// `donation` basis points, a step of 0.5% from 0 to 10%.
     ///

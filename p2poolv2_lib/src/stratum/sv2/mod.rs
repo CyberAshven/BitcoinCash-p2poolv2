@@ -19,6 +19,8 @@
 //! BCH extended channels negotiate work selection and install declared jobs only
 //! after validating the token, header, coinbase and exact share-chain payouts.
 //! Full templates also require a successful local BCHN proposal check.
+//! A BCH Job Declaration client can ask for those payouts on its connection
+//! with the requested payout outputs extension (see `payout_outputs`).
 //!
 //! The node can also be a Template Distribution client: with
 //! `template_source = "sv2"` its templates come from a Stratum V2 Template
@@ -29,6 +31,7 @@ mod custom_job;
 mod live_tests;
 mod mining;
 mod noise;
+pub mod payout_outputs;
 pub mod preparation;
 mod server;
 mod session;

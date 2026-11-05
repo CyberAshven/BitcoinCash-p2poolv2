@@ -14,3 +14,4 @@ marked separately from implemented behavior.
 - [Share chain address format](address-format.md)
 - [Mine on the current chain](mine-on-bitcoin-chain.md)
 - [Proposal: a decentralized PHOTON GPU pool](photon-pool.md)
+- [Proposal: P2Pool payouts for standard SV2 Job Declaration clients](sv2-payout-extension.md)

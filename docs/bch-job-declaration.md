@@ -189,8 +189,11 @@ transport and messages; independent declarator or ASIC firmware interoperability
 still requires separate validation. Since the 2026-10-24 token leaf rules,
 the Full-Template declaration discloses its two token leaves in
 `excess_data`, and the Coinbase-Only job mines no token and prints no aux
-proof; the runs recorded below predate that change, and the test has not
-been run against BCHN since.
+proof; the runs recorded below predate that change. It passed again with
+BCHN 29.2.0 on 2026-11-03: Full-Template block 102
+(`7f851d5d…904d`, two token leaves disclosed) and Coinbase-Only block 103
+(`1c3ed69e…7fce`, 219 satoshis of private fee), both accepted by both
+nodes.
 
 Use fresh data directories, outside the repository. The first node needs this
 `bitcoin.conf`:
@@ -337,3 +340,141 @@ Full-Template used Start9 BCHN proposal validation. No hash search, share reward
 or found-block broadcast is claimed by this check. The API request regression
 also compares the prepared bytes with the existing core builder and refuses
 changed BCH tips, bits and share-owner networks.
+
+## Payout outputs on the Job Declaration connection
+
+A standard Job Declaration client can get a job's exact coinbase outputs on
+its Job Declaration connection, without `/jd_prepare` and without knowing how
+P2Pool builds a coinbase. The experimental extension `0x5052`, "Requested
+Payout Outputs", is specified in section 7 of the
+[SV2 payout proposal](architecture/sv2-payout-extension.md#7-specification).
+It changes no share-chain rule, and `/jd_prepare` is unchanged.
+
+The client asks for `0x5052` with `RequestExtensions` after
+`SetupConnection` on a Job Declaration connection, in either mode. A Bitcoin
+Cash node grants it there. A Mining connection and a Bitcoin node do not get
+it. A `0x5052` message on a connection that did not negotiate it closes the
+connection.
+
+`AllocateMiningJobToken.user_identifier` is a mining identity, as a mining
+channel's ([Miner options](miner-options.md#stratum-v2)): the payout
+CashAddr and worker, then `p2p=` with the share address unless the node
+configures one, and an optional `donation=`. The token remembers the payout
+address and share owner. The mining channel that installs the job must use
+the same identity. A token whose identity names no payout address or share
+owner is still allocated; a request for its outputs gets `invalid-request`.
+
+Before each `DeclareMiningJob` or `SetCustomMiningJob`, the client sends
+`RequestPayoutOutputs`: the token, its template's revenue, height, previous
+block hash and bits, and its scriptSig prefix. The node answers with the
+bytes `/jd_prepare` builds for them, from the same builder and the token's
+PPLNS snapshot: the exact empty merge-mining commitment as output 0, the
+PPLNS outputs, padding, and the share commitment last. `EXACT_OUTPUTS` is
+always set, with version 2, sequence `0xfffffffe` and lock time
+`height - 1`. The coinbase carries these outputs and no others, and its
+scriptSig is the prefix followed by the extranonce. The job is then
+validated as any other declared job.
+
+An unknown, expired or used token gets `invalid-mining-job-token`. A token
+anchored on an earlier share, or a request for another height, previous hash
+or bits than the token's template, gets `stale-payout-outputs`. A prefix
+without the height push, revenue past BCH's monetary range, or any input the
+builders refuse gets `invalid-request`. Outputs past the 65,535-byte field
+get `payout-outputs-too-large`, and a template without PPLNS weights
+`payout-outputs-unavailable`. None of these closes the connection.
+
+Whenever the share the node anchors new tokens on, or the BCH block its
+template builds on, changes (about every 10 seconds), each connection that
+negotiated `0x5052` gets `PayoutOutputsStale`. Outputs for earlier tokens
+are then stale: the client allocates a new token and asks again. A
+`stale-payout-outputs` answer is the same race, not a reason to leave the
+pool. A connection may hold outputs for eight open tokens at once; asking
+for a ninth closes it, as a ninth pending declaration does.
+
+On a connection that negotiated `0x5052`, the allocation's zero-value
+outputs also list output 0, the largest padding and the commitment beside
+the payout scripts, so a client reserving their size for
+`CoinbaseOutputConstraints` has room for every answered set. Other
+connections get the payout scripts alone, as before.
+
+Merge-mined tokens still need Full-Template with the leaves in
+`excess_data`; this extension serves only the exact empty commitment.
+
+`a_standard_client_mines_on_requested_payout_outputs_in_both_modes` runs the
+encrypted listener with a client that builds both jobs from the reply alone.
+Both jobs are installed and each mines a share. BCHN responses are mocked.
+
+```sh
+cargo nextest run -p p2poolv2_lib -E 'test(a_standard_client_mines_on_requested_payout_outputs_in_both_modes)'
+```
+
+The ignored `bchn_jobs_on_requested_payout_outputs_reach_both_real_nodes`
+test does the same against two real BCHN nodes, set up as in the
+[two-node check](#two-node-bchn-regtest-check), and runs the same way with
+its own name. The pool node checks the Full-Template proposal and submits
+the block; the client broadcasts the Coinbase-only block, whose revenue
+includes the fee of a transaction the pool never saw. Both nodes must
+accept both blocks.
+
+Run with BCHN 29.2.0 on 2026-11-03, after the two-node check on the same
+pair (both tests passed, 5.9 seconds for this one; both nodes ended on
+block 105, `29eb5fcd…2f0b`):
+
+| Mode | Height | Block hash | Coinbase value (sat) |
+|---|---|---|---|
+| Full-Template | 104 | `48fb1a86c6d48c3b3825a9d4c5504776382ffb77e8dbb2cee3241bf2339199b8` | 5000000219 |
+| Coinbase-Only | 105 | `29eb5fcd34bc6a17e3c86839aca759bc7c25699294be723302b7ccaf40c62f0b` | 5000000219 |
+
+The Coinbase-Only value includes the private transaction's 219-satoshi fee.
+This is regtest evidence with this repository's test client; the chipnet run
+with an independent client that the proposal asks for is still open.
+
+### On a running node
+
+The ignored `a_running_node_serves_requested_payout_outputs` test is a Job
+Declaration client for a node that is already running. It needs no RPC login,
+only the node's Stratum V2 address, its published authority key and a mining
+identity:
+
+```sh
+P2POOL_SV2_ADDRESS=127.0.0.1:3336 \
+P2POOL_SV2_AUTHORITY_KEY=9b... \
+P2POOL_SV2_IDENTITY='bchtest:q....worker,p2p=tp2pool:q...' \
+cargo test -p p2poolv2_lib --lib a_running_node_serves_requested_payout_outputs -- --ignored --nocapture
+```
+
+It takes the template fields (version, previous block, bits, time, height)
+from the node's own extended job and declares an empty block, so its coinbase
+pays out the block subsidy alone. It then checks five things in turn:
+
+1. A request naming a block the node is not building on is refused.
+2. The outputs answered for the current block pay out the whole value with
+   `EXACT_OUTPUTS` and lock time `height - 1`.
+3. A Full-Template job on those outputs is declared, and it is installed with
+   `SetCustomMiningJob`. The node has its BCHN check the block proposal
+   first.
+4. The next share or block brings `PayoutOutputsStale`.
+5. A fresh token then gets the new outputs.
+
+It submits no shares.
+
+Run on 2026-11-05 at 13:16 UTC against the chipnet pool's node1, built from
+`ef59b72b`, with its templates from a BCHN 29.1.0 chipnet node; it passed in
+9.7 seconds. The test address is this repository's
+`bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr`.
+
+- **Refused:** a previous block of all zeros got `stale-payout-outputs`.
+- **Answered:** chipnet height 331011, previous block
+  `00000000000013f305ba63f37306cac43552a10c3eb487532df847a2c355734e`, 2,500,000,000
+  satoshis in six outputs, in this order:
+  - the empty merge-mining commitment;
+  - three PPLNS payees (1,194,333, 25,000,000 and 2,473,805,667 satoshis);
+  - the padding;
+  - the share commitment.
+- **Installed:** the declaration was accepted and the job installed as job 2.
+- **Stale, then fresh:** the next share pushed `PayoutOutputsStale` within 10
+  seconds. The fresh token's outputs paid 1,195,200, 25,000,000 and
+  2,473,804,800 satoshis, under a new share commitment.
+
+This was this repository's client against a real chipnet pool. Shares credited
+through an independent `0x5052` client still need a miner behind one.
