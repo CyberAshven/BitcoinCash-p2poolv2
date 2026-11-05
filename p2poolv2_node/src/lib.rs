@@ -527,6 +527,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             Chain::Bitcoin => None,
         },
         authority: stratum_config.sv2_authority(),
+        coinbase_only_from: stratum_config.sv2_coinbase_only_networks.clone(),
     });
 
     tokio::spawn(async move {

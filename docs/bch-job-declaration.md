@@ -106,6 +106,24 @@ This mode retains the protocol's withholding and hidden-invalid-work risk.
 A Coinbase-Only job declares no leaves, so it merge-mines no token: its
 output 0 must be the exact empty commitment.
 
+**Which clients may use Coinbase-Only.** A Coinbase-Only declarator's
+shares are credited on a block whose transactions the node never sees
+(`block_available = false`). PPLNS here weights shares by difficulty, so a
+declarator that never lets a block through costs the other miners their
+share of it. That is sabotage of the block-withholding kind, not theft
+(sv2-spec 6.3.1; Delving Bitcoin "PPLNS with job declaration";
+jtoomim/p2pool#21). So a node takes Coinbase-Only declarations only from the
+client addresses in `[stratum] sv2_coinbase_only_from`. Each entry is an IP
+address or a CIDR range, and the default is this computer
+(`["127.0.0.0/8", "::1/128"]`). Add your own declarator, for example the
+Tailscale address of your own Knuth node. `[]` refuses Coinbase-Only from
+everyone, and `["0.0.0.0/0", "::/0"]` takes it from everyone. An IPv4-mapped
+IPv6 address counts as its IPv4 address. Full-Template declarations are
+taken from every client, since the node checks their templates. A refused client gets
+`SetupConnection.Error` with error code `unsupported-feature-flags` and
+`flags` set to `DECLARE_TX_DATA` (`0x1`), the flag it must set (sv2-spec
+3.x). It may set up again in Full-Template mode on the same connection.
+
 Once a job is active, its target and credited difficulty remain fixed.
 Vardiff and `UpdateChannel` change later jobs. Device maximum targets apply
 when each job is assigned; zero maximum targets are rejected.

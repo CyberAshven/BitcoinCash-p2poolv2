@@ -544,6 +544,12 @@ pub fn bch_template_transaction(index: u32) -> TemplateTransaction {
     }
 }
 
+/// The default `sv2_coinbase_only_from`: this computer only.
+#[cfg(test)]
+pub(crate) fn test_coinbase_only_from() -> Vec<ipnet::IpNet> {
+    vec!["127.0.0.0/8".parse().unwrap(), "::1/128".parse().unwrap()]
+}
+
 /// A BCH payout snapshot with distinct weights.
 #[cfg(any(test, feature = "test-utils"))]
 pub fn test_bch_prepared() -> Arc<PreparedNotifyParams> {

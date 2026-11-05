@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A node takes Stratum V2 Coinbase-Only Job Declaration only from the client
+addresses in `[stratum] sv2_coinbase_only_from` (IP addresses or CIDR
+ranges), by default this computer (`127.0.0.0/8`, `::1/128`). In that mode
+the node credits shares on a block whose transactions it never sees, so a
+declarator that withholds its blocks costs the other miners; until now any
+client could use it. Full-Template declarations are taken from every
+client. A refused client gets `SetupConnection.Error`
+`unsupported-feature-flags` with the `DECLARE_TX_DATA` flag it must set.
+`[]` refuses Coinbase-Only from everyone; `["0.0.0.0/0", "::/0"]` restores
+the old behaviour. No share-chain rule changes.
+
 The Stratum V2 Job Declaration server handles `PushSolution` (spec
 6.4.9). It answered the message with "unsupported Stratum V2 message type
 96" and closed the connection, which sends a Job Declaration client to its
