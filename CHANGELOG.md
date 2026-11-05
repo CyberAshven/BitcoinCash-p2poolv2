@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`config.sample.toml` sets `wait_for_chain_sync = false`, and the
+quickstart says when to set it. Without the line the node waits for a
+share chain tip under 5 minutes old before opening its Stratum port, and
+the first node of a new share chain, or any node on regtest, never has
+one: following the quickstart, the port never opened. Set it to `true` once
+`dial_peers` lists a node of a running share chain, as the Umbrel packages
+already say. The quickstart also says to mine one block on a new regtest
+chain first: BCHN reports `initialblockdownload` while its tip is the 2011
+genesis block, and the node waits for it. No code or share-chain rule
+
 Calls to BCHN no longer fail on a connection BCHN has just closed. The RPC
 client kept idle connections for 90 s, and BCHN closes one idle for
 `-rpcservertimeout`, 30 s by default, counted from the last request it

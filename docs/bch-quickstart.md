@@ -22,8 +22,12 @@ BCHN answers `getblocktemplate` with "Bitcoin is not connected!" until it has
 at least one peer, on regtest as well. On regtest, set
 `allowunconnectedmining=1`, BCHN's option for a node with no peers, or run a
 second BCHN node and connect the two. The Docker dev stack does the former
-(`docker/README.adoc`). Hardware, disk and ports are in
-[requirements.md](requirements.md).
+(`docker/README.adoc`). A new regtest chain holds only the genesis block,
+dated 2011, so BCHN reports `initialblockdownload` until it has a newer
+block, and P2Poolv2 waits for it (`Bitcoin node still syncing, checking
+again in 300s`). Mine one block before starting the node:
+`bitcoin-cli -regtest generatetoaddress 1 <bchreg: address>`. Hardware, disk
+and ports are in [requirements.md](requirements.md).
 
 BCHN fills templates only to `-percentblockmaxsize` of the block size limit
 (50% on mainnet by default). Leave it below 100%: the pool adds a coinbase
@@ -105,6 +109,15 @@ never uses DNS seeds: the seeds built into P2Poolv2 are Bitcoin nodes, and
 there are no Bitcoin Cash seeds yet. `dns_seed` is ignored and always off on
 `chain = "bitcoin-cash"`, so without `dial_peers` the node only waits for
 peers to dial it.
+
+`wait_for_chain_sync` in `[stratum]` decides when the Stratum port opens.
+With `true`, the default when the line is missing, it opens only once the
+share chain tip is under 5 minutes old. A new share chain starts from a
+genesis share that is older than that, so the first node of a chain, and
+any node on regtest, must set it to `false`, or its Stratum port never
+opens. `config.sample.toml` sets `false`. Set `true` once `dial_peers` lists
+a node of a running share chain, so miners connect only after this node
+has caught up.
 
 To run a node that others join, keep `listen_address` on all interfaces
 (`/ip4/0.0.0.0/tcp/6884`), let TCP port 6884 in through the firewall (and
