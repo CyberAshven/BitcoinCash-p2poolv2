@@ -25,6 +25,17 @@ its jobs from the reply alone gets them installed and mines a share in both
 Job Declaration modes. No share-chain rule changes, and `/jd_prepare` is
 unchanged.
 
+A Stratum V2 share for a job on the BCH block a new tip just replaced is
+taken again. On a new tip a channel dropped all its jobs, so the share that
+found the block often lost its credit: a Job Declaration client's
+`PushSolution`, or BCHN's ZMQ notification of that block, brings the new
+template before the share arrives, and the share was refused as
+`invalid-job-id` (seen in Knuth's end-to-end run). A channel now keeps the
+jobs of the tip it leaves and drops older ones, as the share chain still
+pays shares one BCH block off the paying share's chain. A share for a job
+the channel gave out and has since dropped is `stale-share`; only an id it
+never gave out is `invalid-job-id`. No share-chain rule changes.
+
 The Stratum V2 Job Declaration server handles `PushSolution` (spec
 6.4.9). It answered the message with "unsupported Stratum V2 message type
 96" and closed the connection, which sends a Job Declaration client to its
