@@ -1039,6 +1039,8 @@ fn a_new_bch_block_on_the_same_share_pushes_payout_outputs_stale() {
         vec![stale_frame().unwrap()]
     );
     assert!(connection.on_template(&next).unwrap().is_empty());
+}
+
 /// The extranonce a pushed solution's coinbase carries in these tests: the
 /// whole scriptSig of the declared coinbase.
 static PUSHED_EXTRANONCE: [u8; 8] = [7; 8];
