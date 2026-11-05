@@ -17,7 +17,9 @@ use bitcoindrpc::BitcoindRpcClient;
 use p2poolv2_api::start_api_server;
 use p2poolv2_electrum::start_electrum_server;
 use p2poolv2_lib::accounting::payout::simple_pplns::share_worker::PplnsShareWorker;
-use p2poolv2_lib::accounting::payout::{build_payout_for_mode, payout_pplns_window};
+use p2poolv2_lib::accounting::payout::{
+    AnchorWeights, ShareChainWeights, build_payout_for_mode, payout_pplns_window,
+};
 use p2poolv2_lib::accounting::stats::metrics;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::config::{
@@ -521,6 +523,13 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     // Stratum V2 is served by the stratum server beside SV1, sharing its job
     // tracker, templates and shares. A port that cannot be bound fails the
     // stratum server's start, which stops the node.
+    // The verifier reads the same window the notifier snapshotted. Hydrapool's
+    // window is a placeholder its payout never reads, so it verifies nothing.
+    let anchor_weights =
+        payout_pplns_window(stratum_config.mode, &shared_pplns_window).map(|window| {
+            Arc::new(ShareChainWeights::new(window, chain_store_handle.clone()))
+                as Arc<dyn AnchorWeights>
+        });
     let sv2_listener = stratum_config.sv2_port.map(|port| Sv2Listener {
         port,
         pool_transactions: pool_transactions.clone(),
@@ -529,6 +538,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             Chain::Bitcoin => None,
         },
         authority: stratum_config.sv2_authority(),
+        anchor_weights,
         coinbase_only_from: stratum_config.sv2_coinbase_only_networks.clone(),
     });
 

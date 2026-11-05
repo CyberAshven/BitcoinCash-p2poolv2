@@ -51,6 +51,45 @@ fn request_payout_outputs_encodes_its_fields_in_order_little_endian() {
 }
 
 #[test]
+fn verify_payout_outputs_encodes_its_fields_in_order_little_endian() {
+    let token = [0xaa; 3];
+    let prev_hash = [0x11; 32];
+    let prefix = [0x51, 0x52];
+    let request = VerifyPayoutOutputs {
+        request_id: 0x0102_0304,
+        mining_job_token: B0255::new(&token).unwrap(),
+        user_identifier: "miner".try_into().unwrap(),
+        available_payout_value: 0x0506_0708_090a_0b0c,
+        height: 0x0d0e_0f10,
+        prev_hash: U256::new(&prev_hash).unwrap(),
+        nbits: 0x1112_1314,
+        coinbase_prefix: B0255::new(&prefix).unwrap(),
+    };
+
+    let mut bytes = binary_sv2::to_bytes(request.clone()).unwrap();
+
+    assert_eq!(
+        bytes,
+        [
+            &[0x04, 0x03, 0x02, 0x01][..],
+            &[3, 0xaa, 0xaa, 0xaa],
+            &[5],
+            b"miner",
+            &[0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x06, 0x05],
+            &[0x10, 0x0f, 0x0e, 0x0d],
+            &[0x11; 32],
+            &[0x14, 0x13, 0x12, 0x11],
+            &[2, 0x51, 0x52],
+        ]
+        .concat()
+    );
+    assert_eq!(
+        VerifyPayoutOutputs::from_bytes(&mut bytes).unwrap(),
+        request
+    );
+}
+
+#[test]
 fn success_and_error_replies_round_trip() {
     let outputs = [0x00];
     let success = RequestPayoutOutputsSuccess {
@@ -94,6 +133,57 @@ fn success_and_error_replies_round_trip() {
 #[test]
 fn the_stale_notice_is_an_empty_extension_frame() {
     assert_eq!(stale_frame().unwrap(), [0x52, 0x50, 0x03, 0, 0, 0]);
+}
+
+/// A verify reply is the request reply with the message type changed.
+/// Success payloads match, and so do error payloads. A height of zero has
+/// no lock time of height minus one, so both framers answer `invalid-request`.
+#[test]
+fn verify_replies_match_request_replies_except_the_message_type() {
+    let prepared = test_bch_prepared();
+    let template = prepared.template();
+    let token = prepared
+        .mining_job_token([0x11; 32], template.curtime)
+        .unwrap();
+    let prefix = Builder::new()
+        .push_int(i64::from(template.height))
+        .into_bytes();
+    let identity = PayoutIdentity {
+        payout: PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x22; 20]),
+            Network::Regtest,
+        )),
+        owner: ShareOwner::CashP2pkh([0x22; 20]),
+    };
+    let mut request_bytes =
+        test_payout_outputs_request(7, &token, template, template.coinbasevalue, &prefix);
+    let request = RequestPayoutOutputs::from_bytes(&mut request_bytes).unwrap();
+    let build = || {
+        prepare_payout_outputs(
+            &request,
+            &prepared,
+            Some(&identity),
+            Some(prepared.prev_share_blockhash()),
+        )
+        .unwrap()
+    };
+
+    let requested = answer_frame(&request, Ok(build())).unwrap();
+    let verified = verify_answer_frame(request.request_id, request.height, Ok(build())).unwrap();
+    assert_eq!(requested[2], REQUEST_PAYOUT_OUTPUTS_SUCCESS);
+    assert_eq!(verified[2], VERIFY_PAYOUT_OUTPUTS_SUCCESS);
+    assert_eq!(&requested[6..], &verified[6..]);
+
+    let mut zero = request.clone();
+    zero.height = 0;
+    let requested = answer_frame(&zero, Ok(build())).unwrap();
+    let verified = verify_answer_frame(zero.request_id, 0, Ok(build())).unwrap();
+    assert_eq!(requested[2], REQUEST_PAYOUT_OUTPUTS_ERROR);
+    assert_eq!(verified[2], VERIFY_PAYOUT_OUTPUTS_ERROR);
+    assert_eq!(&requested[6..], &verified[6..]);
+    let mut payload = requested[6..].to_vec();
+    let error = RequestPayoutOutputsError::from_bytes(&mut payload).unwrap();
+    assert_eq!(error.error_code.as_utf8_or_hex(), INVALID_REQUEST);
 }
 
 /// The outputs a request gets are the ones `/jd_prepare`'s builder makes for
@@ -540,4 +630,57 @@ fn an_error_reply_carries_its_code() {
         error.error_code.as_utf8_or_hex(),
         PAYOUT_OUTPUTS_UNAVAILABLE
     );
+}
+
+/// An anchor deeper than the verify limit is refused from its metadata
+/// alone: the window, whose walk from an uncached anchor has no step cap,
+/// is never taken.
+#[test]
+fn a_verify_for_an_anchor_past_the_depth_limit_is_unknown_without_the_window() {
+    struct DeepAnchor;
+    impl AnchorWeights for DeepAnchor {
+        fn weights_at(
+            &self,
+            _anchor: BlockHash,
+            _nbits: u32,
+            _prev_hash: BlockHash,
+        ) -> Result<HashMap<PayoutAddress, u128>, WindowError> {
+            panic!("a too deep anchor must not reach the window");
+        }
+        fn anchor_depth(&self, _anchor: BlockHash) -> Option<u32> {
+            Some(MAX_VERIFY_ANCHOR_DEPTH + 1)
+        }
+    }
+    let prepared = test_bch_prepared();
+    let template = prepared.template();
+    let token = prepared
+        .mining_job_token([0x11; 32], template.curtime)
+        .unwrap();
+    let prefix = Builder::new()
+        .push_int(i64::from(template.height))
+        .into_bytes();
+    let prev_hash = BlockHash::from_str(&template.previousblockhash).unwrap();
+    let request = VerifyPayoutOutputs {
+        request_id: 1,
+        mining_job_token: B0255::new(&token).unwrap(),
+        user_identifier: "miner".try_into().unwrap(),
+        available_payout_value: template.coinbasevalue,
+        height: template.height,
+        prev_hash: U256::new(prev_hash.as_byte_array()).unwrap(),
+        nbits: CompactTarget::from_unprefixed_hex(&template.bits)
+            .unwrap()
+            .to_consensus(),
+        coinbase_prefix: B0255::new(&prefix).unwrap(),
+    };
+    let identity = PayoutIdentity {
+        payout: PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x22; 20]),
+            Network::Regtest,
+        )),
+        owner: ShareOwner::CashP2pkh([0x22; 20]),
+    };
+
+    let answer = verify_payout_outputs(&request, Some(&identity), Some(&DeepAnchor));
+
+    assert_eq!(answer.err(), Some(UNKNOWN_ANCHOR));
 }

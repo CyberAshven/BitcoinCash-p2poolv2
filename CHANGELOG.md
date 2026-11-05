@@ -18,6 +18,18 @@ browser's Basic challenge only when the request already sent credentials,
 so the WASM app's probes fail silently to that indicator instead of
 raising the login dialog.
 
+A Job Declaration client no longer has to trust one node for its payout
+outputs. `VerifyPayoutOutputs` (`0x04` in extension `0x5052`) asks a second
+node, which did not issue the token, to recompute the outputs from the
+token, the client's identity and the template fields at the token's
+anchor; it answers the same bytes `RequestPayoutOutputs.Success` carries,
+or `unknown-anchor` when it does not hold that share. The node keeps no
+state for it, allows each connection one verify at a time and four a
+second (`verify-rate-limited`), and refuses anchors more than 100 shares
+below its tip before touching the PPLNS window. The extension spec now
+publishes the job token layout and the share commitment derivation, so a
+client can check the commitment output itself. No share-chain rule changes.
+
 A node takes Stratum V2 Coinbase-Only Job Declaration only from the client
 addresses in `[stratum] sv2_coinbase_only_from` (IP addresses or CIDR
 ranges), by default this computer (`127.0.0.0/8`, `::1/128`). In that mode
