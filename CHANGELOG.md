@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The sim harness runs on Windows. Node configs escaped no paths, so a
+Windows store path (`\s...`) broke the TOML and the nodes exited before
+logging; the swarm's process pattern joined with `/` while node configs use
+`\`; processes were signalled and found with `kill` and `pgrep`; and BCHN
+was started with `-daemon`, which Windows BCHN refuses. Paths and strings
+in node configs are now TOML-escaped, the pattern is joined like the
+configs, Windows uses `tasklist`, `taskkill /F` and a PowerShell
+`Win32_Process` query (a forced stop: Windows console processes have no
+graceful signal without `unsafe`), and BCHN is spawned in the background on
+Windows. `cargo sim nightly deep-fork-refused` passes on Windows with BCHN
+29.2.0 and no workarounds. Linux and macOS are unchanged.
+
 A node no longer stops when a share transaction's stored rows are missing,
 for example after the pruner deletes them between two reads. `get_tx`
 unwrapped each input and output row, and release builds abort on panic, so

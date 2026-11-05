@@ -138,6 +138,58 @@ fn pool_signature_within_the_limit_is_accepted() {
 }
 
 #[test]
+fn toml_basic_string_round_trips_a_windows_path() {
+    let path = r"C:\p2pool\sim\store-0.db";
+    let document = format!("path = \"{}\"", toml_basic_string(path));
+    let table: toml::Table = document.parse().expect("parse");
+    assert_eq!(table["path"].as_str(), Some(path));
+    assert_eq!(toml_basic_string("say \"hi\" \\ "), "say \\\"hi\\\" \\\\ ");
+}
+
+#[test]
+fn node_config_escapes_paths_for_toml() {
+    let mut swarm = settings(1);
+    swarm.run_dir = RunDir::new(r"C:\p2pool\sim");
+    swarm.rpc.password = "quo\"te\\slash".to_string();
+    let shape = NodeShape {
+        hashrate: "5".to_string(),
+        latency_ms: 0,
+    };
+    let config = node_config(
+        &swarm,
+        &NodeIdentity {
+            index: 0,
+            payout_address: "bchreg:qpayout",
+            shape: &shape,
+        },
+    );
+    let parsed: toml::Table = config.parse().expect("config parses");
+    let store = swarm.run_dir.node_store(0).display().to_string();
+    assert_eq!(
+        parsed
+            .get("store")
+            .and_then(|table| table.get("path"))
+            .and_then(toml::Value::as_str),
+        Some(store.as_str())
+    );
+    let stats_dir = format!("{}/stats-0", swarm.run_dir.path().display());
+    assert_eq!(
+        parsed
+            .get("logging")
+            .and_then(|table| table.get("stats_dir"))
+            .and_then(toml::Value::as_str),
+        Some(stats_dir.as_str())
+    );
+    assert_eq!(
+        parsed
+            .get("bitcoinrpc")
+            .and_then(|table| table.get("password"))
+            .and_then(toml::Value::as_str),
+        Some("quo\"te\\slash")
+    );
+}
+
+#[test]
 fn nodes_mine_bitcoin_cash_regtest() {
     let shape = NodeShape {
         hashrate: "5".to_string(),
