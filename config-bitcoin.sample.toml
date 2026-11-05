@@ -44,15 +44,11 @@ minimum_difficulty = 100
 # share every 3.33 seconds.
 # maximum_difficulty = 4294967296
 solo_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
-# Pool operating mode: "p2poolv2" (share chain) or "hydrapool"
-# (standalone PPLNS, no share chain). Default p2poolv2.
-# mode = "p2poolv2"
-# Share chain address owning every share this node mines. In p2poolv2
-# mode a share needs an owner, so a miner that does not send
-# p2p=<address> in its stratum password gets this address instead.
+# Share chain address owning every share this node mines. A share needs an
+# owner, so a miner that does not send p2p=<address> in its stratum
+# password gets this address instead.
 # Leave it unset only if every one of your miners sends p2p=; otherwise
 # they are rejected at authorize.
-# Not valid with mode = "hydrapool", which has no share chain.
 #
 # Set this to YOUR OWN share chain address before enabling it. There is
 # deliberately no default: any address published here would own the shares
@@ -77,7 +73,7 @@ bootstrap_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
 # donation_address = "tb1qyazxde6558qj6z3d9np5e6msmrspwpf6k0qggk"
 # In basis points, 1% = 100 basis points. Default 0 on Bitcoin, 100 on Bitcoin Cash
 # donation = 0
-# Any fee amount for node/hydrapool provider to be sent to fee address. Default no fee.
+# Any fee amount for the node provider to be sent to fee address. Default no fee.
 # This is where a public pool operator takes their own cut. It is taken after
 # the donation. On Bitcoin Cash, the donation and the fee may each be at most
 # 1000 basis points (10%); peers reject shares above that.

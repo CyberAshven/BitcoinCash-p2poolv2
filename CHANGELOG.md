@@ -15,6 +15,15 @@ reports Bitcoin Cash's depths; upstream's reports a chipnet node as
 `testnet` with Bitcoin's coinbase maturity of 6048. No share-chain rule
 changes.
 
+The configs, packaging, TUI config editor and docs offer only P2Pool mode.
+Hydrapool mode (standalone PPLNS, no share chain) came with upstream and its
+code stays as upstream has it, so `mode = "hydrapool"` still parses, but
+nothing an operator reads offers it: the `mode` lines are gone from the
+sample configs and the TUI editor, and `bootstrap_address` is described as
+required to parse and never paid by a share chain node. `pool-diagnose`
+looks for the `p2poolv2` process by default; the script it replaced looked
+for `hydrapool`. No share-chain rule changes.
+
 A Hydrapool-mode node starts again after the share-chain genesis changes
 between releases. Hydrapool keeps no share chain beyond genesis, but startup
 refused any store built on another genesis. `init_for_mode`, ported from
