@@ -79,10 +79,11 @@ pub fn HelpPage() -> impl IntoView {
                     </li>
                     <li>
                         <code>"/hashrate"</code> ", " <code>"/found_blocks"</code> ", "
-                        <code>"/miners"</code> ", " <code>"/network"</code>
+                        <code>"/miners"</code> ", " <code>"/network"</code> ", "
+                        <code>"/peers"</code>
                     </li>
                     <li>
-                        <code>"/metrics"</code> " (Prometheus) and " <code>"/peers"</code>
+                        <code>"/metrics"</code> " (Prometheus)"
                         ": always behind the API login"
                     </li>
                 </ul>

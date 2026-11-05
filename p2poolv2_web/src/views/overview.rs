@@ -3,52 +3,62 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The overview, as `/dashboard` shows it: KPI cards, the hashrate chart,
-//! the newest found blocks and a page of the share chain. Its first page of
-//! shares is live, from `/ws`; the rest refreshes on the node's 30 seconds.
+//! the newest found blocks and the newest few share heights. Its shares are
+//! live, from `/ws`; the shares page has the whole chain.
 
 use super::blocks::{NO_BLOCKS_YET, blocks_table};
-use crate::api::{ChainInfo, FoundBlock, Hashrate, HashratePoint, Miners, Share, Shares};
+use crate::api::{ChainInfo, FoundBlock, Hashrate, HashratePoint, Miners, Share};
 use crate::app::{Ctx, ctx, polled};
 use crate::chart::HashrateChart;
 use crate::format::{
     UNKNOWN, difficulty_from_bits, difficulty_from_network_hashrate, fmt_ago, fmt_difficulty,
     fmt_hashrate, optional,
 };
-use crate::layout::{KpiCard, Tone, ago_cell, loading, miner_link, pager, share_link};
-use crate::route::{PAGE_SIZE, Paging, Route, Tab};
+use crate::layout::{KpiCard, Tone, ago_cell, loading, miner_link, share_link};
+use crate::route::{Route, Tab};
 use leptos::prelude::*;
 use std::cmp::Reverse;
 use std::collections::HashSet;
 
 /// Chart windows offered: seconds, button, what the panel note calls it and
-/// the chart's name. The first is the node's chart, the last day.
-const WINDOWS: [(u64, &str, &str, &str); 3] = [
+/// the chart's name.
+const WINDOWS: [(u64, &str, &str, &str); 4] = [
+    (
+        3_600,
+        "Hour",
+        "one sample a minute, the last hour",
+        "Hashrate over the last hour",
+    ),
     (
         86_400,
-        "24h",
+        "Day",
         "one sample a minute, the last day",
         "Hashrate over the last day",
     ),
     (
-        21_600,
-        "6h",
-        "one sample a minute, the last 6 hours",
-        "Hashrate over the last 6 hours",
+        604_800,
+        "Week",
+        "one sample a minute, the last week",
+        "Hashrate over the last week",
     ),
     (
-        3_600,
-        "1h",
-        "one sample a minute, the last hour",
-        "Hashrate over the last hour",
+        2_592_000,
+        "Month",
+        "one sample a minute, the last month",
+        "Hashrate over the last month",
     ),
 ];
 
-/// Most hashrate samples kept for the chart: a day at one a minute, the most
-/// the node's history holds.
-pub const MAX_HISTORY_POINTS: usize = 1_440;
+/// Most hashrate samples kept for the chart: the store's 30-day retention
+/// at one sample a minute, the most the node's history holds.
+pub const MAX_HISTORY_POINTS: usize = 2_592_000 / 60;
 
 /// Found blocks the overview lists; the blocks page has them all.
 const RECENT_BLOCKS: usize = 5;
+
+/// Confirmed share heights the overview's Recent shares lists; the shares
+/// page has them all.
+const RECENT_SHARES: usize = 5;
 
 /// A confirmed share or one of its uncles, as the overview lists it.
 #[derive(Clone, Debug, PartialEq)]
@@ -122,7 +132,7 @@ fn share_row_view(row: ShareRow) -> impl IntoView {
     }
 }
 
-fn shares_table(rows: Vec<ShareRow>) -> impl IntoView {
+pub fn shares_table(rows: Vec<ShareRow>) -> impl IntoView {
     view! {
         <div class="table-wrap">
             <table class="table">
@@ -170,17 +180,43 @@ fn first_error(errors: [Option<String>; 4]) -> Option<String> {
 }
 
 #[component]
-pub fn OverviewPage(page: usize) -> impl IntoView {
+pub fn OverviewPage() -> impl IntoView {
     let context = ctx();
     context.frame.set("Dashboard", Tab::Dashboard, Vec::new());
-    let Ctx {
-        connection,
-        clock,
-        recent,
-        ..
-    } = context;
+    let Ctx { clock, recent, .. } = context;
 
-    let window = RwSignal::new(WINDOWS[0].0);
+    let stored_window = crate::app::stored(crate::app::local_storage(), "p2pool.range")
+        .and_then(|stored| stored.parse::<u64>().ok())
+        .and_then(|seconds| {
+            WINDOWS
+                .iter()
+                .any(|(window, ..)| *window == seconds)
+                .then_some(seconds)
+        })
+        .unwrap_or(WINDOWS[1].0);
+    let window = RwSignal::new(stored_window);
+    // The chart's zoomed window; `None` shows everything. The header's
+    // reset button clears it while a zoom is active.
+    let zoom = RwSignal::new(None::<(f64, f64)>);
+    // The three chart series, persisted like the range so a reload keeps
+    // them; the network line is opt-in, so it starts from its own flag.
+    let pool_visible = RwSignal::new(crate::app::stored_flag("p2pool.pool-visible"));
+    let local_visible = RwSignal::new(crate::app::stored_flag("p2pool.local-visible"));
+    let network_visible = RwSignal::new(crate::app::stored_opt_in_flag("p2pool.network-visible"));
+    // The found-block diamonds, on by default like the pool and node
+    // series: [stored_flag] reads only `"0"` as off.
+    let blocks_visible = RwSignal::new(crate::app::stored_flag("p2pool.blocks-visible"));
+    // The chips write the flip back so the next visit keeps it. `"1"`/`"0"`
+    // suits both flags: [stored_flag] reads only `"0"` as off, and
+    // [stored_opt_in_flag] reads only `"1"` as on.
+    let flip = |signal: RwSignal<bool>, key: &'static str| {
+        move |_| {
+            let next = !signal.get_untracked();
+            signal.set(next);
+            let stored = if next { "1" } else { "0" };
+            crate::app::store(crate::app::local_storage(), key, stored);
+        }
+    };
     let hashrate = polled::<Hashrate>(move || format!("/hashrate?window={}", window.get()));
     let chain = polled::<ChainInfo>(|| "/chain_info".into());
     let blocks = polled::<Vec<FoundBlock>>(|| "/found_blocks".into());
@@ -192,26 +228,6 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         let live = recent.with(|shares| shares.first().map(|share| share.height));
         polled.max(live)
     });
-    let paging =
-        Signal::derive(move || Paging::of(page, tip.get().map_or(0, |tip| tip as usize + 1)));
-    // Older pages are read from `/shares` below the polled tip, so they move
-    // on the node's refresh; the first page is the live list.
-    let older = LocalResource::new(move || {
-        let connection = connection.get();
-        let newest = loaded(&chain, |info| info.chain_tip_height).flatten();
-        async move {
-            let skipped =
-                newest.map_or(0, |newest| Paging::of(page, newest as usize + 1).skipped());
-            match newest {
-                Some(newest) if skipped > 0 => {
-                    let to = newest.saturating_sub(u32::try_from(skipped).unwrap_or(u32::MAX));
-                    let path = format!("/shares?to={to}&num={PAGE_SIZE}");
-                    Some(connection.get::<Shares>(&path).await)
-                }
-                _ => None,
-            }
-        }
-    });
 
     let found = Memo::new(move |_| {
         loaded(&blocks, |blocks| {
@@ -222,13 +238,11 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         })
         .unwrap_or_default()
     });
+    // The overview shows the few newest heights; `recent` stays newest
+    // first, and the shares page carries the whole chain.
     let rows = Signal::derive(move || {
-        if page <= 1 {
-            return Some(recent.with(|shares| found.with(|found| share_rows(shares, found))));
-        }
-        older.with(|older| match older {
-            Some(Some(Ok(shares))) => Some(found.with(|found| share_rows(&shares.shares, found))),
-            _ => None,
+        recent.with(|shares| {
+            found.with(|found| share_rows(&shares[..shares.len().min(RECENT_SHARES)], found))
         })
     });
     let history = Memo::new(move |_| {
@@ -237,12 +251,47 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         })
         .unwrap_or_default()
     });
-    let rate = move |pick: fn(&Hashrate) -> Option<f64>| {
-        Signal::derive(move || {
-            loaded(&hashrate, |hashrate| optional(pick(hashrate), fmt_hashrate))
-                .unwrap_or_else(|| UNKNOWN.to_string())
+    // The found blocks inside the chart's window, oldest first, for the
+    // diamonds. The window is the selected range around the now-ticking
+    // clock (a tick re-filters so aging blocks drop off, as the sample
+    // window does); a zoom is left to the chart, which drops blocks
+    // outside its own frame when it snaps them to the line.
+    let chart_blocks = Memo::new(move |_| {
+        let seconds = window.get();
+        let now = clock.get();
+        loaded(&blocks, |blocks| {
+            blocks
+                .iter()
+                .filter(|block| {
+                    block.bitcoin_time >= now.saturating_sub(seconds) && block.bitcoin_time <= now
+                })
+                .map(|block| FoundBlock {
+                    bitcoin_height: block.bitcoin_height,
+                    bitcoin_blockhash: block.bitcoin_blockhash.clone(),
+                    share_blockhash: block.share_blockhash.clone(),
+                    bitcoin_time: block.bitcoin_time,
+                    miner_bitcoin_address: block.miner_bitcoin_address.clone(),
+                })
+                .collect::<Vec<FoundBlock>>()
         })
-    };
+        .unwrap_or_default()
+    });
+    // Harmonize the KPI cards: fall back to the newest non-null history
+    // sample when the live read is unknown, so all three cards show a value
+    // (or all show the dash) together.
+    let pool_rate = Signal::derive(move || {
+        loaded(&hashrate, |hashrate| {
+            let newest = hashrate.pool_hashrate.or_else(|| {
+                hashrate
+                    .history
+                    .iter()
+                    .rev()
+                    .find_map(|point| point.pool_hashrate)
+            });
+            optional(newest, fmt_hashrate)
+        })
+        .unwrap_or_else(|| UNKNOWN.to_string())
+    });
     let error = Signal::derive(move || {
         first_error([
             failure(&hashrate),
@@ -253,6 +302,12 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
     });
 
     let local_note = Signal::derive(move || {
+        let totals = loaded(&miners, |miners| {
+            format!(
+                "{} rejected of {} shares",
+                miners.rejected_shares_total, miners.accepted_shares_total
+            )
+        });
         vec![
             loaded(&miners, |miners| {
                 format!(
@@ -261,6 +316,7 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
                 )
             })
             .unwrap_or_else(|| format!("{UNKNOWN} miners, {UNKNOWN} workers online")),
+            totals.unwrap_or_else(|| format!("{UNKNOWN} rejected of {UNKNOWN} shares")),
         ]
     });
     // The node's overview shows the newest sample that has this node's rate.
@@ -277,17 +333,49 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         })
         .unwrap_or_else(|| UNKNOWN.to_string())
     });
+    let network_rate = Signal::derive(move || {
+        loaded(&hashrate, |hashrate| {
+            let newest = hashrate.network_hashrate.or_else(|| {
+                hashrate
+                    .history
+                    .iter()
+                    .rev()
+                    .find_map(|point| point.network_hashrate)
+            });
+            optional(newest, fmt_hashrate)
+        })
+        .unwrap_or_else(|| UNKNOWN.to_string())
+    });
     let network_notes = Signal::derive(move || {
-        let difficulty = loaded(&hashrate, |hashrate| {
+        let network_difficulty = loaded(&hashrate, |hashrate| {
             hashrate
                 .network_hashrate
                 .map(difficulty_from_network_hashrate)
+                .or_else(|| {
+                    hashrate
+                        .history
+                        .iter()
+                        .rev()
+                        .find_map(|point| point.network_hashrate)
+                        .map(difficulty_from_network_hashrate)
+                })
         })
         .flatten();
         vec![
-            format!("Difficulty {}", optional(difficulty, fmt_difficulty)),
-            "Estimated from difficulty, 10-minute blocks".to_string(),
+            format!(
+                "Difficulty {}",
+                optional(network_difficulty, fmt_difficulty)
+            ),
+            "Est. from diff. 10-min blocks".to_string(),
         ]
+    });
+    let pool_notes = Signal::derive(move || vec!["Confirmed shares, last hour".to_string()]);
+    let share_notes = Signal::derive(move || {
+        let share_difficulty = loaded(&hashrate, |hashrate| hashrate.share_difficulty).flatten();
+        vec![format!(
+            "Difficulty {}",
+            optional(share_difficulty, fmt_difficulty)
+        )]
     });
     let height = Signal::derive(move || {
         tip.get()
@@ -307,21 +395,25 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         ]
     });
 
-    let window_note = move || {
-        WINDOWS
-            .iter()
-            .find(|(seconds, ..)| *seconds == window.get())
-            .map_or(WINDOWS[0].2, |(_, _, note, _)| note)
-    };
     let range_buttons = WINDOWS
         .iter()
         .map(|&(seconds, label, _, _)| {
+            let selected = move || window.get() == seconds;
+            let on_click = move |_| {
+                window.set(seconds);
+                crate::app::store(
+                    crate::app::local_storage(),
+                    "p2pool.range",
+                    &seconds.to_string(),
+                );
+            };
             view! {
                 <button
-                    class="range-btn"
-                    class:active=move || window.get() == seconds
+                    class="outline header-btn"
+                    class:active-nav=selected
+                    aria-current=move || selected().then_some("true")
                     type="button"
-                    on:click=move |_| window.set(seconds)
+                    on:click=on_click
                 >
                     {label}
                 </button>
@@ -334,7 +426,77 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
             .iter()
             .find(|(window_seconds, ..)| *window_seconds == seconds)
             .map_or(WINDOWS[0].3, |(.., label)| label);
-        view! { <HashrateChart history=history label=label /> }
+        view! {
+            <HashrateChart
+                history=history
+                blocks=chart_blocks
+                range=zoom
+                label=label
+                pool_visible=pool_visible
+                local_visible=local_visible
+                network_visible=network_visible
+                blocks_visible=blocks_visible
+            />
+        }
+    };
+    let series_toggles = move || {
+        view! {
+            <span class="series-toggles" role="group" aria-label="Chart series">
+                <button
+                    class="legend-chip"
+                    class:off=move || !pool_visible.get()
+                    type="button"
+                    aria-pressed=move || pool_visible.get().to_string()
+                    on:click=flip(pool_visible, "p2pool.pool-visible")
+                >
+                    <span class="legend-dot pool"></span>
+                    "Pool"
+                </button>
+                <button
+                    class="legend-chip"
+                    class:off=move || !local_visible.get()
+                    type="button"
+                    aria-pressed=move || local_visible.get().to_string()
+                    on:click=flip(local_visible, "p2pool.local-visible")
+                >
+                    <span class="legend-dot local"></span>
+                    "Node"
+                </button>
+                <button
+                    class="legend-chip"
+                    class:off=move || !network_visible.get()
+                    type="button"
+                    aria-pressed=move || network_visible.get().to_string()
+                    on:click=flip(network_visible, "p2pool.network-visible")
+                >
+                    <span class="legend-dot network"></span>
+                    "Network"
+                </button>
+                <button
+                    class="legend-chip"
+                    class:off=move || !blocks_visible.get()
+                    type="button"
+                    aria-pressed=move || blocks_visible.get().to_string()
+                    on:click=flip(blocks_visible, "p2pool.blocks-visible")
+                >
+                    <span class="legend-dot blocks"></span>
+                    "Blocks"
+                </button>
+            </span>
+        }
+    };
+    let reset_zoom = move || {
+        zoom.get().map(|_| {
+            view! {
+                <button
+                    class="legend-chip legend-reset reset-zoom"
+                    type="button"
+                    on:click=move |_| zoom.set(None)
+                >
+                    "Reset zoom"
+                </button>
+            }
+        })
     };
 
     let blocks_panel = move || {
@@ -376,26 +538,25 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
     let shares_panel = move || {
         let known_tip = tip.get();
         let answered = chain.with(Option::is_some) || known_tip.is_some();
-        match rows.get() {
-            _ if !answered => loading(),
-            None => loading(),
-            Some(rows) if rows.is_empty() => {
-                let text = if known_tip.is_none() {
-                    "No confirmed shares yet. Point a miner at this node's stratum port to get started."
-                } else {
-                    "No shares on this page."
-                };
-                view! { <p class="empty-state">{text}</p> }.into_any()
-            }
-            Some(rows) => {
-                let Paging { page, pages } = paging.get();
-                view! {
-                    {shares_table(rows)}
-                    {pager(page, pages, |page| Route::Dashboard { page })}
-                }
-                .into_any()
-            }
+        if !answered {
+            return loading();
         }
+        let rows = rows.get();
+        if rows.is_empty() {
+            let text = if known_tip.is_none() {
+                "No confirmed shares yet. Point a miner at this node's stratum port to get started."
+            } else {
+                "No shares on this page."
+            };
+            return view! { <p class="empty-state">{text}</p> }.into_any();
+        }
+        view! {
+            {shares_table(rows)}
+            <div class="panel-more">
+                <a href=Route::Shares { page: 1 }.href()>"More found shares \u{2192}"</a>
+            </div>
+        }
+        .into_any()
     };
 
     view! {
@@ -403,32 +564,41 @@ pub fn OverviewPage(page: usize) -> impl IntoView {
         <div class="kpi-grid">
             <KpiCard
                 label="Pool hashrate"
-                value=rate(|hashrate| hashrate.pool_hashrate)
+                value=pool_rate
                 tone=Tone::Green
-                notes=vec!["From the newest shares on the share chain".to_string()]
+                notes=pool_notes
             />
             <KpiCard
-                label="This node"
+                label="Node hashrate"
                 value=local_rate
                 tone=Tone::Local
                 href="#/miners"
                 notes=local_note
             />
             <KpiCard
-                label="Network hashrate (BCH)"
-                value=rate(|hashrate| hashrate.network_hashrate)
+                label="network hashrate"
+                value=network_rate
                 tone=Tone::Net
                 notes=network_notes
             />
-            <KpiCard label="Share chain height" value=height notes={Vec::<String>::new()} />
-            <KpiCard label="Blocks found" value=blocks_found href="#/blocks" notes=blocks_note />
+            <KpiCard label="Share chain height" value=height notes=share_notes />
+            <KpiCard
+                label="Blocks found"
+                value=blocks_found
+                tone=Tone::Green
+                href="#/blocks"
+                notes=blocks_note
+            />
         </div>
         <div class="panel">
-            <h2>
+            <h2 class="hashrate-head">
                 "Hashrate"
-                <span class="panel-note">{window_note}</span>
-                <span class="range-btns">{range_buttons}</span>
+                <span class="range-group" aria-label="Chart time range">
+                    {reset_zoom}
+                    {range_buttons}
+                </span>
             </h2>
+            {series_toggles}
             <div class="chart-wrap">{chart}</div>
         </div>
         <div class="panel">
@@ -491,12 +661,13 @@ mod tests {
     }
 
     #[test]
-    fn test_history_keeps_the_newest_day() {
+    fn test_history_keeps_the_newest_month() {
         let history: Vec<HashratePoint> = (0..MAX_HISTORY_POINTS as u64 + 5)
             .map(|minute| HashratePoint {
                 time: minute,
                 pool_hashrate: None,
                 local_hashrate: None,
+                network_hashrate: None,
             })
             .collect();
         let capped = capped_history(history);

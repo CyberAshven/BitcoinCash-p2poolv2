@@ -71,7 +71,7 @@ series count bounded:
 | `accepted_difficulty_total` | counter | actor | Sum of accepted share difficulty |
 | `shares_rejected_total` | counter | actor | Rejected share count |
 | `best_share` / `best_share_ever` | gauge | actor | Highest true difficulty (session / all-time) |
-| `pool_difficulty` | gauge | actor | Current pool difficulty |
+| `pool_difficulty` | gauge | scrape-time fill from job tracker | Current pool share difficulty (the newest prepared notify's ASERT target); 0.0 until the first notify |
 | `start_time_seconds` / `last_update_seconds` | gauge | actor | Unix timestamps |
 | `user_shares_valid_total{payout_address}` | counter | actor | Per-user valid shares (scaled by 2^32) |
 | `worker_shares_valid_total{payout_address,workername}` | counter | actor | Per-worker valid shares |

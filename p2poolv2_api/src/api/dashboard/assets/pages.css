@@ -23,6 +23,12 @@ header.site-header .header-search input[type="search"] {
 header.site-header .tabs li a[aria-current="page"] {
   text-decoration: none;
 }
+/* Hidden slot that keeps the overview auto-refresh button's width on every
+   other page, so Search and Admin never shift when you navigate. */
+header .header-right .auto-slot {
+  min-width: 6.75rem;
+  visibility: hidden;
+}
 /* When the menu bar's items do not fit on one line, it wraps instead of
    scrolling the page sideways, as it does on phones. The WASM dashboard's
    bar carries a live status and its settings too. */
@@ -111,6 +117,114 @@ tr.uncle-row {
   content: "\2212";
 }
 
+/* Hashrate chart time-range buttons (Hour/Day/Week/Month): plain links, no script. */
+.hashrate-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0.3rem;
+}
+.range-group {
+  display: inline-flex;
+  gap: 0.32rem;
+  font-size: 0.72rem;
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: normal;
+  /* Inside .panel h2, Pico's h1..h6 --pico-font-weight:700 would make the
+     outline buttons bold; the header nav buttons are regular 400. */
+  --pico-font-weight: 400;
+}
+/* The box (border included) must stay compact so Month fits in the card.
+   Beats Pico's [role=button] padding, which reads --pico-form-element-spacing-
+   horizontal: 2rem when the group has role="group". */
+.panel h2 .range-group .header-btn {
+  padding: 0.15rem 0.18rem;
+  font-size: 0.68rem;
+  letter-spacing: normal;
+  white-space: nowrap;
+}
+/* The wasm header's Reset zoom button sits at the start of the group,
+   left of the Hour/Day/Week/Month buttons; the wider margin keeps it
+   from crowding them. */
+.panel h2 .range-group .reset-zoom {
+  margin-right: 0.75rem;
+}
+
+/* Keep the title and range buttons on one line. The buttons carry their own
+   font-size; this keeps the title at .panel h2's 0.95rem, not Pico's h2 size. */
+.panel h2.hashrate-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0.4rem;
+  min-width: 0;
+  font-size: 0.95rem;
+}
+.panel h2.hashrate-head .range-group {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* Pool/Node/Network series toggles: their own row under the hashrate heading,
+   so the stateless links can flip ?pool=0/?node=0/?network=1 (server) or
+   toggle the signals (wasm) without a script. The network line is opt-in. */
+.series-toggles {
+  display: flex;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0 0 0.4rem;
+  /* Pico styles [role=group] width:100% with children flex:1 1 auto, which
+     stretched the pills across the row; it also paints a green box-shadow on
+     the whole group when any chip is focused (click). Undo both. */
+  width: auto;
+  box-shadow: none;
+}
+/* Pico's a[role=button]{display:inline-block} outranks .legend-chip's
+   inline-flex (0,1,1 vs 0,1,0), so the dot/label gap needs this higher
+   specificity; the compact size matches the range buttons beside it. */
+.series-toggles .legend-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.1rem 0.3rem;
+  gap: 0.4rem;
+  font-size: 0.68rem;
+  font-weight: 400;
+  line-height: 1.1;
+  flex: none;
+  cursor: pointer;
+}
+.series-toggles .legend-chip:focus {
+  box-shadow: none;
+}
+.series-toggles .legend-chip:focus-visible {
+  box-shadow: 0 0 0 var(--pico-outline-width) var(--pico-primary-focus);
+}
+.series-toggles .legend-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+}
+.series-toggles .legend-dot.pool {
+  background: var(--ms-green);
+}
+.series-toggles .legend-dot.local {
+  background: #22d3ee;
+}
+.series-toggles .legend-dot.network {
+  background: #8b5cf6;
+}
+/* The blocks dot wears the marker's diamond shape, like the tooltip's
+   Block key. */
+.series-toggles .legend-dot.blocks {
+  background: var(--ms-green);
+  border-radius: 1px;
+  transform: rotate(45deg);
+}
+.series-toggles .legend-chip.off {
+  opacity: 0.45;
+}
+
 /* The hashrate chart, drawn as SVG on the server. */
 .chart-wrap figure {
   margin: 0;
@@ -124,12 +238,15 @@ tr.uncle-row {
 }
 .chart-wrap .axis {
   fill: var(--pico-muted-color);
-  font-size: 11px;
+  font-size: 8px;
   font-family: var(--pico-font-family-monospace);
 }
 .chart-wrap .line {
   fill: none;
-  stroke-width: 2;
+  stroke-width: 1;
+}
+.chart-wrap .area {
+  stroke: none;
 }
 .chart-wrap .dot {
   stroke: none;
@@ -150,6 +267,24 @@ tr.uncle-row {
 .chart-wrap .key.local {
   fill: #22d3ee;
   color: #22d3ee;
+}
+.chart-wrap .line.network {
+  stroke: #8b5cf6;
+}
+.chart-wrap .dot.network,
+.chart-wrap .key.network {
+  fill: #8b5cf6;
+  color: #8b5cf6;
+}
+/* Found-block row in a tracer tooltip: green like the marker it names,
+   and the key marker is the chart's diamond (rotated square), not a dot,
+   matching the legend chip's blocks dot. */
+.chart-wrap .key.blocks {
+  color: var(--ms-green);
+}
+.chart-wrap .key.blocks::before {
+  border-radius: 1px;
+  transform: rotate(45deg);
 }
 .chart-wrap figcaption {
   display: flex;
@@ -175,12 +310,10 @@ tr.uncle-row {
   margin: 0;
 }
 
-/* The hashrate chart of the Rust/WASM dashboard (p2poolv2_web), which loads
-   these same stylesheets: zooming, a crosshair on the nearest point, and
-   CashDragon0's .chart-tip on the side away from it. The node's own pages
-   never render these classes. */
+/* The hashrate chart: zoomable via SVG, and the node's own pages (plus the
+   WASM dashboard) use .chart-hit strips with .chart-tip on hover -- CSS only,
+   no script anywhere. */
 .chart-wrap svg.zoomable {
-  cursor: crosshair;
   user-select: none;
 }
 .chart-wrap .crosshair {
@@ -191,12 +324,375 @@ tr.uncle-row {
   fill: var(--ms-green);
   opacity: 0.15;
 }
-.chart-wrap .chart-tip.at-left {
-  left: 11%;
+/* Positioning: the box is pinned upper-right; per-span left/right (or
+   at-left/at-right) only feed the content swap and are overridden. */
+.chart-wrap {
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
 }
-.chart-wrap .chart-tip.at-right {
-  right: 2%;
+.chart-wrap .chart-hit {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* 8px of the 720-unit viewBox = 1/90 of the wrap width. Size zones in %
+     (not a fixed 8px) so they stay exactly adjacent at any responsive width.
+     A fixed 8px left a gap whenever the wrap was wider than 720px, so the
+     cursor left the zone, :hover dropped, and the tip flickered. */
+  width: 1.111111%;
+  margin-left: -0.555556%;
+  visibility: visible;
+  /* Must NOT be opacity:0 here -- parent opacity multiplies with the child
+     tip, so the tip could never paint. The span itself paints nothing (it
+     has no background); only the tip below is gated on hover. */
+  z-index: 10;
+  pointer-events: auto;
 }
+.chart-wrap .chart-hit .chart-tip {
+  position: absolute;
+  z-index: 1;
+  opacity: 0;
+   /* Fixed spot: just above the plot, right of the strip. The strip spans
+      top:0/bottom:0 of the chart-wrap, so bottom:100% lands the tip's bottom
+      edge exactly at the svg top -- the tip floats over the chips/head row
+      and never covers the data lines (the top of the plot is the busiest
+      band: the network line peaks 37px down). The at-left/at-right class
+      (and any inline left/right the WASM tip once carried) only feeds the
+      content swap and is overridden, so every zone's tip lands in the same
+      box -- only the hovered zone's tip paints, so the content swaps under
+      the cursor but the box never moves (no cursor-follow, no flicker). */
+  top: auto !important;
+  bottom: calc(100% - 5px) !important;
+  right: 8px !important;
+  left: auto !important;
+}
+/* Only the tip of the zone actually under the cursor paints. Zones tile the
+   plot exactly (width 1.111111% = 8/720, margin-left -0.555556% = -4/720,
+   step 1.111% of left%) so they are always adjacent at any width -- no gaps
+   for the cursor to fall through, so the tip never blinks between zones.
+   Each zone's left comes from its nth-child position, one per 8px step of
+   the 720-unit viewBox, so no page ever carries a style=" attribute. */
+.chart-wrap .chart-hit:nth-child(1) { left: 10.555556%; }
+.chart-wrap .chart-hit:nth-child(2) { left: 11.666667%; }
+.chart-wrap .chart-hit:nth-child(3) { left: 12.777778%; }
+.chart-wrap .chart-hit:nth-child(4) { left: 13.888889%; }
+.chart-wrap .chart-hit:nth-child(5) { left: 15.000000%; }
+.chart-wrap .chart-hit:nth-child(6) { left: 16.111111%; }
+.chart-wrap .chart-hit:nth-child(7) { left: 17.222222%; }
+.chart-wrap .chart-hit:nth-child(8) { left: 18.333333%; }
+.chart-wrap .chart-hit:nth-child(9) { left: 19.444444%; }
+.chart-wrap .chart-hit:nth-child(10) { left: 20.555556%; }
+.chart-wrap .chart-hit:nth-child(11) { left: 21.666667%; }
+.chart-wrap .chart-hit:nth-child(12) { left: 22.777778%; }
+.chart-wrap .chart-hit:nth-child(13) { left: 23.888889%; }
+.chart-wrap .chart-hit:nth-child(14) { left: 25.000000%; }
+.chart-wrap .chart-hit:nth-child(15) { left: 26.111111%; }
+.chart-wrap .chart-hit:nth-child(16) { left: 27.222222%; }
+.chart-wrap .chart-hit:nth-child(17) { left: 28.333333%; }
+.chart-wrap .chart-hit:nth-child(18) { left: 29.444444%; }
+.chart-wrap .chart-hit:nth-child(19) { left: 30.555556%; }
+.chart-wrap .chart-hit:nth-child(20) { left: 31.666667%; }
+.chart-wrap .chart-hit:nth-child(21) { left: 32.777778%; }
+.chart-wrap .chart-hit:nth-child(22) { left: 33.888889%; }
+.chart-wrap .chart-hit:nth-child(23) { left: 35.000000%; }
+.chart-wrap .chart-hit:nth-child(24) { left: 36.111111%; }
+.chart-wrap .chart-hit:nth-child(25) { left: 37.222222%; }
+.chart-wrap .chart-hit:nth-child(26) { left: 38.333333%; }
+.chart-wrap .chart-hit:nth-child(27) { left: 39.444444%; }
+.chart-wrap .chart-hit:nth-child(28) { left: 40.555556%; }
+.chart-wrap .chart-hit:nth-child(29) { left: 41.666667%; }
+.chart-wrap .chart-hit:nth-child(30) { left: 42.777778%; }
+.chart-wrap .chart-hit:nth-child(31) { left: 43.888889%; }
+.chart-wrap .chart-hit:nth-child(32) { left: 45.000000%; }
+.chart-wrap .chart-hit:nth-child(33) { left: 46.111111%; }
+.chart-wrap .chart-hit:nth-child(34) { left: 47.222222%; }
+.chart-wrap .chart-hit:nth-child(35) { left: 48.333333%; }
+.chart-wrap .chart-hit:nth-child(36) { left: 49.444444%; }
+.chart-wrap .chart-hit:nth-child(37) { left: 50.555556%; }
+.chart-wrap .chart-hit:nth-child(38) { left: 51.666667%; }
+.chart-wrap .chart-hit:nth-child(39) { left: 52.777778%; }
+.chart-wrap .chart-hit:nth-child(40) { left: 53.888889%; }
+.chart-wrap .chart-hit:nth-child(41) { left: 55.000000%; }
+.chart-wrap .chart-hit:nth-child(42) { left: 56.111111%; }
+.chart-wrap .chart-hit:nth-child(43) { left: 57.222222%; }
+.chart-wrap .chart-hit:nth-child(44) { left: 58.333333%; }
+.chart-wrap .chart-hit:nth-child(45) { left: 59.444444%; }
+.chart-wrap .chart-hit:nth-child(46) { left: 60.555556%; }
+.chart-wrap .chart-hit:nth-child(47) { left: 61.666667%; }
+.chart-wrap .chart-hit:nth-child(48) { left: 62.777778%; }
+.chart-wrap .chart-hit:nth-child(49) { left: 63.888889%; }
+.chart-wrap .chart-hit:nth-child(50) { left: 65.000000%; }
+.chart-wrap .chart-hit:nth-child(51) { left: 66.111111%; }
+.chart-wrap .chart-hit:nth-child(52) { left: 67.222222%; }
+.chart-wrap .chart-hit:nth-child(53) { left: 68.333333%; }
+.chart-wrap .chart-hit:nth-child(54) { left: 69.444444%; }
+.chart-wrap .chart-hit:nth-child(55) { left: 70.555556%; }
+.chart-wrap .chart-hit:nth-child(56) { left: 71.666667%; }
+.chart-wrap .chart-hit:nth-child(57) { left: 72.777778%; }
+.chart-wrap .chart-hit:nth-child(58) { left: 73.888889%; }
+.chart-wrap .chart-hit:nth-child(59) { left: 75.000000%; }
+.chart-wrap .chart-hit:nth-child(60) { left: 76.111111%; }
+.chart-wrap .chart-hit:nth-child(61) { left: 77.222222%; }
+.chart-wrap .chart-hit:nth-child(62) { left: 78.333333%; }
+.chart-wrap .chart-hit:nth-child(63) { left: 79.444444%; }
+.chart-wrap .chart-hit:nth-child(64) { left: 80.555556%; }
+.chart-wrap .chart-hit:nth-child(65) { left: 81.666667%; }
+.chart-wrap .chart-hit:nth-child(66) { left: 82.777778%; }
+.chart-wrap .chart-hit:nth-child(67) { left: 83.888889%; }
+.chart-wrap .chart-hit:nth-child(68) { left: 85.000000%; }
+.chart-wrap .chart-hit:nth-child(69) { left: 86.111111%; }
+.chart-wrap .chart-hit:nth-child(70) { left: 87.222222%; }
+.chart-wrap .chart-hit:nth-child(71) { left: 88.333333%; }
+.chart-wrap .chart-hit:nth-child(72) { left: 89.444444%; }
+.chart-wrap .chart-hit:nth-child(73) { left: 90.555556%; }
+.chart-wrap .chart-hit:nth-child(74) { left: 91.666667%; }
+.chart-wrap .chart-hit:nth-child(75) { left: 92.777778%; }
+.chart-wrap .chart-hit:nth-child(76) { left: 93.888889%; }
+.chart-wrap .chart-hit:nth-child(77) { left: 95.000000%; }
+.chart-wrap .chart-hit:nth-child(78) { left: 96.111111%; }
+.chart-wrap .chart-hit:nth-child(79) { left: 97.222222%; }
+.chart-wrap .chart-hit:nth-child(80) { left: 98.333333%; }
+.chart-wrap .chart-hit:hover .chart-tip {
+  opacity: 1;
+}
+/* Tracer dots: chart.py draws hidden circles inside the svg, one per data
+   series per hit zone, at that zone's nearest sample vertex. The zone's strip
+   sits after the svg, so only a :has() on the figure can reach back into the
+   svg; hovering a strip reveals its circles, so a dot snaps along each data
+   line under the cursor -- still no script. data-zone and nth-child share the
+   strip's real position among the figure's children (the svg is child 1, so
+   strips start at 2), which is also what positions the strips above. */
+.chart-wrap .tracer {
+  opacity: 0;
+  stroke-width: 1;
+}
+.chart-wrap .tracer.pool {
+  fill: var(--ms-green);
+  stroke: var(--ms-green);
+  /* Two stacked drop-shadows: a tight core plus a soft halo, so the dot
+     reads as glowing against the dark chart. */
+  filter: drop-shadow(0 0 1px var(--ms-green)) drop-shadow(0 0 3px var(--ms-green));
+}
+.chart-wrap .tracer.local {
+  fill: #22d3ee;
+  stroke: #22d3ee;
+  filter: drop-shadow(0 0 1px #22d3ee) drop-shadow(0 0 3px #22d3ee);
+}
+.chart-wrap .tracer.network {
+  fill: #8b5cf6;
+  stroke: #8b5cf6;
+  filter: drop-shadow(0 0 1px #8b5cf6) drop-shadow(0 0 3px #8b5cf6);
+}
+/* Found-block markers: green diamonds (5.6-unit squares rotated 45 degrees)
+   sitting on the pool line at each block's time. A darker stroke keeps the
+   solid marker distinct from the thin pool line under it; the same two
+   drop-shadows as the tracers give it the chart's glow. */
+.chart-wrap .cube {
+  fill: var(--ms-green);
+  stroke: #062a1f;
+  stroke-width: 0.75;
+  filter: drop-shadow(0 0 1px var(--ms-green)) drop-shadow(0 0 3px var(--ms-green));
+  /* Rotation lives on the presentation attribute (rotate(45 cx cy)), so the
+     rendered diamond equals the base size with no CSS transform. These
+     properties take over when supported: the square is centered on (cx, cy),
+     so its pre-transform bbox center is the diamond's center, and scale grows
+     the marker from there. --cube-scale defaults to 1 (resting size) and is
+     raised per hovered zone by the rules below; transition eases the growth.
+     Without the CSS transform the attribute still renders a correct diamond. */
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: rotate(45deg) scale(var(--cube-scale, 1));
+  transition: transform 120ms ease-out;
+  --cube-scale: 1;
+}
+/* Grow the found-block diamond when the tracer lands in a zone whose
+   strip overlaps it: same zone pairing as the tracer rules below, keyed
+   by the cube's own data-zone token list (chart.py tags each marker with
+   the zones within reach). One rule per zone, all static. */
+.chart-wrap figure:has(.chart-hit:nth-child(2):hover) .cube[data-zone~="2"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(3):hover) .cube[data-zone~="3"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(4):hover) .cube[data-zone~="4"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(5):hover) .cube[data-zone~="5"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(6):hover) .cube[data-zone~="6"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(7):hover) .cube[data-zone~="7"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(8):hover) .cube[data-zone~="8"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(9):hover) .cube[data-zone~="9"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(10):hover) .cube[data-zone~="10"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(11):hover) .cube[data-zone~="11"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(12):hover) .cube[data-zone~="12"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(13):hover) .cube[data-zone~="13"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(14):hover) .cube[data-zone~="14"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(15):hover) .cube[data-zone~="15"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(16):hover) .cube[data-zone~="16"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(17):hover) .cube[data-zone~="17"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(18):hover) .cube[data-zone~="18"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(19):hover) .cube[data-zone~="19"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(20):hover) .cube[data-zone~="20"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(21):hover) .cube[data-zone~="21"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(22):hover) .cube[data-zone~="22"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(23):hover) .cube[data-zone~="23"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(24):hover) .cube[data-zone~="24"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(25):hover) .cube[data-zone~="25"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(26):hover) .cube[data-zone~="26"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(27):hover) .cube[data-zone~="27"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(28):hover) .cube[data-zone~="28"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(29):hover) .cube[data-zone~="29"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(30):hover) .cube[data-zone~="30"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(31):hover) .cube[data-zone~="31"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(32):hover) .cube[data-zone~="32"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(33):hover) .cube[data-zone~="33"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(34):hover) .cube[data-zone~="34"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(35):hover) .cube[data-zone~="35"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(36):hover) .cube[data-zone~="36"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(37):hover) .cube[data-zone~="37"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(38):hover) .cube[data-zone~="38"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(39):hover) .cube[data-zone~="39"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(40):hover) .cube[data-zone~="40"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(41):hover) .cube[data-zone~="41"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(42):hover) .cube[data-zone~="42"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(43):hover) .cube[data-zone~="43"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(44):hover) .cube[data-zone~="44"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(45):hover) .cube[data-zone~="45"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(46):hover) .cube[data-zone~="46"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(47):hover) .cube[data-zone~="47"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(48):hover) .cube[data-zone~="48"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(49):hover) .cube[data-zone~="49"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(50):hover) .cube[data-zone~="50"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(51):hover) .cube[data-zone~="51"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(52):hover) .cube[data-zone~="52"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(53):hover) .cube[data-zone~="53"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(54):hover) .cube[data-zone~="54"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(55):hover) .cube[data-zone~="55"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(56):hover) .cube[data-zone~="56"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(57):hover) .cube[data-zone~="57"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(58):hover) .cube[data-zone~="58"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(59):hover) .cube[data-zone~="59"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(60):hover) .cube[data-zone~="60"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(61):hover) .cube[data-zone~="61"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(62):hover) .cube[data-zone~="62"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(63):hover) .cube[data-zone~="63"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(64):hover) .cube[data-zone~="64"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(65):hover) .cube[data-zone~="65"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(66):hover) .cube[data-zone~="66"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(67):hover) .cube[data-zone~="67"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(68):hover) .cube[data-zone~="68"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(69):hover) .cube[data-zone~="69"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(70):hover) .cube[data-zone~="70"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(71):hover) .cube[data-zone~="71"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(72):hover) .cube[data-zone~="72"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(73):hover) .cube[data-zone~="73"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(74):hover) .cube[data-zone~="74"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(75):hover) .cube[data-zone~="75"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(76):hover) .cube[data-zone~="76"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(77):hover) .cube[data-zone~="77"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(78):hover) .cube[data-zone~="78"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(79):hover) .cube[data-zone~="79"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(80):hover) .cube[data-zone~="80"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(81):hover) .cube[data-zone~="81"] { --cube-scale: 1.7; }
+.chart-wrap figure:has(.chart-hit:nth-child(2):hover) .tracer[data-zone="2"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(3):hover) .tracer[data-zone="3"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(4):hover) .tracer[data-zone="4"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(5):hover) .tracer[data-zone="5"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(6):hover) .tracer[data-zone="6"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(7):hover) .tracer[data-zone="7"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(8):hover) .tracer[data-zone="8"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(9):hover) .tracer[data-zone="9"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(10):hover) .tracer[data-zone="10"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(11):hover) .tracer[data-zone="11"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(12):hover) .tracer[data-zone="12"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(13):hover) .tracer[data-zone="13"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(14):hover) .tracer[data-zone="14"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(15):hover) .tracer[data-zone="15"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(16):hover) .tracer[data-zone="16"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(17):hover) .tracer[data-zone="17"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(18):hover) .tracer[data-zone="18"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(19):hover) .tracer[data-zone="19"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(20):hover) .tracer[data-zone="20"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(21):hover) .tracer[data-zone="21"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(22):hover) .tracer[data-zone="22"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(23):hover) .tracer[data-zone="23"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(24):hover) .tracer[data-zone="24"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(25):hover) .tracer[data-zone="25"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(26):hover) .tracer[data-zone="26"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(27):hover) .tracer[data-zone="27"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(28):hover) .tracer[data-zone="28"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(29):hover) .tracer[data-zone="29"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(30):hover) .tracer[data-zone="30"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(31):hover) .tracer[data-zone="31"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(32):hover) .tracer[data-zone="32"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(33):hover) .tracer[data-zone="33"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(34):hover) .tracer[data-zone="34"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(35):hover) .tracer[data-zone="35"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(36):hover) .tracer[data-zone="36"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(37):hover) .tracer[data-zone="37"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(38):hover) .tracer[data-zone="38"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(39):hover) .tracer[data-zone="39"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(40):hover) .tracer[data-zone="40"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(41):hover) .tracer[data-zone="41"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(42):hover) .tracer[data-zone="42"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(43):hover) .tracer[data-zone="43"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(44):hover) .tracer[data-zone="44"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(45):hover) .tracer[data-zone="45"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(46):hover) .tracer[data-zone="46"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(47):hover) .tracer[data-zone="47"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(48):hover) .tracer[data-zone="48"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(49):hover) .tracer[data-zone="49"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(50):hover) .tracer[data-zone="50"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(51):hover) .tracer[data-zone="51"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(52):hover) .tracer[data-zone="52"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(53):hover) .tracer[data-zone="53"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(54):hover) .tracer[data-zone="54"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(55):hover) .tracer[data-zone="55"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(56):hover) .tracer[data-zone="56"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(57):hover) .tracer[data-zone="57"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(58):hover) .tracer[data-zone="58"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(59):hover) .tracer[data-zone="59"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(60):hover) .tracer[data-zone="60"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(61):hover) .tracer[data-zone="61"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(62):hover) .tracer[data-zone="62"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(63):hover) .tracer[data-zone="63"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(64):hover) .tracer[data-zone="64"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(65):hover) .tracer[data-zone="65"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(66):hover) .tracer[data-zone="66"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(67):hover) .tracer[data-zone="67"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(68):hover) .tracer[data-zone="68"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(69):hover) .tracer[data-zone="69"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(70):hover) .tracer[data-zone="70"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(71):hover) .tracer[data-zone="71"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(72):hover) .tracer[data-zone="72"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(73):hover) .tracer[data-zone="73"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(74):hover) .tracer[data-zone="74"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(75):hover) .tracer[data-zone="75"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(76):hover) .tracer[data-zone="76"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(77):hover) .tracer[data-zone="77"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(78):hover) .tracer[data-zone="78"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(79):hover) .tracer[data-zone="79"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(80):hover) .tracer[data-zone="80"] { opacity: 1; }
+.chart-wrap figure:has(.chart-hit:nth-child(81):hover) .tracer[data-zone="81"] { opacity: 1; }
+/* WASM chart (p2poolv2_web/src/chart.rs) emits a bare .chart-tip (not inside
+   .chart-hit). Pin it to the same fixed upper-right spot; !important beats any
+   JS-set inline left so it does not follow the cursor either. The at-left /
+   at-right classes are kept for the style_guard selector check but neutralized
+   here so they cannot move the box. */
+.chart-tip.at-left {
+  top: auto !important;
+  bottom: calc(100% - 5px) !important;
+  left: auto !important;
+  right: 8px !important;
+}
+.chart-tip.at-right {
+  top: auto !important;
+  bottom: calc(100% - 5px) !important;
+  left: auto !important;
+  right: 8px !important;
+}
+.chart-wrap > .chart-tip {
+  top: auto !important;
+  bottom: calc(100% - 5px) !important;
+  right: 8px !important;
+  left: auto !important;
+}
+
 
 /* The landing page in website/. It loads these same stylesheets, so it
    wears the dashboard's colours, font and logo; the rules below cover only

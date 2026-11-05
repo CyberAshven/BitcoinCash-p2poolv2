@@ -8,9 +8,10 @@ use crate::accounting::payout::payout_tree::PayoutTree;
 use crate::shares::share_block::ShareTransaction;
 use crate::shares::share_commitment::ShareCommitment;
 use bitcoin::BlockHash;
+use bitcoin::pow::CompactTarget;
 use dashmap::DashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use tracing::debug;
 pub mod parse_coinbase;
 
@@ -80,6 +81,19 @@ pub struct JobTracker {
     /// making linear scan faster than hash lookups with far less memory overhead.
     job_shares: DashMap<JobId, Vec<BlockHash>>,
     latest_job_id: AtomicU64,
+    /// `bits` of the newest block template seen. Kept beside the jobs rather
+    /// than read off the newest job id: jobs are inserted per miner notify
+    /// and expire after [`MAX_JOB_AGE_SECS`], so a tracker without recent
+    /// miners would otherwise lose the network difficulty even while
+    /// templates keep arriving. Read on every `/hashrate` and `/metrics`
+    /// request, hence a lock the readers share.
+    latest_network_bits: RwLock<Option<CompactTarget>>,
+    /// The share target the newest prepared notify asks miners to meet
+    /// (`PoolDifficulty::calculate_target_clamped`, refreshed on every
+    /// notify build). Kept like `latest_network_bits` rather than derived
+    /// from jobs so the current pool difficulty survives job expiry and
+    /// reads the same live feed. `None` until the first notify is built.
+    pool_target: RwLock<Option<CompactTarget>>,
     /// Ids for jobs miners declare, apart from `latest_job_id`.
     declared_job_id: AtomicU64,
 }
@@ -95,6 +109,8 @@ impl JobTracker {
             job_details: DashMap::new(),
             job_shares: DashMap::new(),
             latest_job_id: AtomicU64::new(timestamp),
+            latest_network_bits: RwLock::new(None),
+            pool_target: RwLock::new(None),
             declared_job_id: AtomicU64::new(DECLARED_JOB_ID_BASE),
         }
     }
@@ -164,16 +180,60 @@ impl JobTracker {
         self.job_details.get(&job_id).map(|r| r.clone())
     }
 
-    /// Current bitcoin network difficulty derived from the latest job's
-    /// block template `bits`. Returns None when there is no job yet or the
-    /// `bits` field cannot be parsed. Uses the mainnet-relative difficulty
+    /// Record the newest block template's `bits`.
+    ///
+    /// Called for every template this node prepares, so the network
+    /// difficulty tracks the template feed even when no miner is connected
+    /// to receive a job and the job map has been cleaned out. Inserting a
+    /// job does not call it: a job a miner declares over SV2 carries the
+    /// miner's `bits`, which can be a block behind the node's newest
+    /// template, and must not replace them.
+    pub fn set_network_bits(&self, bits: CompactTarget) {
+        let mut slot = self
+            .latest_network_bits
+            .write()
+            .expect("network bits lock poisoned");
+        *slot = Some(bits);
+    }
+
+    /// Record the share target of the newest prepared notify.
+    ///
+    /// Called once per notify build with the ASERT-clamped target miners
+    /// must meet, so the current pool difficulty is readable while no
+    /// miner is connected and after the job map has been cleaned out.
+    pub fn set_pool_target(&self, target: CompactTarget) {
+        let mut slot = self.pool_target.write().expect("pool target lock poisoned");
+        *slot = Some(target);
+    }
+
+    /// Current pool share difficulty in the share chain's units, from the
+    /// newest prepared notify's target ([`Self::set_pool_target`]). Returns
+    /// None until the first notify is built. Uses `difficulty_float`, the
+    /// same mainnet-relative conversion as
+    /// [`Self::get_network_difficulty`], so both gauges share units.
+    pub fn get_pool_difficulty(&self) -> Option<f64> {
+        let target_bits = *self.pool_target.read().expect("pool target lock poisoned");
+        let target = bitcoin::Target::from_compact(target_bits?);
+        Some(target.difficulty_float())
+    }
+
+    /// Current bitcoin network difficulty derived from the newest block
+    /// template's `bits` ([`Self::set_network_bits`], refreshed on every
+    /// prepared template). Returns None until the first
+    /// template arrives. Uses the mainnet-relative difficulty
     /// (`difficulty_float`) so it shares units with the pool's truediffone
     /// share difficulties. This lets Grafana divide work by this value.
+    ///
+    /// Independent of the job map: jobs are per-miner and expire after
+    /// [`MAX_JOB_AGE_SECS`], while the template feed is what sets the
+    /// network difficulty.
     pub fn get_network_difficulty(&self) -> Option<f64> {
-        let job = self.get_job(self.get_latest_job_id())?;
-        let compact_target =
-            bitcoin::pow::CompactTarget::from_unprefixed_hex(&job.blocktemplate.bits).ok()?;
-        Some(bitcoin::Target::from_compact(compact_target).difficulty_float())
+        let bits = *self
+            .latest_network_bits
+            .read()
+            .expect("network bits lock poisoned");
+        let target = bitcoin::Target::from_compact(bits?);
+        Some(target.difficulty_float())
     }
 
     /// Remove job details that are older than the specified duration in seconds
@@ -302,18 +362,65 @@ mod tests {
     async fn test_get_network_difficulty() {
         let tracker = start_tracker_actor();
 
-        // No job inserted yet -> no difficulty available
+        // No template prepared yet -> no difficulty available
         assert!(tracker.get_network_difficulty().is_none());
 
         let template_str = include_str!(
             "../../../../../p2poolv2_tests/test_data/gbt/signet/gbt-no-transactions.json"
         );
         let template: BlockTemplate = serde_json::from_str(template_str).unwrap();
-        let expected = bitcoin::Target::from_compact(
-            bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap(),
-        )
-        .difficulty_float();
+        let bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap();
+        let expected = bitcoin::Target::from_compact(bits).difficulty_float();
 
+        tracker.set_network_bits(bits);
+
+        let difficulty = tracker.get_network_difficulty().unwrap();
+        assert_eq!(difficulty, expected);
+        assert!(difficulty > 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_declared_job_does_not_move_the_network_difficulty() {
+        let tracker = start_tracker_actor();
+
+        let template_str = include_str!(
+            "../../../../../p2poolv2_tests/test_data/gbt/signet/gbt-no-transactions.json"
+        );
+        let template: BlockTemplate = serde_json::from_str(template_str).unwrap();
+        let own_bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap();
+        tracker.set_network_bits(own_bits);
+        let expected = bitcoin::Target::from_compact(own_bits).difficulty_float();
+
+        // A miner declares a job on the block before, with other bits.
+        let mut declared_template = template.clone();
+        declared_template.bits = format!("{:08x}", own_bits.to_consensus() + 1);
+        let declared_id = tracker.get_next_declared_job_id();
+        tracker.insert_job(
+            Arc::new(declared_template),
+            "cb1".to_string(),
+            "cb2".to_string(),
+            Some(create_test_commitment()),
+            TEST_COINBASE_NSECS,
+            vec![],
+            declared_id,
+        );
+
+        assert!(tracker.get_job(declared_id).is_some());
+        assert_eq!(tracker.get_network_difficulty(), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn network_difficulty_survives_job_cleanup() {
+        let tracker = start_tracker_actor();
+
+        let template_str = include_str!(
+            "../../../../../p2poolv2_tests/test_data/gbt/signet/gbt-no-transactions.json"
+        );
+        let template: BlockTemplate = serde_json::from_str(template_str).unwrap();
+        let bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).unwrap();
+        let expected = bitcoin::Target::from_compact(bits).difficulty_float();
+
+        tracker.set_network_bits(bits);
         let job_id = tracker.get_next_job_id();
         tracker.insert_job(
             Arc::new(template),
@@ -325,9 +432,51 @@ mod tests {
             job_id,
         );
 
-        let difficulty = tracker.get_network_difficulty().unwrap();
-        assert_eq!(difficulty, expected);
-        assert!(difficulty > 0.0);
+        assert_eq!(tracker.cleanup_old_jobs(0), 1);
+        assert!(
+            tracker.get_job(job_id).is_none(),
+            "the job map must actually be empty"
+        );
+        assert_eq!(tracker.get_network_difficulty(), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn network_difficulty_follows_the_newest_template_bits() {
+        let tracker = start_tracker_actor();
+
+        let old_bits = CompactTarget::from_consensus(0x1b4188f5);
+        let new_bits = CompactTarget::from_consensus(0x1b4188f6);
+        let old_difficulty = bitcoin::Target::from_compact(old_bits).difficulty_float();
+        let new_difficulty = bitcoin::Target::from_compact(new_bits).difficulty_float();
+
+        tracker.set_network_bits(old_bits);
+        assert_eq!(tracker.get_network_difficulty(), Some(old_difficulty));
+
+        tracker.set_network_bits(new_bits);
+        assert_eq!(tracker.get_network_difficulty(), Some(new_difficulty));
+    }
+
+    #[tokio::test]
+    async fn pool_difficulty_is_none_before_the_first_notify() {
+        let tracker = start_tracker_actor();
+
+        assert!(tracker.get_pool_difficulty().is_none());
+    }
+
+    #[tokio::test]
+    async fn pool_difficulty_follows_the_newest_notify_target() {
+        let tracker = start_tracker_actor();
+
+        let old_target = CompactTarget::from_consensus(0x1a4188f5);
+        let new_target = CompactTarget::from_consensus(0x1a4188f6);
+        let old_difficulty = bitcoin::Target::from_compact(old_target).difficulty_float();
+        let new_difficulty = bitcoin::Target::from_compact(new_target).difficulty_float();
+
+        tracker.set_pool_target(old_target);
+        assert_eq!(tracker.get_pool_difficulty(), Some(old_difficulty));
+
+        tracker.set_pool_target(new_target);
+        assert_eq!(tracker.get_pool_difficulty(), Some(new_difficulty));
     }
 
     #[tokio::test]

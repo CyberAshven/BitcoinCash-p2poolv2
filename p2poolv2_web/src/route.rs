@@ -15,8 +15,13 @@ use crate::format::{url_component, url_decode};
 /// A page of the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
-    /// The overview, at a page of its recent shares.
+    /// The overview. `page` is carried for old links; the overview always
+    /// shows the newest recent shares.
     Dashboard {
+        page: usize,
+    },
+    /// The shares page: the whole confirmed share chain, paged.
+    Shares {
         page: usize,
     },
     Blocks {
@@ -127,6 +132,9 @@ impl Route {
         let path = path.trim_start_matches('/').trim_end_matches('/');
         let (head, rest) = path.split_once('/').unwrap_or((path, ""));
         match (head, rest) {
+            ("shares", _) => Route::Shares {
+                page: page_of(query),
+            },
             ("blocks", _) => Route::Blocks {
                 page: page_of(query),
             },
@@ -152,6 +160,7 @@ impl Route {
     pub fn href(&self) -> String {
         match self {
             Route::Dashboard { page } => format!("#/{}", page_suffix('?', *page)),
+            Route::Shares { page } => format!("#/shares{}", page_suffix('?', *page)),
             Route::Blocks { page } => format!("#/blocks{}", page_suffix('?', *page)),
             Route::Block(hash) => format!("#/block/{}", url_component(hash)),
             Route::Miners { page } => format!("#/miners{}", page_suffix('?', *page)),
@@ -208,6 +217,15 @@ mod tests {
         assert_eq!(Route::parse("#/?page=3"), Route::Dashboard { page: 3 });
         assert_eq!(Route::parse("#/miners?page=0"), Route::Miners { page: 1 });
         assert_eq!(Route::parse("#/blocks?page=x"), Route::Blocks { page: 1 });
+    }
+
+    #[test]
+    fn test_the_shares_route_round_trips_its_page() {
+        assert_eq!(Route::parse("#/shares"), Route::Shares { page: 1 });
+        assert_eq!(Route::parse("#/shares?page=4"), Route::Shares { page: 4 });
+        assert_eq!(Route::Shares { page: 1 }.href(), "#/shares");
+        assert_eq!(Route::Shares { page: 4 }.href(), "#/shares?page=4");
+        assert_eq!(Route::parse("#/shares?page=4"), Route::Shares { page: 4 });
     }
 
     #[test]

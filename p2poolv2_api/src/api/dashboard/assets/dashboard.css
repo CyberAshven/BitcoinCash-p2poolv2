@@ -959,6 +959,7 @@ dialog > article code {
     row-gap: 0.3rem;
     margin-left: auto;
   }
+  /* The Admin link hides beside the search field on a narrow screen. */
   header .header-right li:nth-child(2) {
     display: none;
   }
