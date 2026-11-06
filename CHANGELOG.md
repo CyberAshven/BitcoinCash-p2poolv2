@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Share-chain rule change on Bitcoin Cash, a flag day with its own protocol
+segment (`genesis-last-resort`): the genesis share is paid only when no
+other share or uncle in the PPLNS window is. Genesis pays a NUMS key that no
+one can spend, and it counted in the window like mined work, so every block
+found while it was in the window gave it a part, and all of it when the
+window's real work was off the paying block's chain. On chipnet that address
+holds 46.7 tBCH, from the first hours of each share chain since October. It
+is still paid when nothing else is, so the share built right on genesis and
+a window with no work on the paying chain keep a payee rather than the share
+being refused. A node on the old rule builds another coinbase while genesis is in
+the window, so the two do not peer, and existing share chains start again on
+a fresh store. Bitcoin is unchanged.
+
 A node taking templates from a Stratum V2 Template Provider
 (`template_source = "sv2"`) withdraws mining work once no provider
 connection has published a template for 60 seconds, as the
