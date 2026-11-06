@@ -45,7 +45,7 @@ use crate::config::{BitcoinCashNetwork, TemplateProvider};
 use crate::stratum::block_submit::submit_block;
 use crate::stratum::work::block_template::{BlockTemplate, TemplateTransaction};
 use crate::stratum::work::error::WorkError;
-use crate::stratum::work::gbt::build_merkle_branches_for_template;
+use crate::stratum::work::gbt::{LOST_CONTACT_AFTER, build_merkle_branches_for_template};
 use crate::stratum::work::notify::{NotifyCmd, NotifySender};
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use binary_sv2::{B064K, Deserialize};
@@ -74,7 +74,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep, sleep_until, timeout};
 use tracing::{debug, error, info, warn};
 
 /// Template Distribution Protocol version this client speaks.
@@ -672,10 +672,12 @@ enum ConnectionEnd {
 /// the notifier, in place of `start_gbt`.
 ///
 /// The task keeps reconnecting while the node runs, waiting longer after
-/// each failed connection up to [`MAX_RECONNECT_DELAY`]; miners keep the
-/// last template meanwhile, as they do when `getblocktemplate` fails. It
-/// ends when the notifier's receiver is dropped. `bitcoin_config` is the
-/// node templates are checked against and blocks fall back to.
+/// each failed connection up to [`MAX_RECONNECT_DELAY`]. Miners keep the
+/// last template meanwhile, until no connection has published a template
+/// for [`LOST_CONTACT_AFTER`]: then mining work is withdrawn, as it is when
+/// `getblocktemplate` fails that long, and the next template brings it
+/// back. It ends when the notifier's receiver is dropped. `bitcoin_config`
+/// is the node templates are checked against and blocks fall back to.
 pub async fn start_template_provider(
     provider: TemplateProvider,
     bitcoin_config: BitcoinRpcConfig,
@@ -699,7 +701,7 @@ pub async fn start_template_provider(
         }
     );
     tokio::spawn(async move {
-        keep_connected(&provider, &bitcoind, &notify_tx).await;
+        keep_connected(&provider, &bitcoind, &notify_tx, LOST_CONTACT_AFTER).await;
     });
     Ok(())
 }
@@ -709,20 +711,32 @@ pub async fn start_template_provider(
 /// A `Reconnect` sends the next connection to the address it names, after
 /// [`RECONNECT_DELAY`]; any other end of a connection returns to the
 /// configured provider, which may redirect again.
+///
+/// Once `lost_contact_after` has passed since the last connection that
+/// published a template ended, with no connection publishing since, mining
+/// work is withdrawn ([`NotifyCmd::Withdraw`]), once. A provider sends
+/// templates only when they change, so an open connection keeps the work
+/// however quiet it is.
 async fn keep_connected(
     provider: &TemplateProvider,
     bitcoind: &BitcoindRpcClient,
     notify_tx: &NotifySender,
+    lost_contact_after: Duration,
 ) {
     let mut target = provider.clone();
     let mut delay = RECONNECT_DELAY;
-    let mut running = true;
-    while running {
+    let mut lost_since: Option<Instant> = None;
+    let mut withdrawn = false;
+    loop {
         let (end, published) = serve_provider(&target, bitcoind, notify_tx).await;
-        match end {
+        if published {
+            lost_since = None;
+            withdrawn = false;
+        }
+        let pause = match end {
             ConnectionEnd::NotifierClosed => {
                 info!("Notifier closed, stopping the Template Provider client");
-                running = false;
+                return;
             }
             ConnectionEnd::Redirected(next) => {
                 info!(
@@ -731,7 +745,7 @@ async fn keep_connected(
                 );
                 target = next;
                 delay = RECONNECT_DELAY;
-                sleep(RECONNECT_DELAY).await;
+                RECONNECT_DELAY
             }
             ConnectionEnd::Failed(reason) => {
                 if published {
@@ -744,10 +758,26 @@ async fn keep_connected(
                     delay.as_secs()
                 );
                 target = provider.clone();
-                sleep(delay).await;
+                let pause = delay;
                 delay = (delay * 2).min(MAX_RECONNECT_DELAY);
+                pause
             }
+        };
+        let withdraw_at = *lost_since.get_or_insert_with(Instant::now) + lost_contact_after;
+        let reconnect_at = Instant::now() + pause;
+        if !withdrawn && withdraw_at <= reconnect_at {
+            sleep_until(withdraw_at).await;
+            warn!(
+                "No Template Provider connection has published a template for {} seconds; withdrawing mining work",
+                lost_contact_after.as_secs()
+            );
+            if notify_tx.send(NotifyCmd::Withdraw).await.is_err() {
+                info!("Notifier closed, stopping the Template Provider client");
+                return;
+            }
+            withdrawn = true;
         }
+        sleep_until(reconnect_at).await;
     }
 }
 

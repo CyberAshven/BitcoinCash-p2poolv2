@@ -20,6 +20,20 @@ being refused. A node on the old rule builds another coinbase while genesis is i
 the window, so the two do not peer, and existing share chains start again on
 a fresh store. Bitcoin is unchanged.
 
+A node taking templates from a Stratum V2 Template Provider
+(`template_source = "sv2"`) withdraws mining work once no provider
+connection has published a template for 60 seconds, as the
+`getblocktemplate` sources do since the previous change. Until now its
+miners kept the last template however long the provider was gone, while
+the client reconnected with growing delays. The minute counts from the
+end of the last connection that published a template, and the
+withdrawal comes at that minute, not at the end of a backoff sleep. A
+provider sends templates only when they change, so an open connection
+keeps the work however quiet it is. The next template brings the work
+back. The notifier's log line now says `Withdrawing mining work: no
+template for 60 seconds`, whichever source stopped. No share-chain rule
+changes.
+
 Sorting transactions into canonical order (CTOR) hashes each transaction
 once. The sort computed each transaction's id inside every comparison, so a
 Job Declaration of 67,535 transactions hashed about two million times
