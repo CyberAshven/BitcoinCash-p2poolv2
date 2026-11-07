@@ -21,8 +21,14 @@ BCHD's `mainnet` and `chipnet` now pass too, in any case. BCHD has no ZMQ,
 so it is used with `node_p2p_address`; the quickstart has a BCHD section.
 BCHD refuses a payout-tree transaction already in its mempool, which BCHN
 accepts again; the executor now reads that refusal as accepted rather than
-warning about it on every new block. Log lines and two metric descriptions that said BCHN for whichever node
-`[bitcoinrpc]` names now say the node. No share-chain rule changes.
+warning about it on every new block. Log lines and two metric descriptions
+that said BCHN for whichever node `[bitcoinrpc]` names now say the node. No
+share-chain rule changes.
+
+The release's Apple Silicon macOS build runs on GitHub's `macos-15`
+runner (`dist-workspace.toml`). dist 0.32.0 picks `macos-14`, which GitHub
+retired on 2026-11-02: the job was cancelled before it started, and the
+release kept its previous Linux and macOS files. No code changes.
 
 A node taking templates from a Stratum V2 Template Provider
 (`template_source = "sv2"`) withdraws mining work once no provider
