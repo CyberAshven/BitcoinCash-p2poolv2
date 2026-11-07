@@ -28,7 +28,11 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 ///
 /// - 1 (2026-10-30): chain work counts the work of each uncle a share
 ///   names. Stores written before this have no version.
-pub const STORE_FORMAT_VERSION: u32 = 1;
+/// - 2 (2026-11-05): Bitcoin Cash pays the genesis share only as the last
+///   resort (`BCH_GENESIS_LAST_RESORT_RULE_TAG`). A chain's first hours
+///   were validated under the old rule, so a node could not sync them from
+///   peers under the new one; the chain starts again.
+pub const STORE_FORMAT_VERSION: u32 = 2;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -538,8 +542,9 @@ impl Store {
         };
         Err(StoreError::OutdatedStore(format!(
             "the share-chain store at {} has {found}, and this node writes format \
-             {STORE_FORMAT_VERSION}, where chain work counts uncle work. Delete the store \
-             directory and restart to resync the share chain from peers.",
+             {STORE_FORMAT_VERSION}, where chain work counts uncle work and Bitcoin Cash pays \
+             the genesis share only as the last resort. Delete the store directory and restart \
+             to resync the share chain from peers.",
             self.path
         )))
     }
@@ -835,6 +840,29 @@ mod tests {
             .unwrap_err();
         let expected = format!("has format {}", STORE_FORMAT_VERSION + 1);
         assert!(error.to_string().contains(&expected), "{error}");
+    }
+
+    /// A store from before the genesis last-resort rule, format 1, is
+    /// refused: its chain's first hours were validated under the old rule.
+    #[test]
+    fn test_store_from_before_genesis_last_resort_is_refused() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        store
+            .db
+            .put_cf(&metadata_cf, STORE_FORMAT_KEY, 1u32.to_le_bytes())
+            .unwrap();
+
+        let error = store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap_err();
+        assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
+        assert!(error.to_string().contains("has format 1"), "{error}");
     }
 
     #[test_log::test]

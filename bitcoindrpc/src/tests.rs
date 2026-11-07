@@ -116,7 +116,7 @@ async fn test_getblockchaininfo() {
     assert_eq!(
         info,
         GetBlockchainInfo {
-            initial_block_download: true,
+            initial_block_download: Some(true),
             chain: None,
             blocks: None,
         }
@@ -275,7 +275,7 @@ async fn bch_template_request_has_no_segwit_rule() {
     Mock::given(method("POST"))
         .and(body_json(serde_json::json!({
             "method": "getblocktemplate",
-            "params": [{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}],
+            "params": [{"capabilities": ["coinbasevalue", "coinbase/append", "workid"]}],
             "id": 0,
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

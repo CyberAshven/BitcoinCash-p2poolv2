@@ -393,7 +393,7 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
 
     if let Some(network_difficulty) = state.tracker_handle.get_network_difficulty() {
         exposition.push_str(
-            "# HELP network_difficulty Current difficulty of the chain being mined (BCHN's on Bitcoin Cash)\n",
+            "# HELP network_difficulty Current difficulty of the chain being mined, from the node\n",
         );
         exposition.push_str("# TYPE network_difficulty gauge\n");
         exposition.push_str(&format!("network_difficulty {network_difficulty}\n"));

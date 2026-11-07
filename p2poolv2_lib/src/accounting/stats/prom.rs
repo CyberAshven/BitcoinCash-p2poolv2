@@ -83,7 +83,7 @@ impl PoolMetrics {
             320 + 96 * (self.found_block_submissions.len() + self.found_block_submit_retries.len()),
         );
         output.push_str(
-            "# HELP found_block_submissions_total Found blocks sent to a BCHN node, by node and outcome\n",
+            "# HELP found_block_submissions_total Found blocks sent to a Bitcoin Cash node, by node and outcome\n",
         );
         output.push_str("# TYPE found_block_submissions_total counter\n");
         for ((node, outcome), count) in &self.found_block_submissions {
@@ -93,7 +93,7 @@ impl PoolMetrics {
         }
         output.push('\n');
         output.push_str(
-            "# HELP found_block_submit_retries_total Times a found block was sent again to a BCHN node after a connection error, time-out or busy node\n",
+            "# HELP found_block_submit_retries_total Times a found block was sent again to a Bitcoin Cash node after a connection error, time-out or busy node\n",
         );
         output.push_str("# TYPE found_block_submit_retries_total counter\n");
         for (node, retries) in &self.found_block_submit_retries {

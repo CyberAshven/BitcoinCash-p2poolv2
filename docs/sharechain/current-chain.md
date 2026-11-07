@@ -112,6 +112,15 @@ for any payout it cannot build, and tries again with the next template. Only
 the share chain's first share, built from the network's first block, builds
 on the all-zero hash; any other share that does is invalid.
 
+That first share, genesis, mines nothing and pays a NUMS key no one can
+spend. Since 2026-11-05 (`genesis-last-resort`, a flag day of its own) a
+window pays it only when it pays no other share or uncle: the payout of the
+share built right on it, and of a window with no other work on the paying
+chain.
+Before, genesis took its weight beside mined work, and the whole payout when
+that work was off the paying chain, which on chipnet sent 46.7 tBCH to its
+key.
+
 ## Why not reject stale work instead
 
 Tying share validity to the local node's tip fails: nodes see new blocks at

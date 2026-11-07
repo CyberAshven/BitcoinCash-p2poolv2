@@ -121,13 +121,9 @@ impl TreeExecutionNode for BitcoindRpcClient {
     }
 
     async fn in_initial_block_download(&self) -> Result<bool, String> {
-        let info: serde_json::Value = self
-            .request("getblockchaininfo", Vec::new())
+        BitcoindRpcClient::in_initial_block_download(self)
             .await
-            .map_err(|error| error.to_string())?;
-        info.get("initialblockdownload")
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| "getblockchaininfo has no initialblockdownload".to_string())
+            .map_err(|error| error.to_string())
     }
 
     async fn block_confirmations(&self, blockhash: BlockHash) -> Result<Option<i64>, String> {
@@ -188,6 +184,9 @@ fn classify_rejection(code: i32, message: &str) -> BroadcastOutcome {
         RPC_VERIFY_ALREADY_IN_CHAIN => BroadcastOutcome::InChain,
         RPC_TRANSACTION_ERROR => BroadcastOutcome::MissingInputs,
         _ if missing_inputs => BroadcastOutcome::MissingInputs,
+        // BCHD refuses a transaction already in its mempool; BCHN accepts it
+        // again.
+        _ if message.contains("txn-already-in-mempool") => BroadcastOutcome::Accepted,
         _ => BroadcastOutcome::Rejected(format!("RPC error {code}: {message}")),
     }
 }
@@ -249,7 +248,7 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
         let tip = match self.node.best_block_hash().await {
             Ok(tip) => tip,
             Err(error) => {
-                debug!("Payout tree executor cannot read BCHN's tip: {error}");
+                debug!("Payout tree executor cannot read the node's tip: {error}");
                 return;
             }
         };
@@ -358,7 +357,7 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
                             descendants_confirmed = false;
                         }
                         warn!(
-                            "BCHN refused payout tree transaction {} of coinbase {}: {reason}",
+                            "The node refused payout tree transaction {} of coinbase {}: {reason}",
                             transaction.compute_txid(),
                             stored.coinbase_txid
                         );

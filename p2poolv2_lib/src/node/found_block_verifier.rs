@@ -146,7 +146,7 @@ impl FoundBlockVerifier {
                     .await
                 {
                     Ok(true) => {
-                        info!("BCHN confirmed pool block {block_hash} in its chain");
+                        info!("The node confirmed pool block {block_hash} in its chain");
                         let historical = self.historical_candidates.remove(&block_hash);
                         if !historical && self.store.is_current() {
                             let _ = self.metrics.reset_block_effort().await;
@@ -154,7 +154,9 @@ impl FoundBlockVerifier {
                     }
                     Ok(false) => {}
                     Err(error) => {
-                        warn!("Cannot record BCHN acceptance of pool block {block_hash}: {error}")
+                        warn!(
+                            "Cannot record the node's acceptance of pool block {block_hash}: {error}"
+                        )
                     }
                 }
             }
@@ -173,13 +175,13 @@ impl FoundBlockVerifier {
                     );
                     self.settled.insert(block_hash);
                 } else {
-                    debug!("Candidate pool block {block_hash} is not in BCHN's chain");
+                    debug!("Candidate pool block {block_hash} is not in the node's chain");
                 }
             }
             Ok(Err(error)) => {
-                debug!("BCHN cannot confirm candidate pool block {block_hash} yet: {error}");
+                debug!("The node cannot confirm candidate pool block {block_hash} yet: {error}");
             }
-            Err(_) => warn!("BCHN timed out checking candidate pool block {block_hash}"),
+            Err(_) => warn!("The node timed out checking candidate pool block {block_hash}"),
         }
     }
 }

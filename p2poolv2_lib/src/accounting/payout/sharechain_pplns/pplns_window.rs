@@ -419,6 +419,13 @@ pub const BCH_WORK_WEIGHT_RULE_TAG: &str = "weight-work";
 /// cuts off the whole coinbase builds another coinbase for every share.
 pub const BCH_PER_SHARE_CUTS_RULE_TAG: &str = "cuts-per-share";
 
+/// Protocol tag segment for paying the genesis share on Bitcoin Cash only as
+/// the last resort (`ResolvedWindow::pays`): nothing while any other share
+/// or uncle in the window is paid. A node paying genesis beside mined work
+/// builds another coinbase whenever genesis is in the window, from a new
+/// chain's second share until genesis leaves it.
+pub const BCH_GENESIS_LAST_RESORT_RULE_TAG: &str = "genesis-last-resort";
+
 /// What a share's base weight, before `DIFFICULTY_SCALE` and the uncle
 /// split, counts.
 ///
@@ -542,11 +549,22 @@ impl ResolvedWindow {
     }
 
     /// Whether this window pays work building on `bch_prev`. Every share is
-    /// paid without the Bitcoin Cash chain rule, and so is the chain's first
-    /// share, the only one building on the all-zero hash.
+    /// paid without the Bitcoin Cash chain rule.
+    ///
+    /// The genesis share, the only one building on the all-zero hash, is the
+    /// payee of last resort (`BCH_GENESIS_LAST_RESORT_RULE_TAG`): paid only
+    /// when no other share or uncle in the window is. Its key is a NUMS key
+    /// no one can spend, so any weight it takes beside mined work is lost.
+    /// It is still paid when nothing else is, so the share built right on
+    /// genesis and a window whose work is all off the paying chain keep a
+    /// payee.
     fn pays(&self, bch_prev: &BlockHash) -> bool {
         self.paid_bch_prevs.as_ref().is_none_or(|paid_bch_prevs| {
-            *bch_prev == BlockHash::all_zeros() || paid_bch_prevs.paid.contains(bch_prev)
+            if *bch_prev == BlockHash::all_zeros() {
+                paid_bch_prevs.paid.is_empty()
+            } else {
+                paid_bch_prevs.paid.contains(bch_prev)
+            }
         })
     }
 
@@ -5663,9 +5681,10 @@ mod tests {
         ]
     }
 
-    /// A block on c3 pays the shares on c3, on n4 after it, on the sibling
-    /// s2 and the chain's first share on the all-zero hash, but not the
-    /// share on f3, two blocks off the chain. The window credits agree.
+    /// A block on c3 pays the shares on c3, on n4 after it and on the
+    /// sibling s2, but not the share on f3, two blocks off the chain, nor
+    /// genesis on the all-zero hash beside them (its payee is a NUMS key).
+    /// The window credits agree.
     #[test]
     fn test_bch_window_pays_only_work_on_the_paying_chain_or_one_block_off() {
         let tree = bch_tree();
@@ -5683,19 +5702,74 @@ mod tests {
             .unwrap();
 
         let paid = |index: usize| distribution.contains_key(&headers[index].miner_bitcoin_address);
-        assert!(paid(0) && paid(1) && paid(3) && paid(4));
-        assert!(!paid(2));
+        assert!(paid(0) && paid(1) && paid(3));
+        assert!(!paid(2) && !paid(4));
         assert_eq!(
             distribution[&headers[0].miner_bitcoin_address],
             window.base_weight(&headers[0]) * DIFFICULTY_SCALE
         );
         assert_eq!(credits.window_share_count, 5);
-        assert_eq!(credits.by_payout_address.len(), 4);
+        assert_eq!(credits.by_payout_address.len(), 3);
         assert!(
             !credits
                 .by_payout_address
                 .contains_key(&headers[2].miner_bitcoin_address)
         );
+        assert!(
+            !credits
+                .by_payout_address
+                .contains_key(&headers[4].miner_bitcoin_address)
+        );
+    }
+
+    /// Genesis, the share on the all-zero hash, is the payee of last resort:
+    /// alone in the window it takes the whole payout, and beside work that is
+    /// all off the paying chain it takes it too, rather than the block paying
+    /// no one. The window credits agree.
+    #[test]
+    fn test_bch_window_pays_genesis_only_when_nothing_else_is_paid() {
+        let tree = bch_tree();
+        let store = store_knowing(tree.values().copied());
+        let paying_block = PayingBlock::new(1, tree["c3"].block_hash());
+
+        let alone = vec![share_on(BlockHash::all_zeros(), PUBKEY_5G, vec![])];
+        let mut window = current_chain_window(5);
+        cache_shares(&mut window, &alone);
+        let distribution = window
+            .get_distribution_from_start_hash(alone[0].block_hash(), paying_block, &store)
+            .unwrap();
+        assert_eq!(distribution.len(), 1);
+        assert!(distribution.contains_key(&alone[0].miner_bitcoin_address));
+
+        let beside_off_chain_work = vec![
+            share_on(tree["f3"].block_hash(), PUBKEY_3G, vec![]),
+            share_on(BlockHash::all_zeros(), PUBKEY_5G, vec![]),
+        ];
+        let mut window = current_chain_window(5);
+        cache_shares(&mut window, &beside_off_chain_work);
+        let distribution = window
+            .get_distribution_from_start_hash(
+                beside_off_chain_work[0].block_hash(),
+                paying_block,
+                &store,
+            )
+            .unwrap();
+        let credits = window
+            .get_window_credits_from_start_hash(
+                beside_off_chain_work[0].block_hash(),
+                paying_block,
+                &store,
+                10,
+            )
+            .unwrap();
+        let genesis_payee = &beside_off_chain_work[1].miner_bitcoin_address;
+        assert_eq!(distribution.len(), 1);
+        assert_eq!(
+            distribution[genesis_payee],
+            window.base_weight(&beside_off_chain_work[1]) * DIFFICULTY_SCALE
+        );
+        assert_eq!(credits.by_payout_address.len(), 1);
+        assert!(credits.by_payout_address.contains_key(genesis_payee));
     }
 
     /// A share off the chain keeps its slot: with a four-share cap the window
