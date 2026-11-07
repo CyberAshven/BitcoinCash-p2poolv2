@@ -34,6 +34,43 @@ BCHN fills templates only to `-percentblockmaxsize` of the block size limit
 with one output per miner in the PPLNS window, and a full template plus that
 coinbase could exceed the limit.
 
+### Or run BCHD
+
+P2Poolv2 takes templates from BCHD as well (checked with BCHD 0.22.4 on
+regtest). BCHD has no ZMQ, so it hears new blocks on BCHD's P2P port: set
+`node_p2p_address` in `[stratum]`. BCHD serves RPC over TLS with its own
+certificate, which P2Poolv2 does not read, so run BCHD on the same computer
+with TLS off; BCHD allows that only on localhost. In `bchd.conf`:
+
+```ini
+rpcuser=p2pool
+rpcpass=<your password>
+rpclisten=127.0.0.1:8334
+notls=1
+; Leave room for the pool's coinbase (see below).
+blockmaxsize=16000000
+```
+
+and in P2Poolv2's config:
+
+```toml
+[stratum]
+node_p2p_address = "127.0.0.1:8333"
+
+[bitcoinrpc]
+url = "http://127.0.0.1:8334"
+```
+
+`zmqpubhashblock` stays in the config; with no publisher on its address it
+stays silent. BCHD needs no `miningaddr`: the pool builds its own coinbase.
+BCHD fills a template up to 1,000 bytes below the block size limit unless
+`blockmaxsize` is set, and the pool's coinbase is often larger, so set
+`blockmaxsize` below the limit (16,000,000 is what BCHN's 50% gives at
+32 MB). BCHD does not report `initialblockdownload`: P2Poolv2 waits instead
+until BCHD gives a template, which BCHD refuses while it downloads the
+chain. On regtest BCHD gives templates without peers, and its `generate`
+needs `miningaddr`.
+
 ## 2. Get your share address
 
 A share is owned by a P2PKH key from your own wallet. Take a regular

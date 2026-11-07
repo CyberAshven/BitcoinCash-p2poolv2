@@ -50,10 +50,9 @@ impl std::error::Error for PreflightError {
 
 async fn check_synced(bitcoind: &BitcoindRpcClient) -> Result<(), PreflightError> {
     let is_in_ibd = bitcoind
-        .getblockchaininfo()
+        .in_initial_block_download()
         .await
-        .map_err(|e| PreflightError::Rpc(e.into()))?
-        .initial_block_download;
+        .map_err(|e| PreflightError::Rpc(e.into()))?;
 
     if is_in_ibd {
         return Err(PreflightError::NotSynced);
@@ -81,13 +80,15 @@ fn rpc_client(bitcoinrpc_config: &BitcoinRpcConfig) -> Result<BitcoindRpcClient,
     .map_err(|e| PreflightError::Rpc(e.into()))
 }
 
-/// Refuse a node whose `getblockchaininfo` chain is not BCHN's name for
-/// `network` (`main`, `chip` or `regtest`).
+/// Refuse a node whose `getblockchaininfo` chain is none of the names
+/// Bitcoin Cash nodes give `network` ([`BitcoinCashNetwork::node_chain_names`]:
+/// `main` or `mainnet`, `chip` or `chipnet`, `regtest`), in any case.
 ///
 /// Run before waiting for the node to sync, so a node on the wrong network
 /// is refused at once instead of after its initial block download. A
-/// Bitcoin, Bitcoin SV or eCash node can report the same name as BCHN
-/// (`main`, `regtest`), so [`check_bitcoin_cash_block`] runs after the sync.
+/// Bitcoin, Bitcoin SV or eCash node can report the same name (`main`,
+/// `mainnet`, `regtest`), so [`check_bitcoin_cash_block`] runs after the
+/// sync.
 async fn check_bitcoin_cash_chain_name(
     bitcoind: &BitcoindRpcClient,
     network: BitcoinCashNetwork,
@@ -96,18 +97,19 @@ async fn check_bitcoin_cash_chain_name(
         .getblockchaininfo()
         .await
         .map_err(|e| PreflightError::Rpc(e.into()))?;
-    let expected = network.bchn_chain_name();
+    let names = network.node_chain_names();
     let name = config_name(network);
     match info.chain.as_deref() {
-        Some(chain) if chain == expected => Ok(()),
+        Some(chain) if names.iter().any(|known| chain.eq_ignore_ascii_case(known)) => Ok(()),
         Some(chain) => Err(PreflightError::NotBitcoinCash(format!(
             "The node in [bitcoinrpc] is on chain \"{chain}\", but bitcoin_cash_network = \
-             \"{name}\" needs a BCHN node on chain \"{expected}\". Point [bitcoinrpc] at a BCHN \
-             node on Bitcoin Cash {name}, or set bitcoin_cash_network to the node's network."
+             \"{name}\" needs a node on chain \"{}\". Point [bitcoinrpc] at a node on Bitcoin \
+             Cash {name}, or set bitcoin_cash_network to the node's network.",
+            names.join("\" or \"")
         ))),
         None => Err(PreflightError::NotBitcoinCash(
             "The node in [bitcoinrpc] reports no chain in getblockchaininfo. P2Pool on \
-             Bitcoin Cash needs BCHN."
+             Bitcoin Cash needs a node that names its network there."
                 .to_string(),
         )),
     }
@@ -379,6 +381,95 @@ mod tests {
             verify_bitcoin_cash_chain_name(&bitcoinrpc_config, BitcoinCashNetwork::Chipnet).await;
 
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// BCHD 0.22.4 names its networks `mainnet` and `chipnet` and reports no
+    /// `initialblockdownload`.
+    #[tokio::test]
+    async fn a_bchd_node_passes_the_chain_name_check() {
+        for (chain, network) in [
+            ("mainnet", BitcoinCashNetwork::Mainnet),
+            ("chipnet", BitcoinCashNetwork::Chipnet),
+        ] {
+            let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
+            Mock::given(method("POST"))
+                .and(body_partial_json(
+                    serde_json::json!({"method": "getblockchaininfo"}),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "result": {"chain": chain, "blocks": 0, "headers": 0, "pruned": false},
+                    "error": null,
+                    "id": 0
+                })))
+                .mount(&mock_server)
+                .await;
+
+            let result = verify_bitcoin_cash_chain_name(&bitcoinrpc_config, network).await;
+
+            assert!(result.is_ok(), "{chain}: {result:?}");
+        }
+    }
+
+    /// Mounts a `getblockchaininfo` answer without `initialblockdownload`,
+    /// as BCHD gives, and `template` as the answer to a Bitcoin Cash
+    /// template request. The server answers while it is kept.
+    async fn node_without_download_flag(
+        template: serde_json::Value,
+    ) -> (MockServer, BitcoindRpcClient) {
+        let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                serde_json::json!({"method": "getblockchaininfo"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": {"chain": "chipnet", "blocks": 280000},
+                "error": null,
+                "id": 0
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "getblocktemplate",
+                "params": [{"capabilities": ["coinbasevalue", "coinbase/append", "workid"]}],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(template))
+            .mount(&mock_server)
+            .await;
+        let bitcoind = rpc_client(&bitcoinrpc_config).unwrap();
+        (mock_server, bitcoind)
+    }
+
+    #[tokio::test]
+    async fn a_node_without_the_download_flag_that_gives_a_template_is_synced() {
+        let (_server, bitcoind) = node_without_download_flag(serde_json::json!({
+            "result": {"height": 280001, "coinbasevalue": 312500000, "transactions": []},
+            "error": null,
+            "id": 0
+        }))
+        .await;
+
+        let result = check_synced(&bitcoind).await;
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// BCHD's answer to a template request while it downloads the chain.
+    #[tokio::test]
+    async fn a_node_without_the_download_flag_still_downloading_is_not_synced() {
+        let (_server, bitcoind) = node_without_download_flag(serde_json::json!({
+            "result": null,
+            "error": {"code": -10, "message": "Bitcoin is downloading blocks..."},
+            "id": 0
+        }))
+        .await;
+
+        let result = check_synced(&bitcoind).await;
+
+        assert!(
+            matches!(result, Err(PreflightError::NotSynced)),
+            "{result:?}"
+        );
     }
 
     /// BCHN on testnet4 uses chipnet's genesis and CashAddr prefix, so only

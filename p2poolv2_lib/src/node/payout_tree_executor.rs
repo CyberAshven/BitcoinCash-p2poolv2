@@ -121,13 +121,9 @@ impl TreeExecutionNode for BitcoindRpcClient {
     }
 
     async fn in_initial_block_download(&self) -> Result<bool, String> {
-        let info: serde_json::Value = self
-            .request("getblockchaininfo", Vec::new())
+        BitcoindRpcClient::in_initial_block_download(self)
             .await
-            .map_err(|error| error.to_string())?;
-        info.get("initialblockdownload")
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| "getblockchaininfo has no initialblockdownload".to_string())
+            .map_err(|error| error.to_string())
     }
 
     async fn block_confirmations(&self, blockhash: BlockHash) -> Result<Option<i64>, String> {
