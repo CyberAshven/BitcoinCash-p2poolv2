@@ -12,7 +12,7 @@ use bitcoin::consensus::Encodable;
 use bitcoin::consensus::encode;
 use bitcoin::{BlockHash, Work};
 use rocksdb::{BlockBasedOptions, ColumnFamilyDescriptor, DB, Options as RocksDbOptions};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
@@ -346,6 +346,15 @@ impl Store {
     /// This produces a topologically sorted DAG subgraph because every
     /// block's parent is at height H-1, which is either in this batch
     /// or was sent in a previous batch.
+    ///
+    /// A height with more than MAX_BLOCKS_PER_HEIGHT blocks, as a burst
+    /// of hashrate on a small pool makes, keeps MAX_BLOCKS_PER_HEIGHT of
+    /// them: first the blocks on the confirmed or candidate chain and the
+    /// uncles those chains name, then the rest by blockhash. Sorting by
+    /// blockhash alone could leave out the confirmed block, and a peer
+    /// syncing from this node then never connected the headers above it.
+    /// A block whose parent or uncle was left out is left out too: a peer
+    /// could not connect it either.
     fn get_descendant_blockhashes(
         &self,
         blockhash: &BlockHash,
@@ -370,18 +379,35 @@ impl Store {
             top_confirmed_height,
         );
         let height_entries = self.get_blockhashes_for_height_range(start_height, end_height);
+        let mut left_out: HashSet<BlockHash> = HashSet::new();
 
-        for (_height, raw_hashes) in height_entries {
-            let mut hashes_at_height: Vec<BlockHash> = self
+        for (height, raw_hashes) in height_entries {
+            let mut blocks_at_height: Vec<(BlockHash, ChainMembership)> = self
                 .get_block_metadata_batch(&raw_hashes)?
                 .into_iter()
                 .filter(|(_, metadata)| {
                     metadata.status != Status::Pending && metadata.status != Status::Invalid
                 })
-                .map(|(hash, _)| hash)
+                .map(|(hash, metadata)| (hash, metadata.chain))
                 .collect();
-            hashes_at_height.sort();
-            hashes_at_height.truncate(MAX_BLOCKS_PER_HEIGHT);
+            if !left_out.is_empty() {
+                self.leave_out_unconnectable(&mut blocks_at_height, &mut left_out)?;
+            }
+            blocks_at_height.sort_by_key(|(hash, _)| *hash);
+            if blocks_at_height.len() > MAX_BLOCKS_PER_HEIGHT {
+                let chain_uncles = self.uncles_named_by_chains_above(height)?;
+                blocks_at_height.sort_by_key(|(hash, chain)| {
+                    let on_a_chain = *chain != ChainMembership::None || chain_uncles.contains(hash);
+                    (!on_a_chain, *hash)
+                });
+                left_out.extend(
+                    blocks_at_height
+                        .drain(MAX_BLOCKS_PER_HEIGHT..)
+                        .map(|(hash, _)| hash),
+                );
+            }
+            let hashes_at_height: Vec<BlockHash> =
+                blocks_at_height.into_iter().map(|(hash, _)| hash).collect();
 
             let found_stop = hashes_at_height.contains(stop_blockhash);
             blockhashes.extend(hashes_at_height);
@@ -392,6 +418,43 @@ impl Store {
         }
 
         Ok(blockhashes)
+    }
+
+    /// The uncles that the confirmed and candidate blocks up to
+    /// MAX_UNCLES_DEPTH heights above `height` name.
+    fn uncles_named_by_chains_above(&self, height: u32) -> Result<HashSet<BlockHash>, StoreError> {
+        let mut uncles = HashSet::new();
+        for above in height + 1..=height.saturating_add(MAX_UNCLES_DEPTH as u32) {
+            let chain_blocks = [
+                self.get_confirmed_at_height(above).ok(),
+                self.get_candidate_at_height(above).ok(),
+            ];
+            for chain_block in chain_blocks.into_iter().flatten() {
+                if let Some(header) = self.get_share_header(&chain_block)? {
+                    uncles.extend(header.uncles);
+                }
+            }
+        }
+        Ok(uncles)
+    }
+
+    /// Remove from `blocks` each block whose parent or an uncle is in
+    /// `left_out`, and add it there.
+    fn leave_out_unconnectable(
+        &self,
+        blocks: &mut Vec<(BlockHash, ChainMembership)>,
+        left_out: &mut HashSet<BlockHash>,
+    ) -> Result<(), StoreError> {
+        let hashes: Vec<BlockHash> = blocks.iter().map(|(hash, _)| *hash).collect();
+        for (hash, header) in self.get_share_headers(&hashes)? {
+            let unconnectable = left_out.contains(&header.prev_share_blockhash)
+                || header.uncles.iter().any(|uncle| left_out.contains(uncle));
+            if unconnectable {
+                left_out.insert(hash);
+            }
+        }
+        blocks.retain(|(hash, _)| !left_out.contains(hash));
+        Ok(())
     }
 
     /// Get genesis block hash from chain state
