@@ -11,7 +11,7 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::accounting::stats::metrics::MetricsHandle;
 use crate::command::Command;
-use crate::config::{Chain, Config, PoolMode};
+use crate::config::{BchShareChain, Chain, Config, PoolMode};
 use crate::monitoring_events::MonitoringEventSender;
 use crate::node::Node;
 use crate::node::SwarmSend;
@@ -503,6 +503,12 @@ impl NodeActor {
         let pool_difficulty = PoolDifficulty::build(&chain_store_handle, chain)
             .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
 
+        // The vardiff share chain derives its difficulty floor from the shared
+        // PPLNS window (docs/sharechain/vardiff-sharechain.md); main and mini
+        // keep the ASERT equality pin, so they do not receive the window.
+        let sharechain_floor_window = (config.stratum.bch_share_chain == BchShareChain::Vardiff)
+            .then(|| pplns_window.clone());
+
         // The clone is redundant for the real PoolDifficulty, which is Copy, but
         // mockall_double swaps in the non-Copy MockPoolDifficulty under cfg(test)
         // and pool_difficulty is used again below.
@@ -510,6 +516,7 @@ impl NodeActor {
         let mut validator = DefaultShareValidator::new(pool_difficulty.clone())
             .for_chain(chain)
             .with_target_ceiling(target_ceiling)
+            .with_sharechain_floor_window(sharechain_floor_window.clone())
             .with_bitcoin_cash_network(bitcoin_cash_network);
         if let Some(sink) = start_payout_tree_executor(&config, &chain_store_handle) {
             validator = validator.with_payout_tree_sink(sink);
@@ -604,6 +611,7 @@ impl NodeActor {
         )
         .for_chain(chain)
         .with_target_ceiling(target_ceiling)
+        .with_sharechain_floor_window(sharechain_floor_window)
         .with_bitcoin_cash_network(bitcoin_cash_network);
         let validation_worker_id = workers
             .spawn(async move {
