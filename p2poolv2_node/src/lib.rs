@@ -577,7 +577,6 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             .share_chain(share_chain)
             .bch_share_network(bch_share_network)
             .cash_share(cash_share)
-            .sharechain_tier_mode(stratum_config.sharechain_tier_mode)
             .target_ceiling(target_ceiling)
             .merge_mining_tokens(
                 stratum_config

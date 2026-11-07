@@ -358,7 +358,6 @@ async fn test_handle_submit_meets_difficulty_should_submit() {
         cash_share: None,
         template_refresh_tx: Some(template_refresh_tx),
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -460,7 +459,6 @@ async fn test_handle_submit_a_meets_difficulty_should_submit() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -553,7 +551,6 @@ async fn test_handle_submit_with_version_rolling_meets_difficulty_should_submit(
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -656,7 +653,6 @@ async fn test_handle_submit_triggers_difficulty_adjustment() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -737,7 +733,6 @@ async fn test_handle_submit_with_stale_job_returns_error() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -813,7 +808,6 @@ async fn test_handle_submit_with_less_difficulty_than_session_is_rejected_but_em
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -891,7 +885,6 @@ async fn test_handle_submit_duplicate_share_is_rejected() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -937,7 +930,6 @@ async fn test_handle_submit_duplicate_share_is_rejected() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1013,7 +1005,6 @@ async fn test_handle_submit_accepts_low_difficulty_share_when_ignore_difficulty_
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1102,7 +1093,6 @@ async fn test_handle_submit_emits_coinbase_proof_of_share_coinbase() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1174,7 +1164,6 @@ async fn test_handle_submit_not_subscribed_returns_error() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1267,7 +1256,6 @@ async fn test_handle_submit_unknown_job_id_returns_invalid_jobid() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1378,7 +1366,6 @@ async fn test_handle_submit_validation_failure_returns_other_unknown_with_messag
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1473,7 +1460,6 @@ async fn test_handle_submit_bad_nonce_returns_error_not_panic() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1569,7 +1555,6 @@ async fn test_handle_submit_none_version_bits_returns_error_not_panic() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1643,7 +1628,6 @@ async fn test_handle_submit_unauthorized_returns_error() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1747,7 +1731,6 @@ async fn test_p2poolv2_mode_accepts_and_accounts_share_below_pool_difficulty_wit
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1845,7 +1828,6 @@ async fn test_hydrapool_mode_accepts_share_despite_hard_pool_difficulty() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1945,7 +1927,6 @@ async fn test_hydrapool_mode_does_not_store_share_below_session_difficulty() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -2041,7 +2022,6 @@ async fn test_hydrapool_mode_ignore_difficulty_does_not_store_share_below_sessio
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -2130,7 +2110,6 @@ async fn a_winning_share_sends_its_miner_the_token_proof() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: Some(MergeMiningLogs::from_logs(leaves, wins)),
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -2209,7 +2188,6 @@ async fn a_winning_share_without_the_disclosure_sends_nothing_new() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),

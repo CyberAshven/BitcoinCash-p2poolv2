@@ -395,7 +395,6 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -501,7 +500,6 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -648,7 +646,6 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -760,7 +757,6 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -833,7 +829,6 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -908,7 +903,6 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -987,7 +981,6 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -1075,7 +1068,6 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -1137,7 +1129,6 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -1197,7 +1188,6 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -1261,7 +1251,6 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -1369,7 +1358,6 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -1439,7 +1427,6 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
@@ -1521,7 +1508,6 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),

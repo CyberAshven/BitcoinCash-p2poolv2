@@ -110,24 +110,16 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 ///
 /// The share chain's own segment follows `{BCH_ASERT_ANCHOR_TAG}`
 /// (`docs/sharechain/vardiff-sharechain.md`, section 5). The vardiff share
-/// chain emits the fixed `vardiff` rule tag, in place of the static
-/// `floor-<value>` segment the floor of the validation band used to pin. That
-/// floor segment stays dormant: no chain configures a static floor anymore,
-/// so main and mini emit their pre-floor strings (a configured floor would
-/// still derive a different string and fail the handshake).
-fn share_chain_rule_tag(
-    chain: Chain,
-    share_chain: BchShareChain,
-    floor: Option<u64>,
-) -> Option<String> {
+/// chain emits the fixed `vardiff` rule tag; main and mini emit no chain
+/// segment, so their strings stay as they were before the vardiff chain
+/// landed.
+fn share_chain_rule_tag(chain: Chain, share_chain: BchShareChain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
         Chain::BitcoinCash => {
             let chain_segment = match share_chain {
                 BchShareChain::Vardiff => format!("/{BCH_VARDIFF_RULE_TAG}"),
-                BchShareChain::Main | BchShareChain::Mini => floor
-                    .map(|value| format!("/floor-{value}"))
-                    .unwrap_or_default(),
+                BchShareChain::Main | BchShareChain::Mini => String::new(),
             };
             Some(format!(
                 "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}{chain_segment}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_PER_SHARE_CUTS_RULE_TAG}/{BCH_UNCLE_ONCE_RULE_TAG}/{BCH_SHARE_BODY_RULE_TAG}/{BCH_PAYOUT_SCRIPT_RULE_TAG}/{}/{}/{}/{BCH_NO_SEGWIT_RULE_TAG}/{BCH_WORK_WEIGHT_RULE_TAG}/{BCH_MERGE_MINING_RULE_TAG}/{BCH_SHARE_VERSION_RULE_TAG}/{BCH_CURRENT_CHAIN_RULE_TAG}",
@@ -145,10 +137,9 @@ fn share_chain_rule_tag(
 fn share_chain_segment(
     chain: Chain,
     share_chain: BchShareChain,
-    floor: Option<u64>,
     genesis_hash: BlockHash,
 ) -> String {
-    match share_chain_rule_tag(chain, share_chain, floor) {
+    match share_chain_rule_tag(chain, share_chain) {
         Some(rule_tag) => format!("{}/{rule_tag}", genesis_tag(genesis_hash)),
         None => genesis_tag(genesis_hash),
     }
@@ -166,13 +157,12 @@ pub fn protocol_string(
     network: bitcoin::Network,
     chain: Chain,
     share_chain: BchShareChain,
-    floor: Option<u64>,
     genesis_hash: BlockHash,
 ) -> String {
     format!(
         "/p2pool/{}/{}/1.0.0",
         network.to_core_arg(),
-        share_chain_segment(chain, share_chain, floor, genesis_hash)
+        share_chain_segment(chain, share_chain, genesis_hash)
     )
 }
 
@@ -185,13 +175,12 @@ pub fn kad_protocol_string(
     network: bitcoin::Network,
     chain: Chain,
     share_chain: BchShareChain,
-    floor: Option<u64>,
     genesis_hash: BlockHash,
 ) -> String {
     format!(
         "/p2pool/{}/{}/kad/1.0.0",
         network.to_core_arg(),
-        share_chain_segment(chain, share_chain, floor, genesis_hash)
+        share_chain_segment(chain, share_chain, genesis_hash)
     )
 }
 
@@ -204,16 +193,9 @@ impl P2PoolRequestResponseProtocol {
         network: bitcoin::Network,
         chain: Chain,
         share_chain: BchShareChain,
-        floor: Option<u64>,
         genesis_hash: BlockHash,
     ) -> Self {
-        Self(protocol_string(
-            network,
-            chain,
-            share_chain,
-            floor,
-            genesis_hash,
-        ))
+        Self(protocol_string(network, chain, share_chain, genesis_hash))
     }
 }
 
@@ -376,7 +358,6 @@ mod tests {
                 bitcoin::Network::Signet,
                 Chain::Bitcoin,
                 BchShareChain::Main,
-                None,
                 genesis_hash
             ),
             format!("/p2pool/signet/{expected_tag}/1.0.0")
@@ -401,14 +382,12 @@ mod tests {
                 bitcoin::Network::Testnet4,
                 Chain::Bitcoin,
                 BchShareChain::Main,
-                None,
                 genesis_hash
             ),
             protocol_string(
                 bitcoin::Network::Testnet4,
                 Chain::Bitcoin,
                 BchShareChain::Main,
-                None,
                 other_genesis_hash
             )
         );
@@ -427,7 +406,6 @@ mod tests {
             bitcoin::Network::Signet,
             Chain::Bitcoin,
             BchShareChain::Main,
-            None,
             genesis_hash,
         );
         assert_eq!(kad, format!("/p2pool/signet/{expected_tag}/kad/1.0.0"));
@@ -437,7 +415,6 @@ mod tests {
                 bitcoin::Network::Signet,
                 Chain::Bitcoin,
                 BchShareChain::Main,
-                None,
                 genesis_hash
             )
         );
@@ -459,7 +436,6 @@ mod tests {
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
                 BchShareChain::Main,
-                None,
                 genesis_hash
             ),
             format!(
@@ -468,8 +444,7 @@ mod tests {
         );
     }
 
-    /// The vardiff share chain emits its fixed `vardiff` rule segment in
-    /// place of the static floor segment
+    /// The vardiff share chain emits its fixed `vardiff` rule segment
     /// (`docs/sharechain/vardiff-sharechain.md`, section 5), so its nodes
     /// never negotiate with main or mini peers.
     #[test]
@@ -484,7 +459,6 @@ mod tests {
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
                 BchShareChain::Vardiff,
-                None,
                 genesis_hash
             ),
             format!(
@@ -506,14 +480,12 @@ mod tests {
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
                 BchShareChain::Vardiff,
-                None,
                 genesis_hash
             ),
             protocol_string(
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
                 BchShareChain::Main,
-                None,
                 genesis_hash
             )
         );
@@ -536,7 +508,6 @@ mod tests {
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
                 BchShareChain::Mini,
-                None,
                 genesis_hash
             ),
             genesis_anchor_string
@@ -561,7 +532,6 @@ mod tests {
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
                 BchShareChain::Mini,
-                None,
                 genesis_hash
             ),
             before_trading_string
@@ -587,7 +557,6 @@ mod tests {
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
                 BchShareChain::Mini,
-                None,
                 genesis_hash
             ),
             before_budget_string
@@ -607,7 +576,6 @@ mod tests {
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             BchShareChain::Main,
-            None,
             genesis_hash,
         );
         let before = current.replace("/bch-prev-1off/", "/");
@@ -635,7 +603,6 @@ mod tests {
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
                 BchShareChain::Main,
-                None,
                 genesis_hash
             ),
             before_uncle_once_string
@@ -659,7 +626,6 @@ mod tests {
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             BchShareChain::Main,
-            None,
             genesis_hash,
         );
         assert_ne!(string, before_batch_string);
@@ -684,7 +650,6 @@ mod tests {
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             BchShareChain::Main,
-            None,
             genesis_hash,
         );
         assert_ne!(string, before_fixes_string);
@@ -709,7 +674,6 @@ mod tests {
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
                 BchShareChain::Main,
-                None,
                 genesis_hash
             ),
             fixed_window_string
@@ -730,7 +694,6 @@ mod tests {
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
                 BchShareChain::Main,
-                None,
                 genesis_hash
             ),
             format!(

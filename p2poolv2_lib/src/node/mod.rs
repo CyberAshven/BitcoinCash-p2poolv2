@@ -157,7 +157,6 @@ impl Node {
             config.stratum.network,
             config.stratum.chain,
             config.stratum.bch_share_chain,
-            None,
             genesis_hash,
         );
 

@@ -67,7 +67,6 @@ impl P2PoolBehaviour {
                 config.stratum.network,
                 config.stratum.chain,
                 config.stratum.bch_share_chain,
-                None,
                 genesis_hash,
             ),
         )?);
@@ -82,7 +81,6 @@ impl P2PoolBehaviour {
                 config.stratum.network,
                 config.stratum.chain,
                 config.stratum.bch_share_chain,
-                None,
                 genesis_hash,
             ),
             local_key.public(),
@@ -114,7 +112,6 @@ impl P2PoolBehaviour {
                         config.stratum.network,
                         config.stratum.chain,
                         config.stratum.bch_share_chain,
-                        None,
                         genesis_hash,
                     ),
                     ProtocolSupport::Full,

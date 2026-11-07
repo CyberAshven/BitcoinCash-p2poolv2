@@ -244,25 +244,6 @@ pub enum BchShareChain {
     Vardiff,
 }
 
-/// How stratum jobs use the Bitcoin Cash share-chain validation band.
-///
-/// The on-modes need the band live on every node of the share chain, so the
-/// switch stays `off` until the coordinated flag day and an upgrading
-/// operator is unaffected. Bitcoin and Hydrapool jobs never use the tier
-/// computation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum SharechainTierMode {
-    /// Today's behavior: no tier bits, the difficulty setters are never
-    /// called. Default.
-    #[default]
-    Off,
-    /// Every job at `max(floor, D_ceiling)`, no `w_i` term.
-    UniformFloor,
-    /// `max(floor, D_ceiling, w_i * D_asert_capped)` per miner.
-    Tier,
-}
-
 impl BitcoinCashNetwork {
     /// The network's name as `bitcoin_cash_network` spells it: "mainnet",
     /// "chipnet", "regtest" or "scalenet".
@@ -448,13 +429,6 @@ pub struct StratumConfig<State = Raw> {
     /// rejected.
     #[serde(default)]
     pub bch_share_chain: BchShareChain,
-    /// How stratum jobs use the share-chain validation band: `off`
-    /// (default), `uniform-floor` or `tier`. Ignored unless `chain` is
-    /// `bitcoin-cash` in p2poolv2 mode; the on-modes assume every node on
-    /// the share chain runs the band, so they ship behind the coordinated
-    /// flag day (`docs/sharechain/variable-share-diff.md`, section 7).
-    #[serde(default)]
-    pub sharechain_tier_mode: SharechainTierMode,
     /// Stratum V2 listen port. Absent means the node does not open an SV2
     /// socket, which is what every existing configuration does.
     #[serde(default)]
@@ -782,7 +756,6 @@ impl StratumConfig<Raw> {
             chain: self.chain,
             bitcoin_cash_network: self.bitcoin_cash_network,
             bch_share_chain: self.bch_share_chain,
-            sharechain_tier_mode: self.sharechain_tier_mode,
             sv2_port: self.sv2_port,
             sv2_authority_public_key: self.sv2_authority_public_key,
             sv2_authority_secret_key: self.sv2_authority_secret_key,
@@ -1217,7 +1190,6 @@ impl StratumConfig<Raw> {
             chain: Chain::Bitcoin,
             bitcoin_cash_network: None,
             bch_share_chain: BchShareChain::Main,
-            sharechain_tier_mode: SharechainTierMode::Off,
             sv2_port: None,
             sv2_authority_public_key: None,
             sv2_authority_secret_key: None,
@@ -2692,103 +2664,6 @@ mod tests {
         config.maximum_difficulty = Some(u64::MAX);
         let parsed = config.parse().unwrap();
         assert_eq!(parsed.maximum_difficulty, Some(u64::MAX));
-    }
-
-    /// The shipped sample leaves the tier switch out, so it reads as `off`
-    /// and upgrading operators stay byte-identical until the flag day.
-    #[test]
-    fn sharechain_tier_mode_defaults_to_off_when_absent() {
-        let config = Config::load("../config.sample.toml").unwrap();
-        assert_eq!(config.stratum.sharechain_tier_mode, SharechainTierMode::Off);
-    }
-
-    #[test]
-    fn sharechain_tier_mode_reads_off() {
-        let config: Config = config::Config::builder()
-            .add_source(config::File::with_name("../config.sample.toml"))
-            .add_source(config::File::from_str(
-                r#"
-                [stratum]
-                sharechain_tier_mode = "off"
-                "#,
-                config::FileFormat::Toml,
-            ))
-            .build()
-            .unwrap()
-            .try_deserialize()
-            .unwrap();
-
-        assert_eq!(config.stratum.sharechain_tier_mode, SharechainTierMode::Off);
-    }
-
-    #[test]
-    fn sharechain_tier_mode_reads_uniform_floor() {
-        let config: Config = config::Config::builder()
-            .add_source(config::File::with_name("../config.sample.toml"))
-            .add_source(config::File::from_str(
-                r#"
-                [stratum]
-                sharechain_tier_mode = "uniform-floor"
-                "#,
-                config::FileFormat::Toml,
-            ))
-            .build()
-            .unwrap()
-            .try_deserialize()
-            .unwrap();
-
-        assert_eq!(
-            config.stratum.sharechain_tier_mode,
-            SharechainTierMode::UniformFloor
-        );
-    }
-
-    #[test]
-    fn sharechain_tier_mode_reads_tier() {
-        let config: Config = config::Config::builder()
-            .add_source(config::File::with_name("../config.sample.toml"))
-            .add_source(config::File::from_str(
-                r#"
-                [stratum]
-                sharechain_tier_mode = "tier"
-                "#,
-                config::FileFormat::Toml,
-            ))
-            .build()
-            .unwrap()
-            .try_deserialize()
-            .unwrap();
-
-        assert_eq!(
-            config.stratum.sharechain_tier_mode,
-            SharechainTierMode::Tier
-        );
-    }
-
-    #[test]
-    fn sharechain_tier_mode_rejects_an_unknown_value() {
-        let result: Result<Config, _> = config::Config::builder()
-            .add_source(config::File::with_name("../config.sample.toml"))
-            .add_source(config::File::from_str(
-                r#"
-                [stratum]
-                sharechain_tier_mode = "bogus"
-                "#,
-                config::FileFormat::Toml,
-            ))
-            .build()
-            .unwrap()
-            .try_deserialize();
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_keeps_a_configured_sharechain_tier_mode() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.sharechain_tier_mode = SharechainTierMode::Tier;
-        let parsed = config.parse().unwrap();
-        assert_eq!(parsed.sharechain_tier_mode, SharechainTierMode::Tier);
     }
 
     #[test]

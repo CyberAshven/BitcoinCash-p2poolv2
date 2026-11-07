@@ -40,8 +40,7 @@ pub const MINI_ANCHOR_TARGET: u32 = 0x1c384bd7;
 /// on (`docs/sharechain/vardiff-sharechain.md`, section 4).
 pub const VARDIFF_ANCHOR_TARGET: u32 = 0x1c4188f5;
 
-/// Segment naming the vardiff share chain's rule set in the protocol string,
-/// in place of the static `floor-<value>` segment
+/// Segment naming the vardiff share chain's rule set in the protocol string
 /// (`docs/sharechain/vardiff-sharechain.md`, section 5). It is `vardiff` from
 /// the first increment through the completed chain: the increments are one
 /// implementation and are not meant to coexist on a libp2p network.

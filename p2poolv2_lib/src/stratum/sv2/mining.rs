@@ -866,9 +866,9 @@ impl MiningChannels {
     ///
     /// When the channel's difficulty is above the job's share difficulty, it
     /// comes down to it first and a `SetTarget` precedes the job, so the
-    /// device throws away no hash that is a share-chain share. With the
-    /// `sharechain_tier_mode` switch on, the job carries the miner's tier
-    /// bits and a channel below its tier is raised to it with the same
+    /// device throws away no hash that is a share-chain share. When the
+    /// prepared template carries a derived floor, the job carries the miner's
+    /// tier bits and a channel below its tier is raised to it with the same
     /// `SetTarget` treatment; at most one `SetTarget` precedes the job,
     /// since the setters' predicates are mutually exclusive.
     /// Extended coinbase limits are checked before the channel or tracker
@@ -892,11 +892,11 @@ impl MiningChannels {
             let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
             check_extended_job_fits(prefix_length, suffix_length)?;
         }
-        // Per-miner tier of the job, once the tier switch is on. Needs the
-        // share chain (not Hydrapool) and the derived floor the prepared
-        // template carries: without a floor no band applies and a tier job
-        // would be rejected. Inlined through the free functions because
-        // `self.channels` is mutably borrowed for `channel`.
+        // Per-miner tier of the job. Needs the share chain (not Hydrapool)
+        // and the derived floor the prepared template carries: without a
+        // floor no band applies and a tier job would be rejected. Inlined
+        // through the free functions because `self.channels` is mutably
+        // borrowed for `channel`.
         let tier_bits = if is_hydrapool {
             None
         } else if let Some(floor) = prepared.sharechain_floor() {
@@ -906,13 +906,12 @@ impl MiningChannels {
                 .as_deref()
                 .and_then(|address| self.ctx.tier_rx.borrow().get(address).copied())
                 .unwrap_or(0.0);
-            tier_job_bits(
-                self.ctx.sharechain_tier_mode,
+            Some(tier_job_bits(
                 floor,
                 prepared.bits(),
                 self.ctx.target_ceiling,
                 hashrate_share,
-            )
+            ))
         } else {
             None
         };

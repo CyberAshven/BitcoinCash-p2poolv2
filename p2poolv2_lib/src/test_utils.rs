@@ -1376,7 +1376,6 @@ pub(crate) async fn test_bch_stratum_context(
         cash_share: Some([0x22; 20]),
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),

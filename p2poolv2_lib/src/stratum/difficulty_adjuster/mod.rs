@@ -9,7 +9,7 @@
 //! adjusts the difficulty to maintain an optimal share submission frequency.
 
 use crate::accounting::calc::{decay_time, sane_time_diff, time_bias};
-use crate::config::{DEFAULT_MAXIMUM_DIFFICULTY, SharechainTierMode};
+use crate::config::DEFAULT_MAXIMUM_DIFFICULTY;
 use crate::pool_difficulty::target_for_difficulty;
 use bitcoin::{CompactTarget, Network, Target};
 #[cfg(test)]
@@ -107,39 +107,32 @@ pub fn miner_tier_difficulty(
         .max(MINIMUM_SESSION_DIFFICULTY)
 }
 
-/// Share-chain job bits for a miner under the `sharechain_tier_mode` switch,
-/// or `None` when every job stays on the pool-wide ASERT basis (`off`).
+/// Share-chain job bits for a miner: the difficulty
+/// [`miner_tier_difficulty`] computes, encoded for the job.
 ///
-/// `floor` is the share-chain difficulty floor (see
-/// docs/sharechain/vardiff-sharechain.md), `asert_bits` the job's
+/// `floor` is the share-chain difficulty floor derived from the PPLNS window
+/// (see docs/sharechain/vardiff-sharechain.md), `asert_bits` the job's
 /// pool-wide ASERT share target and `ceiling_bits` the share chain's easiest
 /// share target ([`PoolDifficulty::target_ceiling`]). `hashrate_share` is the
-/// miner's published `w_i`, read from the metrics snapshot; `uniform-floor`
-/// ignores it and every miner gets `max(floor, D_ceiling)`.
+/// miner's published `w_i`, read from the metrics snapshot.
 ///
 /// The difficulty comes from [`miner_tier_difficulty`] and is encoded with the
 /// truncating [`Target::to_compact_lossy`], so the decoded job difficulty is
 /// never below the tier it was computed from (design section 3.3).
 ///
 /// Callers short-circuit Hydrapool jobs before calling this: Hydrapool has no
-/// share chain, so its jobs must stay exactly as they are. A caller with no
-/// configured floor (Bitcoin, or a test context) has no band to enforce and
-/// must not call this either: with no floor the tier would only re-encode the
+/// share chain, so its jobs must stay exactly as they are. A caller without a
+/// derived floor (Bitcoin, or a test context) has no band to enforce and must
+/// not call this either: with no floor the tier would only re-encode the
 /// pool basis.
 pub(crate) fn tier_job_bits(
-    mode: SharechainTierMode,
     floor: u64,
     asert_bits: CompactTarget,
     ceiling_bits: CompactTarget,
     hashrate_share: f64,
-) -> Option<CompactTarget> {
-    let hashrate_share = match mode {
-        SharechainTierMode::Off => return None,
-        SharechainTierMode::UniformFloor => 0.0,
-        SharechainTierMode::Tier => hashrate_share,
-    };
+) -> CompactTarget {
     let difficulty = miner_tier_difficulty(floor, asert_bits, ceiling_bits, hashrate_share);
-    Some(target_for_difficulty(difficulty).to_compact_lossy())
+    target_for_difficulty(difficulty).to_compact_lossy()
 }
 
 /// DifficultyAdjuster implements the dynamic difficulty adjustment algorithm based on CKPool.
@@ -1443,7 +1436,7 @@ mod tests {
     }
 
     #[test]
-    fn miner_tier_difficulty_of_a_configured_floor_wins_over_everything() {
+    fn miner_tier_difficulty_of_a_derived_floor_wins_over_everything() {
         assert_eq!(
             miner_tier_difficulty(
                 10_000_000,
@@ -1456,67 +1449,29 @@ mod tests {
     }
 
     #[test]
-    fn tier_job_bits_is_none_while_the_switch_is_off() {
-        assert_eq!(
-            tier_job_bits(
-                SharechainTierMode::Off,
-                1285,
-                CompactTarget::from_consensus(0x1d00_ffff),
-                CompactTarget::from_consensus(0x1b38_4bd7),
-                0.5,
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn tier_job_bits_of_a_uniform_floor_encodes_max_of_floor_and_ceiling() {
+    fn tier_job_bits_uses_the_floor_when_it_beats_the_capped_basis() {
         // asert at difficulty 1, ceiling 1164: the capped basis is 1164 and
-        // the pool floor 1285 wins over it.
+        // the derived floor 1285 wins over it.
         let bits = tier_job_bits(
-            SharechainTierMode::UniformFloor,
             1285,
             CompactTarget::from_consensus(0x1d00_ffff),
             CompactTarget::from_consensus(0x1b38_4bd7),
             0.5,
-        )
-        .unwrap();
+        );
 
         assert_eq!(share_difficulty_ceiling(bits), Some(1285));
     }
 
     #[test]
-    fn tier_job_bits_ignores_the_hashrate_share_under_uniform_floor() {
-        let with_share = tier_job_bits(
-            SharechainTierMode::UniformFloor,
-            1285,
-            CompactTarget::from_consensus(0x1d00_ffff),
-            CompactTarget::from_consensus(0x1b38_4bd7),
-            0.5,
-        );
-        let without_share = tier_job_bits(
-            SharechainTierMode::UniformFloor,
-            1285,
-            CompactTarget::from_consensus(0x1d00_ffff),
-            CompactTarget::from_consensus(0x1b38_4bd7),
-            0.0,
-        );
-
-        assert_eq!(with_share, without_share);
-    }
-
-    #[test]
-    fn tier_job_bits_encodes_the_miner_tier_under_the_tier_mode() {
+    fn tier_job_bits_encodes_the_miner_tier() {
         // Half the pool at an asert basis of 10,000 gets 5,000, which wins
         // over the floor and the ceiling.
         let bits = tier_job_bits(
-            SharechainTierMode::Tier,
             1,
             CompactTarget::from_consensus(0x1b06_8db2),
             CompactTarget::from_consensus(0x1b38_4bd7),
             0.5,
-        )
-        .unwrap();
+        );
 
         assert_eq!(share_difficulty_ceiling(bits), Some(5000));
     }
@@ -1527,13 +1482,11 @@ mod tests {
         // down: the 10,000,000 floor encodes to 0x1a01ad7d, which decodes to
         // 10,000,044 (design section 3.3, the never-easier rule).
         let bits = tier_job_bits(
-            SharechainTierMode::Tier,
             10_000_000,
             CompactTarget::from_consensus(0x1d00_ffff),
             CompactTarget::from_consensus(0x1b38_4bd7),
             0.5,
-        )
-        .unwrap();
+        );
 
         assert_eq!(share_difficulty_ceiling(bits), Some(10_000_044));
     }

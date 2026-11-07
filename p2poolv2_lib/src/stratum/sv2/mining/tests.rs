@@ -1,7 +1,6 @@
 use super::*;
 use crate::accounting::OutputPair;
 use crate::accounting::stats::metrics;
-use crate::config::SharechainTierMode;
 use crate::shares::auxpow::{AuxProof, Disclosure};
 use crate::shares::bch_asert::BchAsert;
 use crate::shares::coinbase_proof::CoinbaseProof;
@@ -623,12 +622,11 @@ async fn a_channel_above_the_share_difficulty_gets_set_target_before_the_job() {
     assert_eq!(job.target, Target::MAX_ATTAINABLE_MAINNET);
 }
 
-/// With the tier switch on, a channel below its miner tier is raised to it
-/// before the job that commits to the tier bits.
+/// A channel below its miner tier is raised to it before the job that
+/// commits to the tier bits.
 #[tokio::test]
 async fn a_channel_below_its_miner_tier_gets_set_target_before_the_tier_job() {
-    let (mut ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
-    ctx.sharechain_tier_mode = SharechainTierMode::Tier;
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
         request_id: 1,
@@ -677,8 +675,7 @@ async fn a_channel_below_its_miner_tier_gets_set_target_before_the_tier_job() {
 /// A channel above its miner tier comes down to it before the tier job.
 #[tokio::test]
 async fn a_channel_above_its_miner_tier_gets_set_target_before_the_tier_job() {
-    let (mut ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
-    ctx.sharechain_tier_mode = SharechainTierMode::Tier;
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = open_extended_request(&bch_identity());
     channels
@@ -716,8 +713,7 @@ async fn a_channel_above_its_miner_tier_gets_set_target_before_the_tier_job() {
 /// the way every other `SetTarget` is.
 #[tokio::test]
 async fn a_tier_set_target_respects_the_channels_max_target() {
-    let (mut ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
-    ctx.sharechain_tier_mode = SharechainTierMode::Tier;
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let device_target = target_for_difficulty(5000);
     let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
@@ -744,43 +740,11 @@ async fn a_tier_set_target_respects_the_channels_max_target() {
     );
 }
 
-/// Hydrapool has no share chain, so the tier switch never touches its jobs.
+/// Hydrapool has no share chain, so the derived floor never touches its jobs.
 #[tokio::test]
-async fn a_hydrapool_channel_ignores_the_tier_switch() {
+async fn a_hydrapool_channel_ignores_the_derived_floor() {
     let (mut ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
     ctx.mode = PoolMode::Hydrapool;
-    ctx.sharechain_tier_mode = SharechainTierMode::Tier;
-    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
-    let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
-        request_id: 1,
-        user_identity: bch_identity().as_str().try_into().unwrap(),
-        nominal_hash_rate: 1.0,
-        max_target: U256::new(&[0xff; 32]).unwrap(),
-        min_extranonce_size: 8,
-    })
-    .unwrap();
-    channels
-        .handle(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL, &mut open, None)
-        .await
-        .unwrap();
-
-    let frames = channels.on_template(&test_bch_prepared_with_sharechain_floor(1285));
-
-    assert_eq!(frame_type(&frames[0]), MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB);
-    assert_eq!(
-        channels.channels[&1]
-            .session
-            .difficulty_adjuster
-            .get_current_difficulty(),
-        1
-    );
-}
-
-/// With the tier switch off a derived floor is not a tier: the job keeps
-/// the pool-wide bits and no `SetTarget` precedes it.
-#[tokio::test]
-async fn a_channel_keeps_the_pool_basis_while_the_tier_switch_is_off() {
-    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = binary_sv2::to_bytes(OpenExtendedMiningChannel {
         request_id: 1,
@@ -859,7 +823,6 @@ async fn extended_channel_mines_the_job_it_is_sent_and_its_share_is_emitted() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1120,7 +1083,6 @@ async fn standard_channel_mines_the_merkle_root_it_is_sent() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1256,7 +1218,6 @@ async fn a_share_below_the_channel_target_keeps_the_block_submission_policy() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1383,7 +1344,6 @@ async fn a_hydrapool_share_meeting_the_channel_target_is_queued_at_the_job_diffi
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1521,7 +1481,6 @@ async fn a_hydrapool_share_below_the_channel_target_is_not_queued() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1613,7 +1572,6 @@ async fn a_connection_cannot_open_more_than_the_channel_cap() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1694,7 +1652,6 @@ async fn channels_are_refused_without_a_share_address_or_a_valid_identity() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1861,7 +1818,6 @@ async fn a_bitcoin_channel_takes_its_share_address_from_p2p() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1932,7 +1888,6 @@ async fn a_channel_naming_another_share_address_than_the_node_is_refused() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -1999,7 +1954,6 @@ async fn a_bitcoin_cash_channel_takes_its_share_hash_from_p2p() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -2068,7 +2022,6 @@ async fn a_bitcoin_cash_channel_opens_through_a_translator_worker_suffix() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -2140,7 +2093,6 @@ async fn a_bitcoin_cash_channel_with_a_taproot_share_address_is_refused() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -2205,7 +2157,6 @@ async fn update_channel_answers_with_a_target_capped_by_the_new_maximum() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -2298,7 +2249,6 @@ async fn update_channel_for_an_unknown_channel_gets_an_error_reply() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
@@ -2361,7 +2311,6 @@ async fn close_channel_removes_the_channel() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ),
