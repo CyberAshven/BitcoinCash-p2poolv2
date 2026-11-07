@@ -20,6 +20,11 @@ being refused. A node on the old rule builds another coinbase while genesis is i
 the window, so the two do not peer, and existing share chains start again on
 a fresh store. Bitcoin is unchanged.
 
+The release's Apple Silicon macOS build runs on GitHub's `macos-15`
+runner (`dist-workspace.toml`). dist 0.32.0 picks `macos-14`, which GitHub
+retired on 2026-11-02: the job was cancelled before it started, and the
+release kept its previous Linux and macOS files. No code changes.
+
 A node taking templates from a Stratum V2 Template Provider
 (`template_source = "sv2"`) withdraws mining work once no provider
 connection has published a template for 60 seconds, as the
