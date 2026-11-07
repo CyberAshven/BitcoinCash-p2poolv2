@@ -408,9 +408,7 @@ fn a_custom_job_built_from_the_reply_alone_is_valid() {
         transactions: None,
         declaration: None,
     };
-    assert!(
-        validate_custom_job(&custom, declared, payout, owner, DEFAULT_VERSION_MASK, None).is_ok()
-    );
+    assert!(validate_custom_job(&custom, declared, payout, owner, DEFAULT_VERSION_MASK).is_ok());
 }
 
 /// The share commitment binds the scriptSig prefix, so outputs asked for one
@@ -460,8 +458,7 @@ fn a_custom_job_with_another_prefix_than_requested_is_refused() {
         declaration: None,
     };
     assert_eq!(
-        validate_custom_job(&custom, declared, payout, owner, DEFAULT_VERSION_MASK, None)
-            .unwrap_err(),
+        validate_custom_job(&custom, declared, payout, owner, DEFAULT_VERSION_MASK).unwrap_err(),
         "invalid-pplns-outputs"
     );
 }
@@ -517,8 +514,7 @@ fn a_custom_job_paying_another_value_than_requested_is_refused() {
         declaration: None,
     };
     assert_eq!(
-        validate_custom_job(&custom, declared, payout, owner, DEFAULT_VERSION_MASK, None)
-            .unwrap_err(),
+        validate_custom_job(&custom, declared, payout, owner, DEFAULT_VERSION_MASK).unwrap_err(),
         "invalid-pplns-outputs"
     );
 }

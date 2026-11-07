@@ -23,7 +23,7 @@ use p2poolv2_lib::accounting::payout::{
 use p2poolv2_lib::accounting::stats::metrics;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::config::{
-    BitcoinCashNetwork, Chain, Config, PoolMode, TemplateProvider, TemplateSource,
+    BchShareChain, BitcoinCashNetwork, Chain, Config, PoolMode, TemplateProvider, TemplateSource,
     bitcoin_cash_donation_cashaddr,
 };
 use p2poolv2_lib::node::actor::NodeHandle;
@@ -454,6 +454,12 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         stratum_config.bitcoin_cash_network,
     );
     let api_pplns_window = payout_pplns_window(stratum_config.mode, &shared_pplns_window);
+    // Only the vardiff share chain derives a job floor; its payout window is
+    // the one the notifier reads it from. Every other chain passes `None`, so
+    // their jobs keep the pool-wide bits.
+    let notify_sharechain_floor_window =
+        payout_pplns_window(stratum_config.mode, &shared_pplns_window)
+            .filter(|_| stratum_config.bch_share_chain == BchShareChain::Vardiff);
     // Bitcoin Cash share chain nodes take, relay and mine share transactions;
     // Bitcoin nodes and Hydrapool keep building shares with the coinbase alone.
     let share_transactions = (stratum_config.chain == Chain::BitcoinCash
@@ -477,6 +483,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             notify_transactions,
             notify_share_transaction_pool,
             tracker_handle_for_notify,
+            notify_sharechain_floor_window,
         )
         .await;
         if *exit_receiver_notify.borrow() == ShutdownReason::None {

@@ -594,9 +594,14 @@ pub fn test_bch_prepared() -> Arc<PreparedNotifyParams> {
 
 /// A BCH payout snapshot like [`test_bch_prepared`] whose prepared share
 /// bits are `bits`: the basis every token's commitment is built on, so a
-/// caller can place a declared job above or below a difficulty floor.
+/// caller can place a declared job above or below a difficulty floor. When
+/// `sharechain_floor` is set the params carry it the way a vardiff node's
+/// prepared does.
 #[cfg(any(test, feature = "test-utils"))]
-pub fn test_bch_prepared_with_share_bits(bits: CompactTarget) -> Arc<PreparedNotifyParams> {
+pub fn test_bch_prepared_with_share_bits(
+    bits: CompactTarget,
+    sharechain_floor: Option<u64>,
+) -> Arc<PreparedNotifyParams> {
     let template: BlockTemplate = serde_json::from_str(include_str!(
         "../../bitcoindrpc/test_data/bchn-regtest-template.json"
     ))
@@ -610,13 +615,15 @@ pub fn test_bch_prepared_with_share_bits(bits: CompactTarget) -> Arc<PreparedNot
         bitcoin::Network::Regtest,
     ));
     let weights = HashMap::from([(first, 1), (second, 3)]);
-    test_bch_prepared_with_weights_and_cuts(
+    test_bch_prepared_on(
+        BlockHash::from_byte_array([0x33; 32]),
         template,
         weights,
         (None, None),
         (None, None),
         None,
         bits,
+        sharechain_floor,
     )
 }
 
@@ -832,7 +839,16 @@ pub(crate) fn test_bch_prepared_with_weights_and_cuts(
         fee,
         merge_tokens,
         bits,
+        None,
     )
+}
+
+/// [`test_bch_prepared`] carrying the derived share-chain floor `floor` on
+/// its params: what a vardiff node publishes at a share whose window derives
+/// the floor.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_bch_prepared_with_sharechain_floor(floor: u64) -> Arc<PreparedNotifyParams> {
+    test_bch_prepared_with_share_bits(CompactTarget::from_consensus(0x2100ffff), Some(floor))
 }
 
 /// [`test_bch_prepared`] built on the share `anchor` with `weights` instead
@@ -855,6 +871,7 @@ pub(crate) fn test_bch_prepared_anchored(
         (None, None),
         None,
         CompactTarget::from_consensus(0x2100ffff),
+        None,
     )
 }
 
@@ -871,10 +888,12 @@ pub(crate) fn test_bch_prepared_on_anchor(anchor: BlockHash) -> Arc<PreparedNoti
         (None, None),
         None,
         CompactTarget::from_consensus(0x2100ffff),
+        None,
     )
 }
 
 /// [`test_bch_prepared_with_weights_and_cuts`] on the share `anchor`.
+#[allow(clippy::too_many_arguments)] // fixture builder: one parameter per prepared field
 #[cfg(any(test, feature = "test-utils"))]
 fn test_bch_prepared_on(
     anchor: BlockHash,
@@ -884,6 +903,7 @@ fn test_bch_prepared_on(
     (fee_address, fee): (Option<PayoutAddress>, Option<u16>),
     merge_tokens: Option<Arc<TokenSet>>,
     bits: CompactTarget,
+    sharechain_floor: Option<u64>,
 ) -> Arc<PreparedNotifyParams> {
     let payout_split =
         PayoutSplit::for_chain(crate::config::Chain::BitcoinCash, merge_tokens.is_some());
@@ -903,6 +923,7 @@ fn test_bch_prepared_on(
             .payout_split(payout_split)
             .prev_share_blockhash(anchor)
             .bits(bits)
+            .sharechain_floor(sharechain_floor)
             .donation_address(donation_address)
             .donation(donation)
             .fee_address(fee_address)
@@ -1355,7 +1376,6 @@ pub(crate) async fn test_bch_stratum_context(
         cash_share: Some([0x22; 20]),
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_diff_floor: None,
         sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,

@@ -73,11 +73,6 @@ pub struct StratumServer {
     pub bch_share_network: Option<p2poolv2_wallet::bch_share::BchShareNetwork>,
     /// Pool wide Bitcoin Cash share hash, when the operator configured one.
     pub cash_share: Option<[u8; 20]>,
-    /// Dormant share-chain difficulty floor, V2's derived-floor enforcement
-    /// point (docs/sharechain/vardiff-sharechain.md). Unset is the V1
-    /// equality pin. Read on the SV2 job declaration path to clamp a
-    /// declared job's commitment to the floor.
-    pub sharechain_diff_floor: Option<u64>,
     /// How jobs use the share-chain validation band from
     /// `[stratum] sharechain_tier_mode`. `off` keeps every job on the
     /// pool-wide ASERT basis; the on-modes compute a per-miner `tier_bits`.
@@ -148,7 +143,6 @@ pub struct StratumServerBuilder {
     share_chain: Chain,
     bch_share_network: Option<p2poolv2_wallet::bch_share::BchShareNetwork>,
     cash_share: Option<[u8; 20]>,
-    sharechain_diff_floor: Option<u64>,
     sharechain_tier_mode: SharechainTierMode,
     target_ceiling: Option<CompactTarget>,
     sv2: Option<Sv2Listener>,
@@ -279,14 +273,6 @@ impl StratumServerBuilder {
         self
     }
 
-    /// Dormant share-chain difficulty floor, V2's derived-floor enforcement
-    /// point (docs/sharechain/vardiff-sharechain.md). Unset is the V1
-    /// equality pin.
-    pub fn sharechain_diff_floor(mut self, sharechain_diff_floor: Option<u64>) -> Self {
-        self.sharechain_diff_floor = sharechain_diff_floor;
-        self
-    }
-
     /// How jobs use the share-chain validation band from
     /// `[stratum] sharechain_tier_mode`. `off`, the default, keeps every job
     /// on the pool-wide ASERT basis.
@@ -355,7 +341,6 @@ impl StratumServerBuilder {
             share_chain: self.share_chain,
             bch_share_network: self.bch_share_network,
             cash_share: self.cash_share,
-            sharechain_diff_floor: self.sharechain_diff_floor,
             sharechain_tier_mode: self.sharechain_tier_mode,
             target_ceiling: self.target_ceiling.unwrap_or(CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
@@ -591,7 +576,6 @@ impl StratumServer {
             share_chain: self.share_chain,
             bch_share_network: self.bch_share_network,
             cash_share: self.cash_share,
-            sharechain_diff_floor: self.sharechain_diff_floor,
             sharechain_tier_mode: self.sharechain_tier_mode,
             target_ceiling: self.target_ceiling,
             tier_rx: metrics.subscribe_tiers(),
@@ -711,11 +695,6 @@ pub(crate) struct StratumContext {
     pub bch_share_network: Option<p2poolv2_wallet::bch_share::BchShareNetwork>,
     /// Configured Bitcoin Cash share hash. None when each miner sends `p2p=`.
     pub cash_share: Option<[u8; 20]>,
-    /// Dormant share-chain difficulty floor, V2's derived-floor enforcement
-    /// point (docs/sharechain/vardiff-sharechain.md). None is the V1
-    /// equality pin. The SV2 job declaration path clamps a declared job's
-    /// commitment to it.
-    pub sharechain_diff_floor: Option<u64>,
     /// How jobs use the share-chain validation band from
     /// `[stratum] sharechain_tier_mode`. `off` keeps every job on the
     /// pool-wide ASERT basis, the SV1 and SV2 job builders then compute no
@@ -930,8 +909,9 @@ where
 ///
 /// With `sharechain_tier_mode` on, the job carries the miner's tier bits
 /// ([`tier_job_bits`]) and the session comes up to the tier before the job.
-/// The tier needs a configured floor and a share chain, so Hydrapool sessions
-/// and contexts without a floor keep the pool-wide job.
+/// The tier needs the derived floor the prepared template carries and a share
+/// chain, so Hydrapool sessions and templates without a floor keep the
+/// pool-wide job.
 ///
 /// A miner whose login chose their own `donation=` gets the job at that
 /// donation (`PreparedNotifyParams::for_miner_donation`).
@@ -947,12 +927,12 @@ fn job_lines<D: DifficultyAdjusterTrait>(
 ) -> Result<String, WorkError> {
     let miner_prepared = prepared.for_miner_donation(session.donation)?;
     let prepared = miner_prepared.as_deref().unwrap_or(prepared);
-    // The tier needs a share chain (not Hydrapool) and a configured floor to
-    // enforce; without a floor the band is the old equality pin and a tier job
-    // would be rejected.
+    // The tier needs a share chain (not Hydrapool) and the derived floor the
+    // prepared template carries; without a floor no band applies and a tier
+    // job would be rejected.
     let tier_bits = if is_hydrapool {
         None
-    } else if let Some(floor) = ctx.sharechain_diff_floor {
+    } else if let Some(floor) = prepared.sharechain_floor() {
         let hashrate_share = session
             .btcaddress
             .as_deref()
@@ -1263,7 +1243,6 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_diff_floor: None,
             sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
@@ -1402,7 +1381,6 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_diff_floor: None,
             sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
@@ -1502,7 +1480,6 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_diff_floor: None,
             sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
@@ -1600,7 +1577,6 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_diff_floor: None,
             sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
@@ -1717,7 +1693,6 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_diff_floor: None,
             sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
@@ -1854,7 +1829,6 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_diff_floor: None,
             sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
@@ -1981,7 +1955,6 @@ mod stratum_server_tests {
                 cash_share: None,
                 template_refresh_tx: None,
                 merge_mining_logs: None,
-                sharechain_diff_floor: None,
                 sharechain_tier_mode: crate::config::SharechainTierMode::Off,
                 target_ceiling: bitcoin::CompactTarget::from_consensus(
                     crate::shares::share_block::MAX_POOL_TARGET,
@@ -2080,7 +2053,6 @@ mod stratum_server_tests {
                 cash_share: None,
                 template_refresh_tx: None,
                 merge_mining_logs: None,
-                sharechain_diff_floor: None,
                 sharechain_tier_mode: crate::config::SharechainTierMode::Off,
                 target_ceiling: bitcoin::CompactTarget::from_consensus(
                     crate::shares::share_block::MAX_POOL_TARGET,
@@ -2139,8 +2111,9 @@ mod stratum_server_tests {
         });
     }
 
-    /// Helper to create a PreparedNotifyParams for testing.
-    fn create_test_prepared_notify() -> Arc<PreparedNotifyParams> {
+    /// Helper to create a PreparedNotifyParams for testing, carrying
+    /// `sharechain_floor` as the derived share-chain floor when set.
+    fn create_test_prepared_notify(sharechain_floor: Option<u64>) -> Arc<PreparedNotifyParams> {
         use crate::accounting::OutputPair;
         use crate::stratum::work::block_template::BlockTemplate;
         use crate::stratum::work::prepared_notify::PreparedNotifyParamsBuilder;
@@ -2165,6 +2138,7 @@ mod stratum_server_tests {
         let prepared =
             PreparedNotifyParamsBuilder::new(template, output_distribution, b"test_pool", false)
                 .bits(CompactTarget::from_consensus(0x1d00ffff))
+                .sharechain_floor(sharechain_floor)
                 .build()
                 .expect("PreparedNotifyParamsBuilder::build should succeed");
 
@@ -2235,7 +2209,6 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_diff_floor: None,
             sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
@@ -2247,7 +2220,7 @@ mod stratum_server_tests {
         };
 
         // Pre-load a template before starting handle_connection
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(None);
         let (_template_tx, template_rx) = watch::channel(Some(prepared));
 
         let handle = tokio::spawn(async move {
@@ -2380,7 +2353,6 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_diff_floor: None,
             sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
@@ -2420,7 +2392,7 @@ mod stratum_server_tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Now send a template update through the watch channel
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(None);
         template_tx
             .send(Some(prepared))
             .expect("Failed to send template");
@@ -2535,7 +2507,6 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
-            sharechain_diff_floor: None,
             sharechain_tier_mode: crate::config::SharechainTierMode::Off,
             target_ceiling: bitcoin::CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
@@ -2574,7 +2545,7 @@ mod stratum_server_tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Send a template update while not authorized
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(None);
         template_tx
             .send(Some(prepared))
             .expect("Failed to send template");
@@ -2724,7 +2695,7 @@ mod stratum_server_tests {
     #[tokio::test]
     async fn job_lines_lower_a_session_above_the_share_difficulty_before_the_job() {
         let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(None);
         let mut session = Session::<DifficultyAdjuster>::new(1000, 1, None, DEFAULT_VERSION_MASK);
 
         let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
@@ -2743,7 +2714,7 @@ mod stratum_server_tests {
     #[tokio::test]
     async fn job_lines_send_only_the_job_to_a_session_at_the_share_difficulty() {
         let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(None);
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
 
         let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
@@ -2756,7 +2727,7 @@ mod stratum_server_tests {
     #[tokio::test]
     async fn job_lines_leave_a_hydrapool_session_difficulty_alone() {
         let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(None);
         let mut session = Session::<DifficultyAdjuster>::new(1000, 1, None, DEFAULT_VERSION_MASK);
 
         let lines = job_lines(&mut session, &prepared, true, &ctx).unwrap();
@@ -2771,9 +2742,8 @@ mod stratum_server_tests {
     async fn job_lines_raise_a_session_to_its_miner_tier_before_the_job() {
         let (mut ctx, _emissions, _directories) =
             test_bch_stratum_context("http://127.0.0.1:1").await;
-        ctx.sharechain_diff_floor = Some(1285);
         ctx.sharechain_tier_mode = SharechainTierMode::Tier;
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(Some(1285));
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
         session.parsed_address = Some(
             bitcoin::Address::p2pkh(
@@ -2813,9 +2783,8 @@ mod stratum_server_tests {
     async fn job_lines_lower_a_session_above_its_miner_tier() {
         let (mut ctx, _emissions, _directories) =
             test_bch_stratum_context("http://127.0.0.1:1").await;
-        ctx.sharechain_diff_floor = Some(1285);
         ctx.sharechain_tier_mode = SharechainTierMode::Tier;
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(Some(1285));
         let mut session = Session::<DifficultyAdjuster>::new(5000, 1, None, DEFAULT_VERSION_MASK);
 
         let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
@@ -2836,9 +2805,8 @@ mod stratum_server_tests {
     async fn job_lines_leave_a_hydrapool_session_alone_with_the_tier_switch_on() {
         let (mut ctx, _emissions, _directories) =
             test_bch_stratum_context("http://127.0.0.1:1").await;
-        ctx.sharechain_diff_floor = Some(1285);
         ctx.sharechain_tier_mode = SharechainTierMode::Tier;
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(Some(1285));
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
 
         let lines = job_lines(&mut session, &prepared, true, &ctx).unwrap();
@@ -2849,14 +2817,12 @@ mod stratum_server_tests {
         assert_eq!(session.difficulty_adjuster.share_difficulty_floor, None);
     }
 
-    /// With the switch off the configured floor is not a tier: a session below
-    /// it stays there, and the job keeps the pool-wide bits.
+    /// With the switch off a derived floor is not a tier: a session below it
+    /// stays there, and the job keeps the pool-wide bits.
     #[tokio::test]
     async fn job_lines_keep_the_share_difficulty_with_the_tier_switch_off() {
-        let (mut ctx, _emissions, _directories) =
-            test_bch_stratum_context("http://127.0.0.1:1").await;
-        ctx.sharechain_diff_floor = Some(1285);
-        let prepared = create_test_prepared_notify();
+        let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
+        let prepared = create_test_prepared_notify(Some(1285));
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
 
         let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
@@ -2872,14 +2838,13 @@ mod stratum_server_tests {
     async fn job_lines_uniform_floor_ignores_the_miners_hashrate_share() {
         let (mut ctx, _emissions, _directories) =
             test_bch_stratum_context("http://127.0.0.1:1").await;
-        ctx.sharechain_diff_floor = Some(1285);
         ctx.sharechain_tier_mode = SharechainTierMode::UniformFloor;
         let (tier_tx, tier_rx) = watch::channel(Arc::new(HashMap::from([(
             "miner-address".to_string(),
             10.0,
         )])));
         ctx.tier_rx = tier_rx;
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(Some(1285));
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
         session.btcaddress = Some("miner-address".to_string());
 
@@ -2902,14 +2867,13 @@ mod stratum_server_tests {
     async fn job_lines_scale_the_tier_job_with_the_miners_hashrate_share() {
         let (mut ctx, _emissions, _directories) =
             test_bch_stratum_context("http://127.0.0.1:1").await;
-        ctx.sharechain_diff_floor = Some(1285);
         ctx.sharechain_tier_mode = SharechainTierMode::Tier;
         let (tier_tx, tier_rx) = watch::channel(Arc::new(HashMap::from([(
             "miner-address".to_string(),
             10.0,
         )])));
         ctx.tier_rx = tier_rx;
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(Some(1285));
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
         session.btcaddress = Some("miner-address".to_string());
 
@@ -2931,9 +2895,8 @@ mod stratum_server_tests {
     async fn job_lines_send_only_the_job_to_a_session_settled_at_its_tier() {
         let (mut ctx, _emissions, _directories) =
             test_bch_stratum_context("http://127.0.0.1:1").await;
-        ctx.sharechain_diff_floor = Some(1285);
         ctx.sharechain_tier_mode = SharechainTierMode::Tier;
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(Some(1285));
         let mut session = Session::<DifficultyAdjuster>::new(1285, 1, None, DEFAULT_VERSION_MASK);
 
         let lines = job_lines(&mut session, &prepared, false, &ctx).unwrap();
@@ -2948,7 +2911,7 @@ mod stratum_server_tests {
     #[tokio::test]
     async fn a_suggested_difficulty_after_a_job_stays_at_the_share_difficulty() {
         let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
-        let prepared = create_test_prepared_notify();
+        let prepared = create_test_prepared_notify(None);
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
         job_lines(&mut session, &prepared, false, &ctx).unwrap();
 

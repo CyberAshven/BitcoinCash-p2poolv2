@@ -130,8 +130,8 @@ fn check_declared_tokens(
 /// Coinbase-only jobs deliberately do not reveal their transaction list.
 /// Their declarator must validate CTOR/consensus and broadcast found blocks.
 ///
-/// `sharechain_diff_floor` is the share-chain difficulty floor, when the
-/// validating node has one (dormant until V2; see
+/// The declared params carry the share-chain difficulty floor their window
+/// derives, when the chain has one (see
 /// docs/sharechain/vardiff-sharechain.md). A declared commitment below it is
 /// raised to the floor's compact encoding before its digest is built, so a
 /// miner's locally declared job stays floor-compliant; the truncating encoder
@@ -142,7 +142,6 @@ pub(crate) fn validate_custom_job(
     payout: PayoutAddress,
     owner: ShareOwner,
     version_mask: i32,
-    sharechain_diff_floor: Option<u64>,
 ) -> Result<(JobDetails, Option<Block>), String> {
     let original = declared.prepared.template();
     let prev_hash =
@@ -193,7 +192,7 @@ pub(crate) fn validate_custom_job(
     // Raise a below-floor commitment to the floor before the digest is built:
     // the declared job's coinbase must commit to the clamped bits, and a
     // declaration built on the token's own bits then mismatches below.
-    if let Some(floor) = sharechain_diff_floor {
+    if let Some(floor) = declared.prepared.sharechain_floor() {
         let floor_target = target_for_difficulty(floor);
         if Target::from_compact(commitment.bits) > floor_target {
             commitment.bits = floor_target.to_compact_lossy();

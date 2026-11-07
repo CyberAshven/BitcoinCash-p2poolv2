@@ -8,11 +8,17 @@ use super::gbt::LOST_CONTACT_AFTER;
 use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::PayoutSplit;
 use crate::accounting::payout::payout_distribution::{PayoutDistribution, build_pplns_outputs};
+#[cfg(test)]
+#[mockall_double::double]
+use crate::accounting::payout::sharechain_pplns::PplnsWindow;
+#[cfg(not(test))]
+use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
     PayingBlock, bitcoin_block_difficulty,
 };
 use crate::config::StratumConfig;
 use crate::pool_difficulty;
+use crate::pool_difficulty::target_to_difficulty_rounded_up;
 use crate::shares::bch_asert::BchAsert;
 #[cfg(test)]
 #[mockall_double::double]
@@ -27,7 +33,7 @@ use crate::stratum::work::merge_tokens::{TokenFile, TokenSet};
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
 use crate::stratum::work::tracker::JobTracker;
 use p2poolv2_wallet::payout_address::PayoutAddress;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, warn};
 
@@ -51,6 +57,12 @@ pub(crate) struct NotifyContext {
     /// The tokens a Bitcoin Cash P2Pool node merge-mines for its miners
     /// (`[stratum] merge_mining_tokens`), read again when the file changes.
     pub merge_tokens: Option<TokenFile>,
+    /// The PPLNS window the derived share-chain difficulty floor is read
+    /// from: the payout's own window, set only on a vardiff node. Each
+    /// prepared template carries the floor the window at its share-chain
+    /// anchor derives, and the job paths read that result rather than
+    /// walking anything per job.
+    pub sharechain_floor_window: Option<Arc<RwLock<PplnsWindow>>>,
 }
 
 /// Build the output distribution for the coinbase transaction using
@@ -98,6 +110,34 @@ fn build_output_distribution(
         })
 }
 
+/// The share-chain difficulty floor the window ending at `tip` derives,
+/// when this node has the vardiff chain's payout window: the floor
+/// `PplnsWindow::get_sharechain_floor_from_start_hash` computes from the
+/// window's declared work and the ASERT-capped parent difficulty. `None`
+/// off the vardiff chain, whose windows derive no floor.
+///
+/// A window failure is a preparation failure: the floor is consensus, so a
+/// job built without it could commit below the band every validator of the
+/// share applies.
+fn sharechain_floor_at(
+    context: &NotifyContext,
+    tip: bitcoin::BlockHash,
+    target: bitcoin::CompactTarget,
+) -> Result<Option<u64>, WorkError> {
+    let Some(window) = context.sharechain_floor_window.as_ref() else {
+        return Ok(None);
+    };
+    let d_asert_capped = target_to_difficulty_rounded_up(bitcoin::Target::from_compact(target));
+    window
+        .write()
+        .expect("PPLNS window lock poisoned on write")
+        .get_sharechain_floor_from_start_hash(tip, &context.chain_store_handle, d_asert_capped)
+        .map(Some)
+        .map_err(|error| WorkError {
+            message: format!("Failed to derive the sharechain floor at {tip}: {error}"),
+        })
+}
+
 /// Build a PreparedNotifyParams from a template using the notify context.
 ///
 /// Queries chain state (tip, uncles, difficulty) and prepares the
@@ -121,6 +161,7 @@ fn build_prepared_notify(
         })?;
     let target = context.pool_difficulty.calculate_target_clamped(parent);
     context.tracker.set_pool_target(target);
+    let sharechain_floor = sharechain_floor_at(context, tip, target)?;
     // Bitcoin Cash shares follow the mining base's rule version, or the next
     // one once 95% of the vote span's work desires it (`next_share_version`).
     let share_version = if context.config.chain == crate::config::Chain::BitcoinCash {
@@ -176,6 +217,7 @@ fn build_prepared_notify(
     .prev_share_blockhash(tip)
     .uncles(uncles)
     .bits(target)
+    .sharechain_floor(sharechain_floor)
     .donation_address(context.config.donation_address().cloned())
     .donation(context.config.donation)
     .fee_address(context.config.fee_address().cloned())
@@ -357,6 +399,11 @@ fn publish_prepared_notify(
 /// On Bitcoin Cash `share_transaction_pool` supplies the share transactions
 /// each notify's shares carry; Bitcoin passes `None`.
 ///
+/// `sharechain_floor_window` is the vardiff node's payout window: each
+/// prepared template carries the share-chain difficulty floor the window at
+/// its anchor derives, and a floor failure withdraws work like any other
+/// preparation failure. `None` on every other chain, which derives no floor.
+///
 /// A token file (`merge_mining_tokens`) that cannot be read or is not valid
 /// returns at once too, so a node never starts mining without the tokens it
 /// was told to merge-mine.
@@ -371,6 +418,7 @@ pub async fn start_notify(
     pool_transactions: PoolTransactionCache,
     share_transaction_pool: Option<ShareTransactionPool>,
     tracker: Arc<JobTracker>,
+    sharechain_floor_window: Option<Arc<RwLock<PplnsWindow>>>,
 ) {
     let pool_signature = match config.pool_signature {
         Some(ref sig) => sig.as_bytes().to_vec(),
@@ -399,6 +447,7 @@ pub async fn start_notify(
         share_transaction_pool,
         tracker,
         merge_tokens,
+        sharechain_floor_window,
     };
 
     let mut latest_template: Option<Arc<BlockTemplate>> = None;
@@ -466,6 +515,8 @@ mod tests {
     use super::*;
     use crate::accounting::OutputPair;
     use crate::accounting::payout::payout_distribution::MockPayoutDistribution;
+    use crate::accounting::payout::sharechain_pplns::MockPplnsWindow;
+    use crate::accounting::payout::sharechain_pplns::pplns_window::WindowError;
     use crate::config::BitcoinCashNetwork;
     use crate::pool_difficulty::AsertParent;
     use crate::shares::bch_asert::{U256, get_compact};
@@ -596,6 +647,7 @@ mod tests {
                 PoolTransactionCache::new(),
                 None,
                 start_tracker_actor(),
+                None,
             )
             .await;
         });
@@ -677,6 +729,7 @@ mod tests {
                 PoolTransactionCache::new(),
                 None,
                 start_tracker_actor(),
+                None,
             )
             .await;
         });
@@ -789,6 +842,7 @@ mod tests {
                 PoolTransactionCache::new(),
                 None,
                 start_tracker_actor(),
+                None,
             )
             .await;
         });
@@ -904,6 +958,7 @@ mod tests {
                 PoolTransactionCache::new(),
                 None,
                 start_tracker_actor(),
+                None,
             )
             .await;
         });
@@ -1014,6 +1069,7 @@ mod tests {
             share_transaction_pool: None,
             tracker: start_tracker_actor(),
             merge_tokens: None,
+            sharechain_floor_window: None,
         };
 
         // Build prepared notify
@@ -1050,6 +1106,153 @@ mod tests {
         let stored_commitment = details.share_commitment.unwrap();
         assert_eq!(stored_commitment.miner_bitcoin_address, btcaddress);
         assert_eq!(stored_commitment.prev_share_blockhash, genesis.block_hash());
+    }
+
+    /// A vardiff context derives the floor at the mining base and the ASERT
+    /// target, and the prepared params carry it.
+    #[tokio::test]
+    async fn test_build_prepared_notify_carries_the_derived_floor() {
+        let data = include_str!(
+            "../../../../p2poolv2_tests/test_data/gbt/regtest/ckpool/one-txn/gbt.json"
+        );
+        let gbt_json: serde_json::Value = serde_json::from_str(data).expect("Invalid JSON");
+        let template: BlockTemplate =
+            serde_json::from_value(gbt_json).expect("Failed to parse BlockTemplate");
+
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let genesis = genesis_for_tests();
+        let genesis_hash = genesis.block_hash();
+        chain_store_handle
+            .expect_get_mining_base_and_uncles()
+            .returning(move || Ok((genesis_hash, vec![])));
+        chain_store_handle.expect_get_asert_parent().returning(|_| {
+            let genesis_header = genesis_for_tests().header;
+            Ok(AsertParent::from_header(
+                &genesis_header,
+                0,
+                genesis_header.time,
+            ))
+        });
+
+        let stratum_config = StratumConfig::new_for_test_default().parse().unwrap();
+        let pool_difficulty =
+            pool_difficulty::PoolDifficulty::new(genesis.header.bits, genesis.header.time, 0);
+        let test_distribution = vec![OutputPair {
+            address: "bcrt1qe2qaq0e8qlp425pxytrakala7725dynwhknufr"
+                .parse::<bitcoin::Address<_>>()
+                .unwrap()
+                .assume_checked()
+                .into(),
+            amount: Amount::from_sat(template.coinbasevalue),
+        }];
+        let mut floor_window = MockPplnsWindow::default();
+        floor_window
+            .expect_get_sharechain_floor_from_start_hash()
+            .withf(|start_hash, _, d_asert_capped| {
+                // The fixture's clamped pool target rounds up to 1165.
+                *start_hash == genesis_for_tests().block_hash() && *d_asert_capped == 1165
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(1285));
+
+        let mut context = NotifyContext {
+            chain_store_handle,
+            config: stratum_config,
+            pool_signature: b"test_pool".to_vec(),
+            pool_difficulty,
+            payout: Box::new(mock_payout_with_distribution(test_distribution)),
+            pool_transactions: PoolTransactionCache::new(),
+            share_transaction_pool: None,
+            tracker: start_tracker_actor(),
+            merge_tokens: None,
+            sharechain_floor_window: Some(Arc::new(RwLock::new(floor_window))),
+        };
+
+        let prepared = build_prepared_notify(&Arc::new(template), false, &mut context)
+            .expect("build_prepared_notify should succeed");
+
+        assert_eq!(prepared.sharechain_floor(), Some(1285));
+    }
+
+    /// A failed floor walk withdraws work without ending the notifier: the
+    /// floor is consensus, so no job may be published without it.
+    #[tokio::test]
+    async fn test_start_notify_withdraws_when_the_floor_walk_fails() {
+        let (template_tx, mut template_rx) =
+            watch::channel::<Option<Arc<PreparedNotifyParams>>>(None);
+        let (notify_tx, notify_rx) = mpsc::channel::<NotifyCmd>(10);
+
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let genesis = genesis_for_tests();
+        let genesis_hash = genesis.block_hash();
+        let genesis_header = genesis.header.clone();
+        chain_store_handle
+            .expect_get_mining_base_and_uncles()
+            .returning(move || Ok((genesis_hash, vec![])));
+        chain_store_handle.expect_get_asert_parent().returning(|_| {
+            let genesis_header = genesis_for_tests().header;
+            Ok(AsertParent::from_header(
+                &genesis_header,
+                0,
+                genesis_header.time,
+            ))
+        });
+
+        let pool_difficulty =
+            pool_difficulty::PoolDifficulty::new(genesis_header.bits, genesis_header.time, 0);
+        let stratum_config = StratumConfig::new_for_test_default().parse().unwrap();
+        let mut floor_window = MockPplnsWindow::default();
+        floor_window
+            .expect_get_sharechain_floor_from_start_hash()
+            .times(1)
+            .returning(|_, _, _| {
+                Err(WindowError::MissingUncle {
+                    uncle: bitcoin::BlockHash::all_zeros(),
+                })
+            });
+        let floor_window = Arc::new(RwLock::new(floor_window));
+
+        let task_handle = tokio::spawn(async move {
+            start_notify(
+                notify_rx,
+                template_tx,
+                chain_store_handle,
+                &stratum_config,
+                Box::new(MockPayoutDistribution::default()),
+                pool_difficulty,
+                PoolTransactionCache::new(),
+                None,
+                start_tracker_actor(),
+                Some(floor_window),
+            )
+            .await;
+        });
+
+        let data = include_str!(
+            "../../../../p2poolv2_tests/test_data/gbt/regtest/ckpool/one-txn/gbt.json"
+        );
+        let gbt_json: serde_json::Value = serde_json::from_str(data).expect("Invalid JSON");
+        let template: BlockTemplate =
+            serde_json::from_value(gbt_json).expect("Failed to parse BlockTemplate");
+        notify_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::new(template),
+            })
+            .await
+            .expect("Failed to send template");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), template_rx.changed())
+            .await
+            .expect("notifier must withdraw work when the floor walk fails")
+            .expect("notifier must keep its template sender open");
+
+        assert!(
+            template_rx.borrow_and_update().is_none(),
+            "no job may be published from a template whose floor walk failed"
+        );
+        assert!(!task_handle.is_finished());
+        drop(notify_tx);
+        task_handle.await.expect("notifier task panicked");
     }
 
     /// Build notify via prepared path, parse coinbase2, and verify extracted outputs match.

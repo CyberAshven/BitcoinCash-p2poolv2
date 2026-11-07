@@ -234,6 +234,12 @@ pub struct PreparedNotifyParams {
     uncles: Vec<BlockHash>,
     /// Share chain difficulty target (for building ShareCommitment struct)
     bits: CompactTarget,
+    /// The share-chain difficulty floor the window at `prev_share_blockhash`
+    /// derives (docs/sharechain/vardiff-sharechain.md), `None` off the
+    /// vardiff chain. The SV1 and SV2 job paths read it through
+    /// [`Self::sharechain_floor`]; a declared job is clamped to it in
+    /// `validate_custom_job`.
+    sharechain_floor: Option<u64>,
     /// Donation address for developers
     donation_address: Option<PayoutAddress>,
     /// Donation in basis points
@@ -385,6 +391,7 @@ impl PreparedNotifyParams {
         .prev_share_blockhash(self.prev_share_blockhash)
         .uncles(self.uncles.clone())
         .bits(self.bits)
+        .sharechain_floor(self.sharechain_floor)
         .donation_address(donation_address)
         .donation(donation)
         .fee_address(self.fee_address.clone())
@@ -488,6 +495,15 @@ impl PreparedNotifyParams {
     /// The ASERT-computed pool target for shares built on these params.
     pub fn bits(&self) -> bitcoin::CompactTarget {
         self.bits
+    }
+
+    /// The share-chain difficulty floor the window at
+    /// [`Self::prev_share_blockhash`] derives, `None` when the chain derives
+    /// none (Bitcoin, Hydrapool, the main and mini share chains). Vardiff's
+    /// per-miner tier jobs commit at or above it, and a declared job is
+    /// clamped to it in `validate_custom_job`.
+    pub(crate) fn sharechain_floor(&self) -> Option<u64> {
+        self.sharechain_floor
     }
 
     /// The share transactions shares built on these params carry.
@@ -600,6 +616,7 @@ pub(crate) struct PreparedNotifyParamsBuilder {
     prev_share_blockhash: BlockHash,
     uncles: Vec<BlockHash>,
     bits: CompactTarget,
+    sharechain_floor: Option<u64>,
     donation_address: Option<PayoutAddress>,
     donation: Option<u16>,
     fee_address: Option<PayoutAddress>,
@@ -629,6 +646,7 @@ impl PreparedNotifyParamsBuilder {
             prev_share_blockhash: BlockHash::all_zeros(),
             uncles: Vec::new(),
             bits: CompactTarget::from_consensus(0),
+            sharechain_floor: None,
             donation_address: None,
             donation: None,
             fee_address: None,
@@ -675,6 +693,14 @@ impl PreparedNotifyParamsBuilder {
 
     pub fn bits(mut self, bits: CompactTarget) -> Self {
         self.bits = bits;
+        self
+    }
+
+    /// The share-chain difficulty floor the window at `prev_share_blockhash`
+    /// derives (`PplnsWindow::get_sharechain_floor_from_start_hash`); `None`,
+    /// the default, when the chain derives none.
+    pub fn sharechain_floor(mut self, sharechain_floor: Option<u64>) -> Self {
+        self.sharechain_floor = sharechain_floor;
         self
     }
 
@@ -894,6 +920,7 @@ impl PreparedNotifyParamsBuilder {
             prev_share_blockhash: self.prev_share_blockhash,
             uncles: self.uncles,
             bits: self.bits,
+            sharechain_floor: self.sharechain_floor,
             donation_address: self.donation_address,
             donation: self.donation,
             fee_address: self.fee_address,

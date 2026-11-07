@@ -278,20 +278,14 @@ impl MiningChannels {
             .session
             .share_owner
             .ok_or("authorized channel has no share owner")?;
-        let (job, proposal) = match validate_custom_job(
-            request,
-            declared,
-            payout,
-            owner,
-            self.version_mask,
-            self.ctx.sharechain_diff_floor,
-        ) {
-            Ok(validated) => validated,
-            Err(reason) => {
-                debug!("Rejected SV2 custom job: {reason}");
-                return custom_job_error(request, "invalid-custom-job");
-            }
-        };
+        let (job, proposal) =
+            match validate_custom_job(request, declared, payout, owner, self.version_mask) {
+                Ok(validated) => validated,
+                Err(reason) => {
+                    debug!("Rejected SV2 custom job: {reason}");
+                    return custom_job_error(request, "invalid-custom-job");
+                }
+            };
         if job
             .share_commitment
             .as_ref()
@@ -899,13 +893,13 @@ impl MiningChannels {
             check_extended_job_fits(prefix_length, suffix_length)?;
         }
         // Per-miner tier of the job, once the tier switch is on. Needs the
-        // share chain (not Hydrapool) and a configured floor: without a floor
-        // the band is the old equality pin and a tier job would be rejected.
-        // Inlined through the free functions because `self.channels` is
-        // mutably borrowed for `channel`.
+        // share chain (not Hydrapool) and the derived floor the prepared
+        // template carries: without a floor no band applies and a tier job
+        // would be rejected. Inlined through the free functions because
+        // `self.channels` is mutably borrowed for `channel`.
         let tier_bits = if is_hydrapool {
             None
-        } else if let Some(floor) = self.ctx.sharechain_diff_floor {
+        } else if let Some(floor) = prepared.sharechain_floor() {
             let hashrate_share = channel
                 .session
                 .btcaddress

@@ -1113,7 +1113,6 @@ async fn disconnect_releases_the_authorized_worker_and_connection_permit() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
-        sharechain_diff_floor: None,
         sharechain_tier_mode: crate::config::SharechainTierMode::Off,
         target_ceiling: bitcoin::CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,

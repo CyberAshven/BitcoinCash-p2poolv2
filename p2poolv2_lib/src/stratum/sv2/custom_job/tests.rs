@@ -5,7 +5,8 @@ use crate::test_utils::{
     bch_template_transaction, test_bch_custom_job, test_bch_custom_job_with_leaves,
     test_bch_custom_job_with_share_bits, test_bch_declared_leaves, test_bch_prepared,
     test_bch_prepared_for_template, test_bch_prepared_with_cuts, test_bch_prepared_with_share_bits,
-    test_bch_prepared_with_tree_payees, test_merge_token_set,
+    test_bch_prepared_with_sharechain_floor, test_bch_prepared_with_tree_payees,
+    test_merge_token_set,
 };
 use binary_sv2::{B064K, Deserialize, Seq0255, U256};
 use bitcoin::Address;
@@ -32,7 +33,6 @@ fn a_full_declared_job_retains_the_tree_of_its_own_coinbase() {
         payout.into(),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
-        None,
     )
     .unwrap();
     let tree = job.payout_tree.unwrap();
@@ -67,7 +67,6 @@ fn full_job_uses_declared_transactions_and_proportional_fee_revenue() {
         payout.into(),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
-        None,
     )
     .unwrap();
     assert!(job.block_available);
@@ -123,7 +122,6 @@ fn full_job_on_a_light_template_drops_the_light_job() {
         payout.into(),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
-        None,
     )
     .unwrap();
     assert!(job.blocktemplate.light.is_none());
@@ -151,7 +149,6 @@ fn private_job_preserves_hidden_merkle_path_without_pool_transactions() {
         payout.into(),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
-        None,
     )
     .unwrap();
     assert!(!job.block_available);
@@ -185,7 +182,6 @@ fn full_job_rejects_wrong_merkle_path() {
             payout.into(),
             ShareOwner::CashP2pkh([0x22; 20]),
             DEFAULT_VERSION_MASK,
-            None,
         )
         .unwrap_err(),
         "invalid-merkle-path"
@@ -218,7 +214,6 @@ fn private_job_rejects_diverted_pplns_payment() {
             payout.into(),
             ShareOwner::CashP2pkh([0x22; 20]),
             DEFAULT_VERSION_MASK,
-            None,
         )
         .unwrap_err(),
         "invalid-pplns-outputs"
@@ -246,7 +241,6 @@ fn full_job_rejects_changed_declaration() {
             payout.into(),
             ShareOwner::CashP2pkh([0x22; 20]),
             DEFAULT_VERSION_MASK,
-            None,
         )
         .unwrap_err(),
         "declaration-mismatch"
@@ -292,7 +286,6 @@ fn validate_declared_leaves(
         regtest_payout(0x22),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
-        None,
     )
 }
 
@@ -376,7 +369,6 @@ fn a_coinbase_only_job_cannot_carry_a_token_root() {
         regtest_payout(0x22),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
-        None,
     )
     .unwrap_err();
     assert!(reason.contains("Coinbase-only"), "{reason}");
@@ -389,7 +381,7 @@ fn a_coinbase_only_job_cannot_carry_a_token_root() {
 fn a_coinbase_only_job_below_the_floor_is_installed_at_the_floor_bits() {
     // The prepared share bits are far easier than difficulty 1285, so the
     // clamp fires on every honest token-minted job on this fixture.
-    let prepared = test_bch_prepared();
+    let prepared = test_bch_prepared_with_sharechain_floor(1285);
     let token = prepared
         .mining_job_token([1; 32], prepared.template().curtime)
         .unwrap();
@@ -408,7 +400,6 @@ fn a_coinbase_only_job_below_the_floor_is_installed_at_the_floor_bits() {
         regtest_payout(0x22),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
-        Some(1285),
     )
     .unwrap();
     let commitment = job.share_commitment.unwrap();
@@ -421,7 +412,7 @@ fn a_coinbase_only_job_below_the_floor_is_installed_at_the_floor_bits() {
 /// digest already commits to the floor's bits.
 #[test]
 fn a_full_job_below_the_floor_is_installed_at_the_floor_bits() {
-    let prepared = test_bch_prepared();
+    let prepared = test_bch_prepared_with_sharechain_floor(1285);
     let token = prepared
         .mining_job_token([1; 32], prepared.template().curtime)
         .unwrap();
@@ -440,7 +431,6 @@ fn a_full_job_below_the_floor_is_installed_at_the_floor_bits() {
         regtest_payout(0x22),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
-        Some(1285),
     )
     .unwrap();
     assert_eq!(
@@ -456,7 +446,7 @@ fn a_full_job_below_the_floor_is_installed_at_the_floor_bits() {
 /// declaration comparison, so its reason is the one that surfaces.
 #[test]
 fn a_floor_unaware_full_job_below_the_floor_is_rejected() {
-    let prepared = test_bch_prepared();
+    let prepared = test_bch_prepared_with_sharechain_floor(1285);
     let token = prepared
         .mining_job_token([1; 32], prepared.template().curtime)
         .unwrap();
@@ -470,7 +460,6 @@ fn a_floor_unaware_full_job_below_the_floor_is_rejected() {
             regtest_payout(0x22),
             ShareOwner::CashP2pkh([0x22; 20]),
             DEFAULT_VERSION_MASK,
-            Some(1285),
         )
         .unwrap_err(),
         "invalid-pplns-outputs"
@@ -482,7 +471,8 @@ fn a_floor_unaware_full_job_below_the_floor_is_rejected() {
 /// consistent.
 #[test]
 fn a_full_job_at_the_floor_is_installed_unchanged() {
-    let prepared = test_bch_prepared_with_share_bits(CompactTarget::from_consensus(0x1b330000));
+    let prepared =
+        test_bch_prepared_with_share_bits(CompactTarget::from_consensus(0x1b330000), Some(1285));
     let token = prepared
         .mining_job_token([1; 32], prepared.template().curtime)
         .unwrap();
@@ -495,7 +485,6 @@ fn a_full_job_at_the_floor_is_installed_unchanged() {
         regtest_payout(0x22),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
-        Some(1285),
     )
     .unwrap();
     let commitment = job.share_commitment.unwrap();
@@ -505,7 +494,8 @@ fn a_full_job_at_the_floor_is_installed_unchanged() {
 /// A commitment harder than the floor passes through unchanged.
 #[test]
 fn a_full_job_above_the_floor_is_installed_unchanged() {
-    let prepared = test_bch_prepared_with_share_bits(CompactTarget::from_consensus(0x1b320000));
+    let prepared =
+        test_bch_prepared_with_share_bits(CompactTarget::from_consensus(0x1b320000), Some(1285));
     let token = prepared
         .mining_job_token([1; 32], prepared.template().curtime)
         .unwrap();
@@ -518,7 +508,6 @@ fn a_full_job_above_the_floor_is_installed_unchanged() {
         regtest_payout(0x22),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
-        Some(1285),
     )
     .unwrap();
     let commitment = job.share_commitment.unwrap();
@@ -526,8 +515,8 @@ fn a_full_job_above_the_floor_is_installed_unchanged() {
     assert!(Target::from_compact(commitment.bits) < target_for_difficulty(1285));
 }
 
-/// Without a configured floor the commitment keeps the token's bits exactly,
-/// as before the feature: the fixture's prepared bits pass through untouched.
+/// Without a derived floor the commitment keeps the token's bits exactly, as
+/// before the feature: the fixture's prepared bits pass through untouched.
 #[test]
 fn a_full_job_without_a_floor_keeps_its_token_bits() {
     let prepared = test_bch_prepared();
@@ -544,7 +533,6 @@ fn a_full_job_without_a_floor_keeps_its_token_bits() {
         regtest_payout(0x22),
         ShareOwner::CashP2pkh([0x22; 20]),
         DEFAULT_VERSION_MASK,
-        None,
     )
     .unwrap();
     assert_eq!(job.share_commitment.unwrap().bits, expected_bits);
