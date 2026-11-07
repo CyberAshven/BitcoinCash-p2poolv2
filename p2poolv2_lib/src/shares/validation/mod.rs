@@ -747,7 +747,9 @@ pub trait ShareValidator {
     /// fresh PoolDifficulty on every batch.
     fn pool_difficulty(&self) -> &PoolDifficulty;
 
-    /// The configured Bitcoin Cash share-chain difficulty floor.
+    /// The Bitcoin Cash share-chain difficulty floor, when the validator
+    /// derives one (dormant until V2; see
+    /// docs/sharechain/vardiff-sharechain.md).
     ///
     /// `Some(floor)` switches header-sync and block-receipt validation from
     /// the ASERT equality pin to the band `[effective floor, infinity)`.
@@ -777,13 +779,15 @@ pub struct DefaultShareValidator {
     /// Bitcoin and the Bitcoin Cash main chain use `MAX_POOL_TARGET`. The mini
     /// chain uses its own easier ceiling so its genesis target is valid.
     target_ceiling: CompactTarget,
-    /// The Bitcoin Cash share-chain difficulty floor, when configured.
+    /// The Bitcoin Cash share-chain difficulty floor, when the validator
+    /// derives one (dormant until V2; see
+    /// docs/sharechain/vardiff-sharechain.md).
     ///
     /// `Some(floor)` on Bitcoin Cash switches the three ASERT sites from the
     /// equality pin to the validation band `[effective floor, infinity)`,
     /// where the effective floor is `max(floor, the ceiling's difficulty)` in
     /// difficulty space. `None` on Bitcoin and on a Bitcoin Cash validator
-    /// without a configured floor keeps the equality rule.
+    /// without a derived floor keeps the equality rule.
     sharechain_diff_floor: Option<u64>,
     /// The Bitcoin Cash network's ASERT parameters, for the format check of
     /// a token share's bitcoin header. `None` on Bitcoin and on regtest,
@@ -1033,11 +1037,12 @@ impl DefaultShareValidator {
         self
     }
 
-    /// Set the Bitcoin Cash share-chain difficulty floor.
+    /// Set the Bitcoin Cash share-chain difficulty floor (dormant until V2;
+    /// see docs/sharechain/vardiff-sharechain.md).
     ///
     /// `Some(floor)` selects the validation band at the three ASERT sites;
     /// `None` keeps the equality pin. The default is `None`, matching
-    /// Bitcoin and a Bitcoin Cash node configured without a floor.
+    /// Bitcoin and the V1 equality pin.
     pub fn with_sharechain_diff_floor(mut self, sharechain_diff_floor: Option<u64>) -> Self {
         self.sharechain_diff_floor = sharechain_diff_floor;
         self

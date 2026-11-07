@@ -73,9 +73,10 @@ pub struct StratumServer {
     pub bch_share_network: Option<p2poolv2_wallet::bch_share::BchShareNetwork>,
     /// Pool wide Bitcoin Cash share hash, when the operator configured one.
     pub cash_share: Option<[u8; 20]>,
-    /// Share-chain difficulty floor from `[stratum] sharechain_diff_floor`,
-    /// when the network configures one. Read on the SV2 job declaration path
-    /// to clamp a declared job's commitment to the floor.
+    /// Dormant share-chain difficulty floor, V2's derived-floor enforcement
+    /// point (docs/sharechain/vardiff-sharechain.md). Unset is the V1
+    /// equality pin. Read on the SV2 job declaration path to clamp a
+    /// declared job's commitment to the floor.
     pub sharechain_diff_floor: Option<u64>,
     /// How jobs use the share-chain validation band from
     /// `[stratum] sharechain_tier_mode`. `off` keeps every job on the
@@ -278,8 +279,9 @@ impl StratumServerBuilder {
         self
     }
 
-    /// Share-chain difficulty floor from `[stratum] sharechain_diff_floor`.
-    /// Unset means no floor, as on Bitcoin or a node without the key.
+    /// Dormant share-chain difficulty floor, V2's derived-floor enforcement
+    /// point (docs/sharechain/vardiff-sharechain.md). Unset is the V1
+    /// equality pin.
     pub fn sharechain_diff_floor(mut self, sharechain_diff_floor: Option<u64>) -> Self {
         self.sharechain_diff_floor = sharechain_diff_floor;
         self
@@ -709,9 +711,10 @@ pub(crate) struct StratumContext {
     pub bch_share_network: Option<p2poolv2_wallet::bch_share::BchShareNetwork>,
     /// Configured Bitcoin Cash share hash. None when each miner sends `p2p=`.
     pub cash_share: Option<[u8; 20]>,
-    /// Share-chain difficulty floor from `[stratum] sharechain_diff_floor`.
-    /// None on Bitcoin or when the network configures none. The SV2 job
-    /// declaration path clamps a declared job's commitment to it.
+    /// Dormant share-chain difficulty floor, V2's derived-floor enforcement
+    /// point (docs/sharechain/vardiff-sharechain.md). None is the V1
+    /// equality pin. The SV2 job declaration path clamps a declared job's
+    /// commitment to it.
     pub sharechain_diff_floor: Option<u64>,
     /// How jobs use the share-chain validation band from
     /// `[stratum] sharechain_tier_mode`. `off` keeps every job on the

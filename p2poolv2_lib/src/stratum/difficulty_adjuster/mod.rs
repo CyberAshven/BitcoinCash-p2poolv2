@@ -82,7 +82,8 @@ pub fn share_difficulty_ceiling(share_bits: CompactTarget) -> Option<u64> {
 /// than the chain's own difficulty. `asert_capped_bits` is the asert-capped
 /// share target and `ceiling_bits` the ceiling's, both in compact form and
 /// read as stratum difficulty by [`share_difficulty_ceiling`]. `floor` is the
-/// configured `sharechain_diff_floor`. The result is at least
+/// share-chain difficulty floor, V2's derived floor (see
+/// docs/sharechain/vardiff-sharechain.md). The result is at least
 /// [`MINIMUM_SESSION_DIFFICULTY`], since difficulty 0 has no target.
 pub fn miner_tier_difficulty(
     floor: u64,
@@ -109,7 +110,8 @@ pub fn miner_tier_difficulty(
 /// Share-chain job bits for a miner under the `sharechain_tier_mode` switch,
 /// or `None` when every job stays on the pool-wide ASERT basis (`off`).
 ///
-/// `floor` is the configured `sharechain_diff_floor`, `asert_bits` the job's
+/// `floor` is the share-chain difficulty floor (see
+/// docs/sharechain/vardiff-sharechain.md), `asert_bits` the job's
 /// pool-wide ASERT share target and `ceiling_bits` the share chain's easiest
 /// share target ([`PoolDifficulty::target_ceiling`]). `hashrate_share` is the
 /// miner's published `w_i`, read from the metrics snapshot; `uniform-floor`
@@ -183,8 +185,8 @@ pub struct DifficultyAdjuster {
     /// before the first job and in Hydrapool mode, which has no share chain.
     pub share_difficulty_ceiling: Option<u64>,
     /// Per-miner tier difficulty of the latest job sent to this session, from
-    /// [`miner_tier_difficulty`]. Set from `sharechain_diff_floor` once the
-    /// tier switch is on (phase 2); the session difficulty never goes below
+    /// [`miner_tier_difficulty`]. Set from the V2 derived share-chain
+    /// difficulty floor once the tier switch is on (phase 2); the session difficulty never goes below
     /// it, whatever vardiff or the pool minimum ask for. `None` while the
     /// switch is off, so the clamp below is a no-op.
     pub share_difficulty_floor: Option<u64>,

@@ -130,11 +130,12 @@ fn check_declared_tokens(
 /// Coinbase-only jobs deliberately do not reveal their transaction list.
 /// Their declarator must validate CTOR/consensus and broadcast found blocks.
 ///
-/// `sharechain_diff_floor` is the network's configured share-chain difficulty
-/// floor, when it has one. A declared commitment below it is raised to the
-/// floor's compact encoding before its digest is built, so a miner's locally
-/// declared job stays floor-compliant; the truncating encoder guarantees the
-/// decoded difficulty is never below the floor.
+/// `sharechain_diff_floor` is the share-chain difficulty floor, when the
+/// validating node has one (dormant until V2; see
+/// docs/sharechain/vardiff-sharechain.md). A declared commitment below it is
+/// raised to the floor's compact encoding before its digest is built, so a
+/// miner's locally declared job stays floor-compliant; the truncating encoder
+/// guarantees the decoded difficulty is never below the floor.
 pub(crate) fn validate_custom_job(
     request: &SetCustomMiningJob,
     declared: DeclaredJob,

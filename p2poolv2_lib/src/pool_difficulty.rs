@@ -85,11 +85,13 @@ pub(crate) fn target_for_difficulty(difficulty: u64) -> Target {
 
 /// Easiest target ASERT may return for this anchor.
 ///
-/// The mini Bitcoin Cash chain clamps to its own anchor. Every other anchor,
-/// including Bitcoin, keeps [`MAX_TARGET_CONSENSUS`].
+/// The mini and vardiff Bitcoin Cash chains clamp to their own anchors. Every
+/// other anchor, including Bitcoin, keeps [`MAX_TARGET_CONSENSUS`].
 fn asert_easy_clamp(anchor_target: CompactTarget) -> u32 {
     if anchor_target.to_consensus() == crate::shares::bch_genesis::MINI_ANCHOR_TARGET {
         crate::shares::bch_genesis::MINI_ANCHOR_TARGET
+    } else if anchor_target.to_consensus() == crate::shares::bch_genesis::VARDIFF_ANCHOR_TARGET {
+        crate::shares::bch_genesis::VARDIFF_ANCHOR_TARGET
     } else {
         MAX_TARGET_CONSENSUS
     }

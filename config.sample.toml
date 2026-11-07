@@ -42,8 +42,9 @@ chain = "bitcoin-cash"
 # "mainnet", "chipnet", "scalenet" or "regtest". The node refuses to start
 # unless [bitcoinrpc] is BCHN on this network.
 bitcoin_cash_network = "chipnet"
-# "mini" (share target 256 times easier, for small miners and test networks)
-# or "main". Every node on one share chain must use the same one.
+# "mini" (share target 256 times easier, for small miners and test networks),
+# "main", or "vardiff" (see docs/sharechain/vardiff-sharechain.md). Every node
+# on one share chain must use the same one.
 bch_share_chain = "mini"
 hostname = "0.0.0.0"
 port = 3333

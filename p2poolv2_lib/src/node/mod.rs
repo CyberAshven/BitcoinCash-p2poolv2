@@ -156,7 +156,8 @@ impl Node {
         let network_protocol = protocol_string(
             config.stratum.network,
             config.stratum.chain,
-            config.stratum.sharechain_diff_floor,
+            config.stratum.bch_share_chain,
+            None,
             genesis_hash,
         );
 

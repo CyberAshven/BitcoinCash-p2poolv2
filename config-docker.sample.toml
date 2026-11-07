@@ -54,7 +54,8 @@ minimum_difficulty = 100
 chain = "bitcoin-cash"
 # "mainnet", "chipnet" or "regtest". Under compose, NETWORK sets it.
 bitcoin_cash_network = "regtest"
-# "mini" (share target 256 times easier, for small miners) or "main".
+# "mini" (share target 256 times easier, for small miners), "main", or
+# "vardiff" (see docs/sharechain/vardiff-sharechain.md).
 # Under compose, BCH_SHARE_CHAIN sets it.
 bch_share_chain = "mini"
 

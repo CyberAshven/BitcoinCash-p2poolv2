@@ -281,6 +281,7 @@ fn umbrel_app_stores_are_named_after_network_and_share_chain() {
         let share_chain = match config.stratum.bch_share_chain {
             BchShareChain::Main => "main",
             BchShareChain::Mini => "mini",
+            BchShareChain::Vardiff => "vardiff",
         };
         assert_eq!(
             config.store.path,

@@ -53,7 +53,7 @@ use crate::address::Address as P2PoolAddress;
 #[cfg(test)]
 use crate::config::{Chain, PoolMode};
 #[cfg(test)]
-use crate::config::{Parsed, StratumConfig, Sv2Authority};
+use crate::config::{StratumConfig, Sv2Authority};
 #[cfg(test)]
 use crate::pool_difficulty::AsertParent;
 #[cfg(test)]
@@ -1319,18 +1319,6 @@ pub fn test_bch_auxpow() -> (AuxProof, TokenLeaf) {
     )
     .unwrap();
     (proof, leaf)
-}
-
-/// A parsed Bitcoin Cash chipnet stratum config, the shape a chipnet node
-/// runs on after `Config::load`. Production derives the protocol-tag floor
-/// and other band values from it.
-#[cfg(test)]
-pub(crate) fn test_bch_chipnet_stratum_config() -> StratumConfig<Parsed> {
-    let mut config = StratumConfig::new_for_test_default();
-    config.chain = Chain::BitcoinCash;
-    config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
-    config.bootstrap_address = "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t".to_string();
-    config.parse().unwrap()
 }
 
 /// Disposable BCH mining context; keep the returned directories alive until the test ends.

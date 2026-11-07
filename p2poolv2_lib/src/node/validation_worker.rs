@@ -96,8 +96,10 @@ pub struct ValidationWorker {
     chain: Chain,
     /// Easiest share target the validator accepts. Defaults to the main ceiling.
     target_ceiling: CompactTarget,
-    /// The Bitcoin Cash share-chain difficulty floor, when configured. `None`
-    /// keeps the ASERT equality pin; see `DefaultShareValidator`.
+    /// The Bitcoin Cash share-chain difficulty floor, when the validator
+    /// derives one (dormant until V2; see
+    /// docs/sharechain/vardiff-sharechain.md). `None` keeps the ASERT
+    /// equality pin; see `DefaultShareValidator`.
     sharechain_diff_floor: Option<u64>,
     /// The Bitcoin Cash network whose ASERT checks token shares' headers.
     bitcoin_cash_network: Option<BitcoinCashNetwork>,
@@ -148,7 +150,9 @@ impl ValidationWorker {
     }
 
     /// Set the Bitcoin Cash share-chain difficulty floor this worker's
-    /// validator enforces (`DefaultShareValidator::with_sharechain_diff_floor`).
+    /// validator enforces (dormant until V2; see
+    /// docs/sharechain/vardiff-sharechain.md and
+    /// `DefaultShareValidator::with_sharechain_diff_floor`).
     pub fn with_sharechain_diff_floor(mut self, sharechain_diff_floor: Option<u64>) -> Self {
         self.sharechain_diff_floor = sharechain_diff_floor;
         self

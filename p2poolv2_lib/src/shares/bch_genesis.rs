@@ -6,8 +6,9 @@
 //!
 //! Bitcoin genesis files stay as they are. A Bitcoin Cash node anchors its
 //! share on the published BCHN genesis block for the selected network and
-//! pays the NUMS key with P2PKH. Main and mini differ by their anchor target,
-//! so the genesis hash differs and the chains do not reorg into each other.
+//! pays the NUMS key with P2PKH. Main, mini and vardiff differ by their
+//! anchor target, so the genesis hash differs and the chains do not reorg
+//! into each other.
 
 use crate::config::{BchShareChain, BitcoinCashNetwork, Chain, StratumConfig};
 use crate::shares::coinbase_proof::CoinbaseProof;
@@ -31,6 +32,20 @@ pub const MAIN_ANCHOR_TARGET: u32 = 0x1b4188f5;
 /// higher than [`crate::shares::share_block::MAX_POOL_TARGET`], which multiplies
 /// the target by 256.
 pub const MINI_ANCHOR_TARGET: u32 = 0x1c384bd7;
+
+/// Anchor and ceiling of the vardiff share chain. The compact exponent is one
+/// higher than [`MAIN_ANCHOR_TARGET`] and the mantissa is its own, so the
+/// target is 256 times easier than main and shares start at difficulty
+/// 3.90625. This is the chain the variable share-difficulty increments build
+/// on (`docs/sharechain/vardiff-sharechain.md`, section 4).
+pub const VARDIFF_ANCHOR_TARGET: u32 = 0x1c4188f5;
+
+/// Segment naming the vardiff share chain's rule set in the protocol string,
+/// in place of the static `floor-<value>` segment
+/// (`docs/sharechain/vardiff-sharechain.md`, section 5). It is `vardiff` from
+/// the first increment through the completed chain: the increments are one
+/// implementation and are not meant to coexist on a libp2p network.
+pub const BCH_VARDIFF_RULE_TAG: &str = "vardiff";
 
 /// Published BCHN chipnet (and testnet4) genesis hash.
 #[cfg(test)]
@@ -60,7 +75,7 @@ pub fn genesis_for_stratum<State>(
     }
 }
 
-/// Share genesis for a Bitcoin Cash network and main or mini chain.
+/// Share genesis for a Bitcoin Cash network and main, mini or vardiff chain.
 pub fn build(
     network: BchShareNetwork,
     share_chain: BchShareChain,
@@ -123,11 +138,14 @@ pub fn anchor_block(network: BchShareNetwork) -> Block {
 
 /// Ceiling applied to share targets on the chain anchored at `anchor`.
 ///
-/// Mini keeps its own easier ceiling. Every other anchor, including Bitcoin
-/// and the Bitcoin Cash main chain, keeps [`crate::shares::share_block::MAX_POOL_TARGET`].
+/// Mini and vardiff keep their own easier ceilings. Every other anchor,
+/// including Bitcoin and the Bitcoin Cash main chain, keeps
+/// [`crate::shares::share_block::MAX_POOL_TARGET`].
 pub fn target_ceiling(anchor: CompactTarget) -> CompactTarget {
     if anchor.to_consensus() == MINI_ANCHOR_TARGET {
         CompactTarget::from_consensus(MINI_ANCHOR_TARGET)
+    } else if anchor.to_consensus() == VARDIFF_ANCHOR_TARGET {
+        CompactTarget::from_consensus(VARDIFF_ANCHOR_TARGET)
     } else {
         CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET)
     }
@@ -156,6 +174,7 @@ fn anchor_bits(share_chain: BchShareChain) -> CompactTarget {
     match share_chain {
         BchShareChain::Main => sim_overrides::anchor_target(),
         BchShareChain::Mini => CompactTarget::from_consensus(MINI_ANCHOR_TARGET),
+        BchShareChain::Vardiff => CompactTarget::from_consensus(VARDIFF_ANCHOR_TARGET),
     }
 }
 
@@ -232,6 +251,7 @@ mod tests {
     fn bitcoin_cash_genesis_pays_p2pkh_and_mini_is_a_different_chain() {
         let main = build(BchShareNetwork::Regtest, BchShareChain::Main).unwrap();
         let mini = build(BchShareNetwork::Regtest, BchShareChain::Mini).unwrap();
+        let vardiff = build(BchShareNetwork::Regtest, BchShareChain::Vardiff).unwrap();
         assert!(matches!(
             main.header.miner_address,
             ShareOwner::CashP2pkh(_)
@@ -240,8 +260,38 @@ mod tests {
         assert_eq!(main.transactions[0].output.len(), 1);
         assert!(main.transactions[0].input[0].witness.is_empty());
         assert_ne!(main.block_hash(), mini.block_hash());
+        assert_ne!(main.block_hash(), vardiff.block_hash());
+        assert_ne!(mini.block_hash(), vardiff.block_hash());
         assert_eq!(mini.header.bits.to_consensus(), MINI_ANCHOR_TARGET);
         assert_eq!(main.header.bits.to_consensus(), MAIN_ANCHOR_TARGET);
+        assert_eq!(vardiff.header.bits.to_consensus(), VARDIFF_ANCHOR_TARGET);
+    }
+
+    #[test]
+    fn mainnet_vardiff_genesis_hash_is_pinned() {
+        let genesis = build(BchShareNetwork::Mainnet, BchShareChain::Vardiff).unwrap();
+        assert_eq!(
+            genesis.block_hash().to_string(),
+            "b1149912dd13fe383b587fa4fb292ec6e31d7d1910007b8c2bf6744e0f3af030"
+        );
+    }
+
+    #[test]
+    fn chipnet_vardiff_genesis_hash_is_pinned() {
+        let genesis = build(BchShareNetwork::Chipnet, BchShareChain::Vardiff).unwrap();
+        assert_eq!(
+            genesis.block_hash().to_string(),
+            "df47aaa72e493d4f76e4ed2b5fb3c2e4b39f2715a5e9fb54d12adce6761c5f83"
+        );
+    }
+
+    #[test]
+    fn regtest_vardiff_genesis_hash_is_pinned() {
+        let genesis = build(BchShareNetwork::Regtest, BchShareChain::Vardiff).unwrap();
+        assert_eq!(
+            genesis.block_hash().to_string(),
+            "e3dcd23ef544a1ee7f01df247f3c14cacddc730e6ff62b175caa86c1d74a05d4"
+        );
     }
 
     // The Bitcoin Cash genesis shares, pinned. Their hashes name the share

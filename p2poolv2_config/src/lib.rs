@@ -32,31 +32,6 @@ pub const DEFAULT_VERSION_MASK: i32 = 0x1fffe000;
 /// drive the adjuster's sums to their limits.
 pub const DEFAULT_MAXIMUM_DIFFICULTY: u64 = 1 << 32;
 
-/// Share-chain difficulty floor when `sharechain_diff_floor` is not
-/// configured, on a Bitcoin Cash main share chain on mainnet: 10,000,000.
-///
-/// The floor is the cheapest difficulty a share-chain share may declare (the
-/// `[floor, infinity)` validation band, `docs/sharechain/variable-share-diff.md`
-/// §3). Other Bitcoin Cash networks default lower because their share chains
-/// are small: chipnet and scalenet, and every mini share chain, default to
-/// [`DEFAULT_SHARECHAIN_DIFF_FLOOR_TESTNET`]; regtest's main chain defaults to
-/// [`DEFAULT_SHARECHAIN_DIFF_FLOOR_REGTEST`]. Bitcoin has no share-chain
-/// floor: unset there means no floor (the equality rule, unchanged), and a
-/// configured value passes through parse but is not enforced until floor
-/// validation arrives for Bitcoin (V1). Keep mainnet's value at or below
-/// `expected_pool_hashrate * 10 / 2^32` or the chain under-emits (§9 of the
-/// spec).
-pub const DEFAULT_SHARECHAIN_DIFF_FLOOR: u64 = 10_000_000;
-
-/// Share-chain difficulty floor default on chipnet and scalenet, and on any
-/// mini share chain (share target 256 times easier than main): 5. Matches
-/// [`DEFAULT_SHARECHAIN_DIFF_FLOOR`]'s doc table, `variable-share-diff.md`
-/// §3.
-pub const DEFAULT_SHARECHAIN_DIFF_FLOOR_TESTNET: u64 = 5;
-
-/// Share-chain difficulty floor default on regtest's main share chain: 1.
-pub const DEFAULT_SHARECHAIN_DIFF_FLOOR_REGTEST: u64 = 1;
-
 /// One hundred percent, in basis points.
 pub const MAX_BASIS_POINTS: u16 = 10_000;
 
@@ -253,7 +228,9 @@ pub enum BitcoinCashNetwork {
 ///
 /// Main and mini are different genesis shares, so they do not reorg into
 /// each other. Mini's anchor target is 256 times easier than the main
-/// ceiling, which is the existing `MAX_POOL_TARGET`.
+/// ceiling, which is the existing `MAX_POOL_TARGET`. Vardiff is a third
+/// share chain (`docs/sharechain/vardiff-sharechain.md`): its own anchor
+/// target, with variable share difficulty still to come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BchShareChain {
@@ -262,6 +239,9 @@ pub enum BchShareChain {
     Main,
     /// Share target ceiling and anchor `0x1c384bd7` (256 times easier).
     Mini,
+    /// Share target ceiling and anchor `0x1c4188f5` (256 times easier than
+    /// main; its own genesis, `docs/sharechain/vardiff-sharechain.md`).
+    Vardiff,
 }
 
 /// How stratum jobs use the Bitcoin Cash share-chain validation band.
@@ -406,22 +386,6 @@ pub struct StratumConfig<State = Raw> {
     /// The maximum difficulty for the pool. Parsing fills an unset value with
     /// [`DEFAULT_MAXIMUM_DIFFICULTY`], so a parsed config always has one.
     pub maximum_difficulty: Option<u64>,
-    /// The cheapest difficulty a share-chain share may declare: the lower
-    /// bound of the `[floor, infinity)` validation band
-    /// (`docs/sharechain/variable-share-diff.md`, section 3). Consensus-critical
-    /// on Bitcoin Cash: the value goes into every node's protocol string as
-    /// `floor-<value>`, so all nodes on one share chain must agree, and a
-    /// change is a coordinated flag day, not a config tweak.
-    ///
-    /// Bitcoin Cash only. Parsing fills an unset value with the network
-    /// default: [`DEFAULT_SHARECHAIN_DIFF_FLOOR`] on mainnet,
-    /// [`DEFAULT_SHARECHAIN_DIFF_FLOOR_TESTNET`] on chipnet and scalenet and
-    /// on a mini share chain, [`DEFAULT_SHARECHAIN_DIFF_FLOOR_REGTEST`] on
-    /// regtest. On Bitcoin a configured value is accepted and passes
-    /// through unchanged but is inert for now: no floor check runs on a
-    /// Bitcoin share chain yet (V1), and unset stays `None`, keeping the
-    /// equality rule.
-    pub sharechain_diff_floor: Option<u64>,
     /// The address for solo mining payouts
     pub solo_address: Option<String>,
     /// The ZMQ publisher address for block hashes
@@ -479,8 +443,9 @@ pub struct StratumConfig<State = Raw> {
     /// `mainnet` (alias `main`), `chipnet`, and `regtest`.
     #[serde(default)]
     pub bitcoin_cash_network: Option<BitcoinCashNetwork>,
-    /// Main or mini Bitcoin Cash share chain. Ignored unless `chain` is
-    /// `bitcoin-cash`. `mini` on a Bitcoin node is rejected.
+    /// Main, mini or vardiff Bitcoin Cash share chain. Ignored unless `chain`
+    /// is `bitcoin-cash`. `mini` and `vardiff` on a Bitcoin node are
+    /// rejected.
     #[serde(default)]
     pub bch_share_chain: BchShareChain,
     /// How stratum jobs use the share-chain validation band: `off`
@@ -681,11 +646,23 @@ impl StratumConfig<Raw> {
             });
         }
 
-        if self.chain == Chain::Bitcoin && self.bch_share_chain == BchShareChain::Mini {
-            return Err(ConfigError {
-                message: "bch_share_chain = mini is only valid when chain is bitcoin-cash"
-                    .to_string(),
-            });
+        if self.chain == Chain::Bitcoin {
+            match self.bch_share_chain {
+                BchShareChain::Main => {}
+                BchShareChain::Mini => {
+                    return Err(ConfigError {
+                        message: "bch_share_chain = mini is only valid when chain is bitcoin-cash"
+                            .to_string(),
+                    });
+                }
+                BchShareChain::Vardiff => {
+                    return Err(ConfigError {
+                        message:
+                            "bch_share_chain = vardiff is only valid when chain is bitcoin-cash"
+                                .to_string(),
+                    });
+                }
+            }
         }
 
         if self.chain == Chain::BitcoinCash
@@ -783,21 +760,6 @@ impl StratumConfig<Raw> {
         )?;
         let sv2_coinbase_only_networks = parse_client_networks(&self.sv2_coinbase_only_from)?;
 
-        // The floor fills from the network default only on Bitcoin Cash, where
-        // the network check above has already required `bitcoin_cash_network`.
-        // On Bitcoin a configured value passes through unchanged but stays
-        // inert: no floor check runs on a Bitcoin share chain yet (V1), and
-        // unset means no floor, the equality rule.
-        let sharechain_diff_floor = match (self.chain, self.sharechain_diff_floor) {
-            (Chain::BitcoinCash, Some(floor)) => Some(floor),
-            (Chain::BitcoinCash, None) => Some(sharechain_diff_floor_default(
-                self.bitcoin_cash_network
-                    .expect("bitcoin_cash_network is required when chain is bitcoin-cash"),
-                self.bch_share_chain,
-            )),
-            (Chain::Bitcoin, floor) => floor,
-        };
-
         Ok(StratumConfig {
             hostname: self.hostname,
             port: self.port,
@@ -807,7 +769,6 @@ impl StratumConfig<Raw> {
                 self.maximum_difficulty
                     .unwrap_or(DEFAULT_MAXIMUM_DIFFICULTY),
             ),
-            sharechain_diff_floor,
             solo_address: self.solo_address,
             zmqpubhashblock: self.zmqpubhashblock,
             node_p2p_address: self.node_p2p_address,
@@ -1158,29 +1119,6 @@ fn parse_sv2_authority(
     }))
 }
 
-/// The default share-chain difficulty floor for a Bitcoin Cash network and
-/// share chain: 10,000,000 on mainnet's main chain, 5 on chipnet and
-/// scalenet and on any mini chain, 1 on regtest's main chain. The table in
-/// [`DEFAULT_SHARECHAIN_DIFF_FLOOR`]; the mini chain default follows its
-/// share target, 256 times easier than main, like the sample configurations
-/// describe. Unknown networks fall back to the regtest value so an unset key
-/// can never be unbounded.
-fn sharechain_diff_floor_default(
-    bitcoin_cash_network: BitcoinCashNetwork,
-    bch_share_chain: BchShareChain,
-) -> u64 {
-    match bch_share_chain {
-        BchShareChain::Mini => DEFAULT_SHARECHAIN_DIFF_FLOOR_TESTNET,
-        BchShareChain::Main => match bitcoin_cash_network {
-            BitcoinCashNetwork::Mainnet => DEFAULT_SHARECHAIN_DIFF_FLOOR,
-            BitcoinCashNetwork::Chipnet | BitcoinCashNetwork::Scalenet => {
-                DEFAULT_SHARECHAIN_DIFF_FLOOR_TESTNET
-            }
-            BitcoinCashNetwork::Regtest => DEFAULT_SHARECHAIN_DIFF_FLOOR_REGTEST,
-        },
-    }
-}
-
 /// Donation output and basis points this node puts in the shares it mines.
 ///
 /// Bitcoin keeps the upstream rule: both fields or neither, and any address.
@@ -1280,7 +1218,6 @@ impl StratumConfig<Raw> {
             bitcoin_cash_network: None,
             bch_share_chain: BchShareChain::Main,
             sharechain_tier_mode: SharechainTierMode::Off,
-            sharechain_diff_floor: None,
             sv2_port: None,
             sv2_authority_public_key: None,
             sv2_authority_secret_key: None,
@@ -2757,138 +2694,6 @@ mod tests {
         assert_eq!(parsed.maximum_difficulty, Some(u64::MAX));
     }
 
-    /// A Bitcoin node keeps the equality rule: a configured floor passes
-    /// through parse untouched (inert until floor validation arrives for
-    /// Bitcoin, V1) and an unset one stays None.
-    #[test]
-    fn bitcoin_keeps_a_configured_sharechain_diff_floor_inert() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.sharechain_diff_floor = Some(DEFAULT_SHARECHAIN_DIFF_FLOOR);
-        let parsed = config.parse().unwrap();
-        assert_eq!(
-            parsed.sharechain_diff_floor,
-            Some(DEFAULT_SHARECHAIN_DIFF_FLOOR)
-        );
-
-        let mut unset = StratumConfig::<Raw>::new_for_test_default();
-        unset.sharechain_diff_floor = None;
-        let parsed_unset = unset.parse().unwrap();
-        assert_eq!(parsed_unset.sharechain_diff_floor, None);
-    }
-
-    /// Mainnet's main share chain fills an unset floor with 10,000,000.
-    #[test]
-    fn bitcoin_cash_mainnet_fills_an_unset_floor_with_the_default() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.chain = Chain::BitcoinCash;
-        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Mainnet);
-        config.network = Network::Signet;
-        config.bootstrap_address =
-            "bitcoincash:qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2".to_string();
-        config.sharechain_diff_floor = None;
-
-        let parsed = config.parse().unwrap();
-        assert_eq!(
-            parsed.sharechain_diff_floor,
-            Some(DEFAULT_SHARECHAIN_DIFF_FLOOR)
-        );
-    }
-
-    /// Chipnet's main share chain fills an unset floor with 5.
-    #[test]
-    fn bitcoin_cash_chipnet_fills_an_unset_floor_with_the_testnet_default() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.chain = Chain::BitcoinCash;
-        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
-        config.network = Network::Signet;
-        config.bootstrap_address = "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t".to_string();
-        config.sharechain_diff_floor = None;
-
-        let parsed = config.parse().unwrap();
-        assert_eq!(
-            parsed.sharechain_diff_floor,
-            Some(DEFAULT_SHARECHAIN_DIFF_FLOOR_TESTNET)
-        );
-    }
-
-    /// Regtest's main share chain fills an unset floor with 1.
-    #[test]
-    fn bitcoin_cash_regtest_fills_an_unset_floor_with_one() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.chain = Chain::BitcoinCash;
-        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Regtest);
-        config.network = Network::Signet;
-        config.bootstrap_address = "bchreg:qqzldt8u5mafprrw6uljppyqg30uhl97ey890dqm34".to_string();
-        config.sharechain_diff_floor = None;
-
-        let parsed = config.parse().unwrap();
-        assert_eq!(
-            parsed.sharechain_diff_floor,
-            Some(DEFAULT_SHARECHAIN_DIFF_FLOOR_REGTEST)
-        );
-    }
-
-    /// A mini share chain is 256 times easier than main, so it defaults to
-    /// the testnet floor (5) even on mainnet.
-    #[test]
-    fn mini_share_chain_fills_an_unset_floor_with_the_testnet_default() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.chain = Chain::BitcoinCash;
-        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Mainnet);
-        config.network = Network::Signet;
-        config.bootstrap_address =
-            "bitcoincash:qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2".to_string();
-        config.bch_share_chain = BchShareChain::Mini;
-        config.sharechain_diff_floor = None;
-
-        let parsed = config.parse().unwrap();
-        assert_eq!(
-            parsed.sharechain_diff_floor,
-            Some(DEFAULT_SHARECHAIN_DIFF_FLOOR_TESTNET)
-        );
-    }
-
-    /// A configured floor wins over every network default.
-    #[test]
-    fn test_parse_keeps_a_configured_sharechain_diff_floor() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.chain = Chain::BitcoinCash;
-        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Mainnet);
-        config.network = Network::Signet;
-        config.bootstrap_address =
-            "bitcoincash:qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2".to_string();
-        config.sharechain_diff_floor = Some(50_000_000);
-
-        let parsed = config.parse().unwrap();
-        assert_eq!(parsed.sharechain_diff_floor, Some(50_000_000));
-    }
-
-    /// The shipped sample (chipnet, mini chain) picks up its default floor,
-    /// so a real configuration file exercises the fill path end to end.
-    #[test]
-    fn config_sample_fills_the_sharechain_diff_floor() {
-        let config = Config::load("../config.sample.toml").unwrap();
-        let parsed = config.stratum.parse().unwrap();
-        assert_eq!(
-            parsed.sharechain_diff_floor,
-            Some(DEFAULT_SHARECHAIN_DIFF_FLOOR_TESTNET)
-        );
-    }
-
-    /// The documented env override reaches the key. The separator is `__`:
-    /// with a single `_` the key would resolve to
-    /// `stratum.sharechain.diff.floor`, miss the field and be silently
-    /// discarded (see
-    /// `env_override_reaches_a_field_whose_name_contains_an_underscore`).
-    #[test]
-    fn env_override_reaches_the_sharechain_diff_floor() {
-        with_var("P2POOL_STRATUM__SHARECHAIN_DIFF_FLOOR", Some("77"), || {
-            let config = Config::load("../config.sample.toml").unwrap();
-            let parsed = config.stratum.parse().unwrap();
-            assert_eq!(parsed.sharechain_diff_floor, Some(77));
-        });
-    }
-
     /// The shipped sample leaves the tier switch out, so it reads as `off`
     /// and upgrading operators stay byte-identical until the flag day.
     #[test]
@@ -3122,6 +2927,21 @@ mod tests {
     }
 
     #[test]
+    fn bitcoin_rejects_a_vardiff_share_chain() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.bch_share_chain = BchShareChain::Vardiff;
+
+        let error = config.parse().unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("bch_share_chain = vardiff is only valid when chain is bitcoin-cash"),
+            "unexpected message: {}",
+            error.message
+        );
+    }
+
+    #[test]
     fn bitcoin_cash_regtest_parses_on_the_regtest_network_whatever_network_says() {
         let mut config = StratumConfig::<Raw>::new_for_test_default();
         config.chain = Chain::BitcoinCash;
@@ -3166,6 +2986,18 @@ mod tests {
 
         let parsed = config.parse().unwrap();
         assert_eq!(parsed.bch_share_chain, BchShareChain::Mini);
+    }
+
+    #[test]
+    fn bitcoin_cash_accepts_the_vardiff_share_chain() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.chain = Chain::BitcoinCash;
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        config.bootstrap_address = "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t".to_string();
+        config.bch_share_chain = BchShareChain::Vardiff;
+
+        let parsed = config.parse().unwrap();
+        assert_eq!(parsed.bch_share_chain, BchShareChain::Vardiff);
     }
 }
 

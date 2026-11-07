@@ -15,9 +15,10 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::{
     BCH_COINBASE_MATURITY, BCH_PER_SHARE_CUTS_RULE_TAG, BCH_PPLNS_WINDOW_BLOCKS,
     BCH_WORK_WEIGHT_RULE_TAG, bch_depth_rule_tag,
 };
-use crate::config::Chain;
+use crate::config::{BchShareChain, Chain};
 use crate::node::messages::{MAX_P2P_MESSAGE_SIZE, Message, RawMessage};
 use crate::pool_difficulty::BCH_ASERT_ANCHOR_TAG;
+use crate::shares::bch_genesis::BCH_VARDIFF_RULE_TAG;
 use crate::shares::bch_headers::BCH_CURRENT_CHAIN_RULE_TAG;
 use crate::shares::bch_script::BCH_SHARE_TRADE_RULE_TAG;
 use crate::shares::coinbase_proof::bch_merkle_rule_tag;
@@ -107,21 +108,29 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// Bitcoin Cash headers a node before it cannot read, so it ships as a flag
 /// day with its own last segment. Later rule changes go through the vote.
 ///
-/// The floor of the share-chain validation band is pinned by a
-/// `floor-<value>` segment right after `{BCH_ASERT_ANCHOR_TAG}` (absent
-/// when the floor is unset or the chain is Bitcoin). Two nodes with
-/// different floors derive different protocol strings and fail the
-/// handshake instead of trading shares one side would reject; raising or
-/// lowering the floor is a coordinated flag day, not a config tweak.
-fn share_chain_rule_tag(chain: Chain, floor: Option<u64>) -> Option<String> {
+/// The share chain's own segment follows `{BCH_ASERT_ANCHOR_TAG}`
+/// (`docs/sharechain/vardiff-sharechain.md`, section 5). The vardiff share
+/// chain emits the fixed `vardiff` rule tag, in place of the static
+/// `floor-<value>` segment the floor of the validation band used to pin. That
+/// floor segment stays dormant: no chain configures a static floor anymore,
+/// so main and mini emit their pre-floor strings (a configured floor would
+/// still derive a different string and fail the handshake).
+fn share_chain_rule_tag(
+    chain: Chain,
+    share_chain: BchShareChain,
+    floor: Option<u64>,
+) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
         Chain::BitcoinCash => {
-            let floor_segment = floor
-                .map(|value| format!("/floor-{value}"))
-                .unwrap_or_default();
+            let chain_segment = match share_chain {
+                BchShareChain::Vardiff => format!("/{BCH_VARDIFF_RULE_TAG}"),
+                BchShareChain::Main | BchShareChain::Mini => floor
+                    .map(|value| format!("/floor-{value}"))
+                    .unwrap_or_default(),
+            };
             Some(format!(
-                "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}{floor_segment}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_PER_SHARE_CUTS_RULE_TAG}/{BCH_UNCLE_ONCE_RULE_TAG}/{BCH_SHARE_BODY_RULE_TAG}/{BCH_PAYOUT_SCRIPT_RULE_TAG}/{}/{}/{}/{BCH_NO_SEGWIT_RULE_TAG}/{BCH_WORK_WEIGHT_RULE_TAG}/{BCH_MERGE_MINING_RULE_TAG}/{BCH_SHARE_VERSION_RULE_TAG}/{BCH_CURRENT_CHAIN_RULE_TAG}",
+                "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}{chain_segment}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_PER_SHARE_CUTS_RULE_TAG}/{BCH_UNCLE_ONCE_RULE_TAG}/{BCH_SHARE_BODY_RULE_TAG}/{BCH_PAYOUT_SCRIPT_RULE_TAG}/{}/{}/{}/{BCH_NO_SEGWIT_RULE_TAG}/{BCH_WORK_WEIGHT_RULE_TAG}/{BCH_MERGE_MINING_RULE_TAG}/{BCH_SHARE_VERSION_RULE_TAG}/{BCH_CURRENT_CHAIN_RULE_TAG}",
                 bch_payout_rule_tag(),
                 bch_merkle_rule_tag(),
                 bch_depth_rule_tag(),
@@ -133,8 +142,13 @@ fn share_chain_rule_tag(chain: Chain, floor: Option<u64>) -> Option<String> {
 
 /// The share chain part of every protocol string: the genesis tag, followed
 /// on Bitcoin Cash by the rule tag.
-fn share_chain_segment(chain: Chain, floor: Option<u64>, genesis_hash: BlockHash) -> String {
-    match share_chain_rule_tag(chain, floor) {
+fn share_chain_segment(
+    chain: Chain,
+    share_chain: BchShareChain,
+    floor: Option<u64>,
+    genesis_hash: BlockHash,
+) -> String {
+    match share_chain_rule_tag(chain, share_chain, floor) {
         Some(rule_tag) => format!("{}/{rule_tag}", genesis_tag(genesis_hash)),
         None => genesis_tag(genesis_hash),
     }
@@ -143,21 +157,22 @@ fn share_chain_segment(chain: Chain, floor: Option<u64>, genesis_hash: BlockHash
 /// Build the libp2p protocol string for a bitcoin network and share chain.
 ///
 /// Network isolation is enforced through protocol negotiation: nodes on
-/// different networks, on share chains with different genesis blocks, or on
-/// Bitcoin Cash with different payout rules or share-chain floors derive
-/// different protocol strings and therefore fail to negotiate a shared
-/// protocol. Centralizing construction here keeps the string consistent
-/// across the request-response protocol, Identify, and the Noise prologue.
+/// different networks, on different share chains (different genesis blocks),
+/// or on Bitcoin Cash with different payout rules derive different protocol
+/// strings and therefore fail to negotiate a shared protocol. Centralizing
+/// construction here keeps the string consistent across the request-response
+/// protocol, Identify, and the Noise prologue.
 pub fn protocol_string(
     network: bitcoin::Network,
     chain: Chain,
+    share_chain: BchShareChain,
     floor: Option<u64>,
     genesis_hash: BlockHash,
 ) -> String {
     format!(
         "/p2pool/{}/{}/1.0.0",
         network.to_core_arg(),
-        share_chain_segment(chain, floor, genesis_hash)
+        share_chain_segment(chain, share_chain, floor, genesis_hash)
     )
 }
 
@@ -169,13 +184,14 @@ pub fn protocol_string(
 pub fn kad_protocol_string(
     network: bitcoin::Network,
     chain: Chain,
+    share_chain: BchShareChain,
     floor: Option<u64>,
     genesis_hash: BlockHash,
 ) -> String {
     format!(
         "/p2pool/{}/{}/kad/1.0.0",
         network.to_core_arg(),
-        share_chain_segment(chain, floor, genesis_hash)
+        share_chain_segment(chain, share_chain, floor, genesis_hash)
     )
 }
 
@@ -187,10 +203,17 @@ impl P2PoolRequestResponseProtocol {
     pub fn new(
         network: bitcoin::Network,
         chain: Chain,
+        share_chain: BchShareChain,
         floor: Option<u64>,
         genesis_hash: BlockHash,
     ) -> Self {
-        Self(protocol_string(network, chain, floor, genesis_hash))
+        Self(protocol_string(
+            network,
+            chain,
+            share_chain,
+            floor,
+            genesis_hash,
+        ))
     }
 }
 
@@ -339,7 +362,6 @@ mod tests {
     use crate::config::{BchShareChain, Chain};
     use crate::shares::bch_genesis;
     use crate::shares::share_block::ShareBlock;
-    use crate::test_utils::test_bch_chipnet_stratum_config;
     use p2poolv2_wallet::bch_share::BchShareNetwork;
 
     #[test]
@@ -350,7 +372,13 @@ mod tests {
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
 
         assert_eq!(
-            protocol_string(bitcoin::Network::Signet, Chain::Bitcoin, None, genesis_hash),
+            protocol_string(
+                bitcoin::Network::Signet,
+                Chain::Bitcoin,
+                BchShareChain::Main,
+                None,
+                genesis_hash
+            ),
             format!("/p2pool/signet/{expected_tag}/1.0.0")
         );
     }
@@ -372,12 +400,14 @@ mod tests {
             protocol_string(
                 bitcoin::Network::Testnet4,
                 Chain::Bitcoin,
+                BchShareChain::Main,
                 None,
                 genesis_hash
             ),
             protocol_string(
                 bitcoin::Network::Testnet4,
                 Chain::Bitcoin,
+                BchShareChain::Main,
                 None,
                 other_genesis_hash
             )
@@ -393,63 +423,97 @@ mod tests {
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
 
-        let kad = kad_protocol_string(bitcoin::Network::Signet, Chain::Bitcoin, None, genesis_hash);
+        let kad = kad_protocol_string(
+            bitcoin::Network::Signet,
+            Chain::Bitcoin,
+            BchShareChain::Main,
+            None,
+            genesis_hash,
+        );
         assert_eq!(kad, format!("/p2pool/signet/{expected_tag}/kad/1.0.0"));
         assert_ne!(
             kad,
-            protocol_string(bitcoin::Network::Signet, Chain::Bitcoin, None, genesis_hash)
+            protocol_string(
+                bitcoin::Network::Signet,
+                Chain::Bitcoin,
+                BchShareChain::Main,
+                None,
+                genesis_hash
+            )
         );
     }
 
-    /// A Bitcoin Cash node names its payout rule after the genesis tag, and
-    /// pins its share-chain floor behind `asert-parent`. The string feeds the
-    /// Noise prologue, Identify and request-response, so a peer on another
-    /// rule or another floor fails the handshake.
+    /// A Bitcoin Cash node names the share chain's rules after the genesis
+    /// tag. The string feeds the Noise prologue, Identify and
+    /// request-response, so a peer on another chain or another rule fails the
+    /// handshake.
     #[test]
     fn test_bitcoin_cash_protocol_string_carries_the_payout_rule() {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
-        let floor = test_bch_chipnet_stratum_config()
-            .sharechain_diff_floor
-            .expect("a parsed Bitcoin Cash config fills the floor");
 
         assert_eq!(
             protocol_string(
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
-                Some(floor),
+                BchShareChain::Main,
+                None,
                 genesis_hash
             ),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/floor-{floor}/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/1.0.0"
             )
         );
     }
 
-    /// Two nodes with different floors derive different protocol strings, so
-    /// they fail the handshake instead of trading shares one side rejects.
+    /// The vardiff share chain emits its fixed `vardiff` rule segment in
+    /// place of the static floor segment
+    /// (`docs/sharechain/vardiff-sharechain.md`, section 5), so its nodes
+    /// never negotiate with main or mini peers.
     #[test]
-    fn test_different_floors_derive_different_protocol_strings() {
+    fn test_vardiff_share_chain_protocol_string_emits_the_vardiff_segment() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Vardiff)
+            .unwrap()
+            .block_hash();
+        let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
+
+        assert_eq!(
+            protocol_string(
+                bitcoin::Network::Testnet,
+                Chain::BitcoinCash,
+                BchShareChain::Vardiff,
+                None,
+                genesis_hash
+            ),
+            format!(
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/vardiff/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/1.0.0"
+            )
+        );
+    }
+
+    /// Even from the same genesis, the vardiff segment alone keeps a vardiff
+    /// node and a main node on different protocol strings.
+    #[test]
+    fn test_vardiff_and_main_share_chains_derive_different_protocol_strings() {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
             .unwrap()
             .block_hash();
-        let floor = test_bch_chipnet_stratum_config()
-            .sharechain_diff_floor
-            .expect("a parsed Bitcoin Cash config fills the floor");
 
         assert_ne!(
             protocol_string(
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
-                Some(floor),
+                BchShareChain::Vardiff,
+                None,
                 genesis_hash
             ),
             protocol_string(
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
-                Some(floor + 1),
+                BchShareChain::Main,
+                None,
                 genesis_hash
             )
         );
@@ -466,15 +530,13 @@ mod tests {
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
         let genesis_anchor_string = format!("/p2pool/test/{expected_tag}/pplns-k3-m100/1.0.0");
-        let floor = test_bch_chipnet_stratum_config()
-            .sharechain_diff_floor
-            .expect("a parsed Bitcoin Cash config fills the floor");
 
         assert_ne!(
             protocol_string(
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
-                Some(floor),
+                BchShareChain::Mini,
+                None,
                 genesis_hash
             ),
             genesis_anchor_string
@@ -493,15 +555,13 @@ mod tests {
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
         let before_trading_string =
             format!("/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/1.0.0");
-        let floor = test_bch_chipnet_stratum_config()
-            .sharechain_diff_floor
-            .expect("a parsed Bitcoin Cash config fills the floor");
 
         assert_ne!(
             protocol_string(
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
-                Some(floor),
+                BchShareChain::Mini,
+                None,
                 genesis_hash
             ),
             before_trading_string
@@ -521,15 +581,13 @@ mod tests {
         let before_budget_string = format!(
             "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/1.0.0"
         );
-        let floor = test_bch_chipnet_stratum_config()
-            .sharechain_diff_floor
-            .expect("a parsed Bitcoin Cash config fills the floor");
 
         assert_ne!(
             protocol_string(
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
-                Some(floor),
+                BchShareChain::Mini,
+                None,
                 genesis_hash
             ),
             before_budget_string
@@ -545,13 +603,11 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
             .unwrap()
             .block_hash();
-        let floor = test_bch_chipnet_stratum_config()
-            .sharechain_diff_floor
-            .expect("a parsed Bitcoin Cash config fills the floor");
         let current = protocol_string(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
-            Some(floor),
+            BchShareChain::Main,
+            None,
             genesis_hash,
         );
         let before = current.replace("/bch-prev-1off/", "/");
@@ -573,15 +629,13 @@ mod tests {
         let before_uncle_once_string = format!(
             "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/1.0.0"
         );
-        let floor = test_bch_chipnet_stratum_config()
-            .sharechain_diff_floor
-            .expect("a parsed Bitcoin Cash config fills the floor");
 
         assert_ne!(
             protocol_string(
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
-                Some(floor),
+                BchShareChain::Main,
+                None,
                 genesis_hash
             ),
             before_uncle_once_string
@@ -601,13 +655,11 @@ mod tests {
         let before_batch_string = format!(
             "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-cap11/uncle-once/1.0.0"
         );
-        let floor = test_bch_chipnet_stratum_config()
-            .sharechain_diff_floor
-            .expect("a parsed Bitcoin Cash config fills the floor");
         let string = protocol_string(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
-            Some(floor),
+            BchShareChain::Main,
+            None,
             genesis_hash,
         );
         assert_ne!(string, before_batch_string);
@@ -628,13 +680,11 @@ mod tests {
         let before_fixes_string = format!(
             "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert/version-vote/1.0.0"
         );
-        let floor = test_bch_chipnet_stratum_config()
-            .sharechain_diff_floor
-            .expect("a parsed Bitcoin Cash config fills the floor");
         let string = protocol_string(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
-            Some(floor),
+            BchShareChain::Main,
+            None,
             genesis_hash,
         );
         assert_ne!(string, before_fixes_string);
@@ -653,15 +703,13 @@ mod tests {
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
         let fixed_window_string = format!("/p2pool/test/{expected_tag}/1.0.0");
-        let floor = test_bch_chipnet_stratum_config()
-            .sharechain_diff_floor
-            .expect("a parsed Bitcoin Cash config fills the floor");
 
         assert_ne!(
             protocol_string(
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
-                Some(floor),
+                BchShareChain::Main,
+                None,
                 genesis_hash
             ),
             fixed_window_string
@@ -676,19 +724,17 @@ mod tests {
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
-        let floor = test_bch_chipnet_stratum_config()
-            .sharechain_diff_floor
-            .expect("a parsed Bitcoin Cash config fills the floor");
 
         assert_eq!(
             kad_protocol_string(
                 bitcoin::Network::Testnet,
                 Chain::BitcoinCash,
-                Some(floor),
+                BchShareChain::Main,
+                None,
                 genesis_hash
             ),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/floor-{floor}/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/kad/1.0.0"
             )
         );
     }

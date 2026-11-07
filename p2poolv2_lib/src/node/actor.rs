@@ -493,7 +493,6 @@ impl NodeActor {
         let block_receiver_tx_for_response = block_receiver_tx.clone();
         let chain = config.stratum.chain;
         let bitcoin_cash_network = config.stratum.bitcoin_cash_network;
-        let sharechain_diff_floor = config.stratum.sharechain_diff_floor;
         let target_ceiling = crate::shares::bch_genesis::target_ceiling(
             crate::shares::bch_genesis::genesis_for_stratum(&config.stratum)
                 .map_err(|error| -> Box<dyn Error> { error })?
@@ -511,7 +510,6 @@ impl NodeActor {
         let mut validator = DefaultShareValidator::new(pool_difficulty.clone())
             .for_chain(chain)
             .with_target_ceiling(target_ceiling)
-            .with_sharechain_diff_floor(sharechain_diff_floor)
             .with_bitcoin_cash_network(bitcoin_cash_network);
         if let Some(sink) = start_payout_tree_executor(&config, &chain_store_handle) {
             validator = validator.with_payout_tree_sink(sink);
@@ -606,7 +604,6 @@ impl NodeActor {
         )
         .for_chain(chain)
         .with_target_ceiling(target_ceiling)
-        .with_sharechain_diff_floor(sharechain_diff_floor)
         .with_bitcoin_cash_network(bitcoin_cash_network);
         let validation_worker_id = workers
             .spawn(async move {

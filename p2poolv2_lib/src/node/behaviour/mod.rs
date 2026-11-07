@@ -66,7 +66,8 @@ impl P2PoolBehaviour {
             kad_protocol_string(
                 config.stratum.network,
                 config.stratum.chain,
-                config.stratum.sharechain_diff_floor,
+                config.stratum.bch_share_chain,
+                None,
                 genesis_hash,
             ),
         )?);
@@ -80,7 +81,8 @@ impl P2PoolBehaviour {
             protocol_string(
                 config.stratum.network,
                 config.stratum.chain,
-                config.stratum.sharechain_diff_floor,
+                config.stratum.bch_share_chain,
+                None,
                 genesis_hash,
             ),
             local_key.public(),
@@ -111,7 +113,8 @@ impl P2PoolBehaviour {
                     P2PoolRequestResponseProtocol::new(
                         config.stratum.network,
                         config.stratum.chain,
-                        config.stratum.sharechain_diff_floor,
+                        config.stratum.bch_share_chain,
+                        None,
                         genesis_hash,
                     ),
                     ProtocolSupport::Full,
