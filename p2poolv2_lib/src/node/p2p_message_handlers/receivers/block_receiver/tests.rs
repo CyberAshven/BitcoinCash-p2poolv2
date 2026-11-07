@@ -1,4 +1,5 @@
 use super::*;
+use crate::accounting::payout::sharechain_pplns::MockPplnsWindow;
 use crate::accounting::payout::sharechain_pplns::pplns_window::PRUNE_DEPTH;
 use crate::node::request_response_handler::block_fetcher;
 use crate::node::validation_worker;
@@ -11,6 +12,7 @@ use crate::store::writer::StoreError;
 use crate::test_utils::TestShareBlockBuilder;
 use bitcoin::CompactTarget;
 use bitcoin::hashes::Hash;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
@@ -429,7 +431,7 @@ async fn test_process_share_block_with_ready_parent_commits() {
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
     mock_validator
-        .expect_sharechain_diff_floor()
+        .expect_sharechain_floor_window()
         .return_const(None);
     mock_validator
         .expect_pool_difficulty()
@@ -544,7 +546,7 @@ async fn test_process_share_block_invalid_uncles_dropped() {
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
     mock_validator
-        .expect_sharechain_diff_floor()
+        .expect_sharechain_floor_window()
         .return_const(None);
     mock_validator
         .expect_pool_difficulty()
@@ -637,7 +639,7 @@ async fn test_process_share_block_with_an_invalid_timestamp_is_dropped() {
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
     mock_validator
-        .expect_sharechain_diff_floor()
+        .expect_sharechain_floor_window()
         .return_const(None);
     mock_validator
         .expect_pool_difficulty()
@@ -775,7 +777,7 @@ async fn test_process_share_block_refused_below_prune_target_is_ok() {
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
     mock_validator
-        .expect_sharechain_diff_floor()
+        .expect_sharechain_floor_window()
         .return_const(None);
     mock_validator
         .expect_pool_difficulty()
@@ -1394,7 +1396,7 @@ async fn test_process_share_block_already_header_valid_still_stores_body() {
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
     mock_validator
-        .expect_sharechain_diff_floor()
+        .expect_sharechain_floor_window()
         .return_const(None);
     mock_validator
         .expect_pool_difficulty()
@@ -1479,7 +1481,7 @@ async fn test_process_share_block_asert_mismatch_dropped() {
         .expect_validate_uncles()
         .returning(|_, _| Ok(()));
     mock_validator
-        .expect_sharechain_diff_floor()
+        .expect_sharechain_floor_window()
         .return_const(None);
     mock_validator
         .expect_pool_difficulty()
@@ -1511,10 +1513,10 @@ async fn test_process_share_block_asert_mismatch_dropped() {
     assert_eq!(receiver.pending_count(), 0);
 }
 
-/// With a floor configured, `validate_asert` accepts a declared target
-/// sitting exactly at the floor: `0x1d000033` decodes to
-/// `MAX_ATTAINABLE_MAINNET / 1285` exactly. `calculate_target_clamped`
-/// has no expectation, proving the band path replaced the equality pin.
+/// With the window deriving floor 1285, `validate_asert` accepts a declared
+/// target sitting exactly at the floor: the mocked ASERT target decodes to
+/// difficulty 1285, and `0x1d000033` decodes to
+/// `MAX_ATTAINABLE_MAINNET / 1285` exactly.
 #[test]
 fn test_validate_asert_accepts_share_at_the_floor() {
     let parent_hash = BlockHash::from_byte_array([0xab; 32]);
@@ -1534,14 +1536,26 @@ fn test_validate_asert_accepts_share_at_the_floor() {
 
     let mut mock_pool_difficulty = PoolDifficulty::default();
     mock_pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1d000033));
+    mock_pool_difficulty
         .expect_target_ceiling()
         .return_const(CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ));
+    let mut floor_window = MockPplnsWindow::default();
+    floor_window
+        .expect_get_sharechain_floor_from_start_hash()
+        .withf(move |start_hash, _, d_asert_capped| {
+            *start_hash == parent_hash && *d_asert_capped == 1285
+        })
+        .times(1)
+        .returning(|_, _, _| Ok(1285));
+    let floor_window = Arc::new(RwLock::new(floor_window));
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_sharechain_diff_floor()
-        .return_const(Some(1285));
+        .expect_sharechain_floor_window()
+        .return_const(Some(floor_window));
     mock_validator
         .expect_pool_difficulty()
         .return_const(mock_pool_difficulty);
@@ -1565,7 +1579,7 @@ fn test_validate_asert_accepts_share_at_the_floor() {
     receiver.validate_asert(&block).unwrap();
 }
 
-/// A declared target easier than the floor is rejected with the band
+/// A declared target easier than the derived floor is rejected with the band
 /// message, before any proof-of-work check.
 #[test]
 fn test_validate_asert_rejects_share_below_the_floor() {
@@ -1586,14 +1600,26 @@ fn test_validate_asert_rejects_share_below_the_floor() {
 
     let mut mock_pool_difficulty = PoolDifficulty::default();
     mock_pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1d000033));
+    mock_pool_difficulty
         .expect_target_ceiling()
         .return_const(CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ));
+    let mut floor_window = MockPplnsWindow::default();
+    floor_window
+        .expect_get_sharechain_floor_from_start_hash()
+        .withf(move |start_hash, _, d_asert_capped| {
+            *start_hash == parent_hash && *d_asert_capped == 1285
+        })
+        .times(1)
+        .returning(|_, _, _| Ok(1285));
+    let floor_window = Arc::new(RwLock::new(floor_window));
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_sharechain_diff_floor()
-        .return_const(Some(1285));
+        .expect_sharechain_floor_window()
+        .return_const(Some(floor_window));
     mock_validator
         .expect_pool_difficulty()
         .return_const(mock_pool_difficulty);
@@ -1640,14 +1666,26 @@ fn test_validate_asert_rejects_zero_declared_target() {
 
     let mut mock_pool_difficulty = PoolDifficulty::default();
     mock_pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1d000033));
+    mock_pool_difficulty
         .expect_target_ceiling()
         .return_const(CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ));
+    let mut floor_window = MockPplnsWindow::default();
+    floor_window
+        .expect_get_sharechain_floor_from_start_hash()
+        .withf(move |start_hash, _, d_asert_capped| {
+            *start_hash == parent_hash && *d_asert_capped == 1285
+        })
+        .times(1)
+        .returning(|_, _, _| Ok(1285));
+    let floor_window = Arc::new(RwLock::new(floor_window));
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_sharechain_diff_floor()
-        .return_const(Some(1285));
+        .expect_sharechain_floor_window()
+        .return_const(Some(floor_window));
     mock_validator
         .expect_pool_difficulty()
         .return_const(mock_pool_difficulty);
@@ -1678,8 +1716,8 @@ fn test_validate_asert_rejects_zero_declared_target() {
     assert!(error.to_string().contains("zero"), "{error}");
 }
 
-/// With floor 1 against the main chain ceiling, the ceiling binds: a
-/// difficulty-1 header is rejected and the ceiling's own target passes.
+/// With the derived floor at 0, the ceiling binds: a difficulty-1 header is
+/// rejected and the ceiling's own target passes.
 #[test]
 fn test_validate_asert_uses_the_ceiling_when_the_floor_is_easier() {
     let parent_hash = BlockHash::from_byte_array([0xab; 32]);
@@ -1699,14 +1737,26 @@ fn test_validate_asert_uses_the_ceiling_when_the_floor_is_easier() {
 
     let mut mock_pool_difficulty = PoolDifficulty::default();
     mock_pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1d000033));
+    mock_pool_difficulty
         .expect_target_ceiling()
         .return_const(CompactTarget::from_consensus(
             crate::shares::share_block::MAX_POOL_TARGET,
         ));
+    let mut floor_window = MockPplnsWindow::default();
+    floor_window
+        .expect_get_sharechain_floor_from_start_hash()
+        .withf(move |start_hash, _, d_asert_capped| {
+            *start_hash == parent_hash && *d_asert_capped == 1285
+        })
+        .times(2)
+        .returning(|_, _, _| Ok(0));
+    let floor_window = Arc::new(RwLock::new(floor_window));
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_sharechain_diff_floor()
-        .return_const(Some(1));
+        .expect_sharechain_floor_window()
+        .return_const(Some(floor_window));
     mock_validator
         .expect_pool_difficulty()
         .return_const(mock_pool_difficulty);
@@ -1762,7 +1812,7 @@ fn test_validate_asert_uses_equality_pin_when_floor_is_unset() {
         .returning(|_| CompactTarget::from_consensus(0x1d00ffff));
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_sharechain_diff_floor()
+        .expect_sharechain_floor_window()
         .return_const(None);
     mock_validator
         .expect_pool_difficulty()
@@ -1905,7 +1955,7 @@ async fn test_cascade_commits_child_when_parent_arrives() {
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
     mock_validator
-        .expect_sharechain_diff_floor()
+        .expect_sharechain_floor_window()
         .return_const(None);
     mock_validator
         .expect_pool_difficulty()
@@ -2043,7 +2093,7 @@ async fn test_pending_block_re_received_with_ready_parent_is_processed() {
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
     mock_validator
-        .expect_sharechain_diff_floor()
+        .expect_sharechain_floor_window()
         .return_const(None);
     mock_validator
         .expect_pool_difficulty()
@@ -2223,7 +2273,7 @@ async fn process_bch_block_with_prev(prev_known: bool) -> bool {
         .expect_calculate_target_clamped()
         .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
     mock_validator
-        .expect_sharechain_diff_floor()
+        .expect_sharechain_floor_window()
         .return_const(None);
     mock_validator
         .expect_pool_difficulty()

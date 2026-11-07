@@ -20,6 +20,9 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ConfirmedHeaderResult;
 use crate::shares::share_block::{ShareHeader, ShareTransaction};
+use crate::shares::validation::sharechain_floor::{
+    FloorCredit, FloorError, SHARECHAIN_FLOOR_PRESENCE_MINIMUM, derive_sharechain_floor,
+};
 use crate::store::dag_store::MAX_UNCLES_DEPTH;
 use crate::store::writer::StoreError;
 use bitcoin::Address;
@@ -33,6 +36,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::hash;
+use std::iter;
 use tracing::{debug, warn};
 
 /// The PPLNS window: a coinbase pays at most `PPLNS_WINDOW_SHARES` shares,
@@ -98,6 +102,25 @@ const MIN_SIZING_BLOCK_DIFFICULTY: u128 = 1;
 /// same number.
 pub fn bitcoin_block_difficulty(bits: CompactTarget, network: bitcoin::Network) -> u128 {
     Target::from_compact(bits).difficulty(network)
+}
+
+/// The difficulty a share's own `bits` declare, measured against the
+/// **mainnet** proof-of-work limit (`Target::difficulty(Network::Bitcoin)`),
+/// whatever chain the share chain pays on.
+///
+/// This is the `d` of the share chain's floor and tier arithmetic, the same
+/// unit as `target_for_difficulty` and `share_difficulty_ceiling`: `bits` is
+/// the share's claim about its own work, so it is measured against the
+/// hardest limit, overstating rather than understating the work it claims.
+/// Never call this with the node's own network: the payout network maps
+/// chipnet, scalenet and regtest to `Network::Regtest`, whose proof-of-work
+/// limit is about `2^31` times easier.
+///
+/// The band rejects a declared target of zero when a share is admitted
+/// (`BandRejection::ZeroTarget`), so a share in the chain decodes to a
+/// non-zero target here.
+pub(crate) fn declared_share_difficulty(header: &ShareHeader) -> u128 {
+    bitcoin_block_difficulty(header.bits, bitcoin::Network::Bitcoin)
 }
 
 /// The bitcoin block a coinbase pays, as far as its window needs it.
@@ -365,8 +388,19 @@ struct ConfirmedEntry {
     /// Base weight of the share (`WeightUnit`): its difficulty on Bitcoin,
     /// its exact work on Bitcoin Cash.
     difficulty: u128,
+    /// The difficulty the share's own `bits` declare against the mainnet
+    /// proof-of-work limit (`declared_share_difficulty`): the `d` the floor
+    /// sums. Not `difficulty`, which is the share's payout weight in this
+    /// window's `WeightUnit`.
+    declared_difficulty: u128,
     /// Uncle entries, if any, referenced by the share
     uncle_entries: Vec<UncleEntry>,
+    /// Uncle hashes of this share the lookup table did not hold when the
+    /// entry was built, so their work is absent from `uncle_entries`. The
+    /// payout walk skips them (warn and continue); the floor walk heals them
+    /// from the store and refuses the share if they stay missing
+    /// (`get_sharechain_floor_from_start_hash`). Empty in normal operation.
+    unresolved_uncles: Vec<BlockHash>,
     /// Txid of the share's coinbase, which carries its payout right. Set on
     /// Bitcoin Cash, where the payout rights index needs it to evict the
     /// share; all zeros on Bitcoin.
@@ -480,6 +514,10 @@ struct UncleEntry {
     owner_key: usize,
     /// Base weight of the uncle share before weighting (`WeightUnit`).
     difficulty: u128,
+    /// The difficulty the uncle's own `bits` declare against the mainnet
+    /// proof-of-work limit (`declared_share_difficulty`): the `d` the floor
+    /// sums. Not `difficulty`, the uncle's payout weight.
+    declared_difficulty: u128,
     /// The block the uncle's bitcoin header builds on.
     bch_prev: BlockHash,
 }
@@ -755,10 +793,10 @@ pub struct WindowCredits {
 /// Why a payout distribution could not be produced.
 ///
 /// The cases are distinguished by the response validation needs:
-/// `InsufficientEntries` and `RightsHistoryTooShallow` are permanent for this
-/// node and drop the share without a verdict, `NothingEligible` is the
-/// share's own fault and makes it invalid, and everything else may still
-/// resolve and leaves it for a retry.
+/// `InsufficientEntries`, `RightsHistoryTooShallow` and `FloorOverflow` are
+/// permanent for this node and drop the share without a verdict,
+/// `NothingEligible` is the share's own fault and makes it invalid, and
+/// everything else may still resolve and leaves it for a retry.
 #[derive(Debug)]
 pub enum WindowError {
     /// The walk ran out of cached entries before reaching either bound, and
@@ -792,6 +830,19 @@ pub enum WindowError {
         anchor: BlockHash,
         bch_prev: BlockHash,
     },
+    /// The floor walk needs the header of a window uncle that was missing
+    /// when its entry was built and the store does not hold now either. The
+    /// floor is consensus and cannot skip a missing uncle the way the payout
+    /// walk does: refuse rather than sum a partial window. Unlike
+    /// `InsufficientEntries` the header may still arrive, so a retry can
+    /// resolve this.
+    MissingUncle { uncle: BlockHash },
+    /// The derived floor exceeds `u64::MAX` and leaves the rule's
+    /// representable domain. Like `InsufficientEntries`, permanent for this
+    /// node: the arithmetic cannot produce a floor to judge the share
+    /// against, so it is dropped without a verdict, never judged against a
+    /// saturated one.
+    FloorOverflow,
     /// A store read failed, or the anchor's ancestry is not stored. Either may
     /// resolve later.
     ReadFailure(Box<dyn Error + Send + Sync>),
@@ -827,6 +878,14 @@ impl fmt::Display for WindowError {
                 "PPLNS window for anchor {anchor} pays no share: none is on the chain of \
                  Bitcoin Cash block {bch_prev} or one block off it"
             ),
+            WindowError::MissingUncle { uncle } => write!(
+                formatter,
+                "Floor window uncle {uncle} is missing: a window uncle header must be cached or \
+                 stored to sum the window's floor work"
+            ),
+            WindowError::FloorOverflow => {
+                write!(formatter, "Floor window arithmetic exceeds u64::MAX")
+            }
             WindowError::ReadFailure(error) => write!(formatter, "{error}"),
         }
     }
@@ -837,6 +896,14 @@ impl Error for WindowError {}
 impl From<Box<dyn Error + Send + Sync>> for WindowError {
     fn from(error: Box<dyn Error + Send + Sync>) -> Self {
         WindowError::ReadFailure(error)
+    }
+}
+
+impl From<FloorError> for WindowError {
+    fn from(error: FloorError) -> Self {
+        match error {
+            FloorError::WindowWorkOverflow => WindowError::FloorOverflow,
+        }
     }
 }
 
@@ -1219,6 +1286,142 @@ impl PplnsWindow {
         window_credits.by_payout_address = credited_by_value(&self.address_keys, by_payout_key);
         window_credits.by_share_owner = credited_by_value(&self.owner_keys, by_owner_key);
         Ok(window_credits)
+    }
+
+    /// The share chain difficulty floor the window anchored at `start_hash`
+    /// derives, for the vardiff band rule.
+    ///
+    /// The window is the one the payout walk takes: newest to oldest from
+    /// the anchor, the immature shares skipped. Each share's declared
+    /// difficulty and its uncles' declared difficulties are summed per
+    /// miner (`miner_bitcoin_address`); the floor is the smallest such
+    /// miner work among the miners with at least
+    /// `SHARECHAIN_FLOOR_PRESENCE_MINIMUM` window shares, scaled by
+    /// `d_asert_capped` and divided by the window's total declared
+    /// difficulty, rounded up (`derive_sharechain_floor`). A window with no
+    /// miner at the presence minimum, or no declared work at all, derives
+    /// floor 0.
+    ///
+    /// Unlike the payout walk, the window here is always
+    /// `max_window_shares` shares: the floor is a fixed-count property, not
+    /// the work-sized payout window, and no Bitcoin Cash chain filter
+    /// applies, since every accepted window share counts towards the
+    /// mining floor. An uncle whose header was missing when its entry was
+    /// built is read from the store here: the payout walk may skip such an
+    /// uncle, the floor may not.
+    ///
+    /// Errors with `InsufficientEntries` when eviction has trimmed the
+    /// cache so the walk cannot fill its window, with `MissingUncle` when a
+    /// window uncle header cannot be materialized even from the store, with
+    /// `FloorOverflow` when the derived floor exceeds `u64::MAX`, and with
+    /// `ReadFailure` when a store read fails. The floor is consensus, so
+    /// every failure refuses the share rather than judging it against a
+    /// partial window.
+    pub fn get_sharechain_floor_from_start_hash(
+        &mut self,
+        start_hash: BlockHash,
+        chain_store_handle: &ChainStoreHandle,
+        d_asert_capped: u128,
+    ) -> Result<u64, WindowError> {
+        let (candidate_headers, confirmed_start_index) =
+            self.resolve_start_hash(start_hash, chain_store_handle)?;
+        let candidate_entries =
+            self.build_entries_from_headers(&candidate_headers, chain_store_handle)?;
+        let paying_height = self.paying_height(&candidate_entries, confirmed_start_index);
+        let immature_share_count = self.immature_share_count(paying_height);
+
+        let candidate_count = candidate_entries.len();
+        let confirmed_available = self.confirmed_entries.len() - confirmed_start_index;
+        let window_len = self
+            .max_window_shares
+            .min((candidate_count + confirmed_available).saturating_sub(immature_share_count));
+        if window_len < self.max_window_shares && !self.reaches_chain_start() {
+            return Err(WindowError::InsufficientEntries {
+                anchor: start_hash,
+                oldest_cached_height: self
+                    .confirmed_entries
+                    .back()
+                    .map_or(0, |entry| entry.height),
+                max_window_shares: self.max_window_shares,
+            });
+        }
+
+        let candidate_window_start = immature_share_count.min(candidate_count);
+        let candidate_window_len = window_len.min(candidate_count - candidate_window_start);
+        let candidate_window = &candidate_entries
+            [candidate_window_start..candidate_window_start + candidate_window_len];
+        let confirmed_window_start =
+            confirmed_start_index + (immature_share_count - candidate_window_start);
+        let confirmed_window_end = confirmed_window_start + (window_len - candidate_window_len);
+
+        let mut seen_uncles: HashSet<BlockHash> = HashSet::new();
+        let mut missing_uncles: Vec<BlockHash> = Vec::new();
+        for entry in candidate_window.iter().chain(
+            self.confirmed_entries
+                .range(confirmed_window_start..confirmed_window_end),
+        ) {
+            for uncle_hash in &entry.unresolved_uncles {
+                if seen_uncles.insert(*uncle_hash) {
+                    missing_uncles.push(*uncle_hash);
+                }
+            }
+        }
+        let healed_uncles = self.heal_floor_uncles(&missing_uncles, chain_store_handle)?;
+
+        let credits = candidate_window
+            .iter()
+            .chain(
+                self.confirmed_entries
+                    .range(confirmed_window_start..confirmed_window_end),
+            )
+            .flat_map(|entry| floor_credits_for_entry(entry, &healed_uncles));
+        let floor =
+            derive_sharechain_floor(credits, d_asert_capped, SHARECHAIN_FLOOR_PRESENCE_MINIMUM)?;
+        Ok(floor)
+    }
+
+    /// Read the headers of window uncles an entry was built without, into
+    /// the miner keys and declared difficulties the floor credits.
+    ///
+    /// The payout walk skips an uncle whose header the lookup table did not
+    /// hold; the floor may not, or nodes disagreeing on what their store
+    /// holds would derive different floors. Everything unresolved is read in
+    /// one batch, interned into `address_keys` so a healed uncle and a
+    /// cached share of the same miner share one floor identity, and a header
+    /// still missing afterwards fails closed with `MissingUncle`.
+    fn heal_floor_uncles(
+        &mut self,
+        missing_uncles: &[BlockHash],
+        chain_store_handle: &ChainStoreHandle,
+    ) -> Result<HashMap<BlockHash, FloorUncle>, WindowError> {
+        if missing_uncles.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let uncle_headers = chain_store_handle
+            .get_share_headers(missing_uncles)
+            .map_err(|error| {
+                WindowError::ReadFailure(
+                    format!("Cannot read the floor window's uncle headers: {error}").into(),
+                )
+            })?;
+        let mut healed_uncles = HashMap::with_capacity(uncle_headers.len());
+        for (blockhash, header) in uncle_headers {
+            let declared_difficulty = declared_share_difficulty(&header);
+            let internal_key = self.address_keys.key_for(header.miner_bitcoin_address);
+            healed_uncles.insert(
+                blockhash,
+                FloorUncle {
+                    internal_key,
+                    declared_difficulty,
+                },
+            );
+        }
+        for uncle_hash in missing_uncles {
+            if !healed_uncles.contains_key(uncle_hash) {
+                return Err(WindowError::MissingUncle { uncle: *uncle_hash });
+            }
+        }
+        Ok(healed_uncles)
     }
 
     /// Resolve the anchor and work out where its window starts and what
@@ -1627,7 +1830,8 @@ impl PplnsWindow {
             .iter()
             .map(|(blockhash, header)| {
                 let difficulty = self.base_weight(header);
-                let uncle_entries = resolve_uncle_entries(&header.uncles, &uncle_lookup_table);
+                let (uncle_entries, unresolved_uncles) =
+                    resolve_uncle_entries(&header.uncles, &uncle_lookup_table);
                 let mut entry = self.build_confirmed_entry(
                     *blockhash,
                     0,
@@ -1636,6 +1840,8 @@ impl PplnsWindow {
                     difficulty,
                     uncle_entries,
                 );
+                entry.declared_difficulty = declared_share_difficulty(header);
+                entry.unresolved_uncles = unresolved_uncles;
                 entry.cuts = self.share_cuts(header);
                 entry.bch_prev = header.bitcoin_header.prev_blockhash;
                 entry
@@ -2092,7 +2298,8 @@ impl PplnsWindow {
         } in confirmed_headers.into_iter().rev()
         {
             let difficulty = self.base_weight(&header);
-            let uncle_entries = resolve_uncle_entries(&header.uncles, &uncle_lookup_table);
+            let (uncle_entries, unresolved_uncles) =
+                resolve_uncle_entries(&header.uncles, &uncle_lookup_table);
             let coinbase_txid = match &mut self.rights {
                 Some(rights) => {
                     let coinbase_txid = share_coinbase_txid(&header);
@@ -2108,6 +2315,7 @@ impl PplnsWindow {
                 None => Txid::all_zeros(),
             };
             let cuts = self.share_cuts(&header);
+            let declared_difficulty = declared_share_difficulty(&header);
             let mut entry = self.build_confirmed_entry(
                 blockhash,
                 height,
@@ -2116,6 +2324,8 @@ impl PplnsWindow {
                 difficulty,
                 uncle_entries,
             );
+            entry.declared_difficulty = declared_difficulty;
+            entry.unresolved_uncles = unresolved_uncles;
             entry.coinbase_txid = coinbase_txid;
             entry.cuts = cuts;
             entry.bch_prev = header.bitcoin_header.prev_blockhash;
@@ -2182,7 +2392,9 @@ impl PplnsWindow {
             blockhash,
             height,
             difficulty,
+            declared_difficulty: 0,
             uncle_entries,
+            unresolved_uncles: Vec::new(),
             internal_key,
             owner_key,
             coinbase_txid: Txid::all_zeros(),
@@ -2191,13 +2403,15 @@ impl PplnsWindow {
     }
 
     /// Build an UncleEntry, resolving the miner address and the share owner
-    /// to internal keys.
+    /// to internal keys. `declared_difficulty` is the uncle's difficulty
+    /// against the mainnet proof-of-work limit, for the floor walk.
     fn build_uncle_entry(
         &mut self,
         blockhash: BlockHash,
         miner_address: PayoutAddress,
         share_owner: ShareOwner,
         difficulty: u128,
+        declared_difficulty: u128,
     ) -> UncleEntry {
         let internal_key = self.address_keys.key_for(miner_address);
         let owner_key = self.owner_keys.key_for(share_owner);
@@ -2207,6 +2421,7 @@ impl PplnsWindow {
             internal_key,
             owner_key,
             difficulty,
+            declared_difficulty,
             bch_prev: BlockHash::all_zeros(),
         }
     }
@@ -2228,11 +2443,13 @@ impl PplnsWindow {
         for (blockhash, header) in uncle_headers {
             let difficulty = self.base_weight(&header);
             let cuts = self.share_cuts(&header);
+            let declared_difficulty = declared_share_difficulty(&header);
             let mut uncle_entry = self.build_uncle_entry(
                 blockhash,
                 header.miner_bitcoin_address,
                 header.miner_address,
                 difficulty,
+                declared_difficulty,
             );
             uncle_entry.cuts = cuts;
             uncle_entry.bch_prev = header.bitcoin_header.prev_blockhash;
@@ -2344,27 +2561,81 @@ fn collect_unique_uncle_hashes(confirmed_headers: &[ConfirmedHeaderResult]) -> V
     all_uncle_hashes
 }
 
-/// Resolve uncle hashes into UncleEntry values using a pre-built lookup table.
+/// Resolve uncle hashes into UncleEntry values using a pre-built lookup table,
+/// and report the hashes the table did not hold so a caller that cannot skip
+/// them (the floor walk) can heal or refuse.
 fn resolve_uncle_entries(
     uncle_hashes: &[BlockHash],
     uncle_lookup: &HashMap<BlockHash, UncleEntry>,
-) -> Vec<UncleEntry> {
+) -> (Vec<UncleEntry>, Vec<BlockHash>) {
     let mut entries = Vec::with_capacity(uncle_hashes.len());
+    let mut unresolved = Vec::new();
     for uncle_hash in uncle_hashes {
         if let Some(uncle_entry) = uncle_lookup.get(uncle_hash) {
             entries.push(UncleEntry {
                 cuts: uncle_entry.cuts,
                 blockhash: uncle_entry.blockhash,
                 difficulty: uncle_entry.difficulty,
+                declared_difficulty: uncle_entry.declared_difficulty,
                 internal_key: uncle_entry.internal_key,
                 owner_key: uncle_entry.owner_key,
                 bch_prev: uncle_entry.bch_prev,
             });
         } else {
             tracing::warn!("Uncle header not found for {uncle_hash}, skipping");
+            unresolved.push(*uncle_hash);
         }
     }
-    entries
+    (entries, unresolved)
+}
+
+/// A window uncle the floor walk healed from the store after the entry was
+/// built without it: only what the floor sums, the miner identity and the
+/// declared difficulty.
+struct FloorUncle {
+    /// Internal key mapping the uncle's `miner_bitcoin_address` in
+    /// `address_keys`, the floor's payout identity.
+    internal_key: usize,
+    /// The uncle's declared difficulty against the mainnet proof-of-work
+    /// limit (`declared_share_difficulty`).
+    declared_difficulty: u128,
+}
+
+/// The floor credits one window entry contributes: its own share credit,
+/// then one credit per resolved uncle.
+///
+/// The share credits its own miner and counts for presence; an uncle credits
+/// the uncle's own miner (`UncleEntry::internal_key`) and never counts for
+/// presence, since an uncle takes no window slot. An uncle the entry was
+/// built without is looked up in `healed_uncles`: the caller must have healed
+/// every hash in `ConfirmedEntry::unresolved_uncles` before the walk.
+fn floor_credits_for_entry<'entry>(
+    entry: &'entry ConfirmedEntry,
+    healed_uncles: &'entry HashMap<BlockHash, FloorUncle>,
+) -> impl Iterator<Item = FloorCredit<usize>> + 'entry {
+    let share_credit = FloorCredit {
+        miner: entry.internal_key,
+        declared_difficulty: entry.declared_difficulty,
+        counts_for_presence: true,
+    };
+    let resolved_uncle_credits = entry.uncle_entries.iter().map(|uncle_entry| FloorCredit {
+        miner: uncle_entry.internal_key,
+        declared_difficulty: uncle_entry.declared_difficulty,
+        counts_for_presence: false,
+    });
+    let healed_uncle_credits = entry.unresolved_uncles.iter().map(|uncle_hash| {
+        let healed = healed_uncles
+            .get(uncle_hash)
+            .expect("floor window uncles are healed before the walk");
+        FloorCredit {
+            miner: healed.internal_key,
+            declared_difficulty: healed.declared_difficulty,
+            counts_for_presence: false,
+        }
+    });
+    iter::once(share_credit)
+        .chain(resolved_uncle_credits)
+        .chain(healed_uncle_credits)
 }
 
 /// Share owner every benchmark entry gets.
@@ -2404,6 +2675,7 @@ impl PplnsWindow {
                     uncle_miner.into(),
                     BENCHMARK_SHARE_OWNER,
                     uncle_difficulty,
+                    uncle_difficulty,
                 ));
             }
 
@@ -2412,7 +2684,7 @@ impl PplnsWindow {
                 .unwrap()
                 .assume_checked();
             let height = total_count - 1 - index as u32;
-            let entry = self.build_confirmed_entry(
+            let mut entry = self.build_confirmed_entry(
                 blockhash,
                 height,
                 miner_address.into(),
@@ -2420,6 +2692,7 @@ impl PplnsWindow {
                 difficulty,
                 uncle_entries,
             );
+            entry.declared_difficulty = difficulty;
             self.confirmed_entries.push_back(entry);
         }
 
@@ -2475,6 +2748,12 @@ mockall::mock! {
             paying_block: PayingBlock,
             chain_store_handle: &ChainStoreHandle,
         ) -> Result<HashMap<PayoutAddress, u128>, WindowError>;
+        pub fn get_sharechain_floor_from_start_hash(
+            &mut self,
+            start_hash: BlockHash,
+            chain_store_handle: &ChainStoreHandle,
+            d_asert_capped: u128,
+        ) -> Result<u64, WindowError>;
     }
 }
 
@@ -2512,6 +2791,7 @@ mod tests {
             window.base_weight(header),
             Vec::new(),
         );
+        entry.declared_difficulty = declared_share_difficulty(header);
         entry.cuts = window.share_cuts(header);
         entry.bch_prev = header.bitcoin_header.prev_blockhash;
         entry
@@ -2532,6 +2812,7 @@ mod tests {
             window.base_weight(header),
             uncle_entries,
         );
+        entry.declared_difficulty = declared_share_difficulty(header);
         entry.cuts = window.share_cuts(header);
         entry.bch_prev = header.bitcoin_header.prev_blockhash;
         entry
@@ -2544,6 +2825,7 @@ mod tests {
             header.miner_bitcoin_address.clone(),
             header.miner_address,
             window.base_weight(header),
+            declared_share_difficulty(header),
         );
         entry.cuts = window.share_cuts(header);
         entry.bch_prev = header.bitcoin_header.prev_blockhash;
@@ -5513,6 +5795,7 @@ mod tests {
             uncle_payee.clone(),
             BENCHMARK_SHARE_OWNER,
             3,
+            3,
         );
         uncle.cuts = ShareCuts {
             donation: None,
@@ -5880,5 +6163,252 @@ mod tests {
 
         assert_eq!(sized.len(), 3);
         assert_eq!(claimed_only.len(), 5);
+    }
+
+    /// Three shares by one miner fill the window, so the smallest miner work
+    /// is the whole window work and the floor is the ASERT difficulty as is.
+    #[test]
+    fn test_floor_single_miner_window_derives_the_asert_difficulty() {
+        let first = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        let second = build_test_header(&first.block_hash().to_string(), PUBKEY_G, 2);
+        let third = build_test_header(&second.block_hash().to_string(), PUBKEY_G, 2);
+        let headers = [third, second, first];
+        let mut window = PplnsWindow::new_with_window_sizes(TEST_NETWORK, 0, 3);
+        cache_shares(&mut window, &headers);
+
+        let floor = window
+            .get_sharechain_floor_from_start_hash(
+                headers[0].block_hash(),
+                &MockChainStoreHandle::default(),
+                250,
+            )
+            .unwrap();
+
+        assert_eq!(floor, 250);
+    }
+
+    /// The anchor itself is immature under a maturity skip of two, so the
+    /// window is the three older shares by the other miner: a full window's
+    /// floor, not one diluted by the anchor's single share.
+    #[test]
+    fn test_floor_skips_immature_shares() {
+        let anchor = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        let first = build_test_header(&anchor.block_hash().to_string(), PUBKEY_2G, 2);
+        let second = build_test_header(&first.block_hash().to_string(), PUBKEY_2G, 2);
+        let third = build_test_header(&second.block_hash().to_string(), PUBKEY_2G, 2);
+        let headers = [anchor, first, second, third];
+        let mut window = PplnsWindow::new_with_window_sizes(TEST_NETWORK, 2, 3);
+        cache_shares(&mut window, &headers);
+
+        let floor = window
+            .get_sharechain_floor_from_start_hash(
+                headers[0].block_hash(),
+                &MockChainStoreHandle::default(),
+                250,
+            )
+            .unwrap();
+
+        assert_eq!(floor, 250);
+    }
+
+    /// Three shares by one miner, each including one uncle by another: the
+    /// window work splits evenly between the share miner and the uncle
+    /// miner, but only the share miner reaches the presence minimum, so the
+    /// floor is half the ASERT difficulty, rounded up.
+    #[test]
+    fn test_floor_counts_uncle_work_for_the_uncle_miner() {
+        let uncle_one = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_2G, 2);
+        let uncle_two = build_test_header(&uncle_one.block_hash().to_string(), PUBKEY_2G, 2);
+        let uncle_three = build_test_header(&uncle_two.block_hash().to_string(), PUBKEY_2G, 2);
+        let first = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        let second = build_test_header(&first.block_hash().to_string(), PUBKEY_G, 2);
+        let third = build_test_header(&second.block_hash().to_string(), PUBKEY_G, 2);
+
+        let mut window = PplnsWindow::new_with_window_sizes(TEST_NETWORK, 0, 3);
+        let uncle_entry_one = uncle_entry_from_header(&mut window, &uncle_one);
+        let uncle_entry_two = uncle_entry_from_header(&mut window, &uncle_two);
+        let uncle_entry_three = uncle_entry_from_header(&mut window, &uncle_three);
+        let entry_three =
+            entry_from_header_with_uncles(&mut window, &third, 2, vec![uncle_entry_three]);
+        let entry_two =
+            entry_from_header_with_uncles(&mut window, &second, 1, vec![uncle_entry_two]);
+        let entry_one =
+            entry_from_header_with_uncles(&mut window, &first, 0, vec![uncle_entry_one]);
+        window.confirmed_entries.push_back(entry_three);
+        window.confirmed_entries.push_back(entry_two);
+        window.confirmed_entries.push_back(entry_one);
+
+        let floor = window
+            .get_sharechain_floor_from_start_hash(
+                third.block_hash(),
+                &MockChainStoreHandle::default(),
+                250,
+            )
+            .unwrap();
+
+        assert_eq!(floor, 125);
+    }
+
+    /// Three shares by one miner and one by another: only the first reaches
+    /// the presence minimum, so its work over the whole window's work scales
+    /// the ASERT difficulty down to three quarters, rounded up.
+    #[test]
+    fn test_floor_dilutes_by_a_sub_presence_miner() {
+        let first = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        let second = build_test_header(&first.block_hash().to_string(), PUBKEY_G, 2);
+        let third = build_test_header(&second.block_hash().to_string(), PUBKEY_G, 2);
+        let fourth = build_test_header(&third.block_hash().to_string(), PUBKEY_2G, 2);
+        let headers = [third, second, first, fourth];
+        let mut window = PplnsWindow::new_with_window_sizes(TEST_NETWORK, 0, 4);
+        cache_shares(&mut window, &headers);
+
+        let floor = window
+            .get_sharechain_floor_from_start_hash(
+                headers[0].block_hash(),
+                &MockChainStoreHandle::default(),
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(floor, 75);
+    }
+
+    /// Two shares by one miner and one by another: neither reaches the
+    /// presence minimum, so no miner work can be the minimum and the floor
+    /// is zero.
+    #[test]
+    fn test_floor_is_zero_without_a_present_miner() {
+        let first = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        let second = build_test_header(&first.block_hash().to_string(), PUBKEY_G, 2);
+        let third = build_test_header(&second.block_hash().to_string(), PUBKEY_2G, 2);
+        let headers = [third, second, first];
+        let mut window = PplnsWindow::new_with_window_sizes(TEST_NETWORK, 0, 3);
+        cache_shares(&mut window, &headers);
+
+        let floor = window
+            .get_sharechain_floor_from_start_hash(
+                headers[0].block_hash(),
+                &MockChainStoreHandle::default(),
+                250,
+            )
+            .unwrap();
+
+        assert_eq!(floor, 0);
+    }
+
+    /// A share whose uncle header the lookup table missed heals the uncle
+    /// from the store, so the uncle's work credits its miner exactly as a
+    /// resolved uncle's would.
+    #[test]
+    fn test_floor_heals_a_missing_uncle_from_the_store() {
+        let uncle_one = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_2G, 2);
+        let uncle_two = build_test_header(&uncle_one.block_hash().to_string(), PUBKEY_2G, 2);
+        let uncle_three = build_test_header(&uncle_two.block_hash().to_string(), PUBKEY_2G, 2);
+        let first = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        let second = build_test_header(&first.block_hash().to_string(), PUBKEY_G, 2);
+        let third = build_test_header(&second.block_hash().to_string(), PUBKEY_G, 2);
+
+        let mut window = PplnsWindow::new_with_window_sizes(TEST_NETWORK, 0, 3);
+        let mut entry = entry_from_header(&mut window, &third, 2);
+        entry.unresolved_uncles = vec![uncle_three.block_hash()];
+        window.confirmed_entries.push_back(entry);
+        let mut entry = entry_from_header(&mut window, &second, 1);
+        entry.unresolved_uncles = vec![uncle_two.block_hash()];
+        window.confirmed_entries.push_back(entry);
+        let mut entry = entry_from_header(&mut window, &first, 0);
+        entry.unresolved_uncles = vec![uncle_one.block_hash()];
+        window.confirmed_entries.push_back(entry);
+
+        let uncle_headers = vec![
+            (uncle_one.block_hash(), uncle_one.clone()),
+            (uncle_two.block_hash(), uncle_two.clone()),
+            (uncle_three.block_hash(), uncle_three.clone()),
+        ];
+        let mut mock = MockChainStoreHandle::default();
+        mock.expect_get_share_headers()
+            .returning(move |_| Ok(uncle_headers.clone()));
+
+        let floor = window
+            .get_sharechain_floor_from_start_hash(third.block_hash(), &mock, 250)
+            .unwrap();
+
+        assert_eq!(floor, 125);
+    }
+
+    /// A window uncle the store does not hold either fails the floor closed:
+    /// summing a partial window would give different floors on nodes whose
+    /// caches differ.
+    #[test]
+    fn test_floor_refuses_a_still_missing_uncle() {
+        let uncle_one = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_2G, 2);
+        let uncle_two = build_test_header(&uncle_one.block_hash().to_string(), PUBKEY_2G, 2);
+        let uncle_three = build_test_header(&uncle_two.block_hash().to_string(), PUBKEY_2G, 2);
+        let first = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        let second = build_test_header(&first.block_hash().to_string(), PUBKEY_G, 2);
+        let third = build_test_header(&second.block_hash().to_string(), PUBKEY_G, 2);
+
+        let mut window = PplnsWindow::new_with_window_sizes(TEST_NETWORK, 0, 3);
+        let mut entry = entry_from_header(&mut window, &third, 2);
+        entry.unresolved_uncles = vec![uncle_three.block_hash()];
+        window.confirmed_entries.push_back(entry);
+        let mut entry = entry_from_header(&mut window, &second, 1);
+        entry.unresolved_uncles = vec![uncle_two.block_hash()];
+        window.confirmed_entries.push_back(entry);
+        let mut entry = entry_from_header(&mut window, &first, 0);
+        entry.unresolved_uncles = vec![uncle_one.block_hash()];
+        window.confirmed_entries.push_back(entry);
+
+        let mut mock = MockChainStoreHandle::default();
+        mock.expect_get_share_headers()
+            .returning(|_| Ok(Vec::new()));
+
+        let error = window
+            .get_sharechain_floor_from_start_hash(third.block_hash(), &mock, 250)
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                WindowError::MissingUncle { uncle } if uncle == uncle_three.block_hash()
+            ),
+            "{error}"
+        );
+    }
+
+    /// An anchor at the evicted back of the cache can fill only one of its
+    /// three window shares, and the cache no longer reaches the chain start,
+    /// so the floor refuses the truncated window instead of deriving it.
+    #[test]
+    fn test_floor_refuses_an_evicted_window() {
+        let first = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+        let second = build_test_header(&first.block_hash().to_string(), PUBKEY_G, 2);
+        let third = build_test_header(&second.block_hash().to_string(), PUBKEY_G, 2);
+
+        let mut window = PplnsWindow::new_with_window_sizes(TEST_NETWORK, 0, 3);
+        let entry_three = entry_from_header(&mut window, &third, 3);
+        let entry_two = entry_from_header(&mut window, &second, 2);
+        let entry_one = entry_from_header(&mut window, &first, 1);
+        window.confirmed_entries.push_back(entry_three);
+        window.confirmed_entries.push_back(entry_two);
+        window.confirmed_entries.push_back(entry_one);
+
+        let anchor = first.block_hash();
+        let error = window
+            .get_sharechain_floor_from_start_hash(anchor, &MockChainStoreHandle::default(), 250)
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                WindowError::InsufficientEntries {
+                    anchor: errored_anchor,
+                    oldest_cached_height,
+                    max_window_shares,
+                } if errored_anchor == anchor
+                    && oldest_cached_height == 1
+                    && max_window_shares == 3
+            ),
+            "{error}"
+        );
     }
 }

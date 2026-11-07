@@ -2,18 +2,21 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::accounting::payout::sharechain_pplns::pplns_window::{
+    BCH_COINBASE_MATURITY, PPLNS_WINDOW_SHARES, declared_share_difficulty,
+};
 use crate::node::messages::ShareHeaderBatch;
 use crate::node::p2p_message_handlers::MAX_HEADERS_IN_RESPONSE;
 use crate::node::p2p_message_handlers::receivers::bch_headers::learn_carried_bch_headers;
 use crate::node::p2p_message_handlers::senders::send_getheaders;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::{SwarmSend, messages::Message};
-use crate::pool_difficulty::AsertParent;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
+use crate::pool_difficulty::{AsertParent, target_to_difficulty_rounded_up};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -21,6 +24,9 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::{
     MIN_CUMULATIVE_CHAIN_WORK_MULTIPLIER, ShareHeader, is_terminal_blockhash,
+};
+use crate::shares::validation::sharechain_floor::{
+    FloorCredit, SHARECHAIN_FLOOR_PRESENCE_MINIMUM, derive_sharechain_floor,
 };
 use crate::shares::validation::{
     MTP_WINDOW, ShareValidator, ValidationError, check_sharechain_band,
@@ -30,9 +36,11 @@ use crate::store::dag_store::MAX_BLOCKS_PER_HEIGHT;
 use crate::store::writer::StoreError;
 use bitcoin::hashes::Hash;
 use bitcoin::{BlockHash, CompactTarget, Target, Work};
+use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
+use std::iter;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
@@ -409,6 +417,8 @@ fn validate_dag_connectivity_and_difficulty(
     let mut known_hashes: HashSet<BlockHash> =
         HashSet::with_capacity(share_headers.len() + anchor_hashes.len());
     known_hashes.extend(anchor_hashes);
+    let mut validated_headers: HashMap<BlockHash, &ShareHeader> =
+        HashMap::with_capacity(share_headers.len());
 
     let mut cumulative_work = Work::from_hex("0x00").unwrap();
     let mut asert_parent_cache: HashMap<BlockHash, AsertParent> =
@@ -444,24 +454,37 @@ fn validate_dag_connectivity_and_difficulty(
         let parent =
             get_cached_asert_parent(&parent_hash, &mut asert_parent_cache, chain_store_handle)?;
 
-        match share_validator.sharechain_diff_floor() {
-            Some(floor) => {
-                check_sharechain_band(header.bits, floor, pool_difficulty.target_ceiling())
-                    .map_err(|_rejection| HeaderSyncError::BelowFloor {
-                        block_hash: header.block_hash(),
-                        declared: header.bits.to_consensus(),
-                        floor,
-                    })?;
-            }
-            None => {
-                let expected_bits = pool_difficulty.calculate_target_clamped(parent);
-                if header.bits != expected_bits {
-                    return Err(HeaderSyncError::AsertMismatch {
-                        block_hash: header.block_hash(),
-                        declared: header.bits.to_consensus(),
-                        expected: expected_bits.to_consensus(),
-                    });
-                }
+        if share_validator.derives_sharechain_floor() {
+            let d_asert_capped = target_to_difficulty_rounded_up(Target::from_compact(
+                pool_difficulty.calculate_target_clamped(parent),
+            ));
+            let floor = derive_sync_sharechain_floor(
+                SyncFloorWalkStart {
+                    parent_hash,
+                    header_hash: header.block_hash(),
+                    parent_height: parent.height,
+                },
+                &validated_headers,
+                chain_store_handle,
+                d_asert_capped,
+                BCH_COINBASE_MATURITY,
+                lowest_anchor_height,
+            )?;
+            check_sharechain_band(header.bits, floor, pool_difficulty.target_ceiling()).map_err(
+                |_rejection| HeaderSyncError::BelowFloor {
+                    block_hash: header.block_hash(),
+                    declared: header.bits.to_consensus(),
+                    floor,
+                },
+            )?;
+        } else {
+            let expected_bits = pool_difficulty.calculate_target_clamped(parent);
+            if header.bits != expected_bits {
+                return Err(HeaderSyncError::AsertMismatch {
+                    block_hash: header.block_hash(),
+                    declared: header.bits.to_consensus(),
+                    expected: expected_bits.to_consensus(),
+                });
             }
         }
 
@@ -487,10 +510,178 @@ fn validate_dag_connectivity_and_difficulty(
             },
         );
         known_hashes.insert(header_hash);
+        validated_headers.insert(header_hash, header);
         cumulative_work = cumulative_work + header.get_work();
     }
 
     Ok(cumulative_work)
+}
+
+/// One floor-window entry as the header-sync walk reads it: the fields the
+/// floor arithmetic needs, without the payout window cache's payout fields,
+/// which header sync does not track.
+struct SyncFloorEntry {
+    declared_difficulty: u128,
+    miner: PayoutAddress,
+    uncles: Vec<BlockHash>,
+}
+
+/// Where a header-sync floor walk starts: the validated header's parent
+/// (the first window entry) and the validated header itself, whose hash is
+/// the child reported when that first entry is missing.
+struct SyncFloorWalkStart {
+    parent_hash: BlockHash,
+    header_hash: BlockHash,
+    parent_height: u32,
+}
+
+/// Derive the PPLNS window floor for the header whose parent is
+/// `start.parent_hash`, as the vardiff share chain checks it at header sync
+/// (see docs/sharechain/vardiff-sharechain.md).
+///
+/// The walk mirrors `PplnsWindow::get_sharechain_floor_from_start_hash`:
+/// the same `PPLNS_WINDOW_SHARES` window walked down from the validated
+/// header's parent, the same `BCH_COINBASE_MATURITY` skip counted from that
+/// parent, and the same credits (each share's own `d` to its miner, each
+/// uncle's `d` to the uncle's miner). It walks naively, one store read per
+/// ancestor below the batch -- the batch is small and this runs only on the
+/// vardiff chain -- and refuses (`MissingParentInBatch`, `MissingUncle`)
+/// rather than deriving a floor over a partial window.
+///
+/// `validated_headers` holds the batch headers earlier in the parent-before-
+/// child order, so every ancestor is either there or in the store. Uncle
+/// headers are looked for in the batch first, then read from the store in
+/// one batch, and a miss fails closed.
+fn derive_sync_sharechain_floor(
+    start: SyncFloorWalkStart,
+    validated_headers: &HashMap<BlockHash, &ShareHeader>,
+    chain_store_handle: &ChainStoreHandle,
+    d_asert_capped: u128,
+    maturity_skip: usize,
+    lowest_anchor_height: u32,
+) -> Result<u64, HeaderSyncError> {
+    let paying_height = start.parent_height as usize + 1;
+    let immature_share_count = maturity_skip
+        .saturating_sub(1)
+        .min(paying_height.saturating_sub(maturity_skip));
+
+    let mut window_entries: Vec<SyncFloorEntry> = Vec::with_capacity(PPLNS_WINDOW_SHARES);
+    let mut entry_hash = start.parent_hash;
+    let mut entry_height = start.parent_height;
+    let mut child_hash = start.header_hash;
+    let mut skipped_entries = 0usize;
+    let mut reached_chain_start = false;
+    while window_entries.len() < PPLNS_WINDOW_SHARES && !reached_chain_start {
+        let (declared_difficulty, miner, uncles, prev_hash) =
+            if let Some(header) = validated_headers.get(&entry_hash) {
+                (
+                    declared_share_difficulty(header),
+                    header.miner_bitcoin_address.clone(),
+                    header.uncles.clone(),
+                    header.prev_share_blockhash,
+                )
+            } else {
+                let header = chain_store_handle
+                    .get_share_header(&entry_hash)
+                    .map_err(|error| match error {
+                        StoreError::NotFound(_message) => HeaderSyncError::MissingParentInBatch {
+                            header: child_hash,
+                            parent: entry_hash,
+                            lowest_anchor_height,
+                        },
+                        error => HeaderSyncError::Other(Box::new(error)),
+                    })?;
+                (
+                    declared_share_difficulty(&header),
+                    header.miner_bitcoin_address.clone(),
+                    header.uncles.clone(),
+                    header.prev_share_blockhash,
+                )
+            };
+
+        if skipped_entries < immature_share_count {
+            skipped_entries += 1;
+        } else {
+            window_entries.push(SyncFloorEntry {
+                declared_difficulty,
+                miner,
+                uncles,
+            });
+        }
+
+        reached_chain_start = entry_height == 0;
+        if !reached_chain_start {
+            child_hash = entry_hash;
+            entry_hash = prev_hash;
+            entry_height -= 1;
+        }
+    }
+
+    let mut seen_uncles: HashSet<BlockHash> = HashSet::new();
+    let mut unmaterialized_uncles: Vec<BlockHash> = Vec::new();
+    for entry in &window_entries {
+        for uncle_hash in &entry.uncles {
+            if seen_uncles.insert(*uncle_hash) {
+                unmaterialized_uncles.push(*uncle_hash);
+            }
+        }
+    }
+
+    let mut resolved_uncles: HashMap<BlockHash, (u128, PayoutAddress)> =
+        HashMap::with_capacity(unmaterialized_uncles.len());
+    for uncle_hash in &unmaterialized_uncles {
+        if let Some(header) = validated_headers.get(uncle_hash) {
+            resolved_uncles.insert(
+                *uncle_hash,
+                (
+                    declared_share_difficulty(header),
+                    header.miner_bitcoin_address.clone(),
+                ),
+            );
+        }
+    }
+    if !unmaterialized_uncles.is_empty() {
+        let uncle_headers = chain_store_handle
+            .get_share_headers(&unmaterialized_uncles)
+            .map_err(|error| HeaderSyncError::Other(Box::new(error)))?;
+        for (uncle_hash, header) in uncle_headers {
+            resolved_uncles.insert(
+                uncle_hash,
+                (
+                    declared_share_difficulty(&header),
+                    header.miner_bitcoin_address.clone(),
+                ),
+            );
+        }
+    }
+    for uncle_hash in &unmaterialized_uncles {
+        if !resolved_uncles.contains_key(uncle_hash) {
+            return Err(HeaderSyncError::MissingUncle {
+                uncle_hash: *uncle_hash,
+                lowest_anchor_height,
+            });
+        }
+    }
+
+    let credits = window_entries.iter().flat_map(|entry| {
+        iter::once(FloorCredit {
+            miner: entry.miner.clone(),
+            declared_difficulty: entry.declared_difficulty,
+            counts_for_presence: true,
+        })
+        .chain(entry.uncles.iter().map(|uncle_hash| {
+            let (declared_difficulty, miner) = resolved_uncles
+                .get(uncle_hash)
+                .expect("every window uncle is resolved before any credit is built");
+            FloorCredit {
+                miner: miner.clone(),
+                declared_difficulty: *declared_difficulty,
+                counts_for_presence: false,
+            }
+        }))
+    });
+    derive_sharechain_floor(credits, d_asert_capped, SHARECHAIN_FLOOR_PRESENCE_MINIMUM)
+        .map_err(|error| HeaderSyncError::Other(Box::new(error)))
 }
 
 /// A header's time and parent, all the median time past walk reads.

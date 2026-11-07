@@ -406,7 +406,9 @@ fn window_error(error: WindowError) -> ApiError {
         WindowError::InsufficientEntries { .. }
         | WindowError::RightsHistoryTooShallow { .. }
         | WindowError::UnknownBchPrev { .. }
-        | WindowError::NothingEligible { .. } => ApiError::ServiceUnavailable(error.to_string()),
+        | WindowError::NothingEligible { .. }
+        | WindowError::MissingUncle { .. }
+        | WindowError::FloorOverflow => ApiError::ServiceUnavailable(error.to_string()),
         WindowError::ReadFailure(_) => {
             ApiError::ServerError(format!("Failed to read the PPLNS window: {error}"))
         }

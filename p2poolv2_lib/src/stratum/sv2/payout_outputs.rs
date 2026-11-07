@@ -346,16 +346,21 @@ fn block_hash_of(prev_hash: &U256) -> Result<BlockHash, &'static str> {
 /// The error code a window error becomes for `VerifyPayoutOutputs`.
 ///
 /// A missing anchor share, a store read that failed while looking for it,
-/// an anchor deeper than this window, and a Bitcoin Cash header the window
-/// does not have yet are `unknown-anchor`: the client retries or asks
-/// another node. A window that pays no one is `payout-outputs-unavailable`.
+/// an anchor deeper than this window, a Bitcoin Cash header the window
+/// does not have yet, and a floor-window uncle the store does not hold are
+/// `unknown-anchor`: the client retries or asks another node. A window that
+/// pays no one, or a floor outside the representable range, is
+/// `payout-outputs-unavailable`.
 fn anchor_error_code(error: &WindowError) -> &'static str {
     match error {
         WindowError::InsufficientEntries { .. }
         | WindowError::RightsHistoryTooShallow { .. }
         | WindowError::ReadFailure(_)
-        | WindowError::UnknownBchPrev { .. } => UNKNOWN_ANCHOR,
-        WindowError::NothingEligible { .. } => PAYOUT_OUTPUTS_UNAVAILABLE,
+        | WindowError::UnknownBchPrev { .. }
+        | WindowError::MissingUncle { .. } => UNKNOWN_ANCHOR,
+        WindowError::NothingEligible { .. } | WindowError::FloorOverflow => {
+            PAYOUT_OUTPUTS_UNAVAILABLE
+        }
     }
 }
 

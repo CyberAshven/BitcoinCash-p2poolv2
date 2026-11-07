@@ -5,6 +5,7 @@
 use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::validation_worker::{ValidationEvent, ValidationSender};
+use crate::pool_difficulty::target_to_difficulty_rounded_up;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -15,7 +16,7 @@ use crate::shares::validation::{ShareValidator, check_sharechain_band, stored_an
 use crate::store::block_tx_metadata::Status;
 use crate::store::prune_blocks::prune_height_for_tip;
 use crate::store::writer::StoreError;
-use bitcoin::BlockHash;
+use bitcoin::{BlockHash, Target};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::error::Error;
 use std::sync::Arc;
@@ -407,41 +408,59 @@ impl BlockReceiver {
 
     /// ASERT difficulty check against the parent as stored.
     ///
-    /// With a configured floor the declared target must fall in the
-    /// validation band `[effective floor, infinity)`; without one it must
-    /// equal the ASERT-calculated target, as before.
+    /// With a sharechain floor window the declared target must fall in the
+    /// validation band `[effective floor, infinity)`, where the floor is
+    /// derived from the window below the parent; without one it must equal
+    /// the ASERT-calculated target, as before.
     fn validate_asert(&self, share_block: &ShareBlock) -> Result<(), Box<dyn Error + Send + Sync>> {
         let parent_hash = share_block.header.prev_share_blockhash;
         let parent = self.chain_store_handle.get_asert_parent(&parent_hash)?;
-        match self.share_validator.sharechain_diff_floor() {
-            Some(floor) => {
-                check_sharechain_band(
-                    share_block.header.bits,
-                    floor,
-                    self.share_validator.pool_difficulty().target_ceiling(),
+        if let Some(window) = self.share_validator.sharechain_floor_window() {
+            let d_asert_capped = target_to_difficulty_rounded_up(Target::from_compact(
+                self.share_validator
+                    .pool_difficulty()
+                    .calculate_target_clamped(parent),
+            ));
+            let floor = window
+                .write()
+                .expect("PPLNS window lock poisoned on write")
+                .get_sharechain_floor_from_start_hash(
+                    parent_hash,
+                    &self.chain_store_handle,
+                    d_asert_capped,
                 )
-                .map_err(|rejection| -> Box<dyn Error + Send + Sync> {
+                .map_err(|error| -> Box<dyn Error + Send + Sync> {
                     format!(
-                        "Share block {} rejected by the difficulty band: {rejection}",
+                        "Share block {} failed to derive the sharechain floor: {error}",
                         share_block.block_hash()
                     )
                     .into()
                 })?;
-            }
-            None => {
-                let expected_bits = self
-                    .share_validator
-                    .pool_difficulty()
-                    .calculate_target_clamped(parent);
-                if share_block.header.bits != expected_bits {
-                    let block_hash = share_block.block_hash();
-                    return Err(format!(
-                        "ASERT mismatch for {block_hash}: declared bits {:#010x}, expected {:#010x}",
-                        share_block.header.bits.to_consensus(),
-                        expected_bits.to_consensus()
-                    )
-                    .into());
-                }
+            check_sharechain_band(
+                share_block.header.bits,
+                floor,
+                self.share_validator.pool_difficulty().target_ceiling(),
+            )
+            .map_err(|rejection| -> Box<dyn Error + Send + Sync> {
+                format!(
+                    "Share block {} rejected by the difficulty band: {rejection}",
+                    share_block.block_hash()
+                )
+                .into()
+            })?;
+        } else {
+            let expected_bits = self
+                .share_validator
+                .pool_difficulty()
+                .calculate_target_clamped(parent);
+            if share_block.header.bits != expected_bits {
+                let block_hash = share_block.block_hash();
+                return Err(format!(
+                    "ASERT mismatch for {block_hash}: declared bits {:#010x}, expected {:#010x}",
+                    share_block.header.bits.to_consensus(),
+                    expected_bits.to_consensus()
+                )
+                .into());
             }
         }
         Ok(())

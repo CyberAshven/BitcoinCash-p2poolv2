@@ -10,6 +10,11 @@
 //! `OrganiseEvent::Block` and `SwarmSend::BroadcastBlock` events. Runs in a dedicated
 //! tokio task, decoupled from the P2P message handler hot path.
 
+#[cfg(test)]
+#[mockall_double::double]
+use crate::accounting::payout::sharechain_pplns::PplnsWindow;
+#[cfg(not(test))]
+use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::config::{BitcoinCashNetwork, Chain};
 use crate::node::SwarmSend;
@@ -32,7 +37,7 @@ use crate::utils::cpu::available_cpus;
 use bitcoin::{BlockHash, CompactTarget};
 use libp2p::request_response::ResponseChannel;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, error, info, warn};
 
@@ -96,11 +101,11 @@ pub struct ValidationWorker {
     chain: Chain,
     /// Easiest share target the validator accepts. Defaults to the main ceiling.
     target_ceiling: CompactTarget,
-    /// The Bitcoin Cash share-chain difficulty floor, when the validator
-    /// derives one (dormant until V2; see
+    /// The shared PPLNS window this worker's validator derives its
+    /// sharechain difficulty floor from (the vardiff chain; see
     /// docs/sharechain/vardiff-sharechain.md). `None` keeps the ASERT
     /// equality pin; see `DefaultShareValidator`.
-    sharechain_diff_floor: Option<u64>,
+    sharechain_floor_window: Option<Arc<RwLock<PplnsWindow>>>,
     /// The Bitcoin Cash network whose ASERT checks token shares' headers.
     bitcoin_cash_network: Option<BitcoinCashNetwork>,
 }
@@ -125,7 +130,7 @@ impl ValidationWorker {
             target_ceiling: CompactTarget::from_consensus(
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
-            sharechain_diff_floor: None,
+            sharechain_floor_window: None,
             bitcoin_cash_network: None,
         }
     }
@@ -149,12 +154,15 @@ impl ValidationWorker {
         self
     }
 
-    /// Set the Bitcoin Cash share-chain difficulty floor this worker's
-    /// validator enforces (dormant until V2; see
+    /// Set the shared PPLNS window this worker's validator derives its
+    /// sharechain difficulty floor from (the vardiff chain; see
     /// docs/sharechain/vardiff-sharechain.md and
-    /// `DefaultShareValidator::with_sharechain_diff_floor`).
-    pub fn with_sharechain_diff_floor(mut self, sharechain_diff_floor: Option<u64>) -> Self {
-        self.sharechain_diff_floor = sharechain_diff_floor;
+    /// `DefaultShareValidator::with_sharechain_floor_window`).
+    pub fn with_sharechain_floor_window(
+        mut self,
+        sharechain_floor_window: Option<Arc<RwLock<PplnsWindow>>>,
+    ) -> Self {
+        self.sharechain_floor_window = sharechain_floor_window;
         self
     }
 
@@ -170,7 +178,7 @@ impl ValidationWorker {
             DefaultShareValidator::new(self.pool_difficulty)
                 .for_chain(self.chain)
                 .with_target_ceiling(self.target_ceiling)
-                .with_sharechain_diff_floor(self.sharechain_diff_floor)
+                .with_sharechain_floor_window(self.sharechain_floor_window)
                 .with_bitcoin_cash_network(self.bitcoin_cash_network),
         );
 

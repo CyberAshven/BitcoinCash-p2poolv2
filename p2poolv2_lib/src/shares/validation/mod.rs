@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 mod bitcoin_block_validation;
+pub(crate) mod sharechain_floor;
 #[cfg(test)]
 mod version_vote_tests;
 
@@ -31,7 +32,7 @@ use crate::node::payout_tree_executor::PayoutTreeSender;
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
-use crate::pool_difficulty::target_for_difficulty;
+use crate::pool_difficulty::{target_for_difficulty, target_to_difficulty_rounded_up};
 use crate::shares::bch_asert::BchAsert;
 use crate::shares::bch_headers::BchHeaderRules;
 use crate::shares::bch_script;
@@ -350,10 +351,10 @@ pub(crate) enum BandRejection {
     BelowFloor {
         /// The target the declared bits decode to.
         declared: Target,
-        /// The effective floor: the stricter of the configured floor target
+        /// The effective floor: the stricter of the derived floor target
         /// and the chain ceiling, in target space.
         threshold: Target,
-        /// The configured floor difficulty, for the message.
+        /// The derived floor difficulty, for the message.
         floor: u64,
     },
 }
@@ -381,7 +382,7 @@ impl fmt::Display for BandRejection {
 /// Check a declared share target against the share chain validation band
 /// `[effective floor, infinity)`.
 ///
-/// The effective floor is the stricter of the configured floor and the chain
+/// The effective floor is the stricter of the derived floor and the chain
 /// ceiling, compared in target space as `min(target_for_difficulty(floor),
 /// Target::from_compact(ceiling))`: a larger target is easier, so a share
 /// passes when its declared target is at or below that threshold. The floor
@@ -409,6 +410,34 @@ pub(crate) fn check_sharechain_band(
         });
     }
     Ok(())
+}
+
+/// Map a failed window walk from `operation` into the validation verdict the
+/// share deserves, so every window walk classifies a given error the same.
+///
+/// An eviction or arithmetic failure is `unresolvable`: the anchor is below
+/// the confirmed entries this node's window retains, and the window's oldest
+/// entry only moves forward with the confirmed tip, so no retry can bring it
+/// back into range. Drop the share without a verdict. A store read failure,
+/// missing ancestry or a missing uncle header is `recoverable`: each may
+/// resolve later. A window with no eligible work pays no one on the share's
+/// BCH chain and is `consensus` invalid.
+pub(crate) fn classify_window_failure(error: WindowError, operation: &str) -> ValidationError {
+    match error {
+        WindowError::InsufficientEntries { .. }
+        | WindowError::RightsHistoryTooShallow { .. }
+        | WindowError::FloorOverflow => ValidationError::unresolvable(format!(
+            "Cannot {operation} from prev_share_blockhash: {error}"
+        )),
+        WindowError::ReadFailure(_)
+        | WindowError::UnknownBchPrev { .. }
+        | WindowError::MissingUncle { .. } => ValidationError::recoverable(format!(
+            "Failed to {operation} from prev_share_blockhash: {error}"
+        )),
+        WindowError::NothingEligible { .. } => ValidationError::consensus(format!(
+            "Share pays no one on its Bitcoin Cash chain: {error}"
+        )),
+    }
 }
 
 /// The times of up to `MTP_WINDOW` stored ancestors ending at `parent_hash`,
@@ -569,10 +598,11 @@ pub trait ShareValidator {
     ///
     /// Looks up the parent share in the chain store as a presence check, then
     /// checks the share's declared target. On Bitcoin and on a Bitcoin Cash
-    /// validator without a configured floor the target must equal the
-    /// ASERT-calculated one; with a floor it must fall in the validation band
-    /// `[effective floor, infinity)`. Returns an error if the bitcoin block
-    /// hash does not meet the declared target.
+    /// validator without a sharechain floor window the target must equal the
+    /// ASERT-calculated one; with a window it must fall in the validation band
+    /// `[effective floor, infinity)`, where the floor is derived from the
+    /// window below the parent. Returns an error if the bitcoin block hash
+    /// does not meet the declared target.
     fn validate_with_pool_difficulty(
         &self,
         share_header: &ShareHeader,
@@ -747,14 +777,24 @@ pub trait ShareValidator {
     /// fresh PoolDifficulty on every batch.
     fn pool_difficulty(&self) -> &PoolDifficulty;
 
-    /// The Bitcoin Cash share-chain difficulty floor, when the validator
-    /// derives one (dormant until V2; see
+    /// The shared PPLNS window this chain derives its sharechain difficulty
+    /// floor from, when it derives one (the vardiff chain; see
     /// docs/sharechain/vardiff-sharechain.md).
     ///
-    /// `Some(floor)` switches header-sync and block-receipt validation from
-    /// the ASERT equality pin to the band `[effective floor, infinity)`.
-    /// `None` on Bitcoin and on a Bitcoin Cash validator without a floor.
-    fn sharechain_diff_floor(&self) -> Option<u64>;
+    /// `Some(window)` switches block-receipt and full validation from the
+    /// ASERT equality pin to the band `[effective floor, infinity)`, deriving
+    /// the floor from the window at each check. `None` on Bitcoin and on a
+    /// Bitcoin Cash chain before V2.
+    fn sharechain_floor_window(&self) -> Option<Arc<RwLock<PplnsWindow>>>;
+
+    /// Whether this chain derives its sharechain difficulty floor from the
+    /// share window (the vardiff chain; see
+    /// docs/sharechain/vardiff-sharechain.md) instead of the equality pin.
+    ///
+    /// When true, the ASERT validation sites derive the floor from the
+    /// window ([`Self::sharechain_floor_window`]) and apply the band. False
+    /// on Bitcoin and on every Bitcoin Cash chain before V2.
+    fn derives_sharechain_floor(&self) -> bool;
 
     /// The rules a Bitcoin Cash header from a peer must pass, or `None` on
     /// a Bitcoin node, which ignores carried headers.
@@ -779,16 +819,16 @@ pub struct DefaultShareValidator {
     /// Bitcoin and the Bitcoin Cash main chain use `MAX_POOL_TARGET`. The mini
     /// chain uses its own easier ceiling so its genesis target is valid.
     target_ceiling: CompactTarget,
-    /// The Bitcoin Cash share-chain difficulty floor, when the validator
-    /// derives one (dormant until V2; see
+    /// The shared PPLNS window this validator derives its sharechain
+    /// difficulty floor from, when it derives one (the vardiff chain; see
     /// docs/sharechain/vardiff-sharechain.md).
     ///
-    /// `Some(floor)` on Bitcoin Cash switches the three ASERT sites from the
-    /// equality pin to the validation band `[effective floor, infinity)`,
-    /// where the effective floor is `max(floor, the ceiling's difficulty)` in
-    /// difficulty space. `None` on Bitcoin and on a Bitcoin Cash validator
-    /// without a derived floor keeps the equality rule.
-    sharechain_diff_floor: Option<u64>,
+    /// `Some(window)` switches the ASERT sites from the equality pin to the
+    /// band `[effective floor, infinity)`, where the floor is
+    /// `ceil(window_miner_work * ASERT difficulty / window_work)` over the
+    /// window below the share's parent. `None` (the default) keeps the
+    /// equality rule on Bitcoin and on every Bitcoin Cash chain before V2.
+    sharechain_floor_window: Option<Arc<RwLock<PplnsWindow>>>,
     /// The Bitcoin Cash network's ASERT parameters, for the format check of
     /// a token share's bitcoin header. `None` on Bitcoin and on regtest,
     /// which has no ASERT anchor.
@@ -825,7 +865,7 @@ impl DefaultShareValidator {
             time_provider,
             chain: Chain::Bitcoin,
             target_ceiling: CompactTarget::from_consensus(MAX_POOL_TARGET),
-            sharechain_diff_floor: None,
+            sharechain_floor_window: None,
             bch_asert: None,
             bch_header_rules: None,
             payout_tree_sink: None,
@@ -1037,14 +1077,18 @@ impl DefaultShareValidator {
         self
     }
 
-    /// Set the Bitcoin Cash share-chain difficulty floor (dormant until V2;
-    /// see docs/sharechain/vardiff-sharechain.md).
+    /// Set the shared PPLNS window this validator derives its sharechain
+    /// difficulty floor from (the vardiff chain; see
+    /// docs/sharechain/vardiff-sharechain.md).
     ///
-    /// `Some(floor)` selects the validation band at the three ASERT sites;
-    /// `None` keeps the equality pin. The default is `None`, matching
-    /// Bitcoin and the V1 equality pin.
-    pub fn with_sharechain_diff_floor(mut self, sharechain_diff_floor: Option<u64>) -> Self {
-        self.sharechain_diff_floor = sharechain_diff_floor;
+    /// `Some(window)` switches the ASERT sites from the equality pin to the
+    /// validation band. The default is `None`, matching Bitcoin and the V1
+    /// equality pin.
+    pub fn with_sharechain_floor_window(
+        mut self,
+        sharechain_floor_window: Option<Arc<RwLock<PplnsWindow>>>,
+    ) -> Self {
+        self.sharechain_floor_window = sharechain_floor_window;
         self
     }
 
@@ -1681,29 +1725,7 @@ impl DefaultShareValidator {
                 paying_block,
                 chain_store_handle,
             )
-            .map_err(|error| match error {
-                // The anchor is below the confirmed entries this node's window
-                // retains, and the window's oldest entry only moves forward
-                // with the confirmed tip, so no retry can bring it back into
-                // range. Drop the share without a verdict.
-                WindowError::InsufficientEntries { .. }
-                | WindowError::RightsHistoryTooShallow { .. } => ValidationError::unresolvable(
-                    format!("Cannot resolve PPLNS window from prev_share_blockhash: {error}"),
-                ),
-                // A store read failed, the ancestry is not stored yet, or a
-                // BCH header the window places work with has not arrived;
-                // each may resolve later.
-                WindowError::ReadFailure(_) | WindowError::UnknownBchPrev { .. } => {
-                    ValidationError::recoverable(format!(
-                        "Failed to resolve PPLNS window from prev_share_blockhash: {error}"
-                    ))
-                }
-                // The share builds on a BCH chain none of its window's work
-                // is on, so its coinbase can pay no one.
-                WindowError::NothingEligible { .. } => ValidationError::consensus(format!(
-                    "Share pays no one on its Bitcoin Cash chain: {error}"
-                )),
-            })?;
+            .map_err(|error| classify_window_failure(error, "resolve PPLNS window"))?;
 
         // The total paid out is the bitcoin coinbase's own output total. The
         // admission gate has matched the coinbase to the proof of work, so this
@@ -1975,8 +1997,12 @@ impl ShareValidator for DefaultShareValidator {
         &self.pool_difficulty
     }
 
-    fn sharechain_diff_floor(&self) -> Option<u64> {
-        self.sharechain_diff_floor
+    fn sharechain_floor_window(&self) -> Option<Arc<RwLock<PplnsWindow>>> {
+        self.sharechain_floor_window.clone()
+    }
+
+    fn derives_sharechain_floor(&self) -> bool {
+        self.sharechain_floor_window.is_some()
     }
 
     fn bch_header_rules(&self) -> Option<BchHeaderRules> {
@@ -2001,21 +2027,30 @@ impl ShareValidator for DefaultShareValidator {
                 ))
             })?;
 
-        match self.sharechain_diff_floor {
-            Some(floor) => {
-                check_sharechain_band(share_header.bits, floor, self.target_ceiling)
-                    .map_err(|rejection| ValidationError::consensus(rejection.to_string()))?;
-            }
-            None => {
-                let calculated_target = self.pool_difficulty.calculate_target_clamped(parent);
-                // Ensure the advertised header bits match the calculated pool target.
-                if share_header.bits != calculated_target {
-                    return Err(ValidationError::consensus(format!(
-                        "Share header bits {:#010x} does not match calculated pool target {:#010x}",
-                        share_header.bits.to_consensus(),
-                        calculated_target.to_consensus()
-                    )));
-                }
+        if let Some(window) = &self.sharechain_floor_window {
+            let d_asert_capped = target_to_difficulty_rounded_up(Target::from_compact(
+                self.pool_difficulty.calculate_target_clamped(parent),
+            ));
+            let floor = window
+                .write()
+                .expect("PPLNS window lock poisoned on write")
+                .get_sharechain_floor_from_start_hash(
+                    parent_hash,
+                    chain_store_handle,
+                    d_asert_capped,
+                )
+                .map_err(|error| classify_window_failure(error, "derive the sharechain floor"))?;
+            check_sharechain_band(share_header.bits, floor, self.target_ceiling)
+                .map_err(|rejection| ValidationError::consensus(rejection.to_string()))?;
+        } else {
+            let calculated_target = self.pool_difficulty.calculate_target_clamped(parent);
+            // Ensure the advertised header bits match the calculated pool target.
+            if share_header.bits != calculated_target {
+                return Err(ValidationError::consensus(format!(
+                    "Share header bits {:#010x} does not match calculated pool target {:#010x}",
+                    share_header.bits.to_consensus(),
+                    calculated_target.to_consensus()
+                )));
             }
         }
 
@@ -2352,7 +2387,9 @@ mockall::mock! {
 
         fn pool_difficulty(&self) -> &PoolDifficulty;
 
-        fn sharechain_diff_floor(&self) -> Option<u64>;
+        fn sharechain_floor_window(&self) -> Option<Arc<RwLock<PplnsWindow>>>;
+
+        fn derives_sharechain_floor(&self) -> bool;
 
         fn bch_header_rules(&self) -> Option<BchHeaderRules>;
     }
@@ -2362,6 +2399,7 @@ mockall::mock! {
 mod tests {
     use super::*;
     use crate::accounting::OutputPair;
+    use crate::accounting::payout::sharechain_pplns::MockPplnsWindow;
     use crate::accounting::payout::sharechain_pplns::pplns_window::{
         BCH_COINBASE_MATURITY, BCH_PAYOUT_DEPTH, COINBASE_MATURITY, PAYOUT_DEPTH,
         PPLNS_WINDOW_SHARES,
@@ -4673,9 +4711,9 @@ mod tests {
         assert!(matches!(rejection, BandRejection::ZeroTarget));
     }
 
-    /// With a floor configured, the validator rejects a declared target
-    /// below the floor before the proof-of-work check, so this runs with
-    /// or without the `sim` feature.
+    /// With the seeded window's derived floor at 1285, the validator
+    /// rejects a declared target below the floor before the proof-of-work
+    /// check, so this runs with or without the `sim` feature.
     #[test]
     fn test_validate_with_pool_difficulty_rejects_share_below_the_floor() {
         let mut chain_store_handle = ChainStoreHandle::default();
@@ -4689,11 +4727,19 @@ mod tests {
             &mut chain_store_handle,
             &mut pool_difficulty,
             BlockHash::all_zeros(),
-            0x207FFFFF,
+            0x1d000033,
         );
 
+        let mut floor_window = MockPplnsWindow::default();
+        floor_window
+            .expect_get_sharechain_floor_from_start_hash()
+            .withf(|start_hash, _, d_asert_capped| {
+                *start_hash == BlockHash::all_zeros() && *d_asert_capped == 1285
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(1285));
         let error = validator_with(pool_difficulty)
-            .with_sharechain_diff_floor(Some(1285))
+            .with_sharechain_floor_window(Some(Arc::new(RwLock::new(floor_window))))
             .validate_with_pool_difficulty(&header, &chain_store_handle)
             .unwrap_err();
         assert_eq!(error.kind(), FailureKind::Consensus);
@@ -4716,11 +4762,19 @@ mod tests {
             &mut chain_store_handle,
             &mut pool_difficulty,
             BlockHash::all_zeros(),
-            0x207FFFFF,
+            0x1d000033,
         );
 
+        let mut floor_window = MockPplnsWindow::default();
+        floor_window
+            .expect_get_sharechain_floor_from_start_hash()
+            .withf(|start_hash, _, d_asert_capped| {
+                *start_hash == BlockHash::all_zeros() && *d_asert_capped == 1285
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(1285));
         let error = validator_with(pool_difficulty)
-            .with_sharechain_diff_floor(Some(1285))
+            .with_sharechain_floor_window(Some(Arc::new(RwLock::new(floor_window))))
             .validate_with_pool_difficulty(&header, &chain_store_handle)
             .unwrap_err();
         assert_eq!(error.kind(), FailureKind::Consensus);
@@ -4745,11 +4799,19 @@ mod tests {
             &mut chain_store_handle,
             &mut pool_difficulty,
             BlockHash::all_zeros(),
-            0x207FFFFF,
+            0x1d000033,
         );
 
+        let mut floor_window = MockPplnsWindow::default();
+        floor_window
+            .expect_get_sharechain_floor_from_start_hash()
+            .withf(|start_hash, _, d_asert_capped| {
+                *start_hash == BlockHash::all_zeros() && *d_asert_capped == 1285
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(1285));
         validator_with(pool_difficulty)
-            .with_sharechain_diff_floor(Some(1285))
+            .with_sharechain_floor_window(Some(Arc::new(RwLock::new(floor_window))))
             .validate_with_pool_difficulty(&header, &chain_store_handle)
             .unwrap();
     }

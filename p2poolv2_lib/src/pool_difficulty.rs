@@ -79,6 +79,27 @@ pub(crate) fn target_for_difficulty(difficulty: u64) -> Target {
     Target::from_be_bytes(quotient)
 }
 
+/// Difficulty of `target` in mainnet proof-of-work space, rounded up: the
+/// smallest integer `d` with `target <= MAX_ATTAINABLE_MAINNET / d`.
+///
+/// The vardiff share chain derives its difficulty floor from an ASERT target
+/// in its compact encoding, whose mantissa truncates and would otherwise
+/// round a floor easier than the target it came from. Rounding up keeps the
+/// floor never easier than the parent chain's ASERT difficulty.
+///
+/// A zero target would mean an infinite difficulty; the arithmetic saturates
+/// at `u128::MAX` so the floor fails closed (its sum overflows the band's
+/// `u64`) instead of dividing by zero.
+pub(crate) fn target_to_difficulty_rounded_up(target: Target) -> u128 {
+    if target == Target::ZERO {
+        return u128::MAX;
+    }
+    let dividend = target_to_u512(Target::MAX_ATTAINABLE_MAINNET);
+    let divisor = target_to_u512(target);
+    let quotient = (dividend + divisor - U512::one()) / divisor;
+    u128::try_from(quotient).unwrap_or(u128::MAX)
+}
+
 // ---------------------------------------------------------------------------
 // ASERT core algorithm
 // ---------------------------------------------------------------------------
@@ -522,6 +543,35 @@ mod tests {
         let product = anchor * U512::from(65536u64);
         let recovered = product >> 16;
         assert_eq!(anchor, recovered);
+    }
+
+    #[test]
+    fn test_target_to_difficulty_rounded_up_at_max_are_one() {
+        assert_eq!(
+            target_to_difficulty_rounded_up(Target::MAX_ATTAINABLE_MAINNET),
+            1
+        );
+    }
+
+    #[test]
+    fn test_target_to_difficulty_rounded_up_exact_division() {
+        // 0x1d000033 decodes to MAX_ATTAINABLE_MAINNET / 1285 exactly.
+        let target = Target::from_compact(CompactTarget::from_consensus(0x1d000033));
+        assert_eq!(target_to_difficulty_rounded_up(target), 1285);
+    }
+
+    #[test]
+    fn test_target_to_difficulty_rounded_up_rounds_up_a_truncated_target() {
+        // One above MAX_ATTAINABLE_MAINNET / 3 still has the quotient below
+        // three, so the difficulty rounds up to three.
+        let quotient = target_to_u512(Target::MAX_ATTAINABLE_MAINNET) / U512::from(3u64);
+        let target = u512_to_target(quotient + U512::one());
+        assert_eq!(target_to_difficulty_rounded_up(target), 3);
+    }
+
+    #[test]
+    fn test_target_to_difficulty_rounded_up_zero_target_saturates() {
+        assert_eq!(target_to_difficulty_rounded_up(Target::ZERO), u128::MAX);
     }
 
     #[test]

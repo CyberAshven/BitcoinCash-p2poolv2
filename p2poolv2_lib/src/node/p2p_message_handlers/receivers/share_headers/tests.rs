@@ -8,7 +8,10 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::MAX_POOL_TARGET;
 use crate::shares::validation::{MockDefaultShareValidator, ValidationError};
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
-use crate::test_utils::{TestShareBlockBuilder, share_header_batch_with_empty_branches};
+use crate::test_utils::{
+    PUBKEY_2G, PUBKEY_G, TestShareBlockBuilder, build_test_header, build_test_header_with_uncles,
+    share_header_batch_with_empty_branches,
+};
 use tokio::sync::{mpsc, oneshot};
 
 /// Build a single test header with bits set to MAX_POOL_TARGET so it
@@ -83,8 +86,8 @@ fn setup_minimum_difficulty_mock(mock_validator: &mut MockDefaultShareValidator)
         .expect_validate_header_timestamp()
         .returning(|_, _| Ok(()));
     mock_validator
-        .expect_sharechain_diff_floor()
-        .return_const(None);
+        .expect_derives_sharechain_floor()
+        .return_const(false);
     let mut pool_difficulty = PoolDifficulty::default();
     pool_difficulty
         .expect_calculate_target_clamped()
@@ -476,10 +479,11 @@ async fn test_asert_mismatch_rejected() {
     );
 }
 
-/// With a floor configured, a header whose declared target sits exactly
-/// at the floor passes: `0x1d000033` decodes to `MAX_ATTAINABLE_MAINNET
-/// / 1285` exactly. `calculate_target_clamped` has no expectation, so the
-/// test also proves the band path replaced the equality pin.
+/// A vardiff validator derives the band's floor at header sync from the
+/// batch and store: three same-miner window entries below the header's
+/// parent, with the mocked ASERT target decoding to difficulty 1285, derive
+/// floor 1285, and a header declaring the target that sits exactly at the
+/// floor passes.
 #[test]
 fn test_validate_header_chain_accepts_header_at_the_floor() {
     let mut chain_store_handle = ChainStoreHandle::default();
@@ -496,9 +500,12 @@ fn test_validate_header_chain_accepts_header_at_the_floor() {
         .expect_validate_header_timestamp()
         .returning(|_, _| Ok(()));
     mock_validator
-        .expect_sharechain_diff_floor()
-        .return_const(Some(1285));
+        .expect_derives_sharechain_floor()
+        .return_const(true);
     let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1d000033));
     pool_difficulty
         .expect_target_ceiling()
         .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
@@ -506,20 +513,29 @@ fn test_validate_header_chain_accepts_header_at_the_floor() {
         .expect_pool_difficulty()
         .return_const(pool_difficulty);
 
+    let template = build_valid_test_header();
+    let mut parent = build_valid_test_header();
+    parent.prev_share_blockhash = template.prev_share_blockhash;
+    parent.time = template.time + 1;
+    let mut grandparent = build_valid_test_header();
+    grandparent.prev_share_blockhash = parent.block_hash();
+    grandparent.time = template.time + 2;
     let mut header = build_valid_test_header();
+    header.prev_share_blockhash = grandparent.block_hash();
+    header.time = template.time + 3;
     header.bits = CompactTarget::from_consensus(0x1d000033);
 
     let result = validate_header_chain(
-        &share_header_batch_with_empty_branches(vec![header]),
+        &share_header_batch_with_empty_branches(vec![parent, grandparent, header]),
         &chain_store_handle,
         &mock_validator,
     );
     assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
 }
 
-/// With a floor configured, a header whose declared target is easier
-/// than the floor is rejected as `BelowFloor`, before any ASERT or PoW
-/// comparison.
+/// With the derived floor at 1285, a header whose declared target is
+/// easier than the floor is rejected as `BelowFloor`, before any ASERT or
+/// PoW comparison.
 #[test]
 fn test_validate_header_chain_rejects_header_below_the_floor() {
     let mut chain_store_handle = ChainStoreHandle::default();
@@ -536,9 +552,12 @@ fn test_validate_header_chain_rejects_header_below_the_floor() {
         .expect_validate_header_timestamp()
         .returning(|_, _| Ok(()));
     mock_validator
-        .expect_sharechain_diff_floor()
-        .return_const(Some(1285));
+        .expect_derives_sharechain_floor()
+        .return_const(true);
     let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1d000033));
     pool_difficulty
         .expect_target_ceiling()
         .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
@@ -546,17 +565,27 @@ fn test_validate_header_chain_rejects_header_below_the_floor() {
         .expect_pool_difficulty()
         .return_const(pool_difficulty);
 
-    // The ceiling's own target is easier than the floor at 1285.
-    let header = build_valid_test_header();
+    let template = build_valid_test_header();
+    let mut parent = build_valid_test_header();
+    parent.prev_share_blockhash = template.prev_share_blockhash;
+    parent.time = template.time + 1;
+    let mut grandparent = build_valid_test_header();
+    grandparent.prev_share_blockhash = parent.block_hash();
+    grandparent.time = template.time + 2;
+    // The default declared bits are the ceiling's target, easier than the
+    // floor at 1285.
+    let mut header = build_valid_test_header();
+    header.prev_share_blockhash = grandparent.block_hash();
+    header.time = template.time + 3;
 
     let error = validate_header_chain(
-        &share_header_batch_with_empty_branches(vec![header]),
+        &share_header_batch_with_empty_branches(vec![parent, grandparent, header]),
         &chain_store_handle,
         &mock_validator,
     )
     .unwrap_err();
     assert!(
-        matches!(error, HeaderSyncError::BelowFloor { .. }),
+        matches!(error, HeaderSyncError::BelowFloor { floor: 1285, .. }),
         "{error}"
     );
     assert!(
@@ -585,9 +614,12 @@ fn test_validate_header_chain_rejects_zero_declared_target_below_floor() {
         .expect_validate_header_timestamp()
         .returning(|_, _| Ok(()));
     mock_validator
-        .expect_sharechain_diff_floor()
-        .return_const(Some(1285));
+        .expect_derives_sharechain_floor()
+        .return_const(true);
     let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1d000033));
     pool_difficulty
         .expect_target_ceiling()
         .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
@@ -595,11 +627,20 @@ fn test_validate_header_chain_rejects_zero_declared_target_below_floor() {
         .expect_pool_difficulty()
         .return_const(pool_difficulty);
 
+    let template = build_valid_test_header();
+    let mut parent = build_valid_test_header();
+    parent.prev_share_blockhash = template.prev_share_blockhash;
+    parent.time = template.time + 1;
+    let mut grandparent = build_valid_test_header();
+    grandparent.prev_share_blockhash = parent.block_hash();
+    grandparent.time = template.time + 2;
     let mut header = build_valid_test_header();
+    header.prev_share_blockhash = grandparent.block_hash();
+    header.time = template.time + 3;
     header.bits = CompactTarget::from_consensus(0);
 
     let error = validate_header_chain(
-        &share_header_batch_with_empty_branches(vec![header]),
+        &share_header_batch_with_empty_branches(vec![parent, grandparent, header]),
         &chain_store_handle,
         &mock_validator,
     )
@@ -608,11 +649,18 @@ fn test_validate_header_chain_rejects_zero_declared_target_below_floor() {
         matches!(error, HeaderSyncError::BelowFloor { .. }),
         "{error}"
     );
+    assert!(
+        error
+            .to_string()
+            .contains("below the sharechain difficulty floor 1285"),
+        "{error}"
+    );
 }
 
-/// With floor 1 against the main chain ceiling, the ceiling is the
-/// stricter bound: a difficulty-1 header is rejected even though it meets
-/// the floor, and the ceiling's own target passes.
+/// With the derived floor at 0 (the one-entry window below the header's
+/// parent is under the presence minimum), the ceiling is the stricter
+/// bound: a difficulty-1 header is rejected even though it meets the
+/// floor, and the ceiling's own target passes.
 #[test]
 fn test_validate_header_chain_uses_the_ceiling_when_the_floor_is_easier() {
     let mut chain_store_handle = ChainStoreHandle::default();
@@ -629,9 +677,12 @@ fn test_validate_header_chain_uses_the_ceiling_when_the_floor_is_easier() {
         .expect_validate_header_timestamp()
         .returning(|_, _| Ok(()));
     mock_validator
-        .expect_sharechain_diff_floor()
-        .return_const(Some(1));
+        .expect_derives_sharechain_floor()
+        .return_const(true);
     let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1d000033));
     pool_difficulty
         .expect_target_ceiling()
         .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
@@ -739,8 +790,8 @@ fn test_validate_header_chain_checks_timestamps_against_batch_and_store_ancestor
         .times(1)
         .returning(|_, _| Ok(()));
     mock_validator
-        .expect_sharechain_diff_floor()
-        .return_const(None);
+        .expect_derives_sharechain_floor()
+        .return_const(false);
     let mut pool_difficulty = PoolDifficulty::default();
     pool_difficulty
         .expect_calculate_target_clamped()
@@ -1715,5 +1766,249 @@ fn test_validate_header_chain_rejects_batch_with_unknown_external_parent() {
             .unwrap_err()
             .to_string()
             .contains("External parent(s) not found in store"),
+    );
+}
+
+/// The sync floor walk derives the floor from the batch's earlier,
+/// already-validated headers alone when the whole window sits there: three
+/// shares by one miner make the window minimum the whole window, so the
+/// floor is the ASERT difficulty.
+#[test]
+fn test_sync_floor_walk_derives_the_floor_from_batch_headers() {
+    let first = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+    let second = build_test_header(&first.block_hash().to_string(), PUBKEY_G, 2);
+    let third = build_test_header(&second.block_hash().to_string(), PUBKEY_G, 2);
+    let mut validated_headers: HashMap<BlockHash, &ShareHeader> = HashMap::new();
+    validated_headers.insert(third.block_hash(), &third);
+    validated_headers.insert(second.block_hash(), &second);
+    validated_headers.insert(first.block_hash(), &first);
+
+    let floor = derive_sync_sharechain_floor(
+        SyncFloorWalkStart {
+            parent_hash: third.block_hash(),
+            header_hash: third.block_hash(),
+            parent_height: 2,
+        },
+        &validated_headers,
+        &ChainStoreHandle::default(),
+        250,
+        BCH_COINBASE_MATURITY,
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(floor, 250);
+}
+
+/// The same three-share window read from the store instead of the batch
+/// derives the same floor: the batch-store seam is not part of the rule.
+#[test]
+fn test_sync_floor_walk_reads_ancestors_from_the_store() {
+    let first = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+    let second = build_test_header(&first.block_hash().to_string(), PUBKEY_G, 2);
+    let third = build_test_header(&second.block_hash().to_string(), PUBKEY_G, 2);
+    let mut store_headers: HashMap<BlockHash, ShareHeader> = HashMap::new();
+    store_headers.insert(third.block_hash(), third.clone());
+    store_headers.insert(second.block_hash(), second.clone());
+    store_headers.insert(first.block_hash(), first.clone());
+    let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |hash| {
+            store_headers
+                .get(hash)
+                .cloned()
+                .ok_or_else(|| StoreError::NotFound(format!("missing {hash}")))
+        });
+
+    let floor = derive_sync_sharechain_floor(
+        SyncFloorWalkStart {
+            parent_hash: third.block_hash(),
+            header_hash: third.block_hash(),
+            parent_height: 2,
+        },
+        &HashMap::new(),
+        &chain_store_handle,
+        250,
+        BCH_COINBASE_MATURITY,
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(floor, 250);
+}
+
+/// The walk skips the immature shares at the top of the window, counted
+/// down from the validated header's parent: the skipped share's miner is
+/// one share short of presence and would dilute the floor to 100 if it
+/// were counted.
+#[test]
+fn test_sync_floor_walk_skips_immature_shares() {
+    let first = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2);
+    let second = build_test_header(&first.block_hash().to_string(), PUBKEY_G, 2);
+    let third = build_test_header(&second.block_hash().to_string(), PUBKEY_G, 2);
+    let fourth = build_test_header(&third.block_hash().to_string(), PUBKEY_G, 2);
+    let immature = build_test_header(&fourth.block_hash().to_string(), PUBKEY_2G, 2);
+    let mut validated_headers: HashMap<BlockHash, &ShareHeader> = HashMap::new();
+    validated_headers.insert(immature.block_hash(), &immature);
+    validated_headers.insert(fourth.block_hash(), &fourth);
+    validated_headers.insert(third.block_hash(), &third);
+    validated_headers.insert(second.block_hash(), &second);
+    validated_headers.insert(first.block_hash(), &first);
+
+    let floor = derive_sync_sharechain_floor(
+        SyncFloorWalkStart {
+            parent_hash: immature.block_hash(),
+            header_hash: immature.block_hash(),
+            parent_height: 4,
+        },
+        &validated_headers,
+        &ChainStoreHandle::default(),
+        250,
+        2,
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(floor, 250);
+}
+
+/// Three shares by one miner, each referencing an uncle by another miner:
+/// the uncles are not window entries, so only the share miner reaches the
+/// presence minimum, and the floor is half the ASERT difficulty once the
+/// uncles' work is credited to the uncle miner.
+#[test]
+fn test_sync_floor_walk_credits_uncle_work_to_the_uncle_miner() {
+    let uncle_one = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_2G, 2);
+    let uncle_two = build_test_header(&uncle_one.block_hash().to_string(), PUBKEY_2G, 2);
+    let uncle_three = build_test_header(&uncle_two.block_hash().to_string(), PUBKEY_2G, 2);
+    let first = build_test_header_with_uncles(
+        &BlockHash::all_zeros().to_string(),
+        PUBKEY_G,
+        2,
+        vec![uncle_one.block_hash()],
+    );
+    let second = build_test_header_with_uncles(
+        &first.block_hash().to_string(),
+        PUBKEY_G,
+        2,
+        vec![uncle_two.block_hash()],
+    );
+    let third = build_test_header_with_uncles(
+        &second.block_hash().to_string(),
+        PUBKEY_G,
+        2,
+        vec![uncle_three.block_hash()],
+    );
+    let mut validated_headers: HashMap<BlockHash, &ShareHeader> = HashMap::new();
+    validated_headers.insert(third.block_hash(), &third);
+    validated_headers.insert(second.block_hash(), &second);
+    validated_headers.insert(first.block_hash(), &first);
+    let uncle_headers = vec![
+        (uncle_one.block_hash(), uncle_one.clone()),
+        (uncle_two.block_hash(), uncle_two.clone()),
+        (uncle_three.block_hash(), uncle_three.clone()),
+    ];
+    let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_get_share_headers()
+        .returning(move |_| Ok(uncle_headers.clone()));
+
+    let floor = derive_sync_sharechain_floor(
+        SyncFloorWalkStart {
+            parent_hash: third.block_hash(),
+            header_hash: third.block_hash(),
+            parent_height: 2,
+        },
+        &validated_headers,
+        &chain_store_handle,
+        250,
+        BCH_COINBASE_MATURITY,
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(floor, 125);
+}
+
+/// A window uncle the store does not hold fails the walk closed: summing a
+/// partial window would derive different floors on nodes whose stores
+/// differ, so the share is refused, not judged.
+#[test]
+fn test_sync_floor_walk_refuses_a_missing_uncle() {
+    let uncle = build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_2G, 2);
+    let share = build_test_header_with_uncles(
+        &BlockHash::all_zeros().to_string(),
+        PUBKEY_G,
+        2,
+        vec![uncle.block_hash()],
+    );
+    let stored_share = share.clone();
+    let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_share.clone()));
+    chain_store_handle
+        .expect_get_share_headers()
+        .returning(|_| Ok(Vec::new()));
+
+    let error = derive_sync_sharechain_floor(
+        SyncFloorWalkStart {
+            parent_hash: share.block_hash(),
+            header_hash: share.block_hash(),
+            parent_height: 0,
+        },
+        &HashMap::new(),
+        &chain_store_handle,
+        250,
+        BCH_COINBASE_MATURITY,
+        0,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            HeaderSyncError::MissingUncle { uncle_hash, .. }
+                if uncle_hash == uncle.block_hash()
+        ),
+        "{error}"
+    );
+}
+
+/// An ancestor of the batch's parent that neither the batch nor the store
+/// holds fails the walk: a report of the missing parent, retryable with a
+/// deeper getheaders.
+#[test]
+fn test_sync_floor_walk_refuses_a_missing_ancestor() {
+    let parent_hash =
+        build_test_header(&BlockHash::all_zeros().to_string(), PUBKEY_G, 2).block_hash();
+    let header_hash = build_test_header(&parent_hash.to_string(), PUBKEY_G, 2).block_hash();
+    let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(|hash| Err(StoreError::NotFound(format!("missing {hash}"))));
+
+    let error = derive_sync_sharechain_floor(
+        SyncFloorWalkStart {
+            parent_hash,
+            header_hash,
+            parent_height: 1,
+        },
+        &HashMap::new(),
+        &chain_store_handle,
+        250,
+        BCH_COINBASE_MATURITY,
+        0,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            HeaderSyncError::MissingParentInBatch { header, parent, .. }
+                if header == header_hash && parent == parent_hash
+        ),
+        "{error}"
     );
 }
