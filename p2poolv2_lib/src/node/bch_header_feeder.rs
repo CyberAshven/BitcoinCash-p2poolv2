@@ -115,7 +115,7 @@ impl BchHeaderFeeder {
                 warn!("Cannot follow the node's headers before syncing shares: {error}")
             }
             Err(_) => warn!(
-                "BCHN's headers took longer than {} s; syncing shares while the feeder goes on",
+                "The node's headers took longer than {} s; syncing shares while the feeder goes on",
                 limit.as_secs()
             ),
         }
@@ -161,7 +161,7 @@ impl BchHeaderFeeder {
                 let height = u32::try_from(summary.height)
                     .map_err(|_| format!("height {} is too high", summary.height))?;
                 info!(
-                    "Learning {} Bitcoin Cash headers back from BCHN's tip to height {height}",
+                    "Learning {} Bitcoin Cash headers back from the node's tip to height {height}",
                     walked.len()
                 );
                 break height;
