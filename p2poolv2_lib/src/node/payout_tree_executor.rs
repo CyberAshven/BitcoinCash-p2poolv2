@@ -245,7 +245,7 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
         let tip = match self.node.best_block_hash().await {
             Ok(tip) => tip,
             Err(error) => {
-                debug!("Payout tree executor cannot read BCHN's tip: {error}");
+                debug!("Payout tree executor cannot read the node's tip: {error}");
                 return;
             }
         };
@@ -354,7 +354,7 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
                             descendants_confirmed = false;
                         }
                         warn!(
-                            "BCHN refused payout tree transaction {} of coinbase {}: {reason}",
+                            "The node refused payout tree transaction {} of coinbase {}: {reason}",
                             transaction.compute_txid(),
                             stored.coinbase_txid
                         );

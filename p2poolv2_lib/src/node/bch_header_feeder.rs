@@ -96,8 +96,8 @@ impl BchHeaderFeeder {
             timer.tick().await;
             match self.sync_once().await {
                 Ok(0) => {}
-                Ok(added) => debug!("Learned {added} Bitcoin Cash headers from BCHN"),
-                Err(error) => warn!("Cannot follow BCHN's headers: {error}"),
+                Ok(added) => debug!("Learned {added} Bitcoin Cash headers from the node"),
+                Err(error) => warn!("Cannot follow the node's headers: {error}"),
             }
         }
     }
@@ -109,10 +109,10 @@ impl BchHeaderFeeder {
     pub(crate) async fn first_sync(&self, limit: Duration) {
         match timeout(limit, self.sync_once()).await {
             Ok(Ok(added)) => {
-                info!("Learned {added} Bitcoin Cash headers from BCHN before syncing shares")
+                info!("Learned {added} Bitcoin Cash headers from the node before syncing shares")
             }
             Ok(Err(error)) => {
-                warn!("Cannot follow BCHN's headers before syncing shares: {error}")
+                warn!("Cannot follow the node's headers before syncing shares: {error}")
             }
             Err(_) => warn!(
                 "BCHN's headers took longer than {} s; syncing shares while the feeder goes on",
@@ -259,7 +259,7 @@ pub async fn relay_templates_learning_prevs(
         {
             match feeder.learn_from(prev).await {
                 Ok(_) => learned = Some(prev),
-                Err(error) => warn!("Cannot learn template parent {prev} from BCHN: {error}"),
+                Err(error) => warn!("Cannot learn template parent {prev} from the node: {error}"),
             }
         }
         if output.send(command).await.is_err() {

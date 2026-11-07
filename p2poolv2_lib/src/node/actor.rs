@@ -436,7 +436,7 @@ fn start_payout_tree_executor(
     ) {
         Ok(client) => client,
         Err(error) => {
-            error!("No payout tree executor: cannot make a BCHN client: {error}");
+            error!("No payout tree executor: cannot make an RPC client for the node: {error}");
             return None;
         }
     };

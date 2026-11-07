@@ -328,7 +328,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         ) {
             Ok(client) => client,
             Err(e) => {
-                error!("Failed to create the BCHN client for templates: {e}");
+                error!("Failed to create the RPC client for the node's templates: {e}");
                 return Err(ExitCode::FAILURE);
             }
         };
