@@ -19,7 +19,8 @@ chain or has no peers. The payout-tree executor reads the same answer.
 And the start-up check took only BCHN's network names (`main`, `chip`);
 BCHD's `mainnet` and `chipnet` now pass too, in any case. BCHD has no ZMQ,
 so it is used with `node_p2p_address`; the quickstart has a BCHD section.
-No share-chain rule changes.
+Log lines and two metric descriptions that said BCHN for whichever node
+`[bitcoinrpc]` names now say the node. No share-chain rule changes.
 
 A node taking templates from a Stratum V2 Template Provider
 (`template_source = "sv2"`) withdraws mining work once no provider
