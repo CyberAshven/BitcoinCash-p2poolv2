@@ -44,6 +44,28 @@ Both branches keep version `0.0.1-alpha` and the fork's `homepage` and
 workspace crates arrive, run `cargo update --workspace --offline` so
 `Cargo.lock` gives them the alpha version.
 
+## Skills (Bitcoin Cash fork)
+
+Skills live in `.agents/skills/`, each linked from `.claude/skills/`.
+Besides upstream's `nl-outlines`, this fork has:
+
+- `bch-not-btc` -- check each Bitcoin assumption against Bitcoin Cash's
+  rules before porting code or choosing a limit
+- `bch-node-agnostic` -- code that talks to the node works on BCHN, BCHD
+  and Knuth alike
+- `bch-share-chain-rules` -- what a share-chain rule change is, and how it
+  is explained, agreed, tagged and rolled out
+- `bch-e2e-evidence` -- prove a behaviour change with a run before and
+  after it
+- `bch-upstream-sync` -- look upstream first, and bring its changes in by
+  merge or cherry-pick
+
+Read the matching skill before working in its area. A new skill gets its
+own directory and a relative link, `.claude/skills/<name>` ->
+`../../.agents/skills/<name>`. Where git checks links out as text files
+(Windows without `core.symlinks`), add the link to the index directly:
+`git update-index --add --cacheinfo 120000,$(printf '../../.agents/skills/<name>' | git hash-object -w --stdin),.claude/skills/<name>`.
+
 ## Build and test commands
 
 ```sh
