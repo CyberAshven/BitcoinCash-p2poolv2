@@ -47,7 +47,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 /// The node the tests mine on, from the environment.
-fn bchn() -> BitcoindRpcClient {
+pub(crate) fn bchn() -> BitcoindRpcClient {
     let url = std::env::var("P2POOL_TEST_BCHN_RPC_URL")
         .expect("set P2POOL_TEST_BCHN_RPC_URL to a BCHN regtest node's RPC URL");
     let user = std::env::var("P2POOL_TEST_BCHN_RPC_USER").unwrap_or_default();
@@ -55,7 +55,7 @@ fn bchn() -> BitcoindRpcClient {
     BitcoindRpcClient::new(&url, &user, &password).unwrap()
 }
 
-async fn call(node: &BitcoindRpcClient, method: &str, params: Vec<Value>) -> Value {
+pub(crate) async fn call(node: &BitcoindRpcClient, method: &str, params: Vec<Value>) -> Value {
     node.request(method, params)
         .await
         .unwrap_or_else(|error| panic!("{method} failed: {error}"))
@@ -94,15 +94,15 @@ fn weights(count: u32, seed: u8) -> HashMap<PayoutAddress, u128> {
 /// only to a connected node, so this reads the tip instead: regtest never
 /// retargets, halves the 50-coin subsidy every 150 blocks, and the block
 /// carries no transaction, so no fees.
-struct NextBlock {
-    height: u64,
-    previous: BlockHash,
-    time: u32,
-    bits: CompactTarget,
-    coinbase_value: u64,
+pub(crate) struct NextBlock {
+    pub(crate) height: u64,
+    pub(crate) previous: BlockHash,
+    pub(crate) time: u32,
+    pub(crate) bits: CompactTarget,
+    pub(crate) coinbase_value: u64,
 }
 
-async fn next_block(node: &BitcoindRpcClient) -> NextBlock {
+pub(crate) async fn next_block(node: &BitcoindRpcClient) -> NextBlock {
     let tip = call(node, "getbestblockhash", Vec::new()).await;
     let header = call(node, "getblockheader", vec![tip.clone(), json!(true)]).await;
     let height = header["height"].as_u64().unwrap() + 1;
@@ -117,7 +117,7 @@ async fn next_block(node: &BitcoindRpcClient) -> NextBlock {
 
 /// Mine one block whose coinbase pays `payouts` on top of BCHN's tip,
 /// returning the coinbase. Asserts BCHN accepts the block.
-async fn mine_coinbase(
+pub(crate) async fn mine_coinbase(
     node: &BitcoindRpcClient,
     payouts: &CoinbasePayouts,
 ) -> (Transaction, BlockHash, u64) {

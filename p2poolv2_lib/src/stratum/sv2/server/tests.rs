@@ -6,6 +6,7 @@ use crate::shares::share_block::ShareHeader;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::stratum::block_submit::FoundBlockSubmitter;
 use crate::stratum::sv2::PoolTransactionCache;
+use crate::stratum::sv2::large_templates::LARGE_TEMPLATES_EXTENSION;
 use crate::stratum::sv2::payout_outputs::{
     EXACT_OUTPUTS, INVALID_REQUEST, PAYOUT_OUTPUTS_STALE, REQUEST_PAYOUT_OUTPUTS,
     REQUEST_PAYOUT_OUTPUTS_ERROR, REQUEST_PAYOUT_OUTPUTS_SUCCESS, RequestPayoutOutputsError,
@@ -1370,6 +1371,92 @@ async fn a_bch_job_declaration_connection_is_granted_requested_payout_outputs() 
         ]
     );
     assert!(connection.has_payout_outputs());
+}
+
+/// A Full-Template Job Declaration connection asking for `0x5052` and
+/// `0x4C54` together, as Knuth does, is granted both in one
+/// `RequestExtensions.Success`; a Coinbase-Only one gets `0x5052` alone.
+#[tokio::test]
+async fn a_full_template_declarator_is_granted_large_templates_beside_payout_outputs() {
+    for (flags, granted) in [
+        (1, vec![PAYOUT_OUTPUTS_EXTENSION, LARGE_TEMPLATES_EXTENSION]),
+        (0, vec![PAYOUT_OUTPUTS_EXTENSION]),
+    ] {
+        let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+        let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+        let registry = Arc::new(Mutex::new(JobRegistry::new(
+            PoolTransactionCache::new(),
+            Some(MergeMiningCommitment::empty()),
+        )));
+        let mut connection = Sv2Connection::new(registry);
+        let mut setup =
+            binary_sv2::to_bytes(test_sv2_setup(Protocol::JobDeclarationProtocol, flags)).unwrap();
+        connection
+            .handle_message(MESSAGE_TYPE_SETUP_CONNECTION, &mut setup)
+            .unwrap();
+        let request = Sv2Message {
+            extension_type: EXTENSIONS_NEGOTIATION,
+            message_type: REQUEST_EXTENSIONS,
+            payload: extensions_payload(9, &[PAYOUT_OUTPUTS_EXTENSION, LARGE_TEMPLATES_EXTENSION]),
+        };
+
+        let frames = handle_messages(
+            &mut connection,
+            Some(&mut channels),
+            None,
+            None,
+            vec![request],
+        )
+        .await
+        .unwrap();
+
+        let payload = extensions_payload(9, &granted);
+        assert_eq!(
+            frames,
+            vec![
+                [
+                    &[
+                        0x01,
+                        0x00,
+                        REQUEST_EXTENSIONS_SUCCESS,
+                        payload.len() as u8,
+                        0,
+                        0
+                    ][..],
+                    &payload[..],
+                ]
+                .concat()
+            ]
+        );
+        assert_eq!(connection.has_large_templates(), flags == 1);
+    }
+}
+
+/// A `0x4C54` message on a connection that did not negotiate it closes the
+/// connection, as any unknown extension does.
+#[tokio::test]
+async fn a_large_templates_message_without_negotiation_closes_the_connection() {
+    let registry = Arc::new(Mutex::new(JobRegistry::new(
+        PoolTransactionCache::new(),
+        Some(MergeMiningCommitment::empty()),
+    )));
+    let mut connection = Sv2Connection::new(registry);
+    let mut setup =
+        binary_sv2::to_bytes(test_sv2_setup(Protocol::JobDeclarationProtocol, 1)).unwrap();
+    connection
+        .handle_message(MESSAGE_TYPE_SETUP_CONNECTION, &mut setup)
+        .unwrap();
+    let page = Sv2Message {
+        extension_type: LARGE_TEMPLATES_EXTENSION,
+        message_type: crate::stratum::sv2::large_templates::DECLARE_MINING_JOB_TRANSACTIONS,
+        payload: vec![2, 0, 0, 0, 0, 0],
+    };
+
+    assert!(
+        handle_messages(&mut connection, None, None, None, vec![page])
+            .await
+            .is_err()
+    );
 }
 
 /// A Mining connection keeps getting `0x4D4D` alone, and a Bitcoin node's

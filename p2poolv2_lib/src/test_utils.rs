@@ -816,7 +816,7 @@ fn test_bch_prepared_with_weights(
 /// merge-mining `merge_tokens` for every miner when given. `bits` is the
 /// prepared share bits, the basis of every token's commitment.
 #[cfg(any(test, feature = "test-utils"))]
-fn test_bch_prepared_with_weights_and_cuts(
+pub(crate) fn test_bch_prepared_with_weights_and_cuts(
     template: BlockTemplate,
     weights: HashMap<PayoutAddress, u128>,
     donation: (Option<PayoutAddress>, Option<u16>),
@@ -2225,6 +2225,18 @@ pub struct TestShareBlockBuilder {
     nonce: Option<u32>,
     bits: Option<CompactTarget>,
     time: Option<u32>,
+    cuts: TestShareCuts,
+}
+
+/// The donation and fee a test share commits, in its header and in the
+/// share commitment its coinbase carries, as a mined share does.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, Default)]
+struct TestShareCuts {
+    donation_address: Option<PayoutAddress>,
+    donation: Option<u16>,
+    fee_address: Option<PayoutAddress>,
+    fee: Option<u16>,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -2293,6 +2305,22 @@ impl TestShareBlockBuilder {
         self
     }
 
+    /// Commit a donation of `basis_points` to `address`, as a share mined
+    /// with that donation does.
+    pub fn donation(mut self, address: PayoutAddress, basis_points: u16) -> Self {
+        self.cuts.donation_address = Some(address);
+        self.cuts.donation = Some(basis_points);
+        self
+    }
+
+    /// Commit a fee of `basis_points` to `address`, as a share mined on a
+    /// node taking that fee does.
+    pub fn fee(mut self, address: PayoutAddress, basis_points: u16) -> Self {
+        self.cuts.fee_address = Some(address);
+        self.cuts.fee = Some(basis_points);
+        self
+    }
+
     pub fn with_easy_target(self) -> Self {
         let easy_target = bitcoin::CompactTarget::from_consensus(0x2100ffff);
         self.bits(easy_target)
@@ -2340,6 +2368,7 @@ impl TestShareBlockBuilder {
             self.nonce,
             self.bits,
             self.time,
+            self.cuts,
         )
     }
 }
@@ -2410,6 +2439,7 @@ fn test_share_block(
     nonce: Option<u32>,
     bits: Option<CompactTarget>,
     time: Option<u32>,
+    cuts: TestShareCuts,
 ) -> ShareBlock {
     let share_bits = bits.unwrap_or(CompactTarget::from_consensus(
         0x01e0377ae * work.unwrap_or(1),
@@ -2442,10 +2472,10 @@ fn test_share_block(
                 share_witness_root: compute_witness_root(&other_share_transactions),
                 bits: share_bits,
                 time: share_time,
-                donation_address: None,
-                donation: None,
-                fee_address: None,
-                fee: None,
+                donation_address: cuts.donation_address.clone(),
+                donation: cuts.donation,
+                fee_address: cuts.fee_address.clone(),
+                fee: cuts.fee,
                 bch_coinbase: None,
                 pool_merge_mining: None,
                 share_version: crate::shares::share_version::ShareVersion::CURRENT,
@@ -2514,10 +2544,10 @@ fn test_share_block(
         bitcoin_header,
         time: share_time,
         bits: share_bits,
-        donation_address: None,
-        donation: None,
-        fee_address: None,
-        fee: None,
+        donation_address: cuts.donation_address,
+        donation: cuts.donation,
+        fee_address: cuts.fee_address,
+        fee: cuts.fee,
         bitcoin_height: 1,
         coinbase_proof,
         bch_coinbase: None,

@@ -111,11 +111,13 @@ pub fn Header() -> impl IntoView {
         Feed::Connecting => "connecting",
         Feed::Live => "live",
         Feed::Offline => "offline",
+        Feed::Unauthorized => "unauthorized",
     };
     let live_title = move || match live.get() {
         Feed::Connecting => "Connecting to the node's share feed",
         Feed::Live => "New shares arrive as the node confirms them",
         Feed::Offline => "The share feed is down; retrying",
+        Feed::Unauthorized => "The node refused the API user or password; fix them in Settings",
     };
     view! {
         <header class="site-header">
@@ -163,7 +165,9 @@ pub fn Header() -> impl IntoView {
                         <span
                             class="status-dot"
                             class:ok=move || live.get() == Feed::Live
-                            class:err=move || live.get() == Feed::Offline
+                            class:err=move || {
+                                matches!(live.get(), Feed::Offline | Feed::Unauthorized)
+                            }
                         ></span>
                         " "
                         {live_label}

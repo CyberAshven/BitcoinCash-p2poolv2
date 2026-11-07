@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A node taking templates from a Stratum V2 Template Provider
+(`template_source = "sv2"`) withdraws mining work once no provider
+connection has published a template for 60 seconds, as the
+`getblocktemplate` sources do since the previous change. Until now its
+miners kept the last template however long the provider was gone, while
+the client reconnected with growing delays. The minute counts from the
+end of the last connection that published a template, and the
+withdrawal comes at that minute, not at the end of a backoff sleep. A
+provider sends templates only when they change, so an open connection
+keeps the work however quiet it is. The next template brings the work
+back. The notifier's log line now says `Withdrawing mining work: no
+template for 60 seconds`, whichever source stopped. No share-chain rule
+changes.
+
+Sorting transactions into canonical order (CTOR) hashes each transaction
+once. The sort computed each transaction's id inside every comparison, so a
+Job Declaration of 67,535 transactions hashed about two million times
+instead of 67,535, and the large-template test took 46 s in a debug build,
+past CI's 30 s limit. It now takes 4 s. The order is the same. No
+share-chain rule changes.
+
+A Full-Template Job Declaration can carry any template Bitcoin Cash's block
+size limit allows. Standard Job Declaration lists at most 65,535
+transactions and asks for them by `u16` position, and one reply must fit a
+16 MiB frame. This node asked for every transaction in one reply, so a
+declaration topped out at about 16 MiB, below BCH's 32 MB floor. A Bitcoin
+Cash node now grants the experimental extension `0x4C54` ("large
+templates", `docs/architecture/sv2-large-templates-extension.md`) to
+Full-Template connections. Declared ids may come in pages ahead of
+`DeclareMiningJob`, the node asks in batches of at most 65,535 (by `u32`
+position past `u16`), one request at a time, and a client may answer with
+the part that fits one frame. A declaration lists at most `size_limit / 65`
+transactions, and declared transaction memory is bounded by two blocks at
+the template's size limit (at least 64 MiB), replacing the fixed 64 MiB.
+Standard declarations are unchanged. No share-chain rule changes.
+
+A node withdraws mining work once its Bitcoin Cash node has given no
+template for 60 seconds, as P2Pool v1 stops giving work 60 seconds after
+it last heard from bitcoind ("lost contact with bitcoind"). Until now a
+node that lost its BCHN kept handing out its last template: on 2026-11-05
+the chipnet pool lost the Start9 BCHN for over three hours, and its
+miners kept hashing a template whose BCH tip had moved on. Now the
+template poller withdraws the work after a minute without a template:
+SV1 and SV2 mining connections close, so miners can fail over to a backup
+pool, and no Job Declaration token is allocated. The next template
+publishes work again, with clean jobs. Polls come every 10 seconds, so a
+single failed poll never withdraws work. The Stratum V2 Template Provider
+source (`template_source = "sv2"`) is unchanged. No share-chain rule
+changes.
+
+The Bitcoin Cash per-share donation has regtest tests against BCHN, which
+the nightly workflow runs with the payout tree tests
+(`per_share_donation_bchn_test`). Each mines a block whose coinbase the
+window splits and checks every payee in the coinbase BCHN stored. A block
+found before any share-chain share pays the genesis key the whole value
+and the donation key nothing. Miner shares at the default 1% pay the key
+each share's own cut, short of 1% of the block by genesis's weight where
+genesis is paid beside them. The tests build the window without the BCH
+chain rule (`with_bch_header_rules`), which decides whether genesis is
+paid beside other shares; the cuts are split the same either way. Shares
+mined with `donation=0.5`, `donation=0` and no choice give the key 50, 0
+and 100 basis points of their own parts. A unit test checks that the
+outputs a Job Declaration client requests (`0x5052`) pay the donation key
+what the node's own job on the same window pays. `TestShareBlockBuilder`
+can commit a share's donation and fee. Tests only; no share-chain rule
+changes.
+
+`public_dashboard` now also opens `GET /peers` and a tokenless `/ws`
+connection (a bad `/ws` token is still 401); `/metrics`, `/blocked_ips`
+and `/jd_prepare` keep the API login. The peer list moved from the node's
+own routes to the share chain routes, and `/ws` no longer needs a token
+on a public node. The WASM dashboard no longer sends a half-empty
+`?token=` when only the session password is gone, and its header feed
+says `unauthorized` when the node refuses the login. A 401 carries the
+browser's Basic challenge only when the request already sent credentials,
+so the WASM app's probes fail silently to that indicator instead of
+raising the login dialog.
+
 A Job Declaration client no longer has to trust one node for its payout
 outputs. `VerifyPayoutOutputs` (`0x04` in extension `0x5052`) asks a second
 node, which did not issue the token, to recompute the outputs from the

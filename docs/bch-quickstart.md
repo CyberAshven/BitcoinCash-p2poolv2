@@ -240,6 +240,15 @@ Payouts appear in the miners' wallets in the coinbase of each block the pool
 finds and become spendable after 100 blocks, as for any Bitcoin Cash
 coinbase.
 
+If the node cannot get a template from BCHN for 60 seconds, it withdraws
+mining work and closes the miners' connections, so a miner with a backup
+pool fails over to it. The log says `Withdrawing mining work: no template
+for 60 seconds`, after `Error polling block template` lines that give the
+reason. Work comes back with the next template (`The node gives templates
+again`). With `template_source = "sv2"` the same happens 60 seconds after
+the last Template Provider connection that published a template ended,
+after `Template Provider connection to … ended` lines.
+
 ## 5. Check two nodes on chipnet
 
 This check passed on 2026-10-15 (see [bch-design.md](bch-design.md#chipnet-run-2026-10-15)).

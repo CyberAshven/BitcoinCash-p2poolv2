@@ -32,10 +32,11 @@
 //! computed-class check keeps it that way.
 
 use super::assets;
+use super::chart::ChartBlock;
 use super::history::Sample;
 use super::pages::{
     self, BlockView, BlocksView, FoundBlockRow, MinerRow, MinerView, MinersView, Overview, Paging,
-    ShareRow, ShareView, Site, WorkerRow,
+    ShareRow, ShareView, SharesView, Site, WorkerRow,
 };
 use crate::api::endpoints::miner::{MinerResponse, MinerShare, WindowSummary};
 use crate::api::endpoints::share::{BitcoinHeaderOutput, ShareLookupOutput};
@@ -367,6 +368,7 @@ fn site() -> Site {
     Site {
         network: "Bitcoin Cash chipnet".to_string(),
         badge: "chipnet".to_string(),
+        auth: true,
     }
 }
 
@@ -404,6 +406,13 @@ fn share_row(is_uncle: bool) -> ShareRow {
 }
 
 fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockRow>) -> String {
+    let chart_blocks: Vec<ChartBlock> = blocks
+        .iter()
+        .map(|block| ChartBlock {
+            height: block.height,
+            time: block.time,
+        })
+        .collect();
     pages::overview(&Overview {
         site: site(),
         now: 1_000,
@@ -412,13 +421,22 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         local_hashrate: Some(1e9),
         network_hashrate: Some(1e15),
         network_difficulty: Some(1e5),
+        share_difficulty: Some(73.0),
         miners_online: 1,
         workers_online: 1,
+        accepted_shares_total: 10,
+        rejected_shares_total: 3,
         samples,
         blocks_found: blocks.len(),
         blocks,
         shares,
-        shares_paging: Paging { page: 1, pages: 2 },
+        auto: pages::Auto::On,
+        range_key: pages::normalize_range(None),
+        pool_on: true,
+        node_on: false,
+        network_on: false,
+        blocks_on: true,
+        chart_blocks,
     })
     .into_string()
 }
@@ -524,6 +542,22 @@ fn every_page() -> String {
             vec![found_block()],
         ),
         overview(Vec::new(), Vec::new(), Vec::new()),
+        pages::shares(&SharesView {
+            site: site(),
+            now: 1_000,
+            tip_height: Some(30),
+            shares: vec![share_row(false), share_row(true)],
+            paging: Paging { page: 2, pages: 3 },
+        })
+        .into_string(),
+        pages::shares(&SharesView {
+            site: site(),
+            now: 1_000,
+            tip_height: None,
+            shares: Vec::new(),
+            paging: Paging { page: 1, pages: 1 },
+        })
+        .into_string(),
         pages::blocks(&BlocksView {
             site: site(),
             now: 1_000,
@@ -593,6 +627,7 @@ fn every_page() -> String {
         })
         .into_string(),
         pages::help(&site()).into_string(),
+        pages::signin(&site()).into_string(),
         pages::error(&site(), "Not here").into_string(),
     ]
     .concat()

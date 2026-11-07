@@ -13,6 +13,8 @@ mod organise_pipeline_test;
 #[cfg(test)]
 mod payout_tree_bchn_test;
 #[cfg(test)]
+mod per_share_donation_bchn_test;
+#[cfg(test)]
 mod pruned_serving_test;
 // The sim build shortens the PPLNS window cap to 80 shares, which leaves the
 // traded share out of these tests' windows.

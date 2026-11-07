@@ -90,8 +90,13 @@ pub struct PoolMetrics {
     pub best_share_ever: u64,
     /// User metrics
     pub users: HashMap<String, User>,
-    /// Current pool difficulty
-    pub pool_difficulty: u64,
+    /// Current pool share difficulty in the share chain's units
+    /// (`difficulty_float` of the newest prepared notify's target). The
+    /// metrics actor never writes it: `/metrics` fills it from
+    /// `JobTracker::get_pool_difficulty` at scrape time, so it is 0.0
+    /// until the first notify is built. Runtime-only (not persisted).
+    #[serde(default)]
+    pub pool_difficulty: f64,
     /// Confirmed sharechain pool difficulty since the last bitcoin block was
     /// found; reset to zero on each block find. Numerator of the block effort
     /// metric (`work_since_last_block / network_difficulty`). Runtime-only (not
@@ -131,7 +136,7 @@ impl Default for PoolMetrics {
             best_share: 0,
             best_share_ever: 0,
             users: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
-            pool_difficulty: 0,
+            pool_difficulty: 0.0,
             work_since_last_block: 0.0,
             found_block_submissions: BTreeMap::new(),
             found_block_submit_retries: BTreeMap::new(),
@@ -774,6 +779,78 @@ pub async fn start_metrics(log_dir: String) -> Result<MetricsHandle, std::io::Er
 mod tests {
     use super::*;
     use crate::accounting::stats::pool_local_stats::save_pool_local_stats;
+
+    /// A metrics with `work` pushed at `at` on its submission window.
+    fn window_of(at: u64, work: f64) -> PoolMetrics {
+        let mut metrics = PoolMetrics::default();
+        metrics.submission_window.push_back(WorkDatum { at, work });
+        metrics
+    }
+
+    #[test]
+    fn local_submission_hashrate_sums_the_trailing_ten_minutes_of_work() {
+        let metrics = PoolMetrics {
+            submission_window: [
+                WorkDatum {
+                    at: 1_000,
+                    work: HASHES_PER_DIFFICULTY,
+                },
+                WorkDatum {
+                    at: 1_010,
+                    work: HASHES_PER_DIFFICULTY,
+                },
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let rate = metrics.local_submission_hashrate(1_020).unwrap();
+        assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 20.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn local_submission_hashrate_ignores_work_older_than_ten_minutes() {
+        // The t=1_000 share falls outside the ten minutes ending at t=3_000;
+        // only the t=2_500 share counts, over the span from t=2_500 to now.
+        let metrics = PoolMetrics {
+            submission_window: [
+                WorkDatum {
+                    at: 1_000,
+                    work: HASHES_PER_DIFFICULTY,
+                },
+                WorkDatum {
+                    at: 2_500,
+                    work: HASHES_PER_DIFFICULTY,
+                },
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let rate = metrics.local_submission_hashrate(3_000).unwrap();
+        assert!((rate - HASHES_PER_DIFFICULTY / 500.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn local_submission_hashrate_is_none_with_no_shares() {
+        assert_eq!(
+            PoolMetrics::default().local_submission_hashrate(1_000),
+            None
+        );
+    }
+
+    #[test]
+    fn local_submission_hashrate_is_none_when_the_span_is_zero() {
+        let metrics = window_of(1_000, HASHES_PER_DIFFICULTY);
+        assert_eq!(metrics.local_submission_hashrate(1_000), None);
+    }
+
+    #[test]
+    fn local_submission_hashrate_divides_by_the_elapsed_time_before_ten_minutes() {
+        // The window is younger than ten minutes: the span is from the
+        // first share to now, not the full ten minutes.
+        let metrics = window_of(1_000, 2.0 * HASHES_PER_DIFFICULTY);
+        let rate = metrics.local_submission_hashrate(1_010).unwrap();
+        assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 10.0).abs() < 1.0);
+    }
 
     #[test]
     fn shared_worker_stays_active_until_the_last_connection_closes() {

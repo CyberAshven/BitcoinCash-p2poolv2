@@ -5,13 +5,15 @@
 //! Hashrate history the node keeps for its dashboard.
 //!
 //! A sampler task records the pool's, this node's and the network's hashrate
-//! once a minute into a bounded ring. The dashboard therefore draws from the
-//! node, not from a browser that forgets on reload. The ring is bounded, so
-//! the history cannot grow without limit.
+//! once a minute into a bounded ring, and queues the same sample to the
+//! store's `HashrateSamples` column family so a restart reloads the
+//! history instead of starting empty. The ring is bounded to the store's
+//! 30-day retention, so the in-memory history cannot grow without limit.
 
 use crate::api::server::AppState;
 use bitcoin::{CompactTarget, Target};
 use p2poolv2_lib::store::dag_store::ShareInfo;
+use p2poolv2_lib::store::hashrate_samples::{HashrateSample, RETENTION_SECS};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,12 +23,21 @@ use tracing::warn;
 /// How often the sampler records a sample.
 pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Samples kept: one day at one a minute.
-pub(crate) const MAX_SAMPLES: usize = 24 * 60;
+/// Samples kept: the store's 30-day retention at one a minute.
+pub(crate) const MAX_SAMPLES: usize = (RETENTION_SECS / SAMPLE_INTERVAL.as_secs()) as usize;
 
 /// Shares the pool hashrate is estimated from: the newest this many
 /// confirmed shares.
 pub(crate) const POOL_HASHRATE_SHARES: u32 = 120;
+
+/// Shares whose timestamp sits at least this far before the newest share in
+/// the window are left out of the hashrate span. A seed share (e.g. the
+/// genesis share at a fixed past time) would otherwise stretch the span and
+/// collapse the reported hashrate by orders of magnitude. When that filter
+/// would leave fewer than two shares -- a gap longer than this between
+/// confirmed shares -- the two newest shares are used instead, so the span
+/// never collapses to zero.
+pub(crate) const MAX_SHARE_GAP_SECS: u32 = 3600;
 
 /// Expected seconds between Bitcoin Cash blocks, for network hashrate.
 const BLOCK_INTERVAL_SECONDS: f64 = 600.0;
@@ -36,24 +47,14 @@ const HASHES_PER_DIFFICULTY: f64 = 4_294_967_296.0;
 
 /// One sample of the hashrates the dashboard charts, in hashes per second.
 /// `None` where the value could not be known at that time.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Sample {
-    /// Unix seconds.
-    pub(crate) time: u64,
-    /// The whole pool, from the share chain.
-    pub(crate) pool: Option<f64>,
-    /// This node's miners, from the work this node accepted.
-    pub(crate) local: Option<f64>,
-    /// The Bitcoin Cash network, from the block template's difficulty.
-    pub(crate) network: Option<f64>,
-}
+///
+/// The same shape the store persists (`p2poolv2_lib`'s `HashrateSample`),
+/// re-exported so the API never field-renames on the write-through path.
+pub(crate) type Sample = HashrateSample;
 
 #[derive(Default)]
 struct Inner {
     samples: VecDeque<Sample>,
-    /// The accepted work total at the previous sample: (unix seconds,
-    /// accepted difficulty total), for this node's hashrate.
-    last_accepted: Option<(u64, u64)>,
 }
 
 /// The dashboard's history. Cheap to share; every method takes the lock
@@ -83,15 +84,28 @@ impl HashrateHistory {
         inner.samples.push_back(sample);
     }
 
-    /// This node's hashrate since the previous call, from its accepted
-    /// difficulty total. `None` on the first call and after the total went
-    /// backwards (the metrics were reset).
-    pub(crate) fn local_hashrate(&self, time: u64, accepted_difficulty_total: u64) -> Option<f64> {
+    /// Replace the ring with `samples`, oldest first, as the server does
+    /// once at startup after loading the store. Newest beyond the ring's
+    /// bound are kept. Samples persisted before rates were normalized
+    /// (a negative zero local value) are corrected on the way in.
+    pub(crate) fn load(&self, samples: Vec<Sample>) {
         let mut inner = self.lock();
-        let previous = inner
-            .last_accepted
-            .replace((time, accepted_difficulty_total));
-        previous.and_then(|previous| local_hashrate(previous, (time, accepted_difficulty_total)))
+        let normalize = |sample: Sample| Sample {
+            pool: normalize_rate(sample.pool),
+            local: normalize_rate(sample.local),
+            network: normalize_rate(sample.network),
+            ..sample
+        };
+        let kept: VecDeque<Sample> = if samples.len() > MAX_SAMPLES {
+            samples[samples.len() - MAX_SAMPLES..]
+                .iter()
+                .copied()
+                .map(normalize)
+                .collect()
+        } else {
+            samples.into_iter().map(normalize).collect()
+        };
+        inner.samples = kept;
     }
 }
 
@@ -100,27 +114,61 @@ pub(crate) fn work_from_bits(bits: CompactTarget) -> f64 {
     Target::from_compact(bits).difficulty_float() * HASHES_PER_DIFFICULTY
 }
 
-/// Hashrate behind a run of shares, from their bits and timestamps.
+/// Staleness decay for the pool hashrate, in `[0.0, 1.0]`.
 ///
-/// The oldest share only opens the time span: its work was done before it,
-/// outside the span. `None` with fewer than two shares or no time between
-/// the oldest and the newest.
-pub(crate) fn share_chain_hashrate(shares: &[(u32, CompactTarget)]) -> Option<f64> {
-    let oldest = shares.iter().min_by_key(|(time, _)| *time)?;
-    let newest = shares.iter().max_by_key(|(time, _)| *time)?;
-    let span = newest.0.checked_sub(oldest.0).filter(|span| *span > 0)?;
-    let total: f64 = shares.iter().map(|(_, bits)| work_from_bits(*bits)).sum();
-    Some((total - work_from_bits(oldest.1)) / f64::from(span))
+/// Full value while the newest confirmed share is at most
+/// [`MAX_SHARE_GAP_SECS`] old -- normal mining cadence never sees less than
+/// one. Beyond that the value ramps linearly down to zero over the next
+/// [`MAX_SHARE_GAP_SECS`], reaching zero once the newest share is twice the
+/// gap old, so a stalled share chain fades out instead of pinning a
+/// historical estimate forever. A `now` before the newest share (clock
+/// skew) counts as age zero.
+pub(crate) fn staleness_decay(newest_share_time: u32, now: u64) -> f64 {
+    let gap = u64::from(MAX_SHARE_GAP_SECS);
+    let age = now.saturating_sub(u64::from(newest_share_time));
+    if age <= gap {
+        1.0
+    } else if age >= 2 * gap {
+        0.0
+    } else {
+        1.0 - (age - gap) as f64 / f64::from(MAX_SHARE_GAP_SECS)
+    }
 }
 
-/// Hashrate between two readings of an accepted difficulty total.
-pub(crate) fn local_hashrate(previous: (u64, u64), current: (u64, u64)) -> Option<f64> {
-    let seconds = current
-        .0
-        .checked_sub(previous.0)
-        .filter(|seconds| *seconds > 0)?;
-    let difficulty = current.1.checked_sub(previous.1)?;
-    Some(difficulty as f64 * HASHES_PER_DIFFICULTY / seconds as f64)
+/// A rate must never read as negative zero in JSON or on the chart:
+/// `-0.0` and `0.0` compare equal, but only `0.0` serializes as `0.0`.
+pub(crate) fn normalize_rate(rate: Option<f64>) -> Option<f64> {
+    rate.map(|value| if value == 0.0 { 0.0 } else { value })
+}
+
+/// Hashrate behind a run of shares, from their bits and timestamps,
+/// decayed by [`staleness_decay`] against `now`.
+///
+/// Shares older than [`MAX_SHARE_GAP_SECS`] before the newest are dropped so
+/// a seed share (e.g. the genesis share at a fixed past time) cannot inflate
+/// the span. When that filter would leave fewer than two shares -- a gap
+/// longer than [`MAX_SHARE_GAP_SECS`] between confirmed shares -- the two
+/// newest shares are used instead, so the span never collapses to zero. The
+/// oldest share only opens the time span: its work was done
+/// before it, outside the span. `None` with fewer than two shares or no time
+/// between the oldest and the newest.
+pub(crate) fn share_chain_hashrate(shares: &[(u32, CompactTarget)], now: u64) -> Option<f64> {
+    let newest = shares.iter().max_by_key(|(time, _)| *time)?;
+    let mut kept: Vec<&(u32, CompactTarget)> = shares
+        .iter()
+        .filter(|(time, _)| newest.0.saturating_sub(*time) <= MAX_SHARE_GAP_SECS)
+        .collect();
+    if kept.len() < 2 {
+        let mut window: Vec<&(u32, CompactTarget)> = shares.iter().collect();
+        window.sort_unstable_by_key(|left| std::cmp::Reverse(left.0));
+        window.truncate(2);
+        kept = window;
+    }
+    let oldest = kept.iter().min_by_key(|(time, _)| *time)?;
+    let span = newest.0.checked_sub(oldest.0).filter(|span| *span > 0)?;
+    let total: f64 = kept.iter().map(|(_, bits)| work_from_bits(*bits)).sum();
+    let rate = (total - work_from_bits(oldest.1)) / f64::from(span);
+    Some(rate * staleness_decay(newest.0, now))
 }
 
 /// Network hashrate implied by a block difficulty.
@@ -128,19 +176,26 @@ pub(crate) fn network_hashrate(difficulty: f64) -> f64 {
     difficulty * HASHES_PER_DIFFICULTY / BLOCK_INTERVAL_SECONDS
 }
 
+/// Block difficulty implied by a network hashrate, the inverse of
+/// [`network_hashrate`], so a hashrate-only fallback sample can still
+/// show a difficulty the way the wasm dashboard does.
+pub(crate) fn difficulty_from_network_hashrate(hashes_per_second: f64) -> f64 {
+    hashes_per_second * BLOCK_INTERVAL_SECONDS / HASHES_PER_DIFFICULTY
+}
+
 /// Whether a share's Bitcoin Cash header met its own block target.
 pub(crate) fn is_block(header: &bitcoin::block::Header) -> bool {
     header.validate_pow(header.target()).is_ok()
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or_default()
 }
 
-/// The newest confirmed shares, up to `count`, oldest first.
+/// The newest confirmed shares, up to `count`, newest first.
 pub(crate) fn newest_shares(state: &AppState, count: u32) -> Vec<ShareInfo> {
     let Ok(Some(tip)) = state.chain_store_handle.get_tip_height() else {
         return Vec::new();
@@ -154,60 +209,130 @@ pub(crate) fn newest_shares(state: &AppState, count: u32) -> Vec<ShareInfo> {
         .unwrap_or_default()
 }
 
-/// The pool hashrate from the newest confirmed shares.
-pub(crate) fn pool_hashrate(state: &AppState) -> Option<f64> {
+/// The pool hashrate from the newest confirmed shares, decayed against
+/// `now` once the newest share ages past [`MAX_SHARE_GAP_SECS`].
+pub(crate) fn pool_hashrate(state: &AppState, now: u64) -> Option<f64> {
     let shares = newest_shares(state, POOL_HASHRATE_SHARES);
     let points: Vec<(u32, CompactTarget)> = shares
         .iter()
         .map(|share| (share.timestamp, share.bits))
         .collect();
-    share_chain_hashrate(&points)
+    share_chain_hashrate(&points, now)
 }
 
 /// Record one sample.
 async fn tick(state: &Arc<AppState>, history: &Arc<HashrateHistory>) {
     let time = unix_now();
-    let accepted = state
-        .metrics_handle
-        .get_metrics()
-        .await
-        .accepted_difficulty_total;
-    let local = history.local_hashrate(time, accepted);
     let network = state
         .tracker_handle
         .get_network_difficulty()
         .map(network_hashrate);
+    // This node's hashrate from the metrics actor's sliding window of
+    // accepted submissions: an async channel read, before the store read.
+    let local = state
+        .metrics_handle
+        .get_metrics()
+        .await
+        .local_submission_hashrate(time);
 
     // The store is read synchronously; keep that off the async workers.
     let blocking_state = Arc::clone(state);
-    let pool = match tokio::task::spawn_blocking(move || pool_hashrate(&blocking_state)).await {
-        Ok(pool) => pool,
+    let pool = match tokio::task::spawn_blocking(move || {
+        let shares = newest_shares(&blocking_state, POOL_HASHRATE_SHARES);
+        let points: Vec<(u32, CompactTarget)> = shares
+            .iter()
+            .map(|share| (share.timestamp, share.bits))
+            .collect();
+        share_chain_hashrate(&points, time)
+    })
+    .await
+    {
+        Ok(result) => result,
         Err(error) => {
             warn!("Dashboard sampler could not read the share chain: {error}");
             None
         }
     };
 
-    history.push_sample(Sample {
+    let sample = Sample {
         time,
-        pool,
-        local,
+        pool: normalize_rate(pool),
+        local: normalize_rate(local),
         network,
-    });
+    };
+    history.push_sample(sample);
+    // Queue the same sample to the store, off the hot path: the channel is
+    // unbounded, so this never blocks the sampler's async worker.
+    state
+        .chain_store_handle
+        .store_handle()
+        .add_hashrate_sample(sample);
+}
+
+/// Evict store samples older than the retention window and reload the
+/// store's samples into `history`, oldest first. The blocking half of
+/// [`reload_persisted`], for callers already on a blocking thread
+/// (the startup load in `server.rs`).
+pub(crate) fn reload_persisted_blocking(state: &AppState, history: &HashrateHistory) {
+    let store = state.chain_store_handle.store_handle().store();
+    let oldest = unix_now().saturating_sub(RETENTION_SECS);
+    if let Err(error) = store.evict_hashrate_samples_before(oldest) {
+        warn!("hashrate sample eviction failed: {error}");
+    }
+    history.load(store.load_hashrate_samples(oldest));
+}
+
+/// Evict store samples older than the retention window and reload the
+/// store's samples into `history`, oldest first.
+///
+/// Returns how many samples were loaded. The sampler calls it every
+/// [`run_sampler`]'s eviction interval so a clock jump or a long downtime
+/// leaves disk and ring in agreement.
+pub(crate) async fn reload_persisted(state: Arc<AppState>, history: Arc<HashrateHistory>) -> usize {
+    let store = Arc::clone(state.chain_store_handle.store_handle().store());
+    let oldest = unix_now().saturating_sub(RETENTION_SECS);
+    let loaded = tokio::task::spawn_blocking(move || {
+        if let Err(error) = store.evict_hashrate_samples_before(oldest) {
+            warn!("hashrate sample eviction failed: {error}");
+        }
+        store.load_hashrate_samples(oldest)
+    })
+    .await;
+    match loaded {
+        Ok(samples) => {
+            let count = samples.len();
+            history.load(samples);
+            count
+        }
+        Err(error) => {
+            warn!("Could not reload hashrate history from the store: {error}");
+            0
+        }
+    }
 }
 
 /// Sample once a minute until the history is dropped with the API server.
 ///
-/// Holds the history only weakly, so it never keeps it alive.
+/// Holds the history only weakly, so it never keeps it alive. Every
+/// EVICTION_INTERVAL samples it drops store rows past the retention
+/// window and reloads what remains, so disk and ring agree after a
+/// clock jump or a long downtime.
 pub(crate) async fn run_sampler(state: Arc<AppState>, history: Weak<HashrateHistory>) {
+    const EVICTION_INTERVAL: u32 = 60;
     let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut since_eviction: u32 = EVICTION_INTERVAL;
     loop {
         interval.tick().await;
         let Some(history) = history.upgrade() else {
             return;
         };
         tick(&state, &history).await;
+        since_eviction = since_eviction.saturating_add(1);
+        if since_eviction >= EVICTION_INTERVAL {
+            since_eviction = 0;
+            reload_persisted(Arc::clone(&state), Arc::clone(&history)).await;
+        }
     }
 }
 
@@ -234,7 +359,7 @@ mod tests {
             (1_010, difficulty_one()),
             (1_020, difficulty_one()),
         ];
-        let rate = share_chain_hashrate(&shares).unwrap();
+        let rate = share_chain_hashrate(&shares, 1_020).unwrap();
         assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 20.0).abs() < 1.0);
     }
 
@@ -243,38 +368,121 @@ mod tests {
         let ordered = [(1_000, difficulty_one()), (1_030, difficulty_one())];
         let reversed = [(1_030, difficulty_one()), (1_000, difficulty_one())];
         assert_eq!(
-            share_chain_hashrate(&ordered),
-            share_chain_hashrate(&reversed)
+            share_chain_hashrate(&ordered, 1_030),
+            share_chain_hashrate(&reversed, 1_030)
         );
     }
 
     #[test]
     fn share_chain_hashrate_needs_two_shares_and_a_span() {
-        assert_eq!(share_chain_hashrate(&[]), None);
-        assert_eq!(share_chain_hashrate(&[(1_000, difficulty_one())]), None);
+        assert_eq!(share_chain_hashrate(&[], 1_000), None);
         assert_eq!(
-            share_chain_hashrate(&[(1_000, difficulty_one()), (1_000, difficulty_one())]),
+            share_chain_hashrate(&[(1_000, difficulty_one())], 1_000),
+            None
+        );
+        assert_eq!(
+            share_chain_hashrate(
+                &[(1_000, difficulty_one()), (1_000, difficulty_one())],
+                1_000
+            ),
             None
         );
     }
 
     #[test]
-    fn local_hashrate_is_accepted_work_over_time() {
-        let rate = local_hashrate((100, 1_000), (160, 1_600)).unwrap();
-        assert!((rate - 600.0 * HASHES_PER_DIFFICULTY / 60.0).abs() < 1.0);
+    fn share_chain_hashrate_drops_shares_far_older_than_the_newest() {
+        // The seed share sits more than MAX_SHARE_GAP_SECS before the
+        // newest and is dropped. Of the kept recent shares, the oldest
+        // (1_000 + MAX + 1) only opens the span and its work is skipped;
+        // the two newer shares contribute work over the 10 s span.
+        let shares = [
+            (1_000, difficulty_one()),
+            (1_000 + MAX_SHARE_GAP_SECS + 1, difficulty_one()),
+            (1_000 + MAX_SHARE_GAP_SECS + 6, difficulty_one()),
+            (1_000 + MAX_SHARE_GAP_SECS + 11, difficulty_one()),
+        ];
+        let rate =
+            share_chain_hashrate(&shares, 1_000 + u64::from(MAX_SHARE_GAP_SECS) + 11).unwrap();
+        assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 10.0).abs() < 1.0);
     }
 
     #[test]
-    fn local_hashrate_skips_a_reset_total_and_no_elapsed_time() {
-        assert_eq!(local_hashrate((100, 1_000), (160, 500)), None);
-        assert_eq!(local_hashrate((100, 1_000), (100, 2_000)), None);
+    fn share_chain_hashrate_uses_the_two_newest_when_the_gap_filter_would_leave_one() {
+        // The newest share sits more than MAX_SHARE_GAP_SECS after the
+        // previous one, so the filter would keep only the newest and the
+        // span would collapse to zero. The two newest are used instead:
+        // the previous share opens the span, the newest contributes its
+        // work over the gap between them.
+        let gap = MAX_SHARE_GAP_SECS + 3750;
+        let shares = [(1_000, difficulty_one()), (1_000 + gap, difficulty_one())];
+        let rate = share_chain_hashrate(&shares, 1_000 + u64::from(gap)).unwrap();
+        assert!((rate - HASHES_PER_DIFFICULTY / f64::from(gap)).abs() < 1.0);
     }
 
     #[test]
-    fn history_local_hashrate_needs_a_previous_reading() {
+    fn the_pool_rate_is_fully_kept_while_the_newest_share_is_fresh() {
+        let shares = [(1_000, difficulty_one()), (1_010, difficulty_one())];
+        assert_eq!(
+            staleness_decay(1_000, 1_000 + u64::from(MAX_SHARE_GAP_SECS)),
+            1.0
+        );
+        assert_eq!(
+            share_chain_hashrate(&shares, 1_010).unwrap(),
+            share_chain_hashrate(&shares, 1_010 + u64::from(MAX_SHARE_GAP_SECS)).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_pool_rate_ramps_down_over_the_second_gap() {
+        // Halfway between the first gap and twice the gap: half the rate.
+        assert_eq!(
+            staleness_decay(1_000, 1_000 + 3 * u64::from(MAX_SHARE_GAP_SECS) / 2),
+            0.5
+        );
+    }
+
+    #[test]
+    fn the_pool_rate_reaches_zero_when_the_newest_share_is_twice_the_gap_old() {
+        assert_eq!(
+            staleness_decay(1_000, 1_000 + 2 * u64::from(MAX_SHARE_GAP_SECS)),
+            0.0
+        );
+        assert_eq!(
+            staleness_decay(1_000, 1_000 + 2 * u64::from(MAX_SHARE_GAP_SECS) + 60),
+            0.0
+        );
+    }
+
+    #[test]
+    fn a_clock_older_than_the_newest_share_counts_as_fresh() {
+        assert_eq!(staleness_decay(5_000, 1_000), 1.0);
+    }
+
+    #[test]
+    fn a_negative_zero_rate_normalizes_to_plain_zero() {
+        assert_eq!(normalize_rate(Some(-0.0)), Some(0.0));
+        assert!(
+            !normalize_rate(Some(-0.0))
+                .expect("value")
+                .is_sign_negative()
+        );
+        assert_eq!(normalize_rate(Some(0.0)), Some(0.0));
+        assert_eq!(normalize_rate(None), None);
+        assert_eq!(normalize_rate(Some(1.0)), Some(1.0));
+    }
+
+    #[test]
+    fn loading_rewrites_a_persisted_negative_zero_rate() {
         let history = HashrateHistory::default();
-        assert_eq!(history.local_hashrate(100, 1_000), None);
-        assert!(history.local_hashrate(160, 1_600).is_some());
+        history.load(vec![Sample {
+            time: 10,
+            pool: Some(5.0),
+            local: Some(-0.0),
+            network: None,
+        }]);
+        let sample = history.samples().remove(0);
+        assert!(!sample.local.expect("value").is_sign_negative());
+        assert_eq!(sample.pool, Some(5.0));
     }
 
     #[test]
@@ -283,7 +491,13 @@ mod tests {
     }
 
     #[test]
-    fn samples_are_capped_at_one_day() {
+    fn difficulty_from_network_hashrate_inverts_the_rate_estimate() {
+        let rate = network_hashrate(600.0);
+        assert!((difficulty_from_network_hashrate(rate) - 600.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn samples_are_capped_at_the_retention_window() {
         let history = HashrateHistory::default();
         for time in 0..(MAX_SAMPLES as u64 + 10) {
             history.push_sample(Sample {
@@ -296,6 +510,23 @@ mod tests {
         let samples = history.samples();
         assert_eq!(samples.len(), MAX_SAMPLES);
         assert_eq!(samples.first().unwrap().time, 10);
+    }
+
+    #[test]
+    fn load_replaces_the_ring_with_the_newest_bound_samples() {
+        let history = HashrateHistory::default();
+        let loaded: Vec<Sample> = (0..(MAX_SAMPLES as u64 + 5))
+            .map(|time| Sample {
+                time,
+                pool: None,
+                local: None,
+                network: None,
+            })
+            .collect();
+        history.load(loaded);
+        let samples = history.samples();
+        assert_eq!(samples.len(), MAX_SAMPLES);
+        assert_eq!(samples.first().unwrap().time, 5);
     }
 
     #[test]

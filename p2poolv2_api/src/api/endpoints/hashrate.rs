@@ -15,12 +15,14 @@ use axum::{
     extract::{Query, State},
     routing::get,
 };
+use p2poolv2_lib::store::hashrate_samples::RETENTION_SECS;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Default and maximum window, in seconds. The history holds one day.
+/// Default window: one hour. Maximum: the store's 30-day retention, from
+/// which the ring's bound is derived too.
 const DEFAULT_WINDOW_SECS: u64 = 3600;
-const MAX_WINDOW_SECS: u64 = 86_400;
+const MAX_WINDOW_SECS: u64 = RETENTION_SECS;
 
 #[derive(Deserialize)]
 pub struct HashrateQuery {
@@ -56,6 +58,10 @@ pub struct HashrateResponse {
     pub pool_hashrate: Option<f64>,
     pub local_hashrate: Option<f64>,
     pub network_hashrate: Option<f64>,
+    /// Current pool share difficulty (the ASERT target of the newest
+    /// prepared notify, in the share chain's units). Live tracker read,
+    /// independent of the samples: None until the first notify is built.
+    pub share_difficulty: Option<f64>,
     /// Samples in the window, oldest first.
     pub history: Vec<HashratePoint>,
 }
@@ -84,6 +90,13 @@ fn in_window(samples: &[Sample], window: u64) -> Vec<HashratePoint> {
         .collect()
 }
 
+/// GET /hashrate: the dashboard's hashrate history as JSON.
+///
+/// `window` is seconds of history ending at the newest sample, clamped
+/// to `[60, MAX_WINDOW_SECS]` and validated out of range as 400 rather
+/// than silently clamped. `MAX_WINDOW_SECS` is the store's 30-day
+/// retention, the 30-day surface; the overview chart stays at 1440
+/// points so its "last day" title remains truthful.
 async fn hashrate(
     State(state): State<Arc<HashrateState>>,
     Query(query): Query<HashrateQuery>,
@@ -98,16 +111,31 @@ async fn hashrate(
     let current = match samples.last() {
         Some(newest) => HashratePoint::from(newest),
         None => {
-            // Before the first sample: read pool and network now. The store
-            // read is synchronous, so keep it off the async workers.
+            // Before the first sample: read pool and network live (the
+            // store read is synchronous, so keep it off the async workers)
+            // and the local rate from the metrics actor's window.
             let app = Arc::clone(&state.app);
-            let pool = tokio::task::spawn_blocking(move || history::pool_hashrate(&app))
+            let now = history::unix_now();
+            let local = state
+                .app
+                .metrics_handle
+                .get_metrics()
                 .await
-                .unwrap_or_default();
+                .local_submission_hashrate(now);
+            let pool = tokio::task::spawn_blocking(move || {
+                let shares = history::newest_shares(&app, history::POOL_HASHRATE_SHARES);
+                let points: Vec<(u32, bitcoin::CompactTarget)> = shares
+                    .iter()
+                    .map(|share| (share.timestamp, share.bits))
+                    .collect();
+                history::share_chain_hashrate(&points, now)
+            })
+            .await
+            .unwrap_or_default();
             HashratePoint {
                 time: 0,
-                pool_hashrate: pool,
-                local_hashrate: None,
+                pool_hashrate: history::normalize_rate(pool),
+                local_hashrate: history::normalize_rate(local),
                 network_hashrate: state
                     .app
                     .tracker_handle
@@ -122,6 +150,7 @@ async fn hashrate(
         pool_hashrate: current.pool_hashrate,
         local_hashrate: current.local_hashrate,
         network_hashrate: current.network_hashrate,
+        share_difficulty: state.app.tracker_handle.get_pool_difficulty(),
         history: in_window(&samples, window),
     }))
 }
@@ -150,5 +179,30 @@ mod tests {
         assert_eq!(points[0].pool_hashrate, Some(1.0));
         assert_eq!(points[0].local_hashrate, None);
         assert!(in_window(&[], 60).is_empty());
+    }
+
+    #[test]
+    fn a_full_retention_window_is_accepted() {
+        assert_eq!(MAX_WINDOW_SECS, RETENTION_SECS);
+        assert_eq!(RETENTION_SECS, 2_592_000);
+    }
+
+    #[test]
+    fn a_window_above_retention_is_rejected() {
+        assert!(!(60..=MAX_WINDOW_SECS).contains(&(RETENTION_SECS + 1)));
+    }
+
+    #[test]
+    fn in_window_keeps_the_newest_full_retention_span() {
+        let samples = [
+            sample(0),
+            sample(RETENTION_SECS - 60),
+            sample(RETENTION_SECS),
+        ];
+        let points = in_window(&samples, RETENTION_SECS);
+        assert_eq!(
+            points.iter().map(|point| point.time).collect::<Vec<_>>(),
+            vec![0, RETENTION_SECS - 60, RETENTION_SECS]
+        );
     }
 }

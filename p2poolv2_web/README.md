@@ -9,8 +9,8 @@ It looks and reads like the dashboard the node renders itself
 (`/dashboard`): the same header, menu bar, search box, trail and footer, the
 same KPI cards, panels, tables, pager and miners grid, and the same pages:
 Dashboard, Blocks, Miners and Help, with block, miner and share pages behind
-them. On top of that it takes new shares live from `/ws`, refreshes the
-overview every 30 seconds, and its hashrate chart zooms (scroll, drag to
+them. On top of that it takes new shares live from `/ws`, polls the
+overview on a 30-second timer, and its hashrate chart zooms (scroll, drag to
 select, double-click to reset) and shows the values under the cursor. A
 Settings page holds the API URL and login. Pages are addressed by the URL
 fragment (`#/miners`, `#/miner?address=...`), so every page is a link that
