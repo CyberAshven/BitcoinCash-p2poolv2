@@ -206,7 +206,7 @@ pub enum Chain {
 /// same prefix for its other test networks, so the prefix does not
 /// distinguish chipnet from scalenet, testnet3 or testnet4. The RPC URL has
 /// to point at the network named here; the node checks at start that it does
-/// (`bchn_chain_name`, `bch_only_block`).
+/// (`node_chain_names`, `bch_only_block`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BitcoinCashNetwork {
@@ -299,14 +299,16 @@ impl BitcoinCashNetwork {
         }
     }
 
-    /// The `chain` BCHN's `getblockchaininfo` reports on this network:
-    /// `CBaseChainParams` in BCHN's `src/chainparamsbase.cpp`.
-    pub fn bchn_chain_name(self) -> &'static str {
+    /// The `chain` names Bitcoin Cash nodes' `getblockchaininfo` reports on
+    /// this network: BCHN's first (`CBaseChainParams` in its
+    /// `src/chainparamsbase.cpp`), then BCHD's (`Name` in its
+    /// `chaincfg/params.go`). BCHD has no scalenet.
+    pub fn node_chain_names(self) -> &'static [&'static str] {
         match self {
-            BitcoinCashNetwork::Mainnet => "main",
-            BitcoinCashNetwork::Chipnet => "chip",
-            BitcoinCashNetwork::Regtest => "regtest",
-            BitcoinCashNetwork::Scalenet => "scale",
+            BitcoinCashNetwork::Mainnet => &["main", "mainnet"],
+            BitcoinCashNetwork::Chipnet => &["chip", "chipnet"],
+            BitcoinCashNetwork::Regtest => &["regtest"],
+            BitcoinCashNetwork::Scalenet => &["scale"],
         }
     }
 
@@ -2273,10 +2275,16 @@ mod tests {
     }
 
     #[test]
-    fn bchn_chain_names_match_chainparamsbase() {
-        assert_eq!(BitcoinCashNetwork::Mainnet.bchn_chain_name(), "main");
-        assert_eq!(BitcoinCashNetwork::Chipnet.bchn_chain_name(), "chip");
-        assert_eq!(BitcoinCashNetwork::Regtest.bchn_chain_name(), "regtest");
+    fn node_chain_names_match_bchn_then_bchd() {
+        assert_eq!(
+            BitcoinCashNetwork::Mainnet.node_chain_names(),
+            ["main", "mainnet"]
+        );
+        assert_eq!(
+            BitcoinCashNetwork::Chipnet.node_chain_names(),
+            ["chip", "chipnet"]
+        );
+        assert_eq!(BitcoinCashNetwork::Regtest.node_chain_names(), ["regtest"]);
     }
 
     /// BCHN `src/chainparams.cpp`, `CMainParams` checkpoint "Axion
@@ -2321,7 +2329,7 @@ mod tests {
                 "00000000b711dc753130e5083888d106f99b920b1b8a492eb5ac41d40e482905"
             ))
         );
-        assert_eq!(BitcoinCashNetwork::Scalenet.bchn_chain_name(), "scale");
+        assert_eq!(BitcoinCashNetwork::Scalenet.node_chain_names(), ["scale"]);
     }
 
     /// Scalenet takes BCHN's test network address forms: the `bchtest`

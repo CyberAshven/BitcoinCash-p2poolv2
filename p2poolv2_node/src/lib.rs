@@ -263,9 +263,9 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     };
     info!("Latest tip {} at height {}", tip, height);
 
-    // A Bitcoin Cash node mines only for BCHN on the configured network: the
-    // chain name is checked before waiting for the node to sync, and a block
-    // only Bitcoin Cash has once it has synced.
+    // A Bitcoin Cash node mines only for a Bitcoin Cash node on the
+    // configured network: the chain name is checked before waiting for the
+    // node to sync, and a block only Bitcoin Cash has once it has synced.
     if let Some(network) = bitcoin_cash_network
         && let Err(error) =
             preflight::verify_bitcoin_cash_chain_name(&config.bitcoinrpc, network).await
@@ -328,7 +328,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         ) {
             Ok(client) => client,
             Err(e) => {
-                error!("Failed to create the BCHN client for templates: {e}");
+                error!("Failed to create the RPC client for the node's templates: {e}");
                 return Err(ExitCode::FAILURE);
             }
         };

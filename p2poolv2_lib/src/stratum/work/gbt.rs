@@ -592,7 +592,7 @@ mod gbt_load_tests {
         mock_method(
             &server,
             "getblocktemplatelight",
-            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            serde_json::json!([{"capabilities": ["coinbasevalue", "coinbase/append", "workid"]}]),
             BCHN_LIGHT_TEMPLATE.to_string(),
         )
         .await;
@@ -636,14 +636,14 @@ mod gbt_load_tests {
         mock_method(
             &server,
             "getblocktemplatelight",
-            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            serde_json::json!([{"capabilities": ["coinbasevalue", "coinbase/append", "workid"]}]),
             KNUTH_SHAPED_LIGHT_TEMPLATE.to_string(),
         )
         .await;
         mock_method(
             &server,
             "getblocktemplate",
-            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            serde_json::json!([{"capabilities": ["coinbasevalue", "coinbase/append", "workid"]}]),
             include_str!("../../../../bitcoindrpc/test_data/bchn-regtest-template.json").into(),
         )
         .await;
@@ -676,7 +676,7 @@ mod gbt_load_tests {
         mock_method(
             &server,
             "getblocktemplate",
-            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            serde_json::json!([{"capabilities": ["coinbasevalue", "coinbase/append", "workid"]}]),
             include_str!("../../../../bitcoindrpc/test_data/bchn-regtest-template.json").into(),
         )
         .await;
@@ -697,7 +697,7 @@ mod gbt_load_tests {
         mock_method(
             &server,
             "getblocktemplatelight",
-            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            serde_json::json!([{"capabilities": ["coinbasevalue", "coinbase/append", "workid"]}]),
             BCHN_LIGHT_TEMPLATE.to_string(),
         )
         .await;
@@ -711,7 +711,7 @@ mod gbt_load_tests {
         mock_method(
             &server,
             "getblocktemplate",
-            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            serde_json::json!([{"capabilities": ["coinbasevalue", "coinbase/append", "workid"]}]),
             include_str!("../../../../bitcoindrpc/test_data/bchn-regtest-template.json").into(),
         )
         .await;
@@ -734,7 +734,7 @@ mod gbt_load_tests {
         mock_method(
             &server,
             "getblocktemplatelight",
-            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            serde_json::json!([{"capabilities": ["coinbasevalue", "coinbase/append", "workid"]}]),
             KNUTH_SHAPED_LIGHT_TEMPLATE.to_string(),
         )
         .await;
@@ -765,7 +765,7 @@ mod gbt_load_tests {
         mock_method(
             &server,
             "getblocktemplate",
-            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            serde_json::json!([{"capabilities": ["coinbasevalue", "coinbase/append", "workid"]}]),
             include_str!("../../../../bitcoindrpc/test_data/bchn-regtest-template.json").into(),
         )
         .await;
@@ -789,7 +789,7 @@ mod gbt_load_tests {
         mock_method(
             &server,
             "getblocktemplate",
-            serde_json::json!([{"capabilities": ["coinbasetxn", "coinbase/append", "workid"]}]),
+            serde_json::json!([{"capabilities": ["coinbasevalue", "coinbase/append", "workid"]}]),
             include_str!("../../../../bitcoindrpc/test_data/bchn-chipnet-template.json").into(),
         )
         .await;
@@ -1189,7 +1189,7 @@ mod gbt_server_tests {
             &mock_server,
             "getblocktemplate",
             serde_json::json!([{
-                "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
+                "capabilities": ["coinbasevalue", "coinbase/append", "workid"],
             }]),
             include_str!("../../../../bitcoindrpc/test_data/bchn-regtest-template.json")
                 .to_string(),
@@ -1235,7 +1235,7 @@ mod gbt_server_tests {
             &mock_server,
             "getblocktemplate",
             serde_json::json!([{
-                "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
+                "capabilities": ["coinbasevalue", "coinbase/append", "workid"],
             }]),
             GBT_NO_TRANSACTIONS_FIXTURE.to_string(),
         )
