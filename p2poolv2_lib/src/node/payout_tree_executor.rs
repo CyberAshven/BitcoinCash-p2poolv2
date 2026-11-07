@@ -184,6 +184,9 @@ fn classify_rejection(code: i32, message: &str) -> BroadcastOutcome {
         RPC_VERIFY_ALREADY_IN_CHAIN => BroadcastOutcome::InChain,
         RPC_TRANSACTION_ERROR => BroadcastOutcome::MissingInputs,
         _ if missing_inputs => BroadcastOutcome::MissingInputs,
+        // BCHD refuses a transaction already in its mempool; BCHN accepts it
+        // again.
+        _ if message.contains("txn-already-in-mempool") => BroadcastOutcome::Accepted,
         _ => BroadcastOutcome::Rejected(format!("RPC error {code}: {message}")),
     }
 }

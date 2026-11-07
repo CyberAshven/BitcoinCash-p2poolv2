@@ -445,3 +445,38 @@ fn bchn_rejections_are_classified() {
         BroadcastOutcome::Rejected("RPC error -26: min relay fee not met".to_string())
     );
 }
+
+/// BCHD 0.22.4's answers, from its `rpcserver.go` and `mempool/mempool.go`.
+#[test]
+fn bchd_rejections_are_classified() {
+    let txid = "503f8d7f32d542ab27b9515313b66ce93d78bf7d3c91dabe40e215b491859963";
+    assert_eq!(
+        classify_rejection(-27, "TX rejected: transaction already exists"),
+        BroadcastOutcome::InChain
+    );
+    assert_eq!(
+        classify_rejection(
+            -25,
+            &format!(
+                "TX rejected: orphan transaction {txid} references outputs of unknown or fully-spent transaction {txid}"
+            )
+        ),
+        BroadcastOutcome::MissingInputs
+    );
+    assert_eq!(
+        classify_rejection(
+            -26,
+            &format!(
+                "txn-mempool-conflict, output {txid}:0 already spent by transaction {txid} in the memory pool (code 18)"
+            )
+        ),
+        BroadcastOutcome::MissingInputs
+    );
+    assert_eq!(
+        classify_rejection(
+            -26,
+            &format!("txn-already-in-mempool, already have transaction {txid} (code 18)")
+        ),
+        BroadcastOutcome::Accepted
+    );
+}
