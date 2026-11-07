@@ -25,6 +25,19 @@ warning about it on every new block. Log lines and two metric descriptions
 that said BCHN for whichever node `[bitcoinrpc]` names now say the node. No
 share-chain rule changes.
 
+Share-chain rule change on Bitcoin Cash, a flag day with its own protocol
+segment (`genesis-last-resort`): the genesis share is paid only when no
+other share or uncle in the PPLNS window is. Genesis pays a NUMS key that no
+one can spend, and it counted in the window like mined work, so every block
+found while it was in the window gave it a part, and all of it when the
+window's real work was off the paying block's chain. On chipnet that address
+holds 46.7 tBCH, from the first hours of each share chain since October. It
+is still paid when nothing else is, so the share built right on genesis and
+a window with no work on the paying chain keep a payee rather than the share
+being refused. A node on the old rule builds another coinbase while genesis is in
+the window, so the two do not peer, and existing share chains start again on
+a fresh store. Bitcoin is unchanged.
+
 The release's Apple Silicon macOS build runs on GitHub's `macos-15`
 runner (`dist-workspace.toml`). dist 0.32.0 picks `macos-14`, which GitHub
 retired on 2026-11-02: the job was cancelled before it started, and the
