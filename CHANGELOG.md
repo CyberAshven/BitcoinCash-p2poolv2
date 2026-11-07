@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A new node can sync a share chain that has a height with more than 20
+shares. A node answering a header or block request sends at most 20 shares
+per height, and it picked them by blockhash, so the confirmed share at such a
+height could be left out of every answer; a peer syncing from it never
+connected the shares above and asked again without end. On chipnet, a
+burst of hashrate left more than 20 siblings at share height 37469, and a
+new node peered with the pool stopped there. The confirmed and candidate
+shares, and the uncles they name, now come first, and a share whose parent
+or uncle is left out is left out too. Only what a node sends changes; no
+share-chain rule changes.
+
 P2Poolv2 runs on BCHD as well as BCHN. Three things stopped it. The
 template request asked for `coinbasetxn` alone, so BCHD, which acts on the
 request's capabilities, sent a ready-made coinbase and no `coinbasevalue`;
