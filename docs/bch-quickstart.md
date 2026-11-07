@@ -37,9 +37,11 @@ coinbase could exceed the limit.
 ### Or run BCHD
 
 P2Poolv2 takes templates from BCHD as well (checked with BCHD 0.22.4 on
-regtest). BCHD has no ZMQ, so it hears new blocks on BCHD's P2P port: set
-`node_p2p_address` in `[stratum]`. BCHD serves RPC over TLS with its own
-certificate, which P2Poolv2 does not read, so run BCHD on the same computer
+regtest and chipnet). BCHD has no ZMQ, so it hears new blocks on BCHD's P2P
+port: set `node_p2p_address` in `[stratum]`. BCHD serves RPC over TLS with a
+self-signed certificate it makes itself, `rpc.cert`. P2Poolv2's TLS refuses
+that certificate even when trusted, because it is a CA certificate used as
+the server's own (`CaUsedAsEndEntity`). So run BCHD on the same computer
 with TLS off; BCHD allows that only on localhost. In `bchd.conf`:
 
 ```ini
