@@ -24,3 +24,8 @@ allow-dirty = ["ci"]
 [[dist.extra-artifacts]]
 artifacts = ["config.sample.toml"]
 build = ["true"]
+
+# GitHub retired the macos-14 runner image, dist 0.32.0's default for Apple
+# Silicon, on 2026-11-02; jobs asking for it are cancelled before they start.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
