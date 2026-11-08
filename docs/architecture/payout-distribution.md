@@ -58,6 +58,12 @@ through `bitcoin_block_difficulty`).
    not fit and every later payee go to a P2SH32 payout tree. Direct outputs
    below dust are allowed; tree leaves are checked after fees at 3 sat/byte
    and merged into the largest tree payee when needed. See below.
+9. **Payout levels (Bitcoin Cash):** between rules 7 and 8, every payee
+   below the level of its newest credited entry, `546 * 2^k` satoshis, is
+   pooled with the others at that level, and the pot is drawn among them,
+   seeded from the anchor; the donation key and fee addresses are never
+   drawn, and a payee that wins nothing gets no output
+   ([Coinbase payouts](../payouts/coinbase.md#payout-levels)).
 
 ### Bitcoin Cash per-share cuts
 
@@ -387,7 +393,8 @@ See `pruning.md` for the two-window retention model.
 | Peer isolation by rule | `share_chain_rule_tag`, `protocol_string` (`node/behaviour/request_response.rs`) |
 | Window walk and weights | `walk_window_entries` (with `ConfirmedEntry::work` for the BCH bound), `for_each_credit` (the only place the weights are applied) |
 | BCH payee of a share's own weight | `PplnsWindow::transferred_payees`, `ResolvedWindow::share_payee`; the index in `sharechain_pplns/payout_rights.rs` (`PayoutRights`, `RightsOverlay`) |
-| Entry point | `PplnsWindow::get_distribution_from_start_hash` |
+| Entry point | `PplnsWindow::get_distribution_from_start_hash`; with payout levels, `get_weights_from_start_hash` |
+| Payout levels and the draw | `PayeeLevels`, `collect_distribution` (`sharechain_pplns/pplns_window.rs`); `PplnsWeights`, `draw_group`, `draw_seed` (`accounting/payout/payout_levels.rs`); `draw_payout_levels` (`accounting/payout/coinbase_budget.rs`) |
 | Every miner's credits (API `/miner`, one walk per anchor) | `PplnsWindow::get_window_credits_from_start_hash`, same walk and weights; on BCH the API sizes it from the anchor share's own header |
 | Producer | `Payout::fill_distribution_from_shares` (`sharechain_pplns/payout.rs`), from `build_output_distribution` (`stratum/work/notify.rs`); the window is built by `build_payout_for_mode` (`accounting/payout/mod.rs`) |
 | Cuts and split | `ShareCuts`, `distribution_for_resolved` (`sharechain_pplns/pplns_window.rs`); Bitcoin/Hydrapool cuts in `include_address_and_cut` (`accounting/payout/payout_distribution.rs`) |

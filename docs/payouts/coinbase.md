@@ -103,3 +103,57 @@ paid, since a coinbase may hold any value; in the payout tree, whose
 transactions are relayed, a payee below it is merged into the largest. What
 a small miner can expect per block is worked out on
 [Small miners](../small-miners.md).
+
+## Payout levels
+
+Since 2026-11-09 every Bitcoin Cash share carries its miner's payout level
+`k`, 0 to 7, the smallest payment the miner wants: `L_k = 546 * 2^k`
+satoshis, from 546 (the P2PKH dust limit) to 69,888
+([Miner options](../miner-options.md#payout-level)). A slice below its level
+is paid by a draw among the slices at the same level, within the same block,
+so nothing is held and nothing is owed
+([Share chain redesign](../sharechain/small-miners-design.md#4-payout-levels)).
+This is a share-chain rule (`levels-546x2`); Bitcoin Cash sees only fewer,
+larger coinbase outputs.
+
+A payee's level is the level of its newest credited entry in the window:
+the newest share or uncle paying its locking script, a share counting as
+newer than the uncles it includes. After the window's weights, cuts and
+rounding have given each payee its amount `a` in satoshis:
+
+1. Every payee whose amount is at least its level, the donation key and
+   every fee address (every recipient of a donation or fee cut in the
+   window) keep their amount.
+2. The others are grouped by level. Within a group at level `L`, payees are
+   ordered by locking script bytes, and `S` is the sum of their amounts.
+3. `n = S / L`, rounded down.
+4. The seed is the first 8 bytes, as a little-endian integer, of
+   `SHA-256("p2pool-payout-level" || parent share hash || k)`: the parent
+   share hash is the 32 bytes of the share's `prev_share_blockhash` as its
+   header serializes them, the anchor of its window, and `k` one byte.
+5. If `n` is 0, one point `p = seed mod S` picks the payee whose running
+   total of amounts first exceeds `p`. It gets `S`.
+6. Otherwise `D = S / n`, rounded down, and the points
+   `p_j = (seed mod D) + j * D` for `j = 0 .. n-1` each pay `D` to the payee
+   whose running total first exceeds it. The first point's payee also gets
+   `S - n * D`, less than `n` satoshis.
+7. Each payee's winnings replace its amount; a payee that wins nothing gets
+   no output in this block. The outputs are then ordered and split as
+   above, the payout tree included, in the same order of weight.
+
+The pot of each level is paid exactly, and each payee's expected payment is
+its amount, up to the at most `n` satoshis of step 6. Every node draws the
+same way, because the seed comes from the parent share, which every share
+built on it shares, and the share that pays cannot change it. A miner at a
+high level is paid less often and more each time: at level 5 a miner earning
+1,000 satoshis a block wins a 17,472-satoshi payment about once in 17
+blocks.
+
+```text
+level 3 (4,368 sat), S = 9,000, n = 2, D = 4,500, seed mod D = 1,200
+
+  payee   amount   running total   points 1,200 and 5,700
+  X       2,000    2,000           1,200 -> X wins 4,500
+  Y       3,000    5,000
+  Z       4,000    9,000           5,700 -> Z wins 4,500
+```

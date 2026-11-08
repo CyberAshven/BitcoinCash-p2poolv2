@@ -37,7 +37,12 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 ///   the share's minimum, the target its node wanted and its band cap. A
 ///   stored header has none of these and would not decode, and the merged
 ///   chain starts from a new genesis.
-pub const STORE_FORMAT_VERSION: u32 = 3;
+/// - 4 (2026-11-09): Bitcoin Cash share headers carry their miner's payout
+///   level, and a slice below its payee's level is paid by a draw
+///   (`BCH_PAYOUT_LEVELS_RULE_TAG`). A stored header has no level and would
+///   not decode, its coinbase was validated without the draw, and the chain
+///   starts from a new genesis.
+pub const STORE_FORMAT_VERSION: u32 = 4;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -549,8 +554,9 @@ impl Store {
             "the share-chain store at {} has {found}, and this node writes format \
              {STORE_FORMAT_VERSION}, where chain work counts uncle work, Bitcoin Cash pays \
              the genesis share only as the last resort, and Bitcoin Cash has one share chain \
-             (the main and mini chains merged) whose headers carry a difficulty band. Delete \
-             the store directory and restart to resync the share chain from peers.",
+             (the main and mini chains merged) whose headers carry a difficulty band and a \
+             payout level, with payees below their level paid by a draw. Delete the store \
+             directory and restart to resync the share chain from peers.",
             self.path
         )))
     }
@@ -893,6 +899,31 @@ mod tests {
         assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
         assert!(error.to_string().contains("has format 2"), "{error}");
         assert!(error.to_string().contains("difficulty band"), "{error}");
+    }
+
+    /// A store from before payout levels, format 3, is refused: its headers
+    /// carry no payout level, and its coinbases were validated without the
+    /// draw.
+    #[test]
+    fn test_store_from_before_payout_levels_is_refused() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        store
+            .db
+            .put_cf(&metadata_cf, STORE_FORMAT_KEY, 3u32.to_le_bytes())
+            .unwrap();
+
+        let error = store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap_err();
+        assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
+        assert!(error.to_string().contains("has format 3"), "{error}");
+        assert!(error.to_string().contains("payout level"), "{error}");
     }
 
     #[test_log::test]
