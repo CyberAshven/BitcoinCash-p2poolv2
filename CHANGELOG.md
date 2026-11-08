@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A Stratum V2 proxy that puts many machines on one extended channel can name
+the machine behind each share with the extension Worker-Specific Hashrate
+Tracking (`0x0002`), and the node's dashboard, `/miners` and Prometheus
+metrics list each machine as a worker of the channel's payout address, as
+they list Stratum V1 workers. The proxy asks for `0x0002` right after
+`SetupConnection.Success` and ends each `SubmitSharesExtended` with a TLV
+field holding the name, at most 32 bytes of UTF-8. The field's header is
+little-endian, as every SV2 field is; the extension's own example prints it
+big-endian. Only the worker label changes: the channel's payout address and
+share owner still own every share, and the names stay on this node, never
+stored in a share or sent to a peer. A name over 32 bytes, or not UTF-8,
+refuses that share with `invalid-share`, and a channel's shares bring at
+most 1,024 names. The node grants the extension when asked and never
+requires it. A `RequestExtensions` of which the node grants nothing is now
+answered with `RequestExtensions.Error`, every extension asked for
+unsupported, as the extensions negotiation (`0x0001`) requires, instead of
+an empty `RequestExtensions.Success`. No share-chain rule changes.
+
 A new node can sync a share chain that has a height with more than 20
 shares. A node answering a header or block request sends at most 20 shares
 per height, and it picked them by blockhash, so the confirmed share at such a
