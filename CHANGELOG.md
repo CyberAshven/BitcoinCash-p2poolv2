@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Share-chain rule change on Bitcoin Cash, a flag day with its own protocol
-segment (`levels-546x2`): payout levels (issue #79, row 3;
+segment (`levels-546x2`): payout levels (issue #79, row 4;
 `docs/sharechain/small-miners-design.md`, part 4). Each Bitcoin Cash share
 header carries its miner's payout level `k`, 0 to 7, committed after the
 band under tag `0x25`; a header above 7 does not decode. Level `k` is the
