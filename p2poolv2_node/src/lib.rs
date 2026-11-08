@@ -460,6 +460,20 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let notify_sharechain_floor_window =
         payout_pplns_window(stratum_config.mode, &shared_pplns_window)
             .filter(|_| stratum_config.bch_share_chain == BchShareChain::Vardiff);
+    // The floor walk fails closed on an unpopulated window cache, and the
+    // organise worker only populates it once a share is promoted: a fresh
+    // chain would derive no floor, issue no job, and never receive the first
+    // share to promote. Seed the cache from the confirmed genesis before the
+    // notifier starts, so the empty window derives floor 0 as the floor rule
+    // requires (docs/sharechain/vardiff-sharechain.md).
+    if let Some(floor_window) = notify_sharechain_floor_window.as_ref() {
+        let mut floor_window = floor_window
+            .write()
+            .expect("PPLNS window lock poisoned on write");
+        if let Err(error) = floor_window.update(&chain_store_handle) {
+            error!("Failed to seed the sharechain floor window: {error}");
+        }
+    }
     // Bitcoin Cash share chain nodes take, relay and mine share transactions;
     // Bitcoin nodes and Hydrapool keep building shares with the coinbase alone.
     let share_transactions = (stratum_config.chain == Chain::BitcoinCash
