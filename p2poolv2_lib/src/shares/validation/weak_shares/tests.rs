@@ -7,7 +7,7 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::MockPplnsWindow;
 use crate::pool_difficulty::{AsertParent, MockPoolDifficulty};
 use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
 use crate::shares::validation::FailureKind;
-use crate::shares::weak::{GENESIS_WEAK_RATIO, WEAK_RATIO_UNIT, WeakSummary, next_weak_ratio};
+use crate::shares::weak::{GENESIS_WEAK_RATIO, WeakSummary, next_weak_ratio};
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::test_utils::{TestShareBlockBuilder, TestWeakShare, build_test_weak_share};
 use bitcoin::hashes::Hash;
@@ -171,6 +171,8 @@ fn a_weak_share_on_a_job_at_the_minimum_passes_the_header_rules() {
 
 /// A hash that meets its own share target is a full share and must travel
 /// as one, or one proof of work would be credited twice.
+/// Proof-of-work checks are off under the `sim` feature.
+#[cfg(not(feature = "sim"))]
 #[test]
 fn a_weak_share_meeting_its_own_bits_is_refused() {
     let parent = TestShareBlockBuilder::new()
@@ -219,8 +221,12 @@ fn a_weak_share_meeting_its_own_bits_is_refused() {
 
 /// With a weak ratio of one the parent's weak target is its minimum, `HARD`,
 /// which the weak share's hash misses.
+/// Proof-of-work checks are off under the `sim` feature.
+#[cfg(not(feature = "sim"))]
 #[test]
 fn a_weak_share_missing_its_parents_weak_target_is_refused() {
+    use crate::shares::weak::WEAK_RATIO_UNIT;
+
     let parent = TestShareBlockBuilder::new()
         .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
         .bits(CompactTarget::from_consensus(HARD))
