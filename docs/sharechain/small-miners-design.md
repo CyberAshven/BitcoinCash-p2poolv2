@@ -429,6 +429,32 @@ rate on chipnet. What it must settle:
 - `WEAK_DEPTH` and the uncle depth scale with the period;
 - it ships through the share-version vote, version 2.
 
+### What the uncle rate already shows
+
+The live chipnet pool, measured from node1's API on 2026-11-08 over the
+8,700 heights below share 64,454 (about 24 hours): 8,700 confirmed shares, 257
+uncles (2.95% of confirmed shares), every one named, none orphaned, at an
+average interval of 9.99 seconds. All of it is one miner on two nodes on one
+PC, so it measures local races, not network latency.
+
+The network simulation ([Network simulation](../simulation/network-sim.md))
+measured the stale rate, uncles and orphans together, against the share
+interval on 100 nodes:
+
+| Share interval | Stale, 3 KB coinbase | Orphaned | Stale, 200 KiB coinbase | Orphaned |
+|---|---|---|---|---|
+| 1 s | 15.9% | 0.5% | 45.8% | 11.1% |
+| 2 s | 8.7% | 0.1% | 29.5% | 1.8% |
+| 5 s | 3.8% | 0.0% | 14.1% | 0.2% |
+| 10 s | 2.1% | 0.0% | 7.8% | 0.0% |
+| 30 s | 0.5% | 0.0% | 2.7% | 0.0% |
+
+The live 2.95% at 10 seconds sits where the simulation puts it. So the share
+period's lower bound is set by the coinbase size: about 2 seconds for small
+coinbases, about 5 for large ones, before orphans and the three-uncle limit
+start losing work. Below that, weak shares carry the extra credit instead: they
+never race, so they add credit without adding stale shares.
+
 ## Rollout
 
 | Part | Protocol tag segment | Store format | How it ships |
