@@ -461,9 +461,13 @@ provider or a second node can then supply templates. Bitcoin and
   floor of the block size limit. After `SetupConnection.Success` the node
   asks for the BCH large templates extension `0x4C54`
   ([architecture/sv2-large-templates-extension.md](architecture/sv2-large-templates-extension.md),
-  section 7) and waits up to 10 s for the answer before it sends
-  `CoinbaseOutputConstraints`. A provider that grants it pushes each
-  template's transactions after its `NewTemplate`, so the node asks for
+  section 7) and waits for the answer before it sends
+  `CoinbaseOutputConstraints`: twice the `SetupConnection` round trip, at
+  least 250 ms and at most 10 s. A provider that does not answer in time
+  (bchn-sv2-bridge ignores the request) or closes the connection on it
+  (Pickaxe's provider does) is not asked again while the node runs, so it
+  costs that one wait or one reconnection. A provider that grants it pushes
+  each template's transactions after its `NewTemplate`, so the node asks for
   none: in full (pages of up to 65,535, then the core `Success`), or as a
   delta on the last template pushed complete (a bitmap of the transactions
   it keeps, then the added ones, sorted into CTOR). Only the block size

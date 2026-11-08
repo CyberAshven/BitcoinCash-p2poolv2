@@ -33,8 +33,11 @@
 //! node reconnects, as for any malformed message. A `NewTemplate` before the
 //! previous template's `Success` means the provider gave that push up: its
 //! transactions and the base are dropped, and the next push is full. A
-//! provider that refuses the extension, or does not answer within
-//! [`SETUP_TIMEOUT`], is asked for each template's transactions as before.
+//! provider that refuses the extension is asked for each template's
+//! transactions as before. So is one that does not answer within twice the
+//! `SetupConnection` round trip ([`extensions_wait`]), and one that closes
+//! the connection on the request; while the node runs, neither is asked
+//! again.
 //!
 //! A block found on a provided template goes back with `SubmitSolution`.
 //! The protocol has no reply to it, so whenever the provider cannot take the
@@ -92,7 +95,7 @@ use common_messages_sv2::{
     MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol, Reconnect, SetupConnection,
     SetupConnectionError,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use template_distribution_sv2::{
@@ -150,10 +153,14 @@ const MAX_PENDING_TEMPLATES: usize = 16;
 /// Found blocks queued for one provider connection.
 const SOLUTION_QUEUE: usize = 16;
 
-/// How long the provider has to answer `SetupConnection`, and how long the
-/// node waits for its answer to `RequestExtensions` before it carries on
-/// without the extension.
+/// How long the provider has to answer `SetupConnection`, and the longest
+/// the node waits for its answer to `RequestExtensions`
+/// ([`extensions_wait`]).
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The shortest wait for the answer to `RequestExtensions`, however fast
+/// `SetupConnection` was answered.
+const MIN_EXTENSIONS_WAIT: Duration = Duration::from_millis(250);
 
 /// The request id of the one `RequestExtensions` this client sends on a
 /// connection.
@@ -446,6 +453,9 @@ struct ProviderSession {
     /// Set when the connection negotiated the large templates extension: the
     /// provider then pushes every template's transactions.
     push: Option<TransactionPush>,
+    /// The provider did not answer `RequestExtensions` in time, so an answer
+    /// may still come; the first is logged and ignored.
+    extensions_unanswered: bool,
 }
 
 impl ProviderSession {
@@ -459,11 +469,23 @@ impl ProviderSession {
         }
     }
 
+    /// The session of a connection whose provider did not answer
+    /// `RequestExtensions` in time. The connection is standard: an answer
+    /// that comes later is ignored, as the extensions specification says,
+    /// with one warning.
+    fn with_unanswered_extensions() -> Self {
+        Self {
+            extensions_unanswered: true,
+            ..Self::default()
+        }
+    }
+
     /// Handle one message from the provider: a base protocol message goes to
     /// [`Self::on_message`], a large templates message to
     /// [`Self::on_large_templates`] when this connection negotiated the
     /// extension, and a message of an extension this connection did not
-    /// negotiate is ignored.
+    /// negotiate is ignored. A late answer to `RequestExtensions` is ignored
+    /// too, with a warning the first time.
     fn dispatch(&mut self, message: Sv2Message) -> Result<Vec<SessionAction>, String> {
         let Sv2Message {
             extension_type,
@@ -474,6 +496,19 @@ impl ProviderSession {
             0 => self.on_message(message_type, &mut payload),
             LARGE_TEMPLATES_EXTENSION if self.push.is_some() => {
                 self.on_large_templates(message_type, &mut payload)?;
+                Ok(Vec::new())
+            }
+            EXTENSIONS_NEGOTIATION
+                if self.extensions_unanswered
+                    && matches!(
+                        message_type,
+                        REQUEST_EXTENSIONS_SUCCESS | REQUEST_EXTENSIONS_ERROR
+                    ) =>
+            {
+                self.extensions_unanswered = false;
+                warn!(
+                    "Template Provider answered RequestExtensions after the wait; ignoring the answer, the connection stays standard"
+                );
                 Ok(Vec::new())
             }
             other => {
@@ -1014,6 +1049,10 @@ pub async fn start_template_provider(
 /// work is withdrawn ([`NotifyCmd::Withdraw`]), once. A provider sends
 /// templates only when they change, so an open connection keeps the work
 /// however quiet it is.
+///
+/// The addresses of providers that ignored `RequestExtensions`, or closed
+/// the connection on it, are kept while the client runs: later connections
+/// to them do not ask ([`open_connection`]).
 async fn keep_connected(
     provider: &TemplateProvider,
     bitcoind: &BitcoindRpcClient,
@@ -1024,8 +1063,10 @@ async fn keep_connected(
     let mut delay = RECONNECT_DELAY;
     let mut lost_since: Option<Instant> = None;
     let mut withdrawn = false;
+    let mut silent_providers = HashSet::with_capacity(1);
     loop {
-        let (end, published) = serve_provider(&target, bitcoind, notify_tx).await;
+        let (end, published) =
+            serve_provider(&target, bitcoind, notify_tx, &mut silent_providers).await;
         if published {
             lost_since = None;
             withdrawn = false;
@@ -1081,14 +1122,16 @@ async fn keep_connected(
 /// Serve one provider connection until it ends.
 ///
 /// Returns why it ended and whether it published a template. Solutions
-/// still queued for it then go to the node over RPC.
+/// still queued for it then go to the node over RPC. `silent_providers` is
+/// the client's list of providers not to ask for extensions.
 async fn serve_provider(
     provider: &TemplateProvider,
     bitcoind: &BitcoindRpcClient,
     notify_tx: &NotifySender,
+    silent_providers: &mut HashSet<String>,
 ) -> (ConnectionEnd, bool) {
     let (solutions_tx, mut solutions_rx) = mpsc::channel(SOLUTION_QUEUE);
-    let (end, published) = match open_connection(provider).await {
+    let (end, published) = match open_connection(provider, silent_providers).await {
         Ok((transport, stream, session, early_messages)) => {
             let (mut reader, writer) = stream.into_split();
             let mut connection = ProviderConnection {
@@ -1123,11 +1166,17 @@ async fn serve_provider(
 /// ([`negotiate_large_templates`]) and declare the coinbase output
 /// constraints.
 ///
+/// A provider in `silent_providers` is not asked: it ignored
+/// `RequestExtensions` before, or closed the connection on it. One that does
+/// either now joins them. Ignoring leaves this connection standard; closing
+/// ends it, and the next connection is standard from the start.
+///
 /// Also returns the connection's session, which takes pushed transactions
 /// when the provider granted the extension, and any messages that arrived
 /// with the setup reply or while the node waited for the extension's answer.
 async fn open_connection(
     provider: &TemplateProvider,
+    silent_providers: &mut HashSet<String>,
 ) -> Result<(Transport, TcpStream, ProviderSession, Vec<Sv2Message>), String> {
     let mut stream = timeout(SETUP_TIMEOUT, TcpStream::connect(&provider.address))
         .await
@@ -1144,6 +1193,7 @@ async fn open_connection(
         },
     };
     let setup = transport.wire(setup_connection_frame(provider)?)?;
+    let setup_sent = Instant::now();
     stream
         .write_all(&setup)
         .await
@@ -1151,13 +1201,12 @@ async fn open_connection(
     let mut early_messages = timeout(SETUP_TIMEOUT, read_setup_reply(&mut stream, &mut transport))
         .await
         .map_err(|_| "no SetupConnection reply".to_string())??;
-    let answer = negotiate_large_templates(
-        &mut stream,
-        &mut transport,
-        &mut early_messages,
-        SETUP_TIMEOUT,
-    )
-    .await?;
+    let wait = extensions_wait(setup_sent.elapsed());
+    let answer = if silent_providers.contains(&provider.address) {
+        ExtensionAnswer::NotAsked
+    } else {
+        negotiate_large_templates(&mut stream, &mut transport, &mut early_messages, wait).await?
+    };
     match answer {
         ExtensionAnswer::Granted => info!(
             "Template Provider at {} granted the large templates extension (0x4C54); it pushes each template's transactions",
@@ -1167,10 +1216,25 @@ async fn open_connection(
             "Template Provider at {} did not grant the large templates extension (0x4C54); asking for each template's transactions",
             provider.address
         ),
-        ExtensionAnswer::Unanswered => info!(
-            "Template Provider at {} did not answer RequestExtensions within {}s; asking for each template's transactions",
-            provider.address,
-            SETUP_TIMEOUT.as_secs()
+        ExtensionAnswer::Unanswered => {
+            info!(
+                "Template Provider at {} did not answer RequestExtensions within {} ms; asking for each template's transactions, and not asking it for extensions again",
+                provider.address,
+                wait.as_millis()
+            );
+            silent_providers.insert(provider.address.clone());
+        }
+        ExtensionAnswer::Closed => {
+            warn!(
+                "Template Provider at {} closed the connection on RequestExtensions; connecting again without asking it for extensions",
+                provider.address
+            );
+            silent_providers.insert(provider.address.clone());
+            return Err("closed on RequestExtensions".to_string());
+        }
+        ExtensionAnswer::NotAsked => info!(
+            "Template Provider at {} did not answer RequestExtensions on an earlier connection; asking for each template's transactions",
+            provider.address
         ),
     }
     let constraints = transport.wire(coinbase_output_constraints_frame()?)?;
@@ -1182,10 +1246,12 @@ async fn open_connection(
         "Template Provider at {} set up; reserved {COINBASE_OUTPUT_RESERVE} coinbase output bytes and {COINBASE_OUTPUT_SIGCHECKS} BCH SigChecks",
         provider.address
     );
-    let session = if answer == ExtensionAnswer::Granted {
-        ProviderSession::with_large_templates()
-    } else {
-        ProviderSession::default()
+    let session = match answer {
+        ExtensionAnswer::Granted => ProviderSession::with_large_templates(),
+        ExtensionAnswer::Unanswered => ProviderSession::with_unanswered_extensions(),
+        ExtensionAnswer::Refused | ExtensionAnswer::Closed | ExtensionAnswer::NotAsked => {
+            ProviderSession::default()
+        }
     };
     Ok((transport, stream, session, early_messages))
 }
@@ -1251,8 +1317,26 @@ enum ExtensionAnswer {
     Granted,
     /// `RequestExtensions.Error`, or a Success without the extension.
     Refused,
-    /// No answer in time: a provider may ignore `RequestExtensions`.
+    /// No answer in time: a provider may ignore `RequestExtensions`
+    /// (bchn-sv2-bridge does).
     Unanswered,
+    /// The provider closed the connection before it answered: one that
+    /// takes no extension frame at all (Pickaxe's does).
+    Closed,
+    /// Not asked: the provider did not answer on an earlier connection.
+    NotAsked,
+}
+
+/// How long to wait for the answer to `RequestExtensions`: twice the round
+/// trip `SetupConnection` took, the strategy the extensions negotiation
+/// specification suggests, at least [`MIN_EXTENSIONS_WAIT`] and at most
+/// [`SETUP_TIMEOUT`]. The specification lets a provider ignore the request,
+/// and the node sends nothing else until the answer, so this wait is what a
+/// silent provider costs the connection.
+fn extensions_wait(setup_round_trip: Duration) -> Duration {
+    setup_round_trip
+        .saturating_mul(2)
+        .clamp(MIN_EXTENSIONS_WAIT, SETUP_TIMEOUT)
 }
 
 /// `RequestExtensions` asking for the large templates extension.
@@ -1270,8 +1354,9 @@ fn request_large_templates_frame() -> Result<Vec<u8>, String> {
 ///
 /// Messages that arrive meanwhile, before or after the answer, are added to
 /// `early_messages` in order. Without an answer in time the connection
-/// stays standard, and an answer that comes later is ignored like any
-/// message of an extension that was not negotiated.
+/// stays standard, and an answer that comes later is ignored
+/// ([`ProviderSession::with_unanswered_extensions`]). A provider that closes
+/// the connection before it answers gives [`ExtensionAnswer::Closed`].
 async fn negotiate_large_templates(
     stream: &mut TcpStream,
     transport: &mut Transport,
@@ -1292,7 +1377,8 @@ async fn negotiate_large_templates(
 }
 
 /// Read until the provider answers `RequestExtensions`, adding every other
-/// message to `early_messages`.
+/// message to `early_messages`. A connection that ends first, closed or
+/// reset, is [`ExtensionAnswer::Closed`].
 async fn read_extensions_reply(
     stream: &mut TcpStream,
     transport: &mut Transport,
@@ -1300,13 +1386,14 @@ async fn read_extensions_reply(
 ) -> Result<ExtensionAnswer, String> {
     let mut buffer = vec![0u8; 4096];
     loop {
-        let count = stream
-            .read(&mut buffer)
-            .await
-            .map_err(|error| format!("read: {error}"))?;
-        if count == 0 {
-            return Err("closed before answering RequestExtensions".to_string());
-        }
+        let count = match stream.read(&mut buffer).await {
+            Ok(0) => return Ok(ExtensionAnswer::Closed),
+            Ok(count) => count,
+            Err(read_error) => {
+                debug!("Template Provider connection failed on RequestExtensions: {read_error}");
+                return Ok(ExtensionAnswer::Closed);
+            }
+        };
         let mut answer = None;
         for message in transport.decode(&buffer[..count])? {
             match extension_answer(&message)? {

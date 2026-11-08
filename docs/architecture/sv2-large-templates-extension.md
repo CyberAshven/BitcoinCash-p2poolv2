@@ -214,11 +214,21 @@ comes with it, and arrive before the next `NewTemplate`:
 ### How a P2Pool node takes it
 
 - `template_distribution::negotiate_large_templates` asks after
-  `SetupConnection.Success` and waits up to the 10-second setup timeout.
+  `SetupConnection.Success` and sends nothing else until the answer, as the
+  extensions specification requires. It waits twice the time
+  `SetupConnection` took to be answered, the specification's suggested
+  strategy, at least 250 ms and at most the 10-second setup timeout.
   Messages that arrive meanwhile are kept. A Success that lists `0x4C54`
   puts the connection in push mode. An Error, a Success without it, or no
   answer leaves it standard, exactly as before; an answer that comes later is
-  ignored.
+  ignored, with one warning.
+- A provider that does not answer in time (bchn-sv2-bridge dispatches on the
+  message type alone and ignores the request), or that closes the connection
+  on it (Pickaxe's provider refuses any extension frame), is remembered by
+  address while the node runs. Later connections to it skip
+  `RequestExtensions` and are standard from the start; one that closed is
+  reconnected at once that way. A provider that answered, with a Success or
+  an Error, is asked again on every connection.
 - In push mode the node sends no `RequestTransactionData`. It keeps two
   lists only: the base, and the template being received. Both hold shared
   references to the transactions, so a delta's kept transactions and the

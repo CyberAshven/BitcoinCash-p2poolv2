@@ -1354,9 +1354,10 @@ async fn a_provider_signed_by_another_authority_is_refused() {
         authority_public_key: Some(other_key),
         network: BitcoinCashNetwork::Regtest,
     };
+    let mut silent_providers = HashSet::with_capacity(1);
     let (_server, opened) = tokio::join!(
         TestSv2Server::accept(&listener, Some(&authority)),
-        open_connection(&provider)
+        open_connection(&provider, &mut silent_providers)
     );
     let Err(refused) = opened else {
         panic!("a provider with another authority was accepted");
@@ -1386,11 +1387,302 @@ async fn a_refused_setup_connection_ends_the_connection() {
             .await;
         server
     };
-    let (_server, opened) = tokio::join!(refuse, open_connection(&provider));
+    let mut silent_providers = HashSet::with_capacity(1);
+    let (_server, opened) = tokio::join!(refuse, open_connection(&provider, &mut silent_providers));
     let Err(refused) = opened else {
         panic!("a refused setup opened the connection");
     };
     assert!(refused.contains("unsupported-protocol"), "{refused}");
+}
+
+/// The node waits for the answer to `RequestExtensions` twice as long as
+/// `SetupConnection` took, but at least 250 ms and at most the setup
+/// timeout.
+#[test]
+fn the_extensions_wait_is_twice_the_setup_round_trip_within_its_bounds() {
+    assert_eq!(
+        extensions_wait(Duration::from_millis(400)),
+        Duration::from_millis(800)
+    );
+    assert_eq!(
+        extensions_wait(Duration::from_millis(10)),
+        MIN_EXTENSIONS_WAIT
+    );
+    assert_eq!(extensions_wait(Duration::from_secs(8)), SETUP_TIMEOUT);
+}
+
+/// A provider that took 500 ms to answer `SetupConnection` has 1 s to answer
+/// `RequestExtensions`: its grant after 600 ms, past the 250 ms floor, is
+/// still taken.
+#[tokio::test]
+async fn a_slow_setup_gets_a_longer_wait_for_the_extensions_answer() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider = TemplateProvider {
+        address: listener.local_addr().unwrap().to_string(),
+        authority_public_key: None,
+        network: BitcoinCashNetwork::Regtest,
+    };
+    let slow = async {
+        let mut server = TestSv2Server::accept(&listener, None).await;
+        server.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
+        sleep(Duration::from_millis(500)).await;
+        server
+            .send_message(
+                MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+                SetupConnectionSuccess {
+                    used_version: 2,
+                    flags: 0,
+                },
+            )
+            .await;
+        server
+            .receive_extension(EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS)
+            .await;
+        sleep(Duration::from_millis(600)).await;
+        server
+            .send_frame(
+                encode_extension_frame(
+                    EXTENSIONS_NEGOTIATION,
+                    REQUEST_EXTENSIONS_SUCCESS,
+                    false,
+                    &extensions_payload(1, &[LARGE_TEMPLATES_EXTENSION]),
+                )
+                .unwrap(),
+            )
+            .await;
+        server
+            .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
+            .await;
+        server
+    };
+    let mut silent_providers = HashSet::with_capacity(1);
+    let (_server, opened) = tokio::join!(slow, open_connection(&provider, &mut silent_providers));
+    let Ok((_, _, session, _)) = opened else {
+        panic!("the slow provider's connection did not open");
+    };
+    assert!(session.push.is_some());
+    assert!(silent_providers.is_empty());
+}
+
+/// A provider that does not answer `RequestExtensions` costs its first
+/// connection the wait, at least 250 ms, and is not asked again: the next
+/// connection declares its coinbase output constraints right after
+/// `SetupConnection.Success`.
+#[tokio::test]
+async fn a_silent_provider_is_not_asked_for_extensions_again() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider = TemplateProvider {
+        address: listener.local_addr().unwrap().to_string(),
+        authority_public_key: None,
+        network: BitcoinCashNetwork::Regtest,
+    };
+    let mut silent_providers = HashSet::with_capacity(1);
+    let ignore = async {
+        let mut server = TestSv2Server::accept(&listener, None).await;
+        server.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
+        server
+            .send_message(
+                MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+                SetupConnectionSuccess {
+                    used_version: 2,
+                    flags: 0,
+                },
+            )
+            .await;
+        let answered = Instant::now();
+        server
+            .receive_extension(EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS)
+            .await;
+        server
+            .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
+            .await;
+        assert!(answered.elapsed() >= MIN_EXTENSIONS_WAIT);
+        server
+    };
+    let (_first, opened) = tokio::join!(ignore, open_connection(&provider, &mut silent_providers));
+    let Ok((_, _, session, _)) = opened else {
+        panic!("the silent provider's first connection did not open");
+    };
+    assert!(session.push.is_none());
+    assert!(silent_providers.contains(&provider.address));
+
+    let standard = async {
+        let mut server = TestSv2Server::accept(&listener, None).await;
+        server.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
+        server
+            .send_message(
+                MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+                SetupConnectionSuccess {
+                    used_version: 2,
+                    flags: 0,
+                },
+            )
+            .await;
+        server
+            .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
+            .await;
+        server
+    };
+    let (_second, opened) =
+        tokio::join!(standard, open_connection(&provider, &mut silent_providers));
+    let Ok((_, _, session, _)) = opened else {
+        panic!("the silent provider's second connection did not open");
+    };
+    assert!(session.push.is_none());
+}
+
+/// A provider that answers `RequestExtensions`, even with a refusal, is
+/// asked again on its next connection.
+#[tokio::test]
+async fn an_answering_provider_is_asked_for_extensions_on_every_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider = TemplateProvider {
+        address: listener.local_addr().unwrap().to_string(),
+        authority_public_key: None,
+        network: BitcoinCashNetwork::Regtest,
+    };
+    let mut silent_providers = HashSet::with_capacity(1);
+    let refuse = async {
+        let mut server = TestSv2Server::accept(&listener, None).await;
+        server.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
+        server
+            .send_message(
+                MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+                SetupConnectionSuccess {
+                    used_version: 2,
+                    flags: 0,
+                },
+            )
+            .await;
+        server.answer_extensions(&[]).await;
+        server
+            .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
+            .await;
+        server
+    };
+    let (_first, opened) = tokio::join!(refuse, open_connection(&provider, &mut silent_providers));
+    assert!(opened.is_ok());
+    assert!(silent_providers.is_empty());
+
+    let grant = async {
+        let mut server = TestSv2Server::accept(&listener, None).await;
+        server.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
+        server
+            .send_message(
+                MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+                SetupConnectionSuccess {
+                    used_version: 2,
+                    flags: 0,
+                },
+            )
+            .await;
+        server.answer_extensions(&[LARGE_TEMPLATES_EXTENSION]).await;
+        server
+            .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
+            .await;
+        server
+    };
+    let (_second, opened) = tokio::join!(grant, open_connection(&provider, &mut silent_providers));
+    let Ok((_, _, session, _)) = opened else {
+        panic!("the answering provider's second connection did not open");
+    };
+    assert!(session.push.is_some());
+}
+
+/// A provider that takes no extension frame and closes the connection on
+/// `RequestExtensions`, as Pickaxe's does, is not asked again: the node
+/// reconnects and takes its templates the standard way.
+#[tokio::test]
+async fn a_provider_that_closes_on_request_extensions_is_served_standard_after_reconnecting() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let rpc = parent_lookup_rpc(&fixture).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut notify_rx = start_keep_connected(&listener, &rpc, LOST_CONTACT_AFTER);
+    let mut closing = TestSv2Server::accept(&listener, None).await;
+    closing.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
+    closing
+        .send_message(
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+            SetupConnectionSuccess {
+                used_version: 2,
+                flags: 0,
+            },
+        )
+        .await;
+    closing
+        .receive_extension(EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS)
+        .await;
+    drop(closing);
+
+    let mut server = TestSv2Server::accept(&listener, None).await;
+    server.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
+    server
+        .send_message(
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+            SetupConnectionSuccess {
+                used_version: 2,
+                flags: 0,
+            },
+        )
+        .await;
+    // No RequestExtensions this time.
+    server
+        .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
+        .await;
+    server
+        .send_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            test_tdp_new_template(42, true, &fixture),
+        )
+        .await;
+    server
+        .send_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            test_tdp_set_new_prev_hash(42, &fixture),
+        )
+        .await;
+    let mut request_payload = server.receive(MESSAGE_TYPE_REQUEST_TRANSACTION_DATA).await;
+    let request = RequestTransactionData::from_bytes(&mut request_payload).unwrap();
+    assert_eq!(request.template_id, 42);
+    server
+        .send_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            test_tdp_transaction_data(42, &fixture),
+        )
+        .await;
+    let Some(NotifyCmd::SendToAll { template }) = timeout(Duration::from_secs(5), notify_rx.recv())
+        .await
+        .unwrap()
+    else {
+        panic!("expected the provider's template after reconnecting");
+    };
+    assert_eq!(template.transactions.len(), fixture.transactions.len());
+}
+
+/// An answer to `RequestExtensions` that comes after the wait is ignored:
+/// the connection stays standard and still asks for each template's
+/// transactions.
+#[test]
+fn a_late_answer_to_request_extensions_is_ignored() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let mut session = ProviderSession::with_unanswered_extensions();
+    let late = session
+        .dispatch(Sv2Message {
+            extension_type: EXTENSIONS_NEGOTIATION,
+            message_type: REQUEST_EXTENSIONS_SUCCESS,
+            payload: extensions_payload(1, &[LARGE_TEMPLATES_EXTENSION]),
+        })
+        .unwrap();
+    assert!(late.is_empty());
+    assert!(session.push.is_none());
+    assert!(!session.extensions_unanswered);
+    let announced = session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(9, true, &fixture)).unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(announced.as_slice(), [SessionAction::Send(_)]));
 }
 
 /// A provider that lists `0x4C54` in its `RequestExtensions.Success` grants

@@ -13,14 +13,17 @@ limit allows. One standard `RequestTransactionData.Success` carries at most
 65,535 transactions in one 16 MiB frame, below the 32 MB floor. After
 `SetupConnection.Success` the node now asks for the large templates
 extension `0x4C54` (`docs/architecture/sv2-large-templates-extension.md`,
-section 7) and waits up to 10 seconds for the answer. A provider that grants
-it pushes each template's transactions without being asked: in full, in
-pages of up to 65,535, or as a delta on the last template it pushed, a
-bitmap of the transactions kept and the added ones. The node checks each
-list against the template's merkle path and reconnects when one fails. A
-provider that refuses the extension or does not answer is asked for each
-template's transactions as before. Knuth's Template Provider is being
-written to the same contract. No share-chain rule changes.
+section 7) and waits for the answer twice as long as `SetupConnection`
+took, at least 250 ms and at most 10 seconds. A provider that grants it
+pushes each template's transactions without being asked: in full, in pages
+of up to 65,535, or as a delta on the last template it pushed, a bitmap of
+the transactions kept and the added ones. The node checks each list against
+the template's merkle path and reconnects when one fails. A provider that
+refuses the extension or does not answer is asked for each template's
+transactions as before. One that does not answer in time (bchn-sv2-bridge)
+or closes the connection on the request (Pickaxe's provider) is not asked
+again while the node runs. Knuth's Template Provider is being written to the
+same contract. No share-chain rule changes.
 
 A new node can sync a share chain that has a height with more than 20
 shares. A node answering a header or block request sends at most 20 shares
