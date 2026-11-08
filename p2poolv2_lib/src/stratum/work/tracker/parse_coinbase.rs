@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::accounting::stats::prom::escape_label_value;
 use crate::address_display::payout_address_string;
 use crate::stratum::work::coinbase::extract_outputs_from_coinbase2;
 use crate::stratum::work::tracker::JobTracker;
@@ -39,7 +40,8 @@ pub fn get_distribution(
                         Ok(address) => {
                             let address = payout_address_string(&address, cash_network);
                             exposition.push_str(&format!(
-                                "coinbase_output{{index=\"{index}\",address=\"{address}\"}} {}\n",
+                                "coinbase_output{{index=\"{index}\",address=\"{}\"}} {}\n",
+                                escape_label_value(&address),
                                 tx_out.value.to_sat()
                             ));
                         }

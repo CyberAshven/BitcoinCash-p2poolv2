@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`/metrics` escapes its label values as the Prometheus text format requires:
+a backslash, double quote or line feed is written as `\\`, `\"` or `\n`. A
+miner chooses its worker name, over Stratum V1 (`address.worker`) and V2,
+and its payout address text too when addresses are not validated. Written
+raw, a quote or line feed in either could end the label or the line early:
+the scrape then failed, or the rest of the name was read as samples the
+miner wrote. The found-block `miner` and the `coinbase_output` `address`
+labels are escaped the same way. Metric names and values are unchanged. No
+share-chain rule changes.
+
 A new node can sync a share chain that has a height with more than 20
 shares. A node answering a header or block request sends at most 20 shares
 per height, and it picked them by blockhash, so the confirmed share at such a

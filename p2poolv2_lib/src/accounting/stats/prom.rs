@@ -3,9 +3,35 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::accounting::stats::metrics::PoolMetrics;
+use std::borrow::Cow;
 use std::time::SystemTime;
 
 const TWO32: f64 = (1u64 << 32) as f64;
+
+/// Escape a label value as the Prometheus text exposition format requires:
+/// a backslash, double quote or line feed is written as `\\`, `\"` or `\n`.
+///
+/// A worker name is whatever the miner sent, and so is the payout address
+/// when addresses are not validated. Written raw, a quote or line feed
+/// could end the label or the line early, and the rest would be read as
+/// samples of its own. A value with none of the three is returned without
+/// a copy.
+pub fn escape_label_value(value: &str) -> Cow<'_, str> {
+    if value.contains(['\\', '"', '\n']) {
+        let mut escaped = String::with_capacity(value.len() + 8);
+        for character in value.chars() {
+            match character {
+                '\\' => escaped.push_str("\\\\"),
+                '"' => escaped.push_str("\\\""),
+                '\n' => escaped.push_str("\\n"),
+                other => escaped.push(other),
+            }
+        }
+        Cow::Owned(escaped)
+    } else {
+        Cow::Borrowed(value)
+    }
+}
 
 impl PoolMetrics {
     pub fn get_exposition(&self) -> String {
@@ -137,7 +163,7 @@ impl PoolMetrics {
         for (btcaddress, user) in &some_shares_users {
             output.push_str(&format!(
                 "user_shares_valid_total{{payout_address=\"{}\"}} {:.0}\n",
-                btcaddress,
+                escape_label_value(btcaddress),
                 (user.shares_valid_total as f64) * TWO32
             ));
         }
@@ -159,8 +185,8 @@ impl PoolMetrics {
                 };
                 output.push_str(&format!(
                     "worker_shares_valid_total{{payout_address=\"{}\",workername=\"{}\"}} {:.0}\n",
-                    btcaddress,
-                    display_name,
+                    escape_label_value(btcaddress),
+                    escape_label_value(display_name),
                     (worker.shares_valid_total as f64) * TWO32
                 ));
             }
@@ -181,7 +207,9 @@ impl PoolMetrics {
                 };
                 output.push_str(&format!(
                     "worker_best_share{{payout_address=\"{}\",workername=\"{}\"}} {}\n",
-                    btcaddress, display_name, worker.best_share
+                    escape_label_value(btcaddress),
+                    escape_label_value(display_name),
+                    worker.best_share
                 ));
             }
         }
@@ -203,7 +231,9 @@ impl PoolMetrics {
                 };
                 output.push_str(&format!(
                     "worker_best_share_ever{{payout_address=\"{}\",workername=\"{}\"}} {}\n",
-                    btcaddress, display_name, worker.best_share_ever
+                    escape_label_value(btcaddress),
+                    escape_label_value(display_name),
+                    worker.best_share_ever
                 ));
             }
         }
@@ -224,7 +254,9 @@ impl PoolMetrics {
                 };
                 output.push_str(&format!(
                     "worker_last_share_at{{payout_address=\"{}\",workername=\"{}\"}} {}\n",
-                    btcaddress, display_name, worker.last_share_at
+                    escape_label_value(btcaddress),
+                    escape_label_value(display_name),
+                    worker.last_share_at
                 ));
             }
         }
@@ -238,6 +270,8 @@ impl PoolMetrics {
 mod tests {
     use super::*;
     use crate::accounting::stats::user::User;
+    use crate::accounting::stats::worker::Worker;
+    use std::borrow::Cow;
     use std::collections::{BTreeMap, HashMap};
     use std::time::SystemTime;
 
@@ -475,5 +509,100 @@ mod tests {
         assert!(exposition.contains(&format!(
             r#"worker_last_share_at{{payout_address="bc1qtest",workername="unnamed"}} {recent}"#
         )));
+    }
+
+    #[test]
+    fn a_workername_with_quote_backslash_and_newline_is_escaped() {
+        let recent = now();
+        let worker = Worker {
+            last_share_at: recent,
+            shares_valid_total: 10,
+            active: true,
+            best_share: 500,
+            best_share_ever: 500,
+        };
+        let user = User {
+            last_share_at: recent,
+            shares_valid_total: 10,
+            workers: HashMap::from([("rig\"1\\\nfake_metric 1".to_string(), worker)]),
+            best_share: 500,
+            best_share_ever: 500,
+        };
+        let metrics = PoolMetrics {
+            users: HashMap::from([("bc1qtest".to_string(), user)]),
+            ..Default::default()
+        };
+
+        let exposition = metrics.get_exposition();
+
+        assert!(exposition.contains(&format!(
+            r#"worker_shares_valid_total{{payout_address="bc1qtest",workername="rig\"1\\\nfake_metric 1"}} {:.0}"#,
+            10.0 * TWO32
+        )));
+        assert!(exposition.contains(
+            r#"worker_best_share{payout_address="bc1qtest",workername="rig\"1\\\nfake_metric 1"} 500"#
+        ));
+        assert!(exposition.contains(
+            r#"worker_best_share_ever{payout_address="bc1qtest",workername="rig\"1\\\nfake_metric 1"} 500"#
+        ));
+        assert!(exposition.contains(&format!(
+            r#"worker_last_share_at{{payout_address="bc1qtest",workername="rig\"1\\\nfake_metric 1"}} {recent}"#
+        )));
+    }
+
+    #[test]
+    fn a_hostile_payout_address_and_workername_add_no_samples() {
+        let recent = now();
+        let worker = Worker {
+            last_share_at: recent,
+            shares_valid_total: 10,
+            active: true,
+            best_share: 500,
+            best_share_ever: 500,
+        };
+        let user = User {
+            last_share_at: recent,
+            shares_valid_total: 10,
+            workers: HashMap::from([("rig\nfake_worker_metric 1".to_string(), worker)]),
+            best_share: 500,
+            best_share_ever: 500,
+        };
+        let metrics = PoolMetrics {
+            users: HashMap::from([("bc1q\"x\nfake_user_metric 1".to_string(), user)]),
+            ..Default::default()
+        };
+
+        let worker_expositions = metrics.get_worker_expositions();
+
+        // Five families, each a HELP, a TYPE, one sample and a blank line.
+        assert_eq!(worker_expositions.lines().count(), 20);
+        assert_eq!(
+            worker_expositions
+                .lines()
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .count(),
+            5
+        );
+        assert!(
+            !worker_expositions
+                .lines()
+                .any(|line| line.starts_with("fake_"))
+        );
+        assert!(worker_expositions.contains(&format!(
+            r#"user_shares_valid_total{{payout_address="bc1q\"x\nfake_user_metric 1"}} {:.0}"#,
+            10.0 * TWO32
+        )));
+    }
+
+    #[test]
+    fn an_ordinary_label_value_is_unchanged() {
+        assert!(matches!(
+            escape_label_value("bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"),
+            Cow::Borrowed("bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a")
+        ));
+        assert!(matches!(
+            escape_label_value("rig-01.backup_2"),
+            Cow::Borrowed("rig-01.backup_2")
+        ));
     }
 }
