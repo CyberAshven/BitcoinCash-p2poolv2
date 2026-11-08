@@ -225,6 +225,34 @@ password: x
   handled: the share address ends at its first dot. Behind such a proxy put
   `p2p=` last: a suffix after `donation=` makes its value unreadable, and
   the channel is refused.
+- A proxy that puts many machines on one extended channel can name the
+  machine behind each share with the extension Worker-Specific Hashrate
+  Tracking (`0x0002`). It asks for it with `RequestExtensions` right after
+  `SetupConnection.Success`, before opening a channel, as the extensions
+  negotiation (`0x0001`) orders; a later request is not granted. It then
+  ends each `SubmitSharesExtended` with a TLV field: extension type
+  `0x0002` (`U16`), field type `0x01` (`U8`), the length (`U16`) and the
+  name, at most 32 bytes of UTF-8. The header is little-endian, as every
+  SV2 field is; the extension's own example prints it big-endian.
+  - The node's dashboard, `/miners` and Prometheus metrics list each named
+    machine as a worker of the channel's payout address, active until the
+    channel closes, as they list SV1 workers. Only the label changes: the
+    channel's payout address and share owner still own every share.
+  - A share without a name counts as the channel's own worker. A name over
+    32 bytes, or not UTF-8, refuses that share with `invalid-share`. TLV
+    fields the node does not use are skipped, and bytes after the message
+    that are not whole TLV fields are ignored, as before.
+  - A channel's shares bring at most 1,024 names; a new name past that
+    counts as the channel's own worker. A proxy with more machines opens
+    more channels.
+  - The names stay on this node, like SV1 worker names: they are never
+    stored in a share, sent to a peer or put on the share chain.
+  - The miner's side decides: the node grants `0x0002` when asked and never
+    requires it. On a connection that did not ask, TLV fields are ignored.
+- The node answers `RequestExtensions` with `RequestExtensions.Success`
+  naming the extensions it grants (on a Mining connection, `0x4D4D` and
+  `0x0002`), or with `RequestExtensions.Error` listing them all as
+  unsupported when it grants none of them.
 
 ## Node settings miners notice
 
