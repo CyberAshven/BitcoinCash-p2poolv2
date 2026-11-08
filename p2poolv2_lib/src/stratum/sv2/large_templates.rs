@@ -23,11 +23,25 @@
 //!   request with the longest prefix of the asked transactions that fits one
 //!   frame, and the node asks again for the rest.
 //!
-//! The design is shared with Knuth's client (`docs/architecture/
-//! sv2-large-templates-extension.md`).
+//! Template Distribution has the same limits: one
+//! `RequestTransactionData.Success` lists at most 65,535 transactions and
+//! must fit one frame. A Template Provider that grants the extension pushes
+//! every template's transactions after its `NewTemplate`, so the client never
+//! asks:
+//!
+//! - `RequestTransactionData.Transactions` (`0x03`, provider to client) is one
+//!   page of a template's transactions, in order; the core
+//!   `RequestTransactionData.Success` carries the rest and ends the push.
+//! - `RequestTransactionData.Kept` (`0x04`, provider to client) starts a
+//!   delta: a bitmap of the base template's transactions this template keeps
+//!   ([`kept_entries`]). The pages and the Success then carry the added
+//!   transactions, and the list is the kept and the added ones in CTOR.
+//!
+//! The design is shared with Knuth's client and Template Provider
+//! (`docs/architecture/sv2-large-templates-extension.md`).
 
 use super::session::encode_extension_frame;
-use binary_sv2::{Deserialize, Seq064K, Serialize, U256};
+use binary_sv2::{B016M, Deserialize, Seq064K, Serialize, U256};
 
 /// The extension's `extension_type`.
 pub const LARGE_TEMPLATES_EXTENSION: u16 = 0x4C54;
@@ -35,6 +49,12 @@ pub const LARGE_TEMPLATES_EXTENSION: u16 = 0x4C54;
 pub const DECLARE_MINING_JOB_TRANSACTIONS: u8 = 0x01;
 /// `ProvideMissingTransactions.Positions`: a request by `u32` position.
 pub const PROVIDE_MISSING_TRANSACTIONS_POSITIONS: u8 = 0x02;
+/// `RequestTransactionData.Transactions`: a page of a template's
+/// transactions, pushed by a Template Provider.
+pub const REQUEST_TRANSACTION_DATA_TRANSACTIONS: u8 = 0x03;
+/// `RequestTransactionData.Kept`: the base template's transactions a pushed
+/// delta keeps.
+pub const REQUEST_TRANSACTION_DATA_KEPT: u8 = 0x04;
 
 /// Most transaction ids in one page, and most positions in one request:
 /// what a `SEQ0_64K` holds.
@@ -62,6 +82,60 @@ pub struct ProvideMissingTransactionsPositions<'decoder> {
     /// 0-based positions in the whole declared list, pages first, the
     /// coinbase not counted.
     pub unknown_tx_position_list: Seq064K<'decoder, u32>,
+}
+
+/// `RequestTransactionData.Transactions` (`0x03`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RequestTransactionDataTransactions<'decoder> {
+    /// The template the page belongs to.
+    pub template_id: u64,
+    /// Serialized transactions, in the order the push gives them.
+    pub transaction_list: Seq064K<'decoder, B016M<'decoder>>,
+}
+
+/// `RequestTransactionData.Kept` (`0x04`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RequestTransactionDataKept<'decoder> {
+    /// The template the delta builds.
+    pub template_id: u64,
+    /// The last template whose transactions were pushed complete on the
+    /// connection.
+    pub base_template_id: u64,
+    /// One bit per base transaction, in block order without the coinbase
+    /// ([`kept_entries`]).
+    pub kept: B016M<'decoder>,
+}
+
+/// The entries of `base` that a `RequestTransactionData.Kept` bitmap keeps,
+/// in order.
+///
+/// Bit `i`, `(kept[i / 8] >> (i % 8)) & 1`, keeps `base[i]`. The bitmap is
+/// exactly `ceil(base.len() / 8)` bytes, and the unused high bits of its last
+/// byte are clear; any other bitmap is an error.
+pub fn kept_entries<T: Clone>(base: &[T], kept: &[u8]) -> Result<Vec<T>, String> {
+    if kept.len() != base.len().div_ceil(8) {
+        return Err(format!(
+            "kept bitmap of {} bytes for a base of {} transactions",
+            kept.len(),
+            base.len()
+        ));
+    }
+    let used_bits = base.len() % 8;
+    if used_bits != 0 && kept.last().is_some_and(|last| *last >> used_bits != 0) {
+        return Err("kept bitmap sets bits past the base".to_string());
+    }
+    let count = kept
+        .iter()
+        .map(|byte| byte.count_ones() as usize)
+        .sum::<usize>();
+    let mut entries = Vec::with_capacity(count);
+    entries.extend(
+        base.iter()
+            .enumerate()
+            .filter(|(index, _)| (kept[index / 8] >> (index % 8)) & 1 == 1)
+            .map(|(_, entry)| entry.clone()),
+    );
+    Ok(entries)
 }
 
 /// The most transactions a declaration for a block of `size_limit` bytes can

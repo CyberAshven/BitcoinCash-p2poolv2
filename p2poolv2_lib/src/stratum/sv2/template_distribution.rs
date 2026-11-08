@@ -7,14 +7,34 @@
 //!
 //! The node connects to the configured provider, over Noise when the
 //! provider's authority key is pinned, sets up the Template Distribution
-//! Protocol and declares in `CoinbaseOutputConstraints` the most coinbase
-//! output bytes it can ever add. The provider then sends `NewTemplate` and
-//! `SetNewPrevHash`, and the node asks for each template's transactions with
-//! `RequestTransactionData`. Once a template's parent and transactions are
-//! both known it becomes a [`BlockTemplate`], passes the checks a BCHN
+//! Protocol, asks for the large templates extension and declares in
+//! `CoinbaseOutputConstraints` the most coinbase output bytes it can ever
+//! add. The provider then sends `NewTemplate` and `SetNewPrevHash`, and the
+//! node asks for each template's transactions with `RequestTransactionData`,
+//! unless the provider pushes them. Once a template's parent and transactions
+//! are both known it becomes a [`BlockTemplate`], passes the checks a BCHN
 //! template passes (CTOR, no witness data, target and bits), and goes to the
 //! notifier exactly as a template fetched over RPC does. SV1 and SV2 jobs,
 //! share emission and PPLNS payouts therefore do not change.
+//!
+//! Standard Template Distribution limits a template to what one
+//! `RequestTransactionData.Success` carries: 65,535 transactions in one
+//! 16 MiB frame, below the 32 MB floor of Bitcoin Cash's block size limit. So
+//! after `SetupConnection.Success` the node asks for the large templates
+//! extension (`0x4C54`, `super::large_templates`). A provider that grants it
+//! pushes every template's transactions after its `NewTemplate`, and the node
+//! asks for none. A push is full (pages of up to 65,535 transactions, then
+//! the core `Success` with the rest) or a delta on the base, the last
+//! template whose transactions arrived complete (a bitmap of the base's
+//! transactions it keeps, then the added ones; the list is both in CTOR).
+//! Only the block size limit then bounds a template. Each complete list is
+//! checked against the template's merkle path before it becomes the base;
+//! a list that fails, or a push out of order, ends the connection and the
+//! node reconnects, as for any malformed message. A `NewTemplate` before the
+//! previous template's `Success` means the provider gave that push up: its
+//! transactions and the base are dropped, and the next push is full. A
+//! provider that refuses the extension, or does not answer within
+//! [`SETUP_TIMEOUT`], is asked for each template's transactions as before.
 //!
 //! A block found on a provided template goes back with `SubmitSolution`.
 //! The protocol has no reply to it, so whenever the provider cannot take the
@@ -39,7 +59,12 @@
 //! Only Bitcoin Cash templates are mapped: a provider that requires coinbase
 //! outputs (a Bitcoin provider's segwit commitment) is refused.
 
-use super::large_templates::LARGE_TEMPLATES_EXTENSION;
+use super::ctor_key;
+use super::large_templates::{
+    LARGE_TEMPLATES_EXTENSION, REQUEST_TRANSACTION_DATA_KEPT,
+    REQUEST_TRANSACTION_DATA_TRANSACTIONS, RequestTransactionDataKept,
+    RequestTransactionDataTransactions, kept_entries,
+};
 use super::noise::NoiseTransport;
 use super::session::{Sv2Message, decode_plain_frames, encode_extension_frame, encode_frame};
 use crate::config::{BitcoinCashNetwork, TemplateProvider};
@@ -50,10 +75,12 @@ use crate::stratum::merge_disclosure::{
 };
 use crate::stratum::work::block_template::{BlockTemplate, TemplateTransaction};
 use crate::stratum::work::error::WorkError;
-use crate::stratum::work::gbt::{LOST_CONTACT_AFTER, build_merkle_branches_for_template};
+use crate::stratum::work::gbt::{
+    LOST_CONTACT_AFTER, build_merkle_branches_for_template, compute_merkle_branches,
+};
 use crate::stratum::work::notify::{NotifyCmd, NotifySender};
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
-use binary_sv2::{B064K, Deserialize};
+use binary_sv2::{B016M, B064K, Deserialize, Seq064K};
 use bitcoin::blockdata::script::Builder;
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash;
@@ -205,8 +232,10 @@ struct AnnouncedTemplate {
     coinbase_outputs: Vec<u8>,
     coinbase_tx_locktime: u32,
     merkle_path: Vec<[u8; 32]>,
-    /// `None` until `RequestTransactionData.Success` arrives.
-    transactions: Option<Vec<Transaction>>,
+    /// `None` until `RequestTransactionData.Success` arrives, or the
+    /// provider's push of them is complete. A pushed list shares its
+    /// transactions with the push base ([`TransactionPush`]).
+    transactions: Option<Vec<Arc<Transaction>>>,
 }
 
 impl AnnouncedTemplate {
@@ -257,34 +286,210 @@ enum SessionAction {
     Reconnect { host: String, port: u16 },
 }
 
+/// How a template's push has begun.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushForm {
+    /// Nothing has arrived yet, so a `Kept` may still start a delta.
+    Unstarted,
+    /// Pages of the whole list.
+    Full,
+    /// The base's kept transactions, then pages of the added ones.
+    Delta,
+}
+
+/// A template's transactions while the provider pushes them.
+#[derive(Debug)]
+struct PartialPush {
+    template_id: u64,
+    /// The template's merkle path, which the complete list must give.
+    merkle_path: Vec<[u8; 32]>,
+    form: PushForm,
+    /// The transactions so far: a delta's kept ones first, then every page
+    /// in order.
+    transactions: Vec<Arc<Transaction>>,
+}
+
+/// A template's complete pushed transactions, in block order.
+#[derive(Debug)]
+struct PushedTransactions {
+    template_id: u64,
+    transactions: Vec<Arc<Transaction>>,
+}
+
+/// What a connection that negotiated the large templates extension
+/// (`0x4C54`) keeps of the transactions its provider pushes: the base a
+/// delta builds on and the template being received, nothing more.
+#[derive(Debug, Default)]
+struct TransactionPush {
+    /// The last template whose transactions arrived complete, full or
+    /// delta: the list a `Kept` bitmap is over.
+    base: Option<PushedTransactions>,
+    /// The template whose transactions are arriving.
+    receiving: Option<PartialPush>,
+}
+
+impl TransactionPush {
+    /// Expect the transactions of `announced`, which follow its
+    /// `NewTemplate`.
+    ///
+    /// A push still arriving was given up by the provider, which sends
+    /// nothing more for it and pushes the next template in full: its
+    /// transactions are dropped, and the base with them.
+    fn announce(&mut self, announced: &AnnouncedTemplate) {
+        if let Some(abandoned) = self.receiving.take() {
+            info!(
+                "Template Provider gave up the push of template {}; template {} comes in full",
+                abandoned.template_id, announced.template_id
+            );
+            self.base = None;
+        }
+        self.receiving = Some(PartialPush {
+            template_id: announced.template_id,
+            merkle_path: announced.merkle_path.clone(),
+            form: PushForm::Unstarted,
+            transactions: Vec::new(),
+        });
+    }
+
+    /// The push of `template_id`, which must be the one arriving.
+    fn arriving(&mut self, template_id: u64) -> Result<&mut PartialPush, String> {
+        self.receiving
+            .as_mut()
+            .filter(|receiving| receiving.template_id == template_id)
+            .ok_or_else(|| {
+                format!("transactions for template {template_id}, which is not being pushed")
+            })
+    }
+
+    /// Start a delta with the base's transactions that `message` keeps. It
+    /// must come first in the push and name the base.
+    fn on_kept(&mut self, message: &RequestTransactionDataKept<'_>) -> Result<(), String> {
+        let template_id = message.template_id;
+        let base_template_id = message.base_template_id;
+        let base = match self.base.as_ref() {
+            Some(base) if base.template_id == base_template_id => &base.transactions,
+            _ => {
+                return Err(format!(
+                    "template {template_id} is a delta on template {base_template_id}, which is not the base"
+                ));
+            }
+        };
+        let kept = kept_entries(base, message.kept.as_bytes())?;
+        let receiving = self.arriving(template_id)?;
+        if receiving.form != PushForm::Unstarted {
+            return Err(format!("Kept for template {template_id} after its pages"));
+        }
+        receiving.transactions = kept;
+        receiving.form = PushForm::Delta;
+        Ok(())
+    }
+
+    /// Add a page of the arriving template's transactions.
+    fn on_page(&mut self, message: &RequestTransactionDataTransactions<'_>) -> Result<(), String> {
+        let receiving = self.arriving(message.template_id)?;
+        receiving
+            .transactions
+            .extend(decode_transactions(&message.transaction_list)?);
+        if receiving.form == PushForm::Unstarted {
+            receiving.form = PushForm::Full;
+        }
+        Ok(())
+    }
+
+    /// End the arriving template's push with the transactions of its
+    /// `RequestTransactionData.Success`, check the complete list against the
+    /// template's merkle path, and make it the base.
+    ///
+    /// Returns the list. A Success for another template, or a list that does
+    /// not give the merkle path, is an error.
+    fn complete(
+        &mut self,
+        message: &RequestTransactionDataSuccess<'_>,
+    ) -> Result<Vec<Arc<Transaction>>, String> {
+        let template_id = message.template_id;
+        let Some(mut receiving) = self
+            .receiving
+            .take()
+            .filter(|receiving| receiving.template_id == template_id)
+        else {
+            return Err(format!(
+                "RequestTransactionData.Success for template {template_id}, which is not being pushed"
+            ));
+        };
+        receiving
+            .transactions
+            .extend(decode_transactions(&message.transaction_list)?);
+        if receiving.form == PushForm::Delta {
+            receiving
+                .transactions
+                .sort_by_cached_key(|transaction| ctor_key(transaction));
+        }
+        if !gives_merkle_path(&receiving.transactions, &receiving.merkle_path) {
+            return Err(format!(
+                "the transactions pushed for template {template_id} do not give its merkle path"
+            ));
+        }
+        let transactions = receiving.transactions.clone();
+        self.base = Some(PushedTransactions {
+            template_id,
+            transactions: receiving.transactions,
+        });
+        Ok(transactions)
+    }
+}
+
 /// The Template Distribution state of one provider connection, without I/O.
 #[derive(Default)]
 struct ProviderSession {
     tip: Option<ProviderTip>,
     pending: BTreeMap<u64, AnnouncedTemplate>,
+    /// Set when the connection negotiated the large templates extension: the
+    /// provider then pushes every template's transactions.
+    push: Option<TransactionPush>,
 }
 
 impl ProviderSession {
+    /// The session of a connection that negotiated the large templates
+    /// extension (`0x4C54`): the provider pushes every template's
+    /// transactions, so none are asked for.
+    fn with_large_templates() -> Self {
+        Self {
+            push: Some(TransactionPush::default()),
+            ..Self::default()
+        }
+    }
+
     /// Handle one message from the provider: a base protocol message goes to
-    /// [`Self::on_message`], and a message of an extension this connection
-    /// did not negotiate is ignored.
+    /// [`Self::on_message`], a large templates message to
+    /// [`Self::on_large_templates`] when this connection negotiated the
+    /// extension, and a message of an extension this connection did not
+    /// negotiate is ignored.
     fn dispatch(&mut self, message: Sv2Message) -> Result<Vec<SessionAction>, String> {
         let Sv2Message {
             extension_type,
             message_type,
             mut payload,
         } = message;
-        if extension_type != 0 {
-            debug!("Ignoring a Template Provider message of extension {extension_type:#06x}");
-            return Ok(Vec::new());
+        match extension_type {
+            0 => self.on_message(message_type, &mut payload),
+            LARGE_TEMPLATES_EXTENSION if self.push.is_some() => {
+                self.on_large_templates(message_type, &mut payload)?;
+                Ok(Vec::new())
+            }
+            other => {
+                debug!("Ignoring a Template Provider message of extension {other:#06x}");
+                Ok(Vec::new())
+            }
         }
-        self.on_message(message_type, &mut payload)
     }
 
     /// Handle one message from the provider.
     ///
     /// A malformed message is an error, which ends the connection. Messages
-    /// this client does not use are ignored.
+    /// this client does not use are ignored. On a connection that negotiated
+    /// large templates, `RequestTransactionData.Success` ends a template's
+    /// push ([`TransactionPush::complete`]), and a push that does not give
+    /// the template's merkle path is an error too.
     fn on_message(
         &mut self,
         message_type: u8,
@@ -304,7 +509,13 @@ impl ProviderSession {
             MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS => {
                 let message = RequestTransactionDataSuccess::from_bytes(payload)
                     .map_err(|error| format!("{error:?}"))?;
-                Ok(self.on_transactions(&message))
+                match self.push.as_mut() {
+                    Some(push) => {
+                        let transactions = push.complete(&message)?;
+                        Ok(self.on_pushed(message.template_id, transactions))
+                    }
+                    None => Ok(self.on_transactions(&message)),
+                }
             }
             MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR => {
                 let message = RequestTransactionDataError::from_bytes(payload)
@@ -327,12 +538,17 @@ impl ProviderSession {
         }
     }
 
-    /// Keep the template and ask for its transactions.
+    /// Keep the template and ask for its transactions, unless the provider
+    /// pushes them: then they follow this message.
     ///
     /// A template for the current parent is refused before any
-    /// `SetNewPrevHash`, which it would relate to.
+    /// `SetNewPrevHash`, which it would relate to. Its pushed transactions
+    /// still arrive, and still become the base.
     fn on_new_template(&mut self, message: &NewTemplate<'_>) -> Result<Vec<SessionAction>, String> {
         let announced = AnnouncedTemplate::from_message(message);
+        if let Some(push) = self.push.as_mut() {
+            push.announce(&announced);
+        }
         if !announced.future && self.tip.is_none() {
             warn!(
                 "Template Provider sent current template {} before any SetNewPrevHash",
@@ -341,7 +557,7 @@ impl ProviderSession {
             return Ok(Vec::new());
         }
         let template_id = announced.template_id;
-        let needs_transactions = announced.transactions.is_none();
+        let needs_transactions = announced.transactions.is_none() && self.push.is_none();
         self.pending.insert(template_id, announced);
         while self.pending.len() > MAX_PENDING_TEMPLATES {
             self.pending.pop_first();
@@ -392,12 +608,7 @@ impl ProviderSession {
             debug!("Transactions for Template Provider template {template_id}, no longer pending");
             return Vec::new();
         };
-        let decoded = message
-            .transaction_list
-            .iter()
-            .map(|raw| deserialize::<Transaction>(raw.as_bytes()))
-            .collect::<Result<Vec<_>, _>>();
-        match decoded {
+        match decode_transactions(&message.transaction_list) {
             Ok(transactions) => {
                 announced.transactions = Some(transactions);
                 self.take_ready(template_id).into_iter().collect()
@@ -421,6 +632,50 @@ impl ProviderSession {
         self.pending.remove(&message.template_id);
     }
 
+    /// Handle one large templates (`0x4C54`) message on a connection that
+    /// negotiated the extension: a page of the pushed template's
+    /// transactions, or the `Kept` that starts a delta. Another message of
+    /// the extension, a malformed one or one out of the push's order is an
+    /// error, which ends the connection.
+    fn on_large_templates(&mut self, message_type: u8, payload: &mut [u8]) -> Result<(), String> {
+        let push = self
+            .push
+            .as_mut()
+            .ok_or("large templates message without the extension")?;
+        match message_type {
+            REQUEST_TRANSACTION_DATA_TRANSACTIONS => {
+                let message = RequestTransactionDataTransactions::from_bytes(payload)
+                    .map_err(|error| format!("{error:?}"))?;
+                push.on_page(&message)
+            }
+            REQUEST_TRANSACTION_DATA_KEPT => {
+                let message = RequestTransactionDataKept::from_bytes(payload)
+                    .map_err(|error| format!("{error:?}"))?;
+                push.on_kept(&message)
+            }
+            other => Err(format!(
+                "unsupported large templates message type {other:#04x}"
+            )),
+        }
+    }
+
+    /// Give a pushed template its complete transactions, already checked
+    /// against its merkle path, and the template, if it can be mined now.
+    fn on_pushed(
+        &mut self,
+        template_id: u64,
+        transactions: Vec<Arc<Transaction>>,
+    ) -> Vec<SessionAction> {
+        let Some(announced) = self.pending.get_mut(&template_id) else {
+            debug!(
+                "Pushed transactions for Template Provider template {template_id}, no longer pending"
+            );
+            return Vec::new();
+        };
+        announced.transactions = Some(transactions);
+        self.take_ready(template_id).into_iter().collect()
+    }
+
     /// The template, if it can be mined now: its transactions are known and
     /// it is either the template the latest `SetNewPrevHash` activated or a
     /// template for the current parent. Older pending templates go with it.
@@ -436,6 +691,35 @@ impl ProviderSession {
             .retain(|pending_id, _| *pending_id > template_id);
         Some(SessionAction::Ready(ReadyTemplate { announced, tip }))
     }
+}
+
+/// The transactions of a `RequestTransactionData.Success` or of a pushed
+/// page, each serialized as Bitcoin Cash serializes it.
+fn decode_transactions(
+    transaction_list: &Seq064K<'_, B016M<'_>>,
+) -> Result<Vec<Arc<Transaction>>, String> {
+    transaction_list
+        .iter()
+        .map(|raw| {
+            deserialize::<Transaction>(raw.as_bytes())
+                .map(Arc::new)
+                .map_err(|decode_error| decode_error.to_string())
+        })
+        .collect()
+}
+
+/// Whether `transactions`, in block order after a placeholder coinbase, give
+/// `merkle_path`: the coinbase's merkle path at position 0, as a
+/// `NewTemplate` carries it.
+fn gives_merkle_path(transactions: &[Arc<Transaction>], merkle_path: &[[u8; 32]]) -> bool {
+    let txids = transactions
+        .iter()
+        .map(|transaction| transaction.compute_txid().to_raw_hash())
+        .collect();
+    compute_merkle_branches(txids)
+        .iter()
+        .map(|branch| branch.to_byte_array())
+        .eq(merkle_path.iter().copied())
 }
 
 /// The floor of the network's adaptive block size limit (ABLA): 32 MB on
@@ -541,7 +825,7 @@ fn provided_block_template(
         transactions: transactions
             .iter()
             .map(|transaction| TemplateTransaction {
-                data: hex::encode(serialize(transaction)),
+                data: hex::encode(serialize(transaction.as_ref())),
                 txid: transaction.compute_txid().to_string(),
                 hash: transaction.compute_txid().to_string(),
                 depends: Vec::new(),
@@ -805,7 +1089,7 @@ async fn serve_provider(
 ) -> (ConnectionEnd, bool) {
     let (solutions_tx, mut solutions_rx) = mpsc::channel(SOLUTION_QUEUE);
     let (end, published) = match open_connection(provider).await {
-        Ok((transport, stream, early_messages)) => {
+        Ok((transport, stream, session, early_messages)) => {
             let (mut reader, writer) = stream.into_split();
             let mut connection = ProviderConnection {
                 provider,
@@ -813,7 +1097,7 @@ async fn serve_provider(
                 notify_tx,
                 transport,
                 writer,
-                session: ProviderSession::default(),
+                session,
                 parent: None,
                 reported_size_limit: None,
                 found_block: None,
@@ -839,11 +1123,12 @@ async fn serve_provider(
 /// ([`negotiate_large_templates`]) and declare the coinbase output
 /// constraints.
 ///
-/// Also returns any messages that arrived with the setup reply or while the
-/// node waited for the extension's answer.
+/// Also returns the connection's session, which takes pushed transactions
+/// when the provider granted the extension, and any messages that arrived
+/// with the setup reply or while the node waited for the extension's answer.
 async fn open_connection(
     provider: &TemplateProvider,
-) -> Result<(Transport, TcpStream, Vec<Sv2Message>), String> {
+) -> Result<(Transport, TcpStream, ProviderSession, Vec<Sv2Message>), String> {
     let mut stream = timeout(SETUP_TIMEOUT, TcpStream::connect(&provider.address))
         .await
         .map_err(|_| "connect timed out".to_string())?
@@ -875,7 +1160,7 @@ async fn open_connection(
     .await?;
     match answer {
         ExtensionAnswer::Granted => info!(
-            "Template Provider at {} granted the large templates extension (0x4C54)",
+            "Template Provider at {} granted the large templates extension (0x4C54); it pushes each template's transactions",
             provider.address
         ),
         ExtensionAnswer::Refused => info!(
@@ -897,7 +1182,12 @@ async fn open_connection(
         "Template Provider at {} set up; reserved {COINBASE_OUTPUT_RESERVE} coinbase output bytes and {COINBASE_OUTPUT_SIGCHECKS} BCH SigChecks",
         provider.address
     );
-    Ok((transport, stream, early_messages))
+    let session = if answer == ExtensionAnswer::Granted {
+        ProviderSession::with_large_templates()
+    } else {
+        ProviderSession::default()
+    };
+    Ok((transport, stream, session, early_messages))
 }
 
 /// Read until the provider answers `SetupConnection`, and return the

@@ -1,8 +1,10 @@
 use super::*;
-use crate::stratum::sv2::session::Sv2Message;
+use crate::stratum::sv2::large_templates::MAX_IDS_PER_MESSAGE;
+use crate::stratum::sv2::sort_ctor;
 use crate::test_utils::{
-    TestSv2Server, test_coinbase_transaction, test_sv2_authority, test_tdp_new_template,
-    test_tdp_set_new_prev_hash, test_tdp_transaction_data,
+    TestSv2Server, bch_template_transaction, test_coinbase_transaction, test_sv2_authority,
+    test_tdp_new_template, test_tdp_set_new_prev_hash, test_tdp_transaction_data,
+    test_tdp_transactions_page, test_template_with_transactions,
 };
 use binary_sv2::to_bytes;
 use bitcoin::block::{Header, Version};
@@ -1530,6 +1532,636 @@ async fn a_provider_that_does_not_answer_leaves_the_connection_standard() {
     assert_eq!(early_messages[0].message_type, MESSAGE_TYPE_NEW_TEMPLATE);
 }
 
+/// Without the large templates extension a `0x4C54` message is ignored, as
+/// any extension's is, and a template's transactions are still asked for.
+#[test]
+fn a_large_templates_message_is_ignored_without_the_extension() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let mut session = ProviderSession::default();
+    let announced = session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(9, true, &fixture)).unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(announced.as_slice(), [SessionAction::Send(_)]));
+    let page = session
+        .dispatch(Sv2Message {
+            extension_type: LARGE_TEMPLATES_EXTENSION,
+            message_type: REQUEST_TRANSACTION_DATA_TRANSACTIONS,
+            payload: to_bytes(test_tdp_transactions_page(
+                9,
+                &fixture.decode_transactions().unwrap(),
+            ))
+            .unwrap(),
+        })
+        .unwrap();
+    assert!(page.is_empty());
+    assert!(session.pending[&9].transactions.is_none());
+}
+
+/// A full push of more than 65,535 transactions, past what one standard
+/// `RequestTransactionData.Success` carries: a page of 65,535, then the rest
+/// in the core Success. Nothing is asked for, and the list is rebuilt in
+/// order.
+#[test]
+fn a_full_push_of_more_than_65_535_transactions_rebuilds_the_template() {
+    let fixture: BlockTemplate = serde_json::from_str(REGTEST_TEMPLATE).unwrap();
+    let model = Transaction::try_from(&bch_template_transaction(0)).unwrap();
+    let count = MAX_IDS_PER_MESSAGE + 4_465;
+    let mut transactions = (0..count as u32)
+        .map(|index| {
+            let mut transaction = model.clone();
+            transaction.input[0].previous_output.vout = index;
+            transaction
+        })
+        .collect::<Vec<_>>();
+    sort_ctor(&mut transactions);
+    let large = test_template_with_transactions(&fixture, &transactions);
+    let mut session = ProviderSession::with_large_templates();
+    let announced = session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(1, true, &large)).unwrap(),
+        )
+        .unwrap();
+    assert!(announced.is_empty());
+    session
+        .on_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            &mut to_bytes(test_tdp_set_new_prev_hash(1, &large)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_TRANSACTIONS,
+            &mut to_bytes(test_tdp_transactions_page(
+                1,
+                &transactions[..MAX_IDS_PER_MESSAGE],
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let rest = test_template_with_transactions(&fixture, &transactions[MAX_IDS_PER_MESSAGE..]);
+    let mut actions = session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(1, &rest)).unwrap(),
+        )
+        .unwrap();
+    let Some(SessionAction::Ready(ready)) = actions.pop() else {
+        panic!("template was not ready");
+    };
+    let pushed = ready.announced.transactions.unwrap();
+    assert_eq!(pushed.len(), count);
+    assert!(pushed.iter().map(Arc::as_ref).eq(transactions.iter()));
+}
+
+/// A delta on the same tip: a `Kept` bitmap over the base, then the added
+/// transactions, in any order. The kept and the added ones in CTOR give the
+/// template's merkle path, and the template is ready.
+#[test]
+fn a_delta_on_the_same_tip_rebuilds_the_template_from_the_base() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let base = fixture.decode_transactions().unwrap();
+    let mut session = ProviderSession::with_large_templates();
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(1, true, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            &mut to_bytes(test_tdp_set_new_prev_hash(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    // Template 2 drops the base's first and eighth transactions and adds two.
+    let added = [
+        Transaction::try_from(&bch_template_transaction(2)).unwrap(),
+        Transaction::try_from(&bch_template_transaction(1)).unwrap(),
+    ];
+    let mut expected = base[1..7]
+        .iter()
+        .chain(&base[8..])
+        .chain(&added)
+        .cloned()
+        .collect::<Vec<_>>();
+    sort_ctor(&mut expected);
+    let delta = test_template_with_transactions(&fixture, &expected);
+    let announced = session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(2, false, &delta)).unwrap(),
+        )
+        .unwrap();
+    assert!(announced.is_empty());
+    // 65 base transactions take 9 bytes, the last one using one bit.
+    let kept = [0b0111_1110, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+    session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_KEPT,
+            &mut to_bytes(RequestTransactionDataKept {
+                template_id: 2,
+                base_template_id: 1,
+                kept: B016M::new(&kept).unwrap(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let mut actions = session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(
+                2,
+                &test_template_with_transactions(&fixture, &added),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let Some(SessionAction::Ready(ready)) = actions.pop() else {
+        panic!("the delta was not ready");
+    };
+    assert_eq!(ready.announced.template_id, 2);
+    assert_eq!(
+        ready.announced.transactions,
+        Some(expected.into_iter().map(Arc::new).collect::<Vec<_>>())
+    );
+}
+
+/// A delta on a new tip builds on the last template whose transactions
+/// arrived complete, whatever its parent, and a delta's own list is the base
+/// of the next one.
+#[test]
+fn a_delta_on_a_new_tip_builds_on_the_last_complete_template() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let base = fixture.decode_transactions().unwrap();
+    let mut next_tip = fixture.clone();
+    next_tip.previousblockhash = BlockHash::from_byte_array([7; 32]).to_string();
+    let mut session = ProviderSession::with_large_templates();
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(1, true, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            &mut to_bytes(test_tdp_set_new_prev_hash(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    // On the new tip, template 2 keeps the base's last 33 transactions and
+    // adds one.
+    let added = Transaction::try_from(&bch_template_transaction(1)).unwrap();
+    let mut second = base[32..]
+        .iter()
+        .chain([&added])
+        .cloned()
+        .collect::<Vec<_>>();
+    sort_ctor(&mut second);
+    let delta = test_template_with_transactions(&next_tip, &second);
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(2, true, &delta)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            &mut to_bytes(test_tdp_set_new_prev_hash(2, &delta)).unwrap(),
+        )
+        .unwrap();
+    let kept = [0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0x01];
+    session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_KEPT,
+            &mut to_bytes(RequestTransactionDataKept {
+                template_id: 2,
+                base_template_id: 1,
+                kept: B016M::new(&kept).unwrap(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let mut actions = session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(
+                2,
+                &test_template_with_transactions(&next_tip, &[added]),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let Some(SessionAction::Ready(ready)) = actions.pop() else {
+        panic!("the delta on the new tip was not ready");
+    };
+    assert_eq!(ready.tip.prev_hash, BlockHash::from_byte_array([7; 32]));
+    assert_eq!(
+        ready.announced.transactions,
+        Some(second.iter().cloned().map(Arc::new).collect::<Vec<_>>())
+    );
+    // Template 3 drops template 2's first transaction and adds none. Its 34
+    // transactions take 5 bytes, the last one using two bits.
+    let third = second[1..].to_vec();
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(
+                3,
+                false,
+                &test_template_with_transactions(&next_tip, &third),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let kept = [0xfe, 0xff, 0xff, 0xff, 0x03];
+    session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_KEPT,
+            &mut to_bytes(RequestTransactionDataKept {
+                template_id: 3,
+                base_template_id: 2,
+                kept: B016M::new(&kept).unwrap(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let mut actions = session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(
+                3,
+                &test_template_with_transactions(&next_tip, &[]),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let Some(SessionAction::Ready(ready)) = actions.pop() else {
+        panic!("the delta on the delta was not ready");
+    };
+    assert_eq!(
+        ready.announced.transactions,
+        Some(third.into_iter().map(Arc::new).collect::<Vec<_>>())
+    );
+}
+
+/// A `Kept` bitmap that keeps a transaction the template dropped gives a
+/// list without the template's merkle path: the push fails, which ends the
+/// connection.
+#[test]
+fn a_delta_with_a_wrong_kept_bitmap_fails_verification() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let base = fixture.decode_transactions().unwrap();
+    let mut session = ProviderSession::with_large_templates();
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(1, true, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            &mut to_bytes(test_tdp_set_new_prev_hash(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    // Template 2 drops the base's first transaction, but the bitmap keeps
+    // every one.
+    let delta = test_template_with_transactions(&fixture, &base[1..]);
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(2, false, &delta)).unwrap(),
+        )
+        .unwrap();
+    let kept = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+    session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_KEPT,
+            &mut to_bytes(RequestTransactionDataKept {
+                template_id: 2,
+                base_template_id: 1,
+                kept: B016M::new(&kept).unwrap(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let refused = session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(
+                2,
+                &test_template_with_transactions(&fixture, &[]),
+            ))
+            .unwrap(),
+        )
+        .unwrap_err();
+    assert!(refused.contains("merkle path"), "{refused}");
+}
+
+/// Added transactions other than the template's give a list without its
+/// merkle path: the push fails, which ends the connection.
+#[test]
+fn a_delta_with_wrong_added_transactions_fails_verification() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let base = fixture.decode_transactions().unwrap();
+    let mut session = ProviderSession::with_large_templates();
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(1, true, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            &mut to_bytes(test_tdp_set_new_prev_hash(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    // Template 2 keeps every base transaction and adds one; the push adds
+    // another.
+    let added = Transaction::try_from(&bch_template_transaction(1)).unwrap();
+    let mut expected = base.iter().chain([&added]).cloned().collect::<Vec<_>>();
+    sort_ctor(&mut expected);
+    let delta = test_template_with_transactions(&fixture, &expected);
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(2, false, &delta)).unwrap(),
+        )
+        .unwrap();
+    let kept = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+    session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_KEPT,
+            &mut to_bytes(RequestTransactionDataKept {
+                template_id: 2,
+                base_template_id: 1,
+                kept: B016M::new(&kept).unwrap(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let other = Transaction::try_from(&bch_template_transaction(2)).unwrap();
+    let refused = session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(
+                2,
+                &test_template_with_transactions(&fixture, &[other]),
+            ))
+            .unwrap(),
+        )
+        .unwrap_err();
+    assert!(refused.contains("merkle path"), "{refused}");
+}
+
+/// A `Kept` bitmap holds one bit per base transaction, rounded up to whole
+/// bytes, with the unused bits clear. Any other ends the connection.
+#[test]
+fn a_kept_bitmap_that_does_not_fit_the_base_breaks_the_connection() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let mut session = ProviderSession::with_large_templates();
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(1, true, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            &mut to_bytes(test_tdp_set_new_prev_hash(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(2, false, &fixture)).unwrap(),
+        )
+        .unwrap();
+    // 65 base transactions need 9 bytes.
+    let short = session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_KEPT,
+            &mut to_bytes(RequestTransactionDataKept {
+                template_id: 2,
+                base_template_id: 1,
+                kept: B016M::new(&[0xff; 8]).unwrap(),
+            })
+            .unwrap(),
+        )
+        .unwrap_err();
+    assert!(short.contains("kept bitmap of 8 bytes"), "{short}");
+    // The ninth byte may use only its lowest bit.
+    let past = session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_KEPT,
+            &mut to_bytes(RequestTransactionDataKept {
+                template_id: 2,
+                base_template_id: 1,
+                kept: B016M::new(&[0xff; 9]).unwrap(),
+            })
+            .unwrap(),
+        )
+        .unwrap_err();
+    assert!(past.contains("past the base"), "{past}");
+}
+
+/// A `NewTemplate` before the previous template's Success means the
+/// provider gave that push up. Its partial transactions are dropped, and
+/// the next push, in full, rebuilds the next template alone.
+#[test]
+fn a_new_template_before_the_success_drops_the_partial_push() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let base = fixture.decode_transactions().unwrap();
+    let mut session = ProviderSession::with_large_templates();
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(1, true, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            &mut to_bytes(test_tdp_set_new_prev_hash(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    // Template 2's delta stops after its first page.
+    let added = [
+        Transaction::try_from(&bch_template_transaction(1)).unwrap(),
+        Transaction::try_from(&bch_template_transaction(2)).unwrap(),
+    ];
+    let mut second = base.iter().chain(&added).cloned().collect::<Vec<_>>();
+    sort_ctor(&mut second);
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(
+                2,
+                false,
+                &test_template_with_transactions(&fixture, &second),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let kept = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+    session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_KEPT,
+            &mut to_bytes(RequestTransactionDataKept {
+                template_id: 2,
+                base_template_id: 1,
+                kept: B016M::new(&kept).unwrap(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_TRANSACTIONS,
+            &mut to_bytes(test_tdp_transactions_page(2, &added[..1])).unwrap(),
+        )
+        .unwrap();
+    // Template 3 comes in full: a page, then the Success.
+    let third = base[..40].to_vec();
+    let announced = session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(
+                3,
+                false,
+                &test_template_with_transactions(&fixture, &third),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(announced.is_empty());
+    session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_TRANSACTIONS,
+            &mut to_bytes(test_tdp_transactions_page(3, &third[..10])).unwrap(),
+        )
+        .unwrap();
+    let actions = session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(
+                3,
+                &test_template_with_transactions(&fixture, &third[10..]),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let [SessionAction::Ready(ready)] = actions.as_slice() else {
+        panic!("template 3 alone was not ready");
+    };
+    assert_eq!(ready.announced.template_id, 3);
+    assert_eq!(
+        ready.announced.transactions,
+        Some(third.into_iter().map(Arc::new).collect::<Vec<_>>())
+    );
+}
+
+/// After a push is given up the next one is full: a `Kept` then has no
+/// base, which ends the connection.
+#[test]
+fn a_delta_after_a_dropped_push_breaks_the_connection() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let base = fixture.decode_transactions().unwrap();
+    let mut session = ProviderSession::with_large_templates();
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(1, true, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            &mut to_bytes(test_tdp_set_new_prev_hash(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            &mut to_bytes(test_tdp_transaction_data(1, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(2, false, &fixture)).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_TRANSACTIONS,
+            &mut to_bytes(test_tdp_transactions_page(2, &base[..10])).unwrap(),
+        )
+        .unwrap();
+    session
+        .on_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            &mut to_bytes(test_tdp_new_template(3, false, &fixture)).unwrap(),
+        )
+        .unwrap();
+    let kept = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+    let refused = session
+        .on_large_templates(
+            REQUEST_TRANSACTION_DATA_KEPT,
+            &mut to_bytes(RequestTransactionDataKept {
+                template_id: 3,
+                base_template_id: 1,
+                kept: B016M::new(&kept).unwrap(),
+            })
+            .unwrap(),
+        )
+        .unwrap_err();
+    assert!(refused.contains("not the base"), "{refused}");
+}
+
 #[cfg(not(feature = "sim"))]
 #[tokio::test]
 async fn a_block_on_a_provided_template_goes_to_its_provider_and_not_over_rpc() {
@@ -1991,4 +2623,156 @@ async fn the_successor_of_a_block_this_node_found_is_published_without_a_parent_
     assert_eq!(template.previousblockhash, found.block_hash().to_string());
     // Not asked about the found block, the node's last limit stands.
     assert_eq!(template.sizelimit, 40_000_000);
+}
+
+/// A provider that grants large templates pushes each template's
+/// transactions: the node publishes the template without asking for them,
+/// and the next message it sends is the block found on it.
+#[tokio::test]
+async fn a_provider_that_grants_large_templates_pushes_each_template() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let transactions = fixture.decode_transactions().unwrap();
+    let rpc = parent_lookup_rpc(&fixture).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider = TemplateProvider {
+        address: listener.local_addr().unwrap().to_string(),
+        authority_public_key: None,
+        network: BitcoinCashNetwork::Chipnet,
+    };
+    let (notify_tx, mut notify_rx) = mpsc::channel(4);
+    start_template_provider(
+        provider,
+        BitcoinRpcConfig {
+            url: rpc.uri(),
+            username: "user".to_string(),
+            password: "pass".to_string(),
+        },
+        notify_tx,
+    )
+    .await
+    .unwrap();
+    let mut server = TestSv2Server::accept(&listener, None).await;
+    server.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
+    server
+        .send_message(
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+            SetupConnectionSuccess {
+                used_version: 2,
+                flags: 0,
+            },
+        )
+        .await;
+    assert_eq!(
+        server.answer_extensions(&[LARGE_TEMPLATES_EXTENSION]).await,
+        vec![LARGE_TEMPLATES_EXTENSION]
+    );
+    server
+        .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
+        .await;
+    server
+        .send_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            test_tdp_new_template(41, true, &fixture),
+        )
+        .await;
+    server
+        .send_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            test_tdp_set_new_prev_hash(41, &fixture),
+        )
+        .await;
+    server
+        .send_frame(
+            encode_extension_frame(
+                LARGE_TEMPLATES_EXTENSION,
+                REQUEST_TRANSACTION_DATA_TRANSACTIONS,
+                false,
+                &to_bytes(test_tdp_transactions_page(41, &transactions[..40])).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await;
+    server
+        .send_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            test_tdp_transaction_data(
+                41,
+                &test_template_with_transactions(&fixture, &transactions[40..]),
+            ),
+        )
+        .await;
+    let Some(NotifyCmd::SendToAll { template }) = timeout(Duration::from_secs(5), notify_rx.recv())
+        .await
+        .unwrap()
+    else {
+        panic!("expected a template for the notifier");
+    };
+    assert_eq!(template.transactions.len(), fixture.transactions.len());
+    let block = Block {
+        header: Header {
+            version: Version::from_consensus(fixture.version),
+            prev_blockhash: BlockHash::from_str(&fixture.previousblockhash).unwrap(),
+            merkle_root: TxMerkleNode::all_zeros(),
+            time: fixture.curtime,
+            bits: CompactTarget::from_unprefixed_hex(&fixture.bits).unwrap(),
+            nonce: 1234,
+        },
+        txdata: vec![test_coinbase_transaction(1)],
+    };
+    template.provided.as_ref().unwrap().submit(block).unwrap();
+    // The node asked for no transactions before it sent the block.
+    let mut solution_payload = server.receive(MESSAGE_TYPE_SUBMIT_SOLUTION).await;
+    let solution = SubmitSolution::from_bytes(&mut solution_payload).unwrap();
+    assert_eq!(solution.template_id, 41);
+}
+
+/// A push whose transactions do not give the template's merkle path breaks
+/// the connection: nothing is published, and the node connects again.
+#[tokio::test]
+async fn a_push_that_fails_verification_ends_the_connection() {
+    let fixture: BlockTemplate = serde_json::from_str(CHIPNET_TEMPLATE).unwrap();
+    let transactions = fixture.decode_transactions().unwrap();
+    let rpc = parent_lookup_rpc(&fixture).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut notify_rx = start_keep_connected(&listener, &rpc, LOST_CONTACT_AFTER);
+    let mut server = TestSv2Server::accept(&listener, None).await;
+    server.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
+    server
+        .send_message(
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+            SetupConnectionSuccess {
+                used_version: 2,
+                flags: 0,
+            },
+        )
+        .await;
+    server.answer_extensions(&[LARGE_TEMPLATES_EXTENSION]).await;
+    server
+        .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
+        .await;
+    server
+        .send_message(
+            MESSAGE_TYPE_NEW_TEMPLATE,
+            test_tdp_new_template(41, true, &fixture),
+        )
+        .await;
+    server
+        .send_message(
+            MESSAGE_TYPE_SET_NEW_PREV_HASH,
+            test_tdp_set_new_prev_hash(41, &fixture),
+        )
+        .await;
+    // The push leaves out the template's last transaction.
+    server
+        .send_message(
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+            test_tdp_transaction_data(
+                41,
+                &test_template_with_transactions(&fixture, &transactions[..64]),
+            ),
+        )
+        .await;
+    let mut reconnected = TestSv2Server::accept(&listener, None).await;
+    reconnected.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
+    assert!(notify_rx.try_recv().is_err());
 }

@@ -96,6 +96,8 @@ use crate::stratum::server::StratumContext;
 #[cfg(test)]
 use crate::stratum::session::{EXTRANONCE1_SIZE, EXTRANONCE2_SIZE};
 #[cfg(test)]
+use crate::stratum::sv2::large_templates::RequestTransactionDataTransactionsOwned;
+#[cfg(test)]
 use crate::stratum::sv2::payout_outputs::{
     RequestPayoutOutputs, RequestPayoutOutputsSuccess, VerifyPayoutOutputs,
 };
@@ -530,6 +532,49 @@ pub(crate) fn test_tdp_transaction_data(
         excess_data: Vec::new().try_into().unwrap(),
         transaction_list: transactions.try_into().unwrap(),
     }
+}
+
+/// A large templates page (`RequestTransactionData.Transactions`) of
+/// `transactions` for `template_id`.
+#[cfg(test)]
+pub(crate) fn test_tdp_transactions_page(
+    template_id: u64,
+    transactions: &[bitcoin::Transaction],
+) -> RequestTransactionDataTransactionsOwned {
+    let transactions = transactions
+        .iter()
+        .map(|transaction| serialize(transaction).try_into().unwrap())
+        .collect::<Vec<_>>();
+    RequestTransactionDataTransactionsOwned {
+        template_id,
+        transaction_list: transactions.try_into().unwrap(),
+    }
+}
+
+/// `template` with `transactions`, in the order given, in place of its own:
+/// the template a provider builds when its mempool changes.
+#[cfg(test)]
+pub(crate) fn test_template_with_transactions(
+    template: &BlockTemplate,
+    transactions: &[bitcoin::Transaction],
+) -> BlockTemplate {
+    let mut changed = template.clone();
+    changed.transactions = transactions
+        .iter()
+        .map(|transaction| {
+            let txid = transaction.compute_txid().to_string();
+            TemplateTransaction {
+                data: hex::encode(serialize(transaction)),
+                txid: txid.clone(),
+                hash: txid,
+                depends: Vec::new(),
+                fee: 0,
+                sigops: 0,
+                weight: 0,
+            }
+        })
+        .collect();
+    changed
 }
 
 /// Well-known secp256k1 compressed public keys (multiples of the generator G).
