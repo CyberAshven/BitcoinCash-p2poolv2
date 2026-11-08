@@ -17,6 +17,7 @@ members = [
     "p2poolv2_netsim",
     "p2poolv2_safa",
     "p2poolv2_photon_payout",
+    "p2poolv2_payout_sim",
 ]
 resolver = "2"
 

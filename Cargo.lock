@@ -4503,6 +4503,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "p2poolv2_payout_sim"
+version = "0.0.1-alpha"
+dependencies = [
+ "clap",
+ "p2poolv2_netsim",
+]
+
+[[package]]
 name = "p2poolv2_photon_payout"
 version = "0.0.1-alpha"
 dependencies = [
