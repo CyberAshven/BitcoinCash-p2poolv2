@@ -96,9 +96,13 @@ const SHARE_VERSION_TAG: u8 = 0x22;
 
 /// Tag before a share's band in a Bitcoin Cash commitment's suffix, right
 /// after the share version (`docs/sharechain/small-miners-design.md`, part
-/// 2). The band always follows the share version and has a fixed length, so
-/// sharing the share version's tag value leaves the digest unambiguous.
-const BAND_TAG: u8 = 0x22;
+/// 2).
+///
+/// Each part of a Bitcoin Cash commitment's suffix has its own tag byte:
+/// `0x21` a declared coinbase, `0x22` the share version, `0x23` a pool-built
+/// job's token root, `0x24` the band. `0x25` is reserved for payout levels
+/// and `0x26` for weak shares (parts 4 and 3 of the design page).
+const BAND_TAG: u8 = 0x24;
 
 /// Tag before a pool-built job's token root in a Bitcoin Cash commitment's
 /// suffix, after the share version.
@@ -553,22 +557,15 @@ mod tests {
         assert_eq!(bitcoin.hash(), bitcoin_voting.hash());
     }
 
-    /// A Bitcoin Cash commitment at the minimum: its bits are its minimum
-    /// and its wanted bits, in a band of one.
-    fn cash_commitment_at_the_minimum() -> ShareCommitment {
+    /// The proof of work fixes the target a share's node wanted: another
+    /// wanted target is another commitment.
+    #[test]
+    fn bitcoin_cash_commitment_binds_the_wanted_bits() {
         let mut cash = create_test_commitment();
         cash.miner_address = p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
         cash.asert_bits = cash.bits;
         cash.wanted_bits = cash.bits;
         cash.band_cap = crate::shares::band::BAND_CAP_UNIT;
-        cash
-    }
-
-    /// The proof of work fixes the target a share's node wanted: another
-    /// wanted target is another commitment.
-    #[test]
-    fn bitcoin_cash_commitment_binds_the_wanted_bits() {
-        let cash = cash_commitment_at_the_minimum();
         let mut wanting_more = cash.clone();
         wanting_more.wanted_bits = CompactTarget::from_consensus(0x1b10_0000);
 
@@ -578,7 +575,11 @@ mod tests {
     /// The proof of work fixes the band cap.
     #[test]
     fn bitcoin_cash_commitment_binds_the_band_cap() {
-        let cash = cash_commitment_at_the_minimum();
+        let mut cash = create_test_commitment();
+        cash.miner_address = p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
+        cash.asert_bits = cash.bits;
+        cash.wanted_bits = cash.bits;
+        cash.band_cap = crate::shares::band::BAND_CAP_UNIT;
         let mut wider = cash.clone();
         wider.band_cap = 2048;
 
@@ -588,11 +589,41 @@ mod tests {
     /// The proof of work fixes the minimum the share claims.
     #[test]
     fn bitcoin_cash_commitment_binds_the_minimum_bits() {
-        let cash = cash_commitment_at_the_minimum();
+        let mut cash = create_test_commitment();
+        cash.miner_address = p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
+        cash.asert_bits = cash.bits;
+        cash.wanted_bits = cash.bits;
+        cash.band_cap = crate::shares::band::BAND_CAP_UNIT;
         let mut easier_minimum = cash.clone();
         easier_minimum.asert_bits = CompactTarget::from_consensus(0x1c38_4bd7);
 
         assert_ne!(cash.hash(), easier_minimum.hash());
+    }
+
+    /// The band has a tag byte of its own, unlike every other part of a
+    /// suffix, so its bytes can never be read as a second share version: the
+    /// same bytes behind the share version's tag are another suffix and
+    /// another digest.
+    #[test]
+    fn the_band_has_its_own_commitment_tag() {
+        let wanted_bits = CompactTarget::from_consensus(0x1b10_0000);
+        let asert_bits = CompactTarget::from_consensus(0x1b40_0000);
+        let mut banded = Vec::with_capacity(32);
+        append_share_version(&mut banded, ShareVersion::CURRENT);
+        append_band(&mut banded, wanted_bits, 2048, asert_bits);
+        let share_version_length = 1 + serialize(&ShareVersion::CURRENT).len();
+        let mut read_as_share_version = banded.clone();
+        read_as_share_version[share_version_length] = SHARE_VERSION_TAG;
+
+        assert_eq!(banded[share_version_length], BAND_TAG);
+        assert_eq!(banded.len(), share_version_length + 1 + 12);
+        assert_ne!(BAND_TAG, SHARE_VERSION_TAG);
+        assert_ne!(BAND_TAG, POOL_MERGE_MINING_TAG);
+        assert_ne!(BAND_TAG, 0x21);
+        assert_ne!(
+            commitment_digest(&[], 0, &banded, None, None),
+            commitment_digest(&[], 0, &read_as_share_version, None, None)
+        );
     }
 
     /// A Bitcoin header carries no band, so a Bitcoin commitment digests

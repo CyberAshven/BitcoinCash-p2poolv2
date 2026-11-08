@@ -107,7 +107,7 @@ Each Bitcoin Cash share header gains three fields:
 | `asert_bits` | This share's minimum `T_asert`, which must equal the ASERT target from the parent; the next share's ASERT is anchored at it |
 
 All three are committed in the share commitment after the share version (tag
-byte `0x22`, then the 4-byte compact `wanted_bits`, the 4-byte `band_cap` and
+byte `0x24`, then the 4-byte compact `wanted_bits`, the 4-byte `band_cap` and
 the 4-byte compact `asert_bits`), so the proof of work fixes them. `wanted_bits` must be at least as hard as `bits`; it
 is a signal only and never makes a share valid or invalid beyond that. Carrying
 `band_cap` in the header lets a node check it from the parent's header alone,
@@ -307,7 +307,7 @@ milliseconds. The simulation measures this at `WEAK_CAP` per share.
 ### How a share carries them
 
 A share may carry up to `WEAK_CAP` weak shares and `WEAK_BYTES` of them in its
-body. Its header commits to them (tag byte `0x24` in the share commitment, then
+body. Its header commits to them (tag byte `0x26` in the share commitment, then
 the 4-byte `weak_ratio`, a 2-byte count and the 32-byte merkle root of the
 carried weak shares' proof-of-work hashes), so the proof of work fixes the
 list. A carried weak share must be
@@ -383,7 +383,7 @@ L_k = 546 * 2^k satoshis,  k = 0 .. 7
 
 546 is Bitcoin Cash's P2PKH dust limit, the floor. 69,888 is the cap, which
 keeps large amounts out of any draw. Each Bitcoin Cash share header gains a
-field, committed after `wanted_bits` (tag byte `0x23`, then one byte):
+field, committed after `wanted_bits` (tag byte `0x25`, then one byte):
 
 | Field | Contents |
 |---|---|
