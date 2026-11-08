@@ -17,6 +17,7 @@
 
 use crate::address::share_owner::ShareOwner;
 use crate::config::SimConfig;
+use crate::shares::band::{BAND_CAP_MAX, BAND_CAP_UNIT, JobBand, heavier_job_band};
 use crate::sim::blockfind::submit_sim_block;
 use crate::sim::share::{SimShareParams, build_sim_emission};
 use crate::sim::timing::{
@@ -74,6 +75,25 @@ impl SimEmitter {
         }
     }
 
+    /// The band of this miner's next job on `prepared`: with
+    /// `share_multiple` set, that multiple of the minimum's work, within the
+    /// share's band cap unless `share_multiple_ignores_cap`
+    /// (`shares::band::heavier_job_band`); `None`, the minimum, otherwise.
+    fn job_band(&self, prepared: &PreparedNotifyParams) -> Option<JobBand> {
+        self.config.share_multiple.map(|multiple| {
+            let band_cap = if self.config.share_multiple_ignores_cap {
+                BAND_CAP_MAX
+            } else {
+                prepared.band_cap()
+            };
+            heavier_job_band(
+                prepared.bits(),
+                band_cap,
+                u64::from(multiple) * u64::from(BAND_CAP_UNIT),
+            )
+        })
+    }
+
     /// Run the emission loop until the notify channel or emissions channel
     /// closes. Intended to be raced against a shutdown signal by the caller.
     pub async fn run(mut self) {
@@ -112,7 +132,11 @@ impl SimEmitter {
 
             // Pace: sleep an exponential interval sized by the current ASERT
             // pool difficulty and this miner's modeled hashrate.
-            let difficulty = difficulty_from_bits(prepared.bits());
+            //* A heavier miner paces by its own job's target.
+            let difficulty = difficulty_from_bits(
+                self.job_band(&prepared)
+                    .map_or(prepared.bits(), |band| band.bits),
+            );
             let mean = mean_share_interval_secs(difficulty, self.config.hashrate);
             let secs = sample_exponential_secs(mean, &mut rng);
             tokio::time::sleep(Duration::from_secs_f64(secs.max(0.0))).await;
@@ -143,6 +167,7 @@ impl SimEmitter {
                 enonce2_hex: &enonce2_hex,
                 nonce,
                 ntime,
+                job_band: self.job_band(&prepared),
             };
 
             match build_sim_emission(params) {
@@ -181,8 +206,10 @@ impl SimEmitter {
                     emitted += 1;
                     if last_stats.elapsed() >= STATS_INTERVAL {
                         info!(
-                            "sim stats: emitted={emitted} pool_difficulty={difficulty:.1} hashrate={}",
-                            self.config.hashrate
+                            "sim stats: emitted={emitted} pool_difficulty={:.1} hashrate={} job_difficulty={difficulty:.1} band_cap={}",
+                            difficulty_from_bits(prepared.bits()),
+                            self.config.hashrate,
+                            prepared.band_cap()
                         );
                         last_stats = std::time::Instant::now();
                     }

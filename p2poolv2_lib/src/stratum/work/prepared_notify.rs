@@ -1266,7 +1266,7 @@ pub(crate) fn insert_miner_job(
 /// job id and coinbase2 placeholders in the pre-built JSON. The SV1 server
 /// uses [`build_notify_with_job_id`], which also gives the job's id. The job
 /// is at the minimum.
-#[cfg(any(test, feature = "sim"))]
+#[cfg(test)]
 pub(crate) fn build_notify_from_prepared(
     prepared: &PreparedNotifyParams,
     miner_bitcoin_address: Option<&PayoutAddress>,

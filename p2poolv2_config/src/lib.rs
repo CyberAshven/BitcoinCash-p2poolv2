@@ -1491,6 +1491,16 @@ pub struct SimConfig {
     /// identical across nodes (ASERT consensus). Omit for the default 10s.
     #[serde(default)]
     pub ideal_block_time_secs: Option<u32>,
+    /// Bitcoin Cash: this node's miner wants shares this many times the
+    /// minimum's work, as a big miner's node gives it: it mines at that
+    /// multiple within the share's band cap and records the rest as its
+    /// wanted target. Omit to mine at the minimum.
+    #[serde(default)]
+    pub share_multiple: Option<u32>,
+    /// With `share_multiple`, mine at that multiple even past the band cap,
+    /// so peers can be seen refusing the shares.
+    #[serde(default)]
+    pub share_multiple_ignores_cap: bool,
 }
 
 /// Config for p2poolv2 nodes
