@@ -7,6 +7,7 @@ mod bitcoin_block_validation;
 mod version_vote_tests;
 mod weak_shares;
 
+use crate::shares::weak::WeakShare;
 pub use weak_shares::WeakPayoutCache;
 use weak_shares::{check_weak_shares_match_header, check_weak_shares_size};
 
@@ -721,6 +722,19 @@ pub trait ShareValidator {
     /// The rules a Bitcoin Cash header from a peer must pass, or `None` on
     /// a Bitcoin node, which ignores carried headers.
     fn bch_header_rules(&self) -> Option<BchHeaderRules>;
+
+    /// Check a weak share (`shares::weak`) before the weak pool keeps or
+    /// relays it: every rule but the carrier's, its header rules and its
+    /// coinbase paying the PPLNS window anchored at its parent
+    /// (`DefaultShareValidator::validate_relayed_weak_share`). `cache` keeps
+    /// the window's payouts between weak shares on one template.
+    fn validate_weak_share(
+        &self,
+        weak_share: &WeakShare,
+        chain_store_handle: &ChainStoreHandle,
+        pplns_window: &RwLock<PplnsWindow>,
+        cache: &mut WeakPayoutCache,
+    ) -> Result<(), ValidationError>;
 }
 
 /// Production implementation of ShareValidator.
@@ -1919,6 +1933,16 @@ impl ShareValidator for DefaultShareValidator {
         self.bch_header_rules
     }
 
+    fn validate_weak_share(
+        &self,
+        weak_share: &WeakShare,
+        chain_store_handle: &ChainStoreHandle,
+        pplns_window: &RwLock<PplnsWindow>,
+        cache: &mut WeakPayoutCache,
+    ) -> Result<(), ValidationError> {
+        self.validate_relayed_weak_share(weak_share, chain_store_handle, pplns_window, cache)
+    }
+
     fn validate_with_pool_difficulty(
         &self,
         share_header: &ShareHeader,
@@ -2295,6 +2319,14 @@ mockall::mock! {
         fn pool_difficulty(&self) -> &PoolDifficulty;
 
         fn bch_header_rules(&self) -> Option<BchHeaderRules>;
+
+        fn validate_weak_share(
+            &self,
+            weak_share: &WeakShare,
+            chain_store_handle: &ChainStoreHandle,
+            pplns_window: &RwLock<PplnsWindow>,
+            cache: &mut WeakPayoutCache,
+        ) -> Result<(), ValidationError>;
     }
 }
 

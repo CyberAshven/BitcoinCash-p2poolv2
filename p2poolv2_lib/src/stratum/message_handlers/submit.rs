@@ -4,8 +4,12 @@
 
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::config::PoolMode;
+use crate::node::weak_share_worker::WeakShareEvent;
 use crate::shares::coinbase_proof::CoinbaseProof;
 use crate::shares::share_block::ShareHeader;
+use crate::shares::share_commitment::ShareCommitment;
+use crate::shares::weak::WeakShare;
+use crate::shares::weak_pool::WeakShareSource;
 #[cfg(not(feature = "sim"))]
 use crate::store::found_block::FoundBlock;
 use crate::store::payout_tree::StoredPayoutTree;
@@ -573,6 +577,7 @@ async fn emit_share_chain_share(
     };
     let pool_target = bitcoin::Target::from_compact(commitment.bits);
     if !pool_target.is_met_by(pool_share.block_hash) {
+        emit_weak_share(stratum_context, &pool_share, commitment);
         debug!(
             "Share does not meet pool difficulty, not emitting to share chain: hash {} target {:?}",
             pool_share.block_hash, commitment.bits
@@ -611,6 +616,73 @@ async fn emit_share_chain_share(
         .await
         .map_err(|e| Error::SubmitFailure(format!("Failed to send share to store: {e}")))?;
     Ok(true)
+}
+
+/// Send a submission that missed its share target but meets its job's weak
+/// target to the weak share worker, as a weak share (`shares::weak`): the
+/// share header as mined, its coinbase's scriptSig and total value, and the
+/// job's merkle branch. Only a Bitcoin Cash job at the minimum has a weak
+/// target. A full queue drops it, as a lost share would be: the worker
+/// checks and relays at its own pace, never holding up the miner.
+fn emit_weak_share(
+    stratum_context: &StratumContext,
+    pool_share: &PoolShare<'_>,
+    commitment: &ShareCommitment,
+) {
+    let (Some(weak_share_tx), Some(weak_target)) =
+        (&stratum_context.weak_share_tx, pool_share.job.weak_target)
+    else {
+        return;
+    };
+    if !weak_target.is_met_by(pool_share.block_hash) {
+        return;
+    }
+    let Some(weak_share) = build_weak_share(pool_share, commitment) else {
+        return;
+    };
+    if weak_share_tx
+        .try_send(WeakShareEvent {
+            weak_share,
+            source: WeakShareSource::Local,
+        })
+        .is_err()
+    {
+        debug!(
+            "Weak share queue full, dropping weak share {}",
+            pool_share.block_hash
+        );
+    }
+}
+
+/// The weak share a submission on `pool_share`'s job makes: the share header
+/// its commitment and Bitcoin Cash header give, with the coinbase's scriptSig
+/// and total value and the job's coinbase merkle branch. `None` for a
+/// coinbase this pool did not build, which has no commitment to prove.
+pub(crate) fn build_weak_share(
+    pool_share: &PoolShare<'_>,
+    commitment: &ShareCommitment,
+) -> Option<WeakShare> {
+    let coinbase_proof =
+        CoinbaseProof::from_coinbase(pool_share.coinbase, commitment.share_witness_root).ok()?;
+    let header = ShareHeader::from_commitment_and_header(
+        commitment.clone(),
+        pool_share.header,
+        u64::from(pool_share.job.blocktemplate.height),
+        coinbase_proof,
+    );
+    let coinbase_script_sig = pool_share.coinbase.input.first()?.script_sig.clone();
+    let coinbase_value = pool_share
+        .coinbase
+        .output
+        .iter()
+        .map(|output| output.value.to_sat())
+        .sum();
+    Some(WeakShare {
+        header,
+        coinbase_script_sig,
+        coinbase_value,
+        merkle_branch: pool_share.job.template_merkle_branches.clone(),
+    })
 }
 
 /// Ask the template task for a new template now, so miners move off the

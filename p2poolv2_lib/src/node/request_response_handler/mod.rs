@@ -15,6 +15,7 @@ use crate::node::p2p_message_handlers::receivers::block_receiver::BlockReceiverH
 use crate::node::request_sender::RequestSender;
 use crate::node::response_worker::{ResponseWorkerEvent, ResponseWorkerSender};
 use crate::node::validation_worker::ValidationSender;
+use crate::node::weak_share_worker::WeakShareEventSender;
 use crate::service::PeerHandle;
 use crate::service::p2p_service::RequestContext;
 use crate::service::spawn_peer_service;
@@ -72,6 +73,9 @@ pub struct RequestResponseHandler<C: Send + Sync> {
     /// Bitcoin Cash: the pool relayed share transactions go to. `None` on
     /// Bitcoin, which ignores them.
     share_transaction_pool: Option<ShareTransactionPool>,
+    /// Bitcoin Cash P2Pool: where relayed weak shares go to be checked
+    /// (`node::weak_share_worker`). `None` on Bitcoin and in Hydrapool mode.
+    weak_share_tx: Option<WeakShareEventSender>,
 }
 
 /// Implementation of ResponseChannel<Message>, used in production.
@@ -106,7 +110,14 @@ impl RequestResponseHandler<ResponseChannel<Message>> {
             inbound_failures_total: 0,
             responses_dropped_total: 0,
             share_transaction_pool,
+            weak_share_tx: None,
         }
+    }
+
+    /// Send the weak shares peers relay to `weak_share_tx`, the weak share
+    /// worker's channel. Without it they are acknowledged and dropped.
+    pub fn set_weak_share_sender(&mut self, weak_share_tx: WeakShareEventSender) {
+        self.weak_share_tx = Some(weak_share_tx);
     }
 
     /// Handle a request-response event from the libp2p network.
@@ -317,6 +328,7 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
             block_receiver_handle: self.block_receiver_handle.clone(),
             share_validator: self.share_validator.clone(),
             share_transaction_pool: self.share_transaction_pool.clone(),
+            weak_share_tx: self.weak_share_tx.clone(),
         };
 
         let peer_handle = match self.peer_handles.get(&peer) {

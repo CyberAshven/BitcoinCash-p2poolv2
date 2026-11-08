@@ -28,10 +28,12 @@ use p2poolv2_lib::config::{
 };
 use p2poolv2_lib::node::actor::NodeHandle;
 use p2poolv2_lib::node::bch_header_feeder::relay_templates_learning_prevs;
+use p2poolv2_lib::node::weak_share_worker::WeakShareNetwork;
 use p2poolv2_lib::pool_difficulty::PoolDifficulty;
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::shares::merge_mining::MergeMiningCommitment;
 use p2poolv2_lib::shares::transaction_pool::ShareTransactionPool;
+use p2poolv2_lib::shares::weak_pool::WeakPool;
 use p2poolv2_lib::store::Store;
 use p2poolv2_lib::store::writer::{StoreHandle, StoreWriter, write_channel};
 use p2poolv2_lib::stratum::client_connections::start_connections_handler;
@@ -459,6 +461,19 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let notify_share_transaction_pool = share_transactions
         .as_ref()
         .map(|(share_transaction_pool, _)| share_transaction_pool.clone());
+    // Bitcoin Cash share chain nodes find, check, relay and carry weak
+    // shares; the pool and its worker's channel are shared by the notifier,
+    // stratum and the node.
+    let weak_shares = (stratum_config.chain == Chain::BitcoinCash
+        && stratum_config.mode == PoolMode::P2poolv2)
+        .then(|| {
+            let (pool, relay_rx) = WeakPool::new(chain_store_handle.clone());
+            WeakShareNetwork::new(pool, relay_rx)
+        });
+    let notify_weak_pool = weak_shares.as_ref().map(|network| network.pool.clone());
+    let stratum_weak_share_tx = weak_shares
+        .as_ref()
+        .map(|network| network.events_tx.clone());
     let exit_sender_notify = exit_sender.clone();
     let exit_receiver_notify = exit_sender.subscribe();
     let notify_transactions = pool_transactions.clone();
@@ -473,6 +488,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             pool_difficulty_for_notify,
             notify_transactions,
             notify_share_transaction_pool,
+            notify_weak_pool,
             tracker_handle_for_notify,
         )
         .await;
@@ -574,7 +590,8 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
                     .map(PathBuf::from),
             )
             .sv2(sv2_listener)
-            .extra_submit_nodes(extra_submit_nodes);
+            .extra_submit_nodes(extra_submit_nodes)
+            .weak_share_tx(stratum_weak_share_tx);
         let mut stratum_server = match template_refresh_tx {
             Some(template_refresh_tx) => {
                 stratum_server_builder.template_refresh_tx(template_refresh_tx)
@@ -615,6 +632,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         notify_tx_for_node,
         shared_pplns_window,
         share_transactions,
+        weak_shares,
     )
     .await
     {

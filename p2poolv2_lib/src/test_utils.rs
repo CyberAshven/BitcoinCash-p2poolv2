@@ -1357,6 +1357,7 @@ pub(crate) async fn test_bch_stratum_context(
         cash_share: Some([0x22; 20]),
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     (ctx, emissions_rx, [stats_dir, store_dir])
 }

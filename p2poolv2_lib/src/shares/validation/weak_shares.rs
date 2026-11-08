@@ -410,7 +410,7 @@ impl DefaultShareValidator {
     /// [`Self::validate_weak_share_coinbase`]). Rule 5 and the depth rule are
     /// the carrier's ([`Self::validate_carried_weak_positions`]); the weak
     /// pool applies them against the best chain.
-    pub fn validate_weak_share(
+    pub fn validate_relayed_weak_share(
         &self,
         weak_share: &WeakShare,
         chain_store_handle: &ChainStoreHandle,

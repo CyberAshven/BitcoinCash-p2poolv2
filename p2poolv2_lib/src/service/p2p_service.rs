@@ -17,6 +17,7 @@ use crate::node::p2p_message_handlers::handle_request;
 use crate::node::p2p_message_handlers::receivers::block_receiver::BlockReceiverHandle;
 use crate::node::request_response_handler::block_fetcher::BlockFetcherHandle;
 use crate::node::validation_worker::ValidationSender;
+use crate::node::weak_share_worker::WeakShareEventSender;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -41,6 +42,9 @@ pub struct RequestContext<C, T> {
     /// Bitcoin Cash: where a relayed share transaction goes. `None` on
     /// Bitcoin.
     pub share_transaction_pool: Option<ShareTransactionPool>,
+    /// Bitcoin Cash P2Pool: where a relayed weak share goes to be checked.
+    /// `None` on Bitcoin and in Hydrapool mode.
+    pub weak_share_tx: Option<WeakShareEventSender>,
 }
 
 /// The Tower service that processes inbound P2P requests.

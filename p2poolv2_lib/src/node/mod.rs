@@ -17,6 +17,7 @@ pub mod request_response_handler;
 pub mod request_sender;
 pub mod response_worker;
 pub mod validation_worker;
+pub mod weak_share_worker;
 pub use crate::config::Config;
 pub mod actor;
 pub mod messages;

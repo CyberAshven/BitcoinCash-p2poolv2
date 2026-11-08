@@ -16,8 +16,9 @@ use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, bch_split_for_commitment};
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
 use crate::accounting::payout::payout_tree::PayoutTree;
+use crate::pool_difficulty::target_to_u512;
 use crate::shares::auxpow::{SplitSlot, TokenSplit};
-use crate::shares::band::{BAND_CAP_UNIT, JobBand};
+use crate::shares::band::{BAND_CAP_UNIT, JobBand, compact_at_or_above};
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::{ShareTransaction, encode_optional_address};
 use crate::shares::share_commitment::{
@@ -601,20 +602,27 @@ impl PreparedNotifyParams {
         }
     }
 
-    /// The weak ratio every share on these params carries.
-    pub(crate) fn weak_ratio(&self) -> u32 {
-        self.weak_ratio
-    }
-
-    /// The weak shares every share on these params carries.
-    pub(crate) fn weak_shares(&self) -> &Arc<[WeakShare]> {
-        &self.weak_shares
-    }
-
     /// The weak target of the mining base: what a weak share on a job at the
-    /// minimum on these params must meet. `None` on Bitcoin.
+    /// minimum on these params must meet. `None` on Bitcoin. Read by the sim's
+    /// emitter; stratum reads it through each job (`JobDetails::weak_target`).
+    #[cfg_attr(not(feature = "sim"), allow(dead_code))]
     pub(crate) fn weak_target(&self) -> Option<Target> {
         self.weak_target
+    }
+
+    /// The target a session's difficulty ceiling follows for a job with
+    /// `job_band` on these params: a job at the minimum, which makes weak
+    /// shares, its weak target, rounded to the easiest compact form at least
+    /// that easy, so the miner submits every hash a weak share needs; any
+    /// other job its own bits (`share_difficulty_ceiling`).
+    pub(crate) fn session_ceiling_bits(&self, job_band: Option<JobBand>) -> CompactTarget {
+        let job_bits = job_band.map_or(self.bits, |band| band.bits);
+        match self.weak_target {
+            Some(weak_target) if job_bits == self.bits => {
+                compact_at_or_above(target_to_u512(weak_target))
+            }
+            _ => job_bits,
+        }
     }
 
     /// The share transactions shares built on these params carry.

@@ -140,15 +140,16 @@ impl PplnsWindow {
         if missing.is_empty() {
             return Ok(weak_works);
         }
+        //* A stored parent without a band, a Bitcoin share header, has no
+        //* weak target: its children are credited at their own work.
+        let mut stored = HashSet::with_capacity(missing.len());
         for (blockhash, header) in chain_store_handle.get_share_headers(&missing)? {
+            stored.insert(blockhash);
             if let Some(work) = self.child_weak_work(&header) {
                 weak_works.insert(blockhash, work);
             }
         }
-        match missing
-            .iter()
-            .find(|parent| !weak_works.contains_key(*parent))
-        {
+        match missing.iter().find(|parent| !stored.contains(*parent)) {
             Some(parent) => Err(StoreError::NotFound(format!(
                 "Header of share {parent}, the parent of credited work, is not stored"
             ))
