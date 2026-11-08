@@ -10,7 +10,7 @@
 
 use crate::accounting::calc::{decay_time, sane_time_diff, time_bias};
 use crate::config::DEFAULT_MAXIMUM_DIFFICULTY;
-use crate::pool_difficulty::target_for_difficulty;
+use crate::pool_difficulty::{target_for_difficulty, target_to_difficulty_rounded_up};
 use bitcoin::{CompactTarget, Network, Target};
 #[cfg(test)]
 use mockall::automock;
@@ -72,6 +72,32 @@ pub fn share_difficulty_ceiling(share_bits: CompactTarget) -> Option<u64> {
     )
 }
 
+/// Lowest stratum difficulty whose share target is never easier than the
+/// share target `share_bits`, that is, the mainnet difficulty of `share_bits`
+/// rounded up (docs/sharechain/vardiff-sharechain.md: target-to-difficulty
+/// for a lower bound rounds up).
+///
+/// The tier formula uses it for `D_ceiling`, the chain ceiling the job must
+/// not sit above: a fractional ceiling such as the vardiff anchor's
+/// difficulty 3.90625 must yield difficulty 4, never 3, or the job's target
+/// would be easier than the chain ceiling and every share on it rejected.
+/// [`share_difficulty_ceiling`] is the session-cap counterpart and rounds
+/// down, so its target is never harder than the share target.
+///
+/// It is at least [`MINIMUM_SESSION_DIFFICULTY`]. `None` for a zero target,
+/// which no job carries.
+pub fn share_difficulty_lower_bound(share_bits: CompactTarget) -> Option<u64> {
+    let share_target = Target::from_compact(share_bits);
+    if share_target == Target::ZERO {
+        return None;
+    }
+    Some(
+        u64::try_from(target_to_difficulty_rounded_up(share_target))
+            .unwrap_or(u64::MAX)
+            .max(MINIMUM_SESSION_DIFFICULTY),
+    )
+}
+
 /// Difficulty of the job a miner holding `hashrate_share` (its share `w_i` of
 /// the pool hashrate) gets, per the variable-share-difficulty formula:
 ///
@@ -81,7 +107,9 @@ pub fn share_difficulty_ceiling(share_bits: CompactTarget) -> Option<u64> {
 /// floored at the share ceiling, so a small miner is never asked for less
 /// than the chain's own difficulty. `asert_capped_bits` is the asert-capped
 /// share target and `ceiling_bits` the ceiling's, both in compact form and
-/// read as stratum difficulty by [`share_difficulty_ceiling`]. `floor` is the
+/// read as stratum difficulty: `D_ceiling` by
+/// [`share_difficulty_lower_bound`], since it is a lower bound on the job
+/// and rounds up, `D_asert` by [`share_difficulty_ceiling`]. `floor` is the
 /// share-chain difficulty floor, V2's derived floor (see
 /// docs/sharechain/vardiff-sharechain.md). The result is at least
 /// [`MINIMUM_SESSION_DIFFICULTY`], since difficulty 0 has no target.
@@ -91,7 +119,7 @@ pub fn miner_tier_difficulty(
     ceiling_bits: CompactTarget,
     hashrate_share: f64,
 ) -> u64 {
-    let ceiling = share_difficulty_ceiling(ceiling_bits).unwrap_or(MINIMUM_SESSION_DIFFICULTY);
+    let ceiling = share_difficulty_lower_bound(ceiling_bits).unwrap_or(MINIMUM_SESSION_DIFFICULTY);
     let asert_capped = share_difficulty_ceiling(asert_capped_bits)
         .unwrap_or(MINIMUM_SESSION_DIFFICULTY)
         .max(ceiling);
@@ -625,6 +653,7 @@ impl DifficultyAdjusterTrait for DifficultyAdjuster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shares::bch_genesis::VARDIFF_ANCHOR_TARGET;
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
     use std::time::Duration;
@@ -1321,6 +1350,32 @@ mod tests {
     }
 
     #[test]
+    fn share_difficulty_lower_bound_of_a_fractional_ceiling_rounds_up() {
+        // The vardiff anchor's difficulty is 3.90625: the lower bound is 4,
+        // so a job on it is never easier than the chain ceiling.
+        assert_eq!(
+            share_difficulty_lower_bound(CompactTarget::from_consensus(0x1c41_88f5)),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn share_difficulty_lower_bound_of_the_difficulty_one_target_is_1() {
+        assert_eq!(
+            share_difficulty_lower_bound(CompactTarget::from_consensus(0x1d00_ffff)),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn share_difficulty_lower_bound_of_a_zero_target_is_none() {
+        assert_eq!(
+            share_difficulty_lower_bound(CompactTarget::from_consensus(0)),
+            None
+        );
+    }
+
+    #[test]
     fn a_session_above_the_share_difficulty_is_lowered_to_it() {
         let mut adjuster = DifficultyAdjuster::new(5_000, 1, None);
 
@@ -1393,8 +1448,9 @@ mod tests {
 
     #[test]
     fn miner_tier_difficulty_of_a_share_below_the_ceiling_is_the_ceiling() {
-        // asert at difficulty 1, ceiling at 4: the asert-capped basis is 4, so
-        // a miner with no hashrate share still gets the ceiling.
+        // asert at difficulty 1, ceiling at difficulty 4.55: the ceiling
+        // rounds up to 5, the asert-capped basis is 5, so a miner with no
+        // hashrate share still gets the ceiling.
         assert_eq!(
             miner_tier_difficulty(
                 1,
@@ -1402,7 +1458,7 @@ mod tests {
                 CompactTarget::from_consensus(0x1c38_4bd7),
                 0.0,
             ),
-            4
+            5
         );
     }
 
@@ -1422,8 +1478,9 @@ mod tests {
 
     #[test]
     fn miner_tier_difficulty_of_a_small_miner_is_the_ceiling() {
-        // A tiny hashrate share scales below the ceiling, but `D_ceiling` is
-        // in the maximum, so the job stays at the share-chain difficulty.
+        // A tiny hashrate share scales below the ceiling, but `D_ceiling`
+        // (the 4.55 chain ceiling rounded up) is in the maximum, so the job
+        // stays at the share-chain difficulty.
         assert_eq!(
             miner_tier_difficulty(
                 1,
@@ -1431,7 +1488,7 @@ mod tests {
                 CompactTarget::from_consensus(0x1c38_4bd7),
                 1e-9,
             ),
-            4
+            5
         );
     }
 
@@ -1446,6 +1503,26 @@ mod tests {
             ),
             10_000_000
         );
+    }
+
+    #[test]
+    fn miner_tier_difficulty_rounds_the_vardiff_ceiling_up_to_4() {
+        // The vardiff anchor's difficulty is 3.90625: a truncated read gave
+        // tier 3, whose job target sits above the chain ceiling, so every
+        // share on it was rejected. The ceiling term is a lower bound and
+        // rounds up (docs/sharechain/vardiff-sharechain.md).
+        let anchor = CompactTarget::from_consensus(VARDIFF_ANCHOR_TARGET);
+
+        assert_eq!(miner_tier_difficulty(1, anchor, anchor, 0.0), 4);
+    }
+
+    #[test]
+    fn tier_job_bits_of_a_tiny_miner_are_never_easier_than_the_vardiff_ceiling() {
+        let anchor = CompactTarget::from_consensus(VARDIFF_ANCHOR_TARGET);
+
+        let bits = tier_job_bits(1, anchor, anchor, 0.0);
+
+        assert!(Target::from_compact(bits) <= Target::from_compact(anchor));
     }
 
     #[test]

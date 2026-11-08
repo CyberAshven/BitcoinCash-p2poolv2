@@ -2780,7 +2780,8 @@ mod stratum_server_tests {
     }
 
     /// The job difficulty scales with the miner's `w_i`: the derived floor
-    /// 1285 and `D_ceiling` 1164 give `10 * 1164 = 11640`.
+    /// 1285 and `D_ceiling` 1165 (the main chain ceiling's difficulty 1164.109
+    /// rounded up) give `10 * 1165 = 11650`.
     #[tokio::test]
     async fn job_lines_scale_the_tier_job_with_the_miners_hashrate_share() {
         let (mut ctx, _emissions, _directories) =
@@ -2802,8 +2803,8 @@ mod stratum_server_tests {
             .collect();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["method"], "mining.set_difficulty");
-        assert!(messages[0]["params"][0].as_u64().unwrap() >= 11640);
-        assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 11640);
+        assert!(messages[0]["params"][0].as_u64().unwrap() >= 11650);
+        assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 11650);
         drop(tier_tx);
     }
 
