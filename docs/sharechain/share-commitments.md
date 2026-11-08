@@ -28,6 +28,11 @@ share transaction root (`ShareCommitment::hash` in
 - on Bitcoin Cash, the share version and the share's difficulty band: tag
   `0x24`, then its wanted bits, band cap and minimum, four bytes each
   ([Share validation](validation.md#the-difficulty-band-bitcoin-cash));
+- on Bitcoin Cash, after the band, the share's weak shares: tag `0x26`,
+  then its 4-byte weak ratio, the 2-byte count of the weak shares its body
+  carries and the 32-byte merkle root of their proof-of-work hashes, so the
+  proof of work fixes the list
+  ([Share validation](validation.md#weak-shares-follow-the-rules-bitcoin-cash));
 - the miner payout address (with its network class) and the miner share
   address.
 

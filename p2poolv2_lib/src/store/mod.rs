@@ -37,7 +37,14 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 ///   the share's minimum, the target its node wanted and its band cap. A
 ///   stored header has none of these and would not decode, and the merged
 ///   chain starts from a new genesis.
-pub const STORE_FORMAT_VERSION: u32 = 3;
+/// - 5 (2026-11-09): Bitcoin Cash share headers carry a weak ratio and
+///   commit the weak shares their bodies carry (`BCH_WEAK_SHARE_RULE_TAG`),
+///   the store keeps those weak shares and a summary of their credit, and
+///   the PPLNS window credits proofs from jobs at the minimum at the weak
+///   work. A stored header has no weak ratio and would not decode, and its
+///   chain was paid under the old credit; the chain starts again. Format 4
+///   is payout levels (issue #79 row 4).
+pub const STORE_FORMAT_VERSION: u32 = 5;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -555,7 +562,8 @@ impl Store {
             "the share-chain store at {} has {found}, and this node writes format \
              {STORE_FORMAT_VERSION}, where chain work counts uncle work, Bitcoin Cash pays \
              the genesis share only as the last resort, and Bitcoin Cash has one share chain \
-             (the main and mini chains merged) whose headers carry a difficulty band. Delete \
+             (the main and mini chains merged) whose headers carry a difficulty band and weak \
+             shares, with every proof from a job at the minimum paid at the weak work. Delete \
              the store directory and restart to resync the share chain from peers.",
             self.path
         )))
@@ -899,6 +907,30 @@ mod tests {
         assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
         assert!(error.to_string().contains("has format 2"), "{error}");
         assert!(error.to_string().contains("difficulty band"), "{error}");
+    }
+
+    /// A store from before weak shares, format 3, is refused: its headers
+    /// carry no weak ratio, and its shares were credited at their own work.
+    #[test]
+    fn test_store_from_before_weak_shares_is_refused() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        store
+            .db
+            .put_cf(&metadata_cf, STORE_FORMAT_KEY, 3u32.to_le_bytes())
+            .unwrap();
+
+        let error = store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap_err();
+        assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
+        assert!(error.to_string().contains("has format 3"), "{error}");
+        assert!(error.to_string().contains("weak work"), "{error}");
     }
 
     #[test_log::test]

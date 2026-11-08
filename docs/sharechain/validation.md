@@ -60,6 +60,13 @@ weight in the PPLNS window and its work in fork choice are its own exact
 work, `2^256 / (T + 1)`, so a heavier share counts for more. Bitcoin shares
 carry no band, and their target must equal the computed one.
 
+Since 2026-11-09 each Bitcoin Cash share header also carries its weak ratio
+`weak_ratio`, `R` in units of 1/1024, which must equal one step from the
+parent's (`next_weak_ratio` in `shares/weak.rs`: down by `R / 256` when the
+parent carried more than 32 weak shares, up by `R / 256` when it carried
+fewer, the same at exactly 32; between 1 and 4096; 4096 at genesis). Full
+validation, header sync and block receipt check it with the band.
+
 Share headers carry everything needed to check the target, but only once all
 of a header's ancestors are known. During the first sync a node therefore
 checks proof of work in order, after the headers have arrived; in normal
@@ -141,6 +148,49 @@ header: during header sync, and when a block arrives, not only when the
 body is validated. During header sync an uncle must arrive before the
 share that names it. Nodes send headers height by height, and an uncle is
 always lower than its nephew, so it does.
+
+## Weak shares follow the rules (Bitcoin Cash)
+
+Since 2026-11-09 a Bitcoin Cash share may carry weak shares: easier proofs
+of work on jobs at the minimum
+([Share chain redesign](small-miners-design.md#3-weak-shares);
+`shares/weak.rs`, `shares/validation/weak_shares.rs`). A weak share is the
+share header as mined, its Bitcoin Cash coinbase scriptSig (at most 100
+bytes), the coinbase's total value and its merkle branch, and is known by
+its proof-of-work hash. It is valid when:
+
+1. its `bits` is its minimum, the target ASERT gives from its parent: a job
+   at the minimum;
+2. its hash meets its parent's weak target, `min(T_asert(parent) *
+   R(parent), ceiling)` with `T_asert(parent)` the parent's minimum and
+   `R(parent)` its weak ratio, never harder than that minimum, and misses
+   its own `bits`;
+3. its coinbase, rebuilt as the node would build a share's on that parent
+   (the scriptSig it carries, output 0 from its merge-mining fields, the
+   PPLNS window's payouts for its total value, the payout tree, padding, the
+   commitment from its header and the locktime from its height), hashes and
+   folds up its branch to its header's merkle root;
+4. it passes every header rule a full share passes but the share target:
+   owner and payout scripts, donation and fee caps, uncle count, a target no
+   easier than the ceiling, the share version, the token share ASERT check,
+   its coinbase proof, the band and weak ratio, its Bitcoin Cash prev and its
+   timestamp;
+5. no share, uncle or weak share credited on the carrying chain has its hash.
+   A full share with that hash would have the same header, whose bits the
+   hash misses, so the carried-once rule below covers it.
+
+A share carries at most 64 weak shares (`WEAK_CAP`) in 96 KiB (`WEAK_BYTES`).
+Its header commits to them under tag `0x26`: its weak ratio, their count and
+the merkle root of their hashes. The body check refuses a list that does not
+match, or that repeats a hash, as a bad copy. Each carried weak share's
+parent must be 1 to 6 shares below the carrier (`WEAK_DEPTH`), and no
+ancestor of the carrier may carry it already, as an uncle has one nephew.
+Full validation checks rules 1, 2 and 4 and the depth and carried-once rules
+with the share's other parallel checks, and rule 3 with its own coinbase
+check. Weak work does not count in fork choice, so header sync does not read
+weak shares. A node checks a weak share a peer relays against rules 1 to 4
+before it keeps or relays it. These are share-chain rules; BCHN never sees
+weak shares.
 
 ## Bitcoin Cash payouts follow the PPLNS window
 

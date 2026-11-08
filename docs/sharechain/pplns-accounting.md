@@ -122,3 +122,43 @@ On Bitcoin Cash, a share's work for sizing the window is its difficulty plus
 its uncles', and uncles take no window slots of their own. An uncle's weight
 always goes to the uncle's own payout address; only a main-chain share's
 weight follows its payout right.
+
+## Weak shares and the weak-work credit (Bitcoin Cash)
+
+Since 2026-11-09 a Bitcoin Cash share may carry weak shares, easier proofs of
+work on jobs at the minimum
+([Share validation](validation.md#weak-shares-follow-the-rules-bitcoin-cash);
+[Share chain redesign](small-miners-design.md#how-weak-shares-are-paid)).
+Every proof of work from a job at the minimum is credited at the weak work of
+its parent's weak target, `2^256 / (T_weak(parent) + 1)`, whether it became a
+full share, an uncle or a weak share; a share heavier than the minimum is
+credited at its own work:
+
+| Kind | Credited weight | Carrying share gets |
+|---|---|---|
+| Full share at the minimum | the weak work | |
+| Full share heavier than the minimum | its own work | |
+| Uncle | 9/10 of the weight above for its kind | 1/10 of it |
+| Weak share | the weak work, less 5% (`INCLUDER_CUT`) | 5% of it |
+
+The hashes that meet the weak target are a fair sample of a miner's work, so
+every miner is paid in proportion to its work: per unit of work a miner at
+the minimum and a heavier one earn the same. Crediting a full share at its own
+work on top of its weak shares would pay those hashes twice. When `R` is 1 the
+weak work is the minimum's and nothing changes.
+
+A weak share's weight goes to its own payout address after its own donation
+and fee, like an uncle's; it has no share coinbase and no payout right to
+sell. The carrying share's 5% joins its own weight, as a nephew bonus does,
+and only when both are on the paying block's Bitcoin Cash chain. For sizing
+the window a share's work is its credited weight plus its uncles' and its
+weak shares', so the window still holds three blocks of actual work; weak
+shares take no window slots. Weak work does not count in fork choice.
+
+A node stores, with each share, a summary of the weak shares it carries: their
+proof-of-work hashes, for the carried-once rule, and their credit groups, one
+per parent, payee, donation, fee and Bitcoin Cash prev with a count. The
+window reads one entry per group and share, never the weak shares themselves
+(`WeakSummary` in `shares/weak.rs`, the `WeakSummaries` column family). These
+are share-chain rules: a Bitcoin Cash node sees only other payees in the
+coinbase.

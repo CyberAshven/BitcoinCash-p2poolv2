@@ -95,6 +95,18 @@ for a token share; see the storage budget in
 
 Body data: deleted by the pruner below the prune target.
 
+### 1e. `WeakShares` and `WeakSummaries` - Carried Weak Shares (Bitcoin Cash)
+
+The weak shares a Bitcoin Cash share carries (`shares::weak`), and the
+summary the PPLNS window and the carried-once rule read instead of them.
+
+| Key                    | Value                                  | Notes |
+|------------------------|----------------------------------------|-------|
+| `blockhash` (32 bytes) | `WeakShares`: count + each `WeakShare` (header, scriptSig, value, branch) | Written with a full block that carries weak shares; nothing for none |
+| `blockhash` (32 bytes) | `WeakSummaries`: the weak shares' proof-of-work hashes, then their credit groups (parent, payout address, share owner, donation, fee, BCH prev, count) | Written with the weak shares; a function of the carried list alone |
+
+Body data: both are deleted by the pruner below the prune target.
+
 ---
 
 ### 2. `BlockIndex` - Parent->Children Index

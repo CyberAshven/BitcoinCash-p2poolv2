@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Share-chain rule change on Bitcoin Cash, on the same flag day with its own
+protocol segment (`weak-64-500-6`): weak shares (issue #79, row 5;
+`docs/sharechain/small-miners-design.md`, part 3). A weak share is an easier
+proof of work on a job at the minimum, one whose hash meets the parent's weak
+target but not the share target, and a later share carries it the way it
+names an uncle: up to 64 weak shares and 96 KiB of them, each mined on a
+parent at most 6 shares below, none carried twice on a chain. The weak
+target is the parent's minimum times its weak ratio `R`, at most the chain's
+ceiling; `R` starts at 4096 and moves 1/256 a share, down while shares carry
+more than 32 weak shares and up while they carry fewer. Every proof from a
+job at the minimum, full share, uncle or weak share, is now credited in the
+PPLNS window at the weak work, `2^256 / (T_weak + 1)`, and a heavier share
+at its own; a weak share's credit goes, less a 5% includer cut that the
+carrying share earns, to the weak share's own payout address after its own
+donation and fee. So a home miner's work counts many times per share, and
+every miner is paid in proportion to its work. Weak work does not count in
+fork choice. Each Bitcoin Cash share header carries its weak ratio, the count
+and the merkle root of the weak shares it carries, all committed (tag
+`0x26`), and the Job Declaration token carries the weak ratio (layout 4).
+Nodes relay weak shares in a new message, check each before relaying it,
+keep them in a weak pool and fill their own shares from it; the session
+difficulty of a miner on a job at the minimum is capped at the weak
+difficulty, SV1 and SV2, so miners need no change. These are share-chain
+rules only: Bitcoin Cash's own rules do not change, and the blocks the pool
+finds stay ordinary Bitcoin Cash blocks with other payees in their coinbase.
+A node on the old rules cannot read the new headers or messages, so the two
+do not peer; every node must upgrade together and start on a fresh store
+(store format 5). Bitcoin is unchanged.
+
 Share-chain rule change on Bitcoin Cash, a flag day with its own protocol
 segment (`band-c64`): one share chain, and a difficulty band (issue #79, row
 3; `docs/sharechain/small-miners-design.md`, parts 1 and 2). The main and

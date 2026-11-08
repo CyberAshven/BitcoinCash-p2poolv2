@@ -1,6 +1,7 @@
 # Share chain redesign for payout variance and fees
 
-Status: parts 1 and 2 implemented on branch feat/one-chain-band; parts 3 to 5
+Status: parts 1 and 2 implemented on branch feat/one-chain-band, part 3 on
+branch feat/weak-shares (store format 5); parts 4 and 5
 are proposals. Tracked in
 [issue #79](https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues/79).
 Values marked *(sim)* are first proposals that the simulation in row 2 of the
@@ -508,7 +509,7 @@ never race, so they add credit without adding stale shares.
 |---|---|---|---|
 | 1 One chain | the mini chain's genesis tag only | 3 | flag day: every node restarts on a fresh store |
 | 2 Band | `band-c64` | 3 | same flag day |
-| 3 Weak shares | `weak-64-200-6` | 3 | same flag day; old nodes cannot read the new share message |
+| 3 Weak shares | `weak-64-500-6` | 5 | same flag day; old nodes cannot read the new header or the weak share message |
 | 4 Payout levels | `levels-546x2` | 3 | same flag day |
 | 5 Share period | none; share version 2 | 3 | share-version vote |
 
