@@ -84,6 +84,7 @@ mod tests {
     use super::*;
     use crate::accounting::payout::coinbase_budget::PayoutSplit;
     use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+    use crate::accounting::payout::payout_levels::PplnsWeights;
     use crate::address::share_owner::ShareOwner;
     use crate::config::Chain;
     use crate::pool_difficulty::MockPoolDifficulty;
@@ -353,7 +354,7 @@ mod tests {
         ));
         let outputs = build_pplns_outputs(
             template.coinbasevalue,
-            &HashMap::from([(payout.clone(), 1)]),
+            &PplnsWeights::without_levels(HashMap::from([(payout.clone(), 1)])),
             &None,
             None,
             &None,
@@ -389,7 +390,8 @@ mod tests {
         );
         let tracker = start_tracker_actor();
         let owner = ShareOwner::CashP2pkh([9; 20]);
-        let (job_id, _) = insert_miner_job(&prepared, Some(&payout), Some(owner), None, &tracker);
+        let (job_id, _) =
+            insert_miner_job(&prepared, Some(&payout), Some(owner), None, None, &tracker);
         let job = tracker.get_job(job_id).unwrap();
         let commitment = job.share_commitment.clone().unwrap();
         assert_eq!(

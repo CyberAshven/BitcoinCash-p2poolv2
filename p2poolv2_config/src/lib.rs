@@ -74,6 +74,23 @@ pub const DEFAULT_BITCOIN_CASH_FEE: u16 = 100;
 /// block it finds, while its shares still earn a slice of everyone else's.
 pub const MAX_BITCOIN_CASH_CUT: u16 = 1_000;
 
+/// The highest payout level `k` a Bitcoin Cash share may carry: level `k`
+/// pays slices below `546 * 2^k` satoshis by a draw
+/// (`docs/sharechain/small-miners-design.md`, part 4), so level 7 is 69,888
+/// satoshis, the cap that keeps large amounts out of any draw. A share-chain
+/// rule: a share header above it does not decode.
+pub const MAX_PAYOUT_LEVEL: u8 = 7;
+
+/// The payout level a Bitcoin Cash node gives a miner whose login chooses
+/// none, when `payout_level` is not set: level 5, 17,472 satoshis, about
+/// 0.85% of a payment spent at the default `spend_cost`. Node policy.
+pub const DEFAULT_PAYOUT_LEVEL: u8 = 5;
+
+/// What spending one payment costs, in satoshis, when `spend_cost` is not
+/// set: a P2PKH input of 148 bytes at 1 sat/byte. A miner's
+/// `fee-tolerance=` option is a share of a payment this cost may take.
+pub const DEFAULT_SPEND_COST: u64 = 148;
+
 /// [`BITCOIN_CASH_DONATION_ADDRESS`] under a network's CashAddr prefix, for
 /// logs and documentation. Each string decodes to
 /// [`bitcoin_cash_donation_address`] for that network.
@@ -485,6 +502,17 @@ pub struct StratumConfig<State = Raw> {
     /// the node merge-mines nothing. Bitcoin Cash in P2Pool mode only.
     #[serde(default)]
     pub merge_mining_tokens: Option<String>,
+    /// The payout level, 0 to [`MAX_PAYOUT_LEVEL`], a Bitcoin Cash node
+    /// gives a miner whose login sets neither `min-payout=` nor
+    /// `fee-tolerance=`. Parsing fills an unset value with
+    /// [`DEFAULT_PAYOUT_LEVEL`] and refuses one above the maximum.
+    #[serde(default)]
+    pub payout_level: Option<u8>,
+    /// What spending one payment costs, in satoshis, for a miner's
+    /// `fee-tolerance=` option and the node's level policy. Parsing fills an
+    /// unset value with [`DEFAULT_SPEND_COST`].
+    #[serde(default)]
+    pub spend_cost: Option<u64>,
 
     // Parsed addresses - only available when State = Parsed
     #[serde(skip)]
@@ -682,6 +710,15 @@ impl StratumConfig<Raw> {
 
         validate_cuts(self.chain, donation, fee)?;
         validate_light_templates(self.chain, self.template_source)?;
+        let payout_level = self.payout_level.unwrap_or(DEFAULT_PAYOUT_LEVEL);
+        if payout_level > MAX_PAYOUT_LEVEL {
+            return Err(ConfigError {
+                message: format!(
+                    "payout_level {payout_level} is above the highest payout level, \
+                     {MAX_PAYOUT_LEVEL}"
+                ),
+            });
+        }
 
         let sv2_authority = parse_sv2_authority(
             self.sv2_port,
@@ -734,6 +771,8 @@ impl StratumConfig<Raw> {
             wait_for_chain_sync: self.wait_for_chain_sync,
             mode: self.mode,
             merge_mining_tokens: self.merge_mining_tokens,
+            payout_level: Some(payout_level),
+            spend_cost: Some(self.spend_cost.unwrap_or(DEFAULT_SPEND_COST)),
             bootstrap_address_parsed: Some(bootstrap_address_parsed),
             donation_address_parsed,
             fee_address_parsed,
@@ -776,6 +815,18 @@ impl StratumConfig<Parsed> {
     /// Bitcoin Cash share address configured for this pool, if any.
     pub fn bch_miner_address(&self) -> Option<BchShareAddress> {
         self.bch_miner_address
+    }
+
+    /// The payout level of a miner whose login chooses none
+    /// ([`DEFAULT_PAYOUT_LEVEL`] unless `payout_level` is set).
+    pub fn payout_level(&self) -> u8 {
+        self.payout_level.unwrap_or(DEFAULT_PAYOUT_LEVEL)
+    }
+
+    /// What spending one payment costs, in satoshis
+    /// ([`DEFAULT_SPEND_COST`] unless `spend_cost` is set).
+    pub fn spend_cost(&self) -> u64 {
+        self.spend_cost.unwrap_or(DEFAULT_SPEND_COST)
     }
 
     /// Stratum V2 authority keys, when the operator configured them.
@@ -1167,6 +1218,8 @@ impl StratumConfig<Raw> {
             wait_for_chain_sync: true,
             mode: PoolMode::default(),
             merge_mining_tokens: None,
+            payout_level: None,
+            spend_cost: None,
             bootstrap_address_parsed: None,
             donation_address_parsed: None,
             fee_address_parsed: None,
@@ -2439,7 +2492,9 @@ mod tests {
     /// is refused at start-up instead of being read as the merged chain.
     #[test]
     fn a_config_that_still_sets_bch_share_chain_is_refused() {
-        let sample = std::fs::read_to_string("../config.sample.toml").unwrap();
+        let sample = std::fs::read_to_string("../config.sample.toml")
+            .unwrap()
+            .replace("\r\n", "\n");
         let with_share_chain = sample.replace(
             "\nbitcoin_cash_network = \"chipnet\"\n",
             "\nbitcoin_cash_network = \"chipnet\"\nbch_share_chain = \"main\"\n",
@@ -3077,6 +3132,34 @@ mod bitcoin_cash_donation_tests {
             .unwrap();
         assert_eq!(parsed.donation, Some(MAX_BITCOIN_CASH_CUT));
         assert_eq!(parsed.fee, Some(MAX_BITCOIN_CASH_CUT));
+    }
+
+    /// Without `payout_level` and `spend_cost` a node gives miners level 5
+    /// and prices a payment's spend at 148 satoshis.
+    #[test]
+    fn an_unset_payout_level_and_spend_cost_take_their_defaults() {
+        let parsed = bitcoin_cash_config_with_cuts(0, 0).parse().unwrap();
+
+        assert_eq!(parsed.payout_level(), DEFAULT_PAYOUT_LEVEL);
+        assert_eq!(parsed.payout_level, Some(5));
+        assert_eq!(parsed.spend_cost(), 148);
+    }
+
+    #[test]
+    fn the_highest_payout_level_is_accepted() {
+        let mut config = bitcoin_cash_config_with_cuts(0, 0);
+        config.payout_level = Some(MAX_PAYOUT_LEVEL);
+
+        assert_eq!(config.parse().unwrap().payout_level(), 7);
+    }
+
+    #[test]
+    fn a_payout_level_above_seven_is_refused() {
+        let mut config = bitcoin_cash_config_with_cuts(0, 0);
+        config.payout_level = Some(8);
+
+        let error = config.parse().unwrap_err();
+        assert!(error.message.contains("payout_level 8"), "{error:?}");
     }
 
     #[test]

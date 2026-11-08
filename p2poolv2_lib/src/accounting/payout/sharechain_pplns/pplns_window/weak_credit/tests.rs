@@ -8,13 +8,14 @@
 //* loaded share is paid. The minimum is `2^222`, the parent's weak ratio 4,
 //* so its weak target is `2^224`, below the ceiling the window is given.
 
-use super::super::{Chain, ConfirmedHeaderResult, DIFFICULTY_SCALE, PplnsWindow};
+use super::super::{Chain, ConfirmedHeaderResult, DIFFICULTY_SCALE, PplnsWindow, ShareCuts};
+use super::WeakEntry;
 use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
 use crate::shares::weak::{WEAK_RATIO_UNIT, WeakShare, WeakSummary, includer_part, target_work};
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::test_utils::TestShareBlockBuilder;
 use bitcoin::hashes::Hash;
-use bitcoin::{Address, CompactTarget, Network, PubkeyHash, ScriptBuf, Target, Work};
+use bitcoin::{Address, BlockHash, CompactTarget, Network, PubkeyHash, ScriptBuf, Target, Work};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
 use std::collections::HashMap;
@@ -372,4 +373,137 @@ fn per_unit_of_work_a_miner_at_the_minimum_earns_what_a_heavier_miner_earns() {
         (small_per_hash / heavy_per_hash - 1.0).abs() < 1e-6,
         "small {small_per_hash}, heavy {heavy_per_hash}"
     );
+}
+
+/// A weak entry of `miner` at `payout_level`, built as the window builds one
+/// from a carried weak share's credit group.
+fn weak_entry_at_level(
+    window: &mut PplnsWindow,
+    miner: PayoutAddress,
+    payout_level: u8,
+) -> WeakEntry {
+    WeakEntry {
+        cuts: ShareCuts::default(),
+        internal_key: window.address_keys.key_for(miner),
+        owner_key: window.owner_keys.key_for(ShareOwner::CashP2pkh([0x44; 20])),
+        bch_prev: BlockHash::all_zeros(),
+        payout_level,
+        count: 1,
+        work: 2,
+    }
+}
+
+/// A weak share is an entry for a payee's level: a miner whose newest
+/// credited entry is its weak share in a newer share by another miner is
+/// drawn at the weak share's own level.
+#[test]
+fn a_weak_share_newer_than_its_miners_share_sets_its_level() {
+    let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
+    let miner = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([1; 20]),
+        Network::Regtest,
+    ));
+    let other = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([9; 20]),
+        Network::Regtest,
+    ));
+    let anchor = BlockHash::from_byte_array([2; 32]);
+    let mut carrier =
+        window.build_confirmed_entry(anchor, 1, other, ShareOwner::CashP2pkh([9; 20]), 2, vec![]);
+    carrier.payout_level = 1;
+    carrier.weak_entries = vec![weak_entry_at_level(&mut window, miner.clone(), 6)];
+    let mut older = window.build_confirmed_entry(
+        BlockHash::from_byte_array([1; 32]),
+        0,
+        miner.clone(),
+        ShareOwner::CashP2pkh([1; 20]),
+        2,
+        vec![],
+    );
+    older.payout_level = 3;
+    window.confirmed_entries.push_back(carrier);
+    window.confirmed_entries.push_back(older);
+    let resolved = window.resolved_window(Vec::new(), 0, 1, HashMap::new());
+
+    let levels = window
+        .distribution_for_resolved(anchor, &resolved)
+        .unwrap()
+        .levels
+        .unwrap();
+
+    assert_eq!(levels.level_of(&miner), Some(6));
+}
+
+/// A share is newer than the weak shares it carries: its own level counts
+/// when both pay one miner.
+#[test]
+fn a_share_is_newer_than_the_weak_shares_it_carries() {
+    let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
+    let miner = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([1; 20]),
+        Network::Regtest,
+    ));
+    let anchor = BlockHash::from_byte_array([2; 32]);
+    let mut share = window.build_confirmed_entry(
+        anchor,
+        0,
+        miner.clone(),
+        ShareOwner::CashP2pkh([1; 20]),
+        2,
+        vec![],
+    );
+    share.payout_level = 2;
+    share.weak_entries = vec![weak_entry_at_level(&mut window, miner.clone(), 7)];
+    window.confirmed_entries.push_back(share);
+    let resolved = window.resolved_window(Vec::new(), 0, 1, HashMap::new());
+
+    let levels = window
+        .distribution_for_resolved(anchor, &resolved)
+        .unwrap()
+        .levels
+        .unwrap();
+
+    assert_eq!(levels.level_of(&miner), Some(2));
+}
+
+/// An uncle is newer than the weak shares the same share carries: the
+/// uncle's level counts when both pay one miner.
+#[test]
+fn an_uncle_is_newer_than_the_weak_shares_beside_it() {
+    let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
+    let miner = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([1; 20]),
+        Network::Regtest,
+    ));
+    let other = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([9; 20]),
+        Network::Regtest,
+    ));
+    let mut uncle = window.build_uncle_entry(
+        BlockHash::from_byte_array([3; 32]),
+        miner.clone(),
+        ShareOwner::CashP2pkh([1; 20]),
+        2,
+    );
+    uncle.payout_level = 4;
+    let anchor = BlockHash::from_byte_array([2; 32]);
+    let mut carrier = window.build_confirmed_entry(
+        anchor,
+        0,
+        other,
+        ShareOwner::CashP2pkh([9; 20]),
+        2,
+        vec![uncle],
+    );
+    carrier.weak_entries = vec![weak_entry_at_level(&mut window, miner.clone(), 1)];
+    window.confirmed_entries.push_back(carrier);
+    let resolved = window.resolved_window(Vec::new(), 0, 1, HashMap::new());
+
+    let levels = window
+        .distribution_for_resolved(anchor, &resolved)
+        .unwrap()
+        .levels
+        .unwrap();
+
+    assert_eq!(levels.level_of(&miner), Some(4));
 }

@@ -459,6 +459,9 @@ fn miner_report(shares: Vec<MinerShare>) -> MinerResponse {
         weight: "20".to_string(),
         share_fraction: 0.1,
         payout_fraction: 0.2,
+        payout_level: Some(5),
+        payout_level_satoshis: Some(17_472),
+        expected_payments_a_month: Some(4.5),
         shares,
     }
 }

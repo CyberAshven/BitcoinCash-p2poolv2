@@ -309,6 +309,7 @@ async fn requested_outputs_pay_the_per_share_donation_the_nodes_own_job_pays() {
         Some(&payee(1)),
         Some(ShareOwner::CashP2pkh([1; 20])),
         None,
+        None,
         &tracker,
     );
     let job = tracker.get_job(job_id).unwrap();
@@ -741,7 +742,7 @@ fn a_verify_for_an_anchor_past_the_depth_limit_is_unknown_without_the_window() {
             _anchor: BlockHash,
             _nbits: u32,
             _prev_hash: BlockHash,
-        ) -> Result<HashMap<PayoutAddress, u128>, WindowError> {
+        ) -> Result<PplnsWeights, WindowError> {
             panic!("a too deep anchor must not reach the window");
         }
         fn anchor_depth(&self, _anchor: BlockHash) -> Option<u32> {

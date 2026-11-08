@@ -10,6 +10,7 @@ use libp2p::request_response::{Codec, OutboundFailure};
 use std::io;
 
 use crate::accounting::payout::coinbase_budget::bch_payout_rule_tag;
+use crate::accounting::payout::payout_levels::BCH_PAYOUT_LEVELS_RULE_TAG;
 use crate::accounting::payout::sharechain_pplns::payout_rights::BCH_PAYOUT_HOLDER_RULE_TAG;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
     BCH_COINBASE_MATURITY, BCH_GENESIS_LAST_RESORT_RULE_TAG, BCH_PER_SHARE_CUTS_RULE_TAG,
@@ -127,6 +128,16 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// starts from a new genesis, so every node upgrades together on a fresh
 /// store rather than through the vote.
 ///
+/// Payout levels (`BCH_PAYOUT_LEVELS_RULE_TAG`, 2026-11-09, issue #79 row 3,
+/// part 4) are the fourth flag day, on the same restart. Each share header
+/// carries its miner's payout level, and a slice of a found block below its
+/// payee's level `546 * 2^k` satoshis is paid by a draw among the slices at
+/// that level, seeded from the share's parent (`payout_levels`). A node
+/// before it cannot read the longer header and would rebuild another
+/// coinbase whenever a payee is below its level, and the header change gives
+/// the chain a new genesis, so every node upgrades together on a fresh store
+/// rather than through the vote.
+///
 /// Weak shares (`BCH_WEAK_SHARE_RULE_TAG`, 2026-11-09, issue #79 row 5) ship
 /// on the same flag day: a share carries up to `WEAK_CAP` (64) easier proofs
 /// of work on jobs at the minimum, each with its parent at most `WEAK_DEPTH`
@@ -140,7 +151,7 @@ fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
         Chain::BitcoinCash => Some(format!(
-            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_PER_SHARE_CUTS_RULE_TAG}/{BCH_UNCLE_ONCE_RULE_TAG}/{BCH_SHARE_BODY_RULE_TAG}/{BCH_PAYOUT_SCRIPT_RULE_TAG}/{}/{}/{}/{BCH_NO_SEGWIT_RULE_TAG}/{BCH_WORK_WEIGHT_RULE_TAG}/{BCH_MERGE_MINING_RULE_TAG}/{BCH_SHARE_VERSION_RULE_TAG}/{BCH_CURRENT_CHAIN_RULE_TAG}/{BCH_GENESIS_LAST_RESORT_RULE_TAG}/{BCH_BAND_RULE_TAG}/{BCH_WEAK_SHARE_RULE_TAG}",
+            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_PER_SHARE_CUTS_RULE_TAG}/{BCH_UNCLE_ONCE_RULE_TAG}/{BCH_SHARE_BODY_RULE_TAG}/{BCH_PAYOUT_SCRIPT_RULE_TAG}/{}/{}/{}/{BCH_NO_SEGWIT_RULE_TAG}/{BCH_WORK_WEIGHT_RULE_TAG}/{BCH_MERGE_MINING_RULE_TAG}/{BCH_SHARE_VERSION_RULE_TAG}/{BCH_CURRENT_CHAIN_RULE_TAG}/{BCH_GENESIS_LAST_RESORT_RULE_TAG}/{BCH_BAND_RULE_TAG}/{BCH_PAYOUT_LEVELS_RULE_TAG}/{BCH_WEAK_SHARE_RULE_TAG}",
             bch_payout_rule_tag(),
             bch_merkle_rule_tag(),
             bch_depth_rule_tag(),
@@ -414,7 +425,7 @@ mod tests {
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/weak-64-500-6/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2/weak-64-500-6/1.0.0"
             )
         );
     }
@@ -487,7 +498,7 @@ mod tests {
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         let before = current.replace(
-            "/bch-prev-1off/genesis-last-resort/band-c64/weak-64-500-6/",
+            "/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2/weak-64-500-6/",
             "/",
         );
 
@@ -505,7 +516,10 @@ mod tests {
             .unwrap()
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
-        let before = current.replace("/genesis-last-resort/band-c64/weak-64-500-6/", "/");
+        let before = current.replace(
+            "/genesis-last-resort/band-c64/levels-546x2/weak-64-500-6/",
+            "/",
+        );
 
         assert_ne!(current, before);
         assert!(before.ends_with("/bch-prev-1off/1.0.0"), "{before}");
@@ -521,14 +535,30 @@ mod tests {
             .unwrap()
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
-        let before = current.replace("/band-c64/weak-64-500-6/", "/");
+        let before = current.replace("/band-c64/levels-546x2/weak-64-500-6/", "/");
 
         assert_ne!(current, before);
         assert!(before.ends_with("/genesis-last-resort/1.0.0"), "{before}");
     }
 
+    /// A chipnet node from before payout levels derived the string ending
+    /// `.../band-c64/1.0.0`. It cannot read a header with a payout level and
+    /// pays every payee its exact slice, so the new string differs and the
+    /// two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_payout_levels() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current.replace("/levels-546x2/weak-64-500-6/", "/");
+
+        assert_ne!(current, before);
+        assert!(before.ends_with("/band-c64/1.0.0"), "{before}");
+    }
+
     /// A chipnet node from before weak shares derived the string ending
-    /// `.../band-c64/1.0.0`. It cannot read a header with a weak ratio and
+    /// `.../levels-546x2/1.0.0`. It cannot read a header with a weak ratio and
     /// carried weak shares, nor the weak share message, and credits shares at
     /// their own work, so the new string differs and the two cannot negotiate.
     #[test]
@@ -540,7 +570,7 @@ mod tests {
         let before = current.replace("/weak-64-500-6/", "/");
 
         assert_ne!(current, before);
-        assert!(before.ends_with("/band-c64/1.0.0"), "{before}");
+        assert!(before.ends_with("/levels-546x2/1.0.0"), "{before}");
     }
 
     /// A chipnet node from before the one-nephew uncle rule derived
@@ -631,7 +661,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/weak-64-500-6/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2/weak-64-500-6/kad/1.0.0"
             )
         );
     }

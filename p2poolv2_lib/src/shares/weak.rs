@@ -287,9 +287,10 @@ pub fn empty_weak_root() -> sha256d::Hash {
 }
 
 /// The carried weak shares of one share that pay one payee alike: mined on
-/// the same parent, paying the same address with the same donation and fee
-/// and building on the same Bitcoin Cash block. Each is credited at the
-/// weak work of that parent, so a group stands for `count` equal credits.
+/// the same parent, paying the same address with the same donation, fee and
+/// payout level and building on the same Bitcoin Cash block. Each is
+/// credited at the weak work of that parent, so a group stands for `count`
+/// equal credits.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct WeakCreditGroup {
     /// The share the weak shares were mined on: its weak target sets their
@@ -305,6 +306,9 @@ pub struct WeakCreditGroup {
     /// Their fee address and basis points.
     pub fee_address: Option<PayoutAddress>,
     pub fee: Option<u16>,
+    /// Their payout level (`ShareHeader::payout_level`): the level their
+    /// payee is drawn at when one of them is its newest credited entry.
+    pub payout_level: u8,
     /// The Bitcoin Cash block they build on, which places their work on a
     /// Bitcoin Cash chain (`bch_eligibility`).
     pub bch_prev: BlockHash,
@@ -322,6 +326,7 @@ impl WeakCreditGroup {
             && self.donation == header.donation
             && self.fee_address == header.fee_address
             && self.fee == header.fee
+            && self.payout_level == header.payout_level
             && self.bch_prev == header.bitcoin_header.prev_blockhash
     }
 
@@ -335,6 +340,7 @@ impl WeakCreditGroup {
             donation: header.donation,
             fee_address: header.fee_address.clone(),
             fee: header.fee,
+            payout_level: header.payout_level,
             bch_prev: header.bitcoin_header.prev_blockhash,
             count: 1,
         }
@@ -386,6 +392,7 @@ impl Encodable for WeakCreditGroup {
         length += self.donation.unwrap_or(0).consensus_encode(writer)?;
         length += encode_optional_address(&self.fee_address, writer)?;
         length += self.fee.unwrap_or(0).consensus_encode(writer)?;
+        length += self.payout_level.consensus_encode(writer)?;
         length += self.bch_prev.consensus_encode(writer)?;
         length += self.count.consensus_encode(writer)?;
         Ok(length)
@@ -403,6 +410,7 @@ impl Decodable for WeakCreditGroup {
         let donation = Some(u16::consensus_decode(reader)?).filter(|cut| *cut > 0);
         let fee_address = decode_optional_address(reader)?;
         let fee = Some(u16::consensus_decode(reader)?).filter(|cut| *cut > 0);
+        let payout_level = u8::consensus_decode(reader)?;
         Ok(Self {
             parent,
             payout_address,
@@ -411,6 +419,7 @@ impl Decodable for WeakCreditGroup {
             donation,
             fee_address,
             fee,
+            payout_level,
             bch_prev: BlockHash::consensus_decode(reader)?,
             count: u32::consensus_decode(reader)?,
         })

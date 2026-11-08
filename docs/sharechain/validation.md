@@ -66,6 +66,18 @@ parent's (`next_weak_ratio` in `shares/weak.rs`: down by `R / 256` when the
 parent carried more than 32 weak shares, up by `R / 256` when it carried
 fewer, the same at exactly 32; between 1 and 4096; 4096 at genesis). Full
 validation, header sync and block receipt check it with the band.
+### The payout level (Bitcoin Cash)
+
+Since 2026-11-09 a Bitcoin Cash share header also carries `payout_level`,
+the payout level `k` of its miner, one byte after the band and committed
+after it under tag `0x25`
+([Coinbase payouts](../payouts/coinbase.md#payout-levels)). It must be at
+most 7. A header with a higher level does not decode, so header sync, block
+receipt and the store all refuse it the same way, before any other check.
+Any level from 0 to 7 is valid: which level a miner mines at is its own and
+its node's choice. The level matters only when a coinbase pays the share's
+payee: a payee below its level is paid by the draw, which the coinbase
+rebuild below checks. Bitcoin shares carry no level.
 
 Share headers carry everything needed to check the target, but only once all
 of a header's ancestors are known. During the first sync a node therefore
@@ -207,6 +219,10 @@ carries. The rebuild covers:
   behind a 100-share maturity skip and at most 120,960 shares;
 - who is paid: on Bitcoin Cash the holder of each share's payout right
   ([Trading shares for BCH](../atomic-swap/bch-share-trading.md#payout-rights));
+- the payout level draw: on Bitcoin Cash each payee below the level of its
+  newest credited entry is pooled with the others at that level, and the
+  pot is drawn with the seed of the share's parent and the level
+  ([Coinbase payouts](../payouts/coinbase.md#payout-levels));
 - output 0, the merge-mining v2 commitment: the root, `h` and salt from
   `pool_merge_mining` on a pool-built token share or `bch_coinbase` on a
   Job Declaration share, and the exact empty commitment otherwise,

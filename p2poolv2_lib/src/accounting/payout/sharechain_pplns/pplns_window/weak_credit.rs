@@ -50,6 +50,8 @@ pub(super) struct WeakEntry {
     /// The block they build on, which places their work on a Bitcoin Cash
     /// chain.
     pub(super) bch_prev: BlockHash,
+    /// Their payout level (`WeakCreditGroup::payout_level`).
+    pub(super) payout_level: u8,
     /// How many weak shares the entry holds.
     pub(super) count: u32,
     /// Their weak work together: `count` times the weak work of their
@@ -200,6 +202,7 @@ impl PplnsWindow {
                 internal_key: self.address_keys.key_for(group.payout_address.clone()),
                 owner_key: self.owner_keys.key_for(group.share_owner),
                 bch_prev: group.bch_prev,
+                payout_level: group.payout_level,
                 count: group.count,
                 work: parent_work.saturating_mul(u128::from(group.count)),
             });
@@ -253,7 +256,10 @@ impl PplnsWindow {
 
     /// Credit the weak shares `entry` carries: each weak entry the window
     /// pays earns its weak work, less [`INCLUDER_CUT`], for its own payee
-    /// after its own cuts. Returns the includer's part of the paid weak
+    /// after its own cuts. Each credit carries its weak shares' own payout
+    /// level and is placed after the share's own credit and its uncles, in
+    /// the order its group first appears among the carried weak shares
+    /// (`NewestLevel`). Returns the includer's part of the paid weak
     /// entries, which the carrying share adds to its own weight.
     pub(super) fn credit_weak_entries(
         entry: &ConfirmedEntry,
@@ -261,7 +267,7 @@ impl PplnsWindow {
         credit: &mut impl FnMut(Credit),
     ) -> u128 {
         let mut includer_bonus: u128 = 0;
-        for weak_entry in &entry.weak_entries {
+        for (group_index, weak_entry) in entry.weak_entries.iter().enumerate() {
             if !resolved.pays(&weak_entry.bch_prev) {
                 continue;
             }
@@ -276,6 +282,8 @@ impl PplnsWindow {
                 difficulty: weak_entry.work,
                 weight: scaled - includer,
                 weak_shares: weak_entry.count,
+                payout_level: weak_entry.payout_level,
+                place_in_share: 1 + entry.uncle_entries.len() + group_index,
             });
             includer_bonus = includer_bonus.saturating_add(includer);
         }

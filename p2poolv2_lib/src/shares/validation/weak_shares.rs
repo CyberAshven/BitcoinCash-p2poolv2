@@ -372,14 +372,14 @@ impl DefaultShareValidator {
                 bitcoin_block_difficulty(header.bitcoin_header.bits, window.network()),
                 header.bitcoin_header.prev_blockhash,
             );
-            let distribution = window
-                .get_distribution_from_start_hash(
+            let weights = window
+                .get_weights_from_start_hash(
                     header.prev_share_blockhash,
                     paying_block,
                     chain_store_handle,
                 )
                 .map_err(window_error_verdict)?;
-            Self::build_expected_outputs(header, &distribution, weak_share.coinbase_value, split)
+            Self::build_expected_outputs(header, &weights, weak_share.coinbase_value, split)
         })?;
         let commitment_hash = ShareCommitment::from_share_header_and_root(
             header,

@@ -162,7 +162,7 @@ fn next_payouts(chain: &ShareChain, next: &NextBlock) -> CoinbasePayouts {
     window.update(&chain.store).unwrap();
     let paying = PayingBlock::new(bitcoin_block_difficulty(next.bits, NETWORK), next.previous);
     let weights = window
-        .get_distribution_from_start_hash(chain.tip.block_hash(), paying, &chain.store)
+        .get_weights_from_start_hash(chain.tip.block_hash(), paying, &chain.store)
         .unwrap();
     build_pplns_outputs(
         next.coinbase_value,

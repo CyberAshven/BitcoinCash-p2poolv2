@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::*;
+use crate::accounting::payout::payout_levels::PplnsWeights;
 use crate::accounting::payout::sharechain_pplns::pplns_window::MockPplnsWindow;
 use crate::pool_difficulty::{AsertParent, MockPoolDifficulty};
 use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
@@ -339,8 +340,8 @@ fn a_weak_share_whose_coinbase_pays_its_window_passes_the_coinbase_rule() {
     let mut window = MockPplnsWindow::default();
     window.expect_network().return_const(Network::Regtest);
     window
-        .expect_get_distribution_from_start_hash()
-        .returning(move |_, _, _| Ok(distribution.clone()));
+        .expect_get_weights_from_start_hash()
+        .returning(move |_, _, _| Ok(PplnsWeights::without_levels(distribution.clone())));
     let validator =
         DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
 
@@ -384,9 +385,9 @@ fn weak_shares_on_one_template_share_one_window_walk() {
     let mut window = MockPplnsWindow::default();
     window.expect_network().return_const(Network::Regtest);
     window
-        .expect_get_distribution_from_start_hash()
+        .expect_get_weights_from_start_hash()
         .times(1)
-        .returning(move |_, _, _| Ok(distribution.clone()));
+        .returning(move |_, _, _| Ok(PplnsWeights::without_levels(distribution.clone())));
     let validator =
         DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
     let mut cache = WeakPayoutCache::new();
@@ -432,8 +433,13 @@ fn a_weak_share_whose_coinbase_does_not_pay_its_window_is_refused() {
     let mut window = MockPplnsWindow::default();
     window.expect_network().return_const(Network::Regtest);
     window
-        .expect_get_distribution_from_start_hash()
-        .returning(move |_, _, _| Ok(HashMap::from([(window_payee.clone(), 1_000u128)])));
+        .expect_get_weights_from_start_hash()
+        .returning(move |_, _, _| {
+            Ok(PplnsWeights::without_levels(HashMap::from([(
+                window_payee.clone(),
+                1_000u128,
+            )])))
+        });
     let validator =
         DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
 
@@ -475,8 +481,8 @@ fn a_weak_share_whose_branch_does_not_reach_its_merkle_root_is_refused() {
     let mut window = MockPplnsWindow::default();
     window.expect_network().return_const(Network::Regtest);
     window
-        .expect_get_distribution_from_start_hash()
-        .returning(move |_, _, _| Ok(distribution.clone()));
+        .expect_get_weights_from_start_hash()
+        .returning(move |_, _, _| Ok(PplnsWeights::without_levels(distribution.clone())));
     let validator =
         DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
 

@@ -48,6 +48,8 @@ use crate::accounting::OutputPair;
 use crate::accounting::payout::coinbase_budget::PayoutSplit;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::accounting::payout::payout_levels::PplnsWeights;
 #[cfg(test)]
 use crate::accounting::stats::metrics;
 #[cfg(any(test, feature = "test-utils"))]
@@ -879,7 +881,7 @@ pub(crate) fn test_bch_prepared_with_weights_and_cuts(
     test_bch_prepared_on(
         BlockHash::from_byte_array([0x33; 32]),
         template,
-        weights,
+        PplnsWeights::without_levels(weights),
         donation,
         fee,
         merge_tokens,
@@ -892,7 +894,7 @@ pub(crate) fn test_bch_prepared_with_weights_and_cuts(
 #[cfg(test)]
 pub(crate) fn test_bch_prepared_anchored(
     anchor: BlockHash,
-    weights: HashMap<PayoutAddress, u128>,
+    weights: PplnsWeights,
 ) -> Arc<PreparedNotifyParams> {
     let template: BlockTemplate = serde_json::from_str(include_str!(
         "../../bitcoindrpc/test_data/bchn-regtest-template.json"
@@ -921,7 +923,7 @@ pub(crate) fn test_bch_prepared_on_anchor(anchor: BlockHash) -> Arc<PreparedNoti
 fn test_bch_prepared_on(
     anchor: BlockHash,
     template: BlockTemplate,
-    weights: HashMap<PayoutAddress, u128>,
+    weights: PplnsWeights,
     (donation_address, donation): (Option<PayoutAddress>, Option<u16>),
     (fee_address, fee): (Option<PayoutAddress>, Option<u16>),
     merge_tokens: Option<Arc<TokenSet>>,
@@ -1731,6 +1733,7 @@ pub fn build_test_weak_share(weak: TestWeakShare<'_>) -> crate::shares::weak::We
         asert_bits: weak.minimum,
         wanted_bits: weak.bits,
         band_cap: crate::shares::band::BAND_CAP_UNIT,
+        payout_level: 0,
         weak_ratio: weak.weak_ratio,
         weak_count: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
@@ -1751,7 +1754,7 @@ pub fn build_test_weak_share(weak: TestWeakShare<'_>) -> crate::shares::weak::We
     );
     let payouts = build_pplns_outputs(
         coinbase_value,
-        weak.distribution,
+        &PplnsWeights::without_levels(weak.distribution.clone()),
         &None,
         None,
         &None,
@@ -1982,6 +1985,7 @@ pub fn create_test_commitment() -> ShareCommitment {
         asert_bits: CompactTarget::default(),
         wanted_bits: CompactTarget::default(),
         band_cap: 0,
+        payout_level: 0,
         weak_ratio: 0,
         weak_count: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
@@ -2119,6 +2123,7 @@ pub fn build_token_win_submit(
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
         None,
+        None,
         tracker,
     );
     let job = tracker.get_job(job_id).unwrap();
@@ -2230,6 +2235,7 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         asert_bits: CompactTarget::default(),
         wanted_bits: CompactTarget::default(),
         band_cap: 0,
+        payout_level: 0,
         weak_ratio: 0,
         weak_count: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
@@ -2298,6 +2304,7 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         asert_bits: CompactTarget::default(),
         wanted_bits: CompactTarget::default(),
         band_cap: 0,
+        payout_level: 0,
         weak_ratio: 0,
         weak_count: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
@@ -2334,6 +2341,7 @@ pub struct TestShareBlockBuilder {
     time: Option<u32>,
     cuts: TestShareCuts,
     band: Option<TestShareBand>,
+    payout_level: u8,
     weak_ratio: Option<u32>,
     weak_shares: Vec<crate::shares::weak::WeakShare>,
 }
@@ -2484,6 +2492,13 @@ impl TestShareBlockBuilder {
         self
     }
 
+    /// Commit payout level `payout_level` (`accounting::payout::payout_levels`)
+    /// instead of level 0. A Bitcoin share carries no level.
+    pub fn payout_level(mut self, payout_level: u8) -> Self {
+        self.payout_level = payout_level;
+        self
+    }
+
     /// Commit this weak ratio (`shares::weak`) instead of the default, the
     /// genesis ratio `R_MAX` on Bitcoin Cash, which stays where it is under a
     /// parent carrying no weak shares.
@@ -2543,6 +2558,7 @@ impl TestShareBlockBuilder {
             self.time,
             self.cuts,
             self.band,
+            self.payout_level,
             TestShareWeak {
                 weak_ratio: self.weak_ratio,
                 weak_shares: self.weak_shares,
@@ -2646,8 +2662,14 @@ fn test_share_block(
     time: Option<u32>,
     cuts: TestShareCuts,
     band: Option<TestShareBand>,
+    payout_level: u8,
     weak: TestShareWeak,
 ) -> ShareBlock {
+    //* A Bitcoin share carries no payout level.
+    let payout_level = match share_owner {
+        ShareOwner::CashP2pkh(_) => payout_level,
+        _ => 0,
+    };
     let share_bits = bits.unwrap_or(CompactTarget::from_consensus(
         0x01e0377ae * work.unwrap_or(1),
     ));
@@ -2691,6 +2713,7 @@ fn test_share_block(
                 asert_bits: share_band.asert_bits,
                 wanted_bits: share_band.wanted_bits,
                 band_cap: share_band.band_cap,
+                payout_level,
                 weak_ratio,
                 weak_count,
                 weak_root,
@@ -2771,6 +2794,7 @@ fn test_share_block(
         asert_bits: share_band.asert_bits,
         wanted_bits: share_band.wanted_bits,
         band_cap: share_band.band_cap,
+        payout_level,
         weak_ratio,
         weak_count,
         weak_root,
@@ -2864,6 +2888,7 @@ impl TestShareHeaderBuilder {
             asert_bits: CompactTarget::default(),
             wanted_bits: CompactTarget::default(),
             band_cap: 0,
+            payout_level: 0,
             weak_ratio: 0,
             weak_count: 0,
             weak_root: crate::shares::weak::empty_weak_root(),

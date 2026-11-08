@@ -10,6 +10,7 @@
 //! network: the main and mini chains merged on 2026-11-09 into one that keeps
 //! the mini chain's anchor, ceiling and genesis (`MINI_ANCHOR_TARGET`).
 
+use crate::accounting::payout::payout_levels::GENESIS_PAYOUT_LEVEL;
 use crate::config::{BitcoinCashNetwork, Chain, StratumConfig};
 use crate::shares::band::GENESIS_BAND_CAP;
 use crate::shares::coinbase_proof::CoinbaseProof;
@@ -95,6 +96,7 @@ pub fn build(network: BchShareNetwork) -> Result<ShareBlock, Box<dyn Error + Sen
         asert_bits: anchor_bits,
         wanted_bits: anchor_bits,
         band_cap: GENESIS_BAND_CAP,
+        payout_level: GENESIS_PAYOUT_LEVEL,
         weak_ratio: GENESIS_WEAK_RATIO,
         weak_count: 0,
         weak_root: empty_weak_root(),
@@ -260,15 +262,16 @@ mod tests {
     // values were computed before and after the upstream sync through
     // `61810c56`, which moved the Bitcoin genesis blocks to `.dat` files.
 
-    /// Pinned again on 2026-11-09: the header gained its band (`shares::band`)
-    /// and its weak ratio and weak shares (`shares::weak`), which changed
-    /// every Bitcoin Cash genesis hash in a flag day.
+    /// Pinned again on 2026-11-09: the header gained its band (`shares::band`),
+    /// its payout level (`accounting::payout::payout_levels`) and its weak
+    /// ratio and weak shares (`shares::weak`), each of which changed every
+    /// Bitcoin Cash genesis hash in a flag day.
     #[test]
     fn mainnet_mini_genesis_hash_is_pinned() {
         let genesis = build(BchShareNetwork::Mainnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "3eb0808273be7a50f34aeef610dc106ae6cd9bc27279140c3f72ff545760f6bf"
+            "22e7589763ce92a77820b466f73e13decf36e4884780880a116a25bd42479116"
         );
     }
 
@@ -277,7 +280,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Chipnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "f0a4ff8fd62893c1038e44dc392ebc10cab800abfb76a1b1785b5ccd589addf5"
+            "146406e1067b94cc4923e5f8a580cf7d3c76cb4cde7fbbcf68432d5ad58daeb6"
         );
     }
 
@@ -286,7 +289,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Regtest).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "694ea2a127631e45bbd2ca9fb8f35065d1c9c4eb6cc2b7cabf8f2b63720c8dd5"
+            "1db46a16c32bc01b68470b8b82dcb86047490d249cf73e85e49ff7da50e36025"
         );
     }
 

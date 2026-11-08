@@ -39,14 +39,16 @@ fn bch_job_token_roundtrips_all_terms_within_the_wire_budget() {
     };
     prepared.band_cap = 4096;
     prepared.weak_ratio = 256_000;
-    let token = prepared.mining_job_token([9; 32], 1234).unwrap();
+    let token = prepared
+        .mining_job_token_at_level([9; 32], 1234, 6)
+        .unwrap();
     assert!(token.len() <= 255);
     assert_eq!(
-        token[0], 4,
-        "token layout 4 carries the band cap and the weak ratio"
+        token[0], 5,
+        "token layout 5 carries the band cap, the payout level and the weak ratio"
     );
     let mut old_layout = token.clone();
-    old_layout[0] = 3;
+    old_layout[0] = 4;
     assert!(
         ShareCommitment::from_mining_job_token(
             &old_layout,
@@ -74,6 +76,7 @@ fn bch_job_token_roundtrips_all_terms_within_the_wire_budget() {
     assert_eq!(commitment.fee, Some(50));
     assert_eq!(commitment.share_version, prepared.share_version);
     assert_eq!(commitment.band_cap, 4096);
+    assert_eq!(commitment.payout_level, 6);
     assert_eq!(commitment.asert_bits, prepared.bits);
     assert_eq!(commitment.wanted_bits, prepared.bits);
     assert_eq!(commitment.weak_ratio, 256_000);
@@ -216,6 +219,7 @@ async fn a_job_without_share_transactions_commits_to_the_empty_root() {
         Some(&payout),
         Some(ShareOwner::CashP2pkh([9; 20])),
         None,
+        None,
         &tracker,
     );
 
@@ -245,6 +249,7 @@ async fn a_heavier_job_commits_to_its_own_bits_and_band() {
         Some(&payout),
         Some(ShareOwner::CashP2pkh([9; 20])),
         Some(job_band),
+        None,
         &tracker,
     );
 
@@ -273,6 +278,7 @@ async fn a_job_at_the_minimum_commits_to_the_templates_band() {
         Some(&payout),
         Some(ShareOwner::CashP2pkh([9; 20])),
         None,
+        None,
         &tracker,
     );
 
@@ -280,6 +286,61 @@ async fn a_job_at_the_minimum_commits_to_the_templates_band() {
     assert_eq!(commitment.bits, prepared.bits());
     assert_eq!(commitment.wanted_bits, prepared.bits());
     assert_eq!(commitment.asert_bits, prepared.bits());
+    assert_eq!(commitment.payout_level, prepared.payout_level());
+    assert!(coinbase2.contains(&hex::encode(commitment.hash().as_byte_array())));
+}
+
+/// A miner's own payout level replaces the node's in its job's commitment,
+/// and the digest its coinbase carries is the hash of the commitment it
+/// stores, as a peer rebuilds it from the share header.
+#[tokio::test]
+async fn a_job_commits_to_its_miners_own_payout_level() {
+    let prepared = test_bch_prepared();
+    let tracker = start_tracker_actor();
+    let payout = PayoutAddress::from(Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([1; 20]),
+        Network::Regtest,
+    ));
+
+    let (job_id, coinbase2) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([9; 20])),
+        None,
+        Some(2),
+        &tracker,
+    );
+
+    let commitment = tracker.get_job(job_id).unwrap().share_commitment.unwrap();
+    assert_ne!(prepared.payout_level(), 2);
+    assert_eq!(commitment.payout_level, 2);
+    assert_eq!(commitment.bits, prepared.bits());
+    assert!(coinbase2.contains(&hex::encode(commitment.hash().as_byte_array())));
+}
+
+/// A heavier job at a miner's own level carries both.
+#[tokio::test]
+async fn a_heavier_job_commits_to_its_band_and_its_miners_payout_level() {
+    let prepared = test_bch_prepared();
+    let tracker = start_tracker_actor();
+    let payout = PayoutAddress::from(Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([1; 20]),
+        Network::Regtest,
+    ));
+    let job_band = heavier_job_band(prepared.bits(), 4096, 2 * u64::from(BAND_CAP_UNIT));
+
+    let (job_id, coinbase2) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([9; 20])),
+        Some(job_band),
+        Some(7),
+        &tracker,
+    );
+
+    let commitment = tracker.get_job(job_id).unwrap().share_commitment.unwrap();
+    assert_eq!(commitment.bits, job_band.bits);
+    assert_eq!(commitment.payout_level, 7);
     assert!(coinbase2.contains(&hex::encode(commitment.hash().as_byte_array())));
 }
 
@@ -332,6 +393,7 @@ async fn jobs_commit_to_the_weak_shares_the_template_carries() {
         Some(&payout),
         Some(ShareOwner::CashP2pkh([9; 20])),
         None,
+        None,
         &tracker,
     );
     let (heavier_job, heavier_coinbase2) = insert_miner_job(
@@ -339,6 +401,7 @@ async fn jobs_commit_to_the_weak_shares_the_template_carries() {
         Some(&payout),
         Some(ShareOwner::CashP2pkh([9; 20])),
         Some(job_band),
+        None,
         &tracker,
     );
 
@@ -380,6 +443,7 @@ async fn only_a_job_at_the_minimum_has_a_weak_target() {
         Some(&payout),
         Some(ShareOwner::CashP2pkh([9; 20])),
         None,
+        None,
         &tracker,
     );
     let (heavier_job, _) = insert_miner_job(
@@ -387,6 +451,7 @@ async fn only_a_job_at_the_minimum_has_a_weak_target() {
         Some(&payout),
         Some(ShareOwner::CashP2pkh([9; 20])),
         Some(job_band),
+        None,
         &tracker,
     );
 
@@ -417,6 +482,7 @@ async fn a_heavier_job_held_at_the_minimum_has_the_weak_target() {
         Some(&payout),
         Some(ShareOwner::CashP2pkh([9; 20])),
         Some(held_band),
+        None,
         &tracker,
     );
 
@@ -473,6 +539,7 @@ async fn coinbase_part_lengths_are_the_lengths_of_each_miners_job() {
                 &prepared,
                 Some(&payout),
                 Some(ShareOwner::CashP2pkh([byte; 20])),
+                None,
                 None,
                 &tracker,
             );
@@ -614,6 +681,7 @@ async fn test_commitment_hash_matches_struct_hash() {
         asert_bits: CompactTarget::default(),
         wanted_bits: CompactTarget::default(),
         band_cap: 0,
+        payout_level: 0,
         weak_ratio: 0,
         weak_count: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
@@ -709,6 +777,7 @@ fn notify_hash_matches_share_commitment_hash() {
         asert_bits: CompactTarget::default(),
         wanted_bits: CompactTarget::default(),
         band_cap: 0,
+        payout_level: 0,
         weak_ratio: 0,
         weak_count: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
@@ -946,10 +1015,22 @@ async fn each_miner_s_job_carries_the_root_of_their_own_leaves() {
     let owner = ShareOwner::CashP2pkh([0x22; 20]);
     let first = regtest_payout(0x12);
     let second = regtest_payout(0x34);
-    let (first_id, _) =
-        insert_miner_job(&prepared, Some(&first), Some(owner), None, &tracker_handle);
-    let (second_id, _) =
-        insert_miner_job(&prepared, Some(&second), Some(owner), None, &tracker_handle);
+    let (first_id, _) = insert_miner_job(
+        &prepared,
+        Some(&first),
+        Some(owner),
+        None,
+        None,
+        &tracker_handle,
+    );
+    let (second_id, _) = insert_miner_job(
+        &prepared,
+        Some(&second),
+        Some(owner),
+        None,
+        None,
+        &tracker_handle,
+    );
     let first_job = tracker_handle.get_job(first_id).unwrap();
     let second_job = tracker_handle.get_job(second_id).unwrap();
 
@@ -1012,6 +1093,7 @@ async fn a_miner_s_token_coinbase_is_the_one_a_validator_rebuilds() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
         None,
         &tracker_handle,
     );
@@ -1080,7 +1162,7 @@ async fn a_job_without_a_payout_carries_the_empty_commitment() {
         None,
     );
     let tracker_handle = start_tracker_actor();
-    let (job_id, _) = insert_miner_job(&prepared, None, None, None, &tracker_handle);
+    let (job_id, _) = insert_miner_job(&prepared, None, None, None, None, &tracker_handle);
     let job = tracker_handle.get_job(job_id).unwrap();
     assert!(job.merge_tokens.is_none());
     assert_eq!(

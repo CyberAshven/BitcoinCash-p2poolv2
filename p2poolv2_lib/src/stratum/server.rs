@@ -35,6 +35,7 @@ use crate::stratum::session_timeout::{self, check_session_timeouts};
 use crate::stratum::sv2::{self, PoolTransactionCache, Sv2Mining};
 use crate::stratum::work::band_policy::miner_job_band;
 use crate::stratum::work::error::WorkError;
+use crate::stratum::work::level_policy::session_payout_level;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_with_job_id};
 use crate::stratum::work::tracker::JobTracker;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
@@ -915,7 +916,9 @@ fn session_hashrate<D: DifficultyAdjusterTrait>(
 /// On Bitcoin Cash a miner whose `miner_hashrate` would make too many shares
 /// at the minimum gets a heavier job inside the difficulty band
 /// (`band_policy::miner_job_band`); the ceiling then follows that job's own
-/// bits.
+/// bits. Its job carries its payout level: the one its login chose, or the
+/// node's, lowered when it would expect fewer than 3 payments a month
+/// (`level_policy::session_payout_level`).
 fn job_lines<D: DifficultyAdjusterTrait>(
     session: &mut Session<D>,
     prepared: &PreparedNotifyParams,
@@ -925,10 +928,13 @@ fn job_lines<D: DifficultyAdjusterTrait>(
 ) -> Result<String, WorkError> {
     let miner_prepared = prepared.for_miner_donation(session.donation)?;
     let prepared = miner_prepared.as_deref().unwrap_or(prepared);
-    let job_band = if is_hydrapool {
-        None
+    let (job_band, payout_level) = if is_hydrapool {
+        (None, None)
     } else {
-        miner_job_band(prepared, miner_hashrate)
+        (
+            miner_job_band(prepared, miner_hashrate),
+            Some(session_payout_level(session, prepared, miner_hashrate)),
+        )
     };
     //* A job at the minimum makes weak shares, so its ceiling follows the
     //* weak target (`PreparedNotifyParams::session_ceiling_bits`).
@@ -950,6 +956,7 @@ fn job_lines<D: DifficultyAdjusterTrait>(
         commitment_address,
         share_address,
         job_band,
+        payout_level,
         tracker_handle,
     )?;
     let mut lines = String::with_capacity(notify_json.len() + 1024);

@@ -1,8 +1,9 @@
 # Share chain redesign for payout variance and fees
 
-Status: parts 1 and 2 implemented on branch feat/one-chain-band, part 3 on
-branch feat/weak-shares (store format 5); parts 4 and 5
-are proposals. Tracked in
+Status: parts 1 and 2 implemented on branch feat/one-chain-band; part 4
+implemented on branch feat/payout-levels, on top of it (store format 4);
+part 3 on branch feat/weak-shares, on top of both (store format 5); part 5
+is a proposal. Tracked in
 [issue #79](https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues/79).
 Values marked *(sim)* are first proposals that the simulation in row 2 of the
 issue confirms or replaces.
@@ -403,7 +404,8 @@ L_k = 546 * 2^k satoshis,  k = 0 .. 7
 
 546 is Bitcoin Cash's P2PKH dust limit, the floor. 69,888 is the cap, which
 keeps large amounts out of any draw. Each Bitcoin Cash share header gains a
-field, committed after `wanted_bits` (tag byte `0x25`, then one byte):
+field, encoded after the band and committed after the band (tag byte `0x25`,
+then one byte); a header above 7 does not decode:
 
 | Field | Contents |
 |---|---|
@@ -411,7 +413,12 @@ field, committed after `wanted_bits` (tag byte `0x25`, then one byte):
 
 A payee's level in a block is the `payout_level` of its newest credited entry in
 the window: the newest share, uncle or weak share paying that address. The
-donation key and fee addresses are never drawn.
+walk visits window shares newest first; an uncle is placed at the share that
+includes it, as the window credits it, and a share is newer than the uncles
+it includes, which are its ancestors. A weak share is placed at the share
+that carries it, after that share's uncles, and has its own header's
+level. The donation key and fee addresses, every recipient of a donation or
+fee cut in the window, are never drawn, even when they also mine.
 
 ### The draw
 
@@ -424,7 +431,9 @@ amount `a` in satoshis:
    ordered by locking script bytes, and `S` is the sum of their amounts.
 3. `n = S / L`, rounded down.
 4. The seed is the first 8 bytes, as a little-endian integer, of
-   `SHA-256("p2pool-payout-level" || parent share hash || k)`.
+   `SHA-256("p2pool-payout-level" || parent share hash || k)`: the parent
+   share hash is the 32 bytes of the paying share's `prev_share_blockhash` as
+   its header serializes them, and `k` one byte.
 5. If `n` is 0, one point `p = seed mod S` picks the winner: the payee whose
    running total of amounts first exceeds `p`. It gets `S`.
 6. Otherwise `D = S / n` rounded down, points `p_j = (seed mod D) + j * D` for
@@ -433,7 +442,7 @@ amount `a` in satoshis:
    less than `n` satoshis.
 7. Each payee's winnings replace its amount; a payee that wins nothing is not
    paid in this block. The outputs are then ordered and built as today,
-   including the payout tree.
+   including the payout tree: by weight, as before the draw.
 
 Every payee's expected payment equals its amount, up to the at most `n`
 satoshis of step 6; the draw changes only how a group's pot is split, never
@@ -455,6 +464,15 @@ Without either, the node's default applies: level 5, 17,472 satoshis, about
 work makes fewer than 3 payments a month likely at the level it asked for
 (node policy, not a rule). The dashboard shows each miner its expected
 income, payments a month and monthly swing.
+
+As built: `min-payout=` wins when both are given; a `fee-tolerance=` no level
+meets gives level 7. The node estimates a miner's payments a month from its
+hashrate, the pool's (from its newest 60 confirmed shares) and the
+template's coinbase value, as the band's node policy sizes heavier jobs, and
+logs the warning once per connection. A Job Declaration token carries the
+level its identity chose, or the node's, unlowered. The `/miner` API and the
+dashboard's miner page show the miner's level and its expected payments a
+month at it; income and monthly swing are not shown yet.
 
 ### Steering the seed
 
@@ -510,8 +528,14 @@ never race, so they add credit without adding stale shares.
 | 1 One chain | the mini chain's genesis tag only | 3 | flag day: every node restarts on a fresh store |
 | 2 Band | `band-c64` | 3 | same flag day |
 | 3 Weak shares | `weak-64-500-6` | 5 | same flag day; old nodes cannot read the new header or the weak share message |
-| 4 Payout levels | `levels-546x2` | 3 | same flag day |
+| 4 Payout levels | `levels-546x2` | 4 | same flag day; old nodes cannot read the longer header |
 | 5 Share period | none; share version 2 | 3 | share-version vote |
+
+A part that changes what a stored share holds raises the store format when
+it merges, so the numbers follow the merge order: part 4 raised it to 4
+(2026-11-09), because its header carries the payout level, and part 3 to 5
+(2026-11-09), because its header carries the weak ratio and the store keeps
+the weak shares.
 
 Each part is its own pull request, with its plain-words explanation and the
 maintainer's agreement before merging. Chipnet restarts once per merged part

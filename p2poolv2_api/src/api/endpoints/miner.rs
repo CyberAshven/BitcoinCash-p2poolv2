@@ -26,6 +26,7 @@ use axum::{
 };
 use bitcoin::CompactTarget;
 use bitcoin::{BlockHash, Network};
+use p2poolv2_lib::accounting::payout::payout_levels::{PplnsWeights, level_amount};
 use p2poolv2_lib::accounting::payout::sharechain_pplns::PplnsWindow;
 use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::{
     MinerCredits, PayingBlock, WindowCredit, WindowCredits, WindowError, bitcoin_block_difficulty,
@@ -37,8 +38,11 @@ use p2poolv2_lib::config::PayoutAddress;
 use p2poolv2_lib::config::{BitcoinCashNetwork, Chain, parse_payout_address, parse_share_address};
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::store::writer::StoreError;
+use p2poolv2_lib::stratum::work::band_policy::{
+    POOL_HASHRATE_SHARES, pool_blocks_per_second, recent_pool_hashrate,
+};
+use p2poolv2_lib::stratum::work::level_policy::expected_payments_a_month;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
@@ -82,8 +86,29 @@ pub struct MinerResponse {
     /// PPLNS payout it would earn. The payout is what is left of the coinbase
     /// after the donation and fee the finding share's header sets.
     pub payout_fraction: f64,
+    /// Bitcoin Cash: the payout level `k` of this address's newest credited
+    /// entry in the window, the level its slice of the next block is drawn
+    /// at when the slice is smaller. Null on Bitcoin and with nothing in the
+    /// window.
+    pub payout_level: Option<u8>,
+    /// The smallest payment at `payout_level`, `546 * 2^k` satoshis.
+    pub payout_level_satoshis: Option<u64>,
+    /// An estimate of the payments a month this address can expect at
+    /// `payout_level`: the pool's blocks a month, from its recent hashrate
+    /// and the current template's target, times the share of a block's draw
+    /// its slice of the template's coinbase value wins on average, at most
+    /// one a block. Null without a level, a template or a pool hashrate.
+    pub expected_payments_a_month: Option<f64>,
     /// This address's shares and uncles, newest first, at most `limit`.
     pub shares: Vec<MinerShare>,
+}
+
+/// What the pool's next blocks look like, for a miner's expected payments:
+/// the current template's coinbase value and the pool's blocks a second.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PoolBlocks {
+    pub coinbase_value: u64,
+    pub blocks_per_second: f64,
 }
 
 /// The PPLNS window the miner is part of.
@@ -137,7 +162,7 @@ struct PreparationSnapshot {
     anchor: BlockHash,
     bits: u32,
     previous_hash: BlockHash,
-    weights: Arc<HashMap<PayoutAddress, u128>>,
+    weights: Arc<PplnsWeights>,
 }
 
 impl MinerWindowSource {
@@ -159,7 +184,7 @@ impl MinerWindowSource {
         bits: u32,
         previous_hash: BlockHash,
         chain_store_handle: &ChainStoreHandle,
-    ) -> Result<Arc<HashMap<PayoutAddress, u128>>, ApiError> {
+    ) -> Result<Arc<PplnsWeights>, ApiError> {
         let mut cache = self.preparation.lock().await;
         if let Some(snapshot) = cache.as_ref()
             && (snapshot.anchor, snapshot.bits, snapshot.previous_hash)
@@ -176,7 +201,7 @@ impl MinerWindowSource {
             let difficulty =
                 bitcoin_block_difficulty(CompactTarget::from_consensus(bits), window.network());
             window
-                .get_distribution_from_start_hash(
+                .get_weights_from_start_hash(
                     anchor,
                     PayingBlock::new(difficulty, previous_hash),
                     &store,
@@ -323,6 +348,7 @@ pub(crate) async fn miner_report(
     let window_credits = window_source
         .credits_at(anchor, &state.chain_store_handle)
         .await?;
+    let pool_blocks = pool_blocks(state, window_credits.anchor_height);
 
     Ok(build_response(
         &miner,
@@ -330,7 +356,29 @@ pub(crate) async fn miner_report(
         &window_credits,
         limit,
         &state.app_config,
+        pool_blocks,
     ))
+}
+
+/// The coinbase value of the template this node mines and the pool's blocks
+/// a second: its hashrate from the newest `POOL_HASHRATE_SHARES` confirmed
+/// shares up to `tip_height`, as the job builder estimates it, against the
+/// template's target. `None` without a template or a hashrate.
+fn pool_blocks(state: &AppState, tip_height: u32) -> Option<PoolBlocks> {
+    let job = state
+        .tracker_handle
+        .get_job(state.tracker_handle.get_latest_job_id())?;
+    let block_bits = CompactTarget::from_unprefixed_hex(&job.blocktemplate.bits).ok()?;
+    let from_height = tip_height.saturating_sub(POOL_HASHRATE_SHARES - 1);
+    let headers = state
+        .chain_store_handle
+        .get_confirmed_headers_in_range(from_height, tip_height)
+        .ok()?;
+    let pool_hashrate = recent_pool_hashrate(&headers)?;
+    Some(PoolBlocks {
+        coinbase_value: job.blocktemplate.coinbasevalue,
+        blocks_per_second: pool_blocks_per_second(pool_hashrate, block_bits),
+    })
 }
 
 /// Read `address` as either of the two addresses a share header carries,
@@ -417,13 +465,16 @@ fn window_error(error: WindowError) -> ApiError {
 
 /// Shape a miner's credits for the wire, listing at most `limit` shares and
 /// rendering every address for this node's chain. A miner the window does
-/// not credit gets zeros.
+/// not credit gets zeros. With `pool_blocks` the miner's expected payments
+/// a month at its payout level are estimated from its payout fraction of
+/// the template's coinbase value.
 fn build_response(
     miner: &MinerAddress,
     anchor: BlockHash,
     window_credits: &WindowCredits,
     limit: usize,
     app_config: &AppConfig,
+    pool_blocks: Option<PoolBlocks>,
 ) -> MinerResponse {
     let (address, address_type, miner_credits) = match miner {
         MinerAddress::Payout(address) => (
@@ -445,6 +496,18 @@ fn build_response(
         .take(limit)
         .map(|credit| miner_share(credit, app_config.cash_network))
         .collect();
+    let payout_fraction = fraction(miner_credits.weight, window_credits.window_weight);
+    let expected_payments_a_month =
+        miner_credits
+            .payout_level
+            .zip(pool_blocks)
+            .map(|(level, pool_blocks)| {
+                expected_payments_a_month(
+                    payout_fraction * pool_blocks.coinbase_value as f64,
+                    level,
+                    pool_blocks.blocks_per_second,
+                )
+            });
 
     MinerResponse {
         address,
@@ -465,7 +528,10 @@ fn build_response(
             miner_credits.share_count as u128,
             window_credits.window_share_count as u128,
         ),
-        payout_fraction: fraction(miner_credits.weight, window_credits.window_weight),
+        payout_fraction,
+        payout_level: miner_credits.payout_level,
+        payout_level_satoshis: miner_credits.payout_level.map(level_amount),
+        expected_payments_a_month,
         shares,
     }
 }

@@ -6,6 +6,7 @@ pub mod share_transaction;
 pub mod short_ids;
 
 use super::transactions;
+use crate::accounting::payout::payout_levels::MAX_PAYOUT_LEVEL;
 use crate::address::Address as P2PoolAddress;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::coinbase_proof::{
@@ -156,12 +157,21 @@ pub struct ShareHeader {
     /// one step from its parent's (`shares::band::next_band_cap`).
     #[serde(default)]
     pub band_cap: u32,
+    /// The payout level `k` of this share's miner, 0 to
+    /// [`MAX_PAYOUT_LEVEL`]: a slice of a found block below `546 * 2^k`
+    /// satoshis paying the address this share credits is paid by a draw
+    /// (`accounting::payout::payout_levels`). Encoded after the band, and
+    /// committed after it under its own tag, for Bitcoin Cash share owners
+    /// only; Bitcoin shares carry none and read as 0. A header above
+    /// [`MAX_PAYOUT_LEVEL`] does not decode.
+    #[serde(default)]
+    pub payout_level: u8,
     /// This share's weak ratio `R` in units of 1/1024, one step from its
     /// parent's (`shares::weak::next_weak_ratio`): weak shares mined on this
     /// share meet its weak target, its minimum times `R`
-    /// (`shares::weak::parent_weak_target`). Encoded after the band, and
-    /// committed with `weak_count` and `weak_root`, for Bitcoin Cash share
-    /// owners only; Bitcoin shares read all three as zero.
+    /// (`shares::weak::parent_weak_target`). Encoded after the payout level,
+    /// and committed with `weak_count` and `weak_root`, for Bitcoin Cash
+    /// share owners only; Bitcoin shares read all three as zero.
     #[serde(default)]
     pub weak_ratio: u32,
     /// How many weak shares this share's body carries (`shares::weak`).
@@ -297,6 +307,7 @@ impl ShareHeader {
             asert_bits: commitment.asert_bits,
             wanted_bits: commitment.wanted_bits,
             band_cap: commitment.band_cap,
+            payout_level: commitment.payout_level,
             weak_ratio: commitment.weak_ratio,
             weak_count: commitment.weak_count,
             weak_root: commitment.weak_root,
@@ -390,6 +401,7 @@ impl ShareHeader {
             len += self.wanted_bits.consensus_encode(w)?;
             len += self.band_cap.consensus_encode(w)?;
             len += self.asert_bits.consensus_encode(w)?;
+            len += self.payout_level.consensus_encode(w)?;
             len += self.weak_ratio.consensus_encode(w)?;
             len += self.weak_count.consensus_encode(w)?;
             len += self.weak_root.consensus_encode(w)?;
@@ -441,13 +453,14 @@ impl ShareHeader {
         } else {
             share_owner::consensus_decode_from_tag(owner_tag, r)?
         };
-        let (share_version, wanted_bits, band_cap, asert_bits) =
+        let (share_version, wanted_bits, band_cap, asert_bits, payout_level) =
             if matches!(miner_address, ShareOwner::CashP2pkh(_)) {
                 (
                     ShareVersion::consensus_decode(r)?,
                     CompactTarget::consensus_decode(r)?,
                     u32::consensus_decode(r)?,
                     CompactTarget::consensus_decode(r)?,
+                    decode_payout_level(r)?,
                 )
             } else {
                 (
@@ -455,6 +468,7 @@ impl ShareHeader {
                     CompactTarget::default(),
                     0,
                     CompactTarget::default(),
+                    0,
                 )
             };
         let (weak_ratio, weak_count, weak_root) =
@@ -538,11 +552,25 @@ impl ShareHeader {
             asert_bits,
             wanted_bits,
             band_cap,
+            payout_level,
             weak_ratio,
             weak_count,
             weak_root,
         })
     }
+}
+
+/// Decode a Bitcoin Cash header's payout level, refusing one above
+/// [`MAX_PAYOUT_LEVEL`]: a share-chain rule, so header sync, block receipt
+/// and the store all refuse such a header the same way.
+pub(crate) fn decode_payout_level<R: bitcoin::io::Read + ?Sized>(
+    reader: &mut R,
+) -> Result<u8, bitcoin::consensus::encode::Error> {
+    let payout_level = u8::consensus_decode(reader)?;
+    if payout_level > MAX_PAYOUT_LEVEL {
+        return Err(ParseFailed("payout level above 7"));
+    }
+    Ok(payout_level)
 }
 
 impl Encodable for ShareHeader {
@@ -739,6 +767,7 @@ impl ShareBlock {
             asert_bits: CompactTarget::default(),
             wanted_bits: CompactTarget::default(),
             band_cap: 0,
+            payout_level: 0,
             weak_ratio: 0,
             weak_count: 0,
             weak_root: sha256d::Hash::all_zeros(),
@@ -1124,6 +1153,88 @@ mod tests {
         assert_eq!(decoded.minimum_bits(), decoded.bits);
     }
 
+    /// A Bitcoin Cash header round-trips its payout level, one byte after
+    /// the band, and its coinbase proof holds: the commitment carries it.
+    #[test]
+    fn bitcoin_cash_header_round_trips_its_payout_level() {
+        let share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .payout_level(6)
+            .build();
+        let level_zero = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build();
+
+        let decoded: ShareHeader = deserialize(&serialize(&share.header)).unwrap();
+
+        assert_eq!(decoded, share.header);
+        assert_eq!(decoded.payout_level, 6);
+        assert_eq!(
+            serialize(&share.header).len(),
+            serialize(&level_zero.header).len()
+        );
+        CoinbaseProof::verify(&share.header, &share.template_merkle_branches).unwrap();
+    }
+
+    /// The proof of work fixes the payout level: another level is another
+    /// share hash and fails the coinbase proof.
+    #[test]
+    fn bitcoin_cash_header_binds_its_payout_level() {
+        let share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .payout_level(5)
+            .build();
+        let mut lower = share.header.clone();
+        lower.payout_level = 4;
+
+        assert_ne!(lower.block_hash(), share.header.block_hash());
+        assert!(CoinbaseProof::verify(&lower, &share.template_merkle_branches).is_err());
+    }
+
+    /// A Bitcoin Cash header claiming a payout level above 7 does not
+    /// decode, so header sync, block receipt and the store refuse it alike.
+    #[test]
+    fn a_bitcoin_cash_header_above_level_seven_does_not_decode() {
+        let mut header = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build()
+            .header;
+        header.payout_level = 8;
+
+        let error = deserialize::<ShareHeader>(&serialize(&header)).unwrap_err();
+
+        assert!(
+            error.to_string().contains("payout level above 7"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_bitcoin_cash_header_at_level_seven_decodes() {
+        let mut header = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build()
+            .header;
+        header.payout_level = 7;
+
+        let decoded: ShareHeader = deserialize(&serialize(&header)).unwrap();
+
+        assert_eq!(decoded.payout_level, 7);
+    }
+
+    /// A Bitcoin header carries no payout level: it is not encoded, and
+    /// decodes as 0.
+    #[test]
+    fn bitcoin_header_carries_no_payout_level() {
+        let bitcoin = TestShareBlockBuilder::new().build().header;
+        let mut leveled = bitcoin.clone();
+        leveled.payout_level = 7;
+
+        assert_eq!(serialize(&leveled), serialize(&bitcoin));
+        let decoded: ShareHeader = deserialize(&serialize(&leveled)).unwrap();
+        assert_eq!(decoded.payout_level, 0);
+    }
+
     /// A share is a token share exactly when its commitment is not the
     /// exact empty one: pool-built shares and declared shares with the empty
     /// commitment are no-token shares.
@@ -1345,6 +1456,7 @@ mod tests {
             asert_bits: CompactTarget::default(),
             wanted_bits: CompactTarget::default(),
             band_cap: 0,
+            payout_level: 0,
             weak_ratio: 0,
             weak_count: 0,
             weak_root: sha256d::Hash::all_zeros(),
