@@ -46,6 +46,8 @@ use crate::accounting::OutputPair;
 use crate::accounting::payout::coinbase_budget::PayoutSplit;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::accounting::payout::payout_levels::PplnsWeights;
 #[cfg(test)]
 use crate::accounting::stats::metrics;
 #[cfg(any(test, feature = "test-utils"))]
@@ -877,7 +879,7 @@ pub(crate) fn test_bch_prepared_with_weights_and_cuts(
     test_bch_prepared_on(
         BlockHash::from_byte_array([0x33; 32]),
         template,
-        weights,
+        PplnsWeights::without_levels(weights),
         donation,
         fee,
         merge_tokens,
@@ -890,7 +892,7 @@ pub(crate) fn test_bch_prepared_with_weights_and_cuts(
 #[cfg(test)]
 pub(crate) fn test_bch_prepared_anchored(
     anchor: BlockHash,
-    weights: HashMap<PayoutAddress, u128>,
+    weights: PplnsWeights,
 ) -> Arc<PreparedNotifyParams> {
     let template: BlockTemplate = serde_json::from_str(include_str!(
         "../../bitcoindrpc/test_data/bchn-regtest-template.json"
@@ -919,7 +921,7 @@ pub(crate) fn test_bch_prepared_on_anchor(anchor: BlockHash) -> Arc<PreparedNoti
 fn test_bch_prepared_on(
     anchor: BlockHash,
     template: BlockTemplate,
-    weights: HashMap<PayoutAddress, u128>,
+    weights: PplnsWeights,
     (donation_address, donation): (Option<PayoutAddress>, Option<u16>),
     (fee_address, fee): (Option<PayoutAddress>, Option<u16>),
     merge_tokens: Option<Arc<TokenSet>>,
@@ -1874,6 +1876,7 @@ pub fn create_test_commitment() -> ShareCommitment {
         asert_bits: CompactTarget::default(),
         wanted_bits: CompactTarget::default(),
         band_cap: 0,
+        payout_level: 0,
     }
 }
 
@@ -2008,6 +2011,7 @@ pub fn build_token_win_submit(
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
         None,
+        None,
         tracker,
     );
     let job = tracker.get_job(job_id).unwrap();
@@ -2119,6 +2123,7 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         asert_bits: CompactTarget::default(),
         wanted_bits: CompactTarget::default(),
         band_cap: 0,
+        payout_level: 0,
     };
     let commitment_hash = share_commitment.hash();
 
@@ -2184,6 +2189,7 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         asert_bits: CompactTarget::default(),
         wanted_bits: CompactTarget::default(),
         band_cap: 0,
+        payout_level: 0,
     };
 
     let template_merkle_branches = build_merkle_branches_for_template(&template)
@@ -2216,6 +2222,7 @@ pub struct TestShareBlockBuilder {
     time: Option<u32>,
     cuts: TestShareCuts,
     band: Option<TestShareBand>,
+    payout_level: u8,
 }
 
 /// The donation and fee a test share commits, in its header and in the
@@ -2364,6 +2371,13 @@ impl TestShareBlockBuilder {
         self
     }
 
+    /// Commit payout level `payout_level` (`accounting::payout::payout_levels`)
+    /// instead of level 0. A Bitcoin share carries no level.
+    pub fn payout_level(mut self, payout_level: u8) -> Self {
+        self.payout_level = payout_level;
+        self
+    }
+
     pub fn build(self) -> ShareBlock {
         let default_pubkey_hex =
             "020202020202020202020202020202020202020202020202020202020202020202";
@@ -2408,6 +2422,7 @@ impl TestShareBlockBuilder {
             self.time,
             self.cuts,
             self.band,
+            self.payout_level,
         )
     }
 }
@@ -2480,7 +2495,13 @@ fn test_share_block(
     time: Option<u32>,
     cuts: TestShareCuts,
     band: Option<TestShareBand>,
+    payout_level: u8,
 ) -> ShareBlock {
+    //* A Bitcoin share carries no payout level.
+    let payout_level = match share_owner {
+        ShareOwner::CashP2pkh(_) => payout_level,
+        _ => 0,
+    };
     let share_bits = bits.unwrap_or(CompactTarget::from_consensus(
         0x01e0377ae * work.unwrap_or(1),
     ));
@@ -2523,6 +2544,7 @@ fn test_share_block(
                 asert_bits: share_band.asert_bits,
                 wanted_bits: share_band.wanted_bits,
                 band_cap: share_band.band_cap,
+                payout_level,
             };
 
             let bitcoin_coinbase = build_bitcoin_coinbase_transaction(
@@ -2600,6 +2622,7 @@ fn test_share_block(
         asert_bits: share_band.asert_bits,
         wanted_bits: share_band.wanted_bits,
         band_cap: share_band.band_cap,
+        payout_level,
     };
 
     ShareBlock {
@@ -2689,6 +2712,7 @@ impl TestShareHeaderBuilder {
             asert_bits: CompactTarget::default(),
             wanted_bits: CompactTarget::default(),
             band_cap: 0,
+            payout_level: 0,
         }
     }
 }

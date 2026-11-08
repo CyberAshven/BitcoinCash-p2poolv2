@@ -637,6 +637,7 @@ mod tests {
 
     use super::*;
     use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+    use crate::accounting::payout::payout_levels::PplnsWeights;
     use crate::{
         stratum::work::block_template::BlockTemplate,
         test_utils::{create_test_commitment, genesis_for_tests},
@@ -1539,7 +1540,7 @@ mod tests {
     fn token_share_payouts(count: u8) -> CoinbasePayouts {
         build_pplns_outputs(
             312_500_000,
-            &bch_weights(count),
+            &PplnsWeights::without_levels(bch_weights(count)),
             &Some(bch_payout(0xd0, 0).address),
             Some(150),
             &Some(bch_payout(0xd1, 0).address),

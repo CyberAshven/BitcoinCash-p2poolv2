@@ -8,6 +8,7 @@ pub mod coinbase;
 pub mod difficulty;
 pub(crate) mod error;
 pub mod gbt;
+pub mod level_policy;
 pub mod merge_tokens;
 pub mod notify;
 pub mod prepared_notify;

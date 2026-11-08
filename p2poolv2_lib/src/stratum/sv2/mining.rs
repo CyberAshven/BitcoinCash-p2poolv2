@@ -54,7 +54,7 @@ use crate::stratum::message_handlers::submit::{
 };
 use crate::stratum::parse_password::{
     donation_percent, extract_string_value, log_unknown_options, parse_password,
-    resolve_miner_donation, split_user_identity,
+    resolve_miner_donation, resolve_miner_payout_level, split_user_identity,
 };
 use crate::stratum::server::StratumContext;
 use crate::stratum::session::Session;
@@ -62,6 +62,7 @@ use crate::stratum::validate_username;
 use crate::stratum::work::band_policy::miner_job_band;
 use crate::stratum::work::difficulty::validate::build_coinbase_from_components;
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
+use crate::stratum::work::level_policy::session_payout_level;
 use crate::stratum::work::merge_tokens::MinerTokenJob;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, insert_miner_job};
 use crate::stratum::work::tracker::{JobDetails, JobId};
@@ -811,6 +812,14 @@ impl MiningChannels {
                 return open_error(request_id, "invalid-donation");
             }
         };
+        let payout_level =
+            match resolve_miner_payout_level(options, self.ctx.share_chain, self.ctx.mode) {
+                Ok(payout_level) => payout_level,
+                Err(reason) => {
+                    debug!("Refusing SV2 channel for {username}: {reason}");
+                    return open_error(request_id, "invalid-payout-level");
+                }
+            };
         if kind == ChannelKind::Extended
             && let Some(prepared) = &current
         {
@@ -843,6 +852,7 @@ impl MiningChannels {
         session.parsed_address = validated.parsed_address;
         session.share_owner = share_owner;
         session.donation = donation;
+        session.payout_level = payout_level;
         if let Some(basis_points) = donation {
             debug!(
                 "SV2 channel for {username} mines with a {} P2Pool donation",
@@ -996,7 +1006,9 @@ impl MiningChannels {
     /// On Bitcoin Cash a miner whose hashrate would make too many shares at
     /// the minimum gets a heavier job inside the difficulty band
     /// (`band_policy::miner_job_band`), and the ceiling follows that job's
-    /// own bits.
+    /// own bits. The job carries the channel's payout level: the one its
+    /// identity chose, or the node's, lowered when the miner would expect
+    /// fewer than 3 payments a month (`level_policy::session_payout_level`).
     fn job_frames(
         &mut self,
         channel_id: u32,
@@ -1016,15 +1028,22 @@ impl MiningChannels {
             let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
             check_extended_job_fits(prefix_length, suffix_length)?;
         }
-        let job_band = if is_hydrapool {
-            None
+        let (job_band, payout_level) = if is_hydrapool {
+            (None, None)
         } else {
             let miner_hashrate = channel
                 .session
                 .btcaddress
                 .as_deref()
                 .and_then(|address| self.ctx.metrics.miner_hashrate(address));
-            miner_job_band(prepared, miner_hashrate)
+            (
+                miner_job_band(prepared, miner_hashrate),
+                Some(session_payout_level(
+                    &mut channel.session,
+                    prepared,
+                    miner_hashrate,
+                )),
+            )
         };
         let ceiling = job_share_difficulty_ceiling(
             self.ctx.mode,
@@ -1060,6 +1079,7 @@ impl MiningChannels {
             bitcoin_address,
             share_owner,
             job_band,
+            payout_level,
             &self.ctx.tracker_handle,
         );
         let job = self

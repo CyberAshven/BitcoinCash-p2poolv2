@@ -8,6 +8,7 @@ use super::gbt::LOST_CONTACT_AFTER;
 use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::PayoutSplit;
 use crate::accounting::payout::payout_distribution::{PayoutDistribution, build_pplns_outputs};
+use crate::accounting::payout::payout_levels::PplnsWeights;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
     PayingBlock, bitcoin_block_difficulty,
 };
@@ -127,7 +128,7 @@ fn build_prepared_notify(
     context.tracker.set_pool_target(target);
     // Bitcoin Cash shares follow the mining base's rule version, or the next
     // one once 95% of the vote span's work desires it (`next_share_version`).
-    let (share_version, band_cap, share_rate_limit) = if context.config.chain
+    let (share_version, band_cap, pool_hashrate) = if context.config.chain
         == crate::config::Chain::BitcoinCash
     {
         let mining_base = context
@@ -146,16 +147,18 @@ fn build_prepared_notify(
                 message: format!("Failed to tally the share version vote: {error}"),
             })?;
         //* Every share on this template carries the band cap one step
-        //* from the mining base's, and the node sizes heavier jobs from
-        //* the pool's recent block rate.
+        //* from the mining base's, and the node sizes heavier jobs and
+        //* lowers payout levels from the pool's recent hashrate.
         (
             share_version,
             next_band_cap(&ParentBand::from_header(&mining_base)),
-            bch_share_rate_limit(template, parent.height, &context.chain_store_handle),
+            bch_pool_hashrate(parent.height, &context.chain_store_handle),
         )
     } else {
         (ShareVersion::CURRENT, BAND_CAP_UNIT, None)
     };
+    let share_rate_limit =
+        pool_hashrate.and_then(|pool_hashrate| bch_share_rate_limit(template, pool_hashrate));
 
     //* Anchor the payout on the same `tip` we commit as prev_share_blockhash
     //* below, so a confirmed-chain advance between reads cannot make the
@@ -200,23 +203,20 @@ fn build_prepared_notify(
     .share_version(share_version)
     .band_cap(band_cap)
     .share_rate_limit(share_rate_limit)
+    .pool_hashrate(pool_hashrate)
+    .payout_level(context.config.payout_level())
+    .spend_cost(context.config.spend_cost())
     .share_transactions(share_transactions)
     .build()
 }
 
-/// The share rate above which a Bitcoin Cash miner gets heavier shares on
-/// `template` (`band_policy::share_rate_limit`): the pool's hashrate from
-/// the newest [`POOL_HASHRATE_SHARES`] confirmed shares up to `tip_height`,
-/// against the template's block target. `None` while the chain is too short
-/// or the read fails: every job is then at the minimum, which is always
-/// valid, so a node that cannot estimate the pool's block rate loses nothing
-/// but the heavier shares.
-fn bch_share_rate_limit(
-    template: &BlockTemplate,
-    tip_height: u32,
-    chain_store_handle: &ChainStoreHandle,
-) -> Option<f64> {
-    let block_bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).ok()?;
+/// The Bitcoin Cash pool's hashrate from the newest
+/// [`POOL_HASHRATE_SHARES`] confirmed shares up to `tip_height`. `None`
+/// while the chain is too short or the read fails: every job is then at the
+/// minimum and at its miner's chosen payout level, which is always valid, so
+/// a node that cannot estimate the pool's block rate loses nothing but the
+/// heavier shares and the level policy.
+fn bch_pool_hashrate(tip_height: u32, chain_store_handle: &ChainStoreHandle) -> Option<f64> {
     let from_height = tip_height.saturating_sub(POOL_HASHRATE_SHARES - 1);
     let headers = chain_store_handle
         .get_confirmed_headers_in_range(from_height, tip_height)
@@ -224,7 +224,14 @@ fn bch_share_rate_limit(
             debug!("No pool hashrate for heavier shares, every job at the minimum: {error}")
         })
         .ok()?;
-    let pool_hashrate = recent_pool_hashrate(&headers)?;
+    recent_pool_hashrate(&headers)
+}
+
+/// The share rate above which a Bitcoin Cash miner gets heavier shares on
+/// `template` (`band_policy::share_rate_limit`): `pool_hashrate` against
+/// the template's block target.
+fn bch_share_rate_limit(template: &BlockTemplate, pool_hashrate: f64) -> Option<f64> {
+    let block_bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).ok()?;
     Some(share_rate_limit(pool_hashrate, block_bits))
 }
 
@@ -239,7 +246,7 @@ fn bch_share_rate_limit(
 fn merge_token_payouts(
     template: &BlockTemplate,
     output_distribution: CoinbasePayouts,
-    weights: Option<&std::collections::HashMap<PayoutAddress, u128>>,
+    weights: Option<&PplnsWeights>,
     merge_tokens: Option<Arc<TokenSet>>,
     context: &NotifyContext,
 ) -> Result<(CoinbasePayouts, Option<Arc<TokenSet>>), WorkError> {

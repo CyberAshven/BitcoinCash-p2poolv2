@@ -9,6 +9,7 @@
 
 use crate::accounting::payout::coinbase_budget::bch_split_for_commitment;
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+use crate::accounting::payout::payout_levels::PplnsWeights;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::stratum::work::coinbase::{
@@ -18,8 +19,6 @@ use crate::stratum::work::coinbase::{
 use bitcoin::Amount;
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash;
-use p2poolv2_wallet::payout_address::PayoutAddress;
-use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug)]
@@ -74,7 +73,7 @@ impl std::error::Error for PreparationError {}
 pub fn prepare_coinbase(
     token: &[u8],
     commitment: ShareCommitment,
-    weights: &HashMap<PayoutAddress, u128>,
+    weights: &PplnsWeights,
     value: u64,
     height: u32,
     descriptor: BchCoinbase,
@@ -89,7 +88,7 @@ pub fn prepare_coinbase(
 pub fn prepare_declared_coinbase(
     token: &[u8],
     mut commitment: ShareCommitment,
-    weights: &HashMap<PayoutAddress, u128>,
+    weights: &PplnsWeights,
     value: u64,
     height: u32,
     descriptor: BchCoinbase,

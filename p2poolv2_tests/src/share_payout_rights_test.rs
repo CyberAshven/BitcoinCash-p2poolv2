@@ -233,9 +233,16 @@ fn next_coinbase(
     anchor: &ShareBlock,
     chain_store_handle: &ChainStoreHandle,
 ) -> Vec<OutputPair> {
+    let weights = window
+        .get_weights_from_start_hash(
+            anchor.block_hash(),
+            MINIMUM_PAYING_DIFFICULTY.into(),
+            chain_store_handle,
+        )
+        .unwrap();
     build_pplns_outputs(
         COINBASE_VALUE,
-        &weights(window, anchor, chain_store_handle),
+        &weights,
         &None,
         None,
         &None,
