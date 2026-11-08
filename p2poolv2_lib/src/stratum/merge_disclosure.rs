@@ -54,6 +54,9 @@ pub const EXTENSIONS_NEGOTIATION: u16 = 0x0001;
 pub const REQUEST_EXTENSIONS: u8 = 0x00;
 /// `RequestExtensions.Success`: the request id and the granted types.
 pub const REQUEST_EXTENSIONS_SUCCESS: u8 = 0x01;
+/// `RequestExtensions.Error`: the request id, the unsupported types and the
+/// types the server requires.
+pub const REQUEST_EXTENSIONS_ERROR: u8 = 0x02;
 /// The disclosure extension's message of a job's leaves.
 pub const JOB_LEAVES: u8 = 0x00;
 /// The disclosure extension's message of a share's token win.
@@ -74,8 +77,10 @@ pub const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
 /// connection never waits on the disk.
 const LOG_QUEUE_LINES: usize = 1024;
 
-/// The extensions a `RequestExtensions` payload asks for: its request id
-/// and the extension types. `None` when the payload is not exactly one.
+/// The extensions a `RequestExtensions` payload asks for, or a
+/// `RequestExtensions.Success` payload, of the same layout, grants: its
+/// request id and the extension types. `None` when the payload is not
+/// exactly one.
 pub fn requested_extensions(payload: &[u8]) -> Option<(u16, Vec<u16>)> {
     let request = u16::from_le_bytes(payload.get(..2)?.try_into().ok()?);
     let count = usize::from(u16::from_le_bytes(payload.get(2..4)?.try_into().ok()?));

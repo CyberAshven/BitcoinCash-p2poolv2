@@ -39,10 +39,15 @@
 //! Only Bitcoin Cash templates are mapped: a provider that requires coinbase
 //! outputs (a Bitcoin provider's segwit commitment) is refused.
 
+use super::large_templates::LARGE_TEMPLATES_EXTENSION;
 use super::noise::NoiseTransport;
-use super::session::{decode_plain_frames, encode_frame};
+use super::session::{Sv2Message, decode_plain_frames, encode_extension_frame, encode_frame};
 use crate::config::{BitcoinCashNetwork, TemplateProvider};
 use crate::stratum::block_submit::submit_block;
+use crate::stratum::merge_disclosure::{
+    EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS, REQUEST_EXTENSIONS_ERROR,
+    REQUEST_EXTENSIONS_SUCCESS, extensions_payload, requested_extensions,
+};
 use crate::stratum::work::block_template::{BlockTemplate, TemplateTransaction};
 use crate::stratum::work::error::WorkError;
 use crate::stratum::work::gbt::{LOST_CONTACT_AFTER, build_merkle_branches_for_template};
@@ -118,8 +123,14 @@ const MAX_PENDING_TEMPLATES: usize = 16;
 /// Found blocks queued for one provider connection.
 const SOLUTION_QUEUE: usize = 16;
 
-/// How long the provider has to answer `SetupConnection`.
+/// How long the provider has to answer `SetupConnection`, and how long the
+/// node waits for its answer to `RequestExtensions` before it carries on
+/// without the extension.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The request id of the one `RequestExtensions` this client sends on a
+/// connection.
+const EXTENSIONS_REQUEST_ID: u16 = 1;
 
 /// First wait before reconnecting to the provider; it doubles up to
 /// [`MAX_RECONNECT_DELAY`] while connections keep failing.
@@ -254,6 +265,22 @@ struct ProviderSession {
 }
 
 impl ProviderSession {
+    /// Handle one message from the provider: a base protocol message goes to
+    /// [`Self::on_message`], and a message of an extension this connection
+    /// did not negotiate is ignored.
+    fn dispatch(&mut self, message: Sv2Message) -> Result<Vec<SessionAction>, String> {
+        let Sv2Message {
+            extension_type,
+            message_type,
+            mut payload,
+        } = message;
+        if extension_type != 0 {
+            debug!("Ignoring a Template Provider message of extension {extension_type:#06x}");
+            return Ok(Vec::new());
+        }
+        self.on_message(message_type, &mut payload)
+    }
+
     /// Handle one message from the provider.
     ///
     /// A malformed message is an error, which ends the connection. Messages
@@ -624,28 +651,14 @@ enum Transport {
 }
 
 impl Transport {
-    /// Complete Template Distribution messages in `incoming`: type and
-    /// payload. This node negotiates no extension with a provider, so a
-    /// frame of one is left out.
-    fn decode(&mut self, incoming: &[u8]) -> Result<Vec<(u8, Vec<u8>)>, String> {
-        let messages = match self {
+    /// Complete messages in `incoming`, of the base protocol and of any
+    /// extension: the session tells which it takes
+    /// ([`ProviderSession::dispatch`]).
+    fn decode(&mut self, incoming: &[u8]) -> Result<Vec<Sv2Message>, String> {
+        match self {
             Transport::Plain { decoder, inbox } => decode_plain_frames(decoder, inbox, incoming),
             Transport::Noise(noise) => noise.decode(incoming),
-        }?;
-        Ok(messages
-            .into_iter()
-            .filter(|message| {
-                let base = message.extension_type == 0;
-                if !base {
-                    debug!(
-                        "Ignoring a Template Provider message of extension {:#06x}",
-                        message.extension_type
-                    );
-                }
-                base
-            })
-            .map(|message| (message.message_type, message.payload))
-            .collect())
+        }
     }
 
     /// Bytes to write for one unencrypted frame.
@@ -821,13 +834,16 @@ async fn serve_provider(
     (end, published)
 }
 
-/// Connect, run the Noise handshake when the key is pinned, and set up the
-/// Template Distribution Protocol with the coinbase output constraints.
+/// Connect, run the Noise handshake when the key is pinned, set up the
+/// Template Distribution Protocol, ask for the large templates extension
+/// ([`negotiate_large_templates`]) and declare the coinbase output
+/// constraints.
 ///
-/// Also returns any messages that arrived with the setup reply.
+/// Also returns any messages that arrived with the setup reply or while the
+/// node waited for the extension's answer.
 async fn open_connection(
     provider: &TemplateProvider,
-) -> Result<(Transport, TcpStream, Vec<(u8, Vec<u8>)>), String> {
+) -> Result<(Transport, TcpStream, Vec<Sv2Message>), String> {
     let mut stream = timeout(SETUP_TIMEOUT, TcpStream::connect(&provider.address))
         .await
         .map_err(|_| "connect timed out".to_string())?
@@ -847,9 +863,31 @@ async fn open_connection(
         .write_all(&setup)
         .await
         .map_err(|error| format!("write: {error}"))?;
-    let early_messages = timeout(SETUP_TIMEOUT, read_setup_reply(&mut stream, &mut transport))
+    let mut early_messages = timeout(SETUP_TIMEOUT, read_setup_reply(&mut stream, &mut transport))
         .await
         .map_err(|_| "no SetupConnection reply".to_string())??;
+    let answer = negotiate_large_templates(
+        &mut stream,
+        &mut transport,
+        &mut early_messages,
+        SETUP_TIMEOUT,
+    )
+    .await?;
+    match answer {
+        ExtensionAnswer::Granted => info!(
+            "Template Provider at {} granted the large templates extension (0x4C54)",
+            provider.address
+        ),
+        ExtensionAnswer::Refused => info!(
+            "Template Provider at {} did not grant the large templates extension (0x4C54); asking for each template's transactions",
+            provider.address
+        ),
+        ExtensionAnswer::Unanswered => info!(
+            "Template Provider at {} did not answer RequestExtensions within {}s; asking for each template's transactions",
+            provider.address,
+            SETUP_TIMEOUT.as_secs()
+        ),
+    }
     let constraints = transport.wire(coinbase_output_constraints_frame()?)?;
     stream
         .write_all(&constraints)
@@ -863,11 +901,12 @@ async fn open_connection(
 }
 
 /// Read until the provider answers `SetupConnection`, and return the
-/// messages that came after the answer.
+/// messages that came after the answer. No extension is negotiated yet, so
+/// a frame of one is left out.
 async fn read_setup_reply(
     stream: &mut TcpStream,
     transport: &mut Transport,
-) -> Result<Vec<(u8, Vec<u8>)>, String> {
+) -> Result<Vec<Sv2Message>, String> {
     let mut buffer = vec![0u8; 4096];
     let mut messages = Vec::new();
     while messages.is_empty() {
@@ -878,9 +917,26 @@ async fn read_setup_reply(
         if count == 0 {
             return Err("closed before answering SetupConnection".to_string());
         }
-        messages = transport.decode(&buffer[..count])?;
+        messages = transport
+            .decode(&buffer[..count])?
+            .into_iter()
+            .filter(|message| {
+                let base = message.extension_type == 0;
+                if !base {
+                    debug!(
+                        "Ignoring a Template Provider message of extension {:#06x}",
+                        message.extension_type
+                    );
+                }
+                base
+            })
+            .collect();
     }
-    let (message_type, mut payload) = messages.remove(0);
+    let Sv2Message {
+        message_type,
+        mut payload,
+        ..
+    } = messages.remove(0);
     match message_type {
         MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS => Ok(messages),
         MESSAGE_TYPE_SETUP_CONNECTION_ERROR => {
@@ -894,6 +950,106 @@ async fn read_setup_reply(
         other => Err(format!(
             "expected a SetupConnection reply, got message type {other:#04x}"
         )),
+    }
+}
+
+/// What a provider answered when asked for the large templates extension
+/// (`0x4C54`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtensionAnswer {
+    /// `RequestExtensions.Success` listing the extension.
+    Granted,
+    /// `RequestExtensions.Error`, or a Success without the extension.
+    Refused,
+    /// No answer in time: a provider may ignore `RequestExtensions`.
+    Unanswered,
+}
+
+/// `RequestExtensions` asking for the large templates extension.
+fn request_large_templates_frame() -> Result<Vec<u8>, String> {
+    encode_extension_frame(
+        EXTENSIONS_NEGOTIATION,
+        REQUEST_EXTENSIONS,
+        false,
+        &extensions_payload(EXTENSIONS_REQUEST_ID, &[LARGE_TEMPLATES_EXTENSION]),
+    )
+}
+
+/// Ask the provider for the large templates extension (`0x4C54`) and wait
+/// up to `wait` for its answer.
+///
+/// Messages that arrive meanwhile, before or after the answer, are added to
+/// `early_messages` in order. Without an answer in time the connection
+/// stays standard, and an answer that comes later is ignored like any
+/// message of an extension that was not negotiated.
+async fn negotiate_large_templates(
+    stream: &mut TcpStream,
+    transport: &mut Transport,
+    early_messages: &mut Vec<Sv2Message>,
+    wait: Duration,
+) -> Result<ExtensionAnswer, String> {
+    let request = transport.wire(request_large_templates_frame()?)?;
+    stream
+        .write_all(&request)
+        .await
+        .map_err(|error| format!("write: {error}"))?;
+    timeout(
+        wait,
+        read_extensions_reply(stream, transport, early_messages),
+    )
+    .await
+    .unwrap_or(Ok(ExtensionAnswer::Unanswered))
+}
+
+/// Read until the provider answers `RequestExtensions`, adding every other
+/// message to `early_messages`.
+async fn read_extensions_reply(
+    stream: &mut TcpStream,
+    transport: &mut Transport,
+    early_messages: &mut Vec<Sv2Message>,
+) -> Result<ExtensionAnswer, String> {
+    let mut buffer = vec![0u8; 4096];
+    loop {
+        let count = stream
+            .read(&mut buffer)
+            .await
+            .map_err(|error| format!("read: {error}"))?;
+        if count == 0 {
+            return Err("closed before answering RequestExtensions".to_string());
+        }
+        let mut answer = None;
+        for message in transport.decode(&buffer[..count])? {
+            match extension_answer(&message)? {
+                Some(answered) if answer.is_none() => answer = Some(answered),
+                _ => early_messages.push(message),
+            }
+        }
+        if let Some(answer) = answer {
+            return Ok(answer);
+        }
+    }
+}
+
+/// The answer `message` gives to this client's `RequestExtensions`, or
+/// `None` when it is another message.
+fn extension_answer(message: &Sv2Message) -> Result<Option<ExtensionAnswer>, String> {
+    if message.extension_type != EXTENSIONS_NEGOTIATION {
+        return Ok(None);
+    }
+    match message.message_type {
+        REQUEST_EXTENSIONS_SUCCESS => {
+            let (request_id, granted) = requested_extensions(&message.payload)
+                .ok_or("malformed RequestExtensions.Success")?;
+            let listed =
+                request_id == EXTENSIONS_REQUEST_ID && granted.contains(&LARGE_TEMPLATES_EXTENSION);
+            Ok(Some(if listed {
+                ExtensionAnswer::Granted
+            } else {
+                ExtensionAnswer::Refused
+            }))
+        }
+        REQUEST_EXTENSIONS_ERROR => Ok(Some(ExtensionAnswer::Refused)),
+        _ => Ok(None),
     }
 }
 
@@ -936,7 +1092,7 @@ impl ProviderConnection<'_> {
         &mut self,
         reader: &mut OwnedReadHalf,
         solutions_rx: &mut mpsc::Receiver<Solution>,
-        early_messages: Vec<(u8, Vec<u8>)>,
+        early_messages: Vec<Sv2Message>,
     ) -> ConnectionEnd {
         let mut end = self.handle_messages(early_messages).await.err();
         let mut buffer = vec![0u8; READ_BUFFER_SIZE];
@@ -961,11 +1117,11 @@ impl ProviderConnection<'_> {
     }
 
     /// Answer the provider and publish the templates `messages` make ready.
-    async fn handle_messages(&mut self, messages: Vec<(u8, Vec<u8>)>) -> Result<(), ConnectionEnd> {
-        for (message_type, mut payload) in messages {
+    async fn handle_messages(&mut self, messages: Vec<Sv2Message>) -> Result<(), ConnectionEnd> {
+        for message in messages {
             let actions = self
                 .session
-                .on_message(message_type, &mut payload)
+                .dispatch(message)
                 .map_err(|reason| ConnectionEnd::Failed(format!("malformed message: {reason}")))?;
             for action in actions {
                 match action {

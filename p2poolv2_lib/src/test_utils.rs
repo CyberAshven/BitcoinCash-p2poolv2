@@ -81,6 +81,11 @@ use crate::stratum::block_submit::FoundBlockSubmitter;
 #[cfg(test)]
 use crate::stratum::emission::EmissionReceiver;
 #[cfg(test)]
+use crate::stratum::merge_disclosure::{
+    EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS, REQUEST_EXTENSIONS_SUCCESS, extensions_payload,
+    requested_extensions,
+};
+#[cfg(test)]
 use crate::stratum::messages::Notify;
 #[cfg(test)]
 use crate::stratum::messages::Response;
@@ -95,7 +100,7 @@ use crate::stratum::sv2::payout_outputs::{
     RequestPayoutOutputs, RequestPayoutOutputsSuccess, VerifyPayoutOutputs,
 };
 #[cfg(test)]
-use crate::stratum::sv2::{Declaration, DeclaredJob, encode_message};
+use crate::stratum::sv2::{Declaration, DeclaredJob, encode_extension_frame, encode_message};
 #[cfg(test)]
 use crate::stratum::sv2::{NoiseTransport, Sv2Message, decode_plain_frames};
 #[cfg(any(test, feature = "test-utils"))]
@@ -378,7 +383,12 @@ impl TestSv2Server {
         message_type: u8,
         message: T,
     ) {
-        let frame = encode_message(message, message_type).unwrap();
+        self.send_frame(encode_message(message, message_type).unwrap())
+            .await;
+    }
+
+    /// Send one unencrypted frame, such as an extension's message.
+    pub(crate) async fn send_frame(&mut self, frame: Vec<u8>) {
         let wire = match self.noise.as_mut() {
             Some(noise) => noise.encrypt(frame).unwrap(),
             None => frame,
@@ -389,9 +399,41 @@ impl TestSv2Server {
             .unwrap();
     }
 
+    /// Answer the client's `RequestExtensions`, which must be its next
+    /// message, with a `RequestExtensions.Success` that grants `granted`.
+    /// Returns the extensions the client asked for.
+    pub(crate) async fn answer_extensions(&mut self, granted: &[u16]) -> Vec<u16> {
+        let request = self
+            .receive_extension(EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS)
+            .await;
+        let (request_id, asked) =
+            requested_extensions(&request).expect("malformed RequestExtensions");
+        self.send_frame(
+            encode_extension_frame(
+                EXTENSIONS_NEGOTIATION,
+                REQUEST_EXTENSIONS_SUCCESS,
+                false,
+                &extensions_payload(request_id, granted),
+            )
+            .unwrap(),
+        )
+        .await;
+        asked
+    }
+
     /// The payload of the client's next message, which must be of
     /// `expected_type`.
     pub(crate) async fn receive(&mut self, expected_type: u8) -> Vec<u8> {
+        self.receive_extension(0, expected_type).await
+    }
+
+    /// The payload of the client's next message, which must be extension
+    /// `extension_type`'s (0 for the base protocol) `expected_type`.
+    pub(crate) async fn receive_extension(
+        &mut self,
+        extension_type: u16,
+        expected_type: u8,
+    ) -> Vec<u8> {
         timeout(Duration::from_secs(5), async {
             let mut buffer = vec![0u8; 64 * 1024];
             while self.received.is_empty() {
@@ -407,7 +449,10 @@ impl TestSv2Server {
                 self.received.extend(messages);
             }
             let message = self.received.pop_front().unwrap();
-            assert_eq!(message.extension_type, 0, "unexpected SV2 extension");
+            assert_eq!(
+                message.extension_type, extension_type,
+                "unexpected SV2 extension"
+            );
             assert_eq!(
                 message.message_type, expected_type,
                 "unexpected SV2 message type"

@@ -1048,6 +1048,7 @@ async fn templates_flow_from_an_unencrypted_provider_and_solutions_flow_back() {
             },
         )
         .await;
+    server.answer_extensions(&[]).await;
     let mut constraints_payload = server
         .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
         .await;
@@ -1151,6 +1152,7 @@ async fn serve_one_template(
             },
         )
         .await;
+    server.answer_extensions(&[]).await;
     server
         .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
         .await;
@@ -1309,6 +1311,7 @@ async fn a_noise_provider_signed_by_the_pinned_key_sends_templates() {
             },
         )
         .await;
+    server.answer_extensions(&[]).await;
     server
         .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
         .await;
@@ -1386,6 +1389,145 @@ async fn a_refused_setup_connection_ends_the_connection() {
         panic!("a refused setup opened the connection");
     };
     assert!(refused.contains("unsupported-protocol"), "{refused}");
+}
+
+/// A provider that lists `0x4C54` in its `RequestExtensions.Success` grants
+/// the extension. The node asks for it alone.
+#[tokio::test]
+async fn a_provider_that_lists_large_templates_grants_them() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut stream = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let mut server = TestSv2Server::accept(&listener, None).await;
+    let mut transport = Transport::Plain {
+        decoder: Decoder::new(),
+        inbox: Vec::new(),
+    };
+    let mut early_messages = Vec::new();
+    let (asked, answer) = tokio::join!(
+        server.answer_extensions(&[LARGE_TEMPLATES_EXTENSION]),
+        negotiate_large_templates(
+            &mut stream,
+            &mut transport,
+            &mut early_messages,
+            SETUP_TIMEOUT
+        )
+    );
+    assert_eq!(asked, vec![LARGE_TEMPLATES_EXTENSION]);
+    assert_eq!(answer.unwrap(), ExtensionAnswer::Granted);
+    assert!(early_messages.is_empty());
+}
+
+/// A `RequestExtensions.Success` without `0x4C54` leaves the connection
+/// standard.
+#[tokio::test]
+async fn a_success_without_large_templates_refuses_them() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut stream = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let mut server = TestSv2Server::accept(&listener, None).await;
+    let mut transport = Transport::Plain {
+        decoder: Decoder::new(),
+        inbox: Vec::new(),
+    };
+    let mut early_messages = Vec::new();
+    let (asked, answer) = tokio::join!(
+        server.answer_extensions(&[]),
+        negotiate_large_templates(
+            &mut stream,
+            &mut transport,
+            &mut early_messages,
+            SETUP_TIMEOUT
+        )
+    );
+    assert_eq!(asked, vec![LARGE_TEMPLATES_EXTENSION]);
+    assert_eq!(answer.unwrap(), ExtensionAnswer::Refused);
+}
+
+/// A `RequestExtensions.Error` leaves the connection standard.
+#[tokio::test]
+async fn a_request_extensions_error_refuses_large_templates() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut stream = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let mut server = TestSv2Server::accept(&listener, None).await;
+    let mut transport = Transport::Plain {
+        decoder: Decoder::new(),
+        inbox: Vec::new(),
+    };
+    let mut early_messages = Vec::new();
+    let refuse = async {
+        server
+            .receive_extension(EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS)
+            .await;
+        // Request 1: 0x4C54 is unsupported, and nothing is required.
+        let mut error = extensions_payload(1, &[LARGE_TEMPLATES_EXTENSION]);
+        error.extend_from_slice(&0u16.to_le_bytes());
+        server
+            .send_frame(
+                encode_extension_frame(
+                    EXTENSIONS_NEGOTIATION,
+                    REQUEST_EXTENSIONS_ERROR,
+                    false,
+                    &error,
+                )
+                .unwrap(),
+            )
+            .await;
+    };
+    let (_, answer) = tokio::join!(
+        refuse,
+        negotiate_large_templates(
+            &mut stream,
+            &mut transport,
+            &mut early_messages,
+            SETUP_TIMEOUT
+        )
+    );
+    assert_eq!(answer.unwrap(), ExtensionAnswer::Refused);
+}
+
+/// A provider may ignore `RequestExtensions`. The node waits its bounded
+/// time, then carries on standard, keeping what the provider sent meanwhile.
+#[tokio::test]
+async fn a_provider_that_does_not_answer_leaves_the_connection_standard() {
+    let fixture: BlockTemplate = serde_json::from_str(REGTEST_TEMPLATE).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut stream = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let mut server = TestSv2Server::accept(&listener, None).await;
+    let mut transport = Transport::Plain {
+        decoder: Decoder::new(),
+        inbox: Vec::new(),
+    };
+    let mut early_messages = Vec::new();
+    let ignore = async {
+        server
+            .receive_extension(EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS)
+            .await;
+        server
+            .send_message(
+                MESSAGE_TYPE_NEW_TEMPLATE,
+                test_tdp_new_template(5, true, &fixture),
+            )
+            .await;
+    };
+    let (_, answer) = tokio::join!(
+        ignore,
+        negotiate_large_templates(
+            &mut stream,
+            &mut transport,
+            &mut early_messages,
+            Duration::from_millis(500),
+        )
+    );
+    assert_eq!(answer.unwrap(), ExtensionAnswer::Unanswered);
+    assert_eq!(early_messages.len(), 1);
+    assert_eq!(early_messages[0].message_type, MESSAGE_TYPE_NEW_TEMPLATE);
 }
 
 #[cfg(not(feature = "sim"))]
@@ -1549,6 +1691,7 @@ async fn an_extended_channel_block_on_a_provided_template_returns_as_submit_solu
             },
         )
         .await;
+    server.answer_extensions(&[]).await;
     server
         .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
         .await;
@@ -1705,6 +1848,7 @@ async fn a_reconnect_moves_the_client_to_the_provider_it_names() {
             },
         )
         .await;
+    redirecting.answer_extensions(&[]).await;
     redirecting
         .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
         .await;
@@ -1772,6 +1916,7 @@ async fn the_successor_of_a_block_this_node_found_is_published_without_a_parent_
             },
         )
         .await;
+    server.answer_extensions(&[]).await;
     server
         .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
         .await;
