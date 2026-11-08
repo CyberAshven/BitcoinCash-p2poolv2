@@ -224,20 +224,11 @@ pub enum BitcoinCashNetwork {
     Scalenet,
 }
 
-/// Which Bitcoin Cash share chain this node extends.
-///
-/// Main and mini are different genesis shares, so they do not reorg into
-/// each other. Mini's anchor target is 256 times easier than the main
-/// ceiling, which is the existing `MAX_POOL_TARGET`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum BchShareChain {
-    /// Share target ceiling `0x1b384bd7`, anchor `0x1b4188f5`.
-    #[default]
-    Main,
-    /// Share target ceiling and anchor `0x1c384bd7` (256 times easier).
-    Mini,
-}
+/// The `[stratum]` key that once chose the Bitcoin Cash main or mini share
+/// chain. The two merged into one share chain on 2026-11-09, which keeps the
+/// mini chain's anchor, ceiling and genesis, so [`Config::load`] refuses a
+/// config that still sets it.
+pub const REMOVED_BCH_SHARE_CHAIN_KEY: &str = "bch_share_chain";
 
 impl BitcoinCashNetwork {
     /// The network's name as `bitcoin_cash_network` spells it: "mainnet",
@@ -421,10 +412,6 @@ pub struct StratumConfig<State = Raw> {
     /// `mainnet` (alias `main`), `chipnet`, and `regtest`.
     #[serde(default)]
     pub bitcoin_cash_network: Option<BitcoinCashNetwork>,
-    /// Main or mini Bitcoin Cash share chain. Ignored unless `chain` is
-    /// `bitcoin-cash`. `mini` on a Bitcoin node is rejected.
-    #[serde(default)]
-    pub bch_share_chain: BchShareChain,
     /// Stratum V2 listen port. Absent means the node does not open an SV2
     /// socket, which is what every existing configuration does.
     #[serde(default)]
@@ -616,13 +603,6 @@ impl StratumConfig<Raw> {
             });
         }
 
-        if self.chain == Chain::Bitcoin && self.bch_share_chain == BchShareChain::Mini {
-            return Err(ConfigError {
-                message: "bch_share_chain = mini is only valid when chain is bitcoin-cash"
-                    .to_string(),
-            });
-        }
-
         if self.chain == Chain::BitcoinCash
             && let Some(solo_address) = &self.solo_address
         {
@@ -739,7 +719,6 @@ impl StratumConfig<Raw> {
             network: self.network,
             chain: self.chain,
             bitcoin_cash_network: self.bitcoin_cash_network,
-            bch_share_chain: self.bch_share_chain,
             sv2_port: self.sv2_port,
             sv2_authority_public_key: self.sv2_authority_public_key,
             sv2_authority_secret_key: self.sv2_authority_secret_key,
@@ -1173,7 +1152,6 @@ impl StratumConfig<Raw> {
             network: bitcoin::Network::Signet,
             chain: Chain::Bitcoin,
             bitcoin_cash_network: None,
-            bch_share_chain: BchShareChain::Main,
             sv2_port: None,
             sv2_authority_public_key: None,
             sv2_authority_secret_key: None,
@@ -1555,6 +1533,12 @@ impl Config {
     ///
     /// `[[submit_nodes]]` with light templates is refused (see
     /// [`Config::validate_submit_nodes`]).
+    ///
+    /// A config that still sets `bch_share_chain`, in the file or as
+    /// `P2POOL_STRATUM__BCH_SHARE_CHAIN`, is refused: the main and mini
+    /// Bitcoin Cash share chains merged into one (see
+    /// [`REMOVED_BCH_SHARE_CHAIN_KEY`]), and neither value means what it
+    /// meant before.
     pub fn load(path: &str) -> Result<Self, config::ConfigError> {
         let built = config::Config::builder()
             .add_source(config::File::with_name(path))
@@ -1569,6 +1553,18 @@ impl Config {
             )
             .build()?;
         let network_given = built.get_string("stratum.network").is_ok();
+        if built
+            .get::<config::Value>(&format!("stratum.{REMOVED_BCH_SHARE_CHAIN_KEY}"))
+            .is_ok()
+        {
+            return Err(config::ConfigError::Message(format!(
+                "[stratum] {REMOVED_BCH_SHARE_CHAIN_KEY} is no longer a setting: the main and mini \
+                 Bitcoin Cash share chains merged into one share chain, which keeps the mini \
+                 chain's anchor, ceiling and genesis. Remove {REMOVED_BCH_SHARE_CHAIN_KEY} from \
+                 the config (and P2POOL_STRATUM__BCH_SHARE_CHAIN from the environment), and \
+                 start on a fresh store."
+            )));
+        }
         let loaded: Self = built.try_deserialize()?;
         if loaded.stratum.chain == Chain::Bitcoin && !network_given {
             return Err(config::ConfigError::Message(
@@ -2101,8 +2097,7 @@ mod tests {
             [
                 ("P2POOL_STRATUM__CHAIN", Some("bitcoin-cash")),
                 ("P2POOL_STRATUM__BITCOIN_CASH_NETWORK", Some("regtest")),
-                ("P2POOL_STRATUM__BCH_SHARE_CHAIN", Some("mini")),
-                ("P2POOL_STORE__PATH", Some("/p2poolv2/data/regtest-mini")),
+                ("P2POOL_STORE__PATH", Some("/p2poolv2/data/regtest")),
                 ("P2POOL_STRATUM__PORT", Some("3333")),
                 ("P2POOL_API__PORT", Some("46884")),
                 (
@@ -2117,9 +2112,8 @@ mod tests {
                     config.stratum.bitcoin_cash_network,
                     Some(BitcoinCashNetwork::Regtest)
                 );
-                assert_eq!(config.stratum.bch_share_chain, BchShareChain::Mini);
                 assert_eq!(config.stratum.network, Network::Regtest);
-                assert_eq!(config.store.path, "/p2poolv2/data/regtest-mini");
+                assert_eq!(config.store.path, "/p2poolv2/data/regtest");
                 assert_eq!(config.stratum.port, 3333);
                 assert_eq!(config.api.port, 46884);
                 assert_eq!(config.network.listen_address, "/ip4/0.0.0.0/tcp/6884");
@@ -2260,7 +2254,6 @@ mod tests {
             config.stratum.bitcoin_cash_network,
             Some(BitcoinCashNetwork::Regtest)
         );
-        assert_eq!(config.stratum.bch_share_chain, BchShareChain::Mini);
         assert!(!config.network.dns_seed);
     }
 
@@ -2424,6 +2417,53 @@ mod tests {
             panic!("a Bitcoin config without network loaded");
         };
         assert!(error.to_string().contains("network is required"), "{error}");
+    }
+
+    /// The main and mini share chains merged, so a config still choosing one
+    /// is refused at start-up instead of being read as the merged chain.
+    #[test]
+    fn a_config_that_still_sets_bch_share_chain_is_refused() {
+        let sample = std::fs::read_to_string("../config.sample.toml").unwrap();
+        let with_share_chain = sample.replace(
+            "\nbitcoin_cash_network = \"chipnet\"\n",
+            "\nbitcoin_cash_network = \"chipnet\"\nbch_share_chain = \"main\"\n",
+        );
+        assert_ne!(with_share_chain, sample);
+        let path = std::env::temp_dir().join(format!(
+            "p2poolv2-config-with-bch-share-chain-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, with_share_chain).unwrap();
+
+        let result = Config::load(path.to_str().unwrap());
+        std::fs::remove_file(&path).unwrap();
+
+        let Err(error) = result else {
+            panic!("a config setting bch_share_chain loaded");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("main and mini Bitcoin Cash share chains merged into one"),
+            "{error}"
+        );
+    }
+
+    /// The compose stack once set the share chain from the environment; that
+    /// is refused the same way.
+    #[test]
+    fn a_bch_share_chain_environment_override_is_refused() {
+        temp_env::with_var("P2POOL_STRATUM__BCH_SHARE_CHAIN", Some("mini"), || {
+            let Err(error) = Config::load("../config.sample.toml") else {
+                panic!("P2POOL_STRATUM__BCH_SHARE_CHAIN was accepted");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("bch_share_chain is no longer a setting"),
+                "{error}"
+            );
+        });
     }
 
     #[test]
@@ -2777,21 +2817,6 @@ mod tests {
     }
 
     #[test]
-    fn bitcoin_rejects_a_mini_share_chain() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.bch_share_chain = BchShareChain::Mini;
-
-        let error = config.parse().unwrap_err();
-        assert!(
-            error
-                .message
-                .contains("bch_share_chain = mini is only valid when chain is bitcoin-cash"),
-            "unexpected message: {}",
-            error.message
-        );
-    }
-
-    #[test]
     fn bitcoin_cash_regtest_parses_on_the_regtest_network_whatever_network_says() {
         let mut config = StratumConfig::<Raw>::new_for_test_default();
         config.chain = Chain::BitcoinCash;
@@ -2824,18 +2849,6 @@ mod tests {
     fn bitcoin_keeps_its_configured_network() {
         let config = StratumConfig::<Raw>::new_for_test_default();
         assert_eq!(config.effective_network(), Network::Signet);
-    }
-
-    #[test]
-    fn bitcoin_cash_accepts_the_mini_share_chain() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.chain = Chain::BitcoinCash;
-        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
-        config.bootstrap_address = "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t".to_string();
-        config.bch_share_chain = BchShareChain::Mini;
-
-        let parsed = config.parse().unwrap();
-        assert_eq!(parsed.bch_share_chain, BchShareChain::Mini);
     }
 }
 

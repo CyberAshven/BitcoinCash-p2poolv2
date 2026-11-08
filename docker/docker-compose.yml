@@ -98,7 +98,7 @@ services:
   # many candidates a minute below the pool's difficulty; the node rejects them
   # as shares, but on regtest each one meets the block target and the node
   # submits it to BCHN as a block. A share on the share chain still needs its
-  # full share difficulty, which takes a CPU hours on the mini chain.
+  # full share difficulty, which takes a CPU hours on the share chain.
   miner:
     profiles: [regtest]
     image: ghcr.io/256foundation/mujina-minerd:main@sha256:7448991e4cb419cd428f74d3db58b95a2359eb52c898c1bd69d52b06c3b04e5a

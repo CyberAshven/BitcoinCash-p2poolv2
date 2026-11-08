@@ -31,10 +31,11 @@ P2P protocol id and every difficulty calculation read that field, so two
 Bitcoin Cash nodes on one network can no longer split because one left
 `signet` in its file. A Bitcoin Cash node ignores it for genesis. It builds a
 P2PKH share from the published BCHN genesis block for `bitcoin_cash_network`
-and from `bch_share_chain` (`main` or `mini`). Mini's anchor target is
-`0x1c384bd7`, 256 times easier than the main ceiling `0x1b384bd7`. Main
-keeps the existing anchor `0x1b4188f5` and that same ceiling, so a Bitcoin
-config that omits `chain` still starts on the taproot genesis.
+at the mini anchor target `0x1c384bd7`, 256 times easier than Bitcoin's
+ceiling `0x1b384bd7`. Until 2026-11-09 `bch_share_chain` chose between that
+mini chain and a main chain at Bitcoin's anchor `0x1b4188f5`; the two merged
+into one, and the setting is refused. Bitcoin keeps its anchor and ceiling,
+so a Bitcoin config that omits `chain` still starts on the taproot genesis.
 
 A Bitcoin Cash startup that would encode a witness payout is rejected at
 config parse. CashAddr decoding accepts P2PKH, P2SH20 and P2SH32 (since

@@ -25,9 +25,10 @@ ancestors, and its hash must meet it. On Bitcoin Cash the share chain's ASERT
 is BCH's own integer formula (aserti3-2d), anchored at each share's parent
 rather than at genesis (plan decision 12; see
 [Share difficulty: ASERT](../difficulty_adjustment/asert.md)). A target may
-never be easier than the chain's ceiling: `MAX_POOL_TARGET` on the main chain
-and a ceiling 256 times easier on the mini chain
-([Small miners](../small-miners.md)).
+never be easier than the chain's ceiling: `MAX_POOL_TARGET` on Bitcoin, and
+on Bitcoin Cash a ceiling 256 times easier, the former mini chain's
+([Small miners](../small-miners.md)). The Bitcoin Cash main and mini chains
+merged into this one chain on 2026-11-09.
 
 Share headers carry everything needed to check the target, but only once all
 of a header's ancestors are known. During the first sync a node therefore

@@ -38,10 +38,9 @@ max_requests_per_second = 100
 dial_timeout_secs = 30
 
 [store]
-# network: <bitcoin_cash_network>-<bch_share_chain>, for example
-# mainnet-mini. Each network and share chain needs its own folder: the node
-# refuses a store that holds another share chain.
-path = "/p2poolv2/data/chipnet-mini"
+# network: <bitcoin_cash_network>, for example mainnet. Each network needs
+# its own folder: the node refuses a store that holds another share chain.
+path = "/p2poolv2/data/chipnet"
 pplns_ttl_days = 7
 
 [stratum]
@@ -50,9 +49,6 @@ start_difficulty = 10000
 minimum_difficulty = 100
 # network: "chipnet" or "mainnet". BCHN must run the same network.
 bitcoin_cash_network = "chipnet"
-# "mini" (a share target 256 times easier, for small miners) or "main".
-# Change [store] path with it.
-bch_share_chain = "mini"
 
 # BCHN's ZMQ hashblock endpoint (zmqpubhashblock in its bitcoin.conf).
 # bchn.example is a placeholder that never resolves.

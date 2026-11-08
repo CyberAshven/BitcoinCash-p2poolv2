@@ -22,14 +22,13 @@ is their gateway to the network.
   share every 10 seconds on each share chain. See
   [Share difficulty: ASERT](difficulty_adjustment/asert.md).
 
-## Main and mini share chains
+## One share chain
 
-On Bitcoin Cash there are two share chains, each with its own genesis share.
-The mini chain's target ceiling is 256 times easier (difficulty about 4.55
-against about 1,164 on main), for small miners; see
-[Small miners](small-miners.md). A node mines one of them
-(`bch_share_chain` in its config). Mainnet and chipnet run the same rules;
-only the network setting differs.
+On Bitcoin Cash there is one share chain per network. Its target ceiling is
+the former mini chain's, difficulty about 4.55, for small miners; see
+[Small miners](small-miners.md). The main and mini chains merged on
+2026-11-09 ([Share chain redesign](sharechain/small-miners-design.md#1-one-share-chain)).
+Mainnet and chipnet run the same rules; only the network setting differs.
 
 Nodes only talk to nodes on the same chain and rules. Every libp2p protocol
 string carries the Bitcoin Cash network, the share chain's genesis and, on

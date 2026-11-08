@@ -81,7 +81,7 @@ Rules:
   and you would be paid for fewer hashes than you did. When a new job's share
   difficulty is below yours, the node sends `mining.set_difficulty` before
   the job. The share difficulty is rounded down to a whole number, so the
-  mini chain's lowest share difficulty, 4.55, holds you at 4.
+  share chain's lowest share difficulty, 4.55, holds you at 4.
 - `p2p=` must be a share address for the node's network: `p2pool:` on
   mainnet, `tp2pool:` on chipnet, `sp2pool:` on scalenet, `rp2pool:` on
   regtest.

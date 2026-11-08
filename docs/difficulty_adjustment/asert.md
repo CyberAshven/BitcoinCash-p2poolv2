@@ -15,7 +15,8 @@ next_target = anchor_target * 2^((time_delta - ideal * (height_delta + 1)) / hal
 computed with BCH's fixed-point exponent, cubic approximation of `2^x` and
 512-bit intermediate, then clamped so it is never easier than the chain's
 ceiling: `MAX_POOL_TARGET` (`0x1b384bd7`, difficulty about 1,160) on Bitcoin
-and the Bitcoin Cash main chain, `0x1c384bd7` (difficulty about 4) on mini.
+and `0x1c384bd7` (difficulty about 4) on Bitcoin Cash, the former mini
+chain's (the main and mini chains merged on 2026-11-09).
 
 Every caller passes the parent of the share being validated or mined as an
 `AsertParent`: its height, time and bits, and the time of its own parent
@@ -117,7 +118,6 @@ interval):
 | Case (4 TH/s miner) | Parent anchor (Bitcoin Cash) | Genesis anchor |
 |---|---|---|
 | Chipnet mini restarted 180 days after genesis | 0.95 of the steady difficulty after 8 half-lives (80 minutes, 1,139 shares) | at the ceiling |
-| Main chain, same start | 0.94 after 4 half-lives | |
 | Mini chain after a two-day outage | 0.95 eight half-lives after it resumes | at the ceiling |
 | Genesis anchored at launch at the steady difficulty, as the sim does | 1.01 after 6 hours | 1.01, the same target |
 

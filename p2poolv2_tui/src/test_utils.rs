@@ -54,7 +54,6 @@ version_mask = "1fffe000"
 pool_signature = "P2Poolv2"
 chain = "bitcoin-cash"
 bitcoin_cash_network = "chipnet"
-bch_share_chain = "mini"
 
 [bitcoinrpc]
 url = "http://127.0.0.1:48332"

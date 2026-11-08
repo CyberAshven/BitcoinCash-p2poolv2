@@ -108,12 +108,11 @@ const fn secret(field: FieldSpec) -> FieldSpec {
 
 const NETWORKS: &[&str] = &["mainnet", "chipnet", "regtest"];
 const CHAINS: &[&str] = &["bitcoin-cash", "bitcoin"];
-const SHARE_CHAINS: &[&str] = &["main", "mini"];
 const TEMPLATE_SOURCES: &[&str] = &["rpc", "rpc_light", "sv2"];
 const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 
 /// The settings listed, in order.
-pub const FIELDS: [FieldSpec; 44] = [
+pub const FIELDS: [FieldSpec; 43] = [
     // The network switch and the chain come first: they decide the rest.
     optional(
         "stratum",
@@ -128,13 +127,6 @@ pub const FIELDS: [FieldSpec; 44] = [
         "Block chain: bitcoin-cash for this tool (bitcoin is upstream's).",
         ValueKind::Choice(CHAINS),
         Some("bitcoin"),
-    ),
-    optional(
-        "stratum",
-        "bch_share_chain",
-        "Share chain: main, or mini (256 times easier shares, for small miners).",
-        ValueKind::Choice(SHARE_CHAINS),
-        Some("main"),
     ),
     required(
         "stratum",

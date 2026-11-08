@@ -89,9 +89,6 @@ zmqpubhashblock = "tcp://127.0.0.1:28332"
 # chain = "bitcoin"
 # Required with chain = "bitcoin-cash": "mainnet", "chipnet", or "regtest".
 # bitcoin_cash_network = "chipnet"
-# Main or mini Bitcoin Cash share chain. Default "main". "mini" is rejected
-# unless chain is "bitcoin-cash". Mini's share target is 256 times easier.
-# bch_share_chain = "main"
 # Stratum V2 listen port. Absent means the node does not open an SV2 socket.
 # Local frames are unencrypted, so keep it on localhost or a trusted LAN.
 # A Mining connection opens standard or extended channels with

@@ -59,7 +59,6 @@ all:
             - instance: mainnet
               enabled: false # mainnet has not started yet
               bitcoin_cash_network: mainnet
-              bch_share_chain: main
               p2p_listen_address: "/ip4/0.0.0.0/tcp/6884"
               # Share chain peers: Bitcoin Cash has no DNS seeds yet.
               dial_peers: []
@@ -90,10 +89,9 @@ all:
               # sv2_authority_public_key: "9b..."
               # sv2_authority_secret_key: "{{ vault_sv2_authority_secret_key }}"
 
-            # --- Bitcoin Cash chipnet instance, mini share chain ---
+            # --- Bitcoin Cash chipnet instance ---
             - instance: chipnet
               bitcoin_cash_network: chipnet
-              bch_share_chain: mini
               p2p_listen_address: "/ip4/0.0.0.0/tcp/6885"
               dial_peers: []
               wait_for_chain_sync: true

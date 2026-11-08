@@ -38,8 +38,8 @@ The full list, with reasons, is in [docs/bch-plan.md](docs/bch-plan.md),
   three Bitcoin Cash blocks of work (by the paying block's own difficulty), at
   most 120,960 shares; a share counts once 100 shares deep. Uncles are paid
   9/10 of their difficulty.
-- **Main and mini share chains.** The mini chain's share target is 256 times
-  easier, for small miners.
+- **One share chain.** Its share target ceiling, difficulty about 4.5, is the
+  former mini chain's, so small miners still find shares.
 - **Mainnet and chipnet run the same rules;** only the network setting differs.
   Share-chain rules never fork Bitcoin Cash itself.
 - **Donation and fee.** Each node donates 1.5% of the blocks it finds to the
@@ -85,7 +85,6 @@ hardware, disk and ports are in [docs/requirements.md](docs/requirements.md).
    ```toml
    chain = "bitcoin-cash"
    bitcoin_cash_network = "chipnet"     # or "mainnet", "regtest"
-   bch_share_chain = "mini"             # "main" for large miners
    miner_address = "tp2pool:qq..."      # optional: owns every share this node mines
    bootstrap_address = "bchtest:qq..."
    zmqpubhashblock = "tcp://127.0.0.1:28332"

@@ -321,7 +321,7 @@ pub enum RequestResponseError {
 #[cfg(test)]
 mod tests {
     use super::{GENESIS_TAG_LEN, kad_protocol_string, protocol_string};
-    use crate::config::{BchShareChain, Chain};
+    use crate::config::Chain;
     use crate::shares::bch_genesis;
     use crate::shares::share_block::ShareBlock;
     use p2poolv2_wallet::bch_share::BchShareNetwork;
@@ -384,7 +384,7 @@ mod tests {
     /// peer on another rule fails the handshake.
     #[test]
     fn test_bitcoin_cash_protocol_string_carries_the_payout_rule() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -403,7 +403,7 @@ mod tests {
     /// and the two cannot negotiate.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_genesis_anchor_string() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -421,7 +421,7 @@ mod tests {
     /// differs and the two cannot negotiate.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_share_trading() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -440,7 +440,7 @@ mod tests {
     /// past the cap; the new string differs and the two cannot negotiate.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_the_coinbase_budget() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -460,7 +460,7 @@ mod tests {
     /// cannot negotiate.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_the_current_chain_rule() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
@@ -476,7 +476,7 @@ mod tests {
     /// string differs and the two cannot negotiate.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_genesis_last_resort() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
@@ -492,7 +492,7 @@ mod tests {
     /// and the two cannot negotiate.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_uncle_once() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -512,7 +512,7 @@ mod tests {
     /// negotiate; the batch also starts a fresh share chain.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_the_rule_batch() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -531,7 +531,7 @@ mod tests {
     /// minutes before their parent, so the final tag differs from it.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_batch_before_its_review_fixes() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -550,7 +550,7 @@ mod tests {
     /// exchange shares the other would reject.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_fixed_window_string() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -566,7 +566,7 @@ mod tests {
     /// join a sized-window node's DHT either.
     #[test]
     fn test_bitcoin_cash_kad_protocol_string_carries_the_payout_rule() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];

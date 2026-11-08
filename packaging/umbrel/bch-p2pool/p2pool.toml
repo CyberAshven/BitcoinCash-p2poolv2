@@ -38,18 +38,15 @@ max_requests_per_second = 100
 dial_timeout_secs = 30
 
 [store]
-# Main and mini are different share chains. When you change bch_share_chain,
-# change the folder too (mainnet-main or mainnet-mini): the node refuses a
-# store that holds another share chain.
-path = "/p2poolv2/data/mainnet-mini"
+# One folder per network: the node refuses a store that holds another share
+# chain, or one written under older share-chain rules.
+path = "/p2poolv2/data/mainnet"
 pplns_ttl_days = 7
 
 [stratum]
 hostname = "0.0.0.0"
 start_difficulty = 10000
 minimum_difficulty = 100
-# "mini" (a share target 256 times easier, for small miners) or "main".
-bch_share_chain = "mini"
 
 # Share address owning every share this node mines: a p2pool: address made
 # from a P2PKH key in your own wallet with `p2poolv2_cli bch-share-address`.
