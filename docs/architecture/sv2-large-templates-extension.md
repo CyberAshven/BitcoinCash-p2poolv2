@@ -223,12 +223,14 @@ comes with it, and arrive before the next `NewTemplate`:
   answer leaves it standard, exactly as before; an answer that comes later is
   ignored, with one warning.
 - A provider that does not answer in time (bchn-sv2-bridge dispatches on the
-  message type alone and ignores the request), or that closes the connection
-  on it (Pickaxe's provider refuses any extension frame), is remembered by
-  address while the node runs. Later connections to it skip
-  `RequestExtensions` and are standard from the start; one that closed is
-  reconnected at once that way. A provider that answered, with a Success or
-  an Error, is asked again on every connection.
+  message type alone and ignores the request, which the specification
+  allows) is remembered by address while the node runs. Later connections
+  to it skip `RequestExtensions` and are standard from the start. A provider
+  that answered, with a Success or an Error, is asked again on every
+  connection. A provider that closes the connection on the request breaks
+  the specification, which has unknown extension messages ignored: that is
+  an ordinary provider error, and the node reconnects with its usual
+  backoff.
 - In push mode the node sends no `RequestTransactionData`. It keeps two
   lists only: the base, and the template being received. Both hold shared
   references to the transactions, so a delta's kept transactions and the

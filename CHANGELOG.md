@@ -21,9 +21,8 @@ the transactions kept and the added ones. The node checks each list against
 the template's merkle path and reconnects when one fails. A provider that
 refuses the extension or does not answer is asked for each template's
 transactions as before. One that does not answer in time (bchn-sv2-bridge)
-or closes the connection on the request (Pickaxe's provider) is not asked
-again while the node runs. Knuth's Template Provider is being written to the
-same contract. No share-chain rule changes.
+is not asked again while the node runs. Knuth's Template Provider is being
+written to the same contract. No share-chain rule changes.
 
 A new node can sync a share chain that has a height with more than 20
 shares. A node answering a header or block request sends at most 20 shares

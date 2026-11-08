@@ -464,9 +464,8 @@ provider or a second node can then supply templates. Bitcoin and
   section 7) and waits for the answer before it sends
   `CoinbaseOutputConstraints`: twice the `SetupConnection` round trip, at
   least 250 ms and at most 10 s. A provider that does not answer in time
-  (bchn-sv2-bridge ignores the request) or closes the connection on it
-  (Pickaxe's provider does) is not asked again while the node runs, so it
-  costs that one wait or one reconnection. A provider that grants it pushes
+  (bchn-sv2-bridge ignores the request) is not asked again while the node
+  runs, so it costs that one wait. A provider that grants it pushes
   each template's transactions after its `NewTemplate`, so the node asks for
   none: in full (pages of up to 65,535, then the core `Success`), or as a
   delta on the last template pushed complete (a bitmap of the transactions
