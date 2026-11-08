@@ -11,6 +11,7 @@
 //! the mini chain's anchor, ceiling and genesis (`MINI_ANCHOR_TARGET`).
 
 use crate::config::{BitcoinCashNetwork, Chain, StratumConfig};
+use crate::shares::band::GENESIS_BAND_CAP;
 use crate::shares::coinbase_proof::CoinbaseProof;
 use crate::shares::genesis;
 use crate::shares::share_block::{ShareBlock, ShareHeader, ShareTransaction};
@@ -70,6 +71,7 @@ pub fn build(network: BchShareNetwork) -> Result<ShareBlock, Box<dyn Error + Sen
     let coinbase =
         build_sharechain_coinbase_transaction(&miner_address, anchor.header.block_hash(), &[]);
     let transactions = vec![ShareTransaction(coinbase)];
+    let anchor_bits = sim_overrides::bch_anchor_target();
     let header = ShareHeader {
         prev_share_blockhash: bitcoin::BlockHash::all_zeros(),
         uncles: vec![],
@@ -77,7 +79,7 @@ pub fn build(network: BchShareNetwork) -> Result<ShareBlock, Box<dyn Error + Sen
         miner_address,
         bitcoin_header: anchor.header,
         time: sim_overrides::genesis_timestamp(&genesis_data),
-        bits: sim_overrides::bch_anchor_target(),
+        bits: anchor_bits,
         donation_address: None,
         donation: None,
         fee_address: None,
@@ -89,6 +91,9 @@ pub fn build(network: BchShareNetwork) -> Result<ShareBlock, Box<dyn Error + Sen
         bch_coinbase: None,
         pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
+        asert_bits: anchor_bits,
+        wanted_bits: anchor_bits,
+        band_cap: GENESIS_BAND_CAP,
     };
     let bitcoin_coinbase = anchor
         .txdata
@@ -250,12 +255,14 @@ mod tests {
     // values were computed before and after the upstream sync through
     // `61810c56`, which moved the Bitcoin genesis blocks to `.dat` files.
 
+    /// Pinned again on 2026-11-09: the header gained its band (`shares::band`),
+    /// which changed every Bitcoin Cash genesis hash in a flag day.
     #[test]
     fn mainnet_mini_genesis_hash_is_pinned() {
         let genesis = build(BchShareNetwork::Mainnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "ab4967c507cc16bb42e6041756690c173ad9227840f8037d1129824e4f533c78"
+            "1b5a447b4685d855498907e637e00d8528fd6a5716ae35c1bfcfa3ad4530d972"
         );
     }
 
@@ -264,7 +271,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Chipnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "6d6c2b7c38ee5caf040199adb831e31973d2e941578c0fe2833b3c26f3fe7cd0"
+            "175f4f3cf68a69323552d41874511160d3d4d001a5475a12e2510022e44bb61d"
         );
     }
 
@@ -273,7 +280,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Regtest).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "70249f9448079ca55b4842f6efa5dd888db2fcc7b12718ae73a9425d999bcc19"
+            "493b5b78a3e75b2c17f5aedcf4a49dc79eb79550f7447dc41c526ef948616f07"
         );
     }
 

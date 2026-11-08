@@ -385,7 +385,7 @@ mod tests {
         );
         let tracker = start_tracker_actor();
         let owner = ShareOwner::CashP2pkh([9; 20]);
-        let (job_id, _) = insert_miner_job(&prepared, Some(&payout), Some(owner), &tracker);
+        let (job_id, _) = insert_miner_job(&prepared, Some(&payout), Some(owner), None, &tracker);
         let job = tracker.get_job(job_id).unwrap();
         let commitment = job.share_commitment.clone().unwrap();
         assert_eq!(

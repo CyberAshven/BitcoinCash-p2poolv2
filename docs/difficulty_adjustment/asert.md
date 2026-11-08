@@ -32,18 +32,26 @@ share.
 | Chain | Anchor | `anchor_target` | `time_delta` | `height_delta` |
 |---|---|---|---|---|
 | Bitcoin | genesis | genesis bits | parent time - genesis time | parent height |
-| Bitcoin Cash | the parent | parent bits | parent time - its parent's time | 0 |
+| Bitcoin Cash | the parent | parent's minimum (`asert_bits`) | parent time - its parent's time | 0 |
 
 Bitcoin keeps upstream's rule: the algorithm is absolute, so a share's
 target follows from genesis and its parent's height and time alone.
 
 Bitcoin Cash moves BCH's anchor convention to each share's parent: the
-parent is the anchor block, its bits are the anchor target, and its own
+parent is the anchor block, its minimum is the anchor target, and its own
 parent's time is the anchor parent time. The first share builds on genesis,
 whose interval is zero, so it gets the genesis rule's target. Without the
 ceiling the two rules give the same targets, because the exponents add up
 along the chain: two steps of the parent rule are one step of the genesis
 rule over both intervals. They differ only at the ceiling.
+
+The parent's minimum is its `asert_bits`, the target ASERT gave it, which
+equals its bits unless it was mined heavier inside the difficulty band
+(2026-11-09, [Share validation](../sharechain/validation.md#the-difficulty-band-bitcoin-cash)).
+Anchoring at a heavier parent's bits would make the next minimum as heavy
+as that parent; anchoring at its minimum keeps the minimum the pool's own,
+so when big miners mine fewer, heavier shares the minimum falls for everyone
+else.
 
 ## Why Bitcoin Cash does not anchor at genesis
 

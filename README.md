@@ -39,7 +39,9 @@ The full list, with reasons, is in [docs/bch-plan.md](docs/bch-plan.md),
   most 120,960 shares; a share counts once 100 shares deep. Uncles are paid
   9/10 of their difficulty.
 - **One share chain.** Its share target ceiling, difficulty about 4.5, is the
-  former mini chain's, so small miners still find shares.
+  former mini chain's, so small miners still find shares. A big miner gets
+  shares up to 64 times harder (the difficulty band), so it makes fewer of
+  them and the minimum stays low for everyone else.
 - **Mainnet and chipnet run the same rules;** only the network setting differs.
   Share-chain rules never fork Bitcoin Cash itself.
 - **Donation and fee.** Each node donates 1.5% of the blocks it finds to the

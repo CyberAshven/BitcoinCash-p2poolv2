@@ -5,13 +5,14 @@
 use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::validation_worker::{ValidationEvent, ValidationSender};
+use crate::shares::band::check_share_band;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::{ShareBlock, is_terminal_blockhash};
-use crate::shares::validation::{ShareValidator, stored_ancestor_times};
+use crate::shares::validation::{ShareValidator, stored_ancestor_times, stored_parent_band};
 use crate::store::block_tx_metadata::Status;
 use crate::store::prune_blocks::prune_height_for_tip;
 use crate::store::writer::StoreError;
@@ -406,6 +407,10 @@ impl BlockReceiver {
     }
 
     /// ASERT difficulty check against the parent as stored.
+    ///
+    /// On Bitcoin Cash the ASERT target is the share's minimum, its
+    /// `asert_bits`, and the share must also pass the difficulty band
+    /// against its stored parent (`shares::band::check_share_band`).
     fn validate_asert(&self, share_block: &ShareBlock) -> Result<(), Box<dyn Error + Send + Sync>> {
         let parent_hash = share_block.header.prev_share_blockhash;
         let parent = self.chain_store_handle.get_asert_parent(&parent_hash)?;
@@ -413,14 +418,26 @@ impl BlockReceiver {
             .share_validator
             .pool_difficulty()
             .calculate_target_clamped(parent);
-        if share_block.header.bits != expected_bits {
+        if share_block.header.minimum_bits() != expected_bits {
             let block_hash = share_block.block_hash();
             return Err(format!(
                 "ASERT mismatch for {block_hash}: declared bits {:#010x}, expected {:#010x}",
-                share_block.header.bits.to_consensus(),
+                share_block.header.minimum_bits().to_consensus(),
                 expected_bits.to_consensus()
             )
             .into());
+        }
+        if share_block.header.carries_band() {
+            let parent_band = stored_parent_band(&parent_hash, &self.chain_store_handle)?;
+            check_share_band(&share_block.header, &parent_band).map_err(
+                |error| -> Box<dyn Error + Send + Sync> {
+                    format!(
+                        "Share block {} is outside the difficulty band: {error}",
+                        share_block.block_hash()
+                    )
+                    .into()
+                },
+            )?;
         }
         Ok(())
     }

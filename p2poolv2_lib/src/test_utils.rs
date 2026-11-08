@@ -1871,6 +1871,9 @@ pub fn create_test_commitment() -> ShareCommitment {
         bch_coinbase: None,
         pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
+        asert_bits: CompactTarget::default(),
+        wanted_bits: CompactTarget::default(),
+        band_cap: 0,
     }
 }
 
@@ -2004,6 +2007,7 @@ pub fn build_token_win_submit(
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
         tracker,
     );
     let job = tracker.get_job(job_id).unwrap();
@@ -2112,6 +2116,9 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         bch_coinbase: None,
         pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
+        asert_bits: CompactTarget::default(),
+        wanted_bits: CompactTarget::default(),
+        band_cap: 0,
     };
     let commitment_hash = share_commitment.hash();
 
@@ -2174,6 +2181,9 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         bch_coinbase: None,
         pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
+        asert_bits: CompactTarget::default(),
+        wanted_bits: CompactTarget::default(),
+        band_cap: 0,
     };
 
     let template_merkle_branches = build_merkle_branches_for_template(&template)
@@ -2205,6 +2215,7 @@ pub struct TestShareBlockBuilder {
     bits: Option<CompactTarget>,
     time: Option<u32>,
     cuts: TestShareCuts,
+    band: Option<TestShareBand>,
 }
 
 /// The donation and fee a test share commits, in its header and in the
@@ -2216,6 +2227,37 @@ struct TestShareCuts {
     donation: Option<u16>,
     fee_address: Option<PayoutAddress>,
     fee: Option<u16>,
+}
+
+/// The difficulty band a test share commits (`shares::band`): its minimum,
+/// the target its node wanted and its band cap.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, Copy)]
+struct TestShareBand {
+    asert_bits: CompactTarget,
+    wanted_bits: CompactTarget,
+    band_cap: u32,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl TestShareBand {
+    /// The band a share owned by `share_owner` at `share_bits` carries when
+    /// the test sets none: a Bitcoin Cash share at its minimum in a band of
+    /// one, and no band on Bitcoin.
+    fn default_for(share_owner: &ShareOwner, share_bits: CompactTarget) -> Self {
+        match share_owner {
+            ShareOwner::CashP2pkh(_) => Self {
+                asert_bits: share_bits,
+                wanted_bits: share_bits,
+                band_cap: crate::shares::band::BAND_CAP_UNIT,
+            },
+            _ => Self {
+                asert_bits: CompactTarget::default(),
+                wanted_bits: CompactTarget::default(),
+                band_cap: 0,
+            },
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -2305,6 +2347,23 @@ impl TestShareBlockBuilder {
         self.bits(easy_target)
     }
 
+    /// Commit this difficulty band (`shares::band`) instead of the default,
+    /// which puts a Bitcoin Cash share at its minimum in a band of one: a
+    /// share mined heavier, or one claiming another minimum or cap.
+    pub fn band(
+        mut self,
+        asert_bits: CompactTarget,
+        wanted_bits: CompactTarget,
+        band_cap: u32,
+    ) -> Self {
+        self.band = Some(TestShareBand {
+            asert_bits,
+            wanted_bits,
+            band_cap,
+        });
+        self
+    }
+
     pub fn build(self) -> ShareBlock {
         let default_pubkey_hex =
             "020202020202020202020202020202020202020202020202020202020202020202";
@@ -2348,6 +2407,7 @@ impl TestShareBlockBuilder {
             self.bits,
             self.time,
             self.cuts,
+            self.band,
         )
     }
 }
@@ -2419,10 +2479,12 @@ fn test_share_block(
     bits: Option<CompactTarget>,
     time: Option<u32>,
     cuts: TestShareCuts,
+    band: Option<TestShareBand>,
 ) -> ShareBlock {
     let share_bits = bits.unwrap_or(CompactTarget::from_consensus(
         0x01e0377ae * work.unwrap_or(1),
     ));
+    let share_band = band.unwrap_or_else(|| TestShareBand::default_for(share_owner, share_bits));
     let share_time = time.unwrap_or(1700000000u32);
     let prev_blockhash = BlockHash::from_str(prev_share_blockhash).unwrap();
 
@@ -2458,6 +2520,9 @@ fn test_share_block(
                 bch_coinbase: None,
                 pool_merge_mining: None,
                 share_version: crate::shares::share_version::ShareVersion::CURRENT,
+                asert_bits: share_band.asert_bits,
+                wanted_bits: share_band.wanted_bits,
+                band_cap: share_band.band_cap,
             };
 
             let bitcoin_coinbase = build_bitcoin_coinbase_transaction(
@@ -2532,6 +2597,9 @@ fn test_share_block(
         bch_coinbase: None,
         pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
+        asert_bits: share_band.asert_bits,
+        wanted_bits: share_band.wanted_bits,
+        band_cap: share_band.band_cap,
     };
 
     ShareBlock {
@@ -2618,6 +2686,9 @@ impl TestShareHeaderBuilder {
             bch_coinbase: None,
             pool_merge_mining: None,
             share_version: crate::shares::share_version::ShareVersion::CURRENT,
+            asert_bits: CompactTarget::default(),
+            wanted_bits: CompactTarget::default(),
+            band_cap: 0,
         }
     }
 }

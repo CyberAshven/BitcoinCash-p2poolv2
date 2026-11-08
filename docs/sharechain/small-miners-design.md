@@ -1,9 +1,10 @@
 # Share chain redesign for payout variance and fees
 
-Status: proposal, tracked in
+Status: parts 1 and 2 implemented on branch feat/one-chain-band; parts 3 to 5
+are proposals. Tracked in
 [issue #79](https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues/79).
-Nothing here is implemented yet. Values marked *(sim)* are first proposals
-that the simulation in row 2 of the issue confirms or replaces.
+Values marked *(sim)* are first proposals that the simulation in row 2 of the
+issue confirms or replaces.
 
 This page gives the exact rules for four changes to the Bitcoin Cash share
 chain and the outline of a fifth:
@@ -66,12 +67,19 @@ With the band, a share's target `T` must satisfy
 T_asert / C(parent)  <=  T  <=  T_asert
 ```
 
-where `T_asert` is the unchanged ASERT target from the parent
+where `T_asert` is the ASERT target from the parent
 (`calculate_target_clamped`) and `C(parent)` is the band cap carried from
 the parent (below). A share may therefore be up to `C` times harder than the
 minimum, never easier. The comparison uses exact 256-bit targets; a target
 written in compact form is rounded so it is never easier than the target it
 stands for.
+
+ASERT on Bitcoin Cash is anchored at the parent, and its anchor target is the
+parent's own minimum, not the parent's `bits`. Anchored at a heavier parent's
+`bits`, the next minimum would be as heavy as that parent, and every share
+after a heavy one would have to be heavy too. Each share therefore carries its
+minimum as `asert_bits` (below), which must equal `T_asert`; for a share at
+the minimum it equals `bits`, and ASERT then runs exactly as before.
 
 The check replaces the equality at the three places that make it today:
 
@@ -90,16 +98,17 @@ everyone else.
 
 ### What a share carries
 
-Each Bitcoin Cash share header gains two fields:
+Each Bitcoin Cash share header gains three fields:
 
 | Field | Contents |
 |---|---|
 | `wanted_bits` | The target the share's node wanted for this miner before the cap: equal to `bits`, or harder when the cap stopped it |
 | `band_cap` | This share's cap `C` in units of 1/1024, which must equal one step from its parent's `band_cap` (below) |
+| `asert_bits` | This share's minimum `T_asert`, which must equal the ASERT target from the parent; the next share's ASERT is anchored at it |
 
-Both are committed in the share commitment after the share version (tag byte
-`0x22`, then the 4-byte compact `wanted_bits` and the 4-byte `band_cap`), so the
-proof of work fixes them. `wanted_bits` must be at least as hard as `bits`; it
+All three are committed in the share commitment after the share version (tag
+byte `0x22`, then the 4-byte compact `wanted_bits`, the 4-byte `band_cap` and
+the 4-byte compact `asert_bits`), so the proof of work fixes them. `wanted_bits` must be at least as hard as `bits`; it
 is a signal only and never makes a share valid or invalid beyond that. Carrying
 `band_cap` in the header lets a node check it from the parent's header alone,
 during header sync as well as full validation, with no walk back to genesis.
@@ -116,8 +125,8 @@ which is today's rule, and moves by at most a small step per share:
 C_fp:  C in units of 1/1024, an integer from 1024 (C = 1) to C_MAX * 1024
 
 band_cap(genesis) = 1024
-u                 = min(work(parent.bits) / work(the parent's own T_asert),
-                        parent.band_cap / 1024), an integer, at least 1
+u                 = min(work(parent.wanted_bits) / work(the parent's own T_asert),
+                        C_MAX), an integer, at least 1
 wanted more       = parent.wanted_bits is harder than
                     (the parent's own T_asert) * 1024 / parent.band_cap
 
@@ -131,12 +140,16 @@ then clamped to 1024 .. C_MAX * 1024
 | `C_MAX` | 64 *(sim)* |
 | step | 1/512 per share, so `C` doubles in about 355 heavy shares and halves in about 355 others *(sim)* |
 
-A heavy share that wanted more pushes `C` up in proportion to its work, and
-any share that did not want more pulls it down a little. `C` therefore grows
+A share that wanted more pushes `C` up in proportion to the work its node
+wanted, even while the cap holds the share itself at the minimum, and any
+share that did not want more pulls it down a little. Counting the wanted work
+rather than the share's own lets a minority of shares open a band of one: at
+`C = 1` every share's own work is the minimum's. `C` therefore grows
 while a large part of the pool's work is held back by the cap and settles
-when the nodes' wishes fit inside it. A miner cannot push `C` up without
-mining heavier shares, which only lowers the minimum for small miners; a
-miner that mines at the minimum pulls `C` down towards today's rule.
+when the nodes' wishes fit inside it. A miner pushes `C` up only by wanting
+heavier shares, which, once the band opens, it then mines, and that only
+lowers the minimum for small miners; a miner that wants the minimum pulls `C`
+down towards today's rule.
 
 ### Node default (policy, not a rule)
 
@@ -144,9 +157,11 @@ A node gives each miner the minimum target unless the miner would then make
 more than `max(4 shares per pool block, 300 shares a month)`. Such a miner
 gets a harder target, up to `C` times the minimum, chosen so it makes about
 that many shares; `wanted_bits` records the target it would have had without
-the cap. The node estimates the pool's block rate from its window: the
-window's work over its time span, against the Bitcoin Cash difficulty in its
-latest header.
+the cap. The node estimates the pool's block rate from the pool's hashrate,
+the work of its newest 60 confirmed shares (ten minutes) over their time
+span, against the Bitcoin Cash difficulty of the template; each miner's
+hashrate is its accepted submissions over the last ten minutes, all its
+connections together (`stratum/work/band_policy.rs`).
 
 The rule allows heavier shares; nothing forces them. A node that gives every
 miner the minimum makes ASERT bring the minimum back to today's level: no

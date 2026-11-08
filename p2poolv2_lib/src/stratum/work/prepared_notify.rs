@@ -17,11 +17,12 @@ use crate::accounting::payout::coinbase_budget::{PayoutSplit, bch_split_for_comm
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
 use crate::accounting::payout::payout_tree::PayoutTree;
 use crate::shares::auxpow::{SplitSlot, TokenSplit};
+use crate::shares::band::{BAND_CAP_UNIT, JobBand};
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::{ShareTransaction, encode_optional_address};
 use crate::shares::share_commitment::{
-    BCH_JOB_TOKEN_VERSION, ShareCommitment, append_pool_merge_mining, append_share_version,
-    build_commitment_prefix, build_commitment_suffix, commitment_digest,
+    BCH_JOB_TOKEN_VERSION, ShareCommitment, append_band, append_pool_merge_mining,
+    append_share_version, build_commitment_prefix, build_commitment_suffix, commitment_digest,
 };
 use crate::shares::share_version::ShareVersion;
 use crate::shares::transactions::coinbase::compute_witness_root;
@@ -226,14 +227,28 @@ pub struct PreparedNotifyParams {
     /// prev_share_blockhash + uncles + bits
     commitment_prefix: Vec<u8>,
     /// Pre-serialized commitment fields after time (before miner address):
-    /// donation_address + donation + fee_address + fee
+    /// donation_address + donation + fee_address + fee, and on Bitcoin Cash
+    /// the share version and the band of a job at the minimum
     commitment_suffix: Vec<u8>,
+    /// Where the band starts in `commitment_suffix`, on Bitcoin Cash: a
+    /// heavier job's own band replaces it from there
+    /// ([`Self::commitment_suffix_for_band`]). `None` on Bitcoin, which has
+    /// no band.
+    commitment_band_offset: Option<usize>,
     /// Previous share block hash (for building ShareCommitment struct)
     prev_share_blockhash: BlockHash,
     /// Uncle block hashes (for building ShareCommitment struct)
     uncles: Vec<BlockHash>,
-    /// Share chain difficulty target (for building ShareCommitment struct)
+    /// Share chain difficulty target (for building ShareCommitment struct):
+    /// the minimum, `T_asert`, on Bitcoin Cash
     bits: CompactTarget,
+    /// The band cap every share on these params carries, one step from the
+    /// mining base's (`shares::band::next_band_cap`). Bitcoin Cash only.
+    band_cap: u32,
+    /// The share rate, in shares a second, above which a miner gets heavier
+    /// shares (`stratum::work::band_policy`). `None` without an estimate of
+    /// the pool's block rate, or on Bitcoin: every job is at the minimum.
+    share_rate_limit: Option<f64>,
     /// Donation address for developers
     donation_address: Option<PayoutAddress>,
     /// Donation in basis points
@@ -392,6 +407,8 @@ impl PreparedNotifyParams {
         .include_merge_mining(miner_donations.include_merge_mining)
         .merge_tokens(self.merge_tokens.clone())
         .share_version(self.share_version)
+        .band_cap(self.band_cap)
+        .share_rate_limit(self.share_rate_limit)
         .share_transactions(self.share_transactions.to_vec());
         builder.pplns_weights = Some(Arc::clone(weights));
         builder.build()
@@ -410,6 +427,9 @@ impl PreparedNotifyParams {
     }
 
     /// Versioned BCH job terms, preceded by an unpredictable connection nonce.
+    ///
+    /// The terms are the template's own: a declared job's share is at the
+    /// minimum, its bits, and carries the template's band cap.
     pub(crate) fn mining_job_token(
         &self,
         nonce: [u8; 32],
@@ -431,6 +451,9 @@ impl PreparedNotifyParams {
             .consensus_encode(&mut token)
             .expect("vector writer");
         self.share_version
+            .consensus_encode(&mut token)
+            .expect("vector writer");
+        self.band_cap
             .consensus_encode(&mut token)
             .expect("vector writer");
         if token.len() > 255 {
@@ -479,9 +502,60 @@ impl PreparedNotifyParams {
         }
     }
 
-    /// The ASERT-computed pool target for shares built on these params.
+    /// The ASERT-computed pool target for shares built on these params: the
+    /// minimum on Bitcoin Cash, where a heavier job's shares are harder.
     pub fn bits(&self) -> bitcoin::CompactTarget {
         self.bits
+    }
+
+    /// The band cap every share on these params carries.
+    pub(crate) fn band_cap(&self) -> u32 {
+        self.band_cap
+    }
+
+    /// The share rate, in shares a second, above which a miner gets heavier
+    /// shares; `None` when every job is at the minimum.
+    pub(crate) fn share_rate_limit(&self) -> Option<f64> {
+        self.share_rate_limit
+    }
+
+    /// The band of a job at the minimum: its bits are the minimum, and it
+    /// wants nothing harder.
+    pub(crate) fn minimum_job_band(&self) -> JobBand {
+        JobBand {
+            bits: self.bits,
+            wanted_bits: self.bits,
+        }
+    }
+
+    /// `bits` as a share's band field holds it: itself on Bitcoin Cash, zero
+    /// on Bitcoin, whose shares carry no band.
+    fn band_bits(&self, bits: CompactTarget) -> CompactTarget {
+        if self.commitment_band_offset.is_some() {
+            bits
+        } else {
+            CompactTarget::default()
+        }
+    }
+
+    /// The band cap a share on these params commits: zero on Bitcoin.
+    fn commitment_band_cap(&self) -> u32 {
+        if self.commitment_band_offset.is_some() {
+            self.band_cap
+        } else {
+            0
+        }
+    }
+
+    /// The commitment suffix of a job whose shares carry `job_band`: the
+    /// shared suffix up to its band, then that job's band. `None` on
+    /// Bitcoin, which has no band.
+    fn commitment_suffix_for_band(&self, job_band: JobBand) -> Option<Vec<u8>> {
+        let band_offset = self.commitment_band_offset?;
+        let mut suffix = Vec::with_capacity(self.commitment_suffix.len());
+        suffix.extend_from_slice(&self.commitment_suffix[..band_offset]);
+        append_band(&mut suffix, job_band.wanted_bits, self.band_cap, self.bits);
+        Some(suffix)
     }
 
     /// The share transactions shares built on these params carry.
@@ -601,6 +675,8 @@ pub(crate) struct PreparedNotifyParamsBuilder {
     include_merge_mining: bool,
     merge_tokens: Option<Arc<TokenSet>>,
     share_version: ShareVersion,
+    band_cap: u32,
+    share_rate_limit: Option<f64>,
     share_transactions: Vec<ShareTransaction>,
 }
 
@@ -630,6 +706,8 @@ impl PreparedNotifyParamsBuilder {
             include_merge_mining: false,
             merge_tokens: None,
             share_version: ShareVersion::CURRENT,
+            band_cap: BAND_CAP_UNIT,
+            share_rate_limit: None,
             share_transactions: Vec::new(),
         }
     }
@@ -697,6 +775,22 @@ impl PreparedNotifyParamsBuilder {
     /// current version by default.
     pub fn share_version(mut self, share_version: ShareVersion) -> Self {
         self.share_version = share_version;
+        self
+    }
+
+    /// The band cap every share on these params carries, one step from the
+    /// mining base's (`shares::band::next_band_cap`); a band of one by
+    /// default. Committed only on Bitcoin Cash (`include_merge_mining`).
+    pub fn band_cap(mut self, band_cap: u32) -> Self {
+        self.band_cap = band_cap;
+        self
+    }
+
+    /// The share rate, in shares a second, above which a miner gets heavier
+    /// shares (`stratum::work::band_policy`); `None`, the default, keeps
+    /// every job at the minimum.
+    pub fn share_rate_limit(mut self, share_rate_limit: Option<f64>) -> Self {
+        self.share_rate_limit = share_rate_limit;
         self
     }
 
@@ -864,6 +958,13 @@ impl PreparedNotifyParamsBuilder {
         if self.include_merge_mining {
             append_share_version(&mut commitment_suffix, self.share_version);
         }
+        //* The band of a job at the minimum follows the share version; a
+        //* heavier job replaces it from its offset.
+        let commitment_band_offset = self.include_merge_mining.then(|| {
+            let band_offset = commitment_suffix.len();
+            append_band(&mut commitment_suffix, self.bits, self.band_cap, self.bits);
+            band_offset
+        });
 
         let miner_donations = self.miner_donation_address.map(|address| {
             Box::new(MinerDonations {
@@ -885,9 +986,12 @@ impl PreparedNotifyParamsBuilder {
             coinbase2_placeholder_len,
             commitment_prefix,
             commitment_suffix,
+            commitment_band_offset,
             prev_share_blockhash: self.prev_share_blockhash,
             uncles: self.uncles,
             bits: self.bits,
+            band_cap: self.band_cap,
+            share_rate_limit: self.share_rate_limit,
             donation_address: self.donation_address,
             donation: self.donation,
             fee_address: self.fee_address,
@@ -1035,10 +1139,17 @@ fn build_per_miner_coinbase2(
 /// share commitment digests it, and the job keeps the leaves for the
 /// miner's disclosure and wins. A job without a payout address carries the
 /// empty commitment.
+///
+/// On Bitcoin Cash `job_band` gives a heavier miner's job its own target and
+/// wanted target inside the band (`stratum::work::band_policy`): the
+/// commitment then carries them, its digest is built from a prefix with
+/// those bits and a suffix with that band. `None`, and every Bitcoin job,
+/// mines at the minimum, `prepared.bits`.
 pub(crate) fn insert_miner_job(
     prepared: &PreparedNotifyParams,
     miner_bitcoin_address: Option<&PayoutAddress>,
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
+    job_band: Option<JobBand>,
     tracker_handle: &JobTracker,
 ) -> (JobId, String) {
     let fresh_time = SystemTimeProvider.seconds_since_epoch() as u32;
@@ -1050,6 +1161,14 @@ pub(crate) fn insert_miner_job(
         .map(Arc::new);
     let pool_merge_mining = merge_tokens.as_ref().map(|job| job.commitment);
 
+    let minimum_band = prepared.minimum_job_band();
+    let banded_suffix = job_band
+        .filter(|band| *band != minimum_band)
+        .and_then(|band| Some((band, prepared.commitment_suffix_for_band(band)?)));
+    let job_band = banded_suffix
+        .as_ref()
+        .map_or(minimum_band, |(band, _)| *band);
+
     // Build ShareCommitment only when both addresses are available: the share
     // chain coinbase needs an owner and the bitcoin coinbase needs a payee.
     let share_commitment = match (miner_bitcoin_address, miner_address) {
@@ -1059,7 +1178,7 @@ pub(crate) fn insert_miner_job(
             miner_bitcoin_address: bitcoin_address.clone(),
             miner_address: share_address,
             share_witness_root: prepared.share_witness_root,
-            bits: prepared.bits,
+            bits: job_band.bits,
             time: fresh_time,
             donation_address: prepared.donation_address.clone(),
             donation: prepared.donation,
@@ -1068,21 +1187,31 @@ pub(crate) fn insert_miner_job(
             bch_coinbase: None,
             pool_merge_mining,
             share_version: prepared.share_version,
+            asert_bits: prepared.band_bits(prepared.bits),
+            wanted_bits: prepared.band_bits(job_band.wanted_bits),
+            band_cap: prepared.commitment_band_cap(),
         }),
         _ => None,
     };
 
+    //* A heavier job's own bits and band replace the template's minimum in
+    //* the digest's prefix and suffix.
+    let rebuilt_prefix = banded_suffix.as_ref().map(|(band, _)| {
+        build_commitment_prefix(prepared.prev_share_blockhash, &prepared.uncles, band.bits)
+    });
     // The hash the miner embeds in its bitcoin coinbase must be the hash of the
     // commitment we store, so derive one from the other rather than building
     // the same digest twice. A miner's token root follows the shared suffix,
     // as `ShareCommitment::hash` digests it.
-    let miner_suffix = pool_merge_mining.map(|commitment| {
-        let mut suffix = prepared.commitment_suffix.clone();
-        append_pool_merge_mining(&mut suffix, &commitment);
-        suffix
-    });
+    let mut miner_suffix = banded_suffix.map(|(_, suffix)| suffix);
+    if let Some(commitment) = pool_merge_mining {
+        let suffix = miner_suffix.get_or_insert_with(|| prepared.commitment_suffix.clone());
+        append_pool_merge_mining(suffix, &commitment);
+    }
     let commitment_hash_hex = get_commitment_hex(
-        &prepared.commitment_prefix,
+        rebuilt_prefix
+            .as_deref()
+            .unwrap_or(&prepared.commitment_prefix),
         fresh_time,
         miner_suffix
             .as_deref()
@@ -1135,7 +1264,8 @@ pub(crate) fn insert_miner_job(
 ///
 /// Inserts the miner's job with [`insert_miner_job`] and overwrites the
 /// job id and coinbase2 placeholders in the pre-built JSON. The SV1 server
-/// uses [`build_notify_with_job_id`], which also gives the job's id.
+/// uses [`build_notify_with_job_id`], which also gives the job's id. The job
+/// is at the minimum.
 #[cfg(any(test, feature = "sim"))]
 pub(crate) fn build_notify_from_prepared(
     prepared: &PreparedNotifyParams,
@@ -1147,23 +1277,27 @@ pub(crate) fn build_notify_from_prepared(
         prepared,
         miner_bitcoin_address,
         miner_address,
+        None,
         tracker_handle,
     )
     .map(|(notify_json, _job_id)| notify_json)
 }
 
 /// [`build_notify_from_prepared`], also returning the id of the job it
-/// inserted, for what follows the notify (a miner's token leaves).
+/// inserted, for what follows the notify (a miner's token leaves). A heavier
+/// miner's `job_band` passes through to [`insert_miner_job`].
 pub(crate) fn build_notify_with_job_id(
     prepared: &PreparedNotifyParams,
     miner_bitcoin_address: Option<&PayoutAddress>,
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
+    job_band: Option<JobBand>,
     tracker_handle: &JobTracker,
 ) -> Result<(String, JobId), WorkError> {
     let (job_id, coinbase2) = insert_miner_job(
         prepared,
         miner_bitcoin_address,
         miner_address,
+        job_band,
         tracker_handle,
     );
     let job_id_hex = format!("{job_id:016x}");

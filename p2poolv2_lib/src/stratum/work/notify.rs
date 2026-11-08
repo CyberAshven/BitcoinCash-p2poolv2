@@ -13,6 +13,7 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::{
 };
 use crate::config::StratumConfig;
 use crate::pool_difficulty;
+use crate::shares::band::{BAND_CAP_UNIT, ParentBand, next_band_cap};
 use crate::shares::bch_asert::BchAsert;
 #[cfg(test)]
 #[mockall_double::double]
@@ -23,6 +24,9 @@ use crate::shares::share_version::{ShareVersion, next_share_version};
 use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::tally_share_version_votes;
 use crate::stratum::sv2::PoolTransactionCache;
+use crate::stratum::work::band_policy::{
+    POOL_HASHRATE_SHARES, recent_pool_hashrate, share_rate_limit,
+};
 use crate::stratum::work::merge_tokens::{TokenFile, TokenSet};
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
 use crate::stratum::work::tracker::JobTracker;
@@ -123,23 +127,34 @@ fn build_prepared_notify(
     context.tracker.set_pool_target(target);
     // Bitcoin Cash shares follow the mining base's rule version, or the next
     // one once 95% of the vote span's work desires it (`next_share_version`).
-    let share_version = if context.config.chain == crate::config::Chain::BitcoinCash {
-        let mining_base_version = context
+    let (share_version, band_cap, share_rate_limit) = if context.config.chain
+        == crate::config::Chain::BitcoinCash
+    {
+        let mining_base = context
             .chain_store_handle
             .get_share_header(&tip)
             .map_err(|error| WorkError {
-                message: format!("Failed to read the mining base's share version: {error}"),
-            })?
-            .share_version
-            .version;
-        next_share_version(mining_base_version, parent.height, || {
-            tally_share_version_votes(tip, &context.chain_store_handle)
-        })
-        .map_err(|error| WorkError {
-            message: format!("Failed to tally the share version vote: {error}"),
-        })?
+                message: format!(
+                    "Failed to read the mining base's share version and band: {error}"
+                ),
+            })?;
+        let share_version =
+            next_share_version(mining_base.share_version.version, parent.height, || {
+                tally_share_version_votes(tip, &context.chain_store_handle)
+            })
+            .map_err(|error| WorkError {
+                message: format!("Failed to tally the share version vote: {error}"),
+            })?;
+        //* Every share on this template carries the band cap one step
+        //* from the mining base's, and the node sizes heavier jobs from
+        //* the pool's recent block rate.
+        (
+            share_version,
+            next_band_cap(&ParentBand::from_header(&mining_base)),
+            bch_share_rate_limit(template, parent.height, &context.chain_store_handle),
+        )
     } else {
-        ShareVersion::CURRENT
+        (ShareVersion::CURRENT, BAND_CAP_UNIT, None)
     };
 
     //* Anchor the payout on the same `tip` we commit as prev_share_blockhash
@@ -183,8 +198,34 @@ fn build_prepared_notify(
     .include_merge_mining(context.config.chain == crate::config::Chain::BitcoinCash)
     .miner_donations(miner_donation_address(&context.config))
     .share_version(share_version)
+    .band_cap(band_cap)
+    .share_rate_limit(share_rate_limit)
     .share_transactions(share_transactions)
     .build()
+}
+
+/// The share rate above which a Bitcoin Cash miner gets heavier shares on
+/// `template` (`band_policy::share_rate_limit`): the pool's hashrate from
+/// the newest [`POOL_HASHRATE_SHARES`] confirmed shares up to `tip_height`,
+/// against the template's block target. `None` while the chain is too short
+/// or the read fails: every job is then at the minimum, which is always
+/// valid, so a node that cannot estimate the pool's block rate loses nothing
+/// but the heavier shares.
+fn bch_share_rate_limit(
+    template: &BlockTemplate,
+    tip_height: u32,
+    chain_store_handle: &ChainStoreHandle,
+) -> Option<f64> {
+    let block_bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits).ok()?;
+    let from_height = tip_height.saturating_sub(POOL_HASHRATE_SHARES - 1);
+    let headers = chain_store_handle
+        .get_confirmed_headers_in_range(from_height, tip_height)
+        .inspect_err(|error| {
+            debug!("No pool hashrate for heavier shares, every job at the minimum: {error}")
+        })
+        .ok()?;
+    let pool_hashrate = recent_pool_hashrate(&headers)?;
+    Some(share_rate_limit(pool_hashrate, block_bits))
 }
 
 /// The payouts of jobs that merge-mine `merge_tokens` for every miner, and
@@ -646,6 +687,9 @@ mod tests {
         chain_store_handle
             .expect_get_share_header()
             .returning(|_| Ok(genesis_for_tests().header));
+        chain_store_handle
+            .expect_get_confirmed_headers_in_range()
+            .returning(|_, _| Ok(vec![]));
         let pool_difficulty =
             pool_difficulty::PoolDifficulty::new(genesis_header.bits, genesis_header.time, 0);
         let mut config = StratumConfig::new_for_test_default().parse().unwrap();
@@ -758,6 +802,9 @@ mod tests {
         chain_store_handle
             .expect_get_share_header()
             .returning(|_| Ok(genesis_for_tests().header));
+        chain_store_handle
+            .expect_get_confirmed_headers_in_range()
+            .returning(|_, _| Ok(vec![]));
         let pool_difficulty =
             pool_difficulty::PoolDifficulty::new(genesis_header.bits, genesis_header.time, 0);
         let mut config = StratumConfig::new_for_test_default().parse().unwrap();

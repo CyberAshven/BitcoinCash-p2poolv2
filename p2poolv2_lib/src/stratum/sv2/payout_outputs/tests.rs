@@ -308,6 +308,7 @@ async fn requested_outputs_pay_the_per_share_donation_the_nodes_own_job_pays() {
         &prepared,
         Some(&payee(1)),
         Some(ShareOwner::CashP2pkh([1; 20])),
+        None,
         &tracker,
     );
     let job = tracker.get_job(job_id).unwrap();

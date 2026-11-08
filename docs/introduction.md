@@ -17,7 +17,9 @@ P2Poolv2 developers.
   blocks of work, at most 120,960 shares; shares count once 100 deep. Uncles
   are paid 9/10 of their difficulty.
 - **One share chain.** Its share target ceiling, difficulty about 4.5, is the
-  former mini chain's, so small miners still find shares. See
+  former mini chain's, so small miners still find shares. A big miner gets
+  shares up to 64 times harder (the difficulty band), so it makes fewer of
+  them and the minimum stays low for everyone else. See
   [Small miners](small-miners.md).
 - **Mainnet and chipnet run the same rules;** only the network setting
   differs. Regtest is for development.

@@ -26,7 +26,7 @@ mod u512 {
         pub struct U512(8);
     }
 }
-use u512::U512;
+pub(crate) use u512::U512;
 
 use crate::sim_overrides;
 
@@ -43,7 +43,7 @@ const RADIX: i64 = 65536;
 pub const BCH_ASERT_ANCHOR_TAG: &str = "asert-parent";
 
 /// Convert a `Target` to a `U512` via its little-endian byte representation.
-fn target_to_u512(target: Target) -> U512 {
+pub(crate) fn target_to_u512(target: Target) -> U512 {
     let bytes = target.to_le_bytes();
     let mut padded = [0u8; 64];
     padded[..32].copy_from_slice(&bytes);
@@ -52,7 +52,7 @@ fn target_to_u512(target: Target) -> U512 {
 
 /// Convert a `U512` value back to a `Target`, assuming it fits in 256 bits.
 /// The caller must ensure the value has been clamped to the 256-bit range.
-fn u512_to_target(value: U512) -> Target {
+pub(crate) fn u512_to_target(value: U512) -> Target {
     let bytes = value.to_little_endian();
     Target::from_le_bytes(bytes[..32].try_into().expect("slice is 32 bytes"))
 }
@@ -256,7 +256,10 @@ pub struct AsertParent {
     pub height: u32,
     /// Timestamp of the parent share.
     pub time: u32,
-    /// Target the parent share was mined at.
+    /// The parent share's minimum target, the anchor of the Bitcoin Cash
+    /// rule: its `asert_bits`, which its own bits may be harder than within
+    /// the difficulty band (`shares::band`). On Bitcoin, the target it was
+    /// mined at.
     pub bits: CompactTarget,
     /// Timestamp of the parent's own parent. Genesis has no parent and uses
     /// its own time, as the genesis anchor does.
@@ -265,12 +268,14 @@ pub struct AsertParent {
 
 impl AsertParent {
     /// Descriptor for `header` at `height`, whose own parent has timestamp
-    /// `previous_time`.
+    /// `previous_time`. `bits` is the header's minimum
+    /// ([`ShareHeader::minimum_bits`]), so a heavier parent anchors the next
+    /// share's ASERT at its minimum, not at its own bits.
     pub fn from_header(header: &ShareHeader, height: u32, previous_time: u32) -> Self {
         Self {
             height,
             time: header.time,
-            bits: header.bits,
+            bits: header.minimum_bits(),
             previous_time,
         }
     }

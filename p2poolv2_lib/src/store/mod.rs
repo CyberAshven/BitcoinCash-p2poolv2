@@ -32,7 +32,12 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 ///   resort (`BCH_GENESIS_LAST_RESORT_RULE_TAG`). A chain's first hours
 ///   were validated under the old rule, so a node could not sync them from
 ///   peers under the new one; the chain starts again.
-pub const STORE_FORMAT_VERSION: u32 = 2;
+/// - 3 (2026-11-09): Bitcoin Cash has one share chain, the mini chain's,
+///   and its share headers carry a difficulty band (`BCH_BAND_RULE_TAG`):
+///   the share's minimum, the target its node wanted and its band cap. A
+///   stored header has none of these and would not decode, and the merged
+///   chain starts from a new genesis.
+pub const STORE_FORMAT_VERSION: u32 = 3;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -542,9 +547,10 @@ impl Store {
         };
         Err(StoreError::OutdatedStore(format!(
             "the share-chain store at {} has {found}, and this node writes format \
-             {STORE_FORMAT_VERSION}, where chain work counts uncle work and Bitcoin Cash pays \
-             the genesis share only as the last resort. Delete the store directory and restart \
-             to resync the share chain from peers.",
+             {STORE_FORMAT_VERSION}, where chain work counts uncle work, Bitcoin Cash pays \
+             the genesis share only as the last resort, and Bitcoin Cash has one share chain \
+             (the main and mini chains merged) whose headers carry a difficulty band. Delete \
+             the store directory and restart to resync the share chain from peers.",
             self.path
         )))
     }
@@ -863,6 +869,30 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
         assert!(error.to_string().contains("has format 1"), "{error}");
+    }
+
+    /// A store from before the one share chain and its band, format 2, is
+    /// refused: its headers carry no band, and its chain is another genesis's.
+    #[test]
+    fn test_store_from_before_the_band_is_refused() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        store
+            .db
+            .put_cf(&metadata_cf, STORE_FORMAT_KEY, 2u32.to_le_bytes())
+            .unwrap();
+
+        let error = store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap_err();
+        assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
+        assert!(error.to_string().contains("has format 2"), "{error}");
+        assert!(error.to_string().contains("difficulty band"), "{error}");
     }
 
     #[test_log::test]

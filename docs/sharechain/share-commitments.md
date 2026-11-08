@@ -25,6 +25,9 @@ share transaction root (`ShareCommitment::hash` in
 - the share transaction root;
 - on a declared Bitcoin Cash job, the miner's scriptSig prefix and
   merge-mining commitment;
+- on Bitcoin Cash, the share version and the share's difficulty band: tag
+  `0x22`, then its wanted bits, band cap and minimum, four bytes each
+  ([Share validation](validation.md#the-difficulty-band-bitcoin-cash));
 - the miner payout address (with its network class) and the miner share
   address.
 
