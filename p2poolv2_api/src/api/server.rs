@@ -17,6 +17,7 @@ use axum::{
 };
 use chrono::DateTime;
 use p2poolv2_lib::accounting::payout::sharechain_pplns::PplnsWindow;
+use p2poolv2_lib::accounting::stats::prom::escape_label_value;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::monitoring_events::MonitoringEventSender;
 use p2poolv2_lib::node::actor::NodeHandle;
@@ -466,7 +467,7 @@ fn found_blocks_exposition(found_blocks: &[FoundBlock], network: bitcoin::Networ
             "found_block_time_seconds{{blockhash=\"{}\",height=\"{}\",miner=\"{}\",network=\"{}\"}} {}\n",
             found_block.bitcoin_blockhash,
             found_block.bitcoin_height,
-            found_block.miner_bitcoin_address,
+            escape_label_value(&found_block.miner_bitcoin_address),
             network_name,
             found_block.bitcoin_time
         ));
