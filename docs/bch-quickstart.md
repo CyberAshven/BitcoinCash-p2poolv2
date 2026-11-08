@@ -247,6 +247,13 @@ over RPC when the provider connection cannot take them. Keep `[bitcoinrpc]`:
 the node checks each template's parent there, validates shares against it,
 and falls back to it for blocks.
 
+The node asks each provider for the BCH large templates extension
+(`0x4C54`). A provider that grants it pushes every template's transactions,
+so only the block size limit bounds a template; the log says `granted the
+large templates extension`. Any other provider is asked for each template's
+transactions, and a template is then limited to 65,535 transactions in one
+16 MiB message.
+
 ## 4. Point miners at the node
 
 Every option (`p2p=`, `d=`, `th=` and the Stratum V2 identity) is in
