@@ -35,6 +35,8 @@ ASICs are not affected: they only hash the 80-byte header.
 - The node answers `RequestExtensions.Success` with the extensions it
   grants. Knuth turns an extension on only when the Success lists it, and
   a `RequestExtensions.Error` would turn every extension it asked for off.
+  The node answers `RequestExtensions.Error` only when it grants none of
+  them, as `0x0001` requires, which leaves Knuth with none, as before.
 - The extension's messages have the channel bit clear, little-endian
   fields, and `extension_type` `0x4C54` in the frame header.
 - A `0x4C54` message on a connection that did not negotiate it closes the

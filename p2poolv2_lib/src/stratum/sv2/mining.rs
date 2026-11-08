@@ -22,12 +22,23 @@
 //! node configures owns every share and a different `p2p=` is refused, and
 //! without either a P2Poolv2 node refuses the channel. For example
 //! `bchtest:qq...,p2p=tp2pool...` on chipnet.
+//!
+//! A connection that negotiated Worker-Specific Hashrate Tracking
+//! (`0x0002`) may name the machine behind each share of an extended channel,
+//! in a TLV field after `SubmitSharesExtended`. A proxy that aggregates many
+//! devices into one channel then shows each of them in this node's metrics
+//! and dashboard, as SV1 workers are. Only the worker label changes: the
+//! channel's payout address and share owner still own the share. Like every
+//! worker name, it stays on this node: `SimplePplnsShare` skips it when
+//! serialized, and no share-chain message carries it. The miner's side
+//! decides: the node grants the extension when asked and never requires it.
 
 use super::custom_job::validate_custom_job;
 use super::payout_outputs::PayoutIdentity;
 use super::session::DeclaredJob;
 use super::session::{encode_extension_frame, encode_frame, string_field};
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
+use crate::accounting::stats::metrics::MetricsHandle;
 use crate::config::{BitcoinCashNetwork, Chain, PoolMode};
 use crate::stratum::difficulty_adjuster::{
     DifficultyAdjuster, DifficultyAdjusterTrait, TARGET_DRR, share_difficulty_ceiling,
@@ -53,7 +64,7 @@ use crate::stratum::work::gbt::compute_merkle_root_from_branches;
 use crate::stratum::work::merge_tokens::MinerTokenJob;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, insert_miner_job};
 use crate::stratum::work::tracker::{JobDetails, JobId};
-use binary_sv2::{B032, B064K, Deserialize, Seq0255, Sv2Option, U256};
+use binary_sv2::{B032, B064K, Deserialize, GetSize, Seq0255, Sv2Option, U256};
 use bitcoin::block::{Header, Version};
 use bitcoin::hashes::Hash;
 use bitcoin::{Block, BlockHash, CompactTarget, Network, Target, TxMerkleNode};
@@ -62,13 +73,14 @@ use mining_sv2::{
     ERROR_CODE_OPEN_MINING_CHANNEL_MAX_TARGET_OUT_OF_RANGE,
     ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP, ERROR_CODE_SUBMIT_SHARES_BAD_EXTRANONCE_SIZE,
     ERROR_CODE_SUBMIT_SHARES_INVALID_NON_ROLLABLE_VERSION_BIT,
-    ERROR_CODE_UPDATE_CHANNEL_MAX_TARGET_OUT_OF_RANGE, MESSAGE_TYPE_CLOSE_CHANNEL,
-    MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH, MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-    MESSAGE_TYPE_NEW_MINING_JOB, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-    MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
-    MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL, MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
-    MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS,
-    MESSAGE_TYPE_SET_TARGET, MESSAGE_TYPE_SUBMIT_SHARES_ERROR, MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED,
+    ERROR_CODE_SUBMIT_SHARES_INVALID_SHARE, ERROR_CODE_UPDATE_CHANNEL_MAX_TARGET_OUT_OF_RANGE,
+    MESSAGE_TYPE_CLOSE_CHANNEL, MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
+    MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB, MESSAGE_TYPE_NEW_MINING_JOB,
+    MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
+    MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR, MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+    MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR,
+    MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS, MESSAGE_TYPE_SET_TARGET,
+    MESSAGE_TYPE_SUBMIT_SHARES_ERROR, MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED,
     MESSAGE_TYPE_SUBMIT_SHARES_STANDARD, MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS,
     MESSAGE_TYPE_UPDATE_CHANNEL, MESSAGE_TYPE_UPDATE_CHANNEL_ERROR, NewExtendedMiningJob,
     NewMiningJob, OpenExtendedMiningChannel, OpenExtendedMiningChannelSuccess,
@@ -78,7 +90,8 @@ use mining_sv2::{
     UpdateChannel, UpdateChannelError,
 };
 use p2poolv2_wallet::share_owner::ShareOwner;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::iter;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -121,6 +134,26 @@ fn check_extended_job_fits(prefix_length: usize, suffix_length: usize) -> Result
 /// channel, so an unbounded count would let one client make the node do
 /// unbounded work; a proxy aggregating many devices uses extended channels.
 pub const MAX_CHANNELS_PER_CONNECTION: usize = 32;
+
+/// The Stratum V2 extension Worker-Specific Hashrate Tracking (`0x0002`): a
+/// `SubmitSharesExtended` names the worker behind its share in a TLV field.
+pub const WORKER_TRACKING_EXTENSION: u16 = 0x0002;
+
+/// The extension's TLV field type of the share's `user_identity`.
+const USER_IDENTITY_FIELD: u8 = 0x01;
+
+/// The longest `user_identity` the extension allows, in bytes.
+const MAX_USER_IDENTITY_FIELD_LENGTH: usize = 32;
+
+/// A TLV field's header: its extension type (`U16`), field type (`U8`) and
+/// value length (`U16`).
+const TLV_HEADER_LENGTH: usize = 5;
+
+/// Worker names one channel's shares may bring. Each one is a worker in this
+/// node's metrics until the channel closes, so past this many a share with a
+/// new name counts as the channel's own worker, and one client cannot grow
+/// the metrics without bound. A proxy with more machines opens more channels.
+const MAX_WORKER_NAMES_PER_CHANNEL: usize = 1024;
 
 /// Message types this module handles.
 pub fn is_mining_channel_message(message_type: u8) -> bool {
@@ -165,9 +198,53 @@ struct Channel {
     /// Parent and nbits of the channel's latest `SetNewPrevHash`. The jobs
     /// carry no nbits, so new bits on the same parent need a new one too.
     last_tip: Option<(BlockHash, u32)>,
+    /// Worker names, other than the channel's own, that its accepted shares
+    /// brought with Worker-Specific Hashrate Tracking. Each one is a worker
+    /// of the channel's payout address in the node's metrics until the
+    /// channel closes.
+    worker_names: BTreeSet<String>,
 }
 
 impl Channel {
+    /// The worker a share on this channel counts under: `named`, the name
+    /// its Worker-Specific Hashrate Tracking field gives, or the channel's
+    /// own worker without one. A name the channel has not seen yet counts as
+    /// its own worker once it has [`MAX_WORKER_NAMES_PER_CHANNEL`] names.
+    fn share_worker_name(&self, named: Option<&str>) -> String {
+        match named {
+            Some(name)
+                if self.worker_names.contains(name)
+                    || self.worker_names.len() < MAX_WORKER_NAMES_PER_CHANNEL =>
+            {
+                name.to_string()
+            }
+            _ => self.session.workername.clone().unwrap_or_default(),
+        }
+    }
+
+    /// Make `workername`, the worker of a share the channel accepted, a
+    /// worker of the channel's payout address in `metrics` the first time a
+    /// share brings it, as an SV1 worker becomes one on `mining.authorize`.
+    /// The channel's own worker became one when the channel opened, and
+    /// [`MiningChannels::close_channel`] marks them all inactive.
+    async fn authorize_named_worker(&mut self, workername: &str, metrics: &MetricsHandle) {
+        if self.session.workername.as_deref().unwrap_or_default() == workername
+            || self.worker_names.contains(workername)
+        {
+            return;
+        }
+        if let Err(metrics_error) = metrics
+            .increment_worker_count(
+                self.session.btcaddress.clone().unwrap_or_default(),
+                workername.to_string(),
+            )
+            .await
+        {
+            error!("Failed to record SV2 worker {workername}: {metrics_error}");
+        }
+        self.worker_names.insert(workername.to_string());
+    }
+
     /// Move the channel to `tip`, and return whether it is new.
     ///
     /// On a new tip the jobs of the tip it leaves stay valid, and older ones
@@ -229,6 +306,14 @@ pub struct MiningChannels {
     /// (`0x4D4D`): its channels get each job's token leaves and each win's
     /// proof (`stratum::merge_disclosure`).
     merge_disclosure: bool,
+    /// The connection negotiated Worker-Specific Hashrate Tracking
+    /// (`0x0002`): a `SubmitSharesExtended` may name the worker behind its
+    /// share.
+    worker_tracking: bool,
+    /// A mining channel message has come. The extensions negotiation
+    /// (`0x0001`) comes right after `SetupConnection.Success`, before any
+    /// other protocol message, so `0x0002` is no longer granted.
+    channel_message_seen: bool,
 }
 
 impl MiningChannels {
@@ -342,6 +427,8 @@ impl MiningChannels {
             channels: BTreeMap::new(),
             next_channel_id: 1,
             merge_disclosure: false,
+            worker_tracking: false,
+            channel_message_seen: false,
         }
     }
 
@@ -350,6 +437,19 @@ impl MiningChannels {
     /// each win's proof (`WinProof`).
     pub(crate) fn grant_merge_disclosure(&mut self) {
         self.merge_disclosure = true;
+    }
+
+    /// Grant Worker-Specific Hashrate Tracking (`0x0002`) to a Mining
+    /// connection that asks before its first mining channel message, as the
+    /// extensions negotiation (`0x0001`) orders: from then on the TLV fields
+    /// after a `SubmitSharesExtended` may name the worker behind its share.
+    /// Returns whether it was granted.
+    pub(crate) fn grant_worker_tracking(&mut self) -> bool {
+        if self.channel_message_seen {
+            return false;
+        }
+        self.worker_tracking = true;
+        true
     }
 
     /// What follows a job that commits a token root: its `JobLeaves` frame
@@ -427,12 +527,22 @@ impl MiningChannels {
     ///
     /// `current` is the latest prepared template, used to send a newly
     /// opened channel its first job.
+    ///
+    /// On a connection that negotiated Worker-Specific Hashrate Tracking, the
+    /// TLV fields after a `SubmitSharesExtended` may name the share's worker
+    /// (`named_worker`). A named `user_identity` over 32 bytes or not UTF-8
+    /// refuses the share with `invalid-share`: sv2-spec 3.4.3 has a TLV field
+    /// past its length limit reject the message, and names no code for it.
+    /// Every other TLV field, bytes after a message that are not a whole run
+    /// of TLV fields, and anything after a `SubmitSharesStandard`, which the
+    /// extension does not cover, are ignored, as they were before.
     pub async fn handle(
         &mut self,
         message_type: u8,
         payload: &mut [u8],
         current: Option<Arc<PreparedNotifyParams>>,
     ) -> Result<Vec<Vec<u8>>, String> {
+        self.channel_message_seen = true;
         match message_type {
             MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL => {
                 let request = OpenStandardMiningChannel::from_bytes(payload)
@@ -481,13 +591,15 @@ impl MiningChannels {
                     ntime: request.ntime,
                     version: request.version,
                     enonce2: enonce2.to_vec(),
+                    worker_name: None,
                 })
                 .await
             }
             MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED => {
                 let request =
                     SubmitSharesExtended::from_bytes(payload).map_err(|error| error.to_string())?;
-                self.submit(Submission {
+                let fields_length = request.get_size();
+                let mut submission = Submission {
                     channel_id: request.channel_id,
                     sequence_number: request.sequence_number,
                     job_id: request.job_id,
@@ -495,8 +607,26 @@ impl MiningChannels {
                     ntime: request.ntime,
                     version: request.version,
                     enonce2: request.extranonce.as_bytes().to_vec(),
-                })
-                .await
+                    worker_name: None,
+                };
+                if self.worker_tracking {
+                    match named_worker(payload.get(fields_length..).unwrap_or_default()) {
+                        NamedWorker::Unnamed => (),
+                        NamedWorker::Named(name) => submission.worker_name = Some(name.to_string()),
+                        NamedWorker::Invalid => {
+                            debug!(
+                                "Refused SV2 share on channel {}: its worker name is longer than \
+                                 {MAX_USER_IDENTITY_FIELD_LENGTH} bytes or not UTF-8",
+                                submission.channel_id
+                            );
+                            return submit_error(
+                                &submission,
+                                ERROR_CODE_SUBMIT_SHARES_INVALID_SHARE,
+                            );
+                        }
+                    }
+                }
+                self.submit(submission).await
             }
             MESSAGE_TYPE_UPDATE_CHANNEL => {
                 let request =
@@ -513,18 +643,22 @@ impl MiningChannels {
         }
     }
 
+    /// Close `channel_id` and release its workers: its own, and each one its
+    /// shares named with Worker-Specific Hashrate Tracking.
     async fn close_channel(&mut self, channel_id: u32) {
-        if let Some(channel) = self.channels.remove(&channel_id)
-            && let Err(metrics_error) = self
+        let Some(channel) = self.channels.remove(&channel_id) else {
+            return;
+        };
+        let own_worker = channel.session.workername.unwrap_or_default();
+        for workername in iter::once(own_worker).chain(channel.worker_names) {
+            if let Err(metrics_error) = self
                 .ctx
                 .metrics
-                .decrement_worker_count(
-                    channel.session.btcaddress,
-                    channel.session.workername.unwrap_or_default(),
-                )
+                .decrement_worker_count(channel.session.btcaddress.clone(), workername)
                 .await
-        {
-            error!("Failed to record closed SV2 worker: {metrics_error}");
+            {
+                error!("Failed to record closed SV2 worker: {metrics_error}");
+            }
         }
     }
 
@@ -772,6 +906,7 @@ impl MiningChannels {
                 jobs: BTreeMap::new(),
                 next_job_id: 1,
                 last_tip: None,
+                worker_names: BTreeSet::new(),
             },
         );
         if let Err(metrics_error) = self
@@ -1069,11 +1204,13 @@ impl MiningChannels {
                 .map_err(|error| error.to_string())?;
         }
         let difficulty = channel_job.difficulty;
+        // A worker named by the share labels it alone; the channel's payout
+        // address still owns it.
         let share = SimplePplnsShare::new(
             channel.session.user_id.unwrap_or_default(),
             difficulty,
             channel.session.btcaddress.clone().unwrap_or_default(),
-            channel.session.workername.clone().unwrap_or_default(),
+            channel.share_worker_name(submission.worker_name.as_deref()),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_secs())
@@ -1104,6 +1241,12 @@ impl MiningChannels {
         let truediff = get_true_difficulty(&block_hash);
         let meets_channel_target = self.ctx.ignore_difficulty || hash_meets_channel_target;
         if meets_channel_target {
+            channel
+                .authorize_named_worker(
+                    share.workername.as_deref().unwrap_or_default(),
+                    &self.ctx.metrics,
+                )
+                .await;
             let _ = self
                 .ctx
                 .metrics
@@ -1179,6 +1322,70 @@ struct Submission {
     ntime: u32,
     version: u32,
     enonce2: Vec<u8>,
+    /// The worker the share names with Worker-Specific Hashrate Tracking,
+    /// on a connection that negotiated it. `None` counts the share as the
+    /// channel's own worker.
+    worker_name: Option<String>,
+}
+
+/// What the bytes after a `SubmitSharesExtended`'s own fields say about the
+/// worker behind its share.
+#[derive(Debug, PartialEq, Eq)]
+enum NamedWorker<'a> {
+    /// No Worker-Specific Hashrate Tracking field, an empty one, or bytes
+    /// that are not a whole run of TLV fields.
+    Unnamed,
+    /// The share's `user_identity`.
+    Named(&'a str),
+    /// A `user_identity` over [`MAX_USER_IDENTITY_FIELD_LENGTH`] bytes, or
+    /// not UTF-8.
+    Invalid,
+}
+
+/// The worker a `SubmitSharesExtended` share names in its Worker-Specific
+/// Hashrate Tracking field, read from `trailing`, the bytes after the
+/// message's own fields. The first such field counts. An empty name names
+/// no worker.
+fn named_worker(trailing: &[u8]) -> NamedWorker<'_> {
+    match tlv_value(trailing, WORKER_TRACKING_EXTENSION, USER_IDENTITY_FIELD) {
+        None => NamedWorker::Unnamed,
+        Some(value) if value.len() > MAX_USER_IDENTITY_FIELD_LENGTH => NamedWorker::Invalid,
+        Some(value) => match str::from_utf8(value) {
+            Ok("") => NamedWorker::Unnamed,
+            Ok(name) => NamedWorker::Named(name),
+            Err(_) => NamedWorker::Invalid,
+        },
+    }
+}
+
+/// The value of the first TLV field of `extension_type` and `field_type` in
+/// `trailing`, the bytes after a message's own fields (sv2-spec 3.4.3).
+///
+/// `None` without one, and whenever `trailing` is not a whole run of TLV
+/// fields: a header cut short, or a length that runs past the end, means
+/// the bytes are something else, and they are left alone. Fields of other
+/// types are skipped.
+///
+/// The header's fields are little-endian, as sv2-spec 3.1 serializes every
+/// multibyte field and the reference codec (`parsers_sv2`'s `Tlv`) reads
+/// them. The `0x0002` extension's own example prints its header big-endian
+/// (`00 02 01 00 0A`); the general rule wins, as it does in Knuth, which
+/// sends this node named shares.
+fn tlv_value(mut trailing: &[u8], extension_type: u16, field_type: u8) -> Option<&[u8]> {
+    let mut found = None;
+    while !trailing.is_empty() {
+        let header = trailing.get(..TLV_HEADER_LENGTH)?;
+        let end = TLV_HEADER_LENGTH + usize::from(u16::from_le_bytes([header[3], header[4]]));
+        let value = trailing.get(TLV_HEADER_LENGTH..end)?;
+        if found.is_none()
+            && u16::from_le_bytes([header[0], header[1]]) == extension_type
+            && header[2] == field_type
+        {
+            found = Some(value);
+        }
+        trailing = &trailing[end..];
+    }
+    found
 }
 
 /// Target for a stratum difficulty, as SV1 `mining.set_difficulty` means it:

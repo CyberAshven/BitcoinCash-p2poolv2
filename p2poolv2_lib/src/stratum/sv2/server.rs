@@ -11,7 +11,9 @@
 //! get a job for every template the SV1 server sees (see `super::mining`).
 
 use super::large_templates::LARGE_TEMPLATES_EXTENSION;
-use super::mining::{MiningChannels, custom_job_error, is_mining_channel_message};
+use super::mining::{
+    MiningChannels, WORKER_TRACKING_EXTENSION, custom_job_error, is_mining_channel_message,
+};
 use super::noise::NoiseTransport;
 use super::payout_outputs::{PAYOUT_OUTPUTS_EXTENSION, VERIFY_PAYOUT_OUTPUTS};
 use super::session::{
@@ -22,7 +24,8 @@ use crate::config::Sv2Authority;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::stratum::merge_disclosure::{
     EXTENSIONS_NEGOTIATION, MERGE_DISCLOSURE_EXTENSION, REQUEST_EXTENSIONS,
-    REQUEST_EXTENSIONS_SUCCESS, extensions_payload, requested_extensions,
+    REQUEST_EXTENSIONS_ERROR, REQUEST_EXTENSIONS_SUCCESS, extensions_error_payload,
+    extensions_payload, requested_extensions,
 };
 use crate::stratum::server::StratumContext;
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
@@ -247,18 +250,31 @@ async fn handle_connection<ShutdownSignal>(
     }
 }
 
-/// Answer a `RequestExtensions` (`0x0001`, `0x00`): grant the merge-mining
-/// disclosure extension (`0x4D4D`) when asked for on a connection with
-/// mining channels, grant the requested payout outputs extension (`0x5052`)
-/// when asked for on a Job Declaration connection of a Bitcoin Cash node
-/// whose listener serves mining, and leave every other extension out of the
-/// answer. Without mining the node can neither resolve a token's identity
-/// nor watch templates for `PayoutOutputsStale`, so it does not offer
-/// `0x5052`. A request before `SetupConnection`, or one that is not exactly
-/// one request, closes the connection.
+/// Answer a `RequestExtensions` (`0x0001`, `0x00`).
+///
+/// - The merge-mining disclosure extension (`0x4D4D`) is granted when asked
+///   for on a connection with mining channels, whenever it comes after
+///   `SetupConnection`, as Pickaxe's specification of it allows.
+/// - Worker-Specific Hashrate Tracking (`0x0002`) is granted when asked for
+///   on a Mining connection before its first mining channel message, as the
+///   extensions negotiation orders. The node never requires it.
+/// - The requested payout outputs extension (`0x5052`) is granted when asked
+///   for on a Job Declaration connection of a Bitcoin Cash node whose
+///   listener serves mining. Without mining the node can neither resolve a
+///   token's identity nor watch templates for `PayoutOutputsStale`, so it
+///   does not offer `0x5052`.
+/// - The large templates extension (`0x4C54`) is granted as
+///   `Sv2Connection::grant_large_templates` says.
+///
+/// The answer is `RequestExtensions.Success` with the granted extensions,
+/// leaving every other one out. When a request asks for extensions and none
+/// is granted, the answer is `RequestExtensions.Error` with all of them
+/// unsupported and none required, as the negotiation requires; the client
+/// mines on without them. A request before `SetupConnection`, or one that is
+/// not exactly one request, closes the connection.
 fn negotiate_extensions(
     connection: &mut Sv2Connection,
-    channels: Option<&mut MiningChannels>,
+    mut channels: Option<&mut MiningChannels>,
     payload: &[u8],
 ) -> Result<Vec<Vec<u8>>, String> {
     if !connection.is_set_up() {
@@ -266,12 +282,19 @@ fn negotiate_extensions(
     }
     let (request, asked) = requested_extensions(payload).ok_or("malformed RequestExtensions")?;
     let serves_mining = channels.is_some();
-    let mut granted = Vec::with_capacity(3);
-    if let Some(channels) = channels
+    let mut granted = Vec::with_capacity(4);
+    if let Some(channels) = channels.as_deref_mut()
         && asked.contains(&MERGE_DISCLOSURE_EXTENSION)
     {
         channels.grant_merge_disclosure();
         granted.push(MERGE_DISCLOSURE_EXTENSION);
+    }
+    if let Some(channels) = channels
+        && connection.is_mining()
+        && asked.contains(&WORKER_TRACKING_EXTENSION)
+        && channels.grant_worker_tracking()
+    {
+        granted.push(WORKER_TRACKING_EXTENSION);
     }
     if serves_mining
         && asked.contains(&PAYOUT_OUTPUTS_EXTENSION)
@@ -281,6 +304,14 @@ fn negotiate_extensions(
     }
     if asked.contains(&LARGE_TEMPLATES_EXTENSION) && connection.grant_large_templates() {
         granted.push(LARGE_TEMPLATES_EXTENSION);
+    }
+    if granted.is_empty() && !asked.is_empty() {
+        return Ok(vec![encode_extension_frame(
+            EXTENSIONS_NEGOTIATION,
+            REQUEST_EXTENSIONS_ERROR,
+            false,
+            &extensions_error_payload(request, &asked),
+        )?]);
     }
     Ok(vec![encode_extension_frame(
         EXTENSIONS_NEGOTIATION,

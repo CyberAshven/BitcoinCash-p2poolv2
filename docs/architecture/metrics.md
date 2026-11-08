@@ -56,6 +56,11 @@ series count bounded:
   `worker_*`, `coinbase_output`, and the planned
   `pplns_hashrate_distribution`) are bounded by the number of pool
   participants. Acceptable, but watch the active worker count.
+- An SV2 extended channel that negotiated Worker-Specific Hashrate Tracking
+  (`0x0002`) adds one worker per machine its shares name, at most 1,024 per
+  channel (`MAX_WORKER_NAMES_PER_CHANNEL` in `stratum/sv2/mining.rs`); a
+  new name past that counts as the channel's own worker. The names are
+  local to this node, like every worker name.
 - Block hashes are exposed only through `found_block_time_seconds`,
   one series per block the pool has found. Blocks are rare, so
   this stays small while letting Grafana list every block with explorer

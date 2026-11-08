@@ -54,6 +54,9 @@ pub const EXTENSIONS_NEGOTIATION: u16 = 0x0001;
 pub const REQUEST_EXTENSIONS: u8 = 0x00;
 /// `RequestExtensions.Success`: the request id and the granted types.
 pub const REQUEST_EXTENSIONS_SUCCESS: u8 = 0x01;
+/// `RequestExtensions.Error`: the request id, the unsupported types and the
+/// types the responder requires.
+pub const REQUEST_EXTENSIONS_ERROR: u8 = 0x02;
 /// The disclosure extension's message of a job's leaves.
 pub const JOB_LEAVES: u8 = 0x00;
 /// The disclosure extension's message of a share's token win.
@@ -101,6 +104,15 @@ pub fn extensions_payload(request: u16, extensions: &[u16]) -> Vec<u8> {
     extensions
         .iter()
         .for_each(|extension| bytes.extend_from_slice(&extension.to_le_bytes()));
+    bytes
+}
+
+/// A `RequestExtensions.Error` payload: the request id, the `unsupported`
+/// types, and an empty list of required types, as this node requires no
+/// extension.
+pub fn extensions_error_payload(request: u16, unsupported: &[u16]) -> Vec<u8> {
+    let mut bytes = extensions_payload(request, unsupported);
+    bytes.extend_from_slice(&0u16.to_le_bytes());
     bytes
 }
 
