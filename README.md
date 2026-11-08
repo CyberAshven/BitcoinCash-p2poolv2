@@ -1,9 +1,12 @@
 # P2Poolv2 for Bitcoin Cash
 
-> **About this branch.** `alpha-dashv1` is a fork of the `alpha` development
-> branch. Its purpose is to work on UI enhancements -- currently an admin
-> sign-in flow for the dashboard -- which are meant to be reviewed and merged
-> back into `alpha` once they are ready. See `alpha` for the main line.
+> **About this branch.** `alpha-vardiff-v2` is a fork of the `alpha`
+> development branch. Its purpose is to work on the vardiff share chain --
+> the opt-in chain with a function-derived difficulty floor and per-miner
+> tier jobs, specified in
+> [docs/sharechain/vardiff-sharechain.md](docs/sharechain/vardiff-sharechain.md) --
+> which is meant to be reviewed and merged back into `alpha` once it is
+> ready. See `alpha` for the main line.
 
 [![Rust CI](https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/rust.yml/badge.svg?branch=alpha)](https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/rust.yml)
 [![Docs](https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/docs.yml/badge.svg?branch=alpha)](https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/docs.yml)
