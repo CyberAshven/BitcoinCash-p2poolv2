@@ -602,6 +602,13 @@ impl PreparedNotifyParams {
         }
     }
 
+    /// The weak ratio every share on these params carries. Read by the sim's
+    /// emitter for its stats.
+    #[cfg_attr(not(feature = "sim"), allow(dead_code))]
+    pub(crate) fn weak_ratio(&self) -> u32 {
+        self.weak_ratio
+    }
+
     /// The weak target of the mining base: what a weak share on a job at the
     /// minimum on these params must meet. `None` on Bitcoin. Read by the sim's
     /// emitter; stratum reads it through each job (`JobDetails::weak_target`).
@@ -1296,8 +1303,9 @@ pub(crate) fn insert_miner_job(
     let job_band = banded_suffix
         .as_ref()
         .map_or(minimum_band, |(band, _)| *band);
-    //* Only a job at the minimum makes weak shares (rule 1 of part 3).
-    let weak_target = if banded_suffix.is_none() {
+    //* Only a job at the minimum makes weak shares (rule 1 of part 3),
+    //* including a heavier miner's that the band cap holds at the minimum.
+    let weak_target = if job_band.bits == prepared.bits {
         prepared.weak_target
     } else {
         None

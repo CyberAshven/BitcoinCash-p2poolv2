@@ -397,6 +397,37 @@ async fn only_a_job_at_the_minimum_has_a_weak_target() {
     assert_eq!(tracker.get_job(heavier_job).unwrap().weak_target, None);
 }
 
+/// A heavier miner the band cap holds at the minimum mines at the minimum,
+/// and its shares are credited at the weak work, so its job makes weak
+/// shares too.
+#[tokio::test]
+async fn a_heavier_job_held_at_the_minimum_has_the_weak_target() {
+    let mut prepared = Arc::try_unwrap(test_bch_prepared()).ok().unwrap();
+    let weak_target = Target::from_compact(CompactTarget::from_consensus(0x1d00_ffff));
+    prepared.weak_target = Some(weak_target);
+    let tracker = start_tracker_actor();
+    let payout = PayoutAddress::from(Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([1; 20]),
+        Network::Regtest,
+    ));
+    let held_band = heavier_job_band(prepared.bits(), BAND_CAP_UNIT, 2 * u64::from(BAND_CAP_UNIT));
+
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([9; 20])),
+        Some(held_band),
+        &tracker,
+    );
+
+    assert_eq!(held_band.bits, prepared.bits());
+    assert_ne!(held_band.wanted_bits, prepared.bits());
+    assert_eq!(
+        tracker.get_job(job_id).unwrap().weak_target,
+        Some(weak_target)
+    );
+}
+
 /// The session difficulty of a miner on a job at the minimum is capped at
 /// the weak difficulty, so it submits every hash a weak share needs.
 #[test]
