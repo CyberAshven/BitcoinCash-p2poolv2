@@ -28,7 +28,7 @@ use p2poolv2_lib::config::{
 };
 use p2poolv2_lib::node::actor::NodeHandle;
 use p2poolv2_lib::node::bch_header_feeder::relay_templates_learning_prevs;
-use p2poolv2_lib::node::weak_share_worker::WeakShareNetwork;
+use p2poolv2_lib::node::weak_share_worker::{WeakShareEventSender, WeakShareNetwork};
 use p2poolv2_lib::pool_difficulty::PoolDifficulty;
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::shares::merge_mining::MergeMiningCommitment;
@@ -98,6 +98,9 @@ pub struct NodeHandles {
     pub template_rx: watch::Receiver<Option<Arc<PreparedNotifyParams>>>,
     /// Send a shutdown reason to trigger graceful node shutdown.
     pub shutdown_tx: watch::Sender<ShutdownReason>,
+    /// Bitcoin Cash P2Pool: where weak shares found here go to be checked,
+    /// pooled and relayed (`node::weak_share_worker`). `None` otherwise.
+    pub weak_share_tx: Option<WeakShareEventSender>,
 }
 
 /// Opaque runner returned by [`build_node`]. Call [`NodeRunner::run`] to start
@@ -474,6 +477,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let stratum_weak_share_tx = weak_shares
         .as_ref()
         .map(|network| network.events_tx.clone());
+    let weak_share_tx_for_handles = stratum_weak_share_tx.clone();
     let exit_sender_notify = exit_sender.clone();
     let exit_receiver_notify = exit_sender.subscribe();
     let notify_transactions = pool_transactions.clone();
@@ -690,6 +694,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         emissions_tx: emissions_tx_for_handles,
         template_rx: template_rx_for_handles,
         shutdown_tx: exit_sender.clone(),
+        weak_share_tx: weak_share_tx_for_handles,
     };
 
     let runner = NodeRunner {

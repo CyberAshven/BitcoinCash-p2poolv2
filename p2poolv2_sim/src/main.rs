@@ -135,7 +135,8 @@ async fn main() -> ExitCode {
                     identity.share_owner,
                     sim_cfg,
                     sim_rpc,
-                );
+                )
+                .with_weak_share_sender(handles.weak_share_tx.clone());
                 let mut sim_exit_rx = handles.shutdown_tx.subscribe();
                 tokio::spawn(async move {
                     tokio::select! {

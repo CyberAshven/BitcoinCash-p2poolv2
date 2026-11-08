@@ -16,6 +16,8 @@
 use crate::address::share_owner::ShareOwner;
 use crate::shares::band::JobBand;
 use crate::shares::coinbase_proof::CoinbaseProof;
+use crate::shares::share_block::ShareHeader;
+use crate::shares::weak::WeakShare;
 use crate::stratum::emission::Emission;
 use crate::stratum::work::difficulty::validate::build_coinbase_from_components;
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
@@ -144,6 +146,32 @@ pub fn build_sim_emission(params: SimShareParams<'_>) -> Result<BuiltShare, SimS
     };
 
     Ok(BuiltShare { emission, coinbase })
+}
+
+/// The weak share a synthetic proof makes when the sim's emitter draws it
+/// short of the share target (`shares::weak`): the share header the emission
+/// gives, with its coinbase's scriptSig and total value and the job's merkle
+/// branch, as stratum builds one from a real submission.
+pub fn weak_share_from_emission(emission: &Emission) -> Option<WeakShare> {
+    let header = ShareHeader::from_commitment_and_header(
+        emission.share_commitment.clone(),
+        emission.header,
+        u64::from(emission.blocktemplate.height),
+        emission.coinbase_proof.clone(),
+    );
+    let coinbase_script_sig = emission.bitcoin_coinbase.input.first()?.script_sig.clone();
+    let coinbase_value = emission
+        .bitcoin_coinbase
+        .output
+        .iter()
+        .map(|output| output.value.to_sat())
+        .sum();
+    Some(WeakShare {
+        header,
+        coinbase_script_sig,
+        coinbase_value,
+        merkle_branch: emission.template_merkle_branches.clone(),
+    })
 }
 
 #[cfg(test)]
