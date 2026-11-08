@@ -25,6 +25,23 @@ answered with `RequestExtensions.Error`, every extension asked for
 unsupported, as the extensions negotiation (`0x0001`) requires, instead of
 an empty `RequestExtensions.Success`. No share-chain rule changes.
 
+A node that takes its templates from a Stratum V2 Template Provider
+(`template_source = "sv2"`) can take any template Bitcoin Cash's block size
+limit allows. One standard `RequestTransactionData.Success` carries at most
+65,535 transactions in one 16 MiB frame, below the 32 MB floor. After
+`SetupConnection.Success` the node now asks for the large templates
+extension `0x4C54` (`docs/architecture/sv2-large-templates-extension.md`,
+section 7) and waits for the answer twice as long as `SetupConnection`
+took, at least 250 ms and at most 10 seconds. A provider that grants it
+pushes each template's transactions without being asked: in full, in pages
+of up to 65,535, or as a delta on the last template it pushed, a bitmap of
+the transactions kept and the added ones. The node checks each list against
+the template's merkle path and reconnects when one fails. A provider that
+refuses the extension or does not answer is asked for each template's
+transactions as before. One that does not answer in time (bchn-sv2-bridge)
+is not asked again while the node runs. Knuth's Template Provider is being
+written to the same contract. No share-chain rule changes.
+
 A new node can sync a share chain that has a height with more than 20
 shares. A node answering a header or block request sends at most 20 shares
 per height, and it picked them by blockhash, so the confirmed share at such a

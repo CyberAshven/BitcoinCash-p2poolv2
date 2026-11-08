@@ -77,8 +77,10 @@ pub const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
 /// connection never waits on the disk.
 const LOG_QUEUE_LINES: usize = 1024;
 
-/// The extensions a `RequestExtensions` payload asks for: its request id
-/// and the extension types. `None` when the payload is not exactly one.
+/// The extensions a `RequestExtensions` payload asks for, or a
+/// `RequestExtensions.Success` payload, of the same layout, grants: its
+/// request id and the extension types. `None` when the payload is not
+/// exactly one.
 pub fn requested_extensions(payload: &[u8]) -> Option<(u16, Vec<u16>)> {
     let request = u16::from_le_bytes(payload.get(..2)?.try_into().ok()?);
     let count = usize::from(u16::from_le_bytes(payload.get(2..4)?.try_into().ok()?));

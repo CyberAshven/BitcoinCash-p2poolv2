@@ -44,7 +44,9 @@ pub(crate) use noise::NoiseTransport;
 pub use server::bind;
 pub(crate) use server::{Sv2Mining, serve};
 #[cfg(test)]
-pub(crate) use session::{Declaration, DeclaredJob, decode_plain_frames, encode_message};
+pub(crate) use session::{
+    Declaration, DeclaredJob, decode_plain_frames, encode_extension_frame, encode_message,
+};
 pub use session::{
     JobDeclarationMode, JobRegistry, PoolTransactionCache, Sv2Connection, Sv2Message,
 };
