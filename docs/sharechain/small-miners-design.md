@@ -1,0 +1,480 @@
+# Share chain redesign for payout variance and fees
+
+Status: proposal, tracked in
+[issue #79](https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues/79).
+Nothing here is implemented yet. Values marked *(sim)* are first proposals
+that the simulation in row 2 of the issue confirms or replaces.
+
+This page gives the exact rules for four changes to the Bitcoin Cash share
+chain and the outline of a fifth:
+
+1. one share chain instead of main and mini;
+2. a difficulty band with a dynamic cap;
+3. weak shares;
+4. payout levels, a payout threshold paid by a draw;
+5. a dynamic share period (outline only).
+
+Parts 1 to 4 change share-chain rules. None of them changes Bitcoin Cash's
+own rules: the blocks P2Pool finds stay ordinary Bitcoin Cash blocks, and
+what a Bitcoin Cash node sees is only a different set of coinbase payees.
+Why these changes, and the numbers behind them, are in the issue and on
+[Small miners](../small-miners.md).
+
+```text
+ home miners ----- full and weak shares ----.
+                                             v
+ ASICs and farms -- full shares, heavier ---> one share chain
+                    inside the band               |
+                                                  v
+                          PPLNS window: 3 BCH blocks of work
+                                                  |
+                                                  v
+                          coinbase of a found BCH block
+                           |                      |
+            slice >= the miner's level    slice < the level
+                           |                      |
+                     paid directly        draw within the level,
+                                          paid out in the same block
+```
+
+## 1. One share chain
+
+Main and mini merge into one chain, so every miner shares one PPLNS window
+and the whole pool's hashrate finds blocks for everyone.
+
+- The chain keeps the mini chain's anchor, ceiling and genesis
+  (`MINI_ANCHOR_TARGET`, `0x1c384bd7`, difficulty about 4). A small pool then
+  still makes a share every 10 seconds; ASERT raises the difficulty as the
+  pool grows, as it does on mini today.
+- The main chain (`MAIN_ANCHOR_TARGET`, ceiling `MAX_POOL_TARGET`) is
+  removed for Bitcoin Cash. The `bch_share_chain` setting goes away; a
+  config that still sets it to `main` is refused at start-up with a message
+  saying the chains merged.
+- Unchanged: the window of 3 BCH blocks of work behind a 100-share maturity
+  skip and at most 120,960 shares, ASERT anchored at the parent with a
+  600-second half-life, uncles, direct coinbase payouts, the hybrid payout
+  tree, and each share's own donation and fee.
+
+## 2. Difficulty band
+
+### The rule
+
+Today a share's target must equal the target ASERT computes from its parent.
+With the band, a share's target `T` must satisfy
+
+```text
+T_asert / C(parent)  <=  T  <=  T_asert
+```
+
+where `T_asert` is the unchanged ASERT target from the parent
+(`calculate_target_clamped`) and `C(parent)` is the band cap carried from
+the parent (below). A share may therefore be up to `C` times harder than the
+minimum, never easier. The comparison uses exact 256-bit targets; a target
+written in compact form is rounded so it is never easier than the target it
+stands for.
+
+The check replaces the equality at the three places that make it today:
+
+- full validation, `validate_with_pool_difficulty` in
+  `shares/validation/mod.rs`;
+- header sync, `validate_dag_connectivity_and_difficulty` in
+  `node/p2p_message_handlers/receivers/share_headers.rs`;
+- block receipt, `validate_asert` in
+  `node/p2p_message_handlers/receivers/block_receiver.rs`.
+
+A share's weight in the window and its work in fork choice are already its
+exact work, `2^256 / (T + 1)`, so a heavier share counts for more without any
+change there. ASERT counts shares by height and time, so when big miners mine
+heavier shares the pool makes fewer shares, and ASERT lowers the minimum for
+everyone else.
+
+### What a share carries
+
+Each Bitcoin Cash share header gains one field, committed in the share
+commitment after the share version (tag byte `0x22`, then the 4-byte compact
+target):
+
+| Field | Contents |
+|---|---|
+| `wanted_bits` | The target the share's node wanted for this miner before the cap: equal to `bits`, or harder when the cap stopped it |
+
+`wanted_bits` must be at least as hard as `bits`. It is a signal only: it never
+makes a share valid or invalid beyond that.
+
+### The cap `C`
+
+`C` is a fixed-point number carried from share to share, the way ABLA
+carries Bitcoin Cash's block size limit from block to block. It starts at 1,
+which is today's rule, and moves by at most a small step per share:
+
+```text
+C_fp:  C in units of 1/1024, an integer from 1024 (C = 1) to C_MAX * 1024
+
+C_fp(genesis)  = 1024
+u              = min(work(parent.bits) / work(T_asert of the parent), C(parent))
+                 an integer, at least 1
+wanted more    = parent.wanted_bits is harder than T_asert(parent) / C(parent)
+
+C_fp(child) = C_fp(parent) + C_fp(parent) * u / 512    if the parent wanted more
+C_fp(child) = C_fp(parent) - C_fp(parent) / 512        otherwise
+then clamped to 1024 .. C_MAX * 1024
+```
+
+| Constant | Value |
+|---|---|
+| `C_MAX` | 64 *(sim)* |
+| step | 1/512 per share, so `C` doubles in about 355 heavy shares and halves in about 355 others *(sim)* |
+
+A heavy share that wanted more pushes `C` up in proportion to its work, and
+any share that did not want more pulls it down a little. `C` therefore grows
+while a large part of the pool's work is held back by the cap and settles
+when the nodes' wishes fit inside it. A miner cannot push `C` up without
+mining heavier shares, which only lowers the minimum for small miners; a
+miner that mines at the minimum pulls `C` down towards today's rule.
+
+### Node default (policy, not a rule)
+
+A node gives each miner the minimum target unless the miner would then make
+more than `max(4 shares per pool block, 300 shares a month)`. Such a miner
+gets a harder target, up to `C` times the minimum, chosen so it makes about
+that many shares; `wanted_bits` records the target it would have had without
+the cap. The node estimates the pool's block rate from its window: the
+window's work over its time span, against the Bitcoin Cash difficulty in its
+latest header.
+
+The rule allows heavier shares; nothing forces them. A node that gives every
+miner the minimum makes ASERT bring the minimum back to today's level: no
+worse than now. Cash Dragon's `alpha-vardiff-v2` branch already passes a
+per-miner target through jobs (`insert_miner_job`, the job's tier bits) and
+checks a band at the three sites above; that plumbing is reused, and its
+floor derived from the window is replaced by the ASERT minimum.
+
+## 3. Weak shares
+
+A weak share is an easier proof of work that a later share carries, the way
+it carries uncles. It lets a home miner's work count often even in a pool of
+several EH/s, without a second chain and without trusting an operator.
+
+```text
+a miner's hash
+   |
+   +-- meets the BCH block target? ---- yes --> BCH block (also a full share)
+   |
+   +-- meets its share target? -------- yes --> full share: extends the chain
+   |
+   +-- meets the weak target? --------- yes --> weak share: relayed, then
+   |                                            carried by one of the next
+   |                                            few shares
+   +-- otherwise: counted only by its own node, for hashrate statistics
+```
+
+```text
+Share 100 <-- Share 101 <-- Share 102 <-- Share 103
+                ^   ^           ^   ^         ^
+                |   |           |   |         |
+             weak  weak       weak  uncle    weak
+              a     b          c              d
+```
+
+### What a weak share is
+
+A weak share is a proof of work on an ordinary job: its share header and its
+Bitcoin Cash coinbase are exactly what a full share on that job would carry.
+It is valid as a weak share when:
+
+1. its `bits` is exactly `T_asert` of its parent: weak shares come only from
+   jobs at the minimum, so a miner on a heavier band target gets no credit
+   for near misses;
+2. its proof-of-work hash meets the weak target of its parent (below) and
+   does **not** meet its own `bits`: a hash that meets `bits` is a full share
+   and must travel as one;
+3. its Bitcoin Cash coinbase pays the PPLNS window anchored at its parent,
+   exactly as a full share's must (checked as below);
+4. it passes every header rule a full share passes except the share target:
+   timestamps, the current-chain rule for its Bitcoin Cash prev, donation
+   and fee caps, share version;
+5. its proof-of-work hash is not the hash of any share, uncle or weak share
+   already credited on the including share's chain.
+
+A weak share is identified by its proof-of-work hash, the hash of the
+Bitcoin Cash header it carries, not by its share header hash. One proof of
+work is credited once, as a share or as a weak share, never both.
+
+### Where weak shares come from
+
+A node already accepts submissions at each connection's own difficulty
+(vardiff) and turns the ones that meet the share target into shares. With weak
+shares it also turns a submission that meets the weak target, on a job at the
+minimum, into a weak share. For that a connection's difficulty must not be
+above the weak difficulty: the cap that keeps a session's difficulty at or
+below the share difficulty (lessons V8, `share_difficulty_ceiling`) becomes the
+weak difficulty for miners at the minimum. SV1 and SV2 work the same way;
+miners change nothing.
+
+### The weak target
+
+```text
+T_weak(parent) = min(T_asert(parent) * R(parent), T_ceiling)
+```
+
+`R` is a second fixed-point state carried from share to share:
+
+```text
+R_fp:  R in units of 1/1024, from 1024 (R = 1) to R_MAX * 1024
+
+R_fp(genesis) = R_MAX * 1024
+R_fp(child)   = R_fp(parent) - R_fp(parent) / 256   if the parent carried
+                                                    more than WEAK_FILL weak shares
+R_fp(child)   = R_fp(parent) + R_fp(parent) / 256   if it carried fewer
+R_fp(child)   = R_fp(parent)                        if exactly WEAK_FILL
+then clamped to 1024 .. R_MAX * 1024
+```
+
+When home miners fill the weak slots, `R` falls and weak shares get harder;
+when the slots run empty, `R` rises and they get easier. The weak difficulty
+follows the home miners who use it, not industrial hashrate, and never
+becomes easier than the chain's ceiling: in a small pool, where shares are
+already at the ceiling, weak shares are simply never needed.
+
+| Constant | Value |
+|---|---|
+| `R_MAX` | 4096 *(sim)* |
+| `WEAK_CAP` | 64 weak shares per share *(sim)* |
+| `WEAK_FILL` | 32, half the cap *(sim)* |
+| `WEAK_BYTES` | 96 KiB of weak shares per share *(sim)* |
+| `WEAK_DEPTH` | 6: a weak share's parent at most 6 shares below the share that carries it *(sim)* |
+| `INCLUDER_CUT` | 200 basis points (2%) *(sim)* |
+
+### What a weak share message holds
+
+| Field | Size |
+|---|---|
+| The share header, as mined | about 300 to 450 bytes |
+| The Bitcoin Cash coinbase scriptSig | at most 100 bytes |
+| The coinbase's total value | 8 bytes |
+| The coinbase merkle branch | 32 bytes per level, 17 levels for a block of 100,000 transactions |
+
+That is about 0.5 to 1.2 KB. The payout outputs are not carried: every node
+already computes them for that parent.
+
+### How a node checks one
+
+1. Read the weak share's parent; it must be known and within `WEAK_DEPTH` of
+   the node's tip (the node holds it in its weak pool until then, or drops
+   it).
+2. Rebuild the Bitcoin Cash coinbase as the node would for a share on that
+   parent: the scriptSig from the message, then output 0 from the header's
+   merge-mining fields, the window's payouts for the message's total value,
+   the payout tree output if any, the padding, the share commitment rebuilt
+   from the header, and the locktime from the header's height.
+3. Hash the coinbase, fold the merkle branch, and require the header's merkle
+   root.
+4. Check the proof of work against `T_weak(parent)` and against rule 2.
+5. Check rule 5 against the node's best chain and its weak pool.
+
+The window's payouts for a parent and a total value are the same for every
+weak share on that parent and template, so a node caches them; what remains
+per weak share is hashing its coinbase, at most 1,000,000 bytes, a few
+milliseconds. The simulation measures this at `WEAK_CAP` per share.
+
+### How a share carries them
+
+A share may carry up to `WEAK_CAP` weak shares and `WEAK_BYTES` of them in its
+body. Its header commits to them (tag byte `0x24` in the share commitment, then
+a 2-byte count and the 32-byte merkle root of the carried weak shares' proof-of-work
+hashes), so the proof of work fixes the list. A carried weak share must be
+valid as above, its parent at most `WEAK_DEPTH` shares below the carrying share,
+and not carried by any of the carrying share's ancestors.
+
+A node fills its own shares from its weak pool, oldest parent first so none
+expire, up to the cap. It relays a weak share once it has checked it, and
+forgets it once its parent is more than `WEAK_DEPTH` below the tip or once the
+best chain carries it.
+
+### How weak shares are paid
+
+| Kind | Extends the chain | Credited weight | Carrying share gets |
+|---|---|---|---|
+| Full share | yes | its work | |
+| Uncle | no | 9/10 of its work | 1/10 of it |
+| Weak share | no | its work at `T_weak`, less `INCLUDER_CUT` | `INCLUDER_CUT` of it |
+
+- A weak share's work is the exact work of the weak target it met,
+  `2^256 / (T_weak + 1)`, not the work of its hash.
+- Its weight goes to its own payout address, like an uncle's; it has no share
+  coinbase and no payout right to sell. Its own donation and fee come off its
+  own weight (`cuts-per-share`).
+- The carrying share's part follows that share's own weight, as an uncle
+  bonus does.
+- For sizing the window, a share's work is its own plus its uncles' plus its
+  weak shares'. Weak shares take no window slots.
+- Weak shares do not count in fork choice. Counting them, as uncles count
+  since 2026-10-30, would make a share that drops others' weak shares lighter
+  and so lose races (Sunlight's idea); the attack search in row 2 decides
+  whether that is worth the extra header-sync work.
+
+A node stores, with each share, the per-payee sums of its weak shares' credited
+weight, so the window walk reads one entry per payee and share rather than
+every weak share. Weak share bodies are pruned with their carrying share's body
+([Pruning](../architecture/pruning.md)).
+
+### What it costs
+
+At `WEAK_CAP` = 64 per 10-second share, at most 6.4 weak shares a second, about
+5 to 8 KB/s of relay and the same of storage while the shares are within the
+pruning depth. Spam is bounded by the cap and costs real work at the weak
+difficulty, which is paid like anyone's work and raises the weak difficulty
+through `R`.
+
+## 4. Payout levels
+
+A payout level is the smallest payment a miner wants. A slice below it is paid
+by a draw among the miners at the same level, within the same block, so
+nothing is held and nothing is owed.
+
+```text
+slice of a payee ---> at or above its level? --- yes ---> paid directly
+                          |
+                          no
+                          v
+             pooled with the slices at the same level
+                          |
+                          v
+             draw seeded from the parent share's hash
+                          |
+                          v
+             winners get the pot in equal parts of at least the level
+```
+
+### Levels
+
+```text
+L_k = 546 * 2^k satoshis,  k = 0 .. 7
+    = 546, 1,092, 2,184, 4,368, 8,736, 17,472, 34,944, 69,888
+```
+
+546 is Bitcoin Cash's P2PKH dust limit, the floor. 69,888 is the cap, which
+keeps large amounts out of any draw. Each Bitcoin Cash share header gains a
+field, committed after `wanted_bits` (tag byte `0x23`, then one byte):
+
+| Field | Contents |
+|---|---|
+| `payout_level` | `k`, 0 to 7 |
+
+A payee's level in a block is the `payout_level` of its newest credited entry in
+the window: the newest share, uncle or weak share paying that address. The
+donation key and fee addresses are never drawn.
+
+### The draw
+
+After the window's weights, cuts and the existing rounding give each payee an
+amount `a` in satoshis:
+
+1. Every payee whose amount is at least its level, the donation key and every
+   fee address keep their amount.
+2. The others are grouped by level. Within a group at level `L`, payees are
+   ordered by locking script bytes, and `S` is the sum of their amounts.
+3. `n = S / L`, rounded down.
+4. The seed is the first 8 bytes, as a little-endian integer, of
+   `SHA-256("p2pool-payout-level" || parent share hash || k)`.
+5. If `n` is 0, one point `p = seed mod S` picks the winner: the payee whose
+   running total of amounts first exceeds `p`. It gets `S`.
+6. Otherwise `D = S / n` rounded down, points `p_j = (seed mod D) + j * D` for
+   `j = 0 .. n-1`, and each point pays `D` to the payee whose running total
+   first exceeds it. The first point's payee also gets `S - n * D`, which is
+   less than `n` satoshis.
+7. Each payee's winnings replace its amount; a payee that wins nothing is not
+   paid in this block. The outputs are then ordered and built as today,
+   including the payout tree.
+
+Every payee's expected payment equals its amount, up to the at most `n`
+satoshis of step 6; the draw changes only how a group's pot is split, never
+its size. Every node computes the same draw, because the seed comes from the
+parent share, which every share built on that parent shares.
+
+### Choosing a level
+
+A miner sets its level at login, in the password or after a comma, like
+`donation=`:
+
+| Option | Meaning |
+|---|---|
+| `min-payout=<satoshis>` | The smallest level at or above this amount |
+| `fee-tolerance=<percent>` | The level that keeps the cost of spending one payment at or below this share of it, using the node's `spend_cost` (148 satoshis by default, a P2PKH input at 1 sat/byte) |
+
+Without either, the node's default applies: level 5, 17,472 satoshis, about
+0.85% fee loss. A node warns a miner, and lowers its level, when its window
+work makes fewer than 3 payments a month likely at the level it asked for
+(node policy, not a rule). The dashboard shows each miner its expected
+income, payments a month and monthly swing.
+
+### Steering the seed
+
+The seed comes from the parent's hash, which the share that pays cannot
+change. A miner could prefer one parent over another to get a better draw,
+but only by mining away from the best tip, at the risk of being orphaned. The
+attack search in row 2 measures what that is worth.
+
+## 5. Dynamic share period (outline)
+
+The share period moves with the uncle rate: shorter while the network keeps
+up, longer when uncles rise. It is specified after row 6 measures the uncle
+rate on chipnet. What it must settle:
+
+- `IDEAL_BLOCK_TIME` becomes a value carried from share to share, bounded,
+  for example 1 to 10 seconds, moved by the uncle rate over a span of
+  shares;
+- the window's cap and the maturity skip become spans of time, not share
+  counts, so they keep their meaning at any period;
+- `WEAK_DEPTH` and the uncle depth scale with the period;
+- it ships through the share-version vote, version 2.
+
+## Rollout
+
+| Part | Protocol tag segment | Store format | How it ships |
+|---|---|---|---|
+| 1 One chain | the mini chain's genesis tag only | 3 | flag day: every node restarts on a fresh store |
+| 2 Band | `band-c64` | 3 | same flag day |
+| 3 Weak shares | `weak-64-200-6` | 3 | same flag day; old nodes cannot read the new share message |
+| 4 Payout levels | `levels-546x2` | 3 | same flag day |
+| 5 Share period | none; share version 2 | 3 | share-version vote |
+
+Each part is its own pull request, with its plain-words explanation and the
+maintainer's agreement before merging. Chipnet restarts once per merged part
+until mainnet launches; mainnet starts with all four. The share version stays
+1 on the merged chain, so the vote stays free for part 5.
+
+## Simulation and attack search (row 2)
+
+A Rust model in `p2poolv2_tools` (`cargo payout-sim`) that mines shares,
+uncles and weak shares with Poisson timing, builds the window and the
+coinbase exactly as these rules say, and reports each miner's payments a
+month, typical payment, monthly swing and fee loss, the uncle rate and the
+bytes per second. It runs:
+
+- the mini chain as today, the band, Cash Dragon's vardiff chain, and the
+  band with weak shares and payout levels;
+- pools at 1, 5, 10, 20 and 30% of Bitcoin Cash's hashrate, and Bitcoin
+  Cash's hashrate at 1, 3, 10 and 270 times today's;
+- miner mixes from all home miners to 90% industrial.
+
+Attacks:
+
+- a big node that gives its miners the minimum;
+- a node that never carries others' weak shares;
+- weak-share spam at the weak difficulty;
+- a miner that picks parents for a better draw.
+
+It sets `C_MAX`, the band step, `R_MAX`, `WEAK_CAP`, `WEAK_FILL`,
+`WEAK_DEPTH`, `INCLUDER_CUT`, `WEAK_BYTES` and the default level.
+
+## References
+
+- [Issue #79](https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues/79),
+  with the numbers and the research behind this design.
+- [Share validation](validation.md), [Share commitments](share-commitments.md),
+  [PPLNS accounting](pplns-accounting.md),
+  [Coinbase payouts](../payouts/coinbase.md),
+  [Share difficulty: ASERT](../difficulty_adjustment/asert.md).
+- [Lessons from P2Pool v1 on BCH](../p2pool-v1-bch-lessons.md), V6 and V7.
+- [Small miners](../small-miners.md).
