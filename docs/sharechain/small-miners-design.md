@@ -90,16 +90,21 @@ everyone else.
 
 ### What a share carries
 
-Each Bitcoin Cash share header gains one field, committed in the share
-commitment after the share version (tag byte `0x22`, then the 4-byte compact
-target):
+Each Bitcoin Cash share header gains two fields:
 
 | Field | Contents |
 |---|---|
 | `wanted_bits` | The target the share's node wanted for this miner before the cap: equal to `bits`, or harder when the cap stopped it |
+| `band_cap` | This share's cap `C` in units of 1/1024, which must equal one step from its parent's `band_cap` (below) |
 
-`wanted_bits` must be at least as hard as `bits`. It is a signal only: it never
-makes a share valid or invalid beyond that.
+Both are committed in the share commitment after the share version (tag byte
+`0x22`, then the 4-byte compact `wanted_bits` and the 4-byte `band_cap`), so the
+proof of work fixes them. `wanted_bits` must be at least as hard as `bits`; it
+is a signal only and never makes a share valid or invalid beyond that. Carrying
+`band_cap` in the header lets a node check it from the parent's header alone,
+during header sync as well as full validation, with no walk back to genesis.
+In the rule above, `C(parent)` is therefore read as the share's own `band_cap`,
+which is one step from the parent's.
 
 ### The cap `C`
 
@@ -110,13 +115,14 @@ which is today's rule, and moves by at most a small step per share:
 ```text
 C_fp:  C in units of 1/1024, an integer from 1024 (C = 1) to C_MAX * 1024
 
-C_fp(genesis)  = 1024
-u              = min(work(parent.bits) / work(T_asert of the parent), C(parent))
-                 an integer, at least 1
-wanted more    = parent.wanted_bits is harder than T_asert(parent) / C(parent)
+band_cap(genesis) = 1024
+u                 = min(work(parent.bits) / work(the parent's own T_asert),
+                        parent.band_cap / 1024), an integer, at least 1
+wanted more       = parent.wanted_bits is harder than
+                    (the parent's own T_asert) * 1024 / parent.band_cap
 
-C_fp(child) = C_fp(parent) + C_fp(parent) * u / 512    if the parent wanted more
-C_fp(child) = C_fp(parent) - C_fp(parent) / 512        otherwise
+band_cap(child) = parent.band_cap + parent.band_cap * u / 512   if the parent wanted more
+band_cap(child) = parent.band_cap - parent.band_cap / 512       otherwise
 then clamped to 1024 .. C_MAX * 1024
 ```
 
@@ -217,18 +223,24 @@ miners change nothing.
 T_weak(parent) = min(T_asert(parent) * R(parent), T_ceiling)
 ```
 
-`R` is a second fixed-point state carried from share to share:
+`R` is a second fixed-point state that each share header carries as
+`weak_ratio`, committed with the weak-share root (below), and that must equal
+one step from its parent's:
 
 ```text
-R_fp:  R in units of 1/1024, from 1024 (R = 1) to R_MAX * 1024
+weak_ratio:  R in units of 1/1024, from 1024 (R = 1) to R_MAX * 1024
 
-R_fp(genesis) = R_MAX * 1024
-R_fp(child)   = R_fp(parent) - R_fp(parent) / 256   if the parent carried
-                                                    more than WEAK_FILL weak shares
-R_fp(child)   = R_fp(parent) + R_fp(parent) / 256   if it carried fewer
-R_fp(child)   = R_fp(parent)                        if exactly WEAK_FILL
+weak_ratio(genesis) = R_MAX * 1024
+weak_ratio(child)   = parent.weak_ratio - parent.weak_ratio / 256
+                        if the parent carried more than WEAK_FILL weak shares
+weak_ratio(child)   = parent.weak_ratio + parent.weak_ratio / 256
+                        if it carried fewer
+weak_ratio(child)   = parent.weak_ratio   if exactly WEAK_FILL
 then clamped to 1024 .. R_MAX * 1024
 ```
+
+In the formula above, `R(parent)` is the parent's `weak_ratio`: a weak share
+mined on a parent meets that parent's weak target.
 
 When home miners fill the weak slots, `R` falls and weak shares get harder;
 when the slots run empty, `R` rises and they get easier. The weak difficulty
@@ -281,8 +293,9 @@ milliseconds. The simulation measures this at `WEAK_CAP` per share.
 
 A share may carry up to `WEAK_CAP` weak shares and `WEAK_BYTES` of them in its
 body. Its header commits to them (tag byte `0x24` in the share commitment, then
-a 2-byte count and the 32-byte merkle root of the carried weak shares' proof-of-work
-hashes), so the proof of work fixes the list. A carried weak share must be
+the 4-byte `weak_ratio`, a 2-byte count and the 32-byte merkle root of the
+carried weak shares' proof-of-work hashes), so the proof of work fixes the
+list. A carried weak share must be
 valid as above, its parent at most `WEAK_DEPTH` shares below the carrying share,
 and not carried by any of the carrying share's ancestors.
 
