@@ -2486,7 +2486,9 @@ mod tests {
     /// is refused at start-up instead of being read as the merged chain.
     #[test]
     fn a_config_that_still_sets_bch_share_chain_is_refused() {
-        let sample = std::fs::read_to_string("../config.sample.toml").unwrap();
+        let sample = std::fs::read_to_string("../config.sample.toml")
+            .unwrap()
+            .replace("\r\n", "\n");
         let with_share_chain = sample.replace(
             "\nbitcoin_cash_network = \"chipnet\"\n",
             "\nbitcoin_cash_network = \"chipnet\"\nbch_share_chain = \"main\"\n",
