@@ -116,8 +116,8 @@ which is today's rule, and moves by at most a small step per share:
 C_fp:  C in units of 1/1024, an integer from 1024 (C = 1) to C_MAX * 1024
 
 band_cap(genesis) = 1024
-u                 = min(work(parent.bits) / work(the parent's own T_asert),
-                        parent.band_cap / 1024), an integer, at least 1
+u                 = min(work(parent.wanted_bits) / work(the parent's own T_asert),
+                        C_MAX), an integer, at least 1
 wanted more       = parent.wanted_bits is harder than
                     (the parent's own T_asert) * 1024 / parent.band_cap
 
@@ -131,8 +131,12 @@ then clamped to 1024 .. C_MAX * 1024
 | `C_MAX` | 64 *(sim)* |
 | step | 1/512 per share, so `C` doubles in about 355 heavy shares and halves in about 355 others *(sim)* |
 
-A heavy share that wanted more pushes `C` up in proportion to its work, and
-any share that did not want more pulls it down a little. `C` therefore grows
+A share that wanted more pushes `C` up in proportion to how much heavier it
+wanted to be, and any share that did not want more pulls it down a little.
+`u` comes from `wanted_bits`, not `bits`: while `C` is 1 every share's actual
+work equals the minimum, so a step driven by `bits` could open the cap only
+when more than half of all shares wanted heavier ones, which the simulation
+showed never happens in a mixed pool. `C` therefore grows
 while a large part of the pool's work is held back by the cap and settles
 when the nodes' wishes fit inside it. A miner cannot push `C` up without
 mining heavier shares, which only lowers the minimum for small miners; a
@@ -255,7 +259,7 @@ already at the ceiling, weak shares are simply never needed.
 | `WEAK_FILL` | 32, half the cap *(sim)* |
 | `WEAK_BYTES` | 96 KiB of weak shares per share *(sim)* |
 | `WEAK_DEPTH` | 6: a weak share's parent at most 6 shares below the share that carries it *(sim)* |
-| `INCLUDER_CUT` | 200 basis points (2%) *(sim)* |
+| `INCLUDER_CUT` | 500 basis points (5%): the smallest tested cut at which a coalition of half the hashrate, in a pool at 10% of BCH, gains nothing by not carrying others' weak shares *(sim)* |
 
 ### What a weak share message holds
 
@@ -306,11 +310,27 @@ best chain carries it.
 
 ### How weak shares are paid
 
+Every proof of work from a job at the minimum is credited at the weak work,
+`2^256 / (T_weak(parent) + 1)`, whether it became a full share, an uncle or a
+weak share. Only a share heavier than the minimum is credited at its own work.
+
 | Kind | Extends the chain | Credited weight | Carrying share gets |
 |---|---|---|---|
-| Full share | yes | its work | |
-| Uncle | no | 9/10 of its work | 1/10 of it |
-| Weak share | no | its work at `T_weak`, less `INCLUDER_CUT` | `INCLUDER_CUT` of it |
+| Full share at the minimum | yes | the weak work | |
+| Full share heavier than the minimum | yes | its own work | |
+| Uncle | no | 9/10 of the work above for its kind | 1/10 of it |
+| Weak share | no | the weak work, less `INCLUDER_CUT` | `INCLUDER_CUT` of it |
+
+Why: a hash on a job at the minimum earns credit whenever it meets the weak
+target, and the hashes that meet the weak target are a fair sample of the
+miner's work at the weak difficulty. Crediting a full share at its own work on
+top would pay those hashes twice: per unit of work, `1` for the full shares
+plus `1 - 1/R` for the weak shares. The simulation measured a Bitaxe at 1.8
+times its fair pay, and industrial miners at 0.91 times, with that double
+credit; with every minimum proof at the weak work, every miner is paid in
+proportion to its work. Fork choice is unchanged: a full share still adds the
+work of its own target to its chain. When `R` is 1, the weak work is the
+minimum's work and nothing changes.
 
 - A weak share's work is the exact work of the weak target it met,
   `2^256 / (T_weak + 1)`, not the work of its hash.
@@ -319,8 +339,9 @@ best chain carries it.
   own weight (`cuts-per-share`).
 - The carrying share's part follows that share's own weight, as an uncle
   bonus does.
-- For sizing the window, a share's work is its own plus its uncles' plus its
-  weak shares'. Weak shares take no window slots.
+- For sizing the window, a share's work is its credited weight plus its
+  uncles' and its weak shares' credited weights, so the window still holds 3
+  BCH blocks of actual work. Weak shares take no window slots.
 - Weak shares do not count in fork choice. Counting them, as uncles count
   since 2026-10-30, would make a share that drops others' weak shares lighter
   and so lose races (Sunlight's idea); the attack search in row 2 decides
@@ -485,11 +506,12 @@ until mainnet launches; mainnet starts with all four. The share version stays
 
 ## Simulation and attack search (row 2)
 
-A Rust model in `p2poolv2_tools` (`cargo payout-sim`) that mines shares,
-uncles and weak shares with Poisson timing, builds the window and the
-coinbase exactly as these rules say, and reports each miner's payments a
-month, typical payment, monthly swing and fee loss, the uncle rate and the
-bytes per second. It runs:
+An offline Rust model, the crate `p2poolv2_payout_sim` (`cargo payout-sim`;
+its README has every table), that mines shares, uncles and weak shares with
+Poisson timing, sizes the window by work, pays found blocks by weight, runs the
+draw of section 4, and reports each miner's payments a month, typical payment,
+monthly swing and fee loss, and the pool's shares, uncles and weak shares per
+second. It runs:
 
 - the mini chain as today, the band, Cash Dragon's vardiff chain, and the
   band with weak shares and payout levels;
@@ -506,6 +528,46 @@ Attacks:
 
 It sets `C_MAX`, the band step, `R_MAX`, `WEAK_CAP`, `WEAK_FILL`,
 `WEAK_DEPTH`, `INCLUDER_CUT`, `WEAK_BYTES` and the default level.
+
+### What it found
+
+A Bitaxe (1.2 TH/s) in a pool where half the hashrate is industrial. Each cell
+is monthly swing / payments a month / fee loss:
+
+| Design | Pool at 1% of BCH | 10% | 30% |
+|---|---|---|---|
+| Main and mini today | 0.34 / 19.7 / 0.67% | 0.91 / 4.9 / 0.17% | 1.58 / 1.6 / 0.06% |
+| One chain, no band | 0.41 / 19.5 / 0.67% | 1.31 / 2.4 / 0.09% | 2.39 / 0.76 / 0.03% |
+| Band | 0.32 / 29.8 / 1.02% | 1.09 / 3.2 / 0.11% | 2.39 / 0.76 / 0.03% |
+| Cash Dragon's vardiff chain | 0.31 / 30.1 / 1.03% | 0.90 / 4.8 / 0.17% | 1.61 / 1.6 / 0.06% |
+| Band, weak shares and payout levels | 0.20 / 24.9 / 0.85% | 0.25 / 24.6 / 0.85% | 0.39 / 23.6 / 0.83% |
+
+The last row credits every minimum proof at the weak work, as above. The
+simulation found the double credit that rule removes.
+
+Attacks:
+
+- **Big nodes giving their miners the minimum.** Under the band alone, the
+  Bitaxe falls back to the one-chain numbers. With weak shares and the
+  weak-work credit, nobody's income changes.
+- **Nodes that never carry others' weak shares.** With half the hashrate
+  refusing, 4.8% of honest weak shares expire and the Bitaxe gets 0.97 of its
+  fair pay. With 90% refusing, 56% expire and it gets 0.48. A 5% includer cut
+  makes refusing unprofitable for a half-hashrate coalition at 10% of BCH, but
+  no tested cut stops a coalition of most of the hashrate at 1%.
+- **Weak-share spam at 10 times the honest home hashrate.** The Bitaxe's weak
+  shares fall from 581 to 53 a month, but its payments stay at about 25 a
+  month and its swing only goes from 0.20 to 0.23.
+
+Still open:
+
+- **A coalition of most of the hashrate refusing to carry weak shares.** The
+  candidates are counting weak work in fork choice, so a branch that drops weak
+  shares is lighter (Sunlight's idea), or a deeper `WEAK_DEPTH`. Both need the
+  attack search re-run.
+- **Not yet simulated:** the draw-steering attack, and sweeps of `R_MAX`,
+  `WEAK_DEPTH` and the band step.
+- **Not yet measured:** coinbase building and weak-share checking time.
 
 ## References
 
