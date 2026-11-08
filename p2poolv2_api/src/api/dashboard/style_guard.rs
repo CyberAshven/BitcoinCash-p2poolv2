@@ -455,6 +455,7 @@ fn miner_report(shares: Vec<MinerShare>) -> MinerResponse {
         },
         share_count: shares.len(),
         uncle_count: 1,
+        weak_share_count: 0,
         weight: "20".to_string(),
         share_fraction: 0.1,
         payout_fraction: 0.2,
