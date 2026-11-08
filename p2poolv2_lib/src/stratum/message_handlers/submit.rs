@@ -606,6 +606,7 @@ async fn emit_share_chain_share(
             bitcoin_coinbase: pool_share.coinbase.clone(),
             coinbase_proof,
             share_transactions: Arc::clone(&job.share_transactions),
+            weak_shares: Arc::clone(&job.weak_shares),
         })
         .await
         .map_err(|e| Error::SubmitFailure(format!("Failed to send share to store: {e}")))?;

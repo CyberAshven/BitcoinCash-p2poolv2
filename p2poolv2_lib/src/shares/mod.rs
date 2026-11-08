@@ -27,4 +27,5 @@ pub mod share_version;
 pub mod transaction_pool;
 pub mod transactions;
 pub mod validation;
+pub mod weak;
 pub(crate) mod witness_commitment;

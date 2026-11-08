@@ -38,11 +38,15 @@ fn bch_job_token_roundtrips_all_terms_within_the_wire_budget() {
         desired_version: 3,
     };
     prepared.band_cap = 4096;
+    prepared.weak_ratio = 256_000;
     let token = prepared.mining_job_token([9; 32], 1234).unwrap();
     assert!(token.len() <= 255);
-    assert_eq!(token[0], 3, "token layout 3 carries the band cap");
+    assert_eq!(
+        token[0], 4,
+        "token layout 4 carries the band cap and the weak ratio"
+    );
     let mut old_layout = token.clone();
-    old_layout[0] = 2;
+    old_layout[0] = 3;
     assert!(
         ShareCommitment::from_mining_job_token(
             &old_layout,
@@ -72,6 +76,8 @@ fn bch_job_token_roundtrips_all_terms_within_the_wire_budget() {
     assert_eq!(commitment.band_cap, 4096);
     assert_eq!(commitment.asert_bits, prepared.bits);
     assert_eq!(commitment.wanted_bits, prepared.bits);
+    assert_eq!(commitment.weak_ratio, 256_000);
+    assert_eq!(commitment.weak_count, 0);
     let mut trailing = token.clone();
     trailing.push(0);
     assert!(
@@ -435,6 +441,9 @@ async fn test_commitment_hash_matches_struct_hash() {
         asert_bits: CompactTarget::default(),
         wanted_bits: CompactTarget::default(),
         band_cap: 0,
+        weak_ratio: 0,
+        weak_count: 0,
+        weak_root: crate::shares::weak::empty_weak_root(),
         prev_share_blockhash: BlockHash::all_zeros(),
         uncles: Vec::new(),
         miner_bitcoin_address: address,
@@ -527,6 +536,9 @@ fn notify_hash_matches_share_commitment_hash() {
         asert_bits: CompactTarget::default(),
         wanted_bits: CompactTarget::default(),
         band_cap: 0,
+        weak_ratio: 0,
+        weak_count: 0,
+        weak_root: crate::shares::weak::empty_weak_root(),
         prev_share_blockhash: prepared.prev_share_blockhash,
         uncles: prepared.uncles.clone(),
         miner_bitcoin_address: bitcoin_address,

@@ -15,6 +15,7 @@ use crate::shares::genesis;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::shares::share_version::ShareVersion;
+use crate::shares::weak::{WEAK_CAP, WeakShare};
 use crate::sim_overrides;
 use bitcoin::consensus::encode::Error::ParseFailed;
 use bitcoin::secp256k1::Secp256k1;
@@ -23,7 +24,7 @@ use bitcoin::{
     Txid, VarInt,
     block::Header,
     consensus::{Decodable, Encodable},
-    hashes::Hash,
+    hashes::{Hash, sha256d},
 };
 use core::mem;
 use p2poolv2_wallet::payout_address::PayoutAddress;
@@ -155,6 +156,22 @@ pub struct ShareHeader {
     /// one step from its parent's (`shares::band::next_band_cap`).
     #[serde(default)]
     pub band_cap: u32,
+    /// This share's weak ratio `R` in units of 1/1024, one step from its
+    /// parent's (`shares::weak::next_weak_ratio`): weak shares mined on this
+    /// share meet its weak target, its minimum times `R`
+    /// (`shares::weak::parent_weak_target`). Encoded after the band, and
+    /// committed with `weak_count` and `weak_root`, for Bitcoin Cash share
+    /// owners only; Bitcoin shares read all three as zero.
+    #[serde(default)]
+    pub weak_ratio: u32,
+    /// How many weak shares this share's body carries (`shares::weak`).
+    #[serde(default)]
+    pub weak_count: u16,
+    /// The merkle root of the proof-of-work hashes of the weak shares this
+    /// share carries, in order (`shares::weak::weak_root`); all zeros for
+    /// none.
+    #[serde(default = "crate::shares::weak::empty_weak_root")]
+    pub weak_root: sha256d::Hash,
 }
 
 /// Network class an encoded address is rebuilt for: the part of a payout
@@ -183,7 +200,7 @@ pub(crate) fn encode_address<W: bitcoin::io::Write + ?Sized>(
 }
 
 /// Decode an address written by `encode_address`.
-fn decode_address<R: bitcoin::io::Read + ?Sized>(
+pub(crate) fn decode_address<R: bitcoin::io::Read + ?Sized>(
     reader: &mut R,
 ) -> Result<PayoutAddress, bitcoin::consensus::encode::Error> {
     let network = match u8::consensus_decode(reader)? {
@@ -280,6 +297,9 @@ impl ShareHeader {
             asert_bits: commitment.asert_bits,
             wanted_bits: commitment.wanted_bits,
             band_cap: commitment.band_cap,
+            weak_ratio: commitment.weak_ratio,
+            weak_count: commitment.weak_count,
+            weak_root: commitment.weak_root,
         }
     }
 
@@ -370,6 +390,9 @@ impl ShareHeader {
             len += self.wanted_bits.consensus_encode(w)?;
             len += self.band_cap.consensus_encode(w)?;
             len += self.asert_bits.consensus_encode(w)?;
+            len += self.weak_ratio.consensus_encode(w)?;
+            len += self.weak_count.consensus_encode(w)?;
+            len += self.weak_root.consensus_encode(w)?;
         }
         len += self.bitcoin_header.version.consensus_encode(w)?;
         len += self.bitcoin_header.prev_blockhash.consensus_encode(w)?;
@@ -433,6 +456,17 @@ impl ShareHeader {
                     0,
                     CompactTarget::default(),
                 )
+            };
+        let (weak_ratio, weak_count, weak_root) =
+            if matches!(miner_address, ShareOwner::CashP2pkh(_)) {
+                let weak_ratio = u32::consensus_decode(r)?;
+                let weak_count = u16::consensus_decode(r)?;
+                if usize::from(weak_count) > crate::shares::weak::WEAK_CAP {
+                    return Err(ParseFailed("share header carries too many weak shares"));
+                }
+                (weak_ratio, weak_count, sha256d::Hash::consensus_decode(r)?)
+            } else {
+                (0, 0, sha256d::Hash::all_zeros())
             };
         let bitcoin_version = bitcoin::block::Version::consensus_decode(r)?;
         let bitcoin_prev_blockhash = BlockHash::consensus_decode(r)?;
@@ -504,6 +538,9 @@ impl ShareHeader {
             asert_bits,
             wanted_bits,
             band_cap,
+            weak_ratio,
+            weak_count,
+            weak_root,
         })
     }
 }
@@ -553,6 +590,13 @@ pub struct ShareBlock {
     /// different coinbase is a bad copy rather than another block.
     #[serde(default = "empty_bitcoin_coinbase")]
     pub bitcoin_coinbase: Transaction,
+    /// The weak shares this share carries (`shares::weak`), at most
+    /// `WEAK_CAP` of them in `WEAK_BYTES`. Not part of the block hash: the
+    /// header commits to their count and the merkle root of their
+    /// proof-of-work hashes, which the body check compares. Encoded on
+    /// Bitcoin Cash shares only; always empty on Bitcoin.
+    #[serde(default)]
+    pub weak_shares: Vec<WeakShare>,
 }
 
 /// The bitcoin coinbase of a block written before `ShareBlock` carried one:
@@ -695,6 +739,9 @@ impl ShareBlock {
             asert_bits: CompactTarget::default(),
             wanted_bits: CompactTarget::default(),
             band_cap: 0,
+            weak_ratio: 0,
+            weak_count: 0,
+            weak_root: sha256d::Hash::all_zeros(),
         };
         let bitcoin_coinbase = bitcoin_block
             .txdata
@@ -706,6 +753,7 @@ impl ShareBlock {
             transactions,
             template_merkle_branches: vec![],
             bitcoin_coinbase,
+            weak_shares: Vec::new(),
         })
     }
 }
@@ -732,6 +780,12 @@ impl Encodable for ShareBlock {
             len += node.consensus_encode(w)?;
         }
         len += self.bitcoin_coinbase.consensus_encode(w)?;
+        if self.header.carries_band() {
+            len += VarInt(self.weak_shares.len() as u64).consensus_encode(w)?;
+            for weak_share in &self.weak_shares {
+                len += weak_share.consensus_encode(w)?;
+            }
+        }
         Ok(len)
     }
 }
@@ -762,11 +816,25 @@ impl Decodable for ShareBlock {
             template_merkle_branches.push(TxMerkleNode::consensus_decode(r)?);
         }
         let bitcoin_coinbase = Transaction::consensus_decode(r)?;
+        let weak_shares = if header.carries_band() {
+            let weak_count = VarInt::consensus_decode(r)?.0 as usize;
+            if weak_count > WEAK_CAP {
+                return Err(ParseFailed("share block carries too many weak shares"));
+            }
+            let mut weak_shares = Vec::with_capacity(weak_count);
+            for _ in 0..weak_count {
+                weak_shares.push(WeakShare::consensus_decode(r)?);
+            }
+            weak_shares
+        } else {
+            Vec::new()
+        };
         Ok(ShareBlock {
             header,
             transactions,
             template_merkle_branches,
             bitcoin_coinbase,
+            weak_shares,
         })
     }
 }
@@ -972,6 +1040,72 @@ mod tests {
         assert_eq!(serialize(&wider).len(), serialize(&share.header).len());
         assert!(CoinbaseProof::verify(&wanting_more, &share.template_merkle_branches).is_err());
         assert!(CoinbaseProof::verify(&wider, &share.template_merkle_branches).is_err());
+    }
+
+    /// A Bitcoin Cash header round-trips its weak ratio and the count and
+    /// root of the weak shares it carries, and its block round-trips them.
+    #[test]
+    fn bitcoin_cash_share_round_trips_its_weak_shares() {
+        let weak_share = crate::shares::weak::WeakShare {
+            header: TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
+                .nonce(7)
+                .build()
+                .header,
+            coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 20]),
+            coinbase_value: 625_000_000,
+            merkle_branch: vec![TxMerkleNode::all_zeros()],
+        };
+        let share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .weak_ratio(256_000)
+            .weak_shares(vec![weak_share.clone()])
+            .build();
+
+        let decoded: ShareBlock = deserialize(&serialize(&share)).unwrap();
+
+        assert_eq!(decoded, share);
+        assert_eq!(decoded.header.weak_ratio, 256_000);
+        assert_eq!(decoded.header.weak_count, 1);
+        assert_eq!(
+            decoded.header.weak_root,
+            weak_share.pow_hash().to_raw_hash()
+        );
+        assert_eq!(decoded.weak_shares, vec![weak_share]);
+        CoinbaseProof::verify(&share.header, &share.template_merkle_branches).unwrap();
+    }
+
+    /// The weak fields are bound by the proof of work: another ratio or count
+    /// is another share hash and fails the coinbase proof.
+    #[test]
+    fn bitcoin_cash_header_binds_its_weak_shares() {
+        let share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build();
+        let mut easier = share.header.clone();
+        easier.weak_ratio -= 1;
+        let mut counted = share.header.clone();
+        counted.weak_count = 1;
+
+        assert_ne!(easier.block_hash(), share.header.block_hash());
+        assert!(CoinbaseProof::verify(&easier, &share.template_merkle_branches).is_err());
+        assert!(CoinbaseProof::verify(&counted, &share.template_merkle_branches).is_err());
+    }
+
+    /// A Bitcoin header and block carry no weak shares: nothing is encoded,
+    /// and they decode as zero and empty.
+    #[test]
+    fn bitcoin_share_carries_no_weak_shares() {
+        let bitcoin = TestShareBlockBuilder::new().build();
+        let mut weak = bitcoin.clone();
+        weak.header.weak_ratio = 256_000;
+        weak.header.weak_count = 3;
+
+        assert_eq!(serialize(&weak), serialize(&bitcoin));
+        let decoded: ShareBlock = deserialize(&serialize(&weak)).unwrap();
+        assert_eq!(decoded.header.weak_ratio, 0);
+        assert_eq!(decoded.header.weak_count, 0);
+        assert!(decoded.weak_shares.is_empty());
     }
 
     /// A Bitcoin header carries no band: it is not encoded, and decodes as
@@ -1211,6 +1345,9 @@ mod tests {
             asert_bits: CompactTarget::default(),
             wanted_bits: CompactTarget::default(),
             band_cap: 0,
+            weak_ratio: 0,
+            weak_count: 0,
+            weak_root: sha256d::Hash::all_zeros(),
         };
 
         let cloned = commitment.clone();

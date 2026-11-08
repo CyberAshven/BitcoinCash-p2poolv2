@@ -238,6 +238,10 @@ impl Store {
             ColumnFamilyDescriptor::new(ColumnFamily::BchHeaders, Self::cf_options_with_bloom());
         let bch_best_chain_cf =
             ColumnFamilyDescriptor::new(ColumnFamily::BchBestChain, RocksDbOptions::default());
+        let weak_shares_cf =
+            ColumnFamilyDescriptor::new(ColumnFamily::WeakShares, RocksDbOptions::default());
+        let weak_summaries_cf =
+            ColumnFamilyDescriptor::new(ColumnFamily::WeakSummaries, RocksDbOptions::default());
 
         let cfs = vec![
             block_metadata_cf_descriptor,
@@ -264,6 +268,8 @@ impl Store {
             payout_trees_cf,
             bch_headers_cf,
             bch_best_chain_cf,
+            weak_shares_cf,
+            weak_summaries_cf,
         ];
 
         // for the db too, we use default options for now

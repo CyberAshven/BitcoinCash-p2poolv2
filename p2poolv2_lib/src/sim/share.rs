@@ -140,6 +140,7 @@ pub fn build_sim_emission(params: SimShareParams<'_>) -> Result<BuiltShare, SimS
         bitcoin_coinbase: coinbase.clone(),
         coinbase_proof,
         share_transactions: Arc::clone(&job.share_transactions),
+        weak_shares: Arc::clone(&job.weak_shares),
     };
 
     Ok(BuiltShare { emission, coinbase })

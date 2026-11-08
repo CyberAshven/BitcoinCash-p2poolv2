@@ -22,19 +22,23 @@ use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::{ShareTransaction, encode_optional_address};
 use crate::shares::share_commitment::{
     BCH_JOB_TOKEN_VERSION, ShareCommitment, append_band, append_pool_merge_mining,
-    append_share_version, build_commitment_prefix, build_commitment_suffix, commitment_digest,
+    append_share_version, append_weak_shares, build_commitment_prefix, build_commitment_suffix,
+    commitment_digest,
 };
 use crate::shares::share_version::ShareVersion;
 use crate::shares::transactions::coinbase::compute_witness_root;
 use crate::shares::validation::BLOCK_TXS_SIZE_LIMIT;
+use crate::shares::weak::{
+    GENESIS_WEAK_RATIO, WEAK_BYTES, WEAK_CAP, WeakShare, empty_weak_root, weak_root,
+};
 use crate::shares::witness_commitment::WitnessCommitment;
 use crate::stratum::parse_password::MINER_DONATION_STEP;
 use crate::stratum::util::{reverse_four_byte_chunks, to_be_hex};
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoin::consensus::Encodable;
-use bitcoin::hashes::{self, Hash};
+use bitcoin::hashes::{self, Hash, sha256d};
 use bitcoin::transaction::Version;
-use bitcoin::{BlockHash, CompactTarget, WitnessMerkleNode};
+use bitcoin::{BlockHash, CompactTarget, Target, WitnessMerkleNode};
 use p2poolv2_config::MAX_BITCOIN_CASH_CUT;
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::HashMap;
@@ -249,6 +253,18 @@ pub struct PreparedNotifyParams {
     /// shares (`stratum::work::band_policy`). `None` without an estimate of
     /// the pool's block rate, or on Bitcoin: every job is at the minimum.
     share_rate_limit: Option<f64>,
+    /// The weak ratio every share on these params carries, one step from the
+    /// mining base's (`shares::weak::next_weak_ratio`). Bitcoin Cash only.
+    weak_ratio: u32,
+    /// The weak shares every share on these params carries, taken from the
+    /// node's weak pool when the params were built; committed after the band.
+    weak_shares: Arc<[WeakShare]>,
+    /// The merkle root of `weak_shares`' proof-of-work hashes.
+    weak_root: sha256d::Hash,
+    /// The weak target of the mining base (`shares::weak::parent_weak_target`):
+    /// a submission on a job at the minimum that meets it but not the share
+    /// target becomes a weak share. `None` on Bitcoin.
+    weak_target: Option<Target>,
     /// Donation address for developers
     donation_address: Option<PayoutAddress>,
     /// Donation in basis points
@@ -409,6 +425,8 @@ impl PreparedNotifyParams {
         .share_version(self.share_version)
         .band_cap(self.band_cap)
         .share_rate_limit(self.share_rate_limit)
+        .weak_shares(self.weak_ratio, self.weak_shares.to_vec())
+        .weak_target(self.weak_target)
         .share_transactions(self.share_transactions.to_vec());
         builder.pplns_weights = Some(Arc::clone(weights));
         builder.build()
@@ -429,7 +447,8 @@ impl PreparedNotifyParams {
     /// Versioned BCH job terms, preceded by an unpredictable connection nonce.
     ///
     /// The terms are the template's own: a declared job's share is at the
-    /// minimum, its bits, and carries the template's band cap.
+    /// minimum, its bits, carries the template's band cap and weak ratio, and
+    /// carries no weak shares.
     pub(crate) fn mining_job_token(
         &self,
         nonce: [u8; 32],
@@ -454,6 +473,9 @@ impl PreparedNotifyParams {
             .consensus_encode(&mut token)
             .expect("vector writer");
         self.band_cap
+            .consensus_encode(&mut token)
+            .expect("vector writer");
+        self.weak_ratio
             .consensus_encode(&mut token)
             .expect("vector writer");
         if token.len() > 255 {
@@ -548,14 +570,51 @@ impl PreparedNotifyParams {
     }
 
     /// The commitment suffix of a job whose shares carry `job_band`: the
-    /// shared suffix up to its band, then that job's band. `None` on
-    /// Bitcoin, which has no band.
+    /// shared suffix up to its band, then that job's band and the weak shares
+    /// every job on these params carries. `None` on Bitcoin, which has no
+    /// band.
     fn commitment_suffix_for_band(&self, job_band: JobBand) -> Option<Vec<u8>> {
         let band_offset = self.commitment_band_offset?;
         let mut suffix = Vec::with_capacity(self.commitment_suffix.len());
         suffix.extend_from_slice(&self.commitment_suffix[..band_offset]);
         append_band(&mut suffix, job_band.wanted_bits, self.band_cap, self.bits);
+        append_weak_shares(
+            &mut suffix,
+            self.weak_ratio,
+            self.weak_shares.len() as u16,
+            self.weak_root,
+        );
         Some(suffix)
+    }
+
+    /// The weak ratio, count and root a share on these params commits: zero
+    /// on Bitcoin, whose shares carry no weak shares.
+    fn commitment_weak_shares(&self) -> (u32, u16, sha256d::Hash) {
+        if self.commitment_band_offset.is_some() {
+            (
+                self.weak_ratio,
+                self.weak_shares.len() as u16,
+                self.weak_root,
+            )
+        } else {
+            (0, 0, empty_weak_root())
+        }
+    }
+
+    /// The weak ratio every share on these params carries.
+    pub(crate) fn weak_ratio(&self) -> u32 {
+        self.weak_ratio
+    }
+
+    /// The weak shares every share on these params carries.
+    pub(crate) fn weak_shares(&self) -> &Arc<[WeakShare]> {
+        &self.weak_shares
+    }
+
+    /// The weak target of the mining base: what a weak share on a job at the
+    /// minimum on these params must meet. `None` on Bitcoin.
+    pub(crate) fn weak_target(&self) -> Option<Target> {
+        self.weak_target
     }
 
     /// The share transactions shares built on these params carry.
@@ -677,6 +736,9 @@ pub(crate) struct PreparedNotifyParamsBuilder {
     share_version: ShareVersion,
     band_cap: u32,
     share_rate_limit: Option<f64>,
+    weak_ratio: u32,
+    weak_shares: Vec<WeakShare>,
+    weak_target: Option<Target>,
     share_transactions: Vec<ShareTransaction>,
 }
 
@@ -708,8 +770,32 @@ impl PreparedNotifyParamsBuilder {
             share_version: ShareVersion::CURRENT,
             band_cap: BAND_CAP_UNIT,
             share_rate_limit: None,
+            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_shares: Vec::new(),
+            weak_target: None,
             share_transactions: Vec::new(),
         }
+    }
+
+    /// The weak ratio every share on these params carries, one step from the
+    /// mining base's (`shares::weak::next_weak_ratio`), and the weak shares
+    /// they carry, from the node's weak pool. By default the genesis ratio,
+    /// which stays put under a mining base carrying none, and no weak shares.
+    /// `build` keeps them within `WEAK_CAP` and `WEAK_BYTES`. Committed only
+    /// on Bitcoin Cash (`include_merge_mining`).
+    pub fn weak_shares(mut self, weak_ratio: u32, weak_shares: Vec<WeakShare>) -> Self {
+        self.weak_ratio = weak_ratio;
+        self.weak_shares = weak_shares;
+        self
+    }
+
+    /// The mining base's weak target: a submission on a job at the minimum
+    /// that meets it but not the share target becomes a weak share, and the
+    /// session difficulty ceiling for such jobs follows it. `None`, the
+    /// default, makes no weak shares.
+    pub fn weak_target(mut self, weak_target: Option<Target>) -> Self {
+        self.weak_target = weak_target;
+        self
     }
 
     /// Share transactions for every share on these params to carry after its
@@ -958,11 +1044,24 @@ impl PreparedNotifyParamsBuilder {
         if self.include_merge_mining {
             append_share_version(&mut commitment_suffix, self.share_version);
         }
-        //* The band of a job at the minimum follows the share version; a
-        //* heavier job replaces it from its offset.
+        //* The band of a job at the minimum follows the share version, and
+        //* the weak shares follow the band; a heavier job replaces both from
+        //* the band's offset.
+        let weak_shares = if self.include_merge_mining {
+            fit_weak_shares(self.weak_shares)
+        } else {
+            Vec::new()
+        };
+        let weak_root = weak_root(&weak_shares);
         let commitment_band_offset = self.include_merge_mining.then(|| {
             let band_offset = commitment_suffix.len();
             append_band(&mut commitment_suffix, self.bits, self.band_cap, self.bits);
+            append_weak_shares(
+                &mut commitment_suffix,
+                self.weak_ratio,
+                weak_shares.len() as u16,
+                weak_root,
+            );
             band_offset
         });
 
@@ -992,6 +1091,10 @@ impl PreparedNotifyParamsBuilder {
             bits: self.bits,
             band_cap: self.band_cap,
             share_rate_limit: self.share_rate_limit,
+            weak_ratio: self.weak_ratio,
+            weak_shares: weak_shares.into(),
+            weak_root,
+            weak_target: self.weak_target.filter(|_| self.include_merge_mining),
             donation_address: self.donation_address,
             donation: self.donation,
             fee_address: self.fee_address,
@@ -1038,6 +1141,23 @@ pub(crate) fn token_split(
         donation: slot(donation_address, donation)?,
         fee: slot(fee_address, fee)?,
     })
+}
+
+/// Keep the weak shares, in the order given, that fit one share's `WEAK_CAP`
+/// and `WEAK_BYTES`: the rest stay in the weak pool for a later share. A
+/// weak share too large to fit is skipped rather than ending the list, so a
+/// later smaller one can still be carried.
+fn fit_weak_shares(weak_shares: Vec<WeakShare>) -> Vec<WeakShare> {
+    let mut carried = Vec::with_capacity(weak_shares.len().min(WEAK_CAP));
+    let mut carried_bytes: usize = 0;
+    for weak_share in weak_shares {
+        let size = weak_share.encoded_size();
+        if carried.len() < WEAK_CAP && carried_bytes.saturating_add(size) <= WEAK_BYTES {
+            carried_bytes += size;
+            carried.push(weak_share);
+        }
+    }
+    carried
 }
 
 /// Bytes a miner's bitcoin coinbase may add to the one `build` sizes: the
@@ -1168,6 +1288,13 @@ pub(crate) fn insert_miner_job(
     let job_band = banded_suffix
         .as_ref()
         .map_or(minimum_band, |(band, _)| *band);
+    //* Only a job at the minimum makes weak shares (rule 1 of part 3).
+    let weak_target = if banded_suffix.is_none() {
+        prepared.weak_target
+    } else {
+        None
+    };
+    let (weak_ratio, weak_count, weak_root) = prepared.commitment_weak_shares();
 
     // Build ShareCommitment only when both addresses are available: the share
     // chain coinbase needs an owner and the bitcoin coinbase needs a payee.
@@ -1190,6 +1317,9 @@ pub(crate) fn insert_miner_job(
             asert_bits: prepared.band_bits(prepared.bits),
             wanted_bits: prepared.band_bits(job_band.wanted_bits),
             band_cap: prepared.commitment_band_cap(),
+            weak_ratio,
+            weak_count,
+            weak_root,
         }),
         _ => None,
     };
@@ -1255,6 +1385,8 @@ pub(crate) fn insert_miner_job(
             share_transactions: Arc::clone(&prepared.share_transactions),
             merge_tokens,
             payout_tree: prepared.payout_tree.clone(),
+            weak_shares: Arc::clone(&prepared.weak_shares),
+            weak_target,
         },
     );
     (job_id, coinbase2)

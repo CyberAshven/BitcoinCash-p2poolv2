@@ -304,6 +304,8 @@ pub(crate) fn validate_custom_job(
             share_transactions: Arc::from([]),
             merge_tokens: None,
             payout_tree: distribution.tree.map(Arc::new),
+            weak_shares: Arc::from([]),
+            weak_target: None,
         },
         proposal,
     ))

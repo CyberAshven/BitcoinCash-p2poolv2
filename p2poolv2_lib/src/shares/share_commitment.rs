@@ -11,6 +11,7 @@ use super::validation::MAX_UNCLES;
 use bitcoin::consensus::encode::VarInt;
 use bitcoin::consensus::{Decodable, Encodable, serialize};
 use bitcoin::hashes::Hash;
+use bitcoin::hashes::sha256d;
 use bitcoin::io::Write;
 use bitcoin::{BlockHash, CompactTarget, WitnessMerkleNode, hashes};
 use p2poolv2_wallet::payout_address::PayoutAddress;
@@ -89,6 +90,15 @@ pub struct ShareCommitment {
     pub wanted_bits: CompactTarget,
     /// The share's band cap in units of 1/1024 (`ShareHeader::band_cap`).
     pub band_cap: u32,
+    /// The share's weak ratio in units of 1/1024 (`ShareHeader::weak_ratio`),
+    /// committed with the weak shares it carries for Bitcoin Cash share
+    /// owners.
+    pub weak_ratio: u32,
+    /// How many weak shares the share carries (`ShareHeader::weak_count`).
+    pub weak_count: u16,
+    /// The merkle root of the carried weak shares' proof-of-work hashes
+    /// (`ShareHeader::weak_root`).
+    pub weak_root: sha256d::Hash,
 }
 
 /// Tag before the share version in a Bitcoin Cash commitment's suffix.
@@ -100,9 +110,13 @@ const SHARE_VERSION_TAG: u8 = 0x22;
 ///
 /// Each part of a Bitcoin Cash commitment's suffix has its own tag byte:
 /// `0x21` a declared coinbase, `0x22` the share version, `0x23` a pool-built
-/// job's token root, `0x24` the band. `0x25` is reserved for payout levels
-/// and `0x26` for weak shares (parts 4 and 3 of the design page).
+/// job's token root, `0x24` the band, `0x26` the weak shares. `0x25` is
+/// reserved for payout levels (part 4 of the design page).
 const BAND_TAG: u8 = 0x24;
+
+/// Tag before a share's weak shares in a Bitcoin Cash commitment's suffix,
+/// right after the band (`docs/sharechain/small-miners-design.md`, part 3).
+const WEAK_SHARES_TAG: u8 = 0x26;
 
 /// Tag before a pool-built job's token root in a Bitcoin Cash commitment's
 /// suffix, after the share version.
@@ -122,8 +136,9 @@ pub(crate) fn append_pool_merge_mining(suffix: &mut Vec<u8>, commitment: &MergeM
 
 /// Layout version of a Bitcoin Cash Job Declaration token: 2 since the
 /// share version follows the fee (`ShareCommitment::from_mining_job_token`),
-/// 3 since the band cap follows the share version (2026-11-09).
-pub const BCH_JOB_TOKEN_VERSION: u8 = 3;
+/// 3 since the band cap follows the share version (2026-11-09), 4 since the
+/// weak ratio follows the band cap (2026-11-09).
+pub const BCH_JOB_TOKEN_VERSION: u8 = 4;
 
 /// Append the share version to a commitment suffix: what a Bitcoin Cash
 /// commitment digests after the shared fields and before a declared
@@ -158,6 +173,30 @@ pub(crate) fn append_band(
     asert_bits
         .consensus_encode(suffix)
         .expect("encoding the minimum bits should never fail");
+}
+
+/// Append a share's weak shares to a commitment suffix, right after its
+/// band: [`WEAK_SHARES_TAG`], the 4-byte `weak_ratio`, the 2-byte count and
+/// the 32-byte merkle root of the carried weak shares' proof-of-work hashes.
+/// [`ShareCommitment::hash`] appends it for a Bitcoin Cash share owner; the
+/// notify path appends the template's after the band, since every miner on a
+/// template carries the same weak shares.
+pub(crate) fn append_weak_shares(
+    suffix: &mut Vec<u8>,
+    weak_ratio: u32,
+    weak_count: u16,
+    weak_root: sha256d::Hash,
+) {
+    suffix.push(WEAK_SHARES_TAG);
+    weak_ratio
+        .consensus_encode(suffix)
+        .expect("encoding the weak ratio should never fail");
+    weak_count
+        .consensus_encode(suffix)
+        .expect("encoding the weak share count should never fail");
+    weak_root
+        .consensus_encode(suffix)
+        .expect("encoding the weak share root should never fail");
 }
 
 /// Bytes the timestamp contributes to the commitment encoding.
@@ -295,6 +334,7 @@ struct JobTokenTerms {
     fee: u16,
     share_version: ShareVersion,
     band_cap: u32,
+    weak_ratio: u32,
 }
 
 /// Decode a Bitcoin Cash job token's terms.
@@ -304,9 +344,10 @@ struct JobTokenTerms {
 /// (`BCH_JOB_TOKEN_VERSION`), a 32-byte nonce, then the share it anchors on:
 /// previous share hash, uncle count and uncles, share bits, time, optional
 /// donation address and amount, optional fee address and amount, the share
-/// version and the band cap. Its share bits are the minimum, so a declared
-/// share's minimum and wanted bits are its bits. At most 255 bytes. More than
-/// [`MAX_UNCLES`] uncles, or bytes left over, is not a token.
+/// version, the band cap and the weak ratio. Its share bits are the minimum,
+/// so a declared share's minimum and wanted bits are its bits, and a declared
+/// share carries no weak shares. At most 255 bytes. More than [`MAX_UNCLES`]
+/// uncles, or bytes left over, is not a token.
 fn decode_job_token_terms(
     token: &[u8],
 ) -> Result<JobTokenTerms, bitcoin::consensus::encode::Error> {
@@ -331,6 +372,7 @@ fn decode_job_token_terms(
     let fee = u16::consensus_decode(&mut reader)?;
     let share_version = ShareVersion::consensus_decode(&mut reader)?;
     let band_cap = u32::consensus_decode(&mut reader)?;
+    let weak_ratio = u32::consensus_decode(&mut reader)?;
     if !reader.is_empty() {
         return Err(invalid("trailing BCH job token data"));
     }
@@ -345,6 +387,7 @@ fn decode_job_token_terms(
         fee,
         share_version,
         band_cap,
+        weak_ratio,
     })
 }
 
@@ -391,6 +434,9 @@ impl ShareCommitment {
             asert_bits: terms.bits,
             wanted_bits: terms.bits,
             band_cap: terms.band_cap,
+            weak_ratio: terms.weak_ratio,
+            weak_count: 0,
+            weak_root: crate::shares::weak::empty_weak_root(),
         })
     }
 
@@ -437,6 +483,12 @@ impl ShareCommitment {
                 self.wanted_bits,
                 self.band_cap,
                 self.asert_bits,
+            );
+            append_weak_shares(
+                &mut suffix,
+                self.weak_ratio,
+                self.weak_count,
+                self.weak_root,
             );
         }
         if let Some(coinbase) = &self.bch_coinbase {
@@ -503,6 +555,9 @@ impl ShareCommitment {
             asert_bits: header.asert_bits,
             wanted_bits: header.wanted_bits,
             band_cap: header.band_cap,
+            weak_ratio: header.weak_ratio,
+            weak_count: header.weak_count,
+            weak_root: header.weak_root,
         }
     }
 }
@@ -626,6 +681,80 @@ mod tests {
         );
     }
 
+    /// The proof of work fixes the weak ratio a share claims.
+    #[test]
+    fn bitcoin_cash_commitment_binds_the_weak_ratio() {
+        let mut cash = create_test_commitment();
+        cash.miner_address = p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
+        cash.weak_ratio = crate::shares::weak::WEAK_RATIO_MAX;
+        let mut easier = cash.clone();
+        easier.weak_ratio = crate::shares::weak::WEAK_RATIO_MAX - 1;
+
+        assert_ne!(cash.hash(), easier.hash());
+    }
+
+    /// The proof of work fixes how many weak shares a share carries and
+    /// which: another count or another root is another commitment.
+    #[test]
+    fn bitcoin_cash_commitment_binds_the_carried_weak_shares() {
+        let mut cash = create_test_commitment();
+        cash.miner_address = p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
+        let mut counted = cash.clone();
+        counted.weak_count = 1;
+        let mut rooted = cash.clone();
+        rooted.weak_root = sha256d::Hash::from_byte_array([0x55; 32]);
+
+        assert_ne!(cash.hash(), counted.hash());
+        assert_ne!(cash.hash(), rooted.hash());
+    }
+
+    /// The weak shares have a tag byte of their own, after the band's: tag,
+    /// then 4 + 2 + 32 bytes, and read under the band's tag they are another
+    /// digest.
+    #[test]
+    fn the_weak_shares_have_their_own_commitment_tag() {
+        let mut suffix = Vec::with_capacity(64);
+        append_band(
+            &mut suffix,
+            CompactTarget::from_consensus(0x1b10_0000),
+            2048,
+            CompactTarget::from_consensus(0x1b40_0000),
+        );
+        let band_length = suffix.len();
+        append_weak_shares(
+            &mut suffix,
+            crate::shares::weak::WEAK_RATIO_MAX,
+            3,
+            sha256d::Hash::from_byte_array([0x55; 32]),
+        );
+        let mut read_as_band = suffix.clone();
+        read_as_band[band_length] = BAND_TAG;
+
+        assert_eq!(suffix[band_length], WEAK_SHARES_TAG);
+        assert_eq!(suffix.len(), band_length + 1 + 4 + 2 + 32);
+        assert_ne!(WEAK_SHARES_TAG, BAND_TAG);
+        assert_ne!(WEAK_SHARES_TAG, SHARE_VERSION_TAG);
+        assert_ne!(WEAK_SHARES_TAG, POOL_MERGE_MINING_TAG);
+        assert_ne!(WEAK_SHARES_TAG, 0x21);
+        assert_ne!(WEAK_SHARES_TAG, 0x25);
+        assert_ne!(
+            commitment_digest(&[], 0, &suffix, None, None),
+            commitment_digest(&[], 0, &read_as_band, None, None)
+        );
+    }
+
+    /// A Bitcoin header carries no weak shares, so a Bitcoin commitment
+    /// digests none.
+    #[test]
+    fn bitcoin_commitment_ignores_the_weak_shares() {
+        let bitcoin = create_test_commitment();
+        let mut weak = bitcoin.clone();
+        weak.weak_ratio = crate::shares::weak::WEAK_RATIO_MAX;
+        weak.weak_count = 2;
+
+        assert_eq!(bitcoin.hash(), weak.hash());
+    }
+
     /// A Bitcoin header carries no band, so a Bitcoin commitment digests
     /// none.
     #[test]
@@ -673,6 +802,12 @@ mod tests {
             rooted.wanted_bits,
             rooted.band_cap,
             rooted.asert_bits,
+        );
+        append_weak_shares(
+            &mut suffix,
+            rooted.weak_ratio,
+            rooted.weak_count,
+            rooted.weak_root,
         );
         append_pool_merge_mining(&mut suffix, &root);
         assert_eq!(
@@ -868,6 +1003,7 @@ mod tests {
             transactions: share_transactions,
             template_merkle_branches: vec![],
             bitcoin_coinbase: coinbase,
+            weak_shares: Vec::new(),
         }
     }
 
