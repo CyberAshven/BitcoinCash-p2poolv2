@@ -2183,8 +2183,11 @@ impl PplnsWindow {
             if front.height <= fork_height {
                 return;
             }
-            if let Some(entry) = self.confirmed_entries.pop_front()
-                && let Some(rights) = &mut self.rights
+            let Some(entry) = self.confirmed_entries.pop_front() else {
+                return;
+            };
+            self.child_weak_works.remove(&entry.blockhash);
+            if let Some(rights) = &mut self.rights
                 && !rights.undo_share(&entry.blockhash)
             {
                 warn!(
@@ -2309,10 +2312,11 @@ impl PplnsWindow {
     /// bounds live in `get_distribution_from_start_hash`, which counts from the
     /// anchor and refuses a result that ran into an evicted back.
     fn evict_overflow(&mut self) {
-        while self.confirmed_entries.len() > self.cache_capacity() {
-            if let Some(entry) = self.confirmed_entries.pop_back()
-                && let Some(rights) = &mut self.rights
-            {
+        while self.confirmed_entries.len() > self.cache_capacity()
+            && let Some(entry) = self.confirmed_entries.pop_back()
+        {
+            self.child_weak_works.remove(&entry.blockhash);
+            if let Some(rights) = &mut self.rights {
                 rights.evict_share(&entry.blockhash, &entry.coinbase_txid);
             }
         }
