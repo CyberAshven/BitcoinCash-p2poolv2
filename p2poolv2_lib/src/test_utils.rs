@@ -55,9 +55,9 @@ use crate::config::{Chain, PoolMode};
 #[cfg(test)]
 use crate::config::{StratumConfig, Sv2Authority};
 #[cfg(test)]
-use crate::pool_difficulty::AsertParent;
-#[cfg(test)]
 use crate::pool_difficulty::MockPoolDifficulty;
+#[cfg(test)]
+use crate::pool_difficulty::{AsertEpoch, AsertParent};
 #[cfg(test)]
 use crate::shares::auxpow::{AuxProof, AuxiliaryTree, Disclosure, TokenLeaf};
 #[cfg(test)]
@@ -1722,7 +1722,9 @@ pub fn on_schedule_pool_difficulty() -> PoolDifficulty {
 /// `steady_target`, at which this miner makes one share per ideal block
 /// time. A share never takes less than `minimum_interval` seconds, as when
 /// every stratum submission already meets the share target. Intervals are
-/// whole seconds, as share timestamps are. Mining stops with the first share
+/// whole seconds, as share timestamps are. The epoch carries forward: the
+/// first share constructed above genesis is the epoch itself, and every
+/// share above it carries `start.epoch`. Mining stops with the first share
 /// whose time reaches `until_time`.
 #[cfg(test)]
 pub fn mine_at_constant_hashrate(
@@ -1740,11 +1742,22 @@ pub fn mine_at_constant_hashrate(
     let mut reached_until_time = false;
     while !reached_until_time {
         let bits = pool_difficulty.calculate_target_clamped(parent);
+        let epoch = if parent.height == 0 {
+            // The share being mined is the first at height 1: it is the
+            // chain's epoch itself (see [`AsertEpoch`]).
+            Some(AsertEpoch {
+                time: share_time,
+                height: 1,
+            })
+        } else {
+            parent.epoch
+        };
         parent = AsertParent {
             height: parent.height + 1,
             time: share_time,
             bits,
             previous_time: parent.time,
+            epoch,
         };
         reached_until_time = share_time >= until_time;
         let difficulty = Target::from_compact(bits).difficulty_float();

@@ -500,8 +500,9 @@ impl NodeActor {
                 .bits,
         );
 
-        let pool_difficulty = PoolDifficulty::build(&chain_store_handle, chain)
-            .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
+        let pool_difficulty =
+            PoolDifficulty::build(&chain_store_handle, chain, config.stratum.bch_share_chain)
+                .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
 
         // The vardiff share chain derives its difficulty floor from the shared
         // PPLNS window (docs/sharechain/vardiff-sharechain.md); main and mini

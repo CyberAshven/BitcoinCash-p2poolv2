@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use crate::config::Chain;
+use crate::config::{BchShareChain, Chain};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -290,10 +290,28 @@ impl fmt::Display for PoolDifficultyError {
 
 impl Error for PoolDifficultyError {}
 
+/// Anchor of the vardiff share chain's ASERT: the first share at height 1.
+///
+/// The chain genesis carries the Bitcoin Cash anchor block's timestamp,
+/// which in production can be long before the first share. An ASERT
+/// anchored at genesis counts that gap as schedule debt and pins every
+/// share at the easy clamp. The epoch re-anchors the computation at the
+/// first real share instead: the vardiff chain's clock starts there
+/// (`docs/sharechain/vardiff-sharechain.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AsertEpoch {
+    /// Timestamp of the first share at height 1.
+    pub time: u32,
+    /// Height of the epoch anchor, always 1.
+    pub height: u32,
+}
+
 /// The parent of the share whose target is being computed or checked.
 ///
-/// Bitcoin reads `height` and `time`. Bitcoin Cash reads `bits`, `time` and
-/// `previous_time`. Callers fill every field from the same parent, so either
+/// The genesis rule reads `height` and `time` (Bitcoin). The parent rule
+/// reads `bits`, `time` and `previous_time` (the main and mini share
+/// chains). The epoch rule reads `height`, `time` and `epoch` (the vardiff
+/// share chain). Callers fill every field from the same parent, so every
 /// rule sees the share it was given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AsertParent {
@@ -306,36 +324,69 @@ pub struct AsertParent {
     /// Timestamp of the parent's own parent. Genesis has no parent and uses
     /// its own time, as the genesis anchor does.
     pub previous_time: u32,
+    /// Epoch of the parent's chain: the first share at height 1 (see
+    /// [`AsertEpoch`]). `None` on genesis, which predates the epoch, and on
+    /// the chains whose rules do not read it. On the vardiff share chain a
+    /// parent at height 1 or above must carry it; a missing epoch there is
+    /// a construction bug and the construction sites fail closed instead
+    /// of falling back to the genesis anchor.
+    pub epoch: Option<AsertEpoch>,
 }
 
 impl AsertParent {
     /// Descriptor for `header` at `height`, whose own parent has timestamp
-    /// `previous_time`.
+    /// `previous_time`. The epoch is left `None`; the vardiff chain's
+    /// construction sites fill it in (see [`AsertParent::epoch`]).
     pub fn from_header(header: &ShareHeader, height: u32, previous_time: u32) -> Self {
         Self {
             height,
             time: header.time,
             bits: header.bits,
             previous_time,
+            epoch: None,
         }
     }
+}
+
+/// Anchor point the pool ASERT reads.
+///
+/// The same integer formula, different reference points. The choice is part
+/// of the consensus rule: two nodes that anchor differently compute another
+/// target for every share once the chain has been off schedule.
+///
+/// - [`AnchorRule::Genesis`]: the target follows from the chain's genesis
+///   anchor and the parent's height and time alone. Bitcoin uses this rule,
+///   as upstream does.
+/// - [`AnchorRule::Parent`]: Bitcoin Cash's rule, with the parent's bits as
+///   the anchor target and the parent's own interval as the time delta.
+///   Without clamping this gives the genesis rule's targets; at the ceiling
+///   it stops counting time the chain spent behind schedule, so a chain
+///   started long after its genesis time, or restarted after an outage, is
+///   not held at the ceiling while it makes up the missing shares. See
+///   `docs/difficulty_adjustment/asert.md`.
+/// - [`AnchorRule::Epoch`]: the vardiff share chain's rule, the genesis
+///   rule re-anchored at the first share at height 1 ([`AsertEpoch`]).
+///   Its timestamp and height stand in for the genesis anchor's and the
+///   anchor target stays the genesis anchor target, so the production gap
+///   between the genesis timestamp and the first share is not counted as
+///   schedule debt. The chain still does not anchor at the parent, whose
+///   committed per-miner tier (quantized by `round`) would feed back into
+///   the pool ASERT and pin difficulty at an integer. See
+///   `docs/sharechain/vardiff-sharechain.md`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AnchorRule {
+    Genesis,
+    Parent,
+    Epoch,
 }
 
 /// Pool difficulty tracker using the ASERT (aserti3-2d renamed as
 /// aserti3-10m) algorithm. Our halflife is 10m instead of 2 days.
 ///
-/// Where the algorithm is anchored depends on the chain:
-///
-/// - Bitcoin anchors at genesis, as upstream does. The algorithm is absolute
-///   (not iterative): the target follows from the anchor point and the
-///   parent's height and time alone.
-/// - Bitcoin Cash anchors at each share's parent: the same integer formula,
-///   with the parent's bits as the anchor target and the parent's own
-///   interval as the time delta. Without clamping this gives the genesis
-///   rule's targets; at the ceiling it stops counting time the chain spent
-///   behind schedule, so a chain started long after its genesis time, or
-///   restarted after an outage, is not held at the ceiling while it makes up
-///   the missing shares. See `docs/difficulty_adjustment/asert.md`.
+/// Which point the algorithm is anchored at is the [`AnchorRule`] choice:
+/// genesis on Bitcoin, each share's parent on the main and mini Bitcoin
+/// Cash share chains, and the first share at height 1 on the vardiff share
+/// chain.
 #[derive(Clone, Copy)]
 pub struct PoolDifficulty {
     /// The anchor block's compact target (difficulty at the anchor point)
@@ -344,14 +395,15 @@ pub struct PoolDifficulty {
     anchor_parent_time: u32,
     /// The height of the anchor block
     anchor_height: u32,
-    /// Chain whose anchor rule applies: the genesis anchor on Bitcoin, the
-    /// parent anchor on Bitcoin Cash.
-    chain: Chain,
+    /// Which anchor point [`Self::calculate_target`] reads (see
+    /// [`AnchorRule`]).
+    anchor_rule: AnchorRule,
 }
 
 impl PoolDifficulty {
-    /// Create a new PoolDifficulty anchored at the given block, on Bitcoin's
-    /// genesis anchor rule. Use [`Self::for_chain`] to select another chain.
+    /// Create a new PoolDifficulty anchored at the given block, on the
+    /// genesis anchor rule. Use [`Self::for_chain`] and
+    /// [`Self::for_share_chain`] to select another rule.
     ///
     /// For a new chain, the anchor is the genesis block. Use the genesis block's
     /// own timestamp as `anchor_parent_time` since genesis has no parent.
@@ -360,48 +412,69 @@ impl PoolDifficulty {
             anchor_target,
             anchor_parent_time,
             anchor_height,
-            chain: Chain::Bitcoin,
+            anchor_rule: AnchorRule::Genesis,
         }
     }
 
-    /// Build a PoolDifficulty for `chain` anchored at the genesis block from
-    /// the chain store.
+    /// Build a PoolDifficulty for `chain` and `share_chain` anchored at the
+    /// genesis block from the chain store.
     ///
     /// Reads the genesis header to obtain the anchor target and timestamp.
-    /// The anchor height is always 0 since the anchor is genesis. On Bitcoin
-    /// Cash the genesis anchor only sets the first share's target and the
-    /// chain's ceiling; every later share is anchored at its parent.
+    /// The anchor height is always 0 since the anchor is genesis. On the
+    /// main and mini Bitcoin Cash share chains the genesis anchor only sets
+    /// the first share's target and the chain's ceiling; every later share
+    /// is anchored at its parent. The vardiff share chain anchors at its
+    /// epoch (see [`AnchorRule::Epoch`]).
     pub fn build(
         chain_store_handle: &ChainStoreHandle,
         chain: Chain,
+        share_chain: BchShareChain,
     ) -> Result<Self, PoolDifficultyError> {
         let genesis_header = chain_store_handle
             .get_genesis_header()
             .map_err(|error| PoolDifficultyError::AnchorNotFound(error.to_string()))?;
-        Ok(Self::new(genesis_header.bits, genesis_header.time, 0).for_chain(chain))
+        Ok(Self::new(genesis_header.bits, genesis_header.time, 0)
+            .for_chain(chain)
+            .for_share_chain(share_chain))
     }
 
-    /// Select the chain whose anchor rule applies.
+    /// Select the chain whose anchor rule applies: genesis on Bitcoin, the
+    /// parent on Bitcoin Cash.
     pub fn for_chain(mut self, chain: Chain) -> Self {
-        self.chain = chain;
+        self.anchor_rule = match chain {
+            Chain::Bitcoin => AnchorRule::Genesis,
+            Chain::BitcoinCash => AnchorRule::Parent,
+        };
+        self
+    }
+
+    /// Select the Bitcoin Cash share chain whose anchor rule applies: the
+    /// vardiff share chain anchors at the first share at height 1, whose
+    /// timestamp and height arrive with the parent, while main and mini
+    /// keep the parent anchor `for_chain` selected.
+    pub fn for_share_chain(mut self, share_chain: BchShareChain) -> Self {
+        if matches!(share_chain, BchShareChain::Vardiff) {
+            self.anchor_rule = AnchorRule::Epoch;
+        }
         self
     }
 
     /// Calculate the required target for a block given its parent.
     ///
-    /// This is a pure computation from the anchor point: genesis on Bitcoin,
-    /// the parent itself on Bitcoin Cash. The ASERT formula internally adds 1
+    /// This is a pure computation from the anchor point the
+    /// [`AnchorRule`] selects. The ASERT formula internally adds 1
     /// to the height delta, so callers pass the parent, not the block being
     /// mined.
     pub fn calculate_target(&self, parent: AsertParent) -> CompactTarget {
-        match self.chain {
-            Chain::Bitcoin => self.target_from_genesis(parent),
-            Chain::BitcoinCash => self.target_from_parent(parent),
+        match self.anchor_rule {
+            AnchorRule::Genesis => self.target_from_genesis(parent),
+            AnchorRule::Parent => self.target_from_parent(parent),
+            AnchorRule::Epoch => self.target_from_epoch(parent),
         }
     }
 
-    /// Bitcoin's rule: ASERT anchored at genesis, from the parent's height
-    /// and time.
+    /// The genesis rule: ASERT anchored at genesis, from the parent's height
+    /// and time. Bitcoin.
     fn target_from_genesis(&self, parent: AsertParent) -> CompactTarget {
         let time_delta = parent.time as i64 - self.anchor_parent_time as i64;
         let height_delta = parent.height as i64 - self.anchor_height as i64;
@@ -415,10 +488,42 @@ impl PoolDifficulty {
         )
     }
 
-    /// Bitcoin Cash's rule: ASERT anchored at the parent, BCH's own anchor
-    /// convention applied one share back. The anchor target is the parent's
-    /// bits, the time delta is the parent's interval from its own parent, and
-    /// the height delta is zero.
+    /// The epoch rule: the genesis rule with the epoch's timestamp and
+    /// height in place of the genesis anchor's. The vardiff share chain
+    /// uses it; the anchor target is the genesis anchor target.
+    ///
+    /// Until the parent is the epoch itself, the epoch is not on the
+    /// chain yet: the parent is genesis (height 0), it has no epoch, and
+    /// the target is the genesis rule's, which is the first share's. A
+    /// parent at height 1 or above without an epoch never comes from the
+    /// construction sites (see [`AsertParent::epoch`]); falling back there
+    /// would anchor at genesis, the very framing the epoch rule replaces.
+    fn target_from_epoch(&self, parent: AsertParent) -> CompactTarget {
+        let Some(epoch) = parent.epoch else {
+            debug_assert_eq!(
+                parent.height, 0,
+                "parent at height {} has no epoch",
+                parent.height
+            );
+            return self.target_from_genesis(parent);
+        };
+        let time_delta = parent.time as i64 - epoch.time as i64;
+        let height_delta = parent.height as i64 - epoch.height as i64;
+
+        asert_calculate_target(
+            self.anchor_target,
+            time_delta,
+            height_delta,
+            sim_overrides::half_life(),
+            sim_overrides::ideal_block_time(),
+        )
+    }
+
+    /// The parent rule: ASERT anchored at the parent, Bitcoin Cash's own
+    /// anchor convention applied one share back. The main and mini share
+    /// chains use it. The anchor target is the parent's bits, the time
+    /// delta is the parent's interval from its own parent, and the height
+    /// delta is zero.
     ///
     /// When the parent is genesis, its interval is zero and its bits are the
     /// genesis anchor target, so the first share's target is the genesis
@@ -487,8 +592,9 @@ impl PoolDifficulty {
 mockall::mock! {
     pub PoolDifficulty {
         pub fn new(anchor_target: CompactTarget, anchor_parent_time: u32, anchor_height: u32) -> Self;
-        pub fn build(chain_store_handle: &ChainStoreHandle, chain: Chain) -> Result<Self, PoolDifficultyError>;
+        pub fn build(chain_store_handle: &ChainStoreHandle, chain: Chain, share_chain: BchShareChain) -> Result<Self, PoolDifficultyError>;
         pub fn for_chain(self, chain: Chain) -> Self;
+        pub fn for_share_chain(self, share_chain: BchShareChain) -> Self;
         pub fn calculate_target(&self, parent: AsertParent) -> CompactTarget;
         pub fn calculate_target_clamped(&self, parent: AsertParent) -> CompactTarget;
         pub fn calculate_target_consensus(&self, parent: AsertParent) -> u32;
@@ -509,7 +615,7 @@ mod tests {
     use super::*;
     use crate::config::BchShareChain;
     use crate::shares::bch_genesis;
-    use crate::shares::bch_genesis::MINI_ANCHOR_TARGET;
+    use crate::shares::bch_genesis::{MINI_ANCHOR_TARGET, VARDIFF_ANCHOR_TARGET};
     use crate::shares::share_block::{MAX_POOL_TARGET, ShareBlock};
     use crate::test_utils::mine_at_constant_hashrate;
     use bitcoin::hashes::Hash;
@@ -854,6 +960,7 @@ mod tests {
             time: 1_700_000_020,
             bits: CompactTarget::from_consensus(0x1b4188f5),
             previous_time: 1_700_000_010,
+            epoch: None,
         });
         assert_eq!(target.to_consensus(), 0x1b4188f5);
     }
@@ -867,6 +974,7 @@ mod tests {
             time: 1_700_000_015,
             bits: CompactTarget::from_consensus(0x1b4188f5),
             previous_time: 1_700_000_005,
+            epoch: None,
         };
         let compact = pool_difficulty.calculate_target(parent);
         let consensus = pool_difficulty.calculate_target_consensus(parent);
@@ -884,18 +992,21 @@ mod tests {
             time: 1_700_000_020,
             bits: CompactTarget::from_consensus(0x1b4188f5),
             previous_time: 1_700_000_010,
+            epoch: None,
         });
         let on_schedule_5 = pool_difficulty.calculate_target(AsertParent {
             height: 5,
             time: 1_700_000_060,
             bits: CompactTarget::from_consensus(0x1b4188f5),
             previous_time: 1_700_000_050,
+            epoch: None,
         });
         let on_schedule_100 = pool_difficulty.calculate_target(AsertParent {
             height: 100,
             time: 1_700_001_010,
             bits: CompactTarget::from_consensus(0x1b4188f5),
             previous_time: 1_700_001_000,
+            epoch: None,
         });
 
         assert_eq!(on_schedule_1.to_consensus(), 0x1b4188f5);
@@ -916,6 +1027,7 @@ mod tests {
             time: 1_700_000_010,
             bits: CompactTarget::from_consensus(0x1b4188f5),
             previous_time: 1_700_000_000,
+            epoch: None,
         });
         let anchor_wide = target_to_u512(Target::from_compact(CompactTarget::from_consensus(
             0x1b4188f5,
@@ -999,6 +1111,7 @@ mod tests {
             time: 1_700_000_000,
             bits: CompactTarget::from_consensus(0x1b4188f5),
             previous_time: 1_699_999_990,
+            epoch: None,
         });
 
         assert_eq!(
@@ -1091,6 +1204,7 @@ mod tests {
             time: 1_700_000_000,
             bits: CompactTarget::from_consensus(MINI_ANCHOR_TARGET),
             previous_time: 1_700_000_000,
+            epoch: None,
         });
         let main_ceiling = Target::from_compact(CompactTarget::from_consensus(MAX_POOL_TARGET));
         assert!(Target::from_compact(next) > main_ceiling);
@@ -1124,6 +1238,7 @@ mod tests {
             time: 1_700_005_010,
             bits: CompactTarget::from_consensus(0x1a4188f5),
             previous_time: 1_700_005_000,
+            epoch: None,
         });
 
         assert_eq!(next, CompactTarget::from_consensus(0x1a4188f5));
@@ -1143,6 +1258,7 @@ mod tests {
             time: 1_700_005_610,
             bits: parent_bits,
             previous_time: 1_700_005_000,
+            epoch: None,
         });
 
         assert_eq!(
@@ -1199,6 +1315,7 @@ mod tests {
             time: 1_700_009_000,
             bits: CompactTarget::from_consensus(0x1c2a0000),
             previous_time: 1_700_005_000,
+            epoch: None,
         });
 
         assert_eq!(next, CompactTarget::from_consensus(MINI_ANCHOR_TARGET));
@@ -1226,6 +1343,7 @@ mod tests {
                     time: (1_700_005_000 + interval) as u32,
                     bits: CompactTarget::from_consensus(bits),
                     previous_time: 1_700_005_000,
+                    epoch: None,
                 };
                 let public = asert_target_with_easy_clamp(
                     parent.bits,
@@ -1417,6 +1535,7 @@ mod tests {
             time: launch_time,
             bits: steady_target,
             previous_time: launch_time,
+            epoch: None,
         };
 
         let parent_anchor_tip = mine_at_constant_hashrate(
@@ -1452,6 +1571,211 @@ mod tests {
         assert!(
             (0.95..=1.05).contains(&genesis_anchor_ratio),
             "genesis anchor difficulty is {genesis_anchor_ratio} of steady"
+        );
+    }
+
+    // =======================================================================
+    // Vardiff epoch anchor tests
+    // =======================================================================
+
+    /// A vardiff parent at the exact schedule carries committed tier bits,
+    /// but the pool target is the epoch formula over the parent's height
+    /// and time alone: both a difficulty-4 tier and a difficulty-1285 tier
+    /// give the same next target, so the tier round cannot re-anchor the
+    /// pool ASERT (docs/sharechain/vardiff-sharechain.md, the tier
+    /// paragraph).
+    #[test]
+    fn vardiff_anchor_ignores_the_parent_committed_tier_bits() {
+        let genesis_time = 1_700_000_000;
+        let pool_difficulty = PoolDifficulty::new(
+            CompactTarget::from_consensus(VARDIFF_ANCHOR_TARGET),
+            genesis_time,
+            0,
+        )
+        .for_chain(Chain::BitcoinCash)
+        .for_share_chain(BchShareChain::Vardiff);
+        let epoch = AsertEpoch {
+            time: genesis_time + 10,
+            height: 1,
+        };
+        let tier_four = AsertParent {
+            height: 500,
+            time: genesis_time + 5_010,
+            bits: CompactTarget::from_consensus(0x1c3fffc0),
+            previous_time: genesis_time + 5_000,
+            epoch: Some(epoch),
+        };
+        let tier_1285 = AsertParent {
+            bits: CompactTarget::from_consensus(0x1d000033),
+            ..tier_four
+        };
+
+        let from_tier_four = pool_difficulty.calculate_target(tier_four);
+        assert_eq!(
+            from_tier_four,
+            pool_difficulty.calculate_target(tier_1285),
+            "the committed tier bits are never re-read as an anchor"
+        );
+        assert_eq!(
+            from_tier_four,
+            CompactTarget::from_consensus(VARDIFF_ANCHOR_TARGET),
+            "a parent exactly on schedule returns the epoch anchor itself"
+        );
+    }
+
+    /// A chain mining 270 shares in one window (2.25 per second) climbs past
+    /// 4.5 difficulty, where the integer tier round would lock a sole miner's
+    /// jobs: the parent anchor re-reads the committed tier and pins the next
+    /// target at about 4.04 instead.
+    #[test]
+    fn vardiff_anchor_climbs_out_of_the_integer_dead_zone() {
+        let genesis_time = 1_700_000_000;
+        let parent = AsertParent {
+            height: 270,
+            time: genesis_time + 600,
+            bits: CompactTarget::from_consensus(0x1c3fffc0),
+            previous_time: genesis_time + 598,
+            epoch: Some(AsertEpoch {
+                time: genesis_time + 10,
+                height: 1,
+            }),
+        };
+        let epoch_anchor = PoolDifficulty::new(
+            CompactTarget::from_consensus(VARDIFF_ANCHOR_TARGET),
+            genesis_time,
+            0,
+        )
+        .for_chain(Chain::BitcoinCash)
+        .for_share_chain(BchShareChain::Vardiff);
+
+        let next = epoch_anchor.calculate_target_clamped(parent);
+        let difficulty = Target::from_compact(next).difficulty_float();
+        assert!(
+            difficulty > 4.5,
+            "epoch anchor difficulty {difficulty} clears the round() dead zone at 4.5"
+        );
+
+        let parent_anchor = PoolDifficulty::new(
+            CompactTarget::from_consensus(VARDIFF_ANCHOR_TARGET),
+            genesis_time,
+            0,
+        )
+        .for_chain(Chain::BitcoinCash);
+        let pinned = parent_anchor.calculate_target_clamped(parent);
+        let pinned_difficulty = Target::from_compact(pinned).difficulty_float();
+        assert!(
+            pinned_difficulty <= 4.05,
+            "the parent anchor stays pinned at the committed tier, {pinned_difficulty}"
+        );
+    }
+
+    /// A vardiff chain that has fallen far behind its schedule clamps at the
+    /// chain ceiling, its own anchor, never easier.
+    #[test]
+    fn vardiff_anchor_clamps_a_lagging_chain_at_the_chain_ceiling() {
+        let genesis_time = 1_700_000_000;
+        let pool_difficulty = PoolDifficulty::new(
+            CompactTarget::from_consensus(VARDIFF_ANCHOR_TARGET),
+            genesis_time,
+            0,
+        )
+        .for_chain(Chain::BitcoinCash)
+        .for_share_chain(BchShareChain::Vardiff);
+        let parent = AsertParent {
+            height: 10,
+            time: genesis_time + 10_000,
+            bits: CompactTarget::from_consensus(0x1c3fffc0),
+            previous_time: genesis_time + 9_990,
+            epoch: Some(AsertEpoch {
+                time: genesis_time + 10,
+                height: 1,
+            }),
+        };
+
+        let next = pool_difficulty.calculate_target_clamped(parent);
+
+        assert_eq!(next, CompactTarget::from_consensus(VARDIFF_ANCHOR_TARGET));
+    }
+
+    /// Run-3: the share genesis predates the first real share by 199 days.
+    /// Framed at genesis, every on-schedule interval leaves the debt
+    /// unchanged, so the chain clamps at the easy anchor forever. The epoch
+    /// re-anchors at the first share: the parent is the epoch itself, and
+    /// the next target escapes to `anchor * 2^(-ideal/half-life)`, one
+    /// interval's worth under the anchor.
+    #[test]
+    fn vardiff_epoch_escapes_the_stale_genesis_clamp() {
+        let genesis_time = 1_776_855_600;
+        let first_share_time = 1_794_077_693;
+        let anchor = CompactTarget::from_consensus(VARDIFF_ANCHOR_TARGET);
+        let genesis_rule = PoolDifficulty::new(anchor, genesis_time, 0);
+        let epoch_rule = PoolDifficulty::new(anchor, genesis_time, 0)
+            .for_chain(Chain::BitcoinCash)
+            .for_share_chain(BchShareChain::Vardiff);
+        let genesis_parent = AsertParent {
+            height: 0,
+            time: genesis_time,
+            bits: anchor,
+            previous_time: genesis_time,
+            epoch: None,
+        };
+        let first_share = AsertParent {
+            height: 1,
+            time: first_share_time,
+            bits: anchor,
+            previous_time: genesis_time,
+            epoch: Some(AsertEpoch {
+                time: first_share_time,
+                height: 1,
+            }),
+        };
+
+        assert_eq!(
+            epoch_rule.calculate_target_clamped(genesis_parent),
+            genesis_rule.calculate_target_clamped(genesis_parent),
+            "the first share has no epoch yet and keeps the genesis rule's target"
+        );
+        assert_eq!(
+            genesis_rule.calculate_target_clamped(first_share),
+            anchor,
+            "the genesis rule clamps a chain 199 days behind its anchor at the easy anchor"
+        );
+
+        let escaped_ratio = Target::from_compact(epoch_rule.calculate_target_clamped(first_share))
+            .difficulty_float()
+            / Target::from_compact(anchor).difficulty_float();
+        let expected_ratio =
+            2f64.powf(sim_overrides::ideal_block_time() as f64 / sim_overrides::half_life() as f64);
+        assert!(
+            (escaped_ratio - expected_ratio).abs() < 0.001,
+            "the epoch rule escapes to {escaped_ratio} of the anchor, expected {expected_ratio}"
+        );
+    }
+
+    /// Only the vardiff arm moves onto the epoch rule: main and mini keep
+    /// the parent anchor, so an on-schedule parent's own target stands.
+    #[test]
+    fn mini_share_chain_keeps_the_parent_anchor_rule() {
+        let pool_difficulty = PoolDifficulty::new(
+            CompactTarget::from_consensus(VARDIFF_ANCHOR_TARGET),
+            1_700_000_000,
+            0,
+        )
+        .for_chain(Chain::BitcoinCash)
+        .for_share_chain(BchShareChain::Mini);
+        let parent_bits = CompactTarget::from_consensus(0x1a4188f5);
+
+        let next = pool_difficulty.calculate_target(AsertParent {
+            height: 500,
+            time: 1_700_005_010,
+            bits: parent_bits,
+            previous_time: 1_700_005_000,
+            epoch: None,
+        });
+
+        assert_eq!(
+            next, parent_bits,
+            "the parent rule keeps the parent's target when the parent is on schedule"
         );
     }
 }

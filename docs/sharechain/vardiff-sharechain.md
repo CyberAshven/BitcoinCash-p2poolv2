@@ -260,8 +260,9 @@ compute the same floor for the same share, and a share at exactly the floor
 is accepted or rejected by all of them alike; a node's own tip window is used
 only for its *own* job bits, which are node-local. The guarantee is
 determinism under equal window composition, a wider dependency than ASERT
-(which reads only the parent and grandparent header) but not a wider failure
-envelope, because the floor walk fails closed where the payout walk skips.
+(which on this chain reads only the chain's epoch and the parent's height
+and time) but not a wider failure envelope, because the floor walk fails
+closed where the payout walk skips.
 Uncle headers for every window entry -- the entries' own uncles, not only the
 validated share's -- must be stored, or present and already validated in the
 sync batch, before the share is judged. The payout walk skips a missing uncle
@@ -305,7 +306,19 @@ its fair `w_i * D_asert_capped`.
 
 On top of the floor, every miner gets a tier:
 `D_asert` is the pool ASERT difficulty (that of the job target
-`calculate_target_clamped` returns), and
+`calculate_target_clamped` returns), and on the vardiff chain that target is
+the epoch-anchor rule: a closed form from the chain's epoch (its first share
+at height 1) over the parent's height and time, so neither the committed
+tier bits nor a miner's weight can feed back into `D_asert`. The epoch
+replaces genesis as the anchor because the share genesis predates the first
+share by months on a fresh chain: framed at genesis, every on-schedule
+interval leaves the debt unchanged and the chain clamps at the easy anchor
+forever (the run-3 stall), while the epoch framing starts the schedule at
+the first share and escapes immediately. Anchoring at the parent instead
+would re-anchor the pool ASERT on `round(w_i * D_asert_capped)` every share,
+which quantizes away ASERT's sub-integer growth and pins difficulty at an
+integer (the dead-zone pin the live run proved), and would drag the anchor
+toward a minority miner's `w_i < 1` tier. Thus
 
 ```text
 D_asert_capped = max(D_asert, D_ceiling)
@@ -374,10 +387,11 @@ fixed-point unit:
 - The ratio `W_min * D_asert_capped / W_total` is integer division with
   round-up (never-easier), computed in u128 before the u64 narrowing above.
   `D_asert_capped` is the same `calculate_target_clamped` value the equality
-  pin computes, in mainnet difficulty space: derived from the parent header,
-  so it is available wherever the pin is, including header sync, where the
-  batch-local `asert_parent_cache` already serves it -- the floor
-  computation walks the window, not a second ASERT chain. The ceiling's
+  pin computes, in mainnet difficulty space: derived from the parent header's
+  height and time against the chain's epoch, so it is available
+  wherever the pin is, including header sync, where the batch-local
+  `asert_parent_cache` already serves it -- the floor computation walks the
+  window, not a second ASERT chain. The ceiling's
   fractional difficulty is never itself a `floor` value: it is enforced as a
   separate ceiling input, the target-space `min` in the band (below) and the
   `D_ceiling` term in the tier formula above, so the u64 floor is always an

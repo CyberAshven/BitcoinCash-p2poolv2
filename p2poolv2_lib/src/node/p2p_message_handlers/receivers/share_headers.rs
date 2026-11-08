@@ -16,7 +16,7 @@ use crate::node::{SwarmSend, messages::Message};
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
-use crate::pool_difficulty::{AsertParent, target_to_difficulty_rounded_up};
+use crate::pool_difficulty::{AsertEpoch, AsertParent, target_to_difficulty_rounded_up};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -498,9 +498,29 @@ fn validate_dag_connectivity_and_difficulty(
         )?;
 
         let header_hash = header.block_hash();
+        let epoch = if parent.height == 0 {
+            // The header inserted here is the first at height 1: it is the
+            // chain's epoch itself (see [`AsertEpoch`]).
+            Some(AsertEpoch {
+                time: header.time,
+                height: 1,
+            })
+        } else {
+            Some(parent.epoch.ok_or_else(|| {
+                HeaderSyncError::Other(Box::new(std::io::Error::other(format!(
+                    "Header {header_hash} at height {header_height} has a parent without an epoch"
+                ))))
+            })?)
+        };
         asert_parent_cache.insert(
             header_hash,
-            AsertParent::from_header(header, header_height, parent.time),
+            AsertParent {
+                height: header_height,
+                time: header.time,
+                bits: header.bits,
+                previous_time: parent.time,
+                epoch,
+            },
         );
         time_links.insert(
             header_hash,

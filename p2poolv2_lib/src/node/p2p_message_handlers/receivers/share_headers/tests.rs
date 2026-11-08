@@ -900,6 +900,161 @@ fn test_validate_header_chain_accepts_linear_chain() {
     assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
 }
 
+/// The first batch share above genesis is the chain's epoch; the share
+/// following it reads that epoch on its ASERT parent, so difficulty
+/// validation never sees a parent the epoch rule would fall back to
+/// genesis for.
+#[test]
+fn test_validate_header_chain_stamps_the_epoch_of_the_first_share() {
+    let anchor = TestShareBlockBuilder::new().nonce(1).build();
+    let mut share_a = TestShareBlockBuilder::new()
+        .prev_share_blockhash(anchor.block_hash().to_string())
+        .nonce(2)
+        .time(1_700_000_001)
+        .build()
+        .header;
+    share_a.bits = CompactTarget::from_consensus(MAX_POOL_TARGET);
+    let mut share_b = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share_a.block_hash().to_string())
+        .nonce(3)
+        .time(1_700_000_002)
+        .build()
+        .header;
+    share_b.bits = CompactTarget::from_consensus(MAX_POOL_TARGET);
+
+    let mut chain_store_handle = ChainStoreHandle::default();
+    setup_chain_validation_mocks(&mut chain_store_handle);
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_derives_sharechain_floor()
+        .return_const(false);
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .withf(|parent| parent.height == 0 && parent.epoch.is_none())
+        .times(1)
+        .returning(|_| CompactTarget::from_consensus(MAX_POOL_TARGET));
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .withf(|parent| {
+            parent.height == 1
+                && parent.time == 1_700_000_001
+                && parent.epoch
+                    == Some(AsertEpoch {
+                        time: 1_700_000_001,
+                        height: 1,
+                    })
+        })
+        .times(1)
+        .returning(|_| CompactTarget::from_consensus(MAX_POOL_TARGET));
+    pool_difficulty
+        .expect_target_ceiling()
+        .return_const(CompactTarget::from_consensus(MAX_POOL_TARGET));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    let headers = vec![share_a, share_b];
+    let result = validate_header_chain(
+        &share_header_batch_with_empty_branches(headers),
+        &chain_store_handle,
+        &mock_validator,
+    );
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+}
+
+/// A store parent above genesis without an epoch rejects the batch: the
+/// epoch rule must never fall back to the genesis anchor silently.
+#[test]
+fn test_validate_header_chain_rejects_a_parent_without_an_epoch() {
+    let anchor = TestShareBlockBuilder::new().nonce(1).build();
+    let mut child = TestShareBlockBuilder::new()
+        .prev_share_blockhash(anchor.block_hash().to_string())
+        .nonce(2)
+        .build()
+        .header;
+    child.bits = CompactTarget::from_consensus(MAX_POOL_TARGET);
+
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let template_header = build_valid_test_header();
+    let genesis_header = template_header.clone();
+    chain_store_handle
+        .expect_get_genesis_header()
+        .returning(move || Ok(genesis_header.clone()));
+    let parent_header = template_header.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(parent_header.clone()));
+    let asert_parent_header = template_header.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent {
+                height: 5,
+                time: asert_parent_header.time,
+                bits: asert_parent_header.bits,
+                previous_time: asert_parent_header.time,
+                epoch: None,
+            })
+        });
+    chain_store_handle
+        .expect_get_block_metadata()
+        .returning(|_| {
+            Ok(BlockMetadata {
+                expected_height: Some(0),
+                chain_work: Work::from_hex("0x00").unwrap(),
+                status: Status::BlockValid,
+                chain: ChainMembership::Confirmed,
+            })
+        });
+    chain_store_handle
+        .expect_get_block_metadata_batch()
+        .returning(|hashes| {
+            Ok(hashes
+                .iter()
+                .map(|hash| {
+                    (
+                        *hash,
+                        BlockMetadata {
+                            expected_height: Some(0),
+                            chain_work: Work::from_hex("0x00").unwrap(),
+                            status: Status::BlockValid,
+                            chain: ChainMembership::Confirmed,
+                        },
+                    )
+                })
+                .collect())
+        });
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
+    setup_minimum_difficulty_mock(&mut mock_validator);
+
+    let result = validate_header_chain(
+        &share_header_batch_with_empty_branches(vec![child]),
+        &chain_store_handle,
+        &mock_validator,
+    );
+    let error = result.expect_err("a parent above genesis without an epoch must reject the batch");
+    assert!(
+        error.to_string().contains("without an epoch"),
+        "unexpected error: {error}"
+    );
+}
+
 #[test]
 fn test_validate_header_chain_accepts_uncle_before_nephew() {
     let anchor = TestShareBlockBuilder::new().nonce(1).build();

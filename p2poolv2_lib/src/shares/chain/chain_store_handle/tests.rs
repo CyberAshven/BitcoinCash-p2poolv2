@@ -1,9 +1,9 @@
 use crate::config::PoolMode;
-use crate::pool_difficulty::AsertParent;
+use crate::pool_difficulty::{AsertEpoch, AsertParent};
 use crate::store::Store;
 use crate::store::writer::StoreError;
 use crate::test_utils::{
-    TestShareBlockBuilder, build_confirmed_test_chain, genesis_for_tests,
+    TestShareBlockBuilder, build_confirmed_test_chain, confirm_test_block, genesis_for_tests,
     setup_test_chain_store_handle, test_funding_transaction,
 };
 use bitcoin::BlockHash;
@@ -242,14 +242,52 @@ async fn test_get_asert_parent_of_genesis_uses_its_own_time() {
             time: genesis.header.time,
             bits: genesis.header.bits,
             previous_time: genesis.header.time,
+            epoch: None,
         }
     );
 }
 
-/// A share's ASERT parent carries its own height, time and bits and
-/// its parent's time, the interval the Bitcoin Cash rule reads.
+/// A share's ASERT parent carries its own height, time and bits, its
+/// parent's time, the interval the Bitcoin Cash rule reads, and its
+/// chain's epoch, the first share at height 1.
 #[tokio::test]
 async fn test_get_asert_parent_reads_the_share_and_its_parent_time() {
+    let (chain_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let genesis = genesis_for_tests();
+    chain_handle
+        .init_or_setup_genesis(genesis.clone())
+        .await
+        .unwrap();
+    let share = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .nonce(0xe9695792)
+        .time(genesis.header.time + 7)
+        .build();
+    confirm_test_block(&chain_handle, &share).await;
+
+    let parent = chain_handle.get_asert_parent(&share.block_hash()).unwrap();
+
+    assert_eq!(
+        parent,
+        AsertParent {
+            height: 1,
+            time: genesis.header.time + 7,
+            bits: share.header.bits,
+            previous_time: genesis.header.time,
+            epoch: Some(AsertEpoch {
+                time: genesis.header.time + 7,
+                height: 1,
+            }),
+        }
+    );
+}
+
+/// A share above genesis whose height-1 header cannot be read from the
+/// candidate or confirmed index has no epoch: the lookup fails closed
+/// instead of returning a parent the epoch rule would quietly anchor at
+/// genesis.
+#[tokio::test]
+async fn test_get_asert_parent_fails_closed_without_a_height_one_header() {
     let (chain_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
     let genesis = genesis_for_tests();
     chain_handle
@@ -266,15 +304,61 @@ async fn test_get_asert_parent_reads_the_share_and_its_parent_time() {
         .store()
         .store_with_valid_metadata(&share);
 
-    let parent = chain_handle.get_asert_parent(&share.block_hash()).unwrap();
+    let error = chain_handle
+        .get_asert_parent(&share.block_hash())
+        .expect_err("a share above genesis without a height-1 header must fail closed");
+
+    assert!(
+        matches!(error, StoreError::NotFound(_)),
+        "expected NotFound, got {error:?}"
+    );
+}
+
+/// Once the pruner has deleted the candidate entry at height 1, the
+/// confirmed index still names the epoch, so ASERT parents keep
+/// resolving on a pruned chain.
+#[tokio::test]
+async fn test_get_asert_parent_reads_the_epoch_from_confirmed_after_pruning() {
+    let (chain_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let genesis = genesis_for_tests();
+    chain_handle
+        .init_or_setup_genesis(genesis.clone())
+        .await
+        .unwrap();
+    let first_share = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis.block_hash().to_string())
+        .nonce(0xe9695792)
+        .time(genesis.header.time + 7)
+        .build();
+    let second_share = TestShareBlockBuilder::new()
+        .prev_share_blockhash(first_share.block_hash().to_string())
+        .nonce(0xe9695793)
+        .time(genesis.header.time + 17)
+        .build();
+    confirm_test_block(&chain_handle, &first_share).await;
+    confirm_test_block(&chain_handle, &second_share).await;
+
+    chain_handle.prune_block_bodies(1, 2).await.unwrap();
+    assert!(
+        chain_handle.get_candidate_at_height(1).is_err(),
+        "the prune must have deleted the candidate entry at height 1"
+    );
+
+    let parent = chain_handle
+        .get_asert_parent(&second_share.block_hash())
+        .unwrap();
 
     assert_eq!(
         parent,
         AsertParent {
-            height: 1,
-            time: genesis.header.time + 7,
-            bits: share.header.bits,
-            previous_time: genesis.header.time,
+            height: 2,
+            time: genesis.header.time + 17,
+            bits: second_share.header.bits,
+            previous_time: genesis.header.time + 7,
+            epoch: Some(AsertEpoch {
+                time: genesis.header.time + 7,
+                height: 1,
+            }),
         }
     );
 }

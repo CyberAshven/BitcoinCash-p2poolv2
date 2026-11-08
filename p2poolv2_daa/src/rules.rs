@@ -82,6 +82,9 @@ impl SimChain {
     }
 
     /// The tip as the parent of the next share.
+    ///
+    /// Simulated chains follow the Bitcoin rule (`Rule::GenesisAnchor` in
+    /// sim terms), which reads no epoch, so no epoch is stamped.
     pub fn asert_parent(&self) -> AsertParent {
         let tip = self.tip();
         AsertParent {
@@ -89,6 +92,7 @@ impl SimChain {
             time: tip.time,
             bits: tip.bits,
             previous_time: self.previous_time(),
+            epoch: None,
         }
     }
 }

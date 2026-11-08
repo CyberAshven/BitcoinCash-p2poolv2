@@ -438,9 +438,12 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let (template_tx, template_rx) = watch::channel(None);
 
     let chain_store_handle_for_notify = chain_store_handle.clone();
-    let pool_difficulty_for_notify =
-        PoolDifficulty::build(&chain_store_handle, stratum_config.chain)
-            .expect("Failed to build pool difficulty");
+    let pool_difficulty_for_notify = PoolDifficulty::build(
+        &chain_store_handle,
+        stratum_config.chain,
+        stratum_config.bch_share_chain,
+    )
+    .expect("Failed to build pool difficulty");
     // The share chain's easiest share target, for the tier job paths. Read
     // here because the notifier owns `pool_difficulty_for_notify` below.
     let target_ceiling = pool_difficulty_for_notify.target_ceiling();

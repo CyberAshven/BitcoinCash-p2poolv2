@@ -11,7 +11,7 @@
 use crate::accounting::payout::sharechain_pplns::pplns_window::PRUNE_INTERVAL;
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::config::{BitcoinCashNetwork, PoolMode};
-use crate::pool_difficulty::AsertParent;
+use crate::pool_difficulty::{AsertEpoch, AsertParent};
 use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{
     ShareBlock, ShareHeader, ShareTransaction, is_terminal_blockhash,
@@ -451,15 +451,23 @@ impl ChainStoreHandle {
     }
 
     /// Read what ASERT needs from `share_hash` as the parent of the next
-    /// share: its height, time and bits, and its own parent's time.
+    /// share: its height, time and bits, its own parent's time, and its
+    /// chain's epoch.
     ///
     /// Height comes from block metadata, time and bits from the share header,
-    /// and the previous time from the header of the share's own parent, all
-    /// keyed on the given `share_hash`. Genesis has no parent, so its previous
-    /// time is its own. Callers building work pass the same hash they declare
-    /// as `prev_share_blockhash`, so the target (`bits`) they compute is
+    /// the previous time from the header of the share's own parent, and the
+    /// epoch from the chain's first share at height 1 (see
+    /// [`Self::get_asert_epoch`]), all keyed on the given `share_hash`.
+    /// Genesis has no parent, so its previous time is its own. Callers
+    /// building work pass the same hash they declare as
+    /// `prev_share_blockhash`, so the target (`bits`) they compute is
     /// derived from that exact parent rather than a separately re-read live
     /// tip that may have advanced in between.
+    ///
+    /// Only the vardiff share chain's rule reads the epoch; the other rules
+    /// ignore it. A height above genesis without a resolvable epoch fails
+    /// closed here rather than returning a parent whose epoch rule would
+    /// fall back to the genesis anchor.
     pub fn get_asert_parent(&self, share_hash: &BlockHash) -> Result<AsertParent, StoreError> {
         let header = self.get_share_header(share_hash)?;
         let metadata = self.get_block_metadata(share_hash)?;
@@ -471,7 +479,37 @@ impl ChainStoreHandle {
         } else {
             self.get_share_header(&header.prev_share_blockhash)?.time
         };
-        Ok(AsertParent::from_header(&header, height, previous_time))
+        let epoch = if height == 0 {
+            None
+        } else {
+            Some(self.get_asert_epoch()?)
+        };
+        Ok(AsertParent {
+            height,
+            time: header.time,
+            bits: header.bits,
+            previous_time,
+            epoch,
+        })
+    }
+
+    /// The epoch of the vardiff share chain: the first share at height 1.
+    ///
+    /// The candidate index names it while the chain is young. The pruner
+    /// deletes candidate entries below the confirmed tip, so on a chain past
+    /// the prune depth the confirmed index is the durable source; by then
+    /// height 1 sits far above the reorg depth and the two indexes agree.
+    fn get_asert_epoch(&self) -> Result<AsertEpoch, StoreError> {
+        let epoch_hash = match self.get_candidate_at_height(1) {
+            Ok(epoch_hash) => epoch_hash,
+            Err(StoreError::NotFound(_)) => self.get_confirmed_at_height(1)?,
+            Err(error) => return Err(error),
+        };
+        let epoch_header = self.get_share_header(&epoch_hash)?;
+        Ok(AsertEpoch {
+            time: epoch_header.time,
+            height: 1,
+        })
     }
 
     /// Get the genesis blockhash from the chain.
