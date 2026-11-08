@@ -38,6 +38,10 @@ const WEAK_CONSTANTS: [(u64, u64); 6] =
 /// `INCLUDER_CUT` values of its sweep.
 const INCLUDER_CUTS: [f64; 4] = [0.0, 0.01, 0.02, 0.05];
 
+/// Payout levels of the level sweep; levels 0 to 2 pay as level 3 does in
+/// every pool size tested, so they are left out.
+const LEVELS_SWEPT: [u32; 5] = [3, 4, 5, 6, 7];
+
 /// Share periods of the period table, seconds.
 const PERIODS: [f64; 4] = [10.0, 5.0, 2.0, 1.0];
 
@@ -46,6 +50,29 @@ const NON_CARRYING_FRACTIONS: [f64; 3] = [0.0, 0.5, 0.9];
 
 /// Spam multiples of attack (c).
 const SPAM_MULTIPLES: [f64; 3] = [0.0, 1.0, 10.0];
+
+/// The designs of the comparison tables: every design as the page writes
+/// it, and the band with weak shares and levels with shares on minimum jobs
+/// credited at the weak work.
+const VARIANTS: [(Design, WeakCredit); 7] = [
+    (Design::Mini, WeakCredit::Page),
+    (Design::OneChain, WeakCredit::Page),
+    (Design::Band, WeakCredit::Page),
+    (Design::Vardiff, WeakCredit::Page),
+    (Design::BandWeak, WeakCredit::Page),
+    (Design::BandWeakLevels, WeakCredit::Page),
+    (Design::BandWeakLevels, WeakCredit::WeakWork),
+];
+
+/// A design's name in tables, marked when shares on minimum jobs are
+/// credited at the weak work.
+fn variant_name(scenario: &Scenario) -> String {
+    if scenario.design.has_weak_shares() && scenario.weak_credit == WeakCredit::WeakWork {
+        format!("{}, weak work", scenario.design.name())
+    } else {
+        scenario.design.name().to_string()
+    }
+}
 
 /// One table of the default run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,11 +264,12 @@ fn uniform_difficulty(report: &Report) -> f64 {
 fn designs(base: &Scenario) -> String {
     let mut sections = Vec::with_capacity(MinerMix::ALL.len());
     MinerMix::ALL.iter().for_each(|mix| {
-        let scenarios: Vec<Scenario> = Design::ALL
+        let scenarios: Vec<Scenario> = VARIANTS
             .iter()
-            .flat_map(|design| {
+            .flat_map(|(design, credit)| {
                 POOL_FRACTIONS.iter().map(move |fraction| Scenario {
                     design: *design,
+                    weak_credit: *credit,
                     mix: *mix,
                     pool_fraction: *fraction,
                     ..base.clone()
@@ -253,7 +281,7 @@ fn designs(base: &Scenario) -> String {
             .iter()
             .map(|report| {
                 let mut row = vec![
-                    report.scenario.design.name().to_string(),
+                    variant_name(&report.scenario),
                     pool_percent(report.scenario.pool_fraction),
                 ];
                 row.extend(both_miner_cells(report));
@@ -271,11 +299,12 @@ fn designs(base: &Scenario) -> String {
 }
 
 fn hashrate(base: &Scenario) -> String {
-    let scenarios: Vec<Scenario> = Design::ALL
+    let scenarios: Vec<Scenario> = VARIANTS
         .iter()
-        .flat_map(|design| {
+        .flat_map(|(design, credit)| {
             HASHRATE_MULTIPLES.iter().map(move |multiple| Scenario {
                 design: *design,
+                weak_credit: *credit,
                 pool_fraction: 0.10,
                 hashrate_multiple: *multiple,
                 ..base.clone()
@@ -287,7 +316,7 @@ fn hashrate(base: &Scenario) -> String {
         .iter()
         .map(|report| {
             let mut row = vec![
-                report.scenario.design.name().to_string(),
+                variant_name(&report.scenario),
                 format!("x{}", report.scenario.hashrate_multiple),
                 satoshis(report.miners[0].fair_income_per_month),
             ];
@@ -302,11 +331,12 @@ fn hashrate(base: &Scenario) -> String {
 }
 
 fn pool(base: &Scenario) -> String {
-    let scenarios: Vec<Scenario> = Design::ALL
+    let scenarios: Vec<Scenario> = VARIANTS
         .iter()
-        .flat_map(|design| {
+        .flat_map(|(design, credit)| {
             POOL_FRACTIONS.iter().map(move |fraction| Scenario {
                 design: *design,
+                weak_credit: *credit,
                 pool_fraction: *fraction,
                 ..base.clone()
             })
@@ -318,7 +348,7 @@ fn pool(base: &Scenario) -> String {
         .map(|report| {
             let chain = report.home_chain();
             vec![
-                report.scenario.design.name().to_string(),
+                variant_name(&report.scenario),
                 pool_percent(report.scenario.pool_fraction),
                 rounded(chain.asert_difficulty),
                 rounded(chain.easiest_difficulty),
@@ -415,15 +445,18 @@ fn band_cap(base: &Scenario) -> String {
 }
 
 fn weak_constants(base: &Scenario) -> String {
-    let scenarios: Vec<Scenario> = KEY_POOL_FRACTIONS
-        .iter()
-        .flat_map(|fraction| {
-            WEAK_CONSTANTS.iter().map(move |(cap, fill)| Scenario {
-                design: Design::BandWeakLevels,
-                pool_fraction: *fraction,
-                weak_cap: *cap,
-                weak_fill: *fill,
-                ..base.clone()
+    let scenarios: Vec<Scenario> = [WeakCredit::Page, WeakCredit::WeakWork]
+        .into_iter()
+        .flat_map(|credit| {
+            KEY_POOL_FRACTIONS.iter().flat_map(move |fraction| {
+                WEAK_CONSTANTS.iter().map(move |(cap, fill)| Scenario {
+                    design: Design::BandWeakLevels,
+                    weak_credit: credit,
+                    pool_fraction: *fraction,
+                    weak_cap: *cap,
+                    weak_fill: *fill,
+                    ..base.clone()
+                })
             })
         })
         .collect();
@@ -434,6 +467,7 @@ fn weak_constants(base: &Scenario) -> String {
             let weak = report.home_chain().weak.unwrap_or_default();
             let bitaxe = &report.miners[0];
             vec![
+                credit_name(report.scenario.weak_credit).to_string(),
                 pool_percent(report.scenario.pool_fraction),
                 report.scenario.weak_cap.to_string(),
                 report.scenario.weak_fill.to_string(),
@@ -451,6 +485,7 @@ fn weak_constants(base: &Scenario) -> String {
         })
         .collect();
     let headers = [
+        "Credit",
         "Pool",
         "WEAK_CAP",
         "WEAK_FILL",
@@ -555,28 +590,32 @@ fn includer_cut(base: &Scenario) -> String {
 }
 
 fn levels(base: &Scenario) -> String {
-    let scenarios: Vec<Scenario> = KEY_POOL_FRACTIONS
-        .iter()
-        .flat_map(|fraction| {
-            let without = Scenario {
-                design: Design::BandWeak,
-                pool_fraction: *fraction,
-                ..base.clone()
-            };
-            let with_levels = (0..8u32).map(move |level| {
-                let mut scenario = Scenario {
-                    design: Design::BandWeakLevels,
+    let scenarios: Vec<Scenario> = [WeakCredit::Page, WeakCredit::WeakWork]
+        .into_iter()
+        .flat_map(|credit| {
+            KEY_POOL_FRACTIONS.iter().flat_map(move |fraction| {
+                let without = Scenario {
+                    design: Design::BandWeak,
+                    weak_credit: credit,
                     pool_fraction: *fraction,
-                    default_level: level,
                     ..base.clone()
                 };
-                scenario
-                    .tracked
-                    .iter_mut()
-                    .for_each(|miner| miner.level = level);
-                scenario
-            });
-            std::iter::once(without).chain(with_levels)
+                let with_levels = LEVELS_SWEPT.iter().map(move |level| {
+                    let mut scenario = Scenario {
+                        design: Design::BandWeakLevels,
+                        weak_credit: credit,
+                        pool_fraction: *fraction,
+                        default_level: *level,
+                        ..base.clone()
+                    };
+                    scenario
+                        .tracked
+                        .iter_mut()
+                        .for_each(|miner| miner.level = *level);
+                    scenario
+                });
+                std::iter::once(without).chain(with_levels)
+            })
         })
         .collect();
     let reports = run_scenarios(&scenarios);
@@ -592,6 +631,7 @@ fn levels(base: &Scenario) -> String {
             let bitaxe = &report.miners[0];
             let asic = &report.miners[1];
             vec![
+                credit_name(report.scenario.weak_credit).to_string(),
                 pool_percent(report.scenario.pool_fraction),
                 level,
                 rounded(bitaxe.payments_per_month),
@@ -606,6 +646,7 @@ fn levels(base: &Scenario) -> String {
         })
         .collect();
     let headers = [
+        "Credit",
         "Pool",
         "Level",
         "Bitaxe pay/mo",
@@ -621,12 +662,17 @@ fn levels(base: &Scenario) -> String {
 }
 
 fn period(base: &Scenario) -> String {
-    let designs = [Design::OneChain, Design::BandWeakLevels];
+    let designs = [
+        (Design::OneChain, WeakCredit::Page),
+        (Design::BandWeakLevels, WeakCredit::Page),
+        (Design::BandWeakLevels, WeakCredit::WeakWork),
+    ];
     let scenarios: Vec<Scenario> = designs
         .iter()
-        .flat_map(|design| {
+        .flat_map(|(design, credit)| {
             PERIODS.iter().map(move |seconds| Scenario {
                 design: *design,
+                weak_credit: *credit,
                 pool_fraction: 0.10,
                 period_seconds: *seconds,
                 stale_rate: stale_rate_for_period(*seconds),
@@ -640,7 +686,7 @@ fn period(base: &Scenario) -> String {
         .map(|report| {
             let chain = report.home_chain();
             let mut row = vec![
-                report.scenario.design.name().to_string(),
+                variant_name(&report.scenario),
                 format!("{} s", report.scenario.period_seconds),
                 percent(report.scenario.stale_rate),
                 hours(chain.window.span_seconds),
