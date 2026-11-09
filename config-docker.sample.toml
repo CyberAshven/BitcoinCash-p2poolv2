@@ -1,8 +1,8 @@
 # P2Poolv2 for Bitcoin Cash, as the Docker image and docker/docker-compose.yml
 # run it: a regtest node with BCHN on 127.0.0.1.
 #
-# Under compose, NETWORK and BCH_SHARE_CHAIN in docker/.env override chain,
-# bitcoin_cash_network, bch_share_chain and the store path below. For chipnet
+# Under compose, NETWORK in docker/.env overrides chain,
+# bitcoin_cash_network and the store path below. For chipnet
 # or mainnet, copy this file to config.toml, set the values marked "chipnet or
 # mainnet", and set P2POOL_CONFIG=config.toml in docker/.env. Mainnet and
 # chipnet run the same rules; only the network switch differs.
@@ -35,7 +35,7 @@ dial_timeout_secs = 30
 # external_address = "/ip4/203.0.113.1/tcp/6884"
 
 [store]
-# Compose sets /p2poolv2/data/<NETWORK>-<BCH_SHARE_CHAIN> instead.
+# Compose sets /p2poolv2/data/<NETWORK> instead.
 path = "/p2poolv2/data/store.db"
 pplns_ttl_days = 7
 
@@ -54,9 +54,6 @@ minimum_difficulty = 100
 chain = "bitcoin-cash"
 # "mainnet", "chipnet" or "regtest". Under compose, NETWORK sets it.
 bitcoin_cash_network = "regtest"
-# "mini" (share target 256 times easier, for small miners) or "main".
-# Under compose, BCH_SHARE_CHAIN sets it.
-bch_share_chain = "mini"
 
 # Share address owning every share this node mines: a p2pool: (mainnet),
 # tp2pool: (chipnet) or rp2pool: (regtest) address made from a P2PKH key in

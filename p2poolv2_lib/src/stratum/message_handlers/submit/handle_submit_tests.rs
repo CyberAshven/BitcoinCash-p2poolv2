@@ -36,6 +36,8 @@ async fn a_found_tree_is_stored_with_the_submitted_coinbase_and_share() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         &ctx.tracker_handle,
     );
     let job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -84,6 +86,8 @@ async fn a_tree_job_without_a_share_commitment_is_kept_without_a_share() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         &ctx.tracker_handle,
     );
     let mut job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -117,6 +121,8 @@ async fn a_bchn_accepted_submission_records_the_actual_share_and_resets_effort_o
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         &context.tracker_handle,
     );
     let job = context.tracker_handle.get_job(job_id).unwrap();
@@ -191,6 +197,8 @@ async fn a_failed_tree_write_still_hands_the_block_off() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         &ctx.tracker_handle,
     );
     let job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -227,6 +235,8 @@ async fn sv1_keeps_a_found_tree_even_when_the_share_pipeline_rejects_it() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         &ctx.tracker_handle,
     );
     let job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -257,6 +267,8 @@ async fn a_private_declarators_tree_is_kept_before_waiting_for_its_broadcast() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         &ctx.tracker_handle,
     );
     let mut job = ctx.tracker_handle.get_job(job_id).unwrap();

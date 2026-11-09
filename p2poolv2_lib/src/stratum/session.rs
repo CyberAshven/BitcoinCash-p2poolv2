@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::address::Address as P2PoolAddress;
+use crate::stratum::work::level_policy::PayoutLevelChoice;
 use crate::utils::time_provider::SystemTimeProvider;
 use crate::{
     stratum::difficulty_adjuster::DifficultyAdjusterTrait, utils::time_provider::TimeProvider,
@@ -45,6 +46,13 @@ pub struct Session<D: DifficultyAdjusterTrait> {
     /// Bitcoin Cash donation in basis points, resolved from the miner login.
     /// `Some(0)` is an explicit opt-out; Bitcoin leaves this unset.
     pub donation: Option<u16>,
+    /// Bitcoin Cash payout level choice from the miner login (`min-payout=`
+    /// or `fee-tolerance=`). `None` takes the node's level.
+    pub payout_level: Option<PayoutLevelChoice>,
+    /// Set once the node has warned this session that it lowered the
+    /// miner's payout level (`stratum::work::level_policy`), so the warning
+    /// is logged once per session.
+    pub payout_level_warned: bool,
     /// Worker name for the mining device
     pub workername: Option<String>,
     /// Optional password of the miner, supplied by the miner, we just store it in session
@@ -96,6 +104,8 @@ impl<D: DifficultyAdjusterTrait> Session<D> {
             miner_address: None,
             share_owner: None,
             donation: None,
+            payout_level: None,
+            payout_level_warned: false,
             password: None,
             user_id: None,
             worker_id: None,

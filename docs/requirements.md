@@ -96,7 +96,7 @@ mainnet has not started.
 
 | Requirement | Bitcoin Cash fork |
 |---|---|
-| **Nakamoto consensus.** The share chain uses proof of work and most-work fork choice; nodes converge. | Met. Main and mini share chains, each from its own genesis share. |
+| **Nakamoto consensus.** The share chain uses proof of work and most-work fork choice; nodes converge. | Met. One share chain per network, from its own genesis share. |
 | **Reward for all work.** Stale shares are paid, not orphaned. | Met. An uncle is paid 9/10 of its difficulty and its nephew 1/10. |
 | **No centralized operator.** No service is needed for accounting or payouts. | Met. Every node builds and checks the same coinbase. |
 | **Permissionless mining.** Anyone joins without permission. | Met. |
@@ -113,7 +113,7 @@ mainnet has not started.
 | **Payout commitment at template time.** The work commits to the payouts. | Met. The job's coinbase is the payout; the share commits to it. |
 | **Deterministic, verifiable payouts.** Payouts follow from the share chain and every node checks them. | Met. Validators rebuild each share's coinbase: window, donation, fee and payout rights to traded shares. |
 | **Scalability.** Thousands of miners without hitting coinbase size limits. | Met with limits. Bitcoin Cash blocks have room (ABLA). A coinbase pays every miner directly up to Bitcoin Cash's 1,000,000-byte transaction limit, about 29,400 P2PKH payees; a share that merge-mines tokens keeps its coinbase within 3,072 bytes, and payees past a share's limit are paid through a covenant payout tree (plan decision 14). Not yet run at that scale. An SV2 extended channel takes a coinbase of about 1,900 P2PKH payouts at most, and upstream's report that stock ASIC firmware takes only about a dozen outputs is not yet measured on BCH hardware; Stratum V2 standard channels hash headers only. See [Pool size limits](sharechain/pool-size.md). |
-| **Small miner support.** Small miners can spend their earnings without third parties. | Met with limits. The mini share chain and the work-sized window keep payouts above dust (see [small-miners.md](small-miners.md)); shares can be sold for BCH through a hash time locked contract ([atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md)). |
+| **Small miner support.** Small miners can spend their earnings without third parties. | Met with limits. The share chain's easy ceiling (the former mini chain's) and the work-sized window keep payouts above dust (see [small-miners.md](small-miners.md)); shares can be sold for BCH through a hash time locked contract ([atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md)). |
 
 ### Bitcoin Cash additions
 

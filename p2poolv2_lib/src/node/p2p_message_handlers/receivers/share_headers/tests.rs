@@ -9,6 +9,7 @@ use crate::shares::share_block::MAX_POOL_TARGET;
 use crate::shares::validation::{MockDefaultShareValidator, ValidationError};
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::test_utils::{TestShareBlockBuilder, share_header_batch_with_empty_branches};
+use p2poolv2_wallet::share_owner::ShareOwner;
 use tokio::sync::{mpsc, oneshot};
 
 /// Build a single test header with bits set to MAX_POOL_TARGET so it
@@ -1513,4 +1514,453 @@ fn test_validate_header_chain_rejects_batch_with_unknown_external_parent() {
             .to_string()
             .contains("External parent(s) not found in store"),
     );
+}
+
+/// Header sync accepts a Bitcoin Cash header four times harder than its
+/// minimum, in the band of four its parent gives it (`shares::band`): the
+/// parent at its minimum with cap 4104 steps its child down to 4096.
+#[test]
+fn test_validate_dag_accepts_a_heavier_header_inside_the_band() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(1)
+        .build()
+        .header;
+    let child = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(parent.block_hash().to_string())
+        .bits(CompactTarget::from_consensus(0x1c10_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c08_0000),
+            4096,
+        )
+        .nonce(2)
+        .build()
+        .header;
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let stored_parent = parent.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_parent.clone()));
+    let asert_parent = parent.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent,
+                0,
+                asert_parent.time,
+            ))
+        });
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1c40_0000));
+
+    let result = validate_dag_connectivity_and_difficulty(
+        &share_header_batch_with_empty_branches(vec![child]),
+        &mock_validator,
+        &pool_difficulty,
+        &HashSet::from([parent.block_hash()]),
+        &chain_store_handle,
+        0,
+    );
+
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+}
+
+/// A header eight times harder than its minimum in a band of four is
+/// refused at header sync.
+#[test]
+fn test_validate_dag_refuses_a_header_past_the_band_cap() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(1)
+        .build()
+        .header;
+    let child = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(parent.block_hash().to_string())
+        .bits(CompactTarget::from_consensus(0x1c08_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c08_0000),
+            4096,
+        )
+        .nonce(2)
+        .build()
+        .header;
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let stored_parent = parent.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_parent.clone()));
+    let asert_parent = parent.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent,
+                0,
+                asert_parent.time,
+            ))
+        });
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1c40_0000));
+
+    let result = validate_dag_connectivity_and_difficulty(
+        &share_header_batch_with_empty_branches(vec![child]),
+        &mock_validator,
+        &pool_difficulty,
+        &HashSet::from([parent.block_hash()]),
+        &chain_store_handle,
+        0,
+    );
+
+    assert!(matches!(
+        result,
+        Err(HeaderSyncError::OutsideBand {
+            error: BandError::HarderThanCap { .. },
+            ..
+        })
+    ));
+}
+
+/// A header easier than its minimum is refused at header sync.
+#[test]
+fn test_validate_dag_refuses_a_header_easier_than_its_minimum() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(1)
+        .build()
+        .header;
+    let child = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(parent.block_hash().to_string())
+        .bits(CompactTarget::from_consensus(0x1c40_0001))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0001),
+            4096,
+        )
+        .nonce(2)
+        .build()
+        .header;
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let stored_parent = parent.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_parent.clone()));
+    let asert_parent = parent.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent,
+                0,
+                asert_parent.time,
+            ))
+        });
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1c40_0000));
+
+    let result = validate_dag_connectivity_and_difficulty(
+        &share_header_batch_with_empty_branches(vec![child]),
+        &mock_validator,
+        &pool_difficulty,
+        &HashSet::from([parent.block_hash()]),
+        &chain_store_handle,
+        0,
+    );
+
+    assert!(matches!(
+        result,
+        Err(HeaderSyncError::OutsideBand {
+            error: BandError::EasierThanMinimum { .. },
+            ..
+        })
+    ));
+}
+
+/// A header whose band cap is not one step from its parent's is refused at
+/// header sync.
+#[test]
+fn test_validate_dag_refuses_a_band_cap_off_its_step() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(1)
+        .build()
+        .header;
+    let child = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(parent.block_hash().to_string())
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(2)
+        .build()
+        .header;
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let stored_parent = parent.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_parent.clone()));
+    let asert_parent = parent.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent,
+                0,
+                asert_parent.time,
+            ))
+        });
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1c40_0000));
+
+    let result = validate_dag_connectivity_and_difficulty(
+        &share_header_batch_with_empty_branches(vec![child]),
+        &mock_validator,
+        &pool_difficulty,
+        &HashSet::from([parent.block_hash()]),
+        &chain_store_handle,
+        0,
+    );
+
+    assert!(matches!(
+        result,
+        Err(HeaderSyncError::OutsideBand {
+            error: BandError::BandCap {
+                declared: 4104,
+                expected: 4096,
+            },
+            ..
+        })
+    ));
+}
+
+/// A header whose minimum is not the ASERT target from its parent is
+/// refused at header sync, as a header with the wrong bits was before the
+/// band.
+#[test]
+fn test_validate_dag_refuses_a_minimum_other_than_the_asert_target() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(1)
+        .build()
+        .header;
+    let child = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(parent.block_hash().to_string())
+        .bits(CompactTarget::from_consensus(0x1c3f_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c3f_0000),
+            CompactTarget::from_consensus(0x1c3f_0000),
+            4096,
+        )
+        .nonce(2)
+        .build()
+        .header;
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let stored_parent = parent.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_parent.clone()));
+    let asert_parent = parent.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent,
+                0,
+                asert_parent.time,
+            ))
+        });
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1c40_0000));
+
+    let result = validate_dag_connectivity_and_difficulty(
+        &share_header_batch_with_empty_branches(vec![child]),
+        &mock_validator,
+        &pool_difficulty,
+        &HashSet::from([parent.block_hash()]),
+        &chain_store_handle,
+        0,
+    );
+
+    assert!(matches!(
+        result,
+        Err(HeaderSyncError::AsertMismatch {
+            declared: 0x1c3f_0000,
+            expected: 0x1c40_0000,
+            ..
+        })
+    ));
+}
+
+/// A header whose node wanted a target easier than its own is refused at
+/// header sync.
+#[test]
+fn test_validate_dag_refuses_wanted_bits_easier_than_bits() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(1)
+        .build()
+        .header;
+    let child = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(parent.block_hash().to_string())
+        .bits(CompactTarget::from_consensus(0x1c10_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c20_0000),
+            4096,
+        )
+        .nonce(2)
+        .build()
+        .header;
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let stored_parent = parent.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_parent.clone()));
+    let asert_parent = parent.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent,
+                0,
+                asert_parent.time,
+            ))
+        });
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_header_minimum_difficulty()
+        .returning(|_| Ok(()));
+    mock_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1c40_0000));
+
+    let result = validate_dag_connectivity_and_difficulty(
+        &share_header_batch_with_empty_branches(vec![child]),
+        &mock_validator,
+        &pool_difficulty,
+        &HashSet::from([parent.block_hash()]),
+        &chain_store_handle,
+        0,
+    );
+
+    assert!(matches!(
+        result,
+        Err(HeaderSyncError::OutsideBand {
+            error: BandError::WantedEasierThanBits { .. },
+            ..
+        })
+    ));
 }

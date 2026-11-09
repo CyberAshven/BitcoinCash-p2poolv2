@@ -42,9 +42,6 @@ chain = "bitcoin-cash"
 # "mainnet", "chipnet", "scalenet" or "regtest". The node refuses to start
 # unless [bitcoinrpc] is BCHN on this network.
 bitcoin_cash_network = "chipnet"
-# "mini" (share target 256 times easier, for small miners and test networks)
-# or "main". Every node on one share chain must use the same one.
-bch_share_chain = "mini"
 hostname = "0.0.0.0"
 port = 3333
 # Set true once dial_peers lists a node of a running share chain, so miners
@@ -54,7 +51,7 @@ port = 3333
 wait_for_chain_sync = false
 # Difficulty a new miner starts at, and the lowest vardiff gives one. A
 # miner's difficulty never goes above the share difficulty of its job (4 on
-# the mini chain at its easiest), so small values suit chipnet's CPU miners
+# the share chain at its easiest), so small values suit chipnet's CPU miners
 # and Bitaxes; vardiff raises it for ASICs.
 start_difficulty = 1000
 minimum_difficulty = 1
@@ -102,6 +99,14 @@ bootstrap_address = "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2"
 # In basis points, 1% = 100 basis points. Default 100 (1%) when fee_address
 # is set; 0 when it is not.
 # fee = 100
+# The payout level, 0 to 7, of miners whose login sets neither min-payout=
+# nor fee-tolerance=: a miner paid less than 546 * 2^level satoshis by a
+# block is paid by a draw in that block instead (docs/miner-options.md,
+# "Payout level"). Default 5, 17,472 satoshis.
+# payout_level = 5
+# What spending one payment costs, in satoshis, for fee-tolerance=. Default
+# 148, a P2PKH input at 1 sat/byte.
+# spend_cost = 148
 # A JSON file of the covenant tokens this node merge-mines for its miners
 # (docs/bch-auxpow.md, "Merge-mining tokens on a public node"). Each miner's
 # jobs then carry a root of their own token leaves, with their donation and

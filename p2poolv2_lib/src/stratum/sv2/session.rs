@@ -23,7 +23,7 @@ use crate::accounting::payout::AnchorWeights;
 use crate::shares::auxpow::Disclosure;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::stratum::parse_password::{
-    log_unknown_options, parse_miner_donation, split_user_identity,
+    log_unknown_options, parse_miner_donation, parse_miner_payout_level, split_user_identity,
 };
 use crate::stratum::work::coinbase::declared_reservation_outputs;
 use crate::stratum::work::gbt::{compute_merkle_branches, compute_merkle_root_from_branches};
@@ -1013,9 +1013,15 @@ impl Sv2Connection {
     /// the token is allocated all the same, and a request for its outputs
     /// is answered `invalid-request`.
     ///
+    /// The terms carry the payout level `user_identifier` chooses with
+    /// `min-payout=` or `fee-tolerance=`, or the node's own without one. A
+    /// declared job's level is not lowered by the node's level policy: the
+    /// node knows the declarator's hashrate only once it mines.
+    ///
     /// The Job Declaration Protocol has no error reply to this message, so a
-    /// bad `donation=` value, or one on a node without a Bitcoin Cash share
-    /// chain, closes the connection with the reason in the node's log.
+    /// bad `donation=`, `min-payout=` or `fee-tolerance=` value, or one on a
+    /// node without a Bitcoin Cash share chain, closes the connection with
+    /// the reason in the node's log.
     pub(crate) fn on_allocate(
         &mut self,
         request_id: u32,
@@ -1028,6 +1034,7 @@ impl Sv2Connection {
             log_unknown_options(options);
         }
         let donation = parse_miner_donation(options)?;
+        let payout_level = parse_miner_payout_level(options)?;
         let mut registry = self.registry.lock().expect("job registry lock");
         registry.expire_tokens();
         if registry.tokens.len() >= MAX_JOB_TOKENS {
@@ -1035,6 +1042,13 @@ impl Sv2Connection {
         }
         if donation.is_some() && registry.merge_mining.is_none() {
             return Err("donation= is a Bitcoin Cash P2Pool option this node cannot honour".into());
+        }
+        if payout_level.is_some() && registry.merge_mining.is_none() {
+            return Err(
+                "min-payout= and fee-tolerance= are Bitcoin Cash P2Pool options this node \
+                 cannot honour"
+                    .into(),
+            );
         }
         let mut prepared = registry
             .cache
@@ -1079,8 +1093,15 @@ impl Sv2Connection {
                 outputs.insert(0, output_zero);
                 outputs.extend(tail);
             }
+            let level = payout_level.map_or(prepared.payout_level(), |choice| {
+                choice.level(prepared.spend_cost())
+            });
             let token = prepared
-                .mining_job_token(random(), SystemTimeProvider.seconds_since_epoch() as u32)
+                .mining_job_token_at_level(
+                    random(),
+                    SystemTimeProvider.seconds_since_epoch() as u32,
+                    level,
+                )
                 .map_err(|error| error.to_string())?;
             (token, serialize(&outputs))
         } else {

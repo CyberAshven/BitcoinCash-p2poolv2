@@ -1124,6 +1124,15 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
                     (report.share_count) " of " (report.window.share_count) " (" (percent(report.share_fraction)) ")"
                 }))
                 (stat("Uncles credited", html! { (report.uncle_count) }))
+                @if let (Some(level), Some(satoshis)) = (report.payout_level, report.payout_level_satoshis) {
+                    (stat("Payout level", html! {
+                        (level) " (" (satoshis) " satoshis)"
+                        br; small { "smaller slices are paid by a draw" }
+                    }))
+                }
+                @if let Some(payments) = report.expected_payments_a_month {
+                    (stat("Expected payments a month", html! { (format!("{payments:.1}")) }))
+                }
                 (stat("Hashrate", html! {
                     (optional(view.hashrate, fmt_hashrate))
                     @if let Some((shares, seconds)) = view.recent_window {

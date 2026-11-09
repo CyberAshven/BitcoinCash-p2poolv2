@@ -35,6 +35,7 @@ use bitcoindrpc::BitcoindRpcClient;
 use p2poolv2_lib::accounting::CoinbasePayouts;
 use p2poolv2_lib::accounting::payout::coinbase_budget::PayoutSplit;
 use p2poolv2_lib::accounting::payout::payout_distribution::build_pplns_outputs;
+use p2poolv2_lib::accounting::payout::payout_levels::PplnsWeights;
 use p2poolv2_lib::config::Chain;
 use p2poolv2_lib::config::PayoutAddress;
 use p2poolv2_lib::node::payout_tree_executor::{
@@ -196,7 +197,7 @@ async fn bchn_regtest_executes_a_two_level_payout_tree() {
     let value = next.coinbase_value;
     let payouts = build_pplns_outputs(
         value,
-        &weights(700, 0x31),
+        &PplnsWeights::without_levels(weights(700, 0x31)),
         &None,
         None,
         &None,
@@ -307,7 +308,7 @@ async fn bchn_regtest_accepts_a_no_token_coinbase_paying_every_miner() {
     let value = next.coinbase_value;
     let payouts = build_pplns_outputs(
         value,
-        &weights(3_000, 0x32),
+        &PplnsWeights::without_levels(weights(3_000, 0x32)),
         &None,
         None,
         &None,

@@ -58,7 +58,7 @@ What happens:
 . `bchn` starts BCHN on regtest with `allowunconnectedmining=1`, so one node
   serves block templates without peers.
 . `bchn-bootstrap` mines 101 blocks; `bchn` turns healthy.
-. `p2poolv2` starts a regtest node on the mini share chain.
+. `p2poolv2` starts a regtest node on the share chain.
 . `miner-setup` writes the miner's identity; `miner` connects to the node's
   Stratum port.
 . The miner submits a few candidates a minute (`MUJINA_POOL_FORCED_RATE`).
@@ -83,7 +83,7 @@ The `Docker regtest stack` CI workflow (`.github/workflows/docker-regtest.yml`)
 runs these checks, and a second node, on every pull request that changes the
 stack.
 
-A share on the mini share chain needs about 2e10 hashes (difficulty about
+A share on the share chain needs at least about 2e10 hashes (difficulty about
 4.5), which takes a CPU miner hours, so the share chain stays at its genesis
 share and the blocks pay the genesis share's window. Point an ASIC or a Bitaxe
 at `stratum+tcp://<host>:3333` with a `bchreg:` username and

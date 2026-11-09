@@ -11,6 +11,7 @@
 use super::address_keys::AddressKeys;
 use super::bch_eligibility::{BchPlace, PayingChain};
 use super::payout_rights::{ChainShare, PayoutRights, has_share_transactions, share_coinbase_txid};
+use crate::accounting::payout::payout_levels::{PayoutLevels, PplnsWeights};
 use crate::config::Chain;
 use crate::shares::bch_headers::{BchHeaderRules, KnownBchHeader};
 #[cfg(test)]
@@ -374,6 +375,8 @@ struct ConfirmedEntry {
     /// The block the share's bitcoin header builds on, which places its work
     /// on a Bitcoin Cash chain (`bch_eligibility`).
     bch_prev: BlockHash,
+    /// The share's payout level (`ShareHeader::payout_level`): 0 on Bitcoin.
+    payout_level: u8,
 }
 
 impl ConfirmedEntry {
@@ -489,6 +492,8 @@ struct UncleEntry {
     difficulty: u128,
     /// The block the uncle's bitcoin header builds on.
     bch_prev: BlockHash,
+    /// The uncle's own payout level (`ShareHeader::payout_level`).
+    payout_level: u8,
 }
 
 /// Candidate headers collected while walking backward from the anchor to a
@@ -606,6 +611,97 @@ struct Credit {
     difficulty: u128,
     /// Scaled weight credited.
     weight: u128,
+    /// Payout level of the share or uncle that earned it.
+    payout_level: u8,
+    /// Where in its window share the entry sits: 0 for the share itself,
+    /// `1 + i` for the `i`-th uncle the share names (`NewestLevel`).
+    place_in_share: usize,
+}
+
+/// Where a payee's newest credited entry sits in a window walk, and that
+/// entry's payout level: the level the payee is drawn at in the block
+/// (`payout_levels`).
+///
+/// The walk visits window shares newest first. A share is newer than the
+/// uncles it includes, which are its ancestors, and of two uncles one share
+/// includes, the first it names counts. An uncle is placed at the share that
+/// includes it, as the window credits it. So entries are ordered by the
+/// window share carrying them, then by their place in it, a total order no
+/// node's own key numbering can change. Another kind of credited entry
+/// places itself the same way: by the window share that carries it, after
+/// that share's own credit and its uncles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NewestLevel {
+    /// The window share's place in the walk, 0 for the newest.
+    position: usize,
+    /// The entry's place in its window share (`Credit::place_in_share`).
+    place_in_share: usize,
+    /// The entry's payout level.
+    level: u8,
+}
+
+impl NewestLevel {
+    /// Whether this entry is newer than `other`.
+    fn is_newer_than(self, other: NewestLevel) -> bool {
+        (self.position, self.place_in_share) < (other.position, other.place_in_share)
+    }
+
+    /// The newer of `existing` and `self`.
+    fn newest(self, existing: Option<NewestLevel>) -> NewestLevel {
+        match existing {
+            Some(existing) if !self.is_newer_than(existing) => existing,
+            _ => self,
+        }
+    }
+}
+
+/// Each payee key's payout level over one window walk, and the keys the
+/// draw never pools: those a donation or fee cut pays.
+struct PayeeLevels {
+    /// By key: the payee's newest credited entry so far.
+    newest: Vec<Option<NewestLevel>>,
+    /// By key: whether a cut in the window pays it.
+    never_drawn: Vec<bool>,
+}
+
+impl PayeeLevels {
+    fn new(key_count: usize) -> Self {
+        Self {
+            newest: vec![None; key_count],
+            never_drawn: vec![false; key_count],
+        }
+    }
+
+    /// Note `credit`, met at walk position `position`, for the payee `key`.
+    fn note(&mut self, key: usize, credit: &Credit, position: usize) {
+        let candidate = NewestLevel {
+            position,
+            place_in_share: credit.place_in_share,
+            level: credit.payout_level,
+        };
+        self.newest[key] = Some(candidate.newest(self.newest[key]));
+    }
+
+    /// Mark the recipients of `cuts` as never drawn.
+    fn note_cuts(&mut self, cuts: ShareCuts) {
+        if let Some((key, _)) = cuts.donation {
+            self.never_drawn[key] = true;
+        }
+        if let Some((key, _)) = cuts.fee {
+            self.never_drawn[key] = true;
+        }
+    }
+}
+
+/// One payout script's weight and level, summed over the address keys that
+/// lock with it.
+struct ScriptPayee {
+    /// The address the distribution names the script by: the least by
+    /// address text.
+    representative: PayoutAddress,
+    weight: u128,
+    newest: Option<NewestLevel>,
+    never_drawn: bool,
 }
 
 /// The donation and fee one Bitcoin Cash share takes from its own weight, in
@@ -709,6 +805,10 @@ pub struct MinerCredits {
     pub weight: u128,
     /// The miner's weights, newest first, at most the requested number.
     pub credits: Vec<WindowCredit>,
+    /// The payout level of the miner's newest credited entry, the level its
+    /// slice is drawn at on Bitcoin Cash (`payout_levels`); `None` on
+    /// Bitcoin, which has no levels.
+    pub payout_level: Option<u8>,
 }
 
 impl MinerCredits {
@@ -902,6 +1002,10 @@ pub struct PplnsWindow {
     /// own weight (`ShareCuts`). Bitcoin takes the paying share's cuts off
     /// the whole coinbase instead. Set by `for_chain`.
     per_share_cuts: bool,
+    /// Bitcoin Cash: each distribution carries the payout level of every
+    /// payee, which the coinbase split draws by (`payout_levels`). Bitcoin
+    /// has no levels. Set by `for_chain`.
+    payout_levels: bool,
     /// Bitcoin Cash: the header rules that size a window from the paying
     /// block's BCH prev and pay only the work on its chain
     /// (`with_bch_header_rules`). `None` sizes by the claimed difficulty and
@@ -936,6 +1040,7 @@ impl PplnsWindow {
             weight_unit: WeightUnit::IntegerDifficulty,
             rights: None,
             per_share_cuts: false,
+            payout_levels: false,
             bch_rules: None,
             bch_places: HashMap::new(),
             paying_chain: None,
@@ -950,9 +1055,10 @@ impl PplnsWindow {
     /// work, capped at `PPLNS_WINDOW_SHARES` shares, behind
     /// `BCH_COINBASE_MATURITY`, to whoever holds each share's payout right
     /// (see `payout_rights`), each share weighted by its exact work rather
-    /// than its rounded-down difficulty (`WeightUnit::ExactWork`). This is a
-    /// share-chain rule: every node on a share chain must select the same
-    /// chain.
+    /// than its rounded-down difficulty (`WeightUnit::ExactWork`), and gives
+    /// each payee the payout level of its newest credited entry
+    /// (`payout_levels`). This is a share-chain rule: every node on a share
+    /// chain must select the same chain.
     pub fn for_chain(mut self, chain: Chain) -> Self {
         self.sizing = match chain {
             Chain::Bitcoin => WindowSizing::FixedShares,
@@ -970,6 +1076,7 @@ impl PplnsWindow {
             Chain::BitcoinCash => Some(PayoutRights::default()),
         };
         self.per_share_cuts = chain == Chain::BitcoinCash;
+        self.payout_levels = chain == Chain::BitcoinCash;
         self
     }
 
@@ -1122,12 +1229,34 @@ impl PplnsWindow {
         paying_block: PayingBlock,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<HashMap<PayoutAddress, u128>, WindowError> {
+        self.get_weights_from_start_hash(start_hash, paying_block, chain_store_handle)
+            .map(|weights| weights.weights)
+    }
+
+    /// The distribution `get_distribution_from_start_hash` gives, with the
+    /// payout level of each payee on Bitcoin Cash, from the same one walk:
+    /// what a coinbase is split from (`build_pplns_outputs`).
+    ///
+    /// A payee's level is the `payout_level` of its newest credited entry in
+    /// the window (`NewestLevel`): the newest share or uncle paying its
+    /// payout script. The donation key and fee addresses, every recipient of
+    /// a cut in the window, are never drawn and get no level. The levels
+    /// carry `start_hash`, the parent of the share whose coinbase is built,
+    /// which seeds the draw. Bitcoin has no levels.
+    ///
+    /// Errors exactly when `get_distribution_from_start_hash` does.
+    pub fn get_weights_from_start_hash(
+        &mut self,
+        start_hash: BlockHash,
+        paying_block: PayingBlock,
+        chain_store_handle: &ChainStoreHandle,
+    ) -> Result<PplnsWeights, WindowError> {
         let resolved = self.resolve_window(start_hash, paying_block, chain_store_handle)?;
         self.distribution_for_resolved(start_hash, &resolved)
     }
 
     /// The distribution of a resolved window: walk it and sum each address's
-    /// credits.
+    /// credits, noting on Bitcoin Cash each payee's payout level.
     ///
     /// On Bitcoin Cash each credit is split by the cuts of the share or
     /// uncle that earned it (`ShareCuts::credit`), in units of
@@ -1139,7 +1268,7 @@ impl PplnsWindow {
         &self,
         start_hash: BlockHash,
         resolved: &ResolvedWindow,
-    ) -> Result<HashMap<PayoutAddress, u128>, WindowError> {
+    ) -> Result<PplnsWeights, WindowError> {
         let mut weight_by_key = vec![0u128; self.address_keys.len()];
         let mut walked = 0;
         if !self.per_share_cuts {
@@ -1148,14 +1277,22 @@ impl PplnsWindow {
                 Self::add_entry_difficulty(entry, resolved, &mut weight_by_key);
             })?;
             resolved.require_paid(start_hash, walked, total_weight(&weight_by_key))?;
-            return self.collect_distribution(&weight_by_key);
+            return self.collect_distribution(start_hash, &weight_by_key, None);
         }
         let mut any_cut = false;
         let mut credited = Ok(());
+        let mut payee_levels = self
+            .payout_levels
+            .then(|| PayeeLevels::new(self.address_keys.len()));
         self.walk_window(start_hash, resolved, |_, entry| {
+            let position = walked;
             walked += 1;
             Self::for_each_credit(entry, resolved, |credit| {
                 any_cut |= !credit.cuts.is_empty();
+                if let Some(payee_levels) = &mut payee_levels {
+                    payee_levels.note(credit.internal_key, &credit, position);
+                    payee_levels.note_cuts(credit.cuts);
+                }
                 if credited.is_ok() {
                     credited = credit.cuts.credit(&credit, &mut weight_by_key);
                 }
@@ -1168,7 +1305,7 @@ impl PplnsWindow {
                 *weight /= ShareCuts::SCALE;
             }
         }
-        self.collect_distribution(&weight_by_key)
+        self.collect_distribution(start_hash, &weight_by_key, payee_levels.as_ref())
     }
 
     /// Read-only view of every miner's credits in the window that
@@ -1211,7 +1348,10 @@ impl PplnsWindow {
             by_payout_address: HashMap::new(),
             by_share_owner: HashMap::new(),
         };
+        let mut payout_levels = PayeeLevels::new(self.address_keys.len());
+        let mut owner_levels = PayeeLevels::new(self.owner_keys.len());
         self.walk_window(start_hash, &resolved, |height, entry| {
+            let position = window_credits.window_share_count;
             window_credits.newest_height.get_or_insert(height);
             window_credits.oldest_height = Some(height);
             window_credits.window_share_count += 1;
@@ -1226,6 +1366,8 @@ impl PplnsWindow {
                     max_credits,
                 );
                 by_owner_key[credit.owner_key].add(&credit, height, payout_address, max_credits);
+                payout_levels.note(credit.internal_key, &credit, position);
+                owner_levels.note(credit.owner_key, &credit, position);
             });
         })?;
 
@@ -1234,6 +1376,10 @@ impl PplnsWindow {
             window_credits.window_share_count,
             window_credits.window_weight,
         )?;
+        if self.payout_levels {
+            set_payout_levels(&mut by_payout_key, &payout_levels);
+            set_payout_levels(&mut by_owner_key, &owner_levels);
+        }
         window_credits.by_payout_address = credited_by_value(&self.address_keys, by_payout_key);
         window_credits.by_share_owner = credited_by_value(&self.owner_keys, by_owner_key);
         Ok(window_credits)
@@ -1656,6 +1802,7 @@ impl PplnsWindow {
                 );
                 entry.cuts = self.share_cuts(header);
                 entry.bch_prev = header.bitcoin_header.prev_blockhash;
+                entry.payout_level = header.payout_level;
                 entry
             })
             .collect();
@@ -1790,7 +1937,7 @@ impl PplnsWindow {
     ) {
         let share_paid = resolved.pays(&entry.bch_prev);
         let mut nephew_bonus: u128 = 0;
-        for uncle_entry in &entry.uncle_entries {
+        for (uncle_index, uncle_entry) in entry.uncle_entries.iter().enumerate() {
             if !resolved.pays(&uncle_entry.bch_prev) {
                 continue;
             }
@@ -1802,6 +1949,8 @@ impl PplnsWindow {
                 nephew: Some(entry.blockhash),
                 difficulty: uncle_entry.difficulty,
                 weight: uncle_entry.difficulty.saturating_mul(UNCLE_SCALED_WEIGHT),
+                payout_level: uncle_entry.payout_level,
+                place_in_share: 1 + uncle_index,
             });
             nephew_bonus = nephew_bonus
                 .saturating_add(uncle_entry.difficulty.saturating_mul(NEPHEW_SCALED_BONUS));
@@ -1821,6 +1970,8 @@ impl PplnsWindow {
                 .difficulty
                 .saturating_mul(DIFFICULTY_SCALE)
                 .saturating_add(nephew_bonus),
+            payout_level: entry.payout_level,
+            place_in_share: 0,
         });
     }
 
@@ -1874,28 +2025,58 @@ impl PplnsWindow {
 
     /// Aggregate weights by locking bytecode, including cuts whose script
     /// is also a miner's, then retain one address for each script.
+    ///
+    /// With `payee_levels` (Bitcoin Cash), each script also takes the level
+    /// of the newest credited entry among its keys, and a script any cut
+    /// pays is never drawn: the distribution's levels, seeded from
+    /// `start_hash`, list every other script by its representative address.
     fn collect_distribution(
         &self,
+        start_hash: BlockHash,
         difficulty_by_key: &[u128],
-    ) -> Result<HashMap<PayoutAddress, u128>, WindowError> {
-        let mut by_script: HashMap<ScriptBuf, (PayoutAddress, u128)> =
+        payee_levels: Option<&PayeeLevels>,
+    ) -> Result<PplnsWeights, WindowError> {
+        let mut by_script: HashMap<ScriptBuf, ScriptPayee> =
             HashMap::with_capacity(difficulty_by_key.len());
         for (index, difficulty) in difficulty_by_key.iter().enumerate() {
             if *difficulty > 0
                 && let Some(address) = self.address_keys.value_for(index)
             {
-                let (representative, weight) = by_script
-                    .entry(address.script_pubkey())
-                    .or_insert_with(|| (address.clone(), 0));
-                *weight = weight.checked_add(*difficulty).ok_or_else(|| {
+                let payee =
+                    by_script
+                        .entry(address.script_pubkey())
+                        .or_insert_with(|| ScriptPayee {
+                            representative: address.clone(),
+                            weight: 0,
+                            newest: None,
+                            never_drawn: false,
+                        });
+                payee.weight = payee.weight.checked_add(*difficulty).ok_or_else(|| {
                     WindowError::ReadFailure("Aggregated payout weights overflow".into())
                 })?;
-                if address.to_string() < representative.to_string() {
-                    *representative = address.clone();
+                if address.to_string() < payee.representative.to_string() {
+                    payee.representative = address.clone();
+                }
+                if let Some(payee_levels) = payee_levels {
+                    payee.newest = payee_levels.newest[index]
+                        .map(|newest| newest.newest(payee.newest))
+                        .or(payee.newest);
+                    payee.never_drawn |= payee_levels.never_drawn[index];
                 }
             }
         }
-        Ok(by_script.into_values().collect())
+        let mut weights = HashMap::with_capacity(by_script.len());
+        let mut levels = HashMap::with_capacity(by_script.len());
+        for payee in by_script.into_values() {
+            if let Some(newest) = payee.newest.filter(|_| !payee.never_drawn) {
+                levels.insert(payee.representative.clone(), newest.level);
+            }
+            weights.insert(payee.representative, payee.weight);
+        }
+        Ok(PplnsWeights {
+            weights,
+            levels: payee_levels.map(|_| PayoutLevels::new(start_hash, levels)),
+        })
     }
 
     /// Update the cache from the chain store incrementally.
@@ -2137,6 +2318,7 @@ impl PplnsWindow {
             entry.coinbase_txid = coinbase_txid;
             entry.cuts = cuts;
             entry.bch_prev = header.bitcoin_header.prev_blockhash;
+            entry.payout_level = header.payout_level;
             self.confirmed_entries.push_front(entry);
         }
 
@@ -2205,6 +2387,7 @@ impl PplnsWindow {
             owner_key,
             coinbase_txid: Txid::all_zeros(),
             bch_prev: BlockHash::all_zeros(),
+            payout_level: 0,
         }
     }
 
@@ -2226,6 +2409,7 @@ impl PplnsWindow {
             owner_key,
             difficulty,
             bch_prev: BlockHash::all_zeros(),
+            payout_level: 0,
         }
     }
 
@@ -2254,6 +2438,7 @@ impl PplnsWindow {
             );
             uncle_entry.cuts = cuts;
             uncle_entry.bch_prev = header.bitcoin_header.prev_blockhash;
+            uncle_entry.payout_level = header.payout_level;
             uncle_lookup.insert(blockhash, uncle_entry);
         }
         Ok(uncle_lookup)
@@ -2336,6 +2521,14 @@ fn credited_by_value<T: Clone + Eq + hash::Hash>(
     by_value
 }
 
+/// Give each miner's credits the payout level of its newest credited entry
+/// in the walk `levels` noted.
+fn set_payout_levels(credits_by_key: &mut [MinerCredits], levels: &PayeeLevels) {
+    for (miner_credits, newest) in credits_by_key.iter_mut().zip(&levels.newest) {
+        miner_credits.payout_level = newest.map(|newest| newest.level);
+    }
+}
+
 /// Free each slot of `keys` that `referenced` marks unreferenced.
 fn remove_unreferenced_keys<T: PartialEq>(keys: &mut AddressKeys<T>, referenced: &[bool]) {
     for (index, is_referenced) in referenced.iter().enumerate() {
@@ -2377,6 +2570,7 @@ fn resolve_uncle_entries(
                 internal_key: uncle_entry.internal_key,
                 owner_key: uncle_entry.owner_key,
                 bch_prev: uncle_entry.bch_prev,
+                payout_level: uncle_entry.payout_level,
             });
         } else {
             tracing::warn!("Uncle header not found for {uncle_hash}, skipping");
@@ -2475,6 +2669,7 @@ impl PplnsWindow {
             HashMap::new(),
         );
         self.distribution_for_resolved(start_hash, &resolved)
+            .map(|weights| weights.weights)
     }
 }
 
@@ -2493,6 +2688,12 @@ mockall::mock! {
             paying_block: PayingBlock,
             chain_store_handle: &ChainStoreHandle,
         ) -> Result<HashMap<PayoutAddress, u128>, WindowError>;
+        pub fn get_weights_from_start_hash(
+            &mut self,
+            start_hash: BlockHash,
+            paying_block: PayingBlock,
+            chain_store_handle: &ChainStoreHandle,
+        ) -> Result<PplnsWeights, WindowError>;
     }
 }
 
@@ -2532,6 +2733,7 @@ mod tests {
         );
         entry.cuts = window.share_cuts(header);
         entry.bch_prev = header.bitcoin_header.prev_blockhash;
+        entry.payout_level = header.payout_level;
         entry
     }
 
@@ -2552,6 +2754,7 @@ mod tests {
         );
         entry.cuts = window.share_cuts(header);
         entry.bch_prev = header.bitcoin_header.prev_blockhash;
+        entry.payout_level = header.payout_level;
         entry
     }
 
@@ -2565,6 +2768,7 @@ mod tests {
         );
         entry.cuts = window.share_cuts(header);
         entry.bch_prev = header.bitcoin_header.prev_blockhash;
+        entry.payout_level = header.payout_level;
         entry
     }
 
@@ -5552,7 +5756,10 @@ mod tests {
         window.confirmed_entries.push_back(share);
         let resolved =
             window.resolved_window(Vec::new(), 0, 1, HashMap::from([(anchor, buyer_key)]));
-        let weights = window.distribution_for_resolved(anchor, &resolved).unwrap();
+        let weights = window
+            .distribution_for_resolved(anchor, &resolved)
+            .unwrap()
+            .weights;
 
         assert!(!weights.contains_key(&share_payee));
         assert_eq!(weights[&donation], 230_000_000);
@@ -5577,13 +5784,329 @@ mod tests {
         window.address_keys.key_for(address);
         window.address_keys.key_for(alias.clone());
 
-        let weights = window.collect_distribution(&[81, 19]).unwrap();
+        let weights = window
+            .collect_distribution(BlockHash::all_zeros(), &[81, 19], None)
+            .unwrap()
+            .weights;
 
         assert_eq!(weights.len(), 1);
         assert_eq!(weights.values().copied().collect::<Vec<_>>(), vec![100]);
         assert_eq!(
             weights.keys().next().unwrap().script_pubkey(),
             alias.script_pubkey()
+        );
+    }
+
+    /// A payee's level in a block is that of its newest credited share: a
+    /// miner that moved from level 3 to level 6 is drawn at 6. The levels
+    /// carry the anchor, the share's parent, which seeds the draw.
+    #[test]
+    fn test_bch_window_draws_a_payee_at_the_level_of_its_newest_share() {
+        let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
+        let miner = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([1; 20]),
+            Network::Regtest,
+        ));
+        let anchor = BlockHash::from_byte_array([2; 32]);
+        let mut newer = window.build_confirmed_entry(
+            anchor,
+            1,
+            miner.clone(),
+            BENCHMARK_SHARE_OWNER,
+            2,
+            vec![],
+        );
+        newer.payout_level = 6;
+        let mut older = window.build_confirmed_entry(
+            BlockHash::from_byte_array([1; 32]),
+            0,
+            miner.clone(),
+            BENCHMARK_SHARE_OWNER,
+            2,
+            vec![],
+        );
+        older.payout_level = 3;
+        window.confirmed_entries.push_back(newer);
+        window.confirmed_entries.push_back(older);
+        let resolved = window.resolved_window(Vec::new(), 0, 1, HashMap::new());
+
+        let levels = window
+            .distribution_for_resolved(anchor, &resolved)
+            .unwrap()
+            .levels
+            .unwrap();
+
+        assert_eq!(levels.level_of(&miner), Some(6));
+        assert_eq!(levels.parent_share(), anchor);
+    }
+
+    /// A share is newer than the uncles it includes, which are its
+    /// ancestors: its own level counts, though the walk credits its uncles
+    /// first.
+    #[test]
+    fn test_bch_window_counts_a_share_as_newer_than_its_uncles() {
+        let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
+        let miner = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([1; 20]),
+            Network::Regtest,
+        ));
+        let mut uncle = window.build_uncle_entry(
+            BlockHash::from_byte_array([3; 32]),
+            miner.clone(),
+            BENCHMARK_SHARE_OWNER,
+            2,
+        );
+        uncle.payout_level = 7;
+        let anchor = BlockHash::from_byte_array([2; 32]);
+        let mut share = window.build_confirmed_entry(
+            anchor,
+            0,
+            miner.clone(),
+            BENCHMARK_SHARE_OWNER,
+            2,
+            vec![uncle],
+        );
+        share.payout_level = 2;
+        window.confirmed_entries.push_back(share);
+        let resolved = window.resolved_window(Vec::new(), 0, 1, HashMap::new());
+
+        let levels = window
+            .distribution_for_resolved(anchor, &resolved)
+            .unwrap()
+            .levels
+            .unwrap();
+
+        assert_eq!(levels.level_of(&miner), Some(2));
+    }
+
+    /// An uncle by a miner whose newest share is older is that miner's
+    /// newest entry: it is credited at the share that includes it.
+    #[test]
+    fn test_bch_window_gives_an_uncle_the_place_of_the_share_including_it() {
+        let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
+        let miner = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([1; 20]),
+            Network::Regtest,
+        ));
+        let other = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([9; 20]),
+            Network::Regtest,
+        ));
+        let mut uncle = window.build_uncle_entry(
+            BlockHash::from_byte_array([3; 32]),
+            miner.clone(),
+            BENCHMARK_SHARE_OWNER,
+            2,
+        );
+        uncle.payout_level = 4;
+        let anchor = BlockHash::from_byte_array([2; 32]);
+        let nephew =
+            window.build_confirmed_entry(anchor, 1, other, BENCHMARK_SHARE_OWNER, 2, vec![uncle]);
+        let mut older = window.build_confirmed_entry(
+            BlockHash::from_byte_array([1; 32]),
+            0,
+            miner.clone(),
+            BENCHMARK_SHARE_OWNER,
+            2,
+            vec![],
+        );
+        older.payout_level = 1;
+        window.confirmed_entries.push_back(nephew);
+        window.confirmed_entries.push_back(older);
+        let resolved = window.resolved_window(Vec::new(), 0, 1, HashMap::new());
+
+        let levels = window
+            .distribution_for_resolved(anchor, &resolved)
+            .unwrap()
+            .levels
+            .unwrap();
+
+        assert_eq!(levels.level_of(&miner), Some(4));
+    }
+
+    /// The donation key and a fee address are never drawn: the window gives
+    /// them no level, while the miner whose share they cut keeps its own.
+    #[test]
+    fn test_bch_window_never_draws_the_donation_key_or_a_fee_address() {
+        let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
+        let miner = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([1; 20]),
+            Network::Regtest,
+        ));
+        let donation = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([4; 20]),
+            Network::Regtest,
+        ));
+        let fee = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([5; 20]),
+            Network::Regtest,
+        ));
+        let donation_key = window.address_keys.key_for(donation.clone());
+        let fee_key = window.address_keys.key_for(fee.clone());
+        let anchor = BlockHash::from_byte_array([2; 32]);
+        let mut share = window.build_confirmed_entry(
+            anchor,
+            0,
+            miner.clone(),
+            BENCHMARK_SHARE_OWNER,
+            2,
+            vec![],
+        );
+        share.payout_level = 5;
+        share.cuts = ShareCuts {
+            donation: Some((donation_key, 100)),
+            fee: Some((fee_key, 100)),
+        };
+        window.confirmed_entries.push_back(share);
+        let resolved = window.resolved_window(Vec::new(), 0, 1, HashMap::new());
+
+        let weights = window.distribution_for_resolved(anchor, &resolved).unwrap();
+        let levels = weights.levels.unwrap();
+
+        assert!(weights.weights.contains_key(&donation));
+        assert!(weights.weights.contains_key(&fee));
+        assert_eq!(levels.level_of(&donation), None);
+        assert_eq!(levels.level_of(&fee), None);
+        assert_eq!(levels.level_of(&miner), Some(5));
+    }
+
+    /// A fee address that also mines is never drawn, whatever level its own
+    /// shares carry.
+    #[test]
+    fn test_bch_window_never_draws_a_fee_address_that_mines() {
+        let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
+        let operator = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([5; 20]),
+            Network::Regtest,
+        ));
+        let miner = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([1; 20]),
+            Network::Regtest,
+        ));
+        let operator_key = window.address_keys.key_for(operator.clone());
+        let anchor = BlockHash::from_byte_array([2; 32]);
+        let mut cut_share = window.build_confirmed_entry(
+            anchor,
+            1,
+            miner.clone(),
+            BENCHMARK_SHARE_OWNER,
+            2,
+            vec![],
+        );
+        cut_share.cuts = ShareCuts {
+            donation: None,
+            fee: Some((operator_key, 100)),
+        };
+        let mut operator_share = window.build_confirmed_entry(
+            BlockHash::from_byte_array([1; 32]),
+            0,
+            operator.clone(),
+            BENCHMARK_SHARE_OWNER,
+            2,
+            vec![],
+        );
+        operator_share.payout_level = 3;
+        window.confirmed_entries.push_back(cut_share);
+        window.confirmed_entries.push_back(operator_share);
+        let resolved = window.resolved_window(Vec::new(), 0, 1, HashMap::new());
+
+        let levels = window
+            .distribution_for_resolved(anchor, &resolved)
+            .unwrap()
+            .levels
+            .unwrap();
+
+        assert_eq!(levels.level_of(&operator), None);
+        assert_eq!(levels.level_of(&miner), Some(0));
+    }
+
+    /// Of two uncles one share names, the first counts, in whichever order
+    /// they are compared: two keys locking with one script are merged by
+    /// key number, which differs from node to node, so the order must not
+    /// depend on it.
+    #[test]
+    fn test_newest_level_prefers_the_first_uncle_a_share_names_in_any_order() {
+        let first = NewestLevel {
+            position: 0,
+            place_in_share: 1,
+            level: 3,
+        };
+        let second = NewestLevel {
+            position: 0,
+            place_in_share: 2,
+            level: 6,
+        };
+
+        assert_eq!(second.newest(Some(first)), first);
+        assert_eq!(first.newest(Some(second)), first);
+    }
+
+    /// Bitcoin has no payout levels: its distribution carries none.
+    #[test]
+    fn test_bitcoin_window_has_no_payout_levels() {
+        let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::Bitcoin);
+        let miner = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([1; 20]),
+            Network::Regtest,
+        ));
+        let anchor = BlockHash::from_byte_array([2; 32]);
+        let share =
+            window.build_confirmed_entry(anchor, 0, miner, BENCHMARK_SHARE_OWNER, 2, vec![]);
+        window.confirmed_entries.push_back(share);
+        let resolved = window.resolved_window(Vec::new(), 0, 1, HashMap::new());
+
+        let weights = window.distribution_for_resolved(anchor, &resolved).unwrap();
+
+        assert!(weights.levels.is_none());
+    }
+
+    /// The window credits report each payout address's level, the same one
+    /// the distribution draws it at.
+    #[test]
+    fn test_bch_window_credits_report_the_newest_payout_level() {
+        let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
+        let miner = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([1; 20]),
+            Network::Regtest,
+        ));
+        let anchor = BlockHash::from_byte_array([2; 32]);
+        let mut newer = window.build_confirmed_entry(
+            anchor,
+            1,
+            miner.clone(),
+            BENCHMARK_SHARE_OWNER,
+            2,
+            vec![],
+        );
+        newer.payout_level = 6;
+        let mut older = window.build_confirmed_entry(
+            BlockHash::from_byte_array([1; 32]),
+            0,
+            miner.clone(),
+            BENCHMARK_SHARE_OWNER,
+            2,
+            vec![],
+        );
+        older.payout_level = 3;
+        window.confirmed_entries.push_back(newer);
+        window.confirmed_entries.push_back(older);
+
+        let window_credits = window
+            .get_window_credits_from_start_hash(
+                anchor,
+                1_u128.into(),
+                &MockChainStoreHandle::default(),
+                10,
+            )
+            .unwrap();
+
+        assert_eq!(
+            window_credits.by_payout_address[&miner].payout_level,
+            Some(6)
+        );
+        assert_eq!(
+            window_credits.by_share_owner[&BENCHMARK_SHARE_OWNER].payout_level,
+            Some(6)
         );
     }
 

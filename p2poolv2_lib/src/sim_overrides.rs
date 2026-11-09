@@ -18,6 +18,7 @@ const IDEAL_BLOCK_TIME: u32 = 10;
 /// Production ASERT half-life constant (seconds).
 const HALFLIFE: u32 = 600;
 
+use crate::shares::bch_genesis::MINI_ANCHOR_TARGET;
 use crate::shares::genesis::GenesisData;
 use bitcoin::CompactTarget;
 use bitcoin::{BlockHash, Target};
@@ -146,6 +147,34 @@ pub fn anchor_target() -> CompactTarget {
     #[cfg(not(feature = "sim"))]
     {
         CompactTarget::from_consensus(0x1b4188f5)
+    }
+}
+
+/// Return the Bitcoin Cash genesis target (bits).
+///
+/// Production: the one Bitcoin Cash share chain's anchor and ceiling,
+/// [`MINI_ANCHOR_TARGET`].
+/// Sim: the steady-state target of the configured network hashrate, as
+/// [`anchor_target`] computes it, so the chain starts already regulated, as
+/// the sim always has. Its ceiling is then
+/// [`crate::shares::share_block::MAX_POOL_TARGET`]
+/// ([`crate::shares::bch_genesis::target_ceiling`]), which a regulated sim
+/// chain does not reach. Falls back to [`MINI_ANCHOR_TARGET`] if network
+/// hashrate is unset or zero.
+#[inline]
+pub fn bch_anchor_target() -> CompactTarget {
+    #[cfg(feature = "sim")]
+    {
+        let hps = *SIM_NETWORK_HASHRATE.get().unwrap_or(&0);
+        if hps == 0 {
+            CompactTarget::from_consensus(MINI_ANCHOR_TARGET)
+        } else {
+            pool_difficulty::anchor_target_for_network_hashrate(hps as f64)
+        }
+    }
+    #[cfg(not(feature = "sim"))]
+    {
+        CompactTarget::from_consensus(MINI_ANCHOR_TARGET)
     }
 }
 

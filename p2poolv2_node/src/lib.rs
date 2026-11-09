@@ -385,8 +385,8 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 
     if stratum_config.chain == Chain::BitcoinCash {
         info!(
-            "Bitcoin Cash templates, share owners, and {:?} share chain genesis are selected for {:?}.",
-            stratum_config.bch_share_chain, stratum_config.bitcoin_cash_network
+            "Bitcoin Cash templates, share owners, and the share chain genesis are selected for {:?}.",
+            stratum_config.bitcoin_cash_network
         );
         // Only a P2Pool node builds each miner's jobs with their own donation.
         let miner_choice = if stratum_config.mode == PoolMode::P2poolv2 {

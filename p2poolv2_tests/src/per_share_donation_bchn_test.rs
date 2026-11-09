@@ -51,7 +51,7 @@ use p2poolv2_lib::accounting::payout::sharechain_pplns::pplns_window::{
 };
 use p2poolv2_lib::address::bch_share::{BchShareNetwork, encode_payout_address};
 use p2poolv2_lib::config::{
-    BchShareChain, BitcoinCashNetwork, Chain, DEFAULT_BITCOIN_CASH_DONATION, PayoutAddress,
+    BitcoinCashNetwork, Chain, DEFAULT_BITCOIN_CASH_DONATION, PayoutAddress,
     bitcoin_cash_donation_address,
 };
 use p2poolv2_lib::shares::bch_genesis;
@@ -108,7 +108,7 @@ struct ShareChain {
 impl ShareChain {
     async fn new() -> Self {
         let (store, store_dir) = setup_test_chain_store_handle(true).await;
-        let genesis = bch_genesis::build(BchShareNetwork::Regtest, BchShareChain::Mini).unwrap();
+        let genesis = bch_genesis::build(BchShareNetwork::Regtest).unwrap();
         store.init_or_setup_genesis(genesis.clone()).await.unwrap();
         Self {
             store,
@@ -162,7 +162,7 @@ fn next_payouts(chain: &ShareChain, next: &NextBlock) -> CoinbasePayouts {
     window.update(&chain.store).unwrap();
     let paying = PayingBlock::new(bitcoin_block_difficulty(next.bits, NETWORK), next.previous);
     let weights = window
-        .get_distribution_from_start_hash(chain.tip.block_hash(), paying, &chain.store)
+        .get_weights_from_start_hash(chain.tip.block_hash(), paying, &chain.store)
         .unwrap();
     build_pplns_outputs(
         next.coinbase_value,

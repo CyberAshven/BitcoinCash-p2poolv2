@@ -16,8 +16,11 @@ P2Poolv2 developers.
 - **Payouts in the coinbase.** PPLNS over a window of three Bitcoin Cash
   blocks of work, at most 120,960 shares; shares count once 100 deep. Uncles
   are paid 9/10 of their difficulty.
-- **Main and mini share chains.** The mini chain's share target is 256 times
-  easier, for small miners. See [Small miners](small-miners.md).
+- **One share chain.** Its share target ceiling, difficulty about 4.5, is the
+  former mini chain's, so small miners still find shares. A big miner gets
+  shares up to 64 times harder (the difficulty band), so it makes fewer of
+  them and the minimum stays low for everyone else. See
+  [Small miners](small-miners.md).
 - **Mainnet and chipnet run the same rules;** only the network setting
   differs. Regtest is for development.
 - **1% donation** to the project by default, an optional operator fee (1%

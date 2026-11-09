@@ -54,13 +54,15 @@ use crate::stratum::message_handlers::submit::{
 };
 use crate::stratum::parse_password::{
     donation_percent, extract_string_value, log_unknown_options, parse_password,
-    resolve_miner_donation, split_user_identity,
+    resolve_miner_donation, resolve_miner_payout_level, split_user_identity,
 };
 use crate::stratum::server::StratumContext;
 use crate::stratum::session::Session;
 use crate::stratum::validate_username;
+use crate::stratum::work::band_policy::miner_job_band;
 use crate::stratum::work::difficulty::validate::build_coinbase_from_components;
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
+use crate::stratum::work::level_policy::session_payout_level;
 use crate::stratum::work::merge_tokens::MinerTokenJob;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, insert_miner_job};
 use crate::stratum::work::tracker::{JobDetails, JobId};
@@ -810,6 +812,14 @@ impl MiningChannels {
                 return open_error(request_id, "invalid-donation");
             }
         };
+        let payout_level =
+            match resolve_miner_payout_level(options, self.ctx.share_chain, self.ctx.mode) {
+                Ok(payout_level) => payout_level,
+                Err(reason) => {
+                    debug!("Refusing SV2 channel for {username}: {reason}");
+                    return open_error(request_id, "invalid-payout-level");
+                }
+            };
         if kind == ChannelKind::Extended
             && let Some(prepared) = &current
         {
@@ -842,6 +852,7 @@ impl MiningChannels {
         session.parsed_address = validated.parsed_address;
         session.share_owner = share_owner;
         session.donation = donation;
+        session.payout_level = payout_level;
         if let Some(basis_points) = donation {
             debug!(
                 "SV2 channel for {username} mines with a {} P2Pool donation",
@@ -855,7 +866,10 @@ impl MiningChannels {
         if let Some(prepared) = &current {
             session
                 .difficulty_adjuster
-                .set_share_difficulty_ceiling(self.share_difficulty_ceiling(prepared));
+                .set_share_difficulty_ceiling(job_share_difficulty_ceiling(
+                    self.ctx.mode,
+                    prepared.bits(),
+                ));
         }
         let channel_target =
             target_for_difficulty(session.difficulty_adjuster.get_current_difficulty())
@@ -981,17 +995,6 @@ impl MiningChannels {
         }
     }
 
-    /// Share difficulty ceiling of jobs built on `prepared`: the session
-    /// difficulty a channel may have without losing share-chain shares (see
-    /// [`share_difficulty_ceiling`]). `None` in Hydrapool mode, which has no
-    /// share chain.
-    fn share_difficulty_ceiling(&self, prepared: &PreparedNotifyParams) -> Option<u64> {
-        match self.ctx.mode {
-            PoolMode::Hydrapool => None,
-            PoolMode::P2poolv2 => share_difficulty_ceiling(prepared.bits()),
-        }
-    }
-
     /// Insert a tracker job for `channel_id` and build its SV2 frames.
     ///
     /// When the channel's difficulty is above the job's share difficulty, it
@@ -999,13 +1002,19 @@ impl MiningChannels {
     /// device throws away no hash that is a share-chain share.
     /// Extended coinbase limits are checked before the channel or tracker
     /// changes; an unrepresentable job leaves the channel ready to retry.
+    ///
+    /// On Bitcoin Cash a miner whose hashrate would make too many shares at
+    /// the minimum gets a heavier job inside the difficulty band
+    /// (`band_policy::miner_job_band`), and the ceiling follows that job's
+    /// own bits. The job carries the channel's payout level: the one its
+    /// identity chose, or the node's, lowered when the miner would expect
+    /// fewer than 3 payments a month (`level_policy::session_payout_level`).
     fn job_frames(
         &mut self,
         channel_id: u32,
         prepared: &PreparedNotifyParams,
     ) -> Result<Vec<Vec<u8>>, String> {
         let is_hydrapool = self.ctx.mode == PoolMode::Hydrapool;
-        let ceiling = self.share_difficulty_ceiling(prepared);
         let channel = self
             .channels
             .get_mut(&channel_id)
@@ -1019,6 +1028,27 @@ impl MiningChannels {
             let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
             check_extended_job_fits(prefix_length, suffix_length)?;
         }
+        let (job_band, payout_level) = if is_hydrapool {
+            (None, None)
+        } else {
+            let miner_hashrate = channel
+                .session
+                .btcaddress
+                .as_deref()
+                .and_then(|address| self.ctx.metrics.miner_hashrate(address));
+            (
+                miner_job_band(prepared, miner_hashrate),
+                Some(session_payout_level(
+                    &mut channel.session,
+                    prepared,
+                    miner_hashrate,
+                )),
+            )
+        };
+        let ceiling = job_share_difficulty_ceiling(
+            self.ctx.mode,
+            job_band.map_or(prepared.bits(), |band| band.bits),
+        );
         let mut frames = Vec::with_capacity(3);
         if let Some(lowered) = channel
             .session
@@ -1048,6 +1078,8 @@ impl MiningChannels {
             prepared,
             bitcoin_address,
             share_owner,
+            job_band,
+            payout_level,
             &self.ctx.tracker_handle,
         );
         let job = self
@@ -1386,6 +1418,18 @@ fn tlv_value(mut trailing: &[u8], extension_type: u16, field_type: u8) -> Option
         trailing = &trailing[end..];
     }
     found
+}
+
+/// Share difficulty ceiling of a job whose shares are mined at `share_bits`:
+/// the session difficulty a channel may have without losing share-chain
+/// shares (see [`share_difficulty_ceiling`]). It follows each job's own bits,
+/// a heavier one's on Bitcoin Cash. `None` in Hydrapool mode, which has no
+/// share chain.
+fn job_share_difficulty_ceiling(mode: PoolMode, share_bits: CompactTarget) -> Option<u64> {
+    match mode {
+        PoolMode::Hydrapool => None,
+        PoolMode::P2poolv2 => share_difficulty_ceiling(share_bits),
+    }
 }
 
 /// Target for a stratum difficulty, as SV1 `mining.set_difficulty` means it:

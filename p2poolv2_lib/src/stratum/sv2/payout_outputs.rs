@@ -54,6 +54,7 @@
 use super::custom_job::{DECLARED_COINBASE_SEQUENCE, DECLARED_COINBASE_VERSION};
 use super::preparation::{PreparationError, PreparedCoinbase, prepare_declared_coinbase};
 use super::session::{encode_extension_frame, string_field};
+use crate::accounting::payout::payout_levels::PplnsWeights;
 use crate::accounting::payout::sharechain_pplns::payout::AnchorWeights;
 use crate::accounting::payout::sharechain_pplns::pplns_window::WindowError;
 use crate::shares::bch_coinbase::BchCoinbase;
@@ -66,7 +67,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::{BlockHash, CompactTarget};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
-use std::collections::HashMap;
 use std::str::FromStr;
 use tracing::debug;
 
@@ -254,7 +254,7 @@ pub(crate) fn prepare_payout_outputs(
 pub(crate) fn build_declared_payout_outputs(
     token: &[u8],
     identity: &PayoutIdentity,
-    weights: &HashMap<PayoutAddress, u128>,
+    weights: &PplnsWeights,
     available_payout_value: u64,
     height: u32,
     coinbase_prefix: &[u8],

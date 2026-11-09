@@ -552,6 +552,7 @@ curl -s :7600/chain_info | jq            # tip/candidate heights (prefer logs fo
 | `MINER_ADDRESS`                      | `bchreg:qp63…vuwd` | payout address of a node without its own; a `bchreg:` CashAddr (the key with secret 1)                       |
 | `DISTINCT_ADDR`                      | 1               | each node gets its own payout address via the wallet                                                               |
 | `DIAL_FANOUT`                        | 3               | how many earlier peers each node dials                                                                             |
+| `PAYOUT_LEVELS`                      | unset           | each node's `[stratum] payout_level`, in node order, such as `5,7,7`; a node past the list keeps the default 5     |
 | `PROFILE`                            | release         | `release` or `debug`                                                                                               |
 | `RUN_DIR`                            | /tmp/p2pool-sim | where configs/logs/stores go                                                                                       |
 | `BASE_P2P`/`BASE_STRATUM`/`BASE_API` | 7000/7300/7600  | first ports                                                                                                        |
