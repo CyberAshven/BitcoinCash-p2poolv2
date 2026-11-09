@@ -156,6 +156,13 @@ pub struct Hashrate {
     /// Current pool share difficulty (the newest prepared notify's ASERT
     /// target, in the share chain's units). None until the first notify.
     pub share_difficulty: Option<f64>,
+    /// Work accumulated since the last accepted block find: the numerator
+    /// of the block effort metric (divide by `network_difficulty`).
+    /// Runtime-only node state.
+    pub work_since_last_block: Option<f64>,
+    /// Current network difficulty from the newest prepared template. None
+    /// until the first notify is built.
+    pub network_difficulty: Option<f64>,
     /// Oldest first.
     pub history: Vec<HashratePoint>,
 }

@@ -151,6 +151,9 @@ async fn the_overview_is_html_without_script() {
     assert!(body.starts_with("<!DOCTYPE html>"));
     assert!(body.contains("Bitcoin Cash chipnet"));
     assert!(body.contains("Share chain height"));
+    // The Blocks found tile carries the effort note (a dash here: no
+    // template has been built yet, so there is no difficulty to divide by).
+    assert!(body.contains("Effort —"));
     assert!(!body.contains("<script"));
 }
 

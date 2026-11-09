@@ -823,7 +823,32 @@ async fn test_hashrate_route_serves_history() {
     assert_eq!(status, http::StatusCode::OK);
     assert_eq!(body["pool_hashrate"], 5.0);
     assert!(body["local_hashrate"].is_null());
+    // Fresh node: no work accumulated since a find (none happened), and no
+    // template has been built yet, so the denominator is null.
+    assert_eq!(body["work_since_last_block"], 0.0);
+    assert!(body["network_difficulty"].is_null());
     assert_eq!(body["history"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_hashrate_route_serves_accumulated_effort_work() {
+    let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+    let app = build_router(state.clone(), state.app_config.clone());
+    state
+        .metrics_handle
+        .record_confirmed_share(1500.0)
+        .await
+        .unwrap();
+    state
+        .metrics_handle
+        .record_confirmed_share(2500.0)
+        .await
+        .unwrap();
+
+    let (status, body) = get_json(app, "/hashrate?window=600").await;
+    assert_eq!(status, http::StatusCode::OK);
+    assert_eq!(body["work_since_last_block"], 4000.0);
+    assert!(body["network_difficulty"].is_null());
 }
 
 #[tokio::test]

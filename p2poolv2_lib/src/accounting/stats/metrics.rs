@@ -5,6 +5,8 @@
 use crate::accounting::stats::pool_local_stats::load_pool_local_stats;
 use crate::accounting::stats::user::User;
 use crate::accounting::{payout::simple_pplns::SimplePplnsShare, stats::pool_local_stats};
+use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::store::writer::StoreError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
@@ -20,6 +22,10 @@ const METRICS_SAVE_INTERVAL: u64 = 5;
 const SUBMISSION_WINDOW_SECS: u64 = 600;
 /// Hashes a difficulty-1 share takes on average (2^32).
 const HASHES_PER_DIFFICULTY: f64 = 4_294_967_296.0;
+/// Confirmed share headers summed per store read when the block effort
+/// numerator is recomputed from the chain at startup, bounding the walk's
+/// peak memory on a long share chain.
+const EFFORT_SEED_WALK_CHUNK: u32 = 4096;
 
 /// One accepted share in the sliding window the local hashrate reads.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -57,9 +63,12 @@ pub struct PoolMetrics {
     pub pool_difficulty: f64,
     /// Confirmed sharechain pool difficulty since the last bitcoin block was
     /// found; reset to zero on each block find. Numerator of the block effort
-    /// metric (`work_since_last_block / network_difficulty`). Runtime-only (not
-    /// persisted), mainnet-relative units matching network_difficulty. Pool
-    /// hashrate is derived separately from confirmed-chain total work.
+    /// metric (`work_since_last_block / network_difficulty`). Seeded at
+    /// startup from the store by [`work_since_last_block_from_chain`] so work
+    /// already done survives a restart, then incremented live per confirmed
+    /// share. It is not written anywhere itself: the confirmed chain is the
+    /// source of truth. Mainnet-relative units matching network_difficulty.
+    /// Pool hashrate is derived separately from confirmed-chain total work.
     #[serde(default)]
     pub work_since_last_block: f64,
     /// Found blocks sent to BCHN nodes since the node started, by node label
@@ -720,10 +729,98 @@ pub(crate) fn spawn_test_metrics_handle() -> MetricsHandle {
     MetricsHandle::new(sender, miner_hashrates)
 }
 
-/// Construct a new metrics actor with existing metrics and return its handle
+/// The block effort numerator recomputed from the store: the summed
+/// difficulty of the confirmed sharechain shares above the last
+/// BCHN-accepted found block.
+///
+/// The window is the confirmed chain strictly above an anchor share: the
+/// accepted found block whose share sits at the greatest height, falling
+/// back to the genesis share when no block has been accepted yet, so the
+/// genesis share itself never counts and work counting toward an already
+/// found block never carries into the next round. Uncles are excluded,
+/// matching the live increment in the organise worker, which feeds only
+/// each confirmed share's own header difficulty. This is p2poolv1's
+/// approach: the share rows are the source of truth, and no counter is
+/// written for the metric.
+///
+/// Height metadata missing for the genesis share or an accepted found
+/// block is an error rather than a wider window: counting back past a
+/// found block would overstate effort, and the caller decides whether to
+/// fail or to start at zero.
+pub fn work_since_last_block_from_chain(
+    chain_store_handle: &ChainStoreHandle,
+) -> Result<f64, StoreError> {
+    let anchor_height = effort_anchor_height(chain_store_handle)?;
+    let tip_height = chain_store_handle
+        .get_tip_height()?
+        .ok_or_else(|| StoreError::NotFound("confirmed chain tip height".to_string()))?;
+    let mut work = 0.0;
+    let mut window_start = anchor_height + 1;
+    while window_start <= tip_height {
+        let window_end = (window_start + EFFORT_SEED_WALK_CHUNK - 1).min(tip_height);
+        let headers = chain_store_handle
+            .store_handle()
+            .store()
+            .query_share_headers(window_start, window_end)?;
+        work += headers
+            .iter()
+            .map(|header| bitcoin::Target::from_compact(header.bits).difficulty_float())
+            .sum::<f64>();
+        window_start = window_end + 1;
+    }
+    Ok(work)
+}
+
+/// The confirmed height of the share the effort window starts above: the
+/// accepted found block's share with the greatest height, or the genesis
+/// share when no block has been accepted yet.
+fn effort_anchor_height(chain_store_handle: &ChainStoreHandle) -> Result<u32, StoreError> {
+    let genesis_hash = chain_store_handle
+        .get_genesis_blockhash()
+        .ok_or_else(|| StoreError::NotFound("genesis share".to_string()))?;
+    let mut anchor_height = share_confirmed_height(chain_store_handle, &genesis_hash)?;
+    for found_block in chain_store_handle.get_found_blocks()? {
+        let found_height =
+            share_confirmed_height(chain_store_handle, &found_block.share_blockhash)?;
+        anchor_height = anchor_height.max(found_height);
+    }
+    Ok(anchor_height)
+}
+
+/// The confirmed height of `share_hash` from its stored metadata.
+fn share_confirmed_height(
+    chain_store_handle: &ChainStoreHandle,
+    share_hash: &bitcoin::BlockHash,
+) -> Result<u32, StoreError> {
+    chain_store_handle
+        .get_block_metadata(share_hash)?
+        .expected_height
+        .ok_or_else(|| StoreError::NotFound(format!("share height for {share_hash}")))
+}
+
+/// Construct a new metrics actor with existing metrics and return its handle.
+///
+/// The block effort numerator starts at zero: a caller with no share chain
+/// has no work to restore. The node starts the metrics with
+/// [`start_metrics_with_effort_seed`] instead.
 pub async fn start_metrics(log_dir: String) -> Result<MetricsHandle, std::io::Error> {
+    start_metrics_with_effort_seed(log_dir, 0.0).await
+}
+
+/// Construct a new metrics actor with existing metrics and return its
+/// handle, seeding the block effort numerator with `work_since_last_block`
+/// (from [`work_since_last_block_from_chain`]) so work the pool already did
+/// is not lost across a restart.
+///
+/// The seed is applied before the actor spawns, so no reader can observe
+/// zero effort once the handle is returned.
+pub async fn start_metrics_with_effort_seed(
+    log_dir: String,
+    work_since_last_block: f64,
+) -> Result<MetricsHandle, std::io::Error> {
     let (sender, receiver) = mpsc::channel(METRICS_MESSAGE_BUFFER_SIZE);
-    let actor = MetricsActor::with_existing_metrics(&log_dir, receiver)?;
+    let mut actor = MetricsActor::with_existing_metrics(&log_dir, receiver)?;
+    actor.metrics.work_since_last_block = work_since_last_block;
     let miner_hashrates = actor.subscribe_miner_hashrates();
     tokio::spawn(async move {
         actor.run().await;
@@ -749,6 +846,13 @@ pub async fn start_metrics(log_dir: String) -> Result<MetricsHandle, std::io::Er
 mod tests {
     use super::*;
     use crate::accounting::stats::pool_local_stats::save_pool_local_stats;
+    use crate::store::found_block::FoundBlock;
+    use crate::test_utils::{
+        TestShareBlockBuilder, build_confirmed_test_chain, confirm_test_block, genesis_for_tests,
+        setup_test_chain_store_handle, test_funding_transaction,
+    };
+    use bitcoin::TxMerkleNode;
+    use bitcoin::hashes::Hash;
 
     /// A metrics with `work` pushed at `at` on its submission window.
     fn window_of(at: u64, work: f64) -> PoolMetrics {
@@ -982,6 +1086,140 @@ mod tests {
         let metrics = handle.get_metrics().await;
         // Finding a block resets effort toward the next block.
         assert_eq!(metrics.work_since_last_block, 0.0);
+    }
+
+    /// The seed given at start is the numerator the actor reports before
+    /// any share arrives.
+    #[tokio::test]
+    async fn test_start_metrics_seeds_work_since_last_block() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let handle =
+            start_metrics_with_effort_seed(log_dir.path().to_str().unwrap().to_string(), 42.0)
+                .await
+                .unwrap();
+
+        let metrics = handle.get_metrics().await;
+        assert_eq!(metrics.work_since_last_block, 42.0);
+    }
+
+    /// The seed sums every confirmed share above genesis: the genesis share
+    /// itself is never pool work.
+    #[tokio::test]
+    async fn test_effort_seed_sums_confirmed_shares_after_genesis() {
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+        let blocks = build_confirmed_test_chain(&chain_store_handle, 3).await;
+
+        let expected: f64 = blocks
+            .iter()
+            .skip(1)
+            .map(|block| bitcoin::Target::from_compact(block.header.bits).difficulty_float())
+            .sum();
+        let work = work_since_last_block_from_chain(&chain_store_handle).unwrap();
+
+        assert_eq!(work, expected);
+    }
+
+    /// An accepted found block anchors the window: work before it counted
+    /// toward the block it found and does not carry into the next round.
+    #[tokio::test]
+    async fn test_effort_seed_starts_after_accepted_found_block() {
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+        let blocks = build_confirmed_test_chain(&chain_store_handle, 4).await;
+        let found_block = FoundBlock {
+            bitcoin_height: 900_000,
+            bitcoin_blockhash: bitcoin::BlockHash::from_byte_array([1u8; 32]),
+            share_blockhash: blocks[2].block_hash(),
+            bitcoin_time: 1_700_000_002,
+            miner_bitcoin_address: "miner".to_string(),
+        };
+        let stored = chain_store_handle
+            .store_handle()
+            .store()
+            .record_accepted_found_block(&found_block)
+            .unwrap();
+        assert!(stored);
+
+        let expected: f64 = blocks
+            .iter()
+            .skip(3)
+            .map(|block| bitcoin::Target::from_compact(block.header.bits).difficulty_float())
+            .sum();
+        let work = work_since_last_block_from_chain(&chain_store_handle).unwrap();
+
+        assert_eq!(work, expected);
+    }
+
+    /// Only genesis is confirmed, so nothing lies above the anchor and the
+    /// numerator is zero rather than the genesis share's own difficulty.
+    #[tokio::test]
+    async fn test_effort_seed_is_zero_with_only_the_genesis_share() {
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+        chain_store_handle
+            .init_or_setup_genesis(genesis_for_tests())
+            .await
+            .unwrap();
+
+        let work = work_since_last_block_from_chain(&chain_store_handle).unwrap();
+
+        assert_eq!(work, 0.0);
+    }
+
+    /// An empty store has nothing to anchor to; the error keeps the caller
+    /// from silently widening the window.
+    #[tokio::test]
+    async fn test_effort_seed_errors_without_a_genesis_share() {
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+
+        let result = work_since_last_block_from_chain(&chain_store_handle);
+
+        assert!(result.is_err());
+    }
+
+    /// Uncle work never enters the numerator: only each confirmed share's
+    /// own difficulty counts, as the live increment counts it.
+    #[tokio::test]
+    async fn test_effort_seed_excludes_uncle_difficulty() {
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+        let blocks = build_confirmed_test_chain(&chain_store_handle, 2).await;
+        let mut uncle = TestShareBlockBuilder::new()
+            .prev_share_blockhash(blocks[1].block_hash().to_string())
+            .time(1_700_000_050)
+            .add_transaction(test_funding_transaction(50))
+            .build();
+        uncle.template_merkle_branches = vec![TxMerkleNode::from_byte_array([50u8; 32])];
+        chain_store_handle
+            .add_share_block(uncle.clone())
+            .await
+            .unwrap();
+        chain_store_handle
+            .organise_header(uncle.header.clone())
+            .await
+            .unwrap();
+        chain_store_handle
+            .mark_block_valid(uncle.block_hash())
+            .await
+            .unwrap();
+
+        let mut extending_block = TestShareBlockBuilder::new()
+            .prev_share_blockhash(blocks[2].block_hash().to_string())
+            .time(1_700_000_003)
+            .add_transaction(test_funding_transaction(3))
+            .uncles(vec![uncle.block_hash()])
+            .build();
+        extending_block.template_merkle_branches = vec![TxMerkleNode::from_byte_array([3u8; 32])];
+        confirm_test_block(&chain_store_handle, &extending_block).await;
+
+        let mut expected: f64 = blocks
+            .iter()
+            .skip(1)
+            .map(|block| bitcoin::Target::from_compact(block.header.bits).difficulty_float())
+            .sum();
+        expected += bitcoin::Target::from_compact(extending_block.header.bits).difficulty_float();
+        let uncle_difficulty = bitcoin::Target::from_compact(uncle.header.bits).difficulty_float();
+        assert!(uncle_difficulty > 0.0);
+        let work = work_since_last_block_from_chain(&chain_store_handle).unwrap();
+
+        assert_eq!(work, expected);
     }
 
     #[tokio::test]

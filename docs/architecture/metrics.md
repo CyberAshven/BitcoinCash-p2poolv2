@@ -216,10 +216,13 @@ verifier's matching BCHN chain hash can trigger the reset, so blocks found
 by other nodes' miners count too. A share merely meeting its claimed BCH
 target never resets effort, and duplicate acceptances reset it only once.
 This makes it a pool "round luck" metric
-(>100% means the pool is overdue for a block). It is runtime-only (not
-persisted): a fresh or pruned node cannot reconstruct
-work-since-last-block from history. Uncles are excluded so it tracks the
-same confirmed-chain work basis as `sharechain_work_total`.
+(>100% means the pool is overdue for a block). No counter is persisted:
+at startup the node recomputes the value from the store with
+`work_since_last_block_from_chain`, summing the difficulty of the
+confirmed shares above the last BCHN-accepted found block (or above
+genesis when none has been accepted), so work already done survives a
+restart and a fresh store starts at zero. Uncles are excluded so it tracks
+the same confirmed-chain work basis as `sharechain_work_total`.
 `network_difficulty` is the
 mainnet-relative difficulty (`difficulty_float`) from the latest job
 template `bits`, sharing units with the accumulated share difficulty. The
@@ -233,6 +236,12 @@ balloon to the entire chain's work and report an absurd effort. Only
 real-time confirmed shares count. The acceptance verifier also skips
 effort resets for historical candidates present at startup or observed
 while syncing, so later verification cannot erase current-round effort.
+
+The startup seed does not apply that skip: it is chain-derived, so it
+counts every confirmed share above the anchor, including a backlog synced
+before the node started. A node that has been up continuously still
+under-counts sync-backlog shares as described above; the seed and the live
+increment agree from the moment the node is current.
 
 **Grafana:** Gauge or Bar gauge of
 `work_since_last_block / network_difficulty`. Values around 1.0 (100%)

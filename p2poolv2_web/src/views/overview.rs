@@ -12,7 +12,7 @@ use crate::app::{Ctx, ctx, polled};
 use crate::chart::HashrateChart;
 use crate::format::{
     UNKNOWN, difficulty_from_bits, difficulty_from_network_hashrate, fmt_ago, fmt_difficulty,
-    fmt_hashrate, optional,
+    fmt_effort, fmt_hashrate, optional,
 };
 use crate::layout::{KpiCard, Tone, ago_cell, loading, miner_link, share_link};
 use crate::route::{Route, Tab};
@@ -389,9 +389,29 @@ pub fn OverviewPage() -> impl IntoView {
             blocks.first().map(|block| block.bitcoin_time)
         })
         .flatten();
+        // Effort: the metrics actor's accumulated work over the network
+        // difficulty, live first, then inverted from the sampled network
+        // hashrate (the same fallback the difficulty card uses).
+        let effort = loaded(&hashrate, |hashrate| {
+            let difficulty = hashrate.network_difficulty.or_else(|| {
+                hashrate
+                    .network_hashrate
+                    .map(difficulty_from_network_hashrate)
+                    .or_else(|| {
+                        hashrate
+                            .history
+                            .iter()
+                            .rev()
+                            .find_map(|point| point.network_hashrate)
+                            .map(difficulty_from_network_hashrate)
+                    })
+            });
+            fmt_effort(hashrate.work_since_last_block, difficulty)
+        });
         vec![
             last.map(|time| format!("Last {}", fmt_ago(clock.get(), time)))
                 .unwrap_or_else(|| "None yet".to_string()),
+            format!("Effort {}", effort.unwrap_or_else(|| UNKNOWN.to_string())),
         ]
     });
 

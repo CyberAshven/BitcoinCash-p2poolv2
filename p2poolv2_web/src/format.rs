@@ -65,6 +65,19 @@ pub fn fmt_difficulty(difficulty: f64) -> String {
         .to_string()
 }
 
+/// The current block effort: the work accumulated since the last accepted
+/// find as a percent of the network difficulty (whole percents, over 100%
+/// meaning a block is overdue). The formula lives here, as it does in
+/// Grafana. No difficulty yet is the dash, not a zero.
+pub fn fmt_effort(work_since_last_block: Option<f64>, network_difficulty: Option<f64>) -> String {
+    match (work_since_last_block, network_difficulty) {
+        (Some(work), Some(difficulty)) if difficulty > 0.0 => {
+            format!("{:.0}%", work / difficulty * 100.0)
+        }
+        _ => UNKNOWN.to_string(),
+    }
+}
+
 /// Days since 1970-01-01 to a civil (year, month, day), Howard Hinnant's
 /// algorithm.
 fn civil_from_days(days: i64) -> (i64, usize, u32) {

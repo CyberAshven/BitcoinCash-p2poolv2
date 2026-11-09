@@ -521,7 +521,24 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let emissions_tx_for_handles = emissions_tx.clone();
     let template_rx_for_handles = template_rx.clone();
 
-    let metrics_handle = match metrics::start_metrics(config.logging.stats_dir.clone()).await {
+    // Restore the block effort numerator from the confirmed chain before
+    // serving: work the pool already did must survive this restart. A store
+    // read failure must not block mining, so the effort starts at zero and
+    // self-heals from the chain on the next restart; the warning makes the
+    // stale value visible meanwhile.
+    let effort_seed = match metrics::work_since_last_block_from_chain(&chain_store_handle) {
+        Ok(work) => work,
+        Err(error) => {
+            warn!("Could not recompute work since last block, starting effort at zero: {error}");
+            0.0
+        }
+    };
+    let metrics_handle = match metrics::start_metrics_with_effort_seed(
+        config.logging.stats_dir.clone(),
+        effort_seed,
+    )
+    .await
+    {
         Ok(handle) => handle,
         Err(e) => {
             error!("Failed to start metrics: {e}");

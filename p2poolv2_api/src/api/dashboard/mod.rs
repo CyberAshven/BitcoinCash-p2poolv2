@@ -414,6 +414,7 @@ async fn overview(
         network_hashrate,
         network_difficulty,
         share_difficulty: state.tracker_handle.get_pool_difficulty(),
+        work_since_last_block: Some(metrics.work_since_last_block),
         miners_online,
         workers_online,
         accepted_shares_total: metrics.accepted_total,

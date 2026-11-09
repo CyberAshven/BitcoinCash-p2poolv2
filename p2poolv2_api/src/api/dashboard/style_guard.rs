@@ -422,6 +422,7 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         network_hashrate: Some(1e15),
         network_difficulty: Some(1e5),
         share_difficulty: Some(73.0),
+        work_since_last_block: Some(8.3e4),
         miners_online: 1,
         workers_online: 1,
         accepted_shares_total: 10,
@@ -950,6 +951,34 @@ fn the_wasm_app_formats_difficulties_as_the_pages_do() {
     assert_eq!(
         web_format::fmt_difficulty(12_345_678_901.0),
         pages::fmt_difficulty(12_345_678_901.0)
+    );
+}
+
+#[test]
+fn the_wasm_app_formats_effort_as_the_pages_do() {
+    assert_eq!(
+        web_format::fmt_effort(Some(0.0), Some(1_000.0)),
+        pages::fmt_effort(Some(0.0), Some(1_000.0))
+    );
+    assert_eq!(
+        web_format::fmt_effort(Some(830.0), Some(1_000.0)),
+        pages::fmt_effort(Some(830.0), Some(1_000.0))
+    );
+    assert_eq!(
+        web_format::fmt_effort(Some(1_500.0), Some(1_000.0)),
+        pages::fmt_effort(Some(1_500.0), Some(1_000.0))
+    );
+    assert_eq!(
+        web_format::fmt_effort(Some(830.0), None),
+        pages::fmt_effort(Some(830.0), None)
+    );
+    assert_eq!(
+        web_format::fmt_effort(None, Some(1_000.0)),
+        pages::fmt_effort(None, Some(1_000.0))
+    );
+    assert_eq!(
+        web_format::fmt_effort(Some(830.0), Some(0.0)),
+        pages::fmt_effort(Some(830.0), Some(0.0))
     );
 }
 

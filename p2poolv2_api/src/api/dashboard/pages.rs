@@ -232,6 +232,9 @@ pub(crate) struct Overview {
     /// Current pool share difficulty (the newest prepared notify's ASERT
     /// target, in the share chain's units), read live from the job tracker.
     pub(crate) share_difficulty: Option<f64>,
+    /// Work accumulated since the last accepted block find: the numerator
+    /// of the block effort metric, from the metrics actor. Runtime-only.
+    pub(crate) work_since_last_block: Option<f64>,
     pub(crate) miners_online: usize,
     pub(crate) workers_online: usize,
     /// Shares the pool accepted since the node started, node-wide.
@@ -383,6 +386,22 @@ pub(crate) fn fmt_difficulty(difficulty: f64) -> String {
     format!("{}{unit}", three_digits(value))
         .trim_end()
         .to_string()
+}
+
+/// The current block effort: the work accumulated since the last accepted
+/// find as a percent of the network difficulty (whole percents, over 100%
+/// meaning a block is overdue). The formula lives here, as it does in
+/// Grafana. No difficulty yet is the dash, not a zero.
+pub(crate) fn fmt_effort(
+    work_since_last_block: Option<f64>,
+    network_difficulty: Option<f64>,
+) -> String {
+    match (work_since_last_block, network_difficulty) {
+        (Some(work), Some(difficulty)) if difficulty > 0.0 => {
+            format!("{:.0}%", work / difficulty * 100.0)
+        }
+        _ => "—".to_string(),
+    }
 }
 
 pub(crate) fn fmt_utc(unix: u64) -> String {
@@ -846,7 +865,8 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             (kpi_card("Blocks found", view.blocks_found.to_string(), "kpi-value-green", Some("/dashboard/blocks"),
                 &[last_block
                     .map(|time| format!("Last {}", fmt_ago(view.now, u64::from(time))))
-                    .unwrap_or_else(|| "None yet".to_string())]))
+                    .unwrap_or_else(|| "None yet".to_string()),
+                  format!("Effort {}", fmt_effort(view.work_since_last_block, view.network_difficulty))]))
         }
         div.panel {
             h2.hashrate-head { "Hashrate" (range_buttons(view.range_key, view.auto, &series_arg)) }
@@ -1423,6 +1443,7 @@ mod tests {
             network_hashrate: None,
             network_difficulty: None,
             share_difficulty: None,
+            work_since_last_block: None,
             miners_online: 0,
             workers_online: 0,
             accepted_shares_total: 0,
@@ -1927,6 +1948,49 @@ mod tests {
         let card = page.split("kpi-label\">Blocks found").nth(1).unwrap();
         let card = card.split("kpi-card").next().unwrap();
         assert!(card.contains("kpi-value kpi-value-green"));
+    }
+
+    #[test]
+    fn the_blocks_found_card_notes_the_effort_percent() {
+        let mut view = empty_overview();
+        view.work_since_last_block = Some(83_000.0);
+        view.network_difficulty = Some(100_000.0);
+        let page = overview(&view).into_string();
+        let card = page.split("kpi-label\">Blocks found").nth(1).unwrap();
+        let card = card.split("kpi-card").next().unwrap();
+        assert!(card.contains("Effort 83%"));
+    }
+
+    #[test]
+    fn the_blocks_found_card_notes_an_overdue_effort_above_100_percent() {
+        let mut view = empty_overview();
+        view.work_since_last_block = Some(150_000.0);
+        view.network_difficulty = Some(100_000.0);
+        let page = overview(&view).into_string();
+        let card = page.split("kpi-label\">Blocks found").nth(1).unwrap();
+        let card = card.split("kpi-card").next().unwrap();
+        assert!(card.contains("Effort 150%"));
+    }
+
+    #[test]
+    fn the_blocks_found_card_notes_a_dash_effort_before_the_first_notify() {
+        let mut view = empty_overview();
+        view.work_since_last_block = Some(500.0);
+        view.network_difficulty = None;
+        let page = overview(&view).into_string();
+        let card = page.split("kpi-label\">Blocks found").nth(1).unwrap();
+        let card = card.split("kpi-card").next().unwrap();
+        assert!(card.contains("Effort —"));
+    }
+
+    #[test]
+    fn fmt_effort_is_a_whole_percent_or_a_dash() {
+        assert_eq!(fmt_effort(Some(0.0), Some(1_000.0)), "0%");
+        assert_eq!(fmt_effort(Some(830.0), Some(1_000.0)), "83%");
+        assert_eq!(fmt_effort(Some(1_500.0), Some(1_000.0)), "150%");
+        assert_eq!(fmt_effort(Some(830.0), None), "—");
+        assert_eq!(fmt_effort(None, Some(1_000.0)), "—");
+        assert_eq!(fmt_effort(Some(830.0), Some(0.0)), "—");
     }
 
     #[test]
