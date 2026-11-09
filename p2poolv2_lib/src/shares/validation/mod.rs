@@ -31,6 +31,7 @@ use crate::node::payout_tree_executor::PayoutTreeSender;
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
+use crate::shares::band::{ParentBand, check_share_band};
 use crate::shares::bch_asert::BchAsert;
 use crate::shares::bch_headers::BchHeaderRules;
 use crate::shares::bch_script;
@@ -334,6 +335,17 @@ fn check_median_time_past(share_time: u32, ancestor_times: &[u32]) -> Result<(),
     Ok(())
 }
 
+/// The band fields of the stored share `parent_hash` as the parent of the
+/// next share (`shares::band`), read from its header alone.
+pub(crate) fn stored_parent_band(
+    parent_hash: &BlockHash,
+    chain_store_handle: &ChainStoreHandle,
+) -> Result<ParentBand, StoreError> {
+    chain_store_handle
+        .get_share_header(parent_hash)
+        .map(|header| ParentBand::from_header(&header))
+}
+
 /// The times of up to `MTP_WINDOW` stored ancestors ending at `parent_hash`,
 /// newest first, following each header's own parent pointer (not the
 /// confirmed index), so the answer holds on a fork too. Stops at genesis.
@@ -494,6 +506,11 @@ pub trait ShareValidator {
     /// bits and its own parent's time, then uses the stored pool difficulty to
     /// calculate the expected target for this share. Returns an error if the bitcoin block hash does not
     /// meet the calculated target.
+    ///
+    /// On Bitcoin Cash the calculated target is the share's minimum, which
+    /// its `asert_bits` must equal, and its own bits must lie in the
+    /// difficulty band with a band cap one step from the parent's
+    /// (`shares::band::check_share_band`); the hash must meet its own bits.
     fn validate_with_pool_difficulty(
         &self,
         share_header: &ShareHeader,
@@ -1888,16 +1905,27 @@ impl ShareValidator for DefaultShareValidator {
             })?;
 
         let calculated_target = self.pool_difficulty.calculate_target_clamped(parent);
-        let target = Target::from_compact(calculated_target);
+        let target = Target::from_compact(share_header.bits);
         let bitcoin_block_hash = share_header.bitcoin_header.block_hash();
 
         // Ensure the advertised header bits match the calculated pool target.
-        if share_header.bits != calculated_target {
+        if share_header.minimum_bits() != calculated_target {
             return Err(ValidationError::consensus(format!(
                 "Share header bits {:#010x} does not match calculated pool target {:#010x}",
-                share_header.bits.to_consensus(),
+                share_header.minimum_bits().to_consensus(),
                 calculated_target.to_consensus()
             )));
+        }
+        if share_header.carries_band() {
+            let parent_band =
+                stored_parent_band(&parent_hash, chain_store_handle).map_err(|_| {
+                    ValidationError::recoverable(format!(
+                        "Parent share {parent_hash} not found in store"
+                    ))
+                })?;
+            check_share_band(share_header, &parent_band).map_err(|error| {
+                ValidationError::consensus(format!("Share is outside the difficulty band: {error}"))
+            })?;
         }
 
         if !sim_overrides::pow_meets(target, bitcoin_block_hash) {

@@ -31,7 +31,6 @@ start_difficulty = 10000
 minimum_difficulty = 100
 chain = "bitcoin-cash"
 bitcoin_cash_network = "regtest"
-bch_share_chain = "mini"
 bootstrap_address = "bchreg:qqzldt8u5mafprrw6uljppyqg30uhl97ey890dqm34"
 zmqpubhashblock = "tcp://127.0.0.1:28332"
 network = "regtest"

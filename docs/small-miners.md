@@ -4,13 +4,15 @@ How often a small miner finds shares, how often the pool finds blocks, and
 what a miner can expect from each block, with the Bitcoin Cash rules of this
 fork: 10-second shares, a PPLNS window of `K = 3` Bitcoin Cash blocks of work
 (plan decision 11), a 100-share maturity skip, and the main and mini share
-chains. Upstream's wiki pages "Shares For Small Miners" and "Expected Number
-of Shares" do the same arithmetic for Bitcoin; this page redoes it for BCH.
+chains as they ran until 2026-11-09, when they merged into one share chain
+at the mini chain's anchor and ceiling. Upstream's wiki pages "Shares For
+Small Miners" and "Expected Number of Shares" do the same arithmetic for
+Bitcoin; this page redoes it for BCH.
 
 The rules themselves are in
 [architecture/payout-distribution.md](architecture/payout-distribution.md).
-A proposed redesign that replaces main and mini with one chain, a difficulty
-band, weak shares and payout levels is on
+The redesign that replaced main and mini with one chain and a difficulty
+band, and adds weak shares and payout levels next, is on
 [Share chain redesign for payout variance and fees](sharechain/small-miners-design.md).
 Everything below is expectation; real luck varies around it.
 

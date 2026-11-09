@@ -26,7 +26,7 @@ A one-shot mines 101 blocks to BCHN's dev wallet, another takes a payout
 address and a share-owner key from that wallet, and a CPU miner written in
 Rust (mujina) mines through the node. On regtest every hash the miner
 submits also meets the block target, so the node submits blocks to BCHN
-within seconds; shares on the mini share chain still need their full
+within seconds; shares on the share chain still need their full
 difficulty, which takes a CPU hours.
 
 For chipnet or mainnet, copy `config-docker.sample.toml` to `config.toml`,
@@ -50,7 +50,7 @@ The node and the miner use host networking, which Docker supports on Linux.
 
 - **p2poolv2:** installs the release with its installer script, writes each
   instance's config with `chain = "bitcoin-cash"`, `bitcoin_cash_network`,
-  `bch_share_chain`, CashAddr addresses, donation and fee, `dial_peers`,
+  CashAddr addresses, donation and fee, `dial_peers`,
   optional Stratum V2 keys and `[api]` settings, and runs it under systemd.
 - **nginx_p2poolv2:** a rate-limited TLS reverse proxy for the API and,
   optionally, Grafana.

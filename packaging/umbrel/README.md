@@ -139,10 +139,6 @@ set a single value as `P2POOL_<SECTION>__<KEY>`, but not a list):
   peers to dial it. When you list a node of a running share chain, also set
   `wait_for_chain_sync = true`, so miners connect only once this node has
   caught up.
-- `bch_share_chain`: `mini` (the default, a share target 256 times easier,
-  for small miners) or `main`. Change `[store] path` with it, to
-  `/p2poolv2/data/<network>-<share chain>`: the node refuses a store that
-  holds another share chain.
 - `donation` (default 100 basis points, 1%; 0 opts out; a miner's login may
   choose its own with `donation=<percent>`, which this never overrides),
   and `fee_address` and `fee` for a public pool's own cut (`fee` defaults to
@@ -151,7 +147,7 @@ set a single value as `P2POOL_<SECTION>__<KEY>`, but not a list):
 
 The share chain store and the node's stats live in the app's `data/` folder.
 To start again from an empty store, stop the app, delete
-`data/data/<network>-<share chain>` in the app's folder, and start it.
+`data/data/<network>` in the app's folder, and start it.
 
 ## Running on a BCHN elsewhere
 
@@ -197,7 +193,7 @@ restart:
 
 ```toml
 [store]
-path = "/p2poolv2/data/mainnet-mini"
+path = "/p2poolv2/data/mainnet"
 
 [stratum]
 bitcoin_cash_network = "mainnet"

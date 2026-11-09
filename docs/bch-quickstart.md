@@ -100,7 +100,6 @@ set under `[stratum]`:
 ```toml
 chain = "bitcoin-cash"
 bitcoin_cash_network = "mainnet"   # or "chipnet", "scalenet", "regtest"
-bch_share_chain = "mini"           # "main" for large miners
 miner_address = "p2pool:q..."      # from step 2
 bootstrap_address = "bitcoincash:q..."
 ```
@@ -302,15 +301,15 @@ It needs a machine that can reach BCH peers on port 48333.
 
 1. Run BCHN with `chipnet=1`, `server=1` and `zmqpubhashblock`, and let it
    sync (`bitcoin-cli -chipnet getblockchaininfo`).
-2. Start two P2Poolv2 nodes with `bitcoin_cash_network = "chipnet"`, the
-   same `bch_share_chain`, their own `store` paths and ports, and
+2. Start two P2Poolv2 nodes with `bitcoin_cash_network = "chipnet"`,
+   their own `store` paths and ports, and
    `dial_peers` on the second pointing at the first's `listen_address`.
    Both logs should show `Identified Peer ... /p2pool/test/<genesis>/1.0.0`
    with the same genesis id. On a new share chain the genesis share is old,
    so the first node never counts its chain as current: set
    `wait_for_chain_sync = false` there or its Stratum port never opens.
 3. Point a miner at the first node's Stratum port with a `bchtest:` username.
-   A share needs about 2e10 hashes on the mini chain (stratum difficulty
+   A share needs at least about 2e10 hashes (stratum difficulty
    about 4.7). A miner's difficulty never goes above the share difficulty
    of its job (4 here), and the sample's `minimum_difficulty` is 1, so
    vardiff can bring a CPU miner down to where it submits. 24 CPU threads

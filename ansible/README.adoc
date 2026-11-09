@@ -146,7 +146,6 @@ Each entry of `p2poolv2_instances` takes these keys; the role's
 | Key | Meaning
 
 | `bitcoin_cash_network` | `mainnet`, `chipnet` or `regtest`. Mainnet and chipnet run the same rules; only this switch differs.
-| `bch_share_chain` | `main`, or `mini` (share target 256 times easier, for small miners). Each has its own store directory.
 | `bootstrap_address` | A CashAddr for the network (`bitcoincash:`, `bchtest:`, `bchreg:`). Required; a share chain node never pays it.
 | `miner_address` | Optional share address (`p2pool:`, `tp2pool:`, `rp2pool:`) owning every share, made with `p2poolv2_cli bch-share-address`. Without it each miner sends `p2p=<share address>`.
 | `donation` | Optional. Basis points to the project's donation address; 100 (1%) when unset, 0 opts out.

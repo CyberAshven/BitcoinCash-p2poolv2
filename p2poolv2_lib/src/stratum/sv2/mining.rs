@@ -59,6 +59,7 @@ use crate::stratum::parse_password::{
 use crate::stratum::server::StratumContext;
 use crate::stratum::session::Session;
 use crate::stratum::validate_username;
+use crate::stratum::work::band_policy::miner_job_band;
 use crate::stratum::work::difficulty::validate::build_coinbase_from_components;
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
 use crate::stratum::work::merge_tokens::MinerTokenJob;
@@ -855,7 +856,10 @@ impl MiningChannels {
         if let Some(prepared) = &current {
             session
                 .difficulty_adjuster
-                .set_share_difficulty_ceiling(self.share_difficulty_ceiling(prepared));
+                .set_share_difficulty_ceiling(job_share_difficulty_ceiling(
+                    self.ctx.mode,
+                    prepared.bits(),
+                ));
         }
         let channel_target =
             target_for_difficulty(session.difficulty_adjuster.get_current_difficulty())
@@ -981,17 +985,6 @@ impl MiningChannels {
         }
     }
 
-    /// Share difficulty ceiling of jobs built on `prepared`: the session
-    /// difficulty a channel may have without losing share-chain shares (see
-    /// [`share_difficulty_ceiling`]). `None` in Hydrapool mode, which has no
-    /// share chain.
-    fn share_difficulty_ceiling(&self, prepared: &PreparedNotifyParams) -> Option<u64> {
-        match self.ctx.mode {
-            PoolMode::Hydrapool => None,
-            PoolMode::P2poolv2 => share_difficulty_ceiling(prepared.bits()),
-        }
-    }
-
     /// Insert a tracker job for `channel_id` and build its SV2 frames.
     ///
     /// When the channel's difficulty is above the job's share difficulty, it
@@ -999,13 +992,17 @@ impl MiningChannels {
     /// device throws away no hash that is a share-chain share.
     /// Extended coinbase limits are checked before the channel or tracker
     /// changes; an unrepresentable job leaves the channel ready to retry.
+    ///
+    /// On Bitcoin Cash a miner whose hashrate would make too many shares at
+    /// the minimum gets a heavier job inside the difficulty band
+    /// (`band_policy::miner_job_band`), and the ceiling follows that job's
+    /// own bits.
     fn job_frames(
         &mut self,
         channel_id: u32,
         prepared: &PreparedNotifyParams,
     ) -> Result<Vec<Vec<u8>>, String> {
         let is_hydrapool = self.ctx.mode == PoolMode::Hydrapool;
-        let ceiling = self.share_difficulty_ceiling(prepared);
         let channel = self
             .channels
             .get_mut(&channel_id)
@@ -1019,6 +1016,20 @@ impl MiningChannels {
             let (prefix_length, suffix_length) = prepared.coinbase_part_lengths();
             check_extended_job_fits(prefix_length, suffix_length)?;
         }
+        let job_band = if is_hydrapool {
+            None
+        } else {
+            let miner_hashrate = channel
+                .session
+                .btcaddress
+                .as_deref()
+                .and_then(|address| self.ctx.metrics.miner_hashrate(address));
+            miner_job_band(prepared, miner_hashrate)
+        };
+        let ceiling = job_share_difficulty_ceiling(
+            self.ctx.mode,
+            job_band.map_or(prepared.bits(), |band| band.bits),
+        );
         let mut frames = Vec::with_capacity(3);
         if let Some(lowered) = channel
             .session
@@ -1048,6 +1059,7 @@ impl MiningChannels {
             prepared,
             bitcoin_address,
             share_owner,
+            job_band,
             &self.ctx.tracker_handle,
         );
         let job = self
@@ -1386,6 +1398,18 @@ fn tlv_value(mut trailing: &[u8], extension_type: u16, field_type: u8) -> Option
         trailing = &trailing[end..];
     }
     found
+}
+
+/// Share difficulty ceiling of a job whose shares are mined at `share_bits`:
+/// the session difficulty a channel may have without losing share-chain
+/// shares (see [`share_difficulty_ceiling`]). It follows each job's own bits,
+/// a heavier one's on Bitcoin Cash. `None` in Hydrapool mode, which has no
+/// share chain.
+fn job_share_difficulty_ceiling(mode: PoolMode, share_bits: CompactTarget) -> Option<u64> {
+    match mode {
+        PoolMode::Hydrapool => None,
+        PoolMode::P2poolv2 => share_difficulty_ceiling(share_bits),
+    }
 }
 
 /// Target for a stratum difficulty, as SV1 `mining.set_difficulty` means it:

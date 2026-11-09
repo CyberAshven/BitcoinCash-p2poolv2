@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Share-chain rule change on Bitcoin Cash, a flag day with its own protocol
+segment (`band-c64`): one share chain, and a difficulty band (issue #79, row
+3; `docs/sharechain/small-miners-design.md`, parts 1 and 2). The main and
+mini share chains merge into one, which keeps the mini chain's anchor,
+ceiling (difficulty about 4.5) and genesis. The `bch_share_chain` setting is
+gone: a config that still sets it, in the file or as
+`P2POOL_STRATUM__BCH_SHARE_CHAIN`, is refused at start-up, and the Docker,
+Umbrel and Ansible store folders are named after the network alone. A share
+may now be up to `C` times harder than the share chain's minimum, never
+easier; `C` starts at 1, moves by at most 1/512 a share, and is at most 64.
+Each Bitcoin Cash share header carries its minimum (`asert_bits`), the
+target its node wanted for its miner (`wanted_bits`) and its band cap
+(`band_cap`), all committed in the share commitment. The next share's ASERT
+is anchored at its parent's minimum, not at its parent's own target, so a
+heavier share does not make the next minimum heavier. A share's weight in
+the PPLNS window and its work in fork choice were already its exact work.
+By default a node gives each miner the minimum, unless the miner would make
+more than 4 shares per pool block, or 300 a month when that is more; such a
+miner gets a target up to `C` times harder, sized to that many (node policy,
+not a rule). Big miners then make fewer, heavier shares, and ASERT lowers
+the minimum for everyone else. These are share-chain rules only: Bitcoin
+Cash's own rules do not change, and the blocks the pool finds stay ordinary
+Bitcoin Cash blocks. A node on the old rules cannot read the new headers, so
+the two do not peer; every node must upgrade together and start on a fresh
+store (store format 3), and the share chain starts again from its new
+genesis. Bitcoin is unchanged.
+
 `/metrics` escapes its label values as the Prometheus text format requires:
 a backslash, double quote or line feed is written as `\\`, `\"` or `\n`. A
 miner chooses its worker name, over Stratum V1 (`address.worker`) and V2,

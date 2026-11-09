@@ -7,8 +7,9 @@ use crate::accounting::stats::user::User;
 use crate::accounting::{payout::simple_pplns::SimplePplnsShare, stats::pool_local_stats};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::time::SystemTime;
-use tokio::sync::{mpsc, oneshot};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::error;
 
 const METRICS_MESSAGE_BUFFER_SIZE: usize = 1000;
@@ -123,23 +124,52 @@ impl PoolMetrics {
     /// `None` with no shares in the window, or no time between the first
     /// kept share and `now` (the dash, not zero).
     pub fn local_submission_hashrate(&self, now: u64) -> Option<f64> {
-        let cutoff = now.saturating_sub(SUBMISSION_WINDOW_SECS);
-        let mut first: Option<u64> = None;
-        let mut work = 0.0;
-        for datum in &self.submission_window {
-            if datum.at < cutoff {
-                continue;
-            }
-            first = Some(first.map_or(datum.at, |earliest: u64| earliest.min(datum.at)));
-            work += datum.work;
-        }
-        let first = first?;
-        let span = now.saturating_sub(first).min(SUBMISSION_WINDOW_SECS);
-        if span == 0 {
-            return None;
-        }
-        Some(work / span as f64)
+        window_hashrate(&self.submission_window, now)
     }
+}
+
+/// Hashrate of `window` from its work in the trailing
+/// [`SUBMISSION_WINDOW_SECS`] seconds, in hashes per second: the work over
+/// the span from the first kept share to `now`, which is the full ten minutes
+/// once the window is that old. `None` with no work in the window, or no time
+/// between the first kept share and `now` (the dash, not zero). Based on Cash
+/// Dragon's alpha-vardiff-v2, which shares it between the pool and each miner.
+fn window_hashrate(window: &VecDeque<WorkDatum>, now: u64) -> Option<f64> {
+    let cutoff = now.saturating_sub(SUBMISSION_WINDOW_SECS);
+    let mut first: Option<u64> = None;
+    let mut work = 0.0;
+    for datum in window {
+        if datum.at < cutoff {
+            continue;
+        }
+        first = Some(first.map_or(datum.at, |earliest: u64| earliest.min(datum.at)));
+        work += datum.work;
+    }
+    let first = first?;
+    let span = now.saturating_sub(first).min(SUBMISSION_WINDOW_SECS);
+    if span == 0 {
+        return None;
+    }
+    Some(work / span as f64)
+}
+
+/// Each miner's hashrate, in hashes per second, by the payout address it
+/// authorized with: what the job builders size heavier Bitcoin Cash shares
+/// by (`stratum::work::band_policy`).
+pub type MinerHashrates = Arc<HashMap<String, f64>>;
+
+/// How often the actor publishes each miner's hashrate to the job builders.
+/// The ten-minute window moves on every accepted submission; a slow tick
+/// keeps the snapshot fresh enough for a job's target without rebuilding the
+/// map on every submission.
+pub const MINER_HASHRATE_PUBLISH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The current unix time in seconds, 0 before the epoch.
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 /// Messages that can be sent to the MetricsActor
@@ -195,16 +225,19 @@ pub struct MetricsActor {
     metrics: PoolMetrics,
     receiver: mpsc::Receiver<MetricsMessage>,
     worker_connections: HashMap<(String, String), usize>,
+    /// Accepted submissions in the trailing [`SUBMISSION_WINDOW_SECS`]
+    /// seconds per miner, by the payout address it authorized with. Runtime
+    /// only, pruned on the same cutoff as the pool-wide window.
+    miner_windows: HashMap<String, VecDeque<WorkDatum>>,
+    /// Publishes each miner's hashrate to the job builders, which read it
+    /// through [`MetricsHandle::miner_hashrate`].
+    miner_hashrates_tx: watch::Sender<MinerHashrates>,
 }
 
 impl MetricsActor {
     /// Create a new metrics actor with default metrics
     pub fn new(receiver: mpsc::Receiver<MetricsMessage>) -> Self {
-        Self {
-            metrics: PoolMetrics::default(),
-            receiver,
-            worker_connections: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
-        }
+        Self::with_metrics(PoolMetrics::default(), receiver)
     }
 
     /// Create a metrics actor with metrics loaded from the given log directory
@@ -213,18 +246,60 @@ impl MetricsActor {
         receiver: mpsc::Receiver<MetricsMessage>,
     ) -> Result<Self, std::io::Error> {
         let metrics = PoolMetrics::load_existing(log_dir)?;
-        Ok(Self {
+        Ok(Self::with_metrics(metrics, receiver))
+    }
+
+    fn with_metrics(metrics: PoolMetrics, receiver: mpsc::Receiver<MetricsMessage>) -> Self {
+        let (miner_hashrates_tx, _miner_hashrates_rx) =
+            watch::channel(Arc::new(HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY)));
+        Self {
             metrics,
             receiver,
             worker_connections: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
-        })
+            miner_windows: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
+            miner_hashrates_tx,
+        }
     }
 
-    /// Start the actor's message handling loop
+    /// The miner hashrates this actor publishes once it runs, for its
+    /// handle.
+    fn subscribe_miner_hashrates(&self) -> watch::Receiver<MinerHashrates> {
+        self.miner_hashrates_tx.subscribe()
+    }
+
+    /// Start the actor's message handling loop, publishing each miner's
+    /// hashrate every [`MINER_HASHRATE_PUBLISH_INTERVAL`] beside it.
     pub async fn run(mut self) {
-        while let Some(msg) = self.receiver.recv().await {
-            self.handle_message(msg).await;
+        let mut publish_interval = tokio::time::interval(MINER_HASHRATE_PUBLISH_INTERVAL);
+        let mut running = true;
+        while running {
+            tokio::select! {
+                message = self.receiver.recv() => match message {
+                    Some(message) => self.handle_message(message).await,
+                    None => running = false,
+                },
+                _ = publish_interval.tick() => self.publish_miner_hashrates(unix_seconds()),
+            }
         }
+    }
+
+    /// Publish each miner's hashrate at `now`, dropping the miners whose
+    /// window holds no submission any more.
+    fn publish_miner_hashrates(&mut self, now: u64) {
+        let cutoff = now.saturating_sub(SUBMISSION_WINDOW_SECS);
+        self.miner_windows.retain(|_, window| {
+            while window.front().is_some_and(|datum| datum.at < cutoff) {
+                window.pop_front();
+            }
+            !window.is_empty()
+        });
+        let mut hashrates = HashMap::with_capacity(self.miner_windows.len());
+        for (address, window) in &self.miner_windows {
+            if let Some(hashrate) = window_hashrate(window, now) {
+                hashrates.insert(address.clone(), hashrate);
+            }
+        }
+        self.miner_hashrates_tx.send_replace(Arc::new(hashrates));
     }
 
     async fn handle_message(&mut self, msg: MetricsMessage) {
@@ -337,10 +412,16 @@ impl MetricsActor {
         {
             self.metrics.submission_window.pop_front();
         }
-        self.metrics.submission_window.push_back(WorkDatum {
+        let datum = WorkDatum {
             at: current_unix_timestamp,
             work: difficulty as f64 * HASHES_PER_DIFFICULTY,
-        });
+        };
+        self.metrics.submission_window.push_back(datum);
+        let miner_window = self.miner_windows.entry(btcaddress.clone()).or_default();
+        while miner_window.front().is_some_and(|datum| datum.at < cutoff) {
+            miner_window.pop_front();
+        }
+        miner_window.push_back(datum);
         if let Some(user) = self.metrics.users.get_mut(&btcaddress) {
             user.record_share(&workername, difficulty, truediff, current_unix_timestamp);
         }
@@ -431,9 +512,32 @@ impl MetricsActor {
 #[derive(Clone)]
 pub struct MetricsHandle {
     sender: mpsc::Sender<MetricsMessage>,
+    /// The actor's latest snapshot of each miner's hashrate, read
+    /// synchronously by the job builders.
+    miner_hashrates: watch::Receiver<MinerHashrates>,
 }
 
 impl MetricsHandle {
+    /// A handle on the actor behind `sender`, reading the hashrates it
+    /// publishes through `miner_hashrates`.
+    fn new(
+        sender: mpsc::Sender<MetricsMessage>,
+        miner_hashrates: watch::Receiver<MinerHashrates>,
+    ) -> Self {
+        Self {
+            sender,
+            miner_hashrates,
+        }
+    }
+
+    /// The hashrate, in hashes per second, of the miner that authorized with
+    /// `btcaddress`, from its accepted submissions in the trailing ten
+    /// minutes as last published; `None` before its first one. Reads the
+    /// latest snapshot without waiting on the actor.
+    pub fn miner_hashrate(&self, btcaddress: &str) -> Option<f64> {
+        self.miner_hashrates.borrow().get(btcaddress).copied()
+    }
+
     /// Record an accepted share with the given difficulty
     pub async fn record_share_accepted(
         &self,
@@ -608,20 +712,23 @@ impl MetricsHandle {
 #[cfg(test)]
 pub(crate) fn spawn_test_metrics_handle() -> MetricsHandle {
     let (sender, receiver) = mpsc::channel(METRICS_MESSAGE_BUFFER_SIZE);
+    let actor = MetricsActor::new(receiver);
+    let miner_hashrates = actor.subscribe_miner_hashrates();
     tokio::spawn(async move {
-        MetricsActor::new(receiver).run().await;
+        actor.run().await;
     });
-    MetricsHandle { sender }
+    MetricsHandle::new(sender, miner_hashrates)
 }
 
 /// Construct a new metrics actor with existing metrics and return its handle
 pub async fn start_metrics(log_dir: String) -> Result<MetricsHandle, std::io::Error> {
     let (sender, receiver) = mpsc::channel(METRICS_MESSAGE_BUFFER_SIZE);
     let actor = MetricsActor::with_existing_metrics(&log_dir, receiver)?;
+    let miner_hashrates = actor.subscribe_miner_hashrates();
     tokio::spawn(async move {
         actor.run().await;
     });
-    let handle = MetricsHandle { sender };
+    let handle = MetricsHandle::new(sender, miner_hashrates);
     match pool_local_stats::start_stats_saver(
         handle.clone(),
         METRICS_SAVE_INTERVAL,
@@ -713,6 +820,49 @@ mod tests {
         let metrics = window_of(1_000, 2.0 * HASHES_PER_DIFFICULTY);
         let rate = metrics.local_submission_hashrate(1_010).unwrap();
         assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 10.0).abs() < 1.0);
+    }
+
+    /// Each miner's hashrate is published from its own accepted
+    /// submissions, under the address it authorized with.
+    #[test]
+    fn each_miner_hashrate_is_published_by_its_address() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let mut actor = MetricsActor::new(receiver);
+        let handle = MetricsHandle::new(mpsc::channel(1).0, actor.subscribe_miner_hashrates());
+        actor.record_share_accepted("big".into(), "worker".into(), 10, 10);
+        actor.record_share_accepted("small".into(), "worker".into(), 1, 1);
+        let now = actor.metrics.submission_window[0].at + 10;
+
+        actor.publish_miner_hashrates(now);
+
+        let big_span = (now - actor.miner_windows["big"][0].at) as f64;
+        let small_span = (now - actor.miner_windows["small"][0].at) as f64;
+        let big = handle.miner_hashrate("big").unwrap();
+        let small = handle.miner_hashrate("small").unwrap();
+        assert!(
+            (big - 10.0 * HASHES_PER_DIFFICULTY / big_span).abs() < 1.0,
+            "{big}"
+        );
+        assert!(
+            (small - HASHES_PER_DIFFICULTY / small_span).abs() < 1.0,
+            "{small}"
+        );
+        assert_eq!(handle.miner_hashrate("absent"), None);
+    }
+
+    /// A miner whose submissions all left the ten-minute window is dropped.
+    #[test]
+    fn a_miner_without_recent_submissions_is_dropped() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let mut actor = MetricsActor::new(receiver);
+        let handle = MetricsHandle::new(mpsc::channel(1).0, actor.subscribe_miner_hashrates());
+        actor.record_share_accepted("gone".into(), "worker".into(), 10, 10);
+        let now = actor.metrics.submission_window[0].at + SUBMISSION_WINDOW_SECS + 1;
+
+        actor.publish_miner_hashrates(now);
+
+        assert_eq!(handle.miner_hashrate("gone"), None);
+        assert!(actor.miner_windows.is_empty());
     }
 
     #[test]

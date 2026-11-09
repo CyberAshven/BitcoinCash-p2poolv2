@@ -40,6 +40,7 @@ fn mine(prepared: &PreparedNotifyParams) -> (ShareCommitment, Transaction) {
         prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
         &tracker,
     );
     let job = tracker.get_job(job_id).unwrap();

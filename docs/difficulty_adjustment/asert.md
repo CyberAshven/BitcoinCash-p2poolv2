@@ -15,7 +15,8 @@ next_target = anchor_target * 2^((time_delta - ideal * (height_delta + 1)) / hal
 computed with BCH's fixed-point exponent, cubic approximation of `2^x` and
 512-bit intermediate, then clamped so it is never easier than the chain's
 ceiling: `MAX_POOL_TARGET` (`0x1b384bd7`, difficulty about 1,160) on Bitcoin
-and the Bitcoin Cash main chain, `0x1c384bd7` (difficulty about 4) on mini.
+and `0x1c384bd7` (difficulty about 4) on Bitcoin Cash, the former mini
+chain's (the main and mini chains merged on 2026-11-09).
 
 Every caller passes the parent of the share being validated or mined as an
 `AsertParent`: its height, time and bits, and the time of its own parent
@@ -31,18 +32,26 @@ share.
 | Chain | Anchor | `anchor_target` | `time_delta` | `height_delta` |
 |---|---|---|---|---|
 | Bitcoin | genesis | genesis bits | parent time - genesis time | parent height |
-| Bitcoin Cash | the parent | parent bits | parent time - its parent's time | 0 |
+| Bitcoin Cash | the parent | parent's minimum (`asert_bits`) | parent time - its parent's time | 0 |
 
 Bitcoin keeps upstream's rule: the algorithm is absolute, so a share's
 target follows from genesis and its parent's height and time alone.
 
 Bitcoin Cash moves BCH's anchor convention to each share's parent: the
-parent is the anchor block, its bits are the anchor target, and its own
+parent is the anchor block, its minimum is the anchor target, and its own
 parent's time is the anchor parent time. The first share builds on genesis,
 whose interval is zero, so it gets the genesis rule's target. Without the
 ceiling the two rules give the same targets, because the exponents add up
 along the chain: two steps of the parent rule are one step of the genesis
 rule over both intervals. They differ only at the ceiling.
+
+The parent's minimum is its `asert_bits`, the target ASERT gave it, which
+equals its bits unless it was mined heavier inside the difficulty band
+(2026-11-09, [Share validation](../sharechain/validation.md#the-difficulty-band-bitcoin-cash)).
+Anchoring at a heavier parent's bits would make the next minimum as heavy
+as that parent; anchoring at its minimum keeps the minimum the pool's own,
+so when big miners mine fewer, heavier shares the minimum falls for everyone
+else.
 
 ## Why Bitcoin Cash does not anchor at genesis
 
@@ -117,7 +126,6 @@ interval):
 | Case (4 TH/s miner) | Parent anchor (Bitcoin Cash) | Genesis anchor |
 |---|---|---|
 | Chipnet mini restarted 180 days after genesis | 0.95 of the steady difficulty after 8 half-lives (80 minutes, 1,139 shares) | at the ceiling |
-| Main chain, same start | 0.94 after 4 half-lives | |
 | Mini chain after a two-day outage | 0.95 eight half-lives after it resumes | at the ceiling |
 | Genesis anchored at launch at the steady difficulty, as the sim does | 1.01 after 6 hours | 1.01, the same target |
 

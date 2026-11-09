@@ -569,7 +569,7 @@ be written into a Bitcoin Cash coinbase.
 
 The share-chain `network` field still selects the Bitcoin genesis. On
 `bitcoin-cash`, genesis is a P2PKH share anchored at the published BCHN
-genesis block. `bch_share_chain` is `main` or `mini`. A configured
+genesis block, at the mini anchor (one share chain since 2026-11-09). A configured
 `miner_address` is a CashAddr share address (`p2pool`, `tp2pool`, or
 `rp2pool`) and the header stores that P2PKH hash. `sv2_port`, when set,
 opens a local unencrypted Stratum V2 listener beside SV1. Both Job

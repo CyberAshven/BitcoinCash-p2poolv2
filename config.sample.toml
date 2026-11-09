@@ -42,9 +42,6 @@ chain = "bitcoin-cash"
 # "mainnet", "chipnet", "scalenet" or "regtest". The node refuses to start
 # unless [bitcoinrpc] is BCHN on this network.
 bitcoin_cash_network = "chipnet"
-# "mini" (share target 256 times easier, for small miners and test networks)
-# or "main". Every node on one share chain must use the same one.
-bch_share_chain = "mini"
 hostname = "0.0.0.0"
 port = 3333
 # Set true once dial_peers lists a node of a running share chain, so miners
@@ -54,7 +51,7 @@ port = 3333
 wait_for_chain_sync = false
 # Difficulty a new miner starts at, and the lowest vardiff gives one. A
 # miner's difficulty never goes above the share difficulty of its job (4 on
-# the mini chain at its easiest), so small values suit chipnet's CPU miners
+# the share chain at its easiest), so small values suit chipnet's CPU miners
 # and Bitaxes; vardiff raises it for ASICs.
 start_difficulty = 1000
 minimum_difficulty = 1

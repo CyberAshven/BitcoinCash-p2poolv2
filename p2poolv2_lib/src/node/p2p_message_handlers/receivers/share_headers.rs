@@ -14,6 +14,7 @@ use crate::pool_difficulty::AsertParent;
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
+use crate::shares::band::{BandError, ParentBand, check_share_band};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -22,7 +23,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::{
     MIN_CUMULATIVE_CHAIN_WORK_MULTIPLIER, ShareHeader, is_terminal_blockhash,
 };
-use crate::shares::validation::{MTP_WINDOW, ShareValidator, ValidationError};
+use crate::shares::validation::{MTP_WINDOW, ShareValidator, ValidationError, stored_parent_band};
 use crate::store::block_tx_metadata::BlockMetadata;
 use crate::store::dag_store::MAX_BLOCKS_PER_HEIGHT;
 use crate::store::writer::StoreError;
@@ -61,6 +62,12 @@ enum HeaderSyncError {
         block_hash: BlockHash,
         declared: u32,
         expected: u32,
+    },
+    /// A Bitcoin Cash header's bits, band cap or wanted bits break the
+    /// difficulty band (`shares::band::check_share_band`).
+    OutsideBand {
+        block_hash: BlockHash,
+        error: BandError,
     },
     /// A header's timestamp breaks median time past or the future limit.
     InvalidTimestamp {
@@ -138,6 +145,12 @@ impl fmt::Display for HeaderSyncError {
                 write!(
                     formatter,
                     "ASERT mismatch for {block_hash}: declared bits {declared:#010x}, expected {expected:#010x}"
+                )
+            }
+            HeaderSyncError::OutsideBand { block_hash, error } => {
+                write!(
+                    formatter,
+                    "Header {block_hash} is outside the difficulty band: {error}"
                 )
             }
             HeaderSyncError::InvalidTimestamp { block_hash, error } => {
@@ -362,6 +375,22 @@ fn get_cached_asert_parent(
     Ok(parent)
 }
 
+/// Get what the band rule needs from the blockhash as a parent, as
+/// [`get_cached_asert_parent`] does for ASERT: the batch-local cache first,
+/// then the store, whose result is cached.
+fn get_cached_parent_band(
+    blockhash: &BlockHash,
+    cache: &mut HashMap<BlockHash, ParentBand>,
+    chain_store_handle: &ChainStoreHandle,
+) -> Result<ParentBand, Box<dyn Error + Send + Sync>> {
+    if let Some(&cached) = cache.get(blockhash) {
+        return Ok(cached);
+    }
+    let parent_band = stored_parent_band(blockhash, chain_store_handle)?;
+    cache.insert(*blockhash, parent_band);
+    Ok(parent_band)
+}
+
 /// Validate that the batch forms a connected DAG with valid difficulty.
 ///
 /// Every header's parent and every uncle it declares must be either
@@ -376,6 +405,11 @@ fn get_cached_asert_parent(
 /// target is computed from its parent's time: blocks below the
 /// full-validation zone never run `validate_timestamp`, so this is the only
 /// place their times are checked.
+///
+/// On Bitcoin Cash the ASERT target is the header's minimum, its
+/// `asert_bits`, and the header must also pass the difficulty band against
+/// its parent's band fields, from the batch or the store
+/// (`shares::band::check_share_band`).
 ///
 /// Returns the cumulative work across all headers.
 fn validate_dag_connectivity_and_difficulty(
@@ -393,6 +427,8 @@ fn validate_dag_connectivity_and_difficulty(
 
     let mut cumulative_work = Work::from_hex("0x00").unwrap();
     let mut asert_parent_cache: HashMap<BlockHash, AsertParent> =
+        HashMap::with_capacity(share_headers.len() + 1);
+    let mut parent_band_cache: HashMap<BlockHash, ParentBand> =
         HashMap::with_capacity(share_headers.len() + 1);
     let mut time_links: HashMap<BlockHash, TimeLink> =
         HashMap::with_capacity(share_headers.len() + MTP_WINDOW);
@@ -426,12 +462,22 @@ fn validate_dag_connectivity_and_difficulty(
             get_cached_asert_parent(&parent_hash, &mut asert_parent_cache, chain_store_handle)?;
 
         let expected_bits = pool_difficulty.calculate_target_clamped(parent);
-        if header.bits != expected_bits {
+        if header.minimum_bits() != expected_bits {
             return Err(HeaderSyncError::AsertMismatch {
                 block_hash: header.block_hash(),
-                declared: header.bits.to_consensus(),
+                declared: header.minimum_bits().to_consensus(),
                 expected: expected_bits.to_consensus(),
             });
+        }
+        if header.carries_band() {
+            let parent_band =
+                get_cached_parent_band(&parent_hash, &mut parent_band_cache, chain_store_handle)?;
+            check_share_band(header, &parent_band).map_err(|error| {
+                HeaderSyncError::OutsideBand {
+                    block_hash: header.block_hash(),
+                    error,
+                }
+            })?;
         }
 
         let header_height = parent.height + 1;
@@ -448,6 +494,7 @@ fn validate_dag_connectivity_and_difficulty(
             header_hash,
             AsertParent::from_header(header, header_height, parent.time),
         );
+        parent_band_cache.insert(header_hash, ParentBand::from_header(header));
         time_links.insert(
             header_hash,
             TimeLink {

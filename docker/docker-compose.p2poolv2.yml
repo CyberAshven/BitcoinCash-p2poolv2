@@ -33,15 +33,13 @@ services:
       # store directory from it too is what keeps p2poolv2 and BCHN on the
       # same network.
       #
-      # This overrides chain, bitcoin_cash_network and bch_share_chain in the
-      # mounted config.toml. NETWORK is required rather than defaulted,
-      # because a default would quietly put a deployment on one network while
-      # its config said another. The store directory also names the share
-      # chain, because main and mini are different chains.
+      # This overrides chain and bitcoin_cash_network in the mounted
+      # config.toml. NETWORK is required rather than defaulted, because a
+      # default would quietly put a deployment on one network while its
+      # config said another.
       - P2POOL_STRATUM__CHAIN=bitcoin-cash
       - P2POOL_STRATUM__BITCOIN_CASH_NETWORK=${NETWORK:?NETWORK must be set in .env, see docker/.env.sample}
-      - P2POOL_STRATUM__BCH_SHARE_CHAIN=${BCH_SHARE_CHAIN:-mini}
-      - P2POOL_STORE__PATH=/p2poolv2/data/${NETWORK}-${BCH_SHARE_CHAIN:-mini}
+      - P2POOL_STORE__PATH=/p2poolv2/data/${NETWORK}
       - P2POOL_CONFIG=/etc/p2poolv2/config.toml
       - P2POOL_STRATUM__PORT=${P2POOL_STRATUM_PORT:-3333}
       - P2POOL_API__PORT=${P2POOL_API_PORT:-46884}

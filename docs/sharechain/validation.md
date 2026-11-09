@@ -21,13 +21,44 @@ the checks is in
 ## The proof of work meets the share difficulty
 
 A share's declared target must equal the target ASERT computes from its
-ancestors, and its hash must meet it. On Bitcoin Cash the share chain's ASERT
+ancestors, and its hash must meet it; on Bitcoin Cash that is its declared
+minimum, and its own target may be harder within the difficulty band below.
+On Bitcoin Cash the share chain's ASERT
 is BCH's own integer formula (aserti3-2d), anchored at each share's parent
 rather than at genesis (plan decision 12; see
 [Share difficulty: ASERT](../difficulty_adjustment/asert.md)). A target may
-never be easier than the chain's ceiling: `MAX_POOL_TARGET` on the main chain
-and a ceiling 256 times easier on the mini chain
-([Small miners](../small-miners.md)).
+never be easier than the chain's ceiling: `MAX_POOL_TARGET` on Bitcoin, and
+on Bitcoin Cash a ceiling 256 times easier, the former mini chain's
+([Small miners](../small-miners.md)). The Bitcoin Cash main and mini chains
+merged into this one chain on 2026-11-09.
+
+### The difficulty band (Bitcoin Cash)
+
+Since 2026-11-09 a Bitcoin Cash share may be harder than the target ASERT
+computes, up to its band cap `C`, never easier
+([Share chain redesign](small-miners-design.md#2-difficulty-band);
+`shares/band.rs`). Each share header carries three fields, all committed:
+
+- `asert_bits`, the share's minimum `T_asert`: it must equal the target ASERT
+  computes from the parent, and the next share's ASERT is anchored at it
+  rather than at the parent's own bits, so a heavier share does not make
+  the next minimum heavier;
+- `band_cap`, `C` in units of 1/1024: it must equal one step from the
+  parent's (`next_band_cap`: up by `C * u / 512` when the parent's node wanted
+  a harder target than its band allowed, `u` being the work it wanted in
+  units of the minimum's, at least 1 and at most 64; down by `C / 512`
+  otherwise; between 1 and 64);
+- `wanted_bits`, the target the share's node wanted for its miner before the
+  cap: it must be at least as hard as the share's own target.
+
+The share's own target `T`, its `bits`, must then satisfy
+`T_asert / C <= T <= T_asert`, compared exactly on the 256-bit targets the
+compact forms decode to (the lower bound as `T * band_cap >= T_asert *
+1024`), and its hash must meet `T`. Full validation, header sync and block
+receipt all run these checks, from the parent's header alone. A share's
+weight in the PPLNS window and its work in fork choice are its own exact
+work, `2^256 / (T + 1)`, so a heavier share counts for more. Bitcoin shares
+carry no band, and their target must equal the computed one.
 
 Share headers carry everything needed to check the target, but only once all
 of a header's ancestors are known. During the first sync a node therefore

@@ -136,6 +136,25 @@ pub struct ShareHeader {
     /// follow upstream's rules and read as the current version.
     #[serde(default)]
     pub share_version: ShareVersion,
+    /// The share's minimum target, `T_asert`: the ASERT target from its
+    /// parent's own minimum (`shares::band`). `bits` may be up to
+    /// `band_cap / 1024` times harder, never easier. Encoded after the share
+    /// version, and committed, for Bitcoin Cash share owners only, like
+    /// `wanted_bits` and `band_cap`; Bitcoin shares carry no band, these three
+    /// read as zero, and a Bitcoin share's minimum is its `bits`
+    /// ([`Self::minimum_bits`]).
+    #[serde(default)]
+    pub asert_bits: CompactTarget,
+    /// The target this share's node wanted for its miner before the band
+    /// cap: equal to `bits`, or harder when the cap stopped it. A signal that
+    /// moves the next share's band cap; it must be at least as hard as
+    /// `bits`.
+    #[serde(default)]
+    pub wanted_bits: CompactTarget,
+    /// This share's band cap `C` in units of 1/1024 (1024 is a band of one),
+    /// one step from its parent's (`shares::band::next_band_cap`).
+    #[serde(default)]
+    pub band_cap: u32,
 }
 
 /// Network class an encoded address is rebuilt for: the part of a payout
@@ -213,6 +232,22 @@ impl ShareHeader {
         Target::from_compact(self.bits).difficulty(network)
     }
 
+    /// Whether this header carries a difficulty band (`shares::band`): a
+    /// Bitcoin Cash share owner's does, a Bitcoin share's does not.
+    pub fn carries_band(&self) -> bool {
+        matches!(self.miner_address, ShareOwner::CashP2pkh(_))
+    }
+
+    /// The share's minimum target, the one ASERT anchors the next share at:
+    /// `asert_bits` on Bitcoin Cash, `bits` on Bitcoin, which has no band.
+    pub fn minimum_bits(&self) -> CompactTarget {
+        if self.carries_band() {
+            self.asert_bits
+        } else {
+            self.bits
+        }
+    }
+
     /// Build a ShareHeader from a commitment and a bitcoin header
     /// which contains a coinbase matching the commitment.
     ///
@@ -242,6 +277,9 @@ impl ShareHeader {
             bch_coinbase: commitment.bch_coinbase,
             pool_merge_mining: commitment.pool_merge_mining,
             share_version: commitment.share_version,
+            asert_bits: commitment.asert_bits,
+            wanted_bits: commitment.wanted_bits,
+            band_cap: commitment.band_cap,
         }
     }
 
@@ -327,8 +365,11 @@ impl ShareHeader {
             len += POOL_TOKEN_ROOT_BCH_HEADER_TAG.consensus_encode(w)?;
         }
         len += share_owner::consensus_encode(&self.miner_address, w)?;
-        if matches!(self.miner_address, ShareOwner::CashP2pkh(_)) {
+        if self.carries_band() {
             len += self.share_version.consensus_encode(w)?;
+            len += self.wanted_bits.consensus_encode(w)?;
+            len += self.band_cap.consensus_encode(w)?;
+            len += self.asert_bits.consensus_encode(w)?;
         }
         len += self.bitcoin_header.version.consensus_encode(w)?;
         len += self.bitcoin_header.prev_blockhash.consensus_encode(w)?;
@@ -377,11 +418,22 @@ impl ShareHeader {
         } else {
             share_owner::consensus_decode_from_tag(owner_tag, r)?
         };
-        let share_version = if matches!(miner_address, ShareOwner::CashP2pkh(_)) {
-            ShareVersion::consensus_decode(r)?
-        } else {
-            ShareVersion::CURRENT
-        };
+        let (share_version, wanted_bits, band_cap, asert_bits) =
+            if matches!(miner_address, ShareOwner::CashP2pkh(_)) {
+                (
+                    ShareVersion::consensus_decode(r)?,
+                    CompactTarget::consensus_decode(r)?,
+                    u32::consensus_decode(r)?,
+                    CompactTarget::consensus_decode(r)?,
+                )
+            } else {
+                (
+                    ShareVersion::CURRENT,
+                    CompactTarget::default(),
+                    0,
+                    CompactTarget::default(),
+                )
+            };
         let bitcoin_version = bitcoin::block::Version::consensus_decode(r)?;
         let bitcoin_prev_blockhash = BlockHash::consensus_decode(r)?;
         let bitcoin_merkle_root = if include_bitcoin_merkle_root {
@@ -449,6 +501,9 @@ impl ShareHeader {
             bch_coinbase,
             pool_merge_mining,
             share_version,
+            asert_bits,
+            wanted_bits,
+            band_cap,
         })
     }
 }
@@ -637,6 +692,9 @@ impl ShareBlock {
             bch_coinbase: None,
             pool_merge_mining: None,
             share_version: ShareVersion::CURRENT,
+            asert_bits: CompactTarget::default(),
+            wanted_bits: CompactTarget::default(),
+            band_cap: 0,
         };
         let bitcoin_coinbase = bitcoin_block
             .txdata
@@ -866,6 +924,72 @@ mod tests {
         assert_eq!(decoded.share_version, ShareVersion::CURRENT);
     }
 
+    /// A Bitcoin Cash header round-trips a heavier share's band: its
+    /// minimum, the target its node wanted and its band cap.
+    #[test]
+    fn bitcoin_cash_header_round_trips_its_band() {
+        let share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .bits(CompactTarget::from_consensus(0x1c10_0000))
+            .band(
+                CompactTarget::from_consensus(0x1c40_0000),
+                CompactTarget::from_consensus(0x1c08_0000),
+                4096,
+            )
+            .build();
+
+        let decoded: ShareHeader = deserialize(&serialize(&share.header)).unwrap();
+
+        assert_eq!(decoded, share.header);
+        assert_eq!(
+            decoded.asert_bits,
+            CompactTarget::from_consensus(0x1c40_0000)
+        );
+        assert_eq!(
+            decoded.wanted_bits,
+            CompactTarget::from_consensus(0x1c08_0000)
+        );
+        assert_eq!(decoded.band_cap, 4096);
+        assert_eq!(decoded.minimum_bits(), decoded.asert_bits);
+        CoinbaseProof::verify(&share.header, &share.template_merkle_branches).unwrap();
+    }
+
+    /// The band is a fixed twelve bytes the proof of work binds: another
+    /// wanted target or band cap is another share hash and fails the
+    /// coinbase proof.
+    #[test]
+    fn bitcoin_cash_header_binds_its_band() {
+        let share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build();
+        let mut wanting_more = share.header.clone();
+        wanting_more.wanted_bits = CompactTarget::from_consensus(0x1c08_0000);
+        let mut wider = share.header.clone();
+        wider.band_cap = 2048;
+
+        assert_ne!(wanting_more.block_hash(), share.header.block_hash());
+        assert_ne!(wider.block_hash(), share.header.block_hash());
+        assert_eq!(serialize(&wider).len(), serialize(&share.header).len());
+        assert!(CoinbaseProof::verify(&wanting_more, &share.template_merkle_branches).is_err());
+        assert!(CoinbaseProof::verify(&wider, &share.template_merkle_branches).is_err());
+    }
+
+    /// A Bitcoin header carries no band: it is not encoded, and decodes as
+    /// zero, with the share's bits as its minimum.
+    #[test]
+    fn bitcoin_header_carries_no_band() {
+        let bitcoin = TestShareBlockBuilder::new().build().header;
+        let mut banded = bitcoin.clone();
+        banded.wanted_bits = CompactTarget::from_consensus(0x1c08_0000);
+        banded.band_cap = 2048;
+
+        assert_eq!(serialize(&banded), serialize(&bitcoin));
+        let decoded: ShareHeader = deserialize(&serialize(&banded)).unwrap();
+        assert_eq!(decoded.band_cap, 0);
+        assert_eq!(decoded.wanted_bits, CompactTarget::default());
+        assert_eq!(decoded.minimum_bits(), decoded.bits);
+    }
+
     /// A share is a token share exactly when its commitment is not the
     /// exact empty one: pool-built shares and declared shares with the empty
     /// commitment are no-token shares.
@@ -1084,6 +1208,9 @@ mod tests {
             bch_coinbase: None,
             pool_merge_mining: None,
             share_version: ShareVersion::CURRENT,
+            asert_bits: CompactTarget::default(),
+            wanted_bits: CompactTarget::default(),
+            band_cap: 0,
         };
 
         let cloned = commitment.clone();
