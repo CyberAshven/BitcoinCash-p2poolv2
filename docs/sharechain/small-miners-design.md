@@ -661,6 +661,20 @@ The same study also covers:
   - the relay latency and stale-rate effect of weak-share traffic, measured
     in the network simulator (`p2poolv2_netsim`) beside upstream's limit of
     about 1,000 miners at 10-second shares.
+- **Scaling propagation instead of capping it.** Each idea is measured in
+  `p2poolv2_netsim` before and after, against upstream's estimate of about 1,000
+  miners at 10-second shares:
+  - **compact coinbase:** send no payouts a receiver can rebuild from the
+    window, so a share shrinks from up to 1 MB to about 1 KB (Xthinner's and
+    Graphene's idea applied to shares);
+  - **relay before full validation:** forward a share once its proof of work and
+    header check out, and validate its body after (compact blocks'
+    high-bandwidth mode);
+  - **fewer hops:** more direct peer connections, so a share reaches most nodes
+    in one or two hops;
+  - **an uncle cap that follows demand:** like ABLA, bounded by what sync can
+    carry, instead of a fixed 3;
+  - **the dynamic share period:** following the measured uncle rate.
 - **Tokens and SAFA.**
   - whether a weak share's proof of work can win and claim merge-mined tokens as a share's can;
   - how token jobs' 3,072-byte coinbase behaves with the draw and with weak shares;
