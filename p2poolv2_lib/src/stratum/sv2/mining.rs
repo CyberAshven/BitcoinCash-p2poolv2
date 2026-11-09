@@ -868,7 +868,7 @@ impl MiningChannels {
                 .difficulty_adjuster
                 .set_share_difficulty_ceiling(job_share_difficulty_ceiling(
                     self.ctx.mode,
-                    prepared.bits(),
+                    prepared.session_ceiling_bits(None),
                 ));
         }
         let channel_target =
@@ -1045,10 +1045,8 @@ impl MiningChannels {
                 )),
             )
         };
-        let ceiling = job_share_difficulty_ceiling(
-            self.ctx.mode,
-            job_band.map_or(prepared.bits(), |band| band.bits),
-        );
+        let ceiling =
+            job_share_difficulty_ceiling(self.ctx.mode, prepared.session_ceiling_bits(job_band));
         let mut frames = Vec::with_capacity(3);
         if let Some(lowered) = channel
             .session
@@ -1423,6 +1421,8 @@ fn tlv_value(mut trailing: &[u8], extension_type: u16, field_type: u8) -> Option
 /// Share difficulty ceiling of a job whose shares are mined at `share_bits`:
 /// the session difficulty a channel may have without losing share-chain
 /// shares (see [`share_difficulty_ceiling`]). It follows each job's own bits,
+/// or for a Bitcoin Cash job at the minimum its weak target
+/// (`PreparedNotifyParams::session_ceiling_bits`),
 /// a heavier one's on Bitcoin Cash. `None` in Hydrapool mode, which has no
 /// share chain.
 fn job_share_difficulty_ceiling(mode: PoolMode, share_bits: CompactTarget) -> Option<u64> {

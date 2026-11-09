@@ -7,7 +7,9 @@ use super::merge_tokens::MinerTokenJob;
 use crate::accounting::payout::payout_tree::PayoutTree;
 use crate::shares::share_block::ShareTransaction;
 use crate::shares::share_commitment::ShareCommitment;
+use crate::shares::weak::WeakShare;
 use bitcoin::BlockHash;
+use bitcoin::Target;
 use bitcoin::pow::CompactTarget;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -70,6 +72,15 @@ pub struct JobDetails {
     /// The exact payout tree committed by this job's coinbase, retained so
     /// a found block's funds can be recovered before share validation.
     pub payout_tree: Option<Arc<PayoutTree>>,
+    /// The weak shares a share found on this job carries, which its
+    /// commitment's weak root covers. Shared by every job on one notify;
+    /// empty on Bitcoin and for declared jobs.
+    pub weak_shares: Arc<[WeakShare]>,
+    /// The weak target of a Bitcoin Cash job at the minimum
+    /// (`shares::weak::parent_weak_target`): a submission meeting it but not
+    /// the share target becomes a weak share. `None` for heavier jobs,
+    /// declared jobs and on Bitcoin.
+    pub weak_target: Option<Target>,
 }
 
 /// Lock-free job tracker using DashMap for concurrent access.
@@ -144,6 +155,8 @@ impl JobTracker {
                 share_transactions: Arc::from([]),
                 merge_tokens: None,
                 payout_tree: None,
+                weak_shares: Arc::from([]),
+                weak_target: None,
             },
         );
         job_id

@@ -79,6 +79,7 @@ fn build_test_handler_parts(
         inbound_failures_total: 0,
         responses_dropped_total: 0,
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
     (handler, response_worker_rx)
 }

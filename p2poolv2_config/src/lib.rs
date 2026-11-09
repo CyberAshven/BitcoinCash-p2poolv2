@@ -1554,6 +1554,12 @@ pub struct SimConfig {
     /// so peers can be seen refusing the shares.
     #[serde(default)]
     pub share_multiple_ignores_cap: bool,
+    /// Bitcoin Cash: on a job at the minimum, pace proofs by the job's weak
+    /// target and send those short of the share target to the node as weak
+    /// shares, as a real miner capped at the weak difficulty does. Off by
+    /// default, so other sim runs keep pacing by the share target.
+    #[serde(default)]
+    pub weak_shares: bool,
 }
 
 /// Config for p2poolv2 nodes

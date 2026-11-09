@@ -13,13 +13,21 @@
 //! is independently a bitcoin block with probability `1/block_to_share_ratio`
 //! (a Bernoulli draw).
 //!
+//! With `[sim] weak_shares`, a miner on a job at the minimum paces by the
+//! job's weak target instead (`shares::weak`), as a real miner whose session
+//! difficulty is capped at the weak difficulty submits: each proof is a full
+//! share with probability `T_share / T_weak`, else a weak share, which goes to
+//! the node's weak share worker.
+//!
 //! Only compiled under the `sim` feature. See docs/simulation/load-test-plan.md.
 
 use crate::address::share_owner::ShareOwner;
 use crate::config::SimConfig;
+use crate::node::weak_share_worker::{WeakShareEvent, WeakShareEventSender};
 use crate::shares::band::{BAND_CAP_MAX, BAND_CAP_UNIT, JobBand, heavier_job_band};
+use crate::shares::weak_pool::WeakShareSource;
 use crate::sim::blockfind::submit_sim_block;
-use crate::sim::share::{SimShareParams, build_sim_emission};
+use crate::sim::share::{SimShareParams, build_sim_emission, weak_share_from_emission};
 use crate::sim::timing::{
     block_find_probability, difficulty_from_bits, is_block_find, mean_share_interval_secs,
     sample_exponential_secs,
@@ -27,6 +35,7 @@ use crate::sim::timing::{
 use crate::stratum::emission::EmissionSender;
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use crate::stratum::work::tracker::{JobTracker, start_tracker_actor};
+use bitcoin::Target;
 use bitcoindrpc::BitcoindRpcClient;
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use rand::rngs::StdRng;
@@ -48,6 +57,9 @@ pub struct SimEmitter {
     /// Private job tracker: the emitter inserts a job and immediately reads it
     /// back, so it does not share the stratum server's tracker.
     tracker: Arc<JobTracker>,
+    /// The node's weak share worker, where this miner's weak shares go with
+    /// `[sim] weak_shares`. `None` makes no weak shares.
+    weak_share_tx: Option<WeakShareEventSender>,
 }
 
 impl SimEmitter {
@@ -72,7 +84,15 @@ impl SimEmitter {
             config,
             bitcoindrpc,
             tracker: start_tracker_actor(),
+            weak_share_tx: None,
         }
+    }
+
+    /// Send this miner's weak shares to `weak_share_tx`, the node's weak
+    /// share worker, when `[sim] weak_shares` is set.
+    pub fn with_weak_share_sender(mut self, weak_share_tx: Option<WeakShareEventSender>) -> Self {
+        self.weak_share_tx = weak_share_tx.filter(|_| self.config.weak_shares);
+        self
     }
 
     /// The band of this miner's next job on `prepared`: with
@@ -94,6 +114,49 @@ impl SimEmitter {
         })
     }
 
+    /// The weak target this miner's proofs are paced by on `prepared`: the
+    /// template's, for a job at the minimum on a node taking weak shares,
+    /// when it is easier than the share target. A heavier miner the band cap
+    /// holds at the minimum is at the minimum too. `None` paces by the job's
+    /// own target.
+    fn weak_target(&self, prepared: &PreparedNotifyParams) -> Option<Target> {
+        let at_minimum = self
+            .job_band(prepared)
+            .is_none_or(|band| band.bits == prepared.bits());
+        if self.weak_share_tx.is_none() || !at_minimum {
+            return None;
+        }
+        prepared
+            .weak_target()
+            .filter(|weak_target| *weak_target > Target::from_compact(prepared.bits()))
+    }
+
+    /// The difficulty this miner's next proof is paced by on `prepared`: its
+    /// weak target's with weak shares, else its job's own target's.
+    fn pacing_difficulty(&self, prepared: &PreparedNotifyParams) -> f64 {
+        match self.weak_target(prepared) {
+            Some(weak_target) => difficulty_from_bits(weak_target.to_compact_lossy()),
+            None => difficulty_from_bits(
+                self.job_band(prepared)
+                    .map_or(prepared.bits(), |band| band.bits),
+            ),
+        }
+    }
+
+    /// Whether this proof on `prepared` met the share target: always without
+    /// weak shares, else with probability `T_share / T_weak`, the share of
+    /// weak-target hashes that also meet the share target.
+    fn proof_is_full_share(&self, prepared: &PreparedNotifyParams, rng: &mut StdRng) -> bool {
+        match self.weak_target(prepared) {
+            Some(weak_target) => {
+                let share_difficulty = difficulty_from_bits(prepared.bits());
+                let weak_difficulty = difficulty_from_bits(weak_target.to_compact_lossy());
+                rng.random::<f64>() < weak_difficulty / share_difficulty
+            }
+            None => true,
+        }
+    }
+
     /// Run the emission loop until the notify channel or emissions channel
     /// closes. Intended to be raced against a shutdown signal by the caller.
     pub async fn run(mut self) {
@@ -105,14 +168,19 @@ impl SimEmitter {
         // emission ∝ hashrate) and the current ASERT pool difficulty (→ trace
         // whether ASERT converges to a steady state).
         let mut emitted: u64 = 0;
+        let mut weak_emitted: u64 = 0;
         let mut last_stats = std::time::Instant::now();
         const STATS_INTERVAL: Duration = Duration::from_secs(15);
 
         // The configured spelling: on Bitcoin Cash the parsed address would
         // print in Bitcoin's base58 form rather than as the CashAddr.
         info!(
-            "Sim emitter started: address={}, hashrate={} h/s, block:share=1:{}, seed={}",
-            self.config.miner_address, self.config.hashrate, self.config.block_to_share_ratio, seed
+            "Sim emitter started: address={}, hashrate={} h/s, block:share=1:{}, seed={}, weak_shares={}",
+            self.config.miner_address,
+            self.config.hashrate,
+            self.config.block_to_share_ratio,
+            seed,
+            self.weak_share_tx.is_some()
         );
 
         loop {
@@ -132,11 +200,9 @@ impl SimEmitter {
 
             // Pace: sleep an exponential interval sized by the current ASERT
             // pool difficulty and this miner's modeled hashrate.
-            //* A heavier miner paces by its own job's target.
-            let difficulty = difficulty_from_bits(
-                self.job_band(&prepared)
-                    .map_or(prepared.bits(), |band| band.bits),
-            );
+            //* A heavier miner paces by its own job's target, and a miner
+            //* making weak shares by its job's weak target.
+            let difficulty = self.pacing_difficulty(&prepared);
             let mean = mean_share_interval_secs(difficulty, self.config.hashrate);
             let secs = sample_exponential_secs(mean, &mut rng);
             tokio::time::sleep(Duration::from_secs_f64(secs.max(0.0))).await;
@@ -157,6 +223,7 @@ impl SimEmitter {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs() as u32)
                 .unwrap_or(0);
+            let is_full_share = self.proof_is_full_share(&prepared, &mut rng);
 
             let params = SimShareParams {
                 prepared: &prepared,
@@ -171,6 +238,22 @@ impl SimEmitter {
             };
 
             match build_sim_emission(params) {
+                Ok(built) if !is_full_share => {
+                    //* A proof short of the share target is a weak share.
+                    if let (Some(weak_share_tx), Some(weak_share)) = (
+                        &self.weak_share_tx,
+                        weak_share_from_emission(&built.emission),
+                    ) && weak_share_tx
+                        .send(WeakShareEvent {
+                            weak_share,
+                            source: WeakShareSource::Local,
+                        })
+                        .await
+                        .is_ok()
+                    {
+                        weak_emitted += 1;
+                    }
+                }
                 Ok(built) => {
                     // Keep what a block-find needs before the emission is moved.
                     let is_block = is_block_find(p_block, &mut rng);
@@ -204,17 +287,18 @@ impl SimEmitter {
                     }
 
                     emitted += 1;
-                    if last_stats.elapsed() >= STATS_INTERVAL {
-                        info!(
-                            "sim stats: emitted={emitted} pool_difficulty={:.1} hashrate={} job_difficulty={difficulty:.1} band_cap={}",
-                            difficulty_from_bits(prepared.bits()),
-                            self.config.hashrate,
-                            prepared.band_cap()
-                        );
-                        last_stats = std::time::Instant::now();
-                    }
                 }
                 Err(e) => warn!("Sim emitter: failed to build emission: {e}"),
+            }
+            if last_stats.elapsed() >= STATS_INTERVAL {
+                info!(
+                    "sim stats: emitted={emitted} weak_emitted={weak_emitted} pool_difficulty={:.1} hashrate={} job_difficulty={difficulty:.1} band_cap={} weak_ratio={}",
+                    difficulty_from_bits(prepared.bits()),
+                    self.config.hashrate,
+                    prepared.band_cap(),
+                    prepared.weak_ratio()
+                );
+                last_stats = std::time::Instant::now();
             }
         }
 

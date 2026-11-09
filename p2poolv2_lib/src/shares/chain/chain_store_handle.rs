@@ -16,6 +16,7 @@ use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{
     ShareBlock, ShareHeader, ShareTransaction, is_terminal_blockhash,
 };
+use crate::shares::weak::WeakSummary;
 use crate::store::block_tx_metadata::{BlockMetadata, Status};
 use crate::store::dag_store::{BlockValidSearch, ShareDag, UncleInfo};
 use crate::store::found_block::FoundBlock;
@@ -314,6 +315,16 @@ impl ChainStoreHandle {
             )));
         }
         Ok(transactions)
+    }
+
+    /// The weak share summaries (`shares::weak::WeakSummary`) of the given
+    /// shares, keyed by share. A share carrying no weak shares, or held
+    /// without its body, has none.
+    pub fn get_weak_summaries(
+        &self,
+        share_hashes: &[BlockHash],
+    ) -> Result<HashMap<BlockHash, WeakSummary>, StoreError> {
+        self.store_handle.store().get_weak_summaries(share_hashes)
     }
 
     /// Get shares at a specific height.
@@ -1222,6 +1233,7 @@ mockall::mock! {
         pub fn first_existing_share_header(&self, blockhashes: &[BlockHash]) -> Option<BlockHash>;
         pub fn get_share(&self, share_hash: &BlockHash) -> Option<ShareBlock>;
         pub fn get_shares_at_height(&self, height: u32) -> Result<HashMap<BlockHash, ShareBlock>, StoreError>;
+        pub fn get_weak_summaries(&self, share_hashes: &[BlockHash]) -> Result<HashMap<BlockHash, WeakSummary>, StoreError>;
         pub fn get_share_headers(&self, share_hashes: &[BlockHash]) -> Result<Vec<(BlockHash, ShareHeader)>, StoreError>;
         pub fn get_share_header(&self, share_hash: &BlockHash) -> Result<ShareHeader, StoreError>;
         pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;

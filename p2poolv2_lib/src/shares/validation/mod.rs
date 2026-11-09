@@ -5,6 +5,11 @@
 mod bitcoin_block_validation;
 #[cfg(test)]
 mod version_vote_tests;
+mod weak_shares;
+
+use crate::shares::weak::WeakShare;
+pub use weak_shares::WeakPayoutCache;
+use weak_shares::{check_weak_shares_match_header, check_weak_shares_size};
 
 use super::share_block::{MAX_POOL_TARGET, ShareHeader};
 use crate::accounting::CoinbasePayouts;
@@ -439,6 +444,35 @@ fn bitcoin_coinbase_value(coinbase: &Transaction) -> Result<u64, ValidationError
         })
 }
 
+/// The verdict on a share, or a weak share, whose PPLNS window anchored at
+/// its parent could not be resolved: none, a retry, or invalid.
+fn window_error_verdict(error: WindowError) -> ValidationError {
+    match error {
+        // The anchor is below the confirmed entries this node's window
+        // retains, and the window's oldest entry only moves forward
+        // with the confirmed tip, so no retry can bring it back into
+        // range. Drop the share without a verdict.
+        WindowError::InsufficientEntries { .. } | WindowError::RightsHistoryTooShallow { .. } => {
+            ValidationError::unresolvable(format!(
+                "Cannot resolve PPLNS window from prev_share_blockhash: {error}"
+            ))
+        }
+        // A store read failed, the ancestry is not stored yet, or a
+        // BCH header the window places work with has not arrived;
+        // each may resolve later.
+        WindowError::ReadFailure(_) | WindowError::UnknownBchPrev { .. } => {
+            ValidationError::recoverable(format!(
+                "Failed to resolve PPLNS window from prev_share_blockhash: {error}"
+            ))
+        }
+        // The share builds on a BCH chain none of its window's work
+        // is on, so its coinbase can pay no one.
+        WindowError::NothingEligible { .. } => ValidationError::consensus(format!(
+            "Share pays no one on its Bitcoin Cash chain: {error}"
+        )),
+    }
+}
+
 /// Check whether a block is in the PPLNS zone (needing full
 /// validation) or the prune zone (PoW-only validation).
 ///
@@ -688,6 +722,19 @@ pub trait ShareValidator {
     /// The rules a Bitcoin Cash header from a peer must pass, or `None` on
     /// a Bitcoin node, which ignores carried headers.
     fn bch_header_rules(&self) -> Option<BchHeaderRules>;
+
+    /// Check a weak share (`shares::weak`) before the weak pool keeps or
+    /// relays it: every rule but the carrier's, its header rules and its
+    /// coinbase paying the PPLNS window anchored at its parent
+    /// (`DefaultShareValidator::validate_relayed_weak_share`). `cache` keeps
+    /// the window's payouts between weak shares on one template.
+    fn validate_weak_share(
+        &self,
+        weak_share: &WeakShare,
+        chain_store_handle: &ChainStoreHandle,
+        pplns_window: &RwLock<PplnsWindow>,
+        cache: &mut WeakPayoutCache,
+    ) -> Result<(), ValidationError>;
 }
 
 /// Production implementation of ShareValidator.
@@ -1590,29 +1637,7 @@ impl DefaultShareValidator {
                 paying_block,
                 chain_store_handle,
             )
-            .map_err(|error| match error {
-                // The anchor is below the confirmed entries this node's window
-                // retains, and the window's oldest entry only moves forward
-                // with the confirmed tip, so no retry can bring it back into
-                // range. Drop the share without a verdict.
-                WindowError::InsufficientEntries { .. }
-                | WindowError::RightsHistoryTooShallow { .. } => ValidationError::unresolvable(
-                    format!("Cannot resolve PPLNS window from prev_share_blockhash: {error}"),
-                ),
-                // A store read failed, the ancestry is not stored yet, or a
-                // BCH header the window places work with has not arrived;
-                // each may resolve later.
-                WindowError::ReadFailure(_) | WindowError::UnknownBchPrev { .. } => {
-                    ValidationError::recoverable(format!(
-                        "Failed to resolve PPLNS window from prev_share_blockhash: {error}"
-                    ))
-                }
-                // The share builds on a BCH chain none of its window's work
-                // is on, so its coinbase can pay no one.
-                WindowError::NothingEligible { .. } => ValidationError::consensus(format!(
-                    "Share pays no one on its Bitcoin Cash chain: {error}"
-                )),
-            })?;
+            .map_err(window_error_verdict)?;
 
         // The total paid out is the bitcoin coinbase's own output total. The
         // admission gate has matched the coinbase to the proof of work, so this
@@ -1628,80 +1653,12 @@ impl DefaultShareValidator {
             split,
         )?;
         let expected_commitment_hash = ShareCommitment::from_share_block(share).hash();
-
-        // The aux flags, extranonce, nanosecond timestamp, pool signature and
-        // witness commitment are read back from the coinbase itself. The
-        // admission gate has already matched its txid to the proof of work,
-        // so these are the values the miner hashed; rebuilding with them and
-        // comparing the whole coinbase leaves only the payouts, the height
-        // and the commitment to disagree. The pool signature in particular is
-        // a tag, not consensus: nodes configured with different signatures
-        // must still agree on validity.
-        //
-        // Bitcoin Cash puts the merge-mining commitment at output 0: on a
-        // pool-built share the root its node built for its miner's token
-        // leaves (`pool_merge_mining`) or the exact empty one, the declared
-        // one otherwise, so a peer rebuilds it byte for byte. Only its format
-        // is checked: no peer knows or needs the tokens behind a root, so
-        // share validity never depends on them. A Bitcoin Cash coinbase may
-        // not carry a SegWit witness commitment. A declared Bitcoin Cash
-        // coinbase has the declarator's scriptSig
-        // prefix followed by the 12-byte extranonce, so its extranonce is
-        // what follows the prefix in the coinbase the miner hashed.
-        let reconstructed_coinbase = if let Some(declared) = &share.header.bch_coinbase {
-            if self.chain != Chain::BitcoinCash {
-                return Err(ValidationError::consensus(
-                    "Declared BCH coinbase on Bitcoin chain",
-                ));
-            }
-            let script_sig = share
-                .bitcoin_coinbase
-                .input
-                .first()
-                .map(|input| input.script_sig.as_bytes())
-                .unwrap_or_default();
-            let extranonce = script_sig.get(declared.prefix.len()..).ok_or_else(|| {
-                ValidationError::consensus("Declared BCH coinbase is shorter than its prefix")
-            })?;
-            build_declared_coinbase(
-                &expected_payouts,
-                share.header.bitcoin_height,
-                expected_commitment_hash,
-                extranonce,
-                declared,
-            )
-        } else {
-            let fields =
-                parse_bitcoin_coinbase_fields(&share.bitcoin_coinbase).map_err(|error| {
-                    ValidationError::consensus(format!("Malformed bitcoin coinbase: {error}"))
-                })?;
-            self.validate_no_bch_witness_commitment(&fields)?;
-            if self.chain != Chain::BitcoinCash && share.header.pool_merge_mining.is_some() {
-                return Err(ValidationError::consensus(
-                    "Pool-built token root on Bitcoin chain",
-                ));
-            }
-            share
-                .header
-                .check_pool_merge_mining()
-                .map_err(ValidationError::consensus)?;
-            let merge_mining =
-                (self.chain == Chain::BitcoinCash).then(|| share.header.merge_mining_commitment());
-            build_coinbase(
-                Version::TWO,
-                &expected_payouts.outputs,
-                share.header.bitcoin_height as i64,
-                fields.aux_flags,
-                fields.witness_commitment.as_ref(),
-                &fields.pool_signature,
-                Some(expected_commitment_hash),
-                fields.nsecs,
-                Some(&fields.extranonce),
-                merge_mining,
-                expected_payouts.tree_output().as_ref(),
-            )
-        }
-        .map_err(|error| ValidationError::consensus(format!("Error building coinbase {error}")))?;
+        let reconstructed_coinbase = self.rebuild_bitcoin_coinbase(
+            &share.header,
+            &share.bitcoin_coinbase,
+            &expected_payouts,
+            expected_commitment_hash,
+        )?;
 
         if reconstructed_coinbase != share.bitcoin_coinbase {
             return Err(ValidationError::consensus(
@@ -1733,6 +1690,95 @@ impl DefaultShareValidator {
             );
             Ok(())
         }
+    }
+
+    /// Rebuild the Bitcoin Cash or Bitcoin coinbase a share header implies
+    /// for `expected_payouts` and `expected_commitment_hash`, taking from
+    /// `carried_coinbase` only what the header cannot give: its scriptSig's
+    /// aux flags, extranonce, nanosecond timestamp and pool signature, and on
+    /// Bitcoin its witness commitment.
+    ///
+    /// A full share passes the coinbase it carries and compares the whole
+    /// rebuild with it. A weak share carries only its scriptSig, so it passes
+    /// a coinbase with that one input and no outputs and checks the rebuild's
+    /// txid against its header's merkle root instead (`validate_weak_share`).
+    fn rebuild_bitcoin_coinbase(
+        &self,
+        header: &ShareHeader,
+        carried_coinbase: &Transaction,
+        expected_payouts: &CoinbasePayouts,
+        expected_commitment_hash: bitcoin::hashes::sha256::Hash,
+    ) -> Result<Transaction, ValidationError> {
+        // The aux flags, extranonce, nanosecond timestamp, pool signature and
+        // witness commitment are read back from the coinbase itself. The
+        // admission gate has already matched its txid to the proof of work,
+        // so these are the values the miner hashed; rebuilding with them and
+        // comparing the whole coinbase leaves only the payouts, the height
+        // and the commitment to disagree. The pool signature in particular is
+        // a tag, not consensus: nodes configured with different signatures
+        // must still agree on validity.
+        //
+        // Bitcoin Cash puts the merge-mining commitment at output 0: on a
+        // pool-built share the root its node built for its miner's token
+        // leaves (`pool_merge_mining`) or the exact empty one, the declared
+        // one otherwise, so a peer rebuilds it byte for byte. Only its format
+        // is checked: no peer knows or needs the tokens behind a root, so
+        // share validity never depends on them. A Bitcoin Cash coinbase may
+        // not carry a SegWit witness commitment. A declared Bitcoin Cash
+        // coinbase has the declarator's scriptSig
+        // prefix followed by the 12-byte extranonce, so its extranonce is
+        // what follows the prefix in the coinbase the miner hashed.
+        if let Some(declared) = &header.bch_coinbase {
+            if self.chain != Chain::BitcoinCash {
+                return Err(ValidationError::consensus(
+                    "Declared BCH coinbase on Bitcoin chain",
+                ));
+            }
+            let script_sig = carried_coinbase
+                .input
+                .first()
+                .map(|input| input.script_sig.as_bytes())
+                .unwrap_or_default();
+            let extranonce = script_sig.get(declared.prefix.len()..).ok_or_else(|| {
+                ValidationError::consensus("Declared BCH coinbase is shorter than its prefix")
+            })?;
+            build_declared_coinbase(
+                expected_payouts,
+                header.bitcoin_height,
+                expected_commitment_hash,
+                extranonce,
+                declared,
+            )
+        } else {
+            let fields = parse_bitcoin_coinbase_fields(carried_coinbase).map_err(|error| {
+                ValidationError::consensus(format!("Malformed bitcoin coinbase: {error}"))
+            })?;
+            self.validate_no_bch_witness_commitment(&fields)?;
+            if self.chain != Chain::BitcoinCash && header.pool_merge_mining.is_some() {
+                return Err(ValidationError::consensus(
+                    "Pool-built token root on Bitcoin chain",
+                ));
+            }
+            header
+                .check_pool_merge_mining()
+                .map_err(ValidationError::consensus)?;
+            let merge_mining =
+                (self.chain == Chain::BitcoinCash).then(|| header.merge_mining_commitment());
+            build_coinbase(
+                Version::TWO,
+                &expected_payouts.outputs,
+                header.bitcoin_height as i64,
+                fields.aux_flags,
+                fields.witness_commitment.as_ref(),
+                &fields.pool_signature,
+                Some(expected_commitment_hash),
+                fields.nsecs,
+                Some(&fields.extranonce),
+                merge_mining,
+                expected_payouts.tree_output().as_ref(),
+            )
+        }
+        .map_err(|error| ValidationError::consensus(format!("Error building coinbase {error}")))
     }
 
     /// Build the expected payout outputs from share header donation/fee and PPLNS distribution.
@@ -1852,12 +1898,13 @@ impl ShareValidator for DefaultShareValidator {
                 "Bitcoin coinbase carries a witness; it is carried as hashed, without one",
             ));
         }
-        Ok(())
+        check_weak_shares_match_header(share)
     }
 
     fn validate_block_size(&self, share: &ShareBlock) -> Result<(), ValidationError> {
         let transactions_size: usize = share.transactions.iter().map(|tx| tx.total_size()).sum();
         let coinbase_size = share.bitcoin_coinbase.total_size();
+        check_weak_shares_size(&share.weak_shares)?;
         if self.chain == Chain::BitcoinCash {
             if transactions_size > BLOCK_TXS_SIZE_LIMIT as usize {
                 return Err(ValidationError::consensus(format!(
@@ -1886,6 +1933,16 @@ impl ShareValidator for DefaultShareValidator {
 
     fn bch_header_rules(&self) -> Option<BchHeaderRules> {
         self.bch_header_rules
+    }
+
+    fn validate_weak_share(
+        &self,
+        weak_share: &WeakShare,
+        chain_store_handle: &ChainStoreHandle,
+        pplns_window: &RwLock<PplnsWindow>,
+        cache: &mut WeakPayoutCache,
+    ) -> Result<(), ValidationError> {
+        self.validate_relayed_weak_share(weak_share, chain_store_handle, pplns_window, cache)
     }
 
     fn validate_with_pool_difficulty(
@@ -2009,6 +2066,7 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_uncle_bodies_present(share, chain_store_handle)?;
         self.validate_block_size(share)?;
         self.validate_transaction_count(share)?;
+        self.validate_carried_weak_headers(share, chain_store_handle)?;
         self.validate_share_transactions(share, chain_store_handle)
     }
 
@@ -2100,7 +2158,8 @@ impl ShareValidator for DefaultShareValidator {
         pplns_window: Arc<RwLock<PplnsWindow>>,
     ) -> Result<(), ValidationError> {
         self.validate_timestamp(share, chain_store_handle, self.time_provider.as_ref())?;
-        self.validate_bitcoin_coinbase(share, chain_store_handle, pplns_window)?;
+        self.validate_bitcoin_coinbase(share, chain_store_handle, Arc::clone(&pplns_window))?;
+        self.validate_carried_weak_coinbases(share, chain_store_handle, &pplns_window)?;
         self.validate_prevouts(share, chain_store_handle)
     }
 
@@ -2262,6 +2321,14 @@ mockall::mock! {
         fn pool_difficulty(&self) -> &PoolDifficulty;
 
         fn bch_header_rules(&self) -> Option<BchHeaderRules>;
+
+        fn validate_weak_share(
+            &self,
+            weak_share: &WeakShare,
+            chain_store_handle: &ChainStoreHandle,
+            pplns_window: &RwLock<PplnsWindow>,
+            cache: &mut WeakPayoutCache,
+        ) -> Result<(), ValidationError>;
     }
 }
 

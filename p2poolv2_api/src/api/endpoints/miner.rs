@@ -76,6 +76,8 @@ pub struct MinerResponse {
     pub share_count: usize,
     /// Uncles this address mined that window shares include.
     pub uncle_count: usize,
+    /// Weak shares this address mined that window shares carry.
+    pub weak_share_count: usize,
     /// Sum of this address's weight in the window.
     pub weight: String,
     /// `share_count` over the window's share count: its share of the window.
@@ -520,6 +522,7 @@ fn build_response(
         },
         share_count: miner_credits.share_count,
         uncle_count: miner_credits.uncle_count,
+        weak_share_count: miner_credits.weak_share_count,
         weight: miner_credits.weight.to_string(),
         share_fraction: fraction(
             miner_credits.share_count as u128,

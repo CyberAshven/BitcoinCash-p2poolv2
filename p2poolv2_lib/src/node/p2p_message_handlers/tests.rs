@@ -75,6 +75,7 @@ async fn test_handle_request_getheaders() {
         block_receiver_handle: block_receiver_handle.clone(),
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
 
     let result = handle_request(ctx).await;
@@ -130,6 +131,7 @@ async fn test_handle_get_share_blocks() {
         block_receiver_handle: block_receiver_handle.clone(),
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
 
     let result = handle_request(ctx).await;
@@ -190,6 +192,7 @@ async fn test_handle_request_inventory_for_blocks() {
         block_receiver_handle: block_receiver_handle.clone(),
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
 
     let result = handle_request(ctx).await;
@@ -245,6 +248,7 @@ async fn test_handle_request_inventory_for_txns() {
         block_receiver_handle: block_receiver_handle.clone(),
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
 
     let result = handle_request(ctx).await;
@@ -282,6 +286,7 @@ async fn test_handle_request_not_found() {
         block_receiver_handle: block_receiver_handle.clone(),
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
 
     let result = handle_request(ctx).await;
@@ -326,6 +331,7 @@ async fn test_handle_request_get_data_for_block_confirmed() {
         block_receiver_handle: block_receiver_handle.clone(),
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
 
     let result = handle_request(ctx).await;
@@ -373,6 +379,7 @@ async fn test_handle_request_get_data_for_block_not_found() {
         block_receiver_handle: block_receiver_handle.clone(),
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
 
     let result = handle_request(ctx).await;
@@ -415,6 +422,7 @@ async fn test_handle_request_get_data_for_txn() {
         block_receiver_handle: block_receiver_handle.clone(),
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
 
     let result = handle_request(ctx).await;
@@ -446,6 +454,7 @@ async fn test_handle_request_transaction() {
         block_receiver_handle: block_receiver_handle.clone(),
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
 
     let result = handle_request(ctx).await;
@@ -491,6 +500,7 @@ async fn test_handle_request_share_headers() {
         block_receiver_handle: block_receiver_handle.clone(),
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
 
     let result = handle_request(ctx).await;
@@ -534,6 +544,7 @@ async fn test_handle_request_share_block_sends_ack_and_processes() {
         block_receiver_handle,
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
 
     let result = handle_request(ctx).await;
@@ -599,6 +610,7 @@ async fn test_handle_request_share_block_missing_parent_sends_getheaders() {
         block_receiver_handle,
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
+        weak_share_tx: None,
     };
 
     let result = handle_request(ctx).await;

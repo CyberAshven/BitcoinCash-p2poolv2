@@ -36,6 +36,7 @@ use crate::node::request_response_handler::block_fetcher::{
 use crate::node::request_sender::RequestSender;
 use crate::node::response_worker::{ResponseWorker, create_response_worker_channel};
 use crate::node::validation_worker::{ValidationWorker, create_validation_channel};
+use crate::node::weak_share_worker::{WeakShareNetwork, WeakShareWorker};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::pool_difficulty::PoolDifficulty;
@@ -51,6 +52,7 @@ use crate::shares::transaction_pool::{
     TransactionSource,
 };
 use crate::shares::validation::{DefaultShareValidator, ShareValidator};
+use crate::shares::weak_pool::{RelayWeakShare, WeakRelayReceiver};
 use crate::stratum::emission::EmissionReceiver;
 use crate::stratum::work::notify::NotifySender;
 use bitcoin::BlockHash;
@@ -105,6 +107,7 @@ impl NodeHandle {
         notify_tx: NotifySender,
         pplns_window: Arc<RwLock<PplnsWindow>>,
         share_transactions: Option<(ShareTransactionPool, RelayReceiver)>,
+        weak_shares: Option<WeakShareNetwork>,
     ) -> Result<(Self, oneshot::Receiver<()>), Box<dyn Error + Send + Sync>> {
         let (command_tx, command_rx) = mpsc::channel::<Command>(32);
         let (share_transaction_pool, relay_rx) = match share_transactions {
@@ -134,6 +137,7 @@ impl NodeHandle {
             pplns_window,
             share_transaction_pool.clone(),
             relay_rx,
+            weak_shares,
         )
         .unwrap();
 
@@ -416,6 +420,17 @@ struct NodeActor {
     /// Bitcoin Cash: share transactions the pool accepted, to send to peers.
     /// `None` on Bitcoin, or once the pool is gone.
     share_transaction_relay: Option<RelayReceiver>,
+    /// Bitcoin Cash P2Pool: weak shares the weak pool accepted, to send to
+    /// peers. `None` on Bitcoin, in Hydrapool mode, or once the pool is gone.
+    weak_share_relay: Option<WeakRelayReceiver>,
+}
+
+/// The next weak share to relay, or never when there is no relay.
+async fn next_relay_weak_share(relay: &mut Option<WeakRelayReceiver>) -> Option<RelayWeakShare> {
+    match relay {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Start the payout tree executor of a Bitcoin Cash share-chain node and
@@ -467,6 +482,7 @@ impl NodeActor {
         pplns_window: Arc<RwLock<PplnsWindow>>,
         share_transaction_pool: Option<ShareTransactionPool>,
         share_transaction_relay: Option<RelayReceiver>,
+        weak_shares: Option<WeakShareNetwork>,
     ) -> Result<(Self, oneshot::Receiver<()>), Box<dyn Error>> {
         // Create organise channel
         let (organise_tx, organise_rx) = create_organise_channel();
@@ -673,6 +689,24 @@ impl NodeActor {
             .id();
         worker_names.insert(emission_worker_id, "Emission worker");
 
+        // Bitcoin Cash P2Pool: check weak shares from stratum and peers, pool
+        // the ones that pass and relay them (`node::weak_share_worker`).
+        let mut node = node;
+        let weak_share_relay = weak_shares.map(|network| {
+            node.request_response_handler
+                .set_weak_share_sender(network.events_tx);
+            let weak_share_worker = WeakShareWorker::new(
+                network.events_rx,
+                network.pool,
+                chain_store_handle.clone(),
+                share_validator.clone(),
+                pplns_window.clone(),
+            );
+            let weak_share_worker_id = workers.spawn(weak_share_worker.run()).id();
+            worker_names.insert(weak_share_worker_id, "Weak share worker");
+            network.relay_rx
+        });
+
         let (stopping_tx, stopping_rx) = oneshot::channel();
         Ok((
             Self {
@@ -685,6 +719,7 @@ impl NodeActor {
                 worker_names,
                 last_retry_confirmed_tip: None,
                 share_transaction_relay,
+                weak_share_relay,
             },
             stopping_rx,
         ))
@@ -778,6 +813,13 @@ impl NodeActor {
                         None => self.share_transaction_relay = None,
                     }
                 }
+                relay = next_relay_weak_share(&mut self.weak_share_relay),
+                    if self.weak_share_relay.is_some() => {
+                    match relay {
+                        Some(relay) => self.on_relay_weak_share(relay),
+                        None => self.weak_share_relay = None,
+                    }
+                }
             }
         };
 
@@ -823,6 +865,23 @@ impl NodeActor {
             relayed += 1;
         }
         debug!("Relayed share transaction {txid} to {relayed} peers");
+    }
+
+    /// Send a weak share the weak pool accepted to every connected peer but
+    /// the one it came from, as a `WeakShare` request each answers with `Ack`.
+    fn on_relay_weak_share(&mut self, relay: RelayWeakShare) {
+        let pow_hash = relay.weak_share.pow_hash();
+        let peers = self.node.connected_peers();
+        let mut relayed = 0;
+        for peer in peers.iter().filter(|peer| Some(**peer) != relay.source) {
+            self.node
+                .swarm
+                .behaviour_mut()
+                .request_response
+                .send_request(peer, Message::WeakShare(relay.weak_share.clone()));
+            relayed += 1;
+        }
+        debug!("Relayed weak share {pow_hash} to {relayed} peers");
     }
 
     /// Execute one outbound swarm operation. All calls are synchronous swarm

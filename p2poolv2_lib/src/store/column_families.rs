@@ -29,6 +29,8 @@ pub enum ColumnFamily {
     PayoutTrees,
     BchHeaders,
     BchBestChain,
+    WeakShares,
+    WeakSummaries,
 }
 
 impl ColumnFamily {
@@ -58,6 +60,8 @@ impl ColumnFamily {
             ColumnFamily::PayoutTrees => "payout_trees",
             ColumnFamily::BchHeaders => "bch_headers",
             ColumnFamily::BchBestChain => "bch_best_chain",
+            ColumnFamily::WeakShares => "weak_shares",
+            ColumnFamily::WeakSummaries => "weak_summaries",
         }
     }
 }

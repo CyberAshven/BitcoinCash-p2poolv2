@@ -117,9 +117,11 @@ This is a share-chain rule (`levels-546x2`); Bitcoin Cash sees only fewer,
 larger coinbase outputs.
 
 A payee's level is the level of its newest credited entry in the window:
-the newest share or uncle paying its locking script, a share counting as
-newer than the uncles it includes. After the window's weights, cuts and
-rounding have given each payee its amount `a` in satoshis:
+the newest share, uncle or weak share paying its locking script, a share
+counting as newer than the uncles and weak shares it carries and its uncles
+as newer than its weak shares. A weak share has its own header's level.
+After the window's weights, cuts and rounding have given each payee its
+amount `a` in satoshis:
 
 1. Every payee whose amount is at least its level, the donation key and
    every fee address (every recipient of a donation or fee cut in the

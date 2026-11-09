@@ -42,7 +42,13 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 ///   (`BCH_PAYOUT_LEVELS_RULE_TAG`). A stored header has no level and would
 ///   not decode, its coinbase was validated without the draw, and the chain
 ///   starts from a new genesis.
-pub const STORE_FORMAT_VERSION: u32 = 4;
+/// - 5 (2026-11-09): Bitcoin Cash share headers carry a weak ratio and
+///   commit the weak shares their bodies carry (`BCH_WEAK_SHARE_RULE_TAG`),
+///   the store keeps those weak shares and a summary of their credit, and
+///   the PPLNS window credits proofs from jobs at the minimum at the weak
+///   work. A stored header has no weak ratio and would not decode, and its
+///   chain was paid under the old credit; the chain starts again.
+pub const STORE_FORMAT_VERSION: u32 = 5;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -243,6 +249,10 @@ impl Store {
             ColumnFamilyDescriptor::new(ColumnFamily::BchHeaders, Self::cf_options_with_bloom());
         let bch_best_chain_cf =
             ColumnFamilyDescriptor::new(ColumnFamily::BchBestChain, RocksDbOptions::default());
+        let weak_shares_cf =
+            ColumnFamilyDescriptor::new(ColumnFamily::WeakShares, RocksDbOptions::default());
+        let weak_summaries_cf =
+            ColumnFamilyDescriptor::new(ColumnFamily::WeakSummaries, RocksDbOptions::default());
 
         let cfs = vec![
             block_metadata_cf_descriptor,
@@ -269,6 +279,8 @@ impl Store {
             payout_trees_cf,
             bch_headers_cf,
             bch_best_chain_cf,
+            weak_shares_cf,
+            weak_summaries_cf,
         ];
 
         // for the db too, we use default options for now
@@ -554,8 +566,9 @@ impl Store {
             "the share-chain store at {} has {found}, and this node writes format \
              {STORE_FORMAT_VERSION}, where chain work counts uncle work, Bitcoin Cash pays \
              the genesis share only as the last resort, and Bitcoin Cash has one share chain \
-             (the main and mini chains merged) whose headers carry a difficulty band and a \
-             payout level, with payees below their level paid by a draw. Delete the store \
+             (the main and mini chains merged) whose headers carry a difficulty band, a \
+             payout level and weak shares, with payees below their level paid by a draw and \
+             every proof from a job at the minimum paid at the weak work. Delete the store \
              directory and restart to resync the share chain from peers.",
             self.path
         )))
@@ -924,6 +937,30 @@ mod tests {
         assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
         assert!(error.to_string().contains("has format 3"), "{error}");
         assert!(error.to_string().contains("payout level"), "{error}");
+    }
+
+    /// A store from before weak shares, format 4, is refused: its headers
+    /// carry no weak ratio, and its shares were credited at their own work.
+    #[test]
+    fn test_store_from_before_weak_shares_is_refused() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        store
+            .db
+            .put_cf(&metadata_cf, STORE_FORMAT_KEY, 4u32.to_le_bytes())
+            .unwrap();
+
+        let error = store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap_err();
+        assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
+        assert!(error.to_string().contains("has format 4"), "{error}");
+        assert!(error.to_string().contains("weak work"), "{error}");
     }
 
     #[test_log::test]

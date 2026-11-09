@@ -225,6 +225,7 @@ An address with nothing in the window gets zero counts and an empty
 | `window`          | `object` | `newest_height`, `oldest_height`, `share_count` and `weight` of the whole window |
 | `share_count`     | `number` | Window shares this address mined                                  |
 | `uncle_count`     | `number` | Uncles this address mined that window shares include              |
+| `weak_share_count` | `number` | Weak shares this address mined that window shares carry (Bitcoin Cash) |
 | `weight`          | `string` | This address's summed weight                                      |
 | `share_fraction`  | `number` | `share_count` / `window.share_count`: its share of the window     |
 | `payout_fraction` | `number` | `weight` / `window.weight`: its fraction of the next block's PPLNS payout |
@@ -267,6 +268,7 @@ curl -u user:password 'http://127.0.0.1:46884/miner?address=qze95tc2dqrnltvxfa5y
   },
   "share_count": 312,
   "uncle_count": 4,
+  "weak_share_count": 0,
   "weight": "15780000",
   "share_fraction": 0.24940047961630696,
   "payout_fraction": 0.25147410358565736,

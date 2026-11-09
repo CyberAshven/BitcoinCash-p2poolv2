@@ -201,6 +201,25 @@ pub fn pow_meets(target: Target, hash: BlockHash) -> bool {
     }
 }
 
+/// Weak-share gate: does `hash` miss `target`? A weak share's hash must miss
+/// its own share target, or it is a full share (`shares::weak`).
+///
+/// Production: `!target.is_met_by(hash)`.
+/// Sim: always returns `true`, as [`pow_meets`] always meets: the sim's
+/// emitter decides which of its synthetic proofs are weak shares.
+#[inline(always)]
+pub fn pow_misses(target: Target, hash: BlockHash) -> bool {
+    #[cfg(feature = "sim")]
+    {
+        let _ = (target, hash);
+        true
+    }
+    #[cfg(not(feature = "sim"))]
+    {
+        !target.is_met_by(hash)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // propagation delay
 // ---------------------------------------------------------------------------
