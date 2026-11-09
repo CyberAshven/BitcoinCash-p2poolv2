@@ -9,6 +9,9 @@ of Shares" do the same arithmetic for Bitcoin; this page redoes it for BCH.
 
 The rules themselves are in
 [architecture/payout-distribution.md](architecture/payout-distribution.md).
+A proposed redesign that replaces main and mini with one chain, a difficulty
+band, weak shares and payout levels is on
+[Share chain redesign for payout variance and fees](sharechain/small-miners-design.md).
 Everything below is expectation; real luck varies around it.
 
 ## Inputs
