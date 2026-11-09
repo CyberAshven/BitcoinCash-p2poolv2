@@ -24,6 +24,8 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_version::{ShareVersion, next_share_version};
 use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::tally_share_version_votes;
+use crate::shares::weak::{WeakShare, next_weak_ratio, parent_weak_target};
+use crate::shares::weak_pool::WeakPool;
 use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::work::band_policy::{
     POOL_HASHRATE_SHARES, recent_pool_hashrate, share_rate_limit,
@@ -56,6 +58,9 @@ pub(crate) struct NotifyContext {
     /// The tokens a Bitcoin Cash P2Pool node merge-mines for its miners
     /// (`[stratum] merge_mining_tokens`), read again when the file changes.
     pub merge_tokens: Option<TokenFile>,
+    /// Bitcoin Cash P2Pool: the weak shares waiting for a share to carry
+    /// them (`shares::weak_pool`). `None` carries none.
+    pub weak_pool: Option<WeakPool>,
 }
 
 /// Build the output distribution for the coinbase transaction using
@@ -128,7 +133,7 @@ fn build_prepared_notify(
     context.tracker.set_pool_target(target);
     // Bitcoin Cash shares follow the mining base's rule version, or the next
     // one once 95% of the vote span's work desires it (`next_share_version`).
-    let (share_version, band_cap, pool_hashrate) = if context.config.chain
+    let (share_version, band_cap, pool_hashrate, weak) = if context.config.chain
         == crate::config::Chain::BitcoinCash
     {
         let mining_base = context
@@ -153,10 +158,18 @@ fn build_prepared_notify(
             share_version,
             next_band_cap(&ParentBand::from_header(&mining_base)),
             bch_pool_hashrate(parent.height, &context.chain_store_handle),
+            Some(template_weak_shares(
+                &mining_base,
+                tip,
+                parent.height,
+                context,
+            )),
         )
     } else {
-        (ShareVersion::CURRENT, BAND_CAP_UNIT, None)
+        (ShareVersion::CURRENT, BAND_CAP_UNIT, None, None)
     };
+    let (weak_ratio, weak_shares, weak_target) =
+        weak.unwrap_or((crate::shares::weak::GENESIS_WEAK_RATIO, Vec::new(), None));
     let share_rate_limit =
         pool_hashrate.and_then(|pool_hashrate| bch_share_rate_limit(template, pool_hashrate));
 
@@ -203,11 +216,40 @@ fn build_prepared_notify(
     .share_version(share_version)
     .band_cap(band_cap)
     .share_rate_limit(share_rate_limit)
+    .weak_shares(weak_ratio, weak_shares)
+    .weak_target(weak_target)
     .pool_hashrate(pool_hashrate)
     .payout_level(context.config.payout_level())
     .spend_cost(context.config.spend_cost())
     .share_transactions(share_transactions)
     .build()
+}
+
+/// The weak shares of a Bitcoin Cash template on `mining_base` (`tip`, at
+/// `mining_base_height`): the weak ratio its shares carry, one step from the
+/// mining base's; the weak shares they carry, from the node's weak pool,
+/// oldest parent first; and the mining base's weak target, which jobs at the
+/// minimum turn submissions into weak shares at. Without a weak pool the
+/// shares carry none.
+fn template_weak_shares(
+    mining_base: &crate::shares::share_block::ShareHeader,
+    tip: bitcoin::BlockHash,
+    mining_base_height: u32,
+    context: &NotifyContext,
+) -> (u32, Vec<WeakShare>, Option<bitcoin::Target>) {
+    let weak_shares = context
+        .weak_pool
+        .as_ref()
+        .map(|pool| pool.select_for_share(tip, mining_base_height))
+        .unwrap_or_default();
+    (
+        next_weak_ratio(mining_base.weak_ratio, mining_base.weak_count),
+        weak_shares,
+        Some(parent_weak_target(
+            mining_base,
+            context.pool_difficulty.target_ceiling(),
+        )),
+    )
 }
 
 /// The Bitcoin Cash pool's hashrate from the newest
@@ -403,7 +445,8 @@ fn publish_prepared_notify(
 /// Returns when the command channel or all template receivers have closed.
 ///
 /// On Bitcoin Cash `share_transaction_pool` supplies the share transactions
-/// each notify's shares carry; Bitcoin passes `None`.
+/// each notify's shares carry, and `weak_pool` their weak shares; Bitcoin
+/// passes `None` for both.
 ///
 /// A token file (`merge_mining_tokens`) that cannot be read or is not valid
 /// returns at once too, so a node never starts mining without the tokens it
@@ -418,6 +461,7 @@ pub async fn start_notify(
     pool_difficulty: pool_difficulty::PoolDifficulty,
     pool_transactions: PoolTransactionCache,
     share_transaction_pool: Option<ShareTransactionPool>,
+    weak_pool: Option<WeakPool>,
     tracker: Arc<JobTracker>,
 ) {
     let pool_signature = match config.pool_signature {
@@ -447,6 +491,7 @@ pub async fn start_notify(
         share_transaction_pool,
         tracker,
         merge_tokens,
+        weak_pool,
     };
 
     let mut latest_template: Option<Arc<BlockTemplate>> = None;
@@ -642,6 +687,7 @@ mod tests {
                 pool_difficulty,
                 PoolTransactionCache::new(),
                 None,
+                None,
                 start_tracker_actor(),
             )
             .await;
@@ -725,6 +771,7 @@ mod tests {
                 Box::new(payout),
                 pool_difficulty,
                 PoolTransactionCache::new(),
+                None,
                 None,
                 start_tracker_actor(),
             )
@@ -841,6 +888,7 @@ mod tests {
                 pool_difficulty,
                 PoolTransactionCache::new(),
                 None,
+                None,
                 start_tracker_actor(),
             )
             .await;
@@ -956,6 +1004,7 @@ mod tests {
                 pool_difficulty,
                 PoolTransactionCache::new(),
                 None,
+                None,
                 start_tracker_actor(),
             )
             .await;
@@ -1066,6 +1115,7 @@ mod tests {
             share_transaction_pool: None,
             tracker: start_tracker_actor(),
             merge_tokens: None,
+            weak_pool: None,
         };
 
         // Build prepared notify

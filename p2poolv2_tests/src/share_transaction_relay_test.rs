@@ -80,6 +80,7 @@ async fn test_a_submitted_share_transaction_is_relayed_to_a_peer() {
         notify_tx1,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
         Some((pool1.clone(), relay_rx1)),
+        None,
     )
     .await
     .expect("Failed to create node 1");
@@ -93,6 +94,7 @@ async fn test_a_submitted_share_transaction_is_relayed_to_a_peer() {
         notify_tx2,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
         Some((pool2.clone(), relay_rx2)),
+        None,
     )
     .await
     .expect("Failed to create node 2");

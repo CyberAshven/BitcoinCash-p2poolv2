@@ -38,16 +38,17 @@ fn bch_job_token_roundtrips_all_terms_within_the_wire_budget() {
         desired_version: 3,
     };
     prepared.band_cap = 4096;
+    prepared.weak_ratio = 256_000;
     let token = prepared
         .mining_job_token_at_level([9; 32], 1234, 6)
         .unwrap();
     assert!(token.len() <= 255);
     assert_eq!(
-        token[0], 4,
-        "token layout 4 carries the band cap and the payout level"
+        token[0], 5,
+        "token layout 5 carries the band cap, the payout level and the weak ratio"
     );
     let mut old_layout = token.clone();
-    old_layout[0] = 3;
+    old_layout[0] = 4;
     assert!(
         ShareCommitment::from_mining_job_token(
             &old_layout,
@@ -78,6 +79,8 @@ fn bch_job_token_roundtrips_all_terms_within_the_wire_budget() {
     assert_eq!(commitment.payout_level, 6);
     assert_eq!(commitment.asert_bits, prepared.bits);
     assert_eq!(commitment.wanted_bits, prepared.bits);
+    assert_eq!(commitment.weak_ratio, 256_000);
+    assert_eq!(commitment.weak_count, 0);
     let mut trailing = token.clone();
     trailing.push(0);
     assert!(
@@ -341,6 +344,184 @@ async fn a_heavier_job_commits_to_its_band_and_its_miners_payout_level() {
     assert!(coinbase2.contains(&hex::encode(commitment.hash().as_byte_array())));
 }
 
+/// A job carrying the template's weak shares commits to their count, root
+/// and the template's weak ratio, and the digest its coinbase carries is the
+/// hash of the commitment it stores, on a heavier job too, whose band
+/// replaces the template's in the suffix.
+#[tokio::test]
+async fn jobs_commit_to_the_weak_shares_the_template_carries() {
+    let weak_share = WeakShare {
+        header: crate::test_utils::TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
+            .build()
+            .header,
+        coinbase_script_sig: bitcoin::ScriptBuf::new(),
+        coinbase_value: 1,
+        merkle_branch: Vec::new(),
+    };
+    let base = test_bch_prepared();
+    let prepared = PreparedNotifyParamsBuilder::new(
+        Arc::clone(base.template()),
+        build_pplns_outputs(
+            base.template().coinbasevalue,
+            base.pplns_weights().unwrap(),
+            &None,
+            None,
+            &None,
+            None,
+            base.payout_split,
+        )
+        .unwrap(),
+        b"P2Poolv2",
+        true,
+    )
+    .payout_split(base.payout_split)
+    .bits(base.bits())
+    .include_merge_mining(true)
+    .weak_shares(256_000, vec![weak_share.clone()])
+    .build()
+    .unwrap();
+    let tracker = start_tracker_actor();
+    let payout = PayoutAddress::from(Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([1; 20]),
+        Network::Regtest,
+    ));
+    let job_band = heavier_job_band(prepared.bits(), 4096, 2 * u64::from(BAND_CAP_UNIT));
+
+    let (minimum_job, minimum_coinbase2) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([9; 20])),
+        None,
+        None,
+        &tracker,
+    );
+    let (heavier_job, heavier_coinbase2) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([9; 20])),
+        Some(job_band),
+        None,
+        &tracker,
+    );
+
+    let minimum = tracker.get_job(minimum_job).unwrap();
+    let minimum_commitment = minimum.share_commitment.clone().unwrap();
+    assert_eq!(minimum_commitment.weak_ratio, 256_000);
+    assert_eq!(minimum_commitment.weak_count, 1);
+    assert_eq!(
+        minimum_commitment.weak_root,
+        weak_share.pow_hash().to_raw_hash()
+    );
+    assert_eq!(minimum.weak_shares.as_ref(), &[weak_share]);
+    assert!(minimum_coinbase2.contains(&hex::encode(minimum_commitment.hash().as_byte_array())));
+    let heavier_commitment = tracker
+        .get_job(heavier_job)
+        .unwrap()
+        .share_commitment
+        .unwrap();
+    assert_eq!(heavier_commitment.weak_count, 1);
+    assert!(heavier_coinbase2.contains(&hex::encode(heavier_commitment.hash().as_byte_array())));
+}
+
+/// Only a job at the minimum makes weak shares: it keeps the template's
+/// weak target, a heavier job none.
+#[tokio::test]
+async fn only_a_job_at_the_minimum_has_a_weak_target() {
+    let mut prepared = Arc::try_unwrap(test_bch_prepared()).ok().unwrap();
+    let weak_target = Target::from_compact(CompactTarget::from_consensus(0x1d00_ffff));
+    prepared.weak_target = Some(weak_target);
+    let tracker = start_tracker_actor();
+    let payout = PayoutAddress::from(Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([1; 20]),
+        Network::Regtest,
+    ));
+    let job_band = heavier_job_band(prepared.bits(), 4096, 2 * u64::from(BAND_CAP_UNIT));
+
+    let (minimum_job, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([9; 20])),
+        None,
+        None,
+        &tracker,
+    );
+    let (heavier_job, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([9; 20])),
+        Some(job_band),
+        None,
+        &tracker,
+    );
+
+    assert_eq!(
+        tracker.get_job(minimum_job).unwrap().weak_target,
+        Some(weak_target)
+    );
+    assert_eq!(tracker.get_job(heavier_job).unwrap().weak_target, None);
+}
+
+/// A heavier miner the band cap holds at the minimum mines at the minimum,
+/// and its shares are credited at the weak work, so its job makes weak
+/// shares too.
+#[tokio::test]
+async fn a_heavier_job_held_at_the_minimum_has_the_weak_target() {
+    let mut prepared = Arc::try_unwrap(test_bch_prepared()).ok().unwrap();
+    let weak_target = Target::from_compact(CompactTarget::from_consensus(0x1d00_ffff));
+    prepared.weak_target = Some(weak_target);
+    let tracker = start_tracker_actor();
+    let payout = PayoutAddress::from(Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([1; 20]),
+        Network::Regtest,
+    ));
+    let held_band = heavier_job_band(prepared.bits(), BAND_CAP_UNIT, 2 * u64::from(BAND_CAP_UNIT));
+
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([9; 20])),
+        Some(held_band),
+        None,
+        &tracker,
+    );
+
+    assert_eq!(held_band.bits, prepared.bits());
+    assert_ne!(held_band.wanted_bits, prepared.bits());
+    assert_eq!(
+        tracker.get_job(job_id).unwrap().weak_target,
+        Some(weak_target)
+    );
+}
+
+/// The session difficulty of a miner on a job at the minimum is capped at
+/// the weak difficulty, so it submits every hash a weak share needs.
+#[test]
+fn a_job_at_the_minimum_caps_its_session_at_the_weak_target() {
+    let mut prepared = Arc::try_unwrap(test_bch_prepared()).ok().unwrap();
+    prepared.weak_target = Some(Target::from_compact(CompactTarget::from_consensus(
+        0x1d00_ffff,
+    )));
+
+    assert_eq!(
+        prepared.session_ceiling_bits(None),
+        CompactTarget::from_consensus(0x1d00_ffff)
+    );
+}
+
+/// A heavier job makes no weak shares, so its session cap stays at its own
+/// share target.
+#[test]
+fn a_heavier_job_caps_its_session_at_its_own_bits() {
+    let mut prepared = Arc::try_unwrap(test_bch_prepared()).ok().unwrap();
+    prepared.weak_target = Some(Target::from_compact(CompactTarget::from_consensus(
+        0x1d00_ffff,
+    )));
+    let job_band = heavier_job_band(prepared.bits(), 4096, 2 * u64::from(BAND_CAP_UNIT));
+
+    assert_eq!(prepared.session_ceiling_bits(Some(job_band)), job_band.bits);
+}
+
 /// The lengths a channel checks before it builds a job are the lengths of
 /// every miner's job: only the timestamp and commitment differ, not in size.
 #[tokio::test]
@@ -501,6 +682,9 @@ async fn test_commitment_hash_matches_struct_hash() {
         wanted_bits: CompactTarget::default(),
         band_cap: 0,
         payout_level: 0,
+        weak_ratio: 0,
+        weak_count: 0,
+        weak_root: crate::shares::weak::empty_weak_root(),
         prev_share_blockhash: BlockHash::all_zeros(),
         uncles: Vec::new(),
         miner_bitcoin_address: address,
@@ -594,6 +778,9 @@ fn notify_hash_matches_share_commitment_hash() {
         wanted_bits: CompactTarget::default(),
         band_cap: 0,
         payout_level: 0,
+        weak_ratio: 0,
+        weak_count: 0,
+        weak_root: crate::shares::weak::empty_weak_root(),
         prev_share_blockhash: prepared.prev_share_blockhash,
         uncles: prepared.uncles.clone(),
         miner_bitcoin_address: bitcoin_address,

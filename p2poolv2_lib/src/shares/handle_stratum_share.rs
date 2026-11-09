@@ -35,6 +35,7 @@ pub async fn handle_stratum_share(
         bitcoin_coinbase,
         coinbase_proof,
         share_transactions: other_share_transactions,
+        weak_shares,
     } = emission;
 
     // The weak block hash is what makes this coinbase unique to this
@@ -62,6 +63,7 @@ pub async fn handle_stratum_share(
         transactions: share_transactions,
         template_merkle_branches,
         bitcoin_coinbase,
+        weak_shares: weak_shares.to_vec(),
     };
 
     debug!(
@@ -157,6 +159,7 @@ mod tests {
             bitcoin_coinbase: test_coinbase_transaction(1),
             coinbase_proof: CoinbaseProof::default(),
             share_transactions: Arc::from([]),
+            weak_shares: Arc::from([]),
         }
     }
 
@@ -323,6 +326,7 @@ mod tests {
             bitcoin_coinbase: test_coinbase_transaction(1),
             coinbase_proof: CoinbaseProof::default(),
             share_transactions: Arc::from([]),
+            weak_shares: Arc::from([]),
         };
 
         let result = handle_stratum_share(emission, &mock_chain_store).await;
@@ -426,6 +430,7 @@ mod tests {
             coinbase_proof: CoinbaseProof::from_coinbase(&coinbase, commitment.share_witness_root)
                 .unwrap(),
             share_transactions: Arc::clone(&job.share_transactions),
+            weak_shares: Arc::clone(&job.weak_shares),
         };
         let mut mock_chain_store = ChainStoreHandle::default();
         mock_chain_store

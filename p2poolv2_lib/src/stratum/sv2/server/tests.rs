@@ -1112,6 +1112,7 @@ async fn disconnect_releases_the_authorized_worker_and_connection_permit() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let listener = bind("127.0.0.1", 0).await.unwrap();
     let address = listener.local_addr().unwrap();

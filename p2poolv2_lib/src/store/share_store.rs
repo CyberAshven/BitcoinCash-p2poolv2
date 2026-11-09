@@ -7,6 +7,7 @@ use super::{ColumnFamily, Store, writer::StoreError};
 use crate::shares::share_block::{
     MerkleBranches, ShareBlock, ShareHeader, ShareTransaction, Txids, is_terminal_blockhash,
 };
+use crate::shares::weak::{StoredWeakShares, WeakShare, WeakSummary};
 use crate::store::block_tx_metadata::ChainMembership;
 use crate::store::block_tx_metadata::Status::{BlockValid, HeaderValid, Invalid, Pending};
 use crate::store::transaction_store::{BLOCK_TXIDS_SUFFIX, txids_key};
@@ -74,6 +75,8 @@ impl Store {
         self.add_template_merkle_branches(&blockhash, &branches, batch)?;
 
         self.add_bitcoin_coinbase(&blockhash, &share.bitcoin_coinbase, batch)?;
+
+        self.add_weak_shares(&blockhash, &share.weak_shares, batch)?;
 
         // Update block index for parent
         self.update_block_index(&share.header.prev_share_blockhash, &blockhash, batch)?;
@@ -181,6 +184,65 @@ impl Store {
             consensus::serialize(bitcoin_coinbase),
         );
         Ok(())
+    }
+
+    /// Store the weak shares a share block carries (`shares::weak`), and the
+    /// summary the PPLNS window and the carried-once rule read instead of
+    /// them: their proof-of-work hashes and credit groups. Nothing is written
+    /// for a share carrying none.
+    fn add_weak_shares(
+        &self,
+        blockhash: &BlockHash,
+        weak_shares: &[WeakShare],
+        batch: &mut rocksdb::WriteBatch,
+    ) -> Result<(), StoreError> {
+        if weak_shares.is_empty() {
+            return Ok(());
+        }
+        let key = consensus::serialize(blockhash);
+        let weak_shares_cf = self.db.cf_handle(&ColumnFamily::WeakShares).unwrap();
+        let mut stored = Vec::new();
+        StoredWeakShares(weak_shares.to_vec()).consensus_encode(&mut stored)?;
+        batch.put_cf::<&[u8], Vec<u8>>(&weak_shares_cf, &key, stored);
+        let summaries_cf = self.db.cf_handle(&ColumnFamily::WeakSummaries).unwrap();
+        batch.put_cf::<&[u8], Vec<u8>>(
+            &summaries_cf,
+            &key,
+            consensus::serialize(&WeakSummary::of(weak_shares)),
+        );
+        Ok(())
+    }
+
+    /// The weak shares a stored share block carries, empty for none or for a
+    /// share held without its body.
+    pub fn get_weak_shares(&self, blockhash: &BlockHash) -> Result<Vec<WeakShare>, StoreError> {
+        let column_family = self.db.cf_handle(&ColumnFamily::WeakShares).unwrap();
+        let key = consensus::serialize(blockhash);
+        match self.db.get_cf::<&[u8]>(&column_family, &key) {
+            Ok(Some(data)) => Ok(encode::deserialize::<StoredWeakShares>(&data)?.0),
+            Ok(None) => Ok(Vec::new()),
+            Err(error) => Err(StoreError::Database(error.to_string())),
+        }
+    }
+
+    /// The weak share summaries of the given shares, keyed by share; a share
+    /// carrying no weak shares, or held without its body, has none.
+    pub fn get_weak_summaries(
+        &self,
+        blockhashes: &[BlockHash],
+    ) -> Result<HashMap<BlockHash, WeakSummary>, StoreError> {
+        let column_family = self.db.cf_handle(&ColumnFamily::WeakSummaries).unwrap();
+        let keys = blockhashes
+            .iter()
+            .map(|blockhash| (&column_family, consensus::serialize(blockhash)))
+            .collect::<Vec<_>>();
+        let mut summaries = HashMap::with_capacity(blockhashes.len());
+        for (blockhash, result) in blockhashes.iter().zip(self.db.multi_get_cf(keys)) {
+            if let Some(data) = result? {
+                summaries.insert(*blockhash, encode::deserialize::<WeakSummary>(&data)?);
+            }
+        }
+        Ok(summaries)
     }
 
     /// Retrieve the bitcoin coinbase of a stored share block.
@@ -301,11 +363,13 @@ impl Store {
             .collect();
         let template_merkle_branches = self.get_template_merkle_branches(blockhash).ok()?;
         let bitcoin_coinbase = self.get_bitcoin_coinbase(blockhash).ok()??;
+        let weak_shares = self.get_weak_shares(blockhash).ok()?;
         Some(ShareBlock {
             header,
             transactions,
             template_merkle_branches,
             bitcoin_coinbase,
+            weak_shares,
         })
     }
 

@@ -11,6 +11,7 @@ use crate::node::p2p_message_handlers::receivers::bch_headers::learn_carried_bch
 use crate::node::p2p_message_handlers::receivers::block_receiver::BlockReceiverHandle;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::validation_worker::ValidationSender;
+use crate::node::weak_share_worker::{WeakShareEvent, WeakShareEventSender};
 use crate::service::p2p_service::RequestContext;
 #[cfg(test)]
 #[mockall_double::double]
@@ -19,6 +20,8 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::transaction_pool::{ShareTransactionPool, SubmitOutcome, TransactionSource};
 use crate::shares::validation::ShareValidator;
+use crate::shares::weak::WeakShare;
+use crate::shares::weak_pool::WeakShareSource;
 use crate::utils::time_provider::TimeProvider;
 use bitcoin::BlockHash;
 use receivers::getblocks::handle_getblocks;
@@ -114,6 +117,16 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
             )
             .await
         }
+        Message::WeakShare(weak_share) => {
+            handle_weak_share(
+                weak_share,
+                ctx.peer,
+                ctx.weak_share_tx.as_ref(),
+                ctx.response_channel,
+                ctx.swarm_tx,
+            )
+            .await
+        }
         Message::Handshake(handshake_data) => {
             handle_handshake(
                 handshake_data,
@@ -198,6 +211,42 @@ async fn handle_share_transaction<C: Send + Sync>(
         }
         Ok(SubmitOutcome::AlreadyInPool(_)) => {}
         Err(rejection) => debug!("Refused share transaction from peer {peer}: {rejection}"),
+    }
+    Ok(())
+}
+
+/// Handle a weak share a peer relayed: acknowledge it, then hand it to the
+/// weak share worker, which checks it once, rate limits the peer and pools
+/// and relays it on when it passes. A full worker queue drops it: weak shares
+/// are many and small, and a peer that relays a valid one relays it to every
+/// peer. A node without the worker (Bitcoin, Hydrapool) only acknowledges.
+async fn handle_weak_share<C: Send + Sync>(
+    weak_share: WeakShare,
+    peer: libp2p::PeerId,
+    weak_share_tx: Option<&WeakShareEventSender>,
+    response_channel: C,
+    swarm_tx: mpsc::Sender<SwarmSend<C>>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if let Err(error) = swarm_tx
+        .send(SwarmSend::Response(response_channel, Message::Ack))
+        .await
+    {
+        error!("Failed to send WeakShare ack to peer {peer}: {error}");
+        return Err(format!("Failed to send WeakShare ack: {error}").into());
+    }
+    let Some(weak_share_tx) = weak_share_tx else {
+        debug!("Ignoring weak share from peer {peer}: this node keeps no weak pool");
+        return Ok(());
+    };
+    let pow_hash = weak_share.pow_hash();
+    if weak_share_tx
+        .try_send(WeakShareEvent {
+            weak_share,
+            source: WeakShareSource::Peer(peer),
+        })
+        .is_err()
+    {
+        debug!("Weak share queue full, dropping weak share {pow_hash} from peer {peer}");
     }
     Ok(())
 }

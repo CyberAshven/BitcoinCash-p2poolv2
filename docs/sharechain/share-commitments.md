@@ -31,6 +31,11 @@ share transaction root (`ShareCommitment::hash` in
 - on Bitcoin Cash, right after the band, the share's payout level: tag
   `0x25`, then the one-byte level `k`, 0 to 7
   ([Coinbase payouts](../payouts/coinbase.md#payout-levels));
+- on Bitcoin Cash, after the payout level, the share's weak shares: tag
+  `0x26`, then its 4-byte weak ratio, the 2-byte count of the weak shares
+  its body carries and the 32-byte merkle root of their proof-of-work
+  hashes, so the proof of work fixes the list
+  ([Share validation](validation.md#weak-shares-follow-the-rules-bitcoin-cash));
 - the miner payout address (with its network class) and the miner share
   address.
 

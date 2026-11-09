@@ -352,20 +352,26 @@ impl Store {
         Ok(())
     }
 
-    /// Delete a block's txid lists and bitcoin coinbase.
+    /// Delete a block's txid lists, bitcoin coinbase, and the weak shares it
+    /// carries with their summary.
     ///
     /// Nothing writes the `BitcoinTxids` CF yet; its key is deleted anyway so
-    /// a future writer cannot leak data.
+    /// a future writer cannot leak data. A pruned block is below every
+    /// window, so no payout reads its weak share summary again.
     fn delete_block_body_keys(&self, blockhash: &BlockHash, batch: &mut rocksdb::WriteBatch) {
         let block_txids_cf = self.db.cf_handle(&ColumnFamily::BlockTxids).unwrap();
         let bitcoin_txids_cf = self.db.cf_handle(&ColumnFamily::BitcoinTxids).unwrap();
         let bitcoin_coinbase_cf = self.db.cf_handle(&ColumnFamily::BitcoinCoinbase).unwrap();
+        let weak_shares_cf = self.db.cf_handle(&ColumnFamily::WeakShares).unwrap();
+        let weak_summaries_cf = self.db.cf_handle(&ColumnFamily::WeakSummaries).unwrap();
         batch.delete_cf(&block_txids_cf, txids_key(blockhash, BLOCK_TXIDS_SUFFIX));
         batch.delete_cf(
             &bitcoin_txids_cf,
             txids_key(blockhash, BITCOIN_TXIDS_SUFFIX),
         );
         batch.delete_cf(&bitcoin_coinbase_cf, consensus::serialize(blockhash));
+        batch.delete_cf(&weak_shares_cf, consensus::serialize(blockhash));
+        batch.delete_cf(&weak_summaries_cf, consensus::serialize(blockhash));
     }
 }
 

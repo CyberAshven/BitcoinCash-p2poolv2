@@ -352,6 +352,7 @@ Relevant code:
 | `FoundBlocks` | kept forever | Never pruned (`metrics.md`) |
 | `Uncles` | kept | Small, and derived from headers |
 | `BlockTxids`, `BitcoinTxids`, `BitcoinCoinbase` | deleted below the prune target | Body data. Nothing writes `BitcoinTxids` yet; its key is deleted anyway so a future writer cannot leak data |
+| `WeakShares`, `WeakSummaries` | deleted below the prune target | Body data: the weak shares a Bitcoin Cash share carries and the summary of their hashes and credit the PPLNS window reads. A pruned block is below every window, so nothing reads its summary again |
 | `Tx`, `Inputs`, `Outputs`, `TxidsBlocks`, `SpendsIndex` | deleted below the prune target, unless a kept block still includes the txid | Body data that can be shared between blocks |
 | candidate `BlockHeight` entries | deleted at every height below the prune target | Far below the confirmed tip they duplicate the confirmed entries |
 

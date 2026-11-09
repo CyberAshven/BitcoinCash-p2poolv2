@@ -8,6 +8,8 @@
 //! allowing incremental updates (loading only newly confirmed headers)
 //! instead of re-reading the full window from RocksDB on every notify.
 
+mod weak_credit;
+
 use super::address_keys::AddressKeys;
 use super::bch_eligibility::{BchPlace, PayingChain};
 use super::payout_rights::{ChainShare, PayoutRights, has_share_transactions, share_coinbase_txid};
@@ -35,6 +37,7 @@ use std::error::Error;
 use std::fmt;
 use std::hash;
 use tracing::{debug, warn};
+use weak_credit::WeakEntry;
 
 /// The PPLNS window: a coinbase pays at most `PPLNS_WINDOW_SHARES` shares,
 /// each weighted by its difficulty, starting at the newest share that is
@@ -364,10 +367,14 @@ struct ConfirmedEntry {
     /// up by either of the two addresses a share header carries.
     owner_key: usize,
     /// Base weight of the share (`WeightUnit`): its difficulty on Bitcoin,
-    /// its exact work on Bitcoin Cash.
+    /// its exact work on Bitcoin Cash, where a share mined at the minimum is
+    /// credited at its parent's weak work instead (`weak_credit`).
     difficulty: u128,
     /// Uncle entries, if any, referenced by the share
     uncle_entries: Vec<UncleEntry>,
+    /// The weak shares the share carries, one entry per credit group
+    /// (`weak_credit`). Empty on Bitcoin.
+    weak_entries: Vec<WeakEntry>,
     /// Txid of the share's coinbase, which carries its payout right. Set on
     /// Bitcoin Cash, where the payout rights index needs it to evict the
     /// share; all zeros on Bitcoin.
@@ -387,12 +394,17 @@ impl ConfirmedEntry {
     /// so both count towards the pool's expected blocks, even though an uncle
     /// takes no window slot. This bounds the walk only; the weights come from
     /// `for_each_credit`.
+    ///
+    /// On Bitcoin Cash the weak shares the share carries add their weak work
+    /// too, and every weight is the credited one (`weak_credit`), so the
+    /// window still holds its blocks' worth of actual work.
     fn work(&self) -> u128 {
         self.uncle_entries
             .iter()
             .fold(self.difficulty, |work, uncle_entry| {
                 work.saturating_add(uncle_entry.difficulty)
             })
+            .saturating_add(PplnsWindow::weak_entries_work(self))
     }
 }
 
@@ -611,6 +623,9 @@ struct Credit {
     difficulty: u128,
     /// Scaled weight credited.
     weight: u128,
+    /// How many weak shares earned this weight; 0 for a share or an uncle.
+    /// A weak credit names the carrying share as `blockhash` and `nephew`.
+    weak_shares: u32,
     /// Payout level of the share or uncle that earned it.
     payout_level: u8,
     /// Where in its window share the entry sits: 0 for the share itself,
@@ -792,6 +807,9 @@ pub struct WindowCredit {
     /// `miner_bitcoin_address`, or on Bitcoin Cash the P2PKH address of
     /// whoever else holds the share's payout right.
     pub payout_address: PayoutAddress,
+    /// How many weak shares the window share `blockhash` carries earned this
+    /// weight; 0 for a share or an uncle.
+    pub weak_shares: u32,
 }
 
 /// What one miner earns in a payout window.
@@ -801,6 +819,8 @@ pub struct MinerCredits {
     pub share_count: usize,
     /// Uncles the miner mined that window shares include.
     pub uncle_count: usize,
+    /// Weak shares the miner mined that window shares carry.
+    pub weak_share_count: usize,
     /// Sum of the miner's weights.
     pub weight: u128,
     /// The miner's weights, newest first, at most the requested number.
@@ -820,7 +840,9 @@ impl MinerCredits {
         payout_address: Option<&PayoutAddress>,
         max_credits: usize,
     ) {
-        if credit.nephew.is_some() {
+        if credit.weak_shares > 0 {
+            self.weak_share_count += credit.weak_shares as usize;
+        } else if credit.nephew.is_some() {
             self.uncle_count += 1;
         } else {
             self.share_count += 1;
@@ -836,6 +858,7 @@ impl MinerCredits {
                 difficulty: credit.difficulty,
                 weight: credit.weight,
                 payout_address: payout_address.clone(),
+                weak_shares: credit.weak_shares,
             });
         }
     }
@@ -1019,6 +1042,14 @@ pub struct PplnsWindow {
     /// The paying chain walked last, for the next window paid by a block on
     /// the same BCH prev.
     paying_chain: Option<PayingChain>,
+    /// Bitcoin Cash: the share chain's ceiling, which caps every weak target
+    /// (`shares::weak::weak_target`). Set, the window credits each proof from
+    /// a job at the minimum at its parent's weak work and pays the weak
+    /// shares each share carries (`weak_credit`). `None` on Bitcoin.
+    weak_ceiling: Option<CompactTarget>,
+    /// The weak work of each cached share's weak target, which the proofs
+    /// mined on it as a parent are credited at; pruned with the entries.
+    child_weak_works: HashMap<BlockHash, u128>,
 }
 
 impl PplnsWindow {
@@ -1044,6 +1075,8 @@ impl PplnsWindow {
             bch_rules: None,
             bch_places: HashMap::new(),
             paying_chain: None,
+            weak_ceiling: None,
+            child_weak_works: HashMap::with_capacity(INITIAL_ENTRIES_CAPACITY),
         }
     }
 
@@ -1077,6 +1110,20 @@ impl PplnsWindow {
         };
         self.per_share_cuts = chain == Chain::BitcoinCash;
         self.payout_levels = chain == Chain::BitcoinCash;
+        self.weak_ceiling = (chain == Chain::BitcoinCash).then(|| {
+            crate::shares::bch_genesis::target_ceiling(crate::sim_overrides::bch_anchor_target())
+        });
+        self
+    }
+
+    /// Bitcoin Cash, after `for_chain`: cap weak targets at `ceiling`, the
+    /// share chain's easiest share target, instead of the one this build's
+    /// genesis gives. Every node of a chain uses its genesis's ceiling, which
+    /// `for_chain` already sets; tests pick another.
+    pub fn with_weak_ceiling(mut self, ceiling: CompactTarget) -> Self {
+        if self.weak_ceiling.is_some() {
+            self.weak_ceiling = Some(ceiling);
+        }
         self
     }
 
@@ -1102,6 +1149,23 @@ impl PplnsWindow {
     /// recipients interned like payees. A zero or recipient-less cut is none.
     /// Always none on Bitcoin.
     fn share_cuts(&mut self, header: &ShareHeader) -> ShareCuts {
+        self.cuts_of(
+            &header.donation_address,
+            header.donation,
+            &header.fee_address,
+            header.fee,
+        )
+    }
+
+    /// The donation and fee a share's or weak share's credit gives up, as
+    /// `share_cuts` reads them from a header. Always none on Bitcoin.
+    fn cuts_of(
+        &mut self,
+        donation_address: &Option<PayoutAddress>,
+        donation: Option<u16>,
+        fee_address: &Option<PayoutAddress>,
+        fee: Option<u16>,
+    ) -> ShareCuts {
         if !self.per_share_cuts {
             return ShareCuts::default();
         }
@@ -1115,8 +1179,8 @@ impl PplnsWindow {
                 })
         };
         ShareCuts {
-            donation: cut(&header.donation_address, header.donation),
-            fee: cut(&header.fee_address, header.fee),
+            donation: cut(donation_address, donation),
+            fee: cut(fee_address, fee),
         }
     }
 
@@ -1238,11 +1302,11 @@ impl PplnsWindow {
     /// what a coinbase is split from (`build_pplns_outputs`).
     ///
     /// A payee's level is the `payout_level` of its newest credited entry in
-    /// the window (`NewestLevel`): the newest share or uncle paying its
-    /// payout script. The donation key and fee addresses, every recipient of
-    /// a cut in the window, are never drawn and get no level. The levels
-    /// carry `start_hash`, the parent of the share whose coinbase is built,
-    /// which seeds the draw. Bitcoin has no levels.
+    /// the window (`NewestLevel`): the newest share, uncle or weak share
+    /// paying its payout script. The donation key and fee addresses, every
+    /// recipient of a cut in the window, are never drawn and get no level.
+    /// The levels carry `start_hash`, the parent of the share whose coinbase
+    /// is built, which seeds the draw. Bitcoin has no levels.
     ///
     /// Errors exactly when `get_distribution_from_start_hash` does.
     pub fn get_weights_from_start_hash(
@@ -1479,6 +1543,7 @@ impl PplnsWindow {
         self.walk_window_entries(resolved, |_, entry| {
             prevs.insert(entry.bch_prev);
             prevs.extend(entry.uncle_entries.iter().map(|uncle| uncle.bch_prev));
+            prevs.extend(entry.weak_entries.iter().map(|weak| weak.bch_prev));
         });
         prevs.remove(&BlockHash::all_zeros());
 
@@ -1784,13 +1849,34 @@ impl PplnsWindow {
             .iter()
             .flat_map(|(_, header)| header.uncles.iter().copied())
             .collect();
-        let uncle_lookup_table =
-            self.build_uncle_entry_lookup_table(chain_store_handle, &all_uncle_hashes)?;
+        let batch_weak_works = self.batch_child_weak_works(
+            candidate_headers
+                .iter()
+                .map(|(blockhash, header)| (blockhash, header)),
+        );
+        let uncle_lookup_table = self.build_uncle_entry_lookup_table(
+            chain_store_handle,
+            &all_uncle_hashes,
+            &batch_weak_works,
+        )?;
+        let summaries = self.weak_summaries(
+            candidate_headers
+                .iter()
+                .map(|(blockhash, header)| (blockhash, header)),
+            chain_store_handle,
+            true,
+        )?;
+        let parents = self.weak_work_parents(
+            candidate_headers.iter().map(|(_, header)| header),
+            &summaries,
+        );
+        let parent_weak_works =
+            self.resolve_parent_weak_works(&parents, &batch_weak_works, chain_store_handle)?;
 
         let entries = candidate_headers
             .iter()
             .map(|(blockhash, header)| {
-                let difficulty = self.base_weight(header);
+                let difficulty = self.credited_weight(header, &parent_weak_works);
                 let uncle_entries = resolve_uncle_entries(&header.uncles, &uncle_lookup_table);
                 let mut entry = self.build_confirmed_entry(
                     *blockhash,
@@ -1803,6 +1889,8 @@ impl PplnsWindow {
                 entry.cuts = self.share_cuts(header);
                 entry.bch_prev = header.bitcoin_header.prev_blockhash;
                 entry.payout_level = header.payout_level;
+                entry.weak_entries =
+                    self.weak_entries(summaries.get(blockhash), &parent_weak_works);
                 entry
             })
             .collect();
@@ -1949,12 +2037,16 @@ impl PplnsWindow {
                 nephew: Some(entry.blockhash),
                 difficulty: uncle_entry.difficulty,
                 weight: uncle_entry.difficulty.saturating_mul(UNCLE_SCALED_WEIGHT),
+                weak_shares: 0,
                 payout_level: uncle_entry.payout_level,
                 place_in_share: 1 + uncle_index,
             });
             nephew_bonus = nephew_bonus
                 .saturating_add(uncle_entry.difficulty.saturating_mul(NEPHEW_SCALED_BONUS));
         }
+        //* Weak shares the share carries are credited like uncles, and their
+        //* includer cut joins the share's own weight like a nephew bonus.
+        let includer_bonus = Self::credit_weak_entries(entry, resolved, &mut credit);
 
         if !share_paid {
             return;
@@ -1969,7 +2061,9 @@ impl PplnsWindow {
             weight: entry
                 .difficulty
                 .saturating_mul(DIFFICULTY_SCALE)
-                .saturating_add(nephew_bonus),
+                .saturating_add(nephew_bonus)
+                .saturating_add(includer_bonus),
+            weak_shares: 0,
             payout_level: entry.payout_level,
             place_in_share: 0,
         });
@@ -1997,10 +2091,31 @@ impl PplnsWindow {
                 referenced[uncle_entry.internal_key] = true;
                 owner_referenced[uncle_entry.owner_key] = true;
             }
+            for weak_entry in &entry.weak_entries {
+                weak_entry.cuts.retain_keys(&mut referenced);
+                referenced[weak_entry.internal_key] = true;
+                owner_referenced[weak_entry.owner_key] = true;
+            }
         }
         remove_unreferenced_keys(&mut self.address_keys, &referenced);
         remove_unreferenced_keys(&mut self.owner_keys, &owner_referenced);
         self.prune_unreferenced_bch_places();
+        self.prune_unreferenced_weak_works();
+    }
+
+    /// Drop the weak works of shares no longer cached, so the map stays the
+    /// size of the cache.
+    fn prune_unreferenced_weak_works(&mut self) {
+        if self.child_weak_works.len() <= self.confirmed_entries.len() {
+            return;
+        }
+        let cached: HashSet<BlockHash> = self
+            .confirmed_entries
+            .iter()
+            .map(|entry| entry.blockhash)
+            .collect();
+        self.child_weak_works
+            .retain(|blockhash, _| cached.contains(blockhash));
     }
 
     /// Drop the cached places of BCH blocks no cached share, uncle or paying
@@ -2015,6 +2130,7 @@ impl PplnsWindow {
             .flat_map(|entry| {
                 std::iter::once(entry.bch_prev)
                     .chain(entry.uncle_entries.iter().map(|uncle| uncle.bch_prev))
+                    .chain(entry.weak_entries.iter().map(|weak| weak.bch_prev))
             })
             .collect();
         if let Some(chain) = &self.paying_chain {
@@ -2204,6 +2320,7 @@ impl PplnsWindow {
     /// Clear all cached state, forcing a full reload on next update.
     fn invalidate(&mut self) {
         self.confirmed_entries.clear();
+        self.child_weak_works.clear();
         self.cached_tip_blockhash = None;
         self.cached_top_height = None;
         if let Some(rights) = &mut self.rights {
@@ -2247,8 +2364,11 @@ impl PplnsWindow {
             if front.height <= fork_height {
                 return;
             }
-            if let Some(entry) = self.confirmed_entries.pop_front()
-                && let Some(rights) = &mut self.rights
+            let Some(entry) = self.confirmed_entries.pop_front() else {
+                return;
+            };
+            self.child_weak_works.remove(&entry.blockhash);
+            if let Some(rights) = &mut self.rights
                 && !rights.undo_share(&entry.blockhash)
             {
                 warn!(
@@ -2279,8 +2399,30 @@ impl PplnsWindow {
         }
 
         let all_uncle_hashes = collect_unique_uncle_hashes(&confirmed_headers);
-        let uncle_lookup_table =
-            self.build_uncle_entry_lookup_table(chain_store_handle, &all_uncle_hashes)?;
+        let batch_weak_works = self.batch_child_weak_works(
+            confirmed_headers
+                .iter()
+                .map(|result| (&result.blockhash, &result.header)),
+        );
+        let uncle_lookup_table = self.build_uncle_entry_lookup_table(
+            chain_store_handle,
+            &all_uncle_hashes,
+            &batch_weak_works,
+        )?;
+        let summaries = self.weak_summaries(
+            confirmed_headers
+                .iter()
+                .map(|result| (&result.blockhash, &result.header)),
+            chain_store_handle,
+            false,
+        )?;
+        let parents = self.weak_work_parents(
+            confirmed_headers.iter().map(|result| &result.header),
+            &summaries,
+        );
+        let parent_weak_works =
+            self.resolve_parent_weak_works(&parents, &batch_weak_works, chain_store_handle)?;
+        self.child_weak_works.extend(batch_weak_works);
 
         // Headers arrive newest-to-oldest. Reverse to oldest-first so
         // the newest entry ends up at position 0 in the deque after push_front.
@@ -2290,7 +2432,8 @@ impl PplnsWindow {
             header,
         } in confirmed_headers.into_iter().rev()
         {
-            let difficulty = self.base_weight(&header);
+            let difficulty = self.credited_weight(&header, &parent_weak_works);
+            let weak_entries = self.weak_entries(summaries.get(&blockhash), &parent_weak_works);
             let uncle_entries = resolve_uncle_entries(&header.uncles, &uncle_lookup_table);
             let coinbase_txid = match &mut self.rights {
                 Some(rights) => {
@@ -2319,6 +2462,7 @@ impl PplnsWindow {
             entry.cuts = cuts;
             entry.bch_prev = header.bitcoin_header.prev_blockhash;
             entry.payout_level = header.payout_level;
+            entry.weak_entries = weak_entries;
             self.confirmed_entries.push_front(entry);
         }
 
@@ -2350,10 +2494,11 @@ impl PplnsWindow {
     /// bounds live in `get_distribution_from_start_hash`, which counts from the
     /// anchor and refuses a result that ran into an evicted back.
     fn evict_overflow(&mut self) {
-        while self.confirmed_entries.len() > self.cache_capacity() {
-            if let Some(entry) = self.confirmed_entries.pop_back()
-                && let Some(rights) = &mut self.rights
-            {
+        while self.confirmed_entries.len() > self.cache_capacity()
+            && let Some(entry) = self.confirmed_entries.pop_back()
+        {
+            self.child_weak_works.remove(&entry.blockhash);
+            if let Some(rights) = &mut self.rights {
                 rights.evict_share(&entry.blockhash, &entry.coinbase_txid);
             }
         }
@@ -2388,6 +2533,7 @@ impl PplnsWindow {
             coinbase_txid: Txid::all_zeros(),
             bch_prev: BlockHash::all_zeros(),
             payout_level: 0,
+            weak_entries: Vec::new(),
         }
     }
 
@@ -2416,19 +2562,30 @@ impl PplnsWindow {
     /// Build uncle entries and return a hashmap of uncle block hash
     /// -> uncle entry.
     /// The uncle headers are queried in a batch header query.
+    ///
+    /// On Bitcoin Cash an uncle mined at the minimum is weighed at its
+    /// parent's weak work (`weak_credit`), read from `batch_weak_works` (the
+    /// shares loaded with it), the cache or the store.
     fn build_uncle_entry_lookup_table(
         &mut self,
         chain_store_handle: &ChainStoreHandle,
         uncle_hashes: &[BlockHash],
+        batch_weak_works: &HashMap<BlockHash, u128>,
     ) -> Result<HashMap<BlockHash, UncleEntry>, Box<dyn Error + Send + Sync>> {
         if uncle_hashes.is_empty() {
             return Ok(HashMap::new());
         }
 
         let uncle_headers = chain_store_handle.get_share_headers(uncle_hashes)?;
+        let parents = self.weak_work_parents(
+            uncle_headers.iter().map(|(_, header)| header),
+            &HashMap::new(),
+        );
+        let parent_weak_works =
+            self.resolve_parent_weak_works(&parents, batch_weak_works, chain_store_handle)?;
         let mut uncle_lookup = HashMap::with_capacity(uncle_headers.len());
         for (blockhash, header) in uncle_headers {
-            let difficulty = self.base_weight(&header);
+            let difficulty = self.credited_weight(&header, &parent_weak_works);
             let cuts = self.share_cuts(&header);
             let mut uncle_entry = self.build_uncle_entry(
                 blockhash,
@@ -2513,7 +2670,9 @@ fn credited_by_value<T: Clone + Eq + hash::Hash>(
 ) -> HashMap<T, MinerCredits> {
     let mut by_value = HashMap::with_capacity(credits_by_key.len());
     for (index, miner_credits) in credits_by_key.into_iter().enumerate() {
-        let is_credited = miner_credits.share_count + miner_credits.uncle_count > 0;
+        let is_credited =
+            miner_credits.share_count + miner_credits.uncle_count + miner_credits.weak_share_count
+                > 0;
         if is_credited && let Some(value) = keys.value_for(index) {
             by_value.insert(value.clone(), miner_credits);
         }
@@ -4822,6 +4981,7 @@ mod tests {
                 difficulty: nephew_header.get_difficulty(TEST_NETWORK),
                 weight: distribution[nephew_miner],
                 payout_address: nephew_miner.clone(),
+                weak_shares: 0,
             }]
         );
     }
@@ -4871,6 +5031,7 @@ mod tests {
                 difficulty: uncle_difficulty,
                 weight: uncle_difficulty * UNCLE_SCALED_WEIGHT,
                 payout_address: uncle_header.miner_bitcoin_address.clone(),
+                weak_shares: 0,
             }]
         );
     }
