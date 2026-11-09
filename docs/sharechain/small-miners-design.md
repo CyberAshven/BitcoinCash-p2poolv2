@@ -607,6 +607,40 @@ Still open:
   `WEAK_DEPTH` and the band step.
 - **Not yet measured:** coinbase building and weak-share checking time.
 
+### Study: weak work in fork choice, with a smaller includer cut
+
+To be confirmed by simulation before it is considered for the rules.
+
+The 5% includer cut does two jobs: it pays nodes to carry other miners' weak
+shares, and it makes floor mining cost a big miner a few percent of its
+income. But it falls hardest on small miners. A miner pays the cut on every
+weak share someone else carries, which is nearly all of a small miner's, so
+it costs a Bitaxe about 4 to 5% of its income, a miner with 30% of the pool
+about 3.5%, and one with 90% about 0.5%. The 62-minute regtest run measured
+the small miner's cost at about 4%.
+
+The study: count each carried weak share's credited work in fork choice, once
+per chain, as uncle work counts since 2026-10-30. A share that carries weak
+shares adds their work to its chain, so when two shares race, the one that
+carried more wins. A node that drops other miners' weak shares then loses races
+and the pay that goes with them, so carrying pays for itself, and the cut can
+shrink to the smallest value that still pays carriers in quiet stretches,
+perhaps 0 to 1%.
+
+What it would need:
+
+- **Checking before counting.** Weak work counts toward a chain only once the
+  carrying share's body, with its weak shares, has been validated; header sync
+  counts a share's own work only.
+- **No new rule for floor mining.** It would no longer cost a big miner much,
+  which is fine, since floor mining never changes anyone's income.
+
+What the simulation must show (`p2poolv2_payout_sim`, attack b with races):
+for cuts of 0, 1, 2 and 5%, with 50% and 90% of the hashrate refusing to
+carry, whether refusing ever pays, how many honest weak shares expire, and
+each miner's income against its work. The smallest cut at which refusing never
+pays is the proposal.
+
 ## References
 
 - [Issue #79](https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues/79),
