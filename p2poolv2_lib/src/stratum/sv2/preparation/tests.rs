@@ -7,6 +7,7 @@ use bitcoin::script::Builder;
 use bitcoin::{Network, PubkeyHash};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
+use std::collections::HashMap;
 
 #[test]
 fn full_preparation_matches_pplns_with_selected_fee_revenue() {
@@ -57,7 +58,7 @@ fn full_preparation_matches_pplns_with_selected_fee_revenue() {
     let result = prepare_coinbase(
         &token,
         commitment,
-        &weights,
+        &PplnsWeights::without_levels(weights),
         value,
         prepared.template().height,
         descriptor,
@@ -135,7 +136,7 @@ fn coinbase_only_preparation_preserves_pplns_and_aux_commitment() {
     let result = prepare_coinbase(
         &token,
         commitment,
-        &weights,
+        &PplnsWeights::without_levels(weights),
         value,
         prepared.template().height,
         descriptor,

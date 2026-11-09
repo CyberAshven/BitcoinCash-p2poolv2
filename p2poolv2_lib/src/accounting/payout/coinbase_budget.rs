@@ -27,9 +27,17 @@
 //!   remainder goes to the last payee in canonical order, the largest,
 //!   wherever it is paid. Direct payouts below dust are paid as they are: BCH
 //!   consensus accepts any coinbase output value.
+//! - **Payout levels.** Then every payee below its payout level is pooled
+//!   with the others at that level and the pot is drawn among them
+//!   (`payout_levels`); a payee that wins nothing has no output. The
+//!   donation key and fee addresses are never drawn. The straddle rule and
+//!   the tree follow, over the payees left, in the same canonical order.
 
 use crate::accounting::OutputPair;
 use crate::accounting::payout::payout_distribution::append_proportional_distribution;
+use crate::accounting::payout::payout_levels::{
+    PayoutLevels, PplnsWeights, draw_group, draw_seed, level_amount,
+};
 use crate::accounting::payout::payout_tree::{
     BCH_PAYOUT_TREE_FAN_OUT, BCH_TREE_FEE_RATES, PayoutTree, PayoutTreeError, TreePayee,
 };
@@ -41,7 +49,7 @@ use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::{ShareHeader, share_has_token_commitment};
 use bitcoin::{Amount, ScriptBuf};
 use p2poolv2_wallet::payout_address::PayoutAddress;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 
 /// Bitcoin Cash's largest transaction, coinbase included: `MAX_TX_SIZE` in
@@ -150,22 +158,27 @@ pub fn split_for_share(chain: Chain, header: &ShareHeader) -> PayoutSplit {
 /// Append the PPLNS outputs `split` makes of `amount` for `weights`, and
 /// return the payout tree, on Bitcoin Cash when some payees go to one.
 ///
-/// `EveryPayee` is `append_proportional_distribution`. `BchHybrid` is the
-/// hybrid payout (see the module docs).
+/// `EveryPayee` is `append_proportional_distribution`, and never draws.
+/// `BchHybrid` is the hybrid payout (see the module docs), after the payout
+/// level draw when `weights` carries levels.
 pub(crate) fn append_payout_split(
-    weights: &HashMap<PayoutAddress, u128>,
+    weights: &PplnsWeights,
     amount: Amount,
     split: PayoutSplit,
     distribution: &mut Vec<OutputPair>,
 ) -> Result<Option<PayoutTree>, Box<dyn Error + Send + Sync>> {
     match split {
         PayoutSplit::EveryPayee => {
-            append_proportional_distribution(weights, amount, distribution)?;
+            append_proportional_distribution(&weights.weights, amount, distribution)?;
             Ok(None)
         }
-        PayoutSplit::BchHybrid { coinbase_limit } => {
-            append_hybrid_distribution(weights, amount, coinbase_limit, distribution)
-        }
+        PayoutSplit::BchHybrid { coinbase_limit } => append_hybrid_distribution(
+            &weights.weights,
+            weights.levels.as_ref(),
+            amount,
+            coinbase_limit,
+            distribution,
+        ),
     }
 }
 
@@ -185,6 +198,11 @@ impl CanonicalPayee<'_> {
 
 /// The hybrid payout of `amount` over `weights` within `coinbase_limit`.
 ///
+/// With `levels`, each payee's amount first goes through the payout level
+/// draw ([`draw_payout_levels`]), and a payee that wins nothing gets no
+/// output. The rest is as without levels: the canonical order, the straddle
+/// rule and the payout tree.
+///
 /// Outputs already in `distribution` take their bytes from the limit: none
 /// on a Bitcoin Cash share chain, whose donation and fee are payees in
 /// `weights`, but Hydrapool's donation and fee outputs on Bitcoin Cash.
@@ -194,11 +212,15 @@ impl CanonicalPayee<'_> {
 /// into that payee, as dust is, and paid directly in the tree output's place.
 fn append_hybrid_distribution(
     weights: &HashMap<PayoutAddress, u128>,
+    levels: Option<&PayoutLevels>,
     amount: Amount,
     coinbase_limit: usize,
     distribution: &mut Vec<OutputPair>,
 ) -> Result<Option<PayoutTree>, Box<dyn Error + Send + Sync>> {
-    let payees = canonical_payees(weights, amount)?;
+    let mut payees = canonical_payees(weights, amount)?;
+    if let Some(levels) = levels {
+        draw_payout_levels(&mut payees, levels);
+    }
     let output_bytes: Vec<usize> = payees.iter().map(CanonicalPayee::output_bytes).collect();
     let placed_bytes: usize = distribution
         .iter()
@@ -279,6 +301,57 @@ fn canonical_payees(
         last.amount += remainder;
     }
     Ok(payees)
+}
+
+/// The payout level draw (`payout_levels`) over `payees`, which hold their
+/// amounts in canonical order.
+///
+/// A payee at or above its level keeps its amount, as does one `levels`
+/// does not list: the donation key and every fee address. Each other payee
+/// joins the group of its level. Within a group the payees are ordered by
+/// locking script bytes, and the group's pot is drawn among them
+/// ([`draw_group`]) with the seed of the parent share and the level
+/// ([`draw_seed`]). Each drawn payee's winnings replace its amount, and one
+/// that wins nothing is dropped, so the block pays it nothing. The others
+/// keep their canonical order, so the outputs and the payout tree are then
+/// built as without levels.
+fn draw_payout_levels(payees: &mut Vec<CanonicalPayee<'_>>, levels: &PayoutLevels) {
+    let mut groups: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
+    for (index, payee) in payees.iter().enumerate() {
+        if let Some(level) = levels.level_of(payee.address)
+            && payee.amount < level_amount(level)
+        {
+            groups.entry(level).or_default().push(index);
+        }
+    }
+    if groups.is_empty() {
+        return;
+    }
+    let mut drawn = vec![false; payees.len()];
+    for (level, mut members) in groups {
+        members.sort_by(|first, second| {
+            payees[*first]
+                .script_pubkey
+                .as_bytes()
+                .cmp(payees[*second].script_pubkey.as_bytes())
+        });
+        let amounts: Vec<u64> = members.iter().map(|index| payees[*index].amount).collect();
+        let winnings = draw_group(
+            &amounts,
+            level_amount(level),
+            draw_seed(levels.parent_share(), level),
+        );
+        for (index, won) in members.iter().zip(winnings) {
+            payees[*index].amount = won;
+            drawn[*index] = true;
+        }
+    }
+    let mut position = 0;
+    payees.retain(|payee| {
+        let paid = !drawn[position] || payee.amount > 0;
+        position += 1;
+        paid
+    });
 }
 
 /// How many payees, in canonical order, are paid directly in a coinbase of

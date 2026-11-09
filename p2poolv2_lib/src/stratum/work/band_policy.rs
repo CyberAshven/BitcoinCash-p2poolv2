@@ -41,15 +41,21 @@ pub const POOL_HASHRATE_SHARES: u32 = 60;
 const HASHES_PER_DIFFICULTY: f64 = 4_294_967_296.0;
 
 /// The hashes a target takes on average: its difficulty times 2^32.
-fn expected_hashes(bits: CompactTarget) -> f64 {
+pub(crate) fn expected_hashes(bits: CompactTarget) -> f64 {
     Target::from_compact(bits).difficulty_float() * HASHES_PER_DIFFICULTY
+}
+
+/// The pool's blocks a second at `pool_hashrate`, hashes a second, when a
+/// block takes `block_bits`' expected hashes.
+pub fn pool_blocks_per_second(pool_hashrate: f64, block_bits: CompactTarget) -> f64 {
+    pool_hashrate / expected_hashes(block_bits)
 }
 
 /// The pool's hashrate, in hashes a second, behind `headers`, the newest
 /// confirmed shares in any order: their work over the time from the oldest
 /// to the newest. The oldest share only opens the span; its work was done
 /// before it. `None` with fewer than two shares or no time between them.
-pub(crate) fn recent_pool_hashrate(headers: &[ConfirmedHeaderResult]) -> Option<f64> {
+pub fn recent_pool_hashrate(headers: &[ConfirmedHeaderResult]) -> Option<f64> {
     let newest = headers.iter().max_by_key(|result| result.header.time)?;
     let oldest = headers.iter().min_by_key(|result| result.header.time)?;
     let span = newest.header.time.checked_sub(oldest.header.time)?;
@@ -68,8 +74,8 @@ pub(crate) fn recent_pool_hashrate(headers: &[ConfirmedHeaderResult]) -> Option<
 /// shares: `max(4 shares per pool block, 300 shares a month)`, a pool block
 /// taking `block_bits`' expected hashes at `pool_hashrate`.
 pub(crate) fn share_rate_limit(pool_hashrate: f64, block_bits: CompactTarget) -> f64 {
-    let pool_blocks_per_second = pool_hashrate / expected_hashes(block_bits);
-    (SHARES_PER_POOL_BLOCK * pool_blocks_per_second).max(SHARES_PER_MONTH / MONTH_SECONDS)
+    (SHARES_PER_POOL_BLOCK * pool_blocks_per_second(pool_hashrate, block_bits))
+        .max(SHARES_PER_MONTH / MONTH_SECONDS)
 }
 
 /// The band of the next job for a miner hashing at `miner_hashrate`, hashes

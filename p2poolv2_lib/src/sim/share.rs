@@ -86,6 +86,7 @@ pub fn build_sim_emission(params: SimShareParams<'_>) -> Result<BuiltShare, SimS
         Some(params.miner_address),
         Some(params.share_owner),
         params.job_band,
+        None,
         params.tracker,
     )
     .map_err(|e| SimShareError(format!("build notify: {e}")))?;

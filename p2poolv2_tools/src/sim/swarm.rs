@@ -75,6 +75,33 @@ pub struct SwarmSettings {
     pub dial_fanout: usize,
     /// `release` or `debug`.
     pub profile: String,
+    /// `PAYOUT_LEVELS`: the `[stratum] payout_level` of each node, in node
+    /// order, comma separated, such as `5,7,7`. A node past the list keeps
+    /// the node's default level.
+    pub payout_levels: Vec<u8>,
+}
+
+/// The levels of a `PAYOUT_LEVELS` value: comma-separated levels from 0 to
+/// 7, empty for none.
+pub fn parse_payout_levels(value: &str) -> ToolResult<Vec<u8>> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|level| {
+            level
+                .trim()
+                .parse::<u8>()
+                .ok()
+                .filter(|level| *level <= 7)
+                .ok_or_else(|| {
+                    ToolError::message(format!(
+                        "PAYOUT_LEVELS={value:?}: {level:?} is not a payout level from 0 to 7"
+                    ))
+                })
+        })
+        .collect()
 }
 
 impl SwarmSettings {
@@ -108,6 +135,7 @@ impl SwarmSettings {
             pool_signature_prefix: env_vars::string("POOL_SIGNATURE_PREFIX", "P2Pool-sim-"),
             dial_fanout: env_vars::parsed("DIAL_FANOUT", 3)?,
             profile: env_vars::string("PROFILE", "release"),
+            payout_levels: parse_payout_levels(&env_vars::string("PAYOUT_LEVELS", ""))?,
         })
     }
 
@@ -263,7 +291,7 @@ bitcoin_cash_network = "regtest"
 network = "regtest"
 version_mask = "1fffffe0"
 pool_signature = "{prefix}{index}"
-
+{payout_level}
 [bitcoinrpc]
 url = "{rpc_url}"
 username = "{rpc_user}"
@@ -306,6 +334,11 @@ ideal_block_time_secs = {block_time}
         anchor = settings.asert_anchor,
         network_hashrate = settings.network_hashrate(),
         block_time = settings.ideal_block_time,
+        payout_level = settings
+            .payout_levels
+            .get(index)
+            .map(|level| format!("payout_level = {level}\n"))
+            .unwrap_or_default(),
     );
     config
 }

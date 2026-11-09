@@ -28,6 +28,9 @@ share transaction root (`ShareCommitment::hash` in
 - on Bitcoin Cash, the share version and the share's difficulty band: tag
   `0x24`, then its wanted bits, band cap and minimum, four bytes each
   ([Share validation](validation.md#the-difficulty-band-bitcoin-cash));
+- on Bitcoin Cash, right after the band, the share's payout level: tag
+  `0x25`, then the one-byte level `k`, 0 to 7
+  ([Coinbase payouts](../payouts/coinbase.md#payout-levels));
 - the miner payout address (with its network class) and the miner share
   address.
 

@@ -12,6 +12,7 @@ use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::bch_split_for_commitment;
 use crate::accounting::payout::coinbase_budget::{BCH_MAX_TX_SIZE, PayoutSplit, split_for_share};
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+use crate::accounting::payout::payout_levels::PplnsWeights;
 use crate::accounting::payout::payout_tree::PayoutTree;
 #[cfg(test)]
 #[mockall_double::double]
@@ -72,7 +73,6 @@ use bitcoin::{
     Amount, BlockHash, CompactTarget, PubkeyHash, ScriptBuf, Target, Transaction, TxMerkleNode,
     transaction::Version,
 };
-use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, RwLock};
@@ -1559,10 +1559,12 @@ impl DefaultShareValidator {
     /// merkle root computed from the reconstructed coinbase and the template
     /// merkle branches matches the bitcoin header's merkle root.
     ///
-    /// The window comes from the same `get_distribution_from_start_hash` the
+    /// The window comes from the same `get_weights_from_start_hash` the
     /// notifier calls, and the difficulty from the same
     /// `bitcoin_block_difficulty`, applied to the bits the notifier's template
-    /// put in this header.
+    /// put in this header. On Bitcoin Cash the weights carry each payee's
+    /// payout level, and the draw is seeded from `prev_share_blockhash`, the
+    /// window's anchor, as the notifier seeds it.
     ///
     /// When prev_share_blockhash is not on the confirmed chain (e.g.
     /// during a candidate chain reorg), walks backward through the
@@ -1583,7 +1585,7 @@ impl DefaultShareValidator {
             share.header.bitcoin_header.prev_blockhash,
         );
         let address_difficulty_map = window
-            .get_distribution_from_start_hash(
+            .get_weights_from_start_hash(
                 share.header.prev_share_blockhash,
                 paying_block,
                 chain_store_handle,
@@ -1743,7 +1745,7 @@ impl DefaultShareValidator {
     /// When the PPLNS window is empty (bootstrap phase), returns an error.
     fn build_expected_outputs(
         share_header: &ShareHeader,
-        address_difficulty_map: &HashMap<PayoutAddress, u128>,
+        address_difficulty_map: &PplnsWeights,
         coinbase_value: u64,
         split: PayoutSplit,
     ) -> Result<CoinbasePayouts, ValidationError> {
@@ -2302,6 +2304,7 @@ mod tests {
     use bitcoin::transaction::Version;
     use bitcoin::{BlockHash, Network, ScriptBuf, TxOut, WitnessMerkleNode, hashes::Hash};
     use mockall::predicate::*;
+    use p2poolv2_wallet::payout_address::PayoutAddress;
     use p2poolv2_wallet::share_owner::ShareOwner;
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
@@ -5864,7 +5867,7 @@ mod tests {
             .miner_pubkey("020202020202020202020202020202020202020202020202020202020202020202")
             .build()
             .header;
-        let empty_map = HashMap::new();
+        let empty_map = PplnsWeights::default();
         let result = DefaultShareValidator::build_expected_outputs(
             &header,
             &empty_map,
@@ -5901,7 +5904,7 @@ mod tests {
         let total_amount = 1_000_000_000;
         let outputs = DefaultShareValidator::build_expected_outputs(
             &header,
-            &difficulty_map,
+            &PplnsWeights::without_levels(difficulty_map),
             total_amount,
             PayoutSplit::EveryPayee,
         )
@@ -5950,7 +5953,7 @@ mod tests {
         let total = 10_000_000_000;
         let outputs = DefaultShareValidator::build_expected_outputs(
             &header,
-            &difficulty_map,
+            &PplnsWeights::without_levels(difficulty_map),
             total,
             PayoutSplit::EveryPayee,
         )
@@ -6025,12 +6028,12 @@ mod tests {
         let addr_a_clone = address_a.clone();
         let addr_b_clone = address_b.clone();
         mock_window
-            .expect_get_distribution_from_start_hash()
+            .expect_get_weights_from_start_hash()
             .returning(move |_, _, _| {
                 let mut distribution = HashMap::with_capacity(2);
                 distribution.insert(addr_a_clone.clone(), 600u128);
                 distribution.insert(addr_b_clone.clone(), 400u128);
-                Ok(distribution)
+                Ok(PplnsWeights::without_levels(distribution))
             });
         let pplns_window = Arc::new(RwLock::new(mock_window));
 
@@ -6096,12 +6099,12 @@ mod tests {
         let addr_a_clone = address_a.clone();
         let addr_b_clone = address_b.clone();
         mock_window
-            .expect_get_distribution_from_start_hash()
+            .expect_get_weights_from_start_hash()
             .returning(move |_, _, _| {
                 let mut distribution = HashMap::with_capacity(2);
                 distribution.insert(addr_a_clone.clone(), 600u128);
                 distribution.insert(addr_b_clone.clone(), 400u128);
-                Ok(distribution)
+                Ok(PplnsWeights::without_levels(distribution))
             });
         let pplns_window = Arc::new(RwLock::new(mock_window));
 
@@ -6130,8 +6133,8 @@ mod tests {
         let mut mock_window = PplnsWindow::default();
         mock_window.expect_network().return_const(Network::Bitcoin);
         mock_window
-            .expect_get_distribution_from_start_hash()
-            .returning(|_, _, _| Ok(HashMap::new()));
+            .expect_get_weights_from_start_hash()
+            .returning(|_, _, _| Ok(PplnsWeights::default()));
         let pplns_window = Arc::new(RwLock::new(mock_window));
 
         let error = validator()
@@ -6175,7 +6178,7 @@ mod tests {
         let mut mock_window = PplnsWindow::default();
         mock_window.expect_network().return_const(Network::Bitcoin);
         mock_window
-            .expect_get_distribution_from_start_hash()
+            .expect_get_weights_from_start_hash()
             .returning(|_, _, _| {
                 Err(WindowError::ReadFailure(
                     "prev_share_blockhash not found in PPLNS window".into(),
@@ -6212,7 +6215,7 @@ mod tests {
         let mut mock_window = PplnsWindow::default();
         mock_window.expect_network().return_const(Network::Bitcoin);
         mock_window
-            .expect_get_distribution_from_start_hash()
+            .expect_get_weights_from_start_hash()
             .returning(move |_, _, _| {
                 Err(WindowError::InsufficientEntries {
                     anchor,
@@ -6311,8 +6314,13 @@ mod tests {
         mock_window.expect_network().return_const(Network::Bitcoin);
         let addr_a_clone = address_a.clone();
         mock_window
-            .expect_get_distribution_from_start_hash()
-            .returning(move |_, _, _| Ok(HashMap::from([(addr_a_clone.clone(), 1000u128)])));
+            .expect_get_weights_from_start_hash()
+            .returning(move |_, _, _| {
+                Ok(PplnsWeights::without_levels(HashMap::from([(
+                    addr_a_clone.clone(),
+                    1000u128,
+                )])))
+            });
 
         let result = validator().validate_bitcoin_payout(
             &share_block,
@@ -6361,8 +6369,13 @@ mod tests {
         mock_window.expect_network().return_const(Network::Bitcoin);
         let addr_a_clone = address_a.clone();
         mock_window
-            .expect_get_distribution_from_start_hash()
-            .returning(move |_, _, _| Ok(HashMap::from([(addr_a_clone.clone(), 1000u128)])));
+            .expect_get_weights_from_start_hash()
+            .returning(move |_, _, _| {
+                Ok(PplnsWeights::without_levels(HashMap::from([(
+                    addr_a_clone.clone(),
+                    1000u128,
+                )])))
+            });
 
         let result = validator().validate_bitcoin_payout(
             &share_block,
@@ -6413,8 +6426,13 @@ mod tests {
         mock_window.expect_network().return_const(Network::Bitcoin);
         let addr_a_clone = address_a.clone();
         mock_window
-            .expect_get_distribution_from_start_hash()
-            .returning(move |_, _, _| Ok(HashMap::from([(addr_a_clone.clone(), 100u128)])));
+            .expect_get_weights_from_start_hash()
+            .returning(move |_, _, _| {
+                Ok(PplnsWeights::without_levels(HashMap::from([(
+                    addr_a_clone.clone(),
+                    100u128,
+                )])))
+            });
         let pplns_window = Arc::new(RwLock::new(mock_window));
 
         // The reconstructed coinbase will also have 1 sat to address_a,
@@ -6530,13 +6548,13 @@ mod tests {
         let miner_b_clone = miner_b.clone();
         let miner_c_clone = miner_c.clone();
         mock_window
-            .expect_get_distribution_from_start_hash()
+            .expect_get_weights_from_start_hash()
             .returning(move |_, _, _| {
                 let mut distribution = HashMap::with_capacity(3);
                 distribution.insert(miner_a_clone.clone(), 500u128);
                 distribution.insert(miner_b_clone.clone(), 300u128);
                 distribution.insert(miner_c_clone.clone(), 200u128);
-                Ok(distribution)
+                Ok(PplnsWeights::without_levels(distribution))
             });
         let pplns_window = Arc::new(RwLock::new(mock_window));
 
@@ -6631,8 +6649,13 @@ mod tests {
         mock_window.expect_network().return_const(Network::Bitcoin);
         let addr_a_clone = address_a.clone();
         mock_window
-            .expect_get_distribution_from_start_hash()
-            .returning(move |_, _, _| Ok(HashMap::from([(addr_a_clone.clone(), 1000u128)])));
+            .expect_get_weights_from_start_hash()
+            .returning(move |_, _, _| {
+                Ok(PplnsWeights::without_levels(HashMap::from([(
+                    addr_a_clone.clone(),
+                    1000u128,
+                )])))
+            });
         let pplns_window = Arc::new(RwLock::new(mock_window));
 
         let validator = DefaultShareValidator::new(PoolDifficulty::default());
@@ -6705,8 +6728,13 @@ mod tests {
             .return_const(bitcoin::Network::Regtest);
         let addr_a_clone = address_a.clone();
         mock_window
-            .expect_get_distribution_from_start_hash()
-            .returning(move |_, _, _| Ok(HashMap::from([(addr_a_clone.clone(), 1000u128)])));
+            .expect_get_weights_from_start_hash()
+            .returning(move |_, _, _| {
+                Ok(PplnsWeights::without_levels(HashMap::from([(
+                    addr_a_clone.clone(),
+                    1000u128,
+                )])))
+            });
         let pplns_window = Arc::new(RwLock::new(mock_window));
 
         let validator =
@@ -6759,9 +6787,14 @@ mod tests {
         let mut window = PplnsWindow::default();
         window.expect_network().return_const(Network::Regtest);
         window
-            .expect_get_distribution_from_start_hash()
+            .expect_get_weights_from_start_hash()
             .times(2)
-            .returning(move |_, _, _| Ok(HashMap::from([(address.clone(), 1000u128)])));
+            .returning(move |_, _, _| {
+                Ok(PplnsWeights::without_levels(HashMap::from([(
+                    address.clone(),
+                    1000u128,
+                )])))
+            });
         let window = Arc::new(RwLock::new(window));
         let validator = validator().for_chain(Chain::BitcoinCash);
         validator
@@ -6783,17 +6816,19 @@ mod tests {
     /// validator rebuilds exactly that coinbase from the same weights.
     #[test]
     fn a_token_share_past_t_is_rebuilt_with_its_payout_tree() {
-        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
-            .map(|byte| {
-                (
-                    PayoutAddress::from(Address::p2pkh(
-                        PubkeyHash::from_byte_array([byte; 20]),
-                        Network::Regtest,
-                    )),
-                    u128::from(byte) * 1_000,
-                )
-            })
-            .collect();
+        let weights = PplnsWeights::without_levels(
+            (1..=120u8)
+                .map(|byte| {
+                    (
+                        PayoutAddress::from(Address::p2pkh(
+                            PubkeyHash::from_byte_array([byte; 20]),
+                            Network::Regtest,
+                        )),
+                        u128::from(byte) * 1_000,
+                    )
+                })
+                .collect(),
+        );
         let commitment = MergeMiningCommitment {
             root: [0x33; 32],
             height: 2,
@@ -6834,7 +6869,7 @@ mod tests {
         let mut window = PplnsWindow::default();
         window.expect_network().return_const(Network::Regtest);
         window
-            .expect_get_distribution_from_start_hash()
+            .expect_get_weights_from_start_hash()
             .returning(move |_, _, _| Ok(weights.clone()));
 
         let result = validator()
@@ -6860,17 +6895,19 @@ mod tests {
     /// tokens.
     #[test]
     fn a_pool_built_token_share_is_rebuilt_from_its_header_root() {
-        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
-            .map(|byte| {
-                (
-                    PayoutAddress::from(Address::p2pkh(
-                        PubkeyHash::from_byte_array([byte; 20]),
-                        Network::Regtest,
-                    )),
-                    u128::from(byte) * 1_000,
-                )
-            })
-            .collect();
+        let weights = PplnsWeights::without_levels(
+            (1..=120u8)
+                .map(|byte| {
+                    (
+                        PayoutAddress::from(Address::p2pkh(
+                            PubkeyHash::from_byte_array([byte; 20]),
+                            Network::Regtest,
+                        )),
+                        u128::from(byte) * 1_000,
+                    )
+                })
+                .collect(),
+        );
         let root = MergeMiningCommitment {
             root: [0x44; 32],
             height: 1,
@@ -6915,7 +6952,7 @@ mod tests {
         let mut window = PplnsWindow::default();
         window.expect_network().return_const(Network::Regtest);
         window
-            .expect_get_distribution_from_start_hash()
+            .expect_get_weights_from_start_hash()
             .returning(move |_, _, _| Ok(weights.clone()));
 
         let result = validator()
@@ -6972,8 +7009,13 @@ mod tests {
         let mut window = PplnsWindow::default();
         window.expect_network().return_const(Network::Regtest);
         window
-            .expect_get_distribution_from_start_hash()
-            .returning(move |_, _, _| Ok(HashMap::from([(address.clone(), 1000u128)])));
+            .expect_get_weights_from_start_hash()
+            .returning(move |_, _, _| {
+                Ok(PplnsWeights::without_levels(HashMap::from([(
+                    address.clone(),
+                    1000u128,
+                )])))
+            });
 
         let result = validator()
             .for_chain(Chain::BitcoinCash)
@@ -6991,17 +7033,19 @@ mod tests {
     /// output index; the same share as a mere share hands over nothing.
     #[test]
     fn a_found_block_hands_its_payout_tree_to_the_sink() {
-        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
-            .map(|byte| {
-                (
-                    PayoutAddress::from(Address::p2pkh(
-                        PubkeyHash::from_byte_array([byte; 20]),
-                        Network::Regtest,
-                    )),
-                    u128::from(byte) * 1_000,
-                )
-            })
-            .collect();
+        let weights = PplnsWeights::without_levels(
+            (1..=120u8)
+                .map(|byte| {
+                    (
+                        PayoutAddress::from(Address::p2pkh(
+                            PubkeyHash::from_byte_array([byte; 20]),
+                            Network::Regtest,
+                        )),
+                        u128::from(byte) * 1_000,
+                    )
+                })
+                .collect(),
+        );
         let commitment = MergeMiningCommitment {
             root: [0x33; 32],
             height: 2,
@@ -7047,7 +7091,7 @@ mod tests {
         let mut window = PplnsWindow::default();
         window.expect_network().return_const(Network::Regtest);
         window
-            .expect_get_distribution_from_start_hash()
+            .expect_get_weights_from_start_hash()
             .returning(move |_, _, _| Ok(weights.clone()));
         let window = Arc::new(RwLock::new(window));
         let (sink, mut found) = crate::node::payout_tree_executor::payout_tree_channel();
@@ -7081,17 +7125,19 @@ mod tests {
     /// share would, is not the coinbase its commitment implies.
     #[test]
     fn a_token_share_paying_every_payee_directly_is_rejected() {
-        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
-            .map(|byte| {
-                (
-                    PayoutAddress::from(Address::p2pkh(
-                        PubkeyHash::from_byte_array([byte; 20]),
-                        Network::Regtest,
-                    )),
-                    u128::from(byte) * 1_000,
-                )
-            })
-            .collect();
+        let weights = PplnsWeights::without_levels(
+            (1..=120u8)
+                .map(|byte| {
+                    (
+                        PayoutAddress::from(Address::p2pkh(
+                            PubkeyHash::from_byte_array([byte; 20]),
+                            Network::Regtest,
+                        )),
+                        u128::from(byte) * 1_000,
+                    )
+                })
+                .collect(),
+        );
         let commitment = MergeMiningCommitment {
             root: [0x33; 32],
             height: 2,
@@ -7132,7 +7178,7 @@ mod tests {
         let mut window = PplnsWindow::default();
         window.expect_network().return_const(Network::Regtest);
         window
-            .expect_get_distribution_from_start_hash()
+            .expect_get_weights_from_start_hash()
             .returning(move |_, _, _| Ok(weights.clone()));
 
         let result = validator()
@@ -7151,17 +7197,19 @@ mod tests {
     /// and the validator agrees.
     #[test]
     fn a_no_token_share_with_the_same_payees_pays_every_one_directly() {
-        let weights: HashMap<PayoutAddress, u128> = (1..=120u8)
-            .map(|byte| {
-                (
-                    PayoutAddress::from(Address::p2pkh(
-                        PubkeyHash::from_byte_array([byte; 20]),
-                        Network::Regtest,
-                    )),
-                    u128::from(byte) * 1_000,
-                )
-            })
-            .collect();
+        let weights = PplnsWeights::without_levels(
+            (1..=120u8)
+                .map(|byte| {
+                    (
+                        PayoutAddress::from(Address::p2pkh(
+                            PubkeyHash::from_byte_array([byte; 20]),
+                            Network::Regtest,
+                        )),
+                        u128::from(byte) * 1_000,
+                    )
+                })
+                .collect(),
+        );
         let mut share = TestShareBlockBuilder::new().build();
         share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
         share.header.bitcoin_height = 702;
@@ -7197,7 +7245,7 @@ mod tests {
         let mut window = PplnsWindow::default();
         window.expect_network().return_const(Network::Regtest);
         window
-            .expect_get_distribution_from_start_hash()
+            .expect_get_weights_from_start_hash()
             .returning(move |_, _, _| Ok(weights.clone()));
 
         let result = validator()

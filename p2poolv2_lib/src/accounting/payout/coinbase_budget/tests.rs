@@ -49,7 +49,13 @@ fn split(
     split: PayoutSplit,
 ) -> (Vec<OutputPair>, Option<PayoutTree>) {
     let mut outputs = Vec::new();
-    let tree = append_payout_split(weights, Amount::from_sat(amount), split, &mut outputs).unwrap();
+    let tree = append_payout_split(
+        &PplnsWeights::without_levels(weights.clone()),
+        Amount::from_sat(amount),
+        split,
+        &mut outputs,
+    )
+    .unwrap();
     (outputs, tree)
 }
 
@@ -180,7 +186,7 @@ fn outputs_already_placed_shrink_the_payout_budget() {
         },
     ];
     let tree = append_payout_split(
-        &rising_weights(80),
+        &PplnsWeights::without_levels(rising_weights(80)),
         Amount::from_sat(SUBSIDY),
         TOKEN,
         &mut outputs,
@@ -391,7 +397,15 @@ fn the_split_is_deterministic() {
 fn a_zero_total_weight_is_an_error() {
     let weights = HashMap::from([(p2pkh(1), 0)]);
     let mut outputs = Vec::new();
-    assert!(append_payout_split(&weights, Amount::from_sat(SUBSIDY), TOKEN, &mut outputs).is_err());
+    assert!(
+        append_payout_split(
+            &PplnsWeights::without_levels(weights),
+            Amount::from_sat(SUBSIDY),
+            TOKEN,
+            &mut outputs
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -446,4 +460,152 @@ fn a_bitcoin_share_pays_every_payee_whatever_its_header() {
         split_for_share(Chain::Bitcoin, &header),
         PayoutSplit::EveryPayee
     );
+}
+
+/// The parent share every payout level test's draw is seeded from.
+const PARENT_SHARE: [u8; 32] = [0x5a; 32];
+
+/// The outputs `split` makes of `amount` for `weights` drawn at `levels`.
+fn leveled_split(
+    weights: HashMap<PayoutAddress, u128>,
+    levels: HashMap<PayoutAddress, u8>,
+    amount: u64,
+    split: PayoutSplit,
+) -> Vec<OutputPair> {
+    let mut outputs = Vec::new();
+    append_payout_split(
+        &PplnsWeights {
+            weights,
+            levels: Some(PayoutLevels::new(
+                bitcoin::BlockHash::from_byte_array(PARENT_SHARE),
+                levels,
+            )),
+        },
+        Amount::from_sat(amount),
+        split,
+        &mut outputs,
+    )
+    .unwrap();
+    outputs
+}
+
+/// The amount `outputs` pay `address`, if any.
+fn paid_to(outputs: &[OutputPair], address: &PayoutAddress) -> Option<u64> {
+    outputs
+        .iter()
+        .find(|output| output.address == *address)
+        .map(|output| output.amount.to_sat())
+}
+
+/// Two payees of 50,000 satoshis at level 5, 17,472, are paid as without
+/// levels.
+#[test]
+fn payees_at_or_above_their_level_keep_their_amounts() {
+    let outputs = leveled_split(
+        HashMap::from([(p2pkh(1), 1), (p2pkh(2), 1)]),
+        HashMap::from([(p2pkh(1), 5), (p2pkh(2), 5)]),
+        100_000,
+        NO_TOKEN,
+    );
+
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(paid_to(&outputs, &p2pkh(1)), Some(50_000));
+    assert_eq!(paid_to(&outputs, &p2pkh(2)), Some(50_000));
+}
+
+/// Two slices of 1,000 satoshis at level 5 make a pot of 2,000, below the
+/// level: one of them wins it all and the other gets no output, while the
+/// payee above its level keeps its 98,000.
+#[test]
+fn payees_below_their_level_share_one_pot_of_the_same_size() {
+    let outputs = leveled_split(
+        HashMap::from([(p2pkh(1), 98), (p2pkh(2), 1), (p2pkh(3), 1)]),
+        HashMap::from([(p2pkh(1), 0), (p2pkh(2), 5), (p2pkh(3), 5)]),
+        100_000,
+        NO_TOKEN,
+    );
+    let small = [paid_to(&outputs, &p2pkh(2)), paid_to(&outputs, &p2pkh(3))];
+
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(paid_to(&outputs, &p2pkh(1)), Some(98_000));
+    assert!(small.contains(&Some(2_000)), "{small:?}");
+    assert!(small.contains(&None), "{small:?}");
+    assert_eq!(
+        outputs
+            .iter()
+            .map(|output| output.amount.to_sat())
+            .sum::<u64>(),
+        100_000
+    );
+}
+
+/// Four slices of 3,000 satoshis at level 3, 4,368, make a pot of 12,000:
+/// `n = 2` parts of 6,000, each at least the level, and the pot is paid
+/// exactly.
+#[test]
+fn a_pot_of_several_levels_is_paid_in_parts_of_at_least_the_level() {
+    let outputs = leveled_split(
+        HashMap::from([(p2pkh(1), 3), (p2pkh(2), 3), (p2pkh(3), 3), (p2pkh(4), 3)]),
+        HashMap::from([(p2pkh(1), 3), (p2pkh(2), 3), (p2pkh(3), 3), (p2pkh(4), 3)]),
+        12_000,
+        NO_TOKEN,
+    );
+
+    assert!(outputs.len() <= 2, "{outputs:?}");
+    assert!(
+        outputs
+            .iter()
+            .all(|output| output.amount.to_sat().is_multiple_of(6_000)),
+        "{outputs:?}"
+    );
+    assert_eq!(
+        outputs
+            .iter()
+            .map(|output| output.amount.to_sat())
+            .sum::<u64>(),
+        12_000
+    );
+}
+
+/// A payee the levels do not list, as the window lists no donation key or
+/// fee address, keeps a slice below every level.
+#[test]
+fn a_payee_without_a_level_is_never_drawn() {
+    let outputs = leveled_split(
+        HashMap::from([(p2pkh(1), 999), (p2pkh(9), 1)]),
+        HashMap::from([(p2pkh(1), 7)]),
+        100_000,
+        NO_TOKEN,
+    );
+
+    assert_eq!(paid_to(&outputs, &p2pkh(9)), Some(100));
+    assert_eq!(paid_to(&outputs, &p2pkh(1)), Some(99_900));
+}
+
+/// Every node built on the same parent draws the same winners.
+#[test]
+fn the_same_parent_draws_the_same_outputs() {
+    let weights = HashMap::from([(p2pkh(1), 1), (p2pkh(2), 1), (p2pkh(3), 1)]);
+    let levels = HashMap::from([(p2pkh(1), 7), (p2pkh(2), 7), (p2pkh(3), 7)]);
+
+    let first = leveled_split(weights.clone(), levels.clone(), 30_000, NO_TOKEN);
+    let second = leveled_split(weights, levels, 30_000, NO_TOKEN);
+
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].amount.to_sat(), 30_000);
+}
+
+/// A Bitcoin split pays every payee its exact slice, levels or not.
+#[test]
+fn a_bitcoin_split_never_draws() {
+    let outputs = leveled_split(
+        HashMap::from([(p2pkh(1), 1), (p2pkh(2), 1)]),
+        HashMap::from([(p2pkh(1), 7), (p2pkh(2), 7)]),
+        1_000,
+        PayoutSplit::EveryPayee,
+    );
+
+    assert_eq!(paid_to(&outputs, &p2pkh(1)), Some(500));
+    assert_eq!(paid_to(&outputs, &p2pkh(2)), Some(500));
 }

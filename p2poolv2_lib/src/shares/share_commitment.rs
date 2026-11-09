@@ -4,7 +4,9 @@
 
 use super::bch_coinbase::BchCoinbase;
 use super::merge_mining::MergeMiningCommitment;
-use super::share_block::{ShareBlock, ShareHeader, decode_optional_address, encode_address};
+use super::share_block::{
+    ShareBlock, ShareHeader, decode_optional_address, decode_payout_level, encode_address,
+};
 use super::share_version::ShareVersion;
 use super::transactions::coinbase::compute_witness_root;
 use super::validation::MAX_UNCLES;
@@ -89,6 +91,9 @@ pub struct ShareCommitment {
     pub wanted_bits: CompactTarget,
     /// The share's band cap in units of 1/1024 (`ShareHeader::band_cap`).
     pub band_cap: u32,
+    /// The payout level of the share's miner (`ShareHeader::payout_level`),
+    /// committed after the band for Bitcoin Cash share owners.
+    pub payout_level: u8,
 }
 
 /// Tag before the share version in a Bitcoin Cash commitment's suffix.
@@ -100,9 +105,14 @@ const SHARE_VERSION_TAG: u8 = 0x22;
 ///
 /// Each part of a Bitcoin Cash commitment's suffix has its own tag byte:
 /// `0x21` a declared coinbase, `0x22` the share version, `0x23` a pool-built
-/// job's token root, `0x24` the band. `0x25` is reserved for payout levels
-/// and `0x26` for weak shares (parts 4 and 3 of the design page).
+/// job's token root, `0x24` the band, `0x25` the payout level
+/// ([`PAYOUT_LEVEL_TAG`], part 4 of the design page). `0x26` is reserved
+/// for weak shares (part 3).
 const BAND_TAG: u8 = 0x24;
+
+/// Tag before a share's payout level in a Bitcoin Cash commitment's suffix,
+/// right after the band (`docs/sharechain/small-miners-design.md`, part 4).
+const PAYOUT_LEVEL_TAG: u8 = 0x25;
 
 /// Tag before a pool-built job's token root in a Bitcoin Cash commitment's
 /// suffix, after the share version.
@@ -122,8 +132,9 @@ pub(crate) fn append_pool_merge_mining(suffix: &mut Vec<u8>, commitment: &MergeM
 
 /// Layout version of a Bitcoin Cash Job Declaration token: 2 since the
 /// share version follows the fee (`ShareCommitment::from_mining_job_token`),
-/// 3 since the band cap follows the share version (2026-11-09).
-pub const BCH_JOB_TOKEN_VERSION: u8 = 3;
+/// 3 since the band cap follows the share version (2026-11-09), 4 since the
+/// payout level follows the band cap (2026-11-09).
+pub const BCH_JOB_TOKEN_VERSION: u8 = 4;
 
 /// Append the share version to a commitment suffix: what a Bitcoin Cash
 /// commitment digests after the shared fields and before a declared
@@ -158,6 +169,16 @@ pub(crate) fn append_band(
     asert_bits
         .consensus_encode(suffix)
         .expect("encoding the minimum bits should never fail");
+}
+
+/// Append a share's payout level to a commitment suffix, right after its
+/// band: [`PAYOUT_LEVEL_TAG`] and the one-byte level.
+/// [`ShareCommitment::hash`] appends it for a Bitcoin Cash share owner; the
+/// notify path appends the node's default level to its pre-built suffix and
+/// a miner's own level per miner.
+pub(crate) fn append_payout_level(suffix: &mut Vec<u8>, payout_level: u8) {
+    suffix.push(PAYOUT_LEVEL_TAG);
+    suffix.push(payout_level);
 }
 
 /// Bytes the timestamp contributes to the commitment encoding.
@@ -295,6 +316,7 @@ struct JobTokenTerms {
     fee: u16,
     share_version: ShareVersion,
     band_cap: u32,
+    payout_level: u8,
 }
 
 /// Decode a Bitcoin Cash job token's terms.
@@ -304,9 +326,10 @@ struct JobTokenTerms {
 /// (`BCH_JOB_TOKEN_VERSION`), a 32-byte nonce, then the share it anchors on:
 /// previous share hash, uncle count and uncles, share bits, time, optional
 /// donation address and amount, optional fee address and amount, the share
-/// version and the band cap. Its share bits are the minimum, so a declared
-/// share's minimum and wanted bits are its bits. At most 255 bytes. More than
-/// [`MAX_UNCLES`] uncles, or bytes left over, is not a token.
+/// version, the band cap and the payout level. Its share bits are the
+/// minimum, so a declared share's minimum and wanted bits are its bits. At
+/// most 255 bytes. More than [`MAX_UNCLES`] uncles, a payout level above 7
+/// (`MAX_PAYOUT_LEVEL`), or bytes left over, is not a token.
 fn decode_job_token_terms(
     token: &[u8],
 ) -> Result<JobTokenTerms, bitcoin::consensus::encode::Error> {
@@ -331,6 +354,7 @@ fn decode_job_token_terms(
     let fee = u16::consensus_decode(&mut reader)?;
     let share_version = ShareVersion::consensus_decode(&mut reader)?;
     let band_cap = u32::consensus_decode(&mut reader)?;
+    let payout_level = decode_payout_level(&mut reader)?;
     if !reader.is_empty() {
         return Err(invalid("trailing BCH job token data"));
     }
@@ -345,6 +369,7 @@ fn decode_job_token_terms(
         fee,
         share_version,
         band_cap,
+        payout_level,
     })
 }
 
@@ -391,6 +416,7 @@ impl ShareCommitment {
             asert_bits: terms.bits,
             wanted_bits: terms.bits,
             band_cap: terms.band_cap,
+            payout_level: terms.payout_level,
         })
     }
 
@@ -438,6 +464,7 @@ impl ShareCommitment {
                 self.band_cap,
                 self.asert_bits,
             );
+            append_payout_level(&mut suffix, self.payout_level);
         }
         if let Some(coinbase) = &self.bch_coinbase {
             suffix.push(0x21);
@@ -503,6 +530,7 @@ impl ShareCommitment {
             asert_bits: header.asert_bits,
             wanted_bits: header.wanted_bits,
             band_cap: header.band_cap,
+            payout_level: header.payout_level,
         }
     }
 }
@@ -638,6 +666,87 @@ mod tests {
         assert_eq!(bitcoin.hash(), banded.hash());
     }
 
+    /// The proof of work fixes the payout level: another level is another
+    /// commitment.
+    #[test]
+    fn bitcoin_cash_commitment_binds_the_payout_level() {
+        let mut cash = create_test_commitment();
+        cash.miner_address = p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
+        cash.asert_bits = cash.bits;
+        cash.wanted_bits = cash.bits;
+        cash.band_cap = crate::shares::band::BAND_CAP_UNIT;
+        cash.payout_level = 5;
+        let mut higher = cash.clone();
+        higher.payout_level = 6;
+
+        assert_ne!(cash.hash(), higher.hash());
+    }
+
+    /// The payout level follows the band under its own tag, one byte.
+    #[test]
+    fn the_payout_level_follows_the_band_under_its_own_tag() {
+        let level_offset = 1 + serialize(&ShareVersion::CURRENT).len() + 1 + 12;
+        let mut suffix = Vec::with_capacity(32);
+        append_share_version(&mut suffix, ShareVersion::CURRENT);
+        append_band(
+            &mut suffix,
+            CompactTarget::from_consensus(0x1b10_0000),
+            2048,
+            CompactTarget::from_consensus(0x1b40_0000),
+        );
+        append_payout_level(&mut suffix, 5);
+
+        assert_eq!(suffix.len(), level_offset + 2);
+        assert_eq!(suffix[level_offset], 0x25);
+        assert_eq!(suffix[level_offset + 1], 5);
+        assert_ne!(PAYOUT_LEVEL_TAG, BAND_TAG);
+        assert_ne!(PAYOUT_LEVEL_TAG, SHARE_VERSION_TAG);
+        assert_ne!(PAYOUT_LEVEL_TAG, POOL_MERGE_MINING_TAG);
+        assert_ne!(PAYOUT_LEVEL_TAG, 0x21);
+    }
+
+    /// A Bitcoin header carries no payout level, so a Bitcoin commitment
+    /// digests none.
+    #[test]
+    fn bitcoin_commitment_ignores_the_payout_level() {
+        let bitcoin = create_test_commitment();
+        let mut leveled = bitcoin.clone();
+        leveled.payout_level = 7;
+
+        assert_eq!(bitcoin.hash(), leveled.hash());
+    }
+
+    /// A job token's payout level reaches the commitment it decodes to, and
+    /// a token claiming a level above 7 is not a token.
+    #[test]
+    fn a_job_token_carries_its_payout_level() {
+        let mut token = vec![BCH_JOB_TOKEN_VERSION];
+        token.extend_from_slice(&[0x11; 32]);
+        token.extend_from_slice(&build_commitment_prefix(
+            BlockHash::all_zeros(),
+            &[],
+            CompactTarget::from_consensus(0x1c38_4bd7),
+        ));
+        token.extend_from_slice(&1_700_000_000u32.to_le_bytes());
+        token.push(0);
+        token.extend_from_slice(&0u16.to_le_bytes());
+        token.push(0);
+        token.extend_from_slice(&0u16.to_le_bytes());
+        token.extend_from_slice(&serialize(&ShareVersion::CURRENT));
+        token.extend_from_slice(&crate::shares::band::BAND_CAP_UNIT.to_le_bytes());
+        let mut above = token.clone();
+        token.push(6);
+        above.push(8);
+        let payout = create_test_commitment().miner_bitcoin_address;
+        let owner = p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
+
+        let commitment =
+            ShareCommitment::from_mining_job_token(&token, payout.clone(), owner).unwrap();
+
+        assert_eq!(commitment.payout_level, 6);
+        assert!(ShareCommitment::from_mining_job_token(&above, payout, owner).is_err());
+    }
+
     /// A pool-built job's token root is digested, so one proof of work
     /// stands behind one root; and the notify path, which appends it per
     /// miner to the template's pre-built suffix, digests the same bytes as
@@ -674,6 +783,7 @@ mod tests {
             rooted.band_cap,
             rooted.asert_bits,
         );
+        append_payout_level(&mut suffix, rooted.payout_level);
         append_pool_merge_mining(&mut suffix, &root);
         assert_eq!(
             commitment_digest(

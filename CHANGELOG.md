@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Share-chain rule change on Bitcoin Cash, a flag day with its own protocol
+segment (`levels-546x2`): payout levels (issue #79, row 4;
+`docs/sharechain/small-miners-design.md`, part 4). Each Bitcoin Cash share
+header carries its miner's payout level `k`, 0 to 7, committed after the
+band under tag `0x25`; a header above 7 does not decode. Level `k` is the
+smallest payment the miner wants, `546 * 2^k` satoshis, from 546 to 69,888.
+When a found block's coinbase would pay a miner less than the level of its
+newest share or uncle in the window, its slice is pooled with the other
+slices at that level and the pot is paid by a draw in the same block, in
+parts of at least the level, seeded from the share's parent: nothing is held
+and nothing is owed, each miner is paid what it earned on average, and the
+coinbase has fewer, larger outputs. The donation key and fee addresses are
+never drawn. A miner chooses its level at login with `min-payout=<satoshis>`
+or `fee-tolerance=<percent>` (over Stratum V1 and V2, and in a Job
+Declaration token's identity); without either the node's new `payout_level`
+setting applies, level 5 (17,472 satoshis) by default, and `spend_cost`
+(148 satoshis) prices `fee-tolerance=`. A node lowers a miner's level, and
+logs a warning once per connection, when the miner would expect fewer than 3
+payments a month at it (node policy, not a rule). `/miner` and the
+dashboard's miner page show each miner's level and its expected payments a
+month. The Job Declaration token layout is 4. These are share-chain rules
+only: Bitcoin Cash's own rules do not change, and a Bitcoin Cash node sees
+only the coinbase payees. A node without them cannot read the new headers
+and would build other coinbases, so the two do not peer: every node must
+upgrade together and start on a fresh store (store format 4), and the share
+chain starts again from its new genesis. Bitcoin is unchanged.
+
+Share-chain rule change on Bitcoin Cash, a flag day with its own protocol
 segment (`band-c64`): one share chain, and a difficulty band (issue #79, row
 3; `docs/sharechain/small-miners-design.md`, parts 1 and 2). The main and
 mini share chains merge into one, which keeps the mini chain's anchor,

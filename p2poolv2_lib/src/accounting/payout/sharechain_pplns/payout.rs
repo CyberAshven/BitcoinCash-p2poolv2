@@ -11,6 +11,7 @@
 use crate::accounting::OutputPair;
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, append_payout_split};
 use crate::accounting::payout::payout_distribution::PayoutDistribution;
+use crate::accounting::payout::payout_levels::PplnsWeights;
 use crate::accounting::payout::payout_tree::PayoutTree;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
     PayingBlock, PplnsWindow, WindowError, bitcoin_block_difficulty,
@@ -22,7 +23,6 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use bitcoin::{Amount, BlockHash, CompactTarget};
 use p2poolv2_wallet::payout_address::PayoutAddress;
-use std::collections::HashMap;
 use std::error::Error;
 use std::sync::{Arc, RwLock};
 
@@ -34,7 +34,7 @@ use std::sync::{Arc, RwLock};
 /// acquires a write lock to update the window and compute the distribution.
 pub struct Payout {
     pplns_window: Arc<RwLock<PplnsWindow>>,
-    last_weights: Option<HashMap<PayoutAddress, u128>>,
+    last_weights: Option<PplnsWeights>,
 }
 
 impl Payout {
@@ -90,7 +90,7 @@ impl PayoutDistribution for Payout {
             .has_per_share_cuts()
     }
 
-    fn pplns_weights(&self) -> Option<HashMap<PayoutAddress, u128>> {
+    fn pplns_weights(&self) -> Option<PplnsWeights> {
         self.last_weights.clone()
     }
 
@@ -138,7 +138,7 @@ impl PayoutDistribution for Payout {
         }
 
         let address_difficulty_map =
-            window.get_distribution_from_start_hash(anchor, paying_block, chain_store_handle)?;
+            window.get_weights_from_start_hash(anchor, paying_block, chain_store_handle)?;
 
         let tree = append_payout_split(
             &address_difficulty_map,
@@ -156,10 +156,11 @@ impl PayoutDistribution for Payout {
 /// node's payout outputs.
 ///
 /// The window's write lock is held only for
-/// [`PplnsWindow::get_distribution_from_start_hash`], the call share
+/// [`PplnsWindow::get_weights_from_start_hash`], the call share
 /// validation makes, and never together with the job registry lock.
 pub trait AnchorWeights: Send + Sync {
-    /// Weights `get_distribution_from_start_hash` pays at `anchor`.
+    /// Weights and payout levels `get_weights_from_start_hash` pays at
+    /// `anchor`, the parent of the share the outputs are for.
     ///
     /// `nbits` and `prev_hash` are the paying block, as the request carries
     /// them and as validation reads them from the share header.
@@ -168,7 +169,7 @@ pub trait AnchorWeights: Send + Sync {
         anchor: BlockHash,
         nbits: u32,
         prev_hash: BlockHash,
-    ) -> Result<HashMap<PayoutAddress, u128>, WindowError>;
+    ) -> Result<PplnsWeights, WindowError>;
 
     /// How many shares `anchor` is below the confirmed tip: 0 for the tip or
     /// a candidate above it, `None` for a share this node does not hold.
@@ -197,7 +198,7 @@ impl AnchorWeights for ShareChainWeights {
         anchor: BlockHash,
         nbits: u32,
         prev_hash: BlockHash,
-    ) -> Result<HashMap<PayoutAddress, u128>, WindowError> {
+    ) -> Result<PplnsWeights, WindowError> {
         let mut window = self
             .window
             .write()
@@ -206,7 +207,7 @@ impl AnchorWeights for ShareChainWeights {
             bitcoin_block_difficulty(CompactTarget::from_consensus(nbits), window.network()),
             prev_hash,
         );
-        window.get_distribution_from_start_hash(anchor, paying_block, &self.store)
+        window.get_weights_from_start_hash(anchor, paying_block, &self.store)
     }
 
     fn anchor_depth(&self, anchor: BlockHash) -> Option<u32> {
@@ -935,9 +936,11 @@ mod tests {
                 .to_sat(),
             500_000
         );
+        //* The rounding of each slice is checked before the payout level
+        //* draw, which would pool these slices of a 101-satoshi coinbase.
         let rounded = build_pplns_outputs(
             101,
-            &validator_weights,
+            &PplnsWeights::without_levels(validator_weights.weights.clone()),
             &None,
             None,
             &None,
@@ -1058,7 +1061,7 @@ mod tests {
         let validated = build_pplns_outputs(
             value,
             &validator_window
-                .get_distribution_from_start_hash(anchor, 1_u128.into(), &validator_store)
+                .get_weights_from_start_hash(anchor, 1_u128.into(), &validator_store)
                 .unwrap(),
             &paying.donation_address,
             paying.donation,
@@ -1184,7 +1187,7 @@ mod tests {
         let paying_block_difficulty =
             bitcoin_block_difficulty(paying_header.bitcoin_header.bits, window.network());
         let validator_weights = window
-            .get_distribution_from_start_hash(
+            .get_weights_from_start_hash(
                 paying_header.prev_share_blockhash,
                 paying_block_difficulty.into(),
                 &mock,
@@ -1202,8 +1205,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(notifier_outputs, validator_outputs);
-        assert_eq!(validator_weights.len(), 3);
-        assert!(!validator_weights.contains_key(&oldest_miner));
+        assert_eq!(validator_weights.weights.len(), 3);
+        assert!(!validator_weights.weights.contains_key(&oldest_miner));
     }
 
     /// The window is consensus: a validator reading other bits from the
@@ -1281,7 +1284,7 @@ mod tests {
         let paying_block_difficulty =
             bitcoin_block_difficulty(paying_header.bitcoin_header.bits, window.network());
         let validator_weights = window
-            .get_distribution_from_start_hash(
+            .get_weights_from_start_hash(
                 paying_header.prev_share_blockhash,
                 paying_block_difficulty.into(),
                 &mock,
@@ -1299,7 +1302,7 @@ mod tests {
         .unwrap();
 
         assert_ne!(notifier_outputs, validator_outputs);
-        assert_eq!(validator_weights.len(), 4);
+        assert_eq!(validator_weights.weights.len(), 4);
     }
 
     /// The notifier and the validator build the same Bitcoin Cash outputs:
@@ -1367,7 +1370,7 @@ mod tests {
         let shared_window = payout.shared_pplns_window();
         let mut window = shared_window.write().unwrap();
         let validator_weights = window
-            .get_distribution_from_start_hash(tip_hash, paying_block_difficulty.into(), &mock)
+            .get_weights_from_start_hash(tip_hash, paying_block_difficulty.into(), &mock)
             .unwrap();
         let validator_outputs = build_pplns_outputs(
             total_amount.to_sat(),
@@ -1380,10 +1383,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(validator_weights.len(), 20);
+        assert_eq!(validator_weights.weights.len(), 20);
         assert_eq!(notifier_outputs, validator_outputs);
         assert!(notifier_outputs.tree.is_none());
-        assert!(validator_weights.keys().all(|miner| {
+        assert!(validator_weights.weights.keys().all(|miner| {
             notifier_outputs
                 .outputs
                 .iter()

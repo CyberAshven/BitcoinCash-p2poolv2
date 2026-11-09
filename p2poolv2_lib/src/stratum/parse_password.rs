@@ -12,10 +12,13 @@
 //! - `p2p=<miner share address>` names the owner of the miner's share coinbase outputs
 //! - `donation=<percent>` chooses the miner's own P2Pool donation on Bitcoin
 //!   Cash, 0 to 10 in steps of 0.5 (see [`parse_miner_donation`])
+//! - `min-payout=<satoshis>` and `fee-tolerance=<percent>` choose the miner's
+//!   payout level on Bitcoin Cash (see [`parse_miner_payout_level`])
 //!
-//! If both `d=` and `th=` are present, `d=` takes priority. Keys P2Pool does
-//! not read, such as Pickaxe's own `pickaxe-donation=`, are ignored, so one
-//! login works at both kinds of pool.
+//! If both `d=` and `th=` are present, `d=` takes priority, and `min-payout=`
+//! takes priority over `fee-tolerance=`. Keys P2Pool does not read, such as
+//! Pickaxe's own `pickaxe-donation=`, are ignored, so one login works at both
+//! kinds of pool.
 //!
 //! This module only extracts values. Policy lives with the caller: difficulty
 //! clamping and the share address network check both happen at authorize.
@@ -26,6 +29,7 @@
 use crate::address::{Address, AddressError};
 use crate::config::{Chain, PoolMode};
 use crate::stratum::difficulty_adjuster::TARGET_DRR;
+use crate::stratum::work::level_policy::PayoutLevelChoice;
 use p2poolv2_config::MAX_BITCOIN_CASH_CUT;
 use std::str::FromStr;
 use tracing::debug;
@@ -34,7 +38,10 @@ use tracing::debug;
 const OPTION_SEPARATORS: [char; 4] = [',', ' ', '\t', ';'];
 
 /// The option keys P2Pool reads. Any other key is ignored.
-const KNOWN_OPTION_KEYS: [&str; 4] = ["d", "th", "p2p", "donation"];
+const KNOWN_OPTION_KEYS: [&str; 6] = ["d", "th", "p2p", "donation", "min-payout", "fee-tolerance"];
+
+/// The largest `fee-tolerance=`: 100%, in basis points.
+const MAX_FEE_TOLERANCE: u32 = 10_000;
 
 /// A miner's donation moves in steps of 0.5%, 50 basis points, from 0 up to
 /// the donation's own cap, [`MAX_BITCOIN_CASH_CUT`].
@@ -158,29 +165,7 @@ fn donation_basis_points(value: &str) -> Result<u16, String> {
              in steps of 0.5, such as donation=0, donation=0.5 or donation=1, without a % sign."
         )
     };
-    let is_digits = |text: &str, most: usize| {
-        !text.is_empty() && text.len() <= most && text.bytes().all(|byte| byte.is_ascii_digit())
-    };
-    let (whole, fraction) = match value.split_once('.') {
-        Some((whole, fraction)) => (whole, Some(fraction)),
-        None => (value, None),
-    };
-    if !is_digits(whole, 6) || fraction.is_some_and(|fraction| !is_digits(fraction, 2)) {
-        return Err(malformed());
-    }
-    let whole: u32 = whole.parse().map_err(|_| malformed())?;
-    let hundredths: u32 = match fraction {
-        None => 0,
-        Some(fraction) => {
-            let digits: u32 = fraction.parse().map_err(|_| malformed())?;
-            if fraction.len() == 1 {
-                digits * 10
-            } else {
-                digits
-            }
-        }
-    };
-    let basis_points = whole * 100 + hundredths;
+    let basis_points = percent_basis_points(value).ok_or_else(malformed)?;
     if basis_points > u32::from(MAX_BITCOIN_CASH_CUT) {
         return Err(format!(
             "donation={value} is above the donation's 10% cap. Give a percentage from 0 to 10."
@@ -192,6 +177,138 @@ fn donation_basis_points(value: &str) -> Result<u16, String> {
         ));
     }
     u16::try_from(basis_points).map_err(|_| malformed())
+}
+
+/// Basis points of a percentage as a miner writes it: at most six whole
+/// digits and at most two decimals, with no sign and no `%`. `None` for
+/// anything else.
+fn percent_basis_points(value: &str) -> Option<u32> {
+    let is_digits = |text: &str, most: usize| {
+        !text.is_empty() && text.len() <= most && text.bytes().all(|byte| byte.is_ascii_digit())
+    };
+    let (whole, fraction) = match value.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (value, None),
+    };
+    if !is_digits(whole, 6) || fraction.is_some_and(|fraction| !is_digits(fraction, 2)) {
+        return None;
+    }
+    let whole: u32 = whole.parse().ok()?;
+    let hundredths: u32 = match fraction {
+        None => 0,
+        Some(fraction) => {
+            let digits: u32 = fraction.parse().ok()?;
+            if fraction.len() == 1 {
+                digits * 10
+            } else {
+                digits
+            }
+        }
+    };
+    Some(whole * 100 + hundredths)
+}
+
+/// The payout level a miner chose: `min-payout=<satoshis>`, the smallest
+/// level at or above that amount, or `fee-tolerance=<percent>`, the smallest
+/// level whose spend costs at most that share of a payment
+/// ([`PayoutLevelChoice`]). `None` when the options choose neither and the
+/// node's level applies. `min-payout=` wins when both are given.
+///
+/// `min-payout=` takes a whole number of satoshis, `fee-tolerance=` a
+/// percentage from 0 to 100 with at most two decimals and no `%` sign, as
+/// `donation=` does. Anything else is an error naming the value, never a
+/// silent fallback to the node's level. The same choice given twice is
+/// accepted; two different ones are not.
+pub(crate) fn parse_miner_payout_level(
+    options: Option<&str>,
+) -> Result<Option<PayoutLevelChoice>, String> {
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    let mut min_payout = None;
+    let mut fee_tolerance = None;
+    for option in options.split(OPTION_SEPARATORS) {
+        let (key, value) = option.split_once('=').unwrap_or((option, ""));
+        if key.eq_ignore_ascii_case("min-payout") {
+            let satoshis = min_payout_satoshis(value)?;
+            min_payout = once_chosen("min-payout", min_payout, satoshis)?;
+        } else if key.eq_ignore_ascii_case("fee-tolerance") {
+            let basis_points = fee_tolerance_basis_points(value)?;
+            fee_tolerance = once_chosen("fee-tolerance", fee_tolerance, basis_points)?;
+        }
+    }
+    Ok(min_payout
+        .map(PayoutLevelChoice::MinPayout)
+        .or(fee_tolerance.map(PayoutLevelChoice::FeeTolerance)))
+}
+
+/// `chosen` once `value` is given for `key`: the value, unless an earlier
+/// one differs.
+fn once_chosen<T: PartialEq + std::fmt::Display + Copy>(
+    key: &str,
+    chosen: Option<T>,
+    value: T,
+) -> Result<Option<T>, String> {
+    match chosen {
+        Some(previous) if previous != value => Err(format!(
+            "{key}= is given twice, as {previous} and {value}. Give it once."
+        )),
+        _ => Ok(Some(value)),
+    }
+}
+
+/// Satoshis of a `min-payout=` value: a whole number, as many digits as a
+/// 64-bit amount holds.
+fn min_payout_satoshis(value: &str) -> Result<u64, String> {
+    let malformed = || {
+        format!(
+            "min-payout={value} is not a payout P2Pool reads. Give a whole number of satoshis, \
+             such as min-payout=10000."
+        )
+    };
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(malformed());
+    }
+    value.parse().map_err(|_| malformed())
+}
+
+/// Basis points of a `fee-tolerance=` percentage, 0 to 100.
+fn fee_tolerance_basis_points(value: &str) -> Result<u16, String> {
+    let basis_points = percent_basis_points(value).ok_or_else(|| {
+        format!(
+            "fee-tolerance={value} is not a fee tolerance P2Pool reads. Give a percentage from \
+             0 to 100 with at most two decimals, such as fee-tolerance=1 or fee-tolerance=0.5, \
+             without a % sign."
+        )
+    })?;
+    if basis_points > MAX_FEE_TOLERANCE {
+        return Err(format!(
+            "fee-tolerance={value} is above 100%. Give a percentage from 0 to 100."
+        ));
+    }
+    u16::try_from(basis_points).map_err(|_| format!("fee-tolerance={value} is above 100%."))
+}
+
+/// The payout level choice a miner's login options make on this node.
+///
+/// Only a Bitcoin Cash node in P2Pool mode has payout levels. Any other node
+/// refuses `min-payout=` and `fee-tolerance=` rather than mine without the
+/// level the miner chose, as it refuses `donation=`.
+pub(crate) fn resolve_miner_payout_level(
+    options: Option<&str>,
+    chain: Chain,
+    mode: PoolMode,
+) -> Result<Option<PayoutLevelChoice>, String> {
+    let choice = parse_miner_payout_level(options)?;
+    if choice.is_some() && (chain != Chain::BitcoinCash || mode != PoolMode::P2poolv2) {
+        return Err(
+            "min-payout= and fee-tolerance= choose a payout level on a Bitcoin Cash P2Pool \
+             node. This node does not build a Bitcoin Cash share chain, so it cannot honour \
+             them. Remove them to mine here."
+                .to_string(),
+        );
+    }
+    Ok(choice)
 }
 
 /// Basis points as a miner writes the percentage: 50 is `0.5%`.
@@ -351,3 +468,6 @@ mod p2p_address_tests;
 
 #[cfg(test)]
 mod donation_tests;
+
+#[cfg(test)]
+mod payout_level_tests;
