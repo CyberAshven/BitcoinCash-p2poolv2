@@ -55,7 +55,7 @@ jobs:
           toolchain: 1.99.0
 
       - name: Install latest nextest release
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
           tool: nextest
 
@@ -84,7 +84,7 @@ jobs:
           toolchain: 1.99.0
 
       - name: Install latest nextest release
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
           tool: nextest
 
@@ -117,7 +117,7 @@ jobs:
 
       # Trunk fetches the wasm-bindgen CLI matching Cargo.lock and wasm-opt.
       - name: Install trunk
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
           tool: trunk
 
@@ -168,7 +168,7 @@ jobs:
           toolchain: 1.99.0
 
       - name: Install latest nextest release
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
           tool: nextest
 
@@ -187,7 +187,7 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install
       - name: Install cargo-llvm-cov and nextest
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
           tool: cargo-llvm-cov,nextest
       # Run coverage through nextest so it uses the same runner as the test
