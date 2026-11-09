@@ -1,5 +1,5 @@
 # Short names for the developer tools in p2poolv2_tools, p2poolv2_netsim,
-# p2poolv2_daa, p2poolv2_safa and p2poolv2_photon_payout; see docs/tooling.md. They only add cargo
+# p2poolv2_daa, p2poolv2_safa, p2poolv2_photon_payout and p2poolv2_payout_sim; see docs/tooling.md. They only add cargo
 # subcommands and change nothing about how the workspace builds.
 [alias]
 sim = "run --release --package p2poolv2_tools --bin sim_harness --"
@@ -17,6 +17,7 @@ photon-payout-measure = "run --release --package p2poolv2_photon_payout --bin ph
 photon-lean-measure = "run --release --package p2poolv2_photon_payout --bin photon-lean-measure --"
 photon-payout-sim = "run --release --package p2poolv2_photon_payout --bin photon-payout-sim --"
 daa-sim = "run --release --package p2poolv2_daa --bin daa_sim --"
+payout-sim = "run --release --package p2poolv2_payout_sim --bin payout-sim --"
 
 # Ported from p2poolv2/p2poolv2 commit edd40a6843636605a89bbb5441b32d7dfcf46884.
 # Vendored libzmq (zeromq-src, built with the cc crate) never defines

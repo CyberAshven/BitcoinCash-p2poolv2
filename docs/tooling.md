@@ -20,6 +20,7 @@ in `.cargo/config.toml`:
 | `cargo safa <command>` | `safa` (crate `p2poolv2_safa`) | The SAFA AuxPoW covenant: its parameters, a miner's leaf, verified claims and an unsigned chipnet genesis; see `p2poolv2_safa/README.md` |
 | `cargo photon-payout-measure` | `photon-payout-measure` (crate `p2poolv2_photon_payout`) | Offline funded PHOTON payout covenant VM counters, transaction costs and tree execution; see `p2poolv2_photon_payout/README.md` |
 | `cargo daa-sim <command>` | `daa_sim` (crate `p2poolv2_daa`) | Share difficulty simulator: upstream's difficulty analysis ported from Python, on the share chain's own ASERT code; see [difficulty_adjustment/bch-daa-analysis.md](difficulty_adjustment/bch-daa-analysis.md) |
+| `cargo payout-sim` | `payout-sim` (crate `p2poolv2_payout_sim`) | Offline Monte Carlo of payout variance and fees under the share chain designs of issue #79; see [p2poolv2_payout_sim/README.md](../p2poolv2_payout_sim/README.md) |
 
 The aliases build with `--release`, except `donate-qr`, a one-shot
 generator, and `safa`, a quick command line. Every tool takes `--help`. Arguments go
