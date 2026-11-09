@@ -641,6 +641,22 @@ carry, whether refusing ever pays, how many honest weak shares expire, and
 each miner's income against its work. The smallest cut at which refusing never
 pays is the proposal.
 
+The same study also covers:
+
+- **Realistic miner mixes.** A spread of miner sizes (Zipf), and a pool of
+  mostly medium miners, where few or none want heavier shares and many sit at
+  the minimum sharing the weak slots.
+- **Arrivals and departures.** A big miner joining or leaving at once: how long
+  the weak ratio and the band cap take to settle, and what small miners are
+  paid meanwhile.
+- **A tiny pool.** Shares at the ceiling, where weak shares switch off.
+- **Other attacks and losses.** The draw-steering attack, and weak shares lost
+  when their parent is unknown or their carrier becomes an uncle.
+- **Tokens and SAFA.**
+  - whether a weak share's proof of work can win and claim merge-mined tokens as a share's can;
+  - how token jobs' 3,072-byte coinbase behaves with the draw and with weak shares;
+  - what the tSAFA claimer needs across the chipnet restart.
+
 ## References
 
 - [Issue #79](https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues/79),
