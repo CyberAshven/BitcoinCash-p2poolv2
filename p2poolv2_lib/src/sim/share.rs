@@ -158,7 +158,7 @@ pub fn weak_share_from_emission(emission: &Emission) -> Option<WeakShare> {
         emission.share_commitment.clone(),
         emission.header,
         u64::from(emission.blocktemplate.height),
-        emission.coinbase_proof.clone(),
+        emission.coinbase_proof,
     );
     let coinbase_script_sig = emission.bitcoin_coinbase.input.first()?.script_sig.clone();
     let coinbase_value = emission
