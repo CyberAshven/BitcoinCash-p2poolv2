@@ -7,7 +7,7 @@
 
 use crate::api::FoundBlock;
 use crate::app::{ctx, fetched};
-use crate::format::{fmt_ago, fmt_utc, short};
+use crate::format::{UNKNOWN, fmt_ago, fmt_effort, fmt_utc, short};
 use crate::layout::{
     Crumb, ErrorPage, ago_cell, dashboard_crumb, loading, miner_link, pager, share_link, stat,
 };
@@ -20,6 +20,10 @@ pub fn blocks_table(blocks: Vec<FoundBlock>) -> impl IntoView {
         .into_iter()
         .map(|block| {
             let href = block_href(&block.bitcoin_blockhash);
+            let effort = block.effort.as_ref().map_or_else(
+                || UNKNOWN.to_string(),
+                |effort| fmt_effort(Some(effort.work), effort.network_difficulty),
+            );
             view! {
                 <tr>
                     <td>
@@ -32,6 +36,7 @@ pub fn blocks_table(blocks: Vec<FoundBlock>) -> impl IntoView {
                     </td>
                     <td>{share_link(&block.share_blockhash)}</td>
                     <td>{miner_link(&block.miner_bitcoin_address)}</td>
+                    <td>{effort}</td>
                     {ago_cell(block.bitcoin_time)}
                 </tr>
             }
@@ -46,6 +51,7 @@ pub fn blocks_table(blocks: Vec<FoundBlock>) -> impl IntoView {
                         <th>"Block hash"</th>
                         <th>"Share"</th>
                         <th>"Found by"</th>
+                        <th>"Effort"</th>
                         <th>"Found"</th>
                     </tr>
                 </thead>

@@ -247,6 +247,7 @@ fn found_blocks(state: &AppState) -> Vec<FoundBlockRow> {
             share_hash: block.share_blockhash,
             time: block.bitcoin_time,
             payout_address: payout_address_display(state, &block.miner_bitcoin_address),
+            effort: block.effort,
         })
         .collect()
 }

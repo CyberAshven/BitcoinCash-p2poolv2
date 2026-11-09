@@ -104,6 +104,7 @@ contributed work.
 |---|---|---|
 | `found_blocks_total` | counter | live read of `AcceptedFoundBlocks` CF |
 | `found_block_time_seconds{blockhash,height,miner,network}` | gauge | live read of `AcceptedFoundBlocks` CF |
+| `found_block_effort{blockhash,height,miner,network}` | gauge | join of `AcceptedFoundBlocks` with `AcceptedBlockEffort` CF |
 
 Before PR #33 these were `bitcoin_blocks_found_total` and
 `bitcoin_block_found_time_seconds`, and the per-user and per-worker series
@@ -247,6 +248,26 @@ increment agree from the moment the node is current.
 `work_since_last_block / network_difficulty`. Values around 1.0 (100%)
 are expected luck; higher means the pool is running "unlucky" on the
 current block.
+
+**Per-block snapshots.** Each accepted block keeps the work and difficulty
+at its own effort reset in the `AcceptedBlockEffort` column family
+(`store-schema.md` 14b), exposed in the found-blocks exposition as
+`found_block_effort{blockhash,height,miner,network}`: the stored `work`
+divided by the difficulty of the header that claimed the block (that
+header's own nBits, not the live `network_difficulty` gauge -- same
+units). A ratio near 1.0 is expected luck; `* 100` in Grafana is the
+percent both dashboards' blocks tables show, and `/found_blocks` carries
+the same snapshot as its `effort` field. The line is emitted only when a
+snapshot with a difficulty exists, so a block accepted before snapshots
+were kept shows no line rather than a zero.
+
+Ordering and failure: the acceptance is persisted first, then the metric
+resets (the reset returns the pre-reset work), then the snapshot is
+attached best effort -- if the attachment fails the block still counts,
+without effort, and a warning is logged. Duplicate verdicts and
+historical candidates (present at startup or found while syncing) never
+reset the effort and never write a snapshot, so their blocks read
+`effort: null` forever.
 
 ### Found block submissions
 

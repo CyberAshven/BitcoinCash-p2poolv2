@@ -206,6 +206,19 @@ pub struct FoundBlock {
     pub share_blockhash: String,
     pub bitcoin_time: u64,
     pub miner_bitcoin_address: String,
+    /// The work since the previous find over the network difficulty of the
+    /// header that claimed this block. Blocks accepted before snapshots
+    /// were kept arrive as `null`, and so do responses from a node that
+    /// does not keep them yet.
+    #[serde(default)]
+    pub effort: Option<FoundBlockEffort>,
+}
+
+/// A found block's kept effort, as `/found_blocks` reports it.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct FoundBlockEffort {
+    pub work: f64,
+    pub network_difficulty: Option<f64>,
 }
 
 /// The Bitcoin Cash header a share carries.
@@ -443,5 +456,38 @@ mod tests {
         let miners: Miners = serde_json::from_str(body).unwrap();
         assert_eq!(miners.accepted_shares_total, 0);
         assert_eq!(miners.rejected_shares_total, 0);
+    }
+
+    #[test]
+    fn test_found_block_parses_its_kept_effort() {
+        let body = r#"{"bitcoin_height":100,"bitcoin_blockhash":"aa",
+            "share_blockhash":"bb","bitcoin_time":1700000000,
+            "miner_bitcoin_address":"miner",
+            "effort":{"work":900000.0,"network_difficulty":600000.0}}"#;
+        let block: FoundBlock = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            block.effort,
+            Some(FoundBlockEffort {
+                work: 900_000.0,
+                network_difficulty: Some(600_000.0),
+            })
+        );
+    }
+
+    #[test]
+    fn test_found_block_parses_without_a_snapshot() {
+        // A block accepted before snapshots were kept arrives with no effort,
+        // and a node that keeps them still sends null for such a block.
+        let annotated_node = r#"{"bitcoin_height":99,"bitcoin_blockhash":"cc",
+            "share_blockhash":"dd","bitcoin_time":1699999999,
+            "miner_bitcoin_address":"miner","effort":null}"#;
+        let null_effort: FoundBlock = serde_json::from_str(annotated_node).unwrap();
+        assert_eq!(null_effort.effort, None);
+
+        let older_node = r#"{"bitcoin_height":99,"bitcoin_blockhash":"cc",
+            "share_blockhash":"dd","bitcoin_time":1699999999,
+            "miner_bitcoin_address":"miner"}"#;
+        let missing_field: FoundBlock = serde_json::from_str(older_node).unwrap();
+        assert_eq!(missing_field.effort, None);
     }
 }

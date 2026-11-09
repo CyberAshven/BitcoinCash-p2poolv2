@@ -271,6 +271,7 @@ pub fn OverviewPage() -> impl IntoView {
                     share_blockhash: block.share_blockhash.clone(),
                     bitcoin_time: block.bitcoin_time,
                     miner_bitcoin_address: block.miner_bitcoin_address.clone(),
+                    effort: block.effort.clone(),
                 })
                 .collect::<Vec<FoundBlock>>()
         })

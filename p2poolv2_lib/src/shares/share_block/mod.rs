@@ -329,6 +329,15 @@ impl ShareHeader {
         Target::from_compact(self.bitcoin_header.bits).is_met_by(self.bitcoin_header.block_hash())
     }
 
+    /// Network difficulty this header's own bits claim, mainnet-relative:
+    /// the denominator of the block effort snapshot. Once BCHN confirms the
+    /// block hash, these bits are the network difficulty at that height.
+    /// Uses `difficulty_float`, the same conversion as the job tracker's
+    /// `get_network_difficulty`, so both readings share units.
+    pub fn bitcoin_network_difficulty(&self) -> f64 {
+        Target::from_compact(self.bitcoin_header.bits).difficulty_float()
+    }
+
     /// The merge-mining commitment at output 0 of this share's Bitcoin Cash
     /// coinbase: the one a Job Declaration miner declared, the root a
     /// pool-built job's node built for its miner's token leaves

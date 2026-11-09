@@ -19,6 +19,7 @@ use crate::api::endpoints::miner::MinerResponse;
 use crate::api::endpoints::share::ShareLookupOutput;
 use bitcoin::BlockHash;
 use maud::{DOCTYPE, Markup, html};
+use p2poolv2_lib::store::found_block::EffortSnapshot;
 use serde::Serialize;
 
 /// Seconds between refreshes of the overview page while auto is on.
@@ -218,6 +219,9 @@ pub(crate) struct FoundBlockRow {
     pub(crate) time: u32,
     /// Payout address of the miner that found it.
     pub(crate) payout_address: String,
+    /// The work since the previous find over the difficulty of the header
+    /// that claimed it, kept when the block was accepted.
+    pub(crate) effort: Option<EffortSnapshot>,
 }
 
 /// Everything the overview shows.
@@ -401,6 +405,16 @@ pub(crate) fn fmt_effort(
             format!("{:.0}%", work / difficulty * 100.0)
         }
         _ => "—".to_string(),
+    }
+}
+
+/// A found block's kept effort, as percent of the difficulty of the header
+/// that claimed it. A block accepted before snapshots were kept is the
+/// dash, not a zero.
+pub(crate) fn fmt_block_effort(effort: Option<EffortSnapshot>) -> String {
+    match effort {
+        Some(snapshot) => fmt_effort(Some(snapshot.work), snapshot.network_difficulty),
+        None => "—".to_string(),
     }
 }
 
@@ -770,7 +784,7 @@ fn blocks_table(now: u64, blocks: &[FoundBlockRow]) -> Markup {
     html! {
         div.table-x {
             table.table {
-                thead { tr { th { "Height" } th { "Block hash" } th { "Share" } th { "Found by" } th { "Found" } } }
+                thead { tr { th { "Height" } th { "Block hash" } th { "Share" } th { "Found by" } th { "Effort" } th { "Found" } } }
                 tbody {
                     @for block in blocks {
                         @let block_hash = block.block_hash.to_string();
@@ -779,6 +793,7 @@ fn blocks_table(now: u64, blocks: &[FoundBlockRow]) -> Markup {
                             td { a.addr href=(block_href(&block_hash)) title=(block_hash) { (short(&block_hash)) } }
                             td { (share_link(&block.share_hash.to_string())) }
                             td { (miner_link(&block.payout_address)) }
+                            td { (fmt_block_effort(block.effort)) }
                             (ago_cell(now, u64::from(block.time)))
                         }
                     }
@@ -1991,6 +2006,53 @@ mod tests {
         assert_eq!(fmt_effort(Some(830.0), None), "—");
         assert_eq!(fmt_effort(None, Some(1_000.0)), "—");
         assert_eq!(fmt_effort(Some(830.0), Some(0.0)), "—");
+    }
+
+    #[test]
+    fn fmt_block_effort_is_the_snapshot_percent_or_a_dash() {
+        assert_eq!(
+            fmt_block_effort(Some(EffortSnapshot {
+                work: 1_500.0,
+                network_difficulty: Some(1_000.0),
+            })),
+            "150%"
+        );
+        assert_eq!(
+            fmt_block_effort(Some(EffortSnapshot {
+                work: 830.0,
+                network_difficulty: None,
+            })),
+            "—"
+        );
+        assert_eq!(fmt_block_effort(None), "—");
+    }
+
+    #[test]
+    fn the_blocks_table_shows_a_snapshot_effort_percent_and_a_dash_without_one() {
+        let annotated = FoundBlockRow {
+            height: 100,
+            block_hash: "aa".repeat(32).parse::<BlockHash>().unwrap(),
+            share_hash: "bb".repeat(32).parse::<BlockHash>().unwrap(),
+            time: 1_700_000_000,
+            payout_address: "bchtest:qpayout".to_string(),
+            effort: Some(EffortSnapshot {
+                work: 1_500.0,
+                network_difficulty: Some(1_000.0),
+            }),
+        };
+        let unannotated = FoundBlockRow {
+            height: 99,
+            block_hash: "cc".repeat(32).parse::<BlockHash>().unwrap(),
+            share_hash: "dd".repeat(32).parse::<BlockHash>().unwrap(),
+            time: 1_699_999_999,
+            payout_address: "bchtest:qpayout".to_string(),
+            effort: None,
+        };
+        let table = blocks_table(1_700_000_000, &[annotated, unannotated]).into_string();
+
+        assert!(table.contains("<th>Effort</th>"));
+        assert!(table.contains("<td>150%</td>"));
+        assert!(table.contains("<td>—</td>"));
     }
 
     #[test]

@@ -19,7 +19,7 @@ use crate::shares::share_block::{
 use crate::shares::weak::WeakSummary;
 use crate::store::block_tx_metadata::{BlockMetadata, Status};
 use crate::store::dag_store::{BlockValidSearch, ShareDag, UncleInfo};
-use crate::store::found_block::FoundBlock;
+use crate::store::found_block::{EffortSnapshot, FoundBlock};
 use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::{PruneStats, get_range_to_prune};
 use crate::store::transaction_store::{OutputOrigin, PrevoutCheck};
@@ -579,6 +579,18 @@ impl ChainStoreHandle {
     ) -> Result<bool, StoreError> {
         self.store_handle
             .record_accepted_found_block(found_block)
+            .await
+    }
+
+    /// Keep the effort snapshot for a recorded acceptance, written only
+    /// after [`Self::record_accepted_found_block`] inserted the block.
+    pub async fn set_accepted_found_block_effort(
+        &self,
+        bitcoin_blockhash: BlockHash,
+        snapshot: EffortSnapshot,
+    ) -> Result<(), StoreError> {
+        self.store_handle
+            .set_accepted_found_block_effort(bitcoin_blockhash, snapshot)
             .await
     }
 
@@ -1244,6 +1256,7 @@ mockall::mock! {
         pub fn carried_bch_headers(&self, shares: &[ShareHeader]) -> Vec<bitcoin::block::Header>;
         pub async fn set_bch_best_chain(&self, updates: Vec<(u32, BlockHash)>, tip_height: u32) -> Result<(), StoreError>;
         pub async fn record_accepted_found_block(&self, found_block: FoundBlock) -> Result<bool, StoreError>;
+        pub async fn set_accepted_found_block_effort(&self, bitcoin_blockhash: BlockHash, snapshot: EffortSnapshot) -> Result<(), StoreError>;
         pub fn get_payout_trees(&self) -> Result<Vec<StoredPayoutTree>, StoreError>;
         pub fn get_payout_tree(&self, coinbase_txid: &Txid) -> Result<Option<StoredPayoutTree>, StoreError>;
         pub fn get_headers_for_locator(&self, block_hashes: &[BlockHash], stop_block_hash: &BlockHash, limit: usize) -> Result<Vec<ShareHeader>, StoreError>;

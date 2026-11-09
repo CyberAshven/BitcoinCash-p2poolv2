@@ -452,6 +452,13 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
 /// explorer for that network. The network label uses bitcoin core's names
 /// (main, testnet4, signet, regtest). Entries are never deleted from the
 /// store, so the counter is monotonic.
+///
+/// A block whose acceptance kept an effort snapshot also gets a
+/// `found_block_effort` line: the work since the previous find over the
+/// difficulty of the header that claimed it, a ratio of about 1.0 at the
+/// expected effort so Grafana multiplies by 100 for a percent. Blocks
+/// accepted before snapshots were kept emit no line at all rather than a
+/// zero that would read as no effort spent.
 fn found_blocks_exposition(found_blocks: &[FoundBlock], network: bitcoin::Network) -> String {
     let mut output = String::with_capacity(256 + found_blocks.len() * 256);
     output.push_str("# HELP found_blocks_total Total number of blocks found by the pool\n");
@@ -461,6 +468,10 @@ fn found_blocks_exposition(found_blocks: &[FoundBlock], network: bitcoin::Networ
         "# HELP found_block_time_seconds Header time of a block found by the pool, labeled with blockhash, height, miner (payout address) and network\n",
     );
     output.push_str("# TYPE found_block_time_seconds gauge\n");
+    output.push_str(
+        "# HELP found_block_effort Pool work since the previous found block over the network difficulty of the header that claimed it, labeled like found_block_time_seconds; a block accepted without a snapshot emits no line\n",
+    );
+    output.push_str("# TYPE found_block_effort gauge\n");
     let network_name = network.to_core_arg();
     for found_block in found_blocks {
         output.push_str(&format!(
@@ -471,6 +482,19 @@ fn found_blocks_exposition(found_blocks: &[FoundBlock], network: bitcoin::Networ
             network_name,
             found_block.bitcoin_time
         ));
+        if let Some(snapshot) = found_block.effort
+            && let Some(difficulty) = snapshot.network_difficulty
+            && difficulty > 0.0
+        {
+            output.push_str(&format!(
+                "found_block_effort{{blockhash=\"{}\",height=\"{}\",miner=\"{}\",network=\"{}\"}} {}\n",
+                found_block.bitcoin_blockhash,
+                found_block.bitcoin_height,
+                escape_label_value(&found_block.miner_bitcoin_address),
+                network_name,
+                snapshot.work / difficulty
+            ));
+        }
     }
     output
 }

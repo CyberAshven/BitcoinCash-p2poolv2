@@ -195,7 +195,7 @@ pub enum MetricsMessage {
         response: oneshot::Sender<()>,
     },
     ResetBlockEffort {
-        response: oneshot::Sender<()>,
+        response: oneshot::Sender<f64>,
     },
     RecordConfirmedShare {
         difficulty: f64,
@@ -328,8 +328,8 @@ impl MetricsActor {
                 let _ = response.send(());
             }
             MetricsMessage::ResetBlockEffort { response } => {
-                self.reset_block_effort();
-                let _ = response.send(());
+                let work = self.reset_block_effort();
+                let _ = response.send(work);
             }
             MetricsMessage::RecordConfirmedShare {
                 difficulty,
@@ -442,11 +442,15 @@ impl MetricsActor {
     }
 
     /// Reset the block effort accumulator after the pool finds a bitcoin
-    /// block, so work counts toward the next block.
+    /// block, so work counts toward the next block. Returns the work that
+    /// accumulated since the previous find: the caller keeps it as the
+    /// accepted block's effort snapshot.
     ///
     /// The found block itself is recorded in the store, not here.
-    fn reset_block_effort(&mut self) {
+    fn reset_block_effort(&mut self) -> f64 {
+        let work = self.metrics.work_since_last_block;
         self.metrics.work_since_last_block = 0.0;
+        work
     }
 
     /// Record the pool difficulty of a confirmed sharechain share for the
@@ -583,8 +587,9 @@ impl MetricsHandle {
     }
 
     /// Reset the block effort accumulator after the pool finds a bitcoin
-    /// block.
-    pub async fn reset_block_effort(&self) -> Result<(), tokio::sync::oneshot::error::RecvError> {
+    /// block, replying with the work that was reset so the caller can keep
+    /// it as the accepted block's effort snapshot.
+    pub async fn reset_block_effort(&self) -> Result<f64, tokio::sync::oneshot::error::RecvError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.sender
             .send(MetricsMessage::ResetBlockEffort {
@@ -1081,7 +1086,9 @@ mod tests {
         let metrics = handle.get_metrics().await;
         assert_eq!(metrics.work_since_last_block, 750.0);
 
-        let _ = handle.reset_block_effort().await;
+        // The reset replies with the work it zeroed, for the effort snapshot.
+        let reset_work = handle.reset_block_effort().await.unwrap();
+        assert_eq!(reset_work, 750.0);
 
         let metrics = handle.get_metrics().await;
         // Finding a block resets effort toward the next block.
@@ -1131,6 +1138,7 @@ mod tests {
             share_blockhash: blocks[2].block_hash(),
             bitcoin_time: 1_700_000_002,
             miner_bitcoin_address: "miner".to_string(),
+            effort: None,
         };
         let stored = chain_store_handle
             .store_handle()

@@ -447,7 +447,9 @@ fn found_block_acceptance(
             share_blockhash: share_header.block_hash(),
             bitcoin_time: header.time,
             miner_bitcoin_address: share_header.miner_bitcoin_address.to_string(),
+            effort: None,
         },
+        network_difficulty: Some(share_header.bitcoin_network_difficulty()),
     })
 }
 

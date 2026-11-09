@@ -42,6 +42,7 @@ use crate::api::endpoints::miner::{MinerResponse, MinerShare, WindowSummary};
 use crate::api::endpoints::share::{BitcoinHeaderOutput, ShareLookupOutput};
 use bitcoin::BlockHash;
 use bitcoin::hashes::Hash;
+use p2poolv2_lib::store::found_block::EffortSnapshot;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -379,6 +380,10 @@ fn found_block() -> FoundBlockRow {
         share_hash: BlockHash::all_zeros(),
         time: 900,
         payout_address: "bchtest:qpayout".to_string(),
+        effort: Some(EffortSnapshot {
+            work: 900_000.0,
+            network_difficulty: Some(600_000.0),
+        }),
     }
 }
 
