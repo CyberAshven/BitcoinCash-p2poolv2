@@ -652,6 +652,15 @@ The same study also covers:
 - **A tiny pool.** Shares at the ceiling, where weak shares switch off.
 - **Other attacks and losses.** The draw-steering attack, and weak shares lost
   when their parent is unknown or their carrier becomes an uncle.
+- **Large miners filling the weak slots** (sharedcontext's attack). Floods of 10,
+  100 and 1,000 times the home hashrate: small miners' credit lumpiness,
+  payments and income, and what the flood costs the attacker.
+- **Sync and propagation cost.**
+  - the extra header-sync and validation work if weak work counts in fork
+    choice (upstream caps uncles at 3 per share for this reason);
+  - the relay latency and stale-rate effect of weak-share traffic, measured
+    in the network simulator (`p2poolv2_netsim`) beside upstream's limit of
+    about 1,000 miners at 10-second shares.
 - **Tokens and SAFA.**
   - whether a weak share's proof of work can win and claim merge-mined tokens as a share's can;
   - how token jobs' 3,072-byte coinbase behaves with the draw and with weak shares;
