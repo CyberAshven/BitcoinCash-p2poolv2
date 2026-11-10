@@ -333,6 +333,25 @@ impl Default for Miners {
     }
 }
 
+/// One entry of `/peers`: a connected libp2p peer.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Peer {
+    pub ip: Option<String>,
+    /// The peer's multiaddr, shown when `ip` is not known.
+    pub address: String,
+    /// "Inbound" or "Outbound", as the node labels the connection.
+    pub direction: String,
+    /// Seconds since the peer's first connection opened.
+    pub connected_secs: u64,
+    /// Identify's agent_version, e.g. "p2poolv2/0.0.1-alpha"; None until
+    /// it arrives, or for a peer that never sends it.
+    pub version: Option<String>,
+    /// Latest ping round trip in milliseconds; None until the first ping,
+    /// never a fabricated zero. Sub-millisecond round trips keep their
+    /// fraction (e.g. 0.91 on loopback).
+    pub latency_ms: Option<f64>,
+}
+
 /// A `/ws` frame: `{"topic":"Share","data":{...}}`.
 #[derive(Deserialize)]
 struct Event {
@@ -489,5 +508,32 @@ mod tests {
             "miner_bitcoin_address":"miner"}"#;
         let missing_field: FoundBlock = serde_json::from_str(older_node).unwrap();
         assert_eq!(missing_field.effort, None);
+    }
+
+    #[test]
+    fn test_peers_page_parses_the_json_field_names() {
+        // The names the node's /peers answers with, in one row that has
+        // everything and one straight after its connection opened (no IP,
+        // version or ping yet); peer_id is node bookkeeping, ignored here.
+        let body = r#"[{"peer_id":"12D3KooWExample","ip":"127.0.0.1",
+            "address":"/ip4/127.0.0.1/tcp/6884","direction":"Inbound",
+            "connected_secs":1337,"version":"p2poolv2/0.0.1-alpha",
+            "latency_ms":0.914},
+            {"peer_id":"12D3KooWOther","ip":null,
+            "address":"/ip6/2001:db8::1/tcp/6884","direction":"Outbound",
+            "connected_secs":0,"version":null,"latency_ms":null}]"#;
+        let peers: Vec<Peer> = serde_json::from_str(body).unwrap();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].ip.as_deref(), Some("127.0.0.1"));
+        assert_eq!(peers[0].address, "/ip4/127.0.0.1/tcp/6884");
+        assert_eq!(peers[0].direction, "Inbound");
+        assert_eq!(peers[0].connected_secs, 1_337);
+        assert_eq!(peers[0].version.as_deref(), Some("p2poolv2/0.0.1-alpha"));
+        assert_eq!(peers[0].latency_ms, Some(0.914));
+        assert_eq!(peers[1].ip, None);
+        assert_eq!(peers[1].direction, "Outbound");
+        assert_eq!(peers[1].connected_secs, 0);
+        assert_eq!(peers[1].version, None);
+        assert_eq!(peers[1].latency_ms, None);
     }
 }

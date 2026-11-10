@@ -73,10 +73,10 @@ async fn confirm_share(state: &AppState, share: &p2poolv2_lib::shares::share_blo
 
 fn recent_share_row_heights(body: &str) -> Vec<u32> {
     let table = body
-        .split_once("<h2>Recent shares")
+        .split_once("<h2>Shares")
         .and_then(|(_, rest)| rest.split_once("</table>"))
         .map(|(table, _)| table)
-        .expect("overview has a Recent shares table");
+        .expect("overview has a Shares table");
     table
         .split("<tr")
         .skip(1)

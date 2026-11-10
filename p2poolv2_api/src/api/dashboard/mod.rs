@@ -406,6 +406,16 @@ async fn overview(
             time: block.time,
         })
         .collect();
+    // The connected peers, longest uptime first (get_peer_infos sorts).
+    // The panel falls back to its empty state when the node actor cannot
+    // answer, rather than failing the whole page.
+    let peers = match state.node_handle.get_peer_infos().await {
+        Ok(peers) => peers,
+        Err(error) => {
+            tracing::warn!("Dashboard could not read connected peers: {error}");
+            Vec::new()
+        }
+    };
     html(pages::overview(&Overview {
         site: site(state),
         now,
@@ -424,6 +434,7 @@ async fn overview(
         blocks_found,
         blocks: blocks.into_iter().take(RECENT_BLOCKS).collect(),
         shares,
+        peers,
         auto,
         range_key,
         pool_on,

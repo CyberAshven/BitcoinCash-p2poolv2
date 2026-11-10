@@ -130,6 +130,39 @@ pub fn fmt_ago(now: u64, then: u64) -> String {
     }
 }
 
+/// A peer's uptime, compact: 42 s, 13 min, 4h 12m, 2d 03h.
+pub fn fmt_duration(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs} s"),
+        60..=3_599 => format!("{} min", secs / 60),
+        3_600..=86_399 => format!("{}h {:02}m", secs / 3_600, secs % 3_600 / 60),
+        _ => format!("{}d {:02}h", secs / 86_400, secs % 86_400 / 3_600),
+    }
+}
+
+/// A ping round trip in milliseconds: sub-millisecond values keep their
+/// fraction, so a loopback peer reads 0.91 ms instead of a fabricated 0.
+pub fn fmt_latency(latency_ms: f64) -> String {
+    if latency_ms < 1.0 {
+        format!("{latency_ms:.2} ms")
+    } else if latency_ms < 10.0 {
+        format!("{latency_ms:.1} ms")
+    } else {
+        format!("{latency_ms:.0} ms")
+    }
+}
+
+/// A peer's version cell: Identify's agent_version arrives as
+/// "p2poolv2/<semver>", so the cell shows just the version, or the dash
+/// when the peer sent none (or an empty one).
+pub fn agent_version(agent: Option<&str>) -> String {
+    let version = agent.map(|agent| agent.split_once('/').map_or(agent, |(_, suffix)| suffix));
+    match version {
+        Some(version) if !version.is_empty() => version.to_string(),
+        _ => UNKNOWN.to_string(),
+    }
+}
+
 /// A long hash or address cut to its ends.
 pub fn short(hash: &str) -> String {
     let length = hash.chars().count();
@@ -261,6 +294,32 @@ mod tests {
         assert_eq!(fmt_ago(20_000, 0), "5 h ago");
         assert_eq!(fmt_ago(200_000, 0), "2 d ago");
         assert_eq!(fmt_ago(0, 100), "0 s ago");
+    }
+
+    #[test]
+    fn test_peer_uptimes_pick_a_compact_unit() {
+        assert_eq!(fmt_duration(0), "0 s");
+        assert_eq!(fmt_duration(42), "42 s");
+        assert_eq!(fmt_duration(1_800), "30 min");
+        assert_eq!(fmt_duration(8_280), "2h 18m");
+        assert_eq!(fmt_duration(90_000), "1d 01h");
+    }
+
+    #[test]
+    fn test_latencies_keep_sub_millisecond_precision() {
+        assert_eq!(fmt_latency(0.0), "0.00 ms");
+        assert_eq!(fmt_latency(0.914), "0.91 ms");
+        assert_eq!(fmt_latency(5.44), "5.4 ms");
+        assert_eq!(fmt_latency(42.6), "43 ms");
+    }
+
+    #[test]
+    fn test_peer_versions_drop_the_agent_prefix() {
+        assert_eq!(agent_version(Some("p2poolv2/0.0.1-alpha")), "0.0.1-alpha");
+        assert_eq!(agent_version(Some("custom-agent")), "custom-agent");
+        assert_eq!(agent_version(Some("p2poolv2/")), UNKNOWN);
+        assert_eq!(agent_version(Some("")), UNKNOWN);
+        assert_eq!(agent_version(None), UNKNOWN);
     }
 
     #[test]

@@ -7,12 +7,12 @@
 //! live, from `/ws`; the shares page has the whole chain.
 
 use super::blocks::{NO_BLOCKS_YET, blocks_table};
-use crate::api::{ChainInfo, FoundBlock, Hashrate, HashratePoint, Miners, Share};
+use crate::api::{ChainInfo, FoundBlock, Hashrate, HashratePoint, Miners, Peer, Share};
 use crate::app::{Ctx, ctx, polled};
 use crate::chart::HashrateChart;
 use crate::format::{
-    UNKNOWN, difficulty_from_bits, difficulty_from_network_hashrate, fmt_ago, fmt_difficulty,
-    fmt_effort, fmt_hashrate, optional,
+    UNKNOWN, agent_version, difficulty_from_bits, difficulty_from_network_hashrate, fmt_ago,
+    fmt_difficulty, fmt_duration, fmt_effort, fmt_hashrate, fmt_latency, optional,
 };
 use crate::layout::{KpiCard, Tone, ago_cell, loading, miner_link, share_link};
 use crate::route::{Route, Tab};
@@ -59,6 +59,11 @@ const RECENT_BLOCKS: usize = 5;
 /// Confirmed share heights the overview's Recent shares lists; the shares
 /// page has them all.
 const RECENT_SHARES: usize = 5;
+
+/// What the overview's peers panel says when its request answered and no
+/// peer is connected.
+const NO_PEERS_YET: &str =
+    "No p2pool peers connected right now. They appear here once the node dials or accepts a peer.";
 
 /// A confirmed share or one of its uncles, as the overview lists it.
 #[derive(Clone, Debug, PartialEq)]
@@ -153,6 +158,30 @@ pub fn shares_table(rows: Vec<ShareRow>) -> impl IntoView {
     }
 }
 
+/// One connected peer as the peers table's row: its IP (or the full
+/// multiaddr when the IP is not known, or the dash when neither is there),
+/// its version with the identify agent prefix dropped, the connection
+/// direction, its uptime and its latest ping round trip.
+fn peer_row_view(peer: &Peer) -> impl IntoView {
+    let address = peer.ip.as_deref().unwrap_or(peer.address.as_str());
+    let address = if address.is_empty() {
+        UNKNOWN.to_string()
+    } else {
+        address.to_string()
+    };
+    let version = agent_version(peer.version.as_deref());
+    let latency = optional(peer.latency_ms, fmt_latency);
+    view! {
+        <tr>
+            <td class="mono peer-addr">{address}</td>
+            <td>{version}</td>
+            <td>{peer.direction.clone()}</td>
+            <td>{fmt_duration(peer.connected_secs)}</td>
+            <td class="mono">{latency}</td>
+        </tr>
+    }
+}
+
 /// `read` applied to a resource's value once it loaded, without copying the
 /// value.
 fn loaded<T: 'static, R>(
@@ -175,7 +204,7 @@ fn failure<T: 'static>(resource: &LocalResource<Result<T, String>>) -> Option<St
 
 /// The first error among the overview's requests, shown above it as the
 /// node's error page would.
-fn first_error(errors: [Option<String>; 4]) -> Option<String> {
+fn first_error(errors: [Option<String>; 5]) -> Option<String> {
     errors.into_iter().flatten().next()
 }
 
@@ -221,6 +250,7 @@ pub fn OverviewPage() -> impl IntoView {
     let chain = polled::<ChainInfo>(|| "/chain_info".into());
     let blocks = polled::<Vec<FoundBlock>>(|| "/found_blocks".into());
     let miners = polled::<Miners>(|| "/miners".into());
+    let peers = polled::<Vec<Peer>>(|| "/peers".into());
 
     // The live feed moves the tip between polls.
     let tip = Signal::derive(move || {
@@ -299,6 +329,7 @@ pub fn OverviewPage() -> impl IntoView {
             failure(&chain),
             failure(&blocks),
             failure(&miners),
+            failure(&peers),
         ])
     });
 
@@ -579,6 +610,48 @@ pub fn OverviewPage() -> impl IntoView {
         }
         .into_any()
     };
+    // The note counts the connected peers (the libp2p note stands in while
+    // the request has not answered or failed, as the page's empty note does).
+    let peers_note = move || {
+        let count = peers.with(|value| match value {
+            Some(Ok(all)) => Some(all.len()),
+            _ => None,
+        });
+        count
+            .map(|count| format!("{count} connected"))
+            .unwrap_or_else(|| "libp2p".to_string())
+    };
+    let peers_panel = move || {
+        let loaded = peers.with(|value| match value {
+            None => None,
+            Some(Err(_)) => Some(Err(())),
+            Some(Ok(all)) => Some(Ok(all.clone())),
+        });
+        match loaded {
+            None => loading(),
+            Some(Err(())) => view! { <p class="empty-state">{UNKNOWN}</p> }.into_any(),
+            Some(Ok(peers_list)) if peers_list.is_empty() => {
+                view! { <p class="empty-state">{NO_PEERS_YET}</p> }.into_any()
+            }
+            Some(Ok(peers_list)) => view! {
+                <div class="table-wrap">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>"Address"</th>
+                                <th>"Version"</th>
+                                <th>"Direction"</th>
+                                <th>"Uptime"</th>
+                                <th>"Latency"</th>
+                            </tr>
+                        </thead>
+                        <tbody>{peers_list.iter().map(peer_row_view).collect_view()}</tbody>
+                    </table>
+                </div>
+            }
+            .into_any(),
+        }
+    };
 
     view! {
         {move || error.get().map(|message| view! { <div class="toast" role="alert">{message}</div> })}
@@ -623,12 +696,16 @@ pub fn OverviewPage() -> impl IntoView {
             <div class="chart-wrap">{chart}</div>
         </div>
         <div class="panel">
-            <h2>"Found blocks" <span class="panel-note">{blocks_note_text}</span></h2>
+            <h2>"Blocks" <span class="panel-note">{blocks_note_text}</span></h2>
             {blocks_panel}
         </div>
         <div class="panel">
-            <h2>"Recent shares" <span class="panel-note">{shares_note}</span></h2>
+            <h2>"Shares" <span class="panel-note">{shares_note}</span></h2>
             {shares_panel}
+        </div>
+        <div class="panel">
+            <h2>"Peers" <span class="panel-note">{peers_note}</span></h2>
+            {peers_panel}
         </div>
     }
 }
@@ -699,9 +776,15 @@ mod tests {
     #[test]
     fn test_the_first_error_is_shown() {
         assert_eq!(
-            first_error([None, Some("a".to_string()), Some("b".to_string()), None]),
+            first_error([
+                None,
+                Some("a".to_string()),
+                Some("b".to_string()),
+                None,
+                None
+            ]),
             Some("a".to_string())
         );
-        assert_eq!(first_error([None, None, None, None]), None);
+        assert_eq!(first_error([None, None, None, None, None]), None);
     }
 }

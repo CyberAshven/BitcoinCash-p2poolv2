@@ -6,6 +6,7 @@ use libp2p::core::ConnectedPoint;
 use libp2p::swarm::ConnectionId;
 use libp2p::{Multiaddr, PeerId};
 use serde::Serialize;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::time::Instant;
@@ -259,11 +260,14 @@ impl ConnectionTracker {
     }
 
     /// Build a list of connected peer info responses.
+    ///
+    /// Longest uptime first: the peers live in a HashMap, whose arbitrary
+    /// order would reshuffle a dashboard's peers table on every refresh.
     pub(crate) fn get_peer_infos(&self) -> Vec<PeerInfoResponse> {
         let now = Instant::now();
-        self.connected_peers
-            .iter()
-            .map(|(peer_id, info)| PeerInfoResponse {
+        let mut peers = Vec::with_capacity(self.connected_peers.len());
+        peers.extend(self.connected_peers.iter().map(|(peer_id, info)| {
+            PeerInfoResponse {
                 peer_id: peer_id.to_string(),
                 ip: info.ip.map(|ip| ip.to_string()),
                 address: info.address.to_string(),
@@ -273,8 +277,10 @@ impl ConnectionTracker {
                 latency_ms: info
                     .latency
                     .map(|round_trip| round_trip.as_secs_f64() * 1_000.0),
-            })
-            .collect()
+            }
+        }));
+        peers.sort_by_key(|peer| Reverse(peer.connected_secs));
+        peers
     }
 }
 
@@ -283,6 +289,7 @@ mod tests {
     use super::*;
     use libp2p::core::transport::PortUse;
     use libp2p::core::{ConnectedPoint, Endpoint};
+    use std::time::Duration;
 
     fn make_dialer_endpoint(address: &str) -> ConnectedPoint {
         let multiaddr: Multiaddr = address.parse().unwrap();
@@ -469,6 +476,31 @@ mod tests {
         let ips: Vec<Option<String>> = infos.iter().map(|info| info.ip.clone()).collect();
         assert!(ips.contains(&Some("1.2.3.4".to_string())));
         assert!(ips.contains(&Some("5.6.7.8".to_string())));
+    }
+
+    #[test]
+    fn test_get_peer_infos_lists_the_longest_connected_peer_first() {
+        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let older = PeerId::random();
+        let newer = PeerId::random();
+        tracker.handle_established(older, &make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884"));
+        tracker.handle_established(newer, &make_listener_endpoint("/ip4/5.6.7.8/tcp/12345"));
+        // Backdate one peer an hour: the other stays at zero seconds.
+        let established = Instant::now()
+            .checked_sub(Duration::from_secs(3_600))
+            .expect("the monotonic clock reaches back an hour");
+        tracker
+            .connected_peers
+            .get_mut(&older)
+            .unwrap()
+            .connected_at = established;
+
+        let infos = tracker.get_peer_infos();
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].ip.as_deref(), Some("1.2.3.4"));
+        assert!(infos[0].connected_secs >= 3_600);
+        assert_eq!(infos[1].ip.as_deref(), Some("5.6.7.8"));
+        assert_eq!(infos[1].connected_secs, 0);
     }
 
     #[test]

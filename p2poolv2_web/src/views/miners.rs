@@ -311,7 +311,7 @@ pub fn MinerPage(address: String, page: usize) -> impl IntoView {
                     .map(|miner| {
                         view! {
                             <div class="panel">
-                                <h2>"Workers on this node"</h2>
+                                <h2>"Workers"</h2>
                                 <div class="grid-table miners-grid">
                                     <div class="grid-head">
                                         <span></span>
@@ -359,7 +359,7 @@ pub fn MinerPage(address: String, page: usize) -> impl IntoView {
                 </div>
                 {workers}
                 <div class="panel">
-                    <h2>"Shares credited in the window" <span class="panel-note">"newest first"</span></h2>
+                    <h2>"Shares" <span class="panel-note">"newest first"</span></h2>
                     {window_shares(&report, page)}
                 </div>
             }

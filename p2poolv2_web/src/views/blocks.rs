@@ -75,7 +75,7 @@ pub fn BlocksPage(page: usize) -> impl IntoView {
     move || match blocks.get() {
         None => view! {
             <div class="panel">
-                <h2>"Found blocks"</h2>
+                <h2>"Blocks"</h2>
                 {loading()}
             </div>
         }
@@ -88,7 +88,7 @@ pub fn BlocksPage(page: usize) -> impl IntoView {
             view! {
                 <div class="panel">
                     <h2>
-                        "Found blocks"
+                        "Blocks"
                         <span class="panel-note">{format!("{total} in all, newest first")}</span>
                     </h2>
                     {if shown.is_empty() {

@@ -19,6 +19,7 @@ use crate::api::endpoints::miner::MinerResponse;
 use crate::api::endpoints::share::ShareLookupOutput;
 use bitcoin::BlockHash;
 use maud::{DOCTYPE, Markup, html};
+use p2poolv2_lib::node::connection_tracker::{ConnectionDirection, PeerInfoResponse};
 use p2poolv2_lib::store::found_block::EffortSnapshot;
 use serde::Serialize;
 
@@ -253,6 +254,8 @@ pub(crate) struct Overview {
     /// The newest confirmed shares, newest first, uncles under the share that
     /// includes them, at most `super::OVERVIEW_SHARES` heights.
     pub(crate) shares: Vec<ShareRow>,
+    /// Connected libp2p peers, longest uptime first, as `/peers` answers.
+    pub(crate) peers: Vec<PeerInfoResponse>,
     /// The overview's stateless auto-refresh toggle, from `?auto=`.
     pub(crate) auto: Auto,
     /// The normalized `?range=` key selecting the chart window, from
@@ -457,6 +460,39 @@ pub(crate) fn fmt_ago(now: u64, then: u64) -> String {
         60..=3_599 => format!("{} min ago", seconds / 60),
         3_600..=86_399 => format!("{} h ago", seconds / 3_600),
         _ => format!("{} d ago", seconds / 86_400),
+    }
+}
+
+/// A peer's uptime, compact: 42 s, 13 min, 4h 12m, 2d 03h.
+pub(crate) fn fmt_duration(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs} s"),
+        60..=3_599 => format!("{} min", secs / 60),
+        3_600..=86_399 => format!("{}h {:02}m", secs / 3_600, secs % 3_600 / 60),
+        _ => format!("{}d {:02}h", secs / 86_400, secs % 86_400 / 3_600),
+    }
+}
+
+/// A ping round trip in milliseconds: sub-millisecond values keep their
+/// fraction, so a loopback peer reads 0.91 ms instead of a fabricated 0.
+pub(crate) fn fmt_latency(latency_ms: f64) -> String {
+    if latency_ms < 1.0 {
+        format!("{latency_ms:.2} ms")
+    } else if latency_ms < 10.0 {
+        format!("{latency_ms:.1} ms")
+    } else {
+        format!("{latency_ms:.0} ms")
+    }
+}
+
+/// A peer's version cell: Identify's agent_version arrives as
+/// "p2poolv2/<semver>", so the cell shows just the version, or the dash
+/// when the peer sent none (or an empty one).
+pub(crate) fn agent_version(agent: Option<&str>) -> String {
+    let version = agent.map(|agent| agent.split_once('/').map_or(agent, |(_, suffix)| suffix));
+    match version {
+        Some(version) if !version.is_empty() => version.to_string(),
+        _ => "—".to_string(),
     }
 }
 
@@ -803,6 +839,21 @@ fn blocks_table(now: u64, blocks: &[FoundBlockRow]) -> Markup {
     }
 }
 
+/// A peer's address cell: its IP, or the full multiaddr when the IP is not
+/// known, or the dash when neither is there.
+fn peer_address(peer: &PeerInfoResponse) -> &str {
+    let address = peer.ip.as_deref().unwrap_or(peer.address.as_str());
+    if address.is_empty() { "—" } else { address }
+}
+
+/// The direction cell's label, as the JSON API serializes it.
+fn direction_label(direction: &ConnectionDirection) -> &'static str {
+    match direction {
+        ConnectionDirection::Inbound => "Inbound",
+        ConnectionDirection::Outbound => "Outbound",
+    }
+}
+
 pub(crate) fn overview(view: &Overview) -> Markup {
     let (_, _, max_samples, _, period) = *RANGES
         .iter()
@@ -889,7 +940,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             div.chart-wrap { (chart) }
         }
         div.panel {
-            h2 { "Found blocks" span.panel-note { (view.blocks_found) " in all" } }
+            h2 { "Blocks" span.panel-note { (view.blocks_found) " in all" } }
             @if view.blocks.is_empty() {
                 p.empty-state { "The pool has not found a Bitcoin Cash block yet. Keep mining." }
             } @else {
@@ -899,7 +950,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         }
         div.panel {
             h2 {
-                "Recent shares"
+                "Shares"
                 span.panel-note {
                     "newest first, uncles under the share that includes them"
                     @if let Some(tip) = view.tip_height { " · tip " (tip) }
@@ -935,6 +986,35 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                 div.panel-more { a href="/dashboard/shares" { "More found shares →" } }
             }
         }
+        div.panel {
+            h2 {
+                "Peers"
+                span.panel-note {
+                    @if view.peers.is_empty() { "libp2p" }
+                    @else { (view.peers.len()) " connected" }
+                }
+            }
+            @if view.peers.is_empty() {
+                p.empty-state { "No p2pool peers connected right now. They appear here once the node dials or accepts a peer." }
+            } @else {
+                div.table-wrap {
+                    table.table {
+                        thead { tr { th { "Address" } th { "Version" } th { "Direction" } th { "Uptime" } th { "Latency" } } }
+                        tbody {
+                            @for peer in &view.peers {
+                                tr {
+                                    td.mono.peer-addr { (peer_address(peer)) }
+                                    td { (agent_version(peer.version.as_deref())) }
+                                    td { (direction_label(&peer.direction)) }
+                                    td { (fmt_duration(peer.connected_secs)) }
+                                    td.mono { (optional(peer.latency_ms, fmt_latency)) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     };
     let refresh = matches!(view.auto, Auto::On).then_some(OVERVIEW_REFRESH_SECONDS);
     layout(
@@ -953,7 +1033,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
 pub(crate) fn blocks(view: &BlocksView) -> Markup {
     let body = html! {
         div.panel {
-            h2 { "Found blocks" span.panel-note { (view.blocks_found) " in all, newest first" } }
+            h2 { "Blocks" span.panel-note { (view.blocks_found) " in all, newest first" } }
             @if view.blocks.is_empty() {
                 p.empty-state { "The pool has not found a Bitcoin Cash block yet. Keep mining." }
             } @else {
@@ -979,7 +1059,7 @@ pub(crate) fn shares(view: &SharesView) -> Markup {
     let body = html! {
         div.panel {
             h2 {
-                "Recent shares"
+                "Shares"
                 span.panel-note {
                     "newest first, uncles under the share that includes them"
                     @if let Some(tip) = view.tip_height { " · tip " (tip) }
@@ -1181,7 +1261,7 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
         }
         @if !view.workers.is_empty() {
             div.panel {
-                h2 { "Workers on this node" }
+                h2 { "Workers" }
                 div.grid-table.miners-grid {
                     div.grid-head {
                         span {} span { "Worker" } span { "State" } span { "Accepted work" }
@@ -1192,7 +1272,7 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
             }
         }
         div.panel {
-            h2 { "Shares credited in the window" span.panel-note { "newest first" } }
+            h2 { "Shares" span.panel-note { "newest first" } }
             @if shares.is_empty() {
                 p.empty-state { "This address has no shares in the current window." }
             } @else {
@@ -1467,6 +1547,7 @@ mod tests {
             blocks_found: 0,
             blocks: Vec::new(),
             shares: Vec::new(),
+            peers: Vec::new(),
             auto: Auto::On,
             range_key: normalize_range(None),
             pool_on: true,
@@ -2074,6 +2155,90 @@ mod tests {
         assert!(page.contains("More found shares"));
         assert!(!page.contains("page="));
         assert!(!page.contains("Previous"));
+    }
+
+    #[test]
+    fn the_overview_peers_panel_lists_each_connected_peer() {
+        let mut view = empty_overview();
+        view.peers = vec![PeerInfoResponse {
+            peer_id: "12D3KooWExample".to_string(),
+            ip: Some("127.0.0.1".to_string()),
+            address: "/ip4/127.0.0.1/tcp/6884".to_string(),
+            direction: ConnectionDirection::Inbound,
+            connected_secs: 1_337,
+            version: Some("p2poolv2/0.0.1-alpha".to_string()),
+            latency_ms: Some(0.914),
+        }];
+        let page = overview(&view).into_string();
+
+        assert!(page.contains("<h2>Peers"));
+        assert!(page.contains("1 connected"));
+        assert!(page.contains("<th>Address</th>"));
+        assert!(page.contains("<th>Version</th>"));
+        assert!(page.contains("<th>Direction</th>"));
+        assert!(page.contains("<th>Uptime</th>"));
+        assert!(page.contains("<th>Latency</th>"));
+        assert!(page.contains("<td class=\"mono peer-addr\">127.0.0.1</td>"));
+        assert!(page.contains("<td>0.0.1-alpha</td>"));
+        assert!(!page.contains("p2poolv2/"));
+        assert!(page.contains("<td>Inbound</td>"));
+        assert!(page.contains("<td>22 min</td>"));
+        assert!(page.contains("<td class=\"mono\">0.91 ms</td>"));
+    }
+
+    #[test]
+    fn the_overview_peers_panel_falls_back_to_the_multiaddr_and_dashes_missing_values() {
+        let mut view = empty_overview();
+        view.peers = vec![PeerInfoResponse {
+            peer_id: "12D3KooWOther".to_string(),
+            ip: None,
+            address: "/ip6/2001:db8::1/tcp/6884".to_string(),
+            direction: ConnectionDirection::Outbound,
+            connected_secs: 0,
+            version: None,
+            latency_ms: None,
+        }];
+        let page = overview(&view).into_string();
+
+        assert!(page.contains("<td class=\"mono peer-addr\">/ip6/2001:db8::1/tcp/6884</td>"));
+        assert!(page.contains("<td>Outbound</td>"));
+        assert!(page.contains("<td>0 s</td>"));
+        assert!(page.contains("<td>—</td>"));
+        assert!(page.contains("<td class=\"mono\">—</td>"));
+    }
+
+    #[test]
+    fn the_overview_peers_panel_says_so_without_peers() {
+        let page = overview(&empty_overview()).into_string();
+
+        assert!(page.contains("libp2p"));
+        assert!(page.contains("No p2pool peers connected right now."));
+    }
+
+    #[test]
+    fn uptimes_pick_a_compact_unit() {
+        assert_eq!(fmt_duration(0), "0 s");
+        assert_eq!(fmt_duration(42), "42 s");
+        assert_eq!(fmt_duration(1_800), "30 min");
+        assert_eq!(fmt_duration(8_280), "2h 18m");
+        assert_eq!(fmt_duration(90_000), "1d 01h");
+    }
+
+    #[test]
+    fn latencies_keep_sub_millisecond_precision() {
+        assert_eq!(fmt_latency(0.0), "0.00 ms");
+        assert_eq!(fmt_latency(0.914), "0.91 ms");
+        assert_eq!(fmt_latency(5.44), "5.4 ms");
+        assert_eq!(fmt_latency(42.6), "43 ms");
+    }
+
+    #[test]
+    fn peer_versions_drop_the_agent_prefix() {
+        assert_eq!(agent_version(Some("p2poolv2/0.0.1-alpha")), "0.0.1-alpha");
+        assert_eq!(agent_version(Some("custom-agent")), "custom-agent");
+        assert_eq!(agent_version(Some("p2poolv2/")), "—");
+        assert_eq!(agent_version(Some("")), "—");
+        assert_eq!(agent_version(None), "—");
     }
 
     #[test]
