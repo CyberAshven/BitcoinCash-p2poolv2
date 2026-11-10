@@ -513,7 +513,8 @@ fn work_to_f64(work: bitcoin::Work) -> f64 {
 use p2poolv2_lib::node::connection_tracker::PeerInfoResponse;
 
 /// Returns enriched info for all connected peers including IP, direction,
-/// and connection duration.
+/// connection duration, the p2pool version Identify reported and the latest
+/// ping round trip.
 async fn peers(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PeerInfoResponse>>, ApiError> {

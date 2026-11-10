@@ -33,6 +33,10 @@ pub struct PeerInfo {
     pub ip: Option<IpAddr>,
     pub connected_at: Instant,
     pub direction: ConnectionDirection,
+    /// P2pool version the peer's Identify exchange reported, once it arrives.
+    pub version: Option<String>,
+    /// Latest ping round trip measured to the peer, once a ping succeeds.
+    pub latency: Option<std::time::Duration>,
 }
 
 /// Serializable peer info returned by the API.
@@ -43,6 +47,13 @@ pub struct PeerInfoResponse {
     pub address: String,
     pub direction: ConnectionDirection,
     pub connected_secs: u64,
+    /// P2pool version reported by the peer's Identify exchange; None until
+    /// it arrives, or for a peer that never sends it.
+    pub version: Option<String>,
+    /// Latest ping round trip in milliseconds; None until the first
+    /// successful ping, never a fabricated zero. Sub-millisecond round
+    /// trips keep their fraction (e.g. 0.2 on loopback).
+    pub latency_ms: Option<f64>,
 }
 
 /// Result of processing a new connection.
@@ -139,6 +150,8 @@ impl ConnectionTracker {
             ip,
             connected_at: Instant::now(),
             direction,
+            version: None,
+            latency: None,
         };
         self.connected_peers
             .entry(peer_id)
@@ -174,6 +187,23 @@ impl ConnectionTracker {
         let failures = self.ping_failures.entry(connection_id).or_insert(0);
         *failures += 1;
         *failures
+    }
+
+    /// Record the p2pool version Identify reported for a connected peer.
+    /// A peer that is no longer connected is ignored: the value lives with
+    /// the peer's metadata and dies with it.
+    pub(crate) fn record_identified(&mut self, peer_id: &PeerId, version: String) {
+        if let Some(info) = self.connected_peers.get_mut(peer_id) {
+            info.version = Some(version);
+        }
+    }
+
+    /// Record the latest ping round trip measured to a connected peer, so
+    /// /peers can report it. A peer that is no longer connected is ignored.
+    pub(crate) fn record_ping_rtt(&mut self, peer_id: &PeerId, round_trip: std::time::Duration) {
+        if let Some(info) = self.connected_peers.get_mut(peer_id) {
+            info.latency = Some(round_trip);
+        }
     }
 
     /// Count a connection closed for failing ping.
@@ -239,6 +269,10 @@ impl ConnectionTracker {
                 address: info.address.to_string(),
                 direction: info.direction.clone(),
                 connected_secs: now.duration_since(info.connected_at).as_secs(),
+                version: info.version.clone(),
+                latency_ms: info
+                    .latency
+                    .map(|round_trip| round_trip.as_secs_f64() * 1_000.0),
             })
             .collect()
     }
@@ -435,6 +469,69 @@ mod tests {
         let ips: Vec<Option<String>> = infos.iter().map(|info| info.ip.clone()).collect();
         assert!(ips.contains(&Some("1.2.3.4".to_string())));
         assert!(ips.contains(&Some("5.6.7.8".to_string())));
+    }
+
+    #[test]
+    fn test_record_identified_reports_the_version_in_peer_infos() {
+        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let peer_id = PeerId::random();
+        tracker.handle_established(peer_id, &make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884"));
+
+        tracker.record_identified(&peer_id, "p2poolv2/0.0.1-alpha".to_string());
+
+        let infos = tracker.get_peer_infos();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].version.as_deref(), Some("p2poolv2/0.0.1-alpha"));
+    }
+
+    #[test]
+    fn test_record_ping_rtt_reports_latency_in_milliseconds() {
+        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let peer_id = PeerId::random();
+        tracker.handle_established(peer_id, &make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884"));
+
+        tracker.record_ping_rtt(&peer_id, std::time::Duration::from_millis(250));
+        let infos = tracker.get_peer_infos();
+        assert_eq!(infos[0].latency_ms, Some(250.0));
+
+        tracker.record_ping_rtt(&peer_id, std::time::Duration::from_micros(150));
+        let infos = tracker.get_peer_infos();
+        let latency = infos[0].latency_ms.unwrap();
+        assert!(
+            (latency - 0.15).abs() < 1e-9,
+            "sub-millisecond round trips must keep their fraction, got {latency}"
+        );
+    }
+
+    #[test]
+    fn test_peer_infos_have_no_version_or_latency_before_they_are_observed() {
+        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let peer_id = PeerId::random();
+        tracker.handle_established(peer_id, &make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884"));
+
+        let infos = tracker.get_peer_infos();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].version, None);
+        assert_eq!(infos[0].latency_ms, None);
+    }
+
+    #[test]
+    fn test_version_and_latency_are_forgotten_when_the_peer_disconnects() {
+        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let peer_id = PeerId::random();
+        tracker.handle_established(peer_id, &make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884"));
+        tracker.record_identified(&peer_id, "p2poolv2/0.0.1-alpha".to_string());
+        tracker.record_ping_rtt(&peer_id, std::time::Duration::from_millis(250));
+
+        tracker.handle_closed(&peer_id, 0);
+        assert!(tracker.get_peer_infos().is_empty());
+
+        tracker.record_identified(&peer_id, "p2poolv2/0.0.1-alpha".to_string());
+        tracker.record_ping_rtt(&peer_id, std::time::Duration::from_millis(250));
+        assert!(
+            tracker.get_peer_infos().is_empty(),
+            "events for a disconnected peer must not resurrect it"
+        );
     }
 
     #[test]
