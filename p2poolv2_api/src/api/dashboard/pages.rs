@@ -876,7 +876,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                   "Est. from diff. 10-min blocks".to_string()]))
             (kpi_card("Share chain height",
                 view.tip_height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string()), "", None,
-                &[format!("Difficulty {}", optional(view.share_difficulty, fmt_difficulty))]))
+                &[format!("Min. Difficulty {}", optional(view.share_difficulty, fmt_difficulty))]))
             (kpi_card("Blocks found", view.blocks_found.to_string(), "kpi-value-green", Some("/dashboard/blocks"),
                 &[last_block
                     .map(|time| format!("Last {}", fmt_ago(view.now, u64::from(time))))
@@ -1943,7 +1943,7 @@ mod tests {
         let page = overview(&view).into_string();
         let card = page.split("kpi-label\">Share chain height").nth(1).unwrap();
         let card = card.split("kpi-card").next().unwrap();
-        assert!(card.contains("Difficulty 73"));
+        assert!(card.contains("Min. Difficulty 73"));
     }
 
     #[test]
@@ -1954,7 +1954,7 @@ mod tests {
         let page = overview(&view).into_string();
         let card = page.split("kpi-label\">Share chain height").nth(1).unwrap();
         let card = card.split("kpi-card").next().unwrap();
-        assert!(card.contains("Difficulty —"));
+        assert!(card.contains("Min. Difficulty —"));
     }
 
     #[test]

@@ -374,7 +374,7 @@ pub fn OverviewPage() -> impl IntoView {
     let share_notes = Signal::derive(move || {
         let share_difficulty = loaded(&hashrate, |hashrate| hashrate.share_difficulty).flatten();
         vec![format!(
-            "Difficulty {}",
+            "Min. Difficulty {}",
             optional(share_difficulty, fmt_difficulty)
         )]
     });
