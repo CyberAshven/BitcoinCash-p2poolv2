@@ -33,6 +33,8 @@ use crate::pool_difficulty;
 use crate::shares::share_block::ShareBlock;
 #[cfg(feature = "sim")]
 use libp2p::request_response::ResponseChannel;
+#[cfg(feature = "sim")]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // OnceLock state (sim-only, does not exist in production builds)
@@ -49,6 +51,13 @@ static SIM_NETWORK_HASHRATE: std::sync::OnceLock<u64> = std::sync::OnceLock::new
 
 #[cfg(feature = "sim")]
 static SIM_PROPAGATION_DELAY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+#[cfg(feature = "sim")]
+static SIM_ALTER_WEAK_COPY_EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Broadcasts carrying weak shares so far, for [`alter_weak_copy`].
+#[cfg(feature = "sim")]
+static SIM_WEAK_CARRIER_BROADCASTS: AtomicU64 = AtomicU64::new(0);
 
 /// Set the sim ideal block time. Called once at startup by the sim binary.
 /// Does not exist in production builds.
@@ -235,12 +244,16 @@ pub fn init_propagation_delay(ms: u64) {
 ///
 /// Computes a jittered delay from the configured base propagation delay,
 /// then spawns a task that sleeps and sends. All delay/jitter complexity
-/// lives here. Does not exist in production builds.
+/// lives here. With `alter_weak_copy_every` set, some copies carrying weak
+/// shares go out altered ([`alter_weak_copy`]). Does not exist in production
+/// builds.
 #[cfg(feature = "sim")]
 pub fn spawn_delayed_broadcast(
     swarm_tx: tokio::sync::mpsc::Sender<SwarmSend<ResponseChannel<Message>>>,
     share_block: ShareBlock,
 ) {
+    let mut share_block = share_block;
+    alter_weak_copy(&mut share_block);
     let base = *SIM_PROPAGATION_DELAY_MS.get().unwrap_or(&0);
     let delay = if base == 0 {
         std::time::Duration::ZERO
@@ -260,6 +273,44 @@ pub fn spawn_delayed_broadcast(
             tracing::error!("Failed to broadcast share block");
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// altered weak share copies
+// ---------------------------------------------------------------------------
+
+/// Set how often a broadcast carrying weak shares goes out altered
+/// ([`alter_weak_copy`]); zero never alters. Called once at startup by the
+/// sim binary. Does not exist in production builds.
+#[cfg(feature = "sim")]
+pub fn init_alter_weak_copy_every(every: u64) {
+    if every > 0 {
+        SIM_ALTER_WEAK_COPY_EVERY.set(every).ok();
+    }
+}
+
+/// Alter the copy of a share block about to be broadcast as a peer serving
+/// an altered copy of an honest share would: of the broadcasts that carry
+/// weak shares, every `alter_weak_copy_every`-th has its first weak share's
+/// coinbase value raised by one satoshi. Only this copy changes; the store
+/// and the answers to block requests keep the share as it was validated.
+/// Does not exist in production builds.
+#[cfg(feature = "sim")]
+fn alter_weak_copy(share_block: &mut ShareBlock) {
+    if let Some(every) = SIM_ALTER_WEAK_COPY_EVERY.get()
+        && !share_block.weak_shares.is_empty()
+    {
+        let carriers = SIM_WEAK_CARRIER_BROADCASTS.fetch_add(1, Ordering::Relaxed) + 1;
+        if carriers % every == 0 {
+            let block_hash = share_block.block_hash();
+            let weak_share = &mut share_block.weak_shares[0];
+            weak_share.coinbase_value = weak_share.coinbase_value.wrapping_add(1);
+            tracing::info!(
+                "Sim: broadcasting share {block_hash} with weak share {} altered: coinbase value one satoshi higher",
+                weak_share.pow_hash()
+            );
+        }
+    }
 }
 
 #[cfg(test)]
