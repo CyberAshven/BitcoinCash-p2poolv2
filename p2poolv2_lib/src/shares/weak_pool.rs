@@ -26,6 +26,7 @@ use crate::shares::weak::{WEAK_CAP, WEAK_DEPTH, WeakShare};
 use bitcoin::BlockHash;
 use libp2p::PeerId;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -75,6 +76,79 @@ pub struct RelayWeakShare {
 
 pub type WeakRelayReceiver = mpsc::Receiver<RelayWeakShare>;
 
+/// Why the pool did not take a weak share: the `reason` label of
+/// `weak_shares_refused_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeakShareRefusal {
+    /// Its proof-of-work hash was seen before, usually from another peer.
+    Duplicate,
+    /// Its peer sent weak shares faster than [`PEER_WEAK_SHARES_PER_SECOND`].
+    RateLimited,
+    /// It broke a share-chain rule.
+    Invalid,
+    /// It could not be checked: data the check needs was missing, or a store
+    /// read failed.
+    Unchecked,
+    /// The pool was full of weak shares on parents no older than its own.
+    PoolFull,
+}
+
+impl WeakShareRefusal {
+    /// Every reason, in the order the exposition lists them.
+    pub const ALL: [WeakShareRefusal; 5] = [
+        WeakShareRefusal::Duplicate,
+        WeakShareRefusal::RateLimited,
+        WeakShareRefusal::Invalid,
+        WeakShareRefusal::Unchecked,
+        WeakShareRefusal::PoolFull,
+    ];
+
+    /// The reason as its metric label.
+    pub fn label(self) -> &'static str {
+        match self {
+            WeakShareRefusal::Duplicate => "duplicate",
+            WeakShareRefusal::RateLimited => "rate_limited",
+            WeakShareRefusal::Invalid => "invalid",
+            WeakShareRefusal::Unchecked => "unchecked",
+            WeakShareRefusal::PoolFull => "pool_full",
+        }
+    }
+}
+
+/// Weak shares the pool did not take since the node started, by reason.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WeakShareRefusals {
+    pub duplicate: u64,
+    pub rate_limited: u64,
+    pub invalid: u64,
+    pub unchecked: u64,
+    pub pool_full: u64,
+}
+
+impl WeakShareRefusals {
+    /// Count one weak share refused for `refusal`.
+    fn count(&mut self, refusal: WeakShareRefusal) {
+        match refusal {
+            WeakShareRefusal::Duplicate => self.duplicate += 1,
+            WeakShareRefusal::RateLimited => self.rate_limited += 1,
+            WeakShareRefusal::Invalid => self.invalid += 1,
+            WeakShareRefusal::Unchecked => self.unchecked += 1,
+            WeakShareRefusal::PoolFull => self.pool_full += 1,
+        }
+    }
+
+    /// Weak shares refused for `refusal`.
+    pub fn of(&self, refusal: WeakShareRefusal) -> u64 {
+        match refusal {
+            WeakShareRefusal::Duplicate => self.duplicate,
+            WeakShareRefusal::RateLimited => self.rate_limited,
+            WeakShareRefusal::Invalid => self.invalid,
+            WeakShareRefusal::Unchecked => self.unchecked,
+            WeakShareRefusal::PoolFull => self.pool_full,
+        }
+    }
+}
+
 /// What the pool has done since the node started.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WeakPoolCounts {
@@ -82,11 +156,89 @@ pub struct WeakPoolCounts {
     pub found: u64,
     /// Weak shares from peers that passed the checks.
     pub received: u64,
+    /// Weak shares queued for relay to every peer but the one that sent
+    /// them.
+    pub relayed: u64,
     /// Weak shares the best chain carried, dropped from the pool.
     pub carried: u64,
     /// Weak shares whose parent fell more than `WEAK_DEPTH` below the tip
     /// before any share on the best chain carried them.
     pub expired: u64,
+    /// Weak shares the pool did not take, by reason. A weak share dropped
+    /// on a full worker queue, before the pool sees it, is not counted.
+    pub refused: WeakShareRefusals,
+}
+
+/// What the pool has done since the node started and what it holds now:
+/// the weak pool's series of `/metrics`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WeakPoolStats {
+    pub counts: WeakPoolCounts,
+    /// Weak shares waiting in the pool for a share to carry them.
+    pub pooled: usize,
+}
+
+impl WeakPoolStats {
+    /// Render as Prometheus exposition text. The counters reset when the
+    /// node restarts, which `rate()` handles; the refusal reasons are a fixed
+    /// set, so the series stay bounded.
+    pub fn exposition(&self) -> String {
+        let counts = &self.counts;
+        let series: [(&str, &str, &str, u64); 5] = [
+            (
+                "weak_shares_found_total",
+                "counter",
+                "Weak shares this node's miners found that passed the checks",
+                counts.found,
+            ),
+            (
+                "weak_shares_received_total",
+                "counter",
+                "Weak shares from peers that passed the checks",
+                counts.received,
+            ),
+            (
+                "weak_shares_relayed_total",
+                "counter",
+                "Weak shares queued for relay to every peer but the one that sent them",
+                counts.relayed,
+            ),
+            (
+                "weak_shares_expired_total",
+                "counter",
+                "Weak shares dropped from the pool because no share could carry them any more",
+                counts.expired,
+            ),
+            (
+                "weak_pool_size",
+                "gauge",
+                "Weak shares waiting in the pool for a share to carry them",
+                self.pooled as u64,
+            ),
+        ];
+        let mut exposition =
+            String::with_capacity((series.len() + WeakShareRefusal::ALL.len()) * 160);
+        for (name, kind, help, value) in series {
+            // Writing to a String cannot fail.
+            let _ = writeln!(exposition, "# HELP {name} {help}");
+            let _ = writeln!(exposition, "# TYPE {name} {kind}");
+            let _ = writeln!(exposition, "{name} {value}");
+        }
+        let _ = writeln!(
+            exposition,
+            "# HELP weak_shares_refused_total Weak shares the pool did not take, by reason"
+        );
+        let _ = writeln!(exposition, "# TYPE weak_shares_refused_total counter");
+        for refusal in WeakShareRefusal::ALL {
+            let _ = writeln!(
+                exposition,
+                "weak_shares_refused_total{{reason=\"{}\"}} {}",
+                refusal.label(),
+                counts.refused.of(refusal)
+            );
+        }
+        exposition
+    }
 }
 
 /// A weak share waiting in the pool.
@@ -217,18 +369,27 @@ impl WeakPool {
     /// Whether to check the weak share with `pow_hash`: one not seen before,
     /// and from a peer within its rate. A weak share admitted is remembered
     /// as seen whatever its check finds, so no copy of it is checked again.
+    /// A weak share not admitted is counted as refused, a duplicate or over
+    /// its peer's rate.
     pub fn admit(&self, pow_hash: BlockHash, source: WeakShareSource) -> bool {
         let mut state = self.lock();
         if state.seen.contains(&pow_hash) {
+            state.counts.refused.count(WeakShareRefusal::Duplicate);
             return false;
         }
         if let Some(peer) = source.peer()
             && !state.take_peer_token(peer, now_millis())
         {
             debug!("Peer {peer} is over its weak share rate, dropping {pow_hash}");
+            state.counts.refused.count(WeakShareRefusal::RateLimited);
             return false;
         }
         state.mark_seen(pow_hash)
+    }
+
+    /// Count a weak share the worker did not pool, for `refusal`.
+    pub fn refuse(&self, refusal: WeakShareRefusal) {
+        self.lock().counts.refused.count(refusal);
     }
 
     /// Keep a weak share that passed its checks, mined on a share at
@@ -252,6 +413,7 @@ impl WeakPool {
                     }
                     _ => {
                         debug!("Weak pool full, dropping weak share {pow_hash}");
+                        state.counts.refused.count(WeakShareRefusal::PoolFull);
                         return;
                     }
                 }
@@ -277,6 +439,8 @@ impl WeakPool {
         };
         if self.relay_tx.try_send(relay).is_err() {
             debug!("Weak share relay queue full, not relaying {pow_hash}");
+        } else {
+            self.lock().counts.relayed += 1;
         }
     }
 
@@ -325,6 +489,16 @@ impl WeakPool {
     /// What the pool has done since the node started.
     pub fn counts(&self) -> WeakPoolCounts {
         self.lock().counts
+    }
+
+    /// What the pool has done since the node started and how many weak
+    /// shares it holds, read under one lock.
+    pub fn stats(&self) -> WeakPoolStats {
+        let state = self.lock();
+        WeakPoolStats {
+            counts: state.counts,
+            pooled: state.pooled.len(),
+        }
     }
 
     /// Weak shares waiting in the pool.

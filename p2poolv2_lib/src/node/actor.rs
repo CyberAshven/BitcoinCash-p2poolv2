@@ -52,7 +52,7 @@ use crate::shares::transaction_pool::{
     TransactionSource,
 };
 use crate::shares::validation::{DefaultShareValidator, ShareValidator};
-use crate::shares::weak_pool::{RelayWeakShare, WeakRelayReceiver};
+use crate::shares::weak_pool::{RelayWeakShare, WeakPool, WeakPoolStats, WeakRelayReceiver};
 use crate::stratum::emission::EmissionReceiver;
 use crate::stratum::work::notify::NotifySender;
 use bitcoin::BlockHash;
@@ -77,6 +77,10 @@ pub struct NodeHandle {
     /// Bitcoin Cash: the share transaction pool the node relays and mines
     /// from. `None` on Bitcoin.
     share_transaction_pool: Option<ShareTransactionPool>,
+    /// Bitcoin Cash P2Pool: the weak pool the node checks, relays and carries
+    /// weak shares from, read for `/metrics`. `None` on Bitcoin and in
+    /// Hydrapool mode.
+    weak_pool: Option<WeakPool>,
 }
 
 /// Why `NodeHandle::submit_share_transaction` did not take a transaction.
@@ -114,6 +118,7 @@ impl NodeHandle {
             Some((pool, relay_rx)) => (Some(pool), Some(relay_rx)),
             None => (None, None),
         };
+        let weak_pool = weak_shares.as_ref().map(|network| network.pool.clone());
         // Mining on the current chain: learn BCHN's headers before dialing
         // peers, so the share bodies they send find their BCH prevs known.
         if config.stratum.chain == Chain::BitcoinCash {
@@ -149,9 +154,18 @@ impl NodeHandle {
             Self {
                 command_tx,
                 share_transaction_pool,
+                weak_pool,
             },
             stopping_rx,
         ))
+    }
+
+    /// Bitcoin Cash P2Pool: what the weak pool has done since the node
+    /// started and how many weak shares it holds. Read under the pool's own
+    /// lock, never through the node actor. `None` on Bitcoin and in Hydrapool
+    /// mode, which keep no weak pool.
+    pub fn weak_pool_stats(&self) -> Option<WeakPoolStats> {
+        self.weak_pool.as_ref().map(WeakPool::stats)
     }
 
     /// Hand a signed share transaction to this node's pool, which checks it
@@ -286,6 +300,7 @@ impl NodeHandle {
         Self {
             command_tx,
             share_transaction_pool: None,
+            weak_pool: None,
         }
     }
 
@@ -296,6 +311,14 @@ impl NodeHandle {
     ) -> Self {
         Self {
             share_transaction_pool: Some(share_transaction_pool),
+            ..Self::new_for_test()
+        }
+    }
+
+    /// A stub NodeHandle, as `new_for_test`, whose weak pool is `weak_pool`.
+    pub fn new_for_test_with_weak_pool(weak_pool: WeakPool) -> Self {
+        Self {
+            weak_pool: Some(weak_pool),
             ..Self::new_for_test()
         }
     }
@@ -364,6 +387,7 @@ impl NodeHandle {
             Self {
                 command_tx,
                 share_transaction_pool: None,
+                weak_pool: None,
             },
             peer_id_strings,
         )

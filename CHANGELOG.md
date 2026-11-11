@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`/metrics` shows what a Bitcoin Cash node does with weak shares: those its
+miners found and those peers sent that passed the checks, those it queued
+for relay, those carried by its own shares and by shares confirmed on the
+chain, those that expired in the weak pool, those the pool did not take by
+reason (`duplicate`, `rate_limited`, `invalid`, `unchecked`, `pool_full`),
+the pool's size, and the confirmed tip's weak ratio `R` and band cap `C`
+(`docs/architecture/metrics.md`, "Weak shares"). The counters reset on
+restart. Node behaviour only; no share-chain rule changes.
+
 Share-chain rule change on Bitcoin Cash, on the same flag day with its own
 protocol segment (`weak-64-500-6`): weak shares (issue #79, row 5;
 `docs/sharechain/small-miners-design.md`, part 3). A weak share is an easier

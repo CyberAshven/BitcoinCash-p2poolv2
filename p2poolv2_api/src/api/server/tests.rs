@@ -18,10 +18,13 @@ fn test_work_to_f64() {
 
 use base64::Engine;
 use bitcoin::blockdata::constants::genesis_block;
+use bitcoin::hashes::Hash;
 use bitcoin::{Amount, Network, TxOut};
 use p2poolv2_lib::accounting::stats::metrics;
+use p2poolv2_lib::address::share_owner::ShareOwner;
 use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
 use p2poolv2_lib::shares::share_block::ShareBlock;
+use p2poolv2_lib::shares::weak_pool::{WeakPool, WeakShareSource};
 use p2poolv2_lib::stratum::work::block_template::BlockTemplate;
 use p2poolv2_lib::stratum::work::coinbase::parse_address;
 use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
@@ -66,6 +69,58 @@ async fn test_metrics_endpoint_includes_p2p_health() {
 
     assert!(exposition.contains("# TYPE p2p_connected_peers gauge\np2p_connected_peers 0\n"));
     assert!(exposition.contains("p2p_connections_closed_unresponsive_total 0\n"));
+}
+
+#[tokio::test]
+async fn test_metrics_endpoint_includes_the_weak_pool() {
+    let (pool_store, _pool_dir) = setup_test_chain_store_handle(true).await;
+    let (weak_pool, _relay_rx) = WeakPool::new(pool_store);
+    let pow_hash = bitcoin::BlockHash::from_byte_array([7; 32]);
+    weak_pool.admit(pow_hash, WeakShareSource::Local);
+    weak_pool.admit(pow_hash, WeakShareSource::Local);
+    let (state, _temp_dir) =
+        build_test_state(NodeHandle::new_for_test_with_weak_pool(weak_pool)).await;
+
+    let exposition = metrics(State(state)).await;
+
+    assert!(exposition.contains("# TYPE weak_pool_size gauge\nweak_pool_size 0\n"));
+    assert!(exposition.contains("weak_shares_refused_total{reason=\"duplicate\"} 1\n"));
+    assert!(exposition.contains("weak_shares_carried_by_node_total 0\n"));
+    assert!(exposition.contains("weak_shares_carried_on_chain_total 0\n"));
+}
+
+#[tokio::test]
+async fn test_metrics_endpoint_without_a_weak_pool_omits_its_series() {
+    let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+
+    let exposition = metrics(State(state)).await;
+
+    assert!(!exposition.contains("weak_pool_size"));
+    assert!(!exposition.contains("weak_shares_refused_total"));
+}
+
+/// R is carried in units of 1/1024 and C likewise: 2048 is a ratio of 2,
+/// 3072 a cap of 3.
+#[test]
+fn test_tip_weak_ratio_and_band_cap_exposition_reads_the_tip() {
+    let mut tip = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_ratio(2048)
+        .build()
+        .header;
+    tip.band_cap = 3072;
+
+    let exposition = tip_weak_ratio_and_band_cap_exposition(&tip);
+
+    assert!(exposition.contains("# TYPE sharechain_weak_ratio gauge\nsharechain_weak_ratio 2\n"));
+    assert!(exposition.contains("# TYPE sharechain_band_cap gauge\nsharechain_band_cap 3\n"));
+}
+
+#[test]
+fn test_tip_weak_ratio_and_band_cap_exposition_is_empty_for_a_bitcoin_tip() {
+    let tip = TestShareBlockBuilder::new().build().header;
+
+    assert_eq!(tip_weak_ratio_and_band_cap_exposition(&tip), "");
 }
 
 #[test]

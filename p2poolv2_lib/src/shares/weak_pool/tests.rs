@@ -108,3 +108,133 @@ async fn a_weak_share_the_best_chain_carries_leaves_the_pool() {
     assert_eq!(selected, vec![pool_weak_share(2)]);
     assert_eq!(pool.counts().carried, 1);
 }
+
+#[tokio::test]
+async fn a_weak_share_seen_again_is_counted_as_a_duplicate() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let pow_hash = pool_weak_share(1).pow_hash();
+    pool.admit(pow_hash, WeakShareSource::Local);
+
+    pool.admit(pow_hash, WeakShareSource::Peer(PeerId::random()));
+
+    let refused = pool.counts().refused;
+    assert_eq!(refused.duplicate, 1);
+    assert_eq!(refused.rate_limited, 0);
+}
+
+/// A peer's burst is `PEER_WEAK_SHARE_BURST` weak shares; the next one in the
+/// same millisecond is over its rate.
+#[tokio::test]
+async fn a_peer_past_its_burst_is_counted_as_rate_limited() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let peer = PeerId::random();
+    for nonce in 0..PEER_WEAK_SHARE_BURST as u32 {
+        pool.admit(
+            pool_weak_share(nonce).pow_hash(),
+            WeakShareSource::Peer(peer),
+        );
+    }
+
+    let admitted = pool.admit(
+        pool_weak_share(PEER_WEAK_SHARE_BURST as u32).pow_hash(),
+        WeakShareSource::Peer(peer),
+    );
+
+    assert!(!admitted);
+    let refused = pool.counts().refused;
+    assert_eq!(refused.rate_limited, 1);
+    assert_eq!(refused.duplicate, 0);
+}
+
+#[tokio::test]
+async fn a_weak_share_queued_for_relay_is_counted_as_relayed() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+
+    pool.insert(pool_weak_share(1), 3, WeakShareSource::Local);
+
+    let counts = pool.counts();
+    assert_eq!(counts.relayed, 1);
+    assert_eq!(counts.found, 1);
+    assert_eq!(counts.received, 0);
+}
+
+/// With no relay receiver the queue is closed: the weak share is pooled but
+/// not relayed.
+#[tokio::test]
+async fn a_weak_share_the_relay_queue_refuses_is_not_counted_as_relayed() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, relay_rx) = WeakPool::new(chain_store_handle);
+    drop(relay_rx);
+
+    pool.insert(
+        pool_weak_share(1),
+        3,
+        WeakShareSource::Peer(PeerId::random()),
+    );
+
+    let stats = pool.stats();
+    assert_eq!(stats.counts.relayed, 0);
+    assert_eq!(stats.counts.received, 1);
+    assert_eq!(stats.pooled, 1);
+}
+
+/// A full pool keeps a weak share only in place of one on an older parent;
+/// one on a parent as old as the oldest pooled is refused.
+#[tokio::test]
+async fn a_full_pool_counts_a_weak_share_on_an_old_parent_as_pool_full() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    for nonce in 0..MAX_POOL_WEAK_SHARES as u32 {
+        pool.insert(pool_weak_share(nonce), 3, WeakShareSource::Local);
+    }
+
+    pool.insert(
+        pool_weak_share(MAX_POOL_WEAK_SHARES as u32),
+        3,
+        WeakShareSource::Local,
+    );
+
+    let stats = pool.stats();
+    assert_eq!(stats.counts.refused.pool_full, 1);
+    assert_eq!(stats.pooled, MAX_POOL_WEAK_SHARES);
+}
+
+#[test]
+fn the_weak_pool_exposition_lists_each_series_and_every_refusal_reason() {
+    let stats = WeakPoolStats {
+        counts: WeakPoolCounts {
+            found: 2,
+            received: 3,
+            relayed: 4,
+            carried: 5,
+            expired: 6,
+            refused: WeakShareRefusals {
+                duplicate: 7,
+                rate_limited: 8,
+                invalid: 9,
+                unchecked: 10,
+                pool_full: 11,
+            },
+        },
+        pooled: 12,
+    };
+
+    let exposition = stats.exposition();
+
+    assert!(
+        exposition.contains("# TYPE weak_shares_found_total counter\nweak_shares_found_total 2\n")
+    );
+    assert!(exposition.contains("weak_shares_received_total 3\n"));
+    assert!(exposition.contains("weak_shares_relayed_total 4\n"));
+    assert!(exposition.contains("weak_shares_expired_total 6\n"));
+    assert!(exposition.contains("# TYPE weak_pool_size gauge\nweak_pool_size 12\n"));
+    assert!(exposition.contains("# TYPE weak_shares_refused_total counter\n"));
+    assert!(exposition.contains("weak_shares_refused_total{reason=\"duplicate\"} 7\n"));
+    assert!(exposition.contains("weak_shares_refused_total{reason=\"rate_limited\"} 8\n"));
+    assert!(exposition.contains("weak_shares_refused_total{reason=\"invalid\"} 9\n"));
+    assert!(exposition.contains("weak_shares_refused_total{reason=\"unchecked\"} 10\n"));
+    assert!(exposition.contains("weak_shares_refused_total{reason=\"pool_full\"} 11\n"));
+}

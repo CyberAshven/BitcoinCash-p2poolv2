@@ -2567,6 +2567,24 @@ impl TestShareBlockBuilder {
     }
 }
 
+/// A Bitcoin Cash weak share mined on `parent`, known by the proof-of-work
+/// hash `nonce` gives it, for tests that need only its identity and parent:
+/// its coinbase fields are placeholders no check would pass.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_weak_share_on(parent: BlockHash, nonce: u32) -> crate::shares::weak::WeakShare {
+    crate::shares::weak::WeakShare {
+        header: TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
+            .prev_share_blockhash(parent.to_string())
+            .nonce(nonce)
+            .build()
+            .header,
+        coinbase_script_sig: bitcoin::ScriptBuf::new(),
+        coinbase_value: 1,
+        merkle_branch: Vec::new(),
+    }
+}
+
 /// The weak shares a test share carries and the weak ratio it commits.
 #[cfg(any(test, feature = "test-utils"))]
 struct TestShareWeak {

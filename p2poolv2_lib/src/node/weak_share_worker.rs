@@ -28,7 +28,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::validation::{FailureKind, ShareValidator, WeakPayoutCache};
 use crate::shares::weak::WeakShare;
-use crate::shares::weak_pool::{WeakPool, WeakRelayReceiver, WeakShareSource};
+use crate::shares::weak_pool::{WeakPool, WeakRelayReceiver, WeakShareRefusal, WeakShareSource};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -133,9 +133,13 @@ impl WeakShareWorker {
         ) {
             match error.kind() {
                 FailureKind::Consensus => {
-                    info!("Refused weak share {pow_hash} from {source:?}: {error}")
+                    info!("Refused weak share {pow_hash} from {source:?}: {error}");
+                    self.pool.refuse(WeakShareRefusal::Invalid);
                 }
-                _ => debug!("Cannot check weak share {pow_hash} from {source:?} yet: {error}"),
+                _ => {
+                    debug!("Cannot check weak share {pow_hash} from {source:?} yet: {error}");
+                    self.pool.refuse(WeakShareRefusal::Unchecked);
+                }
             }
             return;
         }
@@ -150,7 +154,10 @@ impl WeakShareWorker {
                 debug!("Pooled weak share {pow_hash} on {parent} at height {parent_height}");
                 self.pool.insert(weak_share, parent_height, source);
             }
-            None => debug!("Weak share {pow_hash} has no parent height, dropping it"),
+            None => {
+                debug!("Weak share {pow_hash} has no parent height, dropping it");
+                self.pool.refuse(WeakShareRefusal::Unchecked);
+            }
         }
     }
 
@@ -167,3 +174,6 @@ impl WeakShareWorker {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;
