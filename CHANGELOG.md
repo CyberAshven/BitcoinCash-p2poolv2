@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The dashboard's miner page, and `/miner`, show a miner's expected income a
+month, its expected payments a month at its payout level and its monthly
+swing: how far a month's income typically strays from the expected, as
+`sqrt(1 / credits a month + 1 / pool blocks a month)`, plus
+`1 / payments a month` under the root when its slice of a block is below its
+level. The estimates use its share of the PPLNS window, the pool's block
+rate from its recent hashrate, the template's coinbase value, and its
+shares, uncles and weak shares in the window over the window's time span.
+Display only; no share-chain rule changes.
+
 `/metrics` shows what a Bitcoin Cash node does with weak shares: those its
 miners found and those peers sent that passed the checks, those it queued
 for relay, those carried by its own shares and by shares confirmed on the

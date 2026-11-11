@@ -1130,8 +1130,20 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
                         br; small { "smaller slices are paid by a draw" }
                     }))
                 }
+                @if let Some(income) = report.expected_income_a_month {
+                    (stat("Expected income a month", html! {
+                        (format!("{income:.0}")) " satoshis"
+                        br; small { "from the pool's recent block rate" }
+                    }))
+                }
                 @if let Some(payments) = report.expected_payments_a_month {
                     (stat("Expected payments a month", html! { (format!("{payments:.1}")) }))
+                }
+                @if let Some(swing) = report.monthly_swing {
+                    (stat("Monthly swing", html! {
+                        (percent(swing))
+                        br; small { "how far a month's income typically strays from the expected" }
+                    }))
                 }
                 (stat("Hashrate", html! {
                     (optional(view.hashrate, fmt_hashrate))
@@ -1404,6 +1416,7 @@ pub(crate) fn error(site: &Site, message: &str) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::endpoints::miner::WindowSummary;
 
     fn site() -> Site {
         Site {
@@ -1989,5 +2002,92 @@ mod tests {
         let page = shares(&view).into_string();
         assert!(page.contains("No confirmed shares yet."));
         assert!(!page.contains("Previous"));
+    }
+
+    #[test]
+    fn the_miner_page_shows_the_expected_income_payments_and_swing() {
+        let view = MinerView {
+            site: site(),
+            now: 1_000,
+            report: MinerResponse {
+                address: "bchtest:qpayout".to_string(),
+                address_type: "payout",
+                anchor: "cd".repeat(32),
+                anchor_height: 30,
+                window: WindowSummary {
+                    newest_height: Some(29),
+                    oldest_height: Some(0),
+                    share_count: 30,
+                    weight: "300".to_string(),
+                },
+                share_count: 2,
+                uncle_count: 1,
+                weak_share_count: 7,
+                weight: "3".to_string(),
+                share_fraction: 0.1,
+                payout_fraction: 0.01,
+                payout_level: Some(5),
+                payout_level_satoshis: Some(17_472),
+                expected_payments_a_month: Some(17.17),
+                expected_income_a_month: Some(300_000.0),
+                monthly_swing: Some(0.308),
+                shares: Vec::new(),
+            },
+            hashrate: None,
+            recent_window: None,
+            workers: Vec::new(),
+            paging: Paging { page: 1, pages: 1 },
+        };
+
+        let page = miner(&view).into_string();
+
+        assert!(page.contains("Expected income a month"));
+        assert!(page.contains("300000 satoshis"));
+        assert!(page.contains("Expected payments a month"));
+        assert!(page.contains("17.2"));
+        assert!(page.contains("Monthly swing"));
+        assert!(page.contains("30.80%"));
+        assert!(!page.contains("<script"));
+    }
+
+    #[test]
+    fn the_miner_page_leaves_out_figures_it_cannot_estimate() {
+        let view = MinerView {
+            site: site(),
+            now: 1_000,
+            report: MinerResponse {
+                address: "bchtest:qpayout".to_string(),
+                address_type: "payout",
+                anchor: "cd".repeat(32),
+                anchor_height: 30,
+                window: WindowSummary {
+                    newest_height: Some(29),
+                    oldest_height: Some(0),
+                    share_count: 30,
+                    weight: "300".to_string(),
+                },
+                share_count: 0,
+                uncle_count: 0,
+                weak_share_count: 0,
+                weight: "0".to_string(),
+                share_fraction: 0.0,
+                payout_fraction: 0.0,
+                payout_level: None,
+                payout_level_satoshis: None,
+                expected_payments_a_month: None,
+                expected_income_a_month: None,
+                monthly_swing: None,
+                shares: Vec::new(),
+            },
+            hashrate: None,
+            recent_window: None,
+            workers: Vec::new(),
+            paging: Paging { page: 1, pages: 1 },
+        };
+
+        let page = miner(&view).into_string();
+
+        assert!(!page.contains("Expected income a month"));
+        assert!(!page.contains("Monthly swing"));
     }
 }
