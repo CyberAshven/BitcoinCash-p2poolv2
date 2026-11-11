@@ -301,7 +301,7 @@ fn alter_weak_copy(share_block: &mut ShareBlock) {
         && !share_block.weak_shares.is_empty()
     {
         let carriers = SIM_WEAK_CARRIER_BROADCASTS.fetch_add(1, Ordering::Relaxed) + 1;
-        if carriers % every == 0 {
+        if carriers.is_multiple_of(*every) {
             let block_hash = share_block.block_hash();
             let weak_share = &mut share_block.weak_shares[0];
             weak_share.coinbase_value = weak_share.coinbase_value.wrapping_add(1);
