@@ -321,7 +321,7 @@ them, and fills its own shares from the pool.
 | `weak_shares_relayed_total` | counter | live read of the weak pool | Weak shares queued for relay to every peer but the one that sent them |
 | `weak_shares_carried_by_node_total` | counter | actor, from the stratum submit path | Weak shares carried by the shares this node's miners found, counted when the share goes to the share chain |
 | `weak_shares_carried_on_chain_total` | counter | actor, from the organise worker | Weak shares carried by shares confirmed on the share chain, whichever node found them; counted only while the chain is current |
-| `weak_shares_expired_total` | counter | live read of the weak pool | Weak shares dropped from the pool because no share could carry them any more: their parent fell more than `WEAK_DEPTH` below the tip, or a full pool made room for one on a newer parent |
+| `weak_shares_expired_total` | counter | live read of the weak pool | Weak shares the best chain had not carried, dropped from the pool because no share could carry them any more: their parent fell more than `WEAK_DEPTH` below the tip, or a full pool made room for one on a newer parent |
 | `weak_shares_refused_total{reason}` | counter | live read of the weak pool | Weak shares the pool did not take, by reason (below) |
 | `weak_pool_size` | gauge | live read of the weak pool | Weak shares waiting in the pool for a share to carry them |
 | `weak_pool_waiting_for_parent` | gauge | live read of the weak pool | Weak shares held, unchecked, until their parent arrives |

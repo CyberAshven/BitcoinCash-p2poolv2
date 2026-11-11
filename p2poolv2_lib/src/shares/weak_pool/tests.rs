@@ -167,8 +167,10 @@ async fn a_weak_share_whose_parent_falls_below_the_depth_expires() {
     assert_eq!(pool.len(), 1);
 }
 
+/// A weak share the best chain carries is not offered again, but stays in
+/// the pool in case its carrier becomes an uncle.
 #[tokio::test]
-async fn a_weak_share_the_best_chain_carries_leaves_the_pool() {
+async fn a_weak_share_the_best_chain_carries_is_not_offered_but_kept() {
     let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
     let mining_base = TestShareBlockBuilder::new()
         .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
@@ -185,7 +187,66 @@ async fn a_weak_share_the_best_chain_carries_leaves_the_pool() {
     let selected = pool.select_for_share(mining_base.block_hash(), 4);
 
     assert_eq!(selected, vec![pool_weak_share(2)]);
-    assert_eq!(pool.counts().carried, 1);
+    assert_eq!(pool.len(), 2);
+    assert_eq!(pool.counts().carried, 0);
+}
+
+/// Share A carries weak share 1 and then becomes an uncle: the best chain
+/// now ends at its sibling B, which carries none, so a share on B carries
+/// weak share 1 again.
+#[tokio::test]
+async fn a_weak_share_whose_carrier_becomes_an_uncle_is_carried_again() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let uncle = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(vec![pool_weak_share(1)])
+        .build();
+    let sibling = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x44; 20]))
+        .build();
+    chain_store_handle
+        .add_share_block(uncle.clone())
+        .await
+        .unwrap();
+    chain_store_handle
+        .add_share_block(sibling.clone())
+        .await
+        .unwrap();
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    pool.insert(pool_weak_share(1), 3, WeakShareSource::Local);
+    pool.insert(pool_weak_share(2), 3, WeakShareSource::Local);
+    let on_the_uncle = pool.select_for_share(uncle.block_hash(), 4);
+
+    let on_the_sibling = pool.select_for_share(sibling.block_hash(), 4);
+
+    assert_eq!(on_the_uncle, vec![pool_weak_share(2)]);
+    assert_eq!(on_the_sibling, vec![pool_weak_share(1), pool_weak_share(2)]);
+}
+
+/// Once too deep, a weak share the best chain carried leaves the pool
+/// counted as carried, and one it never carried as expired.
+#[tokio::test]
+async fn a_carried_weak_share_leaves_the_pool_by_depth_counted_as_carried() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let mining_base = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(vec![pool_weak_share(1)])
+        .build();
+    chain_store_handle
+        .add_share_block(mining_base.clone())
+        .await
+        .unwrap();
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    pool.insert(pool_weak_share(1), 3, WeakShareSource::Local);
+    pool.insert(pool_weak_share(2), 3, WeakShareSource::Local);
+    pool.select_for_share(mining_base.block_hash(), 4);
+
+    pool.select_for_share(mining_base.block_hash(), 20);
+
+    let counts = pool.counts();
+    assert_eq!(pool.len(), 0);
+    assert_eq!(counts.carried, 1);
+    assert_eq!(counts.expired, 1);
 }
 
 #[tokio::test]

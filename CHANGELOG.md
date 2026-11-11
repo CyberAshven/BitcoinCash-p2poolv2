@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A weak share carried by a share that then becomes an uncle is carried
+again. The weak pool deleted the weak shares the best chain carried each
+time it filled a share, so when that carrier lost a race, its weak shares
+were gone, and their proof of work was still marked seen. The pool now only
+leaves them out of the shares it fills while the best chain carries them,
+and keeps them until their parent is too deep, so a share on the new best
+chain offers them again. Node behaviour only; no share-chain rule changes.
+
 Checking weak shares costs less. A weak share whose parent is more than
 `WEAK_DEPTH` below the confirmed tip's next share is dropped before any of
 its checks, counted as `too_deep`: a peer replaying old weak shares made the

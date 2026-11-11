@@ -8,10 +8,11 @@
 //!
 //! A node takes weak shares from its own miners and from peers, checks
 //! each before it relays it (`ShareValidator::validate_weak_share`), keeps
-//! it until the best chain carries it or its parent falls more than
-//! `WEAK_DEPTH` below the tip, and fills its own shares from it, oldest
-//! parent first so none expire. Node policy, not a share-chain rule: a share
-//! may carry any valid weak shares, and a node may carry none.
+//! it until its parent falls more than `WEAK_DEPTH` below the tip, and fills
+//! its own shares from it, oldest parent first so none expire, leaving out
+//! those the best chain already carries. One whose carrier becomes an uncle
+//! is offered again. Node policy, not a share-chain rule: a share may carry
+//! any valid weak shares, and a node may carry none.
 //!
 //! Each weak share is known by its proof-of-work hash. A hash that passed
 //! its checks is not taken again from anyone; a copy that failed them keeps
@@ -231,7 +232,8 @@ pub struct WeakPoolCounts {
     /// Weak shares queued for relay to every peer but the one that sent
     /// them.
     pub relayed: u64,
-    /// Weak shares the best chain carried, dropped from the pool.
+    /// Weak shares dropped from the pool, once too deep to carry, that the
+    /// best chain carried.
     pub carried: u64,
     /// Weak shares whose parent fell more than `WEAK_DEPTH` below the tip
     /// before any share on the best chain carried them.
@@ -328,6 +330,10 @@ struct PooledWeakShare {
     parent_height: u32,
     /// Arrival order, which breaks ties between equal parent heights.
     sequence: u64,
+    /// Whether the best chain carried it when a share was last built: it is
+    /// then not offered, but kept, in case the share carrying it becomes an
+    /// uncle and it must be carried again.
+    carried_on_best_chain: bool,
 }
 
 /// A weak share waiting for its parent, or to be checked again.
@@ -556,29 +562,51 @@ impl WeakPoolState {
         true
     }
 
-    /// Drop the weak shares whose parent is below `min_parent_height`.
+    /// Drop the weak shares whose parent is below `min_parent_height`: the
+    /// only way a pooled weak share leaves the pool but for room.
     fn expire_below(&mut self, min_parent_height: u32) {
-        let before = self.pooled.len();
-        self.pooled
-            .retain(|_, pooled| pooled.parent_height >= min_parent_height);
-        self.counts.expired += (before - self.pooled.len()) as u64;
+        let expired: Vec<BlockHash> = self
+            .pooled
+            .iter()
+            .filter(|(_, pooled)| pooled.parent_height < min_parent_height)
+            .map(|(pow_hash, _)| *pow_hash)
+            .collect();
+        for pow_hash in expired {
+            self.drop_pooled(&pow_hash);
+        }
     }
 
-    /// Drop the weak shares the best chain carries.
-    fn remove_carried(&mut self, carried: &HashSet<BlockHash>) {
-        let before = self.pooled.len();
-        self.pooled
-            .retain(|pow_hash, _| !carried.contains(pow_hash));
-        self.counts.carried += (before - self.pooled.len()) as u64;
+    /// Drop the pooled weak share with `pow_hash`, counted as carried when
+    /// the best chain carried it when the last share was built, otherwise as
+    /// expired.
+    fn drop_pooled(&mut self, pow_hash: &BlockHash) {
+        if let Some(pooled) = self.pooled.remove(pow_hash) {
+            if pooled.carried_on_best_chain {
+                self.counts.carried += 1;
+            } else {
+                self.counts.expired += 1;
+            }
+        }
     }
 
-    /// The pooled weak shares mined on parents up to `max_parent_height`,
-    /// oldest parent first, then in arrival order.
+    /// Mark the pooled weak shares the best chain carries, and only those:
+    /// one whose carrier left the best chain is offered again.
+    fn mark_carried(&mut self, carried: &HashSet<BlockHash>) {
+        for (pow_hash, pooled) in self.pooled.iter_mut() {
+            pooled.carried_on_best_chain = carried.contains(pow_hash);
+        }
+    }
+
+    /// The pooled weak shares mined on parents up to `max_parent_height`
+    /// that the best chain does not carry, oldest parent first, then in
+    /// arrival order.
     fn oldest_first(&self, max_parent_height: u32) -> Vec<&PooledWeakShare> {
         let mut candidates: Vec<&PooledWeakShare> = self
             .pooled
             .values()
-            .filter(|pooled| pooled.parent_height <= max_parent_height)
+            .filter(|pooled| {
+                pooled.parent_height <= max_parent_height && !pooled.carried_on_best_chain
+            })
             .collect();
         candidates.sort_by_key(|pooled| (pooled.parent_height, pooled.sequence));
         candidates
@@ -659,8 +687,7 @@ impl WeakPool {
                     .map(|(hash, pooled)| (*hash, pooled.parent_height));
                 match oldest {
                     Some((oldest_hash, oldest_height)) if oldest_height < parent_height => {
-                        state.pooled.remove(&oldest_hash);
-                        state.counts.expired += 1;
+                        state.drop_pooled(&oldest_hash);
                     }
                     _ => {
                         debug!("Weak pool full, dropping weak share {pow_hash}");
@@ -681,6 +708,7 @@ impl WeakPool {
                     weak_share: weak_share.clone(),
                     parent_height,
                     sequence,
+                    carried_on_best_chain: false,
                 },
             );
         }
@@ -702,9 +730,11 @@ impl WeakPool {
     /// first, so none expire; the job builder keeps the first that fit
     /// `WEAK_CAP` and `WEAK_BYTES`.
     ///
-    /// Drops the weak shares that expired and those the chain ending at the
-    /// mining base, the best chain, carries. A store read that fails leaves
-    /// the share carrying none, which is always valid.
+    /// Drops the weak shares that expired. Those the chain ending at the
+    /// mining base, the best chain, carries are left out but kept until they
+    /// expire, so they are offered again if their carrier becomes an uncle.
+    /// A store read that fails leaves the share carrying none, which is
+    /// always valid.
     pub fn select_for_share(
         &self,
         mining_base: BlockHash,
@@ -728,7 +758,7 @@ impl WeakPool {
             }
         };
         let mut state = self.lock();
-        state.remove_carried(&carried);
+        state.mark_carried(&carried);
         state
             .oldest_first(mining_base_height)
             .into_iter()
