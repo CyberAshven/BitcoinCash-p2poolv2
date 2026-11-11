@@ -167,6 +167,18 @@ span, against the Bitcoin Cash difficulty of the template; each miner's
 hashrate is its accepted submissions over the last ten minutes, all its
 connections together (`stratum/work/band_policy.rs`).
 
+Heavier shares are there so ASERT can ease the minimum, and the minimum
+cannot ease past the chain's ceiling. So no miner gets more than the room
+left, the minimum's work over the ceiling's, and that bound is also what the
+node wants: `wanted_bits` does not ask for more, so the band cap does not grow
+for nothing. At the ceiling the room is one and every miner is at the
+minimum. A pool too small for 10-second shares at the ceiling then keeps
+every share it can make; without the bound its node default gave every miner
+64 times the ceiling's work and cut its shares from 0.051 to 0.0008 a second
+(study #85, payout simulator, tiny pool). The room shrinks smoothly as a
+growing pool's minimum nears the ceiling, so ASERT settles on one minimum
+rather than switching heavier jobs on and off around it.
+
 The rule allows heavier shares; nothing forces them. A node that gives every
 miner the minimum makes ASERT bring the minimum back to today's level: no
 worse than now. Cash Dragon's `alpha-vardiff-v2` branch already passes a

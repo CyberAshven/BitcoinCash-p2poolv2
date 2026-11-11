@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Node policy on Bitcoin Cash, not a rule change: a node's default gives no
+miner a heavier share than the minimum's room above the chain's ceiling, the
+minimum's work over the ceiling's (`stratum/work/band_policy.rs`;
+`docs/sharechain/small-miners-design.md`, "Node default"). At the ceiling
+every miner mines at the minimum. In a pool too small for 10-second shares at
+the ceiling the default gave every miner 64 times the ceiling's work, so the
+chain made one share every 21 minutes instead of one every 20 seconds, and
+each such share wanted more than the band and pushed its cap up. The room
+shrinks smoothly as the minimum nears the ceiling, so heavier jobs do not
+switch on and off around it.
+
 Share-chain rule change on Bitcoin Cash, on the same flag day with its own
 protocol segment (`weak-64-500-6`): weak shares (issue #79, row 5;
 `docs/sharechain/small-miners-design.md`, part 3). A weak share is an easier
