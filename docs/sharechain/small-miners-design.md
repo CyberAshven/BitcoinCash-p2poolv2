@@ -603,9 +603,147 @@ Still open:
   candidates are counting weak work in fork choice, so a branch that drops weak
   shares is lighter (Sunlight's idea), or a deeper `WEAK_DEPTH`. Both need the
   attack search re-run.
-- **Not yet simulated:** the draw-steering attack, and sweeps of `R_MAX`,
-  `WEAK_DEPTH` and the band step.
+- **Not yet simulated:** sweeps of the band step. The draw-steering attack
+  and sweeps of `R_MAX` and `WEAK_DEPTH` are in the study below.
 - **Not yet measured:** coinbase building and weak-share checking time.
+
+### Study: weak work in fork choice, with a smaller includer cut
+
+To be confirmed by simulation before it is considered for the rules.
+
+The 5% includer cut does two jobs: it pays nodes to carry other miners' weak
+shares, and it makes floor mining cost a big miner a few percent of its
+income. But it falls hardest on small miners. A miner pays the cut on every
+weak share someone else carries, which is nearly all of a small miner's, so
+it costs a Bitaxe about 4 to 5% of its income, a miner with 30% of the pool
+about 3.5%, and one with 90% about 0.5%. The 62-minute regtest run measured
+the small miner's cost at about 4%.
+
+The study: count each carried weak share's credited work in fork choice, once
+per chain, as uncle work counts since 2026-10-30. A share that carries weak
+shares adds their work to its chain, so when two shares race, the one that
+carried more wins. A node that drops other miners' weak shares then loses races
+and the pay that goes with them, so carrying pays for itself, and the cut can
+shrink to the smallest value that still pays carriers in quiet stretches,
+perhaps 0 to 1%.
+
+What it would need:
+
+- **Checking before counting.** Weak work counts toward a chain only once the
+  carrying share's body, with its weak shares, has been validated; header sync
+  counts a share's own work only.
+- **No new rule for floor mining.** It would no longer cost a big miner much,
+  which is fine, since floor mining never changes anyone's income.
+
+What the simulation must show (`p2poolv2_payout_sim`, attack b with races):
+for cuts of 0, 1, 2 and 5%, with 50% and 90% of the hashrate refusing to
+carry, whether refusing ever pays, how many honest weak shares expire, and
+each miner's income against its work. The smallest cut at which refusing never
+pays is the proposal.
+
+The same study also covers:
+
+- **Realistic miner mixes.** A spread of miner sizes (Zipf), and a pool of
+  mostly medium miners, where few or none want heavier shares and many sit at
+  the minimum sharing the weak slots.
+- **Arrivals and departures.** A big miner joining or leaving at once: how long
+  the weak ratio and the band cap take to settle, and what small miners are
+  paid meanwhile.
+- **A tiny pool.** Shares at the ceiling, where weak shares switch off.
+- **Other attacks and losses.** The draw-steering attack, and weak shares lost
+  when their parent is unknown or their carrier becomes an uncle.
+- **Large miners filling the weak slots** (sharedcontext's attack). Floods of 10,
+  100 and 1,000 times the home hashrate: small miners' credit lumpiness,
+  payments and income, and what the flood costs the attacker.
+- **Sync and propagation cost.**
+  - the extra header-sync and validation work if weak work counts in fork
+    choice (upstream caps uncles at 3 per share for this reason);
+  - the relay latency and stale-rate effect of weak-share traffic, measured
+    in the network simulator (`p2poolv2_netsim`) beside upstream's limit of
+    about 1,000 miners at 10-second shares.
+- **Scaling propagation instead of capping it.** Each idea is measured in
+  `p2poolv2_netsim` before and after, against upstream's estimate of about 1,000
+  miners at 10-second shares:
+  - **compact coinbase:** send no payouts a receiver can rebuild from the
+    window, so a share shrinks from up to 1 MB to about 1 KB (Xthinner's and
+    Graphene's idea applied to shares);
+  - **relay before full validation:** forward a share once its proof of work and
+    header check out, and validate its body after (compact blocks'
+    high-bandwidth mode);
+  - **fewer hops:** more direct peer connections, so a share reaches most nodes
+    in one or two hops;
+  - **an uncle cap that follows demand:** like ABLA, bounded by what sync can
+    carry, instead of a fixed 3;
+  - **the dynamic share period:** following the measured uncle rate.
+- **Tokens and SAFA.**
+  - whether a weak share's proof of work can win and claim merge-mined tokens as a share's can;
+  - how token jobs' 3,072-byte coinbase behaves with the draw and with weak shares;
+  - what the tSAFA claimer needs across the chipnet restart.
+
+#### Results of the payout simulation
+
+These come from `p2poolv2_payout_sim` (#89). Every table is in its README
+under "Study #85", and the coalition tables count 400,000 queued shares a
+row.
+
+1. **Weak work in fork choice changes little through races alone.** Races
+   are about 2% of shares. With half the hashrate refusing, honest weak shares
+   lost go only from 4.92% to 4.65%; with 90% refusing, from 56.2% to 55.9%.
+   A half-hashrate coalition still gains 1.1 to 1.7% with no cut and 0.2 to
+   0.3% at 5%, and a 90% coalition gains 2.6 to 4.3% at every cut.
+2. **It bites only when carrying nodes mine siblings of light tips.** A
+   half-hashrate coalition then loses 5.4 to 9.6% at every cut, 0% included.
+   A 90% coalition still gains 2.2 to 3.8%.
+3. **`WEAK_DEPTH` is what stops a 90% coalition.** With weak work in races and
+   a 1% cut, its gain at 1% and 10% of BCH falls from +2.7% and +4.2% at depth
+   6 to +0.03% and +0.04% at depth 48. Honest weak shares lost fall from 56% to
+   1.2%, and the Bitaxe keeps 0.99 of its fair pay instead of 0.48. At depth
+   48 a 5% cut makes a 90% coalition lose 0.1%. A lone refuser loses its
+   includer income: 0.2 to 0.9% at a 1% cut.
+4. **Miner mixes.** In a Zipf spread and in a pool of mostly medium miners,
+   the Bitaxe gets 23 to 25 payments a month and 0.97 to 1.00 of fair, with a
+   swing of 0.20 to 0.40.
+5. **Arrivals and departures.** The minimum and `R` come within 10% of their
+   new levels within an hour. Home miners' pay swings with the window, not with
+   `R` or `C`: 2.0 times fair in the first hour after the pool doubles, and 0.5
+   after it halves.
+6. **A tiny pool.** At the ceiling no weak share is found. The node default
+   gave every miner 64 times the ceiling's work, so the chain made 0.0008
+   shares a second instead of 0.051. Fixed in node policy (#94).
+7. **Large miners filling the weak slots.** A flood at 1,000 times the home
+   hashrate takes 91 to 99.9% of the weak shares. But it also brings blocks,
+   so the Bitaxe's payments rise and its income stays fair. The flood's cuts
+   paid, less those received, are at most 0.14% of its income.
+8. **Draw steering** wins at most 28 sat a month between racing shares.
+9. **Losses.** Weak shares on a parent that leaves the chain are 1.05% at
+   10-second shares. The Bitaxe still gets 0.99 to 1.00 of fair.
+
+The simulation's proposal for the rules (a flag day, the owner's call):
+
+| Constant | Now | Proposed | Why |
+|---|---|---|---|
+| `WEAK_DEPTH` | 6 | 48 (8 minutes) | the only tested change that stops a 90% refusing coalition |
+| `INCLUDER_CUT` | 5% | 1% | at depth 48, refusing gains a 90% coalition at most 0.04%, and costs a half-hashrate one 0.2 to 0.3%; the Bitaxe pays less to carriers |
+| `R_MAX` | 4,096 | 256 | `R` settles between 34 and 75 in every table; from genesis it settles in 2 hours instead of 4, at 9 KB/s instead of 139 KB/s in the first hour |
+
+Weak work in fork choice is worth its header-sync work only together with
+carriers mining siblings of light tips. Through races alone it moves a
+coalition's gain by 0.12 points at most.
+
+What depth 48 costs a node:
+
+- **Memory.** A node keeps up to about 48 × 35 ≈ 1,700 uncarried weak
+  shares, 1 to 2 MB.
+- **The carried-once check.** It scans up to 48 ancestors' weak shares
+  (3,072 hashes).
+- **The weak coinbase check.** It needs the window at up to 48 parents,
+  which #90 caches by block.
+- **Bitcoin Cash prev staleness does not change.** A weak share, like a full
+  share, only needs its Bitcoin Cash prev to be a known header, so a deeper
+  depth adds no new expiry.
+
+The network simulation's part (sync, relay and the scaling ideas,
+`p2poolv2_netsim`) follows in its own pull request.
 
 ## References
 
