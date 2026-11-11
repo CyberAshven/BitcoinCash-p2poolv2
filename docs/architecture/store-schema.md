@@ -256,7 +256,8 @@ height then position order. See `store/script_history.rs`.
 `position` is the transaction's index in its block.
 
 - **Window:** spendable depth, heights from `candidate tip + 1 -
-  PAYOUT_DEPTH`. Rows are written only for blocks confirmed inside it
+  PAYOUT_DEPTH` (`BCH_PAYOUT_DEPTH` on Bitcoin Cash, here and in the
+  filter threshold). Rows are written only for blocks confirmed inside it
   (`put_confirmed_entry`, and `setup_genesis` for genesis), and reads never
   go below it.
 - **Reorg-out:** the reorged-out block's keys are recomputed from its

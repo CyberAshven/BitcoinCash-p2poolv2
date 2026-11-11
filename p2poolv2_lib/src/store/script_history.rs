@@ -32,7 +32,7 @@
 
 use super::transaction_store::{StoredTxOut, outpoint_key};
 use super::{ColumnFamily, Store, writer::StoreError};
-use crate::accounting::payout::sharechain_pplns::pplns_window::{PAYOUT_DEPTH, PRUNE_INTERVAL};
+use crate::accounting::payout::sharechain_pplns::pplns_window::{ChainDepths, PRUNE_INTERVAL};
 use crate::shares::share_block::ShareTransaction;
 use bitcoin::consensus::encode;
 use bitcoin::hashes::{Hash, sha256};
@@ -84,17 +84,21 @@ pub fn script_hash(script: &Script) -> ScriptHash {
 /// height whose outputs the next block may still spend
 /// (`coinbase_root_height >= height - PAYOUT_DEPTH`). Saturates to genesis
 /// on a young chain.
-pub fn history_start_for_tip(tip_height: u32) -> u32 {
+///
+/// The payout depth is the chain's (`depths`): `PAYOUT_DEPTH` on Bitcoin,
+/// `BCH_PAYOUT_DEPTH` on Bitcoin Cash, where outputs expire sooner.
+pub fn history_start_for_tip(depths: ChainDepths, tip_height: u32) -> u32 {
     tip_height
         .saturating_add(1)
-        .saturating_sub(PAYOUT_DEPTH as u32)
+        .saturating_sub(depths.payout_depth as u32)
 }
 
 /// The height below which the compaction filter drops script history rows,
 /// for a confirmed tip. `PRUNE_INTERVAL` below the window, so the window
 /// would have to drop by more than that before it reached a dropped row.
-pub fn gc_threshold_for_tip(confirmed_tip_height: u32) -> u32 {
-    confirmed_tip_height.saturating_sub((PAYOUT_DEPTH + PRUNE_INTERVAL) as u32)
+/// The payout depth is the chain's, as in `history_start_for_tip`.
+pub fn gc_threshold_for_tip(depths: ChainDepths, confirmed_tip_height: u32) -> u32 {
+    confirmed_tip_height.saturating_sub((depths.payout_depth + PRUNE_INTERVAL) as u32)
 }
 
 /// Options for the `ScriptHistory` column family. It is range-scanned, so
@@ -158,7 +162,7 @@ impl Store {
     /// propagated.
     pub fn history_start(&self) -> Result<u32, StoreError> {
         match self.get_top_candidate_height() {
-            Ok(tip_height) => Ok(history_start_for_tip(tip_height)),
+            Ok(tip_height) => Ok(history_start_for_tip(self.depths(), tip_height)),
             Err(StoreError::NotFound(_)) => Ok(0),
             Err(error) => Err(error),
         }
@@ -302,7 +306,7 @@ impl Store {
         match self.get_top_confirmed_height() {
             Ok(confirmed_tip_height) => {
                 self.script_history_gc_threshold.store(
-                    gc_threshold_for_tip(confirmed_tip_height),
+                    gc_threshold_for_tip(self.depths(), confirmed_tip_height),
                     Ordering::Relaxed,
                 );
                 Ok(())
@@ -412,6 +416,10 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounting::payout::sharechain_pplns::pplns_window::{
+        BCH_PAYOUT_DEPTH, PAYOUT_DEPTH,
+    };
+    use crate::config::Chain;
     use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
     use crate::test_utils::{
         PUBKEY_2G, TestShareBlockBuilder, build_confirmed_test_chain, confirm_test_block,
@@ -847,22 +855,55 @@ mod tests {
 
     #[test]
     fn history_start_includes_every_spendable_height() {
-        assert_eq!(history_start_for_tip(0), 0);
-        assert_eq!(history_start_for_tip(PAYOUT_DEPTH as u32 - 1), 0);
-        assert_eq!(history_start_for_tip(PAYOUT_DEPTH as u32), 1);
-        assert_eq!(history_start_for_tip(PAYOUT_DEPTH as u32 + 9), 10);
+        assert_eq!(history_start_for_tip(ChainDepths::BITCOIN, 0), 0);
+        assert_eq!(
+            history_start_for_tip(ChainDepths::BITCOIN, PAYOUT_DEPTH as u32 - 1),
+            0
+        );
+        assert_eq!(
+            history_start_for_tip(ChainDepths::BITCOIN, PAYOUT_DEPTH as u32),
+            1
+        );
+        assert_eq!(
+            history_start_for_tip(ChainDepths::BITCOIN, PAYOUT_DEPTH as u32 + 9),
+            10
+        );
     }
 
     #[test]
     fn gc_threshold_stays_prune_interval_below_history_start() {
         let confirmed_tip = (PAYOUT_DEPTH + PRUNE_INTERVAL) as u32 + 5;
 
-        assert_eq!(gc_threshold_for_tip(confirmed_tip), 5);
+        assert_eq!(gc_threshold_for_tip(ChainDepths::BITCOIN, confirmed_tip), 5);
         assert_eq!(
-            history_start_for_tip(confirmed_tip) - gc_threshold_for_tip(confirmed_tip),
+            history_start_for_tip(ChainDepths::BITCOIN, confirmed_tip)
+                - gc_threshold_for_tip(ChainDepths::BITCOIN, confirmed_tip),
             PRUNE_INTERVAL as u32 + 1
         );
-        assert_eq!(gc_threshold_for_tip(PAYOUT_DEPTH as u32), 0);
+        assert_eq!(
+            gc_threshold_for_tip(ChainDepths::BITCOIN, PAYOUT_DEPTH as u32),
+            0
+        );
+    }
+
+    /// A Bitcoin Cash store keeps history for its own payout depth,
+    /// `BCH_PAYOUT_DEPTH`, shorter than Bitcoin's: the window and the
+    /// compaction threshold both follow it.
+    #[test]
+    fn bitcoin_cash_store_sizes_history_by_its_own_payout_depth() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false)
+            .unwrap()
+            .with_chain(Chain::BitcoinCash);
+        let mut batch = Store::get_write_batch();
+        store.set_top_candidate_height(BCH_PAYOUT_DEPTH as u32 + 9, &mut batch);
+        store.set_top_confirmed_height((BCH_PAYOUT_DEPTH + PRUNE_INTERVAL) as u32 + 7, &mut batch);
+        store.commit_batch(batch).unwrap();
+
+        store.update_script_history_gc_threshold().unwrap();
+
+        assert_eq!(store.history_start().unwrap(), 10);
+        assert_eq!(store.script_history_gc_threshold(), 7);
     }
 
     /// The candidate tip puts the window start above height 1, so confirming

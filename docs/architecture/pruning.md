@@ -362,7 +362,9 @@ Out of scope:
 
 Script history (`ScriptHistory`, `store/script_history.rs`) is not pruned
 by the pruner. Its window is spendable depth, heights from
-`candidate tip + 1 - PAYOUT_DEPTH`, half the body retention:
+`candidate tip + 1 - PAYOUT_DEPTH`, half the body retention. On Bitcoin
+Cash both depths are the chain's own, `BCH_PAYOUT_DEPTH` here and in the
+filter threshold below:
 - Rows are written only for blocks confirmed inside the window. Those were
   fully validated, so their prevouts are at or above `prune_height` on every
   node, and every node writes and serves the same rows. Reads never go below
