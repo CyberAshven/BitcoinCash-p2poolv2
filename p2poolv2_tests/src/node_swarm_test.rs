@@ -242,7 +242,7 @@ async fn test_node_dials_peer_by_dns_name() {
         .await
         .unwrap();
 
-    let (monitoring_tx1, _monitoring_rx1) = create_monitoring_event_channel();
+    let monitoring_tx1 = create_monitoring_event_channel();
     let (notify_tx1, _notify_rx1) = tokio::sync::mpsc::channel::<NotifyCmd>(10);
     let (node1_handle, _stop_rx1) = NodeHandle::new(
         config1,
@@ -258,7 +258,7 @@ async fn test_node_dials_peer_by_dns_name() {
     .await
     .expect("Failed to create node 1");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let (monitoring_tx2, _monitoring_rx2) = create_monitoring_event_channel();
+    let monitoring_tx2 = create_monitoring_event_channel();
     let (notify_tx2, _notify_rx2) = tokio::sync::mpsc::channel::<NotifyCmd>(10);
     let (node2_handle, _stop_rx2) = NodeHandle::new(
         config2,

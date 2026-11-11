@@ -608,7 +608,7 @@ mod tests {
             metrics_handle,
             tracker_handle: start_tracker_actor(),
             node_handle: NodeHandle::new_for_test(),
-            monitoring_event_sender: create_monitoring_event_channel().0,
+            monitoring_event_sender: create_monitoring_event_channel(),
             auth_user: None,
             auth_token: None,
             pplns_window: pplns_window.map(|window| Arc::new(MinerWindowSource::new(window))),
