@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A Bitcoin Cash node no longer drops a weak share whose parent it does not
+have yet. It holds the weak share, unchecked, in its weak pool and asks the
+peer that sent it for the parent's headers, once per parent, as it does for
+a share block's parent. Once the parent is stored, the weak share is
+checked and pooled as new; a parent too deep for a share on the tip to
+carry the weak share drops it. Held weak shares are bounded: at most 384
+(`WEAK_CAP * WEAK_DEPTH`) and 576 KiB, the oldest dropped first, each held
+at most `WEAK_DEPTH` share periods (60 seconds). `/metrics` adds
+`weak_pool_waiting_for_parent` and the refusal reasons `too_deep` and
+`unknown_parent`. Node behaviour only; no share-chain rule changes.
+
 The dashboard's miner page, and `/miner`, show a miner's expected income a
 month, its expected payments a month at its payout level and its monthly
 swing: how far a month's income typically strays from the expected, as

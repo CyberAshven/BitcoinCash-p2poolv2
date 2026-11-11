@@ -324,6 +324,7 @@ them, and fills its own shares from the pool.
 | `weak_shares_expired_total` | counter | live read of the weak pool | Weak shares dropped from the pool because no share could carry them any more: their parent fell more than `WEAK_DEPTH` below the tip, or a full pool made room for one on a newer parent |
 | `weak_shares_refused_total{reason}` | counter | live read of the weak pool | Weak shares the pool did not take, by reason (below) |
 | `weak_pool_size` | gauge | live read of the weak pool | Weak shares waiting in the pool for a share to carry them |
+| `weak_pool_waiting_for_parent` | gauge | live read of the weak pool | Weak shares held, unchecked, until their parent arrives |
 | `sharechain_weak_ratio` | gauge | live read of the confirmed tip header | The tip's weak ratio `R` as a multiple: the weak target over the minimum |
 | `sharechain_band_cap` | gauge | live read of the confirmed tip header | The tip's band cap `C` as a multiple: how many times harder than the minimum a share may be |
 
@@ -336,6 +337,8 @@ them, and fills its own shares from the pool.
 | `invalid` | broke a share-chain rule |
 | `unchecked` | could not be checked: data the check needs was missing, or a store read failed |
 | `pool_full` | found the pool full of weak shares on parents no older than its own |
+| `too_deep` | had a parent too deep for a share on the tip to carry it |
+| `unknown_parent` | was held for its parent, which did not arrive in `WEAK_DEPTH` share periods, or was the oldest held when newer ones needed the room |
 
 A weak share dropped on a full worker queue, before the pool sees it, is
 not counted. The pool's counters are plain integers behind the pool's

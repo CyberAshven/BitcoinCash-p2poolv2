@@ -725,6 +725,7 @@ impl NodeActor {
                 chain_store_handle.clone(),
                 share_validator.clone(),
                 pplns_window.clone(),
+                node.swarm_tx.clone(),
             );
             let weak_share_worker_id = workers.spawn(weak_share_worker.run()).id();
             worker_names.insert(weak_share_worker_id, "Weak share worker");
