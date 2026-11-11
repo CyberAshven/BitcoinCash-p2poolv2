@@ -274,7 +274,8 @@ pub struct PreparedNotifyParams {
     /// node's weak pool when the params were built; committed after the
     /// payout level.
     weak_shares: Arc<[WeakShare]>,
-    /// The merkle root of `weak_shares`' proof-of-work hashes.
+    /// The merkle root of `weak_shares`' whole encodings
+    /// (`shares::weak::weak_root`).
     weak_root: sha256d::Hash,
     /// The weak target of the mining base (`shares::weak::parent_weak_target`):
     /// a submission on a job at the minimum that meets it but not the share

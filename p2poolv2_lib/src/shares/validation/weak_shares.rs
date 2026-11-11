@@ -151,13 +151,22 @@ impl WeakPayoutCache {
 }
 
 /// The body check of a share's weak shares, against its header alone: as
-/// many as `weak_count`, none repeated, and their proof-of-work hashes'
-/// merkle root the header's `weak_root`. A failure is a bad copy of the
-/// share, as for its other body parts.
+/// many as `weak_count`, no proof-of-work hash twice, and the merkle root of
+/// their whole encodings (`weak_root`) the header's `weak_root`. A failure is
+/// a bad copy of the share, as for its other body parts.
+///
+/// The root binds every field of every carried weak share, so a copy that
+/// alters any of them fails here, before it is stored, and is fetched again.
+/// The weak share checks that run once the body is stored
+/// ([`DefaultShareValidator::validate_carried_weak_headers`] and
+/// [`DefaultShareValidator::validate_carried_weak_coinbases`]) then read only
+/// what the carrier's proof of work fixes, the store's own data aside, so
+/// their failure is a verdict on the share and never a bad copy.
 ///
 /// A repeat is refused before the root is compared: the tree pairs the
-/// last hash of an odd level with itself, so a repeated last weak share
-/// would keep the root (CVE-2012-2459).
+/// last leaf of an odd level with itself, so a repeated last weak share
+/// would keep the root (CVE-2012-2459). It compares proof-of-work hashes,
+/// so two encodings of one proof of work are a repeat too.
 pub(crate) fn check_weak_shares_match_header(share: &ShareBlock) -> Result<(), ValidationError> {
     let header = &share.header;
     if share.weak_shares.len() != usize::from(header.weak_count) {
@@ -541,6 +550,10 @@ impl DefaultShareValidator {
     /// other parallel checks: each one's header rules
     /// ([`Self::validate_weak_share_header`]) and where it may be carried
     /// ([`Self::validate_carried_weak_positions`]).
+    ///
+    /// Runs on a stored body, which passed [`check_weak_shares_match_header`]:
+    /// the carrier's weak root fixes every weak share it reads, so a
+    /// `Consensus` failure here is a verdict on what the miner carried.
     pub(crate) fn validate_carried_weak_headers(
         &self,
         share: &ShareBlock,
@@ -555,6 +568,11 @@ impl DefaultShareValidator {
     /// The coinbase check of every weak share a share carries
     /// ([`Self::validate_weak_share_coinbase`]), with one payout cache for
     /// the share, under one hold of the window.
+    ///
+    /// Runs on a stored body, which passed [`check_weak_shares_match_header`]:
+    /// the scriptSig, total value, branch and header each weak share's
+    /// coinbase is rebuilt from are all fixed by the carrier's weak root, so a
+    /// `Consensus` failure here is a verdict on what the miner carried.
     pub(crate) fn validate_carried_weak_coinbases(
         &self,
         share: &ShareBlock,

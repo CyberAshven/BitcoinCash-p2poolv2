@@ -48,7 +48,12 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 ///   the PPLNS window credits proofs from jobs at the minimum at the weak
 ///   work. A stored header has no weak ratio and would not decode, and its
 ///   chain was paid under the old credit; the chain starts again.
-pub const STORE_FORMAT_VERSION: u32 = 5;
+/// - 6 (2026-11-12): a Bitcoin Cash share's weak root commits each carried
+///   weak share's whole encoding, not only its proof-of-work hash
+///   (`BCH_WEAK_SHARE_RULE_TAG`, `weak2`). A stored share carrying weak
+///   shares commits the old root, which every node now refuses, so the
+///   chain starts again.
+pub const STORE_FORMAT_VERSION: u32 = 6;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -568,8 +573,9 @@ impl Store {
              the genesis share only as the last resort, and Bitcoin Cash has one share chain \
              (the main and mini chains merged) whose headers carry a difficulty band, a \
              payout level and weak shares, with payees below their level paid by a draw and \
-             every proof from a job at the minimum paid at the weak work. Delete the store \
-             directory and restart to resync the share chain from peers.",
+             every proof from a job at the minimum paid at the weak work, and whose weak root \
+             commits each carried weak share's whole encoding. Delete the store directory and \
+             restart to resync the share chain from peers.",
             self.path
         )))
     }
@@ -961,6 +967,30 @@ mod tests {
         assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
         assert!(error.to_string().contains("has format 4"), "{error}");
         assert!(error.to_string().contains("weak work"), "{error}");
+    }
+
+    /// A store from before the weak root bound whole weak shares, format 5,
+    /// is refused: its shares carrying weak shares commit the old root.
+    #[test]
+    fn test_store_from_before_the_whole_weak_share_root_is_refused() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        store
+            .db
+            .put_cf(&metadata_cf, STORE_FORMAT_KEY, 5u32.to_le_bytes())
+            .unwrap();
+
+        let error = store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap_err();
+        assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
+        assert!(error.to_string().contains("has format 5"), "{error}");
+        assert!(error.to_string().contains("whole encoding"), "{error}");
     }
 
     #[test_log::test]

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Share-chain rule change on Bitcoin Cash, a flag day: a share's weak root now
+binds each weak share it carries in full (protocol segment `weak2-64-500-6`,
+store format 6). The root was the merkle root of the carried weak shares'
+proof-of-work hashes only, so a peer could relay an honest share with one
+weak share's coinbase value raised by a satoshi, or its merkle branch,
+scriptSig or coinbase proof changed. The altered body passed the check
+against the header and was stored, the weak share's coinbase or header check
+then failed, and the node marked the honest share invalid and split from the
+chain, at no cost in work to the peer. Each leaf of the root is now the
+SHA-256d of one weak share's whole encoding, so any such change is a bad
+copy: the node drops that body and fetches the share again. The duplicate
+and carried-once checks still compare proof-of-work hashes; the commitment
+layout (tag `0x26`, weak ratio, count, root) is unchanged. Bitcoin Cash's
+own rules do not change, and the blocks the pool finds stay ordinary Bitcoin
+Cash blocks. A node before this change computes another root for every
+share that carries weak shares, so the two do not peer: every node must
+upgrade together and start on a fresh store. Bitcoin is unchanged.
+
 Share-chain rule change on Bitcoin Cash, on the same flag day with its own
 protocol segment (`weak-64-500-6`): weak shares (issue #79, row 5;
 `docs/sharechain/small-miners-design.md`, part 3). A weak share is an easier
