@@ -1709,6 +1709,17 @@ pub struct TestWeakShare<'a> {
 /// whatever the hash.
 #[cfg(test)]
 pub fn build_test_weak_share(weak: TestWeakShare<'_>) -> crate::shares::weak::WeakShare {
+    build_test_weak_share_paying(weak, 5_000_000_000)
+}
+
+/// A weak share as [`build_test_weak_share`] builds it, whose coinbase pays
+/// `coinbase_value` satoshis instead of 50 BCH: one on another template of
+/// the same Bitcoin Cash block, with other fees.
+#[cfg(test)]
+pub fn build_test_weak_share_paying(
+    weak: TestWeakShare<'_>,
+    coinbase_value: u64,
+) -> crate::shares::weak::WeakShare {
     let owner = [0x33; 20];
     let payout: PayoutAddress = Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array(owner),
@@ -1738,7 +1749,6 @@ pub fn build_test_weak_share(weak: TestWeakShare<'_>) -> crate::shares::weak::We
         weak_count: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
     };
-    let coinbase_value = 5_000_000_000;
     let mut header = ShareHeader::from_commitment_and_header(
         commitment.clone(),
         Header {

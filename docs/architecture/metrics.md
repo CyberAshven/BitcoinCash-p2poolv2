@@ -337,7 +337,7 @@ them, and fills its own shares from the pool.
 | `invalid` | broke a share-chain rule |
 | `unchecked` | could not be checked: a store read failed, or data the check needs can no longer arrive |
 | `pool_full` | found the pool full of weak shares on parents no older than its own |
-| `too_deep` | had a parent too deep for a share on the tip to carry it |
+| `too_deep` | had a parent too deep for a share on the tip to carry it, found before any other check, or when a held one's parent arrived |
 | `unknown_parent` | was held for its parent, or for a check that could not finish yet, and did not get it in `WEAK_DEPTH` share periods, or was the oldest held when newer ones needed the room |
 
 A weak share dropped on a full worker queue, before the pool sees it, is

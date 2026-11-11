@@ -31,6 +31,9 @@ async fn a_weak_share_breaking_a_rule_is_counted_as_invalid() {
                 chain: ChainMembership::Confirmed,
             })
         });
+    chain_store_handle
+        .expect_get_tip_height()
+        .returning(|| Ok(Some(5)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
     let mut worker = WeakShareWorker::new(
@@ -74,6 +77,9 @@ async fn a_weak_share_that_cannot_be_checked_is_counted_as_unchecked() {
                 chain: ChainMembership::Confirmed,
             })
         });
+    chain_store_handle
+        .expect_get_tip_height()
+        .returning(|| Ok(Some(5)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
     let mut worker = WeakShareWorker::new(
@@ -117,6 +123,9 @@ async fn a_weak_share_this_nodes_miner_found_is_counted_as_found() {
                 chain: ChainMembership::Confirmed,
             })
         });
+    chain_store_handle
+        .expect_get_tip_height()
+        .returning(|| Ok(Some(5)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
     let mut worker = WeakShareWorker::new(
@@ -160,6 +169,9 @@ async fn a_weak_share_from_a_peer_is_counted_as_received() {
                 chain: ChainMembership::Confirmed,
             })
         });
+    chain_store_handle
+        .expect_get_tip_height()
+        .returning(|| Ok(Some(5)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
     let mut worker = WeakShareWorker::new(
@@ -434,6 +446,9 @@ async fn an_altered_copy_relayed_first_does_not_keep_the_real_weak_share_out() {
                 chain: ChainMembership::Confirmed,
             })
         });
+    chain_store_handle
+        .expect_get_tip_height()
+        .returning(|| Ok(Some(5)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
     let mut worker = WeakShareWorker::new(
@@ -519,7 +534,7 @@ async fn a_weak_share_that_cannot_be_checked_yet_is_checked_again_once_the_tip_m
         .expect_get_tip_height()
         .returning(move || {
             let read = tip_reads.fetch_add(1, Ordering::SeqCst);
-            Ok(Some(if read < 2 { 10 } else { 11 }))
+            Ok(Some(if read < 3 { 10 } else { 11 }))
         });
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
@@ -548,4 +563,51 @@ async fn a_weak_share_that_cannot_be_checked_yet_is_checked_again_once_the_tip_m
     assert_eq!(stats.held, 0);
     assert_eq!(stats.pooled, 1);
     assert_eq!(checks.load(Ordering::SeqCst), 2);
+}
+
+/// A peer replays an old weak share on a parent at height 3 while the
+/// confirmed tip is at 10: no share on the tip may carry it, so it is
+/// dropped before any of its checks, without a walk of the window.
+#[tokio::test]
+async fn a_replayed_weak_share_too_deep_to_carry_is_dropped_before_its_checks() {
+    let (pool_store, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(pool_store);
+    let mut validator = MockDefaultShareValidator::new();
+    validator.expect_validate_weak_share().never();
+    let mut chain_store_handle = MockChainStoreHandle::new();
+    chain_store_handle
+        .expect_get_block_metadata()
+        .returning(|_| {
+            Ok(BlockMetadata {
+                expected_height: Some(3),
+                chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+                status: Status::BlockValid,
+                chain: ChainMembership::Confirmed,
+            })
+        });
+    chain_store_handle
+        .expect_get_tip_height()
+        .returning(|| Ok(Some(10)));
+    let (_events_tx, events_rx) = mpsc::channel(1);
+    let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
+    let mut worker = WeakShareWorker::new(
+        events_rx,
+        pool.clone(),
+        chain_store_handle,
+        Arc::new(validator),
+        Arc::new(RwLock::new(PplnsWindow::default())),
+        swarm_tx,
+    );
+
+    worker
+        .handle(WeakShareEvent {
+            weak_share: test_weak_share_on(BlockHash::from_byte_array([1; 32]), 1),
+            source: WeakShareSource::Peer(PeerId::random()),
+        })
+        .await;
+
+    let stats = pool.stats();
+    assert_eq!(stats.counts.refused.too_deep, 1);
+    assert_eq!(stats.pooled, 0);
+    assert_eq!(stats.held, 0);
 }

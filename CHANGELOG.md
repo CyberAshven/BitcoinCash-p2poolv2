@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Checking weak shares costs less. A weak share whose parent is more than
+`WEAK_DEPTH` below the confirmed tip's next share is dropped before any of
+its checks, counted as `too_deep`: a peer replaying old weak shares made the
+node resolve and walk the PPLNS window, under its write lock, for each one,
+and then relay it. And the window's weights are cached by the weak share's
+parent and the Bitcoin Cash block it pays, not by its whole template: weak
+shares on 64 templates of one block walk the window once, not 64 times.
+Each one's payouts are still built for its own coinbase value, cuts and
+merge-mining output, so the rebuilt coinbases are the same as before. Node
+behaviour only; no share-chain rule changes.
+
 A weak share's proof of work is remembered only once the weak share passes
 its checks. It was remembered before the checks ran, so any failure was
 final: a peer that relayed an altered copy first kept the real weak share

@@ -40,7 +40,8 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::validation::{FailureKind, ShareValidator, WeakPayoutCache};
 use crate::shares::weak::WeakShare;
 use crate::shares::weak_pool::{
-    HoldOutcome, WeakPool, WeakRelayReceiver, WeakShareRefusal, WeakShareSource, now_millis,
+    HoldOutcome, WeakPool, WeakRelayReceiver, WeakShareRefusal, WeakShareSource, can_be_carried,
+    now_millis,
 };
 use crate::store::writer::StoreError;
 use bitcoin::BlockHash;
@@ -169,6 +170,10 @@ impl<C> WeakShareWorker<C> {
         }
         let parent = weak_share.header.prev_share_blockhash;
         match self.parent_height(&parent) {
+            ParentHeight::Known(parent_height) if self.too_deep(parent_height) => {
+                debug!("Weak share {pow_hash} from {source:?} is too deep to carry, dropping it");
+                self.pool.refuse(WeakShareRefusal::TooDeep);
+            }
             ParentHeight::Known(parent_height) => {
                 self.check_and_pool(weak_share, source, parent_height, now_millis())
             }
@@ -178,6 +183,19 @@ impl<C> WeakShareWorker<C> {
                 self.pool.refuse(WeakShareRefusal::Unchecked);
             }
         }
+    }
+
+    /// Whether a weak share on a parent at `parent_height` is too deep for
+    /// the next share on the confirmed tip to carry, more than `WEAK_DEPTH`
+    /// below it ([`can_be_carried`]). Checked before any other rule, so a
+    /// replayed old weak share costs a metadata read, not a window walk. A
+    /// tip that cannot be read leaves the depth to the carrier's check.
+    fn too_deep(&self, parent_height: u32) -> bool {
+        self.chain_store_handle
+            .get_tip_height()
+            .ok()
+            .flatten()
+            .is_some_and(|tip_height| !can_be_carried(parent_height, tip_height))
     }
 
     /// What the store knows of `parent`.
