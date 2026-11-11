@@ -30,7 +30,85 @@ async fn a_weak_share_seen_once_is_not_admitted_again() {
     let pow_hash = pool_weak_share(1).pow_hash();
 
     assert!(pool.admit(pow_hash, WeakShareSource::Local));
+    pool.insert(pool_weak_share(1), 3, WeakShareSource::Local);
     assert!(!pool.admit(pow_hash, WeakShareSource::Peer(PeerId::random())));
+}
+
+/// Only a weak share that passed its checks is remembered: admitting one,
+/// which may then fail its checks, keeps no other copy of its proof of work
+/// out.
+#[tokio::test]
+async fn a_weak_share_admitted_but_not_pooled_is_admitted_again() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let pow_hash = pool_weak_share(1).pow_hash();
+
+    assert!(pool.admit(pow_hash, WeakShareSource::Peer(PeerId::random())));
+    assert!(pool.admit(pow_hash, WeakShareSource::Peer(PeerId::random())));
+}
+
+/// A held copy whose proof of work passed while it waited is dropped as a
+/// duplicate when its parent arrives, rather than checked again.
+#[tokio::test]
+async fn a_held_weak_share_already_pooled_is_released_as_a_duplicate() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let parent = BlockHash::from_byte_array([1; 32]);
+    pool.hold(test_weak_share_on(parent, 1), WeakShareSource::Local);
+    pool.insert(test_weak_share_on(parent, 1), 10, WeakShareSource::Local);
+
+    let released = pool.release_held(&HashMap::from([(parent, 10)]), 10);
+
+    assert!(released.is_empty());
+    assert_eq!(pool.held_len(), 0);
+    assert_eq!(pool.counts().refused.duplicate, 1);
+}
+
+/// One held for a retry at a tip of 10 waits while the tip is 10 and is
+/// released once the tip is 11.
+#[tokio::test]
+async fn a_weak_share_held_for_a_retry_waits_for_the_tip_to_move() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let parent = BlockHash::from_byte_array([1; 32]);
+    pool.hold_for_retry(
+        test_weak_share_on(parent, 1),
+        WeakShareSource::Local,
+        now_millis(),
+        Some(10),
+    );
+
+    let at_the_same_tip = pool.release_held(&HashMap::from([(parent, 10)]), 10);
+    let at_the_next_tip = pool.release_held(&HashMap::from([(parent, 10)]), 11);
+
+    assert!(at_the_same_tip.is_empty());
+    assert_eq!(at_the_next_tip.len(), 1);
+    assert_eq!(pool.held_len(), 0);
+}
+
+/// A retry keeps the time it was first held, so it expires with it.
+#[tokio::test]
+async fn a_weak_share_held_again_for_a_retry_keeps_its_first_hold_time() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let parent = BlockHash::from_byte_array([1; 32]);
+    pool.lock().hold(
+        test_weak_share_on(parent, 2),
+        WeakShareSource::Local,
+        5_000,
+        None,
+    );
+    pool.lock().hold(
+        test_weak_share_on(parent, 1),
+        WeakShareSource::Local,
+        1_000,
+        Some(10),
+    );
+
+    pool.lock().expire_held(1_000 + max_held_millis() + 1);
+
+    assert_eq!(pool.held_len(), 1);
+    assert_eq!(pool.counts().refused.unknown_parent, 1);
 }
 
 #[tokio::test]
@@ -115,7 +193,7 @@ async fn a_weak_share_seen_again_is_counted_as_a_duplicate() {
     let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
     let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
     let pow_hash = pool_weak_share(1).pow_hash();
-    pool.admit(pow_hash, WeakShareSource::Local);
+    pool.insert(pool_weak_share(1), 3, WeakShareSource::Local);
 
     pool.admit(pow_hash, WeakShareSource::Peer(PeerId::random()));
 
@@ -315,8 +393,12 @@ async fn a_weak_share_held_longer_than_the_depth_in_share_periods_is_dropped() {
     let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
     let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
     let parent = BlockHash::from_byte_array([1; 32]);
-    pool.lock()
-        .hold(test_weak_share_on(parent, 1), WeakShareSource::Local, 1_000);
+    pool.lock().hold(
+        test_weak_share_on(parent, 1),
+        WeakShareSource::Local,
+        1_000,
+        None,
+    );
 
     pool.lock().expire_held(1_000 + max_held_millis() + 1);
 

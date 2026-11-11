@@ -332,13 +332,13 @@ them, and fills its own shares from the pool.
 
 | Reason | A weak share that |
 |---|---|
-| `duplicate` | was seen before, usually relayed by another peer first |
+| `duplicate` | had a proof of work that already passed its checks, usually relayed by another peer first, or was already held |
 | `rate_limited` | came from a peer sending weak shares faster than its rate |
 | `invalid` | broke a share-chain rule |
-| `unchecked` | could not be checked: data the check needs was missing, or a store read failed |
+| `unchecked` | could not be checked: a store read failed, or data the check needs can no longer arrive |
 | `pool_full` | found the pool full of weak shares on parents no older than its own |
 | `too_deep` | had a parent too deep for a share on the tip to carry it |
-| `unknown_parent` | was held for its parent, which did not arrive in `WEAK_DEPTH` share periods, or was the oldest held when newer ones needed the room |
+| `unknown_parent` | was held for its parent, or for a check that could not finish yet, and did not get it in `WEAK_DEPTH` share periods, or was the oldest held when newer ones needed the room |
 
 A weak share dropped on a full worker queue, before the pool sees it, is
 not counted. The pool's counters are plain integers behind the pool's

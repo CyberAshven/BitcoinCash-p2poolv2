@@ -6,12 +6,15 @@
 //! them (`shares::weak_pool`).
 //!
 //! Weak shares reach it from this node's stratum, which found them, and
-//! from peers, which relayed them. Each proof-of-work hash is checked once:
-//! the pool admits a hash it has not seen, from a peer within its rate, and
-//! the worker then runs every rule but the carrier's
-//! (`ShareValidator::validate_weak_share`), with one cache of the window's
-//! payouts across weak shares on the same template. A weak share that
-//! passes goes into the pool, which queues it for the node actor to relay.
+//! from peers, which relayed them. The pool admits a proof-of-work hash that
+//! has not passed before, from a peer within its rate, and the worker then
+//! runs every rule but the carrier's (`ShareValidator::validate_weak_share`),
+//! with one cache of the window's payouts across weak shares on the same
+//! template. A weak share that passes goes into the pool, which remembers
+//! its hash and queues it for the node actor to relay; one that fails is
+//! not remembered, so a bad copy relayed first cannot keep the real one out.
+//! One whose check cannot finish yet is held and checked again once the
+//! confirmed tip moves.
 //!
 //! A weak share whose parent this node does not have is held in the pool,
 //! and the parent asked for from the peer that sent it, as the parent of a
@@ -37,7 +40,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::validation::{FailureKind, ShareValidator, WeakPayoutCache};
 use crate::shares::weak::WeakShare;
 use crate::shares::weak_pool::{
-    HoldOutcome, WeakPool, WeakRelayReceiver, WeakShareRefusal, WeakShareSource,
+    HoldOutcome, WeakPool, WeakRelayReceiver, WeakShareRefusal, WeakShareSource, now_millis,
 };
 use crate::store::writer::StoreError;
 use bitcoin::BlockHash;
@@ -167,7 +170,7 @@ impl<C> WeakShareWorker<C> {
         let parent = weak_share.header.prev_share_blockhash;
         match self.parent_height(&parent) {
             ParentHeight::Known(parent_height) => {
-                self.check_and_pool(weak_share, source, parent_height)
+                self.check_and_pool(weak_share, source, parent_height, now_millis())
             }
             ParentHeight::Unknown => self.hold(weak_share, source).await,
             ParentHeight::Unreadable(error) => {
@@ -239,17 +242,26 @@ impl<C> WeakShareWorker<C> {
             }
         };
         for released in self.pool.release_held(&parent_heights, tip_height) {
-            self.check_and_pool(released.weak_share, released.source, released.parent_height);
+            self.check_and_pool(
+                released.weak_share,
+                released.source,
+                released.parent_height,
+                released.held_at_millis,
+            );
         }
     }
 
     /// Run a weak share's checks and pool it, on its parent at
-    /// `parent_height`, if it passes.
+    /// `parent_height`, if it passes. One whose check cannot finish yet (a
+    /// `Recoverable` failure) is held, from `held_at_millis`, to be checked
+    /// again once the confirmed tip moves; one that fails is refused but not
+    /// remembered, so another copy of its proof of work is still checked.
     fn check_and_pool(
         &mut self,
         weak_share: WeakShare,
         source: WeakShareSource,
         parent_height: u32,
+        held_at_millis: u64,
     ) {
         let pow_hash = weak_share.pow_hash();
         if let Err(error) = self.share_validator.validate_weak_share(
@@ -263,8 +275,14 @@ impl<C> WeakShareWorker<C> {
                     info!("Refused weak share {pow_hash} from {source:?}: {error}");
                     self.pool.refuse(WeakShareRefusal::Invalid);
                 }
+                FailureKind::Recoverable => {
+                    debug!("Holding weak share {pow_hash} from {source:?} to check again: {error}");
+                    let tip_height = self.chain_store_handle.get_tip_height().ok().flatten();
+                    self.pool
+                        .hold_for_retry(weak_share, source, held_at_millis, tip_height);
+                }
                 _ => {
-                    debug!("Cannot check weak share {pow_hash} from {source:?} yet: {error}");
+                    debug!("Cannot check weak share {pow_hash} from {source:?}: {error}");
                     self.pool.refuse(WeakShareRefusal::Unchecked);
                 }
             }

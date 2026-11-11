@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A weak share's proof of work is remembered only once the weak share passes
+its checks. It was remembered before the checks ran, so any failure was
+final: a peer that relayed an altered copy first kept the real weak share
+out of every node it reached, and one whose data arrived late was lost. A
+copy that fails its checks no longer keeps another out, the per-peer rate
+limit still applies before the checks, and a weak share whose check cannot
+finish yet is held and checked again once the confirmed tip moves, within
+the held weak shares' bounds. Node behaviour only; no share-chain rule
+changes.
+
 A Bitcoin Cash node no longer drops a weak share whose parent it does not
 have yet. It holds the weak share, unchecked, in its weak pool and asks the
 peer that sent it for the parent's headers, once per parent, as it does for

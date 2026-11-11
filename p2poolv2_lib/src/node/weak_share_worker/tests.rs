@@ -10,6 +10,7 @@ use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::test_utils::{setup_test_chain_store_handle, test_weak_share_on};
 use bitcoin::hashes::Hash;
 use libp2p::PeerId;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[tokio::test]
 async fn a_weak_share_breaking_a_rule_is_counted_as_invalid() {
@@ -402,4 +403,149 @@ async fn a_held_weak_share_whose_parent_arrives_too_deep_is_dropped_unchecked() 
     assert_eq!(stats.held, 0);
     assert_eq!(stats.pooled, 0);
     assert_eq!(stats.counts.refused.too_deep, 1);
+}
+
+/// A peer relays a copy of a weak share with its coinbase value altered,
+/// which fails its checks, before the real one: the real one is still
+/// checked and pooled.
+#[tokio::test]
+async fn an_altered_copy_relayed_first_does_not_keep_the_real_weak_share_out() {
+    let (pool_store, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(pool_store);
+    let mut validator = MockDefaultShareValidator::new();
+    validator
+        .expect_validate_weak_share()
+        .times(2)
+        .returning(|weak_share, _, _, _| {
+            if weak_share.coinbase_value == 2 {
+                Err(ValidationError::consensus("does not pay its PPLNS window"))
+            } else {
+                Ok(())
+            }
+        });
+    let mut chain_store_handle = MockChainStoreHandle::new();
+    chain_store_handle
+        .expect_get_block_metadata()
+        .returning(|_| {
+            Ok(BlockMetadata {
+                expected_height: Some(5),
+                chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+                status: Status::BlockValid,
+                chain: ChainMembership::Confirmed,
+            })
+        });
+    let (_events_tx, events_rx) = mpsc::channel(1);
+    let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
+    let mut worker = WeakShareWorker::new(
+        events_rx,
+        pool.clone(),
+        chain_store_handle,
+        Arc::new(validator),
+        Arc::new(RwLock::new(PplnsWindow::default())),
+        swarm_tx,
+    );
+    let real = test_weak_share_on(BlockHash::from_byte_array([1; 32]), 1);
+    let mut altered = real.clone();
+    altered.coinbase_value = 2;
+    worker
+        .handle(WeakShareEvent {
+            weak_share: altered,
+            source: WeakShareSource::Peer(PeerId::random()),
+        })
+        .await;
+
+    worker
+        .handle(WeakShareEvent {
+            weak_share: real.clone(),
+            source: WeakShareSource::Peer(PeerId::random()),
+        })
+        .await;
+
+    let stats = pool.stats();
+    assert_eq!(stats.counts.refused.invalid, 1);
+    assert_eq!(stats.counts.received, 1);
+    assert_eq!(stats.pooled, 1);
+}
+
+/// The first check cannot finish (a `Recoverable` failure, as when the Bitcoin
+/// Cash block it builds on is not known yet) at a confirmed tip of 10: the
+/// weak share is held, waits while the tip stays at 10, and is checked again
+/// and pooled once the tip is 11.
+#[tokio::test]
+async fn a_weak_share_that_cannot_be_checked_yet_is_checked_again_once_the_tip_moves() {
+    let (pool_store, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(pool_store);
+    let checks = Arc::new(AtomicUsize::new(0));
+    let checks_seen = Arc::clone(&checks);
+    let mut validator = MockDefaultShareValidator::new();
+    validator
+        .expect_validate_weak_share()
+        .returning(move |_, _, _, _| {
+            if checks_seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(ValidationError::recoverable(
+                    "Bitcoin Cash prev not known yet",
+                ))
+            } else {
+                Ok(())
+            }
+        });
+    let parent = BlockHash::from_byte_array([1; 32]);
+    let tip_reads = Arc::new(AtomicUsize::new(0));
+    let mut chain_store_handle = MockChainStoreHandle::new();
+    chain_store_handle
+        .expect_get_block_metadata()
+        .returning(|_| {
+            Ok(BlockMetadata {
+                expected_height: Some(10),
+                chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+                status: Status::BlockValid,
+                chain: ChainMembership::Confirmed,
+            })
+        });
+    chain_store_handle
+        .expect_get_block_metadata_batch()
+        .returning(move |_| {
+            Ok(vec![(
+                parent,
+                BlockMetadata {
+                    expected_height: Some(10),
+                    chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+                    status: Status::BlockValid,
+                    chain: ChainMembership::Confirmed,
+                },
+            )])
+        });
+    chain_store_handle
+        .expect_get_tip_height()
+        .returning(move || {
+            let read = tip_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(if read < 2 { 10 } else { 11 }))
+        });
+    let (_events_tx, events_rx) = mpsc::channel(1);
+    let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
+    let mut worker = WeakShareWorker::new(
+        events_rx,
+        pool.clone(),
+        chain_store_handle,
+        Arc::new(validator),
+        Arc::new(RwLock::new(PplnsWindow::default())),
+        swarm_tx,
+    );
+    worker
+        .handle(WeakShareEvent {
+            weak_share: test_weak_share_on(parent, 1),
+            source: WeakShareSource::Local,
+        })
+        .await;
+    assert_eq!(pool.held_len(), 1);
+
+    worker.release_held();
+    let held_at_the_same_tip = pool.held_len();
+    worker.release_held();
+
+    assert_eq!(held_at_the_same_tip, 1);
+    let stats = pool.stats();
+    assert_eq!(stats.held, 0);
+    assert_eq!(stats.pooled, 1);
+    assert_eq!(checks.load(Ordering::SeqCst), 2);
 }

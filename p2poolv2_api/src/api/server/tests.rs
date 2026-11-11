@@ -28,7 +28,9 @@ use p2poolv2_lib::shares::weak_pool::{WeakPool, WeakShareSource};
 use p2poolv2_lib::stratum::work::block_template::BlockTemplate;
 use p2poolv2_lib::stratum::work::coinbase::parse_address;
 use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
-use p2poolv2_lib::test_utils::{TestShareBlockBuilder, setup_test_chain_store_handle};
+use p2poolv2_lib::test_utils::{
+    TestShareBlockBuilder, setup_test_chain_store_handle, test_weak_share_on,
+};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -75,15 +77,16 @@ async fn test_metrics_endpoint_includes_p2p_health() {
 async fn test_metrics_endpoint_includes_the_weak_pool() {
     let (pool_store, _pool_dir) = setup_test_chain_store_handle(true).await;
     let (weak_pool, _relay_rx) = WeakPool::new(pool_store);
-    let pow_hash = bitcoin::BlockHash::from_byte_array([7; 32]);
-    weak_pool.admit(pow_hash, WeakShareSource::Local);
-    weak_pool.admit(pow_hash, WeakShareSource::Local);
+    let weak_share = test_weak_share_on(bitcoin::BlockHash::from_byte_array([7; 32]), 1);
+    weak_pool.insert(weak_share.clone(), 3, WeakShareSource::Local);
+    weak_pool.admit(weak_share.pow_hash(), WeakShareSource::Local);
     let (state, _temp_dir) =
         build_test_state(NodeHandle::new_for_test_with_weak_pool(weak_pool)).await;
 
     let exposition = metrics(State(state)).await;
 
-    assert!(exposition.contains("# TYPE weak_pool_size gauge\nweak_pool_size 0\n"));
+    assert!(exposition.contains("# TYPE weak_pool_size gauge\nweak_pool_size 1\n"));
+    assert!(exposition.contains("weak_shares_found_total 1\n"));
     assert!(exposition.contains("weak_shares_refused_total{reason=\"duplicate\"} 1\n"));
     assert!(exposition.contains("weak_shares_carried_by_node_total 0\n"));
     assert!(exposition.contains("weak_shares_carried_on_chain_total 0\n"));
