@@ -22,7 +22,7 @@
 //! and message always give the same signature. Nothing here makes a key.
 //! [`crate::shares::bch_script`] verifies these signatures.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use k256::elliptic_curve::PrimeField;
 use k256::elliptic_curve::hazmat::FieldArithmetic;
 use k256::elliptic_curve::ops::Reduce;
