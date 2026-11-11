@@ -99,26 +99,27 @@ pub fn next_weak_ratio(parent_ratio: u64, parent_carried: u64, fill: u64, ratio_
 /// Weak shares waiting to be carried, by the depth of their parent: for the
 /// share about to carry them, index `d` holds those whose parent is `d + 1`
 /// shares below it.
-struct WaitingWeakShares {
-    carrying: Vec<u64>,
-    non_carrying: Vec<u64>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WaitingWeakShares {
+    pub(crate) carrying: Vec<u64>,
+    pub(crate) non_carrying: Vec<u64>,
 }
 
 /// Weak shares one new share carries, by kind.
-#[derive(Default)]
-struct Carried {
-    carrying: u64,
-    non_carrying: u64,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Carried {
+    pub(crate) carrying: u64,
+    pub(crate) non_carrying: u64,
 }
 
 impl Carried {
-    fn total(&self) -> u64 {
+    pub(crate) fn total(&self) -> u64 {
         self.carrying + self.non_carrying
     }
 }
 
 impl WaitingWeakShares {
-    fn new(depth: usize) -> Self {
+    pub(crate) fn new(depth: usize) -> Self {
         Self {
             carrying: vec![0; depth],
             non_carrying: vec![0; depth],
@@ -128,7 +129,7 @@ impl WaitingWeakShares {
     /// A new share arrives: every waiting weak share is one share deeper,
     /// those already at the deepest expire (returned), and the weak shares
     /// found on the old tip join at depth one.
-    fn deepen(&mut self, found_carrying: u64, found_non_carrying: u64) -> (u64, u64) {
+    pub(crate) fn deepen(&mut self, found_carrying: u64, found_non_carrying: u64) -> (u64, u64) {
         self.carrying.rotate_right(1);
         self.non_carrying.rotate_right(1);
         let expired = (self.carrying[0], self.non_carrying[0]);
@@ -139,7 +140,7 @@ impl WaitingWeakShares {
 
     /// A share from a carrying node takes up to `cap` weak shares of both
     /// kinds, oldest parent first, splitting each depth in proportion.
-    fn carry_all(&mut self, cap: u64) -> Carried {
+    pub(crate) fn carry_all(&mut self, cap: u64) -> Carried {
         let mut carried = Carried::default();
         (0..self.carrying.len()).rev().for_each(|depth| {
             let room = cap - carried.total();
@@ -163,7 +164,7 @@ impl WaitingWeakShares {
 
     /// A share from a non-carrying node takes up to `cap` of its own nodes'
     /// weak shares only, oldest parent first.
-    fn carry_own(&mut self, cap: u64) -> Carried {
+    pub(crate) fn carry_own(&mut self, cap: u64) -> Carried {
         let mut carried = Carried::default();
         (0..self.non_carrying.len()).rev().for_each(|depth| {
             let taken = (cap - carried.non_carrying).min(self.non_carrying[depth]);
@@ -171,6 +172,46 @@ impl WaitingWeakShares {
             carried.non_carrying += taken;
         });
         carried
+    }
+
+    /// A share takes what its node carries: everything waiting from a
+    /// carrying node, its own nodes' weak shares only from another.
+    pub(crate) fn carry(&mut self, on_carrying_node: bool, cap: u64) -> Carried {
+        if on_carrying_node {
+            self.carry_all(cap)
+        } else {
+            self.carry_own(cap)
+        }
+    }
+
+    /// Weak shares found on a parent `index + 1` shares below the share
+    /// about to carry them join the queue there.
+    pub(crate) fn add_at(&mut self, index: usize, found_carrying: u64, found_non_carrying: u64) {
+        self.carrying[index] += found_carrying;
+        self.non_carrying[index] += found_non_carrying;
+    }
+
+    /// Keep only the weak shares also left waiting in `other`, a copy of
+    /// the same queue that another share carried from: both take the oldest
+    /// first, so what either took is gone. Returns how many this queue
+    /// loses, by kind.
+    pub(crate) fn keep_shared_with(&mut self, other: &WaitingWeakShares) -> Carried {
+        let mut dropped = Carried::default();
+        self.carrying
+            .iter_mut()
+            .zip(&other.carrying)
+            .for_each(|(mine, theirs)| {
+                dropped.carrying += mine.saturating_sub(*theirs);
+                *mine = (*mine).min(*theirs);
+            });
+        self.non_carrying
+            .iter_mut()
+            .zip(&other.non_carrying)
+            .for_each(|(mine, theirs)| {
+                dropped.non_carrying += mine.saturating_sub(*theirs);
+                *mine = (*mine).min(*theirs);
+            });
+        dropped
     }
 }
 
