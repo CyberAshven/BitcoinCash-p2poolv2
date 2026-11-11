@@ -497,6 +497,12 @@ impl BitcoindRpcClient {
     }
 
     /// Fetch a Bitcoin template, negotiating SegWit and Signet when required.
+    ///
+    /// Signet adds the signet rule. Every network declares the BIP 54
+    /// `consensuscleanup` rule: testnet5 marks it required (`!consensuscleanup`)
+    /// and refuses templates to clients that do not declare it, and the
+    /// coinbase we build already follows BIP 54. Nodes that do not know the
+    /// rule ignore it.
     pub async fn getblocktemplate(
         &self,
         network: bitcoin::Network,
@@ -505,13 +511,13 @@ impl BitcoindRpcClient {
             bitcoin::Network::Signet => {
                 vec![serde_json::json!({
                     "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-                    "rules": ["segwit", "signet"],
+                    "rules": ["segwit", "signet", "consensuscleanup"],
                 })]
             }
             _ => {
                 vec![serde_json::json!({
                     "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-                    "rules": ["segwit"],
+                    "rules": ["segwit", "consensuscleanup"],
                 })]
             }
         };

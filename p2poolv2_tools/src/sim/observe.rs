@@ -34,8 +34,8 @@ static NOT_AN_ERROR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)max_workbase|0 warnings").expect("valid regex"));
 static PROMOTED_ANY_CASE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)Promoted block").expect("valid regex"));
-static SOME_HEIGHT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"Some\(([0-9]+)\)").expect("valid regex"));
+static CONFIRMED_HEIGHT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"confirmed height ([0-9]+):").expect("valid regex"));
 static LAST_PROMOTED_HASH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r".*Promoted block ([0-9a-f]{16,})").expect("valid regex"));
 
@@ -54,8 +54,8 @@ struct LogScan {
 fn scan_log(path: &Path) -> ToolResult<LogScan> {
     let mut scan = LogScan::default();
     for_each_line_bytes(path, |line| {
-        if memchr::memmem::find(line, b"to confirmed height Some").is_some() {
-            let height = SOME_HEIGHT
+        if confirmed_heights(line).next().is_some() {
+            let height = CONFIRMED_HEIGHT
                 .captures(line)
                 .and_then(|found| std::str::from_utf8(&found[1]).ok()?.parse().ok());
             let hash = LAST_PROMOTED_HASH.captures(line).map(|found| {

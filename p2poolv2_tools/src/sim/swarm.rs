@@ -289,7 +289,7 @@ chain = "bitcoin-cash"
 bitcoin_cash_network = "regtest"
 # Required, but Bitcoin Cash derives it from bitcoin_cash_network.
 network = "regtest"
-version_mask = "1fffffe0"
+version_mask = "1fffe000"
 pool_signature = "{prefix}{index}"
 {payout_level}
 [bitcoinrpc]

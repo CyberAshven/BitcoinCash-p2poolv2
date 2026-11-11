@@ -792,6 +792,29 @@ keeps version `0.0.1-alpha`. The sync itself leaves Bitcoin Cash genesis
 shares, protocol strings, the PPLNS window and maturity, the ASERT parent
 anchor and the donation and fee cap as they were.
 
+Synced with upstream P2Poolv2 through `c2287b28` (its v0.17.0). The fork
+keeps version `0.0.1-alpha`. Taken from upstream: the Electrum server's
+`blockchain.headers.subscribe` and `blockchain.scripthash.get_history`,
+`subscribe` and `unsubscribe`, served from a script history index (the new
+`ScriptHistory` column family) that a node writes as it confirms shares and
+keeps only for the heights whose outputs can still be spent; the monitoring
+broadcast that also feeds Electrum's tip watcher; the share difficulty in the
+log line for a promoted share, which now reads `to confirmed height <h>:
+diff=<d>` (`-1` for an uncle), as `cargo sim` and the log tools now read it;
+the BIP 54 `consensuscleanup` rule in Bitcoin template requests; libp2p 0.57
+with hickory 0.26, sha2 0.11 and hmac 0.13; the Codecov upload from its own
+workflow and a coverage gate, here measured against `alpha`; the nix crane
+build. Left out: testnet5, a Bitcoin test network, because upstream's `Chain`
+config type for it collides with this fork's `chain` setting, and the
+Grafana explorer column, since this fork's found-blocks table links each
+block hash to a Bitcoin Cash explorer. On Bitcoin Cash the script history
+window and Electrum's `server.features` depths are Bitcoin Cash's own. A
+store from before this sync has no script history for shares it confirmed
+earlier; they leave the window as the chain grows. The sync changes no
+share-chain rule: Bitcoin Cash genesis shares, protocol strings, the band,
+payout levels, weak shares, per-share cuts, the hybrid payout, the genesis
+last-resort rule and store format 5 are as they were.
+
 ### Added
 
 - Merge-mined tokens on a public node (owner's decision, 2026-10-24): the
