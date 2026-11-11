@@ -65,8 +65,10 @@ async fn newest_shares(connection: &Connection, count: usize) -> Result<Vec<Shar
     Ok(collected)
 }
 
-/// A miner's workers, as rows of the miners grid.
-fn worker_rows(workers: Vec<Worker>) -> impl IntoView {
+/// A miner's workers, as rows of the miners grid. `hashrate` adds the empty
+/// Hashrate cell the miners page's table has (after State); the miner page's
+/// table has no such column.
+fn worker_rows(workers: Vec<Worker>, hashrate: bool) -> impl IntoView {
     workers
         .into_iter()
         .map(|worker| {
@@ -75,6 +77,7 @@ fn worker_rows(workers: Vec<Worker>) -> impl IntoView {
                     <span></span>
                     <span class="mono">{worker.name}</span>
                     <span>{if worker.active { "online" } else { "idle" }}</span>
+                    {hashrate.then(|| view! { <span></span> })}
                     <span>{fmt_difficulty(worker.accepted_work as f64)}</span>
                     <span></span>
                     <span>"best " {fmt_difficulty(worker.best_share as f64)}</span>
@@ -99,7 +102,7 @@ fn miners_grid(miners: Miners) -> impl IntoView {
                 view! { <p class="worker-empty">"No worker-level stats for this address."</p> }
                     .into_any()
             } else {
-                worker_rows(miner.workers).into_any()
+                worker_rows(miner.workers, true).into_any()
             };
             view! {
                 <details>
@@ -109,6 +112,7 @@ fn miners_grid(miners: Miners) -> impl IntoView {
                             {miner.address.clone()}
                         </a>
                         <span>{format!("{active} / {total}")}</span>
+                        <span>{optional(miner.hashrate, fmt_hashrate)}</span>
                         <span>{fmt_difficulty(miner.accepted_work as f64)}</span>
                         <span>{optional(miner.payout_fraction, percent)}</span>
                         <span>{fmt_difficulty(miner.best_share as f64)}</span>
@@ -121,15 +125,16 @@ fn miners_grid(miners: Miners) -> impl IntoView {
         })
         .collect_view();
     view! {
-        <div class="grid-table miners-grid">
+        <div class="grid-table miners-grid hashrate-col">
             <div class="grid-head">
                 <span>"#"</span>
                 <span>"Payout address"</span>
                 <span>"Workers"</span>
-                <span>"Accepted work"</span>
-                <span>"Window share"</span>
-                <span>"Best share"</span>
-                <span>"Last seen"</span>
+                <span>"Hashrate"</span>
+                <span>"Work"</span>
+                <span>"Window"</span>
+                <span>"Best"</span>
+                <span>"Seen"</span>
                 <span></span>
             </div>
             {rows}
@@ -323,7 +328,7 @@ pub fn MinerPage(address: String, page: usize) -> impl IntoView {
                                         <span>"Last seen"</span>
                                         <span></span>
                                     </div>
-                                    {worker_rows(miner.workers)}
+                                    {worker_rows(miner.workers, false)}
                                 </div>
                             </div>
                         }

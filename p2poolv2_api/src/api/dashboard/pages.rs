@@ -323,6 +323,10 @@ pub(crate) struct MinerRow {
     /// Its fraction of the next block's PPLNS payout, when the window could
     /// be read for it.
     pub(crate) payout_fraction: Option<f64>,
+    /// Its hashrate over the window behind the miners page's Hashrate
+    /// column, in hashes per second, or `None` where its work is not in the
+    /// window (rendered as a dash).
+    pub(crate) hashrate: Option<f64>,
 }
 
 /// The miners page.
@@ -1149,13 +1153,16 @@ pub(crate) fn block(view: &BlockView) -> Markup {
     )
 }
 
-fn worker_rows(now: u64, workers: &[WorkerRow]) -> Markup {
+/// A miner's worker rows. `hashrate` adds the empty Hashrate cell the miners
+/// page's table has (after State); the miner page's table has no such column.
+fn worker_rows(now: u64, workers: &[WorkerRow], hashrate: bool) -> Markup {
     html! {
         @for worker in workers {
             div.grid-row.worker {
                 span {}
                 span.mono { (worker.name) }
                 span { @if worker.active { "online" } @else { "idle" } }
+                @if hashrate { span {} }
                 span { (fmt_difficulty(worker.accepted_work as f64)) }
                 span {}
                 span { "best " (fmt_difficulty(worker.best_share as f64)) }
@@ -1177,10 +1184,10 @@ pub(crate) fn miners(view: &MinersView) -> Markup {
             @if view.miners.is_empty() {
                 p.empty-state { "No miners have submitted shares to this node yet." }
             } @else {
-                div.grid-table.miners-grid {
+                div.grid-table.miners-grid.hashrate-col {
                     div.grid-head {
-                        span { "#" } span { "Payout address" } span { "Workers" } span { "Accepted work" }
-                        span { "Window share" } span { "Best share" } span { "Last seen" } span {}
+                        span { "#" } span { "Payout address" } span { "Workers" } span { "Hashrate" }
+                        span { "Work" } span { "Window" } span { "Best" } span { "Seen" } span {}
                     }
                     @for (index, miner) in view.miners.iter().enumerate() {
                         details {
@@ -1188,6 +1195,7 @@ pub(crate) fn miners(view: &MinersView) -> Markup {
                                 span { (first_rank + index + 1) }
                                 a.addr href=(miner_href(&miner.address)) title=(miner.address) { (miner.address) }
                                 span { (miner.workers.iter().filter(|worker| worker.active).count()) " / " (miner.workers.len()) }
+                                span { (optional(miner.hashrate, fmt_hashrate)) }
                                 span { (fmt_difficulty(miner.accepted_work as f64)) }
                                 span { (miner.payout_fraction.map(percent).unwrap_or_else(|| "—".to_string())) }
                                 span { (fmt_difficulty(miner.best_share as f64)) }
@@ -1198,7 +1206,7 @@ pub(crate) fn miners(view: &MinersView) -> Markup {
                                 @if miner.workers.is_empty() {
                                     p.worker-empty { "No worker-level stats for this address." }
                                 } @else {
-                                    (worker_rows(view.now, &miner.workers))
+                                    (worker_rows(view.now, &miner.workers, true))
                                 }
                             }
                         }
@@ -1267,7 +1275,7 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
                         span {} span { "Worker" } span { "State" } span { "Accepted work" }
                         span {} span { "Best share" } span { "Last seen" } span {}
                     }
-                    (worker_rows(view.now, &view.workers))
+                    (worker_rows(view.now, &view.workers, false))
                 }
             }
         }

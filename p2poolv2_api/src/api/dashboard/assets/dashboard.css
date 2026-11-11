@@ -795,6 +795,14 @@ footer.site-footer a {
   font-size: 0.8rem;
 }
 
+/* The miners page's table adds the Hashrate column (after Workers). */
+.miners-grid.hashrate-col .grid-head,
+.miners-grid.hashrate-col .grid-row {
+  grid-template-columns:
+    2.2rem minmax(9rem, 1fr) 5.5rem 5.5rem 5.5rem 4.5rem 6.5rem 5.5rem
+    2rem;
+}
+
 .miners-grid .grid-head {
   background: #1f2224;
   font-size: 0.68rem;

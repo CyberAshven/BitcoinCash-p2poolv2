@@ -559,6 +559,7 @@ fn every_page() -> String {
             best_share: 5,
             last_share_at: 900,
             payout_fraction: Some(0.2),
+            hashrate: Some(7.59e6),
         },
         MinerRow {
             address: "bchtest:qother".to_string(),
@@ -567,6 +568,7 @@ fn every_page() -> String {
             best_share: 0,
             last_share_at: 0,
             payout_fraction: None,
+            hashrate: None,
         },
     ];
     [

@@ -300,6 +300,11 @@ pub struct LocalMiner {
     pub best_share: u64,
     pub last_share_at: u64,
     pub payout_fraction: Option<f64>,
+    /// Its hashrate over the window behind the miners table's Hashrate
+    /// column, in hashes per second, or `None` where it has no share in the
+    /// window (rendered as a dash).
+    #[serde(default)]
+    pub hashrate: Option<f64>,
 }
 
 /// `/miners?page=` or `/miners?address=`.
@@ -459,12 +464,24 @@ mod tests {
             "page_size":25,"accepted_shares_total":3,"rejected_shares_total":1,
             "miners":[{"address":"bchtest:q","workers":[{"name":"rig",
             "active":true,"accepted_work":10,"best_share":5,"last_share_at":9}],
-            "accepted_work":10,"best_share":5,"last_share_at":9,"payout_fraction":null}]}"#;
+            "accepted_work":10,"best_share":5,"last_share_at":9,"payout_fraction":null,
+            "hashrate":7590000}]}"#;
         let miners: Miners = serde_json::from_str(body).unwrap();
         assert_eq!(miners.accepted_shares_total, 3);
         assert_eq!(miners.rejected_shares_total, 1);
         assert_eq!(miners.miners[0].workers[0].name, "rig");
         assert_eq!(miners.miners[0].payout_fraction, None);
+        assert_eq!(miners.miners[0].hashrate, Some(7.59e6));
+    }
+
+    #[test]
+    fn test_miners_page_parses_without_the_hashrate() {
+        // A node that predates the Hashrate column still answers the WASM app.
+        let body = r#"{"miners_online":1,"workers_online":2,"total":1,"page":1,"pages":1,
+            "page_size":25,"miners":[{"address":"bchtest:q","workers":[],
+            "accepted_work":10,"best_share":5,"last_share_at":9,"payout_fraction":null}]}"#;
+        let miners: Miners = serde_json::from_str(body).unwrap();
+        assert_eq!(miners.miners[0].hashrate, None);
     }
 
     #[test]
