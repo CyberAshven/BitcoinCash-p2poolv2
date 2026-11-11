@@ -515,3 +515,36 @@ async fn a_flood_of_weak_shares_on_unknown_parents_stays_within_the_bounds() {
     let oldest_kept = state.held.values().next().unwrap();
     assert_eq!(oldest_kept.weak_share.header.bitcoin_header.nonce, 100);
 }
+
+/// More peers than `MAX_PEER_ALLOWANCES` sending weak shares at once leave
+/// at most that many allowances remembered.
+#[tokio::test]
+async fn the_peer_allowances_stay_bounded_however_many_peers_send() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let mut state = pool.lock();
+    for _ in 0..MAX_PEER_ALLOWANCES + 10 {
+        state.take_peer_token(PeerId::random(), 1_000);
+    }
+
+    assert_eq!(state.allowances.len(), MAX_PEER_ALLOWANCES);
+}
+
+/// Allowances that have refilled are forgotten first: a peer coming back
+/// would get the same full burst.
+#[tokio::test]
+async fn refilled_peer_allowances_are_forgotten_first() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let mut state = pool.lock();
+    for _ in 0..MAX_PEER_ALLOWANCES {
+        state.take_peer_token(PeerId::random(), 1_000);
+    }
+    let newcomer = PeerId::random();
+
+    let admitted = state.take_peer_token(newcomer, 1_000 + 10_000);
+
+    assert!(admitted);
+    assert_eq!(state.allowances.len(), 1);
+    assert!(state.allowances.contains_key(&newcomer));
+}

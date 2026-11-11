@@ -53,6 +53,9 @@ pub const MAX_SEEN_WEAK_SHARES: usize = 8 * MAX_POOL_WEAK_SHARES;
 pub const PEER_WEAK_SHARES_PER_SECOND: u64 = 20;
 /// Most weak shares the pool takes from one peer in one burst.
 pub const PEER_WEAK_SHARE_BURST: u64 = 2 * WEAK_CAP as u64;
+/// Most peers whose weak share rate the pool remembers, far more than a node
+/// connects to at once.
+pub const MAX_PEER_ALLOWANCES: usize = 1024;
 /// Accepted weak shares waiting for the node actor to relay them.
 pub const WEAK_RELAY_CHANNEL_CAPACITY: usize = 512;
 /// Milli-tokens in one token of a peer's rate limiter.
@@ -542,9 +545,14 @@ impl WeakPoolState {
     }
 
     /// Take one token from `peer`'s bucket, refilled at
-    /// [`PEER_WEAK_SHARES_PER_SECOND`] up to [`PEER_WEAK_SHARE_BURST`].
+    /// [`PEER_WEAK_SHARES_PER_SECOND`] up to [`PEER_WEAK_SHARE_BURST`]. A
+    /// peer not remembered yet, with [`MAX_PEER_ALLOWANCES`] remembered, first
+    /// makes the pool forget some ([`Self::forget_allowances`]).
     fn take_peer_token(&mut self, peer: PeerId, now_millis: u64) -> bool {
         let full = PEER_WEAK_SHARE_BURST * MILLIS_PER_TOKEN;
+        if self.allowances.len() >= MAX_PEER_ALLOWANCES && !self.allowances.contains_key(&peer) {
+            self.forget_allowances(now_millis);
+        }
         let allowance = self.allowances.entry(peer).or_insert(PeerAllowance {
             tokens: full,
             updated_at_millis: now_millis,
@@ -560,6 +568,35 @@ impl WeakPoolState {
         }
         allowance.tokens -= MILLIS_PER_TOKEN;
         true
+    }
+
+    /// Make room for one more peer's allowance below [`MAX_PEER_ALLOWANCES`]:
+    /// forget every allowance that has refilled by `now_millis`, which its
+    /// peer would get back the same if it came again, and then, while still
+    /// at the bound, the ones updated longest ago. A peer forgotten that way
+    /// gets a full burst again; that takes more peers sending weak shares at
+    /// once than a node connects to.
+    fn forget_allowances(&mut self, now_millis: u64) {
+        let full = PEER_WEAK_SHARE_BURST * MILLIS_PER_TOKEN;
+        self.allowances.retain(|_, allowance| {
+            let elapsed = now_millis.saturating_sub(allowance.updated_at_millis);
+            allowance
+                .tokens
+                .saturating_add(elapsed.saturating_mul(PEER_WEAK_SHARES_PER_SECOND))
+                < full
+        });
+        let excess = (self.allowances.len() + 1).saturating_sub(MAX_PEER_ALLOWANCES);
+        if excess > 0 {
+            let mut by_update: Vec<(u64, PeerId)> = self
+                .allowances
+                .iter()
+                .map(|(peer, allowance)| (allowance.updated_at_millis, *peer))
+                .collect();
+            by_update.sort_by_key(|(updated_at_millis, _)| *updated_at_millis);
+            for (_, peer) in by_update.into_iter().take(excess) {
+                self.allowances.remove(&peer);
+            }
+        }
     }
 
     /// Drop the weak shares whose parent is below `min_parent_height`: the

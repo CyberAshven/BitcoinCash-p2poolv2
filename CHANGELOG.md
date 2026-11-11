@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The weak pool's per-peer rate limits are bounded. Each peer that ever sent
+a weak share kept an entry for as long as the node ran. The pool now
+remembers at most 1,024 peers: past that, it forgets the entries that have
+refilled, which a peer coming back would get the same, and then the ones
+used longest ago. Node behaviour only; no share-chain rule changes.
+
 A weak share carried by a share that then becomes an uncle is carried
 again. The weak pool deleted the weak shares the best chain carried each
 time it filled a share, so when that carrier lost a race, its weak shares
