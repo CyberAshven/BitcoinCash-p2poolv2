@@ -313,6 +313,38 @@ const PPLNS_WINDOW_BUFFER_DIVISOR: usize = 100;
 #[cfg(feature = "sim")]
 const PPLNS_WINDOW_BUFFER_DIVISOR: usize = 4;
 
+/// The deepest anchor a weak share needs: its window is anchored at its
+/// parent, up to `WEAK_DEPTH` shares below its carrier, which may itself sit
+/// an uncle's depth behind the tip. A buffer short of it makes every node
+/// drop honest shares carrying deep weak shares as unresolvable.
+#[cfg_attr(all(feature = "sim", test), allow(dead_code))]
+const WEAK_ANCHOR_REACH: usize =
+    crate::shares::weak::WEAK_DEPTH as usize + MAX_UNCLES_DEPTH as usize;
+
+/// Entries the cache keeps beyond a window of `window_shares`: its
+/// `PPLNS_WINDOW_BUFFER_DIVISOR` part. Production's 1% (1,210 entries) is far
+/// past `WEAK_ANCHOR_REACH`.
+#[cfg(not(all(feature = "sim", not(test))))]
+const fn window_buffer(window_shares: usize) -> usize {
+    window_shares.div_ceil(PPLNS_WINDOW_BUFFER_DIVISOR)
+}
+
+/// The sim binary's buffer: its quarter of an 80 share window is 20 entries,
+/// short of `WEAK_ANCHOR_REACH`, so it keeps that reach. Unit tests size their
+/// own small windows and keep the divisor's buffer alone.
+#[cfg(all(feature = "sim", not(test)))]
+const fn window_buffer(window_shares: usize) -> usize {
+    let buffer = window_shares.div_ceil(PPLNS_WINDOW_BUFFER_DIVISOR);
+    if buffer < WEAK_ANCHOR_REACH {
+        WEAK_ANCHOR_REACH
+    } else {
+        buffer
+    }
+}
+
+#[cfg(not(all(feature = "sim", test)))]
+const _: () = assert!(window_buffer(PPLNS_WINDOW_SHARES) >= WEAK_ANCHOR_REACH);
+
 /// Bitcoin: blocks from the chain tip whose bodies each node retains.
 /// Equals 2x `PAYOUT_DEPTH`: one payout depth for full tx validation and one
 /// for PoW-only validation that provides output availability.
@@ -2481,9 +2513,7 @@ impl PplnsWindow {
     /// count bound. A deeper anchor is reported as an error rather than
     /// silently truncated.
     fn cache_capacity(&self) -> usize {
-        self.maturity_skip
-            + self.max_window_shares
-            + self.max_window_shares.div_ceil(PPLNS_WINDOW_BUFFER_DIVISOR)
+        self.maturity_skip + self.max_window_shares + window_buffer(self.max_window_shares)
     }
 
     /// Trim the oldest confirmed entries down to `cache_capacity`.
