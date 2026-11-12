@@ -264,22 +264,26 @@ async fn a_weak_share_seen_again_is_counted_as_a_duplicate() {
 }
 
 /// A peer's burst is `PEER_WEAK_SHARE_BURST` weak shares; the next one in the
-/// same millisecond is over its rate.
+/// same millisecond is over its rate. The clock is fixed: a slow build or a
+/// loaded machine would otherwise refill a token every 50 ms of the loop.
 #[tokio::test]
 async fn a_peer_past_its_burst_is_counted_as_rate_limited() {
     let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
     let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
     let peer = PeerId::random();
+    let now = 1_000_000;
     for nonce in 0..PEER_WEAK_SHARE_BURST as u32 {
-        pool.admit(
+        pool.admit_at(
             pool_weak_share(nonce).pow_hash(),
             WeakShareSource::Peer(peer),
+            now,
         );
     }
 
-    let admitted = pool.admit(
+    let admitted = pool.admit_at(
         pool_weak_share(PEER_WEAK_SHARE_BURST as u32).pow_hash(),
         WeakShareSource::Peer(peer),
+        now,
     );
 
     assert!(!admitted);
