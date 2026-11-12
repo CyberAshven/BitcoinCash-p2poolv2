@@ -10,15 +10,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 A limits study runs upstream's five practical objections to the scaling
 ideas against what checking a share really costs a node
 (`docs/simulation/network-sim.md`, "Limits study"). An ignored timing test
-measures it at a 120,960 share window: 6.6 ms at 1,000 payees, 38 ms at
-10,000 and 471 ms at 100,000; a weak share costs 0.3, 4 and 119 ms. The
-network simulator now queues validation one at a time per node
+measures it at a 120,960 share window and the default payout level: 6.4 ms
+with 1,000 miners in the window, 38 ms with 10,000 and 362 ms with 100,000;
+a weak share costs 0.3, 3.8 and 45 ms; a token share 7.4, 45 and 376 ms; and
+100,000 miners at level 0 cost 438 ms. A second
+one walks windows whose shares carry 32 weak shares each: 14 ms for 1,800
+shares and 5,100 payees, 174 ms with 50,100 payees, 211 ms for 18,000 shares
+and 51,000 payees, and 160 ms at the cap with 6,000 payees, against 6.6 ms
+at the cap without weak shares. Loading those windows takes 0.8, 10, 126 and
+88 seconds, because each payee's key is found by scanning the window's
+payees (`AddressKeys::key_for`). The network
+simulator now queues validation one at a time per node
 (`ValidationQueue::Serial`, as the window's write lock serialises walks) and
-reports each node's validation load. On 1,000 nodes: shares without payouts
-keep their check and cut stale shares at up to 10,000 payees; relaying after
-the header check takes under 2 points off; more peers help only small
-shares; uncle caps of 6 and 12 change nothing measurable; and at 100,000
-payees weak-share checks overload a node from 5-second shares down.
+reports each node's validation load. On 1,000 nodes: shares without their
+payouts keep their check and cut stale shares from 16.6% to 3.9% at 10,000
+miners and from 32.6% to 16.3% at 100,000; relaying after the header check
+takes 0.3 to 8 points off; more peers help only shares without payouts and
+make whole shares worse on slow links; uncle caps of 6 and 12 change nothing
+measurable; 100,000 miners with weak shares keep a node 18% busy at
+10-second shares, 91% at 2 seconds and overload it at 1 second; and 10,000
+nodes cost half a point over 1,000.
+
+The payout simulator has a `scale` table: pools of 10 to 90% of a Bitcoin
+Cash at today's difficulty and at 10, 100, 270 (Bitcoin's) and 1,000 times
+that, with the smallest miner that still finds 3 weak shares a month: 0.09
+TH/s in a pool at 10% today and 1.1 TH/s at 90%, 33 to 294 TH/s at
+Bitcoin's difficulty. An ignored report (`payouts_at_scale_by_miner_class`)
+pays one block through the split, the level draw and the payout tree for
+farms, small miners and home miners at those sizes. The sim swarm takes
+`VIRTUAL_MINERS` (many miners a node), `MERGE_TOKENS` (token shares),
+`WEAK_SHARES` and `LOG_LEVEL`, and the runbook's Test J runs 1,200 miners on
+12 nodes with them.
+
+Two findings, not changed here (`docs/sharechain/small-miners-design.md`,
+"Still open"). A level 0 payout that lands in the payout tree is below dust
+once the tree's fee is taken and goes to the tree's largest payee: on token
+shares the swarm's level 0 miners were paid 0.79 to 0.82 of their part of
+the hashrate, and 1.02 to 1.05 without tokens, where every payee fits the
+coinbase. And a node sends every weak share whole to each
+peer, ten duplicates for each one taken in a 12-node mesh, which overran the
+request streams in the first minute of a new chain.
 
 Upstream's script history index (`ScriptHistory`, for Electrum's
 `blockchain.scripthash.*` methods) is an address index, so a Bitcoin Cash

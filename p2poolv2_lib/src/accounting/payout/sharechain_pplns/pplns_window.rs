@@ -9,6 +9,8 @@
 //! instead of re-reading the full window from RocksDB on every notify.
 
 mod weak_credit;
+#[cfg(test)]
+mod weak_walk_cost;
 
 use super::address_keys::AddressKeys;
 use super::bch_eligibility::{BchPlace, PayingChain};
