@@ -38,7 +38,7 @@ varies around it.
 | Includer cut | 1% of a weak share's credit, to the share that carries it | `INCLUDER_CUT` |
 | Window | shares worth `K = 3` blocks of work, at most `W` = 120,960 shares; weak work counts in the work and takes no slots | plan decision 11 |
 | Maturity skip | 100 shares (about 17 minutes) | plan decision 11 |
-| Payout levels | `546 * 2^k` satoshis, `k` 0 to 7; level 5 (17,472 sat) by default | `DEFAULT_PAYOUT_LEVEL` |
+| Payout levels | `546 * 2^k` satoshis, `k` 1 to 7; level 5 (17,472 sat) by default | `DEFAULT_PAYOUT_LEVEL` |
 | Spending a payment | 148 satoshis (one P2PKH input at 1 sat/byte) | `DEFAULT_SPEND_COST` |
 | Dust limit for a P2PKH output | 546 satoshis | BCHN policy |
 
@@ -81,7 +81,7 @@ miner with hashrate `m` in it:
   block, one each pool block for a miner above it. A node lowers a miner's
   level, from its choice or the default, until the miner can expect at least
   3 payments a month (`MIN_PAYMENTS_PER_MONTH`).
-- **Fee loss:** `148 / payment`: 0.85% at level 5, 27% at level 0.
+- **Fee loss:** `148 / payment`: 0.85% at level 5, 14% at level 1, the lowest.
 
 ## Pool size: windows and block intervals
 

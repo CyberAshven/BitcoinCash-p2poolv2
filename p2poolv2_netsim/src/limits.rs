@@ -20,7 +20,7 @@
 //! 5. Faster shares build a fatter DAG and load each node:
 //!    `limits-period` runs 10 to 1-second shares with and without weak
 //!    shares, at each measured validation cost, on a node five times
-//!    slower, at payout level 0 and with token shares.
+//!    slower, at the measured cost of payout level 0 and with token shares.
 //!
 //! `limits-network` then grows the network from 1,000 to 10,000 nodes.
 //!
@@ -120,9 +120,10 @@ pub const TOKEN_SHARES: [MeasuredCost; 3] = [
     },
 ];
 
-/// The worst case for the coinbase: 100,000 miners all at payout level 0,
-/// so every one is paid, 29,400 in the coinbase and 70,600 through the
-/// payout tree.
+/// The worst case measured while level 0 was a legal payout level: 100,000
+/// miners all at payout level 0, so every one is paid, 29,400 in the
+/// coinbase and 70,600 through the payout tree. Level 0 is no longer a
+/// level; these times are that run's, not a level a node now chooses.
 pub const LEVEL_ZERO_100K: MeasuredCost = MeasuredCost {
     miners: 100_000,
     paid_outputs: 100_000,

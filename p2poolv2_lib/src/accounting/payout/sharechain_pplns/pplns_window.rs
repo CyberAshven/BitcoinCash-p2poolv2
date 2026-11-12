@@ -6169,6 +6169,8 @@ mod tests {
     /// shares carry.
     #[test]
     fn test_bch_window_never_draws_a_fee_address_that_mines() {
+        use crate::accounting::payout::payout_levels::MIN_PAYOUT_LEVEL;
+
         let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
         let operator = PayoutAddress::from(Address::p2pkh(
             PubkeyHash::from_byte_array([5; 20]),
@@ -6188,6 +6190,7 @@ mod tests {
             2,
             vec![],
         );
+        cut_share.payout_level = MIN_PAYOUT_LEVEL;
         cut_share.cuts = ShareCuts {
             donation: None,
             fee: Some((operator_key, 100)),
@@ -6211,8 +6214,12 @@ mod tests {
             .levels
             .unwrap();
 
-        assert_eq!(levels.level_of(&operator), None);
-        assert_eq!(levels.level_of(&miner), Some(0));
+        assert_eq!(levels.level_of(&operator), None, "fee address is not drawn");
+        assert_eq!(
+            levels.level_of(&miner),
+            Some(MIN_PAYOUT_LEVEL),
+            "miner at the lowest level"
+        );
     }
 
     /// Of two uncles one share names, the first counts, in whichever order
@@ -6680,15 +6687,16 @@ mod tests {
     /// receives: walk the window from the share's parent (cached by parent
     /// and paid block, so a repeat costs nothing), then build the expected
     /// coinbase outputs and compare. It also shows what the payout levels
-    /// (level 0, 546 sat, and the default level 5, 17,472 sat) and a token
-    /// share's 3,072 byte coinbase do to the coinbase and the payout tree,
-    /// and what executing that tree costs on chain. Run with
+    /// (the lowest level, 1,092 sat, and the default level 5, 17,472 sat)
+    /// and a token share's 3,072 byte coinbase do to the coinbase and the
+    /// payout tree, and what executing that tree costs on chain. Run with
     /// `cargo test --release -p p2poolv2_lib validation_cost -- --ignored --nocapture`.
     #[test]
     #[ignore = "timing report, run by hand"]
     fn validation_cost_at_bitcoin_cash_window_sizes() {
         use crate::accounting::payout::coinbase_budget::PayoutSplit;
         use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+        use crate::accounting::payout::payout_levels::MIN_PAYOUT_LEVEL;
         use crate::accounting::payout::payout_tree::BCH_TREE_EXECUTION_FEE_RATE;
         use std::time::Instant;
 
@@ -6697,11 +6705,11 @@ mod tests {
         );
         for (shares, payees, level) in [
             (1_800, 1_000, 5),
-            (120_960, 1_000, 0),
+            (120_960, 1_000, MIN_PAYOUT_LEVEL),
             (120_960, 1_000, 5),
-            (120_960, 10_000, 0),
+            (120_960, 10_000, MIN_PAYOUT_LEVEL),
             (120_960, 10_000, 5),
-            (120_960, 100_000, 0),
+            (120_960, 100_000, MIN_PAYOUT_LEVEL),
             (120_960, 100_000, 5),
         ] {
             let started = Instant::now();

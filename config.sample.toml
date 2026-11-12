@@ -99,10 +99,11 @@ bootstrap_address = "bchtest:qze95tc2dqrnltvxfa5yhunwx5952f34fv28vandn2"
 # In basis points, 1% = 100 basis points. Default 100 (1%) when fee_address
 # is set; 0 when it is not.
 # fee = 100
-# The payout level, 0 to 7, of miners whose login sets neither min-payout=
+# The payout level, 1 to 7, of miners whose login sets neither min-payout=
 # nor fee-tolerance=: a miner paid less than 546 * 2^level satoshis by a
 # block is paid by a draw in that block instead (docs/miner-options.md,
-# "Payout level"). Default 5, 17,472 satoshis.
+# "Payout level"). Level 0 is not a level: 546 satoshis is below dust once
+# the payout tree's fee is taken. Default 5, 17,472 satoshis.
 # payout_level = 5
 # What spending one payment costs, in satoshis, for fee-tolerance=. Default
 # 148, a P2PKH input at 1 sat/byte.

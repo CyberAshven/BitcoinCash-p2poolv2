@@ -13,8 +13,8 @@
 use crate::constants::{
     ASIC_HASHRATE, BCH_BLOCK_INTERVAL_SECONDS, BCH_BLOCKS_PER_MONTH, BCH_NETWORK_HASHRATE,
     BLOCK_REWARD_SATOSHIS, DEFAULT_BAND_CAP, DEFAULT_LEVEL, HASHES_PER_DIFFICULTY,
-    HOME_MINER_HASHRATE, MINI_CEILING_DIFFICULTY, MONTH_SECONDS, PAGE_INCLUDER_CUT,
-    WEAK_SHARE_MESSAGE_BYTES,
+    HOME_MINER_HASHRATE, MIN_PAYOUT_LEVEL, MINI_CEILING_DIFFICULTY, MONTH_SECONDS,
+    PAGE_INCLUDER_CUT, WEAK_SHARE_MESSAGE_BYTES,
 };
 use crate::levels::level_amount;
 use crate::miners::{MinerClass, MinerKind, MinerMix, TrackedMiner};
@@ -1200,18 +1200,18 @@ const NODE_MIN_PAYMENTS_PER_MONTH: f64 = 3.0;
 
 /// The payout level a node leaves a miner of `hashrate` at in a pool finding
 /// `pool_blocks_per_month` blocks: the highest at or below the default at
-/// which it expects `NODE_MIN_PAYMENTS_PER_MONTH` payments a month, or 0
-/// (`affordable_payout_level` in `p2poolv2_lib`).
+/// which it expects `NODE_MIN_PAYMENTS_PER_MONTH` payments a month, or the
+/// lowest level when none does (`affordable_payout_level` in `p2poolv2_lib`).
 fn node_level(hashrate: f64, network_hashrate: f64, pool_blocks_per_month: f64) -> u32 {
     let fair_per_month = hashrate / network_hashrate * BCH_BLOCKS_PER_MONTH * BLOCK_REWARD_SATOSHIS;
     let per_block = fair_per_month / pool_blocks_per_month;
-    (0..=DEFAULT_LEVEL)
+    (MIN_PAYOUT_LEVEL..=DEFAULT_LEVEL)
         .rev()
         .find(|level| {
             let won_per_block = (per_block / level_amount(*level) as f64).min(1.0);
             pool_blocks_per_month * won_per_block >= NODE_MIN_PAYMENTS_PER_MONTH
         })
-        .unwrap_or(0)
+        .unwrap_or(MIN_PAYOUT_LEVEL)
 }
 
 /// The hashrate that finds `NODE_MIN_PAYMENTS_PER_MONTH` weak shares a month

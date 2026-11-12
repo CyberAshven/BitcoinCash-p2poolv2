@@ -12,11 +12,34 @@
 //! the remainder `S - n * D`. With `n` = 0 one point `seed mod S` picks a
 //! payee for the whole pot. The pot is never changed, only how it is split.
 
-use crate::constants::DUST_LEVEL_SATOSHIS;
+use crate::constants::{DUST_LEVEL_SATOSHIS, LEVEL_COUNT, MIN_PAYOUT_LEVEL};
 
 /// Satoshis of payout level `k`: `546 * 2^k`.
 pub fn level_amount(level: u32) -> u64 {
     DUST_LEVEL_SATOSHIS << level
+}
+
+/// Why `level` is not a payout level: it is below [`MIN_PAYOUT_LEVEL`]. The
+/// message names `level`, the lowest level and that level's amount.
+pub fn payout_level_too_low(level: u32) -> String {
+    format!(
+        "payout level {level} is below the lowest payout level {MIN_PAYOUT_LEVEL} ({} satoshis)",
+        level_amount(MIN_PAYOUT_LEVEL)
+    )
+}
+
+/// `level` when it is a payout level a miner may carry, or why it is not.
+pub fn require_payout_level(level: u32) -> Result<u32, String> {
+    if level < MIN_PAYOUT_LEVEL {
+        return Err(payout_level_too_low(level));
+    }
+    if level >= LEVEL_COUNT {
+        return Err(format!(
+            "payout levels run from {MIN_PAYOUT_LEVEL} to {}",
+            LEVEL_COUNT - 1
+        ));
+    }
+    Ok(level)
 }
 
 /// The draw over one level group. `amounts` are the payees' amounts in their

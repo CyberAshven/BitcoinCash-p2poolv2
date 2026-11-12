@@ -39,8 +39,9 @@ const WEAK_CONSTANTS: [(u64, u64); 6] =
 /// `INCLUDER_CUT` values of its sweep.
 const INCLUDER_CUTS: [f64; 4] = [0.0, 0.01, 0.02, 0.05];
 
-/// Payout levels of the level sweep; levels 0 to 2 pay as level 3 does in
-/// every pool size tested, so they are left out.
+/// Payout levels of the level sweep. Level 0 is not a level, and the levels
+/// below 3 pay as level 3 does in every pool size tested, so they are left
+/// out.
 const LEVELS_SWEPT: [u32; 5] = [3, 4, 5, 6, 7];
 
 /// Share periods of the period table, seconds.

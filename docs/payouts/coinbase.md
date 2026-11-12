@@ -107,7 +107,7 @@ a small miner can expect per block is worked out on
 ## Payout levels
 
 Since 2026-11-09 every Bitcoin Cash share carries its miner's payout level
-`k`, 0 to 7, the smallest payment the miner wants: `L_k = 546 * 2^k`
+`k`, 1 to 7, the smallest payment the miner wants: `L_k = 546 * 2^k`
 satoshis, from 546 (the P2PKH dust limit) to 69,888
 ([Miner options](../miner-options.md#payout-level)). A slice below its level
 is paid by a draw among the slices at the same level, within the same block,

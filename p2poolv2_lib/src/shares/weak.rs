@@ -31,7 +31,8 @@
 use crate::pool_difficulty::{U512, target_to_u512, u512_to_target};
 use crate::shares::coinbase_proof::maximum_merkle_branch_length;
 use crate::shares::share_block::{
-    ShareHeader, decode_address, decode_optional_address, encode_address, encode_optional_address,
+    ShareHeader, checked_payout_level, decode_address, decode_optional_address, encode_address,
+    encode_optional_address,
 };
 use bitcoin::consensus::encode::Error::ParseFailed;
 use bitcoin::consensus::{Decodable, Encodable};
@@ -446,7 +447,7 @@ impl Decodable for WeakCreditGroup {
         let donation = Some(u16::consensus_decode(reader)?).filter(|cut| *cut > 0);
         let fee_address = decode_optional_address(reader)?;
         let fee = Some(u16::consensus_decode(reader)?).filter(|cut| *cut > 0);
-        let payout_level = u8::consensus_decode(reader)?;
+        let payout_level = checked_payout_level(u8::consensus_decode(reader)?)?;
         Ok(Self {
             parent,
             payout_address,
@@ -534,6 +535,41 @@ mod tests {
 
     /// A minimum whose mantissa leaves room to multiply exactly: `2^222`.
     const MINIMUM: u32 = 0x1c40_0000;
+
+    /// A credit group's payout level is the same Bitcoin Cash level as a
+    /// header's: level 0 does not decode, and the lowest level does.
+    #[test]
+    fn a_credit_group_below_the_lowest_level_does_not_decode() {
+        use crate::accounting::payout::payout_levels::{MIN_PAYOUT_LEVEL, payout_level_too_low};
+        use bitcoin::hashes::Hash;
+        use bitcoin::{Address, BlockHash, Network, PubkeyHash};
+
+        let group = |payout_level| WeakCreditGroup {
+            parent: BlockHash::all_zeros(),
+            payout_address: Address::p2pkh(
+                PubkeyHash::from_byte_array([0x11; 20]),
+                Network::Regtest,
+            )
+            .into(),
+            share_owner: ShareOwner::CashP2pkh([0x11; 20]),
+            donation_address: None,
+            donation: None,
+            fee_address: None,
+            fee: None,
+            payout_level,
+            bch_prev: BlockHash::all_zeros(),
+            count: 1,
+        };
+
+        let error = deserialize::<WeakCreditGroup>(&serialize(&group(0))).unwrap_err();
+        assert!(
+            error.to_string().contains(&payout_level_too_low(0)),
+            "credit group level 0: {error}"
+        );
+        let lowest = group(MIN_PAYOUT_LEVEL);
+        let decoded: WeakCreditGroup = deserialize(&serialize(&lowest)).unwrap();
+        assert_eq!(decoded, lowest, "credit group lowest level");
+    }
 
     #[test]
     fn the_rule_tag_names_the_cap_the_includer_cut_and_the_depth() {
