@@ -241,12 +241,48 @@ The blocks that declare a block as an uncle. Uses the merge operator.
 
 ---
 
+### 9d. `ScriptHistory` - Script→Confirmed Transactions
+
+The confirmed transactions that touch each script, for wallet history. A
+transaction touches a script when an output pays it (`OP_RETURN` outputs
+excluded) or an input spends an output that paid it, with one row per
+distinct script per transaction. A prefix scan returns a script's history in
+height then position order. See `store/script_history.rs`.
+
+Bitcoin Cash fork: a node writes these rows only while it serves Electrum
+(`[electrum] enabled`), since it keeps no address index it does not serve.
+`Metadata` key `script_history_from` holds the first confirmed height the
+store has history for (`u32::MAX` while it writes none; absent for a store
+that always kept it), and reads start no lower, so a node that turns Electrum
+on later serves history from then on, never a partial one.
+
+| Key (40 bytes)                                                                  | Value             |
+|---------------------------------------------------------------------------------|-------------------|
+| `sha256(script_pubkey)` (32 bytes) + height (4 bytes BE) + position (4 bytes BE) | `txid` (32 bytes) |
+
+`position` is the transaction's index in its block.
+
+- **Window:** spendable depth, heights from `candidate tip + 1 -
+  PAYOUT_DEPTH` (`BCH_PAYOUT_DEPTH` on Bitcoin Cash, here and in the
+  filter threshold). Rows are written only for blocks confirmed inside it
+  (`put_confirmed_entry`, and `setup_genesis` for genesis), and reads never
+  go below it.
+- **Reorg-out:** the reorged-out block's keys are recomputed from its
+  transactions and deleted in the reorg batch.
+- **Old rows:** never deleted explicitly. A compaction filter drops rows
+  below `confirmed tip - PAYOUT_DEPTH - PRUNE_INTERVAL` (threshold raised by
+  the prune task while the node is current), and periodic compaction filters
+  every file at least daily.
+
+---
+
 ### Pruning
 
 `Tx`, `Inputs`, `Outputs`, `TxidsBlocks` and `SpendsIndex` rows are deleted
 with a pruned block unless a kept block still includes the transaction.
 `BlockTxids`, `BitcoinTxids`, `BitcoinCoinbase` and candidate `BlockHeight`
-entries are deleted below the prune target. Headers, metadata, the block
+entries are deleted below the prune target. `ScriptHistory` is not pruned:
+its compaction filter drops rows at spendable depth (section 9d). Headers, metadata, the block
 index, `h:` and confirmed height entries, `TemplateMerkleBranches`, `Uncles`
 and both `FoundBlocks` and `AcceptedFoundBlocks` are kept forever. See
 `pruning.md`.

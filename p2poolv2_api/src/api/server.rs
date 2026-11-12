@@ -21,6 +21,9 @@ use p2poolv2_lib::accounting::stats::prom::escape_label_value;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::monitoring_events::MonitoringEventSender;
 use p2poolv2_lib::node::actor::NodeHandle;
+use p2poolv2_lib::shares::band::BAND_CAP_UNIT;
+use p2poolv2_lib::shares::share_block::ShareHeader;
+use p2poolv2_lib::shares::weak::WEAK_RATIO_UNIT;
 use p2poolv2_lib::stratum::work::tracker::{JobTracker, parse_coinbase};
 use p2poolv2_lib::{
     accounting::{payout::simple_pplns::SimplePplnsShare, stats::metrics::MetricsHandle},
@@ -37,7 +40,7 @@ use tokio::sync::oneshot;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::{info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -441,7 +444,43 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
         Err(_) => warn!("Timed out reading P2P health for /metrics"),
     }
 
+    if let Some(weak_pool_stats) = state.node_handle.weak_pool_stats() {
+        exposition.push_str(&weak_pool_stats.exposition());
+    }
+    match state.chain_store_handle.get_chain_tip_header() {
+        Ok(tip) => exposition.push_str(&tip_weak_ratio_and_band_cap_exposition(&tip)),
+        Err(error) => debug!("No share chain tip for the weak ratio and band cap: {error}"),
+    }
+
     exposition
+}
+
+/// Exposition for the weak ratio `R` and the band cap `C` of the confirmed
+/// tip share, each as a multiple of the share chain's minimum: the weak
+/// target is the minimum times `R`, and a share may be up to `C` times harder
+/// than the minimum. Empty for a tip without the band, a Bitcoin share.
+fn tip_weak_ratio_and_band_cap_exposition(tip: &ShareHeader) -> String {
+    if !tip.carries_band() {
+        return String::new();
+    }
+    let mut output = String::with_capacity(512);
+    output.push_str(
+        "# HELP sharechain_weak_ratio Weak ratio R of the confirmed tip share: its weak target over its minimum\n",
+    );
+    output.push_str("# TYPE sharechain_weak_ratio gauge\n");
+    output.push_str(&format!(
+        "sharechain_weak_ratio {}\n",
+        f64::from(tip.weak_ratio) / f64::from(WEAK_RATIO_UNIT)
+    ));
+    output.push_str(
+        "# HELP sharechain_band_cap Band cap C of the confirmed tip share: how many times harder than the minimum a share may be\n",
+    );
+    output.push_str("# TYPE sharechain_band_cap gauge\n");
+    output.push_str(&format!(
+        "sharechain_band_cap {}\n",
+        f64::from(tip.band_cap) / f64::from(BAND_CAP_UNIT)
+    ));
+    output
 }
 
 /// Exposition for the bitcoin blocks found by the pool.

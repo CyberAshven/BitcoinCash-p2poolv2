@@ -35,6 +35,10 @@ fn settings(node_count: usize) -> SwarmSettings {
         dial_fanout: 3,
         profile: "release".to_string(),
         payout_levels: Vec::new(),
+        weak_shares: false,
+        virtual_miners: None,
+        merge_tokens: None,
+        log_level: "debug".to_string(),
     }
 }
 
@@ -280,4 +284,51 @@ fn nodes_mine_bitcoin_cash_regtest() {
         "\nbootstrap_address = \"{DEFAULT_MINER_ADDRESS}\"\n"
     )));
     assert!(config.contains(&format!("\nshare_address = \"{}\"\n", share_address(2))));
+}
+
+/// `WEAK_SHARES`, `VIRTUAL_MINERS` and `MERGE_TOKENS` reach the node's
+/// config as `[sim]` and `[stratum]` keys, and a swarm without them writes
+/// none.
+#[test]
+fn the_optional_settings_reach_the_node_config() {
+    let shape = NodeShape {
+        hashrate: "5".to_string(),
+        latency_ms: 0,
+    };
+    let identity = NodeIdentity {
+        index: 0,
+        payout_address: DEFAULT_MINER_ADDRESS,
+        shape: &shape,
+    };
+    let plain = node_config(&settings(2), &identity);
+    let with_options = node_config(
+        &SwarmSettings {
+            weak_shares: true,
+            virtual_miners: Some(100),
+            merge_tokens: Some("D:\\run\\tokens.json".to_string()),
+            ..settings(2)
+        },
+        &identity,
+    );
+
+    assert!(!plain.contains("weak_shares"));
+    assert!(!plain.contains("virtual_miners"));
+    assert!(!plain.contains("merge_mining_tokens"));
+    let parsed: toml::Value = toml::from_str(&with_options).unwrap();
+    let sim = parsed.get("sim").unwrap();
+    assert_eq!(
+        sim.get("weak_shares").and_then(toml::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        sim.get("virtual_miners").and_then(toml::Value::as_integer),
+        Some(100)
+    );
+    assert_eq!(
+        parsed
+            .get("stratum")
+            .and_then(|table| table.get("merge_mining_tokens"))
+            .and_then(toml::Value::as_str),
+        Some("D:\\run\\tokens.json")
+    );
 }

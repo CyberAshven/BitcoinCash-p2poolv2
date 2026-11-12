@@ -8,6 +8,8 @@
 //! cargo run --release -p p2poolv2_netsim -- run --miners 100000 --tokens
 //! cargo run --release -p p2poolv2_netsim -- sweep payees
 //! cargo run --release -p p2poolv2_netsim -- sweep all > results.md
+//! cargo run --release -p p2poolv2_netsim -- sweep scaling --threads 16
+//! cargo run --release -p p2poolv2_netsim -- interval-limit scaling --nodes 1000
 //! cargo run --release -p p2poolv2_netsim -- limits
 //! ```
 
@@ -17,14 +19,21 @@ use p2poolv2_netsim::constants::{
     TOKEN_COINBASE_THRESHOLD_BYTES,
 };
 use p2poolv2_netsim::distribution::Distribution;
+use p2poolv2_netsim::engine::Forwarding;
 use p2poolv2_netsim::payees::HashrateSpread;
-use p2poolv2_netsim::report::{Report, group_thousands, markdown_table};
-use p2poolv2_netsim::scenario::{Scenario, ShareRelay};
+use p2poolv2_netsim::report::{
+    Report, group_thousands, limits_markdown_table, markdown_table, percent, scaling_markdown_table,
+};
+use p2poolv2_netsim::scaling::{
+    Idea, REFERENCE_SHARE_INTERVAL_SECONDS, SEARCH_LONGEST_INTERVAL_SECONDS,
+    SEARCH_SHORTEST_INTERVAL_SECONDS, SEARCH_STEPS, at_size, shortest_interval_within,
+};
+use p2poolv2_netsim::scenario::{HEADER_CHECK_SECONDS, Scenario, ShareRelay, WeakShareCarriage};
 use p2poolv2_netsim::sizes::{
     CoinbaseLayout, ShareSizes, largest_direct_payee_count, largest_payee_count_without_tree,
     split_payees,
 };
-use p2poolv2_netsim::sweep::{Sweep, run_scenarios};
+use p2poolv2_netsim::sweep::{Sweep, available_threads, parallel_map, run_scenarios_on};
 use p2poolv2_netsim::traffic::StratumProtocol;
 use std::process::ExitCode;
 
@@ -50,15 +59,40 @@ enum Command {
         format: Format,
     },
     /// Run a sweep (payees, pool-size, block-size, bandwidth, latency,
-    /// interval, nodes, seeds) or `all`, varied from the given scenario.
+    /// interval, nodes, seeds), `all` of those, one sweep of the scaling
+    /// study (scaling-today, scaling-weak-shares, scaling-compact-coinbase,
+    /// scaling-header-check, scaling-peers, scaling-uncle-cap,
+    /// scaling-combined) or `scaling` for all of them, varied from the given
+    /// scenario.
     Sweep {
-        /// The sweep's name, or `all`.
+        /// The sweep's name, `all` or `scaling`.
         name: String,
         #[command(flatten)]
         scenario: ScenarioArgs,
         /// Output format.
         #[arg(long, value_enum, default_value_t = Format::Markdown)]
         format: Format,
+        /// Runs at once; each holds its shares in memory. Default: every
+        /// thread.
+        #[arg(long)]
+        threads: Option<usize>,
+    },
+    /// For each scenario of a scaling study sweep (or `scaling` for all),
+    /// on the given scenario's node count, the shortest share interval whose
+    /// stale rate stays within today's at 10-second shares on that many
+    /// nodes, by bisection.
+    IntervalLimit {
+        /// A scaling sweep's name, or `scaling`.
+        name: String,
+        #[command(flatten)]
+        scenario: ScenarioArgs,
+        /// The stale rate to stay within (0.0423 is 4.23%). Default: today's
+        /// at 10-second shares on the scenario's node count.
+        #[arg(long)]
+        stale_ceiling: Option<f64>,
+        /// Searches at once. Default: every thread.
+        #[arg(long)]
+        threads: Option<usize>,
     },
     /// Print the payee counts at which a coinbase meets each limit.
     Limits,
@@ -174,6 +208,35 @@ struct ScenarioArgs {
     /// Seconds of mining.
     #[arg(long)]
     duration: Option<f64>,
+    /// Most uncles a share names (3 today).
+    #[arg(long)]
+    max_uncles: Option<usize>,
+    /// When a node forwards a share (studied, not built: after-header-check).
+    #[arg(long, value_enum)]
+    forward: Option<ForwardingRule>,
+    /// Seconds the header check takes when forwarding after it.
+    #[arg(long, default_value_t = HEADER_CHECK_SECONDS)]
+    header_check_seconds: f64,
+    /// Weak shares found per share, gossiped beside the shares (studied, not
+    /// built).
+    #[arg(long)]
+    weak_shares: Option<u64>,
+    /// Payload bytes of a weak share message.
+    #[arg(long)]
+    weak_share_bytes: Option<u64>,
+    /// What a share carries of its weak shares: `gossip-only` (nothing) or
+    /// `whole` (their messages in its body).
+    #[arg(long, value_parser = WeakShareCarriage::parse)]
+    weak_share_carriage: Option<WeakShareCarriage>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ForwardingRule {
+    /// Once the share is fully validated, as nodes do today.
+    AfterValidation,
+    /// Once its proof of work and header check out, its body validated
+    /// after.
+    AfterHeaderCheck,
 }
 
 impl ScenarioArgs {
@@ -214,6 +277,7 @@ impl ScenarioArgs {
             validation_seconds_per_megabyte: self
                 .validation_seconds_per_megabyte
                 .unwrap_or(defaults.validation_seconds_per_megabyte),
+            validation_queue: defaults.validation_queue,
             work_switch_seconds: self
                 .work_switch_seconds
                 .unwrap_or(defaults.work_switch_seconds),
@@ -221,11 +285,47 @@ impl ScenarioArgs {
             bch_peers: self.bch_peers.unwrap_or(defaults.bch_peers),
             stratum: self.stratum.unwrap_or(defaults.stratum),
             duration_seconds: self.duration.unwrap_or(defaults.duration_seconds),
+            max_uncles: self.max_uncles.unwrap_or(defaults.max_uncles),
+            forwarding: match self.forward {
+                None => defaults.forwarding,
+                Some(ForwardingRule::AfterValidation) => Forwarding::AfterValidation,
+                Some(ForwardingRule::AfterHeaderCheck) => Forwarding::AfterHeaderCheck {
+                    header_check_seconds: self.header_check_seconds,
+                },
+            },
+            weak_shares_per_share: self.weak_shares.unwrap_or(defaults.weak_shares_per_share),
+            weak_share_payload_bytes: self
+                .weak_share_bytes
+                .unwrap_or(defaults.weak_share_payload_bytes),
+            weak_share_carriage: self
+                .weak_share_carriage
+                .unwrap_or(defaults.weak_share_carriage),
         }
     }
 }
 
-fn print_reports(reports: &[Report], format: Format) -> Result<(), String> {
+/// Which study's columns a Markdown table has.
+#[derive(Clone, Copy)]
+enum Table {
+    Plain,
+    Scaling,
+    Limits,
+}
+
+impl Table {
+    fn of(sweep: &Sweep) -> Self {
+        if sweep.is_limits() {
+            Table::Limits
+        } else if sweep.is_scaling() {
+            Table::Scaling
+        } else {
+            Table::Plain
+        }
+    }
+}
+
+/// Print `reports`; as Markdown, in `table`'s columns.
+fn print_reports(reports: &[Report], format: Format, table: Table) -> Result<(), String> {
     match format {
         Format::Text => {
             let texts: Vec<String> = reports.iter().map(Report::summary_text).collect();
@@ -235,26 +335,147 @@ fn print_reports(reports: &[Report], format: Format) -> Result<(), String> {
             let json = serde_json::to_string_pretty(reports).map_err(|error| error.to_string())?;
             println!("{json}");
         }
-        Format::Markdown => println!("{}", markdown_table(reports)),
+        Format::Markdown => match table {
+            Table::Plain => println!("{}", markdown_table(reports)),
+            Table::Scaling => println!("{}", scaling_markdown_table(reports)),
+            Table::Limits => println!("{}", limits_markdown_table(reports)),
+        },
     }
     Ok(())
 }
 
-fn run_sweep(name: &str, base: &Scenario, format: Format) -> Result<(), String> {
-    let sweeps: Vec<Sweep> = if name == "all" {
-        Sweep::ALL.to_vec()
-    } else {
-        vec![Sweep::parse(name)?]
-    };
-    sweeps.iter().try_for_each(|sweep| {
-        let reports = run_scenarios(&sweep.scenarios(base));
+/// The sweeps `name` stands for: one, `all`, `scaling` or `limits`.
+fn sweeps_named(name: &str) -> Result<Vec<Sweep>, String> {
+    match name {
+        "all" => Ok(Sweep::ALL.to_vec()),
+        "scaling" => Ok(Sweep::SCALING.to_vec()),
+        "limits" => Ok(Sweep::LIMITS.to_vec()),
+        _ => Sweep::parse(name).map(|sweep| vec![sweep]),
+    }
+}
+
+fn run_sweep(name: &str, base: &Scenario, format: Format, threads: usize) -> Result<(), String> {
+    sweeps_named(name)?.iter().try_for_each(|sweep| {
+        let reports = run_scenarios_on(&sweep.scenarios(base), threads);
         if matches!(format, Format::Markdown) {
             println!("### Sweep: {}\n", sweep.name());
         }
-        print_reports(&reports, format)?;
+        print_reports(&reports, format, Table::of(sweep))?;
         println!();
         Ok(())
     })
+}
+
+/// The scaling ideas `name` stands for: one sweep's, or `scaling` for all.
+fn ideas_named(name: &str) -> Result<Vec<Idea>, String> {
+    if name == "scaling" {
+        return Ok(Idea::ALL.to_vec());
+    }
+    Idea::ALL
+        .iter()
+        .copied()
+        .find(|idea| idea.name() == name)
+        .map(|idea| vec![idea])
+        .ok_or_else(|| {
+            let names: Vec<&str> = Idea::ALL.iter().map(Idea::name).collect();
+            format!(
+                "unknown scaling sweep `{name}`; expected scaling or one of {}",
+                names.join(", ")
+            )
+        })
+}
+
+/// Where one scenario's limit search ended.
+struct LimitFound {
+    label: String,
+    interval_seconds: Option<f64>,
+    report: Option<Report>,
+}
+
+/// Search each scaling scenario `name` stands for, on `base`'s node count,
+/// for the shortest share interval within the stale ceiling, and print a
+/// Markdown table.
+fn run_interval_limit(
+    name: &str,
+    base: &Scenario,
+    stale_ceiling: Option<f64>,
+    threads: usize,
+) -> Result<(), String> {
+    let node_count = base.node_count;
+    let ceiling = stale_ceiling.unwrap_or_else(|| {
+        let today = Idea::Today.variants(base);
+        at_size(&today[0], node_count, REFERENCE_SHARE_INTERVAL_SECONDS)
+            .run()
+            .propagation
+            .stale_rate
+    });
+    let variants: Vec<Scenario> = ideas_named(name)?
+        .iter()
+        .flat_map(|idea| idea.variants(base))
+        .collect();
+    let found = parallel_map(&variants, threads, |variant| {
+        let mut reports: Vec<(f64, Report)> = Vec::with_capacity(2 + SEARCH_STEPS as usize);
+        let interval_seconds = shortest_interval_within(
+            ceiling,
+            REFERENCE_SHARE_INTERVAL_SECONDS,
+            SEARCH_SHORTEST_INTERVAL_SECONDS,
+            SEARCH_LONGEST_INTERVAL_SECONDS,
+            SEARCH_STEPS,
+            |interval| {
+                let report = at_size(variant, node_count, interval).run();
+                let stale = report.propagation.stale_rate;
+                reports.push((interval, report));
+                stale
+            },
+        );
+        let report = interval_seconds.and_then(|limit| {
+            reports
+                .into_iter()
+                .find(|(interval, _)| *interval == limit)
+                .map(|(_, report)| report)
+        });
+        LimitFound {
+            label: variant.label.clone(),
+            interval_seconds,
+            report,
+        }
+    });
+    println!(
+        "Shortest share interval within {} stale on {} nodes\n",
+        percent(ceiling),
+        group_thousands(node_count as u64)
+    );
+    println!(
+        "| Scenario | Shortest share interval (s) | Shares per second against 10-second shares | Stale there | Orphaned there |\n\
+         |---|---:|---:|---:|---:|"
+    );
+    found
+        .iter()
+        .for_each(|limit| println!("{}", limit_row(limit)));
+    Ok(())
+}
+
+/// One row of the interval limit table.
+fn limit_row(limit: &LimitFound) -> String {
+    match (limit.interval_seconds, &limit.report) {
+        (Some(interval), Some(report)) => format!(
+            "| {} | {}{:.2} | {:.2} | {} | {} |",
+            limit.label,
+            if interval <= SEARCH_SHORTEST_INTERVAL_SECONDS {
+                "at most "
+            } else {
+                ""
+            },
+            interval,
+            REFERENCE_SHARE_INTERVAL_SECONDS / interval,
+            percent(report.propagation.stale_rate),
+            percent(report.propagation.orphan_rate),
+        ),
+        _ => format!(
+            "| {} | above {SEARCH_LONGEST_INTERVAL_SECONDS} | - | - | - |",
+            limit.label
+        ),
+    }
 }
 
 fn print_limits() {
@@ -337,16 +558,29 @@ fn main() -> ExitCode {
             let scenario = scenario.scenario();
             scenario
                 .validate()
-                .and_then(|()| print_reports(&[scenario.run()], format))
+                .and_then(|()| print_reports(&[scenario.run()], format, Table::Plain))
         }
         Command::Sweep {
             name,
             scenario,
             format,
+            threads,
         } => {
             let base = scenario.scenario();
+            let threads = threads.unwrap_or_else(available_threads);
             base.validate()
-                .and_then(|()| run_sweep(&name, &base, format))
+                .and_then(|()| run_sweep(&name, &base, format, threads))
+        }
+        Command::IntervalLimit {
+            name,
+            scenario,
+            stale_ceiling,
+            threads,
+        } => {
+            let base = scenario.scenario();
+            let threads = threads.unwrap_or_else(available_threads);
+            base.validate()
+                .and_then(|()| run_interval_limit(&name, &base, stale_ceiling, threads))
         }
         Command::Limits => {
             print_limits();

@@ -64,7 +64,7 @@ Since 2026-11-09 each Bitcoin Cash share header also carries its weak ratio
 `weak_ratio`, `R` in units of 1/1024, which must equal one step from the
 parent's (`next_weak_ratio` in `shares/weak.rs`: down by `R / 256` when the
 parent carried more than 32 weak shares, up by `R / 256` when it carried
-fewer, the same at exactly 32; between 1 and 4096; 4096 at genesis). Full
+fewer, the same at exactly 32; between 1 and 256; 256 at genesis). Full
 validation, header sync and block receipt check it with the band.
 ### The payout level (Bitcoin Cash)
 
@@ -127,10 +127,21 @@ the body against the header using the share alone:
 2. The share coinbase is exactly the one the header implies.
 3. The Bitcoin Cash coinbase has the transaction id the coinbase proof gives,
    and carries no witness.
+4. On Bitcoin Cash, the carried weak shares are the ones the header commits:
+   as many as its weak count, no proof-of-work hash twice, and the merkle
+   root of their whole encodings equal to its weak root (below).
 
 A body that fails is a bad copy, not a bad share: the node discards it and can
 fetch the share again from another peer. Once a body passes, the proof of
 work fixes it, and any later failure rejects the share.
+
+That last rule holds only if the header fixes every part of the body a later
+check reads. Before 2026-11-12 it did not for weak shares: the weak root
+covered their proof-of-work hashes alone, so a peer could alter a carried
+weak share's coinbase value, branch, scriptSig or coinbase proof, the body
+still passed, and the weak share's later coinbase or header check marked an
+honest share invalid. The weak root now covers each weak share's whole
+encoding, so every such change fails item 4 as a bad copy.
 
 ## Uncles follow the rules
 
@@ -193,9 +204,16 @@ its proof-of-work hash. It is valid when:
 
 A share carries at most 64 weak shares (`WEAK_CAP`) in 96 KiB (`WEAK_BYTES`).
 Its header commits to them under tag `0x26`: its weak ratio, their count and
-the merkle root of their hashes. The body check refuses a list that does not
-match, or that repeats a hash, as a bad copy. Each carried weak share's
-parent must be 1 to 6 shares below the carrier (`WEAK_DEPTH`), and no
+the merkle root of their whole encodings, each leaf the SHA-256d of one weak
+share as sent (share header with its coinbase proof, scriptSig, total value,
+branch), so the proof of work fixes every byte of them. The body check
+refuses a list that does not match, or that repeats a proof-of-work hash, as
+a bad copy ([The body matches the header](#the-body-matches-the-header)).
+Since every field a weak share check reads is then fixed by the carrier's
+proof of work, a check that fails after the body is stored is a verdict on
+the share. The repeat and carried-once checks compare the weak shares'
+proof-of-work hashes, read from the carried weak shares. Each carried weak
+share's parent must be 1 to 48 shares below the carrier (`WEAK_DEPTH`), and no
 ancestor of the carrier may carry it already, as an uncle has one nephew.
 Full validation checks rules 1, 2 and 4 and the depth and carried-once rules
 with the share's other parallel checks, and rule 3 with its own coinbase

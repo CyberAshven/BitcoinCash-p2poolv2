@@ -8,11 +8,13 @@ use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::store::column_families::ColumnFamily;
 use crate::store::dag_store::{MAX_BLOCKS_PER_HEIGHT, MAX_UNCLES_DEPTH};
 use crate::store::hashrate_samples::HashrateSample;
+use crate::store::script_history::script_history_cf_options;
 use bitcoin::consensus::Encodable;
 use bitcoin::consensus::encode;
 use bitcoin::{BlockHash, Work};
 use rocksdb::{BlockBasedOptions, ColumnFamilyDescriptor, DB, Options as RocksDbOptions};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
@@ -48,7 +50,17 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 ///   the PPLNS window credits proofs from jobs at the minimum at the weak
 ///   work. A stored header has no weak ratio and would not decode, and its
 ///   chain was paid under the old credit; the chain starts again.
-pub const STORE_FORMAT_VERSION: u32 = 5;
+/// - 6 (2026-11-12): a Bitcoin Cash share's weak root commits each carried
+///   weak share's whole encoding, not only its proof-of-work hash
+///   (`BCH_WEAK_SHARE_RULE_TAG`, `weak2`). A stored share carrying weak
+///   shares commits the old root, which every node now refuses, so the
+///   chain starts again.
+/// - 7 (2026-11-12): Bitcoin Cash weak shares carry a 1% includer cut, may
+///   wait 48 shares for a carrier and are at most 256 times easier than the
+///   minimum (`BCH_WEAK_SHARE_RULE_TAG`, `weak2-64-100-48-256`, study #85).
+///   A stored chain was credited under the old cut and starts from a genesis
+///   whose weak ratio is the old `R_MAX`; the chain starts again.
+pub const STORE_FORMAT_VERSION: u32 = 7;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -61,6 +73,7 @@ pub mod payout_tree;
 mod pplns_shares;
 pub mod prune_blocks;
 mod prune_shares;
+pub mod script_history;
 pub mod share_store;
 pub mod stored_user;
 pub mod transaction_store;
@@ -87,6 +100,13 @@ pub struct Store {
     /// Blocks whose candidate reorg was refused for forking below the reorg
     /// floor, each with the height its branch forks from. In memory only.
     refused_reorgs: Mutex<HashMap<BlockHash, u32>>,
+    /// Script history rows below this height are dropped by the
+    /// `ScriptHistory` compaction filter. Shared with that filter.
+    script_history_gc_threshold: Arc<AtomicU32>,
+    /// The first confirmed height whose script history this store holds: 0
+    /// when it holds every height, `u32::MAX` while it writes none
+    /// (`with_script_history`). Loaded from `Metadata` when the store opens.
+    script_history_from: AtomicU32,
 }
 
 /// Merge operator for appending BlockHashes to a Vec<BlockHash>.
@@ -258,6 +278,12 @@ impl Store {
         let weak_summaries_cf =
             ColumnFamilyDescriptor::new(ColumnFamily::WeakSummaries, RocksDbOptions::default());
 
+        let script_history_gc_threshold = Arc::new(AtomicU32::new(0));
+        let script_history_cf = ColumnFamilyDescriptor::new(
+            ColumnFamily::ScriptHistory,
+            script_history_cf_options(Arc::clone(&script_history_gc_threshold)),
+        );
+
         let cfs = vec![
             block_metadata_cf_descriptor,
             block_txids_cf,
@@ -286,6 +312,7 @@ impl Store {
             bch_best_chain_cf,
             weak_shares_cf,
             weak_summaries_cf,
+            script_history_cf,
         ];
 
         // for the db too, we use default options for now
@@ -321,7 +348,10 @@ impl Store {
             genesis_blockhash: Arc::new(RwLock::new(None)),
             depths: ChainDepths::BITCOIN,
             refused_reorgs: Mutex::new(HashMap::new()),
+            script_history_gc_threshold,
+            script_history_from: AtomicU32::new(0),
         };
+        store.load_script_history_from()?;
         Ok(store)
     }
 
@@ -520,7 +550,8 @@ impl Store {
         Ok(metadata.chain_work)
     }
 
-    /// Setup genesis block for the store
+    /// Setup genesis block for the store, including the script history of
+    /// its coinbase.
     /// Returns an error, if store already has even a single block
     pub fn setup_genesis(
         &self,
@@ -557,6 +588,10 @@ impl Store {
             "Genesis should only have one transaction, the coinbase."
         );
         self.append_to_confirmed(&blockhash, 0, &mut metadata, batch)?;
+        // `put_confirmed_entry` skips the history of a block whose body is
+        // not yet committed, and the genesis body is in this batch. Its
+        // coinbase has no prevouts, so its history is written directly.
+        self.add_script_history_for_block(0, &genesis.transactions, batch)?;
         Ok(())
     }
 
@@ -580,8 +615,9 @@ impl Store {
              the genesis share only as the last resort, and Bitcoin Cash has one share chain \
              (the main and mini chains merged) whose headers carry a difficulty band, a \
              payout level and weak shares, with payees below their level paid by a draw and \
-             every proof from a job at the minimum paid at the weak work. Delete the store \
-             directory and restart to resync the share chain from peers.",
+             every proof from a job at the minimum paid at the weak work, and whose weak root \
+             commits each carried weak share's whole encoding. Delete the store directory and \
+             restart to resync the share chain from peers.",
             self.path
         )))
     }
@@ -973,6 +1009,30 @@ mod tests {
         assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
         assert!(error.to_string().contains("has format 4"), "{error}");
         assert!(error.to_string().contains("weak work"), "{error}");
+    }
+
+    /// A store from before the weak root bound whole weak shares, format 5,
+    /// is refused: its shares carrying weak shares commit the old root.
+    #[test]
+    fn test_store_from_before_the_whole_weak_share_root_is_refused() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        store
+            .db
+            .put_cf(&metadata_cf, STORE_FORMAT_KEY, 5u32.to_le_bytes())
+            .unwrap();
+
+        let error = store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap_err();
+        assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
+        assert!(error.to_string().contains("has format 5"), "{error}");
+        assert!(error.to_string().contains("whole encoding"), "{error}");
     }
 
     #[test_log::test]

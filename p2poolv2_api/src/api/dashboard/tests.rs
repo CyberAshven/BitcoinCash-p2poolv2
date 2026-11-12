@@ -44,7 +44,7 @@ async fn build_state(
         metrics_handle,
         tracker_handle: start_tracker_actor(),
         node_handle: NodeHandle::new_for_test(),
-        monitoring_event_sender: create_monitoring_event_channel().0,
+        monitoring_event_sender: create_monitoring_event_channel(),
         auth_user,
         auth_token,
         pplns_window: None,

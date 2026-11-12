@@ -32,6 +32,7 @@ pub enum ColumnFamily {
     BchBestChain,
     WeakShares,
     WeakSummaries,
+    ScriptHistory,
 }
 
 impl ColumnFamily {
@@ -64,6 +65,7 @@ impl ColumnFamily {
             ColumnFamily::BchBestChain => "bch_best_chain",
             ColumnFamily::WeakShares => "weak_shares",
             ColumnFamily::WeakSummaries => "weak_summaries",
+            ColumnFamily::ScriptHistory => "script_history",
         }
     }
 }

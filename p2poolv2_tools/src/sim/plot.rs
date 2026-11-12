@@ -15,7 +15,8 @@
 //! file and an image stack, while SVG leaves text to the viewer.
 //!
 //! Data sources, all timestamped, from the logs:
-//! * `... to confirmed height Some(N)` in node 0's log: main-chain share rate
+//! * `... to confirmed height N: diff=D` in node 0's log: main-chain share
+//!   rate
 //! * `Confirmed block ... references N uncle(s)` in node 0's log: uncle rate
 //! * `sim stats: ... pool_difficulty=D` in every log: ASERT difficulty
 //! * `sim block-find:` in every log: bitcoin block-finds
@@ -25,6 +26,7 @@ use crate::log_file::for_each_line;
 use crate::log_time::find_micros;
 use crate::sim::RunDir;
 use crate::sim::metrics::config_value;
+use crate::sim::node_log::confirmed_heights;
 use plotters::coord::Shift;
 use plotters::prelude::*;
 use regex::Regex;
@@ -70,7 +72,7 @@ pub fn read_series(run_dir: &RunDir) -> ToolResult<Series> {
     let node_zero = run_dir.node_log(0);
     if node_zero.exists() {
         for_each_line(&node_zero, |line| {
-            if line.contains("to confirmed height Some(")
+            if confirmed_heights(line.as_bytes()).next().is_some()
                 && let Some(time) = seconds_of(line)
             {
                 series.promotions.push(time);

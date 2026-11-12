@@ -4,6 +4,7 @@
 
 //! What a run reports, as JSON or as a Markdown table row.
 
+use crate::constants::SHARE_HEADER_BYTES_PER_UNCLE;
 use crate::engine::{Network, Outcome, Parameters};
 use crate::scenario::{NetworkSummary, Scenario};
 use crate::sizes::{LimitCheck, ShareSizes};
@@ -48,8 +49,26 @@ pub struct PropagationSummary {
     /// `ShareBlock` messages per share per node: one would be a perfect
     /// relay, more is the cost of pushing whole shares.
     pub copies_received_per_share: f64,
-    /// Nodes whose share uploads needed more than their upload rate.
+    /// Nodes whose share and weak share uploads needed more than their
+    /// upload rate.
     pub saturated_nodes: u64,
+    /// Weak shares found.
+    pub weak_shares_found: u64,
+    /// Weak share messages per weak share per node.
+    pub copies_received_per_weak_share: f64,
+    /// Uncles the final chain names per chain share.
+    pub uncles_per_chain_share: f64,
+    /// Header bytes a node syncing the chain fetches per chain share: the
+    /// chain share's header with its uncle hashes, and the headers of the
+    /// uncles it names with theirs.
+    pub header_sync_bytes_per_chain_share: f64,
+    /// Mean and largest part of the run a node's validation worker was
+    /// busy (above 1 under `ValidationQueue::Parallel` means more work than
+    /// one worker can do).
+    pub validation_busy_mean: f64,
+    pub validation_busy_max: f64,
+    /// Mean seconds a validation waited for the worker.
+    pub mean_validation_wait_seconds: f64,
 }
 
 /// Bytes per second per node, by what carries them.
@@ -129,6 +148,13 @@ impl Report {
         } else {
             outcome.share_messages as f64 / (outcome.shares_found as f64 * node_count)
         };
+        let copies_received_per_weak_share = if outcome.weak_shares_found == 0 {
+            0.0
+        } else {
+            outcome.weak_share_messages as f64 / (outcome.weak_shares_found as f64 * node_count)
+        };
+        let (uncles_per_chain_share, header_sync_bytes_per_chain_share) =
+            header_sync_per_chain_share(&outcome, sizes.header_bytes);
         let propagation = PropagationSummary {
             shares_found: outcome.shares_found,
             shares_counted: outcome.shares_counted,
@@ -143,6 +169,13 @@ impl Report {
             mean_seconds_to_all: outcome.mean_seconds_to_all,
             copies_received_per_share,
             saturated_nodes: outcome.saturated_nodes,
+            weak_shares_found: outcome.weak_shares_found,
+            copies_received_per_weak_share,
+            uncles_per_chain_share,
+            header_sync_bytes_per_chain_share,
+            validation_busy_mean: mean(&outcome.node_validation_busy_fraction),
+            validation_busy_max: maximum(&outcome.node_validation_busy_fraction),
+            mean_validation_wait_seconds: outcome.mean_validation_wait_seconds,
         };
         let job_bytes = stratum_job_bytes(
             scenario.stratum,
@@ -204,6 +237,7 @@ impl Report {
              limits broken: {broken}\n\
              shares {found} found, {counted} counted: stale {stale}, uncles {uncles}, orphans {orphans}\n\
              propagation: half the nodes in {half} s, 90% in {ninety} s, all in {all} s; {copies} copies per share per node\n\
+             weak shares {weak_found} found, {weak_copies} copies per weak share per node; {uncles_per_share} uncles per chain share, {header_sync} header-sync bytes per chain share\n\
              P2Pool per node: up {up_mean} Mbit/s mean, {up_max} max; down {down_mean} mean, {down_max} max; {saturated} nodes saturated\n\
              BCHN relay {relay} Mbit/s each way ({short} nodes short of it, mining none of the pool's hashrate); compact block {compact} bytes; full templates {template} Mbit/s from BCHN\n\
              Stratum {protocol}: {job} bytes a job, {per_miner} Mbit/s a miner, {per_node} Mbit/s for {miners_per_node} miners a node\n\
@@ -245,6 +279,10 @@ impl Report {
             miners_per_node = rounded(bandwidth.miners_per_node),
             relay_seconds = rounded(bandwidth.coinbase_relay_seconds),
             orphan_risk = percent(bandwidth.coinbase_orphan_risk),
+            weak_found = propagation.weak_shares_found,
+            weak_copies = rounded(propagation.copies_received_per_weak_share),
+            uncles_per_share = rounded(propagation.uncles_per_chain_share),
+            header_sync = rounded(propagation.header_sync_bytes_per_chain_share),
         )
     }
 }
@@ -297,6 +335,96 @@ pub fn markdown_table(reports: &[Report]) -> String {
         table.push_str(&markdown_row(report));
     });
     table
+}
+
+/// The header of the Markdown table `scaling_markdown_row` fills: what the
+/// scaling study looks at.
+pub fn scaling_markdown_header() -> String {
+    "| Scenario | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Header-sync bytes per chain share |\n\
+     |---|---:|---:|---:|---:|---:|---:|---:|---:|"
+        .to_string()
+}
+
+/// One report as a row of the scaling study's table.
+pub fn scaling_markdown_row(report: &Report) -> String {
+    format!(
+        "| {} | {} | {} | {} | {} | {} | {} / {} | {:.3} | {} |",
+        report.scenario.label,
+        group_thousands(report.share_wire_bytes),
+        percent(report.propagation.stale_rate),
+        percent(report.propagation.orphan_rate),
+        seconds(report.propagation.mean_seconds_to_ninety_percent),
+        seconds(report.propagation.mean_seconds_to_all),
+        rounded(report.bandwidth.p2pool_upload_megabits_mean),
+        rounded(report.bandwidth.p2pool_upload_megabits_max),
+        report.propagation.uncles_per_chain_share,
+        group_thousands(report.propagation.header_sync_bytes_per_chain_share.round() as u64),
+    )
+}
+
+/// A Markdown table of reports for the scaling study.
+pub fn scaling_markdown_table(reports: &[Report]) -> String {
+    let mut table = scaling_markdown_header();
+    reports.iter().for_each(|report| {
+        table.push('\n');
+        table.push_str(&scaling_markdown_row(report));
+    });
+    table
+}
+
+/// The header of the limits study's Markdown table: the scaling columns
+/// that matter to upstream's objections, with each node's validation load.
+pub fn limits_markdown_header() -> String {
+    "| Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |\n\
+     |---|---:|---:|---:|---:|---:|---:|---:|---:|"
+        .to_string()
+}
+
+/// One report as a row of the limits study's table.
+pub fn limits_markdown_row(report: &Report) -> String {
+    format!(
+        "| {} | {} | {:.1} | {} | {} | {} / {} | {:.3} | {} / {} | {:.1} |",
+        report.scenario.label,
+        group_thousands(report.share_wire_bytes),
+        report.scenario.validation_seconds * 1_000.0,
+        percent(report.propagation.stale_rate),
+        seconds(report.propagation.mean_seconds_to_all),
+        rounded(report.bandwidth.p2pool_upload_megabits_mean),
+        rounded(report.bandwidth.p2pool_upload_megabits_max),
+        report.propagation.uncles_per_chain_share,
+        percent(report.propagation.validation_busy_mean),
+        percent(report.propagation.validation_busy_max),
+        report.propagation.mean_validation_wait_seconds * 1_000.0,
+    )
+}
+
+/// A Markdown table of reports for the limits study.
+pub fn limits_markdown_table(reports: &[Report]) -> String {
+    let mut table = limits_markdown_header();
+    reports.iter().for_each(|report| {
+        table.push('\n');
+        table.push_str(&limits_markdown_row(report));
+    });
+    table
+}
+
+/// Uncles named per chain share, and the header bytes a node syncing the
+/// chain fetches per chain share for headers of `header_bytes` without
+/// uncles: each chain share's and each named uncle's, with every uncle hash
+/// they carry. Zero for an empty chain.
+pub fn header_sync_per_chain_share(outcome: &Outcome, header_bytes: u64) -> (f64, f64) {
+    if outcome.chain_length == 0 {
+        return (0.0, 0.0);
+    }
+    let length = outcome.chain_length as f64;
+    let headers = (outcome.chain_length + outcome.uncles_named_by_chain) as f64;
+    let uncle_hashes =
+        (outcome.uncles_named_by_chain + outcome.uncle_hashes_in_named_uncles) as f64;
+    let bytes = headers * header_bytes as f64 + uncle_hashes * SHARE_HEADER_BYTES_PER_UNCLE as f64;
+    (
+        outcome.uncles_named_by_chain as f64 / length,
+        bytes / length,
+    )
 }
 
 fn mean(values: &[f64]) -> f64 {

@@ -1560,6 +1560,28 @@ pub struct SimConfig {
     /// default, so other sim runs keep pacing by the share target.
     #[serde(default)]
     pub weak_shares: bool,
+    /// Bitcoin Cash: of the share blocks this node broadcasts that carry weak
+    /// shares, every this many goes out with its first weak share's coinbase
+    /// value one satoshi higher, as a peer serving an altered copy of an
+    /// honest share would. The node's store and its answers to block requests
+    /// stay honest. For the end-to-end check of the weak-share commitment;
+    /// omit to broadcast every share as stored.
+    #[serde(default)]
+    pub alter_weak_copy_every: Option<u64>,
+    /// Bitcoin Cash: carry only this node's own weak shares in the shares it
+    /// builds, as a node in a coalition refusing to carry others' weak shares
+    /// would. It still checks, stores and relays them. For the end-to-end
+    /// check of `WEAK_DEPTH` against a refusing coalition.
+    #[serde(default)]
+    pub carry_only_own_weak_shares: bool,
+    /// Bitcoin Cash: model this many miners on the node instead of one. Every
+    /// proof is found by one of them, picked at random, each with its own
+    /// payout address and share owner, so a small swarm fills the window with
+    /// hundreds of payees: for end-to-end runs of the level draw, the hybrid
+    /// split and the payout tree. Their keys do not exist, so what they are
+    /// paid on regtest cannot be spent. Omit for the node's one miner.
+    #[serde(default)]
+    pub virtual_miners: Option<u32>,
 }
 
 /// Config for p2poolv2 nodes

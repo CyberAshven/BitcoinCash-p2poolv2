@@ -339,7 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_broadcast_event_delivered_to_subscriber() {
-        let (sender, _guard) = create_monitoring_event_channel();
+        let sender = create_monitoring_event_channel();
         let mut receiver = sender.subscribe();
 
         // Build subscription set as handle_socket would
@@ -521,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_broadcast_event_filtered_for_unsubscribed_topic() {
-        let (sender, _guard) = create_monitoring_event_channel();
+        let sender = create_monitoring_event_channel();
         let mut receiver = sender.subscribe();
 
         // Subscribe to peers only
