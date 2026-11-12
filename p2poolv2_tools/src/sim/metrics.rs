@@ -105,7 +105,7 @@ fn parse_number<T: std::str::FromStr>(bytes: &[u8]) -> Option<T> {
 fn scan_log(path: &Path) -> ToolResult<LogScan> {
     let mut scan = LogScan::default();
     for_each_line_bytes(path, |line| {
-        if memchr::memmem::find(line, b"to confirmed height Some").is_some() {
+        if confirmed_heights(line).next().is_some() {
             scan.promotion_lines += 1;
             let second = std::str::from_utf8(line)
                 .ok()

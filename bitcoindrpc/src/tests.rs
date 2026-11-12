@@ -323,7 +323,7 @@ async fn test_getblocktemplate_mainnet() {
                 "method": "getblocktemplate",
                 "params": [{
                     "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-                    "rules": ["segwit"],
+                    "rules": ["segwit", "consensuscleanup"],
                 }],
                 "id": 0
             })))
@@ -373,7 +373,7 @@ async fn test_getblocktemplate_signet() {
                 "method": "getblocktemplate",
                 "params": [{
                     "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-                    "rules": ["segwit", "signet"],
+                    "rules": ["segwit", "signet", "consensuscleanup"],
                 }],
                 "id": 0
             })))
@@ -752,7 +752,7 @@ async fn test_getblocktemplate_retry_logic() {
                 "method": "getblocktemplate",
                 "params": [{
                     "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-                    "rules": ["segwit"],
+                    "rules": ["segwit", "consensuscleanup"],
                 }],
                 "id": i
             })))
@@ -777,7 +777,7 @@ async fn test_getblocktemplate_retry_logic() {
                 "method": "getblocktemplate",
                 "params": [{
                     "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-                    "rules": ["segwit"],
+                    "rules": ["segwit", "consensuscleanup"],
                 }],
                 "id": 3
             })))

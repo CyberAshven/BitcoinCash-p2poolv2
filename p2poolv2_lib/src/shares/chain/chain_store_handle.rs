@@ -22,6 +22,7 @@ use crate::store::dag_store::{BlockValidSearch, ShareDag, UncleInfo};
 use crate::store::found_block::FoundBlock;
 use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::{PruneStats, get_range_to_prune};
+use crate::store::script_history::{ScriptHash, ScriptHistoryPage};
 use crate::store::transaction_store::{OutputOrigin, PrevoutCheck};
 use crate::store::writer::{StoreError, StoreHandle};
 use bitcoin::{BlockHash, TxMerkleNode, Txid, Work};
@@ -276,6 +277,21 @@ impl ChainStoreHandle {
         txid: &bitcoin::Txid,
     ) -> Result<Option<(BlockHash, u32)>, StoreError> {
         self.store_handle.store().get_confirmed_block_for_txid(txid)
+    }
+
+    /// One page of the confirmed history of `scripthash`, from
+    /// `start_height` but never below the history window, ending at the
+    /// first height boundary after `max_rows` entries. See
+    /// `Store::get_script_history`.
+    pub fn get_script_history(
+        &self,
+        scripthash: &ScriptHash,
+        start_height: u32,
+        max_rows: usize,
+    ) -> Result<ScriptHistoryPage, StoreError> {
+        self.store_handle
+            .store()
+            .get_script_history(scripthash, start_height, max_rows)
     }
 
     /// Check whether a share block exists without deserializing it.
@@ -1096,6 +1112,11 @@ impl ChainStoreHandle {
     /// while the node is current stops a stale or withheld chain from
     /// pruning.
     ///
+    /// While the node is current it also moves the script history
+    /// compaction filter threshold up to the confirmed tip (see
+    /// `Store::update_script_history_gc_threshold`), on every run whether or
+    /// not bodies are due.
+    ///
     /// `next_prune_start` holds where the previous run stopped. It starts empty
     /// and is derived from the store on the first run, so nothing is persisted.
     /// Space and tombstones are reclaimed by RocksDB's automatic compaction;
@@ -1105,8 +1126,17 @@ impl ChainStoreHandle {
         &self,
         next_prune_start: &mut Option<u32>,
     ) -> Result<(), StoreError> {
+        let is_current = self.is_current();
+        // setting scripthistory gc threshold is independent of when
+        // prune is succesful or not, so it can be set before pruning
+        // happens
+        if is_current {
+            self.store_handle
+                .store()
+                .update_script_history_gc_threshold()?;
+        }
         let Some(range) = get_range_to_prune(
-            self.is_current(),
+            is_current,
             self.store_handle.store().prune_target()?,
             *next_prune_start,
             |prune_target| self.find_prune_start(prune_target),
@@ -1162,9 +1192,11 @@ impl ChainStoreHandle {
     pub async fn promote_block(&self, header: ShareHeader) -> Result<Option<u32>, StoreError> {
         let blockhash = header.block_hash();
         let uncle_count = header.uncles.len();
+        let difficulty = header.get_difficulty(self.network);
         self.organise_header(header).await?;
         let height = self.organise_block().await?;
-        info!("Promoted block {blockhash} to confirmed height {height:?}");
+        let log_height = height.map(|h| h as i64).unwrap_or(-1);
+        info!("Promoted block {blockhash} to confirmed height {log_height}: diff={difficulty}");
         if uncle_count > 0 {
             info!("Confirmed block {blockhash} references {uncle_count} uncle(s)");
         }
@@ -1229,6 +1261,7 @@ mockall::mock! {
         pub fn get_share_transactions(&self, share_hash: &BlockHash) -> Result<Vec<ShareTransaction>, StoreError>;
         pub fn get_tx_with_output_origins(&self, txid: &bitcoin::Txid) -> Result<(bitcoin::Transaction, Vec<OutputOrigin>), StoreError>;
         pub fn get_confirmed_block_for_txid(&self, txid: &bitcoin::Txid) -> Result<Option<(BlockHash, u32)>, StoreError>;
+        pub fn get_script_history(&self, scripthash: &ScriptHash, start_height: u32, max_rows: usize) -> Result<ScriptHistoryPage, StoreError>;
         pub fn share_block_exists(&self, blockhash: &BlockHash) -> bool;
         pub fn first_existing_share_header(&self, blockhashes: &[BlockHash]) -> Option<BlockHash>;
         pub fn get_share(&self, share_hash: &BlockHash) -> Option<ShareBlock>;

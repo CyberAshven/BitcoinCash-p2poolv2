@@ -141,7 +141,7 @@ sleep 20
 grep "Promoted block" /tmp/sim-A.log | tail -5
 ```
 
-Expect heights climbing (`... to confirmed height Some(1)`, `Some(2)`, …) every
+Expect heights climbing (`... to confirmed height 1: diff=...`, `2: ...`, …) every
 few seconds. Cross-check via the API (port 7600 in the copied config):
 
 ```sh

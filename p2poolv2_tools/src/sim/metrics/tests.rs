@@ -32,10 +32,10 @@ fn report_of_a_small_run() {
         0,
         "hashrate = 3000\nideal_block_time_secs = 5\n",
         concat!(
-            "2026-10-19T10:00:00.000000Z DEBUG Promoted block aaaaaaaaaaaaaaaa01 to confirmed height Some(1)\n",
-            "2026-10-19T10:00:04.000000Z DEBUG Promoted block aaaaaaaaaaaaaaaa02 to confirmed height Some(2)\n",
-            "2026-10-19T10:00:05.000000Z DEBUG Promoted block bbbbbbbbbbbbbbbb03 to confirmed height None\n",
-            "2026-10-19T10:00:10.000000Z DEBUG Promoted block aaaaaaaaaaaaaaaa03 to confirmed height Some(3)\n",
+            "2026-10-19T10:00:00.000000Z DEBUG Promoted block aaaaaaaaaaaaaaaa01 to confirmed height 1: diff=1\n",
+            "2026-10-19T10:00:04.000000Z DEBUG Promoted block aaaaaaaaaaaaaaaa02 to confirmed height 2: diff=1\n",
+            "2026-10-19T10:00:05.000000Z DEBUG Promoted block bbbbbbbbbbbbbbbb03 to confirmed height -1: diff=1\n",
+            "2026-10-19T10:00:10.000000Z DEBUG Promoted block aaaaaaaaaaaaaaaa03 to confirmed height 3: diff=1\n",
             "2026-10-19T10:00:11.000000Z INFO sim stats: emitted=30 pool_difficulty=100.4\n",
             "2026-10-19T10:00:12.000000Z INFO sim stats: emitted=40 pool_difficulty=99.6\n",
             "2026-10-19T10:00:13.000000Z INFO sim block-find: submitting block\n",
@@ -46,7 +46,7 @@ fn report_of_a_small_run() {
         1,
         "hashrate = 1000\n",
         concat!(
-            "2026-10-19T10:00:01.000000Z DEBUG Promoted block aaaaaaaaaaaaaaaa01 to confirmed height Some(1)\n",
+            "2026-10-19T10:00:01.000000Z DEBUG Promoted block aaaaaaaaaaaaaaaa01 to confirmed height 1: diff=1\n",
             "2026-10-19T10:00:12.000000Z INFO sim stats: emitted=10 pool_difficulty=99\n",
             "2026-10-19T10:00:13.000000Z WARN rejected: AsertMismatch\n",
         ),

@@ -1890,18 +1890,22 @@ fn test_add_txs_with_inputs_or_outputs_should_succeed() {
 
     assert_eq!(res[0].txid, txid);
 
-    let tx = store.get_tx(&txid).unwrap();
-    assert_eq!(tx.version, tx.version);
-    assert_eq!(tx.lock_time, tx.lock_time);
-    assert_eq!(tx.input.len(), 1);
+    let stored_tx = store.get_tx(&txid).unwrap();
+    assert_eq!(stored_tx.version, tx.version);
+    assert_eq!(stored_tx.lock_time, tx.lock_time);
+    assert_eq!(stored_tx.input.len(), 1);
     assert_eq!(
-        tx.input[0].previous_output,
+        stored_tx.input[0].previous_output,
         bitcoin::OutPoint::new(funding_txid, 0)
     );
-    assert_eq!(tx.input[0].script_sig, script_true);
-    assert_eq!(tx.output.len(), 1);
-    assert_eq!(tx.output[0].value, bitcoin::Amount::from_sat(1000000));
-    assert_eq!(tx.output[0].script_pubkey, script_true);
+    assert_eq!(stored_tx.input[0].script_sig, script_true);
+    assert_eq!(stored_tx.output.len(), 1);
+    assert_eq!(
+        stored_tx.output[0].value,
+        bitcoin::Amount::from_sat(1000000)
+    );
+    assert_eq!(stored_tx.output[0].script_pubkey, script_true);
+    assert_eq!(stored_tx, tx);
 }
 
 #[test]
