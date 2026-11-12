@@ -23,7 +23,7 @@ use crate::difficulty::{
     ChainDifficulty, ChainParameters, DifficultyRule, chain_hashrate, found_share_rate,
     settled_band_cap, solve_chain,
 };
-use crate::levels::level_amount;
+use crate::levels::{level_amount, node_level};
 use crate::miners::{MinerClass, MinerKind, MinerMix, TrackedMiner};
 use crate::payouts::{
     ChainPayoutInputs, Steering, TrackedInputs, TrackedOutcome, simulate_chain_payouts,
@@ -232,6 +232,9 @@ pub struct Scenario {
     pub includer_cut: f64,
     /// The payout level of every miner but the tracked ones.
     pub default_level: u32,
+    /// Every class of miners is at the payout level a node would leave it at
+    /// for its machine's hashrate, instead of all at `default_level`.
+    pub node_levels: bool,
     /// The miners whose payments are simulated.
     pub tracked: Vec<TrackedMiner>,
     /// Hashrate below which a miner is on the mini chain (`mini` only).
@@ -280,6 +283,7 @@ impl Default for Scenario {
             weak_ratio_max: WEAK_RATIO_MAX,
             includer_cut: INCLUDER_CUT,
             default_level: DEFAULT_LEVEL,
+            node_levels: false,
             tracked: vec![TrackedMiner::bitaxe(), TrackedMiner::asic()],
             mini_threshold: MINI_THRESHOLD_HASHRATE,
             big_node_at_minimum: false,
@@ -527,6 +531,13 @@ impl Scenario {
             classes
                 .iter_mut()
                 .for_each(|class| class.follows_node_default = false);
+        }
+        if self.node_levels {
+            let network = self.network_hashrate();
+            let pool_blocks = BCH_BLOCKS_PER_MONTH * self.pool_fraction;
+            classes.iter_mut().for_each(|class| {
+                class.level = node_level(class.hashrate, network, pool_blocks);
+            });
         }
         classes
     }

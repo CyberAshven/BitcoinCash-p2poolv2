@@ -9,6 +9,8 @@
 //! instead of re-reading the full window from RocksDB on every notify.
 
 mod weak_credit;
+#[cfg(test)]
+mod weak_walk_cost;
 
 use super::address_keys::AddressKeys;
 use super::bch_eligibility::{BchPlace, PayingChain};
@@ -6670,5 +6672,134 @@ mod tests {
 
         assert_eq!(sized.len(), 3);
         assert_eq!(claimed_only.len(), 5);
+    }
+
+    /// Timing report, not a check: what checking one share's payouts costs a
+    /// node at Bitcoin Cash window sizes, for the network simulator's
+    /// validation time. A node does this for every share and weak share it
+    /// receives: walk the window from the share's parent (cached by parent
+    /// and paid block, so a repeat costs nothing), then build the expected
+    /// coinbase outputs and compare. It also shows what the payout levels
+    /// (level 0, 546 sat, and the default level 5, 17,472 sat) and a token
+    /// share's 3,072 byte coinbase do to the coinbase and the payout tree,
+    /// and what executing that tree costs on chain. Run with
+    /// `cargo test --release -p p2poolv2_lib validation_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing report, run by hand"]
+    fn validation_cost_at_bitcoin_cash_window_sizes() {
+        use crate::accounting::payout::coinbase_budget::PayoutSplit;
+        use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+        use crate::accounting::payout::payout_tree::BCH_TREE_EXECUTION_FEE_RATE;
+        use std::time::Instant;
+
+        println!(
+            "shares,miners,level,token_share,build_ms,load_ms,walk_ms,outputs_ms,coinbase_outputs,tree_payees,tree_transactions,tree_fee_sat"
+        );
+        for (shares, payees, level) in [
+            (1_800, 1_000, 5),
+            (120_960, 1_000, 0),
+            (120_960, 1_000, 5),
+            (120_960, 10_000, 0),
+            (120_960, 10_000, 5),
+            (120_960, 100_000, 0),
+            (120_960, 100_000, 5),
+        ] {
+            let started = Instant::now();
+            let mut headers = Vec::with_capacity(shares);
+            let mut prev_hash = BlockHash::all_zeros().to_string();
+            for index in 0..shares {
+                let payee = (index % payees) as u32;
+                let mut key = [0u8; 20];
+                key[..4].copy_from_slice(&payee.to_le_bytes());
+                let header = TestShareBlockBuilder::new()
+                    .prev_share_blockhash(prev_hash)
+                    .share_owner(ShareOwner::CashP2pkh(key))
+                    .payout_address(PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array(key),
+                        TEST_NETWORK,
+                    )))
+                    .work(2)
+                    .payout_level(level)
+                    .build()
+                    .header;
+                let blockhash = header.block_hash();
+                prev_hash = blockhash.to_string();
+                headers.push(ConfirmedHeaderResult {
+                    height: index as u32,
+                    blockhash,
+                    header,
+                });
+            }
+            let tip_hash = headers.last().unwrap().blockhash;
+            headers.reverse();
+            let build_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            let tip_height = shares as u32 - 1;
+            let mut store = MockChainStoreHandle::default();
+            store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+            store
+                .expect_get_block_metadata()
+                .returning(move |_| Ok(metadata_at_height(tip_height)));
+            store
+                .expect_get_confirmed_headers_in_range()
+                .returning(move |_, _| Ok(headers.clone()));
+            let mut window = PplnsWindow::new(TEST_NETWORK)
+                .for_chain(Chain::BitcoinCash)
+                .with_window_sizes(0, shares);
+
+            let started = Instant::now();
+            window.update(&store).unwrap();
+            let load_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            //* A paying block far heavier than the window, so the cap, all
+            //* `shares`, bounds the walk.
+            let started = Instant::now();
+            let weights = window
+                .get_weights_from_start_hash(
+                    tip_hash,
+                    (1_u128 << 80).into(),
+                    &MockChainStoreHandle::default(),
+                )
+                .unwrap();
+            let walk_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            for token_share in [false, true] {
+                //* The median of seven builds: one build's time moves by a
+                //* third from run to run.
+                let mut build_times = Vec::with_capacity(7);
+                let mut built = None;
+                for _ in 0..7 {
+                    let started = Instant::now();
+                    built = Some(
+                        build_pplns_outputs(
+                            312_500_000,
+                            &weights,
+                            &None,
+                            None,
+                            &None,
+                            None,
+                            PayoutSplit::for_chain(Chain::BitcoinCash, token_share),
+                        )
+                        .unwrap(),
+                    );
+                    build_times.push(started.elapsed().as_secs_f64() * 1_000.0);
+                }
+                build_times.sort_by(f64::total_cmp);
+                let outputs_ms = build_times[build_times.len() / 2];
+                let outputs = built.expect("seven builds ran");
+                let (tree_payees, tree_transactions, tree_fee) =
+                    outputs.tree.as_ref().map_or((0, 0, 0), |tree| {
+                        (
+                            tree.payees().len(),
+                            tree.node_count(),
+                            tree.total_fee(BCH_TREE_EXECUTION_FEE_RATE).unwrap_or(0),
+                        )
+                    });
+
+                println!(
+                    "{shares},{payees},{level},{token_share},{build_ms:.0},{load_ms:.1},{walk_ms:.2},{outputs_ms:.2},{},{tree_payees},{tree_transactions},{tree_fee}",
+                    outputs.outputs.len()
+                );
+            }
+        }
     }
 }

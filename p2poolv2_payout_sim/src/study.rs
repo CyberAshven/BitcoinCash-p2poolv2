@@ -11,9 +11,11 @@
 //! at the minimum credited at the weak work, and `INCLUDER_CUT` at 5%.
 
 use crate::constants::{
-    BCH_BLOCKS_PER_MONTH, BCH_NETWORK_HASHRATE, DEFAULT_BAND_CAP, DEFAULT_LEVEL,
-    HOME_MINER_HASHRATE, MINI_CEILING_DIFFICULTY, PAGE_INCLUDER_CUT, WEAK_SHARE_MESSAGE_BYTES,
+    ASIC_HASHRATE, BCH_BLOCK_INTERVAL_SECONDS, BCH_BLOCKS_PER_MONTH, BCH_NETWORK_HASHRATE,
+    DEFAULT_BAND_CAP, DEFAULT_LEVEL, HASHES_PER_DIFFICULTY, HOME_MINER_HASHRATE,
+    MINI_CEILING_DIFFICULTY, MONTH_SECONDS, PAGE_INCLUDER_CUT, WEAK_SHARE_MESSAGE_BYTES,
 };
+use crate::levels::{NODE_MIN_PAYMENTS_PER_MONTH, node_level};
 use crate::miners::{MinerClass, MinerKind, MinerMix, TrackedMiner};
 use crate::races::ForkChoice;
 use crate::report::{
@@ -1182,6 +1184,106 @@ pub fn losses(base: &Scenario) -> String {
         "ASIC expected vs fair",
     ];
     markdown_table(&headers, &rows)
+}
+
+/// Pool sizes of the scale table, as parts of Bitcoin Cash's hashrate.
+const SCALE_POOL_FRACTIONS: [f64; 4] = [0.10, 0.30, 0.50, 0.90];
+
+/// Bitcoin Cash hashrate multiples of the scale table: today's 3.7 EH/s, up
+/// to Bitcoin's (about 270 times it) and four times that.
+const SCALE_HASHRATE_MULTIPLES: [f64; 5] = [1.0, 10.0, 100.0, 270.0, 1_000.0];
+
+/// The hashrate that finds `NODE_MIN_PAYMENTS_PER_MONTH` weak shares a month
+/// at `weak_difficulty`: below it a miner's credit comes less often than a
+/// node's payment floor, whatever its payout level.
+fn smallest_regular_miner(weak_difficulty: f64) -> f64 {
+    NODE_MIN_PAYMENTS_PER_MONTH * weak_difficulty * HASHES_PER_DIFFICULTY / MONTH_SECONDS
+}
+
+/// One row of the scale table: `multiple` times today's Bitcoin Cash
+/// hashrate and a pool that is `fraction` of it, each class at the level a
+/// node would leave a machine of that hashrate.
+fn scale_scenario(base: &Scenario, multiple: f64, fraction: f64) -> Scenario {
+    let network = BCH_NETWORK_HASHRATE * multiple;
+    let pool_blocks = BCH_BLOCKS_PER_MONTH * fraction;
+    let home_level = node_level(HOME_MINER_HASHRATE, network, pool_blocks);
+    Scenario {
+        pool_fraction: fraction,
+        hashrate_multiple: multiple,
+        node_levels: true,
+        tracked: vec![
+            TrackedMiner {
+                level: home_level,
+                ..TrackedMiner::bitaxe()
+            },
+            TrackedMiner {
+                level: node_level(ASIC_HASHRATE, network, pool_blocks),
+                ..TrackedMiner::asic()
+            },
+        ],
+        ..study_scenario(base)
+    }
+}
+
+/// Bigger pools on a bigger Bitcoin Cash: the adopted design at 10 to 90% of
+/// Bitcoin Cash and 1 to 1,000 times today's hashrate, 50% industrial, with
+/// every class at the payout level a node would leave its machine, including
+/// the tracked Bitaxe and the tracked ASIC. Each row gives Bitcoin Cash's
+/// difficulty at that hashrate (Bitcoin's is about the x270 rows') and the
+/// smallest miner that still finds three weak shares a month.
+pub fn scale(base: &Scenario) -> String {
+    let scenarios: Vec<Scenario> = SCALE_HASHRATE_MULTIPLES
+        .into_iter()
+        .flat_map(|multiple| {
+            SCALE_POOL_FRACTIONS
+                .into_iter()
+                .map(move |fraction| scale_scenario(base, multiple, fraction))
+        })
+        .collect();
+    let reports = run_scenarios(&scenarios);
+    let rows: Vec<Vec<String>> = reports
+        .iter()
+        .map(|report| {
+            let chain = report.home_chain();
+            let network_difficulty = report.scenario.network_hashrate()
+                * BCH_BLOCK_INTERVAL_SECONDS
+                / HASHES_PER_DIFFICULTY;
+            let weak_difficulty = chain.weak.map_or(chain.asert_difficulty, |outcome| {
+                (chain.asert_difficulty / outcome.mean_ratio).max(MINI_CEILING_DIFFICULTY)
+            });
+            let mut row = vec![
+                format!("x{}", report.scenario.hashrate_multiple),
+                format!("{network_difficulty:.2e}"),
+                pool_percent(report.scenario.pool_fraction),
+                rounded(chain.asert_difficulty),
+                weak_ratio(report),
+                rounded(smallest_regular_miner(weak_difficulty) / 1.0e12),
+                report.scenario.tracked[0].level.to_string(),
+                rounded(report.miners[0].weak_shares_per_month),
+                report.scenario.tracked[1].level.to_string(),
+                rounded(report.miners[1].weak_shares_per_month),
+            ];
+            row.extend(both_miner_cells(report));
+            row
+        })
+        .collect();
+    let mut headers: Vec<String> = [
+        "BCH hashrate",
+        "BCH difficulty",
+        "Pool",
+        "Minimum difficulty",
+        "R",
+        "Smallest miner with 3 weak shares a month (TH/s)",
+        "Bitaxe level",
+        "Bitaxe weak/mo",
+        "ASIC level",
+        "ASIC weak/mo",
+    ]
+    .iter()
+    .map(|cell| cell.to_string())
+    .collect();
+    headers.extend(both_miner_headers());
+    table_from(&headers, &rows)
 }
 
 #[cfg(test)]

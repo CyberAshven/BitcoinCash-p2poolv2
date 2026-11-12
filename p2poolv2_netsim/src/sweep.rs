@@ -10,6 +10,7 @@ use crate::constants::{
     BCH_SCALENET_LIMIT_BYTES,
 };
 use crate::distribution::Distribution;
+use crate::limits::Limit;
 use crate::report::{Report, group_thousands};
 use crate::scaling::{self, Idea};
 use crate::scenario::{Scenario, ShareRelay};
@@ -44,6 +45,8 @@ pub enum Sweep {
     /// One idea of the scaling study at 100 and 1,000 nodes and 10, 5, 2
     /// and 1-second shares.
     Scaling(Idea),
+    /// One of upstream's objections, in the limits study.
+    Limits(Limit),
 }
 
 impl Sweep {
@@ -73,17 +76,30 @@ impl Sweep {
         Sweep::Scaling(Idea::Combined),
     ];
 
+    /// The limits study's sweeps, in the order of upstream's objections
+    /// (`sweep limits`).
+    pub const LIMITS: [Sweep; 6] = [
+        Sweep::Limits(Limit::Coinbase),
+        Sweep::Limits(Limit::RelayEarly),
+        Sweep::Limits(Limit::Fanout),
+        Sweep::Limits(Limit::Uncles),
+        Sweep::Limits(Limit::Period),
+        Sweep::Limits(Limit::Network),
+    ];
+
     /// Parse a sweep's command-line name.
     pub fn parse(text: &str) -> Result<Self, String> {
         Sweep::ALL
             .iter()
             .chain(Sweep::SCALING.iter())
+            .chain(Sweep::LIMITS.iter())
             .copied()
             .find(|sweep| sweep.name() == text.trim())
             .ok_or_else(|| {
                 let names: Vec<&str> = Sweep::ALL
                     .iter()
                     .chain(Sweep::SCALING.iter())
+                    .chain(Sweep::LIMITS.iter())
                     .map(Sweep::name)
                     .collect();
                 format!(
@@ -99,6 +115,11 @@ impl Sweep {
         matches!(self, Sweep::Scaling(_))
     }
 
+    /// Whether this is one of the limits study's sweeps.
+    pub fn is_limits(&self) -> bool {
+        matches!(self, Sweep::Limits(_))
+    }
+
     /// The command-line name.
     pub fn name(&self) -> &'static str {
         match self {
@@ -112,6 +133,7 @@ impl Sweep {
             Sweep::Nodes => "nodes",
             Sweep::Seeds => "seeds",
             Sweep::Scaling(idea) => idea.name(),
+            Sweep::Limits(limit) => limit.name(),
         }
     }
 
@@ -128,6 +150,7 @@ impl Sweep {
             Sweep::Nodes => node_scenarios(base),
             Sweep::Seeds => seed_scenarios(base),
             Sweep::Scaling(idea) => scaling::grid(&idea.variants(base)),
+            Sweep::Limits(limit) => limit.scenarios(base),
         }
     }
 }

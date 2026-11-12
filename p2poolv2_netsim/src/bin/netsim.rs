@@ -22,7 +22,7 @@ use p2poolv2_netsim::distribution::Distribution;
 use p2poolv2_netsim::engine::Forwarding;
 use p2poolv2_netsim::payees::HashrateSpread;
 use p2poolv2_netsim::report::{
-    Report, group_thousands, markdown_table, percent, scaling_markdown_table,
+    Report, group_thousands, limits_markdown_table, markdown_table, percent, scaling_markdown_table,
 };
 use p2poolv2_netsim::scaling::{
     Idea, REFERENCE_SHARE_INTERVAL_SECONDS, SEARCH_LONGEST_INTERVAL_SECONDS,
@@ -277,6 +277,7 @@ impl ScenarioArgs {
             validation_seconds_per_megabyte: self
                 .validation_seconds_per_megabyte
                 .unwrap_or(defaults.validation_seconds_per_megabyte),
+            validation_queue: defaults.validation_queue,
             work_switch_seconds: self
                 .work_switch_seconds
                 .unwrap_or(defaults.work_switch_seconds),
@@ -303,9 +304,28 @@ impl ScenarioArgs {
     }
 }
 
-/// Print `reports`; a Markdown table in the scaling study's columns when
-/// `scaling` is set.
-fn print_reports(reports: &[Report], format: Format, scaling: bool) -> Result<(), String> {
+/// Which study's columns a Markdown table has.
+#[derive(Clone, Copy)]
+enum Table {
+    Plain,
+    Scaling,
+    Limits,
+}
+
+impl Table {
+    fn of(sweep: &Sweep) -> Self {
+        if sweep.is_limits() {
+            Table::Limits
+        } else if sweep.is_scaling() {
+            Table::Scaling
+        } else {
+            Table::Plain
+        }
+    }
+}
+
+/// Print `reports`; as Markdown, in `table`'s columns.
+fn print_reports(reports: &[Report], format: Format, table: Table) -> Result<(), String> {
     match format {
         Format::Text => {
             let texts: Vec<String> = reports.iter().map(Report::summary_text).collect();
@@ -315,17 +335,21 @@ fn print_reports(reports: &[Report], format: Format, scaling: bool) -> Result<()
             let json = serde_json::to_string_pretty(reports).map_err(|error| error.to_string())?;
             println!("{json}");
         }
-        Format::Markdown if scaling => println!("{}", scaling_markdown_table(reports)),
-        Format::Markdown => println!("{}", markdown_table(reports)),
+        Format::Markdown => match table {
+            Table::Plain => println!("{}", markdown_table(reports)),
+            Table::Scaling => println!("{}", scaling_markdown_table(reports)),
+            Table::Limits => println!("{}", limits_markdown_table(reports)),
+        },
     }
     Ok(())
 }
 
-/// The sweeps `name` stands for: one, `all` or `scaling`.
+/// The sweeps `name` stands for: one, `all`, `scaling` or `limits`.
 fn sweeps_named(name: &str) -> Result<Vec<Sweep>, String> {
     match name {
         "all" => Ok(Sweep::ALL.to_vec()),
         "scaling" => Ok(Sweep::SCALING.to_vec()),
+        "limits" => Ok(Sweep::LIMITS.to_vec()),
         _ => Sweep::parse(name).map(|sweep| vec![sweep]),
     }
 }
@@ -336,7 +360,7 @@ fn run_sweep(name: &str, base: &Scenario, format: Format, threads: usize) -> Res
         if matches!(format, Format::Markdown) {
             println!("### Sweep: {}\n", sweep.name());
         }
-        print_reports(&reports, format, sweep.is_scaling())?;
+        print_reports(&reports, format, Table::of(sweep))?;
         println!();
         Ok(())
     })
@@ -534,7 +558,7 @@ fn main() -> ExitCode {
             let scenario = scenario.scenario();
             scenario
                 .validate()
-                .and_then(|()| print_reports(&[scenario.run()], format, false))
+                .and_then(|()| print_reports(&[scenario.run()], format, Table::Plain))
         }
         Command::Sweep {
             name,

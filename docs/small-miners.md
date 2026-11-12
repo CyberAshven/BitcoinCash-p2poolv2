@@ -153,10 +153,28 @@ while the income shrinks.
 ## How small can a miner be?
 
 Every miner is paid its fair income on average, however small. How often it
-is paid is its income over its level. At level 0 (546 sat) a miner can
-expect 3 payments a month from 1,638 sat a month: about 4.5 GH/s at today's
-BCH hashrate, 1.2 TH/s at Bitcoin's. A smaller miner is still paid fairly,
-less often.
+is paid depends on two things: its income over its level, and how often it
+finds a weak share, because a credit is never smaller than one weak share.
+The second binds first. A pool makes about 8.3 million weak shares a month
+(32 a share), split among its miners at the minimum, so the smallest miner
+that still finds three a month is:
+
+| BCH difficulty | Pool at 10% of BCH | 30% | 50% | 90% |
+|---|---:|---:|---:|---:|
+| 5.17e11 (today, 3.7 EH/s) | 0.09 TH/s | 0.36 | 0.60 | 1.1 |
+| 5.17e12 (10 times) | 1.2 TH/s | 3.6 | 6.0 | 11 |
+| 1.40e14 (270 times, Bitcoin's) | 33 TH/s | 98 | 163 | 294 |
+| 5.17e14 (1,000 times) | 121 TH/s | 363 | 604 | 1,088 |
+
+These are from the payout simulator's `scale` table, for a pool with half
+its hashrate from home miners. A smaller miner is still paid fairly, in
+rarer and larger pieces: at today's difficulty a 1.2 TH/s miner is paid 25
+times a month in a pool at 10% of BCH and 9 times at 90%; at ten times the
+difficulty, 5 times and once. So a device ages out as the difficulty grows,
+unless it is upgraded: what counts is its part of the hashrate, not its
+TH/s. The level formula alone (3 payments a month from 1,638 sat a month at
+level 0, about 4.5 GH/s today) is a lower floor that the weak-share rate
+reaches first.
 
 Uncles, which the share chain pays at 9/10 of their difficulty, and the
 includer cut on weak shares add a little to a miner's credit; the simulator

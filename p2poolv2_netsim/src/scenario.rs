@@ -19,7 +19,8 @@ use crate::constants::{
 };
 use crate::distribution::Distribution;
 use crate::engine::{
-    self, BchBlockLoad, Forwarding, Network, NodeLink, Parameters, PeerLink, WeakShareLoad,
+    self, BchBlockLoad, Forwarding, Network, NodeLink, Parameters, PeerLink, ValidationQueue,
+    WeakShareLoad,
 };
 use crate::payees::{HashrateSpread, expected_payees, hashrate_fractions, pplns_window_shares};
 use crate::random::SimulationRandom;
@@ -89,6 +90,9 @@ pub struct Scenario {
     pub validation_seconds: f64,
     /// Further validation seconds per megabyte of share (an estimate).
     pub validation_seconds_per_megabyte: f64,
+    /// Whether a node validates shares one at a time, and a weak share's
+    /// validation seconds when it does.
+    pub validation_queue: ValidationQueue,
     /// Seconds from a new best share to the node's miners hashing on it.
     pub work_switch_seconds: f64,
     /// Whether BCHN uses the same link, so its relay and its compact blocks
@@ -145,6 +149,7 @@ impl Default for Scenario {
             },
             validation_seconds: 0.005,
             validation_seconds_per_megabyte: 0.02,
+            validation_queue: ValidationQueue::Parallel,
             work_switch_seconds: 0.05,
             bchn_shares_link: true,
             bch_peers: BCHN_OUTBOUND_PEERS,
@@ -361,6 +366,7 @@ impl Scenario {
                 per_share: self.weak_shares_per_share as f64,
                 wire_bytes: wire_bytes(self.weak_share_payload_bytes),
             }),
+            validation_queue: self.validation_queue,
         }
     }
 

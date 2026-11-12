@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A limits study runs upstream's five practical objections to the scaling
+ideas against what checking a share really costs a node
+(`docs/simulation/network-sim.md`, "Limits study"). An ignored timing test
+measures it at a 120,960 share window and the default payout level: 6.4 ms
+with 1,000 miners in the window, 38 ms with 10,000 and 362 ms with 100,000;
+a weak share costs 0.3, 3.8 and 45 ms; a token share 7.4, 45 and 376 ms; and
+100,000 miners at level 0 cost 438 ms. A second
+one walks windows whose shares carry 32 weak shares each: 14 ms for 1,800
+shares and 5,100 payees, 174 ms with 50,100 payees, 211 ms for 18,000 shares
+and 51,000 payees, and 160 ms at the cap with 6,000 payees, against 6.6 ms at the cap without
+weak shares and 1,000 payees. Loading those
+windows took 0.8, 10, 126 and 88 seconds while each payee's key was found
+by a scan of the window's payees; with the lookup below they load in 0.04,
+0.05, 0.5 and 3.2 seconds. The network
+simulator now queues validation one at a time per node
+(`ValidationQueue::Serial`, as the window's write lock serialises walks) and
+reports each node's validation load. On 1,000 nodes: shares without their
+payouts keep their check and cut stale shares from 16.6% to 3.9% at 10,000
+miners and from 32.6% to 16.3% at 100,000; relaying after the header check
+takes 0.3 to 8 points off; more peers help only shares without payouts and
+make whole shares worse on slow links; uncle caps of 6 and 12 change nothing
+measurable; 100,000 miners with weak shares keep a node 18% busy at
+10-second shares, 88% at 2 seconds and overload it at 1 second when each
+node mines its own template, and 5%, 25% and 53% when the pool mines one
+(the simulator now models the node's cache of weak share payouts); and 10,000
+nodes cost half a point over 1,000.
+
+The payout simulator has a `scale` table: pools of 10 to 90% of a Bitcoin
+Cash at today's difficulty and at 10, 100, 270 (Bitcoin's) and 1,000 times
+that, with the smallest miner that still finds 3 weak shares a month: 0.09
+TH/s in a pool at 10% today and 1.1 TH/s at 90%, 33 to 294 TH/s at
+Bitcoin's difficulty. An ignored report (`payouts_at_scale_by_miner_class`)
+pays one block through the split, the level draw and the payout tree for
+farms, small miners and home miners at those sizes. The sim swarm takes
+`VIRTUAL_MINERS` (many miners a node), `MERGE_TOKENS` (token shares),
+`WEAK_SHARES` and `LOG_LEVEL`, and the runbook's Test J runs 1,200 miners on
+12 nodes with them.
+
+Two findings, not changed here (`docs/sharechain/small-miners-design.md`,
+"Still open"). A level 0 payout that lands in the payout tree is below dust
+once the tree's fee is taken and goes to the tree's largest payee: on token
+shares the swarm's level 0 miners were paid 0.79 to 0.82 of their part of
+the hashrate, and 1.02 to 1.05 without tokens, where every payee fits the
+coinbase. And a node sends every weak share whole to each
+peer, ten duplicates for each one taken in a 12-node mesh, which overran the
+request streams in the first minute of a new chain.
+
 The PPLNS window finds a payee's key with one lookup instead of a scan of
 every payee (`AddressKeys`, upstream's interner, now with a map from value
 to key; a freed slot is still reused lowest first, so keys are assigned as
@@ -111,9 +158,9 @@ have yet. It holds the weak share, unchecked, in its weak pool and asks the
 peer that sent it for the parent's headers, once per parent, as it does for
 a share block's parent. Once the parent is stored, the weak share is
 checked and pooled as new; a parent too deep for a share on the tip to
-carry the weak share drops it. Held weak shares are bounded: at most 384
-(`WEAK_CAP * WEAK_DEPTH`) and 576 KiB, the oldest dropped first, each held
-at most `WEAK_DEPTH` share periods (60 seconds). `/metrics` adds
+carry the weak share drops it. Held weak shares are bounded: at most 3,072
+(`WEAK_CAP * WEAK_DEPTH`) and 4.5 MiB, the oldest dropped first, each held
+at most `WEAK_DEPTH` share periods (8 minutes). `/metrics` adds
 `weak_pool_waiting_for_parent` and the refusal reasons `too_deep` and
 `unknown_parent`. Node behaviour only; no share-chain rule changes.
 

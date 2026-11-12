@@ -609,3 +609,162 @@ fn a_bitcoin_split_never_draws() {
     assert_eq!(paid_to(&outputs, &p2pkh(1)), Some(500));
     assert_eq!(paid_to(&outputs, &p2pkh(2)), Some(500));
 }
+
+/// One class of miners in a `payouts_at_scale_by_miner_class` scenario.
+struct MinerClass {
+    name: &'static str,
+    /// Payees of the class with credit in the window.
+    payees: u32,
+    /// The class's part of the block reward, by its work.
+    part_of_reward: f64,
+    /// The payout level every payee of the class is drawn at.
+    level: u8,
+}
+
+/// Scenario report, not a check: what one Bitcoin Cash block pays each class
+/// of miner under the adopted rules (payout levels, the hybrid split, the
+/// payout tree and its dust rule), for a share without and with a token
+/// commitment, as the pool and Bitcoin Cash's hashrate grow.
+///
+/// Each scenario is a window: big farms at the default level 5, and home
+/// miners whose payees are the weak-share credits the window holds
+/// (`shares in the window * WEAK_FILL`, at most one per home miner). At
+/// today's hashrate the node leaves a home miner at level 5; at 270 times
+/// today's it lowers a 1.2 TH/s miner to level 0 to keep three payments a
+/// month.
+///
+/// Run with
+/// `cargo test --release -p p2poolv2_lib payouts_at_scale -- --ignored --nocapture`.
+#[test]
+#[ignore = "scenario report, run by hand"]
+fn payouts_at_scale_by_miner_class() {
+    use bitcoin::BlockHash;
+    use std::time::Instant;
+
+    let class = |name, payees, part_of_reward, level| MinerClass {
+        name,
+        payees,
+        part_of_reward,
+        level,
+    };
+    let scenarios: Vec<(&str, Vec<MinerClass>)> = vec![
+        (
+            "today; pool 10% of BCH; home at level 5",
+            vec![class("farms", 18, 0.5, 5), class("home", 47_700, 0.5, 5)],
+        ),
+        (
+            "today; pool 1% of BCH; home at level 5",
+            vec![class("farms", 2, 0.5, 5), class("home", 15_400, 0.5, 5)],
+        ),
+        (
+            "270x hashrate; pool 30% of BCH; home at level 0",
+            vec![class("farms", 600, 0.5, 5), class("home", 19_200, 0.5, 0)],
+        ),
+        (
+            "270x hashrate; pool 10% of BCH; home at level 0",
+            vec![class("farms", 1_800, 0.5, 5), class("home", 57_600, 0.5, 0)],
+        ),
+        (
+            "270x hashrate; pool 2% of BCH; home at level 0",
+            vec![class("farms", 400, 0.5, 5), class("home", 288_000, 0.5, 0)],
+        ),
+        (
+            "270x hashrate; pool 1% of BCH; home at level 0",
+            vec![class("farms", 200, 0.5, 5), class("home", 576_000, 0.5, 0)],
+        ),
+        (
+            "270x hashrate; pool 1% of BCH; home at level 1",
+            vec![class("farms", 200, 0.5, 5), class("home", 576_000, 0.5, 1)],
+        ),
+        (
+            "270x hashrate; pool 1% of BCH; home 90% of the work at level 0",
+            vec![class("farms", 40, 0.1, 5), class("home", 576_000, 0.9, 0)],
+        ),
+    ];
+
+    println!(
+        "scenario|share|coinbase outputs|coinbase payout bytes|tree payees|tree transactions|tree fee sat at 1 sat/byte|build ms|class|payees|level|slice sat|fair sat|paid sat|paid over fair|paid in coinbase|paid in tree|tree fee each"
+    );
+    for (scenario, classes) in &scenarios {
+        let mut weights = HashMap::new();
+        let mut levels = HashMap::new();
+        let mut class_of: HashMap<ScriptBuf, usize> = HashMap::new();
+        let mut number = 0u32;
+        let mut class_weight = vec![0u128; classes.len()];
+        for (index, class) in classes.iter().enumerate() {
+            //* Weights in parts of 10^15 of the reward, so a payee's slice
+            //* keeps its digits even among 576,000 payees.
+            let weight = (class.part_of_reward / f64::from(class.payees) * 1e15) as u128;
+            for _ in 0..class.payees {
+                number += 1;
+                let address = p2pkh(number);
+                class_of.insert(address.script_pubkey(), index);
+                levels.insert(address.clone(), class.level);
+                weights.insert(address, weight);
+                class_weight[index] += weight;
+            }
+        }
+        let total_weight: u128 = class_weight.iter().sum();
+        let window = PplnsWeights {
+            weights,
+            levels: Some(PayoutLevels::new(BlockHash::all_zeros(), levels)),
+        };
+        for (share, payout_split) in [("no tokens", NO_TOKEN), ("tokens", TOKEN)] {
+            let mut outputs = Vec::new();
+            let started = Instant::now();
+            let tree = append_payout_split(
+                &window,
+                Amount::from_sat(SUBSIDY),
+                payout_split,
+                &mut outputs,
+            )
+            .unwrap();
+            let build_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            let mut coinbase_sat = vec![0u64; classes.len()];
+            let mut coinbase_payees = vec![0u32; classes.len()];
+            let mut tree_sat = vec![0u64; classes.len()];
+            let mut tree_payees = vec![0u32; classes.len()];
+            for output in &outputs {
+                let class = class_of[&output.address.script_pubkey()];
+                coinbase_sat[class] += output.amount.to_sat();
+                coinbase_payees[class] += 1;
+            }
+            let (tree_count, tree_transactions, tree_fee) =
+                tree.as_ref().map_or((0, 0, 0), |tree| {
+                    for payee in tree.payees() {
+                        let class = class_of[&payee.script_pubkey];
+                        tree_sat[class] += payee.amount;
+                        tree_payees[class] += 1;
+                    }
+                    (
+                        tree.payees().len(),
+                        tree.node_count(),
+                        tree.total_fee(1).unwrap(),
+                    )
+                });
+            let fee_each = if tree_count == 0 {
+                0
+            } else {
+                tree_fee / tree_count as u64
+            };
+            for (index, class) in classes.iter().enumerate() {
+                let fair = SUBSIDY as f64 * class_weight[index] as f64 / total_weight as f64;
+                let paid = coinbase_sat[index] + tree_sat[index];
+                println!(
+                    "{scenario}|{share}|{}|{}|{tree_count}|{tree_transactions}|{tree_fee}|{build_ms:.0}|{}|{}|{}|{:.0}|{fair:.0}|{paid}|{:.4}|{} payees, {} sat|{} payees, {} sat|{fee_each}",
+                    outputs.len(),
+                    output_bytes(&outputs),
+                    class.name,
+                    class.payees,
+                    class.level,
+                    fair / f64::from(class.payees),
+                    paid as f64 / fair,
+                    coinbase_payees[index],
+                    coinbase_sat[index],
+                    tree_payees[index],
+                    tree_sat[index],
+                );
+            }
+        }
+    }
+}

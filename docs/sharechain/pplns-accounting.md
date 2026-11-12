@@ -149,7 +149,7 @@ weak work is the minimum's and nothing changes.
 
 A weak share's weight goes to its own payout address after its own donation
 and fee, like an uncle's; it has no share coinbase and no payout right to
-sell. The carrying share's 5% joins its own weight, as a nephew bonus does,
+sell. The carrying share's 1% joins its own weight, as a nephew bonus does,
 and only when both are on the paying block's Bitcoin Cash chain. For sizing
 the window a share's work is its credited weight plus its uncles' and its
 weak shares', so the window still holds three blocks of actual work; weak
