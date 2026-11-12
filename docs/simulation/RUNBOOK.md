@@ -542,9 +542,12 @@ What to read afterwards:
   hash is `0x76`, its node's seed (index + 1, 8 bytes little endian) and its
   own number, so a P2PKH script names the node it belongs to.
 
-Two runs on 2026-11-12, 12 nodes each: token shares with the smallest
+Three runs on 2026-11-12, 12 nodes each: token shares with the smallest
 four nodes at level 0 (3 hours 23 minutes, 4,134 shares, 226 regtest
-blocks), and the same without tokens (38 minutes, 797 shares, 50 blocks).
+blocks); the same without tokens (38 minutes, 797 shares, 50 blocks); and
+token shares with those four nodes at level 1 instead of 0 (41 minutes, 855
+shares, 55 blocks, of which the node still served the trees of the last
+22). The table below is of the first two.
 
 | What | Token shares, level 0 | No tokens, level 0 |
 |---|---|---|
@@ -568,20 +571,24 @@ What each node's miners were paid against their part of the hashrate
 (token shares: the 83 blocks at the full reward whose tree the node still
 served; no tokens: all 50 blocks):
 
-| Node | Part of the hashrate | Level | Paid over hashrate part, token shares | Paid over hashrate part, no tokens |
-|---:|---:|---:|---:|---:|
-| 0 | 32.2% | 5 | 1.01 | 0.96 |
-| 1 | 16.1% | 5 | 1.05 | 1.02 |
-| 2 | 10.7% | 5 | 1.04 | 0.98 |
-| 3 | 8.1% | 5 | 1.03 | 0.98 |
-| 4 | 6.4% | 3 | 1.03 | 1.03 |
-| 5 | 5.4% | 3 | 1.03 | 1.02 |
-| 6 | 4.6% | 3 | 1.05 | 1.06 |
-| 7 | 4.0% | 3 | 1.04 | 1.04 |
-| 8 | 3.6% | 0 | 0.82 | 1.03 |
-| 9 | 3.2% | 0 | 0.80 | 1.05 |
-| 10 | 2.9% | 0 | 0.80 | 1.02 |
-| 11 | 2.7% | 0 | 0.79 | 1.02 |
+| Node | Part of the hashrate | Level | Paid over hashrate part, token shares | Paid over hashrate part, no tokens | Paid over hashrate part, token shares, level 1 in place of 0 |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 32.2% | 5 | 1.01 | 0.96 | 0.96 |
+| 1 | 16.1% | 5 | 1.05 | 1.02 | 1.04 |
+| 2 | 10.7% | 5 | 1.04 | 0.98 | 1.01 |
+| 3 | 8.1% | 5 | 1.03 | 0.98 | 0.99 |
+| 4 | 6.4% | 3 | 1.03 | 1.03 | 1.00 |
+| 5 | 5.4% | 3 | 1.03 | 1.02 | 1.02 |
+| 6 | 4.6% | 3 | 1.05 | 1.06 | 1.07 |
+| 7 | 4.0% | 3 | 1.04 | 1.04 | 1.05 |
+| 8 | 3.6% | 0 | 0.82 | 1.03 | 0.96 |
+| 9 | 3.2% | 0 | 0.80 | 1.05 | 0.99 |
+| 10 | 2.9% | 0 | 0.80 | 1.02 | 1.08 |
+| 11 | 2.7% | 0 | 0.79 | 1.02 | 0.97 |
+
+With level 1 in place of level 0 the four smallest nodes' miners were paid
+1.00 of their part together (1.03 in an earlier run of 16 blocks), and the
+tree's largest payee received 17,648 satoshis a block, one level 5 payment.
 
 The level 0 miners lose a fifth on token shares, and more as slices
 shrink: after the regtest halving to 610,351 satoshis they were paid 0.60

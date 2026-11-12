@@ -658,6 +658,11 @@ study", and the payout simulator's `scale` table):
   a node 6.4 ms with 1,000 miners in the window, 38 ms with 10,000 and 362
   ms with 100,000; a weak share 0.3, 3.8 and 45 ms. At 10-second shares
   100,000 miners keep a node 18% busy.
+- **A window full of weak shares** costs little more to walk: 14 ms for
+  1,800 shares carrying 32 weak shares each with 5,100 payees, 174 ms with
+  50,100 payees, and 160 ms at the cap of 120,960 shares with 6,000 payees.
+  The time follows the number of payees, about 3.5 microseconds each, not
+  the number of credits.
 - **How often a small miner is paid** falls with the number of home miners
   in a pool, not with its hashrate: a pool makes 3.2 weak shares a second,
   whatever its size. A bigger pool also pays in bigger pieces, because its
@@ -678,20 +683,37 @@ Still open:
   (Bitcoin's hashrate, a pool at 1 to 2% of Bitcoin Cash, half its work
   from home miners) they get 10% of their fair part on a share without
   tokens and 0.03% on a token share, and the farms get the rest. At level 1
-  the same pool is paid 99.9%. It cannot happen while the level 0 winners of
+  the same pool is paid 99.9%. A 12-node swarm with 1,200 miners
+  (`docs/simulation/RUNBOOK.md`, Test J) shows it on real nodes: on token
+  shares the miners at level 0 were paid 0.79 to 0.82 of their part of the
+  hashrate and the tree's largest payee eleven times what its work earned;
+  without tokens they were paid 1.02 to 1.05; with level 1 in place of level
+  0 they were paid 1.00. It cannot happen while the level 0 winners of
   a block fit the coinbase: on chipnet today, or at today's hashrate, where
   a node leaves a 1.2 TH/s miner at level 5. A fix is a rule change. The
   candidates: draw the tree's payees that would be below dust among
   themselves at 1,092 satoshis, so the pot stays theirs; or make level 1 the
   lowest level.
-- **Weak shares at the start of a chain overrun the peer streams.** `R`
-  starts at `R_MAX`, so a new chain's miners find weak shares 256 times as
-  fast as shares until `R` falls, and each is its own request to every
-  peer. A 12-node swarm at 3-second shares logged thousands of dropped
-  streams a minute in its first minutes. Node behaviour, not a rule.
+- **Every weak share is sent whole to every peer.** A node sends each weak
+  share it accepts, as its own request, to every peer but the one it came
+  from, so a node with eleven peers receives it eleven times: the 12-node
+  swarm took 719,915 weak shares from peers and refused 7,122,362
+  duplicates. At the start of a chain, where `R` starts at `R_MAX` and the
+  share difficulty is still below the hashrate, that was more requests than
+  the streams hold: 136,129 inbound streams were dropped in the first
+  minute, and none after. Announcing a weak share by its hash, as
+  transactions are, sends each one once. Node behaviour, not a rule.
+- **A carried weak share's timestamp is checked against the node's own
+  clock.** `validate_carried_weak_headers` applies the 120-second future
+  limit of a relayed weak share to the ones a share carries, and a failure
+  marks the share invalid for good, so two nodes whose clocks differ can
+  disagree about one share for ever. The limit for a carried weak share has
+  to come from chain data, the carrying share's own time. A rule change.
+- **A weak share that passes proof of work and fails a later check can be
+  sent again and again**, each time costing a window walk: the failure is
+  not remembered, the peer is not dropped, and the walk cache empties
+  itself when it is full. Node behaviour.
 - **Not yet simulated:** the band step.
-- **Not yet measured:** the window walk with a window full of weak-share
-  credits.
 
 ## References
 

@@ -17,9 +17,9 @@ a weak share costs 0.3, 3.8 and 45 ms; a token share 7.4, 45 and 376 ms; and
 one walks windows whose shares carry 32 weak shares each: 14 ms for 1,800
 shares and 5,100 payees, 174 ms with 50,100 payees, 211 ms for 18,000 shares
 and 51,000 payees, and 160 ms at the cap with 6,000 payees, against 6.6 ms
-at the cap without weak shares. Loading those windows takes 0.8, 10, 126 and
-88 seconds, because each payee's key is found by scanning the window's
-payees (`AddressKeys::key_for`). The network
+at the cap without weak shares. Loading those windows took 0.8, 10, 126 and
+88 seconds while each payee's key was found by a scan of the window's
+payees; with the lookup below they load in 0.04, 0.05, 0.5 and 3.2 seconds. The network
 simulator now queues validation one at a time per node
 (`ValidationQueue::Serial`, as the window's write lock serialises walks) and
 reports each node's validation load. On 1,000 nodes: shares without their
@@ -50,6 +50,16 @@ the hashrate, and 1.02 to 1.05 without tokens, where every payee fits the
 coinbase. And a node sends every weak share whole to each
 peer, ten duplicates for each one taken in a 12-node mesh, which overran the
 request streams in the first minute of a new chain.
+
+The PPLNS window finds a payee's key with one lookup instead of a scan of
+every payee (`AddressKeys`, upstream's interner, now with a map from value
+to key; a freed slot is still reused lowest first, so keys are assigned as
+before and no payout changes). The window asks for a key for every share
+and every weak share credit it loads: a window of 1,800 shares carrying
+57,568 weak shares for 50,100 payees loaded in 10.4 seconds and now loads in
+0.05, 18,000 shares for 51,000 payees fell from 126 seconds to 0.5, and the
+cap of 120,960 shares with 32 weak shares each for 6,000 payees from 88
+seconds to 3.2.
 
 Upstream's script history index (`ScriptHistory`, for Electrum's
 `blockchain.scripthash.*` methods) is an address index, so a Bitcoin Cash

@@ -236,10 +236,7 @@ fn median_build_ms(weights: &PplnsWeights, token_share: bool, case: &str) -> (f6
 
 /// Timing report, not a check: what a Bitcoin Cash window costs to load,
 /// walk and pay when its shares carry weak-share credits, and what the same
-/// cap costs with none. The load finds each payee's key by scanning the
-/// window's payees (`AddressKeys::key_for`), so its time grows with shares
-/// times weak shares times payees; the cases keep the payees few enough to
-/// finish in minutes. Run with
+/// cap costs with none. Run with
 /// `cargo test --release -p p2poolv2_lib weak_share_credits -- --ignored --nocapture`.
 #[test]
 #[ignore = "timing report, run by hand"]
