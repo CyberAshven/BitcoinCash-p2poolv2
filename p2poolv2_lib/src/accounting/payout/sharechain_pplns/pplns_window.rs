@@ -6669,4 +6669,103 @@ mod tests {
         assert_eq!(sized.len(), 3);
         assert_eq!(claimed_only.len(), 5);
     }
+
+    /// Timing report, not a check: what checking one share's payouts costs a
+    /// node at Bitcoin Cash window sizes, for the network simulator's
+    /// validation time. A node does this for every share and weak share it
+    /// receives: walk the window from the share's parent (cached by parent
+    /// and paid block, so a repeat costs nothing), then build the expected
+    /// coinbase outputs and compare. Run with
+    /// `cargo test --release -p p2poolv2_lib validation_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing report, run by hand"]
+    fn validation_cost_at_bitcoin_cash_window_sizes() {
+        use crate::accounting::payout::coinbase_budget::PayoutSplit;
+        use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+        use std::time::Instant;
+
+        println!("shares,payees,build_ms,load_ms,walk_ms,outputs_ms,outputs");
+        for (shares, payees) in [
+            (1_000, 100),
+            (10_000, 1_000),
+            (120_960, 1_000),
+            (120_960, 10_000),
+            (120_960, 100_000),
+        ] {
+            let started = Instant::now();
+            let mut headers = Vec::with_capacity(shares);
+            let mut prev_hash = BlockHash::all_zeros().to_string();
+            for index in 0..shares {
+                let payee = (index % payees) as u32;
+                let mut key = [0u8; 20];
+                key[..4].copy_from_slice(&payee.to_le_bytes());
+                let header = TestShareBlockBuilder::new()
+                    .prev_share_blockhash(prev_hash)
+                    .share_owner(ShareOwner::CashP2pkh(key))
+                    .payout_address(PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array(key),
+                        TEST_NETWORK,
+                    )))
+                    .work(2)
+                    .build()
+                    .header;
+                let blockhash = header.block_hash();
+                prev_hash = blockhash.to_string();
+                headers.push(ConfirmedHeaderResult {
+                    height: index as u32,
+                    blockhash,
+                    header,
+                });
+            }
+            let tip_hash = headers.last().unwrap().blockhash;
+            headers.reverse();
+            let build_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            let tip_height = shares as u32 - 1;
+            let mut store = MockChainStoreHandle::default();
+            store.expect_get_chain_tip().returning(move || Ok(tip_hash));
+            store
+                .expect_get_block_metadata()
+                .returning(move |_| Ok(metadata_at_height(tip_height)));
+            store
+                .expect_get_confirmed_headers_in_range()
+                .returning(move |_, _| Ok(headers.clone()));
+            let mut window = PplnsWindow::new(TEST_NETWORK)
+                .for_chain(Chain::BitcoinCash)
+                .with_window_sizes(0, shares);
+
+            let started = Instant::now();
+            window.update(&store).unwrap();
+            let load_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            //* A paying block far heavier than the window, so the cap, all
+            //* `shares`, bounds the walk.
+            let started = Instant::now();
+            let weights = window
+                .get_weights_from_start_hash(
+                    tip_hash,
+                    (1_u128 << 80).into(),
+                    &MockChainStoreHandle::default(),
+                )
+                .unwrap();
+            let walk_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            let started = Instant::now();
+            let outputs = build_pplns_outputs(
+                312_500_000,
+                &weights,
+                &None,
+                None,
+                &None,
+                None,
+                PayoutSplit::for_chain(Chain::BitcoinCash, false),
+            )
+            .unwrap();
+            let outputs_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            println!(
+                "{shares},{payees},{build_ms:.0},{load_ms:.1},{walk_ms:.2},{outputs_ms:.2},{}",
+                outputs.outputs.len()
+            );
+        }
+    }
 }

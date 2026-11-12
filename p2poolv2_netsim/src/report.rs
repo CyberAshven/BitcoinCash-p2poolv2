@@ -62,6 +62,13 @@ pub struct PropagationSummary {
     /// chain share's header with its uncle hashes, and the headers of the
     /// uncles it names with theirs.
     pub header_sync_bytes_per_chain_share: f64,
+    /// Mean and largest part of the run a node's validation worker was
+    /// busy (above 1 under `ValidationQueue::Parallel` means more work than
+    /// one worker can do).
+    pub validation_busy_mean: f64,
+    pub validation_busy_max: f64,
+    /// Mean seconds a validation waited for the worker.
+    pub mean_validation_wait_seconds: f64,
 }
 
 /// Bytes per second per node, by what carries them.
@@ -166,6 +173,9 @@ impl Report {
             copies_received_per_weak_share,
             uncles_per_chain_share,
             header_sync_bytes_per_chain_share,
+            validation_busy_mean: mean(&outcome.node_validation_busy_fraction),
+            validation_busy_max: maximum(&outcome.node_validation_busy_fraction),
+            mean_validation_wait_seconds: outcome.mean_validation_wait_seconds,
         };
         let job_bytes = stratum_job_bytes(
             scenario.stratum,
@@ -358,6 +368,42 @@ pub fn scaling_markdown_table(reports: &[Report]) -> String {
     reports.iter().for_each(|report| {
         table.push('\n');
         table.push_str(&scaling_markdown_row(report));
+    });
+    table
+}
+
+/// The header of the limits study's Markdown table: the scaling columns
+/// that matter to upstream's objections, with each node's validation load.
+pub fn limits_markdown_header() -> String {
+    "| Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |\n\
+     |---|---:|---:|---:|---:|---:|---:|---:|---:|"
+        .to_string()
+}
+
+/// One report as a row of the limits study's table.
+pub fn limits_markdown_row(report: &Report) -> String {
+    format!(
+        "| {} | {} | {:.1} | {} | {} | {} / {} | {:.3} | {} / {} | {:.1} |",
+        report.scenario.label,
+        group_thousands(report.share_wire_bytes),
+        report.scenario.validation_seconds * 1_000.0,
+        percent(report.propagation.stale_rate),
+        seconds(report.propagation.mean_seconds_to_all),
+        rounded(report.bandwidth.p2pool_upload_megabits_mean),
+        rounded(report.bandwidth.p2pool_upload_megabits_max),
+        report.propagation.uncles_per_chain_share,
+        percent(report.propagation.validation_busy_mean),
+        percent(report.propagation.validation_busy_max),
+        report.propagation.mean_validation_wait_seconds * 1_000.0,
+    )
+}
+
+/// A Markdown table of reports for the limits study.
+pub fn limits_markdown_table(reports: &[Report]) -> String {
+    let mut table = limits_markdown_header();
+    reports.iter().for_each(|report| {
+        table.push('\n');
+        table.push_str(&limits_markdown_row(report));
     });
     table
 }

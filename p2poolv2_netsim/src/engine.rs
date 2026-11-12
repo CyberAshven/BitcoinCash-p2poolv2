@@ -176,6 +176,22 @@ pub struct Parameters {
     pub forwarding: Forwarding,
     /// Weak shares on the same links, if any.
     pub weak_shares: Option<WeakShareLoad>,
+    /// Whether a node validates shares one at a time.
+    pub validation_queue: ValidationQueue,
+}
+
+/// How a node's validations share its processor.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub enum ValidationQueue {
+    /// Every share and weak share takes `validation_seconds` from when it is
+    /// ready, however many arrive at once: the model before the limits
+    /// study, as if a node had a processor per share.
+    Parallel,
+    /// One at a time, as a node's single validation worker takes them: a
+    /// share or weak share ready while another is validated waits its turn.
+    /// A weak share takes `weak_share_seconds` (its window walk is cached by
+    /// parent, so it costs the coinbase build alone).
+    Serial { weak_share_seconds: f64 },
 }
 
 /// What became of the shares and what the links carried.
@@ -215,6 +231,10 @@ pub struct Outcome {
     pub node_upload_bytes_per_second: Vec<f64>,
     /// P2Pool bytes each node received, per second of mining.
     pub node_download_bytes_per_second: Vec<f64>,
+    /// The part of the run each node's validation worker was busy.
+    pub node_validation_busy_fraction: Vec<f64>,
+    /// Mean seconds a validation waited for the worker, over every node.
+    pub mean_validation_wait_seconds: f64,
     /// Nodes whose share and weak share uploads alone needed more than their
     /// upload rate.
     pub saturated_nodes: u64,
@@ -336,6 +356,15 @@ struct NodeState {
     bytes_received: u64,
     /// Bytes of shares and weak shares the node pushed, acks left out.
     pushed_bytes: u64,
+    /// When the node's validation worker finishes what it has queued
+    /// (`ValidationQueue::Serial`).
+    validation_free_at: f64,
+    /// Seconds the node spent validating.
+    validation_busy_seconds: f64,
+    /// Seconds validations waited for the worker, summed.
+    validation_wait_seconds: f64,
+    /// Validations the node ran.
+    validations: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -532,6 +561,10 @@ impl<'network> Simulation<'network> {
                 bytes_sent: 0,
                 bytes_received: 0,
                 pushed_bytes: 0,
+                validation_free_at: 0.0,
+                validation_busy_seconds: 0.0,
+                validation_wait_seconds: 0.0,
+                validations: 0,
             };
             node_count
         ];
@@ -660,7 +693,7 @@ impl<'network> Simulation<'network> {
             Forwarding::AfterValidation => {
                 states[finder].stage = Stage::Validating;
                 self.at_node.push(states);
-                let validated_at = time + self.parameters.validation_seconds;
+                let validated_at = self.validation_done_at(finder, time, false);
                 self.schedule(
                     validated_at,
                     EventKind::ShareValidated {
@@ -753,12 +786,37 @@ impl<'network> Simulation<'network> {
     /// Validate a share `node` has just received for the first time, or hold
     /// it until what it depends on is accepted (or, when shares are forwarded
     /// after the header check, checked).
+    /// When `node` finishes validating a share (`weak` false) or a weak
+    /// share that is ready at `time`, under `Parameters::validation_queue`,
+    /// and the node's validation accounts.
+    fn validation_done_at(&mut self, node: usize, time: f64, weak: bool) -> f64 {
+        let (cost, serial) = match self.parameters.validation_queue {
+            ValidationQueue::Parallel => (self.parameters.validation_seconds, false),
+            ValidationQueue::Serial { weak_share_seconds } if weak => (weak_share_seconds, true),
+            ValidationQueue::Serial { .. } => (self.parameters.validation_seconds, true),
+        };
+        let state = &mut self.nodes[node];
+        let start = if serial {
+            state.validation_free_at.max(time)
+        } else {
+            time
+        };
+        let done = start + cost;
+        if serial {
+            state.validation_free_at = done;
+        }
+        state.validation_busy_seconds += cost;
+        state.validation_wait_seconds += start - time;
+        state.validations += 1;
+        done
+    }
+
     fn receive_new_share(&mut self, time: f64, node: usize, share: usize) {
         match self.parameters.forwarding {
             Forwarding::AfterValidation => {
                 if self.dependencies_accepted(node, share) {
                     self.at_node[share][node].stage = Stage::Validating;
-                    let validated_at = time + self.parameters.validation_seconds;
+                    let validated_at = self.validation_done_at(node, time, false);
                     self.schedule(validated_at, EventKind::ShareValidated { node, share });
                 } else {
                     self.at_node[share][node].stage = Stage::Waiting;
@@ -828,7 +886,7 @@ impl<'network> Simulation<'network> {
         self.nodes[node].waiting = still_waiting;
         ready.into_iter().for_each(|share| {
             self.at_node[share][node].stage = Stage::Validating;
-            let validated_at = time + self.parameters.validation_seconds;
+            let validated_at = self.validation_done_at(node, time, false);
             self.schedule(validated_at, EventKind::ShareValidated { node, share });
         });
     }
@@ -857,7 +915,7 @@ impl<'network> Simulation<'network> {
             && self.dependencies_accepted(node, share)
         {
             self.at_node[share][node].stage = Stage::Validating;
-            let validated_at = time + self.parameters.validation_seconds;
+            let validated_at = self.validation_done_at(node, time, false);
             self.schedule(validated_at, EventKind::ShareValidated { node, share });
         }
     }
@@ -968,8 +1026,9 @@ impl<'network> Simulation<'network> {
         let slot = self.allocate_weak_share(parent);
         self.weak_shares[slot].at_node[finder].stage = Stage::Validating;
         self.weak_shares_found += 1;
+        let validated_at = self.validation_done_at(finder, time, true);
         self.schedule(
-            time + self.parameters.validation_seconds,
+            validated_at,
             EventKind::WeakShareValidated { node: finder, slot },
         );
         let next = time + self.weak_share_random.next_exponential(mean);
@@ -1019,10 +1078,8 @@ impl<'network> Simulation<'network> {
         if state.stage == Stage::Unknown {
             if self.at_node[parent][node].stage == Stage::Accepted {
                 self.weak_shares[slot].at_node[node].stage = Stage::Validating;
-                self.schedule(
-                    time + self.parameters.validation_seconds,
-                    EventKind::WeakShareValidated { node, slot },
-                );
+                let validated_at = self.validation_done_at(node, time, true);
+                self.schedule(validated_at, EventKind::WeakShareValidated { node, slot });
             } else {
                 self.weak_shares[slot].at_node[node].stage = Stage::Waiting;
                 self.nodes[node].waiting_weak_shares.push(slot);
@@ -1077,10 +1134,8 @@ impl<'network> Simulation<'network> {
         self.nodes[node].waiting_weak_shares = still_waiting;
         ready.into_iter().for_each(|slot| {
             self.weak_shares[slot].at_node[node].stage = Stage::Validating;
-            self.schedule(
-                time + self.parameters.validation_seconds,
-                EventKind::WeakShareValidated { node, slot },
-            );
+            let validated_at = self.validation_done_at(node, time, true);
+            self.schedule(validated_at, EventKind::WeakShareValidated { node, slot });
         });
     }
 
@@ -1202,6 +1257,24 @@ impl<'network> Simulation<'network> {
                 .iter()
                 .map(|state| state.bytes_received as f64 / duration)
                 .collect(),
+            node_validation_busy_fraction: self
+                .nodes
+                .iter()
+                .map(|state| state.validation_busy_seconds / duration)
+                .collect(),
+            mean_validation_wait_seconds: {
+                let validations: u64 = self.nodes.iter().map(|state| state.validations).sum();
+                let waited: f64 = self
+                    .nodes
+                    .iter()
+                    .map(|state| state.validation_wait_seconds)
+                    .sum();
+                if validations == 0 {
+                    0.0
+                } else {
+                    waited / validations as f64
+                }
+            },
             saturated_nodes,
             weak_shares_found: self.weak_shares_found,
             weak_share_messages: self.weak_share_messages,
