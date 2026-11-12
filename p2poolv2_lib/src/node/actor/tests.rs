@@ -10,6 +10,7 @@ async fn test_node_handle_get_pplns_shares_sends_correct_command() {
     let node_handle = NodeHandle {
         command_tx,
         share_transaction_pool: None,
+        weak_pool: None,
     };
 
     let query = GetPplnsShareQuery {
@@ -59,6 +60,7 @@ async fn test_node_handle_get_pplns_shares_channel_send_error() {
     let node_handle = NodeHandle {
         command_tx,
         share_transaction_pool: None,
+        weak_pool: None,
     };
 
     let query = GetPplnsShareQuery {
