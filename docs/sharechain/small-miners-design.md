@@ -521,11 +521,16 @@ interval on 100 nodes:
 | 10 s | 2.1% | 0.0% | 7.8% | 0.0% |
 | 30 s | 0.5% | 0.0% | 2.7% | 0.0% |
 
-The live 2.95% at 10 seconds sits where the simulation puts it. So the share
-period's lower bound is set by the coinbase size: about 2 seconds for small
-coinbases, about 5 for large ones, before orphans and the three-uncle limit
-start losing work. Below that, weak shares carry the extra credit instead: they
-never race, so they add credit without adding stale shares.
+The live 2.95% at 10 seconds sits where the simulation puts it. So by lost
+work alone the share period's lower bound is set by the coinbase size: about 1
+second for small coinbases (0.1% orphaned there), about 5 for large ones (1.1%
+at 2 seconds). No simulated share ever had a fourth uncle to name, so the
+three-uncle limit loses nothing. Holding the stale rate at today's on 1,000
+nodes is stricter: 8.9 seconds today, 5.0 to 3.5 with the scaling ideas
+combined ([Network simulation](../simulation/network-sim.md), "Scaling
+propagation instead of capping it"). Below that, weak shares carry the extra
+credit instead: gossiped beside shares they never race, so they add credit
+without adding stale shares.
 
 ## Rollout
 
