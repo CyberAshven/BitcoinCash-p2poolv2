@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Upstream's script history index (`ScriptHistory`, for Electrum's
+`blockchain.scripthash.*` methods) is an address index, so a Bitcoin Cash
+node writes it only while it serves Electrum. The store records the first
+confirmed height it holds history for, and reads start no lower: a node that
+turns Electrum on later serves history from the next confirmed share on,
+never a partial one, and `verify_chain` checks only those heights.
+
 Share-chain rule change on Bitcoin Cash, on the same flag day with its own
 protocol segment (`weak-64-500-6`): weak shares (issue #79, row 5;
 `docs/sharechain/small-miners-design.md`, part 3). A weak share is an easier

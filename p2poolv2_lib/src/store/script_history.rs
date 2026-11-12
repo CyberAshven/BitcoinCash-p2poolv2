@@ -29,6 +29,13 @@
 //! which stays `PRUNE_INTERVAL` below the window so a small tip drop never
 //! exposes a dropped row. Correctness rests on the read bound; the filter
 //! only reclaims space.
+//!
+//! Bitcoin Cash fork: a node keeps this address index only while it serves
+//! Electrum (`Store::with_script_history`), since no node service should
+//! index addresses it does not serve. A store records the first confirmed
+//! height it holds history for, and the window starts no lower, so a node
+//! that turns Electrum on later serves history from then on, never a
+//! partial one.
 
 use super::transaction_store::{StoredTxOut, outpoint_key};
 use super::{ColumnFamily, Store, writer::StoreError};
@@ -47,6 +54,15 @@ use tracing::warn;
 /// `sha256(script_pubkey)` in internal byte order. Electrum shows it
 /// reversed.
 pub type ScriptHash = [u8; 32];
+
+/// `Metadata` key of the first confirmed height whose script history the
+/// store holds (`Store::with_script_history`), little endian; absent means
+/// every height.
+const SCRIPT_HISTORY_FROM_KEY: &[u8] = b"script_history_from";
+
+/// `SCRIPT_HISTORY_FROM_KEY`'s value while the store keeps no script
+/// history: no height is ever at or above it.
+const NO_SCRIPT_HISTORY: u32 = u32::MAX;
 
 /// One `ScriptHistory` row as RocksDB iteration yields it: key and value.
 type HistoryRow = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
@@ -161,11 +177,59 @@ impl Store {
     /// tip. Genesis when there is no candidate tip yet. Store read errors are
     /// propagated.
     pub fn history_start(&self) -> Result<u32, StoreError> {
-        match self.get_top_candidate_height() {
-            Ok(tip_height) => Ok(history_start_for_tip(self.depths(), tip_height)),
-            Err(StoreError::NotFound(_)) => Ok(0),
-            Err(error) => Err(error),
+        let window_start = match self.get_top_candidate_height() {
+            Ok(tip_height) => history_start_for_tip(self.depths(), tip_height),
+            Err(StoreError::NotFound(_)) => 0,
+            Err(error) => return Err(error),
+        };
+        Ok(window_start.max(self.script_history_from.load(Ordering::Relaxed)))
+    }
+
+    /// Keep the script history index (`keep`, when the node serves
+    /// Electrum) or stop writing it. Stopping marks the store as holding no
+    /// history; keeping it on a store that held none starts the history at
+    /// the next confirmed height, so nothing is served for the heights
+    /// confirmed while it was off. A store that has kept it all along holds
+    /// every height. Call once, before the store is shared.
+    pub fn with_script_history(self, keep: bool) -> Result<Self, StoreError> {
+        let from = self.script_history_from.load(Ordering::Relaxed);
+        let new_from = if !keep {
+            NO_SCRIPT_HISTORY
+        } else if from == NO_SCRIPT_HISTORY {
+            match self.get_top_confirmed_height() {
+                Ok(confirmed_tip_height) => confirmed_tip_height.saturating_add(1),
+                Err(StoreError::NotFound(_)) => 0,
+                Err(error) => return Err(error),
+            }
+        } else {
+            from
+        };
+        if new_from != from {
+            let metadata_cf = self.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+            self.db.put_cf(
+                &metadata_cf,
+                SCRIPT_HISTORY_FROM_KEY,
+                new_from.to_le_bytes(),
+            )?;
+            self.script_history_from.store(new_from, Ordering::Relaxed);
         }
+        Ok(self)
+    }
+
+    /// Read `SCRIPT_HISTORY_FROM_KEY` into memory when the store opens.
+    pub(super) fn load_script_history_from(&self) -> Result<(), StoreError> {
+        let metadata_cf = self.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        if let Some(bytes) = self.db.get_cf(&metadata_cf, SCRIPT_HISTORY_FROM_KEY)? {
+            let height = <[u8; 4]>::try_from(bytes.as_slice()).map_err(|_| {
+                StoreError::Database(format!(
+                    "script history start has {} bytes, not 4",
+                    bytes.len()
+                ))
+            })?;
+            self.script_history_from
+                .store(u32::from_le_bytes(height), Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     /// Write the script history rows of the block confirmed at `height`
@@ -851,6 +915,51 @@ mod tests {
 
         assert_eq!(from_zero.entries, only_kept);
         assert_eq!(from_one.entries, only_kept);
+    }
+
+    /// A node without Electrum keeps no script history: the window starts
+    /// past every height, so nothing is written or served, and the mark
+    /// survives a restart. Turning Electrum on starts the history at the next
+    /// confirmed height, never serving the heights confirmed while it was
+    /// off.
+    #[test]
+    fn script_history_is_kept_only_while_electrum_asks_for_it() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        let store = Store::new(path.clone(), false)
+            .unwrap()
+            .with_script_history(false)
+            .unwrap();
+        assert_eq!(store.history_start().unwrap(), NO_SCRIPT_HISTORY);
+        let mut batch = Store::get_write_batch();
+        store.set_top_confirmed_height(41, &mut batch);
+        store.commit_batch(batch).unwrap();
+        drop(store);
+
+        let reopened = Store::new(path.clone(), false).unwrap();
+        assert_eq!(reopened.history_start().unwrap(), NO_SCRIPT_HISTORY);
+        let kept = reopened.with_script_history(true).unwrap();
+        assert_eq!(kept.history_start().unwrap(), 42);
+        drop(kept);
+
+        let reopened = Store::new(path, false)
+            .unwrap()
+            .with_script_history(true)
+            .unwrap();
+        assert_eq!(reopened.history_start().unwrap(), 42);
+    }
+
+    /// A store that has kept script history from its start holds every
+    /// height, as upstream's always does.
+    #[test]
+    fn a_store_that_always_kept_script_history_holds_every_height() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false)
+            .unwrap()
+            .with_script_history(true)
+            .unwrap();
+
+        assert_eq!(store.history_start().unwrap(), 0);
     }
 
     #[test]

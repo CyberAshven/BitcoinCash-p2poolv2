@@ -225,10 +225,14 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 
     let genesis = p2poolv2_lib::shares::bch_genesis::genesis_for_stratum(&config.stratum)
         .expect("share genesis data is fixed");
+    // The script history index is an address index, kept only while this
+    // node serves Electrum, the one service that reads it.
     let store = Arc::new(
         Store::new(config.store.path.clone(), false)
             .unwrap()
-            .with_chain(config.stratum.chain),
+            .with_chain(config.stratum.chain)
+            .with_script_history(config.electrum.enabled)
+            .unwrap(),
     );
 
     let (write_tx, write_rx) = write_channel();

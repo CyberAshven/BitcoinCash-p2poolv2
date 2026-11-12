@@ -93,6 +93,10 @@ pub struct Store {
     /// Script history rows below this height are dropped by the
     /// `ScriptHistory` compaction filter. Shared with that filter.
     script_history_gc_threshold: Arc<AtomicU32>,
+    /// The first confirmed height whose script history this store holds: 0
+    /// when it holds every height, `u32::MAX` while it writes none
+    /// (`with_script_history`). Loaded from `Metadata` when the store opens.
+    script_history_from: AtomicU32,
 }
 
 /// Merge operator for appending BlockHashes to a Vec<BlockHash>.
@@ -323,7 +327,9 @@ impl Store {
             depths: ChainDepths::BITCOIN,
             refused_reorgs: Mutex::new(HashMap::new()),
             script_history_gc_threshold,
+            script_history_from: AtomicU32::new(0),
         };
+        store.load_script_history_from()?;
         Ok(store)
     }
 

@@ -249,6 +249,13 @@ excluded) or an input spends an output that paid it, with one row per
 distinct script per transaction. A prefix scan returns a script's history in
 height then position order. See `store/script_history.rs`.
 
+Bitcoin Cash fork: a node writes these rows only while it serves Electrum
+(`[electrum] enabled`), since it keeps no address index it does not serve.
+`Metadata` key `script_history_from` holds the first confirmed height the
+store has history for (`u32::MAX` while it writes none; absent for a store
+that always kept it), and reads start no lower, so a node that turns Electrum
+on later serves history from then on, never a partial one.
+
 | Key (40 bytes)                                                                  | Value             |
 |---------------------------------------------------------------------------------|-------------------|
 | `sha256(script_pubkey)` (32 bytes) + height (4 bytes BE) + position (4 bytes BE) | `txid` (32 bytes) |
