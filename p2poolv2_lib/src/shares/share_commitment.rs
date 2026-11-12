@@ -101,8 +101,8 @@ pub struct ShareCommitment {
     pub weak_ratio: u32,
     /// How many weak shares the share carries (`ShareHeader::weak_count`).
     pub weak_count: u16,
-    /// The merkle root of the carried weak shares' proof-of-work hashes
-    /// (`ShareHeader::weak_root`).
+    /// The merkle root of the carried weak shares' whole encodings
+    /// (`ShareHeader::weak_root`, `shares::weak::weak_root`).
     pub weak_root: sha256d::Hash,
 }
 
@@ -199,11 +199,11 @@ pub(crate) fn append_payout_level(suffix: &mut Vec<u8>, payout_level: u8) {
 
 /// Append a share's weak shares to a commitment suffix, right after its
 /// payout level: [`WEAK_SHARES_TAG`], the 4-byte `weak_ratio`, the 2-byte
-/// count and the 32-byte merkle root of the carried weak shares'
-/// proof-of-work hashes. [`ShareCommitment::hash`] appends it for a Bitcoin
-/// Cash share owner; the notify path appends the template's after the
-/// payout level, since every miner on a template carries the same weak
-/// shares.
+/// count and the 32-byte merkle root of the carried weak shares' whole
+/// encodings (`shares::weak::weak_root`). [`ShareCommitment::hash`] appends
+/// it for a Bitcoin Cash share owner; the notify path appends the template's
+/// after the payout level, since every miner on a template carries the same
+/// weak shares.
 pub(crate) fn append_weak_shares(
     suffix: &mut Vec<u8>,
     weak_ratio: u32,
