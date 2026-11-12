@@ -48,7 +48,9 @@ fn a_scenario_takes_the_measured_cost_of_its_miners() {
     assert_eq!(
         scenario.validation_queue,
         ValidationQueue::Serial {
-            weak_share_seconds: 0.00375
+            weak_share_seconds: 0.00375,
+            weak_cached_seconds: 0.001042,
+            templates: WeakTemplates::Each,
         }
     );
     assert_eq!(scenario.payees_override, Some(10_000));
@@ -92,4 +94,65 @@ fn a_slow_node_pays_the_measured_cost_times_its_factor() {
 
     assert!((scenario.validation_seconds - 0.0064 * SLOW_NODE_FACTOR).abs() < 1e-12);
     assert_eq!(scenario.share_interval_seconds, 2.0);
+}
+
+/// Rows with weak shares name each template; rows without keep the old label.
+#[test]
+fn the_period_sweep_adds_per_node_and_one_template_beside_each() {
+    let scenarios = Limit::Period.scenarios(&Scenario::default());
+    let label = |text: &str| {
+        scenarios
+            .iter()
+            .find(|scenario| scenario.label == text)
+            .unwrap_or_else(|| panic!("{text}"))
+    };
+    let plain = label("1,000 miners, no weak shares, 10 s");
+    assert!(
+        matches!(
+            plain.validation_queue,
+            ValidationQueue::Serial {
+                templates: WeakTemplates::Each,
+                ..
+            }
+        ),
+        "no weak shares"
+    );
+    assert_eq!(scenarios.len(), 84, "limits-period rows");
+
+    let each = label("10,000 miners, 32 weak shares a share, each, 10 s");
+    let per_node = label("10,000 miners, 32 weak shares a share, per node, 10 s");
+    let one = label("10,000 miners, 32 weak shares a share, one, 10 s");
+    assert_eq!(
+        each.validation_seconds, per_node.validation_seconds,
+        "10,000 miners, 10 s"
+    );
+    assert_eq!(
+        each.validation_seconds, one.validation_seconds,
+        "10,000 miners, 10 s"
+    );
+    assert_eq!(each.weak_shares_per_share, 32, "each");
+    let queue = |mode| ValidationQueue::Serial {
+        weak_share_seconds: 0.00375,
+        weak_cached_seconds: 0.001042,
+        templates: mode,
+    };
+    assert_eq!(each.validation_queue, queue(WeakTemplates::Each), "each");
+    assert_eq!(
+        per_node.validation_queue,
+        queue(WeakTemplates::PerNode),
+        "per node"
+    );
+    assert_eq!(one.validation_queue, queue(WeakTemplates::Shared), "one");
+    assert_eq!(
+        scenarios
+            .iter()
+            .filter(|scenario| scenario.label.contains(", each,"))
+            .count(),
+        24,
+        "each rows with weak shares"
+    );
+    label("10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 1 s");
+    label("100,000 miners, token shares, 32 weak shares a share, one, 2 s");
+    label("100,000 miners, all at level 0, 32 weak shares a share, each, 5 s");
+    label("100,000 miners, no weak shares, 1 s");
 }

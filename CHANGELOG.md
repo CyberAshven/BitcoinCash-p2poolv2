@@ -29,7 +29,9 @@ miners and from 32.6% to 16.3% at 100,000; relaying after the header check
 takes 0.3 to 8 points off; more peers help only shares without payouts and
 make whole shares worse on slow links; uncle caps of 6 and 12 change nothing
 measurable; 100,000 miners with weak shares keep a node 18% busy at
-10-second shares, 91% at 2 seconds and overload it at 1 second; and 10,000
+10-second shares, 88% at 2 seconds and overload it at 1 second when each
+node mines its own template, and 5%, 25% and 53% when the pool mines one
+(the simulator now models the node's cache of weak share payouts); and 10,000
 nodes cost half a point over 1,000.
 
 The payout simulator has a `scale` table: pools of 10 to 90% of a Bitcoin
