@@ -25,7 +25,12 @@ use crate::difficulty::{
 };
 use crate::levels::level_amount;
 use crate::miners::{MinerClass, MinerKind, MinerMix, TrackedMiner};
-use crate::payouts::{ChainPayoutInputs, TrackedInputs, TrackedOutcome, simulate_chain_payouts};
+use crate::payouts::{
+    ChainPayoutInputs, Steering, TrackedInputs, TrackedOutcome, simulate_chain_payouts,
+};
+use crate::races::{
+    ForkChoice, RaceOutcome, RaceQueueInputs, RaceSettings, Racer, simulate_race_queue,
+};
 use crate::sampling::poisson;
 use crate::weak::{WeakQueueInputs, WeakQueueOutcome, simulate_weak_queue};
 use crate::window::{WindowGeometry, size_window};
@@ -33,6 +38,10 @@ use p2poolv2_netsim::random::SimulationRandom;
 
 /// Samples per class when estimating the other payees' pot in a level group.
 const LEVEL_POT_SAMPLES: usize = 2_000;
+
+/// What the name of a class's part on non-carrying nodes adds to the
+/// class's name.
+pub const NON_CARRYING_SUFFIX: &str = " (non-carrying)";
 
 /// The share chain designs compared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +126,61 @@ pub enum WeakCredit {
     WeakWork,
 }
 
+/// Share races simulated in the weak share queue (study #85) instead of a
+/// flat stale rate, and the weak shares they lose.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShareRaces {
+    /// What decides a race.
+    pub fork_choice: ForkChoice,
+    /// Fraction of weak shares mined on a parent that leaves the chain.
+    pub stale_parent_loss: f64,
+    /// Whether a race's loser drops the weak shares it carried.
+    pub uncle_carrier_drops: bool,
+}
+
+impl ShareRaces {
+    /// Races with `fork_choice` and no weak shares lost.
+    pub fn without_losses(fork_choice: ForkChoice) -> Self {
+        Self {
+            fork_choice,
+            stale_parent_loss: 0.0,
+            uncle_carrier_drops: false,
+        }
+    }
+}
+
+/// When a steering miner has a second parent to pick from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteeringMode {
+    /// Only while two shares race: it builds on the one with the better
+    /// seed. A race goes either way, so this adds no orphan risk.
+    Races,
+    /// Always: it builds on the tip or on the tip's parent, whichever seed
+    /// is better. A share it finds on the parent is a sibling of the tip
+    /// and goes stale.
+    TipOrParent,
+}
+
+impl SteeringMode {
+    /// Name in tables.
+    pub fn name(&self) -> &'static str {
+        match self {
+            SteeringMode::Races => "races only",
+            SteeringMode::TipOrParent => "tip or its parent",
+        }
+    }
+}
+
+/// The draw-steering attack: one tracked miner picks parents for a better
+/// level draw in the blocks it finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawSteering {
+    /// Index of the steering miner in the scenario's tracked miners.
+    pub tracked_index: usize,
+    /// When it can pick.
+    pub mode: SteeringMode,
+}
+
 /// The stale share rate the network simulation measured at `period`
 /// seconds, interpolated linearly between its rows and held at its ends.
 pub fn stale_rate_for_period(period: f64) -> f64 {
@@ -183,6 +247,14 @@ pub struct Scenario {
     pub spam_multiple: f64,
     /// How shares on minimum jobs are credited with weak shares.
     pub weak_credit: WeakCredit,
+    /// Share races in the weak share queue, or `None` for the flat stale
+    /// rate.
+    pub share_races: Option<ShareRaces>,
+    /// The draw-steering attack, if run.
+    pub draw_steering: Option<DrawSteering>,
+    /// Every miner, the tracked ones too, mines at the minimum whatever the
+    /// node default would give it.
+    pub every_miner_at_minimum: bool,
     /// Months simulated.
     pub months: usize,
     /// Seed of every random draw.
@@ -214,6 +286,9 @@ impl Default for Scenario {
             non_carrying_fraction: 0.0,
             spam_multiple: 0.0,
             weak_credit: WeakCredit::Page,
+            share_races: None,
+            draw_steering: None,
+            every_miner_at_minimum: false,
             months: 1_000,
             seed: 1,
             weak_queue_shares: 400_000,
@@ -253,6 +328,48 @@ pub struct MinerReport {
     pub difficulty_multiple: f64,
     /// Part of its expected credit from nephew and includer bonuses.
     pub bonus_fraction: f64,
+    /// For the steering miner: satoshis a month steering is expected to
+    /// win it in level draws.
+    pub steering_gain_per_month: f64,
+    /// For the steering miner: satoshis a month it is expected to lose to
+    /// shares that go stale on the parent it picked.
+    pub steering_orphan_cost_per_month: f64,
+    /// For the steering miner: share of its draws in which the other
+    /// parent's seed was the better one.
+    pub steering_alternative_better: f64,
+}
+
+/// One class's expected income, with the tracked miners' classes among
+/// them.
+#[derive(Debug, Clone)]
+pub struct ClassReport {
+    /// Its name.
+    pub name: String,
+    /// What it is.
+    pub kind: MinerKind,
+    /// Whether its node carries other nodes' weak shares.
+    pub on_carrying_node: bool,
+    /// Miners in the class.
+    pub count: f64,
+    /// Hashes a second of one of its miners.
+    pub miner_hashrate: f64,
+    /// The whole class's hashrate.
+    pub hashrate: f64,
+    /// The whole class's fair income a month.
+    pub fair_income_per_month: f64,
+    /// The whole class's expected income a month.
+    pub expected_income_per_month: f64,
+    /// Satoshis a month of its weak shares' work that goes to the shares
+    /// carrying them, at `INCLUDER_CUT`.
+    pub includer_paid_per_month: f64,
+    /// Satoshis a month its shares receive as includer cuts.
+    pub includer_received_per_month: f64,
+    /// Shares the whole class finds a second, stale ones included.
+    pub found_share_rate: f64,
+    /// Credited weak shares a second, the whole class.
+    pub weak_rate: f64,
+    /// Its found shares that go stale.
+    pub stale_rate: f64,
 }
 
 /// One chain's steady state.
@@ -280,6 +397,10 @@ pub struct ChainReport {
     pub weak_share_rate: f64,
     /// Weak shares carried a second.
     pub carried_weak_rate: f64,
+    /// The race queue's outcome, when share races are simulated.
+    pub races: Option<RaceOutcome>,
+    /// Share of the chain's hashrate on jobs at the minimum.
+    pub minimum_hashrate_fraction: f64,
 }
 
 /// What a run gives.
@@ -293,6 +414,8 @@ pub struct Report {
     pub miners: Vec<MinerReport>,
     /// Each chain.
     pub chains: Vec<ChainReport>,
+    /// Every class on every chain, chain by chain.
+    pub classes: Vec<ClassReport>,
 }
 
 impl Report {
@@ -327,10 +450,13 @@ impl Report {
 #[derive(Debug, Clone, Copy, Default)]
 struct ClassCredit {
     found_rate: f64,
+    stale_rate: f64,
     chain_weight: f64,
     uncle_weight: f64,
     weak_rate: f64,
+    weak_work: f64,
     weak_weight: f64,
+    includer_bonus: f64,
     bonus_rate: f64,
     credited_rate: f64,
 }
@@ -365,7 +491,7 @@ impl Scenario {
             };
             if self.non_carrying_fraction > 0.0 {
                 classes.push(MinerClass {
-                    name: format!("{} (non-carrying)", class.name),
+                    name: format!("{}{NON_CARRYING_SUFFIX}", class.name),
                     count: class.count * self.non_carrying_fraction,
                     on_carrying_node: false,
                     ..class.clone()
@@ -396,6 +522,11 @@ impl Scenario {
                 on_carrying_node: true,
                 level: self.default_level,
             });
+        }
+        if self.every_miner_at_minimum {
+            classes
+                .iter_mut()
+                .for_each(|class| class.follows_node_default = false);
         }
         classes
     }
@@ -444,12 +575,14 @@ impl Scenario {
         let mut random = SimulationRandom::from_seed(self.seed);
         let mut miners: Vec<Option<MinerReport>> = vec![None; self.tracked.len()];
         let mut chain_reports = Vec::with_capacity(2);
+        let mut class_reports = Vec::with_capacity(16);
         let mut pool_hashrate = 0.0;
         self.chains().into_iter().for_each(|chain| {
             let mut chain_random = random.derive();
-            let (report, tracked_reports) = self.run_chain(&chain, &mut chain_random);
+            let (report, tracked_reports, classes) = self.run_chain(&chain, &mut chain_random);
             pool_hashrate += chain_hashrate(&chain.classes);
             chain_reports.push(report);
+            class_reports.extend(classes);
             tracked_reports
                 .into_iter()
                 .for_each(|(index, miner)| miners[index] = Some(miner));
@@ -462,16 +595,18 @@ impl Scenario {
                 .map(|miner| miner.expect("every tracked miner is on a chain"))
                 .collect(),
             chains: chain_reports,
+            classes: class_reports,
         }
     }
 
-    /// Solve, credit and simulate one chain; returns its report and the
-    /// reports of the tracked miners on it with their scenario index.
+    /// Solve, credit and simulate one chain; returns its report, the
+    /// reports of the tracked miners on it with their scenario index, and
+    /// every class's report.
     fn run_chain(
         &self,
         chain: &Chain,
         random: &mut SimulationRandom,
-    ) -> (ChainReport, Vec<(usize, MinerReport)>) {
+    ) -> (ChainReport, Vec<(usize, MinerReport)>, Vec<ClassReport>) {
         let network = self.network_hashrate();
         let parameters = ChainParameters {
             period_seconds: self.period_seconds,
@@ -485,11 +620,13 @@ impl Scenario {
             .has_band()
             .then(|| settled_band_cap(&chain.classes, &parameters, self.band_cap));
         let mut weak_random = random.derive();
-        let weak = self
-            .design
-            .has_weak_shares()
-            .then(|| self.weak_queue(chain, &difficulty, &mut weak_random));
-        let credits = self.credits(chain, &difficulty, weak.as_ref());
+        let (weak, races) = if self.design.has_weak_shares() {
+            let (weak, races) = self.weak_queue(chain, &difficulty, &mut weak_random);
+            (Some(weak), races)
+        } else {
+            (None, None)
+        };
+        let credits = self.credits(chain, &difficulty, weak.as_ref(), races.as_ref());
         let total_credited: f64 = chain
             .classes
             .iter()
@@ -504,6 +641,9 @@ impl Scenario {
         );
         let hashrate = chain_hashrate(&chain.classes);
         let block_rate = hashrate / network / BCH_BLOCK_INTERVAL_SECONDS;
+        let income_per_credit =
+            block_rate * MONTH_SECONDS * BLOCK_REWARD_SATOSHIS * (1.0 - DONATION_FRACTION)
+                / total_credited;
         let tracked_classes: Vec<(usize, usize)> = chain
             .classes
             .iter()
@@ -534,7 +674,7 @@ impl Scenario {
                     let credit = credits[*class_index];
                     TrackedInputs {
                         found_rate: credit.found_rate,
-                        stale_rate: self.stale_rate,
+                        stale_rate: credit.stale_rate,
                         chain_weight: credit.chain_weight,
                         uncle_weight: credit.uncle_weight,
                         weak_rate: credit.weak_rate,
@@ -545,6 +685,7 @@ impl Scenario {
                 .collect(),
             level_pots,
             months: self.months,
+            steering: self.steering(chain, &tracked_classes),
         };
         let mut payout_random = random.derive();
         let outcomes = simulate_chain_payouts(&payout_inputs, &mut payout_random);
@@ -560,6 +701,7 @@ impl Scenario {
                     * (1.0 - DONATION_FRACTION)
                     * credit.credited_rate
                     / total_credited;
+                let summary = summarise_outcome(class, outcome, self.months);
                 let report = MinerReport {
                     name: class.name.clone(),
                     hashrate: class.hashrate,
@@ -568,10 +710,22 @@ impl Scenario {
                     difficulty_multiple: difficulty.class_difficulty[*class_index]
                         / difficulty.asert_difficulty,
                     bonus_fraction: credit.bonus_rate / credit.credited_rate,
-                    ..summarise_outcome(class, outcome, self.months)
+                    steering_orphan_cost_per_month: self.steering_orphan_cost(
+                        *miner_index,
+                        &credit,
+                        summary.steering_alternative_better,
+                        income_per_credit,
+                    ),
+                    ..summary
                 };
                 (*miner_index, report)
             })
+            .collect();
+        let class_reports = chain
+            .classes
+            .iter()
+            .zip(&credits)
+            .map(|(class, credit)| self.class_report(class, credit, income_per_credit))
             .collect();
         let found_share_rate: f64 = chain
             .classes
@@ -585,6 +739,13 @@ impl Scenario {
         let carried_weak_rate = weak.map_or(0.0, |outcome| {
             outcome.carried_per_share * difficulty.chain_share_rate
         });
+        let minimum_hashrate: f64 = chain
+            .classes
+            .iter()
+            .zip(&difficulty.class_at_minimum)
+            .filter(|(_, at_minimum)| **at_minimum)
+            .map(|(class, _)| class.total_hashrate())
+            .sum();
         let report = ChainReport {
             name: chain.name,
             hashrate_fraction: hashrate / network,
@@ -597,17 +758,96 @@ impl Scenario {
             found_share_rate,
             weak_share_rate,
             carried_weak_rate,
+            races,
+            minimum_hashrate_fraction: minimum_hashrate / hashrate,
         };
-        (report, tracked_reports)
+        (report, tracked_reports, class_reports)
     }
 
-    /// Run the weak share queue of a chain in its steady state.
-    fn weak_queue(
+    /// The steering miner's part in the payout simulation, when it is on
+    /// this chain. `tracked_classes` pairs each tracked class's index on
+    /// the chain with its index in the scenario's tracked miners.
+    fn steering(&self, chain: &Chain, tracked_classes: &[(usize, usize)]) -> Option<Steering> {
+        self.draw_steering.and_then(|steering| {
+            tracked_classes
+                .iter()
+                .position(|(_, miner_index)| *miner_index == steering.tracked_index)
+                .map(|payout_index| {
+                    let class = &chain.classes[tracked_classes[payout_index].0];
+                    Steering {
+                        tracked_index: payout_index,
+                        own_block_chance: class.total_hashrate() / chain_hashrate(&chain.classes),
+                        choice_chance: match steering.mode {
+                            SteeringMode::Races => races_per_share(self.stale_rate),
+                            SteeringMode::TipOrParent => 1.0,
+                        },
+                    }
+                })
+        })
+    }
+
+    /// What the steering miner loses a month to stale shares when it mines
+    /// on the tip's parent: in that share of the time its shares would
+    /// have joined the chain go stale, paid as uncles. Zero for any other
+    /// miner and when it picks only between racing shares.
+    fn steering_orphan_cost(
         &self,
-        chain: &Chain,
-        difficulty: &ChainDifficulty,
-        random: &mut SimulationRandom,
-    ) -> WeakQueueOutcome {
+        miner_index: usize,
+        credit: &ClassCredit,
+        alternative_better: f64,
+        income_per_credit: f64,
+    ) -> f64 {
+        match self.draw_steering {
+            Some(steering)
+                if steering.tracked_index == miner_index
+                    && steering.mode == SteeringMode::TipOrParent =>
+            {
+                alternative_better
+                    * credit.found_rate
+                    * (1.0 - credit.stale_rate)
+                    * (credit.chain_weight - credit.uncle_weight)
+                    * income_per_credit
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// One class's expected income and includer cuts, all its miners
+    /// together.
+    fn class_report(
+        &self,
+        class: &MinerClass,
+        credit: &ClassCredit,
+        income_per_credit: f64,
+    ) -> ClassReport {
+        let network = self.network_hashrate();
+        ClassReport {
+            name: class.name.clone(),
+            kind: class.kind,
+            on_carrying_node: class.on_carrying_node,
+            count: class.count,
+            miner_hashrate: class.hashrate,
+            hashrate: class.total_hashrate(),
+            fair_income_per_month: fair_income_per_month(class.total_hashrate(), network),
+            expected_income_per_month: class.count * credit.credited_rate * income_per_credit,
+            includer_paid_per_month: class.count
+                * credit.weak_rate
+                * credit.weak_work
+                * self.includer_cut
+                * income_per_credit,
+            includer_received_per_month: class.count
+                * credit.found_rate
+                * (1.0 - credit.stale_rate)
+                * credit.includer_bonus
+                * income_per_credit,
+            found_share_rate: class.count * credit.found_rate,
+            weak_rate: class.count * credit.weak_rate,
+            stale_rate: credit.stale_rate,
+        }
+    }
+
+    /// The weak share queue's inputs for a chain in its steady state.
+    fn weak_queue_inputs(&self, chain: &Chain, difficulty: &ChainDifficulty) -> WeakQueueInputs {
         let minimum_shares_per_period = |on_carrying_node: bool| -> f64 {
             chain
                 .classes
@@ -632,7 +872,7 @@ impl Scenario {
                 class.count * found_share_rate(class, *class_difficulty) * (1.0 - self.stale_rate)
             })
             .sum();
-        let inputs = WeakQueueInputs {
+        WeakQueueInputs {
             carrying_minimum_shares_per_period: minimum_shares_per_period(true),
             non_carrying_minimum_shares_per_period: minimum_shares_per_period(false),
             carrying_share_fraction: carrying_chain_rate / difficulty.chain_share_rate,
@@ -643,17 +883,49 @@ impl Scenario {
             ceiling_ratio: difficulty.asert_difficulty / chain.ceiling,
             shares: self.weak_queue_shares,
             warmup_shares: 20_000,
-        };
-        simulate_weak_queue(&inputs, random)
+        }
+    }
+
+    /// Run the weak share queue of a chain in its steady state, with share
+    /// races when the scenario simulates them.
+    fn weak_queue(
+        &self,
+        chain: &Chain,
+        difficulty: &ChainDifficulty,
+        random: &mut SimulationRandom,
+    ) -> (WeakQueueOutcome, Option<RaceOutcome>) {
+        let inputs = self.weak_queue_inputs(chain, difficulty);
+        match self.share_races {
+            None => (simulate_weak_queue(&inputs, random), None),
+            Some(share_races) => {
+                let race_inputs = RaceQueueInputs {
+                    queue: inputs,
+                    racers: racers(chain, difficulty),
+                    settings: RaceSettings {
+                        fork_choice: share_races.fork_choice,
+                        races_per_share: races_per_share(self.stale_rate),
+                        stale_parent_loss: share_races.stale_parent_loss,
+                        uncle_carrier_drops: share_races.uncle_carrier_drops,
+                    },
+                };
+                let outcome = simulate_race_queue(&race_inputs, random);
+                (outcome.queue, Some(outcome))
+            }
+        }
     }
 
     /// Every class's expected credit: what a chain share, an uncle and a
     /// weak share of one of its miners are credited, and the rates.
+    ///
+    /// With share races simulated (`races`), each class's stale rate, the
+    /// weak shares each kind of node's shares carry and the weak shares lost
+    /// come from the race queue instead of the flat stale rate.
     fn credits(
         &self,
         chain: &Chain,
         difficulty: &ChainDifficulty,
         weak: Option<&WeakQueueOutcome>,
+        races: Option<&RaceOutcome>,
     ) -> Vec<ClassCredit> {
         let stale = self.stale_rate;
         let ratio = weak.map_or(1.0, |outcome| outcome.mean_ratio);
@@ -677,67 +949,97 @@ impl Scenario {
             .zip(&difficulty.class_difficulty)
             .map(|(class, class_difficulty)| found_share_rate(class, *class_difficulty))
             .collect();
-        let found_total: f64 = chain
-            .classes
-            .iter()
-            .zip(&found_rates)
-            .map(|(class, rate)| class.count * rate)
-            .sum();
-        let found_work: f64 = chain
-            .classes
-            .iter()
-            .zip(&found_rates)
-            .zip(&base_weights)
-            .map(|((class, rate), weight)| class.count * rate * weight)
-            .sum();
-        let average_uncle_weight = found_work / found_total;
-        let nephew_bonus =
-            (1.0 - UNCLE_PAID_FRACTION) * stale / (1.0 - stale) * average_uncle_weight;
-        let (carried_by_carrying, carried_by_non_carrying) = weak.map_or((0.0, 0.0), |outcome| {
-            split_carried(outcome, chain, difficulty, stale)
-        });
+        let stale_rates: Vec<f64> = match races {
+            None => vec![stale; chain.classes.len()],
+            Some(outcome) => outcome.stale_fraction.clone(),
+        };
+        let nephew_bonus = match races {
+            None => {
+                let found_total: f64 = chain
+                    .classes
+                    .iter()
+                    .zip(&found_rates)
+                    .map(|(class, rate)| class.count * rate)
+                    .sum();
+                let found_work: f64 = chain
+                    .classes
+                    .iter()
+                    .zip(&found_rates)
+                    .zip(&base_weights)
+                    .map(|((class, rate), weight)| class.count * rate * weight)
+                    .sum();
+                let average_uncle_weight = found_work / found_total;
+                (1.0 - UNCLE_PAID_FRACTION) * stale / (1.0 - stale) * average_uncle_weight
+            }
+            Some(_) => race_nephew_bonus(&chain.classes, &found_rates, &base_weights, &stale_rates),
+        };
+        let (carried_by_carrying, carried_by_non_carrying) = match races {
+            None => weak.map_or((0.0, 0.0), |outcome| {
+                split_carried(outcome, chain, difficulty, stale)
+            }),
+            Some(outcome) => (
+                outcome.queue.carried_per_carrying_share,
+                outcome.carried_per_non_carrying_share,
+            ),
+        };
         chain
             .classes
             .iter()
             .zip(&difficulty.class_at_minimum)
             .zip(found_rates.iter().zip(&base_weights))
-            .map(|((class, at_minimum), (found_rate, base_weight))| {
-                let carried = if class.on_carrying_node {
-                    carried_by_carrying
-                } else {
-                    carried_by_non_carrying
-                };
-                let includer_bonus = self.includer_cut * carried * weak_work;
-                let bonus = nephew_bonus + includer_bonus;
-                let weak_found_rate = match weak {
-                    Some(_) if *at_minimum => (ratio - 1.0) * found_rate,
-                    _ => 0.0,
-                };
-                let expired = weak.map_or(0.0, |outcome| {
-                    if class.on_carrying_node {
-                        outcome.carrying_expired_fraction
+            .zip(&stale_rates)
+            .map(
+                |(((class, at_minimum), (found_rate, base_weight)), stale)| {
+                    let carried = if class.on_carrying_node {
+                        carried_by_carrying
                     } else {
-                        outcome.non_carrying_expired_fraction
+                        carried_by_non_carrying
+                    };
+                    let includer_bonus = self.includer_cut * carried * weak_work;
+                    let bonus = nephew_bonus + includer_bonus;
+                    let weak_found_rate = match weak {
+                        Some(_) if *at_minimum => (ratio - 1.0) * found_rate,
+                        _ => 0.0,
+                    };
+                    let expired = weak.map_or(0.0, |outcome| {
+                        if class.on_carrying_node {
+                            outcome.carrying_expired_fraction
+                        } else {
+                            outcome.non_carrying_expired_fraction
+                        }
+                    });
+                    let weak_rate = match races {
+                        None => weak_found_rate * (1.0 - expired),
+                        Some(outcome) => {
+                            let lost = if class.on_carrying_node {
+                                outcome.carrying_lost_fraction
+                            } else {
+                                outcome.non_carrying_lost_fraction
+                            };
+                            weak_found_rate * (1.0 - expired - lost)
+                        }
+                    };
+                    let weak_weight = weak_work * (1.0 - self.includer_cut);
+                    let chain_weight = base_weight + bonus;
+                    let uncle_weight = UNCLE_PAID_FRACTION * base_weight;
+                    let bonus_rate = found_rate * (1.0 - stale) * bonus;
+                    let credited_rate = found_rate
+                        * ((1.0 - stale) * chain_weight + stale * uncle_weight)
+                        + weak_rate * weak_weight;
+                    ClassCredit {
+                        found_rate: *found_rate,
+                        stale_rate: *stale,
+                        chain_weight,
+                        uncle_weight,
+                        weak_rate,
+                        weak_work,
+                        weak_weight,
+                        includer_bonus,
+                        bonus_rate,
+                        credited_rate,
                     }
-                });
-                let weak_rate = weak_found_rate * (1.0 - expired);
-                let weak_weight = weak_work * (1.0 - self.includer_cut);
-                let chain_weight = base_weight + bonus;
-                let uncle_weight = UNCLE_PAID_FRACTION * base_weight;
-                let bonus_rate = found_rate * (1.0 - stale) * bonus;
-                let credited_rate = found_rate
-                    * ((1.0 - stale) * chain_weight + stale * uncle_weight)
-                    + weak_rate * weak_weight;
-                ClassCredit {
-                    found_rate: *found_rate,
-                    chain_weight,
-                    uncle_weight,
-                    weak_rate,
-                    weak_weight,
-                    bonus_rate,
-                    credited_rate,
-                }
-            })
+                },
+            )
             .collect()
     }
 
@@ -764,8 +1066,8 @@ impl Scenario {
             .filter(|(class, _)| class.kind != MinerKind::Tracked)
             .for_each(|(class, credit)| {
                 let threshold = level_amount(class.level) as f64;
-                let chain_mean = credit.found_rate * (1.0 - self.stale_rate) * span;
-                let uncle_mean = credit.found_rate * self.stale_rate * span;
+                let chain_mean = credit.found_rate * (1.0 - credit.stale_rate) * span;
+                let uncle_mean = credit.found_rate * credit.stale_rate * span;
                 let weak_mean = credit.weak_rate * span;
                 let below: f64 = (0..LEVEL_POT_SAMPLES)
                     .map(|_| {
@@ -779,6 +1081,55 @@ impl Scenario {
                 pots[class.level as usize] += class.count * below / LEVEL_POT_SAMPLES as f64;
             });
         pots.into_iter().map(|pot| pot.round() as u64).collect()
+    }
+}
+
+/// Races per chain share at stale rate `stale`: each race makes one stale
+/// share, and `stale / (1 - stale)` of them are found per chain share. At
+/// most one.
+pub fn races_per_share(stale: f64) -> f64 {
+    (stale / (1.0 - stale)).min(1.0)
+}
+
+/// The racers of the race queue: each class's found shares, its node and
+/// its share's work over the minimum, in class order.
+fn racers(chain: &Chain, difficulty: &ChainDifficulty) -> Vec<Racer> {
+    chain
+        .classes
+        .iter()
+        .zip(&difficulty.class_difficulty)
+        .map(|(class, class_difficulty)| Racer {
+            found_rate: class.count * found_share_rate(class, *class_difficulty),
+            on_carrying_node: class.on_carrying_node,
+            work_multiple: class_difficulty / difficulty.asert_difficulty,
+        })
+        .collect()
+}
+
+/// The bonus a chain share gets for naming uncles when each class goes
+/// stale at its own rate: the nephew's tenth of the uncles' base work,
+/// uncles per chain share times their mean base work.
+fn race_nephew_bonus(
+    classes: &[MinerClass],
+    found_rates: &[f64],
+    base_weights: &[f64],
+    stale_rates: &[f64],
+) -> f64 {
+    let mut stale_work = 0.0;
+    let mut chain_shares = 0.0;
+    classes
+        .iter()
+        .zip(found_rates)
+        .zip(base_weights)
+        .zip(stale_rates)
+        .for_each(|(((class, found_rate), base_weight), stale)| {
+            stale_work += class.count * found_rate * stale * base_weight;
+            chain_shares += class.count * found_rate * (1.0 - stale);
+        });
+    if chain_shares > 0.0 {
+        (1.0 - UNCLE_PAID_FRACTION) * stale_work / chain_shares
+    } else {
+        0.0
     }
 }
 
@@ -856,6 +1207,13 @@ fn summarise_outcome(class: &MinerClass, outcome: &TrackedOutcome, months: usize
         weak_shares_per_month: outcome.weak_shares as f64 / month_count,
         difficulty_multiple: 1.0,
         bonus_fraction: 0.0,
+        steering_gain_per_month: outcome.steering_gain / month_count,
+        steering_orphan_cost_per_month: 0.0,
+        steering_alternative_better: if outcome.steering_draws > 0 {
+            outcome.steering_alternative_better as f64 / outcome.steering_draws as f64
+        } else {
+            0.0
+        },
     }
 }
 

@@ -10,7 +10,9 @@ use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
 use crate::shares::validation::FailureKind;
 use crate::shares::weak::{GENESIS_WEAK_RATIO, WeakSummary, next_weak_ratio};
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
-use crate::test_utils::{TestShareBlockBuilder, TestWeakShare, build_test_weak_share};
+use crate::test_utils::{
+    TestShareBlockBuilder, TestWeakShare, build_test_weak_share, build_test_weak_share_paying,
+};
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, CompactTarget, Network, PubkeyHash, Work};
 use p2poolv2_wallet::payout_address::PayoutAddress;
@@ -94,6 +96,26 @@ fn a_body_repeating_a_weak_share_is_refused_before_the_root() {
     share.weak_shares.push(body_weak_share(3));
 
     let error = check_weak_shares_match_header(&share).unwrap_err();
+    assert!(error.message.contains("more than once"), "{error}");
+}
+
+/// One proof of work carried twice under two encodings, the second with
+/// another coinbase value: the leaves differ, and the header commits the
+/// root over both, but the repeat check compares proof-of-work hashes and
+/// refuses it.
+#[test]
+fn a_body_carrying_one_proof_of_work_under_two_encodings_is_a_repeat() {
+    let first = body_weak_share(1);
+    let mut second = body_weak_share(1);
+    second.coinbase_value += 1;
+    assert_ne!(first.committed_hash(), second.committed_hash());
+    let share = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(vec![first, second])
+        .build();
+
+    let error = check_weak_shares_match_header(&share).unwrap_err();
+    assert_eq!(error.kind, FailureKind::Consensus);
     assert!(error.message.contains("more than once"), "{error}");
 }
 
@@ -409,6 +431,104 @@ fn weak_shares_on_one_template_share_one_window_walk() {
     assert!(second_result.is_ok(), "{}", second_result.unwrap_err());
 }
 
+/// 64 weak shares on 64 templates of one Bitcoin Cash block, each paying
+/// another coinbase value, share one walk of the window: the weights depend
+/// on the parent and the block, not on the value. Each one's payouts are
+/// still built for its own value, so its rebuilt coinbase matches the one it
+/// was mined on and every one passes.
+#[test]
+fn weak_shares_on_many_templates_of_one_block_share_one_window_walk() {
+    let payee = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x55; 20]),
+        Network::Regtest,
+    ));
+    let distribution = HashMap::from([(payee, 1_000u128)]);
+    let mut window = MockPplnsWindow::default();
+    window.expect_network().return_const(Network::Regtest);
+    let walked = distribution.clone();
+    window
+        .expect_get_weights_from_start_hash()
+        .times(1)
+        .returning(move |_, _, _| Ok(PplnsWeights::without_levels(walked.clone())));
+    let validator =
+        DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
+    let mut cache = WeakPayoutCache::new();
+
+    let passed = (0..64u32)
+        .filter(|template| {
+            let weak_share = build_test_weak_share_paying(
+                TestWeakShare {
+                    parent_hash: BlockHash::from_byte_array([0x66; 32]),
+                    bits: CompactTarget::from_consensus(HARD),
+                    minimum: CompactTarget::from_consensus(HARD),
+                    weak_ratio: GENESIS_WEAK_RATIO,
+                    distribution: &distribution,
+                    time: WEAK_TIME,
+                    nonce: *template,
+                },
+                5_000_000_000 + u64::from(*template),
+            );
+            validator
+                .validate_weak_share_coinbase(
+                    &weak_share,
+                    &MockChainStoreHandle::default(),
+                    &mut window,
+                    &mut cache,
+                )
+                .is_ok()
+        })
+        .count();
+
+    assert_eq!(passed, 64);
+}
+
+/// The cached weights are those of the weak share's own block: one paying
+/// another Bitcoin Cash block walks the window again.
+#[test]
+fn a_weak_share_paying_another_block_walks_the_window_again() {
+    let payee = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x55; 20]),
+        Network::Regtest,
+    ));
+    let distribution = HashMap::from([(payee, 1_000u128)]);
+    let first = build_test_weak_share(TestWeakShare {
+        parent_hash: BlockHash::from_byte_array([0x66; 32]),
+        bits: CompactTarget::from_consensus(HARD),
+        minimum: CompactTarget::from_consensus(HARD),
+        weak_ratio: GENESIS_WEAK_RATIO,
+        distribution: &distribution,
+        time: WEAK_TIME,
+        nonce: 1,
+    });
+    let mut second = first.clone();
+    second.header.bitcoin_header.prev_blockhash = BlockHash::from_byte_array([0x77; 32]);
+    let mut window = MockPplnsWindow::default();
+    window.expect_network().return_const(Network::Regtest);
+    let walked = distribution.clone();
+    window
+        .expect_get_weights_from_start_hash()
+        .times(2)
+        .returning(move |_, _, _| Ok(PplnsWeights::without_levels(walked.clone())));
+    let validator =
+        DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
+    let mut cache = WeakPayoutCache::new();
+
+    let first_result = validator.validate_weak_share_coinbase(
+        &first,
+        &MockChainStoreHandle::default(),
+        &mut window,
+        &mut cache,
+    );
+    let _ = validator.validate_weak_share_coinbase(
+        &second,
+        &MockChainStoreHandle::default(),
+        &mut window,
+        &mut cache,
+    );
+
+    assert!(first_result.is_ok(), "{}", first_result.unwrap_err());
+}
+
 /// A coinbase paying someone other than the window anchored at the weak
 /// share's parent rebuilds to another txid and another merkle root.
 #[test]
@@ -634,6 +754,76 @@ fn a_weak_share_an_ancestor_already_carries_is_refused() {
         .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
         .prev_share_blockhash(carrier_parent.to_string())
         .weak_shares(vec![weak_share])
+        .build();
+    let mut store = MockChainStoreHandle::default();
+    store.expect_get_block_metadata_batch().returning(move |_| {
+        let metadata = |height| BlockMetadata {
+            expected_height: Some(height),
+            chain_work: Work::from_le_bytes([0u8; 32]),
+            status: Status::BlockValid,
+            chain: ChainMembership::Confirmed,
+        };
+        Ok(vec![
+            (carrier_parent, metadata(10)),
+            (weak_parent, metadata(9)),
+        ])
+    });
+    store
+        .expect_get_share_header()
+        .returning(move |_| Ok(earlier_header.clone()));
+    store
+        .expect_get_weak_summaries()
+        .returning(move |_| Ok(HashMap::from([(carrier_parent, summary.clone())])));
+    let validator =
+        DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
+
+    let error = validator
+        .validate_carried_weak_positions(&carrier, &store)
+        .unwrap_err();
+
+    assert_eq!(error.kind, FailureKind::Consensus);
+    assert!(
+        error.message.contains("already carried by an ancestor"),
+        "{error}"
+    );
+}
+
+/// The carrier's parent carries a weak share, and the carrier carries the
+/// same proof of work with another coinbase value: another leaf of the weak
+/// root, but the carried-once rule compares proof-of-work hashes, so it is
+/// still one proof of work credited twice and refused.
+#[test]
+fn a_weak_share_an_ancestor_carries_is_refused_under_another_encoding() {
+    let carrier_parent = BlockHash::from_byte_array([0x01; 32]);
+    let weak_parent = BlockHash::from_byte_array([0x02; 32]);
+    let weak_share = build_test_weak_share(TestWeakShare {
+        parent_hash: weak_parent,
+        bits: CompactTarget::from_consensus(HARD),
+        minimum: CompactTarget::from_consensus(HARD),
+        weak_ratio: GENESIS_WEAK_RATIO,
+        distribution: &HashMap::from([(
+            PayoutAddress::from(Address::p2pkh(
+                PubkeyHash::from_byte_array([0x55; 20]),
+                Network::Regtest,
+            )),
+            1u128,
+        )]),
+        time: WEAK_TIME,
+        nonce: 1,
+    });
+    let mut reencoded = weak_share.clone();
+    reencoded.coinbase_value += 1;
+    assert_ne!(reencoded.committed_hash(), weak_share.committed_hash());
+    let earlier_carrier = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(vec![weak_share])
+        .build();
+    let summary = WeakSummary::of(&earlier_carrier.weak_shares);
+    let earlier_header = earlier_carrier.header;
+    let carrier = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(carrier_parent.to_string())
+        .weak_shares(vec![reencoded])
         .build();
     let mut store = MockChainStoreHandle::default();
     store.expect_get_block_metadata_batch().returning(move |_| {

@@ -177,9 +177,9 @@ pub struct ShareHeader {
     /// How many weak shares this share's body carries (`shares::weak`).
     #[serde(default)]
     pub weak_count: u16,
-    /// The merkle root of the proof-of-work hashes of the weak shares this
-    /// share carries, in order (`shares::weak::weak_root`); all zeros for
-    /// none.
+    /// The merkle root of the weak shares this share carries, in order, each
+    /// leaf the SHA-256d of one weak share's whole encoding
+    /// (`shares::weak::weak_root`); all zeros for none.
     #[serde(default = "crate::shares::weak::empty_weak_root")]
     pub weak_root: sha256d::Hash,
 }
@@ -620,9 +620,10 @@ pub struct ShareBlock {
     pub bitcoin_coinbase: Transaction,
     /// The weak shares this share carries (`shares::weak`), at most
     /// `WEAK_CAP` of them in `WEAK_BYTES`. Not part of the block hash: the
-    /// header commits to their count and the merkle root of their
-    /// proof-of-work hashes, which the body check compares. Encoded on
-    /// Bitcoin Cash shares only; always empty on Bitcoin.
+    /// header commits to their count and the merkle root of their whole
+    /// encodings, which the body check compares, so a copy with any field of
+    /// any of them changed is a bad copy. Encoded on Bitcoin Cash shares only;
+    /// always empty on Bitcoin.
     #[serde(default)]
     pub weak_shares: Vec<WeakShare>,
 }
@@ -1096,10 +1097,7 @@ mod tests {
         assert_eq!(decoded, share);
         assert_eq!(decoded.header.weak_ratio, 256_000);
         assert_eq!(decoded.header.weak_count, 1);
-        assert_eq!(
-            decoded.header.weak_root,
-            weak_share.pow_hash().to_raw_hash()
-        );
+        assert_eq!(decoded.header.weak_root, weak_share.committed_hash());
         assert_eq!(decoded.weak_shares, vec![weak_share]);
         CoinbaseProof::verify(&share.header, &share.template_merkle_branches).unwrap();
     }

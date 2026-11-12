@@ -32,6 +32,7 @@ use super::{
 };
 use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::split_for_share;
+use crate::accounting::payout::payout_levels::PplnsWeights;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
     PayingBlock, bitcoin_block_difficulty,
 };
@@ -115,49 +116,112 @@ impl WeakPayoutKey {
     }
 }
 
-/// Expected payouts of weak shares by parent and template
-/// ([`WeakPayoutKey`]), so each weak share costs one coinbase rebuild and
-/// hash rather than a walk of the PPLNS window.
+impl WeakPayoutKey {
+    /// The part of the key the window's weights depend on.
+    fn weights_key(&self) -> WeakWeightsKey {
+        WeakWeightsKey {
+            parent: self.parent,
+            bitcoin_bits: self.bitcoin_bits,
+            bch_prev: self.bch_prev,
+        }
+    }
+}
+
+/// The most window weights a [`WeakPayoutCache`] keeps before it starts
+/// over: a few Bitcoin Cash blocks on each of the `WEAK_DEPTH` parents a
+/// weak share may build on.
+const WEAK_WEIGHTS_CACHE_CAPACITY: usize = 16;
+
+/// What the PPLNS window's weights for a weak share depend on: its parent,
+/// the window's anchor, and the Bitcoin Cash block its coinbase pays, by its
+/// bits and prev. Weak shares on every template of that block share them,
+/// whatever their coinbase value, cuts or merge-mining output, so they share
+/// one walk of the window.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct WeakWeightsKey {
+    parent: BlockHash,
+    bitcoin_bits: u32,
+    bch_prev: BlockHash,
+}
+
+/// The PPLNS window's weights for weak shares by parent and paid block
+/// ([`WeakWeightsKey`]), and the expected payouts built from them by
+/// template ([`WeakPayoutKey`]): weak shares on many templates of one block
+/// cost one walk of the window, and each weak share one coinbase rebuild and
+/// hash.
 #[derive(Default)]
 pub struct WeakPayoutCache {
+    weights: HashMap<WeakWeightsKey, Arc<PplnsWeights>>,
     payouts: HashMap<WeakPayoutKey, Arc<CoinbasePayouts>>,
 }
 
 impl WeakPayoutCache {
     pub fn new() -> Self {
         Self {
+            weights: HashMap::with_capacity(WEAK_WEIGHTS_CACHE_CAPACITY),
             payouts: HashMap::with_capacity(WEAK_PAYOUT_CACHE_CAPACITY),
         }
     }
 
-    /// The cached payouts for `key`, or `build`'s, kept for the next weak
-    /// share. A full cache starts over: only node memory, never a verdict,
-    /// depends on what it keeps.
+    /// The cached payouts for `key`, or `build_outputs`' from the window's
+    /// weights, cached by [`WeakPayoutKey::weights_key`] or else
+    /// `walk_window`'s; both kept for the next weak share. A full cache
+    /// starts over: only node memory, never a verdict, depends on what it
+    /// keeps.
     fn get_or_build(
         &mut self,
         key: WeakPayoutKey,
-        build: impl FnOnce() -> Result<CoinbasePayouts, ValidationError>,
+        walk_window: impl FnOnce() -> Result<PplnsWeights, ValidationError>,
+        build_outputs: impl FnOnce(&PplnsWeights) -> Result<CoinbasePayouts, ValidationError>,
     ) -> Result<Arc<CoinbasePayouts>, ValidationError> {
         if let Some(payouts) = self.payouts.get(&key) {
             return Ok(Arc::clone(payouts));
         }
-        let payouts = Arc::new(build()?);
+        let weights = self.weights_or_walk(key.weights_key(), walk_window)?;
+        let payouts = Arc::new(build_outputs(&weights)?);
         if self.payouts.len() >= WEAK_PAYOUT_CACHE_CAPACITY {
             self.payouts.clear();
         }
         self.payouts.insert(key, Arc::clone(&payouts));
         Ok(payouts)
     }
+
+    /// The cached window weights for `key`, or `walk_window`'s, kept for the
+    /// next weak share.
+    fn weights_or_walk(
+        &mut self,
+        key: WeakWeightsKey,
+        walk_window: impl FnOnce() -> Result<PplnsWeights, ValidationError>,
+    ) -> Result<Arc<PplnsWeights>, ValidationError> {
+        if let Some(weights) = self.weights.get(&key) {
+            return Ok(Arc::clone(weights));
+        }
+        let weights = Arc::new(walk_window()?);
+        if self.weights.len() >= WEAK_WEIGHTS_CACHE_CAPACITY {
+            self.weights.clear();
+        }
+        self.weights.insert(key, Arc::clone(&weights));
+        Ok(weights)
+    }
 }
 
 /// The body check of a share's weak shares, against its header alone: as
-/// many as `weak_count`, none repeated, and their proof-of-work hashes'
-/// merkle root the header's `weak_root`. A failure is a bad copy of the
-/// share, as for its other body parts.
+/// many as `weak_count`, no proof-of-work hash twice, and the merkle root of
+/// their whole encodings (`weak_root`) the header's `weak_root`. A failure is
+/// a bad copy of the share, as for its other body parts.
+///
+/// The root binds every field of every carried weak share, so a copy that
+/// alters any of them fails here, before it is stored, and is fetched again.
+/// The weak share checks that run once the body is stored
+/// ([`DefaultShareValidator::validate_carried_weak_headers`] and
+/// [`DefaultShareValidator::validate_carried_weak_coinbases`]) then read only
+/// what the carrier's proof of work fixes, the store's own data aside, so
+/// their failure is a verdict on the share and never a bad copy.
 ///
 /// A repeat is refused before the root is compared: the tree pairs the
-/// last hash of an odd level with itself, so a repeated last weak share
-/// would keep the root (CVE-2012-2459).
+/// last leaf of an odd level with itself, so a repeated last weak share
+/// would keep the root (CVE-2012-2459). It compares proof-of-work hashes,
+/// so two encodings of one proof of work are a repeat too.
 pub(crate) fn check_weak_shares_match_header(share: &ShareBlock) -> Result<(), ValidationError> {
     let header = &share.header;
     if share.weak_shares.len() != usize::from(header.weak_count) {
@@ -356,8 +420,9 @@ impl DefaultShareValidator {
     /// hashes it and folds the carried merkle branch, which must give the
     /// header's merkle root.
     ///
-    /// The window's payouts come from `cache` when another weak share on the
-    /// same parent and template already built them.
+    /// The window's weights come from `cache` when another weak share on the
+    /// same parent and Bitcoin Cash block already walked the window, and its
+    /// payouts when one on the same template already built them.
     pub fn validate_weak_share_coinbase(
         &self,
         weak_share: &WeakShare,
@@ -367,20 +432,25 @@ impl DefaultShareValidator {
     ) -> Result<(), ValidationError> {
         let header = &weak_share.header;
         let split = split_for_share(self.chain, header);
-        let payouts = cache.get_or_build(WeakPayoutKey::of(weak_share), || {
-            let paying_block = PayingBlock::new(
-                bitcoin_block_difficulty(header.bitcoin_header.bits, window.network()),
-                header.bitcoin_header.prev_blockhash,
-            );
-            let weights = window
-                .get_weights_from_start_hash(
-                    header.prev_share_blockhash,
-                    paying_block,
-                    chain_store_handle,
-                )
-                .map_err(window_error_verdict)?;
-            Self::build_expected_outputs(header, &weights, weak_share.coinbase_value, split)
-        })?;
+        let payouts = cache.get_or_build(
+            WeakPayoutKey::of(weak_share),
+            || {
+                let paying_block = PayingBlock::new(
+                    bitcoin_block_difficulty(header.bitcoin_header.bits, window.network()),
+                    header.bitcoin_header.prev_blockhash,
+                );
+                window
+                    .get_weights_from_start_hash(
+                        header.prev_share_blockhash,
+                        paying_block,
+                        chain_store_handle,
+                    )
+                    .map_err(window_error_verdict)
+            },
+            |weights| {
+                Self::build_expected_outputs(header, weights, weak_share.coinbase_value, split)
+            },
+        )?;
         let commitment_hash = ShareCommitment::from_share_header_and_root(
             header,
             header.coinbase_proof.share_witness_root,
@@ -541,6 +611,10 @@ impl DefaultShareValidator {
     /// other parallel checks: each one's header rules
     /// ([`Self::validate_weak_share_header`]) and where it may be carried
     /// ([`Self::validate_carried_weak_positions`]).
+    ///
+    /// Runs on a stored body, which passed [`check_weak_shares_match_header`]:
+    /// the carrier's weak root fixes every weak share it reads, so a
+    /// `Consensus` failure here is a verdict on what the miner carried.
     pub(crate) fn validate_carried_weak_headers(
         &self,
         share: &ShareBlock,
@@ -555,6 +629,11 @@ impl DefaultShareValidator {
     /// The coinbase check of every weak share a share carries
     /// ([`Self::validate_weak_share_coinbase`]), with one payout cache for
     /// the share, under one hold of the window.
+    ///
+    /// Runs on a stored body, which passed [`check_weak_shares_match_header`]:
+    /// the scriptSig, total value, branch and header each weak share's
+    /// coinbase is rebuilt from are all fixed by the carrier's weak root, so a
+    /// `Consensus` failure here is a verdict on what the miner carried.
     pub(crate) fn validate_carried_weak_coinbases(
         &self,
         share: &ShareBlock,

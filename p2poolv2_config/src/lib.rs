@@ -1560,6 +1560,14 @@ pub struct SimConfig {
     /// default, so other sim runs keep pacing by the share target.
     #[serde(default)]
     pub weak_shares: bool,
+    /// Bitcoin Cash: of the share blocks this node broadcasts that carry weak
+    /// shares, every this many goes out with its first weak share's coinbase
+    /// value one satoshi higher, as a peer serving an altered copy of an
+    /// honest share would. The node's store and its answers to block requests
+    /// stay honest. For the end-to-end check of the weak-share commitment;
+    /// omit to broadcast every share as stored.
+    #[serde(default)]
+    pub alter_weak_copy_every: Option<u64>,
 }
 
 /// Config for p2poolv2 nodes

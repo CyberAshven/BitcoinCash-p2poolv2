@@ -235,7 +235,8 @@ It is valid as a weak share when:
 
 A weak share is identified by its proof-of-work hash, the hash of the
 Bitcoin Cash header it carries, not by its share header hash. One proof of
-work is credited once, as a share or as a weak share, never both.
+work is credited once, as a share or as a weak share, never both. The share
+that carries it commits more than that identity: its whole encoding (below).
 
 ### Where weak shares come from
 
@@ -325,10 +326,26 @@ milliseconds. The simulation measures this at `WEAK_CAP` per share.
 A share may carry up to `WEAK_CAP` weak shares and `WEAK_BYTES` of them in its
 body. Its header commits to them (tag byte `0x26` in the share commitment, then
 the 4-byte `weak_ratio`, a 2-byte count and the 32-byte merkle root of the
-carried weak shares' proof-of-work hashes), so the proof of work fixes the
-list. A carried weak share must be
+carried weak shares' whole encodings: each leaf is the SHA-256d of one weak
+share as it is sent, header, scriptSig, total value and branch), so the proof
+of work fixes the list and every byte of each weak share in it. A carried weak
+share must be
 valid as above, its parent at most `WEAK_DEPTH` shares below the carrying share,
-and not carried by any of the carrying share's ancestors.
+and not carried by any of the carrying share's ancestors. Those checks use the
+weak shares' proof-of-work hashes, read from the carried weak shares.
+
+Why the whole encoding: the share block hash covers the header, not the body,
+so a peer can relay an honest share with an altered body. The node refuses a
+body that does not match its header as a bad copy and fetches the share again.
+A root of the proof-of-work hashes alone left a carried weak share's other
+fields unbound: a peer could raise one weak share's coinbase value by a
+satoshi, or change its branch, scriptSig or coinbase proof, and the body still
+matched. The node stored it, the weak share's coinbase or header check then
+failed, and the node marked the honest share invalid and split from the chain,
+at no cost in work to the peer. With the whole encoding committed, any such
+change is a bad copy, and a weak share check that fails after the body is
+stored judges what the miner committed. This changed on 2026-11-12 (protocol
+segment `weak2-64-500-6`, store format 6).
 
 A node fills its own shares from its weak pool, oldest parent first so none
 expire, up to the cap. It relays a weak share once it has checked it, and
@@ -483,8 +500,14 @@ hashrate, the pool's (from its newest 60 confirmed shares) and the
 template's coinbase value, as the band's node policy sizes heavier jobs, and
 logs the warning once per connection. A Job Declaration token carries the
 level its identity chose, or the node's, unlowered. The `/miner` API and the
-dashboard's miner page show the miner's level and its expected payments a
-month at it; income and monthly swing are not shown yet.
+dashboard's miner page show the miner's level and its expected income,
+payments a month at its level and monthly swing. Income is its payout
+fraction of the window times the template's coinbase value on each of the
+pool's blocks a month. The swing is
+`sqrt(1 / credits a month + 1 / pool blocks a month)`, with
+`1 / payments a month` added under the root when its slice of a block is
+below its level; its credits a month are its shares, uncles and weak shares
+in the window over the window's time span.
 
 ### Steering the seed
 
@@ -539,7 +562,7 @@ never race, so they add credit without adding stale shares.
 |---|---|---|---|
 | 1 One chain | the mini chain's genesis tag only | 3 | flag day: every node restarts on a fresh store |
 | 2 Band | `band-c64` | 3 | same flag day |
-| 3 Weak shares | `weak-64-500-6` | 5 | same flag day; old nodes cannot read the new header or the weak share message |
+| 3 Weak shares | `weak-64-500-6`, then `weak2-64-500-6` | 5, then 6 | same flag day; old nodes cannot read the new header or the weak share message; the weak root's leaves then became whole encodings, a second flag day |
 | 4 Payout levels | `levels-546x2` | 4 | same flag day; old nodes cannot read the longer header |
 | 5 Share period | none; share version 2 | 3 | share-version vote |
 
@@ -547,7 +570,9 @@ A part that changes what a stored share holds raises the store format when
 it merges, so the numbers follow the merge order: part 4 raised it to 4
 (2026-11-09), because its header carries the payout level, and part 3 to 5
 (2026-11-09), because its header carries the weak ratio and the store keeps
-the weak shares.
+the weak shares. The weak root's binding of each carried weak share's whole
+encoding raised it to 6 (2026-11-12): stored shares were checked against the
+old root, which every node now computes differently.
 
 Each part is its own pull request, with its plain-words explanation and the
 maintainer's agreement before merging. Chipnet restarts once per merged part

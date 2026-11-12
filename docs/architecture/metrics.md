@@ -30,17 +30,22 @@ The response is assembled from two kinds of source:
    needs to be duplicated into the metrics actor. Currently the coinbase
    reward distribution and the network difficulty are read live from the
    `JobTracker` (latest job template), the found bitcoin blocks and
-   confirmed chain work are read from the store, and the P2P health
-   counters are read from the node actor (`NodeHandle::get_p2p_health`).
+   confirmed chain work are read from the store, the P2P health
+   counters are read from the node actor (`NodeHandle::get_p2p_health`),
+   the weak pool's counters from the pool itself
+   (`NodeHandle::weak_pool_stats`), and the weak ratio and band cap from
+   the confirmed tip's header.
 
 ```
 mining.submit ---> MetricsActor (accumulated counters/gauges) --.
-organise/confirm -> MetricsActor (effort accumulator) ----------|
+organise/confirm -> MetricsActor (effort, weak shares carried) -|
                                                                  |
 JobTracker (latest job template) --- live read at scrape -------+--> GET /metrics
 confirmed chain work (get_total_work) --- live read at scrape --|
 FoundBlocks CF (get_found_blocks) --- live read at scrape ------|
 node actor (Command::GetP2pHealth) --- live read at scrape -----|
+weak pool (NodeHandle::weak_pool_stats) --- live read at scrape |
+confirmed tip header (R and C) --- live read at scrape ---------|
                                                                  |
 PplnsWindow (planned) --- live read at scrape ------------------'
 ```
@@ -300,6 +305,62 @@ negotiated but could not exchange messages (the 2026-09-17 fork).
 - *Response backlog*: `p2p_response_queue_depth` and
   `rate(p2p_responses_dropped_total[5m])`; drops during catch-up mean the
   response worker is falling behind.
+
+### Weak shares (Bitcoin Cash)
+
+Weak shares are easier proofs of work that later shares carry
+(`docs/sharechain/small-miners-design.md`, part 3). A Bitcoin Cash P2Pool
+node checks them in the weak share worker (`node/weak_share_worker.rs`),
+keeps the ones that pass in its weak pool (`shares/weak_pool.rs`), relays
+them, and fills its own shares from the pool.
+
+| Metric | Type | Source | Notes |
+|---|---|---|---|
+| `weak_shares_found_total` | counter | live read of the weak pool | Weak shares this node's miners found that passed the checks |
+| `weak_shares_received_total` | counter | live read of the weak pool | Weak shares from peers that passed the checks |
+| `weak_shares_relayed_total` | counter | live read of the weak pool | Weak shares queued for relay to every peer but the one that sent them |
+| `weak_shares_carried_by_node_total` | counter | actor, from the stratum submit path | Weak shares carried by the shares this node's miners found, counted when the share goes to the share chain |
+| `weak_shares_carried_on_chain_total` | counter | actor, from the organise worker | Weak shares carried by shares confirmed on the share chain, whichever node found them; counted only while the chain is current |
+| `weak_shares_expired_total` | counter | live read of the weak pool | Weak shares the best chain had not carried, dropped from the pool because no share could carry them any more: their parent fell more than `WEAK_DEPTH` below the tip, or a full pool made room for one on a newer parent |
+| `weak_shares_refused_total{reason}` | counter | live read of the weak pool | Weak shares the pool did not take, by reason (below) |
+| `weak_pool_size` | gauge | live read of the weak pool | Weak shares waiting in the pool for a share to carry them |
+| `weak_pool_waiting_for_parent` | gauge | live read of the weak pool | Weak shares held, unchecked, until their parent arrives |
+| `sharechain_weak_ratio` | gauge | live read of the confirmed tip header | The tip's weak ratio `R` as a multiple: the weak target over the minimum |
+| `sharechain_band_cap` | gauge | live read of the confirmed tip header | The tip's band cap `C` as a multiple: how many times harder than the minimum a share may be |
+
+`reason` is one of a fixed set, so the series stay bounded:
+
+| Reason | A weak share that |
+|---|---|
+| `duplicate` | had a proof of work that already passed its checks, usually relayed by another peer first, or was already held |
+| `rate_limited` | came from a peer sending weak shares faster than its rate |
+| `invalid` | broke a share-chain rule |
+| `unchecked` | could not be checked: a store read failed, or data the check needs can no longer arrive |
+| `pool_full` | found the pool full of weak shares on parents no older than its own |
+| `too_deep` | had a parent too deep for a share on the tip to carry it, found before any other check, or when a held one's parent arrived |
+| `unknown_parent` | was held for its parent, or for a check that could not finish yet, and did not get it in `WEAK_DEPTH` share periods, or was the oldest held when newer ones needed the room |
+
+A weak share dropped on a full worker queue, before the pool sees it, is
+not counted. The pool's counters are plain integers behind the pool's
+own lock, read at scrape time without the node actor; like the actor's two
+carried counters they are runtime-only and reset on restart. Bitcoin and
+Hydrapool nodes keep no weak pool: they omit the pool's series, and their
+carried counters stay at zero. `sharechain_weak_ratio` and
+`sharechain_band_cap` are omitted while the tip is not a Bitcoin Cash
+share.
+
+**Grafana / alerting:**
+- *Weak share flow*: `rate()` of the found, received, relayed and carried
+  counters over 5 minutes, one time series panel.
+- *Weak shares that missed their carrier*:
+  `rate(weak_shares_expired_total[1h]) / rate(weak_shares_received_total[1h])`;
+  a steady rise means shares are not carrying others' weak shares.
+- *Refusals*: `sum by (reason) (rate(weak_shares_refused_total[5m]))`;
+  `invalid` from one peer's traffic or a jump in `rate_limited` points at a
+  misbehaving peer.
+- *Difficulty state*: `sharechain_weak_ratio` and `sharechain_band_cap` as
+  stats; `R` falls while shares carry more than half the cap of weak
+  shares, and `C` grows while heavy miners are held back by it.
 
 ## Planned metrics (later releases)
 
