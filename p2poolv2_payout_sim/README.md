@@ -294,7 +294,8 @@ where payments are rare (the larger pools and the x270 rows).
   node loses 5%, and it is the smallest tested cut at which a half-hashrate
   coalition at 10% of BCH gains nothing by not carrying. No cut stops a
   heavy coalition at 1%, so counting weak shares in fork choice is worth
-  the attack search.
+  the attack search. Study #85 later
+  moved the cut to 1% with `WEAK_DEPTH` 48 (below).
 - Default level 5 (17,472 sat): 25 payments a month and 0.85% fee loss at
   every pool size with the weak-work credit; level 6 halves the fee loss
   but halves the payments and raises the swing from 0.25 to 0.32 at 10%.
@@ -585,7 +586,7 @@ What it shows:
 5. **The lever is weak shares a second.** More weak shares a share, or a
    shorter share period, gives small miners more, smaller credits. The
    limits study in `docs/simulation/network-sim.md` prices that: each weak
-   share is a coinbase build on every node, 4 ms at 10,000 miners and 45 ms
+   share is a coinbase build on every node, 3.8 ms at 10,000 miners and 45 ms
    at 100,000.
 
 ## Code

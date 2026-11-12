@@ -1035,8 +1035,13 @@ These were measured on one core of a 2026 desktop. The scaling study's guess
 matched at 1,000 miners, was 3 times too low at 10,000 and 15 times too low
 at 100,000. The default payout level matters: at level 5 a 3.125 BCH block
 pays at most 17,886 outputs, so 100,000 miners cost a third of what they
-cost at level 0. The walk measured has no weak-share credits in it; a window
-full of them is not measured here.
+cost at level 0. The walk in the table above has no weak-share credits in
+it. A window whose shares carry 32 weak shares each was measured
+(`validation_cost_with_weak_share_credits`): the walk takes 14 ms for 1,800
+shares and 5,100 payees, 174 ms with 50,100 payees, 211 ms for 18,000
+shares and 51,000 payees, and 160 ms at the cap of 120,960 shares with
+6,000 payees. Its time follows the number of payees, about 3.5 microseconds
+each, not the number of credits.
 
 The node validates up to one share per CPU at once (`validation_worker.rs`).
 But the walk needs write access to the one shared window
@@ -1253,6 +1258,13 @@ share's size and its validation at each hop matter far more than the size
 of the network. Weak shares do not change the stale rate at 1,000 or 3,000
 nodes; they add 0.2 Mbit/s of upload a node.
 
+The window walk with 32 weak shares on each share was measured
+(`validation_cost_with_weak_share_credits`): 14 ms for 1,800 shares and
+5,100 payees, 174 ms with 50,100 payees, 211 ms for 18,000 shares and
+51,000 payees, and 160 ms at the cap of 120,960 shares with 6,000 payees.
+Its time follows the number of payees, about 3.5 microseconds each, not
+the number of credits.
+
 ### What this study did not do
 
 - It did not run real nodes at these sizes: the costs are measured, the
@@ -1262,7 +1274,6 @@ nodes; they add 0.2 Mbit/s of upload a node.
   deeper than 3.
 - Validation was measured on one desktop; a small node is taken as 5 times
   slower, not measured.
-- The window walk was measured without weak-share credits in the window.
 
 ## Code
 

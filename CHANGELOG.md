@@ -16,10 +16,11 @@ a weak share costs 0.3, 3.8 and 45 ms; a token share 7.4, 45 and 376 ms; and
 100,000 miners at level 0 cost 438 ms. A second
 one walks windows whose shares carry 32 weak shares each: 14 ms for 1,800
 shares and 5,100 payees, 174 ms with 50,100 payees, 211 ms for 18,000 shares
-and 51,000 payees, and 160 ms at the cap with 6,000 payees, against 6.6 ms
-at the cap without weak shares. Loading those windows took 0.8, 10, 126 and
-88 seconds while each payee's key was found by a scan of the window's
-payees; with the lookup below they load in 0.04, 0.05, 0.5 and 3.2 seconds. The network
+and 51,000 payees, and 160 ms at the cap with 6,000 payees, against 6.6 ms at the cap without
+weak shares and 1,000 payees. Loading those
+windows took 0.8, 10, 126 and 88 seconds while each payee's key was found
+by a scan of the window's payees; with the lookup below they load in 0.04,
+0.05, 0.5 and 3.2 seconds. The network
 simulator now queues validation one at a time per node
 (`ValidationQueue::Serial`, as the window's write lock serialises walks) and
 reports each node's validation load. On 1,000 nodes: shares without their
@@ -155,9 +156,9 @@ have yet. It holds the weak share, unchecked, in its weak pool and asks the
 peer that sent it for the parent's headers, once per parent, as it does for
 a share block's parent. Once the parent is stored, the weak share is
 checked and pooled as new; a parent too deep for a share on the tip to
-carry the weak share drops it. Held weak shares are bounded: at most 384
-(`WEAK_CAP * WEAK_DEPTH`) and 576 KiB, the oldest dropped first, each held
-at most `WEAK_DEPTH` share periods (60 seconds). `/metrics` adds
+carry the weak share drops it. Held weak shares are bounded: at most 3,072
+(`WEAK_CAP * WEAK_DEPTH`) and 4.5 MiB, the oldest dropped first, each held
+at most `WEAK_DEPTH` share periods (8 minutes). `/metrics` adds
 `weak_pool_waiting_for_parent` and the refusal reasons `too_deep` and
 `unknown_parent`. Node behaviour only; no share-chain rule changes.
 
