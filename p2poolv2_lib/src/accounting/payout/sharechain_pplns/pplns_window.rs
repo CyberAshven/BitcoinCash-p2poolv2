@@ -2107,10 +2107,9 @@ impl PplnsWindow {
     /// uncle miner in any `confirmed_entries` slot (including the eviction
     /// buffer past the window, since those entries stay cached).
     /// Once its last referencing entry leaves the cache -- via eviction or a
-    /// reorg -- the slot is freed so the `AddressKeys` interner stays bounded
-    /// and its linear `key_for` scan does not grow without bound. Runs after
-    /// eviction in `update`; replaces the stale-key cleanup that the removed
-    /// tip-anchored `get_distribution` performed inline.
+    /// reorg -- the slot is freed so the `AddressKeys` interner stays bounded.
+    /// Runs after eviction in `update`; replaces the stale-key cleanup that
+    /// the removed tip-anchored `get_distribution` performed inline.
     fn prune_unreferenced_keys(&mut self) {
         let mut referenced = vec![false; self.address_keys.len()];
         let mut owner_referenced = vec![false; self.owner_keys.len()];
@@ -2719,7 +2718,10 @@ fn set_payout_levels(credits_by_key: &mut [MinerCredits], levels: &PayeeLevels) 
 }
 
 /// Free each slot of `keys` that `referenced` marks unreferenced.
-fn remove_unreferenced_keys<T: PartialEq>(keys: &mut AddressKeys<T>, referenced: &[bool]) {
+fn remove_unreferenced_keys<T: Clone + Eq + hash::Hash>(
+    keys: &mut AddressKeys<T>,
+    referenced: &[bool],
+) {
     for (index, is_referenced) in referenced.iter().enumerate() {
         if !is_referenced {
             keys.remove(index);
