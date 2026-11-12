@@ -26,6 +26,7 @@ use p2poolv2_lib::config::{
     BitcoinCashNetwork, Chain, Config, PoolMode, TemplateProvider, TemplateSource,
     bitcoin_cash_donation_cashaddr,
 };
+use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
 use p2poolv2_lib::node::actor::NodeHandle;
 use p2poolv2_lib::node::bch_header_feeder::relay_templates_learning_prevs;
 use p2poolv2_lib::node::weak_share_worker::{WeakShareEventSender, WeakShareNetwork};
@@ -224,10 +225,14 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 
     let genesis = p2poolv2_lib::shares::bch_genesis::genesis_for_stratum(&config.stratum)
         .expect("share genesis data is fixed");
+    // The script history index is an address index, kept only while this
+    // node serves Electrum, the one service that reads it.
     let store = Arc::new(
         Store::new(config.store.path.clone(), false)
             .unwrap()
-            .with_chain(config.stratum.chain),
+            .with_chain(config.stratum.chain)
+            .with_script_history(config.electrum.enabled)
+            .unwrap(),
     );
 
     let (write_tx, write_rx) = write_channel();
@@ -624,8 +629,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         info!("Stratum server stopped");
     });
 
-    let (monitoring_event_sender, _monitoring_event_receiver) =
-        p2poolv2_lib::monitoring_events::create_monitoring_event_channel();
+    let monitoring_event_sender = create_monitoring_event_channel();
 
     let (node_handle, stopping_rx) = match NodeHandle::new(
         config.clone(),
@@ -655,7 +659,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         metrics_handle.clone(),
         tracker_handle,
         node_handle.clone(),
-        monitoring_event_sender,
+        monitoring_event_sender.clone(),
         stratum_config.network,
         bch_share_network,
         stratum_config.pool_signature,
@@ -683,6 +687,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         Some(start_electrum_server(
             config.electrum.clone(),
             chain_store_handle.clone(),
+            monitoring_event_sender,
             electrum_shutdown.clone(),
         ))
     } else {

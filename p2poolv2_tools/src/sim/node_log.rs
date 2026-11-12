@@ -6,8 +6,9 @@
 //!
 //! The harness measures outcomes from the logs rather than the API: a busy
 //! node can time out an HTTP request, but its log is always complete. The
-//! node logs `Promoted block <hash> to confirmed height Some(<h>)` for each
-//! share it confirms and `... height None` for one it takes as an uncle.
+//! node logs `Promoted block <hash> to confirmed height <h>: diff=<d>` for
+//! each share it confirms and `... height -1: ...` for one it takes as an
+//! uncle.
 
 use crate::error::ToolResult;
 use crate::log_file::for_each_line_bytes;
@@ -15,7 +16,7 @@ use memchr::memmem;
 use std::path::Path;
 use std::sync::LazyLock;
 
-const CONFIRMED_MARKER: &[u8] = b"to confirmed height Some(";
+const CONFIRMED_MARKER: &[u8] = b"to confirmed height ";
 const PROMOTED_MARKER: &[u8] = b"Promoted block ";
 
 static CONFIRMED_FINDER: LazyLock<memmem::Finder<'static>> =
@@ -23,17 +24,18 @@ static CONFIRMED_FINDER: LazyLock<memmem::Finder<'static>> =
 static PROMOTED_FINDER: LazyLock<memmem::Finder<'static>> =
     LazyLock::new(|| memmem::Finder::new(PROMOTED_MARKER));
 
-/// Every height in `to confirmed height Some(<h>)` on `line`, in order.
+/// Every height in `to confirmed height <h>:` on `line`, in order. An
+/// uncle's `-1` is not a height.
 pub fn confirmed_heights(line: &[u8]) -> impl Iterator<Item = u64> + '_ {
     CONFIRMED_FINDER
         .find_iter(line)
-        .filter_map(move |position| digits_then_close(&line[position + CONFIRMED_MARKER.len()..]))
+        .filter_map(move |position| digits_then_colon(&line[position + CONFIRMED_MARKER.len()..]))
 }
 
-/// The number at the start of `text` when a `)` follows it.
-fn digits_then_close(text: &[u8]) -> Option<u64> {
+/// The number at the start of `text` when a `:` follows it.
+fn digits_then_colon(text: &[u8]) -> Option<u64> {
     let length = text.iter().take_while(|byte| byte.is_ascii_digit()).count();
-    if length == 0 || text.get(length) != Some(&b')') {
+    if length == 0 || text.get(length) != Some(&b':') {
         return None;
     }
     std::str::from_utf8(&text[..length]).ok()?.parse().ok()
@@ -65,9 +67,6 @@ pub struct HeightRange {
 pub fn confirmed_height_range(path: &Path) -> ToolResult<Option<HeightRange>> {
     let mut range: Option<HeightRange> = None;
     for_each_line_bytes(path, |line| {
-        if !line.contains(&b'(') {
-            return;
-        }
         for height in confirmed_heights(line) {
             range = Some(match range {
                 None => HeightRange {
@@ -97,7 +96,7 @@ pub fn tip_height(path: &Path) -> u64 {
 /// `height`, or `None`. The hash is the first run of 16 or more hex digits
 /// on the matching part of the line.
 pub fn first_hash_at_height(path: &Path, height: u64) -> ToolResult<Option<String>> {
-    let suffix = format!(" to confirmed height Some({height})");
+    let suffix = format!(" to confirmed height {height}:");
     let mut found: Option<String> = None;
     for_each_line_bytes(path, |line| {
         if found.is_some() {

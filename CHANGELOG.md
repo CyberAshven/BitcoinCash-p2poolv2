@@ -20,6 +20,13 @@ the header check takes under 2 points off; more peers help only small
 shares; uncle caps of 6 and 12 change nothing measurable; and at 100,000
 payees weak-share checks overload a node from 5-second shares down.
 
+Upstream's script history index (`ScriptHistory`, for Electrum's
+`blockchain.scripthash.*` methods) is an address index, so a Bitcoin Cash
+node writes it only while it serves Electrum. The store records the first
+confirmed height it holds history for, and reads start no lower: a node that
+turns Electrum on later serves history from the next confirmed share on,
+never a partial one, and `verify_chain` checks only those heights.
+
 Share-chain rule change on Bitcoin Cash, a flag day: study #85's weak-share
 constants (protocol segment `weak2-64-100-48-256`, store format 7, every
 genesis share re-pinned). `WEAK_DEPTH` rises from 6 to 48, so a weak share
@@ -916,6 +923,29 @@ Synced with upstream P2Poolv2 through `61810c56` (its v0.16.2). The fork
 keeps version `0.0.1-alpha`. The sync itself leaves Bitcoin Cash genesis
 shares, protocol strings, the PPLNS window and maturity, the ASERT parent
 anchor and the donation and fee cap as they were.
+
+Synced with upstream P2Poolv2 through `c2287b28` (its v0.17.0). The fork
+keeps version `0.0.1-alpha`. Taken from upstream: the Electrum server's
+`blockchain.headers.subscribe` and `blockchain.scripthash.get_history`,
+`subscribe` and `unsubscribe`, served from a script history index (the new
+`ScriptHistory` column family) that a node writes as it confirms shares and
+keeps only for the heights whose outputs can still be spent; the monitoring
+broadcast that also feeds Electrum's tip watcher; the share difficulty in the
+log line for a promoted share, which now reads `to confirmed height <h>:
+diff=<d>` (`-1` for an uncle), as `cargo sim` and the log tools now read it;
+the BIP 54 `consensuscleanup` rule in Bitcoin template requests; libp2p 0.57
+with hickory 0.26, sha2 0.11 and hmac 0.13; the Codecov upload from its own
+workflow and a coverage gate, here measured against `alpha`; the nix crane
+build. Left out: testnet5, a Bitcoin test network, because upstream's `Chain`
+config type for it collides with this fork's `chain` setting, and the
+Grafana explorer column, since this fork's found-blocks table links each
+block hash to a Bitcoin Cash explorer. On Bitcoin Cash the script history
+window and Electrum's `server.features` depths are Bitcoin Cash's own. A
+store from before this sync has no script history for shares it confirmed
+earlier; they leave the window as the chain grows. The sync changes no
+share-chain rule: Bitcoin Cash genesis shares, protocol strings, the band,
+payout levels, weak shares, per-share cuts, the hybrid payout, the genesis
+last-resort rule and store format 5 are as they were.
 
 ### Added
 

@@ -307,8 +307,13 @@ impl Store {
     }
 
     /// Take `reorged_out_chain` off the confirmed chain: drop each confirmed
-    /// index entry, remove the spends its transactions recorded, and clear its
-    /// chain membership.
+    /// index entry, remove the spends its transactions recorded and its script
+    /// history rows, and clear its chain membership.
+    ///
+    /// Script history rows are recomputed from the block's transactions and
+    /// deleted. The reorg path rewinds before it confirms the new branch, so
+    /// a new row with the same key at the same height is written after this
+    /// delete and survives.
     ///
     /// Membership drops to `None` rather than `Candidate` because `Candidate`
     /// is reserved for blocks on the candidate chain; a block that is later
@@ -322,6 +327,7 @@ impl Store {
             self.delete_confirmed_entry(*height, batch);
             let reorged_out_txs = self.get_txs_by_blockhash_index(unconfirm)?;
             self.remove_spends_for_block(&reorged_out_txs, batch);
+            self.remove_script_history_for_block(*height, &reorged_out_txs, batch)?;
             let mut metadata = self.get_block_metadata(unconfirm)?;
             metadata.chain = ChainMembership::None;
             self.update_block_metadata(unconfirm, &metadata, batch)?;
@@ -357,8 +363,9 @@ impl Store {
         Ok(new_top_height)
     }
 
-    /// Write a confirmed index entry and record every spend that the
-    /// block's transactions make into `SpendsIndex`.
+    /// Write a confirmed index entry, record every spend that the block's
+    /// transactions make into `SpendsIndex`, and write the block's script
+    /// history rows.
     ///
     /// This is the single point where "a block just became confirmed" is
     /// expressed. `SpendsIndex` presence therefore means exactly
@@ -370,9 +377,11 @@ impl Store {
     /// read against a pending `WriteBatch` will not see its contents.
     ///
     /// For blocks with body data, fetches transactions and records
-    /// spends. For prune-zone blocks without body data, only writes the
-    /// confirmed height index (SpendsIndex not needed because their
-    /// outputs are unspendable via coinbase_root_height check).
+    /// spends and script history (inside the history window only). For
+    /// prune-zone blocks without body data, only writes the confirmed height
+    /// index (SpendsIndex not needed because their outputs are unspendable
+    /// via coinbase_root_height check, and these blocks are far below the
+    /// history window).
     pub(super) fn put_confirmed_entry(
         &self,
         height: Height,
@@ -389,6 +398,7 @@ impl Store {
         if self.share_block_exists(blockhash) {
             let txs = self.get_txs_by_blockhash_index(blockhash)?;
             self.add_spends_for_block(&txs, batch)?;
+            self.add_script_history_for_block(height, &txs, batch)?;
         }
         Ok(())
     }

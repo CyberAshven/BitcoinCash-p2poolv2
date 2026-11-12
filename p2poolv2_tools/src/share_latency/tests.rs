@@ -53,7 +53,7 @@ fn uncle_promotion_is_recorded_as_uncle() {
     let mut events = NodeEvents::default();
     events.add_line(&at(
         "01.5",
-        &format!("Promoted block {HASH_A} to confirmed height None"),
+        &format!("Promoted block {HASH_A} to confirmed height -1: diff=1"),
     ));
     assert_eq!(events.uncles.len(), 1);
     assert!(events.confirmed.is_empty());
@@ -68,7 +68,7 @@ fn propagation_measures_mined_to_validated() {
     ));
     miner.add_line(&at(
         "03.000000",
-        &format!("Promoted block {HASH_A} to confirmed height Some(7)"),
+        &format!("Promoted block {HASH_A} to confirmed height 7: diff=1"),
     ));
     let mut receiver = NodeEvents::default();
     receiver.add_line(&at(
@@ -102,7 +102,7 @@ fn confirmation_measures_first_seen_to_promoted() {
     ));
     node.add_line(&at(
         "04.000000",
-        &format!("Promoted block {HASH_A} to confirmed height Some(7)"),
+        &format!("Promoted block {HASH_A} to confirmed height 7: diff=1"),
     ));
     let mut nodes = Nodes::default();
     nodes.insert("a.log".to_string(), node);

@@ -823,7 +823,7 @@ mod gbt_load_tests {
         let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let params = serde_json::json!([{
             "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-            "rules": ["segwit", "signet"],
+            "rules": ["segwit", "signet", "consensuscleanup"],
         }]);
         mock_method(
             &mock_server,
@@ -1073,7 +1073,7 @@ mod gbt_server_tests {
         let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let params = serde_json::json!([{
             "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-            "rules": ["segwit", "signet"],
+            "rules": ["segwit", "signet", "consensuscleanup"],
         }]);
         mock_method(
             &mock_server,
@@ -1129,7 +1129,7 @@ mod gbt_server_tests {
         let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let params = serde_json::json!([{
             "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-            "rules": ["segwit", "signet"],
+            "rules": ["segwit", "signet", "consensuscleanup"],
         }]);
         mock_method(
             &mock_server,
