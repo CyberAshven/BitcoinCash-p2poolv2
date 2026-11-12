@@ -149,3 +149,16 @@ pub const STALE_RATE_BY_PERIOD: [(f64, f64); 5] = [
     (10.0, 0.021),
     (30.0, 0.005),
 ];
+
+/// `INCLUDER_CUT` as the design page now sets it, 500 basis points (5%),
+/// since the includer-cut table. The study tables use it unless they sweep
+/// the cut.
+pub const PAGE_INCLUDER_CUT: f64 = 0.05;
+
+/// ASERT's half-life on the share chain, seconds (`HALFLIFE`,
+/// `docs/difficulty_adjustment/asert.md`).
+pub const ASERT_HALF_LIFE_SECONDS: f64 = 600.0;
+
+/// Medium miners' sizes in the medium mixes: five log-spaced sizes from 30
+/// to 300 TH/s, each holding an equal part of the medium hashrate.
+pub const MEDIUM_MINER_HASHRATES: [f64; 5] = [30.0e12, 53.3e12, 94.9e12, 168.7e12, 300.0e12];

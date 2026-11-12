@@ -39,7 +39,7 @@ use p2poolv2_lib::config::{BitcoinCashNetwork, Chain, parse_payout_address, pars
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::store::writer::StoreError;
 use p2poolv2_lib::stratum::work::band_policy::{
-    POOL_HASHRATE_SHARES, pool_blocks_per_second, recent_pool_hashrate,
+    MONTH_SECONDS, POOL_HASHRATE_SHARES, pool_blocks_per_second, recent_pool_hashrate,
 };
 use p2poolv2_lib::stratum::work::level_policy::expected_payments_a_month;
 use serde::{Deserialize, Serialize};
@@ -99,6 +99,19 @@ pub struct MinerResponse {
     /// its slice of the template's coinbase value wins on average, at most
     /// one a block. Null without a level, a template or a pool hashrate.
     pub expected_payments_a_month: Option<f64>,
+    /// An estimate of the satoshis a month this address can expect: its
+    /// slice of the template's coinbase value, `payout_fraction` of it, on
+    /// each of the pool's blocks a month. Null without a template or a pool
+    /// hashrate.
+    pub expected_income_a_month: Option<f64>,
+    /// An estimate of how far a month's income strays from its mean, as a
+    /// fraction of it: `sqrt(1 / credits a month + 1 / pool blocks a month)`,
+    /// with `1 / payments a month` added under the root when its slice of a
+    /// block is below its payout level and the draw pays it. Its credits a
+    /// month are its shares, uncles and weak shares in the window over the
+    /// window's time span. Null without credits, a window span, a template or
+    /// a pool hashrate.
+    pub monthly_swing: Option<f64>,
     /// This address's shares and uncles, newest first, at most `limit`.
     pub shares: Vec<MinerShare>,
 }
@@ -349,6 +362,7 @@ pub(crate) async fn miner_report(
         .credits_at(anchor, &state.chain_store_handle)
         .await?;
     let pool_blocks = pool_blocks(state, window_credits.anchor_height);
+    let window_span_seconds = window_span_seconds(&state.chain_store_handle, &window_credits);
 
     Ok(build_response(
         &miner,
@@ -357,7 +371,29 @@ pub(crate) async fn miner_report(
         limit,
         &state.app_config,
         pool_blocks,
+        window_span_seconds,
     ))
+}
+
+/// The seconds between the oldest and the newest share of the window, from
+/// their header times on the confirmed chain. `None` for a window of one
+/// share, a newest share no later than the oldest, or a height the confirmed
+/// chain does not have.
+fn window_span_seconds(
+    chain_store_handle: &ChainStoreHandle,
+    window_credits: &WindowCredits,
+) -> Option<u32> {
+    let oldest_height = window_credits.oldest_height?;
+    let newest_height = window_credits.newest_height?;
+    let header_time = |height: u32| {
+        chain_store_handle
+            .get_confirmed_headers_in_range(height, height)
+            .ok()?
+            .first()
+            .map(|result| result.header.time)
+    };
+    let span = header_time(newest_height)?.checked_sub(header_time(oldest_height)?)?;
+    (span > 0).then_some(span)
 }
 
 /// The coinbase value of the template this node mines and the pool's blocks
@@ -465,9 +501,10 @@ fn window_error(error: WindowError) -> ApiError {
 
 /// Shape a miner's credits for the wire, listing at most `limit` shares and
 /// rendering every address for this node's chain. A miner the window does
-/// not credit gets zeros. With `pool_blocks` the miner's expected payments
-/// a month at its payout level are estimated from its payout fraction of
-/// the template's coinbase value.
+/// not credit gets zeros. With `pool_blocks` the miner's expected income and
+/// payments a month at its payout level are estimated from its payout
+/// fraction of the template's coinbase value, and with `window_span_seconds`
+/// too, its monthly swing.
 fn build_response(
     miner: &MinerAddress,
     anchor: BlockHash,
@@ -475,6 +512,7 @@ fn build_response(
     limit: usize,
     app_config: &AppConfig,
     pool_blocks: Option<PoolBlocks>,
+    window_span_seconds: Option<u32>,
 ) -> MinerResponse {
     let (address, address_type, miner_credits) = match miner {
         MinerAddress::Payout(address) => (
@@ -508,6 +546,18 @@ fn build_response(
                     pool_blocks.blocks_per_second,
                 )
             });
+    let expected_income_a_month = pool_blocks.map(|pool_blocks| {
+        expected_income_a_month(
+            payout_fraction * pool_blocks.coinbase_value as f64,
+            pool_blocks.blocks_per_second,
+        )
+    });
+    let monthly_swing =
+        pool_blocks
+            .zip(window_span_seconds)
+            .and_then(|(pool_blocks, span_seconds)| {
+                miner_monthly_swing(miner_credits, payout_fraction, pool_blocks, span_seconds)
+            });
 
     MinerResponse {
         address,
@@ -532,8 +582,69 @@ fn build_response(
         payout_level: miner_credits.payout_level,
         payout_level_satoshis: miner_credits.payout_level.map(level_amount),
         expected_payments_a_month,
+        expected_income_a_month,
+        monthly_swing,
         shares,
     }
+}
+
+/// The monthly swing of a miner with `miner_credits` and `payout_fraction`
+/// of a window spanning `span_seconds`, on the pool's `pool_blocks`
+/// ([`MinerResponse::monthly_swing`]). The draw adds its own swing only when
+/// the miner's slice of a block is below its payout level.
+fn miner_monthly_swing(
+    miner_credits: &MinerCredits,
+    payout_fraction: f64,
+    pool_blocks: PoolBlocks,
+    span_seconds: u32,
+) -> Option<f64> {
+    let credits =
+        miner_credits.share_count + miner_credits.uncle_count + miner_credits.weak_share_count;
+    let amount_per_block = payout_fraction * pool_blocks.coinbase_value as f64;
+    let draw_payments_a_month = miner_credits
+        .payout_level
+        .filter(|level| amount_per_block < level_amount(*level) as f64)
+        .map(|level| {
+            expected_payments_a_month(amount_per_block, level, pool_blocks.blocks_per_second)
+        });
+    monthly_swing(
+        credits_a_month(credits, span_seconds)?,
+        pool_blocks.blocks_per_second * MONTH_SECONDS,
+        draw_payments_a_month,
+    )
+}
+
+/// The satoshis a month a payee earning `amount_per_block` of each pool
+/// block expects, when the pool finds `blocks_per_second` blocks a second.
+fn expected_income_a_month(amount_per_block: f64, blocks_per_second: f64) -> f64 {
+    amount_per_block * blocks_per_second * MONTH_SECONDS
+}
+
+/// `credits` in a window spanning `span_seconds`, scaled to a month. `None`
+/// for a span of zero.
+fn credits_a_month(credits: usize, span_seconds: u32) -> Option<f64> {
+    (span_seconds > 0).then(|| credits as f64 * MONTH_SECONDS / f64::from(span_seconds))
+}
+
+/// How far a month's income strays from its mean, as a fraction of it:
+/// `sqrt(1 / credits + 1 / blocks)` for a miner's credits and the pool's
+/// blocks a month, plus `1 / payments` under the root for the payments a
+/// month the draw pays it, when its slices are drawn. `None` when any of
+/// them is not positive.
+fn monthly_swing(
+    credits_a_month: f64,
+    blocks_a_month: f64,
+    draw_payments_a_month: Option<f64>,
+) -> Option<f64> {
+    if credits_a_month <= 0.0 || blocks_a_month <= 0.0 {
+        return None;
+    }
+    let draw_variance = match draw_payments_a_month {
+        Some(payments) if payments > 0.0 => 1.0 / payments,
+        Some(_) => return None,
+        None => 0.0,
+    };
+    Some((1.0 / credits_a_month + 1.0 / blocks_a_month + draw_variance).sqrt())
 }
 
 /// One credit as the wire shows it.
@@ -576,12 +687,14 @@ mod tests {
     use axum::Json;
     use bitcoin::hashes::Hash;
     use bitcoin::script::Builder;
+    use bitcoin::{Address, PubkeyHash};
     use p2poolv2_lib::address::share_owner::ShareOwner as WalletOwner;
     use p2poolv2_lib::shares::bch_coinbase::BchCoinbase;
     use p2poolv2_lib::shares::merge_mining::MergeMiningCommitment;
     use p2poolv2_lib::shares::share_commitment::ShareCommitment;
     use p2poolv2_lib::stratum::sv2::preparation::prepare_coinbase;
     use p2poolv2_lib::test_utils::test_bch_job_token_and_template;
+    use std::collections::HashMap;
 
     /// Hash of the Bitcoin Cash share owner the BCH test genesis names.
     const CASH_SHARE_HASH: [u8; 20] = [0x22; 20];
@@ -1226,5 +1339,212 @@ mod tests {
         assert_eq!(second.anchor_height, 1);
         assert_eq!(second.window.share_count, 2);
         assert_eq!(second.payout_fraction, 0.5);
+    }
+
+    /// A pool finding a block a day finds 30 a month.
+    const ONE_BLOCK_A_DAY: f64 = 1.0 / 86_400.0;
+
+    #[test]
+    fn the_expected_income_is_the_slice_of_every_pool_block_in_a_month() {
+        let income = expected_income_a_month(1_000.0, ONE_BLOCK_A_DAY);
+
+        assert!((income - 30_000.0).abs() < 1e-6, "{income}");
+    }
+
+    #[test]
+    fn credits_in_a_window_a_day_long_come_thirty_times_a_month() {
+        let credits = credits_a_month(10, 86_400).unwrap();
+
+        assert!((credits - 300.0).abs() < 1e-9, "{credits}");
+    }
+
+    #[test]
+    fn credits_a_month_need_a_window_span() {
+        assert_eq!(credits_a_month(10, 0), None);
+    }
+
+    /// 1/100 + 1/25 = 0.05.
+    #[test]
+    fn the_swing_of_a_miner_paid_every_block_counts_its_credits_and_the_pools_blocks() {
+        let swing = monthly_swing(100.0, 25.0, None).unwrap();
+
+        assert!((swing - 0.05_f64.sqrt()).abs() < 1e-12, "{swing}");
+    }
+
+    /// 1/100 + 1/25 + 1/4 = 0.3.
+    #[test]
+    fn the_draw_adds_its_payments_to_the_swing() {
+        let swing = monthly_swing(100.0, 25.0, Some(4.0)).unwrap();
+
+        assert!((swing - 0.3_f64.sqrt()).abs() < 1e-12, "{swing}");
+    }
+
+    #[test]
+    fn a_miner_without_credits_has_no_swing() {
+        assert_eq!(monthly_swing(0.0, 25.0, None), None);
+    }
+
+    /// A tenth of the window's weight of 1,000,000-satosh blocks, one a day:
+    /// 100,000 satoshis a block, above level 5's 17,472, so every block pays
+    /// it and the draw adds no swing. Its 10 credits in a day-long window
+    /// are 300 a month.
+    #[test]
+    fn a_miner_above_its_level_is_paid_every_block_and_swings_with_its_credits_and_blocks() {
+        let payout = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x55; 20]),
+            Network::Regtest,
+        ));
+        let window_credits = WindowCredits {
+            anchor_height: 200,
+            newest_height: Some(100),
+            oldest_height: Some(0),
+            window_share_count: 101,
+            window_weight: 10,
+            by_payout_address: HashMap::from([(
+                payout.clone(),
+                MinerCredits {
+                    share_count: 2,
+                    uncle_count: 1,
+                    weak_share_count: 7,
+                    weight: 1,
+                    credits: Vec::new(),
+                    payout_level: Some(5),
+                },
+            )]),
+            by_share_owner: HashMap::new(),
+        };
+        let app_config = AppConfig {
+            pool_signature_length: 0,
+            network: Network::Regtest,
+            cash_network: None,
+            cors_allowed: false,
+        };
+
+        let response = build_response(
+            &MinerAddress::Payout(payout),
+            BlockHash::all_zeros(),
+            &window_credits,
+            10,
+            &app_config,
+            Some(PoolBlocks {
+                coinbase_value: 1_000_000,
+                blocks_per_second: ONE_BLOCK_A_DAY,
+            }),
+            Some(86_400),
+        );
+
+        let income = response.expected_income_a_month.unwrap();
+        assert!((income - 3_000_000.0).abs() < 1e-3, "{income}");
+        let payments = response.expected_payments_a_month.unwrap();
+        assert!((payments - 30.0).abs() < 1e-9, "{payments}");
+        let swing = response.monthly_swing.unwrap();
+        let expected_swing = (1.0 / 300.0 + 1.0 / 30.0_f64).sqrt();
+        assert!((swing - expected_swing).abs() < 1e-12, "{swing}");
+    }
+
+    /// A hundredth of the window's weight: 10,000 satoshis a block, below
+    /// level 5's 17,472, so the draw pays it about 17.2 times a month and
+    /// adds `1 / payments` to the swing.
+    #[test]
+    fn a_miner_below_its_level_swings_with_the_draw_too() {
+        let payout = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x55; 20]),
+            Network::Regtest,
+        ));
+        let window_credits = WindowCredits {
+            anchor_height: 200,
+            newest_height: Some(100),
+            oldest_height: Some(0),
+            window_share_count: 101,
+            window_weight: 100,
+            by_payout_address: HashMap::from([(
+                payout.clone(),
+                MinerCredits {
+                    share_count: 2,
+                    uncle_count: 1,
+                    weak_share_count: 7,
+                    weight: 1,
+                    credits: Vec::new(),
+                    payout_level: Some(5),
+                },
+            )]),
+            by_share_owner: HashMap::new(),
+        };
+        let app_config = AppConfig {
+            pool_signature_length: 0,
+            network: Network::Regtest,
+            cash_network: None,
+            cors_allowed: false,
+        };
+
+        let response = build_response(
+            &MinerAddress::Payout(payout),
+            BlockHash::all_zeros(),
+            &window_credits,
+            10,
+            &app_config,
+            Some(PoolBlocks {
+                coinbase_value: 1_000_000,
+                blocks_per_second: ONE_BLOCK_A_DAY,
+            }),
+            Some(86_400),
+        );
+
+        let income = response.expected_income_a_month.unwrap();
+        assert!((income - 300_000.0).abs() < 1e-3, "{income}");
+        let payments = response.expected_payments_a_month.unwrap();
+        assert!((payments - 300_000.0 / 17_472.0).abs() < 1e-9, "{payments}");
+        let swing = response.monthly_swing.unwrap();
+        let expected_swing = (1.0 / 300.0 + 1.0 / 30.0 + 17_472.0 / 300_000.0_f64).sqrt();
+        assert!((swing - expected_swing).abs() < 1e-12, "{swing}");
+    }
+
+    #[test]
+    fn a_miner_without_a_window_span_has_income_but_no_swing() {
+        let payout = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x55; 20]),
+            Network::Regtest,
+        ));
+        let window_credits = WindowCredits {
+            anchor_height: 200,
+            newest_height: Some(100),
+            oldest_height: Some(100),
+            window_share_count: 1,
+            window_weight: 10,
+            by_payout_address: HashMap::from([(
+                payout.clone(),
+                MinerCredits {
+                    share_count: 1,
+                    uncle_count: 0,
+                    weak_share_count: 0,
+                    weight: 1,
+                    credits: Vec::new(),
+                    payout_level: Some(5),
+                },
+            )]),
+            by_share_owner: HashMap::new(),
+        };
+        let app_config = AppConfig {
+            pool_signature_length: 0,
+            network: Network::Regtest,
+            cash_network: None,
+            cors_allowed: false,
+        };
+
+        let response = build_response(
+            &MinerAddress::Payout(payout),
+            BlockHash::all_zeros(),
+            &window_credits,
+            10,
+            &app_config,
+            Some(PoolBlocks {
+                coinbase_value: 1_000_000,
+                blocks_per_second: ONE_BLOCK_A_DAY,
+            }),
+            None,
+        );
+
+        assert!(response.expected_income_a_month.is_some());
+        assert_eq!(response.monthly_swing, None);
     }
 }
