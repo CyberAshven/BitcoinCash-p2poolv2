@@ -694,12 +694,14 @@ Still open:
   the streams hold: 136,129 inbound streams were dropped in the first
   minute, and none after. Announcing a weak share by its hash, as
   transactions are, sends each one once. Node behaviour, not a rule.
-- **A carried weak share's timestamp is checked against the node's own
-  clock.** `validate_carried_weak_headers` applies the 120-second future
-  limit of a relayed weak share to the ones a share carries, and a failure
-  marks the share invalid for good, so two nodes whose clocks differ can
-  disagree about one share for ever. The limit for a carried weak share has
-  to come from chain data, the carrying share's own time. A rule change.
+- **A carried weak share's time is held to its carrier's (2026-11-12).**
+  `validate_carried_weak_headers` applied the 120-second future limit
+  against each node's own clock, and a failure marked the share invalid for
+  good, so two nodes whose clocks differed by a second could disagree about
+  one share for ever. A carried weak share's time is now at most 120
+  seconds after its carrier's (`check_carried_weak_time`, protocol segment
+  `weak3-64-100-48-256`), and a relayed one ahead of the local clock is held
+  and checked again instead of refused.
 - **A weak share that passes proof of work and fails a later check can be
   sent again and again**, each time costing a window walk: the failure is
   not remembered, the peer is not dropped, and the walk cache empties
