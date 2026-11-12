@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Share-chain rule change on Bitcoin Cash, a flag day: study #85's weak-share
+constants (protocol segment `weak2-64-100-48-256`, store format 7, every
+genesis share re-pinned). `WEAK_DEPTH` rises from 6 to 48, so a weak share
+may wait 48 shares, 8 minutes at 10-second shares, for a carrier; at 6 a
+coalition of 90% of the hashrate refusing to carry others' weak shares let
+56% of them expire and gained 2.7 to 4.2%, and at 48 1.4% expire and it gains
+at most 0.06%. `INCLUDER_CUT` falls from 5% to 1%, so small miners keep more
+of their weak credit. `R_MAX` falls from 4096 to 256: `R` settles between 35
+and 75 in every simulated pool, and a new chain settles in 2 hours instead of
+4 with a fifteenth of the weak-share traffic in its first hour. The weak
+pool's limits follow the depth (up to 12,288 weak shares pooled and 4.5 MiB
+held for unknown parents), and the weak payout caches grow with it, so a
+share carrying weak shares from deep parents reuses the window walks of the
+shares below it. The payout simulator runs with the new constants, adds an
+`R_MAX` table across every miner mix (`r-max-mixes`, with a new 99%
+industrial mix) and a `--weak-ratio-max` option; the sim gains
+`[sim] carry_only_own_weak_shares` for end-to-end runs of a refusing node.
+
 Node policy on Bitcoin Cash, not a rule change: a node's default gives no
 miner a heavier share than the minimum's room above the chain's ceiling, the
 minimum's work over the ceiling's (`stratum/work/band_policy.rs`;

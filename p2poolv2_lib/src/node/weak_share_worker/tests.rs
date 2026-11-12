@@ -6,6 +6,7 @@ use super::*;
 use crate::node::messages::Message;
 use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
 use crate::shares::validation::{MockDefaultShareValidator, ValidationError};
+use crate::shares::weak::WEAK_DEPTH;
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::test_utils::{setup_test_chain_store_handle, test_weak_share_on};
 use bitcoin::hashes::Hash;
@@ -362,9 +363,9 @@ async fn a_held_weak_share_is_checked_and_pooled_once_its_parent_arrives() {
     );
 }
 
-/// The parent arrives at height 3 while the confirmed tip is at 10: no share
-/// on the tip may carry a weak share mined on it, so it is dropped
-/// unchecked.
+/// The parent arrives at height 3 while the confirmed tip is `WEAK_DEPTH`
+/// above it: no share on the tip may carry a weak share mined on it, so it
+/// is dropped unchecked.
 #[tokio::test]
 async fn a_held_weak_share_whose_parent_arrives_too_deep_is_dropped_unchecked() {
     let (pool_store, _temp_dir) = setup_test_chain_store_handle(true).await;
@@ -391,7 +392,7 @@ async fn a_held_weak_share_whose_parent_arrives_too_deep_is_dropped_unchecked() 
         });
     chain_store_handle
         .expect_get_tip_height()
-        .returning(|| Ok(Some(10)));
+        .returning(|| Ok(Some(3 + WEAK_DEPTH)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(4);
     let mut worker = WeakShareWorker::new(
@@ -566,8 +567,9 @@ async fn a_weak_share_that_cannot_be_checked_yet_is_checked_again_once_the_tip_m
 }
 
 /// A peer replays an old weak share on a parent at height 3 while the
-/// confirmed tip is at 10: no share on the tip may carry it, so it is
-/// dropped before any of its checks, without a walk of the window.
+/// confirmed tip is `WEAK_DEPTH` above it: no share on the tip may carry
+/// it, so it is dropped before any of its checks, without a walk of the
+/// window.
 #[tokio::test]
 async fn a_replayed_weak_share_too_deep_to_carry_is_dropped_before_its_checks() {
     let (pool_store, _temp_dir) = setup_test_chain_store_handle(true).await;
@@ -587,7 +589,7 @@ async fn a_replayed_weak_share_too_deep_to_carry_is_dropped_before_its_checks() 
         });
     chain_store_handle
         .expect_get_tip_height()
-        .returning(|| Ok(Some(10)));
+        .returning(|| Ok(Some(3 + WEAK_DEPTH)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
     let mut worker = WeakShareWorker::new(

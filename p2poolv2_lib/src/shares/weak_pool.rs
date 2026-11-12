@@ -66,7 +66,7 @@ const MILLIS_PER_TOKEN: u64 = 1_000;
 pub const MAX_HELD_WEAK_SHARES: usize = WEAK_CAP * WEAK_DEPTH as usize;
 /// Most bytes of weak shares, as encoded, the pool holds while it waits for
 /// their parents: one share's `WEAK_BYTES` on each of the `WEAK_DEPTH`
-/// parents, 576 KiB.
+/// parents, 4.5 MiB.
 pub const MAX_HELD_WEAK_SHARE_BYTES: usize = WEAK_BYTES * WEAK_DEPTH as usize;
 
 /// How long the pool holds a weak share whose parent it does not have, in
@@ -810,6 +810,7 @@ impl WeakPool {
         state
             .oldest_first(mining_base_height)
             .into_iter()
+            .filter(|pooled| crate::sim_overrides::carries_weak_share(&pooled.weak_share))
             .take(2 * WEAK_CAP)
             .map(|pooled| pooled.weak_share.clone())
             .collect()

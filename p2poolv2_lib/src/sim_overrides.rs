@@ -55,6 +55,13 @@ static SIM_PROPAGATION_DELAY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock:
 #[cfg(feature = "sim")]
 static SIM_ALTER_WEAK_COPY_EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
+/// The node's own share owner, when it carries only its own weak shares
+/// ([`carries_weak_share`]).
+#[cfg(feature = "sim")]
+static SIM_CARRY_ONLY_OWN_WEAK_SHARES: std::sync::OnceLock<
+    p2poolv2_wallet::share_owner::ShareOwner,
+> = std::sync::OnceLock::new();
+
 /// Broadcasts carrying weak shares so far, for [`alter_weak_copy`].
 #[cfg(feature = "sim")]
 static SIM_WEAK_CARRIER_BROADCASTS: AtomicU64 = AtomicU64::new(0);
@@ -310,6 +317,40 @@ fn alter_weak_copy(share_block: &mut ShareBlock) {
                 weak_share.pow_hash()
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// refusing to carry others' weak shares
+// ---------------------------------------------------------------------------
+
+/// Make this node carry only weak shares paying `own`, its emitter's share
+/// owner, as a node in a coalition refusing to carry others' weak shares
+/// would. Called once at startup by the sim binary. Does not exist in
+/// production builds.
+#[cfg(feature = "sim")]
+pub fn init_carry_only_own_weak_shares(own: p2poolv2_wallet::share_owner::ShareOwner) {
+    SIM_CARRY_ONLY_OWN_WEAK_SHARES.set(own).ok();
+}
+
+/// Whether a share this node builds may carry `weak_share`.
+///
+/// Production: always.
+/// Sim: unless the node carries only its own weak shares
+/// ([`init_carry_only_own_weak_shares`]) and `weak_share` pays another
+/// miner.
+#[inline(always)]
+pub fn carries_weak_share(weak_share: &crate::shares::weak::WeakShare) -> bool {
+    #[cfg(feature = "sim")]
+    {
+        SIM_CARRY_ONLY_OWN_WEAK_SHARES
+            .get()
+            .is_none_or(|own| weak_share.header.miner_address == *own)
+    }
+    #[cfg(not(feature = "sim"))]
+    {
+        let _ = weak_share;
+        true
     }
 }
 

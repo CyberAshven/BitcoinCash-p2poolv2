@@ -265,13 +265,14 @@ mod tests {
     /// Pinned again on 2026-11-09: the header gained its band (`shares::band`),
     /// its payout level (`accounting::payout::payout_levels`) and its weak
     /// ratio and weak shares (`shares::weak`), each of which changed every
-    /// Bitcoin Cash genesis hash in a flag day.
+    /// Bitcoin Cash genesis hash in a flag day. Pinned again on 2026-11-12:
+    /// the genesis weak ratio is `R_MAX`, which fell from 4096 to 256.
     #[test]
     fn mainnet_mini_genesis_hash_is_pinned() {
         let genesis = build(BchShareNetwork::Mainnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "22e7589763ce92a77820b466f73e13decf36e4884780880a116a25bd42479116"
+            "2e5cd107c346f223978f89b5be97e11c898b25e2003333f434fef31a9d6127fb"
         );
     }
 
@@ -280,7 +281,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Chipnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "146406e1067b94cc4923e5f8a580cf7d3c76cb4cde7fbbcf68432d5ad58daeb6"
+            "5ca4efdd91abb3d1dc0e942ece7bb3048bf8dbb6471c0e3219e8d3e3435fed00"
         );
     }
 
@@ -289,7 +290,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Regtest).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "1db46a16c32bc01b68470b8b82dcb86047490d249cf73e85e49ff7da50e36025"
+            "5be2a770f543374c27af95cda58a06829e67086bd66f986f7ff8c5fd13df17f3"
         );
     }
 

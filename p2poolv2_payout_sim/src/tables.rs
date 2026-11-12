@@ -121,11 +121,13 @@ pub enum Table {
     WeakDepth,
     /// Study #85 constants: `R_MAX` and the start from genesis.
     RatioMax,
+    /// Study #85 constants: `R_MAX` in every miner mix.
+    RatioMaxMixes,
 }
 
 impl Table {
     /// Every table, in the order of the default run.
-    pub const ALL: [Table; 21] = [
+    pub const ALL: [Table; 22] = [
         Table::Designs,
         Table::Hashrate,
         Table::Pool,
@@ -147,6 +149,7 @@ impl Table {
         Table::Losses,
         Table::WeakDepth,
         Table::RatioMax,
+        Table::RatioMaxMixes,
     ];
 
     /// Name on the command line.
@@ -173,6 +176,7 @@ impl Table {
             Table::Losses => "losses",
             Table::WeakDepth => "weak-depth",
             Table::RatioMax => "r-max",
+            Table::RatioMaxMixes => "r-max-mixes",
         }
     }
 
@@ -213,7 +217,7 @@ impl Table {
             Table::RefusingRaces => {
                 "Study: a refusing coalition with share races (band-weak-levels, weak work, 50% industrial)"
             }
-            Table::Mixes => "Study: miner mixes (INCLUDER_CUT 5%)",
+            Table::Mixes => "Study: miner mixes (INCLUDER_CUT 1%)",
             Table::Arrivals => "Study: a big miner joining or leaving at once (50% industrial)",
             Table::TinyPool => {
                 "Study: a tiny pool at the ceiling (1 GH/s on a 37 GH/s test network)"
@@ -231,6 +235,9 @@ impl Table {
                 "Study constants: WEAK_DEPTH and INCLUDER_CUT against a refusing coalition (band-weak-levels, weak work, 50% industrial)"
             }
             Table::RatioMax => "Study constants: R_MAX and the start from genesis (50% industrial)",
+            Table::RatioMaxMixes => {
+                "Study constants: R_MAX 256 and 4,096 in every miner mix (band-weak-levels, weak work)"
+            }
         }
     }
 
@@ -259,6 +266,7 @@ impl Table {
             Table::Losses => study::losses(base),
             Table::WeakDepth => study::weak_depth(base),
             Table::RatioMax => study::ratio_max(base),
+            Table::RatioMaxMixes => study::ratio_max_mixes(base),
         };
         format!("## {}\n\n{body}", self.title())
     }

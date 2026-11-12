@@ -129,6 +129,10 @@ async fn main() -> ExitCode {
         );
         match (resolved, rpc) {
             (Ok(identity), Ok(sim_rpc)) => {
+                if sim_cfg.carry_only_own_weak_shares {
+                    sim_overrides::init_carry_only_own_weak_shares(identity.share_owner);
+                    info!("Sim: carrying only this node's own weak shares");
+                }
                 let emitter = SimEmitter::new(
                     handles.emissions_tx.clone(),
                     handles.template_rx.clone(),

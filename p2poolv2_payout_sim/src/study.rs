@@ -291,9 +291,9 @@ fn refusing_row(report: &Report, all_carry: &Report) -> Vec<String> {
     ]
 }
 
-/// `WEAK_DEPTH` values of its sweep; 6, the page's, is in the refusing
+/// `WEAK_DEPTH` values of its sweep; 48, the rule's, is in the refusing
 /// table.
-const WEAK_DEPTHS: [usize; 3] = [12, 24, 48];
+const WEAK_DEPTHS: [usize; 3] = [6, 12, 24];
 
 /// `INCLUDER_CUT` values of the `WEAK_DEPTH` sweep.
 const DEPTH_SWEEP_INCLUDER_CUTS: [f64; 3] = [0.0, 0.01, 0.05];
@@ -743,6 +743,67 @@ pub fn ratio_max(base: &Scenario) -> String {
         "Weak expired, first hour",
     ];
     markdown_table(&headers, &rows)
+}
+
+/// `R_MAX` values of the mix sweep: the rule's and the one before it.
+const MIX_RATIO_MAXIMA: [u64; 2] = [256, 4_096];
+
+/// Constants: `R_MAX` in every miner mix. `R` settles where the hashrate at
+/// the minimum fills `WEAK_FILL` weak slots, so the less of a pool's
+/// hashrate mines at the minimum, the higher `R` wants to go: a pool of
+/// almost only heavier shares is where 256 can bind and 4,096 not.
+pub fn ratio_max_mixes(base: &Scenario) -> String {
+    let study = study_scenario(base);
+    let scenarios: Vec<Scenario> = MinerMix::ALL
+        .into_iter()
+        .chain(MinerMix::STUDY)
+        .chain([MinerMix::AlmostAllIndustrial])
+        .flat_map(|mix| {
+            let study = study.clone();
+            MIX_POOL_FRACTIONS.into_iter().flat_map(move |fraction| {
+                let study = study.clone();
+                MIX_RATIO_MAXIMA.into_iter().map(move |ratio_max| Scenario {
+                    mix,
+                    pool_fraction: fraction,
+                    weak_ratio_max: ratio_max,
+                    ..study.clone()
+                })
+            })
+        })
+        .collect();
+    let reports = run_scenarios(&scenarios);
+    let rows: Vec<Vec<String>> = reports
+        .iter()
+        .map(|report| {
+            let chain = report.home_chain();
+            let mut row = vec![
+                report.scenario.mix.name().to_string(),
+                pool_percent(report.scenario.pool_fraction),
+                report.scenario.weak_ratio_max.to_string(),
+                percent(chain.minimum_hashrate_fraction),
+                weak_ratio(report),
+                optional(
+                    chain.weak.map(|outcome| outcome.carrying_expired_fraction),
+                    percent,
+                ),
+            ];
+            row.extend(both_miner_cells(report));
+            row
+        })
+        .collect();
+    let mut headers: Vec<String> = [
+        "Mix",
+        "Pool",
+        "R_MAX",
+        "Hashrate at the minimum",
+        "R",
+        "Weak expired",
+    ]
+    .iter()
+    .map(|cell| cell.to_string())
+    .collect();
+    headers.extend(both_miner_headers());
+    table_from(&headers, &rows)
 }
 
 /// The tiny pool's two tracked miners.

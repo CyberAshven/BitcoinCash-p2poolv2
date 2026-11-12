@@ -1568,6 +1568,12 @@ pub struct SimConfig {
     /// omit to broadcast every share as stored.
     #[serde(default)]
     pub alter_weak_copy_every: Option<u64>,
+    /// Bitcoin Cash: carry only this node's own weak shares in the shares it
+    /// builds, as a node in a coalition refusing to carry others' weak shares
+    /// would. It still checks, stores and relays them. For the end-to-end
+    /// check of `WEAK_DEPTH` against a refusing coalition.
+    #[serde(default)]
+    pub carry_only_own_weak_shares: bool,
 }
 
 /// Config for p2poolv2 nodes

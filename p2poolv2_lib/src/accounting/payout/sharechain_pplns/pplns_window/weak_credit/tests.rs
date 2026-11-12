@@ -245,13 +245,13 @@ fn a_carried_weak_share_is_credited_at_the_weak_work_less_the_includer_cut() {
         .get_distribution_from_start_hash(tip, 0_u128.into(), &MockChainStoreHandle::default())
         .unwrap();
 
-    //* The weak share earns 95% of the weak work; the carrier its own weak
-    //* work and the other 5%.
+    //* The weak share earns 99% of the weak work; the carrier its own weak
+    //* work and the other 1%.
     let scaled_weak_work = target_work(Target::from_compact(CompactTarget::from_consensus(
         WEAK_TARGET,
     ))) * DIFFICULTY_SCALE;
     let includer = includer_part(scaled_weak_work);
-    assert_eq!(includer, scaled_weak_work / 20);
+    assert_eq!(includer, scaled_weak_work / 100);
     assert_eq!(distribution[&weak_payout], scaled_weak_work - includer);
     assert_eq!(distribution[&carrier_payout], scaled_weak_work + includer);
 }

@@ -35,7 +35,7 @@ varies around it.
 | Share target ceiling | difficulty about 4.55 (2e10 hashes) | `MINI_ANCHOR_TARGET` |
 | Band cap `C` | heavier shares up to 64 times the minimum's work | `BAND_CAP_MAX_MULTIPLE` |
 | Weak shares | up to 64 carried a share; the weak ratio `R_w` settles near 34.5 weak shares a share | `WEAK_CAP`, `WEAK_FILL`, payout simulator |
-| Includer cut | 5% of a weak share's credit, to the share that carries it | `INCLUDER_CUT` |
+| Includer cut | 1% of a weak share's credit, to the share that carries it | `INCLUDER_CUT` |
 | Window | shares worth `K = 3` blocks of work, at most `W` = 120,960 shares; weak work counts in the work and takes no slots | plan decision 11 |
 | Maturity skip | 100 shares (about 17 minutes) | plan decision 11 |
 | Payout levels | `546 * 2^k` satoshis, `k` 0 to 7; level 5 (17,472 sat) by default | `DEFAULT_PAYOUT_LEVEL` |
@@ -165,8 +165,8 @@ counts both.
 ## Timing
 
 - A share is paid only once it is 100 shares deep, about 17 minutes.
-- A weak share is credited only if a share carries it within 6 shares of its
-  parent (`WEAK_DEPTH`); the simulator loses 0.01 to 0.02% of them that way.
+- A weak share is credited only if a share carries it within 48 shares of its
+  parent (`WEAK_DEPTH`), about 8 minutes; the simulator loses none that way.
 - A coinbase output can be spent 100 BCH blocks after its block, about 17
   hours.
 - After a miner stops, its work stays in the window for the window's length:
