@@ -834,6 +834,8 @@ fn a_serial_validation_worker_makes_shares_wait_their_turn() {
     let serial = Parameters {
         validation_queue: ValidationQueue::Serial {
             weak_share_seconds: 0.0,
+            weak_cached_seconds: 0.0,
+            templates: WeakTemplates::Each,
         },
         ..parallel
     };
@@ -855,4 +857,99 @@ fn a_serial_validation_worker_makes_shares_wait_their_turn() {
         "a worker busier than the run"
     );
     assert!(one_at_a_time.stale_rate > in_parallel.stale_rate);
+}
+
+/// Busy seconds after one node validates two weak shares at the build cost
+/// `1.0` and the cached cost `0.1`.
+fn busy_after_two_weak_shares(
+    templates: WeakTemplates,
+    parents: [usize; 2],
+    finders: [usize; 2],
+) -> f64 {
+    let network = Network::uniform(&[Vec::new()], 1_000_000.0, 4_000_000.0, 0.05);
+    let parameters = Parameters {
+        share_interval_seconds: 10.0,
+        share_wire_bytes: 2_000,
+        wire_bytes_per_uncle: 32,
+        ack_wire_bytes: 105,
+        validation_seconds: 0.8,
+        validation_queue: ValidationQueue::Serial {
+            weak_share_seconds: 1.0,
+            weak_cached_seconds: 0.1,
+            templates,
+        },
+        work_switch_seconds: 0.05,
+        duration_seconds: 600.0,
+        bch_block: None,
+        max_uncles: 3,
+        forwarding: Forwarding::AfterValidation,
+        weak_shares: None,
+    };
+    let mut simulation = Simulation::new(&network, parameters, SimulationRandom::from_seed(1));
+    parents
+        .into_iter()
+        .zip(finders)
+        .for_each(|(parent, finder)| {
+            simulation.validation_done_at(0, 0.0, Some((parent, finder)));
+        });
+    simulation.nodes[0].validation_busy_seconds
+}
+
+/// One node checks two weak shares on one parent found by one other node.
+#[test]
+fn a_weak_share_on_a_cached_template_costs_the_cached_time() {
+    let parents = [4, 4];
+    let finders = [1, 1];
+    assert_eq!(
+        busy_after_two_weak_shares(WeakTemplates::PerNode, parents, finders),
+        1.1,
+        "per node, same finder"
+    );
+    assert_eq!(
+        busy_after_two_weak_shares(WeakTemplates::Shared, parents, finders),
+        1.1,
+        "one template, same finder"
+    );
+    assert_eq!(
+        busy_after_two_weak_shares(WeakTemplates::Each, parents, finders),
+        2.0,
+        "each template"
+    );
+}
+
+/// Two finders on one parent are two templates, unless the network shares one.
+#[test]
+fn per_node_templates_pay_one_build_a_finding_node() {
+    let parents = [4, 4];
+    let finders = [1, 2];
+    assert_eq!(
+        busy_after_two_weak_shares(WeakTemplates::PerNode, parents, finders),
+        2.0,
+        "per node, two finders"
+    );
+    assert_eq!(
+        busy_after_two_weak_shares(WeakTemplates::Shared, parents, finders),
+        1.1,
+        "one template, two finders"
+    );
+}
+
+/// A new parent is a new template in every mode.
+#[test]
+fn a_new_parent_pays_the_build_again() {
+    let parents = [4, 5];
+    let finders = [1, 1];
+    [
+        WeakTemplates::Each,
+        WeakTemplates::PerNode,
+        WeakTemplates::Shared,
+    ]
+    .into_iter()
+    .for_each(|templates| {
+        assert_eq!(
+            busy_after_two_weak_shares(templates, parents, finders),
+            2.0,
+            "two parents, {templates:?}"
+        );
+    });
 }
