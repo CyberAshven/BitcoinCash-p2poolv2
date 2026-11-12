@@ -191,9 +191,7 @@ impl MinerMix {
             MinerMix::Home
             | MinerMix::HalfIndustrial
             | MinerMix::MostlyIndustrial
-            | MinerMix::AlmostAllIndustrial => {
-                self.home_and_farm_classes(hashrate, level)
-            }
+            | MinerMix::AlmostAllIndustrial => self.home_and_farm_classes(hashrate, level),
             MinerMix::Zipf => zipf_classes(hashrate, level),
             MinerMix::Medium => medium_classes(hashrate, 0.0, level),
             MinerMix::MediumFewBig => medium_classes(hashrate, MEDIUM_MIX_BIG_FRACTION, level),

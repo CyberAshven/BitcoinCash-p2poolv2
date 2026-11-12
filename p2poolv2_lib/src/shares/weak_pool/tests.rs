@@ -144,8 +144,9 @@ async fn the_pool_offers_weak_shares_oldest_parent_first() {
     assert_eq!(selected, vec![pool_weak_share(2), pool_weak_share(1)]);
 }
 
-/// A share at height 8 may carry weak shares mined on parents from height 2;
-/// one mined at height 1 can never be carried and leaves the pool.
+/// A share at height `WEAK_DEPTH + 2` may carry weak shares mined on parents
+/// from height 2; one mined at height 1 can never be carried and leaves the
+/// pool.
 #[tokio::test]
 async fn a_weak_share_whose_parent_falls_below_the_depth_expires() {
     let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
@@ -160,7 +161,7 @@ async fn a_weak_share_whose_parent_falls_below_the_depth_expires() {
     pool.insert(pool_weak_share(1), 1, WeakShareSource::Local);
     pool.insert(pool_weak_share(2), 2, WeakShareSource::Local);
 
-    let selected = pool.select_for_share(mining_base.block_hash(), 7);
+    let selected = pool.select_for_share(mining_base.block_hash(), WEAK_DEPTH + 1);
 
     assert_eq!(selected, vec![pool_weak_share(2)]);
     assert_eq!(pool.counts().expired, 1);
@@ -241,7 +242,7 @@ async fn a_carried_weak_share_leaves_the_pool_by_depth_counted_as_carried() {
     pool.insert(pool_weak_share(2), 3, WeakShareSource::Local);
     pool.select_for_share(mining_base.block_hash(), 4);
 
-    pool.select_for_share(mining_base.block_hash(), 20);
+    pool.select_for_share(mining_base.block_hash(), 3 + WEAK_DEPTH);
 
     let counts = pool.counts();
     assert_eq!(pool.len(), 0);
@@ -424,8 +425,9 @@ async fn a_held_weak_share_waits_while_its_parent_has_no_height() {
     assert_eq!(pool.held_parents(), vec![parent]);
 }
 
-/// A tip at 10 takes a carrier at 11, which carries weak shares on parents
-/// from 5: one on a parent at 4 can never be carried.
+/// A tip `WEAK_DEPTH` above height 4 takes a carrier one higher, which
+/// carries weak shares on parents from 5: one on a parent at 4 can never be
+/// carried.
 #[tokio::test]
 async fn a_held_weak_share_whose_parent_arrives_too_deep_is_dropped() {
     let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
@@ -433,7 +435,7 @@ async fn a_held_weak_share_whose_parent_arrives_too_deep_is_dropped() {
     let parent = BlockHash::from_byte_array([1; 32]);
     pool.hold(test_weak_share_on(parent, 1), WeakShareSource::Local);
 
-    let released = pool.release_held(&HashMap::from([(parent, 4)]), 10);
+    let released = pool.release_held(&HashMap::from([(parent, 4)]), 4 + WEAK_DEPTH);
 
     assert!(released.is_empty());
     assert_eq!(pool.held_len(), 0);

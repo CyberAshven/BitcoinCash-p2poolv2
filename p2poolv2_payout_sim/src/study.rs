@@ -762,14 +762,12 @@ pub fn ratio_max_mixes(base: &Scenario) -> String {
             let study = study.clone();
             MIX_POOL_FRACTIONS.into_iter().flat_map(move |fraction| {
                 let study = study.clone();
-                MIX_RATIO_MAXIMA
-                    .into_iter()
-                    .map(move |ratio_max| Scenario {
-                        mix,
-                        pool_fraction: fraction,
-                        weak_ratio_max: ratio_max,
-                        ..study.clone()
-                    })
+                MIX_RATIO_MAXIMA.into_iter().map(move |ratio_max| Scenario {
+                    mix,
+                    pool_fraction: fraction,
+                    weak_ratio_max: ratio_max,
+                    ..study.clone()
+                })
             })
         })
         .collect();

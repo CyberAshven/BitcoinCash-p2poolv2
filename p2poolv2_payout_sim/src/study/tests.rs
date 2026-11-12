@@ -9,7 +9,7 @@ fn the_study_runs_the_design_as_the_page_now_has_it() {
     let scenario = study_scenario(&Scenario::default());
     assert_eq!(scenario.design, Design::BandWeakLevels);
     assert_eq!(scenario.weak_credit, WeakCredit::WeakWork);
-    assert_eq!(scenario.includer_cut, 0.05);
+    assert_eq!(scenario.includer_cut, 0.01);
 }
 
 #[test]
@@ -39,19 +39,35 @@ fn the_coalition_gain_compares_refusing_classes_with_the_same_classes_carrying()
         tracked: tracked_with_non_carrying_asic(),
         months: 2,
         weak_queue_shares: 50_000,
+        weak_depth: 6,
         ..Scenario::default()
     };
     let all_carry = base.run();
     let refusing = Scenario {
         non_carrying_fraction: 0.5,
-        ..base
+        ..base.clone()
     }
     .run();
     assert_eq!(coalition_gain(&all_carry, &all_carry), None);
     let gain = coalition_gain(&refusing, &all_carry).expect("half the pool refuses");
-    // Refusing lets about 5% of honest weak shares expire, and the rest of
-    // the pool shares their part of the blocks: about 1% for the coalition.
+    // At the first depth, 6, refusing lets about 5% of honest weak shares
+    // expire, and the rest of the pool shares their part of the blocks:
+    // about 1% for the coalition.
     assert!(gain > 0.0 && gain < 0.03, "{gain}");
+
+    // At the rule's depth, 48, almost none expire and the coalition loses its
+    // includer cuts.
+    let deep = Scenario {
+        weak_depth: crate::constants::WEAK_DEPTH,
+        ..base
+    };
+    let deep_refusing = Scenario {
+        non_carrying_fraction: 0.5,
+        ..deep.clone()
+    }
+    .run();
+    let deep_gain = coalition_gain(&deep_refusing, &deep.run()).expect("half the pool refuses");
+    assert!(deep_gain < 0.0, "{deep_gain}");
 }
 
 #[test]

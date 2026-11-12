@@ -635,10 +635,10 @@ mod tests {
     }
 
     #[test]
-    fn the_includer_part_is_five_percent_rounded_down() {
-        assert_eq!(includer_part(1_000), 50);
-        assert_eq!(includer_part(19), 0);
-        assert_eq!(includer_part(20), 1);
+    fn the_includer_part_is_one_percent_rounded_down() {
+        assert_eq!(includer_part(1_000), 10);
+        assert_eq!(includer_part(99), 0);
+        assert_eq!(includer_part(100), 1);
     }
 
     #[test]
