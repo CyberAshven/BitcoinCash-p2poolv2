@@ -1243,7 +1243,7 @@ async fn test_confirmed_share_counts_its_weak_shares_as_carried_on_the_chain() {
     mock_chain_handle
         .expect_get_uncle_infos()
         .returning(|_| Vec::new());
-    let (monitoring_tx, _monitoring_rx) = create_monitoring_event_channel();
+    let monitoring_tx = create_monitoring_event_channel();
     let (notify_tx, _notify_rx) = create_test_notify_channel();
     let metrics = create_test_metrics_handle();
     let worker = OrganiseWorker::new(
