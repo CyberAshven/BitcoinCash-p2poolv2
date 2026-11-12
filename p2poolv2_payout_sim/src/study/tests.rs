@@ -84,3 +84,66 @@ fn a_tiny_pool_with_every_miner_at_the_minimum_pays_as_its_one_chain_row() {
     assert!(rows[6].ends_with("| one-chain, node default |"));
     assert!(rows[7].ends_with("| one-chain, node default |"));
 }
+
+/// The class `name` names, so a missing class fails before the level check.
+fn class_named<'a>(classes: &'a [MinerClass], name: &str) -> &'a MinerClass {
+    classes.iter().find(|class| class.name == name).expect(name)
+}
+
+#[test]
+fn with_node_levels_each_class_has_its_own_level() {
+    let scenario = scale_scenario(&Scenario::default(), 100.0, 0.9);
+    // `pool_classes` asks `node_level` with this scenario's network hashrate
+    // and a month of blocks times the pool fraction: the same two figures
+    // `scale_scenario` uses for a multiple of 100 and a fraction of 0.9.
+    let network = scenario.network_hashrate();
+    let pool_blocks = BCH_BLOCKS_PER_MONTH * scenario.pool_fraction;
+    let home_level = node_level(HOME_MINER_HASHRATE, network, pool_blocks);
+    let classes = scenario.pool_classes();
+    let home = class_named(&classes, "home 1.2 TH/s");
+    assert_eq!(
+        home.level, home_level,
+        "class home 1.2 TH/s expected level {home_level}"
+    );
+    assert!(
+        home.level < 5,
+        "class home 1.2 TH/s level {} is below 5",
+        home.level
+    );
+    let small_farm = class_named(&classes, "farm 1 PH/s");
+    assert_eq!(small_farm.level, 5, "class farm 1 PH/s expected level 5");
+    let large_farm = class_named(&classes, "farm 10 PH/s");
+    assert_eq!(large_farm.level, 5, "class farm 10 PH/s expected level 5");
+}
+
+#[test]
+fn without_node_levels_every_class_is_at_the_default() {
+    let mut scenario = scale_scenario(&Scenario::default(), 100.0, 0.9);
+    scenario.node_levels = false;
+    scenario.default_level = 3;
+    // A tracked miner's level is the level stored on the miner. `pool_classes`
+    // copies it when `node_levels` is off, so the tracked miners are set to
+    // the same default as the mix before the classes are built.
+    let default_level = scenario.default_level;
+    scenario
+        .tracked
+        .iter_mut()
+        .for_each(|miner| miner.level = default_level);
+    let classes = scenario.pool_classes();
+    [
+        "home 1.2 TH/s",
+        "farm 1 PH/s",
+        "farm 10 PH/s",
+        "Bitaxe 1.2 TH/s",
+        "ASIC 100 TH/s",
+    ]
+    .into_iter()
+    .for_each(|name| {
+        let level = class_named(&classes, name).level;
+        assert_eq!(
+            level, default_level,
+            "class {name} expected level {default_level}"
+        );
+    });
+    assert_eq!(classes.len(), 5, "every class of the half-industrial pool");
+}
