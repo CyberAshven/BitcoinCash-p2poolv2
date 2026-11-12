@@ -682,13 +682,24 @@ impl WeakPool {
     /// keeps the real one out. A weak share not admitted is counted as
     /// refused, a duplicate or over its peer's rate.
     pub fn admit(&self, pow_hash: BlockHash, source: WeakShareSource) -> bool {
+        self.admit_at(pow_hash, source, now_millis())
+    }
+
+    /// [`Self::admit`] at `now_millis`, milliseconds since the epoch, for the
+    /// peer's rate.
+    pub(crate) fn admit_at(
+        &self,
+        pow_hash: BlockHash,
+        source: WeakShareSource,
+        now_millis: u64,
+    ) -> bool {
         let mut state = self.lock();
         if state.seen.contains(&pow_hash) {
             state.counts.refused.count(WeakShareRefusal::Duplicate);
             return false;
         }
         if let Some(peer) = source.peer()
-            && !state.take_peer_token(peer, now_millis())
+            && !state.take_peer_token(peer, now_millis)
         {
             debug!("Peer {peer} is over its weak share rate, dropping {pow_hash}");
             state.counts.refused.count(WeakShareRefusal::RateLimited);
