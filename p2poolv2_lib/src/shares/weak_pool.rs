@@ -810,6 +810,7 @@ impl WeakPool {
         state
             .oldest_first(mining_base_height)
             .into_iter()
+            .filter(|pooled| crate::sim_overrides::carries_weak_share(&pooled.weak_share))
             .take(2 * WEAK_CAP)
             .map(|pooled| pooled.weak_share.clone())
             .collect()
