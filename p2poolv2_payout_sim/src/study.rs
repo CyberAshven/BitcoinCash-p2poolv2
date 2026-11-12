@@ -12,11 +12,10 @@
 
 use crate::constants::{
     ASIC_HASHRATE, BCH_BLOCK_INTERVAL_SECONDS, BCH_BLOCKS_PER_MONTH, BCH_NETWORK_HASHRATE,
-    BLOCK_REWARD_SATOSHIS, DEFAULT_BAND_CAP, DEFAULT_LEVEL, HASHES_PER_DIFFICULTY,
-    HOME_MINER_HASHRATE, MIN_PAYOUT_LEVEL, MINI_CEILING_DIFFICULTY, MONTH_SECONDS,
-    PAGE_INCLUDER_CUT, WEAK_SHARE_MESSAGE_BYTES,
+    DEFAULT_BAND_CAP, DEFAULT_LEVEL, HASHES_PER_DIFFICULTY, HOME_MINER_HASHRATE,
+    MINI_CEILING_DIFFICULTY, MONTH_SECONDS, PAGE_INCLUDER_CUT, WEAK_SHARE_MESSAGE_BYTES,
 };
-use crate::levels::level_amount;
+use crate::levels::{NODE_MIN_PAYMENTS_PER_MONTH, node_level};
 use crate::miners::{MinerClass, MinerKind, MinerMix, TrackedMiner};
 use crate::races::ForkChoice;
 use crate::report::{
@@ -1194,26 +1193,6 @@ const SCALE_POOL_FRACTIONS: [f64; 4] = [0.10, 0.30, 0.50, 0.90];
 /// to Bitcoin's (about 270 times it) and four times that.
 const SCALE_HASHRATE_MULTIPLES: [f64; 5] = [1.0, 10.0, 100.0, 270.0, 1_000.0];
 
-/// Fewest payments a month a node leaves a miner expecting:
-/// `MIN_PAYMENTS_PER_MONTH` in `p2poolv2_lib`'s `level_policy`.
-const NODE_MIN_PAYMENTS_PER_MONTH: f64 = 3.0;
-
-/// The payout level a node leaves a miner of `hashrate` at in a pool finding
-/// `pool_blocks_per_month` blocks: the highest at or below the default at
-/// which it expects `NODE_MIN_PAYMENTS_PER_MONTH` payments a month, or the
-/// lowest level when none does (`affordable_payout_level` in `p2poolv2_lib`).
-fn node_level(hashrate: f64, network_hashrate: f64, pool_blocks_per_month: f64) -> u32 {
-    let fair_per_month = hashrate / network_hashrate * BCH_BLOCKS_PER_MONTH * BLOCK_REWARD_SATOSHIS;
-    let per_block = fair_per_month / pool_blocks_per_month;
-    (MIN_PAYOUT_LEVEL..=DEFAULT_LEVEL)
-        .rev()
-        .find(|level| {
-            let won_per_block = (per_block / level_amount(*level) as f64).min(1.0);
-            pool_blocks_per_month * won_per_block >= NODE_MIN_PAYMENTS_PER_MONTH
-        })
-        .unwrap_or(MIN_PAYOUT_LEVEL)
-}
-
 /// The hashrate that finds `NODE_MIN_PAYMENTS_PER_MONTH` weak shares a month
 /// at `weak_difficulty`: below it a miner's credit comes less often than a
 /// node's payment floor, whatever its payout level.
@@ -1221,39 +1200,44 @@ fn smallest_regular_miner(weak_difficulty: f64) -> f64 {
     NODE_MIN_PAYMENTS_PER_MONTH * weak_difficulty * HASHES_PER_DIFFICULTY / MONTH_SECONDS
 }
 
+/// One row of the scale table: `multiple` times today's Bitcoin Cash
+/// hashrate and a pool that is `fraction` of it, each class at the level a
+/// node would leave a machine of that hashrate.
+fn scale_scenario(base: &Scenario, multiple: f64, fraction: f64) -> Scenario {
+    let network = BCH_NETWORK_HASHRATE * multiple;
+    let pool_blocks = BCH_BLOCKS_PER_MONTH * fraction;
+    let home_level = node_level(HOME_MINER_HASHRATE, network, pool_blocks);
+    Scenario {
+        pool_fraction: fraction,
+        hashrate_multiple: multiple,
+        node_levels: true,
+        tracked: vec![
+            TrackedMiner {
+                level: home_level,
+                ..TrackedMiner::bitaxe()
+            },
+            TrackedMiner {
+                level: node_level(ASIC_HASHRATE, network, pool_blocks),
+                ..TrackedMiner::asic()
+            },
+        ],
+        ..study_scenario(base)
+    }
+}
+
 /// Bigger pools on a bigger Bitcoin Cash: the adopted design at 10 to 90% of
 /// Bitcoin Cash and 1 to 1,000 times today's hashrate, 50% industrial, with
-/// every home miner's level, the tracked Bitaxe's and the tracked ASIC's set
-/// as a node sets them. Each row gives Bitcoin Cash's difficulty at that
-/// hashrate (Bitcoin's is about the x270 rows') and the smallest miner that
-/// still finds three weak shares a month.
+/// every class at the payout level a node would leave its machine, including
+/// the tracked Bitaxe and the tracked ASIC. Each row gives Bitcoin Cash's
+/// difficulty at that hashrate (Bitcoin's is about the x270 rows') and the
+/// smallest miner that still finds three weak shares a month.
 pub fn scale(base: &Scenario) -> String {
-    let study = study_scenario(base);
     let scenarios: Vec<Scenario> = SCALE_HASHRATE_MULTIPLES
         .into_iter()
         .flat_map(|multiple| {
-            let study = study.clone();
-            SCALE_POOL_FRACTIONS.into_iter().map(move |fraction| {
-                let network = BCH_NETWORK_HASHRATE * multiple;
-                let pool_blocks = BCH_BLOCKS_PER_MONTH * fraction;
-                let home_level = node_level(HOME_MINER_HASHRATE, network, pool_blocks);
-                Scenario {
-                    pool_fraction: fraction,
-                    hashrate_multiple: multiple,
-                    default_level: home_level,
-                    tracked: vec![
-                        TrackedMiner {
-                            level: home_level,
-                            ..TrackedMiner::bitaxe()
-                        },
-                        TrackedMiner {
-                            level: node_level(ASIC_HASHRATE, network, pool_blocks),
-                            ..TrackedMiner::asic()
-                        },
-                    ],
-                    ..study.clone()
-                }
-            })
+            SCALE_POOL_FRACTIONS
+                .into_iter()
+                .map(move |fraction| scale_scenario(base, multiple, fraction))
         })
         .collect();
     let reports = run_scenarios(&scenarios);
