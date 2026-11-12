@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The PPLNS window finds a payee's key with one lookup instead of a scan of
+every payee (`AddressKeys`, upstream's interner, now with a map from value
+to key; a freed slot is still reused lowest first, so keys are assigned as
+before and no payout changes). The window asks for a key for every share
+and every weak share credit it loads: a window of 1,800 shares carrying
+57,568 weak shares for 50,100 payees loaded in 10.4 seconds and now loads in
+0.05, 18,000 shares for 51,000 payees fell from 126 seconds to 0.5, and the
+cap of 120,960 shares with 32 weak shares each for 6,000 payees from 88
+seconds to 3.2.
+
 Upstream's script history index (`ScriptHistory`, for Electrum's
 `blockchain.scripthash.*` methods) is an address index, so a Bitcoin Cash
 node writes it only while it serves Electrum. The store records the first

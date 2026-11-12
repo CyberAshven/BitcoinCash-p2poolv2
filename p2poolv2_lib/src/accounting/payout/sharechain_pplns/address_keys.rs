@@ -3,65 +3,79 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use p2poolv2_wallet::payout_address::PayoutAddress;
+use std::collections::{BTreeSet, HashMap};
+use std::hash::Hash;
 
 const INITIAL_SIZE: usize = 1000;
 
-/// We track the keys as indices of a `Vec<Option<T>>`, where each slot
-/// holds either a value or `None` if the slot is free.
+/// Keys are indices into a vector of slots. Each slot holds the interned
+/// value or `None` when the slot is free. A map from value to key answers
+/// `key_for` with one lookup. A freed slot is reused lowest first, and a
+/// new slot is appended when none is free.
 ///
-/// `key_for` performs a single linear scan over the vector: it returns the
-/// index of an existing value if found, otherwise it reuses the first
-/// `None` slot observed, or appends a new slot if none are free. This avoids
-/// hashing the values.
-///
-/// The window interns payout addresses (the default) and share owners, the
-/// share chain addresses, each in its own `AddressKeys`.
-pub(super) struct AddressKeys<T = PayoutAddress>(Vec<Option<T>>);
+/// The window interns payout addresses (the default) and share owners, each
+/// in its own `AddressKeys`.
+pub(super) struct AddressKeys<T = PayoutAddress> {
+    /// Slot `key` holds the value interned at `key`, or `None` when it is free.
+    slots: Vec<Option<T>>,
+    /// The key of every interned value.
+    keys: HashMap<T, usize>,
+    /// The free slots, so the lowest is reused first.
+    free: BTreeSet<usize>,
+}
 
 impl<T> Default for AddressKeys<T> {
     fn default() -> Self {
-        Self(Vec::with_capacity(INITIAL_SIZE))
+        Self {
+            slots: Vec::with_capacity(INITIAL_SIZE),
+            keys: HashMap::new(),
+            free: BTreeSet::new(),
+        }
     }
 }
 
-impl<T: PartialEq> AddressKeys<T> {
-    /// Returns the index for the value, inserting it if not present.
-    ///
-    /// Reuses the first None slot if available, otherwise appends.
-    pub(super) fn key_for(&mut self, value: T) -> usize {
-        let mut first_none: Option<usize> = None;
-        for (index, slot) in self.0.iter().enumerate() {
-            match slot {
-                Some(existing) if existing == &value => return index,
-                None if first_none.is_none() => first_none = Some(index),
-                _ => {}
-            }
-        }
-        match first_none {
-            Some(index) => {
-                self.0[index] = Some(value);
-                index
-            }
-            None => {
-                self.0.push(Some(value));
-                self.0.len() - 1
-            }
-        }
-    }
-
+impl<T> AddressKeys<T> {
     /// Return the number of slots in the backing vector.
     pub(super) fn len(&self) -> usize {
-        self.0.len()
+        self.slots.len()
     }
 
     /// Get the value at the index
     pub(super) fn value_for(&self, index: usize) -> Option<&T> {
-        self.0.get(index)?.as_ref()
+        self.slots.get(index)?.as_ref()
+    }
+}
+
+impl<T: Clone + Eq + Hash> AddressKeys<T> {
+    /// Returns the key for `value`, found with one lookup when it is already interned.
+    ///
+    /// Otherwise the lowest free slot is reused, or a new slot is appended when none is free.
+    pub(super) fn key_for(&mut self, value: T) -> usize {
+        if let Some(key) = self.keys.get(&value) {
+            return *key;
+        }
+        let key = match self.free.pop_first() {
+            Some(key) => {
+                self.slots[key] = Some(value.clone());
+                key
+            }
+            None => {
+                self.slots.push(Some(value.clone()));
+                self.slots.len() - 1
+            }
+        };
+        self.keys.insert(value, key);
+        key
     }
 
-    /// Set None at index
+    /// Frees the slot at `index`, dropping its value from the map of keys.
+    ///
+    /// An already free slot is left unchanged, and an index past the end panics.
     pub(super) fn remove(&mut self, index: usize) {
-        self.0[index] = None
+        if let Some(value) = self.slots[index].take() {
+            self.keys.remove(&value);
+            self.free.insert(index);
+        }
     }
 }
 
@@ -145,5 +159,78 @@ mod tests {
         let key_b = address_keys.key_for(addr_b);
 
         assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn the_lowest_free_slot_is_reused_first() {
+        let mut address_keys = AddressKeys::<u32>::default();
+
+        assert_eq!(address_keys.key_for(10), 0, "value 10 expected key 0");
+        assert_eq!(address_keys.key_for(20), 1, "value 20 expected key 1");
+        assert_eq!(address_keys.key_for(30), 2, "value 30 expected key 2");
+        assert_eq!(address_keys.key_for(40), 3, "value 40 expected key 3");
+        address_keys.remove(2);
+        address_keys.remove(0);
+
+        assert_eq!(address_keys.key_for(50), 0, "value 50 expected key 0");
+        assert_eq!(address_keys.key_for(60), 2, "value 60 expected key 2");
+        assert_eq!(address_keys.key_for(70), 4, "value 70 expected key 4");
+        assert_eq!(address_keys.len(), 5, "value 70 expected len 5");
+    }
+
+    #[test]
+    fn a_removed_value_gets_a_new_key_when_it_returns() {
+        let mut address_keys = AddressKeys::<u32>::default();
+
+        assert_eq!(address_keys.key_for(10), 0, "value 10 expected key 0");
+        assert_eq!(address_keys.key_for(20), 1, "value 20 expected key 1");
+        address_keys.remove(0);
+
+        assert_eq!(address_keys.key_for(30), 0, "value 30 expected key 0");
+        assert_eq!(address_keys.key_for(10), 2, "value 10 expected key 2");
+        assert_eq!(
+            address_keys.value_for(0),
+            Some(&30),
+            "value 30 expected at key 0"
+        );
+    }
+
+    #[test]
+    fn removing_a_free_slot_changes_nothing() {
+        let mut address_keys = AddressKeys::<u32>::default();
+
+        assert_eq!(address_keys.key_for(10), 0, "value 10 expected key 0");
+        assert_eq!(address_keys.key_for(20), 1, "value 20 expected key 1");
+        address_keys.remove(0);
+        address_keys.remove(0);
+
+        assert_eq!(address_keys.key_for(30), 0, "value 30 expected key 0");
+        assert_eq!(address_keys.key_for(40), 2, "value 40 expected key 2");
+        assert_eq!(address_keys.len(), 3, "value 40 expected len 3");
+    }
+
+    #[test]
+    fn many_values_keep_their_keys() {
+        let mut address_keys = AddressKeys::<u32>::default();
+
+        for value in 0..5_000 {
+            assert_eq!(
+                address_keys.key_for(value),
+                value as usize,
+                "value {value} expected key {value}"
+            );
+        }
+        for value in 0..5_000 {
+            assert_eq!(
+                address_keys.key_for(value),
+                value as usize,
+                "value {value} expected key {value} on the second pass"
+            );
+        }
+        assert_eq!(
+            address_keys.len(),
+            5_000,
+            "values 0..5000 expected len 5000"
+        );
     }
 }
