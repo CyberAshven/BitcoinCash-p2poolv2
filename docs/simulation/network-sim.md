@@ -992,6 +992,220 @@ Not measured here: weak shares carried as 32-byte hashes instead of whole,
 counting weak work in fork choice and the validation it would add, the
 dynamic share period, and uncles deeper than 3 shares.
 
+## Limits study: upstream's practical objections
+
+Upstream's reply to the scaling study (above): a pool always has an upper
+bound, and five of the ideas have practical limits.
+
+1. A share needs enough data to check how it paid out.
+2. Relaying early probably won't move the needle much.
+3. More connections are limited by link bandwidth: a 100 Mbit/s peer can't
+   send a 250 kB share to more than 10 peers in under 250 ms.
+4. A dynamic uncle cap could raise latency.
+5. A faster share rate builds a fatter DAG and loads every node.
+
+The scaling study guessed validation at 5 ms plus 20 ms per MB of share,
+and let a node validate any number of shares at once. That hid objection 5.
+This study measures validation in the node's own code and queues it.
+
+### What a node pays to check a share
+
+`validation_cost_at_bitcoin_cash_window_sizes` in `pplns_window.rs` (an
+ignored test, run by hand in release mode) builds a 120,960 share chain
+and times what a node does for each share it receives:
+- walk the PPLNS window from the share's parent;
+- build the expected coinbase outputs, then compare them.
+
+A weak share pays only the build: its walk is cached by parent and paid block.
+
+| Payees in the window | Walk | Coinbase build | A share | A weak share |
+|---:|---:|---:|---:|---:|
+| 1,000 | 6.3 ms | 0.3 ms | 6.6 ms | 0.3 ms |
+| 10,000 | 34 ms | 4.0 ms | 38 ms | 4.0 ms |
+| 100,000 | 352 ms | 119 ms | 471 ms | 119 ms |
+
+These were measured on one core of a 2026 desktop. The scaling study's guess
+matched at 1,000 payees, was 3 times too low at 10,000 and 19 times too low
+at 100,000.
+
+The node validates up to one share per CPU at once (`validation_worker.rs`).
+But the walk needs write access to the one shared window
+(`Arc<RwLock<PplnsWindow>>`), so walks run one at a time.
+`ValidationQueue::Serial` models this: a node validates one share or weak
+share at a time, and later ones wait. At 100,000 payees this slightly
+overstates the wait, since builds could overlap.
+
+### How it was run
+
+`netsim sweep limits` (or one of `limits-coinbase`, `limits-relay-early`,
+`limits-fanout`, `limits-uncles`, `limits-period`) runs each objection on
+1,000 nodes, upstream's stated limit of about 1,000 miners. It uses the
+measured validation costs, one validation at a time, and today's links: 50
+Mbit/s median upload and 50 ms median latency. A run mines for 8,640 share
+intervals, and the share-period sweep for 1,080, since a thousand nodes
+tracking every weak share of a day at 1-second shares need more memory than a
+desktop has. "Validation busy" is the share of the run a node's validation
+worker had work. Above 100%, shares arrive faster than a node can check them,
+and the queue only grows.
+
+### 1. Enough data to check the payout
+
+On Bitcoin Cash every node already rebuilds a share's payouts to check it:
+they are a rule of the window at the share's parent, and the check compares
+them output by output. A share sent without them leaves out nothing a peer
+can't rebuild, and its check costs the same. Weak shares already travel this
+way (`shares::weak`): the end-to-end runs of #91 and #98 checked thousands of
+them. Only the node that finds a block needs the whole coinbase, and it
+built it.
+
+| Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| whole, 1,000 payees, 10 s | 36,389 | 6.6 | 4.27% | 0.56 | 0.202 / 0.378 | 0.045 | 0.07% / 0.07% | 0.0 |
+| without payouts, 1,000 payees, 10 s | 1,429 | 6.6 | 2.58% | 0.30 | 8.4e-3 / 0.016 | 0.026 | 0.07% / 0.07% | 0.0 |
+| whole, 10,000 payees, 10 s | 350,749 | 38.3 | 16.64% | 2.79 | 1.93 / 3.62 | 0.198 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 payees, 10 s | 1,429 | 38.3 | 3.98% | 0.50 | 7.5e-3 / 0.015 | 0.041 | 0.38% / 0.38% | 0.1 |
+| whole, 100,000 payees, 10 s | 1,028,473 | 471.3 | 41.35% | 29.58 | 5.35 / 10.2 | 0.657 | 4.72% / 4.72% | 8.9 |
+| without payouts, 100,000 payees, 10 s | 1,429 | 471.3 | 19.75% | 3.21 | 6.2e-3 / 0.013 | 0.243 | 4.72% / 4.72% | 9.7 |
+| whole, 1,000 payees, 2 s | 36,389 | 6.6 | 17.90% | 0.57 | 1.02 / 1.91 | 0.216 | 0.33% / 0.33% | 0.0 |
+| without payouts, 1,000 payees, 2 s | 1,429 | 6.6 | 11.39% | 0.30 | 0.042 / 0.079 | 0.128 | 0.33% / 0.33% | 0.0 |
+| whole, 10,000 payees, 2 s | 350,749 | 38.3 | 50.27% | 91.77 | 9.78 / 18.3 | 0.851 | 1.94% / 1.94% | 0.3 |
+| without payouts, 10,000 payees, 2 s | 1,429 | 38.3 | 17.10% | 0.50 | 0.038 / 0.074 | 0.205 | 1.94% / 1.94% | 0.3 |
+| whole, 100,000 payees, 2 s | 1,028,473 | 471.3 | 79.12% | 1443.29 | 27.4 / 51.7 | 1.789 | 23.88% / 23.88% | 41.2 |
+| without payouts, 100,000 payees, 2 s | 1,429 | 471.3 | 55.67% | 3.60 | 0.030 / 0.063 | 1.072 | 23.88% / 23.88% | 56.6 |
+
+At 1,000 and 10,000 payees, shares without payouts keep the stale rate near
+today's at 10-second shares, 2.6% and 4.0% against 4.3% and 17%. At 100,000
+payees validation itself (471 ms each hop) keeps it at 20%.
+
+### 2. Relaying before full validation
+
+| Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| after validation, 1,000 payees, 10 s | 36,389 | 6.6 | 4.27% | 0.56 | 0.202 / 0.378 | 0.045 | 0.07% / 0.07% | 0.0 |
+| after the header check, 1,000 payees, 10 s | 36,389 | 6.6 | 3.99% | 0.53 | 0.204 / 0.380 | 0.042 | 0.07% / 0.07% | 0.0 |
+| after validation, 10,000 payees, 10 s | 350,749 | 38.3 | 16.64% | 2.79 | 1.93 / 3.62 | 0.198 | 0.38% / 0.38% | 0.1 |
+| after the header check, 10,000 payees, 10 s | 350,749 | 38.3 | 15.55% | 2.58 | 1.97 / 3.66 | 0.183 | 0.38% / 0.38% | 0.1 |
+| after validation, 100,000 payees, 10 s | 1,028,473 | 471.3 | 41.35% | 29.58 | 5.35 / 10.2 | 0.657 | 4.72% / 4.72% | 8.9 |
+| after the header check, 100,000 payees, 10 s | 1,028,473 | 471.3 | 34.11% | 36.52 | 5.77 / 10.7 | 0.490 | 4.72% / 4.72% | 8.5 |
+| after validation, 1,000 payees, 2 s | 36,389 | 6.6 | 17.90% | 0.57 | 1.02 / 1.91 | 0.216 | 0.33% / 0.33% | 0.0 |
+| after the header check, 1,000 payees, 2 s | 36,389 | 6.6 | 17.17% | 0.54 | 1.03 / 1.92 | 0.206 | 0.33% / 0.33% | 0.0 |
+| after validation, 10,000 payees, 2 s | 350,749 | 38.3 | 50.27% | 91.77 | 9.78 / 18.3 | 0.851 | 1.94% / 1.94% | 0.3 |
+| after the header check, 10,000 payees, 2 s | 350,749 | 38.3 | 48.36% | 96.97 | 9.95 / 18.5 | 0.795 | 1.94% / 1.94% | 0.3 |
+| after validation, 100,000 payees, 2 s | 1,028,473 | 471.3 | 79.12% | 1443.29 | 27.4 / 51.7 | 1.789 | 23.88% / 23.88% | 41.2 |
+| after the header check, 100,000 payees, 2 s | 1,028,473 | 471.3 | 73.42% | 1996.17 | 29.2 / 54.2 | 1.444 | 23.88% / 23.88% | 37.8 |
+
+Upstream is right: forwarding after the header check takes 0.3 to 1.9
+points off the stale rate at 1,000 and 10,000 payees. It only matters when
+validation is slow: 41% to 34% at 100,000 payees.
+
+### 3. More connections against upload bandwidth
+
+| Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| whole, 10,000 payees, 20 Mbit/s up, 8 peers | 350,749 | 38.3 | 30.98% | 6.32 | 1.95 / 3.64 | 0.436 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 payees, 20 Mbit/s up, 16 peers | 350,749 | 38.3 | 40.80% | 9.81 | 4.21 / 7.58 | 0.639 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 payees, 20 Mbit/s up, 32 peers | 350,749 | 38.3 | 56.43% | 17.98 | 8.71 / 12.4 | 1.079 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 payees, 20 Mbit/s up, 64 peers | 350,749 | 38.3 | 81.74% | 368.18 | 17.7 / 22.2 | 1.900 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 payees, 20 Mbit/s up, 8 peers | 1,429 | 38.3 | 4.04% | 0.51 | 7.5e-3 / 0.015 | 0.042 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 payees, 20 Mbit/s up, 16 peers | 1,429 | 38.3 | 3.43% | 0.40 | 0.017 / 0.031 | 0.036 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 payees, 20 Mbit/s up, 32 peers | 1,429 | 38.3 | 3.20% | 0.35 | 0.035 / 0.051 | 0.033 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 payees, 20 Mbit/s up, 64 peers | 1,429 | 38.3 | 3.15% | 0.36 | 0.075 / 0.095 | 0.032 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 payees, 100 Mbit/s up, 8 peers | 350,749 | 38.3 | 10.96% | 1.59 | 1.90 / 3.59 | 0.123 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 payees, 100 Mbit/s up, 16 peers | 350,749 | 38.3 | 13.36% | 2.09 | 4.15 / 7.51 | 0.153 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 payees, 100 Mbit/s up, 32 peers | 350,749 | 38.3 | 19.25% | 3.05 | 8.63 / 12.3 | 0.235 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 payees, 100 Mbit/s up, 64 peers | 350,749 | 38.3 | 28.52% | 5.65 | 17.7 / 22.1 | 0.388 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 payees, 100 Mbit/s up, 8 peers | 1,429 | 38.3 | 3.91% | 0.49 | 7.5e-3 / 0.015 | 0.041 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 payees, 100 Mbit/s up, 16 peers | 1,429 | 38.3 | 3.26% | 0.37 | 0.016 / 0.031 | 0.034 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 payees, 100 Mbit/s up, 32 peers | 1,429 | 38.3 | 2.88% | 0.30 | 0.034 / 0.050 | 0.029 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 payees, 100 Mbit/s up, 64 peers | 1,429 | 38.3 | 2.60% | 0.27 | 0.072 / 0.092 | 0.027 | 0.38% / 0.38% | 0.1 |
+
+Upstream is right for whole shares: at 10,000 payees (a 350 kB share) more
+peers raise the stale rate, from 31% at 8 peers to 82% at 64 on a 20 Mbit/s
+upload, and from 11% to 29% on 100 Mbit/s. Only with shares sent without
+payouts (1.4 kB) do more peers help, from 4.0% to 3.2% on 20 Mbit/s and 3.9%
+to 2.6% on 100.
+
+### 4. The uncle cap
+
+| Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| uncle cap 3, 10,000 payees, 10 s | 350,749 | 38.3 | 16.64% | 2.79 | 1.93 / 3.62 | 0.198 | 0.38% / 0.38% | 0.1 |
+| uncle cap 6, 10,000 payees, 10 s | 350,749 | 38.3 | 16.64% | 2.79 | 1.93 / 3.62 | 0.198 | 0.38% / 0.38% | 0.1 |
+| uncle cap 12, 10,000 payees, 10 s | 350,749 | 38.3 | 16.64% | 2.79 | 1.93 / 3.62 | 0.198 | 0.38% / 0.38% | 0.1 |
+| uncle cap 3, 10,000 payees, 2 s | 350,749 | 38.3 | 50.27% | 91.77 | 9.78 / 18.3 | 0.851 | 1.94% / 1.94% | 0.3 |
+| uncle cap 6, 10,000 payees, 2 s | 350,749 | 38.3 | 50.26% | 91.77 | 9.78 / 18.3 | 0.852 | 1.94% / 1.94% | 0.3 |
+| uncle cap 12, 10,000 payees, 2 s | 350,749 | 38.3 | 50.26% | 91.77 | 9.78 / 18.3 | 0.852 | 1.94% / 1.94% | 0.3 |
+| uncle cap 3, 10,000 payees, 1 s | 350,749 | 38.3 | 67.40% | 313.61 | 19.3 / 36.1 | 1.373 | 3.83% / 3.83% | 0.5 |
+| uncle cap 6, 10,000 payees, 1 s | 350,749 | 38.3 | 67.42% | 313.59 | 19.3 / 36.1 | 1.396 | 3.83% / 3.83% | 0.5 |
+| uncle cap 12, 10,000 payees, 1 s | 350,749 | 38.3 | 67.40% | 313.61 | 19.3 / 36.1 | 1.405 | 3.83% / 3.83% | 0.5 |
+
+Caps of 6 and 12 change neither the stale rate nor propagation: at
+10-second shares a chain share names 0.2 uncles, so a cap of 3 rarely binds,
+and at 1-second shares 1.37 to 1.41. In this model the cap only decides
+which stale shares are paid. It adds no latency, because every uncle was
+validated when it arrived and naming one costs 32 bytes; deeper header sync
+and the payout of deep forks are not modelled. Not worth changing on this
+evidence.
+
+### 5. Share period and each node's load
+
+| Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 payees, no weak shares, 10 s | 36,389 | 6.6 | 4.20% | 0.57 | 0.211 / 0.395 | 0.045 | 0.07% / 0.07% | 0.0 |
+| 1,000 payees, no weak shares, 5 s | 36,389 | 6.6 | 7.91% | 0.56 | 0.424 / 0.793 | 0.085 | 0.14% / 0.14% | 0.0 |
+| 1,000 payees, no weak shares, 2 s | 36,389 | 6.6 | 18.45% | 0.57 | 1.05 / 1.96 | 0.224 | 0.34% / 0.34% | 0.0 |
+| 1,000 payees, no weak shares, 1 s | 36,389 | 6.6 | 31.18% | 0.57 | 2.09 / 3.92 | 0.441 | 0.69% / 0.69% | 0.0 |
+| 1,000 payees, 32 weak shares a share, 10 s | 36,389 | 6.6 | 4.20% | 0.57 | 0.392 / 0.727 | 0.045 | 0.17% / 0.17% | 0.0 |
+| 1,000 payees, 32 weak shares a share, 5 s | 36,389 | 6.6 | 7.91% | 0.56 | 0.786 / 1.46 | 0.085 | 0.33% / 0.33% | 0.0 |
+| 1,000 payees, 32 weak shares a share, 2 s | 36,389 | 6.6 | 18.45% | 0.57 | 1.95 / 3.62 | 0.224 | 0.82% / 0.82% | 0.0 |
+| 1,000 payees, 32 weak shares a share, 1 s | 36,389 | 6.6 | 31.27% | 0.57 | 3.90 / 7.24 | 0.444 | 1.65% / 1.65% | 0.0 |
+| 10,000 payees, no weak shares, 10 s | 350,749 | 38.3 | 16.96% | 2.81 | 2.02 / 3.78 | 0.205 | 0.40% / 0.40% | 0.1 |
+| 10,000 payees, no weak shares, 5 s | 350,749 | 38.3 | 28.18% | 2.88 | 4.06 / 7.60 | 0.383 | 0.81% / 0.81% | 0.1 |
+| 10,000 payees, no weak shares, 2 s | 350,749 | 38.3 | 50.41% | 12.20 | 10.0 / 18.8 | 0.878 | 1.99% / 1.99% | 0.3 |
+| 10,000 payees, no weak shares, 1 s | 350,749 | 38.3 | 67.92% | 45.25 | 20.1 / 37.6 | 1.343 | 3.98% / 3.98% | 0.5 |
+| 10,000 payees, 32 weak shares a share, 10 s | 350,749 | 38.3 | 16.96% | 2.81 | 2.20 / 4.11 | 0.205 | 1.68% / 1.68% | 0.1 |
+| 10,000 payees, 32 weak shares a share, 5 s | 350,749 | 38.3 | 28.18% | 2.89 | 4.42 / 8.26 | 0.384 | 3.37% / 3.37% | 0.3 |
+| 10,000 payees, 32 weak shares a share, 2 s | 350,749 | 38.3 | 50.59% | 15.59 | 10.9 / 20.4 | 0.863 | 8.40% / 8.40% | 1.0 |
+| 10,000 payees, 32 weak shares a share, 1 s | 350,749 | 38.3 | 69.00% | 53.65 | 21.9 / 40.9 | 1.358 | 16.80% / 16.80% | 3.2 |
+| 100,000 payees, no weak shares, 10 s | 1,028,473 | 471.3 | 42.50% | 13.42 | 5.59 / 10.7 | 0.682 | 4.94% / 4.94% | 9.2 |
+| 100,000 payees, no weak shares, 5 s | 1,028,473 | 471.3 | 60.00% | 49.16 | 11.3 / 21.4 | 1.176 | 9.92% / 9.92% | 18.7 |
+| 100,000 payees, no weak shares, 2 s | 1,028,473 | 471.3 | 79.21% | 215.47 | 28.1 / 53.2 | 1.748 | 24.53% / 24.53% | 41.6 |
+| 100,000 payees, no weak shares, 1 s | 1,028,473 | 471.3 | 88.86% | 724.94 | 57.3 / 107 | 2.032 | 49.01% / 49.01% | 64.0 |
+| 100,000 payees, 32 weak shares a share, 10 s | 1,028,473 | 471.3 | 42.77% | 13.97 | 5.72 / 10.9 | 0.692 | 43.23% / 43.23% | 50.5 |
+| 100,000 payees, 32 weak shares a share, 5 s | 1,028,473 | 471.3 | 62.93% | 51.23 | 11.4 / 21.7 | 1.329 | 86.49% / 86.49% | 261.6 |
+| 100,000 payees, 32 weak shares a share, 2 s | 1,028,473 | 471.3 | 98.92% | 1708.52 | 18.1 / 31.4 | 2.417 | 215.95% / 215.95% | 325153.1 |
+| 100,000 payees, 32 weak shares a share, 1 s | 1,028,473 | 471.3 | 99.37% | 2579.02 | 35.9 / 63.2 | 1.714 | 431.86% / 431.86% | 551716.9 |
+| 10,000 payees, 32 weak shares a share, nodes 5x slower, 10 s | 350,749 | 191.5 | 22.14% | 3.83 | 2.06 / 3.95 | 0.282 | 8.41% / 8.41% | 2.5 |
+| 10,000 payees, 32 weak shares a share, nodes 5x slower, 5 s | 350,749 | 191.5 | 35.29% | 3.91 | 4.14 / 7.94 | 0.520 | 16.85% / 16.85% | 5.8 |
+| 10,000 payees, 32 weak shares a share, nodes 5x slower, 2 s | 350,749 | 191.5 | 59.05% | 13.83 | 10.2 / 19.6 | 1.187 | 42.00% / 42.00% | 22.0 |
+| 10,000 payees, 32 weak shares a share, nodes 5x slower, 1 s | 350,749 | 191.5 | 75.74% | 46.51 | 20.3 / 39.1 | 1.762 | 83.99% / 83.99% | 101.6 |
+
+Upstream is right, and the queue shows where:
+- At 1,000 payees validation stays under 2% of a node's time even at
+  1-second shares with 32 weak shares a share. The limit is propagation:
+  4.2% stale at 10-second shares, 31% at 1-second.
+- At 10,000 payees whole shares are already 17% stale at 10-second shares.
+  Weak shares take 17% of a node's time at 1-second shares, and 84% on a
+  node five times slower.
+- At 100,000 payees weak shares are what a node can't keep up with: each
+  needs a 119 ms coinbase build (a different template for each). A node is
+  43% busy at 10-second shares and 86% at 5-second, and at 2-second shares
+  the queue grows without end.
+
+So a faster share period is bounded by propagation for small pools and by
+validation, mostly of weak shares, for pools paying tens of thousands of
+miners. The weak share's coinbase check has to get cheaper before a pool
+pays about 100,000 miners.
+
+### What this study did not do
+
+- It did not run real nodes at these sizes: the costs are measured, the
+  network is modelled.
+- It did not measure deep forks, header sync of a wide DAG, or uncles
+  deeper than 3.
+- Validation was measured on one desktop; a small node is taken as 5 times
+  slower, not measured.
+
 ## Code
 
 | What | Where |
@@ -1004,6 +1218,8 @@ dynamic share period, and uncles deeper than 3 shares.
 | BCHN, template and Stratum traffic | `p2poolv2_netsim/src/traffic.rs` |
 | Scenarios, sweeps, reports | `scenario.rs`, `sweep.rs`, `report.rs` |
 | The scaling study's ideas, grid and limit search | `p2poolv2_netsim/src/scaling.rs` |
+| The limits study: upstream's objections at measured validation costs | `p2poolv2_netsim/src/limits.rs` |
+| What checking a share costs a node (an ignored timing test) | `p2poolv2_lib/src/accounting/payout/sharechain_pplns/pplns_window.rs`, `validation_cost_at_bitcoin_cash_window_sizes` |
 | Command line | `p2poolv2_netsim/src/bin/netsim.rs` |
 
 The crate is new code for the Bitcoin Cash fork, under AGPL-3.0-or-later

@@ -53,6 +53,11 @@ pub const SLOW_NODE_FACTOR: f64 = 5.0;
 /// Weak shares per share in the weak-share rows: `WEAK_FILL`.
 const WEAK_SHARES_PER_SHARE: u64 = 32;
 
+/// Share intervals each share-period run mines for: three hours at 10-second
+/// shares. A thousand nodes tracking every weak share of a day at 1-second
+/// shares needs more memory than a desktop has.
+const PERIOD_RUN_INTERVALS: f64 = 1_080.0;
+
 /// One of the limits study's sweeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Limit {
@@ -232,6 +237,10 @@ fn uncles(base: &Scenario) -> Vec<Scenario> {
 }
 
 fn period(base: &Scenario) -> Vec<Scenario> {
+    let short = |scenario: Scenario| Scenario {
+        duration_seconds: PERIOD_RUN_INTERVALS * scenario.share_interval_seconds,
+        ..scenario
+    };
     let intervals = [10.0, 5.0, 2.0, 1.0];
     let by_payees = MEASURED_VALIDATION
         .into_iter()
@@ -266,7 +275,7 @@ fn period(base: &Scenario) -> Vec<Scenario> {
             ),
         )
     });
-    by_payees.chain(slow).collect()
+    by_payees.chain(slow).map(short).collect()
 }
 
 #[cfg(test)]

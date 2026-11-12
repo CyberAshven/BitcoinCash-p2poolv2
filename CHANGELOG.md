@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A limits study runs upstream's five practical objections to the scaling
+ideas against what checking a share really costs a node
+(`docs/simulation/network-sim.md`, "Limits study"). An ignored timing test
+measures it at a 120,960 share window: 6.6 ms at 1,000 payees, 38 ms at
+10,000 and 471 ms at 100,000; a weak share costs 0.3, 4 and 119 ms. The
+network simulator now queues validation one at a time per node
+(`ValidationQueue::Serial`, as the window's write lock serialises walks) and
+reports each node's validation load. On 1,000 nodes: shares without payouts
+keep their check and cut stale shares at up to 10,000 payees; relaying after
+the header check takes under 2 points off; more peers help only small
+shares; uncle caps of 6 and 12 change nothing measurable; and at 100,000
+payees weak-share checks overload a node from 5-second shares down.
+
 Share-chain rule change on Bitcoin Cash, a flag day: study #85's weak-share
 constants (protocol segment `weak2-64-100-48-256`, store format 7, every
 genesis share re-pinned). `WEAK_DEPTH` rises from 6 to 48, so a weak share
