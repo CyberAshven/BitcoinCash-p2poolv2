@@ -131,16 +131,27 @@ pub async fn handle_share_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Chain;
     use crate::node::p2p_message_handlers::receivers::block_receiver::create_block_receiver_channel;
     use crate::node::request_response_handler::block_fetcher::{
         BlockFetcherReceiver, create_block_fetcher_channel,
     };
     use crate::node::validation_worker;
     use crate::node::validation_worker::ValidationReceiver;
+    use crate::pool_difficulty::MockPoolDifficulty;
     use crate::shares::share_block::ShareHeader;
-    use crate::shares::validation::{MockDefaultShareValidator, ValidationError};
-    use crate::test_utils::{empty_share_block_from_header, load_share_headers_test_data};
+    use crate::shares::validation::{
+        DefaultShareValidator, MockDefaultShareValidator, ValidationError,
+    };
+    use crate::shares::weak::WeakShare;
+    use crate::test_utils::{
+        TestShareBlockBuilder, empty_share_block_from_header, load_share_headers_test_data,
+    };
+    use bitcoin::hashes::Hash;
+    use bitcoin::{Address, CompactTarget, Network, PubkeyHash, ScriptBuf, TxMerkleNode};
     use mockall::predicate::*;
+    use p2poolv2_wallet::payout_address::PayoutAddress;
+    use p2poolv2_wallet::share_owner::ShareOwner;
 
     /// Create test validation, block receiver, and block fetcher handles.
     fn test_handles() -> (
@@ -621,5 +632,415 @@ mod tests {
             BlockFetcherEvent::BlockRequestCompleted(hash) => assert_eq!(hash, block_hash),
             other => panic!("Expected BlockRequestCompleted, got: {other}"),
         }
+    }
+
+    //* Copies of an honest Bitcoin Cash share with one carried weak share
+    //* altered in a field its proof-of-work hash leaves out. The real
+    //* validator refuses each at the gate, before the block receiver can
+    //* buffer or store it: the share is never validated, so never marked
+    //* Invalid, and the block fetcher is told the request is done, so the
+    //* hash can be fetched again from another peer.
+
+    /// One carried weak share's coinbase value one satoshi higher.
+    #[tokio::test]
+    async fn a_copy_with_a_weak_shares_coinbase_value_altered_is_a_bad_copy() {
+        let mut share_block = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .payout_address(PayoutAddress::from(Address::p2pkh(
+                PubkeyHash::from_byte_array([0x22; 20]),
+                Network::Regtest,
+            )))
+            .bits(CompactTarget::from_consensus(0x2100_ffff))
+            .weak_shares(vec![
+                WeakShare {
+                    header: TestShareBlockBuilder::new()
+                        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                        .nonce(1)
+                        .build()
+                        .header,
+                    coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+                    coinbase_value: 625_000_000,
+                    merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+                },
+                WeakShare {
+                    header: TestShareBlockBuilder::new()
+                        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                        .nonce(2)
+                        .build()
+                        .header,
+                    coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+                    coinbase_value: 625_000_000,
+                    merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+                },
+            ])
+            .build();
+        let block_hash = share_block.block_hash();
+        share_block.weak_shares[1].coinbase_value += 1;
+
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_share_block_exists()
+            .with(eq(block_hash))
+            .returning(|_| false);
+        let validator = DefaultShareValidator::new(MockPoolDifficulty::default())
+            .for_chain(Chain::BitcoinCash)
+            .with_target_ceiling(CompactTarget::from_consensus(0x2100_ffff));
+        let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+        let (block_receiver_handle, mut block_receiver_rx) = create_block_receiver_channel();
+        let (block_fetcher_handle, mut block_fetcher_rx) = create_block_fetcher_channel();
+
+        let result = handle_share_block(
+            share_block,
+            &chain_store_handle,
+            validation_tx,
+            &block_receiver_handle,
+            &block_fetcher_handle,
+            &validator,
+        )
+        .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("does not match its header"), "{error}");
+        assert!(error.contains("root"), "{error}");
+        assert!(
+            block_receiver_rx.try_recv().is_err(),
+            "a bad copy must never be buffered or stored"
+        );
+        assert!(
+            validation_rx.try_recv().is_err(),
+            "a bad copy must never be validated, so never marked Invalid"
+        );
+        match block_fetcher_rx
+            .try_recv()
+            .expect("Expected BlockRequestCompleted for a bad copy")
+        {
+            BlockFetcherEvent::BlockRequestCompleted(hash) => assert_eq!(hash, block_hash),
+            other => panic!("Expected BlockRequestCompleted, got: {other}"),
+        }
+    }
+
+    /// One carried weak share's coinbase merkle branch changed.
+    #[tokio::test]
+    async fn a_copy_with_a_weak_shares_merkle_branch_altered_is_a_bad_copy() {
+        let mut share_block = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .payout_address(PayoutAddress::from(Address::p2pkh(
+                PubkeyHash::from_byte_array([0x22; 20]),
+                Network::Regtest,
+            )))
+            .bits(CompactTarget::from_consensus(0x2100_ffff))
+            .weak_shares(vec![
+                WeakShare {
+                    header: TestShareBlockBuilder::new()
+                        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                        .nonce(1)
+                        .build()
+                        .header,
+                    coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+                    coinbase_value: 625_000_000,
+                    merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+                },
+                WeakShare {
+                    header: TestShareBlockBuilder::new()
+                        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                        .nonce(2)
+                        .build()
+                        .header,
+                    coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+                    coinbase_value: 625_000_000,
+                    merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+                },
+            ])
+            .build();
+        let block_hash = share_block.block_hash();
+        share_block.weak_shares[1].merkle_branch = vec![TxMerkleNode::from_byte_array([0x34; 32])];
+
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_share_block_exists()
+            .with(eq(block_hash))
+            .returning(|_| false);
+        let validator = DefaultShareValidator::new(MockPoolDifficulty::default())
+            .for_chain(Chain::BitcoinCash)
+            .with_target_ceiling(CompactTarget::from_consensus(0x2100_ffff));
+        let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+        let (block_receiver_handle, mut block_receiver_rx) = create_block_receiver_channel();
+        let (block_fetcher_handle, mut block_fetcher_rx) = create_block_fetcher_channel();
+
+        let result = handle_share_block(
+            share_block,
+            &chain_store_handle,
+            validation_tx,
+            &block_receiver_handle,
+            &block_fetcher_handle,
+            &validator,
+        )
+        .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("does not match its header"), "{error}");
+        assert!(error.contains("root"), "{error}");
+        assert!(
+            block_receiver_rx.try_recv().is_err(),
+            "a bad copy must never be buffered or stored"
+        );
+        assert!(
+            validation_rx.try_recv().is_err(),
+            "a bad copy must never be validated, so never marked Invalid"
+        );
+        match block_fetcher_rx
+            .try_recv()
+            .expect("Expected BlockRequestCompleted for a bad copy")
+        {
+            BlockFetcherEvent::BlockRequestCompleted(hash) => assert_eq!(hash, block_hash),
+            other => panic!("Expected BlockRequestCompleted, got: {other}"),
+        }
+    }
+
+    /// One carried weak share's coinbase scriptSig changed.
+    #[tokio::test]
+    async fn a_copy_with_a_weak_shares_script_sig_altered_is_a_bad_copy() {
+        let mut share_block = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .payout_address(PayoutAddress::from(Address::p2pkh(
+                PubkeyHash::from_byte_array([0x22; 20]),
+                Network::Regtest,
+            )))
+            .bits(CompactTarget::from_consensus(0x2100_ffff))
+            .weak_shares(vec![
+                WeakShare {
+                    header: TestShareBlockBuilder::new()
+                        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                        .nonce(1)
+                        .build()
+                        .header,
+                    coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+                    coinbase_value: 625_000_000,
+                    merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+                },
+                WeakShare {
+                    header: TestShareBlockBuilder::new()
+                        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                        .nonce(2)
+                        .build()
+                        .header,
+                    coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+                    coinbase_value: 625_000_000,
+                    merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+                },
+            ])
+            .build();
+        let block_hash = share_block.block_hash();
+        share_block.weak_shares[1].coinbase_script_sig = ScriptBuf::from_bytes(vec![0x52; 40]);
+
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_share_block_exists()
+            .with(eq(block_hash))
+            .returning(|_| false);
+        let validator = DefaultShareValidator::new(MockPoolDifficulty::default())
+            .for_chain(Chain::BitcoinCash)
+            .with_target_ceiling(CompactTarget::from_consensus(0x2100_ffff));
+        let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+        let (block_receiver_handle, mut block_receiver_rx) = create_block_receiver_channel();
+        let (block_fetcher_handle, mut block_fetcher_rx) = create_block_fetcher_channel();
+
+        let result = handle_share_block(
+            share_block,
+            &chain_store_handle,
+            validation_tx,
+            &block_receiver_handle,
+            &block_fetcher_handle,
+            &validator,
+        )
+        .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("does not match its header"), "{error}");
+        assert!(error.contains("root"), "{error}");
+        assert!(
+            block_receiver_rx.try_recv().is_err(),
+            "a bad copy must never be buffered or stored"
+        );
+        assert!(
+            validation_rx.try_recv().is_err(),
+            "a bad copy must never be validated, so never marked Invalid"
+        );
+        match block_fetcher_rx
+            .try_recv()
+            .expect("Expected BlockRequestCompleted for a bad copy")
+        {
+            BlockFetcherEvent::BlockRequestCompleted(hash) => assert_eq!(hash, block_hash),
+            other => panic!("Expected BlockRequestCompleted, got: {other}"),
+        }
+    }
+
+    /// One carried weak share's coinbase proof changed: a midstate byte of
+    /// its share header's proof.
+    #[tokio::test]
+    async fn a_copy_with_a_weak_shares_coinbase_proof_altered_is_a_bad_copy() {
+        let mut share_block = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .payout_address(PayoutAddress::from(Address::p2pkh(
+                PubkeyHash::from_byte_array([0x22; 20]),
+                Network::Regtest,
+            )))
+            .bits(CompactTarget::from_consensus(0x2100_ffff))
+            .weak_shares(vec![
+                WeakShare {
+                    header: TestShareBlockBuilder::new()
+                        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                        .nonce(1)
+                        .build()
+                        .header,
+                    coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+                    coinbase_value: 625_000_000,
+                    merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+                },
+                WeakShare {
+                    header: TestShareBlockBuilder::new()
+                        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                        .nonce(2)
+                        .build()
+                        .header,
+                    coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+                    coinbase_value: 625_000_000,
+                    merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+                },
+            ])
+            .build();
+        let block_hash = share_block.block_hash();
+        share_block.weak_shares[1].header.coinbase_proof.midstate[0] ^= 0x01;
+
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_share_block_exists()
+            .with(eq(block_hash))
+            .returning(|_| false);
+        let validator = DefaultShareValidator::new(MockPoolDifficulty::default())
+            .for_chain(Chain::BitcoinCash)
+            .with_target_ceiling(CompactTarget::from_consensus(0x2100_ffff));
+        let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+        let (block_receiver_handle, mut block_receiver_rx) = create_block_receiver_channel();
+        let (block_fetcher_handle, mut block_fetcher_rx) = create_block_fetcher_channel();
+
+        let result = handle_share_block(
+            share_block,
+            &chain_store_handle,
+            validation_tx,
+            &block_receiver_handle,
+            &block_fetcher_handle,
+            &validator,
+        )
+        .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("does not match its header"), "{error}");
+        assert!(error.contains("root"), "{error}");
+        assert!(
+            block_receiver_rx.try_recv().is_err(),
+            "a bad copy must never be buffered or stored"
+        );
+        assert!(
+            validation_rx.try_recv().is_err(),
+            "a bad copy must never be validated, so never marked Invalid"
+        );
+        match block_fetcher_rx
+            .try_recv()
+            .expect("Expected BlockRequestCompleted for a bad copy")
+        {
+            BlockFetcherEvent::BlockRequestCompleted(hash) => assert_eq!(hash, block_hash),
+            other => panic!("Expected BlockRequestCompleted, got: {other}"),
+        }
+    }
+
+    /// After a bad copy with an altered weak share is refused, the honest
+    /// copy of the same share passes the gate and goes on to the block
+    /// receiver, which stores and validates it.
+    #[tokio::test]
+    async fn the_honest_copy_after_an_altered_weak_share_copy_is_accepted() {
+        let honest = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .payout_address(PayoutAddress::from(Address::p2pkh(
+                PubkeyHash::from_byte_array([0x22; 20]),
+                Network::Regtest,
+            )))
+            .bits(CompactTarget::from_consensus(0x2100_ffff))
+            .weak_shares(vec![
+                WeakShare {
+                    header: TestShareBlockBuilder::new()
+                        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                        .nonce(1)
+                        .build()
+                        .header,
+                    coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+                    coinbase_value: 625_000_000,
+                    merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+                },
+                WeakShare {
+                    header: TestShareBlockBuilder::new()
+                        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                        .nonce(2)
+                        .build()
+                        .header,
+                    coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+                    coinbase_value: 625_000_000,
+                    merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+                },
+            ])
+            .build();
+        let block_hash = honest.block_hash();
+        let mut altered = honest.clone();
+        altered.weak_shares[1].coinbase_value += 1;
+
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_share_block_exists()
+            .with(eq(block_hash))
+            .times(2)
+            .returning(|_| false);
+        let validator = DefaultShareValidator::new(MockPoolDifficulty::default())
+            .for_chain(Chain::BitcoinCash)
+            .with_target_ceiling(CompactTarget::from_consensus(0x2100_ffff));
+        let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+        let (block_receiver_handle, mut block_receiver_rx) = create_block_receiver_channel();
+        let (block_fetcher_handle, _block_fetcher_rx) = create_block_fetcher_channel();
+        let expected = honest.clone();
+        let receiver = tokio::spawn(async move {
+            match block_receiver_rx.recv().await {
+                Some(BlockReceiverEvent::ShareBlockReceived {
+                    share_block,
+                    result_tx,
+                }) => {
+                    let _ = result_tx.send(Ok(()));
+                    assert_eq!(share_block, expected);
+                }
+                _ => panic!("Expected the honest copy at the BlockReceiver"),
+            }
+        });
+
+        let refused = handle_share_block(
+            altered,
+            &chain_store_handle,
+            validation_tx.clone(),
+            &block_receiver_handle,
+            &block_fetcher_handle,
+            &validator,
+        )
+        .await;
+        let accepted = handle_share_block(
+            honest,
+            &chain_store_handle,
+            validation_tx,
+            &block_receiver_handle,
+            &block_fetcher_handle,
+            &validator,
+        )
+        .await;
+
+        assert!(refused.is_err());
+        assert!(accepted.is_ok(), "{}", accepted.unwrap_err());
+        receiver.await.unwrap();
+        assert!(validation_rx.try_recv().is_err());
     }
 }

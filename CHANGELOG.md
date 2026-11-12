@@ -14,6 +14,118 @@ confirmed height it holds history for, and reads start no lower: a node that
 turns Electrum on later serves history from the next confirmed share on,
 never a partial one, and `verify_chain` checks only those heights.
 
+Share-chain rule change on Bitcoin Cash, a flag day: study #85's weak-share
+constants (protocol segment `weak2-64-100-48-256`, store format 7, every
+genesis share re-pinned). `WEAK_DEPTH` rises from 6 to 48, so a weak share
+may wait 48 shares, 8 minutes at 10-second shares, for a carrier; at 6 a
+coalition of 90% of the hashrate refusing to carry others' weak shares let
+56% of them expire and gained 2.7 to 4.2%, and at 48 1.4% expire and it gains
+at most 0.06%. `INCLUDER_CUT` falls from 5% to 1%, so small miners keep more
+of their weak credit. `R_MAX` falls from 4096 to 256: `R` settles between 35
+and 75 in every simulated pool, and a new chain settles in 2 hours instead of
+4 with a fifteenth of the weak-share traffic in its first hour. The weak
+pool's limits follow the depth (up to 12,288 weak shares pooled and 4.5 MiB
+held for unknown parents), and the weak payout caches grow with it, so a
+share carrying weak shares from deep parents reuses the window walks of the
+shares below it. The payout simulator runs with the new constants, adds an
+`R_MAX` table across every miner mix (`r-max-mixes`, with a new 99%
+industrial mix) and a `--weak-ratio-max` option; the sim gains
+`[sim] carry_only_own_weak_shares` for end-to-end runs of a refusing node.
+
+Node policy on Bitcoin Cash, not a rule change: a node's default gives no
+miner a heavier share than the minimum's room above the chain's ceiling, the
+minimum's work over the ceiling's (`stratum/work/band_policy.rs`;
+`docs/sharechain/small-miners-design.md`, "Node default"). At the ceiling
+every miner mines at the minimum. In a pool too small for 10-second shares at
+the ceiling the default gave every miner 64 times the ceiling's work, so the
+chain made one share every 21 minutes instead of one every 20 seconds, and
+each such share wanted more than the band and pushed its cap up. The room
+shrinks smoothly as the minimum nears the ceiling, so heavier jobs do not
+switch on and off around it.
+
+Share-chain rule change on Bitcoin Cash, a flag day: a share's weak root now
+binds each weak share it carries in full (protocol segment `weak2-64-500-6`,
+store format 6). The root was the merkle root of the carried weak shares'
+proof-of-work hashes only, so a peer could relay an honest share with one
+weak share's coinbase value raised by a satoshi, or its merkle branch,
+scriptSig or coinbase proof changed. The altered body passed the check
+against the header and was stored, the weak share's coinbase or header check
+then failed, and the node marked the honest share invalid and split from the
+chain, at no cost in work to the peer. Each leaf of the root is now the
+SHA-256d of one weak share's whole encoding, so any such change is a bad
+copy: the node drops that body and fetches the share again. The duplicate
+and carried-once checks still compare proof-of-work hashes; the commitment
+layout (tag `0x26`, weak ratio, count, root) is unchanged. Bitcoin Cash's
+own rules do not change, and the blocks the pool finds stay ordinary Bitcoin
+Cash blocks. A node before this change computes another root for every
+share that carries weak shares, so the two do not peer: every node must
+upgrade together and start on a fresh store. Bitcoin is unchanged.
+
+The weak pool's per-peer rate limits are bounded. Each peer that ever sent
+a weak share kept an entry for as long as the node ran. The pool now
+remembers at most 1,024 peers: past that, it forgets the entries that have
+refilled, which a peer coming back would get the same, and then the ones
+used longest ago. Node behaviour only; no share-chain rule changes.
+
+A weak share carried by a share that then becomes an uncle is carried
+again. The weak pool deleted the weak shares the best chain carried each
+time it filled a share, so when that carrier lost a race, its weak shares
+were gone, and their proof of work was still marked seen. The pool now only
+leaves them out of the shares it fills while the best chain carries them,
+and keeps them until their parent is too deep, so a share on the new best
+chain offers them again. Node behaviour only; no share-chain rule changes.
+
+Checking weak shares costs less. A weak share whose parent is more than
+`WEAK_DEPTH` below the confirmed tip's next share is dropped before any of
+its checks, counted as `too_deep`: a peer replaying old weak shares made the
+node resolve and walk the PPLNS window, under its write lock, for each one,
+and then relay it. And the window's weights are cached by the weak share's
+parent and the Bitcoin Cash block it pays, not by its whole template: weak
+shares on 64 templates of one block walk the window once, not 64 times.
+Each one's payouts are still built for its own coinbase value, cuts and
+merge-mining output, so the rebuilt coinbases are the same as before. Node
+behaviour only; no share-chain rule changes.
+
+A weak share's proof of work is remembered only once the weak share passes
+its checks. It was remembered before the checks ran, so any failure was
+final: a peer that relayed an altered copy first kept the real weak share
+out of every node it reached, and one whose data arrived late was lost. A
+copy that fails its checks no longer keeps another out, the per-peer rate
+limit still applies before the checks, and a weak share whose check cannot
+finish yet is held and checked again once the confirmed tip moves, within
+the held weak shares' bounds. Node behaviour only; no share-chain rule
+changes.
+
+A Bitcoin Cash node no longer drops a weak share whose parent it does not
+have yet. It holds the weak share, unchecked, in its weak pool and asks the
+peer that sent it for the parent's headers, once per parent, as it does for
+a share block's parent. Once the parent is stored, the weak share is
+checked and pooled as new; a parent too deep for a share on the tip to
+carry the weak share drops it. Held weak shares are bounded: at most 384
+(`WEAK_CAP * WEAK_DEPTH`) and 576 KiB, the oldest dropped first, each held
+at most `WEAK_DEPTH` share periods (60 seconds). `/metrics` adds
+`weak_pool_waiting_for_parent` and the refusal reasons `too_deep` and
+`unknown_parent`. Node behaviour only; no share-chain rule changes.
+
+The dashboard's miner page, and `/miner`, show a miner's expected income a
+month, its expected payments a month at its payout level and its monthly
+swing: how far a month's income typically strays from the expected, as
+`sqrt(1 / credits a month + 1 / pool blocks a month)`, plus
+`1 / payments a month` under the root when its slice of a block is below its
+level. The estimates use its share of the PPLNS window, the pool's block
+rate from its recent hashrate, the template's coinbase value, and its
+shares, uncles and weak shares in the window over the window's time span.
+Display only; no share-chain rule changes.
+
+`/metrics` shows what a Bitcoin Cash node does with weak shares: those its
+miners found and those peers sent that passed the checks, those it queued
+for relay, those carried by its own shares and by shares confirmed on the
+chain, those that expired in the weak pool, those the pool did not take by
+reason (`duplicate`, `rate_limited`, `invalid`, `unchecked`, `pool_full`),
+the pool's size, and the confirmed tip's weak ratio `R` and band cap `C`
+(`docs/architecture/metrics.md`, "Weak shares"). The counters reset on
+restart. Node behaviour only; no share-chain rule changes.
+
 Share-chain rule change on Bitcoin Cash, on the same flag day with its own
 protocol segment (`weak-64-500-6`): weak shares (issue #79, row 5;
 `docs/sharechain/small-miners-design.md`, part 3). A weak share is an easier

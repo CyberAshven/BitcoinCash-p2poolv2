@@ -167,6 +167,18 @@ span, against the Bitcoin Cash difficulty of the template; each miner's
 hashrate is its accepted submissions over the last ten minutes, all its
 connections together (`stratum/work/band_policy.rs`).
 
+Heavier shares are there so ASERT can ease the minimum, and the minimum
+cannot ease past the chain's ceiling. So no miner gets more than the room
+left, the minimum's work over the ceiling's, and that bound is also what the
+node wants: `wanted_bits` does not ask for more, so the band cap does not grow
+for nothing. At the ceiling the room is one and every miner is at the
+minimum. A pool too small for 10-second shares at the ceiling then keeps
+every share it can make; without the bound its node default gave every miner
+64 times the ceiling's work and cut its shares from 0.051 to 0.0008 a second
+(study #85, payout simulator, tiny pool). The room shrinks smoothly as a
+growing pool's minimum nears the ceiling, so ASERT settles on one minimum
+rather than switching heavier jobs on and off around it.
+
 The rule allows heavier shares; nothing forces them. A node that gives every
 miner the minimum makes ASERT bring the minimum back to today's level: no
 worse than now. Cash Dragon's `alpha-vardiff-v2` branch already passes a
@@ -223,7 +235,8 @@ It is valid as a weak share when:
 
 A weak share is identified by its proof-of-work hash, the hash of the
 Bitcoin Cash header it carries, not by its share header hash. One proof of
-work is credited once, as a share or as a weak share, never both.
+work is credited once, as a share or as a weak share, never both. The share
+that carries it commits more than that identity: its whole encoding (below).
 
 ### Where weak shares come from
 
@@ -269,12 +282,20 @@ already at the ceiling, weak shares are simply never needed.
 
 | Constant | Value |
 |---|---|
-| `R_MAX` | 4096 *(sim)* |
+| `R_MAX` | 256 (4096 until study #85) |
 | `WEAK_CAP` | 64 weak shares per share *(sim)* |
 | `WEAK_FILL` | 32, half the cap *(sim)* |
 | `WEAK_BYTES` | 96 KiB of weak shares per share *(sim)* |
-| `WEAK_DEPTH` | 6: a weak share's parent at most 6 shares below the share that carries it *(sim)* |
-| `INCLUDER_CUT` | 500 basis points (5%): the smallest tested cut at which a coalition of half the hashrate, in a pool at 10% of BCH, gains nothing by not carrying others' weak shares *(sim)* |
+| `WEAK_DEPTH` | 48: a weak share's parent at most 48 shares below the share that carries it, 8 minutes at 10-second shares (6 until study #85) |
+| `INCLUDER_CUT` | 100 basis points (1%; 500 until study #85): at `WEAK_DEPTH` 48, refusing to carry others' weak shares gains a coalition of 90% of the hashrate at most 0.06%, and costs a half-hashrate coalition 0.2 to 0.3% of its income and a lone refusing node 0.2 to 0.9% |
+
+`WEAK_DEPTH` 48 costs a node memory and some reading. Its weak pool holds at
+most 4 × 64 × 48 = 12,288 weak shares, about 18 MB at the 1.5 KiB average
+`WEAK_BYTES` allows, and at most 3,072 (4.5 MiB) waiting for parents it does
+not have; a share's carried-once check reads the weak shares of up to 47
+ancestors. In steady state the next share carries almost every weak share,
+so the pool holds far fewer. A weak share, like a share, needs only a known
+Bitcoin Cash prev, so waiting does not make it stale.
 
 ### What a weak share message holds
 
@@ -313,10 +334,27 @@ milliseconds. The simulation measures this at `WEAK_CAP` per share.
 A share may carry up to `WEAK_CAP` weak shares and `WEAK_BYTES` of them in its
 body. Its header commits to them (tag byte `0x26` in the share commitment, then
 the 4-byte `weak_ratio`, a 2-byte count and the 32-byte merkle root of the
-carried weak shares' proof-of-work hashes), so the proof of work fixes the
-list. A carried weak share must be
+carried weak shares' whole encodings: each leaf is the SHA-256d of one weak
+share as it is sent, header, scriptSig, total value and branch), so the proof
+of work fixes the list and every byte of each weak share in it. A carried weak
+share must be
 valid as above, its parent at most `WEAK_DEPTH` shares below the carrying share,
-and not carried by any of the carrying share's ancestors.
+and not carried by any of the carrying share's ancestors. Those checks use the
+weak shares' proof-of-work hashes, read from the carried weak shares.
+
+Why the whole encoding: the share block hash covers the header, not the body,
+so a peer can relay an honest share with an altered body. The node refuses a
+body that does not match its header as a bad copy and fetches the share again.
+A root of the proof-of-work hashes alone left a carried weak share's other
+fields unbound: a peer could raise one weak share's coinbase value by a
+satoshi, or change its branch, scriptSig or coinbase proof, and the body still
+matched. The node stored it, the weak share's coinbase or header check then
+failed, and the node marked the honest share invalid and split from the chain,
+at no cost in work to the peer. With the whole encoding committed, any such
+change is a bad copy, and a weak share check that fails after the body is
+stored judges what the miner committed. This changed on 2026-11-12 (protocol
+segment `weak2-64-500-6`, store format 6; study #85's constants followed the
+same day as `weak2-64-100-48-256`, store format 7).
 
 A node fills its own shares from its weak pool, oldest parent first so none
 expire, up to the cap. It relays a weak share once it has checked it, and
@@ -471,8 +509,14 @@ hashrate, the pool's (from its newest 60 confirmed shares) and the
 template's coinbase value, as the band's node policy sizes heavier jobs, and
 logs the warning once per connection. A Job Declaration token carries the
 level its identity chose, or the node's, unlowered. The `/miner` API and the
-dashboard's miner page show the miner's level and its expected payments a
-month at it; income and monthly swing are not shown yet.
+dashboard's miner page show the miner's level and its expected income,
+payments a month at its level and monthly swing. Income is its payout
+fraction of the window times the template's coinbase value on each of the
+pool's blocks a month. The swing is
+`sqrt(1 / credits a month + 1 / pool blocks a month)`, with
+`1 / payments a month` added under the root when its slice of a block is
+below its level; its credits a month are its shares, uncles and weak shares
+in the window over the window's time span.
 
 ### Steering the seed
 
@@ -509,17 +553,22 @@ interval on 100 nodes:
 
 | Share interval | Stale, 3 KB coinbase | Orphaned | Stale, 200 KiB coinbase | Orphaned |
 |---|---|---|---|---|
-| 1 s | 15.9% | 0.5% | 45.8% | 11.1% |
-| 2 s | 8.7% | 0.1% | 29.5% | 1.8% |
-| 5 s | 3.8% | 0.0% | 14.1% | 0.2% |
+| 1 s | 15.9% | 0.1% | 45.8% | 9.8% |
+| 2 s | 8.7% | 0.0% | 29.5% | 1.1% |
+| 5 s | 3.8% | 0.0% | 14.1% | 0.1% |
 | 10 s | 2.1% | 0.0% | 7.8% | 0.0% |
 | 30 s | 0.5% | 0.0% | 2.7% | 0.0% |
 
-The live 2.95% at 10 seconds sits where the simulation puts it. So the share
-period's lower bound is set by the coinbase size: about 2 seconds for small
-coinbases, about 5 for large ones, before orphans and the three-uncle limit
-start losing work. Below that, weak shares carry the extra credit instead: they
-never race, so they add credit without adding stale shares.
+The live 2.95% at 10 seconds sits where the simulation puts it. So by lost
+work alone the share period's lower bound is set by the coinbase size: about 1
+second for small coinbases (0.1% orphaned there), about 5 for large ones (1.1%
+at 2 seconds). No simulated share ever had a fourth uncle to name, so the
+three-uncle limit loses nothing. Holding the stale rate at today's on 1,000
+nodes is stricter: 8.9 seconds today, 5.0 to 3.5 with the scaling ideas
+combined ([Network simulation](../simulation/network-sim.md), "Scaling
+propagation instead of capping it"). Below that, weak shares carry the extra
+credit instead: gossiped beside shares they never race, so they add credit
+without adding stale shares.
 
 ## Rollout
 
@@ -527,7 +576,7 @@ never race, so they add credit without adding stale shares.
 |---|---|---|---|
 | 1 One chain | the mini chain's genesis tag only | 3 | flag day: every node restarts on a fresh store |
 | 2 Band | `band-c64` | 3 | same flag day |
-| 3 Weak shares | `weak-64-500-6` | 5 | same flag day; old nodes cannot read the new header or the weak share message |
+| 3 Weak shares | `weak-64-500-6`, then `weak2-64-500-6`, then `weak2-64-100-48-256` | 5, then 6, then 7 | same flag day; old nodes cannot read the new header or the weak share message; the weak root's leaves then became whole encodings, a second flag day, and study #85's cut, depth and `R_MAX` a third |
 | 4 Payout levels | `levels-546x2` | 4 | same flag day; old nodes cannot read the longer header |
 | 5 Share period | none; share version 2 | 3 | share-version vote |
 
@@ -535,7 +584,9 @@ A part that changes what a stored share holds raises the store format when
 it merges, so the numbers follow the merge order: part 4 raised it to 4
 (2026-11-09), because its header carries the payout level, and part 3 to 5
 (2026-11-09), because its header carries the weak ratio and the store keeps
-the weak shares.
+the weak shares. The weak root's binding of each carried weak share's whole
+encoding raised it to 6 (2026-11-12): stored shares were checked against the
+old root, which every node now computes differently.
 
 Each part is its own pull request, with its plain-words explanation and the
 maintainer's agreement before merging. Chipnet restarts once per merged part
@@ -588,24 +639,23 @@ Attacks:
 - **Big nodes giving their miners the minimum.** Under the band alone, the
   Bitaxe falls back to the one-chain numbers. With weak shares and the
   weak-work credit, nobody's income changes.
-- **Nodes that never carry others' weak shares.** With half the hashrate
-  refusing, 4.8% of honest weak shares expire and the Bitaxe gets 0.97 of its
-  fair pay. With 90% refusing, 56% expire and it gets 0.48. A 5% includer cut
-  makes refusing unprofitable for a half-hashrate coalition at 10% of BCH, but
-  no tested cut stops a coalition of most of the hashrate at 1%.
+- **Nodes that never carry others' weak shares.** At the first constants
+  (`WEAK_DEPTH` 6, a 5% cut), with half the hashrate refusing, 4.8% of honest
+  weak shares expired and the Bitaxe got 0.97 of its fair pay; with 90%
+  refusing, 56% expired and it got 0.48, and no tested cut stopped that
+  coalition. Study #85 found that a deeper `WEAK_DEPTH` does: at 48, with a 1%
+  cut, 1.4% expire with 90% refusing, the Bitaxe gets 0.99 of its fair pay,
+  and the coalition gains at most 0.06%. Those became the rules on
+  2026-11-12 (`weak2-64-100-48-256`, store format 7).
 - **Weak-share spam at 10 times the honest home hashrate.** The Bitaxe's weak
   shares fall from 581 to 53 a month, but its payments stay at about 25 a
   month and its swing only goes from 0.20 to 0.23.
 
 Still open:
 
-- **A coalition of most of the hashrate refusing to carry weak shares.** The
-  candidates are counting weak work in fork choice, so a branch that drops weak
-  shares is lighter (Sunlight's idea), or a deeper `WEAK_DEPTH`. Both need the
-  attack search re-run.
-- **Not yet simulated:** the draw-steering attack, and sweeps of `R_MAX`,
-  `WEAK_DEPTH` and the band step.
-- **Not yet measured:** coinbase building and weak-share checking time.
+- **Not yet simulated:** the band step.
+- **Not yet measured:** coinbase building and weak-share checking time on
+  mainnet-sized windows.
 
 ## References
 

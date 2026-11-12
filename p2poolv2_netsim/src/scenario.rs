@@ -8,15 +8,19 @@
 //! home and data-centre links, a thousand miners, a pool with 1% of BCH's
 //! hashrate, 32 MB blocks (mainnet's ABLA floor), 10-second shares, the
 //! hybrid payout rule for a share without merge-mined tokens, whole
-//! shares on the wire as today, and a day of mining (8,640 shares).
+//! shares on the wire as today, and a day of mining (8,640 shares). Shares
+//! are forwarded after validation, name at most three uncles and travel
+//! without weak shares, as today.
 
 use crate::constants::{
     BCH_BLOCK_INTERVAL_SECONDS, BCH_MAINNET_ABLA_FLOOR_BYTES, BCHN_OUTBOUND_PEERS,
-    DONATION_KEY_PAYEES, SHARE_HEADER_BYTES_PER_UNCLE, SHARE_INTERVAL_SECONDS,
-    TYPICAL_TRANSACTION_BYTES,
+    DONATION_KEY_PAYEES, MAX_UNCLES, SHARE_HEADER_BYTES_PER_UNCLE, SHARE_INTERVAL_SECONDS,
+    TYPICAL_TRANSACTION_BYTES, WEAK_SHARE_PAYLOAD_BYTES,
 };
 use crate::distribution::Distribution;
-use crate::engine::{self, BchBlockLoad, Network, NodeLink, Parameters, PeerLink};
+use crate::engine::{
+    self, BchBlockLoad, Forwarding, Network, NodeLink, Parameters, PeerLink, WeakShareLoad,
+};
 use crate::payees::{HashrateSpread, expected_payees, hashrate_fractions, pplns_window_shares};
 use crate::random::SimulationRandom;
 use crate::report::Report;
@@ -31,6 +35,12 @@ const BYTES_PER_MEGABIT: f64 = 125_000.0;
 /// Share of its link a node keeps for P2Pool when BCHN's relay alone needs
 /// all of it, so the run can still go on and show the damage.
 const MINIMUM_LINK_SHARE: f64 = 0.05;
+
+/// Seconds a node takes to check a share's proof of work and header before
+/// forwarding it, when shares are forwarded after the header check: a
+/// double SHA-256 of the header, the difficulty and ASERT check against the
+/// parent's header and decoding the message. An estimate.
+pub const HEADER_CHECK_SECONDS: f64 = 0.001;
 
 /// Every input of one run.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -90,6 +100,16 @@ pub struct Scenario {
     pub stratum: StratumProtocol,
     /// Seconds of mining.
     pub duration_seconds: f64,
+    /// Most uncles a share names: `MAX_UNCLES`, three, today.
+    pub max_uncles: usize,
+    /// When a node forwards a share: after validation today.
+    pub forwarding: Forwarding,
+    /// Weak shares found per share, gossiped beside the shares. None today.
+    pub weak_shares_per_share: u64,
+    /// Payload bytes of one weak share message.
+    pub weak_share_payload_bytes: u64,
+    /// What a share carries of the weak shares it includes.
+    pub weak_share_carriage: WeakShareCarriage,
 }
 
 impl Default for Scenario {
@@ -130,6 +150,43 @@ impl Default for Scenario {
             bch_peers: BCHN_OUTBOUND_PEERS,
             stratum: StratumProtocol::V1,
             duration_seconds: 86_400.0,
+            max_uncles: MAX_UNCLES,
+            forwarding: Forwarding::AfterValidation,
+            weak_shares_per_share: 0,
+            weak_share_payload_bytes: WEAK_SHARE_PAYLOAD_BYTES,
+            weak_share_carriage: WeakShareCarriage::GossipOnly,
+        }
+    }
+}
+
+/// What a share carries of the weak shares it includes
+/// (`docs/sharechain/small-miners-design.md`, "How a share carries them").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum WeakShareCarriage {
+    /// Nothing on the wire beyond the share itself: only the weak shares'
+    /// own gossip is counted.
+    GossipOnly,
+    /// Each included weak share's whole message in the share's body, as the
+    /// design has it ("up to `WEAK_CAP` weak shares and `WEAK_BYTES` of them
+    /// in its body"). A share carries the average count, `per_share`.
+    Whole,
+}
+
+impl WeakShareCarriage {
+    /// Parse `gossip-only` or `whole`.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim() {
+            "gossip-only" => Ok(WeakShareCarriage::GossipOnly),
+            "whole" => Ok(WeakShareCarriage::Whole),
+            other => Err(format!("expected gossip-only or whole, got `{other}`")),
+        }
+    }
+
+    /// The command-line name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            WeakShareCarriage::GossipOnly => "gossip-only",
+            WeakShareCarriage::Whole => "whole",
         }
     }
 }
@@ -211,7 +268,22 @@ impl Scenario {
         {
             return Err("delays must not be negative".to_string());
         }
+        if let Forwarding::AfterHeaderCheck {
+            header_check_seconds,
+        } = self.forwarding
+            && !(header_check_seconds >= 0.0 && header_check_seconds.is_finite())
+        {
+            return Err("the header check must not take negative time".to_string());
+        }
         Ok(())
+    }
+
+    /// Bytes a share's body carries of the weak shares it includes.
+    pub fn carried_weak_share_bytes(&self) -> u64 {
+        match self.weak_share_carriage {
+            WeakShareCarriage::GossipOnly => 0,
+            WeakShareCarriage::Whole => self.weak_shares_per_share * self.weak_share_payload_bytes,
+        }
     }
 
     /// Shares in the PPLNS window.
@@ -263,10 +335,11 @@ impl Scenario {
     /// The simulation parameters for shares of `sizes`.
     pub fn parameters(&self, sizes: &ShareSizes, load: &BchnLoad) -> Parameters {
         let full_bytes = sizes.message_payload_bytes(0);
-        let share_wire_bytes = wire_bytes(match self.relay {
+        let share_payload_bytes = match self.relay {
             ShareRelay::Full => full_bytes,
             ShareRelay::WithoutPayouts => sizes.message_payload_bytes_without_payouts(0),
-        });
+        };
+        let share_wire_bytes = wire_bytes(share_payload_bytes + self.carried_weak_share_bytes());
         // Validation rebuilds the whole coinbase however the share travelled.
         let validation_seconds = self.validation_seconds
             + self.validation_seconds_per_megabyte * full_bytes as f64 / 1_000_000.0;
@@ -281,6 +354,12 @@ impl Scenario {
             bch_block: self.bchn_shares_link.then_some(BchBlockLoad {
                 interval_seconds: BCH_BLOCK_INTERVAL_SECONDS,
                 compact_block_bytes: load.compact_block_bytes,
+            }),
+            max_uncles: self.max_uncles,
+            forwarding: self.forwarding,
+            weak_shares: (self.weak_shares_per_share > 0).then_some(WeakShareLoad {
+                per_share: self.weak_shares_per_share as f64,
+                wire_bytes: wire_bytes(self.weak_share_payload_bytes),
             }),
         }
     }

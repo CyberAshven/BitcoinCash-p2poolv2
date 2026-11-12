@@ -44,8 +44,9 @@ use serde::{Deserialize, Serialize};
 /// `weak_ratio` of a ratio of one, `R = 1`: the weak target is the minimum.
 pub const WEAK_RATIO_UNIT: u32 = 1024;
 
-/// `R_MAX`: a weak share is at most 4096 times easier than the minimum.
-pub const WEAK_RATIO_MAX_MULTIPLE: u32 = 4096;
+/// `R_MAX`: a weak share is at most 256 times easier than the minimum
+/// (4096 until 2026-11-12, study #85).
+pub const WEAK_RATIO_MAX_MULTIPLE: u32 = 256;
 
 /// The largest `weak_ratio`, `R_MAX` in units of 1/1024.
 pub const WEAK_RATIO_MAX: u32 = WEAK_RATIO_MAX_MULTIPLE * WEAK_RATIO_UNIT;
@@ -68,12 +69,15 @@ pub const WEAK_FILL: u16 = 32;
 pub const WEAK_BYTES: usize = 96 * 1024;
 
 /// `WEAK_DEPTH`: a carried weak share's parent is at most this many shares
-/// below the share that carries it.
-pub const WEAK_DEPTH: u32 = 6;
+/// below the share that carries it, 8 minutes at
+/// 10-second shares (6 until 2026-11-12, study #85: deep enough that a
+/// coalition of most of the hashrate gains nothing by refusing to carry
+/// others' weak shares).
+pub const WEAK_DEPTH: u32 = 48;
 
 /// `INCLUDER_CUT`: the part of a weak share's credit the share carrying it
-/// earns, in basis points (5%).
-pub const INCLUDER_CUT: u16 = 500;
+/// earns, in basis points (1%; 5% until 2026-11-12, study #85).
+pub const INCLUDER_CUT: u16 = 100;
 
 /// Basis points in one.
 const BASIS_POINTS: u128 = 10_000;
@@ -84,8 +88,21 @@ pub const MAX_WEAK_SCRIPT_SIG_BYTES: usize = 100;
 
 /// Name of the weak-share rule in Bitcoin Cash protocol strings: at most
 /// [`WEAK_CAP`] (64) weak shares a share, an includer cut of
-/// [`INCLUDER_CUT`] (500) basis points and a depth of [`WEAK_DEPTH`] (6).
-pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak-64-500-6";
+/// [`INCLUDER_CUT`] (100) basis points, a depth of [`WEAK_DEPTH`] (48) and an
+/// `R_MAX` of [`WEAK_RATIO_MAX_MULTIPLE`] (256).
+///
+/// `weak2` since 2026-11-12: a share's weak root commits each carried weak
+/// share's whole encoding ([`WeakShare::committed_hash`]), where `weak`
+/// committed only their proof-of-work hashes and left the rest of each weak
+/// share free for a relaying peer to change. The two compute different roots
+/// for every share carrying weak shares, so nodes on them must not peer: a
+/// flag day, with a fresh store.
+///
+/// `weak2-64-100-48-256` since 2026-11-12 (study #85): the cut fell from 500
+/// basis points, the depth rose from 6 and `R_MAX` fell from 4096, and the
+/// tag gained `R_MAX`. Every share's weak credit and every genesis share
+/// (its weak ratio is `R_MAX`) changed: a flag day, with a fresh store.
+pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak2-64-100-48-256";
 
 /// The weak ratio of a share whose parent has `parent_weak_ratio` and
 /// carried `parent_weak_count` weak shares: one step from the parent's.
@@ -209,6 +226,19 @@ impl WeakShare {
         self.header.bitcoin_header.block_hash()
     }
 
+    /// What a carrying share's weak root commits for this weak share
+    /// ([`weak_root`]): the SHA-256d of its whole consensus encoding. The
+    /// carrier's proof of work then fixes every field a weak share check
+    /// reads: its share header with the coinbase proof in it, its coinbase
+    /// scriptSig, its coinbase value and its merkle branch. Its identity, for
+    /// the repeat and carried-once checks, stays [`Self::pow_hash`].
+    pub fn committed_hash(&self) -> sha256d::Hash {
+        let mut engine = sha256d::Hash::engine();
+        self.consensus_encode(&mut engine)
+            .expect("engine doesn't error");
+        sha256d::Hash::from_engine(engine)
+    }
+
     /// Size of the weak share's consensus encoding, the bytes it takes of a
     /// carrying share's [`WEAK_BYTES`].
     pub fn encoded_size(&self) -> usize {
@@ -266,19 +296,25 @@ impl Decodable for WeakShare {
 }
 
 /// The root a share header commits for the weak shares it carries: the
-/// merkle root of their proof-of-work hashes, in the order carried, or all
-/// zeros for none.
+/// merkle root of their committed hashes ([`WeakShare::committed_hash`], the
+/// SHA-256d of each one's whole encoding), in the order carried, or all zeros
+/// for none.
 ///
-/// The tree pairs the last hash of an odd level with itself, so a repeated
-/// last hash would keep the root (CVE-2012-2459); the body check refuses a
-/// list that repeats a hash before it compares the root.
+/// Every byte of a carried weak share is in its leaf, so a body whose weak
+/// shares differ in any field from the ones the miner carried fails the body
+/// check as a bad copy, and a weak share check that fails once the body is
+/// stored judges what the miner committed. Until 2026-11-12 the leaves were
+/// the weak shares' proof-of-work hashes, which left the rest of each weak
+/// share unbound: a peer could change one in an honest share's body and have
+/// the share marked invalid (`BCH_WEAK_SHARE_RULE_TAG`).
+///
+/// The tree pairs the last leaf of an odd level with itself, so a repeated
+/// last weak share would keep the root (CVE-2012-2459); the body check
+/// refuses a list that repeats a proof-of-work hash before it compares the
+/// root.
 pub fn weak_root<'a>(weak_shares: impl IntoIterator<Item = &'a WeakShare>) -> sha256d::Hash {
-    bitcoin::merkle_tree::calculate_root(
-        weak_shares
-            .into_iter()
-            .map(|weak_share| weak_share.pow_hash().to_raw_hash()),
-    )
-    .unwrap_or_else(sha256d::Hash::all_zeros)
+    bitcoin::merkle_tree::calculate_root(weak_shares.into_iter().map(WeakShare::committed_hash))
+        .unwrap_or_else(sha256d::Hash::all_zeros)
 }
 
 /// The root a header carrying no weak shares commits: all zeros.
@@ -503,7 +539,7 @@ mod tests {
     fn the_rule_tag_names_the_cap_the_includer_cut_and_the_depth() {
         assert_eq!(
             BCH_WEAK_SHARE_RULE_TAG,
-            format!("weak-{WEAK_CAP}-{INCLUDER_CUT}-{WEAK_DEPTH}")
+            format!("weak2-{WEAK_CAP}-{INCLUDER_CUT}-{WEAK_DEPTH}-{WEAK_RATIO_MAX_MULTIPLE}")
         );
     }
 
@@ -599,10 +635,10 @@ mod tests {
     }
 
     #[test]
-    fn the_includer_part_is_five_percent_rounded_down() {
-        assert_eq!(includer_part(1_000), 50);
-        assert_eq!(includer_part(19), 0);
-        assert_eq!(includer_part(20), 1);
+    fn the_includer_part_is_one_percent_rounded_down() {
+        assert_eq!(includer_part(1_000), 10);
+        assert_eq!(includer_part(99), 0);
+        assert_eq!(includer_part(100), 1);
     }
 
     #[test]
@@ -681,6 +717,99 @@ mod tests {
         };
 
         assert_ne!(weak_root([&first, &second]), weak_root([&second, &first]));
-        assert_eq!(weak_root([&first]), first.pow_hash().to_raw_hash());
+        assert_eq!(weak_root([&first]), sha256d::Hash::hash(&serialize(&first)));
+    }
+
+    //* Each field a weak share check reads moves the root, while the
+    //* proof-of-work hash, all the root covered before, stays the same.
+
+    #[test]
+    fn the_weak_root_changes_with_a_weak_shares_coinbase_value() {
+        let honest = WeakShare {
+            header: TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                .build()
+                .header,
+            coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+            coinbase_value: 50_000_000,
+            merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+        };
+        let mut altered = honest.clone();
+        altered.coinbase_value += 1;
+
+        assert_eq!(altered.pow_hash(), honest.pow_hash());
+        assert_ne!(weak_root([&altered]), weak_root([&honest]));
+    }
+
+    #[test]
+    fn the_weak_root_changes_with_a_weak_shares_merkle_branch() {
+        let honest = WeakShare {
+            header: TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                .build()
+                .header,
+            coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+            coinbase_value: 50_000_000,
+            merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+        };
+        let mut altered = honest.clone();
+        altered.merkle_branch = vec![TxMerkleNode::from_byte_array([0x34; 32])];
+
+        assert_eq!(altered.pow_hash(), honest.pow_hash());
+        assert_ne!(weak_root([&altered]), weak_root([&honest]));
+    }
+
+    #[test]
+    fn the_weak_root_changes_with_a_weak_shares_script_sig() {
+        let honest = WeakShare {
+            header: TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                .build()
+                .header,
+            coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+            coinbase_value: 50_000_000,
+            merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+        };
+        let mut altered = honest.clone();
+        altered.coinbase_script_sig = ScriptBuf::from_bytes(vec![0x52; 40]);
+
+        assert_eq!(altered.pow_hash(), honest.pow_hash());
+        assert_ne!(weak_root([&altered]), weak_root([&honest]));
+    }
+
+    #[test]
+    fn the_weak_root_changes_with_a_weak_shares_coinbase_proof() {
+        let honest = WeakShare {
+            header: TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                .build()
+                .header,
+            coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+            coinbase_value: 50_000_000,
+            merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+        };
+        let mut altered = honest.clone();
+        altered.header.coinbase_proof.midstate[0] ^= 0x01;
+
+        assert_eq!(altered.pow_hash(), honest.pow_hash());
+        assert_ne!(weak_root([&altered]), weak_root([&honest]));
+    }
+
+    #[test]
+    fn the_weak_root_changes_with_a_weak_shares_share_header() {
+        let honest = WeakShare {
+            header: TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                .build()
+                .header,
+            coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 40]),
+            coinbase_value: 50_000_000,
+            merkle_branch: vec![TxMerkleNode::from_byte_array([0x33; 32])],
+        };
+        let mut altered = honest.clone();
+        altered.header.time += 1;
+
+        assert_eq!(altered.pow_hash(), honest.pow_hash());
+        assert_ne!(weak_root([&altered]), weak_root([&honest]));
     }
 }

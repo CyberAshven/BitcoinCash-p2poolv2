@@ -78,6 +78,25 @@ pub struct PoolMetrics {
     /// reads as unknown until the first share arrives.
     #[serde(skip)]
     pub submission_window: VecDeque<WorkDatum>,
+    /// Weak shares carried by the shares this node's miners found, since the
+    /// node started. Runtime only, not persisted.
+    #[serde(skip)]
+    pub weak_shares_carried_by_node: u64,
+    /// Weak shares carried by the shares confirmed on the share chain while
+    /// it was current, whichever node found them, since the node started.
+    /// Runtime only, not persisted.
+    #[serde(skip)]
+    pub weak_shares_carried_on_chain: u64,
+}
+
+/// Whose share carried weak shares, for
+/// [`MetricsHandle::record_weak_shares_carried`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeakShareCarrier {
+    /// A share this node's miners found, as it goes to the share chain.
+    ThisNode,
+    /// A share confirmed on the share chain, found by any node.
+    Chain,
 }
 
 impl Default for PoolMetrics {
@@ -99,6 +118,8 @@ impl Default for PoolMetrics {
             found_block_submissions: BTreeMap::new(),
             found_block_submit_retries: BTreeMap::new(),
             submission_window: VecDeque::new(),
+            weak_shares_carried_by_node: 0,
+            weak_shares_carried_on_chain: 0,
         }
     }
 }
@@ -216,6 +237,11 @@ pub enum MetricsMessage {
         node: String,
         outcome: &'static str,
         retries: u32,
+        response: oneshot::Sender<()>,
+    },
+    RecordWeakSharesCarried {
+        carrier: WeakShareCarrier,
+        count: u64,
         response: oneshot::Sender<()>,
     },
 }
@@ -368,6 +394,22 @@ impl MetricsActor {
                 self.record_block_submission(node, outcome, retries);
                 let _ = response.send(());
             }
+            MetricsMessage::RecordWeakSharesCarried {
+                carrier,
+                count,
+                response,
+            } => {
+                self.record_weak_shares_carried(carrier, count);
+                let _ = response.send(());
+            }
+        }
+    }
+
+    /// Count `count` weak shares carried by a share of `carrier`'s.
+    fn record_weak_shares_carried(&mut self, carrier: WeakShareCarrier, count: u64) {
+        match carrier {
+            WeakShareCarrier::ThisNode => self.metrics.weak_shares_carried_by_node += count,
+            WeakShareCarrier::Chain => self.metrics.weak_shares_carried_on_chain += count,
         }
     }
 
@@ -688,6 +730,28 @@ impl MetricsHandle {
         response_rx.await
     }
 
+    /// Count `count` weak shares carried by a share of `carrier`'s: one this
+    /// node's miners found, or one confirmed on the share chain. A stopped
+    /// actor is an error, not a panic: no share waits on a metric.
+    pub async fn record_weak_shares_carried(
+        &self,
+        carrier: WeakShareCarrier,
+        count: u64,
+    ) -> Result<(), tokio::sync::oneshot::error::RecvError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        // A send to a stopped actor drops the message with its response
+        // sender, which `response_rx` reports as an error.
+        let _ = self
+            .sender
+            .send(MetricsMessage::RecordWeakSharesCarried {
+                carrier,
+                count,
+                response: response_tx,
+            })
+            .await;
+        response_rx.await
+    }
+
     /// Set last update time. Largely used for testing.
     pub async fn set_last_update(
         &self,
@@ -749,6 +813,48 @@ pub async fn start_metrics(log_dir: String) -> Result<MetricsHandle, std::io::Er
 mod tests {
     use super::*;
     use crate::accounting::stats::pool_local_stats::save_pool_local_stats;
+
+    #[tokio::test]
+    async fn weak_shares_carried_by_this_nodes_shares_are_counted_apart_from_the_chains() {
+        let handle = spawn_test_metrics_handle();
+
+        handle
+            .record_weak_shares_carried(WeakShareCarrier::ThisNode, 3)
+            .await
+            .unwrap();
+
+        let metrics = handle.get_metrics().await;
+        assert_eq!(metrics.weak_shares_carried_by_node, 3);
+        assert_eq!(metrics.weak_shares_carried_on_chain, 0);
+        assert!(
+            metrics
+                .get_exposition()
+                .contains("# TYPE weak_shares_carried_by_node_total counter\nweak_shares_carried_by_node_total 3\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn weak_shares_carried_on_the_chain_are_counted_apart_from_this_nodes() {
+        let handle = spawn_test_metrics_handle();
+
+        handle
+            .record_weak_shares_carried(WeakShareCarrier::Chain, 5)
+            .await
+            .unwrap();
+        handle
+            .record_weak_shares_carried(WeakShareCarrier::Chain, 2)
+            .await
+            .unwrap();
+
+        let metrics = handle.get_metrics().await;
+        assert_eq!(metrics.weak_shares_carried_on_chain, 7);
+        assert_eq!(metrics.weak_shares_carried_by_node, 0);
+        assert!(
+            metrics
+                .get_exposition()
+                .contains("# TYPE weak_shares_carried_on_chain_total counter\nweak_shares_carried_on_chain_total 7\n")
+        );
+    }
 
     /// A metrics with `work` pushed at `at` on its submission window.
     fn window_of(at: u64, work: f64) -> PoolMetrics {

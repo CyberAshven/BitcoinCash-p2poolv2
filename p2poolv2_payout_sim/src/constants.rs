@@ -89,8 +89,9 @@ pub const BAND_CAP_STEP_DIVISOR: f64 = 512.0;
 /// Fixed-point unit of `band_cap` and `weak_ratio`: 1/1024.
 pub const FIXED_POINT_ONE: u64 = 1_024;
 
-/// Largest weak ratio `R_MAX` = 4096 *(sim)*.
-pub const WEAK_RATIO_MAX: u64 = 4_096;
+/// Largest weak ratio `R_MAX` = 256, the rule since study #85 (4,096
+/// before).
+pub const WEAK_RATIO_MAX: u64 = 256;
 
 /// The weak ratio moves by `1/256` of itself per share (design page,
 /// section 3, "The weak target").
@@ -104,12 +105,13 @@ pub const WEAK_CAP: u64 = 64;
 pub const WEAK_FILL: u64 = 32;
 
 /// Deepest a weak share's parent may be below the share that carries it:
-/// `WEAK_DEPTH` = 6 *(sim)*.
-pub const WEAK_DEPTH: usize = 6;
+/// `WEAK_DEPTH` = 48, the rule since study #85 (6 before).
+pub const WEAK_DEPTH: usize = 48;
 
 /// Share of a weak share's work that goes to the share carrying it:
-/// `INCLUDER_CUT` = 2% *(sim)*.
-pub const INCLUDER_CUT: f64 = 0.02;
+/// `INCLUDER_CUT` = 1%, the rule since study #85 (the page first proposed
+/// 2%, then set 5%).
+pub const INCLUDER_CUT: f64 = 0.01;
 
 /// Shares a miner must hold in Cash Dragon's floor window before it can set
 /// the floor: the presence minimum `N` = 3 (`docs/sharechain/vardiff-sharechain.md`
@@ -149,3 +151,16 @@ pub const STALE_RATE_BY_PERIOD: [(f64, f64); 5] = [
     (10.0, 0.021),
     (30.0, 0.005),
 ];
+
+/// `INCLUDER_CUT` as the design page now sets it, 100 basis points (1%),
+/// since study #85 (500 before). The study tables use it unless they sweep
+/// the cut.
+pub const PAGE_INCLUDER_CUT: f64 = INCLUDER_CUT;
+
+/// ASERT's half-life on the share chain, seconds (`HALFLIFE`,
+/// `docs/difficulty_adjustment/asert.md`).
+pub const ASERT_HALF_LIFE_SECONDS: f64 = 600.0;
+
+/// Medium miners' sizes in the medium mixes: five log-spaced sizes from 30
+/// to 300 TH/s, each holding an equal part of the medium hashrate.
+pub const MEDIUM_MINER_HASHRATES: [f64; 5] = [30.0e12, 53.3e12, 94.9e12, 168.7e12, 300.0e12];

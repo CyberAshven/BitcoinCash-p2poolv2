@@ -11,6 +11,7 @@ use crate::constants::{
 };
 use crate::distribution::Distribution;
 use crate::report::{Report, group_thousands};
+use crate::scaling::{self, Idea};
 use crate::scenario::{Scenario, ShareRelay};
 use crate::sizes::CoinbaseLayout;
 use std::num::NonZeroUsize;
@@ -40,10 +41,14 @@ pub enum Sweep {
     Nodes,
     /// The base scenario under eight seeds, to show the noise.
     Seeds,
+    /// One idea of the scaling study at 100 and 1,000 nodes and 10, 5, 2
+    /// and 1-second shares.
+    Scaling(Idea),
 }
 
 impl Sweep {
-    /// Every sweep, in the order the documentation shows them.
+    /// Every sweep of the main results, in the order the documentation
+    /// shows them (`sweep all`).
     pub const ALL: [Sweep; 9] = [
         Sweep::Payees,
         Sweep::Relay,
@@ -56,19 +61,42 @@ impl Sweep {
         Sweep::Seeds,
     ];
 
+    /// The scaling study's sweeps, in the order the documentation shows
+    /// them (`sweep scaling`).
+    pub const SCALING: [Sweep; 7] = [
+        Sweep::Scaling(Idea::Today),
+        Sweep::Scaling(Idea::WeakShares),
+        Sweep::Scaling(Idea::CompactCoinbase),
+        Sweep::Scaling(Idea::HeaderCheckForwarding),
+        Sweep::Scaling(Idea::PeerDegree),
+        Sweep::Scaling(Idea::UncleCap),
+        Sweep::Scaling(Idea::Combined),
+    ];
+
     /// Parse a sweep's command-line name.
     pub fn parse(text: &str) -> Result<Self, String> {
         Sweep::ALL
             .iter()
+            .chain(Sweep::SCALING.iter())
             .copied()
             .find(|sweep| sweep.name() == text.trim())
             .ok_or_else(|| {
-                let names: Vec<&str> = Sweep::ALL.iter().map(Sweep::name).collect();
+                let names: Vec<&str> = Sweep::ALL
+                    .iter()
+                    .chain(Sweep::SCALING.iter())
+                    .map(Sweep::name)
+                    .collect();
                 format!(
                     "unknown sweep `{text}`; expected one of {}",
                     names.join(", ")
                 )
             })
+    }
+
+    /// Whether the sweep belongs to the scaling study, whose table shows
+    /// propagation and header sync rather than BCHN and Stratum.
+    pub fn is_scaling(&self) -> bool {
+        matches!(self, Sweep::Scaling(_))
     }
 
     /// The command-line name.
@@ -83,6 +111,7 @@ impl Sweep {
             Sweep::Interval => "interval",
             Sweep::Nodes => "nodes",
             Sweep::Seeds => "seeds",
+            Sweep::Scaling(idea) => idea.name(),
         }
     }
 
@@ -98,13 +127,14 @@ impl Sweep {
             Sweep::Interval => interval_scenarios(base),
             Sweep::Nodes => node_scenarios(base),
             Sweep::Seeds => seed_scenarios(base),
+            Sweep::Scaling(idea) => scaling::grid(&idea.variants(base)),
         }
     }
 }
 
 /// `base` with a payee count and a layout, and at least as many miners as
 /// payees.
-fn with_payees(base: &Scenario, layout: CoinbaseLayout, payees: u64) -> Scenario {
+pub(crate) fn with_payees(base: &Scenario, layout: CoinbaseLayout, payees: u64) -> Scenario {
     Scenario {
         label: format!("{}, {} payees", layout.name(), group_thousands(payees)),
         layout,
@@ -292,34 +322,56 @@ fn seed_scenarios(base: &Scenario) -> Vec<Scenario> {
 /// depends only on its own scenario, so the result does not depend on the
 /// number of threads.
 pub fn run_scenarios(scenarios: &[Scenario]) -> Vec<Report> {
-    let threads = thread::available_parallelism()
+    run_scenarios_on(scenarios, available_threads())
+}
+
+/// Run `scenarios` on at most `threads` threads, returning the reports in
+/// order: fewer threads hold fewer runs in memory at once.
+pub fn run_scenarios_on(scenarios: &[Scenario], threads: usize) -> Vec<Report> {
+    parallel_map(scenarios, threads, Scenario::run)
+}
+
+/// Threads the machine offers, at least one.
+pub fn available_threads() -> usize {
+    thread::available_parallelism()
         .map(NonZeroUsize::get)
         .unwrap_or(1)
-        .min(scenarios.len().max(1));
+}
+
+/// `work` applied to every item on at most `threads` threads (at least one),
+/// the results in the items' order. Each item is handed to the next free
+/// thread, so the result does not depend on the number of threads.
+pub fn parallel_map<Item: Sync, Output: Send>(
+    items: &[Item],
+    threads: usize,
+    work: impl Fn(&Item) -> Output + Sync,
+) -> Vec<Output> {
+    let threads = threads.max(1).min(items.len().max(1));
     let next = AtomicUsize::new(0);
     let (sender, receiver) = mpsc::channel();
     thread::scope(|scope| {
         (0..threads).for_each(|_| {
             let sender = sender.clone();
             let next = &next;
+            let work = &work;
             scope.spawn(move || {
                 let mut index = next.fetch_add(1, Ordering::Relaxed);
-                while index < scenarios.len() {
+                while index < items.len() {
                     // The receiver outlives the scope, so a send cannot fail.
-                    let _ = sender.send((index, scenarios[index].run()));
+                    let _ = sender.send((index, work(&items[index])));
                     index = next.fetch_add(1, Ordering::Relaxed);
                 }
             });
         });
     });
     drop(sender);
-    let mut slots: Vec<Option<Report>> = vec![None; scenarios.len()];
-    receiver.into_iter().for_each(|(index, report)| {
-        slots[index] = Some(report);
+    let mut slots: Vec<Option<Output>> = (0..items.len()).map(|_| None).collect();
+    receiver.into_iter().for_each(|(index, output)| {
+        slots[index] = Some(output);
     });
     slots
         .into_iter()
-        .map(|slot| slot.expect("every scenario ran"))
+        .map(|slot| slot.expect("every item ran"))
         .collect()
 }
 
