@@ -462,6 +462,8 @@ fn miner_report(shares: Vec<MinerShare>) -> MinerResponse {
         payout_level: Some(5),
         payout_level_satoshis: Some(17_472),
         expected_payments_a_month: Some(4.5),
+        expected_income_a_month: Some(78_624.0),
+        monthly_swing: Some(0.25),
         shares,
     }
 }

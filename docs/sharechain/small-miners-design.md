@@ -488,8 +488,14 @@ hashrate, the pool's (from its newest 60 confirmed shares) and the
 template's coinbase value, as the band's node policy sizes heavier jobs, and
 logs the warning once per connection. A Job Declaration token carries the
 level its identity chose, or the node's, unlowered. The `/miner` API and the
-dashboard's miner page show the miner's level and its expected payments a
-month at it; income and monthly swing are not shown yet.
+dashboard's miner page show the miner's level and its expected income,
+payments a month at its level and monthly swing. Income is its payout
+fraction of the window times the template's coinbase value on each of the
+pool's blocks a month. The swing is
+`sqrt(1 / credits a month + 1 / pool blocks a month)`, with
+`1 / payments a month` added under the root when its slice of a block is
+below its level; its credits a month are its shares, uncles and weak shares
+in the window over the window's time span.
 
 ### Steering the seed
 

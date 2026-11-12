@@ -10,7 +10,9 @@ use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
 use crate::shares::validation::FailureKind;
 use crate::shares::weak::{GENESIS_WEAK_RATIO, WeakSummary, next_weak_ratio};
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
-use crate::test_utils::{TestShareBlockBuilder, TestWeakShare, build_test_weak_share};
+use crate::test_utils::{
+    TestShareBlockBuilder, TestWeakShare, build_test_weak_share, build_test_weak_share_paying,
+};
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, CompactTarget, Network, PubkeyHash, Work};
 use p2poolv2_wallet::payout_address::PayoutAddress;
@@ -427,6 +429,104 @@ fn weak_shares_on_one_template_share_one_window_walk() {
 
     assert!(first_result.is_ok(), "{}", first_result.unwrap_err());
     assert!(second_result.is_ok(), "{}", second_result.unwrap_err());
+}
+
+/// 64 weak shares on 64 templates of one Bitcoin Cash block, each paying
+/// another coinbase value, share one walk of the window: the weights depend
+/// on the parent and the block, not on the value. Each one's payouts are
+/// still built for its own value, so its rebuilt coinbase matches the one it
+/// was mined on and every one passes.
+#[test]
+fn weak_shares_on_many_templates_of_one_block_share_one_window_walk() {
+    let payee = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x55; 20]),
+        Network::Regtest,
+    ));
+    let distribution = HashMap::from([(payee, 1_000u128)]);
+    let mut window = MockPplnsWindow::default();
+    window.expect_network().return_const(Network::Regtest);
+    let walked = distribution.clone();
+    window
+        .expect_get_weights_from_start_hash()
+        .times(1)
+        .returning(move |_, _, _| Ok(PplnsWeights::without_levels(walked.clone())));
+    let validator =
+        DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
+    let mut cache = WeakPayoutCache::new();
+
+    let passed = (0..64u32)
+        .filter(|template| {
+            let weak_share = build_test_weak_share_paying(
+                TestWeakShare {
+                    parent_hash: BlockHash::from_byte_array([0x66; 32]),
+                    bits: CompactTarget::from_consensus(HARD),
+                    minimum: CompactTarget::from_consensus(HARD),
+                    weak_ratio: GENESIS_WEAK_RATIO,
+                    distribution: &distribution,
+                    time: WEAK_TIME,
+                    nonce: *template,
+                },
+                5_000_000_000 + u64::from(*template),
+            );
+            validator
+                .validate_weak_share_coinbase(
+                    &weak_share,
+                    &MockChainStoreHandle::default(),
+                    &mut window,
+                    &mut cache,
+                )
+                .is_ok()
+        })
+        .count();
+
+    assert_eq!(passed, 64);
+}
+
+/// The cached weights are those of the weak share's own block: one paying
+/// another Bitcoin Cash block walks the window again.
+#[test]
+fn a_weak_share_paying_another_block_walks_the_window_again() {
+    let payee = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x55; 20]),
+        Network::Regtest,
+    ));
+    let distribution = HashMap::from([(payee, 1_000u128)]);
+    let first = build_test_weak_share(TestWeakShare {
+        parent_hash: BlockHash::from_byte_array([0x66; 32]),
+        bits: CompactTarget::from_consensus(HARD),
+        minimum: CompactTarget::from_consensus(HARD),
+        weak_ratio: GENESIS_WEAK_RATIO,
+        distribution: &distribution,
+        time: WEAK_TIME,
+        nonce: 1,
+    });
+    let mut second = first.clone();
+    second.header.bitcoin_header.prev_blockhash = BlockHash::from_byte_array([0x77; 32]);
+    let mut window = MockPplnsWindow::default();
+    window.expect_network().return_const(Network::Regtest);
+    let walked = distribution.clone();
+    window
+        .expect_get_weights_from_start_hash()
+        .times(2)
+        .returning(move |_, _, _| Ok(PplnsWeights::without_levels(walked.clone())));
+    let validator =
+        DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
+    let mut cache = WeakPayoutCache::new();
+
+    let first_result = validator.validate_weak_share_coinbase(
+        &first,
+        &MockChainStoreHandle::default(),
+        &mut window,
+        &mut cache,
+    );
+    let _ = validator.validate_weak_share_coinbase(
+        &second,
+        &MockChainStoreHandle::default(),
+        &mut window,
+        &mut cache,
+    );
+
+    assert!(first_result.is_ok(), "{}", first_result.unwrap_err());
 }
 
 /// A coinbase paying someone other than the window anchored at the weak

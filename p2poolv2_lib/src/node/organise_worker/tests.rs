@@ -8,7 +8,9 @@ use crate::shares::validation::ValidationError;
 use crate::store::block_tx_metadata::Status;
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership};
 use crate::stratum::work::notify::{NotifyCmd, NotifyReceiver};
-use crate::test_utils::TestShareBlockBuilder;
+use crate::test_utils::{TestShareBlockBuilder, test_weak_share_on};
+use bitcoin::hashes::Hash;
+use p2poolv2_wallet::share_owner::ShareOwner;
 use std::collections::HashMap;
 
 /// Create a notify channel for tests, returning the sender and receiver.
@@ -1185,6 +1187,89 @@ async fn test_confirmed_block_skips_effort_while_syncing() {
     // confirmed-share work was accumulated into the effort numerator.
     let pool_metrics = metrics.get_metrics().await;
     assert_eq!(pool_metrics.work_since_last_block, 0.0);
+}
+
+/// A share confirmed while the chain is current counts the weak shares it
+/// carries as carried on the chain, not as carried by this node's shares.
+#[tokio::test]
+async fn test_confirmed_share_counts_its_weak_shares_as_carried_on_the_chain() {
+    let (organise_tx, organise_rx) = create_organise_channel();
+    let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_get_candidate_blocks_needing_validation()
+        .returning(|_, _| Ok(Vec::new()));
+    let share = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(vec![
+            test_weak_share_on(BlockHash::from_byte_array([1; 32]), 1),
+            test_weak_share_on(BlockHash::from_byte_array([1; 32]), 2),
+        ])
+        .build();
+    let share_hash = share.block_hash();
+    let share_header = share.header.clone();
+    mock_chain_handle
+        .expect_get_confirmed_at_height()
+        .returning(move |_| Ok(share_hash));
+    mock_chain_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(share_header.clone()));
+    mock_chain_handle
+        .expect_clone()
+        .return_once(MockChainStoreHandle::new);
+    mock_chain_handle
+        .expect_mark_block_valid()
+        .returning(|_| Ok(()));
+    mock_chain_handle
+        .expect_get_block_metadata()
+        .returning(|_| {
+            Ok(BlockMetadata {
+                expected_height: Some(5),
+                chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+                status: Status::BlockValid,
+                chain: ChainMembership::Confirmed,
+            })
+        });
+    mock_chain_handle
+        .expect_get_tip_height()
+        .returning(|| Ok(Some(5)));
+    mock_chain_handle
+        .expect_promote_block()
+        .returning(|_| Ok(Some(6)));
+    mock_chain_handle
+        .expect_get_candidate_tip_height()
+        .returning(|| Ok(Some(6)));
+    mock_chain_handle.expect_is_current().returning(|| true);
+    mock_chain_handle
+        .expect_get_uncle_infos()
+        .returning(|_| Vec::new());
+    let (monitoring_tx, _monitoring_rx) = create_monitoring_event_channel();
+    let (notify_tx, _notify_rx) = create_test_notify_channel();
+    let metrics = create_test_metrics_handle();
+    let worker = OrganiseWorker::new(
+        organise_rx,
+        create_validation_channel().0,
+        mock_chain_handle,
+        monitoring_tx,
+        notify_tx,
+        metrics.clone(),
+        create_test_pplns_window(),
+        stub_share_validator_with_success(),
+    );
+    organise_tx
+        .send(OrganiseEvent::Block {
+            share_block: share,
+            content_validated: true,
+        })
+        .await
+        .unwrap();
+    drop(organise_tx);
+
+    let result = worker.run().await;
+
+    assert!(result.is_ok());
+    let pool_metrics = metrics.get_metrics().await;
+    assert_eq!(pool_metrics.weak_shares_carried_on_chain, 2);
+    assert_eq!(pool_metrics.weak_shares_carried_by_node, 0);
 }
 
 #[tokio::test]
