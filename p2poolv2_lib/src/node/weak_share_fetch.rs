@@ -3,3 +3,598 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Which announced weak shares a node has asked a peer for.
+//!
+//! A hash is fetched from one peer at a time. Further announcements of it
+//! are remembered, up to a bound, and asked only when the first peer does
+//! not have the body, the body fails its check, or the ask goes unanswered.
+
+use crate::shares::weak::WeakShare;
+use crate::shares::weak_pool::{MAX_HELD_WEAK_SHARES, MAX_POOL_WEAK_SHARES};
+use bitcoin::BlockHash;
+use libp2p::PeerId;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
+
+/// Other peers remembered for one hash besides the peer being asked.
+///
+/// Eight failovers cover a mesh that announces the same hash. A further
+/// announcement does not open another stream.
+pub const MAX_ANNOUNCERS_PER_HASH: usize = 8;
+
+/// Weak-share fetches open toward one peer at once.
+///
+/// The block fetcher uses the same cap under the default yamux stream
+/// limit, so one inventory cannot fill a peer's streams.
+pub const MAX_WEAK_FETCHES_PER_PEER: usize = 16;
+
+/// Weak-share fetches open at once, across every peer.
+///
+/// 512 is 32 peers at the per-peer cap. Hashes past it wait instead of
+/// opening a stream each.
+pub const MAX_WEAK_FETCHES_IN_FLIGHT: usize = 512;
+
+/// Hashes announced but not yet asked for.
+///
+/// The pool holds at most [`MAX_POOL_WEAK_SHARES`]. Remembering more
+/// announcements than that cannot be served for long, so a further hash
+/// is ignored until a later inventory offers it.
+pub const MAX_WANTED_WEAK_SHARES: usize = MAX_POOL_WEAK_SHARES;
+
+/// Hashes whose body was refused for the peer's rate.
+///
+/// The next announcer is not asked at once. One slot per hash the pool
+/// could hold; the oldest is dropped past that.
+pub const MAX_RATE_LIMITED_WEAK_SHARES: usize = MAX_POOL_WEAK_SHARES;
+
+/// How long a rate-limited hash waits before a new announcement may fetch it.
+///
+/// One second is the worker's existing tick, so the wait is visible on the
+/// next check without a second timer.
+pub const WEAK_FETCH_RATE_LIMIT_RETRY: Duration = Duration::from_secs(1);
+
+/// How long one fetch may stay unanswered before the next announcer is asked.
+///
+/// Ten seconds is the block fetcher's request timeout, which it keeps equal
+/// to libp2p's. The worker polls this on its one-second tick.
+pub const WEAK_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bodies the worker is holding, so a second announcement does not fetch
+/// another copy.
+///
+/// The pool itself holds at most [`MAX_HELD_WEAK_SHARES`] while it waits
+/// for parents. The oldest record is dropped past that.
+pub const MAX_HELD_FETCHES: usize = MAX_HELD_WEAK_SHARES;
+
+/// A weak share to ask one peer for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WeakShareFetchSend {
+    pub peer: PeerId,
+    pub hash: BlockHash,
+}
+
+/// What the weak-share worker hears about a fetch, apart from the bodies
+/// peers push on the existing weak-share channel.
+///
+/// Public because `handle_inventory` is public and forwards an announcement
+/// on this type. The fields are public so the worker, the inventory handler
+/// and the response dispatcher can build and read them.
+// The body is the weak share. Boxing it would allocate on every fetched
+// body, and the channel that carries this enum is already bounded.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub enum WeakFetchEvent {
+    /// `peer` named these proof-of-work hashes.
+    Announced {
+        peer: PeerId,
+        hashes: Vec<BlockHash>,
+    },
+    /// `peer` returned the body of a fetch.
+    Body { peer: PeerId, weak_share: WeakShare },
+    /// The peer that was asked does not have `hash`.
+    NotFound { hash: BlockHash },
+}
+
+struct Wanted {
+    next: PeerId,
+    others: VecDeque<PeerId>,
+}
+
+struct InFlight {
+    peer: PeerId,
+    asked_at: Instant,
+    others: VecDeque<PeerId>,
+}
+
+/// The fetch book. One task owns it. Every map here is capped.
+pub(crate) struct WeakShareFetch {
+    wanted: HashMap<BlockHash, Wanted>,
+    wanted_order: VecDeque<BlockHash>,
+    in_flight: HashMap<BlockHash, InFlight>,
+    per_peer: HashMap<PeerId, usize>,
+    /// Announcers kept after a body arrives, until the check says whether
+    /// to ask the next peer. At most one entry per in-flight fetch.
+    parked: HashMap<BlockHash, VecDeque<PeerId>>,
+    parked_order: VecDeque<BlockHash>,
+    retry_after: HashMap<BlockHash, Instant>,
+    retry_order: VecDeque<BlockHash>,
+    holding: HashSet<BlockHash>,
+    holding_order: VecDeque<BlockHash>,
+}
+
+impl WeakShareFetch {
+    pub(crate) fn new() -> Self {
+        Self {
+            wanted: HashMap::new(),
+            wanted_order: VecDeque::new(),
+            in_flight: HashMap::new(),
+            per_peer: HashMap::new(),
+            parked: HashMap::new(),
+            parked_order: VecDeque::new(),
+            retry_after: HashMap::new(),
+            retry_order: VecDeque::new(),
+            holding: HashSet::new(),
+            holding_order: VecDeque::new(),
+        }
+    }
+
+    /// Record that `peer` announced `hash` at `now`.
+    ///
+    /// `has_seen` means the pool already checked a copy, so nothing is
+    /// fetched. A hash already in flight or waiting only gains `peer` as
+    /// a later announcer.
+    pub(crate) fn note(&mut self, peer: PeerId, hash: BlockHash, has_seen: bool, now: Instant) {
+        if has_seen || self.holding.contains(&hash) {
+            return;
+        }
+        if let Some(until) = self.retry_after.get(&hash)
+            && *until > now
+        {
+            return;
+        }
+        self.remove_retry(hash);
+        if let Some(inflight) = self.in_flight.get_mut(&hash) {
+            remember_announcer(&mut inflight.others, peer, Some(inflight.peer));
+            return;
+        }
+        if let Some(wanted) = self.wanted.get_mut(&hash) {
+            remember_announcer(&mut wanted.others, peer, Some(wanted.next));
+            return;
+        }
+        if let Some(others) = self.parked.get_mut(&hash) {
+            remember_announcer(others, peer, None);
+            return;
+        }
+        if self.wanted_order.len() >= MAX_WANTED_WEAK_SHARES {
+            return;
+        }
+        self.wanted.insert(
+            hash,
+            Wanted {
+                next: peer,
+                others: VecDeque::new(),
+            },
+        );
+        self.wanted_order.push_back(hash);
+    }
+
+    /// Asks to send, for hashes that are waiting and whose peer has a free
+    /// slot. Never more than the free in-flight slots.
+    pub(crate) fn take_next(&mut self, now: Instant) -> Vec<WeakShareFetchSend> {
+        let mut sends = Vec::new();
+        let mut deferred = VecDeque::new();
+        while self.in_flight.len() < MAX_WEAK_FETCHES_IN_FLIGHT {
+            let pending = self.wanted_order.len();
+            if pending == 0 {
+                break;
+            }
+            let mut started = 0usize;
+            for _ in 0..pending {
+                let Some(hash) = self.wanted_order.pop_front() else {
+                    break;
+                };
+                let Some(wanted) = self.wanted.remove(&hash) else {
+                    continue;
+                };
+                let in_flight_for_peer = self.per_peer.get(&wanted.next).copied().unwrap_or(0);
+                if in_flight_for_peer >= MAX_WEAK_FETCHES_PER_PEER
+                    || self.in_flight.len() >= MAX_WEAK_FETCHES_IN_FLIGHT
+                {
+                    deferred.push_back((hash, wanted));
+                    continue;
+                }
+                self.start(hash, wanted, now, &mut sends);
+                started += 1;
+            }
+            while let Some((hash, wanted)) = deferred.pop_front() {
+                self.wanted.insert(hash, wanted);
+                self.wanted_order.push_back(hash);
+            }
+            if started == 0 {
+                break;
+            }
+        }
+        sends
+    }
+
+    /// The body arrived. The in-flight slot is freed before the pool admits
+    /// the share. Announcers stay parked so a failed check can ask the next
+    /// one. A hash that was only waiting is forgotten: the body is here.
+    pub(crate) fn body_arrived(&mut self, hash: BlockHash) {
+        if let Some(inflight) = self.in_flight.remove(&hash) {
+            self.release_peer(inflight.peer);
+            self.park(hash, inflight.others);
+        }
+        self.remove_wanted(hash);
+    }
+
+    /// The peer we asked does not have the body. Ask the next announcer.
+    pub(crate) fn not_found(&mut self, hash: BlockHash, now: Instant) -> Vec<WeakShareFetchSend> {
+        let Some(inflight) = self.in_flight.remove(&hash) else {
+            return Vec::new();
+        };
+        self.release_peer(inflight.peer);
+        self.requeue(hash, inflight.others);
+        self.take_next(now)
+    }
+
+    /// The body failed its consensus check. Ask the next announcer. The
+    /// pool does not mark that hash seen, so another copy can still pass.
+    pub(crate) fn invalid(&mut self, hash: BlockHash, now: Instant) -> Vec<WeakShareFetchSend> {
+        let others = self.take_parked(hash);
+        if let Some(inflight) = self.in_flight.remove(&hash) {
+            self.release_peer(inflight.peer);
+            self.requeue(hash, inflight.others);
+        } else {
+            self.requeue(hash, others);
+        }
+        self.take_next(now)
+    }
+
+    /// The peer who delivered the body was over its rate. Do not ask the
+    /// next announcer: that would spend a second peer's allowance on the
+    /// same hash. A later announcement, after the retry instant, may fetch.
+    pub(crate) fn rate_limited(&mut self, hash: BlockHash, now: Instant) {
+        self.settled(hash);
+        self.remove_wanted(hash);
+        self.forget_hold(hash);
+        let until = now + WEAK_FETCH_RATE_LIMIT_RETRY;
+        if let Some(stored) = self.retry_after.get_mut(&hash) {
+            *stored = until;
+            return;
+        }
+        while self.retry_order.len() >= MAX_RATE_LIMITED_WEAK_SHARES {
+            let Some(oldest) = self.retry_order.pop_front() else {
+                break;
+            };
+            self.retry_after.remove(&oldest);
+        }
+        self.retry_after.insert(hash, until);
+        self.retry_order.push_back(hash);
+    }
+
+    /// The check passed, or the body will not be asked for again. Drop any
+    /// parked announcers.
+    pub(crate) fn settled(&mut self, hash: BlockHash) {
+        self.take_parked(hash);
+        if let Some(inflight) = self.in_flight.remove(&hash) {
+            self.release_peer(inflight.peer);
+        }
+    }
+
+    /// The body is held for its parent. Do not fetch another copy. When the
+    /// hold expires, [`Self::retain_holds`] forgets it and a later
+    /// announcement may fetch.
+    pub(crate) fn held(&mut self, hash: BlockHash) {
+        self.settled(hash);
+        if self.holding.contains(&hash) {
+            return;
+        }
+        while self.holding_order.len() >= MAX_HELD_FETCHES {
+            let Some(oldest) = self.holding_order.pop_front() else {
+                break;
+            };
+            self.holding.remove(&oldest);
+        }
+        self.holding.insert(hash);
+        self.holding_order.push_back(hash);
+    }
+
+    /// Forget held hashes for which `still_held` is false. Those holds
+    /// expired, or the share was pooled, so a later announcement may fetch
+    /// one that is no longer in hand.
+    pub(crate) fn retain_holds(&mut self, mut still_held: impl FnMut(&BlockHash) -> bool) {
+        let expired: Vec<BlockHash> = self
+            .holding_order
+            .iter()
+            .filter(|hash| !still_held(hash))
+            .copied()
+            .collect();
+        for hash in expired {
+            self.forget_hold(hash);
+        }
+    }
+
+    /// Move fetches that have waited longer than [`WEAK_FETCH_TIMEOUT`] to
+    /// the next announcer. A fetch asked exactly that long ago is still in
+    /// time; the next tick, a nanosecond past, is not.
+    pub(crate) fn poll(&mut self, now: Instant) -> Vec<WeakShareFetchSend> {
+        let timed_out: Vec<BlockHash> = self
+            .in_flight
+            .iter()
+            .filter(|(_, inflight)| {
+                now.saturating_duration_since(inflight.asked_at) > WEAK_FETCH_TIMEOUT
+            })
+            .map(|(hash, _)| *hash)
+            .collect();
+        for hash in timed_out {
+            let Some(inflight) = self.in_flight.remove(&hash) else {
+                continue;
+            };
+            self.release_peer(inflight.peer);
+            self.requeue(hash, inflight.others);
+        }
+        self.take_next(now)
+    }
+
+    /// How many announcers are stored for `hash` behind the one in flight.
+    #[cfg(test)]
+    pub(crate) fn waiting_announcers(&self, hash: &BlockHash) -> usize {
+        self.in_flight
+            .get(hash)
+            .map(|inflight| inflight.others.len())
+            .unwrap_or(0)
+    }
+
+    fn start(
+        &mut self,
+        hash: BlockHash,
+        wanted: Wanted,
+        now: Instant,
+        sends: &mut Vec<WeakShareFetchSend>,
+    ) {
+        *self.per_peer.entry(wanted.next).or_default() += 1;
+        sends.push(WeakShareFetchSend {
+            peer: wanted.next,
+            hash,
+        });
+        self.in_flight.insert(
+            hash,
+            InFlight {
+                peer: wanted.next,
+                asked_at: now,
+                others: wanted.others,
+            },
+        );
+    }
+
+    fn requeue(&mut self, hash: BlockHash, mut others: VecDeque<PeerId>) {
+        let Some(next) = others.pop_front() else {
+            return;
+        };
+        if self.wanted.contains_key(&hash) {
+            return;
+        }
+        if self.wanted_order.len() >= MAX_WANTED_WEAK_SHARES
+            && let Some(oldest) = self.wanted_order.pop_front()
+        {
+            self.wanted.remove(&oldest);
+        }
+        if self.wanted_order.len() >= MAX_WANTED_WEAK_SHARES {
+            return;
+        }
+        self.wanted.insert(hash, Wanted { next, others });
+        self.wanted_order.push_back(hash);
+    }
+
+    fn park(&mut self, hash: BlockHash, others: VecDeque<PeerId>) {
+        if let Some(parked) = self.parked.get_mut(&hash) {
+            *parked = others;
+            return;
+        }
+        while self.parked_order.len() >= MAX_WEAK_FETCHES_IN_FLIGHT {
+            let Some(oldest) = self.parked_order.pop_front() else {
+                break;
+            };
+            self.parked.remove(&oldest);
+        }
+        self.parked.insert(hash, others);
+        self.parked_order.push_back(hash);
+    }
+
+    fn take_parked(&mut self, hash: BlockHash) -> VecDeque<PeerId> {
+        self.parked_order.retain(|parked| *parked != hash);
+        self.parked.remove(&hash).unwrap_or_default()
+    }
+
+    fn remove_wanted(&mut self, hash: BlockHash) {
+        if self.wanted.remove(&hash).is_some() {
+            self.wanted_order.retain(|wanted| *wanted != hash);
+        }
+    }
+
+    fn remove_retry(&mut self, hash: BlockHash) {
+        if self.retry_after.remove(&hash).is_some() {
+            self.retry_order.retain(|retried| *retried != hash);
+        }
+    }
+
+    fn forget_hold(&mut self, hash: BlockHash) {
+        if self.holding.remove(&hash) {
+            self.holding_order.retain(|held| *held != hash);
+        }
+    }
+
+    fn release_peer(&mut self, peer: PeerId) {
+        // `remove` needs the map. The `get_mut` borrow ends before that.
+        let finished = match self.per_peer.get_mut(&peer) {
+            Some(count) => {
+                *count = count.saturating_sub(1);
+                *count == 0
+            }
+            None => return,
+        };
+        if finished {
+            self.per_peer.remove(&peer);
+        }
+    }
+}
+
+fn remember_announcer(others: &mut VecDeque<PeerId>, peer: PeerId, current: Option<PeerId>) {
+    if current == Some(peer) || others.contains(&peer) {
+        return;
+    }
+    if others.len() >= MAX_ANNOUNCERS_PER_HASH {
+        return;
+    }
+    others.push_back(peer);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::hashes::Hash;
+
+    fn hash_h() -> BlockHash {
+        BlockHash::from_byte_array([0x11; 32])
+    }
+
+    fn peer() -> PeerId {
+        PeerId::random()
+    }
+
+    #[test]
+    fn two_announcers_fetch_once_and_the_list_stops_at_eight() {
+        let now = Instant::now();
+        let hash = hash_h();
+        let peers: Vec<PeerId> = (0..10).map(|_| peer()).collect();
+        let mut book = WeakShareFetch::new();
+
+        book.note(peers[0], hash, false, now);
+        book.note(peers[1], hash, false, now);
+        let sends = book.take_next(now);
+
+        assert_eq!(
+            sends,
+            vec![WeakShareFetchSend {
+                peer: peers[0],
+                hash,
+            }],
+            "two announcers of hash H produce one GetData, to the first"
+        );
+        assert_eq!(
+            book.waiting_announcers(&hash),
+            1,
+            "the second announcer of hash H is stored"
+        );
+
+        for announcer in peers.iter().skip(2).take(7) {
+            book.note(*announcer, hash, false, now);
+        }
+        assert_eq!(
+            book.waiting_announcers(&hash),
+            8,
+            "announcers three through nine of hash H fill the list to 8"
+        );
+        book.note(peers[9], hash, false, now);
+        assert_eq!(
+            book.waiting_announcers(&hash),
+            8,
+            "a tenth announcer of hash H does not grow the list past 8"
+        );
+
+        let sends = book.not_found(hash, now);
+        assert_eq!(
+            sends,
+            vec![WeakShareFetchSend {
+                peer: peers[1],
+                hash,
+            }],
+            "not_found from the first peer produces one GetData to the second"
+        );
+
+        let mut seen = WeakShareFetch::new();
+        seen.note(peers[0], hash, true, now);
+        assert!(
+            seen.take_next(now).is_empty(),
+            "has_seen produces no GetData for hash H"
+        );
+    }
+
+    #[test]
+    fn rate_limited_waits_for_a_later_announcement() {
+        let now = Instant::now();
+        let hash = hash_h();
+        let first = peer();
+        let later = peer();
+        let mut book = WeakShareFetch::new();
+        book.note(first, hash, false, now);
+        assert_eq!(
+            book.take_next(now).len(),
+            1,
+            "the first announcement of hash H fetches once before the rate limit"
+        );
+
+        book.rate_limited(hash, now);
+        assert!(
+            book.take_next(now).is_empty(),
+            "rate_limited produces no GetData for hash H"
+        );
+        book.note(later, hash, false, now);
+        assert!(
+            book.take_next(now).is_empty(),
+            "a new announcement of hash H inside the retry instant produces no GetData"
+        );
+
+        let after = now + WEAK_FETCH_RATE_LIMIT_RETRY;
+        book.note(later, hash, false, after);
+        let sends = book.take_next(after);
+        assert_eq!(
+            sends,
+            vec![WeakShareFetchSend { peer: later, hash }],
+            "a new announcement of hash H after the retry instant fetches"
+        );
+    }
+
+    #[test]
+    fn poll_fails_over_only_after_ten_seconds() {
+        let now = Instant::now();
+        let hash = hash_h();
+        let first = peer();
+        let second = peer();
+        let mut book = WeakShareFetch::new();
+        book.note(first, hash, false, now);
+        book.note(second, hash, false, now);
+        let _ = book.take_next(now);
+
+        let at_timeout = now + WEAK_FETCH_TIMEOUT;
+        assert!(
+            book.poll(at_timeout).is_empty(),
+            "poll at 10 seconds does not return hash H"
+        );
+
+        let past = at_timeout + Duration::from_nanos(1);
+        let sends = book.poll(past);
+        assert_eq!(
+            sends,
+            vec![WeakShareFetchSend { peer: second, hash }],
+            "poll at 10 seconds plus one nanosecond asks the next announcer for hash H"
+        );
+    }
+
+    #[test]
+    fn body_arrived_then_poll_produces_nothing() {
+        let now = Instant::now();
+        let hash = hash_h();
+        let mut book = WeakShareFetch::new();
+        book.note(peer(), hash, false, now);
+        book.note(peer(), hash, false, now);
+        let _ = book.take_next(now);
+
+        book.body_arrived(hash);
+        let past = now + WEAK_FETCH_TIMEOUT + Duration::from_nanos(1);
+        assert!(
+            book.poll(past).is_empty(),
+            "body_arrived then poll produces nothing for hash H"
+        );
+    }
+}

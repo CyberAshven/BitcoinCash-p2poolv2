@@ -7,6 +7,7 @@ use crate::shares::validation::{BCH_SHARE_BODY_SIZE_LIMIT, BLOCK_TXS_SIZE_LIMIT,
 use crate::shares::weak::{WEAK_BYTES, WEAK_CAP, WeakShare};
 use crate::test_utils::TestShareBlockBuilder;
 use bitcoin::consensus::encode;
+use bitcoin::hashes::Hash;
 use bitcoin::script::Builder;
 use p2poolv2_wallet::share_owner::ShareOwner;
 use std::str::FromStr;
@@ -279,6 +280,63 @@ fn test_get_data_txid_roundtrip() {
 
     let decoded = GetData::consensus_decode(&mut &encoded[..]).unwrap();
     assert_eq!(decoded, get_data);
+}
+
+fn weak_share_hash(index: u8) -> BlockHash {
+    let mut bytes = [0u8; 32];
+    bytes[0] = index;
+    BlockHash::from_byte_array(bytes)
+}
+
+#[test]
+fn test_weak_share_hashes_roundtrip_through_raw_message() {
+    for count in [0usize, 1, 64] {
+        let hashes: Vec<BlockHash> = (0..count)
+            .map(|index| weak_share_hash(index as u8))
+            .collect();
+        let message = Message::Inventory(InventoryMessage::WeakShareHashes(hashes));
+        let raw = RawMessage::new(message.clone());
+        let mut encoded = Vec::new();
+        raw.consensus_encode(&mut encoded).unwrap();
+
+        let decoded = RawMessage::consensus_decode(&mut &encoded[..]).unwrap();
+        assert_eq!(
+            decoded.payload, message,
+            "weak share inventory of {count} hashes round-trips through RawMessage"
+        );
+        assert_eq!(
+            decoded.payload_len, raw.payload_len,
+            "weak share inventory of {count} hashes keeps its payload length"
+        );
+        assert_eq!(
+            decoded.checksum, raw.checksum,
+            "weak share inventory of {count} hashes keeps its checksum"
+        );
+    }
+}
+
+#[test]
+fn test_get_data_weak_share_roundtrip_through_raw_message() {
+    let get_data = GetData::WeakShare(weak_share_hash(7));
+    let message = Message::GetData(get_data);
+    let raw = RawMessage::new(message.clone());
+    let mut encoded = Vec::new();
+    raw.consensus_encode(&mut encoded).unwrap();
+
+    let decoded = RawMessage::consensus_decode(&mut &encoded[..]).unwrap();
+    assert_eq!(
+        decoded.payload, message,
+        "GetData::WeakShare round-trips through RawMessage"
+    );
+}
+
+#[test]
+fn test_inventory_and_getdata_discriminant_3_fails_decode() {
+    let encoded = [3u8];
+    let inventory = InventoryMessage::consensus_decode(&mut &encoded[..]);
+    assert!(inventory.is_err(), "inventory discriminant 3 fails decode");
+    let get_data = GetData::consensus_decode(&mut &encoded[..]);
+    assert!(get_data.is_err(), "getdata discriminant 3 fails decode");
 }
 
 #[test]
