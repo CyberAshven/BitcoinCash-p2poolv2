@@ -123,11 +123,13 @@ pub enum Table {
     RatioMax,
     /// Study #85 constants: `R_MAX` in every miner mix.
     RatioMaxMixes,
+    /// Bigger pools on a bigger Bitcoin Cash, levels as a node sets them.
+    Scale,
 }
 
 impl Table {
     /// Every table, in the order of the default run.
-    pub const ALL: [Table; 22] = [
+    pub const ALL: [Table; 23] = [
         Table::Designs,
         Table::Hashrate,
         Table::Pool,
@@ -150,6 +152,7 @@ impl Table {
         Table::WeakDepth,
         Table::RatioMax,
         Table::RatioMaxMixes,
+        Table::Scale,
     ];
 
     /// Name on the command line.
@@ -177,6 +180,7 @@ impl Table {
             Table::WeakDepth => "weak-depth",
             Table::RatioMax => "r-max",
             Table::RatioMaxMixes => "r-max-mixes",
+            Table::Scale => "scale",
         }
     }
 
@@ -238,6 +242,9 @@ impl Table {
             Table::RatioMaxMixes => {
                 "Study constants: R_MAX 256 and 4,096 in every miner mix (band-weak-levels, weak work)"
             }
+            Table::Scale => {
+                "Scale: bigger pools on a bigger Bitcoin Cash, levels as a node sets them (band-weak-levels, weak work, 50% industrial)"
+            }
         }
     }
 
@@ -267,6 +274,7 @@ impl Table {
             Table::WeakDepth => study::weak_depth(base),
             Table::RatioMax => study::ratio_max(base),
             Table::RatioMaxMixes => study::ratio_max_mixes(base),
+            Table::Scale => study::scale(base),
         };
         format!("## {}\n\n{body}", self.title())
     }

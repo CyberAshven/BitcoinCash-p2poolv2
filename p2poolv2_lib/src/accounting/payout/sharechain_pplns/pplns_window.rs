@@ -6675,22 +6675,30 @@ mod tests {
     /// validation time. A node does this for every share and weak share it
     /// receives: walk the window from the share's parent (cached by parent
     /// and paid block, so a repeat costs nothing), then build the expected
-    /// coinbase outputs and compare. Run with
+    /// coinbase outputs and compare. It also shows what the payout levels
+    /// (level 0, 546 sat, and the default level 5, 17,472 sat) and a token
+    /// share's 3,072 byte coinbase do to the coinbase and the payout tree,
+    /// and what executing that tree costs on chain. Run with
     /// `cargo test --release -p p2poolv2_lib validation_cost -- --ignored --nocapture`.
     #[test]
     #[ignore = "timing report, run by hand"]
     fn validation_cost_at_bitcoin_cash_window_sizes() {
         use crate::accounting::payout::coinbase_budget::PayoutSplit;
         use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+        use crate::accounting::payout::payout_tree::BCH_TREE_EXECUTION_FEE_RATE;
         use std::time::Instant;
 
-        println!("shares,payees,build_ms,load_ms,walk_ms,outputs_ms,outputs");
-        for (shares, payees) in [
-            (1_000, 100),
-            (10_000, 1_000),
-            (120_960, 1_000),
-            (120_960, 10_000),
-            (120_960, 100_000),
+        println!(
+            "shares,miners,level,token_share,build_ms,load_ms,walk_ms,outputs_ms,coinbase_outputs,tree_payees,tree_transactions,tree_fee_sat"
+        );
+        for (shares, payees, level) in [
+            (1_800, 1_000, 5),
+            (120_960, 1_000, 0),
+            (120_960, 1_000, 5),
+            (120_960, 10_000, 0),
+            (120_960, 10_000, 5),
+            (120_960, 100_000, 0),
+            (120_960, 100_000, 5),
         ] {
             let started = Instant::now();
             let mut headers = Vec::with_capacity(shares);
@@ -6707,6 +6715,7 @@ mod tests {
                         TEST_NETWORK,
                     )))
                     .work(2)
+                    .payout_level(level)
                     .build()
                     .header;
                 let blockhash = header.block_hash();
@@ -6749,23 +6758,33 @@ mod tests {
                 .unwrap();
             let walk_ms = started.elapsed().as_secs_f64() * 1_000.0;
 
-            let started = Instant::now();
-            let outputs = build_pplns_outputs(
-                312_500_000,
-                &weights,
-                &None,
-                None,
-                &None,
-                None,
-                PayoutSplit::for_chain(Chain::BitcoinCash, false),
-            )
-            .unwrap();
-            let outputs_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            for token_share in [false, true] {
+                let started = Instant::now();
+                let outputs = build_pplns_outputs(
+                    312_500_000,
+                    &weights,
+                    &None,
+                    None,
+                    &None,
+                    None,
+                    PayoutSplit::for_chain(Chain::BitcoinCash, token_share),
+                )
+                .unwrap();
+                let outputs_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                let (tree_payees, tree_transactions, tree_fee) =
+                    outputs.tree.as_ref().map_or((0, 0, 0), |tree| {
+                        (
+                            tree.payees().len(),
+                            tree.node_count(),
+                            tree.total_fee(BCH_TREE_EXECUTION_FEE_RATE).unwrap_or(0),
+                        )
+                    });
 
-            println!(
-                "{shares},{payees},{build_ms:.0},{load_ms:.1},{walk_ms:.2},{outputs_ms:.2},{}",
-                outputs.outputs.len()
-            );
+                println!(
+                    "{shares},{payees},{level},{token_share},{build_ms:.0},{load_ms:.1},{walk_ms:.2},{outputs_ms:.2},{},{tree_payees},{tree_transactions},{tree_fee}",
+                    outputs.outputs.len()
+                );
+            }
         }
     }
 }
