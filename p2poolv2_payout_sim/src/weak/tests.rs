@@ -119,3 +119,56 @@ fn a_share_carries_no_more_than_the_cap() {
     assert!(outcome.carried_per_share <= 8.0);
     assert!(outcome.full_share_fraction > 0.0);
 }
+
+#[test]
+fn a_carrying_node_carries_all_kinds_and_a_refusing_one_its_own() {
+    let mut waiting = WaitingWeakShares::new(2);
+    waiting.add_at(1, 3, 2);
+    let mut refusing = waiting.clone();
+    assert_eq!(
+        waiting.carry(true, 64),
+        Carried {
+            carrying: 3,
+            non_carrying: 2
+        }
+    );
+    assert_eq!(
+        refusing.carry(false, 64),
+        Carried {
+            carrying: 0,
+            non_carrying: 2
+        }
+    );
+}
+
+#[test]
+fn weak_shares_added_at_a_depth_join_it() {
+    let mut waiting = WaitingWeakShares::new(3);
+    waiting.add_at(1, 4, 1);
+    waiting.add_at(1, 1, 0);
+    assert_eq!(waiting.carrying, vec![0, 5, 0]);
+    assert_eq!(waiting.non_carrying, vec![0, 1, 0]);
+}
+
+#[test]
+fn keeping_what_two_carriers_left_drops_what_either_took() {
+    // A refusing share took the non-carrying ones; a carrying share took
+    // everything at the deeper depth. What stays is what both left.
+    let mut waiting = WaitingWeakShares::new(2);
+    waiting.add_at(0, 2, 1);
+    waiting.add_at(1, 3, 4);
+    let mut after_carrier = waiting.clone();
+    after_carrier.carry_all(7);
+    let mut after_refuser = waiting.clone();
+    after_refuser.carry_own(64);
+    let dropped = after_carrier.keep_shared_with(&after_refuser);
+    assert_eq!(after_carrier.carrying, vec![2, 0]);
+    assert_eq!(after_carrier.non_carrying, vec![0, 0]);
+    assert_eq!(
+        dropped,
+        Carried {
+            carrying: 0,
+            non_carrying: 1
+        }
+    );
+}

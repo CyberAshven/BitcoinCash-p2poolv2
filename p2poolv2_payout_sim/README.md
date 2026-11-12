@@ -7,7 +7,9 @@ how often they are paid, how large a typical payment is, how much their
 monthly income swings, how often a month brings nothing and what spending
 the payments costs, under each design, pool size, miner mix and Bitcoin Cash
 hashrate. It also reports the pool's share, uncle and weak share rates and
-bytes a second, and runs three attacks.
+bytes a second, runs three attacks, and runs study #85 (weak work in fork
+choice, miner mixes, arrivals, a tiny pool, floods, draw steering, losses
+and the constants `WEAK_DEPTH`, `INCLUDER_CUT` and `R_MAX`).
 
 It is not a network simulation: stale rates come from
 [the network simulation](../docs/simulation/network-sim.md), and nothing
@@ -27,11 +29,13 @@ cargo payout-sim run --help                # every input of one run
 `cargo run --release -p p2poolv2_payout_sim --bin payout-sim --`. The tables
 are `designs`, `hashrate`, `pool`, `weak-credit`, `band-cap`,
 `weak-constants`, `includer-cut`, `levels`, `period`, `attack-minimum`,
-`attack-carriers` and `attack-spam`. Every run is a pure function of its
-inputs and seed (default 1), drawn from `p2poolv2_netsim`'s seeded
-xoshiro256** generator, so the tables below come out the same on any
-machine. The whole default run, 1,000 simulated months per scenario, took
-11 seconds on the 32-thread machine it was run on.
+`attack-carriers` and `attack-spam`, and study #85's `refusing-races`,
+`mixes`, `arrivals`, `tiny-pool`, `floods`, `draw-steering`, `losses`,
+`weak-depth` and `r-max`. Every run is a pure function of its inputs and
+seed (default 1), drawn from `p2poolv2_netsim`'s seeded xoshiro256**
+generator, so the tables below come out the same on any machine. The whole
+default run, 1,000 simulated months per scenario, took 26 seconds on the
+32-thread machine it was run on.
 
 ## The model
 
@@ -154,13 +158,14 @@ fee loss is payments times 148 over income.
 
 ### Left out
 
-- Network effects beyond the stale rate: the share chain's own races,
-  orphans, propagation and the uncle depth limit.
+- Network effects beyond the stale rate: the share chain's own races
+  (except in the study tables that race shares), orphans, propagation and
+  the uncle depth limit.
 - The ABLA-like cap and the weak ratio as dynamics over time: `C` is fixed
   per run; `R` is simulated in the weak share queue but the tracked miners
-  use its time average.
-- The fourth attack on the page, a miner picking parents for a better draw;
-  `R_MAX`, `WEAK_DEPTH`, `WEAK_BYTES` and the band step were not swept.
+  use its time average. The study's `arrivals` and `r-max` tables run both
+  share by share.
+- `WEAK_BYTES` and the band step were not swept.
 - Transaction fees, payout trees, share trading, operator fees.
 
 ## Results
@@ -288,6 +293,221 @@ where payments are rare (the larger pools and the x270 rows).
   constants above do not reach their numbers and every miner prefers the
   minimum.
 
+## Study #85: weak work in fork choice, with a smaller includer cut
+
+The tables named `Study` below answer the study on the design page
+(`docs/sharechain/small-miners-design.md`, "Study: weak work in fork choice,
+with a smaller includer cut", on `docs/weak-work-fork-choice`). They run the
+design as the page now has it: the band, weak shares and payout levels,
+every proof on a job at the minimum credited at the weak work (`weak work`
+above), `INCLUDER_CUT` 5% unless a table sweeps it, 50% industrial unless a
+table says otherwise.
+
+### What the study adds to the model
+
+- **Share races** (`refusing-races`, `weak-depth`, `losses`; `src/races.rs`).
+  The weak share queue races shares instead of taking a flat stale rate: at
+  each share, with chance `s / (1 - s)`, a second share is found on the same
+  parent, each racer drawn by the shares its class finds. Both carry what
+  their nodes carry from the same queue. Fork choice picks the winner by
+  chain work: the share's own work (`share work`, today's rule), plus the
+  work of the weak shares it carries, each once, at the weak ratio
+  (`weak work`, the study's rule). Equal work is a coin toss. The loser is
+  an uncle at 9/10 of its credit; its weak shares stay waiting, as the page
+  has nodes keep a weak share until the best chain carries it. Each class's
+  stale rate, the weak shares each kind of node's shares carry and the
+  weak shares lost then feed the credit.
+- **Carriers mining siblings** (`weak work, siblings`). Weak work in fork
+  choice also lets carrying nodes act on it: when the tip comes from a
+  non-carrying node and carries less weak work than a carrying node's share
+  at the minimum would on the same parent, carrying nodes keep mining on
+  that parent. If a carrying node finds the next share, it is a sibling that
+  outweighs the tip and replaces it, and the weak shares the refusing
+  miners found on the tip are lost; if a refusing node finds it first, it is
+  the tip's child. This is a node policy the page does not state.
+- **Coalition gain.** The refusing (non-carrying) classes' expected income
+  over what the same classes earn, per unit of fair income, when everyone
+  carries. "Refusing ASIC gains" is the tracked non-carrying ASIC against the
+  carrying ASIC of the all-carrying run; in that run it is a lone refuser.
+- **Miner mixes** (`mixes`; `src/miners.rs`). `zipf`: the `k`-th largest
+  miner has `1/k` of the largest one's hashrate, the smallest a home miner's
+  (3,520 miners at 1% of BCH, 78,101 at 30%), the largest 32 ranks a class
+  each and above them ranks grouped by a factor of 1.25. `medium`: 90% on
+  30, 53, 95, 169 and 300 TH/s miners (equal hashrate each), 10% home.
+  `medium, few big`: 80% medium, 10% home, 10% 1 PH/s farms.
+- **Arrivals and departures** (`arrivals`, `r-max`; `src/transition.rs`).
+  A share-by-share chain with no steady state assumed: ASERT anchored at the
+  parent with its 600-second half-life; `band_cap` stepped from the parent's
+  `band_cap` and `wanted_bits` exactly as section 2 of the page has it (up
+  by `C * u / 512`, `u` the wanted multiple as a whole number up to `C_MAX`,
+  when the parent wanted more than its cap allowed, else down by `C / 512`);
+  `weak_ratio` stepped as section 3 has it; the node default inside the cap;
+  weak shares found, carried oldest first and expired; and every share's
+  credit in a running window of 3 BCH blocks of work behind 100 shares.
+  Home miners' pay is their part of that window times the blocks the pool
+  finds at its hashrate. A big miner with as much hashrate as the 50%
+  industrial pool joins or leaves at day 7 (so it is half the pool when
+  present), on the node default or at the minimum; 8 runs of 21 days per
+  case, summed. "Within 10%" is the first hour after the event whose mean is
+  within 10% of the mean of the last 72 hours: `C` wanders around where it
+  settles, so the hour it first gets there is the measure. The `r-max`
+  table runs the same chain from genesis for two days.
+- **Tiny pool** (`tiny-pool`). Two miners of 0.25 and 0.75 GH/s on a 37 GH/s
+  test network (`H` times 10^-8, so the pool finds blocks at all): the
+  ceiling is 4.55, which a 10-second chain reaches below about 2 GH/s. The
+  last column names an earlier row that paid every miner exactly the same.
+- **Floods** (`floods`). Attack (c)'s spammer, a miner at the minimum with a
+  multiple of the honest home hashrate, added to the pool (the network
+  stays the same), at 10, 100 and 1,000 times. Bases: a pool of 1,000 home
+  miners (0.03% of BCH, so 1,000 times is 30%) and 90% industrial at 1%
+  (1,000 times would be more than BCH).
+- **Draw steering** (`draw-steering`; `src/payouts.rs`). A tracked miner,
+  with every payee at its level, picks of two parents the one whose seed
+  pays it more. It can only steer a block it finds itself, so every pool
+  block's draw is also run with a second seed and the difference counted at
+  the chance the block is its own and it has a choice: `races only` while two
+  shares race (`s / (1 - s)`, no orphan risk added, since a race goes either
+  way); `tip or its parent` always, but a share it finds on the parent is a
+  sibling of the tip and goes stale, losing its tenth and its includer cut,
+  for the part of the time the parent's seed is the better one.
+- **Losses** (`losses`). A weak share mined on a parent that leaves the chain
+  (a race's loser, which is also what an unknown parent becomes) is lost: at
+  half the stale rate, since about half the hashrate mines on a race's loser
+  for about one share period. A race's loser can also drop the weak shares
+  it carried (`uncle carrier drops`), instead of their staying in the queue.
+- **Constants**. `weak-depth` sweeps `WEAK_DEPTH` (12, 24, 48) and
+  `INCLUDER_CUT` (0, 1, 5%) against 50% and 90% refusing coalitions;
+  `r-max` sweeps `R_MAX` (256, 1,024, 4,096) from genesis.
+
+### What the study tables show
+
+1. **Weak work in fork choice changes little through races alone.**
+   Refusing shares now lose their races to carrying ones (stale 3.06%
+   against 1.15% for honest shares, 1% of BCH, half refusing), but races
+   are 2% of shares, so honest weak shares lost go only from 4.92% to 4.65%
+   (half refusing) and from 56.2% to 55.9% (90%). A coalition of half the
+   hashrate still gains 1.1 to 1.7% with no cut and 0.2 to 0.3% at 5%; one of
+   90% gains 2.6 to 4.3% at every cut: at most 0.12 points less than under
+   today's fork choice.
+2. **It bites when carrying nodes mine siblings of light tips.** A
+   half-hashrate coalition then loses 5.4 to 9.6% at every cut, 0% included:
+   its light tips are replaced at 0.28 to 0.30 per share. A 90% coalition
+   still gains 2.2 to 3.8%, since carriers find the next share only a tenth
+   of the time. Shares heavier than the minimum are never replaced, so a
+   coalition member on heavy shares (the refusing ASIC at 1% of BCH) gains 6%
+   while its coalition loses.
+3. **`WEAK_DEPTH` is the lever that stops a 90% coalition.** With weak work
+   in races and a 1% cut, the coalition's gain falls from +2.7 / +4.2% at
+   depth 6 (1% / 10% of BCH) to +1.4 / +2.2% at 12, +0.4 / +0.7% at 24 and
+   +0.03 / +0.04% at 48, where honest weak shares lost fall from 56% to 1.2%
+   and the Bitaxe gets 0.99 of fair instead of 0.48. From depth 12 a
+   half-hashrate coalition gains at most 0.08%. At depth 48 a 5% cut makes
+   a 90% coalition lose 0.1%; with carriers mining siblings it loses 0.3 to
+   0.6% at every cut. A lone refuser loses its includer income: nothing at 0%, 0.2 /
+   0.9% at 1%, 1.0 / 4.6% at 5%. Every miner's income is fair at every cut
+   when everyone carries (the cut a home miner pays on its weak shares comes
+   back on the weak shares its own shares carry), and the Bitaxe's swing
+   does not move with the cut.
+4. **Miner mixes.** In the Zipf spread 30% of the hashrate is at the minimum
+   at 1% of BCH and 82% at 30%, `R` 49 to 38, and the Bitaxe's swing is
+   0.20 / 0.26 / 0.35 at 1 / 10 / 30% (one chain: 0.41 / 1.31 / 2.39). With
+   mostly medium miners everyone but the home miners mines heavier shares at
+   1% (minimum 0.22 of uniform, `R` 75), and everyone is at the minimum at
+   10 and 30% (`R` 34.7); the Bitaxe's swing is 0.21 / 0.28 / 0.40. In every
+   mix and size the Bitaxe gets 23 to 25 payments a month and 0.97 to 1.00
+   of fair.
+5. **A big miner joining or leaving.** The minimum and `R` are within 10% of
+   their new levels within an hour in every case, and `R` hardly moves (35
+   to 42): it follows the share of chain shares at the minimum. `C`, under
+   the page's `wanted_bits` rule, is 45 at 1% of BCH and 1.5 at 10% with the
+   50% industrial mix; a big miner on the node default lifts it to 61 / 55 within
+   2 hours, and when it leaves `C` is back within 1 / 13 hours; a big miner
+   at the minimum joining at 1% brings `C` from 45 to 12 in 8 hours. (The
+   `C settles at` column of the band cap table uses the earlier
+   bits-driven step and gives 1.00 for this mix.) Home miners' pay swings
+   with the window, not with `R` or `C`: when the pool doubles they get 2.0
+   times fair in the first hour, 1.9 to 6 hours and 1.4 to a day at 1% of BCH
+   (1.9 and 1.1 at 10%), and when it halves 0.5, 0.55, 0.66 and 0.86 until
+   day 2 (back by 6 hours at 10%), the same whether the big miner is on the
+   node default or at the minimum. Weak shares expiring meanwhile: 0.03% at
+   most.
+6. **Tiny pool.** At the ceiling `R` is 1.00 and no weak share is found, and
+   the page's design with every miner at the minimum pays exactly as one
+   chain, as does the band alone. But the node default still gives every
+   miner 64 times the ceiling (each would make far more than 300 shares a
+   month), so shares fall from 0.051 to 0.0008 a second; payments stay at
+   117 a month and the swing goes from 0.09 to 0.10. The rows with levels
+   differ from one chain only because estimating the level pots draws from
+   the random stream: every slice there is far above every level.
+7. **Floods do not hurt small miners' income.** The flood takes 91 to
+   99.9% of the weak shares and the Bitaxe's fall from 9,718 to 9.5 a month
+   (1,000 home miners, 1,000 times), but the flood brings blocks: the
+   Bitaxe's payments rise from 1.45 to 14 (10 times) and 22 to 25 a month,
+   its swing falls from 0.81 to between 0.22 and 0.39, and its income stays
+   fair. At 90% industrial its swing goes from 0.20 to 0.27 to 0.29 at 100
+   times. The flood is paid fair, and its cuts paid less cuts received are
+   at most 0.14% of its income: it carries nearly all weak shares, so it
+   gets its cuts back.
+8. **Steering the draw does not pay.** Between racing shares it wins at
+   most 28 sat a month (the ASIC at level 7 at 30% of BCH), because a miner
+   steers only the blocks it finds (0.0014 a month for the Bitaxe). Picking
+   the tip's parent every time wins at most 1,308 sat a month and loses 0.5
+   to 1.2% of income to the stale shares it finds there.
+9. **Losses.** Weak shares on a parent that leaves the chain, at half the
+   stale rate, lose 1.05% of weak shares at 10 s and 4.35% at 2 s; the
+   Bitaxe gets 0.99 to 1.00 and 0.98 of fair (the loss goes to heavier
+   shares) with unchanged payments and swing, since `R` rises to fill the
+   slots again.
+   A race's loser dropping its weak shares loses none when every node
+   carries: the winner carried the same oldest ones.
+
+### Recommended constants (study)
+
+- `WEAK_DEPTH` = 48 (8 minutes at 10 s): the only tested change that stops
+  a 90% refusing coalition; its gain falls from +2.7 / +4.2% at 6 to
+  +0.03 / +0.04% at a 1% cut, and the Bitaxe keeps 0.99 of fair instead of
+  0.48.
+- `INCLUDER_CUT` = 1%: at `WEAK_DEPTH` 48 refusing gains a 90% coalition at
+  most 0.04%, costs a half-hashrate coalition 0.2 to 0.3% and a lone refuser
+  0.2 to 0.9%; with races alone only 5% makes refusing never pay (a 90%
+  coalition loses 0.1%), and with carriers mining siblings 0% does.
+- `R_MAX` = 256: with `WEAK_FILL` 32, `R` settles between 34 and 75 in every
+  table, and from genesis 256 brings `R` within 10% in 2 hours instead of 4,
+  with 11 weak shares a second in the first hour (9 KB/s, half expiring)
+  instead of 174 (139 KB/s, 95% expiring).
+- Weak work in fork choice: worth the header-sync work only together with
+  carriers mining siblings of light tips; through races alone it moves a
+  coalition's gain by 0.12 points at most.
+
+### Approximations of the study
+
+- Races: two shares per race, at `s / (1 - s)` per share; both see the same
+  weak queue; first-seen propagation is not modelled (equal work is a coin
+  toss); a race's loser is always named as an uncle.
+- Siblings: the sibling always carries everything waiting and wins; no race
+  at a replacement; replaced tips are not fed back into ASERT (the weak
+  ratio absorbs the change); every weak share's work is counted at the
+  current weak ratio.
+- Coalition and miner incomes in the refusing and depth tables are
+  expected from the credit (400,000 queued shares), not simulated payments.
+- Arrivals: the node's ten-minute hashrate estimates are exact; ASERT in
+  floating point; stale shares lower the share rate but are not raced.
+- Losses: the stale-parent rate (half the stale rate) is an estimate, not a
+  measurement.
+- Steering: the miner's place in its level group is uniform in every block.
+- The tiny pool's network is hypothetical.
+
+### Not done
+
+- Header-sync and validation work of counting weak work in fork choice,
+  relay latency of weak-share traffic, compact coinbases and the other
+  propagation ideas (they belong in `p2poolv2_netsim`), and tokens and SAFA.
+- What a deep `WEAK_DEPTH` costs a node: memory for about 48 times the weak
+  shares per share, and weak shares whose Bitcoin Cash prev goes stale while
+  they wait.
+- `R_MAX` in a pool with almost no hashrate at the minimum, where it would
+  bind; `WEAK_BYTES` and the band step.
+
 ## Code
 
 | What | Where |
@@ -300,7 +520,9 @@ where payments are rare (the larger pools and the x270 rows).
 | Payout levels and the draw | `src/levels.rs` |
 | Tracked miners' payouts block by block | `src/payouts.rs` |
 | Scenarios, credit, reports | `src/scenario.rs` |
-| The tables | `src/tables.rs`, `src/report.rs` |
+| Share races, fork choice and siblings of light tips (study) | `src/races.rs` |
+| A big miner joining or leaving, and genesis, share by share (study) | `src/transition.rs` |
+| The tables | `src/tables.rs`, `src/study.rs`, `src/report.rs` |
 | Command line | `src/bin/payout_sim.rs` |
 
 The crate is new code for the Bitcoin Cash fork, under AGPL-3.0-or-later
@@ -759,3 +981,288 @@ share chain constants it reuses. It does not link `p2poolv2_lib`.
 | 90% industrial | 10% | 0x | 10% | weak work | 38.9 | 52.9 | 24.8 | 17,474 | 0.24 | 0.00% | 1.00 | 1.00 |
 | 90% industrial | 10% | 1x | 11.00% | weak work | 39.3 | 44.6 | 25.0 | 17,473 | 0.24 | 0.00% | 1.00 | 1.01 |
 | 90% industrial | 10% | 10x | 20.00% | weak work | 44.1 | 18.7 | 24.6 | 17,478 | 0.31 | 0.00% | 1.00 | 0.99 |
+
+### Study: a refusing coalition with share races (band-weak-levels, weak work, 50% industrial)
+
+| Pool | Fork choice | INCLUDER_CUT | Refusing | Honest weak lost | Honest stale | Refusing stale | Tips replaced per share | Bitaxe vs fair | Carrying ASIC vs fair | Refusing ASIC vs fair | Coalition gains | Refusing ASIC gains |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1% | share work | 0.00% | 0.00% | 0.02% | 2.09% | - | 0 | 1.00 | 1.00 | 1.00 | - | -0.02% |
+| 1% | share work | 0.00% | 50.00% | 4.92% | 2.10% | 2.13% | 0 | 0.96 | 1.01 | 1.01 | +1.20% | +1.20% |
+| 1% | share work | 0.00% | 90.00% | 56.15% | 2.13% | 2.07% | 0 | 0.47 | 1.03 | 1.03 | +2.80% | +2.79% |
+| 1% | share work | 1.00% | 0.00% | 0.02% | 2.09% | - | 0 | 1.00 | 1.00 | 1.00 | - | -0.23% |
+| 1% | share work | 1.00% | 50.00% | 4.92% | 2.10% | 2.13% | 0 | 0.97 | 1.01 | 1.01 | +1.02% | +1.12% |
+| 1% | share work | 1.00% | 90.00% | 56.15% | 2.13% | 2.07% | 0 | 0.47 | 1.03 | 1.03 | +2.75% | +2.78% |
+| 1% | share work | 2.00% | 0.00% | 0.02% | 2.09% | - | 0 | 1.00 | 1.00 | 1.00 | - | -0.43% |
+| 1% | share work | 2.00% | 50.00% | 4.92% | 2.10% | 2.13% | 0 | 0.97 | 1.02 | 1.01 | +0.84% | +1.04% |
+| 1% | share work | 2.00% | 90.00% | 56.15% | 2.13% | 2.07% | 0 | 0.48 | 1.03 | 1.03 | +2.71% | +2.76% |
+| 1% | share work | 5.00% | 0.00% | 0.02% | 2.09% | - | 0 | 1.00 | 1.01 | 1.00 | - | -1.05% |
+| 1% | share work | 5.00% | 50.00% | 4.92% | 2.10% | 2.13% | 0 | 0.98 | 1.03 | 1.02 | +0.29% | +0.82% |
+| 1% | share work | 5.00% | 90.00% | 56.15% | 2.13% | 2.07% | 0 | 0.50 | 1.04 | 1.04 | +2.58% | +2.71% |
+| 1% | weak work | 0.00% | 0.00% | 0.02% | 2.09% | - | 0 | 1.00 | 1.00 | 1.00 | - | -0.02% |
+| 1% | weak work | 0.00% | 50.00% | 4.65% | 1.15% | 3.06% | 0 | 0.97 | 1.01 | 1.01 | +1.14% | +1.11% |
+| 1% | weak work | 0.00% | 90.00% | 55.85% | 0.78% | 2.26% | 0 | 0.47 | 1.03 | 1.03 | +2.78% | +2.75% |
+| 1% | weak work | 1.00% | 0.00% | 0.02% | 2.09% | - | 0 | 1.00 | 1.00 | 1.00 | - | -0.23% |
+| 1% | weak work | 1.00% | 50.00% | 4.65% | 1.15% | 3.06% | 0 | 0.97 | 1.01 | 1.01 | +0.95% | +1.03% |
+| 1% | weak work | 1.00% | 90.00% | 55.85% | 0.78% | 2.26% | 0 | 0.48 | 1.03 | 1.03 | +2.74% | +2.73% |
+| 1% | weak work | 2.00% | 0.00% | 0.02% | 2.09% | - | 0 | 1.00 | 1.00 | 1.00 | - | -0.43% |
+| 1% | weak work | 2.00% | 50.00% | 4.65% | 1.15% | 3.06% | 0 | 0.97 | 1.02 | 1.01 | +0.77% | +0.96% |
+| 1% | weak work | 2.00% | 90.00% | 55.85% | 0.78% | 2.26% | 0 | 0.48 | 1.03 | 1.03 | +2.69% | +2.72% |
+| 1% | weak work | 5.00% | 0.00% | 0.02% | 2.09% | - | 0 | 1.00 | 1.01 | 1.00 | - | -1.05% |
+| 1% | weak work | 5.00% | 50.00% | 4.65% | 1.15% | 3.06% | 0 | 0.98 | 1.03 | 1.02 | +0.22% | +0.73% |
+| 1% | weak work | 5.00% | 90.00% | 55.85% | 0.78% | 2.26% | 0 | 0.50 | 1.04 | 1.04 | +2.56% | +2.67% |
+| 1% | weak work, siblings | 0.00% | 0.00% | 0.02% | 2.09% | - | 0 | 1.00 | 1.00 | 1.00 | - | -0.02% |
+| 1% | weak work, siblings | 0.00% | 50.00% | 2.31% | 0.65% | 47.63% | 0.297 | 1.04 | 1.06 | 1.06 | -5.38% | +6.46% |
+| 1% | weak work, siblings | 0.00% | 90.00% | 53.92% | 0.54% | 9.46% | 0.072 | 0.50 | 1.06 | 1.06 | +2.40% | +5.85% |
+| 1% | weak work, siblings | 1.00% | 0.00% | 0.02% | 2.09% | - | 0 | 1.00 | 1.00 | 1.00 | - | -0.23% |
+| 1% | weak work, siblings | 1.00% | 50.00% | 2.31% | 0.65% | 47.63% | 0.297 | 1.05 | 1.07 | 1.07 | -5.61% | +6.38% |
+| 1% | weak work, siblings | 1.00% | 90.00% | 53.92% | 0.54% | 9.46% | 0.072 | 0.51 | 1.06 | 1.06 | +2.36% | +5.83% |
+| 1% | weak work, siblings | 2.00% | 0.00% | 0.02% | 2.09% | - | 0 | 1.00 | 1.00 | 1.00 | - | -0.43% |
+| 1% | weak work, siblings | 2.00% | 50.00% | 2.31% | 0.65% | 47.63% | 0.297 | 1.05 | 1.07 | 1.07 | -5.84% | +6.29% |
+| 1% | weak work, siblings | 2.00% | 90.00% | 53.92% | 0.54% | 9.46% | 0.072 | 0.52 | 1.06 | 1.06 | +2.31% | +5.81% |
+| 1% | weak work, siblings | 5.00% | 0.00% | 0.02% | 2.09% | - | 0 | 1.00 | 1.01 | 1.00 | - | -1.05% |
+| 1% | weak work, siblings | 5.00% | 50.00% | 2.31% | 0.65% | 47.63% | 0.297 | 1.06 | 1.08 | 1.07 | -6.51% | +6.04% |
+| 1% | weak work, siblings | 5.00% | 90.00% | 53.92% | 0.54% | 9.46% | 0.072 | 0.54 | 1.07 | 1.07 | +2.19% | +5.76% |
+| 10% | share work | 0.00% | 0.00% | 0.02% | 2.07% | - | 0 | 1.00 | 1.00 | 1.00 | - | -0.06% |
+| 10% | share work | 0.00% | 50.00% | 4.93% | 2.11% | 2.10% | 0 | 0.97 | 0.97 | 1.02 | +1.83% | +1.83% |
+| 10% | share work | 0.00% | 90.00% | 56.24% | 2.10% | 2.13% | 0 | 0.47 | 0.47 | 1.04 | +4.30% | +4.30% |
+| 10% | share work | 1.00% | 0.00% | 0.02% | 2.07% | - | 0 | 1.00 | 1.00 | 0.99 | - | -0.97% |
+| 10% | share work | 1.00% | 50.00% | 4.93% | 2.11% | 2.10% | 0 | 0.97 | 0.97 | 1.01 | +1.56% | +1.49% |
+| 10% | share work | 1.00% | 90.00% | 56.24% | 2.10% | 2.13% | 0 | 0.48 | 0.48 | 1.04 | +4.23% | +4.22% |
+| 10% | share work | 2.00% | 0.00% | 0.02% | 2.07% | - | 0 | 1.00 | 1.00 | 0.98 | - | -1.88% |
+| 10% | share work | 2.00% | 50.00% | 4.93% | 2.11% | 2.10% | 0 | 0.98 | 0.98 | 1.01 | +1.28% | +1.14% |
+| 10% | share work | 2.00% | 90.00% | 56.24% | 2.10% | 2.13% | 0 | 0.49 | 0.49 | 1.04 | +4.17% | +4.13% |
+| 10% | share work | 5.00% | 0.00% | 0.02% | 2.07% | - | 0 | 1.00 | 1.00 | 0.95 | - | -4.62% |
+| 10% | share work | 5.00% | 50.00% | 4.93% | 2.11% | 2.10% | 0 | 0.99 | 0.98 | 1.00 | +0.46% | +0.10% |
+| 10% | share work | 5.00% | 90.00% | 56.24% | 2.10% | 2.13% | 0 | 0.51 | 0.51 | 1.04 | +3.97% | +3.88% |
+| 10% | weak work | 0.00% | 0.00% | 0.02% | 2.07% | - | 0 | 1.00 | 1.00 | 1.00 | - | -0.00% |
+| 10% | weak work | 0.00% | 50.00% | 4.68% | 1.25% | 2.99% | 0 | 0.97 | 0.97 | 1.02 | +1.73% | +1.74% |
+| 10% | weak work | 0.00% | 90.00% | 55.72% | 0.78% | 2.23% | 0 | 0.48 | 0.48 | 1.04 | +4.26% | +4.26% |
+| 10% | weak work | 1.00% | 0.00% | 0.02% | 2.07% | - | 0 | 1.00 | 1.00 | 0.99 | - | -0.91% |
+| 10% | weak work | 1.00% | 50.00% | 4.68% | 1.25% | 2.99% | 0 | 0.97 | 0.97 | 1.01 | +1.45% | +1.40% |
+| 10% | weak work | 1.00% | 90.00% | 55.72% | 0.78% | 2.23% | 0 | 0.48 | 0.48 | 1.04 | +4.19% | +4.17% |
+| 10% | weak work | 2.00% | 0.00% | 0.02% | 2.07% | - | 0 | 1.00 | 1.00 | 0.98 | - | -1.82% |
+| 10% | weak work | 2.00% | 50.00% | 4.68% | 1.25% | 2.99% | 0 | 0.98 | 0.98 | 1.01 | +1.17% | +1.06% |
+| 10% | weak work | 2.00% | 90.00% | 55.72% | 0.78% | 2.23% | 0 | 0.49 | 0.49 | 1.04 | +4.13% | +4.09% |
+| 10% | weak work | 5.00% | 0.00% | 0.02% | 2.07% | - | 0 | 1.00 | 1.00 | 0.95 | - | -4.56% |
+| 10% | weak work | 5.00% | 50.00% | 4.68% | 1.25% | 2.99% | 0 | 0.99 | 0.99 | 1.00 | +0.34% | +0.03% |
+| 10% | weak work | 5.00% | 90.00% | 55.72% | 0.78% | 2.23% | 0 | 0.51 | 0.51 | 1.04 | +3.93% | +3.84% |
+| 10% | weak work, siblings | 0.00% | 0.00% | 0.02% | 2.09% | - | 2.9e-4 | 1.00 | 1.00 | 1.00 | - | -0.29% |
+| 10% | weak work, siblings | 0.00% | 50.00% | 2.40% | 0.75% | 45.61% | 0.281 | 1.07 | 1.07 | 0.86 | -7.89% | -13.76% |
+| 10% | weak work, siblings | 0.00% | 90.00% | 54.23% | 0.58% | 9.02% | 0.068 | 0.51 | 0.51 | 1.02 | +3.82% | +2.14% |
+| 10% | weak work, siblings | 1.00% | 0.00% | 0.02% | 2.09% | - | 2.9e-4 | 1.00 | 1.00 | 0.99 | - | -1.20% |
+| 10% | weak work, siblings | 1.00% | 50.00% | 2.40% | 0.75% | 45.61% | 0.281 | 1.08 | 1.08 | 0.86 | -8.23% | -14.20% |
+| 10% | weak work, siblings | 1.00% | 90.00% | 54.23% | 0.58% | 9.02% | 0.068 | 0.52 | 0.52 | 1.02 | +3.76% | +2.05% |
+| 10% | weak work, siblings | 2.00% | 0.00% | 0.02% | 2.09% | - | 2.9e-4 | 1.00 | 1.00 | 0.98 | - | -2.10% |
+| 10% | weak work, siblings | 2.00% | 50.00% | 2.40% | 0.75% | 45.61% | 0.281 | 1.08 | 1.08 | 0.85 | -8.58% | -14.65% |
+| 10% | weak work, siblings | 2.00% | 90.00% | 54.23% | 0.58% | 9.02% | 0.068 | 0.53 | 0.53 | 1.02 | +3.69% | +1.96% |
+| 10% | weak work, siblings | 5.00% | 0.00% | 0.02% | 2.09% | - | 2.9e-4 | 1.00 | 1.00 | 0.95 | - | -4.84% |
+| 10% | weak work, siblings | 5.00% | 50.00% | 2.40% | 0.75% | 45.61% | 0.281 | 1.09 | 1.09 | 0.84 | -9.62% | -15.98% |
+| 10% | weak work, siblings | 5.00% | 90.00% | 54.23% | 0.58% | 9.02% | 0.068 | 0.55 | 0.55 | 1.01 | +3.50% | +1.69% |
+
+### Study: miner mixes (INCLUDER_CUT 5%)
+
+| Mix | Pool | Design | Miners | Largest miner | Hashrate at the minimum | Minimum / uniform | R | Weak expired | Bitaxe pay/mo | Bitaxe median sat | Bitaxe swing | Bitaxe empty months | Bitaxe fee loss | Bitaxe vs fair | ASIC pay/mo | ASIC median sat | ASIC swing | ASIC empty months | ASIC fee loss | ASIC vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| zipf | 1% | one-chain | 3,520 | 11.41% | 100.00% | 1.00 | - | - | 19.5 | 16,864 | 0.41 | 0.00% | 0.67% | 1.00 | 43.4 | 826,323 | 0.16 | 0.00% | 0.02% | 1.00 |
+| zipf | 1% | band-weak-levels, weak work | 3,520 | 11.41% | 29.65% | 0.42 | 49.2 | 0.02% | 24.5 | 17,485 | 0.20 | 0.00% | 0.85% | 0.99 | 42.9 | 844,326 | 0.16 | 0.00% | 0.02% | 1.00 |
+| zipf | 10% | one-chain | 28,456 | 9.23% | 100.00% | 1.00 | - | - | 2.41 | 168,580 | 1.31 | 45.60% | 0.09% | 0.94 | 170 | 168,580 | 0.14 | 0.00% | 0.07% | 1.00 |
+| zipf | 10% | band-weak-levels, weak work | 28,456 | 9.23% | 67.75% | 0.77 | 39.3 | 0.01% | 24.8 | 17,475 | 0.26 | 0.00% | 0.85% | 1.00 | 432 | 81,283 | 0.05 | 0.00% | 0.18% | 0.99 |
+| zipf | 30% | one-chain | 78,101 | 8.44% | 100.00% | 1.00 | - | - | 0.755 | 505,099 | 2.39 | 78.30% | 0.03% | 0.88 | 70.0 | 505,099 | 0.23 | 0.00% | 0.03% | 1.00 |
+| zipf | 30% | band-weak-levels, weak work | 78,101 | 8.44% | 82.41% | 0.89 | 37.5 | 0.01% | 23.3 | 17,472 | 0.35 | 0.00% | 0.81% | 0.98 | 1,069 | 34,267 | 0.05 | 0.00% | 0.44% | 1.00 |
+| medium | 1% | one-chain | 3,554 | 0.81% | 100.00% | 1.00 | - | - | 19.5 | 16,864 | 0.41 | 0.00% | 0.67% | 1.00 | 43.4 | 826,323 | 0.16 | 0.00% | 0.02% | 1.00 |
+| medium | 1% | band-weak-levels, weak work | 3,554 | 0.81% | 9.98% | 0.22 | 74.8 | 0.02% | 24.1 | 17,476 | 0.21 | 0.00% | 0.85% | 0.97 | 43.1 | 841,153 | 0.17 | 0.00% | 0.02% | 1.00 |
+| medium | 10% | one-chain | 35,614 | 0.08% | 100.00% | 1.00 | - | - | 2.41 | 168,580 | 1.31 | 45.60% | 0.09% | 0.94 | 170 | 168,580 | 0.14 | 0.00% | 0.07% | 1.00 |
+| medium | 10% | band-weak-levels, weak work | 35,614 | 0.08% | 100.00% | 1.00 | 34.7 | 0.01% | 24.8 | 17,479 | 0.28 | 0.00% | 0.85% | 1.00 | 432 | 82,839 | 0.05 | 0.00% | 0.18% | 1.00 |
+| medium | 30% | one-chain | 106,857 | 0.03% | 100.00% | 1.00 | - | - | 0.755 | 505,099 | 2.39 | 78.30% | 0.03% | 0.88 | 70.0 | 505,099 | 0.23 | 0.00% | 0.03% | 1.00 |
+| medium | 30% | band-weak-levels, weak work | 106,857 | 0.03% | 100.00% | 1.00 | 34.7 | 0.01% | 23.0 | 17,475 | 0.40 | 0.00% | 0.80% | 0.97 | 1,030 | 27,613 | 0.05 | 0.00% | 0.42% | 1.00 |
+| medium, few big | 1% | one-chain | 3,505 | 2.70% | 100.00% | 1.00 | - | - | 19.5 | 16,864 | 0.41 | 0.00% | 0.67% | 1.00 | 43.4 | 826,323 | 0.16 | 0.00% | 0.02% | 1.00 |
+| medium, few big | 1% | band-weak-levels, weak work | 3,505 | 2.70% | 9.98% | 0.20 | 67.2 | 0.01% | 24.6 | 17,481 | 0.20 | 0.00% | 0.85% | 0.99 | 43.2 | 841,148 | 0.16 | 0.00% | 0.02% | 1.00 |
+| medium, few big | 10% | one-chain | 35,119 | 0.27% | 100.00% | 1.00 | - | - | 2.41 | 168,580 | 1.31 | 45.60% | 0.09% | 0.94 | 170 | 168,580 | 0.14 | 0.00% | 0.07% | 1.00 |
+| medium, few big | 10% | band-weak-levels, weak work | 35,119 | 0.27% | 100.00% | 1.00 | 34.7 | 0.01% | 24.4 | 17,472 | 0.29 | 0.00% | 0.85% | 0.98 | 432 | 82,839 | 0.05 | 0.00% | 0.18% | 1.00 |
+| medium, few big | 30% | one-chain | 105,372 | 0.09% | 100.00% | 1.00 | - | - | 0.755 | 505,099 | 2.39 | 78.30% | 0.03% | 0.88 | 70.0 | 505,099 | 0.23 | 0.00% | 0.03% | 1.00 |
+| medium, few big | 30% | band-weak-levels, weak work | 105,372 | 0.09% | 100.00% | 1.00 | 34.7 | 0.01% | 22.8 | 17,474 | 0.40 | 0.00% | 0.80% | 0.97 | 1,030 | 27,613 | 0.05 | 0.00% | 0.42% | 1.00 |
+
+### Study: a big miner joining or leaving at once (50% industrial)
+
+#### Settling
+
+| Pool | Big miner | Its jobs | Minimum after / before | C before | C after | R before | R after | Minimum within 10% | C within 10% | R within 10% | Weak expired, first 6 h |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1% | joins | node default | 1.03 | 45.5 | 60.9 | 35.7 | 36.7 | < 1 h | < 1 h | < 1 h | 0.00% |
+| 1% | joins | at the minimum | 3.02 | 45.0 | 12.4 | 35.8 | 36.0 | 1 h | 8 h | < 1 h | 0.00% |
+| 1% | leaves | node default | 0.97 | 60.9 | 44.6 | 36.6 | 35.7 | < 1 h | 1 h | < 1 h | 0.03% |
+| 1% | leaves | at the minimum | 0.33 | 12.4 | 44.8 | 35.9 | 35.7 | 1 h | 2 h | < 1 h | 0.01% |
+| 10% | joins | node default | 0.95 | 1.54 | 55.3 | 42.4 | 40.5 | 1 h | 2 h | 1 h | 0.01% |
+| 10% | joins | at the minimum | 2.18 | 1.52 | 1.00 | 42.5 | 35.4 | 1 h | 1 h | 1 h | 0.03% |
+| 10% | leaves | node default | 1.03 | 55.2 | 1.53 | 40.8 | 42.2 | < 1 h | 13 h | < 1 h | 0.02% |
+| 10% | leaves | at the minimum | 0.46 | 1.00 | 1.53 | 35.3 | 42.3 | 1 h | 4 h | < 1 h | 0.03% |
+
+#### Home miners' expected pay over fair, after the event
+
+| Pool | Big miner | Its jobs | Before | 0-1 h | 1-6 h | 6-24 h | 1-2 d | 2-4 d | 4-8 d | 8-14 d |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1% | joins | node default | 1.02 | 2.01 | 1.89 | 1.41 | 1.01 | 1.01 | 1.01 | 1.02 |
+| 1% | joins | at the minimum | 1.01 | 2.00 | 1.89 | 1.42 | 1.01 | 1.01 | 1.00 | 1.00 |
+| 1% | leaves | node default | 1.02 | 0.52 | 0.55 | 0.66 | 0.86 | 1.00 | 1.01 | 1.01 |
+| 1% | leaves | at the minimum | 1.00 | 0.50 | 0.53 | 0.65 | 0.86 | 1.01 | 1.01 | 1.01 |
+| 10% | joins | node default | 1.00 | 1.88 | 1.14 | 1.01 | 1.00 | 1.01 | 1.00 | 1.01 |
+| 10% | joins | at the minimum | 1.00 | 1.87 | 1.12 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+| 10% | leaves | node default | 1.01 | 0.51 | 0.80 | 0.99 | 0.99 | 0.99 | 1.00 | 1.00 |
+| 10% | leaves | at the minimum | 1.00 | 0.52 | 0.81 | 1.00 | 0.99 | 1.00 | 1.00 | 1.00 |
+
+### Study: a tiny pool at the ceiling (1 GH/s on a 37 GH/s test network)
+
+| Design | Minimum / ceiling | Small share multiple | Large share multiple | R | Weak/s | Shares/s | Small pay/mo | Small median sat | Small swing | Small empty months | Small fee loss | Small vs fair | Large pay/mo | Large median sat | Large swing | Large empty months | Large fee loss | Large vs fair | Pays exactly as |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| one-chain, node default | 1.00 | 1.00 | 1.00 | - | 0 | 0.051 | 117 | 77,342,912 | 0.09 | 0.00% | 0.00% | 1.00 | 117 | 232,032,087 | 0.09 | 0.00% | 0.00% | 1.00 | - |
+| band, node default | 1.00 | 64.0 | 64.0 | - | 0 | 8.0e-4 | 117 | 77,343,749 | 0.10 | 0.00% | 0.00% | 1.00 | 117 | 232,031,250 | 0.09 | 0.00% | 0.00% | 1.00 | - |
+| band-weak, weak work, node default | 1.00 | 64.0 | 64.0 | 1.00 | 0 | 8.0e-4 | 117 | 77,343,749 | 0.10 | 0.00% | 0.00% | 1.00 | 117 | 232,031,250 | 0.09 | 0.00% | 0.00% | 1.00 | band, node default |
+| band-weak-levels, weak work, node default | 1.00 | 64.0 | 64.0 | 1.00 | 0 | 8.0e-4 | 117 | 77,211,687 | 0.10 | 0.00% | 0.00% | 1.00 | 117 | 232,163,312 | 0.09 | 0.00% | 0.00% | 1.00 | - |
+| band, all at the minimum | 1.00 | 1.00 | 1.00 | - | 0 | 0.051 | 117 | 77,342,912 | 0.09 | 0.00% | 0.00% | 1.00 | 117 | 232,032,087 | 0.09 | 0.00% | 0.00% | 1.00 | one-chain, node default |
+| band-weak, weak work, all at the minimum | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.051 | 117 | 77,342,912 | 0.09 | 0.00% | 0.00% | 1.00 | 117 | 232,032,087 | 0.09 | 0.00% | 0.00% | 1.00 | one-chain, node default |
+| band-weak-levels, weak work, all at the minimum | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.051 | 117 | 77,322,059 | 0.09 | 0.00% | 0.00% | 1.00 | 117 | 232,052,940 | 0.09 | 0.00% | 0.00% | 1.00 | - |
+
+### Study: large miners filling the weak slots (band-weak-levels, weak work)
+
+| Pool | Size | Flood | Pool with flood | INCLUDER_CUT | R | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe median sat | Bitaxe swing | Bitaxe empty months | Bitaxe expected vs fair | Bitaxe simulated vs fair | Flood's part of weak shares | Flood vs fair | Flood's cuts paid less received, of its fair income |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1,000 home miners | 0.03% | 0x | 0.03% | 1.00% | 34.7 | 9,718 | 1.45 | 309,549 | 0.81 | 22.70% | 1.00 | 1.04 | - | - | - |
+| 1,000 home miners | 0.03% | 10x | 0.33% | 1.00% | 34.8 | 887 | 14.1 | 30,387 | 0.26 | 0.00% | 1.00 | 0.99 | 90.91% | 1.00 | 0.00% |
+| 1,000 home miners | 0.03% | 100x | 3.01% | 1.00% | 34.7 | 96.5 | 24.7 | 17,513 | 0.23 | 0.00% | 1.00 | 1.00 | 98.92% | 1.00 | -0.00% |
+| 1,000 home miners | 0.03% | 1000x | 29.76% | 1.00% | 34.7 | 9.49 | 23.5 | 17,822 | 0.38 | 0.00% | 1.00 | 0.97 | 99.89% | 1.00 | -0.00% |
+| 1,000 home miners | 0.03% | 0x | 0.03% | 5.00% | 34.7 | 9,718 | 1.45 | 309,610 | 0.81 | 22.70% | 1.00 | 1.04 | - | - | - |
+| 1,000 home miners | 0.03% | 10x | 0.33% | 5.00% | 34.8 | 887 | 14.1 | 30,388 | 0.26 | 0.00% | 1.00 | 0.99 | 90.91% | 1.00 | 0.01% |
+| 1,000 home miners | 0.03% | 100x | 3.01% | 5.00% | 34.7 | 96.5 | 24.7 | 17,548 | 0.22 | 0.00% | 1.00 | 1.00 | 98.92% | 1.00 | -0.00% |
+| 1,000 home miners | 0.03% | 1000x | 29.76% | 5.00% | 34.7 | 9.49 | 21.9 | 18,419 | 0.39 | 0.00% | 1.00 | 0.97 | 99.89% | 1.00 | -0.00% |
+| 90% industrial | 1% | 0x | 1% | 1.00% | 39.5 | 2,900 | 24.9 | 17,476 | 0.20 | 0.00% | 1.02 | 1.01 | - | - | - |
+| 90% industrial | 1% | 10x | 2.00% | 1.00% | 35.7 | 264 | 25.0 | 17,481 | 0.21 | 0.00% | 1.00 | 1.01 | 90.91% | 1.00 | 0.03% |
+| 90% industrial | 1% | 100x | 10.98% | 1.00% | 35.1 | 27.5 | 24.6 | 17,543 | 0.27 | 0.00% | 1.00 | 0.99 | 94.76% | 1.00 | 0.01% |
+| 90% industrial | 1% | 0x | 1% | 5.00% | 39.5 | 2,900 | 24.9 | 17,481 | 0.19 | 0.00% | 1.01 | 1.00 | - | - | - |
+| 90% industrial | 1% | 10x | 2.00% | 5.00% | 35.7 | 264 | 24.8 | 17,474 | 0.21 | 0.00% | 1.00 | 1.00 | 90.91% | 1.00 | 0.14% |
+| 90% industrial | 1% | 100x | 10.98% | 5.00% | 35.1 | 27.5 | 24.7 | 17,520 | 0.29 | 0.00% | 1.00 | 1.00 | 94.76% | 1.00 | 0.05% |
+
+### Study: steering the level draw (band-weak-levels, weak work, 50% industrial)
+
+| Pool | Steering miner | Level | Picks between | Blocks it finds a month | Draws where the other parent is better | Gain sat/mo | Orphan cost sat/mo | Net sat/mo | Net of its income |
+|---|---|---|---|---|---|---|---|---|---|
+| 1% | Bitaxe 1.2 TH/s | 5 | races only | 1.4e-3 | 23.30% | 0.122 | 0 | +0.122 | +0.00% |
+| 1% | Bitaxe 1.2 TH/s | 5 | tip or its parent | 1.4e-3 | 23.30% | 5.70 | 5,312 | -5,306 | -1.22% |
+| 1% | ASIC 100 TH/s | 7 | races only | 0.117 | 0.00% | 0 | 0 | +0 | +0.00% |
+| 1% | ASIC 100 TH/s | 7 | tip or its parent | 0.117 | 0.00% | 0 | 0 | +0 | +0.00% |
+| 10% | Bitaxe 1.2 TH/s | 5 | races only | 1.4e-3 | 16.94% | 0.021 | 0 | +0.021 | +0.00% |
+| 10% | Bitaxe 1.2 TH/s | 5 | tip or its parent | 1.4e-3 | 16.94% | 0.998 | 3,598 | -3,597 | -0.83% |
+| 10% | ASIC 100 TH/s | 7 | races only | 0.117 | 10.06% | 4.35 | 0 | +4.35 | +0.00% |
+| 10% | ASIC 100 TH/s | 7 | tip or its parent | 0.117 | 10.06% | 203 | 178,144 | -177,941 | -0.49% |
+| 30% | Bitaxe 1.2 TH/s | 5 | races only | 1.4e-3 | 16.42% | 1.8e-3 | 0 | +1.8e-3 | +0.00% |
+| 30% | Bitaxe 1.2 TH/s | 5 | tip or its parent | 1.4e-3 | 16.42% | 0.085 | 3,664 | -3,664 | -0.85% |
+| 30% | ASIC 100 TH/s | 7 | races only | 0.117 | 19.45% | 28.1 | 0 | +28.1 | +0.00% |
+| 30% | ASIC 100 TH/s | 7 | tip or its parent | 0.117 | 19.45% | 1,308 | 361,729 | -360,422 | -1.00% |
+
+### Study: weak shares lost to stale parents and uncle carriers (band-weak-levels, weak work, 50% industrial)
+
+| Pool | Period | Stale | Losses | Weak lost | Weak expired | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe swing | Bitaxe empty months | Bitaxe expected vs fair | Bitaxe simulated vs fair | ASIC expected vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1% | 10 s | 2.10% | none | 0.00% | 0.02% | 581 | 24.7 | 0.20 | 0.00% | 1.00 | 0.99 | 1.01 |
+| 1% | 10 s | 2.10% | stale parent | 1.05% | 0.02% | 582 | 24.7 | 0.20 | 0.00% | 0.99 | 1.00 | 1.02 |
+| 1% | 10 s | 2.10% | uncle carrier drops | 0.00% | 0.02% | 581 | 24.7 | 0.20 | 0.00% | 1.00 | 0.99 | 1.01 |
+| 1% | 10 s | 2.10% | both | 1.05% | 0.02% | 582 | 24.7 | 0.20 | 0.00% | 0.99 | 1.00 | 1.02 |
+| 1% | 2 s | 8.70% | none | 0.00% | 0.02% | 2,901 | 24.5 | 0.20 | 0.00% | 1.00 | 0.99 | 1.00 |
+| 1% | 2 s | 8.70% | stale parent | 4.35% | 0.01% | 2,915 | 24.3 | 0.21 | 0.00% | 0.98 | 0.98 | 1.02 |
+| 1% | 2 s | 8.70% | uncle carrier drops | 0.00% | 0.02% | 2,901 | 24.5 | 0.20 | 0.00% | 1.00 | 0.99 | 1.00 |
+| 1% | 2 s | 8.70% | both | 4.35% | 0.01% | 2,915 | 24.3 | 0.21 | 0.00% | 0.98 | 0.98 | 1.02 |
+| 10% | 10 s | 2.10% | none | 0.00% | 0.02% | 38.7 | 24.8 | 0.25 | 0.00% | 1.00 | 1.00 | 1.00 |
+| 10% | 10 s | 2.10% | stale parent | 1.05% | 0.01% | 38.7 | 24.8 | 0.26 | 0.00% | 1.00 | 1.00 | 0.99 |
+| 10% | 10 s | 2.10% | uncle carrier drops | 0.00% | 0.02% | 38.7 | 24.8 | 0.25 | 0.00% | 1.00 | 1.00 | 1.00 |
+| 10% | 10 s | 2.10% | both | 1.05% | 0.01% | 38.7 | 24.8 | 0.26 | 0.00% | 1.00 | 1.00 | 0.99 |
+| 10% | 2 s | 8.70% | none | 0.00% | 0.02% | 291 | 24.6 | 0.21 | 0.00% | 1.00 | 0.99 | 0.99 |
+| 10% | 2 s | 8.70% | stale parent | 4.35% | 0.01% | 292 | 24.3 | 0.21 | 0.00% | 0.98 | 0.98 | 0.97 |
+| 10% | 2 s | 8.70% | uncle carrier drops | 0.00% | 0.02% | 291 | 24.6 | 0.21 | 0.00% | 1.00 | 0.99 | 0.99 |
+| 10% | 2 s | 8.70% | both | 4.35% | 0.01% | 292 | 24.3 | 0.21 | 0.00% | 0.98 | 0.98 | 0.97 |
+
+### Study constants: WEAK_DEPTH and INCLUDER_CUT against a refusing coalition (band-weak-levels, weak work, 50% industrial)
+
+| Pool | Fork choice | WEAK_DEPTH | INCLUDER_CUT | Refusing | Honest weak lost | Bitaxe vs fair | Bitaxe swing | Coalition gains | Refusing ASIC gains | Lone refuser gains |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1% | weak work | 12 | 0.00% | 50.00% | 0.30% | 1.00 | 0.20 | +0.07% | +0.07% | -0.02% |
+| 1% | weak work | 12 | 0.00% | 90.00% | 29.32% | 0.73 | 0.24 | +1.44% | +1.40% | -0.02% |
+| 1% | weak work | 12 | 1.00% | 50.00% | 0.30% | 1.00 | 0.20 | -0.11% | -0.00% | -0.23% |
+| 1% | weak work | 12 | 1.00% | 90.00% | 29.32% | 0.73 | 0.24 | +1.40% | +1.38% | -0.23% |
+| 1% | weak work | 12 | 5.00% | 50.00% | 0.30% | 1.02 | 0.20 | -0.82% | -0.30% | -1.04% |
+| 1% | weak work | 12 | 5.00% | 90.00% | 29.32% | 0.75 | 0.23 | +1.25% | +1.31% | -1.04% |
+| 1% | weak work | 24 | 0.00% | 50.00% | 0.00% | 1.00 | 0.21 | -0.00% | -0.00% | +0.00% |
+| 1% | weak work | 24 | 0.00% | 90.00% | 9.40% | 0.91 | 0.21 | +0.46% | +0.46% | +0.00% |
+| 1% | weak work | 24 | 1.00% | 50.00% | 0.00% | 1.00 | 0.20 | -0.18% | -0.08% | -0.21% |
+| 1% | weak work | 24 | 1.00% | 90.00% | 9.40% | 0.92 | 0.22 | +0.42% | +0.44% | -0.21% |
+| 1% | weak work | 24 | 5.00% | 50.00% | 0.00% | 1.02 | 0.21 | -0.89% | -0.37% | -1.03% |
+| 1% | weak work | 24 | 5.00% | 90.00% | 9.40% | 0.94 | 0.21 | +0.30% | +0.39% | -1.03% |
+| 1% | weak work | 48 | 0.00% | 50.00% | 0.00% | 1.00 | 0.20 | -0.00% | -0.00% | +0.00% |
+| 1% | weak work | 48 | 0.00% | 90.00% | 1.24% | 0.99 | 0.19 | +0.06% | +0.04% | +0.00% |
+| 1% | weak work | 48 | 1.00% | 50.00% | 0.00% | 1.00 | 0.20 | -0.18% | -0.07% | -0.21% |
+| 1% | weak work | 48 | 1.00% | 90.00% | 1.24% | 0.99 | 0.20 | +0.03% | +0.03% | -0.21% |
+| 1% | weak work | 48 | 5.00% | 50.00% | 0.00% | 1.02 | 0.20 | -0.89% | -0.37% | -1.03% |
+| 1% | weak work | 48 | 5.00% | 90.00% | 1.24% | 1.01 | 0.20 | -0.09% | -0.02% | -1.03% |
+| 1% | weak work, siblings | 12 | 0.00% | 50.00% | 0.05% | 1.06 | 0.20 | -5.92% | +5.85% | -0.02% |
+| 1% | weak work, siblings | 12 | 0.00% | 90.00% | 28.96% | 0.75 | 0.23 | +1.11% | +4.51% | -0.02% |
+| 1% | weak work, siblings | 12 | 1.00% | 50.00% | 0.05% | 1.06 | 0.20 | -6.14% | +5.77% | -0.23% |
+| 1% | weak work, siblings | 12 | 1.00% | 90.00% | 28.96% | 0.76 | 0.23 | +1.07% | +4.49% | -0.23% |
+| 1% | weak work, siblings | 12 | 5.00% | 50.00% | 0.05% | 1.08 | 0.20 | -7.03% | +5.45% | -1.04% |
+| 1% | weak work, siblings | 12 | 5.00% | 90.00% | 28.96% | 0.78 | 0.23 | +0.92% | +4.42% | -1.04% |
+| 1% | weak work, siblings | 24 | 0.00% | 50.00% | 0.00% | 1.06 | 0.20 | -5.95% | +5.85% | +0.00% |
+| 1% | weak work, siblings | 24 | 0.00% | 90.00% | 8.90% | 0.95 | 0.21 | +0.08% | +3.50% | +0.00% |
+| 1% | weak work, siblings | 24 | 1.00% | 50.00% | 0.00% | 1.06 | 0.20 | -6.17% | +5.77% | -0.21% |
+| 1% | weak work, siblings | 24 | 1.00% | 90.00% | 8.90% | 0.95 | 0.20 | +0.05% | +3.48% | -0.21% |
+| 1% | weak work, siblings | 24 | 5.00% | 50.00% | 0.00% | 1.08 | 0.20 | -7.06% | +5.45% | -1.03% |
+| 1% | weak work, siblings | 24 | 5.00% | 90.00% | 8.90% | 0.97 | 0.20 | -0.07% | +3.43% | -1.03% |
+| 1% | weak work, siblings | 48 | 0.00% | 50.00% | 0.00% | 1.06 | 0.20 | -5.96% | +5.86% | +0.00% |
+| 1% | weak work, siblings | 48 | 0.00% | 90.00% | 1.24% | 1.02 | 0.20 | -0.30% | +3.13% | +0.00% |
+| 1% | weak work, siblings | 48 | 1.00% | 50.00% | 0.00% | 1.06 | 0.20 | -6.18% | +5.78% | -0.21% |
+| 1% | weak work, siblings | 48 | 1.00% | 90.00% | 1.24% | 1.02 | 0.20 | -0.33% | +3.12% | -0.21% |
+| 1% | weak work, siblings | 48 | 5.00% | 50.00% | 0.00% | 1.08 | 0.19 | -7.07% | +5.46% | -1.03% |
+| 1% | weak work, siblings | 48 | 5.00% | 90.00% | 1.24% | 1.04 | 0.20 | -0.45% | +3.07% | -1.03% |
+| 10% | weak work | 12 | 0.00% | 50.00% | 0.24% | 1.00 | 0.25 | +0.08% | +0.08% | -0.01% |
+| 10% | weak work | 12 | 0.00% | 90.00% | 29.82% | 0.73 | 0.30 | +2.23% | +2.23% | -0.01% |
+| 10% | weak work | 12 | 1.00% | 50.00% | 0.24% | 1.00 | 0.25 | -0.18% | -0.25% | -0.91% |
+| 10% | weak work | 12 | 1.00% | 90.00% | 29.82% | 0.73 | 0.30 | +2.18% | +2.15% | -0.91% |
+| 10% | weak work | 12 | 5.00% | 50.00% | 0.24% | 1.01 | 0.27 | -1.26% | -1.57% | -4.55% |
+| 10% | weak work | 12 | 5.00% | 90.00% | 29.82% | 0.76 | 0.30 | +1.95% | +1.82% | -4.55% |
+| 10% | weak work | 24 | 0.00% | 50.00% | 0.00% | 1.00 | 0.26 | -0.00% | -0.01% | -0.01% |
+| 10% | weak work | 24 | 0.00% | 90.00% | 9.55% | 0.91 | 0.27 | +0.70% | +0.70% | -0.01% |
+| 10% | weak work | 24 | 1.00% | 50.00% | 0.00% | 1.00 | 0.25 | -0.27% | -0.34% | -0.91% |
+| 10% | weak work | 24 | 1.00% | 90.00% | 9.55% | 0.92 | 0.26 | +0.66% | +0.64% | -0.91% |
+| 10% | weak work | 24 | 5.00% | 50.00% | 0.00% | 1.01 | 0.27 | -1.33% | -1.70% | -4.55% |
+| 10% | weak work | 24 | 5.00% | 90.00% | 9.55% | 0.94 | 0.27 | +0.47% | +0.39% | -4.55% |
+| 10% | weak work | 48 | 0.00% | 50.00% | 0.00% | 1.00 | 0.26 | -0.00% | -0.01% | -0.01% |
+| 10% | weak work | 48 | 0.00% | 90.00% | 1.18% | 0.99 | 0.25 | +0.09% | +0.08% | -0.01% |
+| 10% | weak work | 48 | 1.00% | 50.00% | 0.00% | 1.00 | 0.26 | -0.27% | -0.38% | -0.93% |
+| 10% | weak work | 48 | 1.00% | 90.00% | 1.18% | 0.99 | 0.25 | +0.04% | -0.01% | -0.93% |
+| 10% | weak work | 48 | 5.00% | 50.00% | 0.00% | 1.01 | 0.26 | -1.33% | -1.82% | -4.63% |
+| 10% | weak work | 48 | 5.00% | 90.00% | 1.18% | 1.01 | 0.26 | -0.13% | -0.37% | -4.63% |
+| 10% | weak work, siblings | 12 | 0.00% | 50.00% | 0.05% | 1.09 | 0.25 | -8.78% | -14.63% | -0.30% |
+| 10% | weak work, siblings | 12 | 0.00% | 90.00% | 28.38% | 0.77 | 0.29 | +1.70% | +0.01% | -0.30% |
+| 10% | weak work, siblings | 12 | 1.00% | 50.00% | 0.05% | 1.09 | 0.25 | -9.12% | -15.07% | -1.21% |
+| 10% | weak work, siblings | 12 | 1.00% | 90.00% | 28.38% | 0.78 | 0.29 | +1.65% | -0.01% | -1.21% |
+| 10% | weak work, siblings | 12 | 5.00% | 50.00% | 0.05% | 1.11 | 0.26 | -10.48% | -16.84% | -4.85% |
+| 10% | weak work, siblings | 12 | 5.00% | 90.00% | 28.38% | 0.80 | 0.29 | +1.42% | -0.07% | -4.85% |
+| 10% | weak work, siblings | 24 | 0.00% | 50.00% | 0.00% | 1.09 | 0.25 | -8.69% | -14.46% | -0.30% |
+| 10% | weak work, siblings | 24 | 0.00% | 90.00% | 9.21% | 0.96 | 0.26 | +0.20% | -1.47% | -0.30% |
+| 10% | weak work, siblings | 24 | 1.00% | 50.00% | 0.00% | 1.09 | 0.25 | -9.03% | -14.90% | -1.21% |
+| 10% | weak work, siblings | 24 | 1.00% | 90.00% | 9.21% | 0.96 | 0.26 | +0.16% | -1.53% | -1.21% |
+| 10% | weak work, siblings | 24 | 5.00% | 50.00% | 0.00% | 1.11 | 0.26 | -10.38% | -16.69% | -4.84% |
+| 10% | weak work, siblings | 24 | 5.00% | 90.00% | 9.21% | 0.98 | 0.27 | -0.04% | -1.76% | -4.84% |
+| 10% | weak work, siblings | 48 | 0.00% | 50.00% | 0.00% | 1.09 | 0.26 | -8.69% | -14.47% | -0.30% |
+| 10% | weak work, siblings | 48 | 0.00% | 90.00% | 1.12% | 1.04 | 0.25 | -0.42% | -2.10% | -0.30% |
+| 10% | weak work, siblings | 48 | 1.00% | 50.00% | 0.00% | 1.09 | 0.25 | -9.03% | -14.92% | -1.21% |
+| 10% | weak work, siblings | 48 | 1.00% | 90.00% | 1.12% | 1.04 | 0.25 | -0.46% | -2.15% | -1.21% |
+| 10% | weak work, siblings | 48 | 5.00% | 50.00% | 0.00% | 1.11 | 0.27 | -10.39% | -16.72% | -4.84% |
+| 10% | weak work, siblings | 48 | 5.00% | 90.00% | 1.12% | 1.06 | 0.26 | -0.64% | -2.35% | -4.84% |
+
+### Study constants: R_MAX and the start from genesis (50% industrial)
+
+| Pool | R_MAX | R settles at | R gets within 10% | Weak found/s, first hour | Weak KB/s, first hour | Weak expired, first hour |
+|---|---|---|---|---|---|---|
+| 1% | 256 | 35.6 | 2 h | 11.1 | 8.85 | 50.08% |
+| 1% | 1024 | 35.6 | 3 h | 45.8 | 36.6 | 86.94% |
+| 1% | 4096 | 35.7 | 4 h | 174 | 139 | 95.47% |
+| 10% | 256 | 42.2 | 2 h | 11.1 | 8.92 | 44.02% |
+| 10% | 1024 | 42.1 | 3 h | 43.8 | 35.0 | 84.78% |
+| 10% | 4096 | 42.3 | 4 h | 172 | 137 | 95.56% |

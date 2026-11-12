@@ -28,7 +28,9 @@ use std::process::ExitCode;
 struct Cli {
     /// The table to print (`all`, or one name: designs, hashrate, pool,
     /// weak-credit, band-cap, weak-constants, includer-cut, levels, period,
-    /// attack-minimum, attack-carriers, attack-spam).
+    /// attack-minimum, attack-carriers, attack-spam, and study #85's
+    /// refusing-races, mixes, arrivals, tiny-pool, floods, draw-steering,
+    /// losses, weak-depth, r-max).
     #[arg(long, default_value = "all")]
     scenario: String,
     /// Months each scenario simulates.
@@ -64,6 +66,9 @@ enum MixArg {
     HalfIndustrial,
     #[value(name = "90-industrial")]
     MostlyIndustrial,
+    Zipf,
+    Medium,
+    MediumFewBig,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -141,6 +146,9 @@ fn mix(argument: MixArg) -> MinerMix {
         MixArg::Home => MinerMix::Home,
         MixArg::HalfIndustrial => MinerMix::HalfIndustrial,
         MixArg::MostlyIndustrial => MinerMix::MostlyIndustrial,
+        MixArg::Zipf => MinerMix::Zipf,
+        MixArg::Medium => MinerMix::Medium,
+        MixArg::MediumFewBig => MinerMix::MediumFewBig,
     }
 }
 
