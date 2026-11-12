@@ -139,7 +139,7 @@ credited at its own work:
 | Full share at the minimum | the weak work | |
 | Full share heavier than the minimum | its own work | |
 | Uncle | 9/10 of the weight above for its kind | 1/10 of it |
-| Weak share | the weak work, less 5% (`INCLUDER_CUT`) | 5% of it |
+| Weak share | the weak work, less 1% (`INCLUDER_CUT`) | 1% of it |
 
 The hashes that meet the weak target are a fair sample of a miner's work, so
 every miner is paid in proportion to its work: per unit of work a miner at

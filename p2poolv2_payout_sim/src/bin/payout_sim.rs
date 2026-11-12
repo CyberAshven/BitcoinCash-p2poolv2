@@ -66,6 +66,8 @@ enum MixArg {
     HalfIndustrial,
     #[value(name = "90-industrial")]
     MostlyIndustrial,
+    #[value(name = "99-industrial")]
+    AlmostAllIndustrial,
     Zipf,
     Medium,
     MediumFewBig,
@@ -103,10 +105,13 @@ struct RunArgs {
     weak_cap: u64,
     #[arg(long, default_value_t = 32)]
     weak_fill: u64,
-    #[arg(long, default_value_t = 6)]
+    #[arg(long, default_value_t = 48)]
     weak_depth: usize,
-    /// INCLUDER_CUT as a fraction (0.02 is 2%).
-    #[arg(long, default_value_t = 0.02)]
+    /// `R_MAX`, the most times easier than the minimum a weak share may be.
+    #[arg(long, default_value_t = 256)]
+    weak_ratio_max: u64,
+    /// INCLUDER_CUT as a fraction (0.01 is 1%).
+    #[arg(long, default_value_t = 0.01)]
     includer_cut: f64,
     /// Payout level of every untracked miner (0 to 7).
     #[arg(long, default_value_t = 5)]
@@ -146,6 +151,7 @@ fn mix(argument: MixArg) -> MinerMix {
         MixArg::Home => MinerMix::Home,
         MixArg::HalfIndustrial => MinerMix::HalfIndustrial,
         MixArg::MostlyIndustrial => MinerMix::MostlyIndustrial,
+        MixArg::AlmostAllIndustrial => MinerMix::AlmostAllIndustrial,
         MixArg::Zipf => MinerMix::Zipf,
         MixArg::Medium => MinerMix::Medium,
         MixArg::MediumFewBig => MinerMix::MediumFewBig,
@@ -176,6 +182,7 @@ fn scenario_from(arguments: &RunArgs, months: usize, seed: u64) -> Result<Scenar
         weak_cap: arguments.weak_cap,
         weak_fill: arguments.weak_fill,
         weak_depth: arguments.weak_depth,
+        weak_ratio_max: arguments.weak_ratio_max,
         includer_cut: arguments.includer_cut,
         default_level: arguments.level,
         weak_credit: match arguments.weak_credit {

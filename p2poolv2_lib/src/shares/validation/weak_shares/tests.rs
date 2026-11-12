@@ -8,7 +8,7 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::MockPplnsWindow;
 use crate::pool_difficulty::{AsertParent, MockPoolDifficulty};
 use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
 use crate::shares::validation::FailureKind;
-use crate::shares::weak::{GENESIS_WEAK_RATIO, WeakSummary, next_weak_ratio};
+use crate::shares::weak::{GENESIS_WEAK_RATIO, WEAK_DEPTH, WeakSummary, next_weak_ratio};
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::test_utils::{
     TestShareBlockBuilder, TestWeakShare, build_test_weak_share, build_test_weak_share_paying,
@@ -618,6 +618,8 @@ fn a_weak_share_whose_branch_does_not_reach_its_merkle_root_is_refused() {
     assert!(error.message.contains("merkle root"), "{error}");
 }
 
+/// The carrier is at height 101, the weak share's parent at 53: exactly
+/// `WEAK_DEPTH` shares below, the deepest a carried weak share may be.
 #[test]
 fn a_weak_share_carried_once_within_its_depth_is_placed() {
     let carrier_parent = BlockHash::from_byte_array([0x01; 32]);
@@ -655,8 +657,8 @@ fn a_weak_share_carried_once_within_its_depth_is_placed() {
             chain: ChainMembership::Confirmed,
         };
         Ok(vec![
-            (carrier_parent, metadata(10)),
-            (weak_parent, metadata(5)),
+            (carrier_parent, metadata(100)),
+            (weak_parent, metadata(101 - WEAK_DEPTH)),
         ])
     });
     store
@@ -670,8 +672,8 @@ fn a_weak_share_carried_once_within_its_depth_is_placed() {
     assert!(result.is_ok(), "{}", result.unwrap_err());
 }
 
-/// The carrier is at height 11, the weak share's parent at 4: seven shares
-/// below, one more than `WEAK_DEPTH`.
+/// The carrier is at height 101, the weak share's parent at 52: one more
+/// than `WEAK_DEPTH` shares below.
 #[test]
 fn a_weak_share_whose_parent_is_too_deep_is_refused() {
     let carrier_parent = BlockHash::from_byte_array([0x01; 32]);
@@ -705,8 +707,8 @@ fn a_weak_share_whose_parent_is_too_deep_is_refused() {
             chain: ChainMembership::Confirmed,
         };
         Ok(vec![
-            (carrier_parent, metadata(10)),
-            (weak_parent, metadata(4)),
+            (carrier_parent, metadata(100)),
+            (weak_parent, metadata(100 - WEAK_DEPTH)),
         ])
     });
     let validator =
@@ -718,7 +720,9 @@ fn a_weak_share_whose_parent_is_too_deep_is_refused() {
 
     assert_eq!(error.kind, FailureKind::Consensus);
     assert!(
-        error.message.contains("7 shares below its carrier"),
+        error
+            .message
+            .contains(&format!("{} shares below its carrier", WEAK_DEPTH + 1)),
         "{error}"
     );
 }

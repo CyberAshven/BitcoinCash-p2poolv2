@@ -44,8 +44,9 @@ use serde::{Deserialize, Serialize};
 /// `weak_ratio` of a ratio of one, `R = 1`: the weak target is the minimum.
 pub const WEAK_RATIO_UNIT: u32 = 1024;
 
-/// `R_MAX`: a weak share is at most 4096 times easier than the minimum.
-pub const WEAK_RATIO_MAX_MULTIPLE: u32 = 4096;
+/// `R_MAX`: a weak share is at most 256 times easier than the minimum
+/// (4096 until 2026-11-12, study #85).
+pub const WEAK_RATIO_MAX_MULTIPLE: u32 = 256;
 
 /// The largest `weak_ratio`, `R_MAX` in units of 1/1024.
 pub const WEAK_RATIO_MAX: u32 = WEAK_RATIO_MAX_MULTIPLE * WEAK_RATIO_UNIT;
@@ -68,12 +69,15 @@ pub const WEAK_FILL: u16 = 32;
 pub const WEAK_BYTES: usize = 96 * 1024;
 
 /// `WEAK_DEPTH`: a carried weak share's parent is at most this many shares
-/// below the share that carries it.
-pub const WEAK_DEPTH: u32 = 6;
+/// below the share that carries it, 8 minutes at
+/// 10-second shares (6 until 2026-11-12, study #85: deep enough that a
+/// coalition of most of the hashrate gains nothing by refusing to carry
+/// others' weak shares).
+pub const WEAK_DEPTH: u32 = 48;
 
 /// `INCLUDER_CUT`: the part of a weak share's credit the share carrying it
-/// earns, in basis points (5%).
-pub const INCLUDER_CUT: u16 = 500;
+/// earns, in basis points (1%; 5% until 2026-11-12, study #85).
+pub const INCLUDER_CUT: u16 = 100;
 
 /// Basis points in one.
 const BASIS_POINTS: u128 = 10_000;
@@ -84,7 +88,8 @@ pub const MAX_WEAK_SCRIPT_SIG_BYTES: usize = 100;
 
 /// Name of the weak-share rule in Bitcoin Cash protocol strings: at most
 /// [`WEAK_CAP`] (64) weak shares a share, an includer cut of
-/// [`INCLUDER_CUT`] (500) basis points and a depth of [`WEAK_DEPTH`] (6).
+/// [`INCLUDER_CUT`] (100) basis points, a depth of [`WEAK_DEPTH`] (48) and an
+/// `R_MAX` of [`WEAK_RATIO_MAX_MULTIPLE`] (256).
 ///
 /// `weak2` since 2026-11-12: a share's weak root commits each carried weak
 /// share's whole encoding ([`WeakShare::committed_hash`]), where `weak`
@@ -92,7 +97,12 @@ pub const MAX_WEAK_SCRIPT_SIG_BYTES: usize = 100;
 /// share free for a relaying peer to change. The two compute different roots
 /// for every share carrying weak shares, so nodes on them must not peer: a
 /// flag day, with a fresh store.
-pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak2-64-500-6";
+///
+/// `weak2-64-100-48-256` since 2026-11-12 (study #85): the cut fell from 500
+/// basis points, the depth rose from 6 and `R_MAX` fell from 4096, and the
+/// tag gained `R_MAX`. Every share's weak credit and every genesis share
+/// (its weak ratio is `R_MAX`) changed: a flag day, with a fresh store.
+pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak2-64-100-48-256";
 
 /// The weak ratio of a share whose parent has `parent_weak_ratio` and
 /// carried `parent_weak_count` weak shares: one step from the parent's.
@@ -529,7 +539,7 @@ mod tests {
     fn the_rule_tag_names_the_cap_the_includer_cut_and_the_depth() {
         assert_eq!(
             BCH_WEAK_SHARE_RULE_TAG,
-            format!("weak2-{WEAK_CAP}-{INCLUDER_CUT}-{WEAK_DEPTH}")
+            format!("weak2-{WEAK_CAP}-{INCLUDER_CUT}-{WEAK_DEPTH}-{WEAK_RATIO_MAX_MULTIPLE}")
         );
     }
 

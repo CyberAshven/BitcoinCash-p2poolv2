@@ -135,6 +135,9 @@ pub enum MinerMix {
     HalfIndustrial,
     /// A tenth home miners, nine tenths industrial.
     MostlyIndustrial,
+    /// A hundredth home miners, the rest industrial: almost no hashrate at
+    /// the minimum, where `R_MAX` binds first.
+    AlmostAllIndustrial,
     /// A Zipf spread of sizes: the `k`-th largest miner has `1/k` of the
     /// largest one's hashrate, the smallest a home miner's.
     Zipf,
@@ -163,6 +166,7 @@ impl MinerMix {
             MinerMix::Home => "home",
             MinerMix::HalfIndustrial => "50% industrial",
             MinerMix::MostlyIndustrial => "90% industrial",
+            MinerMix::AlmostAllIndustrial => "99% industrial",
             MinerMix::Zipf => "zipf",
             MinerMix::Medium => "medium",
             MinerMix::MediumFewBig => "medium, few big",
@@ -175,6 +179,7 @@ impl MinerMix {
         match self {
             MinerMix::HalfIndustrial => 0.5,
             MinerMix::MostlyIndustrial => 0.9,
+            MinerMix::AlmostAllIndustrial => 0.99,
             MinerMix::MediumFewBig => MEDIUM_MIX_BIG_FRACTION,
             MinerMix::Home | MinerMix::Zipf | MinerMix::Medium => 0.0,
         }
@@ -183,7 +188,10 @@ impl MinerMix {
     /// The classes making up `hashrate`, every miner at `level`.
     pub fn classes(&self, hashrate: f64, level: u32) -> Vec<MinerClass> {
         match self {
-            MinerMix::Home | MinerMix::HalfIndustrial | MinerMix::MostlyIndustrial => {
+            MinerMix::Home
+            | MinerMix::HalfIndustrial
+            | MinerMix::MostlyIndustrial
+            | MinerMix::AlmostAllIndustrial => {
                 self.home_and_farm_classes(hashrate, level)
             }
             MinerMix::Zipf => zipf_classes(hashrate, level),

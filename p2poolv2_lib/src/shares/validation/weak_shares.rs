@@ -57,9 +57,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 /// The most expected payouts a [`WeakPayoutCache`] keeps before it starts
-/// over: a few templates on each of the `WEAK_DEPTH` parents a weak share
+/// over: four templates on each of the `WEAK_DEPTH` parents a weak share
 /// may build on.
-const WEAK_PAYOUT_CACHE_CAPACITY: usize = 64;
+const WEAK_PAYOUT_CACHE_CAPACITY: usize = 4 * WEAK_DEPTH as usize;
 
 /// What a weak share's expected payouts depend on besides the window's
 /// distribution: its parent (the window's anchor), the paying header's bits
@@ -128,9 +128,10 @@ impl WeakPayoutKey {
 }
 
 /// The most window weights a [`WeakPayoutCache`] keeps before it starts
-/// over: a few Bitcoin Cash blocks on each of the `WEAK_DEPTH` parents a
-/// weak share may build on.
-const WEAK_WEIGHTS_CACHE_CAPACITY: usize = 16;
+/// over: two Bitcoin Cash blocks on each of the `WEAK_DEPTH` parents a weak
+/// share may build on, so a share carrying weak shares from deep parents
+/// reuses the walks the shares below it made.
+const WEAK_WEIGHTS_CACHE_CAPACITY: usize = 2 * WEAK_DEPTH as usize;
 
 /// What the PPLNS window's weights for a weak share depend on: its parent,
 /// the window's anchor, and the Bitcoin Cash block its coinbase pays, by its

@@ -64,7 +64,7 @@ Since 2026-11-09 each Bitcoin Cash share header also carries its weak ratio
 `weak_ratio`, `R` in units of 1/1024, which must equal one step from the
 parent's (`next_weak_ratio` in `shares/weak.rs`: down by `R / 256` when the
 parent carried more than 32 weak shares, up by `R / 256` when it carried
-fewer, the same at exactly 32; between 1 and 4096; 4096 at genesis). Full
+fewer, the same at exactly 32; between 1 and 256; 256 at genesis). Full
 validation, header sync and block receipt check it with the band.
 ### The payout level (Bitcoin Cash)
 
@@ -213,7 +213,7 @@ Since every field a weak share check reads is then fixed by the carrier's
 proof of work, a check that fails after the body is stored is a verdict on
 the share. The repeat and carried-once checks compare the weak shares'
 proof-of-work hashes, read from the carried weak shares. Each carried weak
-share's parent must be 1 to 6 shares below the carrier (`WEAK_DEPTH`), and no
+share's parent must be 1 to 48 shares below the carrier (`WEAK_DEPTH`), and no
 ancestor of the carrier may carry it already, as an uncle has one nephew.
 Full validation checks rules 1, 2 and 4 and the depth and carried-once rules
 with the share's other parallel checks, and rule 3 with its own coinbase

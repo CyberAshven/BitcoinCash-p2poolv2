@@ -53,7 +53,12 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 ///   (`BCH_WEAK_SHARE_RULE_TAG`, `weak2`). A stored share carrying weak
 ///   shares commits the old root, which every node now refuses, so the
 ///   chain starts again.
-pub const STORE_FORMAT_VERSION: u32 = 6;
+/// - 7 (2026-11-12): Bitcoin Cash weak shares carry a 1% includer cut, may
+///   wait 48 shares for a carrier and are at most 256 times easier than the
+///   minimum (`BCH_WEAK_SHARE_RULE_TAG`, `weak2-64-100-48-256`, study #85).
+///   A stored chain was credited under the old cut and starts from a genesis
+///   whose weak ratio is the old `R_MAX`; the chain starts again.
+pub const STORE_FORMAT_VERSION: u32 = 7;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
