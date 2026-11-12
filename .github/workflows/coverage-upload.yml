@@ -11,6 +11,9 @@ name: Coverage Upload
 # - The artifact and the checked-out tree are attacker-controlled data. They
 #   are read, never executed: Codecov plugins are disabled and only the named
 #   report is uploaded.
+# - Bitcoin Cash fork: only this repository's own branches are checked out
+#   and uploaded. A fork's PR gets no Codecov upload, so no code from outside
+#   the repository reaches this job.
 # - Event fields such as the branch name are attacker-controlled. They reach
 #   shell steps only through env, never through ${{ }} inside run.
 #
@@ -55,8 +58,10 @@ jobs:
       #* comes from the artifact, so it is only trusted after GitHub confirms
       #* that PR's head is the reported commit. A mismatch means the PR moved
       #* on and a newer run will report for it, so skip rather than fail.
-      #* Fork branches are prefixed with their owner so a fork's "main"
-      #* cannot be recorded as this repository's main.
+      #* Bitcoin Cash fork: only this repository's own branches are uploaded.
+      #* A fork's PR is skipped, so this job, which holds CODECOV_TOKEN, never
+      #* checks out code from outside the repository (CodeQL
+      #* actions/untrusted-checkout).
       - name: Resolve pull request and branch
         id: resolve
         if: steps.codecov_token.outputs.present == 'true'
@@ -67,9 +72,14 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
-          HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
         run: |
           set -euo pipefail
+
+          if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
+            echo "::notice::Rust CI ran for a fork's branch; coverage is uploaded only for this repository's branches"
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           if [ "$TRIGGER_EVENT" = "push" ]; then
             printf 'upload=true\npull_request_number=\nbranch=%s\n' "$HEAD_BRANCH" >> "$GITHUB_OUTPUT"
@@ -95,29 +105,30 @@ jobs:
             exit 0
           fi
 
-          branch="$HEAD_BRANCH"
-          if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
-            branch="$HEAD_OWNER:$HEAD_BRANCH"
-          fi
-
-          printf 'upload=true\npull_request_number=%s\nbranch=%s\n' "$pull_request_number" "$branch" >> "$GITHUB_OUTPUT"
+          printf 'upload=true\npull_request_number=%s\nbranch=%s\n' "$pull_request_number" "$HEAD_BRANCH" >> "$GITHUB_OUTPUT"
 
       # Codecov maps report paths onto the repository's file list, so the
       # reported commit is checked out as files only. Nothing in it runs:
-      # plugins are off and search is disabled below.
+      # plugins are off and search is disabled below. The repository check
+      # repeats the resolve step's, where the scanner can see it: only this
+      # repository's own branches are checked out.
       - name: Check out reported commit
-        if: steps.resolve.outputs.upload == 'true'
+        if: >-
+          steps.resolve.outputs.upload == 'true' &&
+          github.event.workflow_run.head_repository.full_name == github.repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          repository: ${{ github.repository }}
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
-          # Fork PR code is checked out as data only; nothing in it runs
-          # (plugins off, search disabled), so lifting the guard is safe.
+          # A PR branch of this repository is checked out as data only;
+          # nothing in it runs (plugins off, search disabled).
           allow-unsafe-pr-checkout: true
 
       - name: Upload coverage to Codecov
-        if: steps.resolve.outputs.upload == 'true'
+        if: >-
+          steps.resolve.outputs.upload == 'true' &&
+          github.event.workflow_run.head_repository.full_name == github.repository
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
