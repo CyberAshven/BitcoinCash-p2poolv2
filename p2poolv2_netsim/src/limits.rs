@@ -3,11 +3,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! The limits study: upstream's five practical objections to the scaling
-//! study's ideas, each run against the costs a node really pays.
+//! study's ideas, and a bigger network, each run against the costs a node
+//! really pays under the adopted rules.
 //!
 //! 1. A share must carry enough to check how it paid out: `limits-coinbase`
-//!    sends shares whole or without the payouts every peer rebuilds, and
-//!    charges both the same validation.
+//!    sends shares whole, without the payouts every peer rebuilds, or as
+//!    token shares (whose coinbase is 3,072 bytes and pays the rest through
+//!    the payout tree), and charges each its own validation.
 //! 2. Relaying before validation may not move the needle:
 //!    `limits-relay-early` forwards after the header check or after full
 //!    validation at each measured validation cost.
@@ -17,8 +19,10 @@
 //!    and 12 at 10, 2 and 1-second shares.
 //! 5. Faster shares build a fatter DAG and load each node:
 //!    `limits-period` runs 10 to 1-second shares with and without weak
-//!    shares, at each measured validation cost and on a node five times
-//!    slower.
+//!    shares, at each measured validation cost, on a node five times
+//!    slower, at payout level 0 and with token shares.
+//!
+//! `limits-network` then grows the network from 1,000 to 10,000 nodes.
 //!
 //! Every limits scenario validates one share at a time
 //! (`ValidationQueue::Serial`), as a node's validation worker does, at the
@@ -27,24 +31,106 @@
 
 use crate::distribution::Distribution;
 use crate::engine::{Forwarding, ValidationQueue};
+use crate::report::group_thousands;
 use crate::scaling::{LARGE_NETWORK_SHARE_INTERVALS, at_size};
 use crate::scenario::{HEADER_CHECK_SECONDS, Scenario, ShareRelay};
 use crate::sizes::CoinbaseLayout;
 use crate::sweep::with_payees;
 
-/// Nodes in every limits scenario: upstream's stated limit of about 1,000
-/// miners, one node each.
+/// Nodes in every limits scenario but `limits-network`'s: upstream's stated
+/// limit of about 1,000 miners, one node each.
 pub const LIMITS_NODE_COUNT: usize = 1_000;
 
 /// What checking one share costs a node, measured on the release build of
-/// `p2poolv2_lib` (one core of a 2026 desktop): payees in the window, the
-/// share's validation seconds (window walk plus coinbase build) and a weak
-/// share's (coinbase build alone; the walk is cached by parent).
-pub const MEASURED_VALIDATION: [(u64, f64, f64); 3] = [
-    (1_000, 0.0066, 0.0003),
-    (10_000, 0.0383, 0.0040),
-    (100_000, 0.4713, 0.1195),
+/// `p2poolv2_lib` (one core of a 2026 desktop, the median of seven builds).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeasuredCost {
+    /// Miners with credit in the window.
+    pub miners: u64,
+    /// Outputs the block pays them through, in the coinbase or the payout
+    /// tree: every miner, unless the level draw pays fewer.
+    pub paid_outputs: u64,
+    /// Whether the share carries a token commitment (a 3,072 byte coinbase).
+    pub token_share: bool,
+    /// The payout level every miner is at.
+    pub level: u8,
+    /// Seconds to check a share: the window walk and the coinbase build.
+    pub share_seconds: f64,
+    /// Seconds to check a weak share: the coinbase build alone; the walk is
+    /// cached by parent.
+    pub weak_share_seconds: f64,
+}
+
+/// The adopted rules: every miner at the default payout level 5 (17,472
+/// satoshis), shares without tokens. At 100,000 equal miners a 3.125 BCH
+/// block pays 17,883 of them by the level draw.
+pub const ADOPTED: [MeasuredCost; 3] = [
+    MeasuredCost {
+        miners: 1_000,
+        paid_outputs: 1_000,
+        token_share: false,
+        level: 5,
+        share_seconds: 0.0064,
+        weak_share_seconds: 0.00026,
+    },
+    MeasuredCost {
+        miners: 10_000,
+        paid_outputs: 10_000,
+        token_share: false,
+        level: 5,
+        share_seconds: 0.0379,
+        weak_share_seconds: 0.00375,
+    },
+    MeasuredCost {
+        miners: 100_000,
+        paid_outputs: 17_883,
+        token_share: false,
+        level: 5,
+        share_seconds: 0.3615,
+        weak_share_seconds: 0.04485,
+    },
 ];
+
+/// The same miners on token shares: 79 payees in the coinbase, the others in
+/// the payout tree every validator rebuilds.
+pub const TOKEN_SHARES: [MeasuredCost; 3] = [
+    MeasuredCost {
+        miners: 1_000,
+        paid_outputs: 1_000,
+        token_share: true,
+        level: 5,
+        share_seconds: 0.00735,
+        weak_share_seconds: 0.00121,
+    },
+    MeasuredCost {
+        miners: 10_000,
+        paid_outputs: 10_000,
+        token_share: true,
+        level: 5,
+        share_seconds: 0.0446,
+        weak_share_seconds: 0.0105,
+    },
+    MeasuredCost {
+        miners: 100_000,
+        paid_outputs: 17_883,
+        token_share: true,
+        level: 5,
+        share_seconds: 0.376,
+        weak_share_seconds: 0.0593,
+    },
+];
+
+/// The worst case for the coinbase: 100,000 miners all at payout level 0,
+/// so every one is paid, 29,400 in the coinbase and 70,600 through the
+/// payout tree.
+pub const LEVEL_ZERO_100K: MeasuredCost = MeasuredCost {
+    miners: 100_000,
+    paid_outputs: 100_000,
+    token_share: false,
+    level: 0,
+    share_seconds: 0.4376,
+    weak_share_seconds: 0.1328,
+};
 
 /// How much slower than the measuring desktop a small node (a single-board
 /// computer) is taken to be.
@@ -53,15 +139,22 @@ pub const SLOW_NODE_FACTOR: f64 = 5.0;
 /// Weak shares per share in the weak-share rows: `WEAK_FILL`.
 const WEAK_SHARES_PER_SHARE: u64 = 32;
 
-/// Share intervals each share-period run mines for: three hours at 10-second
-/// shares. A thousand nodes tracking every weak share of a day at 1-second
-/// shares needs more memory than a desktop has.
-const PERIOD_RUN_INTERVALS: f64 = 1_080.0;
+/// Share intervals each share-period and network run mines for: three hours
+/// at 10-second shares. A thousand nodes tracking every weak share of a day
+/// at 1-second shares need more memory than a desktop has.
+const SHORT_RUN_INTERVALS: f64 = 1_080.0;
+
+/// Node counts of the network sweep.
+const NETWORK_NODE_COUNTS: [usize; 3] = [1_000, 3_000, 10_000];
+
+/// Largest network the network sweep runs with weak shares: every weak share
+/// is a message to every peer of every node.
+const LARGEST_NETWORK_WITH_WEAK_SHARES: usize = 3_000;
 
 /// One of the limits study's sweeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Limit {
-    /// Objection 1: whole shares against shares without payouts.
+    /// Objection 1: whole shares, shares without payouts and token shares.
     Coinbase,
     /// Objection 2: forwarding after the header check.
     RelayEarly,
@@ -71,16 +164,19 @@ pub enum Limit {
     Uncles,
     /// Objection 5: the share period and each node's validation load.
     Period,
+    /// A bigger network: 1,000 to 10,000 nodes.
+    Network,
 }
 
 impl Limit {
-    /// Every limits sweep, in the order of upstream's objections.
-    pub const ALL: [Limit; 5] = [
+    /// Every limits sweep: upstream's objections in order, then the network.
+    pub const ALL: [Limit; 6] = [
         Limit::Coinbase,
         Limit::RelayEarly,
         Limit::Fanout,
         Limit::Uncles,
         Limit::Period,
+        Limit::Network,
     ];
 
     /// The command-line name of the sweep.
@@ -91,6 +187,7 @@ impl Limit {
             Limit::Fanout => "limits-fanout",
             Limit::Uncles => "limits-uncles",
             Limit::Period => "limits-period",
+            Limit::Network => "limits-network",
         }
     }
 
@@ -102,25 +199,26 @@ impl Limit {
             Limit::Fanout => fanout(base),
             Limit::Uncles => uncles(base),
             Limit::Period => period(base),
+            Limit::Network => network(base),
         }
     }
 }
 
-/// `base` with `payees` paid, validating one share at a time at the measured
-/// cost for that many payees times `slowdown`, on `LIMITS_NODE_COUNT` nodes
-/// at `interval` seconds.
-fn measured(base: &Scenario, payees: u64, slowdown: f64, interval: f64) -> Scenario {
-    let (_, share_seconds, weak_seconds) = MEASURED_VALIDATION
-        .iter()
-        .copied()
-        .find(|(measured_payees, _, _)| *measured_payees == payees)
-        .unwrap_or(MEASURED_VALIDATION[0]);
-    let paid = with_payees(base, CoinbaseLayout::no_tokens(), payees);
+/// `base` paying `cost`'s outputs and validating one share at a time at
+/// `cost` times `slowdown`, on `LIMITS_NODE_COUNT` nodes at `interval`
+/// seconds.
+fn measured(base: &Scenario, cost: MeasuredCost, slowdown: f64, interval: f64) -> Scenario {
+    let layout = if cost.token_share {
+        CoinbaseLayout::with_tokens()
+    } else {
+        CoinbaseLayout::no_tokens()
+    };
+    let paid = with_payees(base, layout, cost.paid_outputs);
     let scenario = Scenario {
-        validation_seconds: share_seconds * slowdown,
+        validation_seconds: cost.share_seconds * slowdown,
         validation_seconds_per_megabyte: 0.0,
         validation_queue: ValidationQueue::Serial {
-            weak_share_seconds: weak_seconds * slowdown,
+            weak_share_seconds: cost.weak_share_seconds * slowdown,
         },
         ..paid
     };
@@ -133,30 +231,59 @@ fn labelled(scenario: Scenario, label: String) -> Scenario {
     Scenario { label, ..scenario }
 }
 
-fn payees_label(payees: u64) -> String {
-    crate::report::group_thousands(payees)
+/// A scenario mining for `SHORT_RUN_INTERVALS` share intervals.
+fn short(scenario: Scenario) -> Scenario {
+    Scenario {
+        duration_seconds: SHORT_RUN_INTERVALS * scenario.share_interval_seconds,
+        ..scenario
+    }
+}
+
+fn miners_label(cost: MeasuredCost) -> String {
+    format!("{} miners", group_thousands(cost.miners))
+}
+
+fn relay_name(relay: ShareRelay) -> &'static str {
+    match relay {
+        ShareRelay::Full => "whole",
+        ShareRelay::WithoutPayouts => "without payouts",
+    }
+}
+
+fn weak_name(weak: u64) -> String {
+    if weak == 0 {
+        "no weak shares".to_string()
+    } else {
+        format!("{weak} weak shares a share")
+    }
 }
 
 fn coinbase(base: &Scenario) -> Vec<Scenario> {
     [10.0, 2.0]
         .into_iter()
         .flat_map(|interval| {
-            MEASURED_VALIDATION
+            ADOPTED
                 .into_iter()
-                .flat_map(move |(payees, _, _)| {
-                    [ShareRelay::Full, ShareRelay::WithoutPayouts].map(|relay| {
-                        let name = match relay {
-                            ShareRelay::Full => "whole",
-                            ShareRelay::WithoutPayouts => "without payouts",
-                        };
+                .zip(TOKEN_SHARES)
+                .flat_map(move |(cost, token_cost)| {
+                    let plain = [ShareRelay::Full, ShareRelay::WithoutPayouts].map(|relay| {
                         labelled(
                             Scenario {
                                 relay,
-                                ..measured(base, payees, 1.0, interval)
+                                ..measured(base, cost, 1.0, interval)
                             },
-                            format!("{name}, {} payees, {interval} s", payees_label(payees)),
+                            format!(
+                                "{}, {}, {interval} s",
+                                relay_name(relay),
+                                miners_label(cost)
+                            ),
                         )
-                    })
+                    });
+                    let token = labelled(
+                        measured(base, token_cost, 1.0, interval),
+                        format!("token share, {}, {interval} s", miners_label(cost)),
+                    );
+                    plain.into_iter().chain([token])
                 })
         })
         .collect()
@@ -166,28 +293,26 @@ fn relay_early(base: &Scenario) -> Vec<Scenario> {
     [10.0, 2.0]
         .into_iter()
         .flat_map(|interval| {
-            MEASURED_VALIDATION
-                .into_iter()
-                .flat_map(move |(payees, _, _)| {
-                    [
-                        ("after validation", Forwarding::AfterValidation),
-                        (
-                            "after the header check",
-                            Forwarding::AfterHeaderCheck {
-                                header_check_seconds: HEADER_CHECK_SECONDS,
-                            },
-                        ),
-                    ]
-                    .map(|(name, forwarding)| {
-                        labelled(
-                            Scenario {
-                                forwarding,
-                                ..measured(base, payees, 1.0, interval)
-                            },
-                            format!("{name}, {} payees, {interval} s", payees_label(payees)),
-                        )
-                    })
+            ADOPTED.into_iter().flat_map(move |cost| {
+                [
+                    ("after validation", Forwarding::AfterValidation),
+                    (
+                        "after the header check",
+                        Forwarding::AfterHeaderCheck {
+                            header_check_seconds: HEADER_CHECK_SECONDS,
+                        },
+                    ),
+                ]
+                .map(|(name, forwarding)| {
+                    labelled(
+                        Scenario {
+                            forwarding,
+                            ..measured(base, cost, 1.0, interval)
+                        },
+                        format!("{name}, {}, {interval} s", miners_label(cost)),
+                    )
                 })
+            })
         })
         .collect()
 }
@@ -200,18 +325,18 @@ fn fanout(base: &Scenario) -> Vec<Scenario> {
                 .into_iter()
                 .flat_map(move |relay| {
                     [8, 16, 32, 64].map(|peers| {
-                        let name = match relay {
-                            ShareRelay::Full => "whole",
-                            ShareRelay::WithoutPayouts => "without payouts",
-                        };
                         labelled(
                             Scenario {
                                 relay,
                                 peers_per_node: peers,
                                 upload_megabits: Distribution::Fixed { value: upload },
-                                ..measured(base, 10_000, 1.0, 10.0)
+                                ..measured(base, ADOPTED[1], 1.0, 10.0)
                             },
-                            format!("{name}, 10,000 payees, {upload} Mbit/s up, {peers} peers"),
+                            format!(
+                                "{}, {}, {upload} Mbit/s up, {peers} peers",
+                                relay_name(relay),
+                                miners_label(ADOPTED[1])
+                            ),
                         )
                     })
                 })
@@ -227,55 +352,108 @@ fn uncles(base: &Scenario) -> Vec<Scenario> {
                 labelled(
                     Scenario {
                         max_uncles: cap,
-                        ..measured(base, 10_000, 1.0, interval)
+                        ..measured(base, ADOPTED[1], 1.0, interval)
                     },
-                    format!("uncle cap {cap}, 10,000 payees, {interval} s"),
+                    format!(
+                        "uncle cap {cap}, {}, {interval} s",
+                        miners_label(ADOPTED[1])
+                    ),
                 )
             })
         })
         .collect()
 }
 
+/// `cost` at every share period, with `weak` weak shares a share, on nodes
+/// `slowdown` times slower; `note` says what sets the rows apart.
+fn period_rows(
+    base: &Scenario,
+    cost: MeasuredCost,
+    slowdown: f64,
+    weak: u64,
+    note: &str,
+) -> Vec<Scenario> {
+    [10.0, 5.0, 2.0, 1.0]
+        .map(|interval| {
+            labelled(
+                short(Scenario {
+                    weak_shares_per_share: weak,
+                    ..measured(base, cost, slowdown, interval)
+                }),
+                format!(
+                    "{}{note}, {}, {interval} s",
+                    miners_label(cost),
+                    weak_name(weak)
+                ),
+            )
+        })
+        .to_vec()
+}
+
 fn period(base: &Scenario) -> Vec<Scenario> {
-    let short = |scenario: Scenario| Scenario {
-        duration_seconds: PERIOD_RUN_INTERVALS * scenario.share_interval_seconds,
-        ..scenario
-    };
-    let intervals = [10.0, 5.0, 2.0, 1.0];
-    let by_payees = MEASURED_VALIDATION
+    ADOPTED
         .into_iter()
-        .flat_map(move |(payees, _, _)| {
+        .flat_map(|cost| {
             [0, WEAK_SHARES_PER_SHARE]
                 .into_iter()
-                .flat_map(move |weak| {
-                    intervals.map(|interval| {
-                        let weak_name = if weak == 0 {
-                            "no weak shares".to_string()
-                        } else {
-                            format!("{weak} weak shares a share")
-                        };
+                .flat_map(move |weak| period_rows(base, cost, 1.0, weak, ""))
+        })
+        .chain(period_rows(
+            base,
+            ADOPTED[1],
+            SLOW_NODE_FACTOR,
+            WEAK_SHARES_PER_SHARE,
+            ", nodes 5x slower",
+        ))
+        .chain(period_rows(
+            base,
+            TOKEN_SHARES[2],
+            1.0,
+            WEAK_SHARES_PER_SHARE,
+            ", token shares",
+        ))
+        .chain(period_rows(
+            base,
+            LEVEL_ZERO_100K,
+            1.0,
+            WEAK_SHARES_PER_SHARE,
+            ", all at level 0",
+        ))
+        .collect()
+}
+
+fn network(base: &Scenario) -> Vec<Scenario> {
+    NETWORK_NODE_COUNTS
+        .into_iter()
+        .flat_map(|nodes| {
+            [ShareRelay::Full, ShareRelay::WithoutPayouts]
+                .into_iter()
+                .flat_map(move |relay| {
+                    let weak_counts: &[u64] = if nodes <= LARGEST_NETWORK_WITH_WEAK_SHARES {
+                        &[0, WEAK_SHARES_PER_SHARE]
+                    } else {
+                        &[0]
+                    };
+                    weak_counts.iter().map(move |&weak| {
                         labelled(
-                            Scenario {
+                            short(Scenario {
+                                relay,
+                                node_count: nodes,
                                 weak_shares_per_share: weak,
-                                ..measured(base, payees, 1.0, interval)
-                            },
-                            format!("{} payees, {weak_name}, {interval} s", payees_label(payees)),
+                                ..measured(base, ADOPTED[1], 1.0, 10.0)
+                            }),
+                            format!(
+                                "{} nodes, {}, {}, {}",
+                                group_thousands(nodes as u64),
+                                relay_name(relay),
+                                miners_label(ADOPTED[1]),
+                                weak_name(weak)
+                            ),
                         )
                     })
                 })
-        });
-    let slow = intervals.map(|interval| {
-        labelled(
-            Scenario {
-                weak_shares_per_share: WEAK_SHARES_PER_SHARE,
-                ..measured(base, 10_000, SLOW_NODE_FACTOR, interval)
-            },
-            format!(
-                "10,000 payees, {WEAK_SHARES_PER_SHARE} weak shares a share, nodes {SLOW_NODE_FACTOR}x slower, {interval} s"
-            ),
-        )
-    });
-    by_payees.chain(slow).map(short).collect()
+        })
+        .collect()
 }
 
 #[cfg(test)]

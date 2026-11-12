@@ -6759,18 +6759,29 @@ mod tests {
             let walk_ms = started.elapsed().as_secs_f64() * 1_000.0;
 
             for token_share in [false, true] {
-                let started = Instant::now();
-                let outputs = build_pplns_outputs(
-                    312_500_000,
-                    &weights,
-                    &None,
-                    None,
-                    &None,
-                    None,
-                    PayoutSplit::for_chain(Chain::BitcoinCash, token_share),
-                )
-                .unwrap();
-                let outputs_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                //* The median of seven builds: one build's time moves by a
+                //* third from run to run.
+                let mut build_times = Vec::with_capacity(7);
+                let mut built = None;
+                for _ in 0..7 {
+                    let started = Instant::now();
+                    built = Some(
+                        build_pplns_outputs(
+                            312_500_000,
+                            &weights,
+                            &None,
+                            None,
+                            &None,
+                            None,
+                            PayoutSplit::for_chain(Chain::BitcoinCash, token_share),
+                        )
+                        .unwrap(),
+                    );
+                    build_times.push(started.elapsed().as_secs_f64() * 1_000.0);
+                }
+                build_times.sort_by(f64::total_cmp);
+                let outputs_ms = build_times[build_times.len() / 2];
+                let outputs = built.expect("seven builds ran");
                 let (tree_payees, tree_transactions, tree_fee) =
                     outputs.tree.as_ref().map_or((0, 0, 0), |tree| {
                         (

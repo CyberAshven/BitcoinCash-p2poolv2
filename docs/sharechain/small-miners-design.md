@@ -651,11 +651,47 @@ Attacks:
   shares fall from 581 to 53 a month, but its payments stay at about 25 a
   month and its swing only goes from 0.20 to 0.23.
 
+Measured at scale (2026-11-12; `docs/simulation/network-sim.md`, "Limits
+study", and the payout simulator's `scale` table):
+
+- **Checking a share** at a 120,960 share window and the default level costs
+  a node 6.4 ms with 1,000 miners in the window, 38 ms with 10,000 and 362
+  ms with 100,000; a weak share 0.3, 3.8 and 45 ms. At 10-second shares
+  100,000 miners keep a node 18% busy.
+- **How often a small miner is paid** falls with the number of home miners
+  in a pool, not with its hashrate: a pool makes 3.2 weak shares a second,
+  whatever its size. A bigger pool also pays in bigger pieces, because its
+  window is shorter: one weak share is worth 24,009 satoshis a block at 50%
+  of Bitcoin Cash.
+
 Still open:
 
+- **A level 0 payout that lands in the payout tree goes to the largest
+  payee.** The tree merges a payee whose amount, less its fee at 3 satoshis
+  a byte, is below dust into its last payee
+  (`payout_tree::merge_dust_payees`). The level 0 draw pays 546 satoshis,
+  the dust limit itself, so every level 0 winner past the coinbase's own
+  outputs (29,400 on a share without tokens, 79 on a token share) is merged
+  away. `payouts_at_scale_by_miner_class` (an ignored report in
+  `coinbase_budget/tests.rs`) pays one block through the split, the draw and
+  the tree: with home miners at level 0 and slices under 675 satoshis
+  (Bitcoin's hashrate, a pool at 1 to 2% of Bitcoin Cash, half its work
+  from home miners) they get 10% of their fair part on a share without
+  tokens and 0.03% on a token share, and the farms get the rest. At level 1
+  the same pool is paid 99.9%. It cannot happen while the level 0 winners of
+  a block fit the coinbase: on chipnet today, or at today's hashrate, where
+  a node leaves a 1.2 TH/s miner at level 5. A fix is a rule change. The
+  candidates: draw the tree's payees that would be below dust among
+  themselves at 1,092 satoshis, so the pot stays theirs; or make level 1 the
+  lowest level.
+- **Weak shares at the start of a chain overrun the peer streams.** `R`
+  starts at `R_MAX`, so a new chain's miners find weak shares 256 times as
+  fast as shares until `R` falls, and each is its own request to every
+  peer. A 12-node swarm at 3-second shares logged thousands of dropped
+  streams a minute in its first minutes. Node behaviour, not a rule.
 - **Not yet simulated:** the band step.
-- **Not yet measured:** coinbase building and weak-share checking time on
-  mainnet-sized windows.
+- **Not yet measured:** the window walk with a window full of weak-share
+  credits.
 
 ## References
 

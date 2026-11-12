@@ -31,7 +31,8 @@ are `designs`, `hashrate`, `pool`, `weak-credit`, `band-cap`,
 `weak-constants`, `includer-cut`, `levels`, `period`, `attack-minimum`,
 `attack-carriers` and `attack-spam`, and study #85's `refusing-races`,
 `mixes`, `arrivals`, `tiny-pool`, `floods`, `draw-steering`, `losses`,
-`weak-depth`, `r-max` and `r-max-mixes`. Every run is a pure function of its inputs and
+`weak-depth`, `r-max` and `r-max-mixes`, and `scale`. Every run is a pure function of its
+inputs and
 seed (default 1), drawn from `p2poolv2_netsim`'s seeded xoshiro256**
 generator, so the tables below come out the same on any machine. The whole
 default run, 1,000 simulated months per scenario, took 26 seconds on the
@@ -525,6 +526,48 @@ pay.
 - `WEAK_BYTES` and the band step. (A deep `WEAK_DEPTH`'s cost to a node is
   on the design page: a weak share needs only a known Bitcoin Cash prev, as
   a share does, so waiting does not make it stale.)
+
+## Scale: bigger pools on a bigger Bitcoin Cash
+
+`cargo payout-sim --scenario scale` runs the adopted design at 10, 30, 50
+and 90% of Bitcoin Cash and at 1, 10, 100, 270 and 1,000 times today's
+hashrate (270 times is about Bitcoin's), 50% industrial, with every home
+miner's payout level, the Bitaxe's and the ASIC's set as a node sets them
+(`level_policy::affordable_payout_level`: the highest level up to 5 that
+still expects three payments a month). The model keeps home miners at 1.2
+TH/s and half the pool's hashrate, so ten times the hashrate is ten times
+the home miners. The table is at the end of this file.
+
+What it shows:
+
+1. **Payouts stay fair at every size.** A miner's income over its fair part
+   stays within the noise of the months simulated, from a tenth to nine
+   tenths of Bitcoin Cash and up to 1,000 times today's hashrate.
+2. **How often a small miner is paid falls with the number of home miners
+   in the pool.** A pool makes `WEAK_FILL` weak shares a share, 3.2 a second
+   at 10-second shares, about 8.3 million a month, whatever its size. They
+   are split among the miners at the minimum. Today a Bitaxe finds 39 a
+   month in a pool at 10% of Bitcoin Cash, 9.4 at 30%, 5.6 at 50% and 3.1 at
+   90%; at ten times the hashrate, 2.8 down to 0.3.
+3. **A bigger pool pays in bigger pieces.** The window is three blocks of
+   work, so at 50% of Bitcoin Cash it is half an hour, 183 shares, and one
+   weak share is worth 24,009 satoshis of each block; at 90%, 43,215. The
+   payout level cannot split a weak share's credit, so above about 30% of
+   Bitcoin Cash a Bitaxe is paid by the weak share, not by its level: 17
+   payments a month at 50% and 9 at 90% today, with 0.4% and 5.5% of months
+   empty.
+4. **A 1.2 TH/s miner ages out as hashrate grows, a 100 TH/s miner much
+   later.** At ten times today's hashrate a Bitaxe is paid 4.7 times a month
+   at 10% of Bitcoin Cash (9% of months empty) and under once a month at
+   90%. At 270 times, Bitcoin's hashrate, it is paid once every three months
+   to once every two years. A 100 TH/s miner at 270 times is still paid 26
+   times a month at 10%, 8.8 at 30%, 5.2 at 50% (19% of months empty) and 3.0
+   at 90% (40% empty).
+5. **The lever is weak shares a second.** More weak shares a share, or a
+   shorter share period, gives small miners more, smaller credits. The
+   limits study in `docs/simulation/network-sim.md` prices that: each weak
+   share is a coinbase build on every node, 4 ms at 10,000 miners and 45 ms
+   at 100,000.
 
 ## Code
 
@@ -1352,5 +1395,32 @@ share chain constants it reuses. It does not link `p2poolv2_lib`.
 | 99% industrial | 10% | 4096 | 50.51% | 39.4 | 0.00% | 25.0 | 17,569 | 0.23 | 0.00% | 0.84% | 1.01 | 432 | 83,446 | 0.05 | 0.00% | 0.18% | 1.00 |
 | 99% industrial | 30% | 256 | 100.00% | 34.7 | 0.00% | 23.9 | 17,485 | 0.39 | 0.10% | 0.83% | 0.98 | 1,041 | 28,814 | 0.05 | 0.00% | 0.43% | 1.00 |
 | 99% industrial | 30% | 4096 | 100.00% | 34.7 | 0.00% | 23.6 | 17,493 | 0.39 | 0.10% | 0.83% | 0.97 | 1,041 | 28,828 | 0.05 | 0.00% | 0.43% | 1.00 |
+
+
+
+### Scale: bigger pools on a bigger Bitcoin Cash, levels as a node sets them (band-weak-levels, weak work, 50% industrial)
+
+| BCH hashrate | Pool | Minimum difficulty | R | Bitaxe level | Bitaxe weak/mo | ASIC level | ASIC weak/mo | Bitaxe pay/mo | Bitaxe median sat | Bitaxe swing | Bitaxe empty months | Bitaxe fee loss | Bitaxe vs fair | ASIC pay/mo | ASIC median sat | ASIC swing | ASIC empty months | ASIC fee loss | ASIC vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| x1 | 10% | 673,227,233 | 36.8 | 5 | 38.6 | 5 | 3,209 | 24.7 | 17,473 | 0.25 | 0.00% | 0.85% | 0.99 | 431 | 83,055 | 0.05 | 0.00% | 0.18% | 1.00 |
+| x1 | 30% | 2,530,147,322 | 34.7 | 5 | 9.40 | 5 | 804 | 24.0 | 17,474 | 0.38 | 0.00% | 0.83% | 0.98 | 1,041 | 28,814 | 0.05 | 0.00% | 0.43% | 1.00 |
+| x1 | 50% | 4,216,912,203 | 34.7 | 5 | 5.59 | 5 | 482 | 17.2 | 24,011 | 0.48 | 0.40% | 0.61% | 0.97 | 1,074 | 24,011 | 0.06 | 0.00% | 0.44% | 1.00 |
+| x1 | 90% | 7,590,441,965 | 34.7 | 5 | 3.06 | 5 | 268 | 9.42 | 43,216 | 0.67 | 5.50% | 0.34% | 0.95 | 745 | 43,216 | 0.07 | 0.00% | 0.31% | 1.00 |
+| x10 | 10% | 8,433,824,405 | 34.7 | 4 | 2.76 | 5 | 242 | 4.73 | 8,736 | 0.76 | 9.30% | 1.69% | 0.96 | 355 | 9,604 | 0.09 | 0.00% | 1.45% | 1.00 |
+| x10 | 30% | 25,301,473,215 | 34.7 | 4 | 0.962 | 5 | 80.6 | 2.95 | 14,406 | 1.18 | 41.00% | 1.02% | 0.99 | 226 | 14,406 | 0.13 | 0.00% | 0.93% | 1.00 |
+| x10 | 50% | 42,169,122,025 | 34.7 | 4 | 0.573 | 5 | 48.3 | 1.80 | 24,009 | 1.45 | 56.40% | 0.61% | 1.01 | 144 | 24,009 | 0.16 | 0.00% | 0.59% | 1.00 |
+| x10 | 90% | 75,904,419,646 | 34.7 | 4 | 0.309 | 5 | 26.8 | 0.920 | 43,215 | 2.06 | 74.20% | 0.34% | 0.93 | 82.1 | 43,215 | 0.21 | 0.00% | 0.34% | 1.00 |
+| x100 | 10% | 84,338,244,051 | 34.7 | 1 | 0.284 | 5 | 24.2 | 0.846 | 4,802 | 2.10 | 75.60% | 3.05% | 0.95 | 68.1 | 4,802 | 0.24 | 0.00% | 2.80% | 1.00 |
+| x100 | 30% | 253,014,732,152 | 34.7 | 1 | 0.089 | 5 | 7.81 | 0.259 | 14,406 | 3.78 | 91.20% | 1.01% | 0.87 | 23.8 | 14,406 | 0.42 | 0.20% | 1.01% | 0.97 |
+| x100 | 50% | 421,691,220,254 | 34.7 | 1 | 0.052 | 5 | 4.62 | 0.183 | 24,009 | 4.77 | 94.70% | 0.60% | 1.04 | 14.1 | 24,009 | 0.54 | 1.40% | 0.61% | 0.95 |
+| x100 | 90% | 759,044,196,457 | 34.7 | 1 | 0.024 | 5 | 2.55 | 0.086 | 43,215 | 6.81 | 97.40% | 0.33% | 0.88 | 7.83 | 43,215 | 0.74 | 8.80% | 0.34% | 0.95 |
+| x270 | 10% | 227,713,258,937 | 34.7 | 0 | 0.097 | 5 | 8.68 | 0.304 | 4,802 | 3.64 | 90.70% | 3.03% | 0.92 | 25.9 | 4,802 | 0.38 | 0.00% | 2.95% | 0.97 |
+| x270 | 30% | 683,139,776,811 | 34.7 | 0 | 0.028 | 5 | 2.83 | 0.091 | 14,406 | 6.42 | 97.00% | 1.00% | 0.84 | 8.76 | 14,406 | 0.68 | 6.90% | 1.01% | 0.96 |
+| x270 | 50% | 1,138,566,294,685 | 34.7 | 0 | 0.015 | 5 | 1.72 | 0.055 | 24,009 | 8.47 | 98.40% | 0.60% | 0.84 | 5.18 | 24,009 | 0.87 | 18.60% | 0.61% | 0.94 |
+| x270 | 90% | 2,049,419,330,433 | 34.7 | 0 | 0.011 | 5 | 0.978 | 0.042 | 43,215 | 10.21 | 98.90% | 0.34% | 1.14 | 3.03 | 43,215 | 1.17 | 40.30% | 0.34% | 0.99 |
+| x1000 | 10% | 843,382,440,507 | 34.7 | 0 | 0.021 | 4 | 2.30 | 0.073 | 4,802 | 8.11 | 97.90% | 2.90% | 0.86 | 7.07 | 4,802 | 0.76 | 9.80% | 3.03% | 0.96 |
+| x1000 | 30% | 2,530,147,321,522 | 34.7 | 0 | 5.0e-3 | 4 | 0.813 | 0.023 | 14,406 | 15.28 | 99.40% | 0.93% | 0.85 | 2.42 | 14,406 | 1.32 | 47.30% | 1.01% | 0.98 |
+| x1000 | 50% | 4,216,912,202,537 | 34.7 | 0 | 5.0e-3 | 4 | 0.488 | 0.014 | 24,009 | 15.94 | 99.50% | 0.62% | 0.78 | 1.52 | 24,009 | 1.63 | 61.80% | 0.61% | 1.02 |
+| x1000 | 90% | 7,590,441,964,567 | 34.7 | 0 | 5.0e-3 | 4 | 0.269 | 0.012 | 43,215 | 17.45 | 99.60% | 0.34% | 1.20 | 0.797 | 43,215 | 2.15 | 76.60% | 0.34% | 0.96 |
 
 

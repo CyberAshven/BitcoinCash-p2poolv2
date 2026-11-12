@@ -78,12 +78,13 @@ impl Sweep {
 
     /// The limits study's sweeps, in the order of upstream's objections
     /// (`sweep limits`).
-    pub const LIMITS: [Sweep; 5] = [
+    pub const LIMITS: [Sweep; 6] = [
         Sweep::Limits(Limit::Coinbase),
         Sweep::Limits(Limit::RelayEarly),
         Sweep::Limits(Limit::Fanout),
         Sweep::Limits(Limit::Uncles),
         Sweep::Limits(Limit::Period),
+        Sweep::Limits(Limit::Network),
     ];
 
     /// Parse a sweep's command-line name.

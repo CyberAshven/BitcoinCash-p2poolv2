@@ -1574,6 +1574,14 @@ pub struct SimConfig {
     /// check of `WEAK_DEPTH` against a refusing coalition.
     #[serde(default)]
     pub carry_only_own_weak_shares: bool,
+    /// Bitcoin Cash: model this many miners on the node instead of one. Every
+    /// proof is found by one of them, picked at random, each with its own
+    /// payout address and share owner, so a small swarm fills the window with
+    /// hundreds of payees: for end-to-end runs of the level draw, the hybrid
+    /// split and the payout tree. Their keys do not exist, so what they are
+    /// paid on regtest cannot be spent. Omit for the node's one miner.
+    #[serde(default)]
+    pub virtual_miners: Option<u32>,
 }
 
 /// Config for p2poolv2 nodes
