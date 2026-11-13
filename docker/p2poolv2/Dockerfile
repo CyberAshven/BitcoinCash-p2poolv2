@@ -63,6 +63,17 @@ FROM debian:trixie-slim AS runner
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
+# The node runs as its own user, p2pool (uid 1000), which owns /p2poolv2.
+# It is also in the bchn-rpc group (gid 2001), the group BCHN's image lets
+# read the RPC password it keeps in the bchn_rpc volume. Both are set before
+# VOLUME, since a change to a volume's directory after it is declared is
+# dropped from the image.
+RUN groupadd --gid 2001 bchn-rpc \
+    && useradd --uid 1000 --user-group --groups bchn-rpc --no-create-home \
+        --home-dir /p2poolv2 --shell /usr/sbin/nologin p2pool \
+    && mkdir -p /p2poolv2/data \
+    && chown -R p2pool:p2pool /p2poolv2
+
 WORKDIR /p2poolv2
 VOLUME /p2poolv2
 
@@ -85,7 +96,7 @@ LABEL org.opencontainers.image.source=https://github.com/CyberAshven/BitcoinCash
 LABEL org.opencontainers.image.description="P2Poolv2 for Bitcoin Cash: a peer-to-peer mining pool where miners coordinate directly and are paid in the coinbase of every block the pool finds."
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
-# TODO: add non-root user
+USER p2pool
 
 HEALTHCHECK --interval=5s --timeout=1s --start-period=1s --retries=3 \
     CMD ["curl", "-sf", "http://127.0.0.1:46884/health"]
