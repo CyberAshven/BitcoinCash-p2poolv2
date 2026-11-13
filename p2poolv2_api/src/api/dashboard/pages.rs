@@ -568,6 +568,15 @@ fn share_link(blockhash: &str) -> Markup {
     html! { a.addr href=(share_href(blockhash)) title=(blockhash) { (short(blockhash)) } }
 }
 
+/// A share's parent, linked to its page. The genesis share has none: its
+/// all-zero parent hash names no share, so it is not a link.
+fn parent_link(blockhash: &str) -> Markup {
+    if blockhash.bytes().all(|byte| byte == b'0') {
+        return html! { span { "none" } };
+    }
+    share_link(blockhash)
+}
+
 /// When a miner or worker last sent a share; one that has not sent any
 /// yet was never seen.
 fn last_seen(now: u64, then: u64) -> Markup {
@@ -1377,7 +1386,7 @@ pub(crate) fn share(view: &ShareView) -> Markup {
             div.stat-list {
                 (stat("Hash", html! { span.mono { (share.blockhash) } }))
                 (stat("Height", html! { (share.height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string())) }))
-                (stat("Parent", share_link(&share.parent)))
+                (stat("Parent", parent_link(&share.parent)))
                 (stat("Payout address", miner_link(owner)))
                 (stat("Share chain address", miner_link(&share.miner_address)))
                 (stat("Share bits", html! { span.mono { (share.bits) } }))

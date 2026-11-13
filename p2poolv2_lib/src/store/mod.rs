@@ -60,7 +60,13 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 ///   minimum (`BCH_WEAK_SHARE_RULE_TAG`, `weak2-64-100-48-256`, study #85).
 ///   A stored chain was credited under the old cut and starts from a genesis
 ///   whose weak ratio is the old `R_MAX`; the chain starts again.
-pub const STORE_FORMAT_VERSION: u32 = 7;
+/// - 8 (2026-11-12): Bitcoin Cash payout levels start at the lowest
+///   (`BCH_PAYOUT_LEVELS_RULE_TAG`, `levels-546x2-k1`). A stored chain was
+///   validated under the rule that allowed level 0; the chain starts again.
+/// - 9 (2026-11-12): a weak share a share carries is held to its carrier's
+///   time (`BCH_WEAK_SHARE_RULE_TAG`, `weak3-64-100-48-256`). A stored chain
+///   was validated against each node's clock; the chain starts again.
+pub const STORE_FORMAT_VERSION: u32 = 9;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -1033,6 +1039,29 @@ mod tests {
         assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
         assert!(error.to_string().contains("has format 5"), "{error}");
         assert!(error.to_string().contains("whole encoding"), "{error}");
+    }
+
+    /// A store from before the payout-level floor, format 7, is refused: its
+    /// chain was validated under the rule that allowed level 0.
+    #[test]
+    fn test_store_from_before_the_level_floor_is_refused() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        store
+            .db
+            .put_cf(&metadata_cf, STORE_FORMAT_KEY, 7u32.to_le_bytes())
+            .unwrap();
+
+        let error = store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap_err();
+        assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
+        assert!(error.to_string().contains("has format 7"), "{error}");
     }
 
     #[test_log::test]

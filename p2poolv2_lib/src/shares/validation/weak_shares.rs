@@ -28,7 +28,8 @@ mod tests;
 
 use super::{
     ChainStoreHandle, DefaultShareValidator, MAX_UNCLES, PplnsWindow, ValidationError,
-    check_future_time_limit, check_median_time_past, stored_ancestor_times, window_error_verdict,
+    check_carried_weak_time, check_median_time_past, check_relayed_weak_time,
+    stored_ancestor_times, window_error_verdict,
 };
 use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::split_for_share;
@@ -53,7 +54,7 @@ use bitcoin::{
     BlockHash, OutPoint, Sequence, Target, Transaction, TxIn, Witness, absolute::LockTime,
     transaction::Version,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 
 /// The most expected payouts a [`WeakPayoutCache`] keeps before it starts
@@ -154,6 +155,10 @@ struct WeakWeightsKey {
 pub struct WeakPayoutCache {
     weights: HashMap<WeakWeightsKey, Arc<PplnsWeights>>,
     payouts: HashMap<WeakPayoutKey, Arc<CoinbasePayouts>>,
+    /// The weights keys in the order they were cached, oldest first.
+    weights_order: VecDeque<WeakWeightsKey>,
+    /// The payout keys in the order they were cached, oldest first.
+    payouts_order: VecDeque<WeakPayoutKey>,
 }
 
 impl WeakPayoutCache {
@@ -161,14 +166,16 @@ impl WeakPayoutCache {
         Self {
             weights: HashMap::with_capacity(WEAK_WEIGHTS_CACHE_CAPACITY),
             payouts: HashMap::with_capacity(WEAK_PAYOUT_CACHE_CAPACITY),
+            weights_order: VecDeque::with_capacity(WEAK_WEIGHTS_CACHE_CAPACITY),
+            payouts_order: VecDeque::with_capacity(WEAK_PAYOUT_CACHE_CAPACITY),
         }
     }
 
     /// The cached payouts for `key`, or `build_outputs`' from the window's
     /// weights, cached by [`WeakPayoutKey::weights_key`] or else
     /// `walk_window`'s; both kept for the next weak share. A full cache
-    /// starts over: only node memory, never a verdict, depends on what it
-    /// keeps.
+    /// drops its oldest entry: only node memory, never a verdict, depends on
+    /// what it keeps.
     fn get_or_build(
         &mut self,
         key: WeakPayoutKey,
@@ -180,9 +187,12 @@ impl WeakPayoutCache {
         }
         let weights = self.weights_or_walk(key.weights_key(), walk_window)?;
         let payouts = Arc::new(build_outputs(&weights)?);
-        if self.payouts.len() >= WEAK_PAYOUT_CACHE_CAPACITY {
-            self.payouts.clear();
+        if self.payouts.len() >= WEAK_PAYOUT_CACHE_CAPACITY
+            && let Some(oldest) = self.payouts_order.pop_front()
+        {
+            self.payouts.remove(&oldest);
         }
+        self.payouts_order.push_back(key.clone());
         self.payouts.insert(key, Arc::clone(&payouts));
         Ok(payouts)
     }
@@ -198,9 +208,12 @@ impl WeakPayoutCache {
             return Ok(Arc::clone(weights));
         }
         let weights = Arc::new(walk_window()?);
-        if self.weights.len() >= WEAK_WEIGHTS_CACHE_CAPACITY {
-            self.weights.clear();
+        if self.weights.len() >= WEAK_WEIGHTS_CACHE_CAPACITY
+            && let Some(oldest) = self.weights_order.pop_front()
+        {
+            self.weights.remove(&oldest);
         }
+        self.weights_order.push_back(key);
         self.weights.insert(key, Arc::clone(&weights));
         Ok(weights)
     }
@@ -307,6 +320,11 @@ impl DefaultShareValidator {
     ///
     /// A parent, ancestor or Bitcoin Cash prev not stored yet is
     /// `Recoverable`.
+    ///
+    /// The future limit of its time is not checked here, because it depends on
+    /// who asks: a relayed weak share is held to this node's clock
+    /// ([`Self::validate_relayed_weak_share`]) and a carried one to its
+    /// carrier's time ([`Self::validate_carried_weak_headers`]).
     pub fn validate_weak_share_header(
         &self,
         weak_share: &WeakShare,
@@ -351,7 +369,6 @@ impl DefaultShareValidator {
 
         self.validate_share_version(header, chain_store_handle)?;
         self.validate_bch_prev_known(header, chain_store_handle)?;
-        check_future_time_limit(header.time, self.time_provider.seconds_since_epoch())?;
         let ancestor_times = stored_ancestor_times(parent_hash, chain_store_handle)?;
         check_median_time_past(header.time, &ancestor_times)
     }
@@ -489,6 +506,10 @@ impl DefaultShareValidator {
         cache: &mut WeakPayoutCache,
     ) -> Result<(), ValidationError> {
         self.validate_weak_share_header(weak_share, chain_store_handle)?;
+        check_relayed_weak_time(
+            weak_share.header.time,
+            self.time_provider.seconds_since_epoch(),
+        )?;
         let mut window = pplns_window
             .write()
             .expect("PPLNS window lock poisoned on write");
@@ -622,6 +643,7 @@ impl DefaultShareValidator {
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError> {
         for weak_share in &share.weak_shares {
+            check_carried_weak_time(weak_share.header.time, share.header.time)?;
             self.validate_weak_share_header(weak_share, chain_store_handle)?;
         }
         self.validate_carried_weak_positions(share, chain_store_handle)

@@ -21,9 +21,9 @@
 //! the chain's own.
 
 use crate::constants::{
-    ASERT_HALF_LIFE_SECONDS, BAND_CAP_STEP_DIVISOR, BCH_BLOCK_INTERVAL_SECONDS,
-    BCH_PPLNS_WINDOW_BLOCKS, BLOCK_REWARD_SATOSHIS, DONATION_FRACTION, FIXED_POINT_ONE,
-    HASHES_PER_DIFFICULTY, MATURITY_SKIP_SHARES, WINDOW_CAP_SECONDS,
+    ASERT_HALF_LIFE_SECONDS, BCH_BLOCK_INTERVAL_SECONDS, BCH_PPLNS_WINDOW_BLOCKS,
+    BLOCK_REWARD_SATOSHIS, DONATION_FRACTION, FIXED_POINT_ONE, HASHES_PER_DIFFICULTY,
+    MATURITY_SKIP_SHARES, WINDOW_CAP_SECONDS,
 };
 use crate::difficulty::{found_share_rate, node_default_shares_per_month, wanted_ratio};
 use crate::miners::{MinerClass, MinerKind};
@@ -38,13 +38,13 @@ const HOUR_SECONDS: f64 = 3_600.0;
 pub const HOURS_BEFORE_EVENT: usize = 24;
 
 /// The next share's band cap, in units of 1/1024, from its parent's
-/// (design page, section 2, "The cap `C`"). It rises by `C * u / 512` when
+/// (design page, section 2, "The cap `C`"). It rises by `C * u / divisor` when
 /// the parent's node wanted heavier shares than its cap allowed,
 /// `parent_wanted` (the wanted work over the parent's minimum) above
 /// `C`, with `u` that multiple as a whole number from 1 to `cap_max`; it
-/// falls by `C / 512` otherwise; and it stays between 1 and `cap_max`.
-pub fn next_band_cap(parent_cap: u64, parent_wanted: f64, cap_max: u64) -> u64 {
-    let divisor = BAND_CAP_STEP_DIVISOR as u64;
+/// falls by `C / divisor` otherwise; and it stays between 1 and `cap_max`. The
+/// page's `divisor` is 512.
+pub fn next_band_cap(parent_cap: u64, parent_wanted: f64, cap_max: u64, divisor: u64) -> u64 {
     let wanted_more = parent_wanted * FIXED_POINT_ONE as f64 > parent_cap as f64;
     let moved = if wanted_more {
         let multiple = (parent_wanted.floor() as u64).clamp(1, cap_max);
@@ -84,6 +84,11 @@ pub struct TransitionInputs {
     pub ceiling_difficulty: f64,
     /// `C_MAX`.
     pub cap_max: u64,
+    /// The band cap's step divisor: 512 on the design page.
+    pub band_step_divisor: u64,
+    /// A class that mines at the minimum and records the largest wanted
+    /// difficulty in every share it finds, to push the cap up.
+    pub overstating: Option<usize>,
     /// `WEAK_CAP`.
     pub weak_cap: u64,
     /// `WEAK_FILL`.
@@ -353,7 +358,12 @@ impl<'a> Transition<'a> {
             inputs.period_seconds,
             inputs.ceiling_difficulty,
         );
-        let band_cap = next_band_cap(self.tip.band_cap, self.tip.wanted, inputs.cap_max);
+        let band_cap = next_band_cap(
+            self.tip.band_cap,
+            self.tip.wanted,
+            inputs.cap_max,
+            inputs.band_step_divisor,
+        );
         let cap = band_cap as f64 / FIXED_POINT_ONE as f64;
         let mut jobs = Jobs {
             pool_hashrate,
@@ -371,8 +381,17 @@ impl<'a> Transition<'a> {
             .iter()
             .enumerate()
             .for_each(|(index, class)| {
-                let wanted = wanted_ratio(class, minimum, target);
-                let multiple = wanted.min(cap).max(1.0);
+                let overstates = inputs.overstating == Some(index);
+                let wanted = if overstates {
+                    inputs.cap_max as f64
+                } else {
+                    wanted_ratio(class, minimum, target)
+                };
+                let multiple = if overstates {
+                    1.0
+                } else {
+                    wanted.min(cap).max(1.0)
+                };
                 let rate = if self.present(index) {
                     class.count * found_share_rate(class, multiple * minimum)
                 } else {

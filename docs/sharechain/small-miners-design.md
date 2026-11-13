@@ -436,8 +436,8 @@ slice of a payee ---> at or above its level? --- yes ---> paid directly
 ### Levels
 
 ```text
-L_k = 546 * 2^k satoshis,  k = 0 .. 7
-    = 546, 1,092, 2,184, 4,368, 8,736, 17,472, 34,944, 69,888
+L_k = 546 * 2^k satoshis,  k = 1 .. 7
+    = 1,092, 2,184, 4,368, 8,736, 17,472, 34,944, 69,888
 ```
 
 546 is Bitcoin Cash's P2PKH dust limit, the floor. 69,888 is the cap, which
@@ -447,7 +447,7 @@ then one byte); a header above 7 does not decode:
 
 | Field | Contents |
 |---|---|
-| `payout_level` | `k`, 0 to 7 |
+| `payout_level` | `k`, 1 to 7 |
 
 A payee's level in a block is the `payout_level` of its newest credited entry in
 the window: the newest share, uncle or weak share paying that address. The
@@ -576,8 +576,8 @@ without adding stale shares.
 |---|---|---|---|
 | 1 One chain | the mini chain's genesis tag only | 3 | flag day: every node restarts on a fresh store |
 | 2 Band | `band-c64` | 3 | same flag day |
-| 3 Weak shares | `weak-64-500-6`, then `weak2-64-500-6`, then `weak2-64-100-48-256` | 5, then 6, then 7 | same flag day; old nodes cannot read the new header or the weak share message; the weak root's leaves then became whole encodings, a second flag day, and study #85's cut, depth and `R_MAX` a third |
-| 4 Payout levels | `levels-546x2` | 4 | same flag day; old nodes cannot read the longer header |
+| 3 Weak shares | `weak-64-500-6`, then `weak2-64-500-6`, then `weak2-64-100-48-256`, then `weak3-64-100-48-256` | 5, then 6, then 7, then 9 | same flag day; old nodes cannot read the new header or the weak share message; the weak root's leaves then became whole encodings, a second flag day, and study #85's cut, depth and `R_MAX` a third |
+| 4 Payout levels | `levels-546x2`, then `levels-546x2-k1` | 4, then 8 | same flag day; old nodes cannot read the longer header |
 | 5 Share period | none; share version 2 | 3 | share-version vote |
 
 A part that changes what a stored share holds raises the store format when
@@ -586,7 +586,9 @@ it merges, so the numbers follow the merge order: part 4 raised it to 4
 (2026-11-09), because its header carries the weak ratio and the store keeps
 the weak shares. The weak root's binding of each carried weak share's whole
 encoding raised it to 6 (2026-11-12): stored shares were checked against the
-old root, which every node now computes differently.
+old root, which every node now computes differently. Dropping level 0
+raised it to 8, and holding a carried weak share to its carrier's time to 9
+(2026-11-13): a stored chain was checked under the rule before each.
 
 Each part is its own pull request, with its plain-words explanation and the
 maintainer's agreement before merging. Chipnet restarts once per merged part
@@ -671,29 +673,20 @@ study", and the payout simulator's `scale` table):
 
 Still open:
 
-- **A level 0 payout that lands in the payout tree goes to the largest
-  payee.** The tree merges a payee whose amount, less its fee at 3 satoshis
-  a byte, is below dust into its last payee
-  (`payout_tree::merge_dust_payees`). The level 0 draw pays 546 satoshis,
-  the dust limit itself, so every level 0 winner past the coinbase's own
-  outputs (29,400 on a share without tokens, 79 on a token share) is merged
-  away. `payouts_at_scale_by_miner_class` (an ignored report in
-  `coinbase_budget/tests.rs`) pays one block through the split, the draw and
-  the tree: with home miners at level 0 and slices under 675 satoshis
-  (Bitcoin's hashrate, a pool at 1 to 2% of Bitcoin Cash, half its work
-  from home miners) they get 10% of their fair part on a share without
-  tokens and 0.03% on a token share, and the farms get the rest. At level 1
-  the same pool is paid 99.9%. A 12-node swarm with 1,200 miners
-  (`docs/simulation/RUNBOOK.md`, Test J) shows it on real nodes: on token
-  shares the miners at level 0 were paid 0.79 to 0.82 of their part of the
-  hashrate and the tree's largest payee eleven times what its work earned;
-  without tokens they were paid 1.02 to 1.05; with level 1 in place of level
-  0 they were paid 1.00. It cannot happen while the level 0 winners of
-  a block fit the coinbase: on chipnet today, or at today's hashrate, where
-  a node leaves a 1.2 TH/s miner at level 5. A fix is a rule change. The
-  candidates: draw the tree's payees that would be below dust among
-  themselves at 1,092 satoshis, so the pot stays theirs; or make level 1 the
-  lowest level.
+- **Level 0 is gone (2026-11-12).** A level 0 win, 546 satoshis, that
+  landed in the payout tree was below dust once the tree's fee was taken,
+  so the tree gave it to its largest payee
+  (`payout_tree::merge_dust_payees`). On a 12-node swarm with 1,200 miners
+  (`docs/simulation/RUNBOOK.md`, Test J) the miners at level 0 were paid
+  0.79 to 0.82 of their part of the hashrate on token shares, the tree's
+  largest payee eleven times what its work earned, and the same miners 1.00
+  with level 1 in place of level 0. The lowest level a share may carry is
+  now 1, 1,092 satoshis (`MIN_PAYOUT_LEVEL`, protocol segment
+  `levels-546x2-k1`): it stays above dust after the tree's fee at 3
+  satoshis a byte. What remains is small: a level's pot below one level
+  payment is paid whole to one payee, and a miner alone below its level
+  keeps its own slice, each under 1,092 satoshis a block, paid as it is in
+  the coinbase and merged in the tree.
 - **Every weak share is sent whole to every peer.** A node sends each weak
   share it accepts, as its own request, to every peer but the one it came
   from, so a node with eleven peers receives it eleven times: the 12-node
@@ -703,17 +696,25 @@ Still open:
   the streams hold: 136,129 inbound streams were dropped in the first
   minute, and none after. Announcing a weak share by its hash, as
   transactions are, sends each one once. Node behaviour, not a rule.
-- **A carried weak share's timestamp is checked against the node's own
-  clock.** `validate_carried_weak_headers` applies the 120-second future
-  limit of a relayed weak share to the ones a share carries, and a failure
-  marks the share invalid for good, so two nodes whose clocks differ can
-  disagree about one share for ever. The limit for a carried weak share has
-  to come from chain data, the carrying share's own time. A rule change.
+- **A carried weak share's time is held to its carrier's (2026-11-12).**
+  `validate_carried_weak_headers` applied the 120-second future limit
+  against each node's own clock, and a failure marked the share invalid for
+  good, so two nodes whose clocks differed by a second could disagree about
+  one share for ever. A carried weak share's time is now at most 120
+  seconds after its carrier's (`check_carried_weak_time`, protocol segment
+  `weak3-64-100-48-256`), and a relayed one ahead of the local clock is held
+  and checked again instead of refused.
 - **A weak share that passes proof of work and fails a later check can be
   sent again and again**, each time costing a window walk: the failure is
   not remembered, the peer is not dropped, and the walk cache empties
   itself when it is full. Node behaviour.
-- **Not yet simulated:** the band step.
+- **The band step is simulated** (`payout-sim --scenario band-step`). Where
+  `C` settles does not depend on its step, only how fast it gets there: 1
+  hour at a divisor of 128, 3 hours at the rule's 512, 5 to 8 at 2,048.
+  Hashrate that mines at the minimum while recording the largest wanted
+  difficulty moves `C` to its maximum with 2% of the pool, and changes
+  nothing home miners are paid: the cap only bounds how heavy a job a node
+  may give.
 
 ## References
 

@@ -13,10 +13,12 @@ use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::test_utils::{
     TestShareBlockBuilder, TestWeakShare, build_test_weak_share, build_test_weak_share_paying,
 };
+use crate::utils::time_provider::TestTimeProvider;
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, CompactTarget, Network, PubkeyHash, Work};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
+use std::time::{Duration, UNIX_EPOCH};
 
 //* Validity tests. A weak share is mined at `HARD`, a target its hash
 //* misses, on a parent whose minimum is `EASY`, the validator's ceiling and
@@ -141,8 +143,9 @@ fn more_weak_shares_than_the_cap_are_refused() {
     assert!(error.message.contains("more than 64"), "{error}");
 }
 
-#[test]
-fn a_weak_share_on_a_job_at_the_minimum_passes_the_header_rules() {
+/// A weak share that passes the header rules, the store that answers for its
+/// parent, and the difficulty its validator needs.
+fn header_rule_fixture() -> (WeakShare, MockChainStoreHandle, MockPoolDifficulty) {
     let parent = TestShareBlockBuilder::new()
         .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
         .bits(CompactTarget::from_consensus(EASY))
@@ -183,6 +186,19 @@ fn a_weak_share_on_a_job_at_the_minimum_passes_the_header_rules() {
             chain: ChainMembership::Confirmed,
         })
     });
+    (weak_share, store, pool_difficulty)
+}
+
+/// A clock a day behind [`WEAK_TIME`]: the fixture's weak share is far past
+/// the future limit of a node that reads it.
+fn a_day_behind() -> Arc<TestTimeProvider> {
+    let now = UNIX_EPOCH + Duration::from_secs(u64::from(WEAK_TIME) - 86_400);
+    Arc::new(TestTimeProvider::new(now))
+}
+
+#[test]
+fn a_weak_share_on_a_job_at_the_minimum_passes_the_header_rules() {
+    let (weak_share, store, pool_difficulty) = header_rule_fixture();
     let validator = DefaultShareValidator::new(pool_difficulty)
         .for_chain(Chain::BitcoinCash)
         .with_target_ceiling(CompactTarget::from_consensus(EASY));
@@ -190,6 +206,82 @@ fn a_weak_share_on_a_job_at_the_minimum_passes_the_header_rules() {
     let result = validator.validate_weak_share_header(&weak_share, &store);
 
     assert!(result.is_ok(), "{}", result.unwrap_err());
+}
+
+/// The header rules do not read the clock, so a carried weak share gets the
+/// same verdict on every node: a validator a day behind the weak share's
+/// time still passes it.
+#[test]
+fn the_header_rules_of_a_weak_share_do_not_depend_on_the_clock() {
+    let (weak_share, store, pool_difficulty) = header_rule_fixture();
+    let validator = DefaultShareValidator::with_time_provider(pool_difficulty, a_day_behind())
+        .for_chain(Chain::BitcoinCash)
+        .with_target_ceiling(CompactTarget::from_consensus(EASY));
+
+    let result = validator.validate_weak_share_header(&weak_share, &store);
+
+    assert!(result.is_ok(), "{}", result.unwrap_err());
+}
+
+/// A relayed weak share ahead of this node's clock is early, not invalid: the
+/// failure is `Recoverable`, so the worker holds it and checks it again.
+#[test]
+fn a_relayed_weak_share_ahead_of_the_clock_is_held_not_refused() {
+    let (weak_share, store, pool_difficulty) = header_rule_fixture();
+    let validator = DefaultShareValidator::with_time_provider(pool_difficulty, a_day_behind())
+        .for_chain(Chain::BitcoinCash)
+        .with_target_ceiling(CompactTarget::from_consensus(EASY));
+
+    let error = validator
+        .validate_relayed_weak_share(
+            &weak_share,
+            &store,
+            &RwLock::new(MockPplnsWindow::default()),
+            &mut WeakPayoutCache::new(),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.kind(), FailureKind::Recoverable, "{error}");
+}
+
+/// A carried weak share is held to its carrier's time: two numbers every
+/// node reads the same. Two minutes after the carrier is the limit.
+#[test]
+fn a_carried_weak_share_may_be_two_minutes_after_its_carrier() {
+    let carrier_time = WEAK_TIME;
+
+    assert!(
+        check_carried_weak_time(carrier_time + 120, carrier_time).is_ok(),
+        "120 seconds after its carrier"
+    );
+    assert!(
+        check_carried_weak_time(carrier_time - 600, carrier_time).is_ok(),
+        "ten minutes before its carrier"
+    );
+    let error = check_carried_weak_time(carrier_time + 121, carrier_time).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        FailureKind::Consensus,
+        "121 seconds after its carrier: {error}"
+    );
+}
+
+/// The clock's limit for a relayed weak share is the same two minutes, and
+/// passing it is never a verdict.
+#[test]
+fn a_relayed_weak_share_may_be_two_minutes_ahead_of_the_clock() {
+    let now = u64::from(WEAK_TIME);
+
+    assert!(
+        check_relayed_weak_time(WEAK_TIME + 120, now).is_ok(),
+        "120 seconds ahead of the clock"
+    );
+    let error = check_relayed_weak_time(WEAK_TIME + 121, now).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        FailureKind::Recoverable,
+        "121 seconds ahead of the clock: {error}"
+    );
 }
 
 /// A hash that meets its own share target is a full share and must travel
@@ -616,6 +708,45 @@ fn a_weak_share_whose_branch_does_not_reach_its_merkle_root_is_refused() {
         .unwrap_err();
 
     assert!(error.message.contains("merkle root"), "{error}");
+}
+
+/// A full cache drops its oldest walk and keeps the rest. Starting over
+/// instead let a peer cycle one key more than the cache holds and make every
+/// weak share it sent again walk the window again.
+#[test]
+fn a_full_cache_drops_only_its_oldest_walk() {
+    let key = |bits: u32| WeakWeightsKey {
+        parent: BlockHash::from_byte_array([1; 32]),
+        bitcoin_bits: bits,
+        bch_prev: BlockHash::all_zeros(),
+    };
+    let walks = std::cell::Cell::new(0usize);
+    let walk = || -> Result<PplnsWeights, ValidationError> {
+        walks.set(walks.get() + 1);
+        Ok(PplnsWeights::without_levels(HashMap::new()))
+    };
+    let mut cache = WeakPayoutCache::new();
+    for bits in 0..=WEAK_WEIGHTS_CACHE_CAPACITY as u32 {
+        cache.weights_or_walk(key(bits), walk).unwrap();
+    }
+    assert_eq!(
+        walks.get(),
+        WEAK_WEIGHTS_CACHE_CAPACITY + 1,
+        "one walk a key"
+    );
+
+    cache.weights_or_walk(key(1), walk).unwrap();
+    assert_eq!(
+        walks.get(),
+        WEAK_WEIGHTS_CACHE_CAPACITY + 1,
+        "the second oldest walk is still cached"
+    );
+    cache.weights_or_walk(key(0), walk).unwrap();
+    assert_eq!(
+        walks.get(),
+        WEAK_WEIGHTS_CACHE_CAPACITY + 2,
+        "the oldest walk was dropped"
+    );
 }
 
 /// The carrier is at height 101, the weak share's parent at 53: exactly

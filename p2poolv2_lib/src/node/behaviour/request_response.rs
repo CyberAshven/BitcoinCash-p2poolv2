@@ -162,6 +162,20 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// `R_MAX` from 4096 to 256, now in the segment. Nodes on the two credit weak
 /// shares differently and start from different genesis shares, so they
 /// cannot share a chain.
+///
+/// Payout levels' lowest rung changed on 2026-11-12, another flag day
+/// (`BCH_PAYOUT_LEVELS_RULE_TAG`, now `levels-546x2-k1`). Level 0 is not a
+/// valid payout level: it paid 546 satoshis, which is below dust once the
+/// payout tree's fee is taken, so a level 0 win that landed in the tree went
+/// to the tree's largest payee. A node on `levels-546x2` still accepts that
+/// header and pays the win, and the genesis share's level byte changed, so
+/// the two cannot share a chain.
+///
+/// The weak segment became `weak3` on 2026-11-12, another flag day: a weak
+/// share a share carries is held to its carrier's time, not to each node's
+/// clock (`check_carried_weak_time`). On `weak2` a share carrying a weak
+/// share stamped two minutes ahead was valid on a node whose clock had
+/// passed that time and invalid for good on one whose clock had not.
 fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
@@ -439,7 +453,7 @@ mod tests {
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2/weak2-64-100-48-256/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak3-64-100-48-256/1.0.0"
             )
         );
     }
@@ -512,7 +526,7 @@ mod tests {
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         let before = current.replace(
-            "/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2/weak2-64-100-48-256/",
+            "/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak3-64-100-48-256/",
             "/",
         );
 
@@ -531,7 +545,7 @@ mod tests {
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         let before = current.replace(
-            "/genesis-last-resort/band-c64/levels-546x2/weak2-64-100-48-256/",
+            "/genesis-last-resort/band-c64/levels-546x2-k1/weak3-64-100-48-256/",
             "/",
         );
 
@@ -549,7 +563,7 @@ mod tests {
             .unwrap()
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
-        let before = current.replace("/band-c64/levels-546x2/weak2-64-100-48-256/", "/");
+        let before = current.replace("/band-c64/levels-546x2-k1/weak3-64-100-48-256/", "/");
 
         assert_ne!(current, before);
         assert!(before.ends_with("/genesis-last-resort/1.0.0"), "{before}");
@@ -565,7 +579,7 @@ mod tests {
             .unwrap()
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
-        let before = current.replace("/levels-546x2/weak2-64-100-48-256/", "/");
+        let before = current.replace("/levels-546x2-k1/weak3-64-100-48-256/", "/");
 
         assert_ne!(current, before);
         assert!(before.ends_with("/band-c64/1.0.0"), "{before}");
@@ -581,7 +595,7 @@ mod tests {
             .unwrap()
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
-        let before = current.replace("/weak2-64-100-48-256/", "/");
+        let before = current.replace("/levels-546x2-k1/weak3-64-100-48-256/", "/levels-546x2/");
 
         assert_ne!(current, before);
         assert!(before.ends_with("/levels-546x2/1.0.0"), "{before}");
@@ -599,7 +613,10 @@ mod tests {
             .unwrap()
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
-        let before = current.replace("/weak2-64-100-48-256/", "/weak-64-500-6/");
+        let before = current.replace(
+            "/levels-546x2-k1/weak3-64-100-48-256/",
+            "/levels-546x2/weak-64-500-6/",
+        );
 
         assert_ne!(current, before);
         assert!(
@@ -619,11 +636,54 @@ mod tests {
             .unwrap()
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
-        let before = current.replace("/weak2-64-100-48-256/", "/weak2-64-500-6/");
+        let before = current.replace(
+            "/levels-546x2-k1/weak3-64-100-48-256/",
+            "/levels-546x2/weak2-64-500-6/",
+        );
 
         assert_ne!(current, before);
         assert!(
             before.ends_with("/levels-546x2/weak2-64-500-6/1.0.0"),
+            "{before}"
+        );
+    }
+
+    /// From 2026-11-12 a carried weak share is held to its carrier's time. A
+    /// node on `weak2` judges it by its own clock, so the new string differs
+    /// and the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_carries_the_carried_weak_time_rule() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current.replace("/weak3-64-100-48-256/", "/weak2-64-100-48-256/");
+
+        assert_ne!(current, before, "carried weak time flag day");
+        assert!(
+            current.ends_with("/levels-546x2-k1/weak3-64-100-48-256/1.0.0"),
+            "{current}"
+        );
+    }
+
+    /// From 2026-11-12 a Bitcoin Cash payout level starts at the lowest. A
+    /// node on `levels-546x2` still accepts level 0, so the new string differs
+    /// and the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_carries_the_level_floor() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current.replace("/levels-546x2-k1/", "/levels-546x2/");
+
+        assert_ne!(current, before, "level floor flag day");
+        assert!(
+            current.contains("levels-546x2-k1"),
+            "protocol string holds levels-546x2-k1: {current}"
+        );
+        assert!(
+            before.ends_with("/levels-546x2/weak3-64-100-48-256/1.0.0"),
             "{before}"
         );
     }
@@ -716,7 +776,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2/weak2-64-100-48-256/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak3-64-100-48-256/kad/1.0.0"
             )
         );
     }

@@ -8,7 +8,8 @@
 #   2. the one in $RPC_SECRET_DIR/password-$NETWORK, from an earlier start;
 #   3. a new random one, written there on first start.
 # The password is written to $RPC_SECRET_DIR/password-$NETWORK, which the
-# compose stack mounts read-only into P2Poolv2, and to a config file in the
+# compose stack mounts read-only into P2Poolv2 and only the bchn user and the
+# bchn-rpc group (P2Poolv2's user) can read, and to a config file in the
 # data directory that only the bchn user can read. It is passed to bitcoind
 # through that config file, never on the command line, and never logged.
 set -eu
@@ -54,6 +55,8 @@ esac
 
 mkdir -p "$RPC_SECRET_DIR"
 printf '%s\n' "$password" > "$secret.tmp"
+chgrp bchn-rpc "$secret.tmp"
+chmod 0640 "$secret.tmp"
 mv "$secret.tmp" "$secret"
 
 conf="/data/bchn-$NETWORK.conf"

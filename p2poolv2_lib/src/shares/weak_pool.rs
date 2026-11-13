@@ -24,7 +24,9 @@
 //! once the confirmed tip moves. A held weak share is dropped when the parent
 //! arrives too deep for any share to carry it, when it has waited
 //! `WEAK_DEPTH` share periods, or to keep the held weak shares within
-//! [`MAX_HELD_WEAK_SHARES`] and [`MAX_HELD_WEAK_SHARE_BYTES`], oldest first.
+//! [`MAX_HELD_WEAK_SHARES`] and [`MAX_HELD_WEAK_SHARE_BYTES`]: then the
+//! source holding the most bytes loses its oldest, so a peer that floods the
+//! held weak shares pushes out only its own.
 //!
 //! Locking: the pool's state sits behind one mutex, held only for in-memory
 //! work. It is never held across an await, a store read or another lock.
@@ -35,6 +37,7 @@ use crate::shares::weak::{WEAK_BYTES, WEAK_CAP, WEAK_DEPTH, WeakShare};
 use crate::sim_overrides::ideal_block_time;
 use bitcoin::BlockHash;
 use libp2p::PeerId;
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Write;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -85,7 +88,7 @@ pub fn can_be_carried(parent_height: u32, tip_height: u32) -> bool {
 }
 
 /// Where a weak share came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WeakShareSource {
     /// One of this node's own miners. Not rate limited.
     Local,
@@ -352,6 +355,14 @@ struct HeldWeakShare {
     retry_above_tip: Option<u32>,
 }
 
+/// The held weak shares from one source: their keys in `held`, oldest
+/// first, and their encoded bytes.
+#[derive(Default)]
+struct HeldBySource {
+    keys: VecDeque<u64>,
+    bytes: usize,
+}
+
 /// A peer's token bucket, in milli-tokens.
 struct PeerAllowance {
     tokens: u64,
@@ -369,6 +380,8 @@ struct WeakPoolState {
     held: BTreeMap<u64, HeldWeakShare>,
     /// The keys of `held`, by the parent each waits for.
     held_by_parent: HashMap<BlockHash, Vec<u64>>,
+    /// The keys of `held`, by the source each came from.
+    held_by_source: HashMap<WeakShareSource, HeldBySource>,
     /// Encoded bytes of the weak shares in `held`.
     held_bytes: usize,
     next_held_key: u64,
@@ -385,6 +398,7 @@ impl WeakPoolState {
             next_sequence: 0,
             held: BTreeMap::new(),
             held_by_parent: HashMap::with_capacity(MAX_HELD_WEAK_SHARES),
+            held_by_source: HashMap::with_capacity(16),
             held_bytes: 0,
             next_held_key: 0,
             counts: WeakPoolCounts::default(),
@@ -393,8 +407,8 @@ impl WeakPoolState {
 
     /// Hold `weak_share`, first held at `held_at_millis`, until its parent
     /// has a height and, with `retry_above_tip`, the confirmed tip is past
-    /// that height, dropping the oldest held weak shares while the count or
-    /// the bytes held pass their bounds.
+    /// that height. While the count or the bytes held pass their bounds, the
+    /// source holding the most bytes loses its oldest held weak share.
     fn hold(
         &mut self,
         weak_share: WeakShare,
@@ -421,7 +435,9 @@ impl WeakPoolState {
             && (self.held.len() >= MAX_HELD_WEAK_SHARES
                 || self.held_bytes + bytes > MAX_HELD_WEAK_SHARE_BYTES)
         {
-            self.drop_oldest_held();
+            if !self.drop_from_largest_source() {
+                break;
+            }
         }
         let key = self.next_held_key;
         self.next_held_key += 1;
@@ -436,6 +452,9 @@ impl WeakPoolState {
             },
         );
         self.held_bytes += bytes;
+        let from_source = self.held_by_source.entry(source).or_default();
+        from_source.keys.push_back(key);
+        from_source.bytes += bytes;
         let keys = self.held_by_parent.entry(parent).or_default();
         keys.push(key);
         if keys.len() == 1 {
@@ -446,7 +465,7 @@ impl WeakPoolState {
     }
 
     /// Take the held weak share at `key` out of the held ones and their
-    /// index by parent.
+    /// indexes by parent and by source.
     fn take_held(&mut self, key: u64) -> Option<HeldWeakShare> {
         let held = self.held.remove(&key)?;
         self.held_bytes -= held.bytes;
@@ -457,16 +476,38 @@ impl WeakPoolState {
                 self.held_by_parent.remove(&parent);
             }
         }
+        if let Some(from_source) = self.held_by_source.get_mut(&held.source) {
+            from_source.keys.retain(|held_key| *held_key != key);
+            from_source.bytes -= held.bytes;
+            if from_source.keys.is_empty() {
+                self.held_by_source.remove(&held.source);
+            }
+        }
         Some(held)
     }
 
-    /// Drop the oldest held weak share, as one whose parent never arrived.
-    fn drop_oldest_held(&mut self) {
-        if let Some(oldest) = self.held.keys().next().copied()
-            && self.take_held(oldest).is_some()
-        {
-            self.counts.refused.count(WeakShareRefusal::UnknownParent);
+    /// Drop the oldest held weak share of the source holding the most
+    /// bytes, as one whose parent never arrived; between sources holding as
+    /// many, the one whose oldest is older. A peer that floods the held weak
+    /// shares so pushes out only its own. Returns whether one was dropped.
+    fn drop_from_largest_source(&mut self) -> bool {
+        let oldest = self
+            .held_by_source
+            .values()
+            .filter_map(|from_source| {
+                let oldest = *from_source.keys.front()?;
+                Some((from_source.bytes, Reverse(oldest)))
+            })
+            .max()
+            .map(|(_, Reverse(oldest))| oldest);
+        let Some(oldest) = oldest else {
+            return false;
+        };
+        if self.take_held(oldest).is_none() {
+            return false;
         }
+        self.counts.refused.count(WeakShareRefusal::UnknownParent);
+        true
     }
 
     /// Drop the held weak shares first held longer than [`max_held_millis`]
@@ -723,7 +764,7 @@ impl WeakPool {
         let pow_hash = weak_share.pow_hash();
         {
             let mut state = self.lock();
-            if !state.mark_seen(pow_hash) {
+            if state.seen.contains(&pow_hash) {
                 state.counts.refused.count(WeakShareRefusal::Duplicate);
                 return;
             }
@@ -744,6 +785,7 @@ impl WeakPool {
                     }
                 }
             }
+            state.mark_seen(pow_hash);
             let sequence = state.next_sequence;
             state.next_sequence += 1;
             match source {
@@ -835,9 +877,10 @@ impl WeakPool {
     /// Hold `weak_share`, whose parent this node does not have, unchecked
     /// until the parent arrives ([`Self::release_held`]). The held weak
     /// shares stay within [`MAX_HELD_WEAK_SHARES`] and
-    /// [`MAX_HELD_WEAK_SHARE_BYTES`], the oldest dropped first, and each
-    /// waits at most [`max_held_millis`]. [`HoldOutcome::NewParent`] says no
-    /// other held weak share waits for its parent yet.
+    /// [`MAX_HELD_WEAK_SHARE_BYTES`], the source holding the most bytes
+    /// losing its oldest first, and each waits at most [`max_held_millis`].
+    /// [`HoldOutcome::NewParent`] says no other held weak share waits for its
+    /// parent yet.
     pub fn hold(&self, weak_share: WeakShare, source: WeakShareSource) -> HoldOutcome {
         let now = now_millis();
         let mut state = self.lock();
@@ -896,6 +939,39 @@ impl WeakPool {
 
     pub fn is_empty(&self) -> bool {
         self.lock().pooled.is_empty()
+    }
+
+    /// Whether `pow_hash` already passed its checks.
+    ///
+    /// A fetch skips a hash the pool has seen: a second copy would be a
+    /// duplicate, and asking for it would open a stream for nothing.
+    pub fn has_seen(&self, pow_hash: &BlockHash) -> bool {
+        self.lock().seen.contains(pow_hash)
+    }
+
+    /// The weak share still in the pool under `pow_hash`.
+    ///
+    /// Cloning out of `pooled` is what a peer is served. A share the best
+    /// chain already carries stays in `pooled` until it expires, so a peer
+    /// that missed it can still fetch it. One that is only held, or that
+    /// [`Self::select_for_share`] dropped because its parent fell below
+    /// `WEAK_DEPTH`, is not returned.
+    pub fn pooled_weak_share(&self, pow_hash: &BlockHash) -> Option<WeakShare> {
+        self.lock()
+            .pooled
+            .get(pow_hash)
+            .map(|pooled| pooled.weak_share.clone())
+    }
+
+    /// Whether a weak share with `pow_hash` is held, waiting for its parent
+    /// or for another check. The fetch book uses this to tell a hold that
+    /// expired from one that is still waiting, so it does not ask for a
+    /// second copy of a share this node already has in hand.
+    pub fn holds(&self, pow_hash: &BlockHash) -> bool {
+        self.lock()
+            .held
+            .values()
+            .any(|held| held.weak_share.pow_hash() == *pow_hash)
     }
 }
 

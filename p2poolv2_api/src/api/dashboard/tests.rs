@@ -700,3 +700,30 @@ async fn the_series_toggles_read_their_query_parameters() {
     assert!(body.contains("/dashboard?range=24h\">"));
     assert!(body.contains("/dashboard?range=24h&amp;pool=0&amp;node=0\""));
 }
+
+/// The genesis share has no parent, so its page links to none: the all-zero
+/// hash a genesis header carries is no share, and a link to it is a dead one.
+#[tokio::test]
+async fn the_genesis_share_page_links_to_no_parent() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    let genesis_block = genesis_for_tests();
+    state
+        .chain_store_handle
+        .init_or_setup_genesis(genesis_block.clone())
+        .await
+        .unwrap();
+
+    let (status, body, _) = get(
+        &state,
+        &format!("/dashboard/share/{}", genesis_block.block_hash()),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains(&format!("/dashboard/share/{}", "0".repeat(64))),
+        "the genesis share page links to no parent: {body}"
+    );
+}
+
+mod browser;

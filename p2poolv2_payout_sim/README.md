@@ -31,7 +31,7 @@ are `designs`, `hashrate`, `pool`, `weak-credit`, `band-cap`,
 `weak-constants`, `includer-cut`, `levels`, `period`, `attack-minimum`,
 `attack-carriers` and `attack-spam`, and study #85's `refusing-races`,
 `mixes`, `arrivals`, `tiny-pool`, `floods`, `draw-steering`, `losses`,
-`weak-depth`, `r-max` and `r-max-mixes`, and `scale`. Every run is a pure function of its
+`weak-depth`, `r-max` and `r-max-mixes`, and `scale` and `band-step`. Every run is a pure function of its
 inputs and
 seed (default 1), drawn from `p2poolv2_netsim`'s seeded xoshiro256**
 generator, so the tables below come out the same on any machine. The whole
@@ -934,7 +934,7 @@ share chain constants it reuses. It does not link `p2poolv2_lib`.
 | 10% | weak work | 5.00% | 1.00 | 4.64% | 1.00 | 4.64% | 0.95 | 0.00% | 1.01 | 0.98 |
 
 
-### Default payout level (band-weak-levels, 50% industrial)
+## Default payout level (band-weak-levels, 50% industrial)
 
 | Credit | Pool | Level | Bitaxe pay/mo | Bitaxe median sat | Bitaxe swing | Bitaxe empty months | Bitaxe fee loss | ASIC pay/mo | ASIC median sat | ASIC fee loss |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -1418,7 +1418,7 @@ share chain constants it reuses. It does not link `p2poolv2_lib`.
 
 
 
-### Scale: bigger pools on a bigger Bitcoin Cash, levels as a node sets them (band-weak-levels, weak work, 50% industrial)
+## Scale: bigger pools on a bigger Bitcoin Cash, levels as a node sets them (band-weak-levels, weak work, 50% industrial)
 
 | BCH hashrate | BCH difficulty | Pool | Minimum difficulty | R | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe level | Bitaxe weak/mo | ASIC level | ASIC weak/mo | Bitaxe pay/mo | Bitaxe median sat | Bitaxe swing | Bitaxe empty months | Bitaxe fee loss | Bitaxe vs fair | ASIC pay/mo | ASIC median sat | ASIC swing | ASIC empty months | ASIC fee loss | ASIC vs fair |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -1434,13 +1434,53 @@ share chain constants it reuses. It does not link `p2poolv2_lib`.
 | x100 | 5.17e13 | 30% | 253,014,732,152 | 34.7 | 36.3 | 1 | 0.089 | 5 | 7.81 | 0.259 | 14,406 | 3.78 | 91.20% | 1.01% | 0.87 | 19.7 | 17,475 | 0.43 | 0.20% | 0.84% | 0.97 |
 | x100 | 5.17e13 | 50% | 421,691,220,254 | 34.7 | 60.4 | 1 | 0.052 | 5 | 4.62 | 0.183 | 24,009 | 4.77 | 94.70% | 0.60% | 1.04 | 14.1 | 24,009 | 0.54 | 1.40% | 0.61% | 0.95 |
 | x100 | 5.17e13 | 90% | 759,044,196,457 | 34.7 | 109 | 1 | 0.024 | 5 | 2.55 | 0.086 | 43,215 | 6.81 | 97.40% | 0.33% | 0.88 | 7.83 | 43,215 | 0.74 | 8.80% | 0.34% | 0.95 |
-| x270 | 1.40e14 | 10% | 227,713,258,937 | 34.7 | 32.6 | 0 | 0.097 | 5 | 8.68 | 0.304 | 4,802 | 3.64 | 90.70% | 3.03% | 0.92 | 7.48 | 17,472 | 0.48 | 0.30% | 0.85% | 0.98 |
-| x270 | 1.40e14 | 30% | 683,139,776,811 | 34.7 | 97.9 | 0 | 0.028 | 5 | 2.83 | 0.091 | 14,406 | 6.42 | 97.00% | 1.00% | 0.84 | 7.22 | 17,474 | 0.69 | 7.20% | 0.84% | 0.95 |
-| x270 | 1.40e14 | 50% | 1,138,566,294,685 | 34.7 | 163 | 0 | 0.015 | 5 | 1.72 | 0.055 | 24,009 | 8.47 | 98.40% | 0.60% | 0.84 | 5.18 | 24,009 | 0.87 | 18.60% | 0.61% | 0.94 |
-| x270 | 1.40e14 | 90% | 2,049,419,330,433 | 34.7 | 294 | 0 | 0.011 | 5 | 0.978 | 0.042 | 43,215 | 10.21 | 98.90% | 0.34% | 1.14 | 3.03 | 43,215 | 1.17 | 40.30% | 0.34% | 0.99 |
-| x1000 | 5.17e14 | 10% | 843,382,440,507 | 34.7 | 121 | 0 | 0.021 | 4 | 2.30 | 0.073 | 4,802 | 8.11 | 97.90% | 2.90% | 0.86 | 7.07 | 4,802 | 0.76 | 9.80% | 3.03% | 0.96 |
-| x1000 | 5.17e14 | 30% | 2,530,147,321,522 | 34.7 | 363 | 0 | 5.0e-3 | 4 | 0.813 | 0.023 | 14,406 | 15.28 | 99.40% | 0.93% | 0.85 | 2.42 | 14,406 | 1.32 | 47.30% | 1.01% | 0.98 |
-| x1000 | 5.17e14 | 50% | 4,216,912,202,537 | 34.7 | 604 | 0 | 5.0e-3 | 4 | 0.488 | 0.014 | 24,009 | 15.94 | 99.50% | 0.62% | 0.78 | 1.52 | 24,009 | 1.63 | 61.80% | 0.61% | 1.02 |
-| x1000 | 5.17e14 | 90% | 7,590,441,964,567 | 34.7 | 1,088 | 0 | 5.0e-3 | 4 | 0.269 | 0.012 | 43,215 | 17.45 | 99.60% | 0.34% | 1.20 | 0.797 | 43,215 | 2.15 | 76.60% | 0.34% | 0.96 |
+| x270 | 1.40e14 | 10% | 227,713,258,937 | 34.7 | 32.6 | 1 | 0.097 | 5 | 8.68 | 0.304 | 4,802 | 3.64 | 90.70% | 3.03% | 0.92 | 7.48 | 17,472 | 0.48 | 0.30% | 0.85% | 0.98 |
+| x270 | 1.40e14 | 30% | 683,139,776,811 | 34.7 | 97.9 | 1 | 0.028 | 5 | 2.83 | 0.091 | 14,406 | 6.42 | 97.00% | 1.00% | 0.84 | 7.22 | 17,474 | 0.69 | 7.20% | 0.84% | 0.95 |
+| x270 | 1.40e14 | 50% | 1,138,566,294,685 | 34.7 | 163 | 1 | 0.015 | 5 | 1.72 | 0.055 | 24,009 | 8.47 | 98.40% | 0.60% | 0.84 | 5.18 | 24,009 | 0.87 | 18.60% | 0.61% | 0.94 |
+| x270 | 1.40e14 | 90% | 2,049,419,330,433 | 34.7 | 294 | 1 | 0.011 | 5 | 0.978 | 0.042 | 43,215 | 10.21 | 98.90% | 0.34% | 1.14 | 3.03 | 43,215 | 1.17 | 40.30% | 0.34% | 0.99 |
+| x1000 | 5.17e14 | 10% | 843,382,440,507 | 34.7 | 121 | 1 | 0.021 | 4 | 2.30 | 0.073 | 4,802 | 8.11 | 97.90% | 2.90% | 0.86 | 7.07 | 4,802 | 0.76 | 9.80% | 3.03% | 0.96 |
+| x1000 | 5.17e14 | 30% | 2,530,147,321,522 | 34.7 | 363 | 1 | 5.0e-3 | 4 | 0.813 | 0.023 | 14,406 | 15.28 | 99.40% | 0.93% | 0.85 | 2.42 | 14,406 | 1.32 | 47.30% | 1.01% | 0.98 |
+| x1000 | 5.17e14 | 50% | 4,216,912,202,537 | 34.7 | 604 | 1 | 5.0e-3 | 4 | 0.488 | 0.014 | 24,009 | 15.94 | 99.50% | 0.62% | 0.78 | 1.52 | 24,009 | 1.63 | 61.80% | 0.61% | 1.02 |
+| x1000 | 5.17e14 | 90% | 7,590,441,964,567 | 34.7 | 1,088 | 1 | 5.0e-3 | 4 | 0.269 | 0.012 | 43,215 | 17.45 | 99.60% | 0.34% | 1.20 | 0.797 | 43,215 | 2.15 | 76.60% | 0.34% | 0.96 |
 
 
+
+## Band step: how fast the cap moves, and hashrate that overstates its wish
+
+`payout-sim --scenario band-step`: a chain from genesis for two days, 50%
+industrial, 8 seeds a row. The cap `C` starts at 1 and moves one step a
+share: up by `C * u / divisor` when the parent's node wanted heavier shares
+than the cap allowed, down by `C / divisor` otherwise. The rule's divisor is
+512. In the last two rows of each pool, part of the pool's hashrate mines at
+the minimum while every share it finds records the largest wanted
+difficulty, to push the cap up.
+
+| Pool | Step divisor | Hashrate overstating | C settles at | C gets within 10% | Home pay over fair, first 6 hours | Home pay over fair, last day |
+|---|---|---|---|---|---|---|
+| 1% | 128 | 0.00% | 41.64 | 1 h | 0.78 | 0.99 |
+| 1% | 512 | 0.00% | 45.39 | 3 h | 0.83 | 1.00 |
+| 1% | 2048 | 0.00% | 45.97 | 8 h | 0.84 | 1.00 |
+| 1% | 512 | 2.00% | 61.39 | 2 h | 0.82 | 1.01 |
+| 1% | 512 | 10.00% | 63.44 | 1 h | 0.80 | 1.01 |
+| 10% | 128 | 0.00% | 1.37 | 1 h | 0.89 | 1.00 |
+| 10% | 512 | 0.00% | 1.53 | 3 h | 0.89 | 1.01 |
+| 10% | 2048 | 0.00% | 2.00 | 5 h | 0.89 | 1.01 |
+| 10% | 512 | 2.00% | 57.38 | 11 h | 0.88 | 1.00 |
+| 10% | 512 | 10.00% | 63.10 | 1 h | 0.89 | 1.00 |
+
+1. **Where `C` settles does not depend on the step.** At 1% of Bitcoin Cash
+   it rests at 42 to 46 for divisors from 128 to 2,048; at 10% between 1.4
+   and 2, where the big miners' jobs are already near the minimum and the
+   cap is hardly used. The divisor sets only the speed: within 10% of the
+   resting cap after 1 hour at 128, 3 hours at 512 and 5 to 8 hours at
+   2,048.
+2. **Overstating moves the cap and nothing else.** 2% of the hashrate
+   recording the largest wanted difficulty takes `C` to 57 to 61, and 10%
+   to 63, the maximum being 64. Home miners are paid 1.00 to 1.01 of fair in
+   the last day either way, and the same in the first six hours as on an
+   honest chain. The cap only bounds how heavy a job a node may give; an
+   honest node still gives each miner the job its own rate calls for.
+3. **The first hours of a new chain pay home miners less, whatever the
+   step:** 0.78 to 0.89 of fair in the first six hours, 0.99 to 1.01 in the
+   last day. That is the weak ratio settling from `R_MAX`, where weak shares
+   are found faster than shares can carry them, not the cap.
