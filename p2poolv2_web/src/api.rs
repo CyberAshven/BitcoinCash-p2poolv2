@@ -190,6 +190,10 @@ pub struct Share {
     pub bits: u32,
     #[serde(default)]
     pub uncles: Vec<Uncle>,
+    /// Weak shares this share's body carries, from its header. `0` when
+    /// the sender (an older node) does not report it.
+    #[serde(default)]
+    pub weak_count: u16,
 }
 
 /// `/shares?to=&num=`.
@@ -247,6 +251,29 @@ pub struct ShareDetail {
     pub bits: String,
     pub time: String,
     pub bitcoin_header: BitcoinHeader,
+    /// How many weak shares this share carries, from its header.
+    pub weak_count: u16,
+    /// This share's weak ratio `R`: its weak target over the minimum, in
+    /// 1024 parts (`p2poolv2_lib::shares::weak::WEAK_RATIO_UNIT`).
+    pub weak_ratio: u32,
+    /// The root committing the carried weak shares, hex.
+    pub weak_root: String,
+    /// The carried weak shares' bodies: empty when the share carries none
+    /// or the body was pruned, then `weak_count` alone reports the count.
+    pub weak_shares: Vec<WeakShareDetail>,
+}
+
+/// One weak share a share's body carries, as `/share?hash=` reports it.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct WeakShareDetail {
+    /// Bitcoin header block hash of the weak share's proof of work.
+    pub pow_hash: String,
+    /// The miner the weak share pays out to.
+    pub miner_bitcoin_address: String,
+    /// Time of the weak share, as the lookup spells it.
+    pub time: String,
+    /// Compact target of the weak share's proof of work, hex.
+    pub bits: String,
 }
 
 /// A share or uncle a miner earns weight from in the window.

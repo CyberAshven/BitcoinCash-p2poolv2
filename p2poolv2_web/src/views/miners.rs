@@ -387,6 +387,7 @@ mod tests {
             timestamp,
             bits: 0x1d00_ffff,
             uncles: Vec::new(),
+            weak_count: 0,
         }
     }
 

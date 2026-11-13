@@ -17,9 +17,10 @@ use super::chart::{ChartBlock, Series, line_chart};
 use super::history::Sample;
 use crate::api::endpoints::miner::MinerResponse;
 use crate::api::endpoints::share::ShareLookupOutput;
-use bitcoin::BlockHash;
+use bitcoin::{BlockHash, CompactTarget, Target};
 use maud::{DOCTYPE, Markup, html};
 use p2poolv2_lib::node::connection_tracker::{ConnectionDirection, PeerInfoResponse};
+use p2poolv2_lib::shares::weak::WEAK_RATIO_UNIT;
 use p2poolv2_lib::store::found_block::EffortSnapshot;
 use serde::Serialize;
 
@@ -207,6 +208,8 @@ pub(crate) struct ShareRow {
     pub(crate) difficulty: Option<f64>,
     pub(crate) is_uncle: bool,
     pub(crate) is_block: bool,
+    /// Weak shares this share's body carries; always 0 for an uncle.
+    pub(crate) weak_count: u16,
 }
 
 /// A block the pool found.
@@ -399,6 +402,17 @@ pub(crate) fn fmt_difficulty(difficulty: f64) -> String {
         .to_string()
 }
 
+/// A share's weak ratio `R` as the dashboard spells it: `R` itself, then
+/// how many times the share chain's minimum target its weak target is.
+/// `R` counts minimum targets in `WEAK_RATIO_UNIT` (1024) parts, so the
+/// multiple is `R / WEAK_RATIO_UNIT` with three significant digits.
+pub(crate) fn fmt_weak_ratio(weak_ratio: u32) -> String {
+    format!(
+        "R = {weak_ratio} ({}x the minimum target)",
+        three_digits(f64::from(weak_ratio) / f64::from(WEAK_RATIO_UNIT))
+    )
+}
+
 /// The current block effort: the work accumulated since the last accepted
 /// find as a percent of the network difficulty (whole percents, over 100%
 /// meaning a block is overdue). The formula lives here, as it does in
@@ -565,6 +579,18 @@ fn last_seen(now: u64, then: u64) -> Markup {
 
 fn ago_cell(now: u64, then: u64) -> Markup {
     html! { td title=(fmt_utc(then)) { (fmt_ago(now, then)) } }
+}
+
+/// A weak share's difficulty from its compact target, hex the way the
+/// share lookup spells it (`0x1c0448d7`). Bits that do not parse render
+/// as the dash, as a list row with no difficulty does.
+pub(crate) fn weak_difficulty(bits: &str) -> String {
+    let difficulty = u32::from_str_radix(bits.trim_start_matches("0x"), 16)
+        .ok()
+        .map(|compact| {
+            Target::from_compact(CompactTarget::from_consensus(compact)).difficulty_float()
+        });
+    optional(difficulty, fmt_difficulty)
 }
 
 /// A KPI card: a label, a value and notes under it.
@@ -977,6 +1003,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                                     td {
                                         @if row.is_uncle { "uncle" } @else { "share" }
                                         @if row.is_block { " " span.badge-block { "block" } }
+                                        @if row.weak_count > 0 { " " span.badge-weak { (row.weak_count) " weak" } }
                                     }
                                     td { (miner_link(&row.payout_address)) }
                                     td { (miner_link(&row.share_address)) }
@@ -1086,6 +1113,7 @@ pub(crate) fn shares(view: &SharesView) -> Markup {
                                     td {
                                         @if row.is_uncle { "uncle" } @else { "share" }
                                         @if row.is_block { " " span.badge-block { "block" } }
+                                        @if row.weak_count > 0 { " " span.badge-weak { (row.weak_count) " weak" } }
                                     }
                                     td { (miner_link(&row.payout_address)) }
                                     td { (miner_link(&row.share_address)) }
@@ -1343,6 +1371,7 @@ pub(crate) fn share(view: &ShareView) -> Markup {
             h2 {
                 "Share"
                 @if view.is_block { " " span.badge-block { "found a block" } }
+                @if share.weak_count > 0 { " " span.badge-weak { (share.weak_count) " weak" } }
                 span.panel-note { (share.validation_status) " · " (share.chain) }
             }
             div.stat-list {
@@ -1353,6 +1382,35 @@ pub(crate) fn share(view: &ShareView) -> Markup {
                 (stat("Share chain address", miner_link(&share.miner_address)))
                 (stat("Share bits", html! { span.mono { (share.bits) } }))
                 (stat("Time", html! { (share.time) }))
+                @if share.weak_count > 0 {
+                    (stat("Weak shares", html! { (share.weak_count) }))
+                    (stat("Weak ratio", html! { (fmt_weak_ratio(share.weak_ratio)) }))
+                    (stat("Weak root", html! { span.mono { (share.weak_root) } }))
+                }
+            }
+        }
+        @if share.weak_count > 0 {
+            div.panel {
+                h2 { "Weak shares" span.panel-note { (share.weak_count) " carried" } }
+                @if share.weak_shares.is_empty() {
+                    p.empty-state { "The carried weak share bodies were pruned. Only the count of " (share.weak_count) " is kept." }
+                } @else {
+                    div.table-x {
+                        table.table {
+                            thead { tr { th { "PoW hash" } th { "Miner" } th { "Time" } th { "Difficulty" } } }
+                            tbody {
+                                @for weak in &share.weak_shares {
+                                    tr {
+                                        td.mono { (weak.pow_hash) }
+                                        td { (miner_link(&weak.miner_bitcoin_address)) }
+                                        td { (weak.time) }
+                                        td.mono { (weak_difficulty(&weak.bits)) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         div.panel {
@@ -1540,12 +1598,57 @@ pub(crate) fn error(site: &Site, message: &str) -> Markup {
 mod tests {
     use super::*;
     use crate::api::endpoints::miner::WindowSummary;
+    use crate::api::endpoints::share::{BitcoinHeaderOutput, WeakShareOutput};
 
     fn site() -> Site {
         Site {
             network: "Bitcoin Cash chipnet".to_string(),
             badge: "chipnet".to_string(),
             auth: true,
+        }
+    }
+
+    /// A share's page with the weak-share fields as the lookup reports
+    /// them: `weak_count` carried, `weak_ratio` over the minimum in
+    /// `WEAK_RATIO_UNIT` parts, and `weak_shares` the bodies still held.
+    fn share_view(
+        weak_count: u16,
+        weak_ratio: u32,
+        weak_shares: Vec<WeakShareOutput>,
+    ) -> ShareView {
+        ShareView {
+            site: site(),
+            share: ShareLookupOutput {
+                blockhash: "ab".repeat(32),
+                height: Some(1),
+                validation_status: "valid".to_string(),
+                chain: "confirmed".to_string(),
+                parent: "00".repeat(32),
+                uncles: Vec::new(),
+                miner_bitcoin_address: "bchtest:qpayout".to_string(),
+                miner_address: "tp2pool:qowner".to_string(),
+                share_witness_root: "00".repeat(32),
+                bits: "1d00ffff".to_string(),
+                time: "2026-10-22 00:00:00 UTC".to_string(),
+                bitcoin_header: BitcoinHeaderOutput {
+                    block_hash: "00".repeat(32),
+                    version: 0x2000_0000,
+                    prev_blockhash: "00".repeat(32),
+                    merkle_root: "00".repeat(32),
+                    time: "2026-10-22 00:00:00 UTC".to_string(),
+                    bits: "1d00ffff".to_string(),
+                    nonce: 7,
+                },
+                template_merkle_branches_count: 0,
+                transactions: None,
+                pruned: false,
+                weak_count,
+                weak_ratio,
+                weak_root: "f61d3df0eef9c5d70dbc861965b0905d037e774e6a43ea3f4a8518fa41913343"
+                    .to_string(),
+                weak_shares,
+            },
+            is_block: false,
         }
     }
 
@@ -2008,6 +2111,7 @@ mod tests {
             difficulty: Some(4.0),
             is_uncle: false,
             is_block: true,
+            weak_count: 0,
         }];
         let page = overview(&view).into_string();
         assert!(!page.contains("<img src=x"));
@@ -2170,6 +2274,7 @@ mod tests {
             difficulty: Some(4.0),
             is_uncle: false,
             is_block: false,
+            weak_count: 0,
         }];
         let page = overview(&view).into_string();
         assert!(page.contains("href=\"/dashboard/shares\""));
@@ -2277,6 +2382,7 @@ mod tests {
                 difficulty: Some(4.0),
                 is_uncle: false,
                 is_block: false,
+                weak_count: 0,
             }],
             paging: Paging { page: 2, pages: 3 },
         };
@@ -2301,6 +2407,71 @@ mod tests {
         let page = shares(&view).into_string();
         assert!(page.contains("No confirmed shares yet."));
         assert!(!page.contains("Previous"));
+    }
+
+    #[test]
+    fn the_shares_list_marks_a_share_that_carries_weak_shares() {
+        let view = SharesView {
+            site: site(),
+            now: 1_000,
+            tip_height: Some(30),
+            shares: vec![ShareRow {
+                height: Some(30),
+                blockhash: "ab".to_string(),
+                time: 900,
+                payout_address: "bchtest:qpayout".to_string(),
+                share_address: "tp2pool:qowner".to_string(),
+                difficulty: Some(4.0),
+                is_uncle: false,
+                is_block: false,
+                weak_count: 1,
+            }],
+            paging: Paging { page: 1, pages: 1 },
+        };
+        let page = shares(&view).into_string();
+        assert!(page.contains("<span class=\"badge-weak\">1 weak</span>"));
+    }
+
+    #[test]
+    fn the_share_page_omits_every_weak_markup_without_weak_shares() {
+        let page = share(&share_view(0, 1024, Vec::new())).into_string();
+        assert!(!page.contains("badge-weak"));
+        assert!(!page.contains("Weak shares"));
+        assert!(!page.contains("Weak ratio"));
+        assert!(!page.contains("Weak root"));
+    }
+
+    #[test]
+    fn the_share_page_shows_the_weak_badge_stats_and_panel_for_a_carrier() {
+        let weak = WeakShareOutput {
+            pow_hash: "0000000004e6a35194dc99afa9fd7bdc1c89ff823a3fe98ac2bc3af046e65ca4"
+                .to_string(),
+            miner_bitcoin_address: "bchtest:qpayout".to_string(),
+            miner_address: "tp2pool:qowner".to_string(),
+            time: "2026-10-22 00:00:00 UTC".to_string(),
+            bits: "0x1c0448d7".to_string(),
+        };
+        let page = share(&share_view(1, 262_144, vec![weak])).into_string();
+        assert!(page.contains("<span class=\"badge-weak\">1 weak</span>"));
+        assert!(page.contains("Weak shares"));
+        assert!(page.contains("R = 262144 (256x the minimum target)"));
+        assert!(page.contains("Weak root"));
+        assert!(page.contains("1 carried"));
+        assert!(page.contains("<th>PoW hash</th>"));
+        assert!(page.contains("<td class=\"mono\">59.7</td>"));
+        assert!(!page.contains("were pruned"));
+    }
+
+    #[test]
+    fn the_share_page_says_the_weak_bodies_were_pruned() {
+        let page = share(&share_view(2, 262_144, Vec::new())).into_string();
+        assert!(
+            page.contains(
+                "The carried weak share bodies were pruned. Only the count of 2 is kept."
+            )
+        );
+        assert!(!page.contains("<th>PoW hash</th>"));
+        assert!(page.contains("<span class=\"badge-weak\">2 weak</span>"));
     }
 
     #[test]

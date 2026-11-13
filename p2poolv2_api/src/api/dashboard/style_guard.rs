@@ -39,7 +39,7 @@ use super::pages::{
     ShareRow, ShareView, SharesView, Site, WorkerRow,
 };
 use crate::api::endpoints::miner::{MinerResponse, MinerShare, WindowSummary};
-use crate::api::endpoints::share::{BitcoinHeaderOutput, ShareLookupOutput};
+use crate::api::endpoints::share::{BitcoinHeaderOutput, ShareLookupOutput, WeakShareOutput};
 use bitcoin::BlockHash;
 use bitcoin::hashes::Hash;
 use p2poolv2_lib::node::connection_tracker::{ConnectionDirection, PeerInfoResponse};
@@ -408,6 +408,10 @@ fn share_row(is_uncle: bool) -> ShareRow {
         difficulty: (!is_uncle).then_some(4.0),
         is_uncle,
         is_block: true,
+        // One weak share on the share row, none on the uncle: an uncle
+        // never carries weak shares, and the badge must show only on the
+        // carrier the guard renders.
+        weak_count: if is_uncle { 0 } else { 1 },
     }
 }
 
@@ -541,6 +545,33 @@ fn share_output(uncles: Vec<String>) -> ShareLookupOutput {
     }
 }
 
+/// A share that carries one weak share whose body the store still holds.
+fn carrying_share_output() -> ShareLookupOutput {
+    ShareLookupOutput {
+        weak_count: 1,
+        weak_ratio: 262_144,
+        weak_shares: vec![WeakShareOutput {
+            pow_hash: "0000000004e6a35194dc99afa9fd7bdc1c89ff823a3fe98ac2bc3af046e65ca4"
+                .to_string(),
+            miner_bitcoin_address: "bchtest:qpayout".to_string(),
+            miner_address: "tp2pool:qowner".to_string(),
+            time: "2026-10-22 00:00:00 UTC".to_string(),
+            bits: "0x1c0448d7".to_string(),
+        }],
+        ..share_output(Vec::new())
+    }
+}
+
+/// A share that carried weak shares whose bodies pruning has removed: only
+/// the count is left to show.
+fn pruned_share_output() -> ShareLookupOutput {
+    ShareLookupOutput {
+        weak_count: 2,
+        weak_ratio: 262_144,
+        ..share_output(Vec::new())
+    }
+}
+
 /// Every page the node renders, each in its full and its empty state.
 fn every_page() -> String {
     let samples = vec![
@@ -665,6 +696,18 @@ fn every_page() -> String {
         pages::share(&ShareView {
             site: site(),
             share: share_output(Vec::new()),
+            is_block: false,
+        })
+        .into_string(),
+        pages::share(&ShareView {
+            site: site(),
+            share: carrying_share_output(),
+            is_block: false,
+        })
+        .into_string(),
+        pages::share(&ShareView {
+            site: site(),
+            share: pruned_share_output(),
             is_block: false,
         })
         .into_string(),
@@ -988,6 +1031,38 @@ fn the_wasm_app_formats_difficulties_as_the_pages_do() {
     assert_eq!(
         web_format::fmt_difficulty(12_345_678_901.0),
         pages::fmt_difficulty(12_345_678_901.0)
+    );
+}
+
+#[test]
+fn the_wasm_app_formats_weak_ratios_as_the_pages_do() {
+    assert_eq!(
+        web_format::fmt_weak_ratio(262_144),
+        pages::fmt_weak_ratio(262_144)
+    );
+    assert_eq!(
+        web_format::fmt_weak_ratio(1024),
+        pages::fmt_weak_ratio(1024)
+    );
+    assert_eq!(
+        web_format::fmt_weak_ratio(u32::MAX),
+        pages::fmt_weak_ratio(u32::MAX)
+    );
+}
+
+#[test]
+fn the_wasm_app_formats_weak_share_difficulties_as_the_pages_do() {
+    assert_eq!(
+        web_format::weak_difficulty("0x1c0448d7"),
+        pages::weak_difficulty("0x1c0448d7")
+    );
+    assert_eq!(
+        web_format::weak_difficulty("1d00ffff"),
+        pages::weak_difficulty("1d00ffff")
+    );
+    assert_eq!(
+        web_format::weak_difficulty("not hex"),
+        pages::weak_difficulty("not hex")
     );
 }
 

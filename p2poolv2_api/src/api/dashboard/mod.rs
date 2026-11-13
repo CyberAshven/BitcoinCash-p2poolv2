@@ -214,6 +214,7 @@ fn share_page(
             difficulty: Some(Target::from_compact(share.bits).difficulty_float()),
             is_uncle: false,
             is_block: share_found_a_block(state, &share.blockhash),
+            weak_count: display.weak_count,
         });
         for uncle in display.uncles {
             rows.push(ShareRow {
@@ -225,6 +226,8 @@ fn share_page(
                 difficulty: None,
                 is_uncle: true,
                 is_block: share_found_a_block(state, &uncle.blockhash),
+                // An uncle never carries weak shares.
+                weak_count: 0,
             });
         }
     }

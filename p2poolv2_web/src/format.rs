@@ -65,6 +65,18 @@ pub fn fmt_difficulty(difficulty: f64) -> String {
         .to_string()
 }
 
+/// A share's weak ratio `R` as the dashboard spells it: `R` itself, then
+/// how many times the share chain's minimum target its weak target is.
+/// `R` counts minimum targets in `WEAK_RATIO_UNIT` (1024) parts, whose
+/// definition lives in `p2poolv2_lib`, which this crate does not depend
+/// on; the style guard compares this with the pages' formatter.
+pub fn fmt_weak_ratio(weak_ratio: u32) -> String {
+    format!(
+        "R = {weak_ratio} ({}x the minimum target)",
+        three_digits(f64::from(weak_ratio) / 1024.0)
+    )
+}
+
 /// The current block effort: the work accumulated since the last accepted
 /// find as a percent of the network difficulty (whole percents, over 100%
 /// meaning a block is overdue). The formula lives here, as it does in
@@ -243,6 +255,16 @@ pub fn work_from_bits(bits: u32) -> f64 {
     difficulty_from_bits(bits) * HASHES_PER_DIFFICULTY
 }
 
+/// A weak share's difficulty from its compact target, hex the way the
+/// share lookup spells it (`0x1c0448d7`). Bits that do not parse render
+/// as the dash, as a list row with no difficulty does.
+pub fn weak_difficulty(bits: &str) -> String {
+    let difficulty = u32::from_str_radix(bits.trim_start_matches("0x"), 16)
+        .ok()
+        .map(difficulty_from_bits);
+    optional(difficulty, fmt_difficulty)
+}
+
 /// Block difficulty implied by a network hashrate, the inverse of how the
 /// node estimates the hashrate from the difficulty.
 pub fn difficulty_from_network_hashrate(hashes_per_second: f64) -> f64 {
@@ -347,6 +369,22 @@ mod tests {
         assert!((difficulty_from_bits(0x1c00_ffff) - 256.0).abs() < 1e-9);
         assert_eq!(difficulty_from_bits(0x1d00_0000), 0.0);
         assert!((work_from_bits(0x1d00_ffff) - HASHES_PER_DIFFICULTY).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_weak_ratio_spells_out_its_multiple_of_the_minimum() {
+        assert_eq!(
+            fmt_weak_ratio(262_144),
+            "R = 262144 (256x the minimum target)"
+        );
+        assert_eq!(fmt_weak_ratio(1024), "R = 1024 (1.00x the minimum target)");
+    }
+
+    #[test]
+    fn test_weak_difficulty_reads_hex_bits_with_or_without_the_prefix() {
+        assert_eq!(weak_difficulty("0x1c0448d7"), "59.7");
+        assert_eq!(weak_difficulty("1d00ffff"), "1.00");
+        assert_eq!(weak_difficulty("not hex"), UNKNOWN);
     }
 
     #[test]

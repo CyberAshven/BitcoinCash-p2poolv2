@@ -77,6 +77,8 @@ pub struct ShareRow {
     pub difficulty: Option<f64>,
     pub is_uncle: bool,
     pub is_block: bool,
+    /// Weak shares this share's body carries; always 0 for an uncle.
+    pub weak_count: u16,
 }
 
 /// The rows for `shares`, newest first: each share followed by the uncles
@@ -95,6 +97,7 @@ pub fn share_rows(shares: &[Share], found: &HashSet<String>) -> Vec<ShareRow> {
             difficulty: Some(difficulty_from_bits(share.bits)),
             is_uncle: false,
             is_block: found.contains(&share.blockhash),
+            weak_count: share.weak_count,
         });
         rows.extend(share.uncles.iter().map(|uncle| ShareRow {
             height: uncle.height,
@@ -105,6 +108,8 @@ pub fn share_rows(shares: &[Share], found: &HashSet<String>) -> Vec<ShareRow> {
             difficulty: None,
             is_uncle: true,
             is_block: found.contains(&uncle.blockhash),
+            // An uncle never carries weak shares.
+            weak_count: 0,
         }));
     }
     rows
@@ -128,6 +133,8 @@ fn share_row_view(row: ShareRow) -> impl IntoView {
             <td>
                 {if row.is_uncle { "uncle" } else { "share" }}
                 {row.is_block.then(|| view! { " " <span class="badge-block">"block"</span> })}
+                {(row.weak_count > 0)
+                    .then(|| view! { " " <span class="badge-weak">{format!("{} weak", row.weak_count)}</span> })}
             </td>
             <td>{miner_link(&row.payout_address)}</td>
             <td>{miner_link(&row.share_address)}</td>
@@ -726,6 +733,7 @@ mod tests {
                 timestamp: 10,
                 bits: 0x1d00_ffff,
                 uncles: Vec::new(),
+                weak_count: 0,
             },
             Share {
                 blockhash: "newer".to_string(),
@@ -741,6 +749,7 @@ mod tests {
                     timestamp: 15,
                     height: Some(1),
                 }],
+                weak_count: 0,
             },
         ];
         let found = HashSet::from(["uncle".to_string()]);
@@ -756,6 +765,45 @@ mod tests {
         assert!(rows[1].is_block);
         assert_eq!(rows[1].difficulty, None);
         assert!(!rows[2].is_block);
+    }
+
+    #[test]
+    fn test_a_share_row_carries_its_weak_count_and_an_uncle_has_none() {
+        let shares = vec![
+            Share {
+                blockhash: "carrier".to_string(),
+                height: 2,
+                miner_bitcoin_address: "bchtest:a".to_string(),
+                miner_address: "tp2pool:a".to_string(),
+                timestamp: 20,
+                bits: 0x1d00_ffff,
+                uncles: Vec::new(),
+                weak_count: 1,
+            },
+            Share {
+                blockhash: "plain".to_string(),
+                height: 1,
+                miner_bitcoin_address: "bchtest:b".to_string(),
+                miner_address: "tp2pool:b".to_string(),
+                timestamp: 10,
+                bits: 0x1d00_ffff,
+                uncles: vec![Uncle {
+                    blockhash: "uncle".to_string(),
+                    miner_bitcoin_address: "bchtest:c".to_string(),
+                    miner_address: "tp2pool:c".to_string(),
+                    timestamp: 5,
+                    height: Some(1),
+                }],
+                weak_count: 0,
+            },
+        ];
+        let rows = share_rows(&shares, &HashSet::new());
+        assert_eq!(rows[0].blockhash, "carrier");
+        assert_eq!(rows[0].weak_count, 1);
+        assert_eq!(rows[1].blockhash, "plain");
+        assert_eq!(rows[1].weak_count, 0);
+        assert!(rows[2].is_uncle);
+        assert_eq!(rows[2].weak_count, 0);
     }
 
     #[test]
