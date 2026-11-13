@@ -14,6 +14,7 @@ the minimum while recording the largest wanted difficulty. Where `C` settles
 does not depend on the step, only how fast it gets there (1, 3 and 5 to 8
 hours); overstating takes `C` to its maximum and changes nothing home miners
 are paid.
+
 The Docker image runs the node as `p2pool` (uid 1000), not as root. The user
 owns `/p2poolv2` and is in the `bchn-rpc` group (gid 2001), which BCHN's
 image now lets read the RPC password it keeps in the `bchn_rpc` volume; the
