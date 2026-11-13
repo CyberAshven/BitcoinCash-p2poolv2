@@ -17,8 +17,11 @@ use super::chart::{ChartBlock, Series, line_chart};
 use super::history::Sample;
 use crate::api::endpoints::miner::MinerResponse;
 use crate::api::endpoints::share::ShareLookupOutput;
-use bitcoin::BlockHash;
+use bitcoin::{BlockHash, CompactTarget, Target};
 use maud::{DOCTYPE, Markup, html};
+use p2poolv2_lib::node::connection_tracker::{ConnectionDirection, PeerInfoResponse};
+use p2poolv2_lib::shares::weak::WEAK_RATIO_UNIT;
+use p2poolv2_lib::store::found_block::EffortSnapshot;
 use serde::Serialize;
 
 /// Seconds between refreshes of the overview page while auto is on.
@@ -205,6 +208,8 @@ pub(crate) struct ShareRow {
     pub(crate) difficulty: Option<f64>,
     pub(crate) is_uncle: bool,
     pub(crate) is_block: bool,
+    /// Weak shares this share's body carries; always 0 for an uncle.
+    pub(crate) weak_count: u16,
 }
 
 /// A block the pool found.
@@ -218,6 +223,9 @@ pub(crate) struct FoundBlockRow {
     pub(crate) time: u32,
     /// Payout address of the miner that found it.
     pub(crate) payout_address: String,
+    /// The work since the previous find over the difficulty of the header
+    /// that claimed it, kept when the block was accepted.
+    pub(crate) effort: Option<EffortSnapshot>,
 }
 
 /// Everything the overview shows.
@@ -232,6 +240,9 @@ pub(crate) struct Overview {
     /// Current pool share difficulty (the newest prepared notify's ASERT
     /// target, in the share chain's units), read live from the job tracker.
     pub(crate) share_difficulty: Option<f64>,
+    /// Work accumulated since the last accepted block find: the numerator
+    /// of the block effort metric, from the metrics actor. Runtime-only.
+    pub(crate) work_since_last_block: Option<f64>,
     pub(crate) miners_online: usize,
     pub(crate) workers_online: usize,
     /// Shares the pool accepted since the node started, node-wide.
@@ -246,6 +257,8 @@ pub(crate) struct Overview {
     /// The newest confirmed shares, newest first, uncles under the share that
     /// includes them, at most `super::OVERVIEW_SHARES` heights.
     pub(crate) shares: Vec<ShareRow>,
+    /// Connected libp2p peers, longest uptime first, as `/peers` answers.
+    pub(crate) peers: Vec<PeerInfoResponse>,
     /// The overview's stateless auto-refresh toggle, from `?auto=`.
     pub(crate) auto: Auto,
     /// The normalized `?range=` key selecting the chart window, from
@@ -313,6 +326,10 @@ pub(crate) struct MinerRow {
     /// Its fraction of the next block's PPLNS payout, when the window could
     /// be read for it.
     pub(crate) payout_fraction: Option<f64>,
+    /// Its hashrate over the window behind the miners page's Hashrate
+    /// column, in hashes per second, or `None` where its work is not in the
+    /// window (rendered as a dash).
+    pub(crate) hashrate: Option<f64>,
 }
 
 /// The miners page.
@@ -385,6 +402,43 @@ pub(crate) fn fmt_difficulty(difficulty: f64) -> String {
         .to_string()
 }
 
+/// A share's weak ratio `R` as the dashboard spells it: `R` itself, then
+/// how many times the share chain's minimum target its weak target is.
+/// `R` counts minimum targets in `WEAK_RATIO_UNIT` (1024) parts, so the
+/// multiple is `R / WEAK_RATIO_UNIT` with three significant digits.
+pub(crate) fn fmt_weak_ratio(weak_ratio: u32) -> String {
+    format!(
+        "R = {weak_ratio} ({}x the minimum target)",
+        three_digits(f64::from(weak_ratio) / f64::from(WEAK_RATIO_UNIT))
+    )
+}
+
+/// The current block effort: the work accumulated since the last accepted
+/// find as a percent of the network difficulty (whole percents, over 100%
+/// meaning a block is overdue). The formula lives here, as it does in
+/// Grafana. No difficulty yet is the dash, not a zero.
+pub(crate) fn fmt_effort(
+    work_since_last_block: Option<f64>,
+    network_difficulty: Option<f64>,
+) -> String {
+    match (work_since_last_block, network_difficulty) {
+        (Some(work), Some(difficulty)) if difficulty > 0.0 => {
+            format!("{:.0}%", work / difficulty * 100.0)
+        }
+        _ => "—".to_string(),
+    }
+}
+
+/// A found block's kept effort, as percent of the difficulty of the header
+/// that claimed it. A block accepted before snapshots were kept is the
+/// dash, not a zero.
+pub(crate) fn fmt_block_effort(effort: Option<EffortSnapshot>) -> String {
+    match effort {
+        Some(snapshot) => fmt_effort(Some(snapshot.work), snapshot.network_difficulty),
+        None => "—".to_string(),
+    }
+}
+
 pub(crate) fn fmt_utc(unix: u64) -> String {
     i64::try_from(unix)
         .ok()
@@ -424,6 +478,39 @@ pub(crate) fn fmt_ago(now: u64, then: u64) -> String {
         60..=3_599 => format!("{} min ago", seconds / 60),
         3_600..=86_399 => format!("{} h ago", seconds / 3_600),
         _ => format!("{} d ago", seconds / 86_400),
+    }
+}
+
+/// A peer's uptime, compact: 42 s, 13 min, 4h 12m, 2d 03h.
+pub(crate) fn fmt_duration(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs} s"),
+        60..=3_599 => format!("{} min", secs / 60),
+        3_600..=86_399 => format!("{}h {:02}m", secs / 3_600, secs % 3_600 / 60),
+        _ => format!("{}d {:02}h", secs / 86_400, secs % 86_400 / 3_600),
+    }
+}
+
+/// A ping round trip in milliseconds: sub-millisecond values keep their
+/// fraction, so a loopback peer reads 0.91 ms instead of a fabricated 0.
+pub(crate) fn fmt_latency(latency_ms: f64) -> String {
+    if latency_ms < 1.0 {
+        format!("{latency_ms:.2} ms")
+    } else if latency_ms < 10.0 {
+        format!("{latency_ms:.1} ms")
+    } else {
+        format!("{latency_ms:.0} ms")
+    }
+}
+
+/// A peer's version cell: Identify's agent_version arrives as
+/// "p2poolv2/<semver>", so the cell shows just the version, or the dash
+/// when the peer sent none (or an empty one).
+pub(crate) fn agent_version(agent: Option<&str>) -> String {
+    let version = agent.map(|agent| agent.split_once('/').map_or(agent, |(_, suffix)| suffix));
+    match version {
+        Some(version) if !version.is_empty() => version.to_string(),
+        _ => "—".to_string(),
     }
 }
 
@@ -501,6 +588,18 @@ fn last_seen(now: u64, then: u64) -> Markup {
 
 fn ago_cell(now: u64, then: u64) -> Markup {
     html! { td title=(fmt_utc(then)) { (fmt_ago(now, then)) } }
+}
+
+/// A weak share's difficulty from its compact target, hex the way the
+/// share lookup spells it (`0x1c0448d7`). Bits that do not parse render
+/// as the dash, as a list row with no difficulty does.
+pub(crate) fn weak_difficulty(bits: &str) -> String {
+    let difficulty = u32::from_str_radix(bits.trim_start_matches("0x"), 16)
+        .ok()
+        .map(|compact| {
+            Target::from_compact(CompactTarget::from_consensus(compact)).difficulty_float()
+        });
+    optional(difficulty, fmt_difficulty)
 }
 
 /// A KPI card: a label, a value and notes under it.
@@ -760,7 +859,7 @@ fn blocks_table(now: u64, blocks: &[FoundBlockRow]) -> Markup {
     html! {
         div.table-x {
             table.table {
-                thead { tr { th { "Height" } th { "Block hash" } th { "Share" } th { "Found by" } th { "Found" } } }
+                thead { tr { th { "Height" } th { "Block hash" } th { "Share" } th { "Found by" } th { "Effort" } th { "Found" } } }
                 tbody {
                     @for block in blocks {
                         @let block_hash = block.block_hash.to_string();
@@ -769,12 +868,28 @@ fn blocks_table(now: u64, blocks: &[FoundBlockRow]) -> Markup {
                             td { a.addr href=(block_href(&block_hash)) title=(block_hash) { (short(&block_hash)) } }
                             td { (share_link(&block.share_hash.to_string())) }
                             td { (miner_link(&block.payout_address)) }
+                            td { (fmt_block_effort(block.effort)) }
                             (ago_cell(now, u64::from(block.time)))
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/// A peer's address cell: its IP, or the full multiaddr when the IP is not
+/// known, or the dash when neither is there.
+fn peer_address(peer: &PeerInfoResponse) -> &str {
+    let address = peer.ip.as_deref().unwrap_or(peer.address.as_str());
+    if address.is_empty() { "—" } else { address }
+}
+
+/// The direction cell's label, as the JSON API serializes it.
+fn direction_label(direction: &ConnectionDirection) -> &'static str {
+    match direction {
+        ConnectionDirection::Inbound => "Inbound",
+        ConnectionDirection::Outbound => "Outbound",
     }
 }
 
@@ -851,11 +966,12 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                   "Est. from diff. 10-min blocks".to_string()]))
             (kpi_card("Share chain height",
                 view.tip_height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string()), "", None,
-                &[format!("Difficulty {}", optional(view.share_difficulty, fmt_difficulty))]))
+                &[format!("Min. Difficulty {}", optional(view.share_difficulty, fmt_difficulty))]))
             (kpi_card("Blocks found", view.blocks_found.to_string(), "kpi-value-green", Some("/dashboard/blocks"),
                 &[last_block
                     .map(|time| format!("Last {}", fmt_ago(view.now, u64::from(time))))
-                    .unwrap_or_else(|| "None yet".to_string())]))
+                    .unwrap_or_else(|| "None yet".to_string()),
+                  format!("Effort {}", fmt_effort(view.work_since_last_block, view.network_difficulty))]))
         }
         div.panel {
             h2.hashrate-head { "Hashrate" (range_buttons(view.range_key, view.auto, &series_arg)) }
@@ -863,7 +979,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             div.chart-wrap { (chart) }
         }
         div.panel {
-            h2 { "Found blocks" span.panel-note { (view.blocks_found) " in all" } }
+            h2 { "Blocks" span.panel-note { (view.blocks_found) " in all" } }
             @if view.blocks.is_empty() {
                 p.empty-state { "The pool has not found a Bitcoin Cash block yet. Keep mining." }
             } @else {
@@ -873,7 +989,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         }
         div.panel {
             h2 {
-                "Recent shares"
+                "Shares"
                 span.panel-note {
                     "newest first, uncles under the share that includes them"
                     @if let Some(tip) = view.tip_height { " · tip " (tip) }
@@ -896,6 +1012,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                                     td {
                                         @if row.is_uncle { "uncle" } @else { "share" }
                                         @if row.is_block { " " span.badge-block { "block" } }
+                                        @if row.weak_count > 0 { " " span.badge-weak { (row.weak_count) " weak" } }
                                     }
                                     td { (miner_link(&row.payout_address)) }
                                     td { (miner_link(&row.share_address)) }
@@ -907,6 +1024,35 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                     }
                 }
                 div.panel-more { a href="/dashboard/shares" { "More found shares →" } }
+            }
+        }
+        div.panel {
+            h2 {
+                "Peers"
+                span.panel-note {
+                    @if view.peers.is_empty() { "libp2p" }
+                    @else { (view.peers.len()) " connected" }
+                }
+            }
+            @if view.peers.is_empty() {
+                p.empty-state { "No p2pool peers connected right now. They appear here once the node dials or accepts a peer." }
+            } @else {
+                div.table-wrap {
+                    table.table {
+                        thead { tr { th { "Address" } th { "Version" } th { "Direction" } th { "Uptime" } th { "Latency" } } }
+                        tbody {
+                            @for peer in &view.peers {
+                                tr {
+                                    td.mono.peer-addr { (peer_address(peer)) }
+                                    td { (agent_version(peer.version.as_deref())) }
+                                    td { (direction_label(&peer.direction)) }
+                                    td { (fmt_duration(peer.connected_secs)) }
+                                    td.mono { (optional(peer.latency_ms, fmt_latency)) }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     };
@@ -927,7 +1073,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
 pub(crate) fn blocks(view: &BlocksView) -> Markup {
     let body = html! {
         div.panel {
-            h2 { "Found blocks" span.panel-note { (view.blocks_found) " in all, newest first" } }
+            h2 { "Blocks" span.panel-note { (view.blocks_found) " in all, newest first" } }
             @if view.blocks.is_empty() {
                 p.empty-state { "The pool has not found a Bitcoin Cash block yet. Keep mining." }
             } @else {
@@ -953,7 +1099,7 @@ pub(crate) fn shares(view: &SharesView) -> Markup {
     let body = html! {
         div.panel {
             h2 {
-                "Recent shares"
+                "Shares"
                 span.panel-note {
                     "newest first, uncles under the share that includes them"
                     @if let Some(tip) = view.tip_height { " · tip " (tip) }
@@ -976,6 +1122,7 @@ pub(crate) fn shares(view: &SharesView) -> Markup {
                                     td {
                                         @if row.is_uncle { "uncle" } @else { "share" }
                                         @if row.is_block { " " span.badge-block { "block" } }
+                                        @if row.weak_count > 0 { " " span.badge-weak { (row.weak_count) " weak" } }
                                     }
                                     td { (miner_link(&row.payout_address)) }
                                     td { (miner_link(&row.share_address)) }
@@ -1043,13 +1190,16 @@ pub(crate) fn block(view: &BlockView) -> Markup {
     )
 }
 
-fn worker_rows(now: u64, workers: &[WorkerRow]) -> Markup {
+/// A miner's worker rows. `hashrate` adds the empty Hashrate cell the miners
+/// page's table has (after State); the miner page's table has no such column.
+fn worker_rows(now: u64, workers: &[WorkerRow], hashrate: bool) -> Markup {
     html! {
         @for worker in workers {
             div.grid-row.worker {
                 span {}
                 span.mono { (worker.name) }
                 span { @if worker.active { "online" } @else { "idle" } }
+                @if hashrate { span {} }
                 span { (fmt_difficulty(worker.accepted_work as f64)) }
                 span {}
                 span { "best " (fmt_difficulty(worker.best_share as f64)) }
@@ -1071,10 +1221,10 @@ pub(crate) fn miners(view: &MinersView) -> Markup {
             @if view.miners.is_empty() {
                 p.empty-state { "No miners have submitted shares to this node yet." }
             } @else {
-                div.grid-table.miners-grid {
+                div.grid-table.miners-grid.hashrate-col {
                     div.grid-head {
-                        span { "#" } span { "Payout address" } span { "Workers" } span { "Accepted work" }
-                        span { "Window share" } span { "Best share" } span { "Last seen" } span {}
+                        span { "#" } span { "Payout address" } span { "Workers" } span { "Hashrate" }
+                        span { "Work" } span { "Window" } span { "Best" } span { "Seen" } span {}
                     }
                     @for (index, miner) in view.miners.iter().enumerate() {
                         details {
@@ -1082,6 +1232,7 @@ pub(crate) fn miners(view: &MinersView) -> Markup {
                                 span { (first_rank + index + 1) }
                                 a.addr href=(miner_href(&miner.address)) title=(miner.address) { (miner.address) }
                                 span { (miner.workers.iter().filter(|worker| worker.active).count()) " / " (miner.workers.len()) }
+                                span { (optional(miner.hashrate, fmt_hashrate)) }
                                 span { (fmt_difficulty(miner.accepted_work as f64)) }
                                 span { (miner.payout_fraction.map(percent).unwrap_or_else(|| "—".to_string())) }
                                 span { (fmt_difficulty(miner.best_share as f64)) }
@@ -1092,7 +1243,7 @@ pub(crate) fn miners(view: &MinersView) -> Markup {
                                 @if miner.workers.is_empty() {
                                     p.worker-empty { "No worker-level stats for this address." }
                                 } @else {
-                                    (worker_rows(view.now, &miner.workers))
+                                    (worker_rows(view.now, &miner.workers, true))
                                 }
                             }
                         }
@@ -1167,18 +1318,18 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
         }
         @if !view.workers.is_empty() {
             div.panel {
-                h2 { "Workers on this node" }
+                h2 { "Workers" }
                 div.grid-table.miners-grid {
                     div.grid-head {
                         span {} span { "Worker" } span { "State" } span { "Accepted work" }
                         span {} span { "Best share" } span { "Last seen" } span {}
                     }
-                    (worker_rows(view.now, &view.workers))
+                    (worker_rows(view.now, &view.workers, false))
                 }
             }
         }
         div.panel {
-            h2 { "Shares credited in the window" span.panel-note { "newest first" } }
+            h2 { "Shares" span.panel-note { "newest first" } }
             @if shares.is_empty() {
                 p.empty-state { "This address has no shares in the current window." }
             } @else {
@@ -1229,6 +1380,7 @@ pub(crate) fn share(view: &ShareView) -> Markup {
             h2 {
                 "Share"
                 @if view.is_block { " " span.badge-block { "found a block" } }
+                @if share.weak_count > 0 { " " span.badge-weak { (share.weak_count) " weak" } }
                 span.panel-note { (share.validation_status) " · " (share.chain) }
             }
             div.stat-list {
@@ -1239,6 +1391,35 @@ pub(crate) fn share(view: &ShareView) -> Markup {
                 (stat("Share chain address", miner_link(&share.miner_address)))
                 (stat("Share bits", html! { span.mono { (share.bits) } }))
                 (stat("Time", html! { (share.time) }))
+                @if share.weak_count > 0 {
+                    (stat("Weak shares", html! { (share.weak_count) }))
+                    (stat("Weak ratio", html! { (fmt_weak_ratio(share.weak_ratio)) }))
+                    (stat("Weak root", html! { span.mono { (share.weak_root) } }))
+                }
+            }
+        }
+        @if share.weak_count > 0 {
+            div.panel {
+                h2 { "Weak shares" span.panel-note { (share.weak_count) " carried" } }
+                @if share.weak_shares.is_empty() {
+                    p.empty-state { "The carried weak share bodies were pruned. Only the count of " (share.weak_count) " is kept." }
+                } @else {
+                    div.table-x {
+                        table.table {
+                            thead { tr { th { "PoW hash" } th { "Miner" } th { "Time" } th { "Difficulty" } } }
+                            tbody {
+                                @for weak in &share.weak_shares {
+                                    tr {
+                                        td.mono { (weak.pow_hash) }
+                                        td { (miner_link(&weak.miner_bitcoin_address)) }
+                                        td { (weak.time) }
+                                        td.mono { (weak_difficulty(&weak.bits)) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         div.panel {
@@ -1426,12 +1607,57 @@ pub(crate) fn error(site: &Site, message: &str) -> Markup {
 mod tests {
     use super::*;
     use crate::api::endpoints::miner::WindowSummary;
+    use crate::api::endpoints::share::{BitcoinHeaderOutput, WeakShareOutput};
 
     fn site() -> Site {
         Site {
             network: "Bitcoin Cash chipnet".to_string(),
             badge: "chipnet".to_string(),
             auth: true,
+        }
+    }
+
+    /// A share's page with the weak-share fields as the lookup reports
+    /// them: `weak_count` carried, `weak_ratio` over the minimum in
+    /// `WEAK_RATIO_UNIT` parts, and `weak_shares` the bodies still held.
+    fn share_view(
+        weak_count: u16,
+        weak_ratio: u32,
+        weak_shares: Vec<WeakShareOutput>,
+    ) -> ShareView {
+        ShareView {
+            site: site(),
+            share: ShareLookupOutput {
+                blockhash: "ab".repeat(32),
+                height: Some(1),
+                validation_status: "valid".to_string(),
+                chain: "confirmed".to_string(),
+                parent: "00".repeat(32),
+                uncles: Vec::new(),
+                miner_bitcoin_address: "bchtest:qpayout".to_string(),
+                miner_address: "tp2pool:qowner".to_string(),
+                share_witness_root: "00".repeat(32),
+                bits: "1d00ffff".to_string(),
+                time: "2026-10-22 00:00:00 UTC".to_string(),
+                bitcoin_header: BitcoinHeaderOutput {
+                    block_hash: "00".repeat(32),
+                    version: 0x2000_0000,
+                    prev_blockhash: "00".repeat(32),
+                    merkle_root: "00".repeat(32),
+                    time: "2026-10-22 00:00:00 UTC".to_string(),
+                    bits: "1d00ffff".to_string(),
+                    nonce: 7,
+                },
+                template_merkle_branches_count: 0,
+                transactions: None,
+                pruned: false,
+                weak_count,
+                weak_ratio,
+                weak_root: "f61d3df0eef9c5d70dbc861965b0905d037e774e6a43ea3f4a8518fa41913343"
+                    .to_string(),
+                weak_shares,
+            },
+            is_block: false,
         }
     }
 
@@ -1445,6 +1671,7 @@ mod tests {
             network_hashrate: None,
             network_difficulty: None,
             share_difficulty: None,
+            work_since_last_block: None,
             miners_online: 0,
             workers_online: 0,
             accepted_shares_total: 0,
@@ -1453,6 +1680,7 @@ mod tests {
             blocks_found: 0,
             blocks: Vec::new(),
             shares: Vec::new(),
+            peers: Vec::new(),
             auto: Auto::On,
             range_key: normalize_range(None),
             pool_on: true,
@@ -1892,6 +2120,7 @@ mod tests {
             difficulty: Some(4.0),
             is_uncle: false,
             is_block: true,
+            weak_count: 0,
         }];
         let page = overview(&view).into_string();
         assert!(!page.contains("<img src=x"));
@@ -1929,7 +2158,7 @@ mod tests {
         let page = overview(&view).into_string();
         let card = page.split("kpi-label\">Share chain height").nth(1).unwrap();
         let card = card.split("kpi-card").next().unwrap();
-        assert!(card.contains("Difficulty 73"));
+        assert!(card.contains("Min. Difficulty 73"));
     }
 
     #[test]
@@ -1940,7 +2169,7 @@ mod tests {
         let page = overview(&view).into_string();
         let card = page.split("kpi-label\">Share chain height").nth(1).unwrap();
         let card = card.split("kpi-card").next().unwrap();
-        assert!(card.contains("Difficulty —"));
+        assert!(card.contains("Min. Difficulty —"));
     }
 
     #[test]
@@ -1949,6 +2178,96 @@ mod tests {
         let card = page.split("kpi-label\">Blocks found").nth(1).unwrap();
         let card = card.split("kpi-card").next().unwrap();
         assert!(card.contains("kpi-value kpi-value-green"));
+    }
+
+    #[test]
+    fn the_blocks_found_card_notes_the_effort_percent() {
+        let mut view = empty_overview();
+        view.work_since_last_block = Some(83_000.0);
+        view.network_difficulty = Some(100_000.0);
+        let page = overview(&view).into_string();
+        let card = page.split("kpi-label\">Blocks found").nth(1).unwrap();
+        let card = card.split("kpi-card").next().unwrap();
+        assert!(card.contains("Effort 83%"));
+    }
+
+    #[test]
+    fn the_blocks_found_card_notes_an_overdue_effort_above_100_percent() {
+        let mut view = empty_overview();
+        view.work_since_last_block = Some(150_000.0);
+        view.network_difficulty = Some(100_000.0);
+        let page = overview(&view).into_string();
+        let card = page.split("kpi-label\">Blocks found").nth(1).unwrap();
+        let card = card.split("kpi-card").next().unwrap();
+        assert!(card.contains("Effort 150%"));
+    }
+
+    #[test]
+    fn the_blocks_found_card_notes_a_dash_effort_before_the_first_notify() {
+        let mut view = empty_overview();
+        view.work_since_last_block = Some(500.0);
+        view.network_difficulty = None;
+        let page = overview(&view).into_string();
+        let card = page.split("kpi-label\">Blocks found").nth(1).unwrap();
+        let card = card.split("kpi-card").next().unwrap();
+        assert!(card.contains("Effort —"));
+    }
+
+    #[test]
+    fn fmt_effort_is_a_whole_percent_or_a_dash() {
+        assert_eq!(fmt_effort(Some(0.0), Some(1_000.0)), "0%");
+        assert_eq!(fmt_effort(Some(830.0), Some(1_000.0)), "83%");
+        assert_eq!(fmt_effort(Some(1_500.0), Some(1_000.0)), "150%");
+        assert_eq!(fmt_effort(Some(830.0), None), "—");
+        assert_eq!(fmt_effort(None, Some(1_000.0)), "—");
+        assert_eq!(fmt_effort(Some(830.0), Some(0.0)), "—");
+    }
+
+    #[test]
+    fn fmt_block_effort_is_the_snapshot_percent_or_a_dash() {
+        assert_eq!(
+            fmt_block_effort(Some(EffortSnapshot {
+                work: 1_500.0,
+                network_difficulty: Some(1_000.0),
+            })),
+            "150%"
+        );
+        assert_eq!(
+            fmt_block_effort(Some(EffortSnapshot {
+                work: 830.0,
+                network_difficulty: None,
+            })),
+            "—"
+        );
+        assert_eq!(fmt_block_effort(None), "—");
+    }
+
+    #[test]
+    fn the_blocks_table_shows_a_snapshot_effort_percent_and_a_dash_without_one() {
+        let annotated = FoundBlockRow {
+            height: 100,
+            block_hash: "aa".repeat(32).parse::<BlockHash>().unwrap(),
+            share_hash: "bb".repeat(32).parse::<BlockHash>().unwrap(),
+            time: 1_700_000_000,
+            payout_address: "bchtest:qpayout".to_string(),
+            effort: Some(EffortSnapshot {
+                work: 1_500.0,
+                network_difficulty: Some(1_000.0),
+            }),
+        };
+        let unannotated = FoundBlockRow {
+            height: 99,
+            block_hash: "cc".repeat(32).parse::<BlockHash>().unwrap(),
+            share_hash: "dd".repeat(32).parse::<BlockHash>().unwrap(),
+            time: 1_699_999_999,
+            payout_address: "bchtest:qpayout".to_string(),
+            effort: None,
+        };
+        let table = blocks_table(1_700_000_000, &[annotated, unannotated]).into_string();
+
+        assert!(table.contains("<th>Effort</th>"));
+        assert!(table.contains("<td>150%</td>"));
+        assert!(table.contains("<td>—</td>"));
     }
 
     #[test]
@@ -1964,12 +2283,97 @@ mod tests {
             difficulty: Some(4.0),
             is_uncle: false,
             is_block: false,
+            weak_count: 0,
         }];
         let page = overview(&view).into_string();
         assert!(page.contains("href=\"/dashboard/shares\""));
         assert!(page.contains("More found shares"));
         assert!(!page.contains("page="));
         assert!(!page.contains("Previous"));
+    }
+
+    #[test]
+    fn the_overview_peers_panel_lists_each_connected_peer() {
+        let mut view = empty_overview();
+        view.peers = vec![PeerInfoResponse {
+            peer_id: "12D3KooWExample".to_string(),
+            ip: Some("127.0.0.1".to_string()),
+            address: "/ip4/127.0.0.1/tcp/6884".to_string(),
+            direction: ConnectionDirection::Inbound,
+            connected_secs: 1_337,
+            version: Some("p2poolv2/0.0.1-alpha".to_string()),
+            latency_ms: Some(0.914),
+        }];
+        let page = overview(&view).into_string();
+
+        assert!(page.contains("<h2>Peers"));
+        assert!(page.contains("1 connected"));
+        assert!(page.contains("<th>Address</th>"));
+        assert!(page.contains("<th>Version</th>"));
+        assert!(page.contains("<th>Direction</th>"));
+        assert!(page.contains("<th>Uptime</th>"));
+        assert!(page.contains("<th>Latency</th>"));
+        assert!(page.contains("<td class=\"mono peer-addr\">127.0.0.1</td>"));
+        assert!(page.contains("<td>0.0.1-alpha</td>"));
+        assert!(!page.contains("p2poolv2/"));
+        assert!(page.contains("<td>Inbound</td>"));
+        assert!(page.contains("<td>22 min</td>"));
+        assert!(page.contains("<td class=\"mono\">0.91 ms</td>"));
+    }
+
+    #[test]
+    fn the_overview_peers_panel_falls_back_to_the_multiaddr_and_dashes_missing_values() {
+        let mut view = empty_overview();
+        view.peers = vec![PeerInfoResponse {
+            peer_id: "12D3KooWOther".to_string(),
+            ip: None,
+            address: "/ip6/2001:db8::1/tcp/6884".to_string(),
+            direction: ConnectionDirection::Outbound,
+            connected_secs: 0,
+            version: None,
+            latency_ms: None,
+        }];
+        let page = overview(&view).into_string();
+
+        assert!(page.contains("<td class=\"mono peer-addr\">/ip6/2001:db8::1/tcp/6884</td>"));
+        assert!(page.contains("<td>Outbound</td>"));
+        assert!(page.contains("<td>0 s</td>"));
+        assert!(page.contains("<td>—</td>"));
+        assert!(page.contains("<td class=\"mono\">—</td>"));
+    }
+
+    #[test]
+    fn the_overview_peers_panel_says_so_without_peers() {
+        let page = overview(&empty_overview()).into_string();
+
+        assert!(page.contains("libp2p"));
+        assert!(page.contains("No p2pool peers connected right now."));
+    }
+
+    #[test]
+    fn uptimes_pick_a_compact_unit() {
+        assert_eq!(fmt_duration(0), "0 s");
+        assert_eq!(fmt_duration(42), "42 s");
+        assert_eq!(fmt_duration(1_800), "30 min");
+        assert_eq!(fmt_duration(8_280), "2h 18m");
+        assert_eq!(fmt_duration(90_000), "1d 01h");
+    }
+
+    #[test]
+    fn latencies_keep_sub_millisecond_precision() {
+        assert_eq!(fmt_latency(0.0), "0.00 ms");
+        assert_eq!(fmt_latency(0.914), "0.91 ms");
+        assert_eq!(fmt_latency(5.44), "5.4 ms");
+        assert_eq!(fmt_latency(42.6), "43 ms");
+    }
+
+    #[test]
+    fn peer_versions_drop_the_agent_prefix() {
+        assert_eq!(agent_version(Some("p2poolv2/0.0.1-alpha")), "0.0.1-alpha");
+        assert_eq!(agent_version(Some("custom-agent")), "custom-agent");
+        assert_eq!(agent_version(Some("p2poolv2/")), "—");
+        assert_eq!(agent_version(Some("")), "—");
+        assert_eq!(agent_version(None), "—");
     }
 
     #[test]
@@ -1987,6 +2391,7 @@ mod tests {
                 difficulty: Some(4.0),
                 is_uncle: false,
                 is_block: false,
+                weak_count: 0,
             }],
             paging: Paging { page: 2, pages: 3 },
         };
@@ -2011,6 +2416,71 @@ mod tests {
         let page = shares(&view).into_string();
         assert!(page.contains("No confirmed shares yet."));
         assert!(!page.contains("Previous"));
+    }
+
+    #[test]
+    fn the_shares_list_marks_a_share_that_carries_weak_shares() {
+        let view = SharesView {
+            site: site(),
+            now: 1_000,
+            tip_height: Some(30),
+            shares: vec![ShareRow {
+                height: Some(30),
+                blockhash: "ab".to_string(),
+                time: 900,
+                payout_address: "bchtest:qpayout".to_string(),
+                share_address: "tp2pool:qowner".to_string(),
+                difficulty: Some(4.0),
+                is_uncle: false,
+                is_block: false,
+                weak_count: 1,
+            }],
+            paging: Paging { page: 1, pages: 1 },
+        };
+        let page = shares(&view).into_string();
+        assert!(page.contains("<span class=\"badge-weak\">1 weak</span>"));
+    }
+
+    #[test]
+    fn the_share_page_omits_every_weak_markup_without_weak_shares() {
+        let page = share(&share_view(0, 1024, Vec::new())).into_string();
+        assert!(!page.contains("badge-weak"));
+        assert!(!page.contains("Weak shares"));
+        assert!(!page.contains("Weak ratio"));
+        assert!(!page.contains("Weak root"));
+    }
+
+    #[test]
+    fn the_share_page_shows_the_weak_badge_stats_and_panel_for_a_carrier() {
+        let weak = WeakShareOutput {
+            pow_hash: "0000000004e6a35194dc99afa9fd7bdc1c89ff823a3fe98ac2bc3af046e65ca4"
+                .to_string(),
+            miner_bitcoin_address: "bchtest:qpayout".to_string(),
+            miner_address: "tp2pool:qowner".to_string(),
+            time: "2026-10-22 00:00:00 UTC".to_string(),
+            bits: "0x1c0448d7".to_string(),
+        };
+        let page = share(&share_view(1, 262_144, vec![weak])).into_string();
+        assert!(page.contains("<span class=\"badge-weak\">1 weak</span>"));
+        assert!(page.contains("Weak shares"));
+        assert!(page.contains("R = 262144 (256x the minimum target)"));
+        assert!(page.contains("Weak root"));
+        assert!(page.contains("1 carried"));
+        assert!(page.contains("<th>PoW hash</th>"));
+        assert!(page.contains("<td class=\"mono\">59.7</td>"));
+        assert!(!page.contains("were pruned"));
+    }
+
+    #[test]
+    fn the_share_page_says_the_weak_bodies_were_pruned() {
+        let page = share(&share_view(2, 262_144, Vec::new())).into_string();
+        assert!(
+            page.contains(
+                "The carried weak share bodies were pruned. Only the count of 2 is kept."
+            )
+        );
+        assert!(!page.contains("<th>PoW hash</th>"));
+        assert!(page.contains("<span class=\"badge-weak\">2 weak</span>"));
     }
 
     #[test]

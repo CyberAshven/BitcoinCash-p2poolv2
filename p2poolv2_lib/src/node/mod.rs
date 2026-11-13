@@ -574,6 +574,8 @@ impl Node {
                     "Identified Peer {} on connection {} with protocol version {}",
                     peer_id, connection_id, info.protocol_version
                 );
+                self.connection_tracker
+                    .record_identified(&peer_id, info.agent_version.clone());
                 // Add the peer's routable advertised addresses to Kademlia
                 for addr in info.listen_addrs {
                     if address_filter::is_routable_multiaddr(&addr) {
@@ -643,6 +645,7 @@ impl Node {
         match event.result {
             Ok(rtt) => {
                 debug!("Ping to {} succeeded, rtt: {:?}", event.peer, rtt);
+                self.connection_tracker.record_ping_rtt(&event.peer, rtt);
                 self.connection_tracker
                     .clear_ping_failures(event.connection);
             }

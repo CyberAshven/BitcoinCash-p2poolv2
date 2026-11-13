@@ -66,6 +66,9 @@ pub struct ShareInfo {
     pub miner_address: p2poolv2_wallet::share_owner::ShareOwner,
     pub timestamp: u32,
     pub bits: CompactTarget,
+    /// How many weak shares this share's body carries, as its header commits.
+    /// Only carriers have one; uncles never do.
+    pub weak_count: u16,
     pub uncles: Vec<UncleInfo>,
 }
 
@@ -724,6 +727,7 @@ impl Store {
                 miner_address: header.miner_address,
                 timestamp: header.time,
                 bits: header.bits,
+                weak_count: header.weak_count,
                 uncles,
             });
         }

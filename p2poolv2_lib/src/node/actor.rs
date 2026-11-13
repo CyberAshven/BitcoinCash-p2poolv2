@@ -350,6 +350,8 @@ impl NodeHandle {
                 address: "/ip4/127.0.0.1/tcp/46884".to_string(),
                 direction: ConnectionDirection::Outbound,
                 connected_secs: 0,
+                version: None,
+                latency_ms: None,
             })
             .collect();
         let (command_tx, mut command_rx) = mpsc::channel::<Command>(32);

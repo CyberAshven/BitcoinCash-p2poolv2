@@ -66,6 +66,30 @@ pub struct ShareLookupOutput {
     /// serialized when true.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pruned: bool,
+    /// How many weak shares this share carries, from its header
+    /// (`ShareHeader::weak_count`).
+    pub weak_count: u16,
+    /// This share's weak ratio R (`ShareHeader::weak_ratio`): its weak
+    /// target over its minimum, in `WEAK_RATIO_UNIT` (1024) parts.
+    pub weak_ratio: u32,
+    /// The root committing the carried weak shares
+    /// (`ShareHeader::weak_root`), hex.
+    pub weak_root: String,
+    /// The carried weak shares' bodies, empty when the share carries none
+    /// or the body was pruned: then `weak_count` alone reports the count.
+    pub weak_shares: Vec<WeakShareOutput>,
+}
+
+/// JSON output for one weak share a share carries: its identity, the
+/// bitcoin header block hash of its proof of work, plus the fields the
+/// dashboard shows.
+#[derive(Serialize)]
+pub struct WeakShareOutput {
+    pub pow_hash: String,
+    pub miner_bitcoin_address: String,
+    pub miner_address: String,
+    pub time: String,
+    pub bits: String,
 }
 
 /// Build the JSON output for a single share identified by its blockhash.
@@ -125,6 +149,30 @@ pub(crate) fn build_share_output(
         .unwrap_or_default()
         .len();
 
+    // Empty for a share carrying no weak shares and for one whose body was
+    // pruned: pruning deletes the weak share bodies with the body, while the
+    // header's weak_count still reports how many there were.
+    let carried_weak_shares = store
+        .get_weak_shares(blockhash)
+        .map_err(|error| ApiError::ServerError(format!("Store error: {error}")))?;
+    let weak_shares = carried_weak_shares
+        .iter()
+        .map(|weak_share| WeakShareOutput {
+            pow_hash: weak_share.pow_hash().to_string(),
+            miner_bitcoin_address: payout_address_string(
+                &weak_share.header.miner_bitcoin_address,
+                cash_network,
+            ),
+            miner_address: to_address_string(
+                &weak_share.header.miner_address,
+                network,
+                cash_network,
+            ),
+            time: format_timestamp(weak_share.header.time as u64),
+            bits: format!("{:#x}", weak_share.header.bits.to_consensus()),
+        })
+        .collect();
+
     let below_prune_height = height.is_some_and(|height| height < prune_height);
     let (transaction_ids, pruned) = if full {
         match chain_store_handle.get_share(blockhash) {
@@ -170,6 +218,10 @@ pub(crate) fn build_share_output(
         template_merkle_branches_count,
         transactions: transaction_ids,
         pruned,
+        weak_count: share_header.weak_count,
+        weak_ratio: share_header.weak_ratio,
+        weak_root: share_header.weak_root.to_string(),
+        weak_shares,
     })
 }
 
@@ -289,15 +341,19 @@ mod tests {
     use super::*;
     use crate::api::server::{AppConfig, AppState};
     use axum::extract::{Query, State};
+    use bitcoin::hashes::Hash;
     use p2poolv2_lib::accounting::stats::metrics;
+    use p2poolv2_lib::address::share_owner::ShareOwner;
     use p2poolv2_lib::config::{
         BitcoinCashNetwork, Chain, bitcoin_cash_donation_cashaddr, parse_payout_address,
     };
     use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
     use p2poolv2_lib::node::actor::NodeHandle;
+    use p2poolv2_lib::shares::weak::{GENESIS_WEAK_RATIO, empty_weak_root};
     use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
     use p2poolv2_lib::test_utils::{
-        build_confirmed_test_chain, genesis_for_tests, setup_test_chain_store_handle,
+        TestShareBlockBuilder, build_confirmed_test_chain, confirm_test_block, genesis_for_tests,
+        setup_test_chain_store_handle, test_weak_share_on,
     };
 
     async fn build_test_state(node_handle: NodeHandle) -> (Arc<AppState>, tempfile::TempDir) {
@@ -416,6 +472,97 @@ mod tests {
         let output = &result.unwrap().0;
         assert_eq!(output.len(), 1);
         assert_eq!(output[0].blockhash, genesis_hash);
+    }
+
+    #[tokio::test]
+    async fn weak_lookup_reports_the_carried_weak_share() {
+        let node_handle = NodeHandle::new_for_test();
+        let (state, _temp_dir) = build_test_state(node_handle).await;
+
+        let genesis = genesis_for_tests();
+        let genesis_hash = genesis.block_hash();
+        state
+            .chain_store_handle
+            .init_or_setup_genesis(genesis)
+            .await
+            .unwrap();
+
+        let weak_share = test_weak_share_on(BlockHash::from_byte_array([7; 32]), 1);
+        let carrier = TestShareBlockBuilder::new()
+            .prev_share_blockhash(genesis_hash.to_string())
+            .time(1_700_000_001)
+            .share_owner(ShareOwner::CashP2pkh([0x44; 20]))
+            .weak_shares(vec![weak_share.clone()])
+            .build();
+        confirm_test_block(&state.chain_store_handle, &carrier).await;
+
+        let result = share(
+            State(state),
+            Query(ShareLookupQuery {
+                hash: Some(carrier.block_hash().to_string()),
+                height: None,
+                full: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let output = &result.0[0];
+        assert_eq!(output.weak_count, 1);
+        assert_eq!(output.weak_ratio, GENESIS_WEAK_RATIO);
+        assert_eq!(output.weak_root, weak_share.committed_hash().to_string());
+        assert_eq!(output.weak_shares.len(), 1);
+        let weak_output = &output.weak_shares[0];
+        assert_eq!(weak_output.pow_hash, weak_share.pow_hash().to_string());
+        assert_eq!(
+            weak_output.miner_bitcoin_address,
+            payout_address_string(&weak_share.header.miner_bitcoin_address, None)
+        );
+        assert_eq!(
+            weak_output.time,
+            format_timestamp(weak_share.header.time as u64)
+        );
+        assert_eq!(
+            weak_output.bits,
+            format!("{:#x}", weak_share.header.bits.to_consensus())
+        );
+    }
+
+    #[tokio::test]
+    async fn share_lookup_reports_no_weak_shares_for_a_share_that_carries_none() {
+        let node_handle = NodeHandle::new_for_test();
+        let (state, _temp_dir) = build_test_state(node_handle).await;
+
+        let genesis = genesis_for_tests();
+        let genesis_hash = genesis.block_hash();
+        state
+            .chain_store_handle
+            .init_or_setup_genesis(genesis)
+            .await
+            .unwrap();
+
+        let carrier = TestShareBlockBuilder::new()
+            .prev_share_blockhash(genesis_hash.to_string())
+            .time(1_700_000_001)
+            .share_owner(ShareOwner::CashP2pkh([0x44; 20]))
+            .build();
+        confirm_test_block(&state.chain_store_handle, &carrier).await;
+
+        let result = share(
+            State(state),
+            Query(ShareLookupQuery {
+                hash: Some(carrier.block_hash().to_string()),
+                height: None,
+                full: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let output = &result.0[0];
+        assert_eq!(output.weak_count, 0);
+        assert_eq!(output.weak_root, empty_weak_root().to_string());
+        assert!(output.weak_shares.is_empty());
     }
 
     #[tokio::test]

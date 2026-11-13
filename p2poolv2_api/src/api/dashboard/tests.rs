@@ -73,10 +73,10 @@ async fn confirm_share(state: &AppState, share: &p2poolv2_lib::shares::share_blo
 
 fn recent_share_row_heights(body: &str) -> Vec<u32> {
     let table = body
-        .split_once("<h2>Recent shares")
+        .split_once("<h2>Shares")
         .and_then(|(_, rest)| rest.split_once("</table>"))
         .map(|(table, _)| table)
-        .expect("overview has a Recent shares table");
+        .expect("overview has a Shares table");
     table
         .split("<tr")
         .skip(1)
@@ -151,6 +151,9 @@ async fn the_overview_is_html_without_script() {
     assert!(body.starts_with("<!DOCTYPE html>"));
     assert!(body.contains("Bitcoin Cash chipnet"));
     assert!(body.contains("Share chain height"));
+    // The Blocks found tile carries the effort note (a dash here: no
+    // template has been built yet, so there is no difficulty to divide by).
+    assert!(body.contains("Effort —"));
     assert!(!body.contains("<script"));
 }
 
@@ -544,6 +547,7 @@ fn a_miner_row_serializes_as_the_wasm_app_reads_it() {
         best_share: 5,
         last_share_at: 9,
         payout_fraction: None,
+        hashrate: None,
     };
     assert_eq!(
         serde_json::to_value(&row).unwrap(),
@@ -559,7 +563,8 @@ fn a_miner_row_serializes_as_the_wasm_app_reads_it() {
             "accepted_work": 10,
             "best_share": 5,
             "last_share_at": 9,
-            "payout_fraction": null
+            "payout_fraction": null,
+            "hashrate": null
         })
     );
 }
@@ -582,6 +587,7 @@ fn online_counts_count_active_workers() {
         best_share: 1,
         last_share_at: 1,
         payout_fraction: None,
+        hashrate: None,
     };
     let miners = [miner(&[true, false, true]), miner(&[false]), miner(&[])];
     assert_eq!(online_counts(&miners), (1, 2));
@@ -596,6 +602,7 @@ fn a_looked_up_miner_matches_either_spelling() {
         best_share: 0,
         last_share_at: 0,
         payout_fraction: None,
+        hashrate: None,
     };
     assert!(is_looked_up_miner(&miner, "qpayout", None));
     assert!(is_looked_up_miner(

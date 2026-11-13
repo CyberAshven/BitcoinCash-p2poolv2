@@ -90,6 +90,8 @@ pub struct ShareInfoDisplay {
     pub miner_address: String,
     pub timestamp: u32,
     pub bits: CompactTarget,
+    /// How many weak shares this share's body carries, as its header commits.
+    pub weak_count: u16,
     pub uncles: Vec<UncleInfoDisplay>,
 }
 
@@ -110,6 +112,7 @@ impl ShareInfoDisplay {
             miner_address: address_for(&share.miner_address, network, cash_network),
             timestamp: share.timestamp,
             bits: share.bits,
+            weak_count: share.weak_count,
             uncles: share
                 .uncles
                 .iter()
@@ -306,6 +309,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 200,
             bits: CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![UncleInfo {
                 blockhash: BlockHash::all_zeros(),
                 prev_blockhash: BlockHash::all_zeros(),

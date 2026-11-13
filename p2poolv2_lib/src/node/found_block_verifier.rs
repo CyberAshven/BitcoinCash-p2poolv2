@@ -11,7 +11,7 @@ use crate::accounting::stats::metrics::MetricsHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
-use crate::store::found_block::FoundBlock;
+use crate::store::found_block::{EffortSnapshot, FoundBlock};
 use bitcoin::BlockHash;
 use bitcoindrpc::BitcoindRpcClient;
 use std::collections::HashSet;
@@ -149,7 +149,7 @@ impl FoundBlockVerifier {
                         info!("The node confirmed pool block {block_hash} in its chain");
                         let historical = self.historical_candidates.remove(&block_hash);
                         if !historical && self.store.is_current() {
-                            let _ = self.metrics.reset_block_effort().await;
+                            self.record_effort_snapshot(candidate).await;
                         }
                     }
                     Ok(false) => {}
@@ -182,6 +182,50 @@ impl FoundBlockVerifier {
                 debug!("The node cannot confirm candidate pool block {block_hash} yet: {error}");
             }
             Err(_) => warn!("The node timed out checking candidate pool block {block_hash}"),
+        }
+    }
+
+    /// Take the pre-reset work from the metrics actor and keep it against
+    /// the candidate BCHN just confirmed. The network difficulty comes from
+    /// the candidate's share header: BCHN confirmed the block hash, so
+    /// those bits are the network difficulty at that height. A header that
+    /// cannot be read leaves the difficulty off the snapshot rather than
+    /// dropping the work, and a snapshot that cannot be written only costs
+    /// the annotation: the accepted record already stands.
+    async fn record_effort_snapshot(&self, candidate: &FoundBlock) {
+        let network_difficulty = match self.store.get_share_header(&candidate.share_blockhash) {
+            Ok(share_header) => Some(share_header.bitcoin_network_difficulty()),
+            Err(error) => {
+                warn!(
+                    "Cannot read the share header of block {} for its effort: {error}",
+                    candidate.bitcoin_blockhash
+                );
+                None
+            }
+        };
+        let work = match self.metrics.reset_block_effort().await {
+            Ok(work) => work,
+            Err(error) => {
+                warn!(
+                    "Metrics actor stopped, effort not reset for block {}: {error}",
+                    candidate.bitcoin_blockhash
+                );
+                return;
+            }
+        };
+        let snapshot = EffortSnapshot {
+            work,
+            network_difficulty,
+        };
+        if let Err(error) = self
+            .store
+            .set_accepted_found_block_effort(candidate.bitcoin_blockhash, snapshot)
+            .await
+        {
+            warn!(
+                "Cannot keep the effort snapshot for block {}: {error}",
+                candidate.bitcoin_blockhash
+            );
         }
     }
 }

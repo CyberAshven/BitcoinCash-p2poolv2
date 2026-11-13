@@ -277,6 +277,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 0,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![],
         });
 
@@ -359,6 +360,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![],
         });
 
@@ -406,6 +408,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![uncle],
         });
 
@@ -436,6 +439,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![],
         });
 
@@ -479,6 +483,7 @@ mod tests {
             miner_address: ShareOwner::CashP2pkh([0x11; 20]),
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![uncle],
         });
 
@@ -507,6 +512,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![],
         });
 
@@ -541,6 +547,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 0,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![],
         });
 

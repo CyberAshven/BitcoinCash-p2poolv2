@@ -269,6 +269,10 @@ impl Store {
             ColumnFamily::AcceptedFoundBlocks,
             RocksDbOptions::default(),
         );
+        let accepted_block_effort_cf = ColumnFamilyDescriptor::new(
+            ColumnFamily::AcceptedBlockEffort,
+            RocksDbOptions::default(),
+        );
         let payout_trees_cf =
             ColumnFamilyDescriptor::new(ColumnFamily::PayoutTrees, RocksDbOptions::default());
         let bch_headers_cf =
@@ -308,6 +312,7 @@ impl Store {
             found_blocks_cf,
             hashrate_samples_cf,
             accepted_found_blocks_cf,
+            accepted_block_effort_cf,
             payout_trees_cf,
             bch_headers_cf,
             bch_best_chain_cf,
@@ -323,10 +328,17 @@ impl Store {
         let db = if read_only {
             // Rebuild a descriptor list for the filtered set: the sample
             // family is write-only on this open so `verify_chain`,
-            // `db_query` and other read-only tools never request it.
+            // `db_query` and other read-only tools never request it, and
+            // RocksDB rejects a listed family the store does not have, so
+            // the effort family -- created by the first read-write open
+            // after an upgrade -- is not requested either. Reads degrade
+            // to no samples and no effort.
             let read_only_cfs: Vec<ColumnFamilyDescriptor> = cfs
                 .iter()
-                .filter(|descriptor| descriptor.name() != ColumnFamily::HashrateSamples.as_str())
+                .filter(|descriptor| {
+                    descriptor.name() != ColumnFamily::HashrateSamples.as_str()
+                        && descriptor.name() != ColumnFamily::AcceptedBlockEffort.as_str()
+                })
                 .map(|descriptor| {
                     ColumnFamilyDescriptor::new(descriptor.name(), RocksDbOptions::default())
                 })

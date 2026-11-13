@@ -90,6 +90,21 @@ tr.uncle-row {
   border-radius: 999px;
   padding: 0.02rem 0.45rem;
 }
+/* Weak-share count carried by the row's share: same pill as badge-block but
+   amber (the badge-warn tone) so "found a block" and "carries weak shares"
+   read apart at a glance. */
+.badge-weak {
+  display: inline-block;
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #e0b45a;
+  background: rgba(224, 180, 90, 0.14);
+  border: 1px solid rgba(224, 180, 90, 0.4);
+  border-radius: 999px;
+  padding: 0.02rem 0.45rem;
+}
 
 .stat-item .v.mono {
   font-size: 0.8rem;
