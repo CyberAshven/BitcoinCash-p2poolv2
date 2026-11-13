@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Two more limits on the weak share path, node behaviour only. When the weak
+shares held for an unknown parent pass their bounds, the source holding the
+most bytes loses its oldest, so a peer that floods them pushes out only its
+own; before, the oldest of all went first, whoever sent it. And a peer is
+asked for the headers of unknown parents at most once a second, however many
+weak shares on new parents it sends: the request is the same headers request
+from this node's tip either way, and before it went out once a new parent.
+
 The Docker image runs the node as `p2pool` (uid 1000), not as root. The user
 owns `/p2poolv2` and is in the `bchn-rpc` group (gid 2001), which BCHN's
 image now lets read the RPC password it keeps in the `bchn_rpc` volume; the
