@@ -81,6 +81,24 @@ pub const MAX_BITCOIN_CASH_CUT: u16 = 1_000;
 /// rule: a share header above it does not decode.
 pub const MAX_PAYOUT_LEVEL: u8 = 7;
 
+/// The lowest payout level `k` a Bitcoin Cash share may carry. Level 0 paid
+/// 546 satoshis, which is below dust once the payout tree's fee is taken, so
+/// a level 0 win that landed in the tree went to the tree's largest payee.
+/// A header below it does not decode, and a `payout_level` below it is
+/// refused.
+pub const MIN_PAYOUT_LEVEL: u8 = 1;
+
+/// Why `level` is not a Bitcoin Cash payout level: it is below
+/// [`MIN_PAYOUT_LEVEL`]. The message names `level`, the lowest level and
+/// that level's amount, `546 * 2^k` satoshis.
+pub fn payout_level_below_minimum(level: u8) -> String {
+    let amount = 546u64 << MIN_PAYOUT_LEVEL;
+    format!(
+        "payout level {level} is below the lowest payout level \
+         {MIN_PAYOUT_LEVEL} ({amount} satoshis)"
+    )
+}
+
 /// The payout level a Bitcoin Cash node gives a miner whose login chooses
 /// none, when `payout_level` is not set: level 5, 17,472 satoshis, about
 /// 0.85% of a payment spent at the default `spend_cost`. Node policy.
@@ -502,10 +520,11 @@ pub struct StratumConfig<State = Raw> {
     /// the node merge-mines nothing. Bitcoin Cash in P2Pool mode only.
     #[serde(default)]
     pub merge_mining_tokens: Option<String>,
-    /// The payout level, 0 to [`MAX_PAYOUT_LEVEL`], a Bitcoin Cash node
-    /// gives a miner whose login sets neither `min-payout=` nor
-    /// `fee-tolerance=`. Parsing fills an unset value with
-    /// [`DEFAULT_PAYOUT_LEVEL`] and refuses one above the maximum.
+    /// The payout level, [`MIN_PAYOUT_LEVEL`] to [`MAX_PAYOUT_LEVEL`], a
+    /// Bitcoin Cash node gives a miner whose login sets neither
+    /// `min-payout=` nor `fee-tolerance=`. Parsing fills an unset value with
+    /// [`DEFAULT_PAYOUT_LEVEL`] and refuses one below the lowest or above
+    /// the maximum.
     #[serde(default)]
     pub payout_level: Option<u8>,
     /// What spending one payment costs, in satoshis, for a miner's
@@ -711,6 +730,11 @@ impl StratumConfig<Raw> {
         validate_cuts(self.chain, donation, fee)?;
         validate_light_templates(self.chain, self.template_source)?;
         let payout_level = self.payout_level.unwrap_or(DEFAULT_PAYOUT_LEVEL);
+        if payout_level < MIN_PAYOUT_LEVEL {
+            return Err(ConfigError {
+                message: payout_level_below_minimum(payout_level),
+            });
+        }
         if payout_level > MAX_PAYOUT_LEVEL {
             return Err(ConfigError {
                 message: format!(
@@ -3182,6 +3206,21 @@ mod bitcoin_cash_donation_tests {
 
         let error = config.parse().unwrap_err();
         assert!(error.message.contains("payout_level 8"), "{error:?}");
+    }
+
+    /// `[stratum] payout_level` of 0 is refused, in the config file and as
+    /// the stratum option, naming the level, the lowest level and its amount.
+    #[test]
+    fn a_payout_level_of_zero_is_refused() {
+        let mut config = bitcoin_cash_config_with_cuts(0, 0);
+        config.payout_level = Some(0);
+
+        let error = config.parse().unwrap_err();
+        assert_eq!(
+            error.message,
+            payout_level_below_minimum(0),
+            "config payout_level 0"
+        );
     }
 
     #[test]

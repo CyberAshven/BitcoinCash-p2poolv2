@@ -67,6 +67,7 @@ impl Decodable for BchCoinbase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounting::payout::payout_levels::MIN_PAYOUT_LEVEL;
     use crate::accounting::{CoinbasePayouts, OutputPair};
     use crate::shares::coinbase_proof::CoinbaseProof;
     use crate::shares::share_block::{ShareBlock, ShareHeader};
@@ -83,6 +84,7 @@ mod tests {
         let mut share = TestShareBlockBuilder::new().build();
         share.header.prev_share_blockhash = share.header.bitcoin_header.block_hash();
         share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        share.header.payout_level = MIN_PAYOUT_LEVEL;
         share.header.bitcoin_height = 702;
         let declared = BchCoinbase {
             prefix: Builder::new()

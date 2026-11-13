@@ -766,7 +766,8 @@ mod tests {
     }
 
     /// A chipnet genesis paying the chipnet donation CashAddr, owned by
-    /// `CASH_SHARE_HASH`.
+    /// `CASH_SHARE_HASH`, at the lowest payout level a Bitcoin Cash share may
+    /// carry. It starts from a Bitcoin share, so the cash level is set here.
     fn bitcoin_cash_genesis() -> ShareBlock {
         let mut genesis = genesis_for_tests();
         genesis.header.miner_bitcoin_address = parse_payout_address(
@@ -777,6 +778,8 @@ mod tests {
         )
         .unwrap();
         genesis.header.miner_address = ShareOwner::CashP2pkh(CASH_SHARE_HASH);
+        genesis.header.payout_level =
+            p2poolv2_lib::accounting::payout::payout_levels::MIN_PAYOUT_LEVEL;
         genesis
     }
 

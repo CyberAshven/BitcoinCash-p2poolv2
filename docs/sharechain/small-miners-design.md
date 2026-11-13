@@ -436,8 +436,8 @@ slice of a payee ---> at or above its level? --- yes ---> paid directly
 ### Levels
 
 ```text
-L_k = 546 * 2^k satoshis,  k = 0 .. 7
-    = 546, 1,092, 2,184, 4,368, 8,736, 17,472, 34,944, 69,888
+L_k = 546 * 2^k satoshis,  k = 1 .. 7
+    = 1,092, 2,184, 4,368, 8,736, 17,472, 34,944, 69,888
 ```
 
 546 is Bitcoin Cash's P2PKH dust limit, the floor. 69,888 is the cap, which
@@ -447,7 +447,7 @@ then one byte); a header above 7 does not decode:
 
 | Field | Contents |
 |---|---|
-| `payout_level` | `k`, 0 to 7 |
+| `payout_level` | `k`, 1 to 7 |
 
 A payee's level in a block is the `payout_level` of its newest credited entry in
 the window: the newest share, uncle or weak share paying that address. The
@@ -671,29 +671,20 @@ study", and the payout simulator's `scale` table):
 
 Still open:
 
-- **A level 0 payout that lands in the payout tree goes to the largest
-  payee.** The tree merges a payee whose amount, less its fee at 3 satoshis
-  a byte, is below dust into its last payee
-  (`payout_tree::merge_dust_payees`). The level 0 draw pays 546 satoshis,
-  the dust limit itself, so every level 0 winner past the coinbase's own
-  outputs (29,400 on a share without tokens, 79 on a token share) is merged
-  away. `payouts_at_scale_by_miner_class` (an ignored report in
-  `coinbase_budget/tests.rs`) pays one block through the split, the draw and
-  the tree: with home miners at level 0 and slices under 675 satoshis
-  (Bitcoin's hashrate, a pool at 1 to 2% of Bitcoin Cash, half its work
-  from home miners) they get 10% of their fair part on a share without
-  tokens and 0.03% on a token share, and the farms get the rest. At level 1
-  the same pool is paid 99.9%. A 12-node swarm with 1,200 miners
-  (`docs/simulation/RUNBOOK.md`, Test J) shows it on real nodes: on token
-  shares the miners at level 0 were paid 0.79 to 0.82 of their part of the
-  hashrate and the tree's largest payee eleven times what its work earned;
-  without tokens they were paid 1.02 to 1.05; with level 1 in place of level
-  0 they were paid 1.00. It cannot happen while the level 0 winners of
-  a block fit the coinbase: on chipnet today, or at today's hashrate, where
-  a node leaves a 1.2 TH/s miner at level 5. A fix is a rule change. The
-  candidates: draw the tree's payees that would be below dust among
-  themselves at 1,092 satoshis, so the pot stays theirs; or make level 1 the
-  lowest level.
+- **Level 0 is gone (2026-11-12).** A level 0 win, 546 satoshis, that
+  landed in the payout tree was below dust once the tree's fee was taken,
+  so the tree gave it to its largest payee
+  (`payout_tree::merge_dust_payees`). On a 12-node swarm with 1,200 miners
+  (`docs/simulation/RUNBOOK.md`, Test J) the miners at level 0 were paid
+  0.79 to 0.82 of their part of the hashrate on token shares, the tree's
+  largest payee eleven times what its work earned, and the same miners 1.00
+  with level 1 in place of level 0. The lowest level a share may carry is
+  now 1, 1,092 satoshis (`MIN_PAYOUT_LEVEL`, protocol segment
+  `levels-546x2-k1`): it stays above dust after the tree's fee at 3
+  satoshis a byte. What remains is small: a level's pot below one level
+  payment is paid whole to one payee, and a miner alone below its level
+  keeps its own slice, each under 1,092 satoshis a block, paid as it is in
+  the coinbase and merged in the tree.
 - **Every weak share is sent whole to every peer.** A node sends each weak
   share it accepts, as its own request, to every peer but the one it came
   from, so a node with eleven peers receives it eleven times: the 12-node

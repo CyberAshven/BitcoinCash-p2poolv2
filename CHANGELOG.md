@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Share-chain rule change on Bitcoin Cash, a flag day: payout level 0 is no
+longer valid (protocol segment `levels-546x2-k1`, store format 8, every
+genesis share re-pinned). A level 0 win pays 546 satoshis, which in the
+payout tree is below dust once the tree's fee is taken, so the tree gave it
+to its largest payee: on a 12-node swarm with 1,200 miners the miners at
+level 0 were paid 0.79 to 0.82 of their part of the hashrate on token
+shares, and 1.00 with level 1 in their place. A share's level is now 1 to 7
+(`MIN_PAYOUT_LEVEL`) and the smallest level payment 1,092 satoshis. A
+header, a weak share credit or a job token at level 0 does not decode,
+`[stratum] payout_level = 0` is refused, and a node never lowers a miner
+below level 1. A miner too small for three payments a month at level 1 is
+paid half as often as it was at level 0, and twice as much each time.
+
 A limits study runs upstream's five practical objections to the scaling
 ideas against what checking a share really costs a node
 (`docs/simulation/network-sim.md`, "Limits study"). An ignored timing test
