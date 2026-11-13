@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The dashboard is tested the way a visitor meets it. A test serves it over a
+small share chain and has headless Chrome load the overview and one page of
+each kind it links to; it follows every link a visitor could follow from
+there and fails on a page that does not answer, a stylesheet that does not
+load, or a link that leads nowhere. It is written in Rust and starts the
+browser itself: `CHROME` names it, else Chrome, Chromium or Edge in its
+usual place; without one the test is skipped on a developer's machine and
+fails in CI. CI also keeps a picture of each page as the
+`dashboard-screenshots` artifact. Its first run found a dead link, now
+fixed: the genesis share's page linked its all-zero parent hash as a share.
+
 Share-chain rule change on Bitcoin Cash, a flag day: a weak share a share
 carries is held to its carrier's time, not to each node's clock (protocol
 segment `weak3-64-100-48-256`, store format 9). The 120-second future limit
