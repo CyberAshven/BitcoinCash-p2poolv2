@@ -285,6 +285,14 @@ pub struct MinerShare {
     pub nephew: Option<String>,
     pub difficulty: String,
     pub weight: String,
+    /// Weak shares this share's body carries; `0` when the sender (an
+    /// older node) does not report it.
+    #[serde(default)]
+    pub weak_count: u16,
+    /// The weak shares credited to this address here; on a carrying share
+    /// this is 0 and `weak_count` above carries its own body's count.
+    #[serde(default)]
+    pub weak_shares: u32,
 }
 
 /// The PPLNS window as a whole.
@@ -303,6 +311,10 @@ pub struct Miner {
     pub window: Window,
     pub share_count: usize,
     pub uncle_count: usize,
+    /// Weak shares the window credits this address; `0` when the sender
+    /// (an older node) does not report it.
+    #[serde(default)]
+    pub weak_share_count: usize,
     pub share_fraction: f64,
     pub payout_fraction: f64,
     pub shares: Vec<MinerShare>,

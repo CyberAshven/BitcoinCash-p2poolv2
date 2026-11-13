@@ -184,6 +184,19 @@ pub fn MinersPage(page: usize) -> impl IntoView {
     }
 }
 
+/// The carried and credited weak-share totals for the Uncles credited
+/// tile, or nothing when both are 0 so the tile stays what `stat()`
+/// emits. The carried side sums the whole report, not the paged slice.
+fn weak_summary(report: &Miner) -> Option<(usize, usize)> {
+    let carried = report
+        .shares
+        .iter()
+        .map(|share| usize::from(share.weak_count))
+        .sum();
+    let credited = report.weak_share_count;
+    (carried > 0 || credited > 0).then_some((carried, credited))
+}
+
 /// The table of a miner's window shares, a page of them.
 fn window_shares(report: &Miner, page: usize) -> impl IntoView + use<> {
     let paging = Paging::of(page, report.shares.len());
@@ -198,11 +211,23 @@ fn window_shares(report: &Miner, page: usize) -> impl IntoView + use<> {
         .iter()
         .map(|share| {
             let is_uncle = share.nephew.is_some();
+            // A weak credit: an uncle whose nephew is itself, as the node
+            // marks the credited row.
+            let is_weak = share.nephew.as_deref() == Some(share.blockhash.as_str());
             view! {
                 <tr class:uncle-row=is_uncle>
                     <td>{share.height}</td>
                     <td>{share_link(&share.blockhash)}</td>
-                    <td>{if is_uncle { "uncle" } else { "share" }}</td>
+                    <td>
+                        {if is_weak { "weak" } else if is_uncle { "uncle" } else { "share" }}
+                        {(share.weak_count > 0)
+                            .then(|| {
+                                view! {
+                                    " "
+                                    <span class="badge-weak">{format!("{} weak", share.weak_count)}</span>
+                                }
+                            })}
+                    </td>
                     <td class="mono">{share.difficulty.clone()}</td>
                     <td class="mono">{share.weight.clone()}</td>
                 </tr>
@@ -349,7 +374,21 @@ pub fn MinerPage(address: String, page: usize) -> impl IntoView {
                             view! { {percent(report.payout_fraction)} }.into_any(),
                         )}
                         {stat("Shares in the window", view! { {in_window} }.into_any())}
-                        {stat("Uncles credited", view! { {report.uncle_count} }.into_any())}
+                        {match weak_summary(&report) {
+                            Some((carried, credited)) => view! {
+                                <div class="stat-item">
+                                    <div class="k">"Uncles credited"</div>
+                                    <div class="v">{report.uncle_count}</div>
+                                    <div class="k">"Weak shares"</div>
+                                    <small>{format!("{carried} carried, {credited} credited")}</small>
+                                </div>
+                            }
+                            .into_any(),
+                            None => {
+                                stat("Uncles credited", view! { {report.uncle_count} }.into_any())
+                                    .into_any()
+                            }
+                        }}
                         {stat("Hashrate", view! { {hashrate} }.into_any())}
                         {stat(
                             "Mining on",
