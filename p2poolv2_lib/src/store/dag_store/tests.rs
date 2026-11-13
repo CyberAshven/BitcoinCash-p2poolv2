@@ -3169,6 +3169,7 @@ fn test_share_info_serialization() {
         miner_address: make_test_share_program(1).into(),
         timestamp: 1_700_000_000,
         bits: CompactTarget::from_consensus(0x1b4188f5),
+        weak_count: 0,
         uncles: vec![],
     };
 
@@ -3207,6 +3208,7 @@ fn test_share_info_with_uncles_serialization() {
         miner_address: make_test_share_program(1).into(),
         timestamp: 1_700_000_020,
         bits: CompactTarget::from_consensus(0x1b4188f5),
+        weak_count: 0,
         uncles: vec![uncle],
     };
 
