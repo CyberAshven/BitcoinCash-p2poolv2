@@ -155,6 +155,14 @@ pub struct MinerShare {
     pub weight: String,
     /// Payout address the weight is paid to, as named by the share.
     pub payout_address: String,
+    /// Weak shares this row's share header says it carries
+    /// (`ShareHeader::weak_count`): above 0 on a carrying share, 0 on an
+    /// uncle and on a weak credit row.
+    pub weak_count: u16,
+    /// Weak shares credited by this row (its own weak work earned); 0 for a
+    /// share or an uncle row. A weak row names the carrying share as its
+    /// `blockhash` and `nephew`.
+    pub weak_shares: u32,
 }
 
 /// The node's share chain PPLNS window, and the snapshot of it `/miner`
@@ -656,6 +664,8 @@ fn miner_share(credit: &WindowCredit, cash_network: Option<BchShareNetwork>) -> 
         difficulty: credit.difficulty.to_string(),
         weight: credit.weight.to_string(),
         payout_address: payout_address_string(&credit.payout_address, cash_network),
+        weak_count: credit.weak_count,
+        weak_shares: credit.weak_shares,
     }
 }
 
