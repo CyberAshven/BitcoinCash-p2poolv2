@@ -64,6 +64,22 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace
 
+      # The run above loaded the dashboard in headless Chrome without
+      # pictures. This one has the browser draw one page of each kind, for
+      # a person to look at.
+      - name: Draw the dashboard in headless Chrome
+        env:
+          DASHBOARD_SCREENSHOTS: ${{ runner.temp }}/dashboard-screenshots
+        run: cargo test -p p2poolv2_api --lib browser
+
+      - name: Keep the dashboard pictures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: dashboard-screenshots
+          path: ${{ runner.temp }}/dashboard-screenshots
+          if-no-files-found: warn
+
       - name: Run sim-feature tests
         run: cargo nextest run -p p2poolv2_lib --features sim
 
