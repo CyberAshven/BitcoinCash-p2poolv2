@@ -318,6 +318,37 @@ fn check_future_time_limit(share_time: u32, current_time: u64) -> Result<(), Val
     Ok(())
 }
 
+/// The future limit of a weak share a share carries: at most
+/// `MAX_FUTURE_TIME_SECS` after the carrying share's own time. Both times are
+/// chain data, so every node reaches the same verdict. A carrier whose own
+/// time is too far ahead of a node's clock is not stored there yet, so the
+/// carrier's time is the one the clock has already held to its limit.
+fn check_carried_weak_time(weak_time: u32, carrier_time: u32) -> Result<(), ValidationError> {
+    let weak_timestamp = u64::from(weak_time);
+    let carrier_timestamp = u64::from(carrier_time);
+    if weak_timestamp > carrier_timestamp.saturating_add(MAX_FUTURE_TIME_SECS) {
+        return Err(ValidationError::consensus(format!(
+            "Weak share timestamp {weak_timestamp} is more than {MAX_FUTURE_TIME_SECS} seconds after its carrier's {carrier_timestamp}"
+        )));
+    }
+    Ok(())
+}
+
+/// The future limit of a weak share relayed alone: at most
+/// `MAX_FUTURE_TIME_SECS` ahead of `current_time`, the local clock in seconds
+/// since the epoch. A weak share ahead of it is early, not invalid: the
+/// failure is `Recoverable`, so the weak share is held and checked again, and
+/// no verdict on it depends on this node's clock.
+fn check_relayed_weak_time(weak_time: u32, current_time: u64) -> Result<(), ValidationError> {
+    let weak_timestamp = u64::from(weak_time);
+    if weak_timestamp > current_time.saturating_add(MAX_FUTURE_TIME_SECS) {
+        return Err(ValidationError::recoverable(format!(
+            "Weak share timestamp {weak_timestamp} is more than {MAX_FUTURE_TIME_SECS} seconds ahead of local time {current_time}"
+        )));
+    }
+    Ok(())
+}
+
 /// The median time past rule every share timestamp follows: strictly greater
 /// than the median of `ancestor_times`, up to `MTP_WINDOW` ancestors ending
 /// at the parent. A share with no ancestor times has nothing to be measured
