@@ -37,8 +37,10 @@ async fn a_weak_share_breaking_a_rule_is_counted_as_invalid() {
         .returning(|| Ok(Some(5)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
+    let (_fetch_tx, fetch_rx) = mpsc::channel(1);
     let mut worker = WeakShareWorker::new(
         events_rx,
+        fetch_rx,
         pool.clone(),
         chain_store_handle,
         Arc::new(validator),
@@ -83,8 +85,10 @@ async fn a_weak_share_that_cannot_be_checked_is_counted_as_unchecked() {
         .returning(|| Ok(Some(5)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
+    let (_fetch_tx, fetch_rx) = mpsc::channel(1);
     let mut worker = WeakShareWorker::new(
         events_rx,
+        fetch_rx,
         pool.clone(),
         chain_store_handle,
         Arc::new(validator),
@@ -129,8 +133,10 @@ async fn a_weak_share_this_nodes_miner_found_is_counted_as_found() {
         .returning(|| Ok(Some(5)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
+    let (_fetch_tx, fetch_rx) = mpsc::channel(1);
     let mut worker = WeakShareWorker::new(
         events_rx,
+        fetch_rx,
         pool.clone(),
         chain_store_handle,
         Arc::new(validator),
@@ -175,8 +181,10 @@ async fn a_weak_share_from_a_peer_is_counted_as_received() {
         .returning(|| Ok(Some(5)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
+    let (_fetch_tx, fetch_rx) = mpsc::channel(1);
     let mut worker = WeakShareWorker::new(
         events_rx,
+        fetch_rx,
         pool.clone(),
         chain_store_handle,
         Arc::new(validator),
@@ -223,8 +231,10 @@ async fn a_weak_share_on_an_unknown_parent_is_held_and_its_peer_asked_for_the_pa
     });
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, mut swarm_rx) = mpsc::channel::<SwarmSend<()>>(4);
+    let (_fetch_tx, fetch_rx) = mpsc::channel(1);
     let mut worker = WeakShareWorker::new(
         events_rx,
+        fetch_rx,
         pool.clone(),
         chain_store_handle,
         Arc::new(validator),
@@ -273,8 +283,10 @@ async fn a_second_weak_share_on_the_same_unknown_parent_does_not_ask_again() {
     });
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, mut swarm_rx) = mpsc::channel::<SwarmSend<()>>(4);
+    let (_fetch_tx, fetch_rx) = mpsc::channel(1);
     let mut worker = WeakShareWorker::new(
         events_rx,
+        fetch_rx,
         pool.clone(),
         chain_store_handle,
         Arc::new(validator),
@@ -335,8 +347,10 @@ async fn a_held_weak_share_is_checked_and_pooled_once_its_parent_arrives() {
         .returning(|| Ok(Some(10)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(4);
+    let (_fetch_tx, fetch_rx) = mpsc::channel(1);
     let mut worker = WeakShareWorker::new(
         events_rx,
+        fetch_rx,
         pool.clone(),
         chain_store_handle,
         Arc::new(validator),
@@ -395,8 +409,10 @@ async fn a_held_weak_share_whose_parent_arrives_too_deep_is_dropped_unchecked() 
         .returning(|| Ok(Some(3 + WEAK_DEPTH)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(4);
+    let (_fetch_tx, fetch_rx) = mpsc::channel(1);
     let mut worker = WeakShareWorker::new(
         events_rx,
+        fetch_rx,
         pool.clone(),
         chain_store_handle,
         Arc::new(validator),
@@ -452,8 +468,10 @@ async fn an_altered_copy_relayed_first_does_not_keep_the_real_weak_share_out() {
         .returning(|| Ok(Some(5)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
+    let (_fetch_tx, fetch_rx) = mpsc::channel(1);
     let mut worker = WeakShareWorker::new(
         events_rx,
+        fetch_rx,
         pool.clone(),
         chain_store_handle,
         Arc::new(validator),
@@ -539,8 +557,10 @@ async fn a_weak_share_that_cannot_be_checked_yet_is_checked_again_once_the_tip_m
         });
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
+    let (_fetch_tx, fetch_rx) = mpsc::channel(1);
     let mut worker = WeakShareWorker::new(
         events_rx,
+        fetch_rx,
         pool.clone(),
         chain_store_handle,
         Arc::new(validator),
@@ -592,8 +612,10 @@ async fn a_replayed_weak_share_too_deep_to_carry_is_dropped_before_its_checks() 
         .returning(|| Ok(Some(3 + WEAK_DEPTH)));
     let (_events_tx, events_rx) = mpsc::channel(1);
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
+    let (_fetch_tx, fetch_rx) = mpsc::channel(1);
     let mut worker = WeakShareWorker::new(
         events_rx,
+        fetch_rx,
         pool.clone(),
         chain_store_handle,
         Arc::new(validator),

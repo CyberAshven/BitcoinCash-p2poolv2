@@ -10,11 +10,12 @@ use self::peer_block_knowledge::PeerBlockKnowledge;
 use crate::config::NetworkConfig;
 use crate::node::SwarmSend;
 use crate::node::behaviour::request_response::RequestResponseEvent;
-use crate::node::messages::{InventoryMessage, Message};
+use crate::node::messages::{GetData, InventoryMessage, Message};
 use crate::node::p2p_message_handlers::receivers::block_receiver::BlockReceiverHandle;
 use crate::node::request_sender::RequestSender;
 use crate::node::response_worker::{ResponseWorkerEvent, ResponseWorkerSender};
 use crate::node::validation_worker::ValidationSender;
+use crate::node::weak_share_fetch::WeakFetchEvent;
 use crate::node::weak_share_worker::WeakShareEventSender;
 use crate::service::PeerHandle;
 use crate::service::p2p_service::RequestContext;
@@ -364,6 +365,19 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
         Ok(())
     }
 
+    /// A weak-share body or a `NotFound` for one, or `response` when it is
+    /// some other message. The body and the `NotFound` are what a fetch
+    /// asked for, so they go to the weak-share worker instead of the
+    /// response worker.
+    #[allow(clippy::result_large_err)]
+    fn weak_fetch_event(peer: PeerId, response: Message) -> Result<WeakFetchEvent, Message> {
+        match response {
+            Message::WeakShare(weak_share) => Ok(WeakFetchEvent::Body { peer, weak_share }),
+            Message::NotFound(GetData::WeakShare(hash)) => Ok(WeakFetchEvent::NotFound { hash }),
+            other => Err(other),
+        }
+    }
+
     /// Dispatch a response by calling handle_response directly.
     ///
     /// Records peer block knowledge before processing. Responses bypass
@@ -380,6 +394,26 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
         response: Message,
     ) -> Result<(), Box<dyn Error>> {
         self.record_peer_knowledge(&peer, &response);
+
+        // A weak-share fetch is a queue send, not a header walk, so it does
+        // not go to the response worker. A node with no weak pool leaves the
+        // message on that path. `is_some` ends before the message is moved,
+        // so the later send on the response worker can borrow `self`.
+        let response = if self.weak_share_tx.is_some() {
+            match Self::weak_fetch_event(peer, response) {
+                Ok(event) => {
+                    if let Some(sender) = self.weak_share_tx.as_ref()
+                        && sender.try_send_fetch(event).is_err()
+                    {
+                        debug!("Weak fetch queue full, dropping response from {peer}");
+                    }
+                    return Ok(());
+                }
+                Err(response) => response,
+            }
+        } else {
+            response
+        };
 
         // Hand the response to the response worker rather than processing it
         // here: handle_response can be heavy (a ShareHeaders batch runs many
