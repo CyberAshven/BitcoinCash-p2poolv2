@@ -53,3 +53,39 @@ jobs:
           tool: cargo-deny
 
       - run: cargo deny check advisories
+
+  # Semgrep community rules for Rust, committed secrets, these workflows and
+  # the Dockerfiles: a second static check beside CodeQL, with rules CodeQL
+  # does not have. Its findings go to the repository's code scanning alerts.
+  # Non-blocking until the first findings are triaged.
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    continue-on-error: true
+    permissions:
+      contents: read
+      security-events: write
+    container:
+      image: semgrep/semgrep:1.185.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - name: Scan
+        run: >-
+          semgrep scan --metrics=off
+          --config p/rust --config p/secrets
+          --config p/github-actions --config p/dockerfile
+          --sarif --output semgrep.sarif
+
+      - name: Findings
+        if: always()
+        run: semgrep scan --metrics=off --config p/rust --config p/secrets --config p/github-actions --config p/dockerfile || true
+
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
