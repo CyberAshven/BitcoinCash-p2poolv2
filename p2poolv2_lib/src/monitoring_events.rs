@@ -92,6 +92,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 1700000000,
             bits: CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![],
         };
         let event = MonitoringEvent::Share(share);
@@ -143,6 +144,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 1_700_000_000,
             bits: CompactTarget::from_consensus(0x1b4188f5),
+            weak_count: 0,
             uncles: vec![],
         };
 
@@ -184,6 +186,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 1_700_000_020,
             bits: CompactTarget::from_consensus(0x1b4188f5),
+            weak_count: 0,
             uncles: vec![uncle],
         };
 

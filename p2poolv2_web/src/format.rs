@@ -65,6 +65,31 @@ pub fn fmt_difficulty(difficulty: f64) -> String {
         .to_string()
 }
 
+/// A share's weak ratio `R` as the dashboard spells it: `R` itself, then
+/// how many times the share chain's minimum target its weak target is.
+/// `R` counts minimum targets in `WEAK_RATIO_UNIT` (1024) parts, whose
+/// definition lives in `p2poolv2_lib`, which this crate does not depend
+/// on; the style guard compares this with the pages' formatter.
+pub fn fmt_weak_ratio(weak_ratio: u32) -> String {
+    format!(
+        "R = {weak_ratio} ({}x the minimum target)",
+        three_digits(f64::from(weak_ratio) / 1024.0)
+    )
+}
+
+/// The current block effort: the work accumulated since the last accepted
+/// find as a percent of the network difficulty (whole percents, over 100%
+/// meaning a block is overdue). The formula lives here, as it does in
+/// Grafana. No difficulty yet is the dash, not a zero.
+pub fn fmt_effort(work_since_last_block: Option<f64>, network_difficulty: Option<f64>) -> String {
+    match (work_since_last_block, network_difficulty) {
+        (Some(work), Some(difficulty)) if difficulty > 0.0 => {
+            format!("{:.0}%", work / difficulty * 100.0)
+        }
+        _ => UNKNOWN.to_string(),
+    }
+}
+
 /// Days since 1970-01-01 to a civil (year, month, day), Howard Hinnant's
 /// algorithm.
 fn civil_from_days(days: i64) -> (i64, usize, u32) {
@@ -114,6 +139,39 @@ pub fn fmt_ago(now: u64, then: u64) -> String {
         60..=3_599 => format!("{} min ago", seconds / 60),
         3_600..=86_399 => format!("{} h ago", seconds / 3_600),
         _ => format!("{} d ago", seconds / 86_400),
+    }
+}
+
+/// A peer's uptime, compact: 42 s, 13 min, 4h 12m, 2d 03h.
+pub fn fmt_duration(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs} s"),
+        60..=3_599 => format!("{} min", secs / 60),
+        3_600..=86_399 => format!("{}h {:02}m", secs / 3_600, secs % 3_600 / 60),
+        _ => format!("{}d {:02}h", secs / 86_400, secs % 86_400 / 3_600),
+    }
+}
+
+/// A ping round trip in milliseconds: sub-millisecond values keep their
+/// fraction, so a loopback peer reads 0.91 ms instead of a fabricated 0.
+pub fn fmt_latency(latency_ms: f64) -> String {
+    if latency_ms < 1.0 {
+        format!("{latency_ms:.2} ms")
+    } else if latency_ms < 10.0 {
+        format!("{latency_ms:.1} ms")
+    } else {
+        format!("{latency_ms:.0} ms")
+    }
+}
+
+/// A peer's version cell: Identify's agent_version arrives as
+/// "p2poolv2/<semver>", so the cell shows just the version, or the dash
+/// when the peer sent none (or an empty one).
+pub fn agent_version(agent: Option<&str>) -> String {
+    let version = agent.map(|agent| agent.split_once('/').map_or(agent, |(_, suffix)| suffix));
+    match version {
+        Some(version) if !version.is_empty() => version.to_string(),
+        _ => UNKNOWN.to_string(),
     }
 }
 
@@ -197,6 +255,16 @@ pub fn work_from_bits(bits: u32) -> f64 {
     difficulty_from_bits(bits) * HASHES_PER_DIFFICULTY
 }
 
+/// A weak share's difficulty from its compact target, hex the way the
+/// share lookup spells it (`0x1c0448d7`). Bits that do not parse render
+/// as the dash, as a list row with no difficulty does.
+pub fn weak_difficulty(bits: &str) -> String {
+    let difficulty = u32::from_str_radix(bits.trim_start_matches("0x"), 16)
+        .ok()
+        .map(difficulty_from_bits);
+    optional(difficulty, fmt_difficulty)
+}
+
 /// Block difficulty implied by a network hashrate, the inverse of how the
 /// node estimates the hashrate from the difficulty.
 pub fn difficulty_from_network_hashrate(hashes_per_second: f64) -> f64 {
@@ -251,6 +319,32 @@ mod tests {
     }
 
     #[test]
+    fn test_peer_uptimes_pick_a_compact_unit() {
+        assert_eq!(fmt_duration(0), "0 s");
+        assert_eq!(fmt_duration(42), "42 s");
+        assert_eq!(fmt_duration(1_800), "30 min");
+        assert_eq!(fmt_duration(8_280), "2h 18m");
+        assert_eq!(fmt_duration(90_000), "1d 01h");
+    }
+
+    #[test]
+    fn test_latencies_keep_sub_millisecond_precision() {
+        assert_eq!(fmt_latency(0.0), "0.00 ms");
+        assert_eq!(fmt_latency(0.914), "0.91 ms");
+        assert_eq!(fmt_latency(5.44), "5.4 ms");
+        assert_eq!(fmt_latency(42.6), "43 ms");
+    }
+
+    #[test]
+    fn test_peer_versions_drop_the_agent_prefix() {
+        assert_eq!(agent_version(Some("p2poolv2/0.0.1-alpha")), "0.0.1-alpha");
+        assert_eq!(agent_version(Some("custom-agent")), "custom-agent");
+        assert_eq!(agent_version(Some("p2poolv2/")), UNKNOWN);
+        assert_eq!(agent_version(Some("")), UNKNOWN);
+        assert_eq!(agent_version(None), UNKNOWN);
+    }
+
+    #[test]
     fn test_long_hashes_are_shortened_on_characters() {
         assert_eq!(short("abc"), "abc");
         let hash = "00000000000cb752459c2b08e1955e5f33252b0207b1c7b5b2f069d5254b9025";
@@ -275,6 +369,22 @@ mod tests {
         assert!((difficulty_from_bits(0x1c00_ffff) - 256.0).abs() < 1e-9);
         assert_eq!(difficulty_from_bits(0x1d00_0000), 0.0);
         assert!((work_from_bits(0x1d00_ffff) - HASHES_PER_DIFFICULTY).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_weak_ratio_spells_out_its_multiple_of_the_minimum() {
+        assert_eq!(
+            fmt_weak_ratio(262_144),
+            "R = 262144 (256x the minimum target)"
+        );
+        assert_eq!(fmt_weak_ratio(1024), "R = 1024 (1.00x the minimum target)");
+    }
+
+    #[test]
+    fn test_weak_difficulty_reads_hex_bits_with_or_without_the_prefix() {
+        assert_eq!(weak_difficulty("0x1c0448d7"), "59.7");
+        assert_eq!(weak_difficulty("1d00ffff"), "1.00");
+        assert_eq!(weak_difficulty("not hex"), UNKNOWN);
     }
 
     #[test]

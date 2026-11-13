@@ -965,6 +965,7 @@ impl OrganiseWorker {
             miner_address: header.miner_address,
             timestamp: header.time,
             bits: header.bits,
+            weak_count: header.weak_count,
             uncles: uncle_infos,
         };
         let event = MonitoringEvent::Share(share_info);

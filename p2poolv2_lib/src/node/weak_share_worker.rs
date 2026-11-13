@@ -48,7 +48,8 @@ use crate::shares::weak_pool::{
 };
 use crate::store::writer::StoreError;
 use bitcoin::BlockHash;
-use std::collections::HashMap;
+use libp2p::PeerId;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -198,6 +199,12 @@ pub struct WeakShareWorker<C> {
     cache: WeakPayoutCache,
     /// Where the request for a held weak share's parent goes.
     swarm_tx: mpsc::Sender<SwarmSend<C>>,
+    /// The peers asked for a held weak share's parent since the last
+    /// [`HELD_RELEASE_INTERVAL`] tick. The request is the same headers
+    /// request from this node's tip whatever the parent, so a peer is asked
+    /// at most once an interval, however many weak shares on new parents it
+    /// sends.
+    parents_asked: HashSet<PeerId>,
 }
 
 impl<C> WeakShareWorker<C> {
@@ -221,6 +228,7 @@ impl<C> WeakShareWorker<C> {
             pplns_window,
             cache: WeakPayoutCache::new(),
             swarm_tx,
+            parents_asked: HashSet::new(),
         }
     }
 
@@ -245,6 +253,7 @@ impl<C> WeakShareWorker<C> {
                     None => self.fetch_closed = true,
                 },
                 _ = release.tick() => {
+                    self.parents_asked.clear();
                     let mut sends = self.release_held();
                     sends.extend(self.fetch.poll(Instant::now()));
                     self.dispatch_fetches(sends).await;
@@ -354,7 +363,8 @@ impl<C> WeakShareWorker<C> {
     }
 
     /// Hold a weak share whose parent is unknown, and ask the peer that sent
-    /// it for the parent when no held weak share waited for it before.
+    /// it for the parent when no held weak share waited for it before and
+    /// that peer was not asked already in this [`HELD_RELEASE_INTERVAL`].
     ///
     /// A share the pool kept is marked held in the fetch book, so a second
     /// announcement does not fetch another copy. One the pool did not keep
@@ -374,15 +384,23 @@ impl<C> WeakShareWorker<C> {
             self.fetch.held(pow_hash);
         }
         if let (HoldOutcome::NewParent, Some(peer)) = (outcome, source.peer())
-            && let Err(error) = request_headers_for_missing_blocks(
+            && !self.parents_asked.contains(&peer)
+        {
+            match request_headers_for_missing_blocks(
                 &[parent],
                 peer,
                 self.chain_store_handle.clone(),
                 self.swarm_tx.clone(),
             )
             .await
-        {
-            debug!("Failed to ask peer {peer} for weak share parent {parent}: {error}");
+            {
+                Ok(()) => {
+                    self.parents_asked.insert(peer);
+                }
+                Err(error) => {
+                    debug!("Failed to ask peer {peer} for weak share parent {parent}: {error}");
+                }
+            }
         }
         Vec::new()
     }

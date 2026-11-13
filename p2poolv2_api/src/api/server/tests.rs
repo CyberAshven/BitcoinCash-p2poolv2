@@ -25,6 +25,7 @@ use p2poolv2_lib::address::share_owner::ShareOwner;
 use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
 use p2poolv2_lib::shares::share_block::ShareBlock;
 use p2poolv2_lib::shares::weak_pool::{WeakPool, WeakShareSource};
+use p2poolv2_lib::store::found_block::EffortSnapshot;
 use p2poolv2_lib::stratum::work::block_template::BlockTemplate;
 use p2poolv2_lib::stratum::work::coinbase::parse_address;
 use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
@@ -140,6 +141,7 @@ fn test_found_blocks_exposition_lists_each_block() {
         .unwrap(),
         bitcoin_time: 1713571767,
         miner_bitcoin_address: "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_string(),
+        effort: None,
     }];
 
     let exposition = found_blocks_exposition(&found_blocks, Network::Bitcoin);
@@ -149,6 +151,37 @@ fn test_found_blocks_exposition_lists_each_block() {
     assert!(exposition.contains(
             "found_block_time_seconds{blockhash=\"0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5\",height=\"840000\",miner=\"bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh\",network=\"main\"} 1713571767\n"
         ));
+    // A block accepted without a snapshot gets no effort line, so no query
+    // reads its missing annotation as zero effort.
+    assert!(exposition.contains("# TYPE found_block_effort gauge\n"));
+    assert!(!exposition.contains("found_block_effort{"));
+}
+
+#[test]
+fn test_found_blocks_exposition_labels_effort_of_annotated_blocks() {
+    let found_blocks = vec![FoundBlock {
+        bitcoin_height: 840000,
+        bitcoin_blockhash: bitcoin::BlockHash::from_str(
+            "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
+        )
+        .unwrap(),
+        share_blockhash: bitcoin::BlockHash::from_str(
+            "00000000000000000001b4e3a8b6c1d2e3f405162738495a6b7c8d9e0f1a2b3c",
+        )
+        .unwrap(),
+        bitcoin_time: 1713571767,
+        miner_bitcoin_address: "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_string(),
+        effort: Some(EffortSnapshot {
+            work: 900_000.0,
+            network_difficulty: Some(600_000.0),
+        }),
+    }];
+
+    let exposition = found_blocks_exposition(&found_blocks, Network::Bitcoin);
+
+    assert!(exposition.contains(
+            "found_block_effort{blockhash=\"0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5\",height=\"840000\",miner=\"bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh\",network=\"main\"} 1.5\n"
+        ));
 }
 
 #[test]
@@ -157,6 +190,7 @@ fn test_found_blocks_exposition_with_no_blocks() {
 
     assert!(exposition.contains("found_blocks_total 0\n"));
     assert!(!exposition.contains("found_block_time_seconds{"));
+    assert!(!exposition.contains("found_block_effort{"));
 }
 
 #[tokio::test]
@@ -881,7 +915,32 @@ async fn test_hashrate_route_serves_history() {
     assert_eq!(status, http::StatusCode::OK);
     assert_eq!(body["pool_hashrate"], 5.0);
     assert!(body["local_hashrate"].is_null());
+    // Fresh node: no work accumulated since a find (none happened), and no
+    // template has been built yet, so the denominator is null.
+    assert_eq!(body["work_since_last_block"], 0.0);
+    assert!(body["network_difficulty"].is_null());
     assert_eq!(body["history"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_hashrate_route_serves_accumulated_effort_work() {
+    let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+    let app = build_router(state.clone(), state.app_config.clone());
+    state
+        .metrics_handle
+        .record_confirmed_share(1500.0)
+        .await
+        .unwrap();
+    state
+        .metrics_handle
+        .record_confirmed_share(2500.0)
+        .await
+        .unwrap();
+
+    let (status, body) = get_json(app, "/hashrate?window=600").await;
+    assert_eq!(status, http::StatusCode::OK);
+    assert_eq!(body["work_since_last_block"], 4000.0);
+    assert!(body["network_difficulty"].is_null());
 }
 
 #[tokio::test]
@@ -901,6 +960,65 @@ async fn test_found_blocks_route_returns_json_list() {
     let (status, body) = get_json(app, "/found_blocks").await;
     assert_eq!(status, http::StatusCode::OK);
     assert!(body.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_found_blocks_route_reports_effort_snapshots() {
+    let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+    let annotated = FoundBlock {
+        bitcoin_height: 100,
+        bitcoin_blockhash: bitcoin::BlockHash::from_str(&"aa".repeat(32)).unwrap(),
+        share_blockhash: bitcoin::BlockHash::from_str(&"bb".repeat(32)).unwrap(),
+        bitcoin_time: 1_700_000_000,
+        miner_bitcoin_address: "miner".to_string(),
+        effort: None,
+    };
+    let unannotated = FoundBlock {
+        bitcoin_height: 99,
+        bitcoin_blockhash: bitcoin::BlockHash::from_str(&"cc".repeat(32)).unwrap(),
+        share_blockhash: bitcoin::BlockHash::from_str(&"dd".repeat(32)).unwrap(),
+        bitcoin_time: 1_699_999_999,
+        miner_bitcoin_address: "miner".to_string(),
+        effort: None,
+    };
+    state
+        .chain_store_handle
+        .record_accepted_found_block(annotated.clone())
+        .await
+        .unwrap();
+    state
+        .chain_store_handle
+        .set_accepted_found_block_effort(
+            annotated.bitcoin_blockhash,
+            EffortSnapshot {
+                work: 900_000.0,
+                network_difficulty: Some(600_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    state
+        .chain_store_handle
+        .record_accepted_found_block(unannotated)
+        .await
+        .unwrap();
+
+    let (status, body) = get_json(
+        build_router(state.clone(), state.app_config.clone()),
+        "/found_blocks",
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK);
+    let blocks = body.as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0]["bitcoin_height"], 100);
+    assert_eq!(blocks[0]["effort"]["work"], serde_json::json!(900_000.0));
+    assert_eq!(
+        blocks[0]["effort"]["network_difficulty"],
+        serde_json::json!(600_000.0)
+    );
+    assert_eq!(blocks[1]["bitcoin_height"], 99);
+    assert!(blocks[1]["effort"].is_null());
 }
 
 #[tokio::test]

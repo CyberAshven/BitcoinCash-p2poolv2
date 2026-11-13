@@ -610,6 +610,61 @@ async fn a_flood_of_weak_shares_on_unknown_parents_stays_within_the_bounds() {
     assert_eq!(oldest_kept.weak_share.header.bitcoin_header.nonce, 100);
 }
 
+/// A peer that floods the held weak shares past their bounds pushes out
+/// only its own: an honest peer's held weak shares, older than the flood,
+/// stay held.
+#[tokio::test]
+async fn a_peer_flooding_the_held_weak_shares_pushes_out_only_its_own() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let unknown_parent = |nonce: u32| {
+        let mut parent = [0; 32];
+        parent[..4].copy_from_slice(&nonce.to_le_bytes());
+        BlockHash::from_byte_array(parent)
+    };
+    let honest = WeakShareSource::Peer(PeerId::random());
+    let flooder = WeakShareSource::Peer(PeerId::random());
+    let honest_count = 5;
+    for nonce in 0..honest_count {
+        pool.hold(test_weak_share_on(unknown_parent(nonce), nonce), honest);
+    }
+    let flood = MAX_HELD_WEAK_SHARES as u32 + 50;
+    for nonce in honest_count..honest_count + flood {
+        pool.hold(test_weak_share_on(unknown_parent(nonce), nonce), flooder);
+    }
+
+    let state = pool.lock();
+    assert_eq!(state.held.len(), MAX_HELD_WEAK_SHARES);
+    let honest_held: Vec<u32> = state
+        .held
+        .values()
+        .filter(|held| held.source == honest)
+        .map(|held| held.weak_share.header.bitcoin_header.nonce)
+        .collect();
+    assert_eq!(honest_held, (0..honest_count).collect::<Vec<_>>());
+    assert_eq!(
+        state.held_by_source[&flooder].keys.len(),
+        MAX_HELD_WEAK_SHARES - honest_count as usize
+    );
+    assert_eq!(state.counts.refused.unknown_parent, 55);
+    assert_eq!(
+        state.held_bytes,
+        state
+            .held_by_source
+            .values()
+            .map(|from_source| from_source.bytes)
+            .sum::<usize>()
+    );
+    assert_eq!(
+        state.held.len(),
+        state
+            .held_by_source
+            .values()
+            .map(|from_source| from_source.keys.len())
+            .sum::<usize>()
+    );
+}
+
 /// More peers than `MAX_PEER_ALLOWANCES` sending weak shares at once leave
 /// at most that many allowances remembered.
 #[tokio::test]

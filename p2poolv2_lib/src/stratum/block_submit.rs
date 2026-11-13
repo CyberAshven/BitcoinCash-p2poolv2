@@ -18,7 +18,7 @@
 
 use crate::accounting::stats::metrics::MetricsHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
-use crate::store::found_block::FoundBlock;
+use crate::store::found_block::{EffortSnapshot, FoundBlock};
 use bitcoin::Block;
 use bitcoindrpc::{BitcoindRpcClient, SubmitBlockOutcome};
 use std::sync::Arc;
@@ -148,10 +148,16 @@ impl BlockSubmission {
 pub struct FoundBlockAcceptance {
     pub store: ChainStoreHandle,
     pub found: FoundBlock,
+    /// Network difficulty of the header that claimed the block, kept so the
+    /// effort snapshot at acceptance can divide the reset work by it.
+    pub network_difficulty: Option<f64>,
 }
 
 impl FoundBlockAcceptance {
-    /// Persist a positive node verdict before resetting the effort metric.
+    /// Persist a positive node verdict before resetting the effort metric,
+    /// then keep the reset work as the accepted block's effort snapshot.
+    /// A snapshot that fails to write is logged: the accepted block stands
+    /// without effort rather than the find being retried or dropped.
     pub async fn record(&self, result: &BlockSubmission, metrics: &MetricsHandle) {
         if result.is_accepted() {
             match self
@@ -159,15 +165,44 @@ impl FoundBlockAcceptance {
                 .record_accepted_found_block(self.found.clone())
                 .await
             {
-                Ok(true) => {
-                    let _ = metrics.reset_block_effort().await;
-                }
+                Ok(true) => self.record_effort_snapshot(metrics).await,
                 Ok(false) => {}
                 Err(error) => error!(
                     "Cannot record accepted BCH block {}: {error}",
                     self.found.bitcoin_blockhash
                 ),
             }
+        }
+    }
+
+    /// Take the pre-reset work from the metrics actor and keep it, with the
+    /// network difficulty captured at construction, against the accepted
+    /// block. Only the first acceptance of a block reaches here: duplicate
+    /// verdicts find the accepted record already present.
+    async fn record_effort_snapshot(&self, metrics: &MetricsHandle) {
+        let work = match metrics.reset_block_effort().await {
+            Ok(work) => work,
+            Err(error) => {
+                warn!(
+                    "Metrics actor stopped, effort not reset for block {}: {error}",
+                    self.found.bitcoin_blockhash
+                );
+                return;
+            }
+        };
+        let snapshot = EffortSnapshot {
+            work,
+            network_difficulty: self.network_difficulty,
+        };
+        if let Err(error) = self
+            .store
+            .set_accepted_found_block_effort(self.found.bitcoin_blockhash, snapshot)
+            .await
+        {
+            warn!(
+                "Cannot keep the effort snapshot for block {}: {error}",
+                self.found.bitcoin_blockhash
+            );
         }
     }
 }

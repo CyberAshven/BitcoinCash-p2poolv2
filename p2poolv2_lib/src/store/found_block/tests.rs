@@ -30,6 +30,7 @@ fn test_confirmed_share_meeting_claimed_target_remains_unverified_candidate() {
             share_blockhash: share.block_hash(),
             bitcoin_time: share.header.bitcoin_header.time,
             miner_bitcoin_address: share.header.miner_bitcoin_address.to_string(),
+            effort: None,
         }]
     );
 }
@@ -192,6 +193,7 @@ async fn test_accepted_block_is_serialized_and_recorded_once_before_share_persis
         share_blockhash: share.block_hash(),
         bitcoin_time: share.header.bitcoin_header.time,
         miner_bitcoin_address: share.header.miner_bitcoin_address.to_string(),
+        effort: None,
     };
     assert!(!chain_store.share_block_exists(&share.block_hash()));
     assert!(
@@ -211,4 +213,102 @@ async fn test_accepted_block_is_serialized_and_recorded_once_before_share_persis
     assert_eq!(chain_store.get_found_blocks().unwrap(), vec![accepted]);
     assert!(chain_store.get_candidate_found_blocks().unwrap().is_empty());
     assert!(!chain_store.share_block_exists(&share.block_hash()));
+}
+
+/// A find's effort snapshot is written after the accepted block and read
+/// back joined to it: the work since the previous find over the network
+/// difficulty of the header that claimed it.
+#[tokio::test]
+async fn test_effort_snapshot_joins_onto_the_accepted_block() {
+    let (chain_store, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let share = TestShareBlockBuilder::new().nonce(0xe9695792).build();
+    let accepted = FoundBlock {
+        bitcoin_height: share.header.bitcoin_height,
+        bitcoin_blockhash: share.header.bitcoin_header.block_hash(),
+        share_blockhash: share.block_hash(),
+        bitcoin_time: share.header.bitcoin_header.time,
+        miner_bitcoin_address: share.header.miner_bitcoin_address.to_string(),
+        effort: None,
+    };
+    assert!(
+        chain_store
+            .record_accepted_found_block(accepted.clone())
+            .await
+            .unwrap()
+    );
+    let snapshot = EffortSnapshot {
+        work: 460.5,
+        network_difficulty: Some(447_000.0),
+    };
+    chain_store
+        .set_accepted_found_block_effort(accepted.bitcoin_blockhash, snapshot)
+        .await
+        .unwrap();
+    let mut expected = accepted;
+    expected.effort = Some(snapshot);
+    assert_eq!(chain_store.get_found_blocks().unwrap(), vec![expected]);
+}
+
+/// The snapshot lives in its own column family beside the accepted record
+/// and survives reopening the store.
+#[test]
+fn test_effort_snapshot_survives_reopen() {
+    let temp_dir = tempdir().unwrap();
+    let path = temp_dir.path().to_str().unwrap().to_string();
+    let share = TestShareBlockBuilder::new().nonce(0xe9695792).build();
+    let accepted = FoundBlock {
+        bitcoin_height: share.header.bitcoin_height,
+        bitcoin_blockhash: share.header.bitcoin_header.block_hash(),
+        share_blockhash: share.block_hash(),
+        bitcoin_time: share.header.bitcoin_header.time,
+        miner_bitcoin_address: share.header.miner_bitcoin_address.to_string(),
+        effort: None,
+    };
+    let snapshot = EffortSnapshot {
+        work: 33.0,
+        network_difficulty: Some(447_000.0),
+    };
+    {
+        let store = Store::new(path.clone(), false).unwrap();
+        assert!(store.record_accepted_found_block(&accepted).unwrap());
+        store
+            .set_accepted_found_block_effort(&accepted.bitcoin_blockhash, snapshot)
+            .unwrap();
+    }
+    let reopened = Store::new(path, false).unwrap();
+    let mut expected = accepted;
+    expected.effort = Some(snapshot);
+    assert_eq!(reopened.get_found_blocks().unwrap(), vec![expected]);
+}
+
+/// Read-only tools never request the effort column family: they open a
+/// store that has one, read the accepted finds, and report no effort.
+#[test]
+fn test_read_only_open_reads_found_blocks_without_effort() {
+    let temp_dir = tempdir().unwrap();
+    let path = temp_dir.path().to_str().unwrap().to_string();
+    let share = TestShareBlockBuilder::new().nonce(0xe9695792).build();
+    let accepted = FoundBlock {
+        bitcoin_height: share.header.bitcoin_height,
+        bitcoin_blockhash: share.header.bitcoin_header.block_hash(),
+        share_blockhash: share.block_hash(),
+        bitcoin_time: share.header.bitcoin_header.time,
+        miner_bitcoin_address: share.header.miner_bitcoin_address.to_string(),
+        effort: None,
+    };
+    {
+        let store = Store::new(path.clone(), false).unwrap();
+        assert!(store.record_accepted_found_block(&accepted).unwrap());
+        store
+            .set_accepted_found_block_effort(
+                &accepted.bitcoin_blockhash,
+                EffortSnapshot {
+                    work: 460.5,
+                    network_difficulty: Some(447_000.0),
+                },
+            )
+            .unwrap();
+    }
+    let read_only = Store::new(path, true).unwrap();
+    assert_eq!(read_only.get_found_blocks().unwrap(), vec![accepted]);
 }

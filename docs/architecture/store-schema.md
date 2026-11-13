@@ -377,13 +377,61 @@ StoreWriter only after a positive BCHN `submitblock` verdict or BCHN's
 chain hash matching the candidate at its declared height. Local accepted
 submissions can be recorded before their share is persisted. The
 serialized existence check makes duplicate acceptance idempotent. Only
-this column family feeds the found-block API and metrics. Never pruned.
+this column family feeds the found-block API and metrics; where effort is
+shown, each entry joins its `AcceptedBlockEffort` snapshot (14b). Never
+pruned.
 
 Normal writable opening creates this column family in an existing store
-without modifying legacy candidates or share data. Read-only opening of
-an older store works without creating it and reports no accepted finds.
-Once BCHN verifies an old candidate, its accepted record persists across
-restarts. No share validity or payout rule depends on either record.
+without modifying legacy candidates or share data. Read-only opening
+cannot create it: RocksDB rejects any listed column family the store
+does not have, even with `create_missing_column_families`, so a
+read-only tool fails to open a store written before this family existed
+until a read-write open has created it; after that, read-only opens
+report the accepted finds normally. Once BCHN verifies an old candidate,
+its accepted record persists across restarts. No share validity or
+payout rule depends on either record.
+
+### 14b. `AcceptedBlockEffort` - Per-Block Effort Snapshots
+
+One annotation per accepted block, keyed by the accepted blockhash: the
+pool work accumulated since the previous find, and the network difficulty
+of the header that claimed this block, both captured at the effort reset
+so a restart never recomputes them against a moved difficulty. Written
+through StoreWriter right after `AcceptedFoundBlocks` records the find;
+when the write fails the accepted block still stands and reads back with
+no effort. Blocks accepted before this column family existed have no
+entry, and `/found_blocks` reports `"effort": null` for them -- there is
+no backfill. Never pruned.
+
+| Key                            | Value                                                                                                       |
+|--------------------------------|-------------------------------------------------------------------------------------------------------------|
+| `bitcoin_blockhash` (32 bytes) | consensus-encoded `EffortSnapshot`: `work` as f64 bits (u64, 8 bytes), presence tag (`1` = difficulty follows, `0` = `None`), then `difficulty` as f64 bits (u64, 8 bytes) when present |
+
+**EffortSnapshot Structure:**
+```rust
+pub struct EffortSnapshot {
+    pub work: f64,
+    pub network_difficulty: Option<f64>,
+}
+```
+
+`work` is what the metrics actor returns as it resets
+`work_since_last_block` to zero (the pre-reset value). `network_difficulty`
+is `Target::from_compact(header.bits)` `difficulty_float` from the found
+block header's own nBits -- the same mainnet-relative units as the live
+`network_difficulty` gauge -- read from the share header BCHN confirmed
+the blockhash with; it is `None` when that header cannot be read.
+
+`get_found_blocks` joins the snapshot onto each accepted block, so the
+found-block API, metrics exposition and both dashboards' blocks tables
+read effort beside the block with no second query. The store format
+version does not change: a read-write open of an older store creates the
+column family and leaves older blocks without effort, and an older binary
+reading a newer store never asks for the family. Read-only tools
+(`verify_chain`, `db_query`) do not request it either -- RocksDB rejects
+a listed column family the store does not have -- so they open an older
+store, read the accepted finds, and report no effort. Only a read-write
+open creates the family.
 
 ---
 

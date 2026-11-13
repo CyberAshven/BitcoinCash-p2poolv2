@@ -318,6 +318,78 @@ async fn a_second_weak_share_on_the_same_unknown_parent_does_not_ask_again() {
     assert!(swarm_rx.try_recv().is_err());
 }
 
+/// Weak shares on many unknown parents from one peer ask that peer for
+/// headers once an interval: the request is the same whatever the parent.
+/// After the release tick the peer can be asked again.
+#[tokio::test]
+async fn a_peer_is_asked_for_unknown_parents_once_an_interval() {
+    let (pool_store, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(pool_store);
+    let mut validator = MockDefaultShareValidator::new();
+    validator.expect_validate_weak_share().never();
+    let mut chain_store_handle = MockChainStoreHandle::new();
+    chain_store_handle
+        .expect_get_block_metadata()
+        .returning(|hash| Err(StoreError::NotFound(hash.to_string())));
+    chain_store_handle.expect_clone().times(2).returning(|| {
+        let mut clone = MockChainStoreHandle::new();
+        clone.expect_is_current().returning(|| true);
+        clone
+            .expect_get_missing_blockhashes()
+            .returning(|hashes| hashes.to_vec());
+        clone
+            .expect_build_locator()
+            .returning(|_| Ok(vec![BlockHash::all_zeros()]));
+        clone
+    });
+    let (_events_tx, events_rx) = mpsc::channel(1);
+    let (swarm_tx, mut swarm_rx) = mpsc::channel::<SwarmSend<()>>(8);
+    let (_fetch_tx, fetch_rx) = mpsc::channel(1);
+    let mut worker = WeakShareWorker::new(
+        events_rx,
+        fetch_rx,
+        pool.clone(),
+        chain_store_handle,
+        Arc::new(validator),
+        Arc::new(RwLock::new(PplnsWindow::default())),
+        swarm_tx,
+    );
+    let peer = PeerId::random();
+    for parent in 1..=3u8 {
+        worker
+            .handle(WeakShareEvent {
+                weak_share: test_weak_share_on(
+                    BlockHash::from_byte_array([parent; 32]),
+                    u32::from(parent),
+                ),
+                source: WeakShareSource::Peer(peer),
+            })
+            .await;
+    }
+
+    assert_eq!(pool.held_len(), 3);
+    assert!(matches!(
+        swarm_rx.try_recv(),
+        Ok(SwarmSend::Request(asked, Message::GetShareHeaders(_, _))) if asked == peer
+    ));
+    assert!(swarm_rx.try_recv().is_err());
+
+    // What the release tick does first.
+    worker.parents_asked.clear();
+    worker
+        .handle(WeakShareEvent {
+            weak_share: test_weak_share_on(BlockHash::from_byte_array([4; 32]), 4),
+            source: WeakShareSource::Peer(peer),
+        })
+        .await;
+
+    assert!(matches!(
+        swarm_rx.try_recv(),
+        Ok(SwarmSend::Request(asked, Message::GetShareHeaders(_, _))) if asked == peer
+    ));
+    assert!(swarm_rx.try_recv().is_err());
+}
+
 /// Held while its parent is unknown, then checked and pooled as new once the
 /// parent is stored at a height a share on the tip can still carry it from.
 #[tokio::test]

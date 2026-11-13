@@ -156,6 +156,13 @@ pub struct Hashrate {
     /// Current pool share difficulty (the newest prepared notify's ASERT
     /// target, in the share chain's units). None until the first notify.
     pub share_difficulty: Option<f64>,
+    /// Work accumulated since the last accepted block find: the numerator
+    /// of the block effort metric (divide by `network_difficulty`).
+    /// Runtime-only node state.
+    pub work_since_last_block: Option<f64>,
+    /// Current network difficulty from the newest prepared template. None
+    /// until the first notify is built.
+    pub network_difficulty: Option<f64>,
     /// Oldest first.
     pub history: Vec<HashratePoint>,
 }
@@ -183,6 +190,10 @@ pub struct Share {
     pub bits: u32,
     #[serde(default)]
     pub uncles: Vec<Uncle>,
+    /// Weak shares this share's body carries, from its header. `0` when
+    /// the sender (an older node) does not report it.
+    #[serde(default)]
+    pub weak_count: u16,
 }
 
 /// `/shares?to=&num=`.
@@ -199,6 +210,19 @@ pub struct FoundBlock {
     pub share_blockhash: String,
     pub bitcoin_time: u64,
     pub miner_bitcoin_address: String,
+    /// The work since the previous find over the network difficulty of the
+    /// header that claimed this block. Blocks accepted before snapshots
+    /// were kept arrive as `null`, and so do responses from a node that
+    /// does not keep them yet.
+    #[serde(default)]
+    pub effort: Option<FoundBlockEffort>,
+}
+
+/// A found block's kept effort, as `/found_blocks` reports it.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct FoundBlockEffort {
+    pub work: f64,
+    pub network_difficulty: Option<f64>,
 }
 
 /// The Bitcoin Cash header a share carries.
@@ -227,6 +251,29 @@ pub struct ShareDetail {
     pub bits: String,
     pub time: String,
     pub bitcoin_header: BitcoinHeader,
+    /// How many weak shares this share carries, from its header.
+    pub weak_count: u16,
+    /// This share's weak ratio `R`: its weak target over the minimum, in
+    /// 1024 parts (`p2poolv2_lib::shares::weak::WEAK_RATIO_UNIT`).
+    pub weak_ratio: u32,
+    /// The root committing the carried weak shares, hex.
+    pub weak_root: String,
+    /// The carried weak shares' bodies: empty when the share carries none
+    /// or the body was pruned, then `weak_count` alone reports the count.
+    pub weak_shares: Vec<WeakShareDetail>,
+}
+
+/// One weak share a share's body carries, as `/share?hash=` reports it.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct WeakShareDetail {
+    /// Bitcoin header block hash of the weak share's proof of work.
+    pub pow_hash: String,
+    /// The miner the weak share pays out to.
+    pub miner_bitcoin_address: String,
+    /// Time of the weak share, as the lookup spells it.
+    pub time: String,
+    /// Compact target of the weak share's proof of work, hex.
+    pub bits: String,
 }
 
 /// A share or uncle a miner earns weight from in the window.
@@ -280,6 +327,11 @@ pub struct LocalMiner {
     pub best_share: u64,
     pub last_share_at: u64,
     pub payout_fraction: Option<f64>,
+    /// Its hashrate over the window behind the miners table's Hashrate
+    /// column, in hashes per second, or `None` where it has no share in the
+    /// window (rendered as a dash).
+    #[serde(default)]
+    pub hashrate: Option<f64>,
 }
 
 /// `/miners?page=` or `/miners?address=`.
@@ -311,6 +363,25 @@ impl Default for Miners {
             miners: Vec::new(),
         }
     }
+}
+
+/// One entry of `/peers`: a connected libp2p peer.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Peer {
+    pub ip: Option<String>,
+    /// The peer's multiaddr, shown when `ip` is not known.
+    pub address: String,
+    /// "Inbound" or "Outbound", as the node labels the connection.
+    pub direction: String,
+    /// Seconds since the peer's first connection opened.
+    pub connected_secs: u64,
+    /// Identify's agent_version, e.g. "p2poolv2/0.0.1-alpha"; None until
+    /// it arrives, or for a peer that never sends it.
+    pub version: Option<String>,
+    /// Latest ping round trip in milliseconds; None until the first ping,
+    /// never a fabricated zero. Sub-millisecond round trips keep their
+    /// fraction (e.g. 0.91 on loopback).
+    pub latency_ms: Option<f64>,
 }
 
 /// A `/ws` frame: `{"topic":"Share","data":{...}}`.
@@ -420,12 +491,24 @@ mod tests {
             "page_size":25,"accepted_shares_total":3,"rejected_shares_total":1,
             "miners":[{"address":"bchtest:q","workers":[{"name":"rig",
             "active":true,"accepted_work":10,"best_share":5,"last_share_at":9}],
-            "accepted_work":10,"best_share":5,"last_share_at":9,"payout_fraction":null}]}"#;
+            "accepted_work":10,"best_share":5,"last_share_at":9,"payout_fraction":null,
+            "hashrate":7590000}]}"#;
         let miners: Miners = serde_json::from_str(body).unwrap();
         assert_eq!(miners.accepted_shares_total, 3);
         assert_eq!(miners.rejected_shares_total, 1);
         assert_eq!(miners.miners[0].workers[0].name, "rig");
         assert_eq!(miners.miners[0].payout_fraction, None);
+        assert_eq!(miners.miners[0].hashrate, Some(7.59e6));
+    }
+
+    #[test]
+    fn test_miners_page_parses_without_the_hashrate() {
+        // A node that predates the Hashrate column still answers the WASM app.
+        let body = r#"{"miners_online":1,"workers_online":2,"total":1,"page":1,"pages":1,
+            "page_size":25,"miners":[{"address":"bchtest:q","workers":[],
+            "accepted_work":10,"best_share":5,"last_share_at":9,"payout_fraction":null}]}"#;
+        let miners: Miners = serde_json::from_str(body).unwrap();
+        assert_eq!(miners.miners[0].hashrate, None);
     }
 
     #[test]
@@ -436,5 +519,65 @@ mod tests {
         let miners: Miners = serde_json::from_str(body).unwrap();
         assert_eq!(miners.accepted_shares_total, 0);
         assert_eq!(miners.rejected_shares_total, 0);
+    }
+
+    #[test]
+    fn test_found_block_parses_its_kept_effort() {
+        let body = r#"{"bitcoin_height":100,"bitcoin_blockhash":"aa",
+            "share_blockhash":"bb","bitcoin_time":1700000000,
+            "miner_bitcoin_address":"miner",
+            "effort":{"work":900000.0,"network_difficulty":600000.0}}"#;
+        let block: FoundBlock = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            block.effort,
+            Some(FoundBlockEffort {
+                work: 900_000.0,
+                network_difficulty: Some(600_000.0),
+            })
+        );
+    }
+
+    #[test]
+    fn test_found_block_parses_without_a_snapshot() {
+        // A block accepted before snapshots were kept arrives with no effort,
+        // and a node that keeps them still sends null for such a block.
+        let annotated_node = r#"{"bitcoin_height":99,"bitcoin_blockhash":"cc",
+            "share_blockhash":"dd","bitcoin_time":1699999999,
+            "miner_bitcoin_address":"miner","effort":null}"#;
+        let null_effort: FoundBlock = serde_json::from_str(annotated_node).unwrap();
+        assert_eq!(null_effort.effort, None);
+
+        let older_node = r#"{"bitcoin_height":99,"bitcoin_blockhash":"cc",
+            "share_blockhash":"dd","bitcoin_time":1699999999,
+            "miner_bitcoin_address":"miner"}"#;
+        let missing_field: FoundBlock = serde_json::from_str(older_node).unwrap();
+        assert_eq!(missing_field.effort, None);
+    }
+
+    #[test]
+    fn test_peers_page_parses_the_json_field_names() {
+        // The names the node's /peers answers with, in one row that has
+        // everything and one straight after its connection opened (no IP,
+        // version or ping yet); peer_id is node bookkeeping, ignored here.
+        let body = r#"[{"peer_id":"12D3KooWExample","ip":"127.0.0.1",
+            "address":"/ip4/127.0.0.1/tcp/6884","direction":"Inbound",
+            "connected_secs":1337,"version":"p2poolv2/0.0.1-alpha",
+            "latency_ms":0.914},
+            {"peer_id":"12D3KooWOther","ip":null,
+            "address":"/ip6/2001:db8::1/tcp/6884","direction":"Outbound",
+            "connected_secs":0,"version":null,"latency_ms":null}]"#;
+        let peers: Vec<Peer> = serde_json::from_str(body).unwrap();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].ip.as_deref(), Some("127.0.0.1"));
+        assert_eq!(peers[0].address, "/ip4/127.0.0.1/tcp/6884");
+        assert_eq!(peers[0].direction, "Inbound");
+        assert_eq!(peers[0].connected_secs, 1_337);
+        assert_eq!(peers[0].version.as_deref(), Some("p2poolv2/0.0.1-alpha"));
+        assert_eq!(peers[0].latency_ms, Some(0.914));
+        assert_eq!(peers[1].ip, None);
+        assert_eq!(peers[1].direction, "Outbound");
+        assert_eq!(peers[1].connected_secs, 0);
+        assert_eq!(peers[1].version, None);
+        assert_eq!(peers[1].latency_ms, None);
     }
 }

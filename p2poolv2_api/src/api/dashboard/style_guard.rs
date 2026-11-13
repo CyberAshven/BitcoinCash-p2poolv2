@@ -39,9 +39,11 @@ use super::pages::{
     ShareRow, ShareView, SharesView, Site, WorkerRow,
 };
 use crate::api::endpoints::miner::{MinerResponse, MinerShare, WindowSummary};
-use crate::api::endpoints::share::{BitcoinHeaderOutput, ShareLookupOutput};
+use crate::api::endpoints::share::{BitcoinHeaderOutput, ShareLookupOutput, WeakShareOutput};
 use bitcoin::BlockHash;
 use bitcoin::hashes::Hash;
+use p2poolv2_lib::node::connection_tracker::{ConnectionDirection, PeerInfoResponse};
+use p2poolv2_lib::store::found_block::EffortSnapshot;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -379,6 +381,10 @@ fn found_block() -> FoundBlockRow {
         share_hash: BlockHash::all_zeros(),
         time: 900,
         payout_address: "bchtest:qpayout".to_string(),
+        effort: Some(EffortSnapshot {
+            work: 900_000.0,
+            network_difficulty: Some(600_000.0),
+        }),
     }
 }
 
@@ -402,10 +408,36 @@ fn share_row(is_uncle: bool) -> ShareRow {
         difficulty: (!is_uncle).then_some(4.0),
         is_uncle,
         is_block: true,
+        // One weak share on the share row, none on the uncle: an uncle
+        // never carries weak shares, and the badge must show only on the
+        // carrier the guard renders.
+        weak_count: if is_uncle { 0 } else { 1 },
     }
 }
 
 fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockRow>) -> String {
+    // Two peers: one with every observation in, one straight after its
+    // connection opened (no IP, version or ping yet).
+    let peers = vec![
+        PeerInfoResponse {
+            peer_id: "12D3KooWExample".to_string(),
+            ip: Some("127.0.0.1".to_string()),
+            address: "/ip4/127.0.0.1/tcp/6884".to_string(),
+            direction: ConnectionDirection::Inbound,
+            connected_secs: 1_337,
+            version: Some("p2poolv2/0.0.1-alpha".to_string()),
+            latency_ms: Some(0.914),
+        },
+        PeerInfoResponse {
+            peer_id: "12D3KooWOther".to_string(),
+            ip: None,
+            address: "/ip6/2001:db8::1/tcp/6884".to_string(),
+            direction: ConnectionDirection::Outbound,
+            connected_secs: 0,
+            version: None,
+            latency_ms: None,
+        },
+    ];
     let chart_blocks: Vec<ChartBlock> = blocks
         .iter()
         .map(|block| ChartBlock {
@@ -422,6 +454,7 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         network_hashrate: Some(1e15),
         network_difficulty: Some(1e5),
         share_difficulty: Some(73.0),
+        work_since_last_block: Some(8.3e4),
         miners_online: 1,
         workers_online: 1,
         accepted_shares_total: 10,
@@ -430,6 +463,7 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         blocks_found: blocks.len(),
         blocks,
         shares,
+        peers,
         auto: pages::Auto::On,
         range_key: pages::normalize_range(None),
         pool_on: true,
@@ -504,6 +538,37 @@ fn share_output(uncles: Vec<String>) -> ShareLookupOutput {
         template_merkle_branches_count: 0,
         transactions: None,
         pruned: false,
+        weak_count: 0,
+        weak_ratio: 1024,
+        weak_root: "00".repeat(32),
+        weak_shares: Vec::new(),
+    }
+}
+
+/// A share that carries one weak share whose body the store still holds.
+fn carrying_share_output() -> ShareLookupOutput {
+    ShareLookupOutput {
+        weak_count: 1,
+        weak_ratio: 262_144,
+        weak_shares: vec![WeakShareOutput {
+            pow_hash: "0000000004e6a35194dc99afa9fd7bdc1c89ff823a3fe98ac2bc3af046e65ca4"
+                .to_string(),
+            miner_bitcoin_address: "bchtest:qpayout".to_string(),
+            miner_address: "tp2pool:qowner".to_string(),
+            time: "2026-10-22 00:00:00 UTC".to_string(),
+            bits: "0x1c0448d7".to_string(),
+        }],
+        ..share_output(Vec::new())
+    }
+}
+
+/// A share that carried weak shares whose bodies pruning has removed: only
+/// the count is left to show.
+fn pruned_share_output() -> ShareLookupOutput {
+    ShareLookupOutput {
+        weak_count: 2,
+        weak_ratio: 262_144,
+        ..share_output(Vec::new())
     }
 }
 
@@ -531,6 +596,7 @@ fn every_page() -> String {
             best_share: 5,
             last_share_at: 900,
             payout_fraction: Some(0.2),
+            hashrate: Some(7.59e6),
         },
         MinerRow {
             address: "bchtest:qother".to_string(),
@@ -539,6 +605,7 @@ fn every_page() -> String {
             best_share: 0,
             last_share_at: 0,
             payout_fraction: None,
+            hashrate: None,
         },
     ];
     [
@@ -629,6 +696,18 @@ fn every_page() -> String {
         pages::share(&ShareView {
             site: site(),
             share: share_output(Vec::new()),
+            is_block: false,
+        })
+        .into_string(),
+        pages::share(&ShareView {
+            site: site(),
+            share: carrying_share_output(),
+            is_block: false,
+        })
+        .into_string(),
+        pages::share(&ShareView {
+            site: site(),
+            share: pruned_share_output(),
             is_block: false,
         })
         .into_string(),
@@ -956,6 +1035,66 @@ fn the_wasm_app_formats_difficulties_as_the_pages_do() {
 }
 
 #[test]
+fn the_wasm_app_formats_weak_ratios_as_the_pages_do() {
+    assert_eq!(
+        web_format::fmt_weak_ratio(262_144),
+        pages::fmt_weak_ratio(262_144)
+    );
+    assert_eq!(
+        web_format::fmt_weak_ratio(1024),
+        pages::fmt_weak_ratio(1024)
+    );
+    assert_eq!(
+        web_format::fmt_weak_ratio(u32::MAX),
+        pages::fmt_weak_ratio(u32::MAX)
+    );
+}
+
+#[test]
+fn the_wasm_app_formats_weak_share_difficulties_as_the_pages_do() {
+    assert_eq!(
+        web_format::weak_difficulty("0x1c0448d7"),
+        pages::weak_difficulty("0x1c0448d7")
+    );
+    assert_eq!(
+        web_format::weak_difficulty("1d00ffff"),
+        pages::weak_difficulty("1d00ffff")
+    );
+    assert_eq!(
+        web_format::weak_difficulty("not hex"),
+        pages::weak_difficulty("not hex")
+    );
+}
+
+#[test]
+fn the_wasm_app_formats_effort_as_the_pages_do() {
+    assert_eq!(
+        web_format::fmt_effort(Some(0.0), Some(1_000.0)),
+        pages::fmt_effort(Some(0.0), Some(1_000.0))
+    );
+    assert_eq!(
+        web_format::fmt_effort(Some(830.0), Some(1_000.0)),
+        pages::fmt_effort(Some(830.0), Some(1_000.0))
+    );
+    assert_eq!(
+        web_format::fmt_effort(Some(1_500.0), Some(1_000.0)),
+        pages::fmt_effort(Some(1_500.0), Some(1_000.0))
+    );
+    assert_eq!(
+        web_format::fmt_effort(Some(830.0), None),
+        pages::fmt_effort(Some(830.0), None)
+    );
+    assert_eq!(
+        web_format::fmt_effort(None, Some(1_000.0)),
+        pages::fmt_effort(None, Some(1_000.0))
+    );
+    assert_eq!(
+        web_format::fmt_effort(Some(830.0), Some(0.0)),
+        pages::fmt_effort(Some(830.0), Some(0.0))
+    );
+}
+
+#[test]
 fn the_wasm_app_formats_times_as_the_pages_do() {
     assert_eq!(web_format::fmt_utc(0), pages::fmt_utc(0));
     assert_eq!(
@@ -1003,4 +1142,32 @@ fn the_wasm_app_shortens_and_links_as_the_pages_do() {
         web_format::optional(None, web_format::fmt_hashrate),
         pages::optional(None, pages::fmt_hashrate)
     );
+}
+
+#[test]
+fn the_wasm_app_formats_peer_details_as_the_pages_do() {
+    assert_eq!(web_format::fmt_duration(0), pages::fmt_duration(0));
+    assert_eq!(web_format::fmt_duration(42), pages::fmt_duration(42));
+    assert_eq!(web_format::fmt_duration(1_800), pages::fmt_duration(1_800));
+    assert_eq!(web_format::fmt_duration(8_280), pages::fmt_duration(8_280));
+    assert_eq!(
+        web_format::fmt_duration(90_000),
+        pages::fmt_duration(90_000)
+    );
+    assert_eq!(web_format::fmt_latency(0.914), pages::fmt_latency(0.914));
+    assert_eq!(web_format::fmt_latency(5.44), pages::fmt_latency(5.44));
+    assert_eq!(web_format::fmt_latency(42.6), pages::fmt_latency(42.6));
+    assert_eq!(
+        web_format::agent_version(Some("p2poolv2/0.0.1-alpha")),
+        pages::agent_version(Some("p2poolv2/0.0.1-alpha"))
+    );
+    assert_eq!(
+        web_format::agent_version(Some("custom-agent")),
+        pages::agent_version(Some("custom-agent"))
+    );
+    assert_eq!(
+        web_format::agent_version(Some("p2poolv2/")),
+        pages::agent_version(Some("p2poolv2/"))
+    );
+    assert_eq!(web_format::agent_version(None), pages::agent_version(None));
 }
