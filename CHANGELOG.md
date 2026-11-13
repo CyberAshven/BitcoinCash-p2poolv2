@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Two more limits on the weak share path, node behaviour only. When the weak
+shares held for an unknown parent pass their bounds, the source holding the
+most bytes loses its oldest, so a peer that floods them pushes out only its
+own; before, the oldest of all went first, whoever sent it. And a peer is
+asked for the headers of unknown parents at most once a second, however many
+weak shares on new parents it sends: the request is the same headers request
+from this node's tip either way, and before it went out once a new parent.
+
+Requests to the Bitcoin Cash node time out. The RPC client had no timeout
+at all, so a request on a connection that stopped carrying data, with no
+close or reset reaching the pool, waited for good. On chipnet that held the
+task that fetches block templates about 30 seconds after each start, from
+the pool PC's Windows reinstall on 2026-11-13: both nodes kept handing out
+work on a stale parent, and found blocks went in without a verdict. A
+request now fails after 30 seconds with nothing from the node (counted from
+the last byte read, so a large template still downloads) and opening a
+connection after 10; the next poll opens a new connection.
+
+The dashboard is tested the way a visitor meets it. A test serves it over a
+small share chain and has headless Chrome load the overview and one page of
+each kind it links to; it follows every link a visitor could follow from
+there and fails on a page that does not answer, a stylesheet that does not
+load, or a link that leads nowhere. It is written in Rust and starts the
+browser itself: `CHROME` names it, else Chrome, Chromium or Edge in its
+usual place; without one the test is skipped on a developer's machine and
+fails in CI. CI also keeps a picture of each page as the
+`dashboard-screenshots` artifact. Its first run found a dead link, now
+fixed: the genesis share's page linked its all-zero parent hash as a share.
+
+The payout simulator has a `band-step` table, the last part of the small
+miners design that had no simulation: the band cap `C` from genesis at step
+divisors of 128, 512 and 2,048, and with 2% and 10% of the pool mining at
+the minimum while recording the largest wanted difficulty. Where `C` settles
+does not depend on the step, only how fast it gets there (1, 3 and 5 to 8
+hours); overstating takes `C` to its maximum and changes nothing home miners
+are paid.
+
 The Docker image runs the node as `p2pool` (uid 1000), not as root. The user
 owns `/p2poolv2` and is in the `bchn-rpc` group (gid 2001), which BCHN's
 image now lets read the RPC password it keeps in the `bchn_rpc` volume; the

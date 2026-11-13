@@ -5,11 +5,14 @@
 use crate::node::SwarmSend;
 use crate::node::messages::{InventoryMessage, Message};
 use crate::node::p2p_message_handlers::receivers::request_missing_blocks::request_headers_for_missing_blocks;
+use crate::node::weak_share_fetch::WeakFetchEvent;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::shares::weak::WEAK_CAP;
+use bitcoin::BlockHash;
 use std::error::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, error};
@@ -31,6 +34,7 @@ pub async fn handle_inventory<C: Send + Sync>(
     chain_store_handle: ChainStoreHandle,
     response_channel: C,
     swarm_tx: mpsc::Sender<SwarmSend<C>>,
+    weak_fetch_tx: Option<mpsc::Sender<WeakFetchEvent>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     if let Err(err) = swarm_tx
         .send(SwarmSend::Response(response_channel, Message::Ack))
@@ -54,9 +58,38 @@ pub async fn handle_inventory<C: Send + Sync>(
                 transaction_hashes
             );
         }
+        InventoryMessage::WeakShareHashes(hashes) => {
+            forward_weak_share_hashes(peer, hashes, weak_fetch_tx.as_ref());
+        }
     }
 
     Ok(())
+}
+
+/// Keep the first [`WEAK_CAP`] hashes and hand them to the weak-share worker.
+///
+/// One inventory can name more hashes than a share may carry. The rest are
+/// dropped here, and a later inventory can offer them. A node with no weak
+/// pool has no fetch channel; the inventory was already acknowledged.
+fn forward_weak_share_hashes(
+    peer: libp2p::PeerId,
+    hashes: Vec<BlockHash>,
+    weak_fetch_tx: Option<&mpsc::Sender<WeakFetchEvent>>,
+) {
+    let hashes: Vec<BlockHash> = hashes.into_iter().take(WEAK_CAP).collect();
+    if hashes.is_empty() {
+        return;
+    }
+    let Some(weak_fetch_tx) = weak_fetch_tx else {
+        debug!("Dropping weak share inventory from {peer}: this node keeps no weak pool");
+        return;
+    };
+    if weak_fetch_tx
+        .try_send(WeakFetchEvent::Announced { peer, hashes })
+        .is_err()
+    {
+        debug!("Weak share fetch queue full, dropping inventory from {peer}");
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +134,7 @@ mod tests {
             chain_store_handle,
             response_channel,
             swarm_tx,
+            None,
         )
         .await;
 
@@ -150,6 +184,7 @@ mod tests {
             chain_store_handle,
             response_channel,
             swarm_tx,
+            None,
         )
         .await;
 
@@ -190,6 +225,7 @@ mod tests {
             chain_store_handle,
             response_channel,
             swarm_tx,
+            None,
         )
         .await;
 
@@ -228,6 +264,7 @@ mod tests {
             chain_store_handle,
             response_channel,
             swarm_tx,
+            None,
         )
         .await;
 
@@ -243,5 +280,62 @@ mod tests {
             swarm_rx.try_recv().is_err(),
             "No additional messages should be sent for transaction inventory"
         );
+    }
+
+    #[tokio::test]
+    async fn test_handle_inventory_weak_share_hashes_forwards_the_first_64() {
+        use crate::node::weak_share_fetch::WeakFetchEvent;
+        use crate::shares::weak::WEAK_CAP;
+
+        let chain_store_handle = ChainStoreHandle::default();
+        let peer_id = libp2p::PeerId::random();
+        let (swarm_tx, mut swarm_rx) = mpsc::channel::<SwarmSend<u32>>(1);
+        let (fetch_tx, mut fetch_rx) = mpsc::channel(1);
+        let hashes: Vec<BlockHash> = (0..WEAK_CAP + 1)
+            .map(|index| {
+                let mut bytes = [0u8; 32];
+                bytes[..4].copy_from_slice(&(index as u32).to_le_bytes());
+                BlockHash::from_byte_array(bytes)
+            })
+            .collect();
+        let dropped = hashes[WEAK_CAP];
+        let inventory = InventoryMessage::WeakShareHashes(hashes.clone());
+
+        let result = handle_inventory(
+            inventory,
+            peer_id,
+            chain_store_handle,
+            5u32,
+            swarm_tx,
+            Some(fetch_tx),
+        )
+        .await;
+
+        assert!(result.is_ok(), "65 weak share hashes are acknowledged");
+        match swarm_rx.recv().await {
+            Some(SwarmSend::Response(channel, Message::Ack)) => {
+                assert_eq!(channel, 5u32, "ack channel for 65 weak share hashes");
+            }
+            other => panic!("Expected Ack for 65 weak share hashes, got {other:?}"),
+        }
+        match fetch_rx.try_recv() {
+            Ok(WeakFetchEvent::Announced {
+                peer,
+                hashes: forwarded,
+            }) => {
+                assert_eq!(peer, peer_id, "announcer of 65 weak share hashes");
+                assert_eq!(forwarded.len(), WEAK_CAP, "65 weak share hashes forward 64");
+                assert_eq!(
+                    forwarded.as_slice(),
+                    &hashes[..WEAK_CAP],
+                    "the first 64 weak share hashes are forwarded"
+                );
+                assert!(
+                    !forwarded.contains(&dropped),
+                    "the 65th weak share hash is not forwarded"
+                );
+            }
+            other => panic!("Expected an announcement of 64 hashes, got {other:?}"),
+        }
     }
 }

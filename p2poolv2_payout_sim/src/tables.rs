@@ -124,13 +124,15 @@ pub enum Table {
     RatioMax,
     /// Study #85 constants: `R_MAX` in every miner mix.
     RatioMaxMixes,
+    /// Constants: the band cap's step, and hashrate that overstates its wish.
+    BandStep,
     /// Bigger pools on a bigger Bitcoin Cash, levels as a node sets them.
     Scale,
 }
 
 impl Table {
     /// Every table, in the order of the default run.
-    pub const ALL: [Table; 23] = [
+    pub const ALL: [Table; 24] = [
         Table::Designs,
         Table::Hashrate,
         Table::Pool,
@@ -153,6 +155,7 @@ impl Table {
         Table::WeakDepth,
         Table::RatioMax,
         Table::RatioMaxMixes,
+        Table::BandStep,
         Table::Scale,
     ];
 
@@ -181,6 +184,7 @@ impl Table {
             Table::WeakDepth => "weak-depth",
             Table::RatioMax => "r-max",
             Table::RatioMaxMixes => "r-max-mixes",
+            Table::BandStep => "band-step",
             Table::Scale => "scale",
         }
     }
@@ -243,6 +247,9 @@ impl Table {
             Table::RatioMaxMixes => {
                 "Study constants: R_MAX 256 and 4,096 in every miner mix (band-weak-levels, weak work)"
             }
+            Table::BandStep => {
+                "Constants: the band cap's step from genesis, and hashrate overstating its wish (50% industrial)"
+            }
             Table::Scale => {
                 "Scale: bigger pools on a bigger Bitcoin Cash, levels as a node sets them (band-weak-levels, weak work, 50% industrial)"
             }
@@ -275,6 +282,7 @@ impl Table {
             Table::WeakDepth => study::weak_depth(base),
             Table::RatioMax => study::ratio_max(base),
             Table::RatioMaxMixes => study::ratio_max_mixes(base),
+            Table::BandStep => study::band_step(base),
             Table::Scale => study::scale(base),
         };
         format!("## {}\n\n{body}", self.title())

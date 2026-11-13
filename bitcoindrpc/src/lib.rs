@@ -71,6 +71,17 @@ const RPC_METHOD_NOT_FOUND: i32 = -32601;
 /// closes it, and the request sent on it then fails.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// How long the node may send nothing while a request waits for its answer:
+/// before the first byte of the answer, and between two reads of its body.
+/// A request on a connection that stopped carrying data, with no close or
+/// reset reaching this side, fails after this instead of waiting for good;
+/// the template task's next poll then opens a new connection. It counts
+/// silence, not the whole answer, so a large template still downloads.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long opening a connection to the node may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Error type for the BitcoindRpcClient
 #[derive(Debug)]
 pub enum BitcoindRpcError {
@@ -271,6 +282,16 @@ pub struct BitcoindRpcClient {
 
 impl BitcoindRpcClient {
     pub fn new(url: &str, username: &str, password: &str) -> Result<Self, BitcoindRpcError> {
+        Self::with_read_timeout(url, username, password, READ_TIMEOUT)
+    }
+
+    /// [`Self::new`] with `read_timeout` in place of [`READ_TIMEOUT`].
+    fn with_read_timeout(
+        url: &str,
+        username: &str,
+        password: &str,
+        read_timeout: Duration,
+    ) -> Result<Self, BitcoindRpcError> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,
@@ -285,6 +306,8 @@ impl BitcoindRpcClient {
         let client = reqwest::Client::builder()
             .default_headers(headers)
             .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(read_timeout)
             .build()
             .map_err(|e| BitcoindRpcError::Other(format!("Failed to create HTTP client: {e}")))?;
 
