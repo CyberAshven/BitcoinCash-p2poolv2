@@ -237,9 +237,11 @@ async fn a_visitor_can_open_every_page_the_overview_links_to() {
             .await
             .unwrap()
     };
+    //* The page itself, whatever its panels are called; that it lists the
+    //* shares is the link to a share asserted below.
     assert!(
-        overview.document.contains("Recent shares"),
-        "the overview shows the recent shares: {}",
+        overview.document.contains("site-header"),
+        "the overview renders as a page: {}",
         overview.document
     );
     let stylesheets = attribute_values(&overview.document, "href", "/dashboard/assets/");
