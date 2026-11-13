@@ -1,4 +1,5 @@
 use super::*;
+use crate::accounting::payout::payout_levels::MIN_PAYOUT_LEVEL;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
@@ -741,6 +742,7 @@ fn declared_bch_coinbase_metadata_survives_store_reconstruction() {
     let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
     let mut share = TestShareBlockBuilder::new().build();
     share.header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+    share.header.payout_level = MIN_PAYOUT_LEVEL;
     share.header.bch_coinbase = Some(BchCoinbase {
         prefix: vec![0x51],
         merge_mining: MergeMiningCommitment::empty(),

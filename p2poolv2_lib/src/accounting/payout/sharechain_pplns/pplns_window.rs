@@ -2109,10 +2109,9 @@ impl PplnsWindow {
     /// uncle miner in any `confirmed_entries` slot (including the eviction
     /// buffer past the window, since those entries stay cached).
     /// Once its last referencing entry leaves the cache -- via eviction or a
-    /// reorg -- the slot is freed so the `AddressKeys` interner stays bounded
-    /// and its linear `key_for` scan does not grow without bound. Runs after
-    /// eviction in `update`; replaces the stale-key cleanup that the removed
-    /// tip-anchored `get_distribution` performed inline.
+    /// reorg -- the slot is freed so the `AddressKeys` interner stays bounded.
+    /// Runs after eviction in `update`; replaces the stale-key cleanup that
+    /// the removed tip-anchored `get_distribution` performed inline.
     fn prune_unreferenced_keys(&mut self) {
         let mut referenced = vec![false; self.address_keys.len()];
         let mut owner_referenced = vec![false; self.owner_keys.len()];
@@ -2721,7 +2720,10 @@ fn set_payout_levels(credits_by_key: &mut [MinerCredits], levels: &PayeeLevels) 
 }
 
 /// Free each slot of `keys` that `referenced` marks unreferenced.
-fn remove_unreferenced_keys<T: PartialEq>(keys: &mut AddressKeys<T>, referenced: &[bool]) {
+fn remove_unreferenced_keys<T: Clone + Eq + hash::Hash>(
+    keys: &mut AddressKeys<T>,
+    referenced: &[bool],
+) {
     for (index, is_referenced) in referenced.iter().enumerate() {
         if !is_referenced {
             keys.remove(index);
@@ -6167,6 +6169,8 @@ mod tests {
     /// shares carry.
     #[test]
     fn test_bch_window_never_draws_a_fee_address_that_mines() {
+        use crate::accounting::payout::payout_levels::MIN_PAYOUT_LEVEL;
+
         let mut window = PplnsWindow::new(Network::Regtest).for_chain(Chain::BitcoinCash);
         let operator = PayoutAddress::from(Address::p2pkh(
             PubkeyHash::from_byte_array([5; 20]),
@@ -6186,6 +6190,7 @@ mod tests {
             2,
             vec![],
         );
+        cut_share.payout_level = MIN_PAYOUT_LEVEL;
         cut_share.cuts = ShareCuts {
             donation: None,
             fee: Some((operator_key, 100)),
@@ -6209,8 +6214,12 @@ mod tests {
             .levels
             .unwrap();
 
-        assert_eq!(levels.level_of(&operator), None);
-        assert_eq!(levels.level_of(&miner), Some(0));
+        assert_eq!(levels.level_of(&operator), None, "fee address is not drawn");
+        assert_eq!(
+            levels.level_of(&miner),
+            Some(MIN_PAYOUT_LEVEL),
+            "miner at the lowest level"
+        );
     }
 
     /// Of two uncles one share names, the first counts, in whichever order
@@ -6678,15 +6687,16 @@ mod tests {
     /// receives: walk the window from the share's parent (cached by parent
     /// and paid block, so a repeat costs nothing), then build the expected
     /// coinbase outputs and compare. It also shows what the payout levels
-    /// (level 0, 546 sat, and the default level 5, 17,472 sat) and a token
-    /// share's 3,072 byte coinbase do to the coinbase and the payout tree,
-    /// and what executing that tree costs on chain. Run with
+    /// (the lowest level, 1,092 sat, and the default level 5, 17,472 sat)
+    /// and a token share's 3,072 byte coinbase do to the coinbase and the
+    /// payout tree, and what executing that tree costs on chain. Run with
     /// `cargo test --release -p p2poolv2_lib validation_cost -- --ignored --nocapture`.
     #[test]
     #[ignore = "timing report, run by hand"]
     fn validation_cost_at_bitcoin_cash_window_sizes() {
         use crate::accounting::payout::coinbase_budget::PayoutSplit;
         use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+        use crate::accounting::payout::payout_levels::MIN_PAYOUT_LEVEL;
         use crate::accounting::payout::payout_tree::BCH_TREE_EXECUTION_FEE_RATE;
         use std::time::Instant;
 
@@ -6695,11 +6705,11 @@ mod tests {
         );
         for (shares, payees, level) in [
             (1_800, 1_000, 5),
-            (120_960, 1_000, 0),
+            (120_960, 1_000, MIN_PAYOUT_LEVEL),
             (120_960, 1_000, 5),
-            (120_960, 10_000, 0),
+            (120_960, 10_000, MIN_PAYOUT_LEVEL),
             (120_960, 10_000, 5),
-            (120_960, 100_000, 0),
+            (120_960, 100_000, MIN_PAYOUT_LEVEL),
             (120_960, 100_000, 5),
         ] {
             let started = Instant::now();

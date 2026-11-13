@@ -436,8 +436,8 @@ slice of a payee ---> at or above its level? --- yes ---> paid directly
 ### Levels
 
 ```text
-L_k = 546 * 2^k satoshis,  k = 0 .. 7
-    = 546, 1,092, 2,184, 4,368, 8,736, 17,472, 34,944, 69,888
+L_k = 546 * 2^k satoshis,  k = 1 .. 7
+    = 1,092, 2,184, 4,368, 8,736, 17,472, 34,944, 69,888
 ```
 
 546 is Bitcoin Cash's P2PKH dust limit, the floor. 69,888 is the cap, which
@@ -447,7 +447,7 @@ then one byte); a header above 7 does not decode:
 
 | Field | Contents |
 |---|---|
-| `payout_level` | `k`, 0 to 7 |
+| `payout_level` | `k`, 1 to 7 |
 
 A payee's level in a block is the `payout_level` of its newest credited entry in
 the window: the newest share, uncle or weak share paying that address. The
@@ -658,6 +658,11 @@ study", and the payout simulator's `scale` table):
   a node 6.4 ms with 1,000 miners in the window, 38 ms with 10,000 and 362
   ms with 100,000; a weak share 0.3, 3.8 and 45 ms. At 10-second shares
   100,000 miners keep a node 18% busy.
+- **A window full of weak shares** costs little more to walk: 14 ms for
+  1,800 shares carrying 32 weak shares each with 5,100 payees, 174 ms with
+  50,100 payees, and 160 ms at the cap of 120,960 shares with 6,000 payees.
+  The time follows the number of payees, about 3.5 microseconds each, not
+  the number of credits.
 - **How often a small miner is paid** falls with the number of home miners
   in a pool, not with its hashrate: a pool makes 3.2 weak shares a second,
   whatever its size. A bigger pool also pays in bigger pieces, because its
@@ -666,32 +671,40 @@ study", and the payout simulator's `scale` table):
 
 Still open:
 
-- **A level 0 payout that lands in the payout tree goes to the largest
-  payee.** The tree merges a payee whose amount, less its fee at 3 satoshis
-  a byte, is below dust into its last payee
-  (`payout_tree::merge_dust_payees`). The level 0 draw pays 546 satoshis,
-  the dust limit itself, so every level 0 winner past the coinbase's own
-  outputs (29,400 on a share without tokens, 79 on a token share) is merged
-  away. `payouts_at_scale_by_miner_class` (an ignored report in
-  `coinbase_budget/tests.rs`) pays one block through the split, the draw and
-  the tree: with home miners at level 0 and slices under 675 satoshis
-  (Bitcoin's hashrate, a pool at 1 to 2% of Bitcoin Cash, half its work
-  from home miners) they get 10% of their fair part on a share without
-  tokens and 0.03% on a token share, and the farms get the rest. At level 1
-  the same pool is paid 99.9%. It cannot happen while the level 0 winners of
-  a block fit the coinbase: on chipnet today, or at today's hashrate, where
-  a node leaves a 1.2 TH/s miner at level 5. A fix is a rule change. The
-  candidates: draw the tree's payees that would be below dust among
-  themselves at 1,092 satoshis, so the pot stays theirs; or make level 1 the
-  lowest level.
-- **Weak shares at the start of a chain overrun the peer streams.** `R`
-  starts at `R_MAX`, so a new chain's miners find weak shares 256 times as
-  fast as shares until `R` falls, and each is its own request to every
-  peer. A 12-node swarm at 3-second shares logged thousands of dropped
-  streams a minute in its first minutes. Node behaviour, not a rule.
+- **Level 0 is gone (2026-11-12).** A level 0 win, 546 satoshis, that
+  landed in the payout tree was below dust once the tree's fee was taken,
+  so the tree gave it to its largest payee
+  (`payout_tree::merge_dust_payees`). On a 12-node swarm with 1,200 miners
+  (`docs/simulation/RUNBOOK.md`, Test J) the miners at level 0 were paid
+  0.79 to 0.82 of their part of the hashrate on token shares, the tree's
+  largest payee eleven times what its work earned, and the same miners 1.00
+  with level 1 in place of level 0. The lowest level a share may carry is
+  now 1, 1,092 satoshis (`MIN_PAYOUT_LEVEL`, protocol segment
+  `levels-546x2-k1`): it stays above dust after the tree's fee at 3
+  satoshis a byte. What remains is small: a level's pot below one level
+  payment is paid whole to one payee, and a miner alone below its level
+  keeps its own slice, each under 1,092 satoshis a block, paid as it is in
+  the coinbase and merged in the tree.
+- **Every weak share is sent whole to every peer.** A node sends each weak
+  share it accepts, as its own request, to every peer but the one it came
+  from, so a node with eleven peers receives it eleven times: the 12-node
+  swarm took 719,915 weak shares from peers and refused 7,122,362
+  duplicates. At the start of a chain, where `R` starts at `R_MAX` and the
+  share difficulty is still below the hashrate, that was more requests than
+  the streams hold: 136,129 inbound streams were dropped in the first
+  minute, and none after. Announcing a weak share by its hash, as
+  transactions are, sends each one once. Node behaviour, not a rule.
+- **A carried weak share's timestamp is checked against the node's own
+  clock.** `validate_carried_weak_headers` applies the 120-second future
+  limit of a relayed weak share to the ones a share carries, and a failure
+  marks the share invalid for good, so two nodes whose clocks differ can
+  disagree about one share for ever. The limit for a carried weak share has
+  to come from chain data, the carrying share's own time. A rule change.
+- **A weak share that passes proof of work and fails a later check can be
+  sent again and again**, each time costing a window walk: the failure is
+  not remembered, the peer is not dropped, and the walk cache empties
+  itself when it is full. Node behaviour.
 - **Not yet simulated:** the band step.
-- **Not yet measured:** the window walk with a window full of weak-share
-  credits.
 
 ## References
 

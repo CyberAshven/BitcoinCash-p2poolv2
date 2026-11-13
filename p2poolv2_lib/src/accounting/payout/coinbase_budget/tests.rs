@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::*;
+use crate::accounting::payout::payout_levels::MIN_PAYOUT_LEVEL;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::test_utils::TestShareBlockBuilder;
 use bitcoin::Address;
@@ -630,8 +631,8 @@ struct MinerClass {
 /// miners whose payees are the weak-share credits the window holds
 /// (`shares in the window * WEAK_FILL`, at most one per home miner). At
 /// today's hashrate the node leaves a home miner at level 5; at 270 times
-/// today's it lowers a 1.2 TH/s miner to level 0 to keep three payments a
-/// month.
+/// today's it lowers a 1.2 TH/s miner to the lowest payout level to keep
+/// three payments a month.
 ///
 /// Run with
 /// `cargo test --release -p p2poolv2_lib payouts_at_scale -- --ignored --nocapture`.
@@ -657,28 +658,46 @@ fn payouts_at_scale_by_miner_class() {
             vec![class("farms", 2, 0.5, 5), class("home", 15_400, 0.5, 5)],
         ),
         (
-            "270x hashrate; pool 30% of BCH; home at level 0",
-            vec![class("farms", 600, 0.5, 5), class("home", 19_200, 0.5, 0)],
+            "270x hashrate; pool 30% of BCH; home at the lowest level",
+            vec![
+                class("farms", 600, 0.5, 5),
+                class("home", 19_200, 0.5, MIN_PAYOUT_LEVEL),
+            ],
         ),
         (
-            "270x hashrate; pool 10% of BCH; home at level 0",
-            vec![class("farms", 1_800, 0.5, 5), class("home", 57_600, 0.5, 0)],
+            "270x hashrate; pool 10% of BCH; home at the lowest level",
+            vec![
+                class("farms", 1_800, 0.5, 5),
+                class("home", 57_600, 0.5, MIN_PAYOUT_LEVEL),
+            ],
         ),
         (
-            "270x hashrate; pool 2% of BCH; home at level 0",
-            vec![class("farms", 400, 0.5, 5), class("home", 288_000, 0.5, 0)],
+            "270x hashrate; pool 2% of BCH; home at the lowest level",
+            vec![
+                class("farms", 400, 0.5, 5),
+                class("home", 288_000, 0.5, MIN_PAYOUT_LEVEL),
+            ],
         ),
         (
-            "270x hashrate; pool 1% of BCH; home at level 0",
-            vec![class("farms", 200, 0.5, 5), class("home", 576_000, 0.5, 0)],
+            "270x hashrate; pool 1% of BCH; home at the lowest level",
+            vec![
+                class("farms", 200, 0.5, 5),
+                class("home", 576_000, 0.5, MIN_PAYOUT_LEVEL),
+            ],
         ),
         (
             "270x hashrate; pool 1% of BCH; home at level 1",
-            vec![class("farms", 200, 0.5, 5), class("home", 576_000, 0.5, 1)],
+            vec![
+                class("farms", 200, 0.5, 5),
+                class("home", 576_000, 0.5, MIN_PAYOUT_LEVEL),
+            ],
         ),
         (
-            "270x hashrate; pool 1% of BCH; home 90% of the work at level 0",
-            vec![class("farms", 40, 0.1, 5), class("home", 576_000, 0.9, 0)],
+            "270x hashrate; pool 1% of BCH; home 90% of the work at the lowest level",
+            vec![
+                class("farms", 40, 0.1, 5),
+                class("home", 576_000, 0.9, MIN_PAYOUT_LEVEL),
+            ],
         ),
     ];
 

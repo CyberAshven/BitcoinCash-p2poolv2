@@ -1035,16 +1035,27 @@ These were measured on one core of a 2026 desktop. The scaling study's guess
 matched at 1,000 miners, was 3 times too low at 10,000 and 15 times too low
 at 100,000. The default payout level matters: at level 5 a 3.125 BCH block
 pays at most 17,886 outputs, so 100,000 miners cost a third of what they
-cost at level 0. The walk measured has no weak-share credits in it; a window
-full of them is not measured here.
+cost at level 0. The walk in the table above has no weak-share credits in
+it. A window whose shares carry 32 weak shares each was measured
+(`validation_cost_with_weak_share_credits`): the walk takes 14 ms for 1,800
+shares and 5,100 payees, 174 ms with 50,100 payees, 211 ms for 18,000
+shares and 51,000 payees, and 160 ms at the cap of 120,960 shares with
+6,000 payees. Its time follows the number of payees, about 3.5 microseconds
+each, not the number of credits.
 
 The node validates up to one share per CPU at once (`validation_worker.rs`).
 But the walk needs write access to the one shared window
 (`Arc<RwLock<PplnsWindow>>`), so walks run one at a time.
 `ValidationQueue::Serial` models this: a node validates one share or weak
-share at a time, and later ones wait. It charges every weak share a build;
-weak shares on one template share theirs, so a pool of few large nodes pays
-less.
+share at a time, and later ones wait. A weak share costs the coinbase build
+the first time a node sees its parent and template, and after that only the
+coinbase rebuild and merkle check (the node's `WeakPayoutCache`): 0.08 ms
+with 1,000 miners, 1.0 ms with 10,000 and 1.4 ms with 100,000 at the default
+level (`validation_cost_of_a_cached_weak_share`, with a stand-in for the
+private rebuild). The period sweep runs three cases: `each` weak share on a
+template of its own, the worst case; `per node`, where the weak shares one
+node's miners find share that node's template; and `one` template for the
+whole pool.
 
 ### How it was run
 
@@ -1179,58 +1190,112 @@ evidence.
 | 1,000 miners, no weak shares, 5 s | 36,389 | 6.4 | 7.82% | 0.56 | 0.424 / 0.793 | 0.084 | 0.13% / 0.13% | 0.0 |
 | 1,000 miners, no weak shares, 2 s | 36,389 | 6.4 | 18.36% | 0.57 | 1.05 / 1.96 | 0.222 | 0.33% / 0.33% | 0.0 |
 | 1,000 miners, no weak shares, 1 s | 36,389 | 6.4 | 31.18% | 0.57 | 2.10 / 3.92 | 0.442 | 0.67% / 0.67% | 0.0 |
-| 1,000 miners, 32 weak shares a share, 10 s | 36,389 | 6.4 | 4.20% | 0.56 | 0.392 / 0.727 | 0.045 | 0.15% / 0.15% | 0.0 |
-| 1,000 miners, 32 weak shares a share, 5 s | 36,389 | 6.4 | 7.82% | 0.56 | 0.786 / 1.46 | 0.084 | 0.30% / 0.30% | 0.0 |
-| 1,000 miners, 32 weak shares a share, 2 s | 36,389 | 6.4 | 18.36% | 0.57 | 1.95 / 3.62 | 0.222 | 0.75% / 0.75% | 0.0 |
-| 1,000 miners, 32 weak shares a share, 1 s | 36,389 | 6.4 | 31.18% | 0.57 | 3.90 / 7.24 | 0.443 | 1.50% / 1.50% | 0.0 |
+| 1,000 miners, 32 weak shares a share, each, 10 s | 36,389 | 6.4 | 4.20% | 0.56 | 0.392 / 0.727 | 0.045 | 0.15% / 0.15% | 0.0 |
+| 1,000 miners, 32 weak shares a share, per node, 10 s | 36,389 | 6.4 | 4.20% | 0.56 | 0.392 / 0.727 | 0.045 | 0.15% / 0.15% | 0.0 |
+| 1,000 miners, 32 weak shares a share, one, 10 s | 36,389 | 6.4 | 4.20% | 0.56 | 0.392 / 0.727 | 0.045 | 0.09% / 0.09% | 0.0 |
+| 1,000 miners, 32 weak shares a share, each, 5 s | 36,389 | 6.4 | 7.82% | 0.56 | 0.786 / 1.46 | 0.084 | 0.30% / 0.30% | 0.0 |
+| 1,000 miners, 32 weak shares a share, per node, 5 s | 36,389 | 6.4 | 7.82% | 0.56 | 0.786 / 1.46 | 0.084 | 0.30% / 0.30% | 0.0 |
+| 1,000 miners, 32 weak shares a share, one, 5 s | 36,389 | 6.4 | 7.82% | 0.56 | 0.786 / 1.46 | 0.084 | 0.19% / 0.19% | 0.0 |
+| 1,000 miners, 32 weak shares a share, each, 2 s | 36,389 | 6.4 | 18.36% | 0.57 | 1.95 / 3.62 | 0.222 | 0.75% / 0.75% | 0.0 |
+| 1,000 miners, 32 weak shares a share, per node, 2 s | 36,389 | 6.4 | 18.36% | 0.57 | 1.95 / 3.62 | 0.222 | 0.74% / 0.74% | 0.0 |
+| 1,000 miners, 32 weak shares a share, one, 2 s | 36,389 | 6.4 | 18.36% | 0.57 | 1.95 / 3.62 | 0.222 | 0.46% / 0.46% | 0.0 |
+| 1,000 miners, 32 weak shares a share, each, 1 s | 36,389 | 6.4 | 31.18% | 0.57 | 3.90 / 7.24 | 0.443 | 1.50% / 1.50% | 0.0 |
+| 1,000 miners, 32 weak shares a share, per node, 1 s | 36,389 | 6.4 | 31.18% | 0.57 | 3.90 / 7.24 | 0.443 | 1.48% / 1.48% | 0.0 |
+| 1,000 miners, 32 weak shares a share, one, 1 s | 36,389 | 6.4 | 31.18% | 0.57 | 3.91 / 7.24 | 0.443 | 0.93% / 0.93% | 0.0 |
 | 10,000 miners, no weak shares, 10 s | 350,749 | 37.9 | 16.88% | 2.80 | 2.02 / 3.78 | 0.203 | 0.40% / 0.40% | 0.1 |
 | 10,000 miners, no weak shares, 5 s | 350,749 | 37.9 | 28.09% | 2.88 | 4.06 / 7.61 | 0.381 | 0.80% / 0.80% | 0.1 |
 | 10,000 miners, no weak shares, 2 s | 350,749 | 37.9 | 50.41% | 12.21 | 10.1 / 18.8 | 0.883 | 1.97% / 1.97% | 0.3 |
 | 10,000 miners, no weak shares, 1 s | 350,749 | 37.9 | 67.83% | 45.26 | 20.1 / 37.6 | 1.334 | 3.94% / 3.94% | 0.5 |
-| 10,000 miners, 32 weak shares a share, 10 s | 350,749 | 37.9 | 16.88% | 2.81 | 2.20 / 4.11 | 0.203 | 1.60% / 1.60% | 0.1 |
-| 10,000 miners, 32 weak shares a share, 5 s | 350,749 | 37.9 | 28.09% | 2.89 | 4.42 / 8.26 | 0.383 | 3.20% / 3.20% | 0.3 |
-| 10,000 miners, 32 weak shares a share, 2 s | 350,749 | 37.9 | 50.41% | 15.60 | 10.9 / 20.5 | 0.856 | 7.98% / 7.98% | 0.9 |
-| 10,000 miners, 32 weak shares a share, 1 s | 350,749 | 37.9 | 68.73% | 53.75 | 21.9 / 40.9 | 1.327 | 15.96% / 15.96% | 3.0 |
+| 10,000 miners, 32 weak shares a share, each, 10 s | 350,749 | 37.9 | 16.88% | 2.81 | 2.20 / 4.11 | 0.203 | 1.60% / 1.60% | 0.1 |
+| 10,000 miners, 32 weak shares a share, per node, 10 s | 350,749 | 37.9 | 16.88% | 2.81 | 2.20 / 4.11 | 0.203 | 1.58% / 1.58% | 0.1 |
+| 10,000 miners, 32 weak shares a share, one, 10 s | 350,749 | 37.9 | 16.88% | 2.81 | 2.20 / 4.11 | 0.203 | 0.76% / 0.76% | 0.1 |
+| 10,000 miners, 32 weak shares a share, each, 5 s | 350,749 | 37.9 | 28.09% | 2.89 | 4.42 / 8.26 | 0.383 | 3.20% / 3.20% | 0.3 |
+| 10,000 miners, 32 weak shares a share, per node, 5 s | 350,749 | 37.9 | 28.09% | 2.89 | 4.42 / 8.26 | 0.383 | 3.16% / 3.16% | 0.3 |
+| 10,000 miners, 32 weak shares a share, one, 5 s | 350,749 | 37.9 | 28.09% | 2.89 | 4.42 / 8.27 | 0.383 | 1.52% / 1.52% | 0.2 |
+| 10,000 miners, 32 weak shares a share, each, 2 s | 350,749 | 37.9 | 50.41% | 15.60 | 10.9 / 20.5 | 0.856 | 7.98% / 7.98% | 0.9 |
+| 10,000 miners, 32 weak shares a share, per node, 2 s | 350,749 | 37.9 | 50.50% | 15.61 | 10.9 / 20.4 | 0.861 | 7.85% / 7.85% | 0.9 |
+| 10,000 miners, 32 weak shares a share, one, 2 s | 350,749 | 37.9 | 50.41% | 15.62 | 11.0 / 20.5 | 0.863 | 3.81% / 3.81% | 0.7 |
+| 10,000 miners, 32 weak shares a share, each, 1 s | 350,749 | 37.9 | 68.73% | 53.75 | 21.9 / 40.9 | 1.327 | 15.96% / 15.96% | 3.0 |
+| 10,000 miners, 32 weak shares a share, per node, 1 s | 350,749 | 37.9 | 68.64% | 53.65 | 21.9 / 40.9 | 1.329 | 15.60% / 15.61% | 3.0 |
+| 10,000 miners, 32 weak shares a share, one, 1 s | 350,749 | 37.9 | 68.64% | 53.74 | 21.9 / 40.9 | 1.334 | 7.88% / 7.88% | 2.0 |
 | 100,000 miners, no weak shares, 10 s | 626,131 | 361.5 | 33.21% | 6.81 | 3.35 / 6.45 | 0.486 | 3.79% / 3.79% | 5.2 |
 | 100,000 miners, no weak shares, 5 s | 626,131 | 361.5 | 48.89% | 10.25 | 6.74 / 13.0 | 0.832 | 7.61% / 7.61% | 10.6 |
 | 100,000 miners, no weak shares, 2 s | 626,131 | 361.5 | 71.83% | 58.18 | 16.7 / 32.0 | 1.631 | 18.81% / 18.81% | 27.0 |
 | 100,000 miners, no weak shares, 1 s | 626,131 | 361.5 | 84.10% | 230.18 | 33.9 / 64.4 | 2.123 | 37.59% / 37.59% | 53.6 |
-| 100,000 miners, 32 weak shares a share, 10 s | 626,131 | 361.5 | 33.57% | 6.83 | 3.51 / 6.74 | 0.493 | 18.16% / 18.16% | 11.3 |
-| 100,000 miners, 32 weak shares a share, 5 s | 626,131 | 361.5 | 49.24% | 11.28 | 7.04 / 13.5 | 0.844 | 36.35% / 36.35% | 29.7 |
-| 100,000 miners, 32 weak shares a share, 2 s | 626,131 | 361.5 | 74.44% | 62.23 | 17.2 / 33.2 | 1.778 | 90.66% / 90.66% | 243.8 |
-| 100,000 miners, 32 weak shares a share, 1 s | 626,131 | 361.5 | 98.74% | 590.34 | 23.4 / 44.4 | 2.214 | 181.28% / 181.28% | 104067.8 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, 10 s | 350,749 | 189.5 | 22.05% | 3.81 | 2.06 / 3.95 | 0.280 | 7.99% / 7.99% | 2.4 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, 5 s | 350,749 | 189.5 | 35.29% | 3.89 | 4.14 / 7.95 | 0.520 | 16.00% / 16.00% | 5.5 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, 2 s | 350,749 | 189.5 | 58.87% | 13.85 | 10.2 / 19.6 | 1.187 | 39.90% / 39.90% | 20.4 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, 1 s | 350,749 | 189.5 | 75.92% | 46.71 | 20.4 / 39.1 | 1.827 | 79.78% / 79.78% | 87.4 |
-| 100,000 miners, token shares, 32 weak shares a share, 10 s | 4,237 | 376.0 | 16.52% | 2.67 | 0.164 / 0.324 | 0.198 | 22.94% / 22.94% | 13.1 |
-| 100,000 miners, token shares, 32 weak shares a share, 5 s | 4,237 | 376.0 | 29.78% | 2.80 | 0.318 / 0.631 | 0.415 | 45.91% / 45.91% | 33.1 |
-| 100,000 miners, token shares, 32 weak shares a share, 2 s | 4,237 | 376.0 | 96.22% | 203.04 | 0.594 / 1.04 | 2.465 | 114.56% / 114.56% | 33945.4 |
-| 100,000 miners, token shares, 32 weak shares a share, 1 s | 4,237 | 376.0 | 99.01% | 957.45 | 1.18 / 2.06 | 2.333 | 229.08% / 229.08% | 187151.3 |
-| 100,000 miners, all at level 0, 32 weak shares a share, 10 s | 1,028,473 | 437.6 | 42.50% | 13.88 | 5.74 / 11.0 | 0.686 | 47.13% / 47.13% | 57.4 |
-| 100,000 miners, all at level 0, 32 weak shares a share, 5 s | 1,028,473 | 437.6 | 63.91% | 50.88 | 11.3 / 21.6 | 1.331 | 94.31% / 94.31% | 436.7 |
-| 100,000 miners, all at level 0, 32 weak shares a share, 2 s | 1,028,473 | 437.6 | 99.01% | 2013.15 | 18.0 / 30.8 | 2.182 | 235.50% / 235.50% | 393030.4 |
-| 100,000 miners, all at level 0, 32 weak shares a share, 1 s | 1,028,473 | 437.6 | 99.37% | 2908.26 | 35.7 / 61.9 | 2.143 | 470.97% / 470.97% | 636793.3 |
+| 100,000 miners, 32 weak shares a share, each, 10 s | 626,131 | 361.5 | 33.57% | 6.83 | 3.51 / 6.74 | 0.493 | 18.16% / 18.16% | 11.3 |
+| 100,000 miners, 32 weak shares a share, per node, 10 s | 626,131 | 361.5 | 33.57% | 6.83 | 3.51 / 6.74 | 0.493 | 17.78% / 17.78% | 11.2 |
+| 100,000 miners, 32 weak shares a share, one, 10 s | 626,131 | 361.5 | 33.21% | 6.81 | 3.53 / 6.78 | 0.485 | 4.62% / 4.62% | 7.0 |
+| 100,000 miners, 32 weak shares a share, each, 5 s | 626,131 | 361.5 | 49.24% | 11.28 | 7.04 / 13.5 | 0.844 | 36.35% / 36.35% | 29.7 |
+| 100,000 miners, 32 weak shares a share, per node, 5 s | 626,131 | 361.5 | 49.07% | 11.26 | 7.04 / 13.5 | 0.833 | 35.58% / 35.60% | 29.2 |
+| 100,000 miners, 32 weak shares a share, one, 5 s | 626,131 | 361.5 | 48.89% | 11.37 | 7.09 / 13.6 | 0.826 | 9.26% / 9.26% | 15.4 |
+| 100,000 miners, 32 weak shares a share, each, 2 s | 626,131 | 361.5 | 74.44% | 62.23 | 17.2 / 33.2 | 1.778 | 90.66% / 90.66% | 243.8 |
+| 100,000 miners, 32 weak shares a share, per node, 2 s | 626,131 | 361.5 | 73.54% | 62.49 | 17.2 / 33.2 | 1.705 | 87.79% / 87.93% | 218.7 |
+| 100,000 miners, 32 weak shares a share, one, 2 s | 626,131 | 361.5 | 71.92% | 64.69 | 17.6 / 33.6 | 1.616 | 24.80% / 24.81% | 47.8 |
+| 100,000 miners, 32 weak shares a share, each, 1 s | 626,131 | 361.5 | 98.74% | 590.34 | 23.4 / 44.4 | 2.214 | 181.28% / 181.28% | 104067.8 |
+| 100,000 miners, 32 weak shares a share, per node, 1 s | 626,131 | 361.5 | 98.65% | 481.67 | 23.8 / 44.9 | 2.133 | 164.33% / 164.90% | 80995.3 |
+| 100,000 miners, 32 weak shares a share, one, 1 s | 626,131 | 361.5 | 83.92% | 261.59 | 35.6 / 67.4 | 1.983 | 53.46% / 53.46% | 122.5 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, each, 10 s | 350,749 | 189.5 | 22.05% | 3.81 | 2.06 / 3.95 | 0.280 | 7.99% / 7.99% | 2.4 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 10 s | 350,749 | 189.5 | 22.05% | 3.81 | 2.06 / 3.95 | 0.280 | 7.88% / 7.88% | 2.4 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, one, 10 s | 350,749 | 189.5 | 22.05% | 3.81 | 2.07 / 3.96 | 0.280 | 3.78% / 3.78% | 1.8 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, each, 5 s | 350,749 | 189.5 | 35.29% | 3.89 | 4.14 / 7.95 | 0.520 | 16.00% / 16.00% | 5.5 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 5 s | 350,749 | 189.5 | 35.29% | 3.89 | 4.14 / 7.95 | 0.520 | 15.77% / 15.77% | 5.5 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, one, 5 s | 350,749 | 189.5 | 35.29% | 3.88 | 4.16 / 7.97 | 0.520 | 7.57% / 7.57% | 4.1 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, each, 2 s | 350,749 | 189.5 | 58.87% | 13.85 | 10.2 / 19.6 | 1.187 | 39.90% / 39.90% | 20.4 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 2 s | 350,749 | 189.5 | 58.96% | 13.88 | 10.2 / 19.6 | 1.198 | 39.21% / 39.22% | 20.3 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, one, 2 s | 350,749 | 189.5 | 58.51% | 14.05 | 10.3 / 19.7 | 1.159 | 18.98% / 18.98% | 12.6 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, each, 1 s | 350,749 | 189.5 | 75.92% | 46.71 | 20.4 / 39.1 | 1.827 | 79.78% / 79.78% | 87.4 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 1 s | 350,749 | 189.5 | 76.01% | 46.83 | 20.4 / 39.0 | 1.811 | 77.91% / 77.93% | 83.3 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, one, 1 s | 350,749 | 189.5 | 74.75% | 47.84 | 20.7 / 39.4 | 1.764 | 39.03% / 39.04% | 33.7 |
+| 100,000 miners, token shares, 32 weak shares a share, each, 10 s | 4,237 | 376.0 | 16.52% | 2.67 | 0.164 / 0.324 | 0.198 | 22.94% / 22.94% | 13.1 |
+| 100,000 miners, token shares, 32 weak shares a share, per node, 10 s | 4,237 | 376.0 | 16.52% | 2.66 | 0.165 / 0.325 | 0.198 | 22.43% / 22.43% | 13.0 |
+| 100,000 miners, token shares, 32 weak shares a share, one, 10 s | 4,237 | 376.0 | 16.16% | 2.62 | 0.195 / 0.364 | 0.193 | 4.52% / 4.52% | 7.4 |
+| 100,000 miners, token shares, 32 weak shares a share, each, 5 s | 4,237 | 376.0 | 29.78% | 2.80 | 0.318 / 0.631 | 0.415 | 45.91% / 45.91% | 33.1 |
+| 100,000 miners, token shares, 32 weak shares a share, per node, 5 s | 4,237 | 376.0 | 29.78% | 2.80 | 0.319 / 0.633 | 0.415 | 44.91% / 44.91% | 32.6 |
+| 100,000 miners, token shares, 32 weak shares a share, one, 5 s | 4,237 | 376.0 | 28.62% | 2.69 | 0.384 / 0.718 | 0.394 | 9.02% / 9.02% | 15.3 |
+| 100,000 miners, token shares, 32 weak shares a share, each, 2 s | 4,237 | 376.0 | 96.22% | 203.04 | 0.594 / 1.04 | 2.465 | 114.56% / 114.56% | 33945.4 |
+| 100,000 miners, token shares, 32 weak shares a share, per node, 2 s | 4,237 | 376.0 | 94.60% | 112.43 | 0.596 / 1.03 | 2.066 | 107.48% / 107.73% | 18259.5 |
+| 100,000 miners, token shares, 32 weak shares a share, one, 2 s | 4,237 | 376.0 | 50.86% | 2.88 | 0.911 / 1.71 | 0.947 | 21.98% / 21.98% | 40.3 |
+| 100,000 miners, token shares, 32 weak shares a share, each, 1 s | 4,237 | 376.0 | 99.01% | 957.45 | 1.18 / 2.06 | 2.333 | 229.08% / 229.08% | 187151.3 |
+| 100,000 miners, token shares, 32 weak shares a share, per node, 1 s | 4,237 | 376.0 | 98.83% | 801.10 | 1.18 / 2.10 | 2.077 | 205.80% / 206.70% | 153001.7 |
+| 100,000 miners, token shares, 32 weak shares a share, one, 1 s | 4,237 | 376.0 | 68.91% | 3.31 | 1.68 / 3.20 | 1.480 | 43.50% / 43.50% | 92.8 |
+| 100,000 miners, all at level 0, 32 weak shares a share, each, 10 s | 1,028,473 | 437.6 | 42.50% | 13.88 | 5.74 / 11.0 | 0.686 | 47.13% / 47.13% | 57.4 |
+| 100,000 miners, all at level 0, 32 weak shares a share, per node, 10 s | 1,028,473 | 437.6 | 42.32% | 13.81 | 5.74 / 10.9 | 0.686 | 45.89% / 45.95% | 55.7 |
+| 100,000 miners, all at level 0, 32 weak shares a share, one, 10 s | 1,028,473 | 437.6 | 41.79% | 13.74 | 5.80 / 11.0 | 0.666 | 6.49% / 6.49% | 13.5 |
+| 100,000 miners, all at level 0, 32 weak shares a share, each, 5 s | 1,028,473 | 437.6 | 63.91% | 50.88 | 11.3 / 21.6 | 1.331 | 94.31% / 94.31% | 436.7 |
+| 100,000 miners, all at level 0, 32 weak shares a share, per node, 5 s | 1,028,473 | 437.6 | 63.38% | 51.27 | 11.4 / 21.7 | 1.348 | 91.53% / 91.66% | 352.0 |
+| 100,000 miners, all at level 0, 32 weak shares a share, one, 5 s | 1,028,473 | 437.6 | 59.56% | 52.95 | 11.7 / 22.1 | 1.176 | 14.04% / 14.04% | 31.4 |
+| 100,000 miners, all at level 0, 32 weak shares a share, each, 2 s | 1,028,473 | 437.6 | 99.01% | 2013.15 | 18.0 / 30.8 | 2.182 | 235.50% / 235.50% | 393030.4 |
+| 100,000 miners, all at level 0, 32 weak shares a share, per node, 2 s | 1,028,473 | 437.6 | 98.92% | 1656.77 | 18.1 / 32.9 | 2.167 | 209.18% / 210.62% | 313671.5 |
+| 100,000 miners, all at level 0, 32 weak shares a share, one, 2 s | 1,028,473 | 437.6 | 79.48% | 244.34 | 29.1 / 54.9 | 1.767 | 43.12% / 43.13% | 115.0 |
+| 100,000 miners, all at level 0, 32 weak shares a share, each, 1 s | 1,028,473 | 437.6 | 99.37% | 2908.26 | 35.7 / 61.9 | 2.143 | 470.97% / 470.97% | 636793.3 |
+| 100,000 miners, all at level 0, 32 weak shares a share, per node, 1 s | 1,028,473 | 437.6 | 99.37% | 2449.10 | 35.9 / 65.3 | 1.714 | 406.39% / 409.17% | 523496.1 |
+| 100,000 miners, all at level 0, 32 weak shares a share, one, 1 s | 1,028,473 | 437.6 | 89.67% | 754.48 | 58.8 / 110 | 2.214 | 91.37% / 91.41% | 369.2 |
 
 Upstream is right, and the queue shows where:
 - At 1,000 miners validation stays under 2% of a node's time even at
   1-second shares with 32 weak shares a share. The limit is propagation:
   4.2% stale at 10-second shares, 31% at 1-second.
 - At 10,000 miners whole shares are already 17% stale at 10-second shares.
-  Weak shares take 16% of a node's time at 1-second shares, and 80% on a
-  node five times slower.
-- At 100,000 miners at the default level a node is 18% busy at 10-second
-  shares, 36% at 5-second and 91% at 2-second; at 1-second shares the queue
-  grows without end. Token shares cost a little more (23%, 46%, then
-  overflow at 2-second), and every miner at level 0 much more: 47% at
-  10-second shares, 94% at 5-second, overflow at 2-second.
+  Weak shares take 16% of a node's time at 1-second shares, and 78% on a
+  node five times slower; half that when the pool mines one template.
+- At 100,000 miners at the default level, with a template a node, a node is
+  18% busy at 10-second shares, 36% at 5-second and 88% at 2-second; at
+  1-second shares the queue grows without end. Token shares cost a little
+  more (22%, 45%, then overflow at 2-second), and every miner at level 0
+  much more: 46% at 10-second shares, 92% at 5-second, overflow at 2-second.
+- The node's payout cache decides how much of that is real. With a template
+  a node, as in this pool of 1,000 equal nodes, the load is within a few
+  points of the worst case, because the 32 weak shares of a share come from
+  about 32 different nodes. With one template for the whole pool a node
+  with 100,000 miners is 5% busy at 10-second shares and 53% at 1-second
+  (44% on token shares, 91% at level 0), and no share period overflows.
 
 So a faster share period is bounded by propagation for small pools and by
-validation, mostly of weak shares, for pools paying tens of thousands of
-miners. At the adopted 10-second period and default level, 100,000 miners
-fit with room; what does not fit is 100,000 miners at level 0 on shares
-faster than 5 seconds.
-
+validation, mostly of weak shares mined on different templates, for pools
+paying tens of thousands of miners. At the adopted 10-second period and
+default level, 100,000 miners fit with room; what does not fit is 100,000
+miners at level 0 on shares faster than 5 seconds, unless the pool's nodes
+build the same template.
 ### 6. A bigger network
 
 | Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |
@@ -1253,6 +1318,13 @@ share's size and its validation at each hop matter far more than the size
 of the network. Weak shares do not change the stale rate at 1,000 or 3,000
 nodes; they add 0.2 Mbit/s of upload a node.
 
+The window walk with 32 weak shares on each share was measured
+(`validation_cost_with_weak_share_credits`): 14 ms for 1,800 shares and
+5,100 payees, 174 ms with 50,100 payees, 211 ms for 18,000 shares and
+51,000 payees, and 160 ms at the cap of 120,960 shares with 6,000 payees.
+Its time follows the number of payees, about 3.5 microseconds each, not
+the number of credits.
+
 ### What this study did not do
 
 - It did not run real nodes at these sizes: the costs are measured, the
@@ -1262,7 +1334,6 @@ nodes; they add 0.2 Mbit/s of upload a node.
   deeper than 3.
 - Validation was measured on one desktop; a small node is taken as 5 times
   slower, not measured.
-- The window walk was measured without weak-share credits in the window.
 
 ## Code
 

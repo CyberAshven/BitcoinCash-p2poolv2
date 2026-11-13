@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Share-chain rule change on Bitcoin Cash, a flag day: payout level 0 is no
+longer valid (protocol segment `levels-546x2-k1`, store format 8, every
+genesis share re-pinned). A level 0 win pays 546 satoshis, which in the
+payout tree is below dust once the tree's fee is taken, so the tree gave it
+to its largest payee: on a 12-node swarm with 1,200 miners the miners at
+level 0 were paid 0.79 to 0.82 of their part of the hashrate on token
+shares, and 1.00 with level 1 in their place. A share's level is now 1 to 7
+(`MIN_PAYOUT_LEVEL`) and the smallest level payment 1,092 satoshis. A
+header, a weak share credit or a job token at level 0 does not decode,
+`[stratum] payout_level = 0` is refused, and a node never lowers a miner
+below level 1. A miner too small for three payments a month at level 1 is
+paid half as often as it was at level 0, and twice as much each time.
+
 A limits study runs upstream's five practical objections to the scaling
 ideas against what checking a share really costs a node
 (`docs/simulation/network-sim.md`, "Limits study"). An ignored timing test
@@ -16,10 +29,11 @@ a weak share costs 0.3, 3.8 and 45 ms; a token share 7.4, 45 and 376 ms; and
 100,000 miners at level 0 cost 438 ms. A second
 one walks windows whose shares carry 32 weak shares each: 14 ms for 1,800
 shares and 5,100 payees, 174 ms with 50,100 payees, 211 ms for 18,000 shares
-and 51,000 payees, and 160 ms at the cap with 6,000 payees, against 6.6 ms
-at the cap without weak shares. Loading those windows takes 0.8, 10, 126 and
-88 seconds, because each payee's key is found by scanning the window's
-payees (`AddressKeys::key_for`). The network
+and 51,000 payees, and 160 ms at the cap with 6,000 payees, against 6.6 ms at the cap without
+weak shares and 1,000 payees. Loading those
+windows took 0.8, 10, 126 and 88 seconds while each payee's key was found
+by a scan of the window's payees; with the lookup below they load in 0.04,
+0.05, 0.5 and 3.2 seconds. The network
 simulator now queues validation one at a time per node
 (`ValidationQueue::Serial`, as the window's write lock serialises walks) and
 reports each node's validation load. On 1,000 nodes: shares without their
@@ -28,7 +42,9 @@ miners and from 32.6% to 16.3% at 100,000; relaying after the header check
 takes 0.3 to 8 points off; more peers help only shares without payouts and
 make whole shares worse on slow links; uncle caps of 6 and 12 change nothing
 measurable; 100,000 miners with weak shares keep a node 18% busy at
-10-second shares, 91% at 2 seconds and overload it at 1 second; and 10,000
+10-second shares, 88% at 2 seconds and overload it at 1 second when each
+node mines its own template, and 5%, 25% and 53% when the pool mines one
+(the simulator now models the node's cache of weak share payouts); and 10,000
 nodes cost half a point over 1,000.
 
 The payout simulator has a `scale` table: pools of 10 to 90% of a Bitcoin
@@ -50,6 +66,16 @@ the hashrate, and 1.02 to 1.05 without tokens, where every payee fits the
 coinbase. And a node sends every weak share whole to each
 peer, ten duplicates for each one taken in a 12-node mesh, which overran the
 request streams in the first minute of a new chain.
+
+The PPLNS window finds a payee's key with one lookup instead of a scan of
+every payee (`AddressKeys`, upstream's interner, now with a map from value
+to key; a freed slot is still reused lowest first, so keys are assigned as
+before and no payout changes). The window asks for a key for every share
+and every weak share credit it loads: a window of 1,800 shares carrying
+57,568 weak shares for 50,100 payees loaded in 10.4 seconds and now loads in
+0.05, 18,000 shares for 51,000 payees fell from 126 seconds to 0.5, and the
+cap of 120,960 shares with 32 weak shares each for 6,000 payees from 88
+seconds to 3.2.
 
 Upstream's script history index (`ScriptHistory`, for Electrum's
 `blockchain.scripthash.*` methods) is an address index, so a Bitcoin Cash
@@ -145,9 +171,9 @@ have yet. It holds the weak share, unchecked, in its weak pool and asks the
 peer that sent it for the parent's headers, once per parent, as it does for
 a share block's parent. Once the parent is stored, the weak share is
 checked and pooled as new; a parent too deep for a share on the tip to
-carry the weak share drops it. Held weak shares are bounded: at most 384
-(`WEAK_CAP * WEAK_DEPTH`) and 576 KiB, the oldest dropped first, each held
-at most `WEAK_DEPTH` share periods (60 seconds). `/metrics` adds
+carry the weak share drops it. Held weak shares are bounded: at most 3,072
+(`WEAK_CAP * WEAK_DEPTH`) and 4.5 MiB, the oldest dropped first, each held
+at most `WEAK_DEPTH` share periods (8 minutes). `/metrics` adds
 `weak_pool_waiting_for_parent` and the refusal reasons `too_deep` and
 `unknown_parent`. Node behaviour only; no share-chain rule changes.
 

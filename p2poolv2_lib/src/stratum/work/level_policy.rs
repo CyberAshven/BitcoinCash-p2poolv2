@@ -4,15 +4,15 @@
 
 //! The payout level a Bitcoin Cash node gives each miner's jobs
 //! (`docs/sharechain/small-miners-design.md`, part 4, "Choosing a level").
-//! Node policy, not a share-chain rule: any level from 0 to
-//! [`MAX_PAYOUT_LEVEL`] is valid, and the draw pays whatever level each
+//! Node policy, not a share-chain rule: any level from [`MIN_PAYOUT_LEVEL`]
+//! to [`MAX_PAYOUT_LEVEL`] is valid, and the draw pays whatever level each
 //! share carries.
 //!
 //! A miner chooses its level at login with `min-payout=` or
 //! `fee-tolerance=` ([`PayoutLevelChoice`]); without either it gets the
 //! node's `payout_level`. When the miner's expected payments a month at that
 //! level would fall below [`MIN_PAYMENTS_PER_MONTH`], the node lowers the
-//! level until they reach it, or to level 0
+//! level until they reach it, or to the lowest level
 //! ([`affordable_payout_level`]). The estimate takes the miner's hashrate,
 //! the pool's hashrate and the template's coinbase value: the miner earns
 //! its share of the pool's hashrate of each block, and at a level above that
@@ -20,7 +20,7 @@
 
 use super::band_policy::{MONTH_SECONDS, expected_hashes, pool_blocks_per_second};
 use super::prepared_notify::PreparedNotifyParams;
-use crate::accounting::payout::payout_levels::{MAX_PAYOUT_LEVEL, level_amount};
+use crate::accounting::payout::payout_levels::{MAX_PAYOUT_LEVEL, MIN_PAYOUT_LEVEL, level_amount};
 use crate::stratum::difficulty_adjuster::DifficultyAdjusterTrait;
 use crate::stratum::session::Session;
 use bitcoin::CompactTarget;
@@ -58,7 +58,7 @@ impl PayoutLevelChoice {
 /// The smallest level whose amount is at least `satoshis`, at most the
 /// highest level.
 pub fn level_at_or_above(satoshis: u64) -> u8 {
-    (0..=MAX_PAYOUT_LEVEL)
+    (MIN_PAYOUT_LEVEL..=MAX_PAYOUT_LEVEL)
         .find(|level| level_amount(*level) >= satoshis)
         .unwrap_or(MAX_PAYOUT_LEVEL)
 }
@@ -67,7 +67,7 @@ pub fn level_at_or_above(satoshis: u64) -> u8 {
 /// of one, compared exactly as `spend_cost * 10,000 <= basis_points * L_k`;
 /// the highest level when none is.
 pub fn level_within_fee(basis_points: u16, spend_cost: u64) -> u8 {
-    (0..=MAX_PAYOUT_LEVEL)
+    (MIN_PAYOUT_LEVEL..=MAX_PAYOUT_LEVEL)
         .find(|level| {
             u128::from(spend_cost) * BASIS_POINTS
                 <= u128::from(basis_points) * u128::from(level_amount(*level))
@@ -87,16 +87,16 @@ pub fn expected_payments_a_month(amount_per_block: f64, level: u8, blocks_per_se
 
 /// The highest level at or below `chosen` at which a payee earning
 /// `amount_per_block` of each of `blocks_per_second` pool blocks a second
-/// expects at least [`MIN_PAYMENTS_PER_MONTH`] payments a month, or level 0
-/// when none does.
+/// expects at least [`MIN_PAYMENTS_PER_MONTH`] payments a month, or the
+/// lowest level when none does.
 pub fn affordable_payout_level(chosen: u8, amount_per_block: f64, blocks_per_second: f64) -> u8 {
-    (0..=chosen)
+    (MIN_PAYOUT_LEVEL..=chosen)
         .rev()
         .find(|level| {
             expected_payments_a_month(amount_per_block, *level, blocks_per_second)
                 >= MIN_PAYMENTS_PER_MONTH
         })
-        .unwrap_or(0)
+        .unwrap_or(MIN_PAYOUT_LEVEL)
 }
 
 /// What a miner hashing at `miner_hashrate` earns of a pool hashing at
@@ -207,8 +207,12 @@ mod tests {
     }
 
     #[test]
-    fn min_payout_of_zero_takes_level_zero() {
-        assert_eq!(PayoutLevelChoice::MinPayout(0).level(148), 0);
+    fn min_payout_of_zero_takes_the_lowest_level() {
+        assert_eq!(
+            PayoutLevelChoice::MinPayout(0).level(148),
+            MIN_PAYOUT_LEVEL,
+            "min-payout of 0 satoshis"
+        );
     }
 
     #[test]
@@ -222,10 +226,15 @@ mod tests {
         assert_eq!(PayoutLevelChoice::FeeTolerance(85).level(148), 5);
     }
 
-    /// 148 / 546 is 27.1%, so a tolerance of 30% is met at level 0.
+    /// 148 / 1,092 is about 13.6%, so a tolerance of 30% is met at the lowest
+    /// level.
     #[test]
-    fn a_wide_fee_tolerance_takes_level_zero() {
-        assert_eq!(PayoutLevelChoice::FeeTolerance(3_000).level(148), 0);
+    fn a_wide_fee_tolerance_takes_the_lowest_level() {
+        assert_eq!(
+            PayoutLevelChoice::FeeTolerance(3_000).level(148),
+            MIN_PAYOUT_LEVEL,
+            "fee tolerance 30%"
+        );
     }
 
     /// No level keeps the spend within 0.1%: 148 / 69,888 is 0.21%.
@@ -269,10 +278,15 @@ mod tests {
         assert_eq!(affordable_payout_level(5, 20_000.0, ONE_BLOCK_A_DAY), 5);
     }
 
-    /// A payee too small for 3 payments a month even at level 0 gets level 0.
+    /// A payee too small for 3 payments a month even at the lowest level gets
+    /// that level, never 0.
     #[test]
-    fn a_payee_too_small_for_any_level_gets_level_zero() {
-        assert_eq!(affordable_payout_level(5, 1.0, ONE_BLOCK_A_DAY), 0);
+    fn a_payee_too_small_for_any_level_gets_the_lowest_level() {
+        assert_eq!(
+            affordable_payout_level(5, 1.0, ONE_BLOCK_A_DAY),
+            MIN_PAYOUT_LEVEL,
+            "miner too small for three payments a month"
+        );
     }
 
     /// A miner with a tenth of the pool's hashrate earns a tenth of each

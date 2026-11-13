@@ -372,7 +372,8 @@ struct JobTokenTerms {
 /// bits are the minimum, so a declared share's minimum and wanted bits are
 /// its bits, and a declared share carries no weak shares. At most 255
 /// bytes. More than [`MAX_UNCLES`] uncles, a payout level above 7
-/// (`MAX_PAYOUT_LEVEL`), or bytes left over, is not a token.
+/// (`MAX_PAYOUT_LEVEL`) or below the lowest (`MIN_PAYOUT_LEVEL`), or bytes
+/// left over, is not a token.
 fn decode_job_token_terms(
     token: &[u8],
 ) -> Result<JobTokenTerms, bitcoin::consensus::encode::Error> {
@@ -847,8 +848,8 @@ mod tests {
         assert_eq!(bitcoin.hash(), leveled.hash());
     }
 
-    /// A job token's payout level reaches the commitment it decodes to, and
-    /// a token claiming a level above 7 is not a token.
+    /// A job token's payout level reaches the commitment it decodes to. A
+    /// token claiming a level above 7, or one below the lowest, is not a token.
     #[test]
     fn a_job_token_carries_its_payout_level() {
         let mut token = vec![BCH_JOB_TOKEN_VERSION];
@@ -866,19 +867,29 @@ mod tests {
         token.extend_from_slice(&serialize(&ShareVersion::CURRENT));
         token.extend_from_slice(&crate::shares::band::BAND_CAP_UNIT.to_le_bytes());
         let mut above = token.clone();
+        let mut below = token.clone();
         token.push(6);
         above.push(8);
+        below.push(0);
         let weak_ratio = crate::shares::weak::GENESIS_WEAK_RATIO.to_le_bytes();
         token.extend_from_slice(&weak_ratio);
         above.extend_from_slice(&weak_ratio);
+        below.extend_from_slice(&weak_ratio);
         let payout = create_test_commitment().miner_bitcoin_address;
         let owner = p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
 
         let commitment =
             ShareCommitment::from_mining_job_token(&token, payout.clone(), owner).unwrap();
 
-        assert_eq!(commitment.payout_level, 6);
-        assert!(ShareCommitment::from_mining_job_token(&above, payout, owner).is_err());
+        assert_eq!(commitment.payout_level, 6, "job token level");
+        assert!(
+            ShareCommitment::from_mining_job_token(&above, payout.clone(), owner).is_err(),
+            "job token above 7"
+        );
+        assert!(
+            ShareCommitment::from_mining_job_token(&below, payout, owner).is_err(),
+            "job token level 0"
+        );
     }
 
     /// A pool-built job's token root is digested, so one proof of work

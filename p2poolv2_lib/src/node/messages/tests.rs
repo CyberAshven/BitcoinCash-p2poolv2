@@ -1,5 +1,6 @@
 use super::*;
 use crate::accounting::payout::coinbase_budget::BCH_MAX_TX_SIZE;
+use crate::accounting::payout::payout_levels::MIN_PAYOUT_LEVEL;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::ShareTransaction;
@@ -148,6 +149,7 @@ fn test_largest_bch_share_block_fits_max_message_size() {
 fn declared_bch_header_batch_round_trips_a_compressed_32_level_proof() {
     let mut header = TestShareBlockBuilder::new().build().header;
     header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
+    header.payout_level = MIN_PAYOUT_LEVEL;
     header.bch_coinbase = Some(BchCoinbase {
         prefix: Builder::new()
             .push_int(header.bitcoin_height as i64)

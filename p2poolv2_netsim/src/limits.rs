@@ -20,7 +20,7 @@
 //! 5. Faster shares build a fatter DAG and load each node:
 //!    `limits-period` runs 10 to 1-second shares with and without weak
 //!    shares, at each measured validation cost, on a node five times
-//!    slower, at payout level 0 and with token shares.
+//!    slower, at the measured cost of payout level 0 and with token shares.
 //!
 //! `limits-network` then grows the network from 1,000 to 10,000 nodes.
 //!
@@ -30,7 +30,7 @@
 //! measured: the window walk and coinbase build for a 120,960 share window.
 
 use crate::distribution::Distribution;
-use crate::engine::{Forwarding, ValidationQueue};
+use crate::engine::{Forwarding, ValidationQueue, WeakTemplates};
 use crate::report::group_thousands;
 use crate::scaling::{LARGE_NETWORK_SHARE_INTERVALS, at_size};
 use crate::scenario::{HEADER_CHECK_SECONDS, Scenario, ShareRelay};
@@ -59,6 +59,8 @@ pub struct MeasuredCost {
     /// Seconds to check a weak share: the coinbase build alone; the walk is
     /// cached by parent.
     pub weak_share_seconds: f64,
+    /// The coinbase rebuild and merkle check a cached weak share still pays.
+    pub weak_cached_seconds: f64,
 }
 
 /// The adopted rules: every miner at the default payout level 5 (17,472
@@ -72,6 +74,7 @@ pub const ADOPTED: [MeasuredCost; 3] = [
         level: 5,
         share_seconds: 0.0064,
         weak_share_seconds: 0.00026,
+        weak_cached_seconds: 0.000076,
     },
     MeasuredCost {
         miners: 10_000,
@@ -80,6 +83,7 @@ pub const ADOPTED: [MeasuredCost; 3] = [
         level: 5,
         share_seconds: 0.0379,
         weak_share_seconds: 0.00375,
+        weak_cached_seconds: 0.001042,
     },
     MeasuredCost {
         miners: 100_000,
@@ -88,6 +92,7 @@ pub const ADOPTED: [MeasuredCost; 3] = [
         level: 5,
         share_seconds: 0.3615,
         weak_share_seconds: 0.04485,
+        weak_cached_seconds: 0.001374,
     },
 ];
 
@@ -101,6 +106,7 @@ pub const TOKEN_SHARES: [MeasuredCost; 3] = [
         level: 5,
         share_seconds: 0.00735,
         weak_share_seconds: 0.00121,
+        weak_cached_seconds: 0.000009,
     },
     MeasuredCost {
         miners: 10_000,
@@ -109,6 +115,7 @@ pub const TOKEN_SHARES: [MeasuredCost; 3] = [
         level: 5,
         share_seconds: 0.0446,
         weak_share_seconds: 0.0105,
+        weak_cached_seconds: 0.000011,
     },
     MeasuredCost {
         miners: 100_000,
@@ -117,12 +124,14 @@ pub const TOKEN_SHARES: [MeasuredCost; 3] = [
         level: 5,
         share_seconds: 0.376,
         weak_share_seconds: 0.0593,
+        weak_cached_seconds: 0.000010,
     },
 ];
 
-/// The worst case for the coinbase: 100,000 miners all at payout level 0,
-/// so every one is paid, 29,400 in the coinbase and 70,600 through the
-/// payout tree.
+/// The worst case measured while level 0 was a legal payout level: 100,000
+/// miners all at payout level 0, so every one is paid, 29,400 in the
+/// coinbase and 70,600 through the payout tree. Level 0 is no longer a
+/// level; these times are that run's, not a level a node now chooses.
 pub const LEVEL_ZERO_100K: MeasuredCost = MeasuredCost {
     miners: 100_000,
     paid_outputs: 100_000,
@@ -130,6 +139,7 @@ pub const LEVEL_ZERO_100K: MeasuredCost = MeasuredCost {
     level: 0,
     share_seconds: 0.4376,
     weak_share_seconds: 0.1328,
+    weak_cached_seconds: 0.00226, // scaled from level 5 by the outputs: 29,400 against 17,885
 };
 
 /// How much slower than the measuring desktop a small node (a single-board
@@ -219,6 +229,8 @@ fn measured(base: &Scenario, cost: MeasuredCost, slowdown: f64, interval: f64) -
         validation_seconds_per_megabyte: 0.0,
         validation_queue: ValidationQueue::Serial {
             weak_share_seconds: cost.weak_share_seconds * slowdown,
+            weak_cached_seconds: cost.weak_cached_seconds * slowdown,
+            templates: WeakTemplates::Each,
         },
         ..paid
     };
@@ -364,8 +376,47 @@ fn uncles(base: &Scenario) -> Vec<Scenario> {
         .collect()
 }
 
+/// `Each`, then one template per finding node, then one template for every
+/// miner. Rows without weak shares stay on `Each` alone.
+const PERIOD_TEMPLATES: [WeakTemplates; 3] = [
+    WeakTemplates::Each,
+    WeakTemplates::PerNode,
+    WeakTemplates::Shared,
+];
+
+/// How `templates` is named in a period-sweep label.
+fn template_name(templates: WeakTemplates) -> &'static str {
+    match templates {
+        WeakTemplates::Each => "each",
+        WeakTemplates::PerNode => "per node",
+        WeakTemplates::Shared => "one",
+    }
+}
+
+/// `scenario` validating weak shares under `templates`. The build and the
+/// cached cost are unchanged.
+fn with_templates(scenario: Scenario, templates: WeakTemplates) -> Scenario {
+    let ValidationQueue::Serial {
+        weak_share_seconds,
+        weak_cached_seconds,
+        ..
+    } = scenario.validation_queue
+    else {
+        return scenario;
+    };
+    Scenario {
+        validation_queue: ValidationQueue::Serial {
+            weak_share_seconds,
+            weak_cached_seconds,
+            templates,
+        },
+        ..scenario
+    }
+}
+
 /// `cost` at every share period, with `weak` weak shares a share, on nodes
-/// `slowdown` times slower; `note` says what sets the rows apart.
+/// `slowdown` times slower; `note` says what sets the rows apart. A row with
+/// weak shares is repeated for each way those shares share a template.
 fn period_rows(
     base: &Scenario,
     cost: MeasuredCost,
@@ -373,21 +424,37 @@ fn period_rows(
     weak: u64,
     note: &str,
 ) -> Vec<Scenario> {
+    let mode_count = if weak == 0 { 1 } else { PERIOD_TEMPLATES.len() };
     [10.0, 5.0, 2.0, 1.0]
-        .map(|interval| {
-            labelled(
-                short(Scenario {
-                    weak_shares_per_share: weak,
-                    ..measured(base, cost, slowdown, interval)
-                }),
-                format!(
-                    "{}{note}, {}, {interval} s",
-                    miners_label(cost),
-                    weak_name(weak)
-                ),
-            )
+        .into_iter()
+        .flat_map(|interval| {
+            PERIOD_TEMPLATES
+                .into_iter()
+                .take(mode_count)
+                .map(|mode| {
+                    let named = if weak == 0 {
+                        String::new()
+                    } else {
+                        format!(", {}", template_name(mode))
+                    };
+                    labelled(
+                        with_templates(
+                            short(Scenario {
+                                weak_shares_per_share: weak,
+                                ..measured(base, cost, slowdown, interval)
+                            }),
+                            mode,
+                        ),
+                        format!(
+                            "{}{note}, {}{named}, {interval} s",
+                            miners_label(cost),
+                            weak_name(weak)
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>()
         })
-        .to_vec()
+        .collect()
 }
 
 fn period(base: &Scenario) -> Vec<Scenario> {

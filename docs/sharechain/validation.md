@@ -74,7 +74,7 @@ after it under tag `0x25`
 ([Coinbase payouts](../payouts/coinbase.md#payout-levels)). It must be at
 most 7. A header with a higher level does not decode, so header sync, block
 receipt and the store all refuse it the same way, before any other check.
-Any level from 0 to 7 is valid: which level a miner mines at is its own and
+Any level from 1 to 7 is valid: which level a miner mines at is its own and
 its node's choice. The level matters only when a coinbase pays the share's
 payee: a payee below its level is paid by the draw, which the coinbase
 rebuild below checks. Bitcoin shares carry no level.
