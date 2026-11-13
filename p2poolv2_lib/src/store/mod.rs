@@ -63,7 +63,10 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 /// - 8 (2026-11-12): Bitcoin Cash payout levels start at the lowest
 ///   (`BCH_PAYOUT_LEVELS_RULE_TAG`, `levels-546x2-k1`). A stored chain was
 ///   validated under the rule that allowed level 0; the chain starts again.
-pub const STORE_FORMAT_VERSION: u32 = 8;
+/// - 9 (2026-11-12): a weak share a share carries is held to its carrier's
+///   time (`BCH_WEAK_SHARE_RULE_TAG`, `weak3-64-100-48-256`). A stored chain
+///   was validated against each node's clock; the chain starts again.
+pub const STORE_FORMAT_VERSION: u32 = 9;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
