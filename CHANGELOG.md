@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Share-chain rule change on Bitcoin Cash, a flag day: a weak share a share
+carries is held to its carrier's time, not to each node's clock (protocol
+segment `weak3-64-100-48-256`, store format 9). The 120-second future limit
+of a carried weak share was checked against the validating node's own clock,
+and a failure marked the carrying share invalid for good, so a miner who
+stamped a weak share two minutes ahead could leave nodes whose clocks
+differed by a second on two sides of one share for ever. A carried weak
+share's time is now at most 120 seconds after its carrier's
+(`check_carried_weak_time`), two numbers every node reads the same. A weak
+share relayed alone is still held to the local clock, but one ahead of it
+is held and checked again, never refused as invalid.
+
 Share-chain rule change on Bitcoin Cash, a flag day: payout level 0 is no
 longer valid (protocol segment `levels-546x2-k1`, store format 8, every
 genesis share re-pinned). A level 0 win pays 546 satoshis, which in the
