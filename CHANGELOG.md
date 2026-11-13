@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The payout simulator has a `band-step` table, the last part of the small
+miners design that had no simulation: the band cap `C` from genesis at step
+divisors of 128, 512 and 2,048, and with 2% and 10% of the pool mining at
+the minimum while recording the largest wanted difficulty. Where `C` settles
+does not depend on the step, only how fast it gets there (1, 3 and 5 to 8
+hours); overstating takes `C` to its maximum and changes nothing home miners
+are paid.
+
 Share-chain rule change on Bitcoin Cash, a flag day: a weak share a share
 carries is held to its carrier's time, not to each node's clock (protocol
 segment `weak3-64-100-48-256`, store format 9). The 120-second future limit
