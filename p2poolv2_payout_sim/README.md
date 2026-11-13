@@ -31,7 +31,7 @@ are `designs`, `hashrate`, `pool`, `weak-credit`, `band-cap`,
 `weak-constants`, `includer-cut`, `levels`, `period`, `attack-minimum`,
 `attack-carriers` and `attack-spam`, and study #85's `refusing-races`,
 `mixes`, `arrivals`, `tiny-pool`, `floods`, `draw-steering`, `losses`,
-`weak-depth`, `r-max` and `r-max-mixes`, and `scale`. Every run is a pure function of its
+`weak-depth`, `r-max` and `r-max-mixes`, and `scale` and `band-step`. Every run is a pure function of its
 inputs and
 seed (default 1), drawn from `p2poolv2_netsim`'s seeded xoshiro256**
 generator, so the tables below come out the same on any machine. The whole
@@ -1444,3 +1444,43 @@ share chain constants it reuses. It does not link `p2poolv2_lib`.
 | x1000 | 5.17e14 | 90% | 7,590,441,964,567 | 34.7 | 1,088 | 1 | 5.0e-3 | 4 | 0.269 | 0.012 | 43,215 | 17.45 | 99.60% | 0.34% | 1.20 | 0.797 | 43,215 | 2.15 | 76.60% | 0.34% | 0.96 |
 
 
+
+## Band step: how fast the cap moves, and hashrate that overstates its wish
+
+`payout-sim --scenario band-step`: a chain from genesis for two days, 50%
+industrial, 8 seeds a row. The cap `C` starts at 1 and moves one step a
+share: up by `C * u / divisor` when the parent's node wanted heavier shares
+than the cap allowed, down by `C / divisor` otherwise. The rule's divisor is
+512. In the last two rows of each pool, part of the pool's hashrate mines at
+the minimum while every share it finds records the largest wanted
+difficulty, to push the cap up.
+
+| Pool | Step divisor | Hashrate overstating | C settles at | C gets within 10% | Home pay over fair, first 6 hours | Home pay over fair, last day |
+|---|---|---|---|---|---|---|
+| 1% | 128 | 0.00% | 41.64 | 1 h | 0.78 | 0.99 |
+| 1% | 512 | 0.00% | 45.39 | 3 h | 0.83 | 1.00 |
+| 1% | 2048 | 0.00% | 45.97 | 8 h | 0.84 | 1.00 |
+| 1% | 512 | 2.00% | 61.39 | 2 h | 0.82 | 1.01 |
+| 1% | 512 | 10.00% | 63.44 | 1 h | 0.80 | 1.01 |
+| 10% | 128 | 0.00% | 1.37 | 1 h | 0.89 | 1.00 |
+| 10% | 512 | 0.00% | 1.53 | 3 h | 0.89 | 1.01 |
+| 10% | 2048 | 0.00% | 2.00 | 5 h | 0.89 | 1.01 |
+| 10% | 512 | 2.00% | 57.38 | 11 h | 0.88 | 1.00 |
+| 10% | 512 | 10.00% | 63.10 | 1 h | 0.89 | 1.00 |
+
+1. **Where `C` settles does not depend on the step.** At 1% of Bitcoin Cash
+   it rests at 42 to 46 for divisors from 128 to 2,048; at 10% between 1.4
+   and 2, where the big miners' jobs are already near the minimum and the
+   cap is hardly used. The divisor sets only the speed: within 10% of the
+   resting cap after 1 hour at 128, 3 hours at 512 and 5 to 8 hours at
+   2,048.
+2. **Overstating moves the cap and nothing else.** 2% of the hashrate
+   recording the largest wanted difficulty takes `C` to 57 to 61, and 10%
+   to 63, the maximum being 64. Home miners are paid 1.00 to 1.01 of fair in
+   the last day either way, and the same in the first six hours as on an
+   honest chain. The cap only bounds how heavy a job a node may give; an
+   honest node still gives each miner the job its own rate calls for.
+3. **The first hours of a new chain pay home miners less, whatever the
+   step:** 0.78 to 0.89 of fair in the first six hours, 0.99 to 1.01 in the
+   last day. That is the weak ratio settling from `R_MAX`, where weak shares
+   are found faster than shares can carry them, not the cap.

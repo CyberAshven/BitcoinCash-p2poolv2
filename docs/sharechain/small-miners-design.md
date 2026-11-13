@@ -576,8 +576,8 @@ without adding stale shares.
 |---|---|---|---|
 | 1 One chain | the mini chain's genesis tag only | 3 | flag day: every node restarts on a fresh store |
 | 2 Band | `band-c64` | 3 | same flag day |
-| 3 Weak shares | `weak-64-500-6`, then `weak2-64-500-6`, then `weak2-64-100-48-256` | 5, then 6, then 7 | same flag day; old nodes cannot read the new header or the weak share message; the weak root's leaves then became whole encodings, a second flag day, and study #85's cut, depth and `R_MAX` a third |
-| 4 Payout levels | `levels-546x2` | 4 | same flag day; old nodes cannot read the longer header |
+| 3 Weak shares | `weak-64-500-6`, then `weak2-64-500-6`, then `weak2-64-100-48-256`, then `weak3-64-100-48-256` | 5, then 6, then 7, then 9 | same flag day; old nodes cannot read the new header or the weak share message; the weak root's leaves then became whole encodings, a second flag day, and study #85's cut, depth and `R_MAX` a third |
+| 4 Payout levels | `levels-546x2`, then `levels-546x2-k1` | 4, then 8 | same flag day; old nodes cannot read the longer header |
 | 5 Share period | none; share version 2 | 3 | share-version vote |
 
 A part that changes what a stored share holds raises the store format when
@@ -586,7 +586,9 @@ it merges, so the numbers follow the merge order: part 4 raised it to 4
 (2026-11-09), because its header carries the weak ratio and the store keeps
 the weak shares. The weak root's binding of each carried weak share's whole
 encoding raised it to 6 (2026-11-12): stored shares were checked against the
-old root, which every node now computes differently.
+old root, which every node now computes differently. Dropping level 0
+raised it to 8, and holding a carried weak share to its carrier's time to 9
+(2026-11-13): a stored chain was checked under the rule before each.
 
 Each part is its own pull request, with its plain-words explanation and the
 maintainer's agreement before merging. Chipnet restarts once per merged part
@@ -706,7 +708,13 @@ Still open:
   sent again and again**, each time costing a window walk: the failure is
   not remembered, the peer is not dropped, and the walk cache empties
   itself when it is full. Node behaviour.
-- **Not yet simulated:** the band step.
+- **The band step is simulated** (`payout-sim --scenario band-step`). Where
+  `C` settles does not depend on its step, only how fast it gets there: 1
+  hour at a divisor of 128, 3 hours at the rule's 512, 5 to 8 at 2,048.
+  Hashrate that mines at the minimum while recording the largest wanted
+  difficulty moves `C` to its maximum with 2% of the pool, and changes
+  nothing home miners are paid: the cap only bounds how heavy a job a node
+  may give.
 
 ## References
 
