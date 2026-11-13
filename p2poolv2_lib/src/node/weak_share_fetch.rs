@@ -192,12 +192,11 @@ impl WeakShareFetch {
                 let Some(hash) = self.wanted_order.pop_front() else {
                     break;
                 };
-                let Some(wanted) = self.wanted.remove(&hash) else {
+                let Some(mut wanted) = self.wanted.remove(&hash) else {
                     continue;
                 };
-                let in_flight_for_peer = self.per_peer.get(&wanted.next).copied().unwrap_or(0);
-                if in_flight_for_peer >= MAX_WEAK_FETCHES_PER_PEER
-                    || self.in_flight.len() >= MAX_WEAK_FETCHES_IN_FLIGHT
+                if self.in_flight.len() >= MAX_WEAK_FETCHES_IN_FLIGHT
+                    || !self.ask_a_free_announcer(&mut wanted)
                 {
                     deferred.push_back((hash, wanted));
                     continue;
@@ -345,6 +344,33 @@ impl WeakShareFetch {
             .unwrap_or(0)
     }
 
+    /// Make `wanted.next` a peer with a free fetch slot: the peer it names,
+    /// or else the first later announcer that has one, so hashes do not queue
+    /// behind one peer that answers slowly or not at all. False when every
+    /// announcer is at [`MAX_WEAK_FETCHES_PER_PEER`].
+    fn ask_a_free_announcer(&self, wanted: &mut Wanted) -> bool {
+        if self.has_free_slot(&wanted.next) {
+            return true;
+        }
+        let Some(position) = wanted
+            .others
+            .iter()
+            .position(|peer| self.has_free_slot(peer))
+        else {
+            return false;
+        };
+        let Some(free) = wanted.others.remove(position) else {
+            return false;
+        };
+        let busy = std::mem::replace(&mut wanted.next, free);
+        wanted.others.push_back(busy);
+        true
+    }
+
+    fn has_free_slot(&self, peer: &PeerId) -> bool {
+        self.per_peer.get(peer).copied().unwrap_or(0) < MAX_WEAK_FETCHES_PER_PEER
+    }
+
     fn start(
         &mut self,
         hash: BlockHash,
@@ -460,6 +486,48 @@ mod tests {
 
     fn peer() -> PeerId {
         PeerId::random()
+    }
+
+    /// A peer with every fetch slot taken does not hold back a hash another
+    /// announcer can serve: the hash is asked from that announcer, and the
+    /// busy peer stays behind it as a later choice.
+    #[test]
+    fn a_hash_is_asked_from_an_announcer_with_a_free_slot() {
+        let now = Instant::now();
+        let busy = peer();
+        let free = peer();
+        let mut book = WeakShareFetch::new();
+        for byte in 0..MAX_WEAK_FETCHES_PER_PEER as u8 {
+            book.note(busy, BlockHash::from_byte_array([byte; 32]), false, now);
+        }
+        assert_eq!(
+            book.take_next(now).len(),
+            MAX_WEAK_FETCHES_PER_PEER,
+            "the busy peer has every slot taken"
+        );
+
+        let extra = BlockHash::from_byte_array([0xee; 32]);
+        book.note(busy, extra, false, now);
+        assert!(
+            book.take_next(now).is_empty(),
+            "only the busy peer announced it: it waits"
+        );
+        book.note(free, extra, false, now);
+        let sends = book.take_next(now);
+
+        assert_eq!(
+            sends,
+            vec![WeakShareFetchSend {
+                peer: free,
+                hash: extra,
+            }],
+            "asked from the announcer with a free slot"
+        );
+        assert_eq!(
+            book.waiting_announcers(&extra),
+            1,
+            "the busy peer stays as a later choice"
+        );
     }
 
     #[test]
