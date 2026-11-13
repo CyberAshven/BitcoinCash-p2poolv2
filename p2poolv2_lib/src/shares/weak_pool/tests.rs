@@ -190,6 +190,69 @@ async fn a_weak_share_the_best_chain_carries_is_not_offered_but_kept() {
     assert_eq!(selected, vec![pool_weak_share(2)]);
     assert_eq!(pool.len(), 2);
     assert_eq!(pool.counts().carried, 0);
+    assert!(
+        pool.has_seen(&pool_weak_share(1).pow_hash()),
+        "a carried weak share is remembered as seen"
+    );
+    assert_eq!(
+        pool.pooled_weak_share(&pool_weak_share(1).pow_hash()),
+        Some(pool_weak_share(1)),
+        "a carried weak share is still returned from the pool"
+    );
+    assert_eq!(
+        pool.pooled_weak_share(&pool_weak_share(2).pow_hash()),
+        Some(pool_weak_share(2)),
+        "a weak share the chain does not carry is still returned"
+    );
+}
+
+#[tokio::test]
+async fn a_weak_share_dropped_by_depth_is_not_returned() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let mining_base = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .build();
+    chain_store_handle
+        .add_share_block(mining_base.clone())
+        .await
+        .unwrap();
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let expired = pool_weak_share(1);
+    pool.insert(expired.clone(), 1, WeakShareSource::Local);
+
+    pool.select_for_share(mining_base.block_hash(), WEAK_DEPTH + 1);
+
+    assert!(
+        pool.has_seen(&expired.pow_hash()),
+        "a weak share dropped for depth stays seen"
+    );
+    assert_eq!(
+        pool.pooled_weak_share(&expired.pow_hash()),
+        None,
+        "a weak share dropped by expire_below is not returned"
+    );
+}
+
+#[tokio::test]
+async fn a_held_weak_share_is_not_returned_as_pooled() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let held = test_weak_share_on(BlockHash::from_byte_array([1; 32]), 1);
+    pool.hold(held.clone(), WeakShareSource::Local);
+
+    assert!(
+        !pool.has_seen(&held.pow_hash()),
+        "a held weak share has not passed its checks"
+    );
+    assert!(
+        pool.holds(&held.pow_hash()),
+        "a held weak share is still held"
+    );
+    assert_eq!(
+        pool.pooled_weak_share(&held.pow_hash()),
+        None,
+        "a weak share that was only held is not returned"
+    );
 }
 
 /// Share A carries weak share 1 and then becomes an uncle: the best chain
@@ -324,6 +387,31 @@ async fn a_weak_share_the_relay_queue_refuses_is_not_counted_as_relayed() {
     assert_eq!(stats.counts.relayed, 0);
     assert_eq!(stats.counts.received, 1);
     assert_eq!(stats.pooled, 1);
+}
+
+/// A weak share a full pool refused for room is not remembered as seen, so
+/// the same weak share is pooled when it comes again and the pool can take it.
+#[tokio::test]
+async fn a_weak_share_refused_by_a_full_pool_may_come_again() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    for nonce in 0..MAX_POOL_WEAK_SHARES as u32 {
+        pool.insert(pool_weak_share(nonce), 3, WeakShareSource::Local);
+    }
+    let refused = pool_weak_share(MAX_POOL_WEAK_SHARES as u32);
+    pool.insert(refused.clone(), 3, WeakShareSource::Local);
+    assert!(
+        !pool.has_seen(&refused.pow_hash()),
+        "refused for room, so not seen"
+    );
+
+    //* On a newer parent it takes the place of the oldest pooled weak share.
+    pool.insert(refused.clone(), 4, WeakShareSource::Local);
+
+    let stats = pool.stats();
+    assert_eq!(stats.counts.refused.pool_full, 1, "refused once");
+    assert_eq!(stats.pooled, MAX_POOL_WEAK_SHARES, "the pool stays full");
+    assert!(pool.has_seen(&refused.pow_hash()), "pooled the second time");
 }
 
 /// A full pool keeps a weak share only in place of one on an older parent;

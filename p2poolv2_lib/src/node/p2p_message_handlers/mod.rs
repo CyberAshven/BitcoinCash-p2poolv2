@@ -25,7 +25,7 @@ use crate::shares::weak_pool::WeakShareSource;
 use crate::utils::time_provider::TimeProvider;
 use bitcoin::BlockHash;
 use receivers::getblocks::handle_getblocks;
-use receivers::getdata::handle_getdata_block;
+use receivers::getdata::{handle_getdata_block, handle_getdata_weak_share};
 use receivers::getheaders::handle_getheaders;
 use receivers::handshake::handle_handshake;
 use receivers::inventory::handle_inventory;
@@ -76,12 +76,17 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
             .await
         }
         Message::Inventory(inventory) => {
+            let weak_fetch_tx = ctx
+                .weak_share_tx
+                .as_ref()
+                .map(|sender| sender.fetch_sender());
             handle_inventory(
                 inventory,
                 ctx.peer,
                 ctx.chain_store_handle,
                 ctx.response_channel,
                 ctx.swarm_tx,
+                weak_fetch_tx,
             )
             .await
         }
@@ -104,6 +109,18 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
                 GetData::Txid(txid) => {
                     debug!("Received txid: {:?}", txid);
                     Ok(())
+                }
+                GetData::WeakShare(hash) => {
+                    // Clone the pool handle so this await does not borrow the
+                    // sender. The clone shares the worker's pool.
+                    let weak_pool = ctx.weak_share_tx.as_ref().map(|sender| sender.pool());
+                    handle_getdata_weak_share(
+                        hash,
+                        weak_pool.as_ref(),
+                        ctx.response_channel,
+                        ctx.swarm_tx,
+                    )
+                    .await
                 }
             }
         }
@@ -313,6 +330,9 @@ pub async fn handle_response<C: Send + Sync>(
                         .await;
                 }
                 GetData::Txid(_) => {}
+                // Peeled off before the response worker once weak-share fetches
+                // are delivered on their own channel. Nothing to do here.
+                GetData::WeakShare(_) => {}
             }
             Ok(())
         }

@@ -18,6 +18,22 @@ fails in CI. CI also keeps a picture of each page as the
 `dashboard-screenshots` artifact. Its first run found a dead link, now
 fixed: the genesis share's page linked its all-zero parent hash as a share.
 
+The payout simulator has a `band-step` table, the last part of the small
+miners design that had no simulation: the band cap `C` from genesis at step
+divisors of 128, 512 and 2,048, and with 2% and 10% of the pool mining at
+the minimum while recording the largest wanted difficulty. Where `C` settles
+does not depend on the step, only how fast it gets there (1, 3 and 5 to 8
+hours); overstating takes `C` to its maximum and changes nothing home miners
+are paid.
+
+The Docker image runs the node as `p2pool` (uid 1000), not as root. The user
+owns `/p2poolv2` and is in the `bchn-rpc` group (gid 2001), which BCHN's
+image now lets read the RPC password it keeps in the `bchn_rpc` volume; the
+file was BCHN's user's alone, and the node read it only because it ran as
+root. A `p2poolv2_data` volume made by an earlier image belongs to root:
+remove it or give it to uid 1000 (`docker/README.adoc`). The Umbrel package
+already ran the image as 1000:1000.
+
 Share-chain rule change on Bitcoin Cash, a flag day: a weak share a share
 carries is held to its carrier's time, not to each node's clock (protocol
 segment `weak3-64-100-48-256`, store format 9). The 120-second future limit

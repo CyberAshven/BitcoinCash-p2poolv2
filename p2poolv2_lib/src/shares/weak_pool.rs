@@ -723,7 +723,7 @@ impl WeakPool {
         let pow_hash = weak_share.pow_hash();
         {
             let mut state = self.lock();
-            if !state.mark_seen(pow_hash) {
+            if state.seen.contains(&pow_hash) {
                 state.counts.refused.count(WeakShareRefusal::Duplicate);
                 return;
             }
@@ -744,6 +744,7 @@ impl WeakPool {
                     }
                 }
             }
+            state.mark_seen(pow_hash);
             let sequence = state.next_sequence;
             state.next_sequence += 1;
             match source {
@@ -896,6 +897,39 @@ impl WeakPool {
 
     pub fn is_empty(&self) -> bool {
         self.lock().pooled.is_empty()
+    }
+
+    /// Whether `pow_hash` already passed its checks.
+    ///
+    /// A fetch skips a hash the pool has seen: a second copy would be a
+    /// duplicate, and asking for it would open a stream for nothing.
+    pub fn has_seen(&self, pow_hash: &BlockHash) -> bool {
+        self.lock().seen.contains(pow_hash)
+    }
+
+    /// The weak share still in the pool under `pow_hash`.
+    ///
+    /// Cloning out of `pooled` is what a peer is served. A share the best
+    /// chain already carries stays in `pooled` until it expires, so a peer
+    /// that missed it can still fetch it. One that is only held, or that
+    /// [`Self::select_for_share`] dropped because its parent fell below
+    /// `WEAK_DEPTH`, is not returned.
+    pub fn pooled_weak_share(&self, pow_hash: &BlockHash) -> Option<WeakShare> {
+        self.lock()
+            .pooled
+            .get(pow_hash)
+            .map(|pooled| pooled.weak_share.clone())
+    }
+
+    /// Whether a weak share with `pow_hash` is held, waiting for its parent
+    /// or for another check. The fetch book uses this to tell a hold that
+    /// expired from one that is still waiting, so it does not ask for a
+    /// second copy of a share this node already has in hand.
+    pub fn holds(&self, pow_hash: &BlockHash) -> bool {
+        self.lock()
+            .held
+            .values()
+            .any(|held| held.weak_share.pow_hash() == *pow_hash)
     }
 }
 
