@@ -710,6 +710,45 @@ fn a_weak_share_whose_branch_does_not_reach_its_merkle_root_is_refused() {
     assert!(error.message.contains("merkle root"), "{error}");
 }
 
+/// A full cache drops its oldest walk and keeps the rest. Starting over
+/// instead let a peer cycle one key more than the cache holds and make every
+/// weak share it sent again walk the window again.
+#[test]
+fn a_full_cache_drops_only_its_oldest_walk() {
+    let key = |bits: u32| WeakWeightsKey {
+        parent: BlockHash::from_byte_array([1; 32]),
+        bitcoin_bits: bits,
+        bch_prev: BlockHash::all_zeros(),
+    };
+    let walks = std::cell::Cell::new(0usize);
+    let walk = || -> Result<PplnsWeights, ValidationError> {
+        walks.set(walks.get() + 1);
+        Ok(PplnsWeights::without_levels(HashMap::new()))
+    };
+    let mut cache = WeakPayoutCache::new();
+    for bits in 0..=WEAK_WEIGHTS_CACHE_CAPACITY as u32 {
+        cache.weights_or_walk(key(bits), walk).unwrap();
+    }
+    assert_eq!(
+        walks.get(),
+        WEAK_WEIGHTS_CACHE_CAPACITY + 1,
+        "one walk a key"
+    );
+
+    cache.weights_or_walk(key(1), walk).unwrap();
+    assert_eq!(
+        walks.get(),
+        WEAK_WEIGHTS_CACHE_CAPACITY + 1,
+        "the second oldest walk is still cached"
+    );
+    cache.weights_or_walk(key(0), walk).unwrap();
+    assert_eq!(
+        walks.get(),
+        WEAK_WEIGHTS_CACHE_CAPACITY + 2,
+        "the oldest walk was dropped"
+    );
+}
+
 /// The carrier is at height 101, the weak share's parent at 53: exactly
 /// `WEAK_DEPTH` shares below, the deepest a carried weak share may be.
 #[test]

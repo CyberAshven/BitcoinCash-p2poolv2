@@ -2519,14 +2519,11 @@ mod tests {
             .filter(|line| !line.starts_with("network = "))
             .collect::<Vec<_>>()
             .join("\n");
-        let path = std::env::temp_dir().join(format!(
-            "p2poolv2-config-without-network-{}.toml",
-            std::process::id()
-        ));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
         std::fs::write(&path, without_network).unwrap();
 
         let result = Config::load(path.to_str().unwrap());
-        std::fs::remove_file(&path).unwrap();
 
         let Err(error) = result else {
             panic!("a Bitcoin config without network loaded");
@@ -2546,14 +2543,11 @@ mod tests {
             "\nbitcoin_cash_network = \"chipnet\"\nbch_share_chain = \"main\"\n",
         );
         assert_ne!(with_share_chain, sample);
-        let path = std::env::temp_dir().join(format!(
-            "p2poolv2-config-with-bch-share-chain-{}.toml",
-            std::process::id()
-        ));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
         std::fs::write(&path, with_share_chain).unwrap();
 
         let result = Config::load(path.to_str().unwrap());
-        std::fs::remove_file(&path).unwrap();
 
         let Err(error) = result else {
             panic!("a config setting bch_share_chain loaded");

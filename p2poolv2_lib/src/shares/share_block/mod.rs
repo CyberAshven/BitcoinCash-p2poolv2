@@ -18,6 +18,7 @@ use crate::shares::genesis;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::shares::share_version::ShareVersion;
+use crate::shares::validation::MAX_UNCLES;
 use crate::shares::weak::{WEAK_CAP, WeakShare};
 use crate::sim_overrides;
 use bitcoin::consensus::encode::Error::ParseFailed;
@@ -440,7 +441,17 @@ impl ShareHeader {
         include_bitcoin_merkle_root: bool,
     ) -> Result<Self, bitcoin::consensus::encode::Error> {
         let prev_share_blockhash = BlockHash::consensus_decode(r)?;
-        let uncles = Vec::<BlockHash>::consensus_decode(r)?;
+        // The count is checked before the hashes are read, so a header cannot
+        // make a node hold more uncle hashes than a share may name.
+        let uncle_count = VarInt::consensus_decode(r)?.0;
+        if uncle_count > MAX_UNCLES as u64 {
+            return Err(ParseFailed(
+                "share header names more uncles than a share may",
+            ));
+        }
+        let uncles = (0..uncle_count)
+            .map(|_| BlockHash::consensus_decode(r))
+            .collect::<Result<Vec<_>, _>>()?;
         let miner_bitcoin_address = decode_address(r)?;
         let owner_tag = u8::consensus_decode(r)?;
         let declared_bch = owner_tag == DECLARED_BCH_HEADER_TAG;
@@ -1282,6 +1293,26 @@ mod tests {
         assert_eq!(serialize(&leveled), serialize(&bitcoin));
         let decoded: ShareHeader = deserialize(&serialize(&leveled)).unwrap();
         assert_eq!(decoded.payout_level, 0, "bitcoin header decodes as 0");
+    }
+
+    /// A header naming more uncles than a share may does not decode, so a
+    /// peer cannot make a node hold thousands of uncle hashes before any rule
+    /// is checked. The most a share may name still decodes.
+    #[test]
+    fn a_header_naming_too_many_uncles_does_not_decode() {
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.uncles = vec![BlockHash::from_byte_array([0x33; 32]); MAX_UNCLES + 1];
+        let error = deserialize::<ShareHeader>(&serialize(&header)).unwrap_err();
+
+        assert!(
+            error.to_string().contains("more uncles than a share may"),
+            "{} uncles: {error}",
+            MAX_UNCLES + 1
+        );
+
+        header.uncles = vec![BlockHash::from_byte_array([0x33; 32]); MAX_UNCLES];
+        let decoded: ShareHeader = deserialize(&serialize(&header)).unwrap();
+        assert_eq!(decoded.uncles.len(), MAX_UNCLES, "{MAX_UNCLES} uncles");
     }
 
     /// A Bitcoin header built at level 0 is still accepted: Bitcoin shares
