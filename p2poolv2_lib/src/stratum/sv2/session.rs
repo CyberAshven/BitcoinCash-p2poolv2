@@ -6,7 +6,9 @@
 //!
 //! A Job Declaration connection and a Mining connection are separate TCP
 //! sessions. The registry is what lets a token allocated on the first be
-//! presented on the second.
+//! presented on the second. A token belongs to the connection that
+//! allocated it: it counts towards that connection's limit and leaves the
+//! registry when the connection ends.
 
 use super::custom_job::declared_leaves;
 use super::large_templates::{
@@ -69,7 +71,7 @@ use mining_sv2::{
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 use tracing::debug;
 
@@ -82,7 +84,19 @@ const WORK_SELECTION_FLAG: u32 = 0b10;
 /// `SetupConnection` flag `DECLARE_TX_DATA` of the Job Declaration
 /// Protocol: the client reveals its transactions (Full-Template mode).
 const DECLARE_TX_DATA_FLAG: u32 = 0b1;
-const MAX_JOB_TOKENS: usize = 64;
+/// Job tokens one connection may hold. A client that allocates a token
+/// ahead of each job leaves one unused whenever the share chain moves
+/// first, and an unused token only ages out ([`TOKEN_LIFETIME`]). So at
+/// this many the connection's oldest open token is dropped for the new
+/// one, or its oldest of any state when none is open. The connection is
+/// not closed.
+const MAX_SESSION_JOB_TOKENS: usize = 64;
+/// Job tokens the registry holds for all connections, a bound on its
+/// memory: 64 connections' worth. An allocation past it closes its
+/// connection. An open token holds an `Arc` to the prepared template it was
+/// allocated on and an identity; declared transactions are bounded
+/// separately (`JobRegistry::declared_byte_limit`).
+const MAX_JOB_TOKENS: usize = 4096;
 const TOKEN_LIFETIME: Duration = Duration::from_secs(120);
 /// The least declared transaction memory a registry allows: twice the
 /// 32 MB floor of Bitcoin Cash's block size limit, to the next MiB power.
@@ -93,6 +107,11 @@ const DECLARED_TEMPLATES: usize = 2;
 /// Request ids one connection may hold large-template pages for, as it may
 /// hold eight pending declarations.
 const MAX_PAGED_DECLARATIONS: usize = 8;
+/// Declarations one connection remembers after [`MAX_SESSION_JOB_TOKENS`]
+/// dropped their token while they waited for transactions, as it may hold
+/// eight pending declarations. The transactions of a remembered one get
+/// `DeclareMiningJob.Error`; the connection stays up.
+const MAX_DROPPED_DECLARATIONS: usize = 8;
 /// Open tokens one connection may hold requested payout outputs for, as it
 /// may hold eight pending declarations. A client asks once per job, just
 /// before declaring it, so a ninth is not following the extension.
@@ -230,6 +249,11 @@ pub(crate) struct Declaration {
 
 struct JobToken {
     allocated: Instant,
+    /// The connection that allocated the token (`Sv2Connection::session_id`).
+    /// The token counts towards that connection's
+    /// [`MAX_SESSION_JOB_TOKENS`] and leaves the registry with it. A Mining
+    /// connection claims a token by its bytes, whoever owns it.
+    owner: u64,
     prepared: Option<Arc<PreparedNotifyParams>>,
     /// Whom the token's requested payout outputs pay; `None` when its
     /// `user_identifier` names no payout address and share owner.
@@ -377,6 +401,8 @@ pub struct JobRegistry {
     coinbase_only_from: Option<Vec<IpNet>>,
     /// Bytes of declarations the connections keep for `PushSolution`.
     solvable_bytes: Arc<AtomicUsize>,
+    /// The id the next connection gets ([`Self::new_session_id`]).
+    next_session_id: u64,
 }
 
 impl JobRegistry {
@@ -390,6 +416,7 @@ impl JobRegistry {
             tokens: HashMap::with_capacity(8),
             coinbase_only_from: None,
             solvable_bytes: Arc::new(AtomicUsize::new(0)),
+            next_session_id: 0,
         }
     }
 
@@ -426,6 +453,44 @@ impl JobRegistry {
     fn expire_tokens(&mut self) {
         self.tokens
             .retain(|_, token| token.allocated.elapsed() < TOKEN_LIFETIME);
+    }
+
+    /// The id of a new connection, which owns the tokens it allocates.
+    fn new_session_id(&mut self) -> u64 {
+        let session_id = self.next_session_id;
+        self.next_session_id += 1;
+        session_id
+    }
+
+    /// Tokens the connection `owner` holds, in any state.
+    fn session_tokens(&self, owner: u64) -> usize {
+        self.tokens
+            .values()
+            .filter(|token| token.owner == owner)
+            .count()
+    }
+
+    /// Drop one token of the connection `owner` to make room for a new one,
+    /// and return its bytes with it: the oldest open one, or the oldest of
+    /// any state when none is open. The transactions a dropped token
+    /// declared no longer count towards [`Self::declared_bytes`].
+    fn drop_oldest_token(&mut self, owner: u64) -> Option<(Vec<u8>, JobToken)> {
+        let bytes = self
+            .tokens
+            .iter()
+            .filter(|(_, token)| token.owner == owner)
+            .min_by_key(|(_, token)| {
+                let open = matches!(token.state, TokenState::Open { .. });
+                (!open, token.allocated)
+            })
+            .map(|(bytes, _)| bytes.clone())?;
+        let token = self.tokens.remove(&bytes)?;
+        Some((bytes, token))
+    }
+
+    /// Drop every token of the connection `owner`, which has ended.
+    fn drop_session_tokens(&mut self, owner: u64) {
+        self.tokens.retain(|_, token| token.owner != owner);
     }
 
     /// `token` while it is open: allocated, and neither declared nor used.
@@ -511,6 +576,9 @@ impl JobRegistry {
 /// Bytes of one Stratum V2 connection.
 pub struct Sv2Connection {
     registry: Arc<Mutex<JobRegistry>>,
+    /// This connection's id in the registry, the owner of the tokens it
+    /// allocates (`JobToken::owner`).
+    session_id: u64,
     decoder: Decoder,
     inbox: Vec<u8>,
     mode: Option<JobDeclarationMode>,
@@ -524,6 +592,10 @@ pub struct Sv2Connection {
     /// Request ids are chosen by each client, so two connections can use the
     /// same one; the token is looked up here, never across the registry.
     pending_declarations: HashMap<u32, Vec<u8>>,
+    /// Request ids of declarations whose token [`MAX_SESSION_JOB_TOKENS`]
+    /// dropped while they waited for `ProvideMissingTransactionsSuccess`,
+    /// oldest first, at most [`MAX_DROPPED_DECLARATIONS`].
+    dropped_declarations: VecDeque<u32>,
     /// The connection negotiated the requested payout outputs extension
     /// (`0x5052`, `super::payout_outputs`).
     payout_outputs: bool,
@@ -553,8 +625,10 @@ pub struct Sv2Connection {
 impl Sv2Connection {
     /// Connection that shares `registry` with the node's other SV2 sessions.
     pub fn new(registry: Arc<Mutex<JobRegistry>>) -> Self {
+        let session_id = registry.lock().expect("job registry lock").new_session_id();
         Self {
             registry,
+            session_id,
             decoder: Decoder::new(),
             inbox: Vec::new(),
             mode: None,
@@ -562,6 +636,7 @@ impl Sv2Connection {
             work_selection: false,
             peer: None,
             pending_declarations: HashMap::with_capacity(4),
+            dropped_declarations: VecDeque::new(),
             payout_outputs: false,
             payout_basis: None,
             payout_sets: HashSet::with_capacity(MAX_PAYOUT_SETS),
@@ -617,6 +692,10 @@ impl Sv2Connection {
         self.mining && self.work_selection
     }
 
+    /// Claim `token` for a custom job, by its bytes: the Job Declaration
+    /// connection that owns it is another connection than this Mining one.
+    /// A token that is unknown, used, expired or dropped is an error, which
+    /// the listener answers with `invalid-mining-job-token`.
     pub(crate) fn take_declared_job(&self, token: &[u8]) -> Result<DeclaredJob, String> {
         self.registry
             .lock()
@@ -1022,6 +1101,11 @@ impl Sv2Connection {
     /// bad `donation=`, `min-payout=` or `fee-tolerance=` value, or one on a
     /// node without a Bitcoin Cash share chain, closes the connection with
     /// the reason in the node's log.
+    ///
+    /// A connection that already holds [`MAX_SESSION_JOB_TOKENS`] loses one
+    /// for the new token (`JobRegistry::drop_oldest_token`) and stays up.
+    /// Only a registry holding [`MAX_JOB_TOKENS`] for all connections closes
+    /// the connection.
     pub(crate) fn on_allocate(
         &mut self,
         request_id: u32,
@@ -1037,6 +1121,21 @@ impl Sv2Connection {
         let payout_level = parse_miner_payout_level(options)?;
         let mut registry = self.registry.lock().expect("job registry lock");
         registry.expire_tokens();
+        if registry.session_tokens(self.session_id) >= MAX_SESSION_JOB_TOKENS
+            && let Some((dropped, token)) = registry.drop_oldest_token(self.session_id)
+        {
+            self.payout_sets.remove(&dropped);
+            // The declaration that waited on the token is over. Its
+            // transactions may already be on their way, so the request id
+            // is remembered for an ordinary answer (`on_transactions`).
+            if let TokenState::AwaitingTransactions { request_id, .. } = token.state {
+                self.pending_declarations.remove(&request_id);
+                if self.dropped_declarations.len() == MAX_DROPPED_DECLARATIONS {
+                    self.dropped_declarations.pop_front();
+                }
+                self.dropped_declarations.push_back(request_id);
+            }
+        }
         if registry.tokens.len() >= MAX_JOB_TOKENS {
             return Err("job token limit reached".into());
         }
@@ -1111,6 +1210,7 @@ impl Sv2Connection {
             token.clone(),
             JobToken {
                 allocated: Instant::now(),
+                owner: self.session_id,
                 prepared,
                 identity,
                 state: TokenState::Open { mode },
@@ -1230,6 +1330,10 @@ impl Sv2Connection {
         };
         drop(registry);
         self.pending_declarations.insert(request.request_id, token);
+        // The request id names this declaration from now on, not an earlier
+        // one whose token was dropped.
+        self.dropped_declarations
+            .retain(|dropped| *dropped != request.request_id);
         self.missing_transactions_request(request.request_id, 0, first)
     }
 
@@ -1241,14 +1345,28 @@ impl Sv2Connection {
     /// one; the node then asks for the rest. Once every declared
     /// transaction has arrived, they are sorted into CTOR and the token is
     /// ready.
+    ///
+    /// Transactions for a declaration whose token
+    /// [`MAX_SESSION_JOB_TOKENS`] dropped meanwhile get
+    /// `DeclareMiningJob.Error` with `invalid-mining-job-token`. Transactions
+    /// for any other request id without a pending declaration close the
+    /// connection.
     fn on_transactions(
         &mut self,
         request: &ProvideMissingTransactionsSuccess,
     ) -> Result<Vec<Vec<u8>>, String> {
-        let token = self
-            .pending_declarations
-            .remove(&request.request_id)
-            .ok_or("transactions arrived with no open declaration")?;
+        let Some(token) = self.pending_declarations.remove(&request.request_id) else {
+            let dropped = self
+                .dropped_declarations
+                .iter()
+                .position(|dropped| *dropped == request.request_id)
+                .ok_or("transactions arrived with no open declaration")?;
+            self.dropped_declarations.remove(dropped);
+            return self.declare_error(
+                request.request_id,
+                ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN,
+            );
+        };
         let large_templates = self.large_templates;
         let mut registry = self.registry.lock().expect("job registry lock");
         registry.expire_tokens();
@@ -1464,6 +1582,18 @@ impl Sv2Connection {
         T: binary_sv2::Serialize + binary_sv2::GetSize,
     {
         Ok(vec![encode_frame(message, message_type)?])
+    }
+}
+
+impl Drop for Sv2Connection {
+    /// A connection that ends takes its tokens out of the registry, so they
+    /// stop counting towards [`MAX_JOB_TOKENS`]. A poisoned lock is taken
+    /// all the same: this may run while a panic unwinds.
+    fn drop(&mut self) {
+        self.registry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drop_session_tokens(self.session_id);
     }
 }
 

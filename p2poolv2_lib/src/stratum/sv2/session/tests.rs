@@ -609,6 +609,7 @@ fn expired_tokens_cannot_install_a_job() {
         token.clone(),
         JobToken {
             allocated: Instant::now() - TOKEN_LIFETIME - Duration::from_secs(1),
+            owner: 0,
             prepared: Some(prepared),
             identity: None,
             state: TokenState::Open {
@@ -638,14 +639,28 @@ fn allocations_are_unpredictable_and_bounded() {
         first.mining_job_token.as_bytes(),
         second.mining_job_token.as_bytes()
     );
-    for request_id in 2..MAX_JOB_TOKENS {
+    for request_id in 2..MAX_SESSION_JOB_TOKENS {
         connection
             .on_allocate(request_id as u32, "miner", None)
             .unwrap();
     }
+    // One more is answered like any other, and takes the place of the
+    // connection's oldest open token.
+    connection.on_allocate(99, "miner", None).unwrap();
+    let registry = connection.registry.lock().unwrap();
     assert_eq!(
-        connection.on_allocate(99, "miner", None).unwrap_err(),
-        "job token limit reached"
+        registry.session_tokens(connection.session_id),
+        MAX_SESSION_JOB_TOKENS
+    );
+    assert!(
+        registry
+            .open_token(first.mining_job_token.as_bytes())
+            .is_none()
+    );
+    assert!(
+        registry
+            .open_token(second.mining_job_token.as_bytes())
+            .is_some()
     );
 }
 
@@ -1934,4 +1949,264 @@ fn the_declared_memory_bound_follows_the_block_size_limit() {
     );
     let raised = registry_with_size_limit(256_000_000);
     assert_eq!(raised.lock().unwrap().declared_byte_limit(), 512_000_000);
+}
+
+/// A Job Declaration connection on `shared`, set up with `flags`.
+fn job_declaration_connection(shared: &Arc<Mutex<JobRegistry>>, flags: u32) -> Sv2Connection {
+    let mut connection = Sv2Connection::new(Arc::clone(shared));
+    accept_message(
+        &mut connection,
+        setup(flags, Protocol::JobDeclarationProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    connection
+}
+
+/// Allocate a token on `connection` and return its bytes.
+fn allocate_token(connection: &mut Sv2Connection, request_id: u32) -> Vec<u8> {
+    let allocated = connection
+        .on_allocate(request_id, "miner", Some(requesting_identity()))
+        .unwrap();
+    let mut payload = response_payload(&allocated[0]);
+    AllocateMiningJobTokenSuccess::from_bytes(&mut payload)
+        .unwrap()
+        .mining_job_token
+        .as_bytes()
+        .to_vec()
+}
+
+/// Declare `transaction` on `token` as request 2, reveal it, and return the
+/// ready token.
+fn declare_ready(
+    connection: &mut Sv2Connection,
+    token: &[u8],
+    transaction: &Transaction,
+) -> Vec<u8> {
+    let transactions = std::slice::from_ref(transaction);
+    declare(connection, token, &wtxid_bytes(transactions)).unwrap();
+    let success = reveal(connection, transactions).unwrap();
+    assert_eq!(
+        reply_type(&success[0]),
+        MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS
+    );
+    let mut payload = response_payload(&success[0]);
+    DeclareMiningJobSuccess::from_bytes(&mut payload)
+        .unwrap()
+        .new_mining_job_token
+        .as_bytes()
+        .to_vec()
+}
+
+/// The token limit is each connection's own: two connections hold
+/// `MAX_SESSION_JOB_TOKENS` open tokens each at the same time. One limit
+/// for the whole registry closed the second client's connection here.
+#[test]
+fn two_connections_each_hold_their_own_tokens() {
+    let shared = registry();
+    let mut first = job_declaration_connection(&shared, 0);
+    let mut second = job_declaration_connection(&shared, 0);
+    let mut tokens = Vec::with_capacity(2 * MAX_SESSION_JOB_TOKENS);
+    for request_id in 0..MAX_SESSION_JOB_TOKENS as u32 {
+        tokens.push(allocate_token(&mut first, request_id));
+        tokens.push(allocate_token(&mut second, request_id));
+    }
+
+    let registry = shared.lock().unwrap();
+    assert_eq!(registry.tokens.len(), 2 * MAX_SESSION_JOB_TOKENS);
+    assert!(
+        tokens
+            .iter()
+            .all(|token| registry.open_token(token).is_some())
+    );
+}
+
+/// The registry's own bound counts every connection's tokens, and an
+/// allocation past it closes its connection. A connection that ends takes
+/// its tokens with it, which makes room again.
+#[test]
+fn a_closed_connection_frees_its_tokens_for_the_registry_bound() {
+    let shared = registry();
+    let mut connections = Vec::with_capacity(MAX_JOB_TOKENS / MAX_SESSION_JOB_TOKENS);
+    for _ in 0..MAX_JOB_TOKENS / MAX_SESSION_JOB_TOKENS {
+        let mut connection = job_declaration_connection(&shared, 0);
+        for request_id in 0..MAX_SESSION_JOB_TOKENS as u32 {
+            allocate_token(&mut connection, request_id);
+        }
+        connections.push(connection);
+    }
+    assert_eq!(shared.lock().unwrap().tokens.len(), MAX_JOB_TOKENS);
+    let mut refused = job_declaration_connection(&shared, 0);
+    assert_eq!(
+        refused.on_allocate(1, "miner", None).unwrap_err(),
+        "job token limit reached"
+    );
+
+    drop(connections.pop());
+
+    assert_eq!(
+        shared.lock().unwrap().tokens.len(),
+        MAX_JOB_TOKENS - MAX_SESSION_JOB_TOKENS
+    );
+    let mut admitted = job_declaration_connection(&shared, 0);
+    allocate_token(&mut admitted, 1);
+}
+
+/// A token the limit dropped is answered like an unknown one by every
+/// message that names it, and no connection closes: a request for its
+/// payout outputs, a declaration, and a Mining connection's custom job.
+#[test]
+fn a_token_dropped_at_the_limit_gets_invalid_mining_job_token() {
+    let shared = registry();
+    let mut connection = job_declaration_connection(&shared, 1);
+    assert!(connection.grant_payout_outputs());
+    let prepared = test_bch_prepared();
+    let template = prepared.template();
+    let prefix = Builder::new()
+        .push_int(i64::from(template.height))
+        .into_bytes();
+    let dropped = allocate_token(&mut connection, 0);
+    let mut request =
+        test_payout_outputs_request(1, &dropped, template, template.coinbasevalue, &prefix);
+    let answered = connection
+        .handle_payout_outputs(REQUEST_PAYOUT_OUTPUTS, &mut request)
+        .unwrap();
+    assert_eq!(answered[0][2], REQUEST_PAYOUT_OUTPUTS_SUCCESS);
+
+    for request_id in 1..=MAX_SESSION_JOB_TOKENS as u32 {
+        allocate_token(&mut connection, request_id);
+    }
+
+    assert!(!connection.payout_sets.contains(&dropped));
+    let mut request =
+        test_payout_outputs_request(2, &dropped, template, template.coinbasevalue, &prefix);
+    let answered = connection
+        .handle_payout_outputs(REQUEST_PAYOUT_OUTPUTS, &mut request)
+        .unwrap();
+    assert_eq!(answered[0][2], REQUEST_PAYOUT_OUTPUTS_ERROR);
+    let mut payload = response_payload(&answered[0]);
+    let error = RequestPayoutOutputsError::from_bytes(&mut payload).unwrap();
+    assert_eq!(error.error_code.as_utf8_or_hex(), INVALID_MINING_JOB_TOKEN);
+
+    let declared = declare(&mut connection, &dropped, &[]).unwrap();
+    assert_eq!(
+        declare_refusal(&declared[0]).0,
+        ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN
+    );
+
+    let mut mining = Sv2Connection::new(Arc::clone(&shared));
+    accept_message(
+        &mut mining,
+        setup(WORK_SELECTION_FLAG, Protocol::MiningProtocol),
+        MESSAGE_TYPE_SETUP_CONNECTION,
+    );
+    assert_eq!(
+        mining.take_declared_job(&dropped).err().as_deref(),
+        Some("invalid-mining-job-token")
+    );
+    let custom = accept_message(
+        &mut mining,
+        custom_job(&dropped),
+        MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
+    );
+    let mut custom_payload = response_payload(&custom[0]);
+    let rejected = SetCustomMiningJobError::from_bytes(&mut custom_payload).unwrap();
+    assert_eq!(
+        rejected.error_code.as_utf8_or_hex(),
+        "invalid-mining-job-token"
+    );
+}
+
+/// A connection at its limit with no open token loses its oldest token of
+/// any state, and stays up. The transactions the token declared leave the
+/// registry's count. Transactions that then arrive for a dropped
+/// declaration get `DeclareMiningJob.Error`, once, and a custom job on a
+/// dropped ready token gets `invalid-mining-job-token`.
+#[test]
+fn a_connection_with_no_open_token_drops_its_oldest_declaration() {
+    let shared = registry();
+    let mut connection = job_declaration_connection(&shared, 1);
+    let prefix = pushed_coinbase_prefix();
+    let suffix = empty_commitment_suffix();
+    // The oldest token waits for its transaction, as declaration 9.
+    let waiting = allocate_token(&mut connection, 0);
+    let unrevealed = transaction_with_lock(1_000);
+    let wtxid = unrevealed.compute_wtxid().to_byte_array();
+    let asked = accept_message(
+        &mut connection,
+        DeclareMiningJob {
+            request_id: 9,
+            mining_job_token: B0255::new(&waiting).unwrap(),
+            version: 1,
+            coinbase_tx_prefix: B064K::new(&prefix).unwrap(),
+            coinbase_tx_suffix: B064K::new(&suffix).unwrap(),
+            wtxid_list: Seq064K::new(vec![U256::new(wtxid.as_slice()).unwrap()]).unwrap(),
+            excess_data: B064K::new(&[]).unwrap(),
+        },
+        MESSAGE_TYPE_DECLARE_MINING_JOB,
+    );
+    assert_eq!(
+        reply_type(&asked[0]),
+        MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS
+    );
+    // Every other token is declared and ready.
+    let mut ready = Vec::with_capacity(MAX_SESSION_JOB_TOKENS);
+    for lock_time in 1..MAX_SESSION_JOB_TOKENS as u32 {
+        let token = allocate_token(&mut connection, lock_time);
+        ready.push(declare_ready(
+            &mut connection,
+            &token,
+            &transaction_with_lock(lock_time),
+        ));
+    }
+    let declared_bytes = || shared.lock().unwrap().declared_bytes();
+    let before = declared_bytes();
+
+    // No token is open, so the next allocation drops the waiting one.
+    let newest = allocate_token(&mut connection, 100);
+
+    {
+        let registry = shared.lock().unwrap();
+        assert_eq!(
+            registry.session_tokens(connection.session_id),
+            MAX_SESSION_JOB_TOKENS
+        );
+        assert!(!registry.tokens.contains_key(&waiting));
+    }
+    assert_eq!(declared_bytes(), before - 32 - prefix.len() - suffix.len());
+    let reveal_waiting = |connection: &mut Sv2Connection| {
+        let serialized = serialize(&unrevealed);
+        let frame = encode_message(
+            ProvideMissingTransactionsSuccess {
+                request_id: 9,
+                transaction_list: Seq064K::new(vec![B016M::new(serialized.as_slice()).unwrap()])
+                    .unwrap(),
+            },
+            MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
+        )
+        .unwrap();
+        connection.accept(&frame)
+    };
+    let refused = reveal_waiting(&mut connection).unwrap();
+    assert_eq!(
+        declare_refusal(&refused[0]).0,
+        ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN
+    );
+    assert_eq!(
+        reveal_waiting(&mut connection).unwrap_err(),
+        "transactions arrived with no open declaration"
+    );
+
+    // With the newest token ready as well, the oldest ready one goes next.
+    declare_ready(&mut connection, &newest, &transaction_with_lock(100));
+    let before = declared_bytes();
+    allocate_token(&mut connection, 101);
+
+    let oldest_bytes = transaction_with_lock(1).total_size() + prefix.len() + suffix.len();
+    assert_eq!(declared_bytes(), before - oldest_bytes);
+    let mining = Sv2Connection::new(Arc::clone(&shared));
+    assert_eq!(
+        mining.take_declared_job(&ready[0]).err().as_deref(),
+        Some("invalid-mining-job-token")
+    );
+    assert!(mining.take_declared_job(&ready[1]).is_ok());
 }

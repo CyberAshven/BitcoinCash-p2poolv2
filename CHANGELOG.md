@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A Stratum V2 Job Declaration client stays on the pool while the share chain
+moves every few seconds. On the live pool it moves about every 4 seconds,
+and four things made a client there lose its job, its connection or its
+place on the pool. A mining channel kept its last 32 jobs of any kind, and
+the node sends every channel its own job at each share-chain move, so a
+declared job was pushed out after about 100 seconds and its next share got
+`stale-share`. A channel now keeps its last eight declared jobs apart from
+the node's own 32, until their Bitcoin Cash parent is two blocks back. The
+node held 64 job tokens for all connections together. A client that
+allocates a token ahead of each job leaves one unused at each share-chain
+move, so two clients filled the 64 and the next allocation closed a
+connection. The 64 are now each connection's own: one more allocation drops
+that connection's oldest open token, or its oldest of any state when none is
+open, and is answered as usual. A connection that closes takes its tokens
+with it, and the node holds at most 4,096 for all connections. At a Bitcoin
+Cash tip change a Full-Template job got `invalid-template` when the node had
+already left the block's parent, or was slow to answer the proposal check,
+and the client took that for a refusal and left the pool for minutes. Such a
+job now gets `stale-chain-tip` when the node answers
+`inconclusive-not-best-prevblk`, and `template-unavailable` when the check
+times out or the request fails; `invalid-template` is left for the node's
+own reason. Last, the `0x5052` text
+(`docs/architecture/sv2-payout-extension.md`, section 7.4) called a repeated
+`stale-payout-outputs` on a new token a refusal. It now says what that
+answer means: the client's node and the pool's node differ on the Bitcoin
+Cash tip or its bits for a moment. The client keeps asking every few
+seconds and mines its last installed job meanwhile. No share-chain rule
+changes.
+
 Requests to the Bitcoin Cash node time out. The RPC client had no timeout
 at all, so a request on a connection that stopped carrying data, with no
 close or reset reaching the pool, waited for good. On chipnet that held the
