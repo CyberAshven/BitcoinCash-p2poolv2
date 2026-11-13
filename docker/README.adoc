@@ -122,7 +122,8 @@ link:../docs/requirements.md[requirements] for ports and disk.
 The chipnet and mainnet configs ship no RPC password. On first start,
 BCHN's `entrypoint.sh` makes a random one (32 random bytes, 64 hex digits)
 and keeps it in the `bchn_rpc` volume as `password-chipnet` or
-`password-mainnet`, readable only by BCHN's user. Later starts reuse it. The
+`password-mainnet`, readable only by BCHN's user and the `bchn-rpc` group
+(gid 2001), which the node's user is in. Later starts reuse it. The
 `p2poolv2` service mounts that volume read-only and passes the password to
 the node as `P2POOL_BITCOINRPC__PASSWORD`, which overrides `password` in
 `config.toml`. bitcoind gets it from a config file in its data directory,
@@ -140,6 +141,23 @@ never on the command line, and no log line prints it. The username stays
 Regtest keeps the public throwaway login `p2pool` / `p2pool` in
 `bchn/bitcoin-regtest.conf` and `config-docker.sample.toml`. Both ports stay
 on the host's loopback interface on every network.
+
+=== The node's user
+
+The node runs as `p2pool`, uid 1000 and gid 1000, not as root. It owns
+`/p2poolv2`, where the share store is. A new `p2poolv2_data` volume takes
+that owner from the image; a host directory mounted at `/p2poolv2` instead
+must be writable by uid 1000.
+
+A `p2poolv2_data` volume made by an image from before this change belongs
+to root, and the node cannot write it. Remove it, which starts a new store
+(`docker compose down`, `docker volume rm p2poolv2_p2poolv2_data`,
+`docker compose up -d`), or give it to the node's user:
+
+[,shell]
+----
+docker compose run --rm --no-deps --user root --entrypoint chown p2poolv2 -R 1000:1000 /p2poolv2
+----
 
 == Running multiple P2Poolv2 nodes
 
