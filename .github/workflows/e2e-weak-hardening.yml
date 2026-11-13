@@ -1,0 +1,170 @@
+name: Weak share hardening swarm
+
+# Evidence for PR #106, on a throwaway branch: the same 12-node swarm as the
+# relay runs of PR #105 (runbook Test J's control: 1,200 miners, no tokens,
+# 3-second shares), once on the hardening branch and once on the relay branch
+# it stacks on, each on its own runner. The question is whether the new
+# disconnect of a peer that sent an invalid weak share ever hits an honest
+# node, and whether anything else changes.
+
+on:
+  push:
+    branches: [e2e/weak-hardening-swarm]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  swarm:
+    name: Swarm (${{ matrix.side }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - side: hardening
+            ref: fix/weak-share-hardening
+          - side: relay-only
+            ref: feat/weak-share-inventory
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.99.0
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: weak-hardening-swarm-${{ matrix.side }}
+
+      - name: Install BCHN
+        run: |
+          set -euo pipefail
+          dockerfile=docker/bchn/Dockerfile
+          version=$(sed -n 's/^ARG BCHN_VERSION=//p' "$dockerfile" | head -n 1)
+          sum=$(sed -n 's/^ARG BCHN_SHA256_AMD64=//p' "$dockerfile" | head -n 1)
+          tarball="bitcoin-cash-node-${version}-x86_64-linux-gnu.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/bitcoin-cash-node/bitcoin-cash-node/releases/download/v${version}/${tarball}"
+          echo "${sum}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bchn"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/bchn" --strip-components=1
+          sudo install -m 0755 "$RUNNER_TEMP/bchn/bin/bitcoind" "$RUNNER_TEMP/bchn/bin/bitcoin-cli" /usr/local/bin/
+          if ! ldconfig -p | grep 'libatomic\.so\.1' > /dev/null; then
+            sudo apt-get update -q
+            sudo apt-get install -y --no-install-recommends libatomic1
+          fi
+          bitcoind --version | head -n 1
+
+      - name: Build the harness and the sim node
+        run: |
+          cargo build --release -p p2poolv2_tools --bin sim_harness
+          cargo build --release -p p2poolv2_sim --features sim
+
+      - name: Start BCHN regtest
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bchn-data"
+          bitcoind -regtest -daemon -datadir="$RUNNER_TEMP/bchn-data" \
+            -rpcport=19981 -port=18981 -listen=0 \
+            -rpcuser=p2pool -rpcpassword=p2pool \
+            -zmqpubhashblock=tcp://127.0.0.1:28981 \
+            -fallbackfee=0.00001 -allowunconnectedmining
+          cli="bitcoin-cli -regtest -rpcport=19981 -rpcuser=p2pool -rpcpassword=p2pool"
+          for i in $(seq 1 30); do $cli getblockcount > /dev/null 2>&1 && break; sleep 2; done
+          $cli createwallet p2pool > /dev/null
+          address=$($cli -rpcwallet=p2pool getnewaddress)
+          for n in 1 2 3 4 5 6; do $cli -rpcwallet=p2pool generatetoaddress 300 "$address" > /dev/null; done
+          echo "START_HEIGHT=$($cli getblockcount)" >> "$GITHUB_ENV"
+
+      - name: Run 12 nodes until 22 blocks are found
+        env:
+          RUN_DIR: ${{ runner.temp }}/run/
+          RPC_URL: http://127.0.0.1:19981
+          ZMQ: tcp://127.0.0.1:28981
+          PROFILE: release
+          IDEAL_BLOCK_TIME: "3"
+          SHARES_PER_BLOCK: "20"
+          HASHRATE: "1e15"
+          LATENCY_MS: "50"
+          WEAK_SHARES: "1"
+          VIRTUAL_MINERS: "100"
+          PAYOUT_LEVELS: 5,5,5,5,3,3,3,3,1,1,1,1
+          LOG_LEVEL: info
+        run: |
+          set -uo pipefail
+          cli="bitcoin-cli -regtest -rpcport=19981 -rpcuser=p2pool -rpcpassword=p2pool"
+          target/release/sim_harness run-swarm 12 2>&1 | tee "$RUNNER_TEMP/launch.log"
+          started=$(date +%s)
+          target_height=$((START_HEIGHT + 22))
+          while :; do
+            height=$($cli getblockcount)
+            elapsed=$(( $(date +%s) - started ))
+            if [ "$height" -ge "$target_height" ] || [ "$elapsed" -ge 4500 ]; then
+              break
+            fi
+            sleep 30
+          done
+          echo "blocks found: $((height - START_HEIGHT)) in $((elapsed / 60)) min" | tee "$RUNNER_TEMP/duration.txt"
+
+      - name: Collect counters
+        if: always()
+        run: |
+          set -uo pipefail
+          run="$RUNNER_TEMP/run"
+          summary="$RUNNER_TEMP/summary.txt"
+          {
+            cat "$RUNNER_TEMP/duration.txt" 2>/dev/null
+            git log --oneline -1
+            for i in $(seq 0 11); do
+              port=76$(printf %02d "$i")
+              log="$run/node-$i.log"
+              echo "node $i: $(curl -s -m 5 "http://127.0.0.1:$port/chain_info" | tr -d '\n' | grep -o '"chain_tip_height":[0-9]*')"
+              curl -s -m 5 "http://127.0.0.1:$port/metrics" \
+                | grep -E '^weak_shares_(found_total|received_total|relayed_total|expired_total|carried_on_chain_total|refused_total)|^weak_pool_size' \
+                | tr '\n' ' '
+              echo
+              echo "  invalid from a peer $(grep -c 'Refused weak share .* from Peer' "$log"); invalid own $(grep -c 'Refused weak share .* from Local' "$log"); disconnected $(grep -c 'Disconnected from peer' "$log"); closed $(grep -c 'Closed connection' "$log"); at capacity $(grep -c 'at capacity' "$log")"
+            done
+          } > "$summary" 2>&1
+          cat "$summary"
+          echo "--- all nodes"
+          grep -o 'chain_tip_height":[0-9]*' "$summary" | sort | uniq -c
+          for k in 'invalid from a peer' 'invalid own' 'disconnected' 'closed' 'at capacity'; do
+            printf '%s: ' "$k"
+            grep -o "$k [0-9]*" "$summary" | awk '{s += $NF} END {print s + 0}'
+          done
+          for k in 'weak_shares_found_total' 'weak_shares_received_total' 'weak_shares_carried_on_chain_total' 'weak_shares_expired_total' 'reason="duplicate"}' 'reason="rate_limited"}' 'reason="invalid"}' 'reason="pool_full"}'; do
+            printf '%s: ' "$k"
+            grep -o "$k [0-9]*" "$summary" | awk '{s += $NF} END {print s + 0}'
+          done
+          echo "--- refusals by reason, all nodes"
+          grep -h 'Refused weak share' "$run"/node-*.log \
+            | sed -E 's/.*Refused weak share [0-9a-f]+ from (Local|Peer)[^:]*: /\1: /; s/[0-9]{6,}/N/g' \
+            | sort | uniq -c | sort -rn | head -n 20
+
+      - name: Stop the swarm
+        if: always()
+        run: |
+          target/release/sim_harness stop-swarm || true
+          bitcoin-cli -regtest -rpcport=19981 -rpcuser=p2pool -rpcpassword=p2pool stop || true
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: swarm-${{ matrix.side }}
+          path: |
+            ${{ runner.temp }}/summary.txt
+            ${{ runner.temp }}/launch.log
+            ${{ runner.temp }}/run/*.log
+            ${{ runner.temp }}/run/*.toml
+          if-no-files-found: warn
