@@ -1,0 +1,56 @@
+name: Chipnet deploy build
+
+# Release binaries of one alpha commit for the chipnet pool's Windows PC,
+# on a throwaway branch: that PC cannot build since its 2026-11-13 Windows
+# reinstall. The binaries are kept as this run's artifact for staging; a
+# deploy still waits on the owner's word. Built like release-windows.yml.
+
+on:
+  push:
+    branches: ['build/chipnet-*']
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Build p2poolv2.exe and p2poolv2_cli.exe
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      COMMIT: 040159379ad411b9d0522c95a9bba400333b5f77
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 040159379ad411b9d0522c95a9bba400333b5f77
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM'
+          $resource = (Get-ChildItem "$llvm\lib\clang" -Directory | Sort-Object { [int]($_.Name -replace '\D.*$', '') } -Descending | Select-Object -First 1).FullName
+          $env:LIBCLANG_PATH = "$llvm\bin"
+          $env:BINDGEN_EXTRA_CLANG_ARGS = "-resource-dir=`"$resource`""
+          $env:CFLAGS = '-DSECP256K1_STATIC -DENABLE_MODULE_ELLSWIFT'
+          $env:CXXFLAGS = '-DSECP256K1_STATIC'
+          cargo build --release --locked --bin p2poolv2 --bin p2poolv2_cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory staging | Out-Null
+          Copy-Item target\release\p2poolv2.exe, target\release\p2poolv2_cli.exe staging
+          $version = (& .\staging\p2poolv2.exe --version | Select-Object -First 1)
+          $describe = (git describe --tags --always)
+          "$($env:COMMIT.Substring(0, 8)) $describe ($version)" | Set-Content -Encoding ascii staging\VERSION.txt
+          Get-FileHash staging\*.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } | Set-Content -Encoding ascii staging\SHA256SUMS
+          Get-Content staging\VERSION.txt, staging\SHA256SUMS
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: chipnet-binaries
+          path: staging/
+          if-no-files-found: error
