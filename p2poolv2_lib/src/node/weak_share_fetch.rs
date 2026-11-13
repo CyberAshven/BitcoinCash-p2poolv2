@@ -40,18 +40,6 @@ pub const MAX_WEAK_FETCHES_IN_FLIGHT: usize = 512;
 /// is ignored until a later inventory offers it.
 pub const MAX_WANTED_WEAK_SHARES: usize = MAX_POOL_WEAK_SHARES;
 
-/// Hashes whose body was refused for the peer's rate.
-///
-/// The next announcer is not asked at once. One slot per hash the pool
-/// could hold; the oldest is dropped past that.
-pub const MAX_RATE_LIMITED_WEAK_SHARES: usize = MAX_POOL_WEAK_SHARES;
-
-/// How long a rate-limited hash waits before a new announcement may fetch it.
-///
-/// One second is the worker's existing tick, so the wait is visible on the
-/// next check without a second timer.
-pub const WEAK_FETCH_RATE_LIMIT_RETRY: Duration = Duration::from_secs(1);
-
 /// How long one fetch may stay unanswered before the next announcer is asked.
 ///
 /// Ten seconds is the block fetcher's request timeout, which it keeps equal
@@ -115,8 +103,6 @@ pub(crate) struct WeakShareFetch {
     /// to ask the next peer. At most one entry per in-flight fetch.
     parked: HashMap<BlockHash, VecDeque<PeerId>>,
     parked_order: VecDeque<BlockHash>,
-    retry_after: HashMap<BlockHash, Instant>,
-    retry_order: VecDeque<BlockHash>,
     holding: HashSet<BlockHash>,
     holding_order: VecDeque<BlockHash>,
 }
@@ -130,28 +116,20 @@ impl WeakShareFetch {
             per_peer: HashMap::new(),
             parked: HashMap::new(),
             parked_order: VecDeque::new(),
-            retry_after: HashMap::new(),
-            retry_order: VecDeque::new(),
             holding: HashSet::new(),
             holding_order: VecDeque::new(),
         }
     }
 
-    /// Record that `peer` announced `hash` at `now`.
+    /// Record that `peer` announced `hash`.
     ///
     /// `has_seen` means the pool already checked a copy, so nothing is
     /// fetched. A hash already in flight or waiting only gains `peer` as
     /// a later announcer.
-    pub(crate) fn note(&mut self, peer: PeerId, hash: BlockHash, has_seen: bool, now: Instant) {
+    pub(crate) fn note(&mut self, peer: PeerId, hash: BlockHash, has_seen: bool) {
         if has_seen || self.holding.contains(&hash) {
             return;
         }
-        if let Some(until) = self.retry_after.get(&hash)
-            && *until > now
-        {
-            return;
-        }
-        self.remove_retry(hash);
         if let Some(inflight) = self.in_flight.get_mut(&hash) {
             remember_announcer(&mut inflight.others, peer, Some(inflight.peer));
             return;
@@ -249,26 +227,22 @@ impl WeakShareFetch {
         self.take_next(now)
     }
 
-    /// The peer who delivered the body was over its rate. Do not ask the
-    /// next announcer: that would spend a second peer's allowance on the
-    /// same hash. A later announcement, after the retry instant, may fetch.
-    pub(crate) fn rate_limited(&mut self, hash: BlockHash, now: Instant) {
-        self.settled(hash);
-        self.remove_wanted(hash);
-        self.forget_hold(hash);
-        let until = now + WEAK_FETCH_RATE_LIMIT_RETRY;
-        if let Some(stored) = self.retry_after.get_mut(&hash) {
-            *stored = until;
-            return;
+    /// The peer who delivered the body was over its rate, so the body was
+    /// dropped unchecked. Ask the next announcer: its copy counts against
+    /// its own rate, as a body it relayed whole would.
+    pub(crate) fn rate_limited(
+        &mut self,
+        hash: BlockHash,
+        now: Instant,
+    ) -> Vec<WeakShareFetchSend> {
+        let others = self.take_parked(hash);
+        if let Some(inflight) = self.in_flight.remove(&hash) {
+            self.release_peer(inflight.peer);
+            self.requeue(hash, inflight.others);
+        } else {
+            self.requeue(hash, others);
         }
-        while self.retry_order.len() >= MAX_RATE_LIMITED_WEAK_SHARES {
-            let Some(oldest) = self.retry_order.pop_front() else {
-                break;
-            };
-            self.retry_after.remove(&oldest);
-        }
-        self.retry_after.insert(hash, until);
-        self.retry_order.push_back(hash);
+        self.take_next(now)
     }
 
     /// The check passed, or the body will not be asked for again. Drop any
@@ -438,12 +412,6 @@ impl WeakShareFetch {
         }
     }
 
-    fn remove_retry(&mut self, hash: BlockHash) {
-        if self.retry_after.remove(&hash).is_some() {
-            self.retry_order.retain(|retried| *retried != hash);
-        }
-    }
-
     fn forget_hold(&mut self, hash: BlockHash) {
         if self.holding.remove(&hash) {
             self.holding_order.retain(|held| *held != hash);
@@ -498,7 +466,7 @@ mod tests {
         let free = peer();
         let mut book = WeakShareFetch::new();
         for byte in 0..MAX_WEAK_FETCHES_PER_PEER as u8 {
-            book.note(busy, BlockHash::from_byte_array([byte; 32]), false, now);
+            book.note(busy, BlockHash::from_byte_array([byte; 32]), false);
         }
         assert_eq!(
             book.take_next(now).len(),
@@ -507,12 +475,12 @@ mod tests {
         );
 
         let extra = BlockHash::from_byte_array([0xee; 32]);
-        book.note(busy, extra, false, now);
+        book.note(busy, extra, false);
         assert!(
             book.take_next(now).is_empty(),
             "only the busy peer announced it: it waits"
         );
-        book.note(free, extra, false, now);
+        book.note(free, extra, false);
         let sends = book.take_next(now);
 
         assert_eq!(
@@ -537,8 +505,8 @@ mod tests {
         let peers: Vec<PeerId> = (0..10).map(|_| peer()).collect();
         let mut book = WeakShareFetch::new();
 
-        book.note(peers[0], hash, false, now);
-        book.note(peers[1], hash, false, now);
+        book.note(peers[0], hash, false);
+        book.note(peers[1], hash, false);
         let sends = book.take_next(now);
 
         assert_eq!(
@@ -556,14 +524,14 @@ mod tests {
         );
 
         for announcer in peers.iter().skip(2).take(7) {
-            book.note(*announcer, hash, false, now);
+            book.note(*announcer, hash, false);
         }
         assert_eq!(
             book.waiting_announcers(&hash),
             8,
             "announcers three through nine of hash H fill the list to 8"
         );
-        book.note(peers[9], hash, false, now);
+        book.note(peers[9], hash, false);
         assert_eq!(
             book.waiting_announcers(&hash),
             8,
@@ -581,45 +549,45 @@ mod tests {
         );
 
         let mut seen = WeakShareFetch::new();
-        seen.note(peers[0], hash, true, now);
+        seen.note(peers[0], hash, true);
         assert!(
             seen.take_next(now).is_empty(),
             "has_seen produces no GetData for hash H"
         );
     }
 
+    /// A body refused for its sender's rate is asked from the next announcer,
+    /// and when none is known yet, from the next peer that announces it.
     #[test]
-    fn rate_limited_waits_for_a_later_announcement() {
+    fn a_body_refused_for_the_rate_is_asked_from_the_next_announcer() {
         let now = Instant::now();
         let hash = hash_h();
         let first = peer();
+        let second = peer();
         let later = peer();
         let mut book = WeakShareFetch::new();
-        book.note(first, hash, false, now);
-        assert_eq!(
-            book.take_next(now).len(),
-            1,
-            "the first announcement of hash H fetches once before the rate limit"
-        );
+        book.note(first, hash, false);
+        book.note(second, hash, false);
+        assert_eq!(book.take_next(now).len(), 1, "hash H is asked once");
 
-        book.rate_limited(hash, now);
-        assert!(
-            book.take_next(now).is_empty(),
-            "rate_limited produces no GetData for hash H"
-        );
-        book.note(later, hash, false, now);
-        assert!(
-            book.take_next(now).is_empty(),
-            "a new announcement of hash H inside the retry instant produces no GetData"
-        );
-
-        let after = now + WEAK_FETCH_RATE_LIMIT_RETRY;
-        book.note(later, hash, false, after);
-        let sends = book.take_next(after);
+        book.body_arrived(hash);
+        let sends = book.rate_limited(hash, now);
         assert_eq!(
             sends,
+            vec![WeakShareFetchSend { peer: second, hash }],
+            "hash H is asked from the second announcer"
+        );
+
+        book.body_arrived(hash);
+        assert!(
+            book.rate_limited(hash, now).is_empty(),
+            "no announcer of hash H is left to ask"
+        );
+        book.note(later, hash, false);
+        assert_eq!(
+            book.take_next(now),
             vec![WeakShareFetchSend { peer: later, hash }],
-            "a new announcement of hash H after the retry instant fetches"
+            "a later announcement of hash H fetches"
         );
     }
 
@@ -630,8 +598,8 @@ mod tests {
         let first = peer();
         let second = peer();
         let mut book = WeakShareFetch::new();
-        book.note(first, hash, false, now);
-        book.note(second, hash, false, now);
+        book.note(first, hash, false);
+        book.note(second, hash, false);
         let _ = book.take_next(now);
 
         let at_timeout = now + WEAK_FETCH_TIMEOUT;
@@ -654,8 +622,8 @@ mod tests {
         let now = Instant::now();
         let hash = hash_h();
         let mut book = WeakShareFetch::new();
-        book.note(peer(), hash, false, now);
-        book.note(peer(), hash, false, now);
+        book.note(peer(), hash, false);
+        book.note(peer(), hash, false);
         let _ = book.take_next(now);
 
         book.body_arrived(hash);
