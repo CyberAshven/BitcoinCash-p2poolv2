@@ -54,7 +54,7 @@ use bitcoin::{
     BlockHash, OutPoint, Sequence, Target, Transaction, TxIn, Witness, absolute::LockTime,
     transaction::Version,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 
 /// The most expected payouts a [`WeakPayoutCache`] keeps before it starts
@@ -155,6 +155,10 @@ struct WeakWeightsKey {
 pub struct WeakPayoutCache {
     weights: HashMap<WeakWeightsKey, Arc<PplnsWeights>>,
     payouts: HashMap<WeakPayoutKey, Arc<CoinbasePayouts>>,
+    /// The weights keys in the order they were cached, oldest first.
+    weights_order: VecDeque<WeakWeightsKey>,
+    /// The payout keys in the order they were cached, oldest first.
+    payouts_order: VecDeque<WeakPayoutKey>,
 }
 
 impl WeakPayoutCache {
@@ -162,14 +166,16 @@ impl WeakPayoutCache {
         Self {
             weights: HashMap::with_capacity(WEAK_WEIGHTS_CACHE_CAPACITY),
             payouts: HashMap::with_capacity(WEAK_PAYOUT_CACHE_CAPACITY),
+            weights_order: VecDeque::with_capacity(WEAK_WEIGHTS_CACHE_CAPACITY),
+            payouts_order: VecDeque::with_capacity(WEAK_PAYOUT_CACHE_CAPACITY),
         }
     }
 
     /// The cached payouts for `key`, or `build_outputs`' from the window's
     /// weights, cached by [`WeakPayoutKey::weights_key`] or else
     /// `walk_window`'s; both kept for the next weak share. A full cache
-    /// starts over: only node memory, never a verdict, depends on what it
-    /// keeps.
+    /// drops its oldest entry: only node memory, never a verdict, depends on
+    /// what it keeps.
     fn get_or_build(
         &mut self,
         key: WeakPayoutKey,
@@ -181,9 +187,12 @@ impl WeakPayoutCache {
         }
         let weights = self.weights_or_walk(key.weights_key(), walk_window)?;
         let payouts = Arc::new(build_outputs(&weights)?);
-        if self.payouts.len() >= WEAK_PAYOUT_CACHE_CAPACITY {
-            self.payouts.clear();
+        if self.payouts.len() >= WEAK_PAYOUT_CACHE_CAPACITY
+            && let Some(oldest) = self.payouts_order.pop_front()
+        {
+            self.payouts.remove(&oldest);
         }
+        self.payouts_order.push_back(key.clone());
         self.payouts.insert(key, Arc::clone(&payouts));
         Ok(payouts)
     }
@@ -199,9 +208,12 @@ impl WeakPayoutCache {
             return Ok(Arc::clone(weights));
         }
         let weights = Arc::new(walk_window()?);
-        if self.weights.len() >= WEAK_WEIGHTS_CACHE_CAPACITY {
-            self.weights.clear();
+        if self.weights.len() >= WEAK_WEIGHTS_CACHE_CAPACITY
+            && let Some(oldest) = self.weights_order.pop_front()
+        {
+            self.weights.remove(&oldest);
         }
+        self.weights_order.push_back(key);
         self.weights.insert(key, Arc::clone(&weights));
         Ok(weights)
     }
