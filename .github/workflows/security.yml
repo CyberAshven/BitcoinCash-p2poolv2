@@ -97,8 +97,18 @@ jobs:
           --exclude semgrep.sarif
           || true
 
+      # Semgrep's SARIF keeps each finding a nosemgrep comment accepts, marked
+      # as suppressed, and code scanning would still open an alert for it.
+      # Those are left out of the upload: the comment in the code is the
+      # record of why it is accepted.
+      - name: Leave out accepted findings
+        if: always()
+        run: >-
+          jq '.runs[].results |= ((. // []) | map(select((.suppressions // []) | length == 0)))'
+          semgrep.sarif > semgrep-open.sarif
+
       - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         if: always()
         with:
-          sarif_file: semgrep.sarif
+          sarif_file: semgrep-open.sarif
           category: semgrep
