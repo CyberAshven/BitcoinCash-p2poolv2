@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Two more limits on the weak share path, node behaviour only. When the weak
+shares held for an unknown parent pass their bounds, the source holding the
+most bytes loses its oldest, so a peer that floods them pushes out only its
+own; before, the oldest of all went first, whoever sent it. And a peer is
+asked for the headers of unknown parents at most once a second, however many
+weak shares on new parents it sends: the request is the same headers request
+from this node's tip either way, and before it went out once a new parent.
+
 Requests to the Bitcoin Cash node time out. The RPC client had no timeout
 at all, so a request on a connection that stopped carrying data, with no
 close or reset reaching the pool, waited for good. On chipnet that held the
