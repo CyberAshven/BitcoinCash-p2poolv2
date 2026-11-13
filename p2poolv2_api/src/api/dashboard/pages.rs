@@ -345,9 +345,11 @@ pub(crate) struct MinerView {
     pub(crate) site: Site,
     pub(crate) now: u64,
     pub(crate) report: MinerResponse,
-    /// The miner's hashrate over the recent shares, if it has any there.
+    /// The miner's hashrate over the window behind the miners page's
+    /// Hashrate column, if it has any there.
     pub(crate) hashrate: Option<f64>,
-    /// How many recent shares, and over how many seconds, it was taken from.
+    /// The window `hashrate` was taken from: how many shares, over how many
+    /// seconds.
     pub(crate) recent_window: Option<(usize, u32)>,
     /// Its workers, when it mines on this node.
     pub(crate) workers: Vec<WorkerRow>,
