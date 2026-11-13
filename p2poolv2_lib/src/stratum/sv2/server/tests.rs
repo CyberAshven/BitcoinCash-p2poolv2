@@ -6,6 +6,7 @@ use crate::shares::share_block::ShareHeader;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::stratum::block_submit::FoundBlockSubmitter;
 use crate::stratum::sv2::PoolTransactionCache;
+use crate::stratum::sv2::large_templates::LARGE_TEMPLATES_EXTENSION;
 use crate::stratum::sv2::payout_outputs::{
     EXACT_OUTPUTS, INVALID_REQUEST, PAYOUT_OUTPUTS_STALE, REQUEST_PAYOUT_OUTPUTS,
     REQUEST_PAYOUT_OUTPUTS_ERROR, REQUEST_PAYOUT_OUTPUTS_SUCCESS, RequestPayoutOutputsError,
@@ -1111,6 +1112,7 @@ async fn disconnect_releases_the_authorized_worker_and_connection_permit() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let listener = bind("127.0.0.1", 0).await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1233,7 +1235,7 @@ async fn a_mining_connection_is_granted_the_merge_mining_disclosure() {
     let request = Sv2Message {
         extension_type: EXTENSIONS_NEGOTIATION,
         message_type: REQUEST_EXTENSIONS,
-        payload: extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION, 0x0002]),
+        payload: extensions_payload(9, &[MERGE_DISCLOSURE_EXTENSION, 0x0003]),
     };
 
     let frames = handle_messages(
@@ -1258,10 +1260,12 @@ async fn a_mining_connection_is_granted_the_merge_mining_disclosure() {
     );
 }
 
-/// A connection that asks for no extension this node knows, or that has
-/// no mining channels to disclose to, is answered with none.
+/// A connection that asks for no extension this node grants, here one with
+/// no mining channels to disclose to, is answered with
+/// `RequestExtensions.Error`: every extension it asked for unsupported, and
+/// none required (0x0001).
 #[tokio::test]
-async fn an_unknown_extension_request_is_answered_with_none() {
+async fn an_unknown_extension_request_is_answered_with_an_error() {
     let mut connection = mining_connection();
     let request = Sv2Message {
         extension_type: EXTENSIONS_NEGOTIATION,
@@ -1277,11 +1281,130 @@ async fn an_unknown_extension_request_is_answered_with_none() {
         frames,
         vec![
             [
+                &[0x01, 0x00, REQUEST_EXTENSIONS_ERROR, 8, 0, 0][..],
+                &extensions_error_payload(9, &[MERGE_DISCLOSURE_EXTENSION])[..],
+            ]
+            .concat()
+        ]
+    );
+}
+
+/// A request that asks for no extension at all is answered with an empty
+/// `RequestExtensions.Success`: nothing it asked for went unsupported.
+#[tokio::test]
+async fn an_empty_extension_request_is_answered_with_an_empty_success() {
+    let mut connection = mining_connection();
+    let request = Sv2Message {
+        extension_type: EXTENSIONS_NEGOTIATION,
+        message_type: REQUEST_EXTENSIONS,
+        payload: extensions_payload(9, &[]),
+    };
+
+    let frames = handle_messages(&mut connection, None, None, None, vec![request])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        frames,
+        vec![
+            [
                 &[0x01, 0x00, REQUEST_EXTENSIONS_SUCCESS, 4, 0, 0][..],
                 &extensions_payload(9, &[])[..],
             ]
             .concat()
         ]
+    );
+}
+
+/// A Mining connection asking for Worker-Specific Hashrate Tracking
+/// (`0x0002`) and an unknown extension is granted `0x0002` alone.
+#[tokio::test]
+async fn a_mining_connection_is_granted_worker_tracking() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let mut connection = mining_connection();
+    let request = Sv2Message {
+        extension_type: EXTENSIONS_NEGOTIATION,
+        message_type: REQUEST_EXTENSIONS,
+        payload: extensions_payload(9, &[WORKER_TRACKING_EXTENSION, 0x0003]),
+    };
+
+    let frames = handle_messages(
+        &mut connection,
+        Some(&mut channels),
+        None,
+        None,
+        vec![request],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        frames,
+        vec![
+            [
+                &[0x01, 0x00, REQUEST_EXTENSIONS_SUCCESS, 6, 0, 0][..],
+                &extensions_payload(9, &[WORKER_TRACKING_EXTENSION])[..],
+            ]
+            .concat()
+        ]
+    );
+}
+
+/// The extensions negotiation comes right after `SetupConnection.Success`,
+/// before any other protocol message (0x0001). A Mining connection that asks
+/// for `0x0002` after opening a channel is answered with
+/// `RequestExtensions.Error`, and keeps mining without it.
+#[tokio::test]
+async fn worker_tracking_asked_for_after_a_channel_opened_is_not_granted() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let mut connection = mining_connection();
+    let payout = bitcoin::Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    );
+    let identity = encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap();
+    let open = Sv2Message {
+        extension_type: 0,
+        message_type: MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+        payload: binary_sv2::to_bytes(OpenExtendedMiningChannel {
+            request_id: 1,
+            user_identity: identity.as_str().try_into().unwrap(),
+            nominal_hash_rate: 1.0,
+            max_target: U256::new(&[0xff; 32]).unwrap(),
+            min_extranonce_size: 8,
+        })
+        .unwrap(),
+    };
+    let request = Sv2Message {
+        extension_type: EXTENSIONS_NEGOTIATION,
+        message_type: REQUEST_EXTENSIONS,
+        payload: extensions_payload(9, &[WORKER_TRACKING_EXTENSION]),
+    };
+
+    let frames = handle_messages(
+        &mut connection,
+        Some(&mut channels),
+        None,
+        None,
+        vec![open, request],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(frames.len(), 2);
+    assert_eq!(
+        frames[0][2],
+        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS
+    );
+    assert_eq!(
+        frames[1],
+        [
+            &[0x01, 0x00, REQUEST_EXTENSIONS_ERROR, 8, 0, 0][..],
+            &extensions_error_payload(9, &[WORKER_TRACKING_EXTENSION])[..],
+        ]
+        .concat()
     );
 }
 
@@ -1364,9 +1487,95 @@ async fn a_bch_job_declaration_connection_is_granted_requested_payout_outputs() 
     assert!(connection.has_payout_outputs());
 }
 
+/// A Full-Template Job Declaration connection asking for `0x5052` and
+/// `0x4C54` together, as Knuth does, is granted both in one
+/// `RequestExtensions.Success`; a Coinbase-Only one gets `0x5052` alone.
+#[tokio::test]
+async fn a_full_template_declarator_is_granted_large_templates_beside_payout_outputs() {
+    for (flags, granted) in [
+        (1, vec![PAYOUT_OUTPUTS_EXTENSION, LARGE_TEMPLATES_EXTENSION]),
+        (0, vec![PAYOUT_OUTPUTS_EXTENSION]),
+    ] {
+        let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+        let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+        let registry = Arc::new(Mutex::new(JobRegistry::new(
+            PoolTransactionCache::new(),
+            Some(MergeMiningCommitment::empty()),
+        )));
+        let mut connection = Sv2Connection::new(registry);
+        let mut setup =
+            binary_sv2::to_bytes(test_sv2_setup(Protocol::JobDeclarationProtocol, flags)).unwrap();
+        connection
+            .handle_message(MESSAGE_TYPE_SETUP_CONNECTION, &mut setup)
+            .unwrap();
+        let request = Sv2Message {
+            extension_type: EXTENSIONS_NEGOTIATION,
+            message_type: REQUEST_EXTENSIONS,
+            payload: extensions_payload(9, &[PAYOUT_OUTPUTS_EXTENSION, LARGE_TEMPLATES_EXTENSION]),
+        };
+
+        let frames = handle_messages(
+            &mut connection,
+            Some(&mut channels),
+            None,
+            None,
+            vec![request],
+        )
+        .await
+        .unwrap();
+
+        let payload = extensions_payload(9, &granted);
+        assert_eq!(
+            frames,
+            vec![
+                [
+                    &[
+                        0x01,
+                        0x00,
+                        REQUEST_EXTENSIONS_SUCCESS,
+                        payload.len() as u8,
+                        0,
+                        0
+                    ][..],
+                    &payload[..],
+                ]
+                .concat()
+            ]
+        );
+        assert_eq!(connection.has_large_templates(), flags == 1);
+    }
+}
+
+/// A `0x4C54` message on a connection that did not negotiate it closes the
+/// connection, as any unknown extension does.
+#[tokio::test]
+async fn a_large_templates_message_without_negotiation_closes_the_connection() {
+    let registry = Arc::new(Mutex::new(JobRegistry::new(
+        PoolTransactionCache::new(),
+        Some(MergeMiningCommitment::empty()),
+    )));
+    let mut connection = Sv2Connection::new(registry);
+    let mut setup =
+        binary_sv2::to_bytes(test_sv2_setup(Protocol::JobDeclarationProtocol, 1)).unwrap();
+    connection
+        .handle_message(MESSAGE_TYPE_SETUP_CONNECTION, &mut setup)
+        .unwrap();
+    let page = Sv2Message {
+        extension_type: LARGE_TEMPLATES_EXTENSION,
+        message_type: crate::stratum::sv2::large_templates::DECLARE_MINING_JOB_TRANSACTIONS,
+        payload: vec![2, 0, 0, 0, 0, 0],
+    };
+
+    assert!(
+        handle_messages(&mut connection, None, None, None, vec![page])
+            .await
+            .is_err()
+    );
+}
+
 /// A Mining connection keeps getting `0x4D4D` alone, and a Bitcoin node's
 /// Job Declaration connection, whose tokens carry no P2Pool terms, gets
-/// neither.
+/// neither: it is told `0x5052` is unsupported.
 #[tokio::test]
 async fn requested_payout_outputs_are_not_granted_to_mining_or_bitcoin_connections() {
     let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
@@ -1424,8 +1633,8 @@ async fn requested_payout_outputs_are_not_granted_to_mining_or_bitcoin_connectio
         bitcoin_frames,
         vec![
             [
-                &[0x01, 0x00, REQUEST_EXTENSIONS_SUCCESS, 4, 0, 0][..],
-                &extensions_payload(9, &[])[..],
+                &[0x01, 0x00, REQUEST_EXTENSIONS_ERROR, 8, 0, 0][..],
+                &extensions_error_payload(9, &[PAYOUT_OUTPUTS_EXTENSION])[..],
             ]
             .concat()
         ]

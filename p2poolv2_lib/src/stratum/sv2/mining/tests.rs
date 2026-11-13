@@ -23,7 +23,7 @@ use crate::test_utils::{
     test_bch_prepared_with_payee_count, test_bch_prepared_with_tokens, test_bch_solve_custom_job,
     test_bch_stratum_context, test_merge_token_set,
 };
-use bitcoin::consensus::deserialize;
+use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::sha256d;
 use bitcoin::{Address, Amount, CompressedPublicKey, Network, Transaction};
 use bitcoindrpc::BitcoindRpcClient;
@@ -673,6 +673,7 @@ async fn extended_channel_mines_the_job_it_is_sent_and_its_share_is_emitted() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
 
@@ -928,6 +929,7 @@ async fn standard_channel_mines_the_merkle_root_it_is_sent() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
 
@@ -1058,6 +1060,7 @@ async fn a_share_below_the_channel_target_keeps_the_block_submission_policy() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = payload(
@@ -1179,6 +1182,7 @@ async fn a_hydrapool_share_meeting_the_channel_target_is_queued_at_the_job_diffi
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = payload(
@@ -1311,6 +1315,7 @@ async fn a_hydrapool_share_below_the_channel_target_is_not_queued() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = payload(
@@ -1397,6 +1402,7 @@ async fn a_connection_cannot_open_more_than_the_channel_cap() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let open = encode_message(
@@ -1472,6 +1478,7 @@ async fn channels_are_refused_without_a_share_address_or_a_valid_identity() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
 
@@ -1633,6 +1640,7 @@ async fn a_bitcoin_channel_takes_its_share_address_from_p2p() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let share_address = make_test_share_address(2, Network::Signet);
@@ -1698,6 +1706,7 @@ async fn a_channel_naming_another_share_address_than_the_node_is_refused() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let identity = format!(
@@ -1759,6 +1768,7 @@ async fn a_bitcoin_cash_channel_takes_its_share_hash_from_p2p() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let share_address = BchShareAddress::new(BchShareNetwork::Regtest, [0x22; 20]).encode();
@@ -1822,6 +1832,7 @@ async fn a_bitcoin_cash_channel_opens_through_a_translator_worker_suffix() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let share_address = BchShareAddress::new(BchShareNetwork::Regtest, [0x22; 20]).encode();
@@ -1888,6 +1899,7 @@ async fn a_bitcoin_cash_channel_with_a_taproot_share_address_is_refused() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let identity = format!(
@@ -1947,6 +1959,7 @@ async fn update_channel_answers_with_a_target_capped_by_the_new_maximum() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = payload(
@@ -2034,6 +2047,7 @@ async fn update_channel_for_an_unknown_channel_gets_an_error_reply() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut update = payload(
@@ -2091,6 +2105,7 @@ async fn close_channel_removes_the_channel() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
     let mut open = payload(
@@ -2886,5 +2901,550 @@ async fn a_new_tip_keeps_the_previous_tips_jobs_and_older_ones_are_stale() {
     assert_eq!(
         short_extranonce_reply(&mut channels, channel_id, first + 1_000).await,
         "invalid-job-id"
+    );
+}
+
+/// A TLV field (sv2-spec 3.4.3), its header little-endian as sv2-spec 3.1
+/// serializes every multibyte field.
+fn tlv_field(extension_type: u16, field_type: u8, value: &[u8]) -> Vec<u8> {
+    let mut field = Vec::with_capacity(TLV_HEADER_LENGTH + value.len());
+    field.extend_from_slice(&extension_type.to_le_bytes());
+    field.push(field_type);
+    field.extend_from_slice(&u16::try_from(value.len()).unwrap().to_le_bytes());
+    field.extend_from_slice(value);
+    field
+}
+
+/// The Worker-Specific Hashrate Tracking field naming `name`.
+fn worker_name_field(name: &[u8]) -> Vec<u8> {
+    tlv_field(WORKER_TRACKING_EXTENSION, USER_IDENTITY_FIELD, name)
+}
+
+/// The `SubmitSharesExtended` payload of a share with `nonce` on the first
+/// job of the channel `opened` opened, followed by `trailing`.
+fn extended_share(opened: &[Vec<u8>], nonce: u32, trailing: &[u8]) -> Vec<u8> {
+    let mut success_payload = payload(&opened[0]);
+    let channel_id = OpenExtendedMiningChannelSuccess::from_bytes(&mut success_payload)
+        .unwrap()
+        .channel_id;
+    let job_frame = opened
+        .iter()
+        .find(|frame| frame_type(frame) == MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
+        .unwrap();
+    let mut job_payload = payload(job_frame);
+    let job = NewExtendedMiningJob::from_bytes(&mut job_payload).unwrap();
+    let mut share = binary_sv2::to_bytes(SubmitSharesExtended {
+        channel_id,
+        sequence_number: nonce,
+        job_id: job.job_id,
+        nonce,
+        ntime: test_bch_prepared().template().curtime,
+        version: job.version,
+        extranonce: B032::new(&[0u8; 8]).unwrap(),
+    })
+    .unwrap();
+    share.extend_from_slice(trailing);
+    share
+}
+
+/// The TLV header is little-endian, as sv2-spec 3.1 serializes every
+/// multibyte field, the reference codec reads it and Knuth sends it. The
+/// `0x0002` extension's example prints it big-endian, `00 02 01 00 0A`; read
+/// little-endian those bytes are extension `0x0200` with a length past the
+/// end, so they name no worker.
+#[test]
+fn the_worker_name_field_is_read_little_endian() {
+    let field = worker_name_field(b"Worker_001");
+    let mut big_endian = vec![0x00, 0x02, 0x01, 0x00, 0x0a];
+    big_endian.extend_from_slice(b"Worker_001");
+
+    assert_eq!(field[..TLV_HEADER_LENGTH], [0x02, 0x00, 0x01, 0x0a, 0x00]);
+    assert_eq!(named_worker(&field), NamedWorker::Named("Worker_001"));
+    assert_eq!(named_worker(&big_endian), NamedWorker::Unnamed);
+}
+
+/// A proxy that aggregates two machines into one extended channel names
+/// each machine's shares with Worker-Specific Hashrate Tracking (`0x0002`):
+/// the node's metrics count two workers, both under the channel's payout
+/// address, and the channel's own worker is credited nothing.
+#[tokio::test]
+async fn named_shares_count_as_separate_workers_of_the_channel_s_address() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    assert!(channels.grant_worker_tracking());
+    let mut open = open_extended_request(&format!("{}.rig", bch_identity()));
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    let mut first = extended_share(&opened, 1, &worker_name_field(b"Worker_001"));
+    let mut second = extended_share(&opened, 2, &worker_name_field(b"Worker_002"));
+
+    let first_reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut first, None)
+        .await
+        .unwrap();
+    let second_reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut second, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        frame_type(&first_reply[0]),
+        MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS
+    );
+    assert_eq!(
+        frame_type(&second_reply[0]),
+        MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS
+    );
+    let payout = channels.channels[&1].session.btcaddress.clone().unwrap();
+    let metrics = channels.ctx.metrics.get_metrics().await;
+    assert_eq!(metrics.users.len(), 1);
+    let workers = &metrics.users[&payout].workers;
+    assert!(workers["Worker_001"].active);
+    assert!(workers["Worker_001"].shares_valid_total > 0);
+    assert!(workers["Worker_002"].active);
+    assert!(workers["Worker_002"].shares_valid_total > 0);
+    assert_eq!(workers["rig"].shares_valid_total, 0);
+}
+
+/// A share without a worker name, on a connection that negotiated
+/// `0x0002`, counts as the channel's own worker, as before.
+#[tokio::test]
+async fn an_unnamed_share_counts_as_the_channel_s_own_worker() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    assert!(channels.grant_worker_tracking());
+    let mut open = open_extended_request(&format!("{}.rig", bch_identity()));
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    let mut share = extended_share(&opened, 1, &[]);
+
+    let reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut share, None)
+        .await
+        .unwrap();
+
+    assert_eq!(frame_type(&reply[0]), MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS);
+    let payout = channels.channels[&1].session.btcaddress.clone().unwrap();
+    let metrics = channels.ctx.metrics.get_metrics().await;
+    let workers = &metrics.users[&payout].workers;
+    assert_eq!(workers.len(), 1);
+    assert!(workers["rig"].shares_valid_total > 0);
+}
+
+/// A worker name of 32 bytes, the most `0x0002` allows, names its share.
+/// One byte more refuses the share with `invalid-share`: a TLV field past
+/// its length limit rejects the message (sv2-spec 3.4.3).
+#[tokio::test]
+async fn a_worker_name_over_32_bytes_refuses_the_share() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    assert!(channels.grant_worker_tracking());
+    let mut open = open_extended_request(&format!("{}.rig", bch_identity()));
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    let longest = "w".repeat(32);
+    let too_long = "w".repeat(33);
+    let mut fits = extended_share(&opened, 1, &worker_name_field(longest.as_bytes()));
+    let mut refused = extended_share(&opened, 2, &worker_name_field(too_long.as_bytes()));
+
+    let fits_reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut fits, None)
+        .await
+        .unwrap();
+    let refused_reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut refused, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        frame_type(&fits_reply[0]),
+        MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS
+    );
+    let mut refused_payload = payload(&refused_reply[0]);
+    assert_eq!(
+        SubmitSharesError::from_bytes(&mut refused_payload)
+            .unwrap()
+            .error_code
+            .as_utf8_or_hex(),
+        ERROR_CODE_SUBMIT_SHARES_INVALID_SHARE
+    );
+    let payout = channels.channels[&1].session.btcaddress.clone().unwrap();
+    let metrics = channels.ctx.metrics.get_metrics().await;
+    let workers = &metrics.users[&payout].workers;
+    assert!(workers[longest.as_str()].shares_valid_total > 0);
+    assert!(!workers.contains_key(too_long.as_str()));
+    assert_eq!(workers["rig"].shares_valid_total, 0);
+}
+
+/// A worker name that is not UTF-8 refuses its share with `invalid-share`.
+#[tokio::test]
+async fn a_worker_name_that_is_not_utf8_refuses_the_share() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    assert!(channels.grant_worker_tracking());
+    let mut open = open_extended_request(&format!("{}.rig", bch_identity()));
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    let mut share = extended_share(&opened, 1, &worker_name_field(&[0xff, 0xfe]));
+
+    let reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut share, None)
+        .await
+        .unwrap();
+
+    let mut reply_payload = payload(&reply[0]);
+    assert_eq!(
+        SubmitSharesError::from_bytes(&mut reply_payload)
+            .unwrap()
+            .error_code
+            .as_utf8_or_hex(),
+        ERROR_CODE_SUBMIT_SHARES_INVALID_SHARE
+    );
+}
+
+/// TLV fields the node does not use are skipped: a later field type of
+/// `0x0002` and another extension's field after the worker name leave the
+/// share named and accepted.
+#[tokio::test]
+async fn unexpected_tlv_fields_beside_the_worker_name_are_ignored() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    assert!(channels.grant_worker_tracking());
+    let mut open = open_extended_request(&format!("{}.rig", bch_identity()));
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    let trailing = [
+        worker_name_field(b"Worker_001"),
+        tlv_field(WORKER_TRACKING_EXTENSION, 0x02, b"a later field"),
+        tlv_field(0x0003, 0x01, b"another extension"),
+    ]
+    .concat();
+    let mut share = extended_share(&opened, 1, &trailing);
+
+    let reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut share, None)
+        .await
+        .unwrap();
+
+    assert_eq!(frame_type(&reply[0]), MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS);
+    let payout = channels.channels[&1].session.btcaddress.clone().unwrap();
+    let metrics = channels.ctx.metrics.get_metrics().await;
+    assert!(metrics.users[&payout].workers["Worker_001"].shares_valid_total > 0);
+}
+
+/// Without `0x0002` negotiated, the node ignores TLV fields after a
+/// `SubmitSharesExtended`, as the extension requires: a worker name, even
+/// one too long, neither names nor refuses the share.
+#[tokio::test]
+async fn worker_names_are_ignored_on_a_connection_that_did_not_negotiate_them() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let mut open = open_extended_request(&format!("{}.rig", bch_identity()));
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    let too_long = "w".repeat(40);
+    let mut named = extended_share(&opened, 1, &worker_name_field(b"Worker_001"));
+    let mut overlong = extended_share(&opened, 2, &worker_name_field(too_long.as_bytes()));
+
+    let named_reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut named, None)
+        .await
+        .unwrap();
+    let overlong_reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut overlong, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        frame_type(&named_reply[0]),
+        MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS
+    );
+    assert_eq!(
+        frame_type(&overlong_reply[0]),
+        MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS
+    );
+    let payout = channels.channels[&1].session.btcaddress.clone().unwrap();
+    let metrics = channels.ctx.metrics.get_metrics().await;
+    let workers = &metrics.users[&payout].workers;
+    assert_eq!(workers.len(), 1);
+    assert!(workers["rig"].shares_valid_total > 0);
+}
+
+/// Bytes after a `SubmitSharesExtended` that are not a whole run of TLV
+/// fields are ignored, as before: a field whose length runs past the end, a
+/// header cut short, and a whole field followed by stray bytes all leave
+/// the share accepted as the channel's own worker.
+#[tokio::test]
+async fn trailing_bytes_that_are_not_tlv_fields_keep_the_channel_s_worker() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    assert!(channels.grant_worker_tracking());
+    let mut open = open_extended_request(&format!("{}.rig", bch_identity()));
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    let field = worker_name_field(b"Worker_001");
+    let mut stray_bytes = field.clone();
+    stray_bytes.extend_from_slice(&[0x00, 0x01]);
+    let mut overrun = extended_share(&opened, 1, &field[..field.len() - 1]);
+    let mut cut_short = extended_share(&opened, 2, &field[..3]);
+    let mut stray = extended_share(&opened, 3, &stray_bytes);
+
+    let overrun_reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut overrun, None)
+        .await
+        .unwrap();
+    let cut_short_reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut cut_short, None)
+        .await
+        .unwrap();
+    let stray_reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut stray, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        frame_type(&overrun_reply[0]),
+        MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS
+    );
+    assert_eq!(
+        frame_type(&cut_short_reply[0]),
+        MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS
+    );
+    assert_eq!(
+        frame_type(&stray_reply[0]),
+        MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS
+    );
+    let payout = channels.channels[&1].session.btcaddress.clone().unwrap();
+    let metrics = channels.ctx.metrics.get_metrics().await;
+    let workers = &metrics.users[&payout].workers;
+    assert_eq!(workers.len(), 1);
+    assert!(workers["rig"].shares_valid_total > 0);
+}
+
+/// `0x0002` covers `SubmitSharesExtended` only: a worker name after a
+/// `SubmitSharesStandard` is ignored, and the share counts as the channel's
+/// own worker.
+#[tokio::test]
+async fn a_standard_share_reads_no_worker_name() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    assert!(channels.grant_worker_tracking());
+    let identity = format!("{}.rig", bch_identity());
+    let mut open = binary_sv2::to_bytes(OpenStandardMiningChannel {
+        request_id: 1,
+        user_identity: identity.as_str().try_into().unwrap(),
+        nominal_hash_rate: 1.0e15,
+        max_target: U256::new(&[0xff; 32]).unwrap(),
+    })
+    .unwrap();
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    let job_frame = opened
+        .iter()
+        .find(|frame| frame_type(frame) == MESSAGE_TYPE_NEW_MINING_JOB)
+        .unwrap();
+    let mut job_payload = payload(job_frame);
+    let job = NewMiningJob::from_bytes(&mut job_payload).unwrap();
+    let mut share = binary_sv2::to_bytes(SubmitSharesStandard {
+        channel_id: 1,
+        sequence_number: 1,
+        job_id: job.job_id,
+        nonce: 1,
+        ntime: test_bch_prepared().template().curtime,
+        version: job.version,
+    })
+    .unwrap();
+    share.extend_from_slice(&worker_name_field(b"Worker_001"));
+
+    let reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_STANDARD, &mut share, None)
+        .await
+        .unwrap();
+
+    assert_eq!(frame_type(&reply[0]), MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS);
+    let payout = channels.channels[&1].session.btcaddress.clone().unwrap();
+    let metrics = channels.ctx.metrics.get_metrics().await;
+    let workers = &metrics.users[&payout].workers;
+    assert_eq!(workers.len(), 1);
+    assert!(workers["rig"].shares_valid_total > 0);
+}
+
+/// Closing a channel marks every worker its shares named inactive, with its
+/// own, as an SV1 worker becomes inactive when its connection ends.
+#[tokio::test]
+async fn closing_a_channel_marks_its_named_workers_inactive() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    assert!(channels.grant_worker_tracking());
+    let mut open = open_extended_request(&format!("{}.rig", bch_identity()));
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    let mut first = extended_share(&opened, 1, &worker_name_field(b"Worker_001"));
+    let mut second = extended_share(&opened, 2, &worker_name_field(b"Worker_002"));
+    channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut first, None)
+        .await
+        .unwrap();
+    channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut second, None)
+        .await
+        .unwrap();
+    let payout = channels.channels[&1].session.btcaddress.clone().unwrap();
+
+    channels.close_all().await;
+
+    let metrics = channels.ctx.metrics.get_metrics().await;
+    let workers = &metrics.users[&payout].workers;
+    assert!(!workers["Worker_001"].active);
+    assert!(!workers["Worker_002"].active);
+    assert!(!workers["rig"].active);
+}
+
+/// A channel whose shares already named [`MAX_WORKER_NAMES_PER_CHANNEL`]
+/// workers counts a share with a new name as its own worker, so one client
+/// cannot grow the node's metrics without bound. A name it has seen still
+/// counts as itself.
+#[tokio::test]
+async fn a_new_worker_name_past_the_channel_s_limit_counts_as_its_own_worker() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    assert!(channels.grant_worker_tracking());
+    let mut open = open_extended_request(&format!("{}.rig", bch_identity()));
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    channels.channels.get_mut(&1).unwrap().worker_names = (0..MAX_WORKER_NAMES_PER_CHANNEL)
+        .map(|index| format!("machine{index}"))
+        .collect();
+    let mut new_name = extended_share(&opened, 1, &worker_name_field(b"Worker_001"));
+    let mut seen_name = extended_share(&opened, 2, &worker_name_field(b"machine7"));
+
+    channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut new_name, None)
+        .await
+        .unwrap();
+    channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut seen_name, None)
+        .await
+        .unwrap();
+
+    let payout = channels.channels[&1].session.btcaddress.clone().unwrap();
+    let metrics = channels.ctx.metrics.get_metrics().await;
+    let workers = &metrics.users[&payout].workers;
+    assert!(!workers.contains_key("Worker_001"));
+    assert!(workers["rig"].shares_valid_total > 0);
+    assert!(workers["machine7"].shares_valid_total > 0);
+}
+
+/// A worker name stays on this node. The share queued for Hydrapool's PPLNS
+/// store carries it in memory, for the metrics, and neither of the share's
+/// encodings, the store's or serde's, holds it. A share-chain emission has
+/// no worker field at all.
+#[tokio::test]
+async fn a_worker_name_never_reaches_a_serialized_share() {
+    let (mut ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let (pplns_shares_tx, mut pplns_shares_rx) = mpsc::channel(10);
+    ctx.mode = PoolMode::Hydrapool;
+    ctx.pplns_shares_tx = pplns_shares_tx;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    assert!(channels.grant_worker_tracking());
+    let mut open = open_extended_request(&format!("{}.rig", bch_identity()));
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared()),
+        )
+        .await
+        .unwrap();
+    // Any hash meets the job's target, so Hydrapool queues the share.
+    let job_id = extended_job_id(&opened);
+    channels
+        .channels
+        .get_mut(&1)
+        .unwrap()
+        .jobs
+        .get_mut(&job_id)
+        .unwrap()
+        .target = Target::from_le_bytes([0xff; 32]);
+    let mut share = extended_share(&opened, 1, &worker_name_field(b"Worker_001"));
+
+    let reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED, &mut share, None)
+        .await
+        .unwrap();
+
+    assert_eq!(frame_type(&reply[0]), MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS);
+    let queued = pplns_shares_rx.try_recv().unwrap();
+    assert_eq!(queued.workername.as_deref(), Some("Worker_001"));
+    let stored = serialize(&queued);
+    assert!(
+        !stored
+            .windows(b"Worker_001".len())
+            .any(|window| window == b"Worker_001")
+    );
+    assert!(
+        !serde_json::to_string(&queued)
+            .unwrap()
+            .contains("Worker_001")
     );
 }

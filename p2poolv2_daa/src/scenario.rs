@@ -12,7 +12,7 @@
 
 use crate::difficulty::{compact_for_difficulty, steady_difficulty};
 use bitcoin::CompactTarget;
-use p2poolv2_lib::shares::bch_genesis::{MAIN_ANCHOR_TARGET, MINI_ANCHOR_TARGET};
+use p2poolv2_lib::shares::bch_genesis::MINI_ANCHOR_TARGET;
 use p2poolv2_tools::seeded::SeededSequence;
 
 /// Upstream's hashrate 1.0.
@@ -41,15 +41,20 @@ pub const DAY: f64 = 86_400.0;
 pub const PETAHASH: f64 = 1e15;
 pub const EXAHASH: f64 = 1e18;
 
+/// Genesis bits of the former Bitcoin Cash main share chain. The main and
+/// mini chains merged into one on 2026-11-09, at the mini chain's anchor;
+/// the analysis keeps the main chain's start to compare against.
+pub const MAIN_ANCHOR_TARGET: u32 = 0x1b4188f5;
+
 /// The share chain a scenario runs on, which sets genesis bits and the
 /// ceiling.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Genesis {
-    /// The Bitcoin Cash main share chain: genesis bits `0x1b4188f5`,
+    /// The former Bitcoin Cash main share chain: genesis bits `0x1b4188f5`,
     /// ceiling `MAX_POOL_TARGET` (difficulty about 1,164).
     Main,
-    /// The Bitcoin Cash mini share chain: genesis bits and ceiling
-    /// `0x1c384bd7` (difficulty about 4.5).
+    /// The Bitcoin Cash share chain, the former mini chain: genesis bits and
+    /// ceiling `0x1c384bd7` (difficulty about 4.5).
     Mini,
     /// Main-chain ceiling, genesis at the steady difficulty of `hashrate`,
     /// as upstream started its chains (and as the sim swarm does).

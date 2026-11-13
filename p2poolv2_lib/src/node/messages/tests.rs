@@ -4,6 +4,7 @@ use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::ShareTransaction;
 use crate::shares::validation::{BCH_SHARE_BODY_SIZE_LIMIT, BLOCK_TXS_SIZE_LIMIT, MAX_UNCLES};
+use crate::shares::weak::{WEAK_BYTES, WEAK_CAP, WeakShare};
 use crate::test_utils::TestShareBlockBuilder;
 use bitcoin::consensus::encode;
 use bitcoin::script::Builder;
@@ -119,6 +120,17 @@ fn test_largest_bch_share_block_fits_max_message_size() {
         bitcoin::ScriptBuf::from_bytes(vec![0; BLOCK_TXS_SIZE_LIMIT as usize]);
     share.transactions = vec![ShareTransaction(share_transaction)];
     share.template_merkle_branches = vec![TxMerkleNode::all_zeros(); 32];
+    //* The most weak shares a share carries: `WEAK_BYTES` of them, each with
+    //* a full scriptSig and a 32-level branch.
+    let weak_share = WeakShare {
+        header: share.header.clone(),
+        coinbase_script_sig: bitcoin::ScriptBuf::from_bytes(vec![0x51; 100]),
+        coinbase_value: 0,
+        merkle_branch: vec![TxMerkleNode::all_zeros(); 32],
+    };
+    let weak_count = (WEAK_BYTES / weak_share.encoded_size()).min(WEAK_CAP);
+    share.header.weak_count = weak_count as u16;
+    share.weak_shares = vec![weak_share; weak_count];
 
     let encoded = encode::serialize(&Message::ShareBlock(share, Vec::new()));
 

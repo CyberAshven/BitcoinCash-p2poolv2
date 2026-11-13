@@ -1,6 +1,6 @@
 # P2Poolv2 configuration -- managed by Ansible
 # Instance: {{ p2poolv2_instance }}
-# Bitcoin Cash {{ p2poolv2_bitcoin_cash_network }}, {{ p2poolv2_bch_share_chain }} share chain
+# Bitcoin Cash {{ p2poolv2_bitcoin_cash_network }}
 
 [network]
 listen_address = "{{ p2poolv2_p2p_listen_address }}"
@@ -39,7 +39,6 @@ maximum_difficulty = {{ p2poolv2_maximum_difficulty }}
 chain = "{{ p2poolv2_chain }}"
 {% if p2poolv2_chain == "bitcoin-cash" %}
 bitcoin_cash_network = "{{ p2poolv2_bitcoin_cash_network }}"
-bch_share_chain = "{{ p2poolv2_bch_share_chain }}"
 # Required by the parser, ignored on Bitcoin Cash: derived from
 # bitcoin_cash_network.
 network = "{{ {'mainnet': 'main', 'chipnet': 'test', 'regtest': 'regtest'}[p2poolv2_bitcoin_cash_network] }}"

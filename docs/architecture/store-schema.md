@@ -95,6 +95,18 @@ for a token share; see the storage budget in
 
 Body data: deleted by the pruner below the prune target.
 
+### 1e. `WeakShares` and `WeakSummaries` - Carried Weak Shares (Bitcoin Cash)
+
+The weak shares a Bitcoin Cash share carries (`shares::weak`), and the
+summary the PPLNS window and the carried-once rule read instead of them.
+
+| Key                    | Value                                  | Notes |
+|------------------------|----------------------------------------|-------|
+| `blockhash` (32 bytes) | `WeakShares`: count + each `WeakShare` (header, scriptSig, value, branch) | Written with a full block that carries weak shares; nothing for none |
+| `blockhash` (32 bytes) | `WeakSummaries`: the weak shares' proof-of-work hashes, then their credit groups (parent, payout address, share owner, donation, fee, BCH prev, count) | Written with the weak shares; a function of the carried list alone |
+
+Body data: both are deleted by the pruner below the prune target.
+
 ---
 
 ### 2. `BlockIndex` - Parent->Children Index
@@ -229,12 +241,48 @@ The blocks that declare a block as an uncle. Uses the merge operator.
 
 ---
 
+### 9d. `ScriptHistory` - Script→Confirmed Transactions
+
+The confirmed transactions that touch each script, for wallet history. A
+transaction touches a script when an output pays it (`OP_RETURN` outputs
+excluded) or an input spends an output that paid it, with one row per
+distinct script per transaction. A prefix scan returns a script's history in
+height then position order. See `store/script_history.rs`.
+
+Bitcoin Cash fork: a node writes these rows only while it serves Electrum
+(`[electrum] enabled`), since it keeps no address index it does not serve.
+`Metadata` key `script_history_from` holds the first confirmed height the
+store has history for (`u32::MAX` while it writes none; absent for a store
+that always kept it), and reads start no lower, so a node that turns Electrum
+on later serves history from then on, never a partial one.
+
+| Key (40 bytes)                                                                  | Value             |
+|---------------------------------------------------------------------------------|-------------------|
+| `sha256(script_pubkey)` (32 bytes) + height (4 bytes BE) + position (4 bytes BE) | `txid` (32 bytes) |
+
+`position` is the transaction's index in its block.
+
+- **Window:** spendable depth, heights from `candidate tip + 1 -
+  PAYOUT_DEPTH` (`BCH_PAYOUT_DEPTH` on Bitcoin Cash, here and in the
+  filter threshold). Rows are written only for blocks confirmed inside it
+  (`put_confirmed_entry`, and `setup_genesis` for genesis), and reads never
+  go below it.
+- **Reorg-out:** the reorged-out block's keys are recomputed from its
+  transactions and deleted in the reorg batch.
+- **Old rows:** never deleted explicitly. A compaction filter drops rows
+  below `confirmed tip - PAYOUT_DEPTH - PRUNE_INTERVAL` (threshold raised by
+  the prune task while the node is current), and periodic compaction filters
+  every file at least daily.
+
+---
+
 ### Pruning
 
 `Tx`, `Inputs`, `Outputs`, `TxidsBlocks` and `SpendsIndex` rows are deleted
 with a pruned block unless a kept block still includes the transaction.
 `BlockTxids`, `BitcoinTxids`, `BitcoinCoinbase` and candidate `BlockHeight`
-entries are deleted below the prune target. Headers, metadata, the block
+entries are deleted below the prune target. `ScriptHistory` is not pruned:
+its compaction filter drops rows at spendable depth (section 9d). Headers, metadata, the block
 index, `h:` and confirmed height entries, `TemplateMerkleBranches`, `Uncles`
 and both `FoundBlocks` and `AcceptedFoundBlocks` are kept forever. See
 `pruning.md`.
@@ -329,13 +377,61 @@ StoreWriter only after a positive BCHN `submitblock` verdict or BCHN's
 chain hash matching the candidate at its declared height. Local accepted
 submissions can be recorded before their share is persisted. The
 serialized existence check makes duplicate acceptance idempotent. Only
-this column family feeds the found-block API and metrics. Never pruned.
+this column family feeds the found-block API and metrics; where effort is
+shown, each entry joins its `AcceptedBlockEffort` snapshot (14b). Never
+pruned.
 
 Normal writable opening creates this column family in an existing store
-without modifying legacy candidates or share data. Read-only opening of
-an older store works without creating it and reports no accepted finds.
-Once BCHN verifies an old candidate, its accepted record persists across
-restarts. No share validity or payout rule depends on either record.
+without modifying legacy candidates or share data. Read-only opening
+cannot create it: RocksDB rejects any listed column family the store
+does not have, even with `create_missing_column_families`, so a
+read-only tool fails to open a store written before this family existed
+until a read-write open has created it; after that, read-only opens
+report the accepted finds normally. Once BCHN verifies an old candidate,
+its accepted record persists across restarts. No share validity or
+payout rule depends on either record.
+
+### 14b. `AcceptedBlockEffort` - Per-Block Effort Snapshots
+
+One annotation per accepted block, keyed by the accepted blockhash: the
+pool work accumulated since the previous find, and the network difficulty
+of the header that claimed this block, both captured at the effort reset
+so a restart never recomputes them against a moved difficulty. Written
+through StoreWriter right after `AcceptedFoundBlocks` records the find;
+when the write fails the accepted block still stands and reads back with
+no effort. Blocks accepted before this column family existed have no
+entry, and `/found_blocks` reports `"effort": null` for them -- there is
+no backfill. Never pruned.
+
+| Key                            | Value                                                                                                       |
+|--------------------------------|-------------------------------------------------------------------------------------------------------------|
+| `bitcoin_blockhash` (32 bytes) | consensus-encoded `EffortSnapshot`: `work` as f64 bits (u64, 8 bytes), presence tag (`1` = difficulty follows, `0` = `None`), then `difficulty` as f64 bits (u64, 8 bytes) when present |
+
+**EffortSnapshot Structure:**
+```rust
+pub struct EffortSnapshot {
+    pub work: f64,
+    pub network_difficulty: Option<f64>,
+}
+```
+
+`work` is what the metrics actor returns as it resets
+`work_since_last_block` to zero (the pre-reset value). `network_difficulty`
+is `Target::from_compact(header.bits)` `difficulty_float` from the found
+block header's own nBits -- the same mainnet-relative units as the live
+`network_difficulty` gauge -- read from the share header BCHN confirmed
+the blockhash with; it is `None` when that header cannot be read.
+
+`get_found_blocks` joins the snapshot onto each accepted block, so the
+found-block API, metrics exposition and both dashboards' blocks tables
+read effort beside the block with no second query. The store format
+version does not change: a read-write open of an older store creates the
+column family and leaves older blocks without effort, and an older binary
+reading a newer store never asks for the family. Read-only tools
+(`verify_chain`, `db_query`) do not request it either -- RocksDB rejects
+a listed column family the store does not have -- so they open an older
+store, read the accepted finds, and report no effort. Only a read-write
+open creates the family.
 
 ---
 

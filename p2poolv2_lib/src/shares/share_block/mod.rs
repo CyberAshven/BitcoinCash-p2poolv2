@@ -6,6 +6,7 @@ pub mod share_transaction;
 pub mod short_ids;
 
 use super::transactions;
+use crate::accounting::payout::payout_levels::MAX_PAYOUT_LEVEL;
 use crate::address::Address as P2PoolAddress;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::coinbase_proof::{
@@ -15,6 +16,7 @@ use crate::shares::genesis;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::shares::share_version::ShareVersion;
+use crate::shares::weak::{WEAK_CAP, WeakShare};
 use crate::sim_overrides;
 use bitcoin::consensus::encode::Error::ParseFailed;
 use bitcoin::secp256k1::Secp256k1;
@@ -23,7 +25,7 @@ use bitcoin::{
     Txid, VarInt,
     block::Header,
     consensus::{Decodable, Encodable},
-    hashes::Hash,
+    hashes::{Hash, sha256d},
 };
 use core::mem;
 use p2poolv2_wallet::payout_address::PayoutAddress;
@@ -136,6 +138,50 @@ pub struct ShareHeader {
     /// follow upstream's rules and read as the current version.
     #[serde(default)]
     pub share_version: ShareVersion,
+    /// The share's minimum target, `T_asert`: the ASERT target from its
+    /// parent's own minimum (`shares::band`). `bits` may be up to
+    /// `band_cap / 1024` times harder, never easier. Encoded after the share
+    /// version, and committed, for Bitcoin Cash share owners only, like
+    /// `wanted_bits` and `band_cap`; Bitcoin shares carry no band, these three
+    /// read as zero, and a Bitcoin share's minimum is its `bits`
+    /// ([`Self::minimum_bits`]).
+    #[serde(default)]
+    pub asert_bits: CompactTarget,
+    /// The target this share's node wanted for its miner before the band
+    /// cap: equal to `bits`, or harder when the cap stopped it. A signal that
+    /// moves the next share's band cap; it must be at least as hard as
+    /// `bits`.
+    #[serde(default)]
+    pub wanted_bits: CompactTarget,
+    /// This share's band cap `C` in units of 1/1024 (1024 is a band of one),
+    /// one step from its parent's (`shares::band::next_band_cap`).
+    #[serde(default)]
+    pub band_cap: u32,
+    /// The payout level `k` of this share's miner, 0 to
+    /// [`MAX_PAYOUT_LEVEL`]: a slice of a found block below `546 * 2^k`
+    /// satoshis paying the address this share credits is paid by a draw
+    /// (`accounting::payout::payout_levels`). Encoded after the band, and
+    /// committed after it under its own tag, for Bitcoin Cash share owners
+    /// only; Bitcoin shares carry none and read as 0. A header above
+    /// [`MAX_PAYOUT_LEVEL`] does not decode.
+    #[serde(default)]
+    pub payout_level: u8,
+    /// This share's weak ratio `R` in units of 1/1024, one step from its
+    /// parent's (`shares::weak::next_weak_ratio`): weak shares mined on this
+    /// share meet its weak target, its minimum times `R`
+    /// (`shares::weak::parent_weak_target`). Encoded after the payout level,
+    /// and committed with `weak_count` and `weak_root`, for Bitcoin Cash
+    /// share owners only; Bitcoin shares read all three as zero.
+    #[serde(default)]
+    pub weak_ratio: u32,
+    /// How many weak shares this share's body carries (`shares::weak`).
+    #[serde(default)]
+    pub weak_count: u16,
+    /// The merkle root of the weak shares this share carries, in order, each
+    /// leaf the SHA-256d of one weak share's whole encoding
+    /// (`shares::weak::weak_root`); all zeros for none.
+    #[serde(default = "crate::shares::weak::empty_weak_root")]
+    pub weak_root: sha256d::Hash,
 }
 
 /// Network class an encoded address is rebuilt for: the part of a payout
@@ -164,7 +210,7 @@ pub(crate) fn encode_address<W: bitcoin::io::Write + ?Sized>(
 }
 
 /// Decode an address written by `encode_address`.
-fn decode_address<R: bitcoin::io::Read + ?Sized>(
+pub(crate) fn decode_address<R: bitcoin::io::Read + ?Sized>(
     reader: &mut R,
 ) -> Result<PayoutAddress, bitcoin::consensus::encode::Error> {
     let network = match u8::consensus_decode(reader)? {
@@ -213,6 +259,22 @@ impl ShareHeader {
         Target::from_compact(self.bits).difficulty(network)
     }
 
+    /// Whether this header carries a difficulty band (`shares::band`): a
+    /// Bitcoin Cash share owner's does, a Bitcoin share's does not.
+    pub fn carries_band(&self) -> bool {
+        matches!(self.miner_address, ShareOwner::CashP2pkh(_))
+    }
+
+    /// The share's minimum target, the one ASERT anchors the next share at:
+    /// `asert_bits` on Bitcoin Cash, `bits` on Bitcoin, which has no band.
+    pub fn minimum_bits(&self) -> CompactTarget {
+        if self.carries_band() {
+            self.asert_bits
+        } else {
+            self.bits
+        }
+    }
+
     /// Build a ShareHeader from a commitment and a bitcoin header
     /// which contains a coinbase matching the commitment.
     ///
@@ -242,6 +304,13 @@ impl ShareHeader {
             bch_coinbase: commitment.bch_coinbase,
             pool_merge_mining: commitment.pool_merge_mining,
             share_version: commitment.share_version,
+            asert_bits: commitment.asert_bits,
+            wanted_bits: commitment.wanted_bits,
+            band_cap: commitment.band_cap,
+            payout_level: commitment.payout_level,
+            weak_ratio: commitment.weak_ratio,
+            weak_count: commitment.weak_count,
+            weak_root: commitment.weak_root,
         }
     }
 
@@ -258,6 +327,15 @@ impl ShareHeader {
     /// accepted the block. Found-block accounting requires BCHN evidence.
     pub fn meets_bitcoin_difficulty(&self) -> bool {
         Target::from_compact(self.bitcoin_header.bits).is_met_by(self.bitcoin_header.block_hash())
+    }
+
+    /// Network difficulty this header's own bits claim, mainnet-relative:
+    /// the denominator of the block effort snapshot. Once BCHN confirms the
+    /// block hash, these bits are the network difficulty at that height.
+    /// Uses `difficulty_float`, the same conversion as the job tracker's
+    /// `get_network_difficulty`, so both readings share units.
+    pub fn bitcoin_network_difficulty(&self) -> f64 {
+        Target::from_compact(self.bitcoin_header.bits).difficulty_float()
     }
 
     /// The merge-mining commitment at output 0 of this share's Bitcoin Cash
@@ -327,8 +405,15 @@ impl ShareHeader {
             len += POOL_TOKEN_ROOT_BCH_HEADER_TAG.consensus_encode(w)?;
         }
         len += share_owner::consensus_encode(&self.miner_address, w)?;
-        if matches!(self.miner_address, ShareOwner::CashP2pkh(_)) {
+        if self.carries_band() {
             len += self.share_version.consensus_encode(w)?;
+            len += self.wanted_bits.consensus_encode(w)?;
+            len += self.band_cap.consensus_encode(w)?;
+            len += self.asert_bits.consensus_encode(w)?;
+            len += self.payout_level.consensus_encode(w)?;
+            len += self.weak_ratio.consensus_encode(w)?;
+            len += self.weak_count.consensus_encode(w)?;
+            len += self.weak_root.consensus_encode(w)?;
         }
         len += self.bitcoin_header.version.consensus_encode(w)?;
         len += self.bitcoin_header.prev_blockhash.consensus_encode(w)?;
@@ -377,11 +462,35 @@ impl ShareHeader {
         } else {
             share_owner::consensus_decode_from_tag(owner_tag, r)?
         };
-        let share_version = if matches!(miner_address, ShareOwner::CashP2pkh(_)) {
-            ShareVersion::consensus_decode(r)?
-        } else {
-            ShareVersion::CURRENT
-        };
+        let (share_version, wanted_bits, band_cap, asert_bits, payout_level) =
+            if matches!(miner_address, ShareOwner::CashP2pkh(_)) {
+                (
+                    ShareVersion::consensus_decode(r)?,
+                    CompactTarget::consensus_decode(r)?,
+                    u32::consensus_decode(r)?,
+                    CompactTarget::consensus_decode(r)?,
+                    decode_payout_level(r)?,
+                )
+            } else {
+                (
+                    ShareVersion::CURRENT,
+                    CompactTarget::default(),
+                    0,
+                    CompactTarget::default(),
+                    0,
+                )
+            };
+        let (weak_ratio, weak_count, weak_root) =
+            if matches!(miner_address, ShareOwner::CashP2pkh(_)) {
+                let weak_ratio = u32::consensus_decode(r)?;
+                let weak_count = u16::consensus_decode(r)?;
+                if usize::from(weak_count) > crate::shares::weak::WEAK_CAP {
+                    return Err(ParseFailed("share header carries too many weak shares"));
+                }
+                (weak_ratio, weak_count, sha256d::Hash::consensus_decode(r)?)
+            } else {
+                (0, 0, sha256d::Hash::all_zeros())
+            };
         let bitcoin_version = bitcoin::block::Version::consensus_decode(r)?;
         let bitcoin_prev_blockhash = BlockHash::consensus_decode(r)?;
         let bitcoin_merkle_root = if include_bitcoin_merkle_root {
@@ -449,8 +558,28 @@ impl ShareHeader {
             bch_coinbase,
             pool_merge_mining,
             share_version,
+            asert_bits,
+            wanted_bits,
+            band_cap,
+            payout_level,
+            weak_ratio,
+            weak_count,
+            weak_root,
         })
     }
+}
+
+/// Decode a Bitcoin Cash header's payout level, refusing one above
+/// [`MAX_PAYOUT_LEVEL`]: a share-chain rule, so header sync, block receipt
+/// and the store all refuse such a header the same way.
+pub(crate) fn decode_payout_level<R: bitcoin::io::Read + ?Sized>(
+    reader: &mut R,
+) -> Result<u8, bitcoin::consensus::encode::Error> {
+    let payout_level = u8::consensus_decode(reader)?;
+    if payout_level > MAX_PAYOUT_LEVEL {
+        return Err(ParseFailed("payout level above 7"));
+    }
+    Ok(payout_level)
 }
 
 impl Encodable for ShareHeader {
@@ -498,6 +627,14 @@ pub struct ShareBlock {
     /// different coinbase is a bad copy rather than another block.
     #[serde(default = "empty_bitcoin_coinbase")]
     pub bitcoin_coinbase: Transaction,
+    /// The weak shares this share carries (`shares::weak`), at most
+    /// `WEAK_CAP` of them in `WEAK_BYTES`. Not part of the block hash: the
+    /// header commits to their count and the merkle root of their whole
+    /// encodings, which the body check compares, so a copy with any field of
+    /// any of them changed is a bad copy. Encoded on Bitcoin Cash shares only;
+    /// always empty on Bitcoin.
+    #[serde(default)]
+    pub weak_shares: Vec<WeakShare>,
 }
 
 /// The bitcoin coinbase of a block written before `ShareBlock` carried one:
@@ -637,6 +774,13 @@ impl ShareBlock {
             bch_coinbase: None,
             pool_merge_mining: None,
             share_version: ShareVersion::CURRENT,
+            asert_bits: CompactTarget::default(),
+            wanted_bits: CompactTarget::default(),
+            band_cap: 0,
+            payout_level: 0,
+            weak_ratio: 0,
+            weak_count: 0,
+            weak_root: sha256d::Hash::all_zeros(),
         };
         let bitcoin_coinbase = bitcoin_block
             .txdata
@@ -648,6 +792,7 @@ impl ShareBlock {
             transactions,
             template_merkle_branches: vec![],
             bitcoin_coinbase,
+            weak_shares: Vec::new(),
         })
     }
 }
@@ -674,6 +819,12 @@ impl Encodable for ShareBlock {
             len += node.consensus_encode(w)?;
         }
         len += self.bitcoin_coinbase.consensus_encode(w)?;
+        if self.header.carries_band() {
+            len += VarInt(self.weak_shares.len() as u64).consensus_encode(w)?;
+            for weak_share in &self.weak_shares {
+                len += weak_share.consensus_encode(w)?;
+            }
+        }
         Ok(len)
     }
 }
@@ -704,11 +855,25 @@ impl Decodable for ShareBlock {
             template_merkle_branches.push(TxMerkleNode::consensus_decode(r)?);
         }
         let bitcoin_coinbase = Transaction::consensus_decode(r)?;
+        let weak_shares = if header.carries_band() {
+            let weak_count = VarInt::consensus_decode(r)?.0 as usize;
+            if weak_count > WEAK_CAP {
+                return Err(ParseFailed("share block carries too many weak shares"));
+            }
+            let mut weak_shares = Vec::with_capacity(weak_count);
+            for _ in 0..weak_count {
+                weak_shares.push(WeakShare::consensus_decode(r)?);
+            }
+            weak_shares
+        } else {
+            Vec::new()
+        };
         Ok(ShareBlock {
             header,
             transactions,
             template_merkle_branches,
             bitcoin_coinbase,
+            weak_shares,
         })
     }
 }
@@ -864,6 +1029,217 @@ mod tests {
         assert_eq!(serialize(&bitcoin_voting), serialize(&bitcoin));
         let decoded: ShareHeader = deserialize(&serialize(&bitcoin_voting)).unwrap();
         assert_eq!(decoded.share_version, ShareVersion::CURRENT);
+    }
+
+    /// A Bitcoin Cash header round-trips a heavier share's band: its
+    /// minimum, the target its node wanted and its band cap.
+    #[test]
+    fn bitcoin_cash_header_round_trips_its_band() {
+        let share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .bits(CompactTarget::from_consensus(0x1c10_0000))
+            .band(
+                CompactTarget::from_consensus(0x1c40_0000),
+                CompactTarget::from_consensus(0x1c08_0000),
+                4096,
+            )
+            .build();
+
+        let decoded: ShareHeader = deserialize(&serialize(&share.header)).unwrap();
+
+        assert_eq!(decoded, share.header);
+        assert_eq!(
+            decoded.asert_bits,
+            CompactTarget::from_consensus(0x1c40_0000)
+        );
+        assert_eq!(
+            decoded.wanted_bits,
+            CompactTarget::from_consensus(0x1c08_0000)
+        );
+        assert_eq!(decoded.band_cap, 4096);
+        assert_eq!(decoded.minimum_bits(), decoded.asert_bits);
+        CoinbaseProof::verify(&share.header, &share.template_merkle_branches).unwrap();
+    }
+
+    /// The band is a fixed twelve bytes the proof of work binds: another
+    /// wanted target or band cap is another share hash and fails the
+    /// coinbase proof.
+    #[test]
+    fn bitcoin_cash_header_binds_its_band() {
+        let share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build();
+        let mut wanting_more = share.header.clone();
+        wanting_more.wanted_bits = CompactTarget::from_consensus(0x1c08_0000);
+        let mut wider = share.header.clone();
+        wider.band_cap = 2048;
+
+        assert_ne!(wanting_more.block_hash(), share.header.block_hash());
+        assert_ne!(wider.block_hash(), share.header.block_hash());
+        assert_eq!(serialize(&wider).len(), serialize(&share.header).len());
+        assert!(CoinbaseProof::verify(&wanting_more, &share.template_merkle_branches).is_err());
+        assert!(CoinbaseProof::verify(&wider, &share.template_merkle_branches).is_err());
+    }
+
+    /// A Bitcoin Cash header round-trips its weak ratio and the count and
+    /// root of the weak shares it carries, and its block round-trips them.
+    #[test]
+    fn bitcoin_cash_share_round_trips_its_weak_shares() {
+        let weak_share = crate::shares::weak::WeakShare {
+            header: TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
+                .nonce(7)
+                .build()
+                .header,
+            coinbase_script_sig: ScriptBuf::from_bytes(vec![0x51; 20]),
+            coinbase_value: 625_000_000,
+            merkle_branch: vec![TxMerkleNode::all_zeros()],
+        };
+        let share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .weak_ratio(256_000)
+            .weak_shares(vec![weak_share.clone()])
+            .build();
+
+        let decoded: ShareBlock = deserialize(&serialize(&share)).unwrap();
+
+        assert_eq!(decoded, share);
+        assert_eq!(decoded.header.weak_ratio, 256_000);
+        assert_eq!(decoded.header.weak_count, 1);
+        assert_eq!(decoded.header.weak_root, weak_share.committed_hash());
+        assert_eq!(decoded.weak_shares, vec![weak_share]);
+        CoinbaseProof::verify(&share.header, &share.template_merkle_branches).unwrap();
+    }
+
+    /// The weak fields are bound by the proof of work: another ratio or count
+    /// is another share hash and fails the coinbase proof.
+    #[test]
+    fn bitcoin_cash_header_binds_its_weak_shares() {
+        let share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build();
+        let mut easier = share.header.clone();
+        easier.weak_ratio -= 1;
+        let mut counted = share.header.clone();
+        counted.weak_count = 1;
+
+        assert_ne!(easier.block_hash(), share.header.block_hash());
+        assert!(CoinbaseProof::verify(&easier, &share.template_merkle_branches).is_err());
+        assert!(CoinbaseProof::verify(&counted, &share.template_merkle_branches).is_err());
+    }
+
+    /// A Bitcoin header and block carry no weak shares: nothing is encoded,
+    /// and they decode as zero and empty.
+    #[test]
+    fn bitcoin_share_carries_no_weak_shares() {
+        let bitcoin = TestShareBlockBuilder::new().build();
+        let mut weak = bitcoin.clone();
+        weak.header.weak_ratio = 256_000;
+        weak.header.weak_count = 3;
+
+        assert_eq!(serialize(&weak), serialize(&bitcoin));
+        let decoded: ShareBlock = deserialize(&serialize(&weak)).unwrap();
+        assert_eq!(decoded.header.weak_ratio, 0);
+        assert_eq!(decoded.header.weak_count, 0);
+        assert!(decoded.weak_shares.is_empty());
+    }
+
+    /// A Bitcoin header carries no band: it is not encoded, and decodes as
+    /// zero, with the share's bits as its minimum.
+    #[test]
+    fn bitcoin_header_carries_no_band() {
+        let bitcoin = TestShareBlockBuilder::new().build().header;
+        let mut banded = bitcoin.clone();
+        banded.wanted_bits = CompactTarget::from_consensus(0x1c08_0000);
+        banded.band_cap = 2048;
+
+        assert_eq!(serialize(&banded), serialize(&bitcoin));
+        let decoded: ShareHeader = deserialize(&serialize(&banded)).unwrap();
+        assert_eq!(decoded.band_cap, 0);
+        assert_eq!(decoded.wanted_bits, CompactTarget::default());
+        assert_eq!(decoded.minimum_bits(), decoded.bits);
+    }
+
+    /// A Bitcoin Cash header round-trips its payout level, one byte after
+    /// the band, and its coinbase proof holds: the commitment carries it.
+    #[test]
+    fn bitcoin_cash_header_round_trips_its_payout_level() {
+        let share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .payout_level(6)
+            .build();
+        let level_zero = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build();
+
+        let decoded: ShareHeader = deserialize(&serialize(&share.header)).unwrap();
+
+        assert_eq!(decoded, share.header);
+        assert_eq!(decoded.payout_level, 6);
+        assert_eq!(
+            serialize(&share.header).len(),
+            serialize(&level_zero.header).len()
+        );
+        CoinbaseProof::verify(&share.header, &share.template_merkle_branches).unwrap();
+    }
+
+    /// The proof of work fixes the payout level: another level is another
+    /// share hash and fails the coinbase proof.
+    #[test]
+    fn bitcoin_cash_header_binds_its_payout_level() {
+        let share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .payout_level(5)
+            .build();
+        let mut lower = share.header.clone();
+        lower.payout_level = 4;
+
+        assert_ne!(lower.block_hash(), share.header.block_hash());
+        assert!(CoinbaseProof::verify(&lower, &share.template_merkle_branches).is_err());
+    }
+
+    /// A Bitcoin Cash header claiming a payout level above 7 does not
+    /// decode, so header sync, block receipt and the store refuse it alike.
+    #[test]
+    fn a_bitcoin_cash_header_above_level_seven_does_not_decode() {
+        let mut header = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build()
+            .header;
+        header.payout_level = 8;
+
+        let error = deserialize::<ShareHeader>(&serialize(&header)).unwrap_err();
+
+        assert!(
+            error.to_string().contains("payout level above 7"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_bitcoin_cash_header_at_level_seven_decodes() {
+        let mut header = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build()
+            .header;
+        header.payout_level = 7;
+
+        let decoded: ShareHeader = deserialize(&serialize(&header)).unwrap();
+
+        assert_eq!(decoded.payout_level, 7);
+    }
+
+    /// A Bitcoin header carries no payout level: it is not encoded, and
+    /// decodes as 0.
+    #[test]
+    fn bitcoin_header_carries_no_payout_level() {
+        let bitcoin = TestShareBlockBuilder::new().build().header;
+        let mut leveled = bitcoin.clone();
+        leveled.payout_level = 7;
+
+        assert_eq!(serialize(&leveled), serialize(&bitcoin));
+        let decoded: ShareHeader = deserialize(&serialize(&leveled)).unwrap();
+        assert_eq!(decoded.payout_level, 0);
     }
 
     /// A share is a token share exactly when its commitment is not the
@@ -1084,6 +1460,13 @@ mod tests {
             bch_coinbase: None,
             pool_merge_mining: None,
             share_version: ShareVersion::CURRENT,
+            asert_bits: CompactTarget::default(),
+            wanted_bits: CompactTarget::default(),
+            band_cap: 0,
+            payout_level: 0,
+            weak_ratio: 0,
+            weak_count: 0,
+            weak_root: sha256d::Hash::all_zeros(),
         };
 
         let cloned = commitment.clone();

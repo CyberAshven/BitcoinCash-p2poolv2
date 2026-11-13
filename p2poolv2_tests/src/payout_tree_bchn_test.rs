@@ -35,6 +35,7 @@ use bitcoindrpc::BitcoindRpcClient;
 use p2poolv2_lib::accounting::CoinbasePayouts;
 use p2poolv2_lib::accounting::payout::coinbase_budget::PayoutSplit;
 use p2poolv2_lib::accounting::payout::payout_distribution::build_pplns_outputs;
+use p2poolv2_lib::accounting::payout::payout_levels::PplnsWeights;
 use p2poolv2_lib::config::Chain;
 use p2poolv2_lib::config::PayoutAddress;
 use p2poolv2_lib::node::payout_tree_executor::{
@@ -47,7 +48,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 /// The node the tests mine on, from the environment.
-fn bchn() -> BitcoindRpcClient {
+pub(crate) fn bchn() -> BitcoindRpcClient {
     let url = std::env::var("P2POOL_TEST_BCHN_RPC_URL")
         .expect("set P2POOL_TEST_BCHN_RPC_URL to a BCHN regtest node's RPC URL");
     let user = std::env::var("P2POOL_TEST_BCHN_RPC_USER").unwrap_or_default();
@@ -55,7 +56,7 @@ fn bchn() -> BitcoindRpcClient {
     BitcoindRpcClient::new(&url, &user, &password).unwrap()
 }
 
-async fn call(node: &BitcoindRpcClient, method: &str, params: Vec<Value>) -> Value {
+pub(crate) async fn call(node: &BitcoindRpcClient, method: &str, params: Vec<Value>) -> Value {
     node.request(method, params)
         .await
         .unwrap_or_else(|error| panic!("{method} failed: {error}"))
@@ -94,15 +95,15 @@ fn weights(count: u32, seed: u8) -> HashMap<PayoutAddress, u128> {
 /// only to a connected node, so this reads the tip instead: regtest never
 /// retargets, halves the 50-coin subsidy every 150 blocks, and the block
 /// carries no transaction, so no fees.
-struct NextBlock {
-    height: u64,
-    previous: BlockHash,
-    time: u32,
-    bits: CompactTarget,
-    coinbase_value: u64,
+pub(crate) struct NextBlock {
+    pub(crate) height: u64,
+    pub(crate) previous: BlockHash,
+    pub(crate) time: u32,
+    pub(crate) bits: CompactTarget,
+    pub(crate) coinbase_value: u64,
 }
 
-async fn next_block(node: &BitcoindRpcClient) -> NextBlock {
+pub(crate) async fn next_block(node: &BitcoindRpcClient) -> NextBlock {
     let tip = call(node, "getbestblockhash", Vec::new()).await;
     let header = call(node, "getblockheader", vec![tip.clone(), json!(true)]).await;
     let height = header["height"].as_u64().unwrap() + 1;
@@ -117,7 +118,7 @@ async fn next_block(node: &BitcoindRpcClient) -> NextBlock {
 
 /// Mine one block whose coinbase pays `payouts` on top of BCHN's tip,
 /// returning the coinbase. Asserts BCHN accepts the block.
-async fn mine_coinbase(
+pub(crate) async fn mine_coinbase(
     node: &BitcoindRpcClient,
     payouts: &CoinbasePayouts,
 ) -> (Transaction, BlockHash, u64) {
@@ -196,7 +197,7 @@ async fn bchn_regtest_executes_a_two_level_payout_tree() {
     let value = next.coinbase_value;
     let payouts = build_pplns_outputs(
         value,
-        &weights(700, 0x31),
+        &PplnsWeights::without_levels(weights(700, 0x31)),
         &None,
         None,
         &None,
@@ -307,7 +308,7 @@ async fn bchn_regtest_accepts_a_no_token_coinbase_paying_every_miner() {
     let value = next.coinbase_value;
     let payouts = build_pplns_outputs(
         value,
-        &weights(3_000, 0x32),
+        &PplnsWeights::without_levels(weights(3_000, 0x32)),
         &None,
         None,
         &None,

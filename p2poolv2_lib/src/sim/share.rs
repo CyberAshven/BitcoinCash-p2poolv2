@@ -7,18 +7,21 @@
 //! Builds an [`Emission`] that is structurally identical to one a real stratum
 //! miner would produce, except the header nonce satisfies no target (PoW is
 //! stubbed under the `sim` feature). It reuses the real work-building path:
-//! [`build_notify_from_prepared`] inserts a per-miner job (commitment +
+//! [`build_notify_with_job_id`] inserts a per-miner job (commitment +
 //! coinbase + merkle branches + nsecs), and the bitcoin header is assembled
 //! from the job exactly as `validate_bitcoin_difficulty` does, so the bitcoin
 //! header merkle root matches what the receive-side `validate_bitcoin_payout`
 //! reconstructs. See `docs/simulation/load-test-plan.md`.
 
 use crate::address::share_owner::ShareOwner;
+use crate::shares::band::JobBand;
 use crate::shares::coinbase_proof::CoinbaseProof;
+use crate::shares::share_block::ShareHeader;
+use crate::shares::weak::WeakShare;
 use crate::stratum::emission::Emission;
 use crate::stratum::work::difficulty::validate::build_coinbase_from_components;
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
-use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_from_prepared};
+use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_with_job_id};
 use crate::stratum::work::tracker::JobTracker;
 use bitcoin::block::Header;
 use bitcoin::{BlockHash, CompactTarget};
@@ -67,6 +70,9 @@ pub struct SimShareParams<'a> {
     pub nonce: u32,
     /// Header time (seconds since epoch).
     pub ntime: u32,
+    /// The band of a heavier miner's job (`shares::band::heavier_job_band`);
+    /// `None` mines at the minimum.
+    pub job_band: Option<JobBand>,
 }
 
 /// Build a synthetic [`Emission`] for one share.
@@ -77,10 +83,12 @@ pub struct SimShareParams<'a> {
 /// normal pipeline — `handle_stratum_share` → store → broadcast — takes over).
 pub fn build_sim_emission(params: SimShareParams<'_>) -> Result<BuiltShare, SimShareError> {
     // Insert a per-miner job: commitment, per-miner coinbase2, nsecs, branches.
-    build_notify_from_prepared(
+    build_notify_with_job_id(
         params.prepared,
         Some(params.miner_address),
         Some(params.share_owner),
+        params.job_band,
+        None,
         params.tracker,
     )
     .map_err(|e| SimShareError(format!("build notify: {e}")))?;
@@ -135,9 +143,36 @@ pub fn build_sim_emission(params: SimShareParams<'_>) -> Result<BuiltShare, SimS
         bitcoin_coinbase: coinbase.clone(),
         coinbase_proof,
         share_transactions: Arc::clone(&job.share_transactions),
+        weak_shares: Arc::clone(&job.weak_shares),
     };
 
     Ok(BuiltShare { emission, coinbase })
+}
+
+/// The weak share a synthetic proof makes when the sim's emitter draws it
+/// short of the share target (`shares::weak`): the share header the emission
+/// gives, with its coinbase's scriptSig and total value and the job's merkle
+/// branch, as stratum builds one from a real submission.
+pub fn weak_share_from_emission(emission: &Emission) -> Option<WeakShare> {
+    let header = ShareHeader::from_commitment_and_header(
+        emission.share_commitment.clone(),
+        emission.header,
+        u64::from(emission.blocktemplate.height),
+        emission.coinbase_proof,
+    );
+    let coinbase_script_sig = emission.bitcoin_coinbase.input.first()?.script_sig.clone();
+    let coinbase_value = emission
+        .bitcoin_coinbase
+        .output
+        .iter()
+        .map(|output| output.value.to_sat())
+        .sum();
+    Some(WeakShare {
+        header,
+        coinbase_script_sig,
+        coinbase_value,
+        merkle_branch: emission.template_merkle_branches.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -212,6 +247,7 @@ mod tests {
             enonce2_hex: "0000000000000001",
             nonce: 0x12345678,
             ntime: 1_700_000_500,
+            job_band: None,
         })
         .expect("build emission")
         .emission;
@@ -271,6 +307,7 @@ mod tests {
             enonce2_hex: "1122334455667788",
             nonce: 42,
             ntime: 1_700_000_600,
+            job_band: None,
         })
         .expect("build emission")
         .emission;
@@ -335,6 +372,7 @@ mod tests {
             enonce2_hex: "0000000000000007",
             nonce: 7,
             ntime: template.curtime,
+            job_band: None,
         })
         .expect("build emission")
         .emission;

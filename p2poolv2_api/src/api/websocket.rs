@@ -277,6 +277,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 0,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![],
         });
 
@@ -339,7 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_broadcast_event_delivered_to_subscriber() {
-        let (sender, _guard) = create_monitoring_event_channel();
+        let sender = create_monitoring_event_channel();
         let mut receiver = sender.subscribe();
 
         // Build subscription set as handle_socket would
@@ -359,6 +360,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![],
         });
 
@@ -406,6 +408,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![uncle],
         });
 
@@ -436,6 +439,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![],
         });
 
@@ -479,6 +483,7 @@ mod tests {
             miner_address: ShareOwner::CashP2pkh([0x11; 20]),
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![uncle],
         });
 
@@ -507,6 +512,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![],
         });
 
@@ -521,7 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_broadcast_event_filtered_for_unsubscribed_topic() {
-        let (sender, _guard) = create_monitoring_event_channel();
+        let sender = create_monitoring_event_channel();
         let mut receiver = sender.subscribe();
 
         // Subscribe to peers only
@@ -541,6 +547,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 0,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![],
         });
 

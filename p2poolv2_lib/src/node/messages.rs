@@ -6,6 +6,7 @@ use crate::node::p2p_message_handlers::MAX_HEADERS_IN_RESPONSE;
 use crate::shares::bch_carried_headers::MAX_CARRIED_BCH_HEADERS;
 use crate::shares::coinbase_proof::MAX_COINBASE_MERKLE_BRANCH_LENGTH;
 use crate::shares::share_block::{ShareBlock, ShareHeader, Txids};
+use crate::shares::weak::WeakShare;
 use crate::store::dag_store::MAX_BLOCKS_PER_HEIGHT;
 use bitcoin::block::Header;
 use bitcoin::consensus::{Decodable, Encodable, encode};
@@ -23,11 +24,12 @@ use std::fmt::Display;
 /// the response worker. Sized for P2Pool's own messages rather than bitcoin's
 /// 5 MB block-relay limit. The largest legitimate messages are a Bitcoin Cash
 /// `ShareBlock`, whose body holds a 1,000,000-byte coinbase and 200 KiB of
-/// share transactions (`BCH_SHARE_BODY_SIZE_LIMIT`, 1,204,800 bytes) beside
-/// its header and coinbase merkle branch, and a `ShareHeaders` batch of
-/// `MAX_HEADERS_IN_RESPONSE` plus up to one height of overshoot (~1 MB of
-/// worst-case headers and branches). 1.25 MiB holds either with about 100 KB
-/// to spare; `test_full_share_headers_response_fits_max_message_size` and
+/// share transactions (`BCH_SHARE_BODY_SIZE_LIMIT`, 1,204,800 bytes) and up
+/// to `WEAK_BYTES` (96 KiB) of weak shares beside its header and coinbase
+/// merkle branch, and a `ShareHeaders` batch of `MAX_HEADERS_IN_RESPONSE`
+/// plus up to one height of overshoot (~1 MB of worst-case headers and
+/// branches). 1.25 MiB holds either, the share with a few KB to spare;
+/// `test_full_share_headers_response_fits_max_message_size` and
 /// `test_largest_bch_share_block_fits_max_message_size` guard the margin.
 pub const MAX_P2P_MESSAGE_SIZE: usize = 1_280 * 1024;
 
@@ -55,6 +57,9 @@ mod message_discriminants {
     pub const SHARE_HEADERS_WITH_BCH: u8 = 10;
     /// `SHARE_BLOCK` preceded by the Bitcoin Cash headers it carries.
     pub const SHARE_BLOCK_WITH_BCH: u8 = 11;
+    /// A Bitcoin Cash weak share (`shares::weak`), pushed to every peer
+    /// once checked.
+    pub const WEAK_SHARE: u8 = 12;
 }
 
 /// InventoryMessage discriminants to determine the type of inventory message
@@ -86,6 +91,9 @@ pub enum Message {
     GetData(GetData),
     Transaction(bitcoin::Transaction),
     Handshake(HandshakeData),
+    /// A checked Bitcoin Cash weak share (`shares::weak`), relayed to every
+    /// peer but the one it came from; answered with `Ack`.
+    WeakShare(WeakShare),
     /// Acknowledgment response for request-response messages that
     /// sometimes do not need to send a meaningful return payload
     /// (e.g. Handshake, Inventory). This is a stop gap solution to
@@ -170,6 +178,7 @@ impl Message {
             Message::GetData(_) => "GetData",
             Message::Transaction(_) => "Transaction",
             Message::Handshake(_) => "Handshake",
+            Message::WeakShare(_) => "WeakShare",
             Message::Ack => "Ack",
         }
     }
@@ -468,6 +477,11 @@ impl Encodable for Message {
                 len += handshake_data.tip_hash.consensus_encode(w)?;
                 Ok(len)
             }
+            Message::WeakShare(weak_share) => {
+                let mut len = WEAK_SHARE.consensus_encode(w)?;
+                len += weak_share.consensus_encode(w)?;
+                Ok(len)
+            }
             Message::Ack => {
                 let len = ACK.consensus_encode(w)?;
                 Ok(len)
@@ -519,6 +533,7 @@ impl Decodable for Message {
                 tip_height: u32::consensus_decode(r)?,
                 tip_hash: BlockHash::consensus_decode(r)?,
             })),
+            WEAK_SHARE => Ok(Message::WeakShare(WeakShare::consensus_decode(r)?)),
             ACK => Ok(Message::Ack),
             _ => Err(encode::Error::ParseFailed("Invalid Message discriminant")),
         }

@@ -31,10 +31,11 @@ P2P protocol id and every difficulty calculation read that field, so two
 Bitcoin Cash nodes on one network can no longer split because one left
 `signet` in its file. A Bitcoin Cash node ignores it for genesis. It builds a
 P2PKH share from the published BCHN genesis block for `bitcoin_cash_network`
-and from `bch_share_chain` (`main` or `mini`). Mini's anchor target is
-`0x1c384bd7`, 256 times easier than the main ceiling `0x1b384bd7`. Main
-keeps the existing anchor `0x1b4188f5` and that same ceiling, so a Bitcoin
-config that omits `chain` still starts on the taproot genesis.
+at the mini anchor target `0x1c384bd7`, 256 times easier than Bitcoin's
+ceiling `0x1b384bd7`. Until 2026-11-09 `bch_share_chain` chose between that
+mini chain and a main chain at Bitcoin's anchor `0x1b4188f5`; the two merged
+into one, and the setting is refused. Bitcoin keeps its anchor and ceiling,
+so a Bitcoin config that omits `chain` still starts on the taproot genesis.
 
 A Bitcoin Cash startup that would encode a witness payout is rejected at
 config parse. CashAddr decoding accepts P2PKH, P2SH20 and P2SH32 (since
@@ -362,6 +363,15 @@ Observed:
   about one block's work of real shares before a block is likely, so the
   genesis share's weight is negligible, but it is not zero until it leaves
   the window.
+- Since 2026-11-05 (`genesis-last-resort`) genesis is paid only when no
+  other share or uncle in the window is. The weight it took was not
+  negligible in practice: a block whose window held only work off its BCH
+  chain paid genesis all of it, and the chipnet NUMS address
+  `bchtest:qqmt9aztcrcms0aulp6v809n8fmgfx4dmgauqtmaxr` (hash160
+  `36b2f44bc0f1b83fbcf874c3bcb33a76849aadda`) holds 46.7 tBCH from the first
+  hours of each share chain. Genesis still takes the payout when nothing else
+  is paid, so the share built right on genesis has a payee and the case
+  above is unchanged.
 
 Header check. On regtest about half of all hashes meet the block target, so
 a block BCHN accepts does not by itself show that the node rebuilt the

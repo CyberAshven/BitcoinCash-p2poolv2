@@ -26,12 +26,15 @@ use p2poolv2_lib::config::{
     BitcoinCashNetwork, Chain, Config, PoolMode, TemplateProvider, TemplateSource,
     bitcoin_cash_donation_cashaddr,
 };
+use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
 use p2poolv2_lib::node::actor::NodeHandle;
 use p2poolv2_lib::node::bch_header_feeder::relay_templates_learning_prevs;
+use p2poolv2_lib::node::weak_share_worker::{WeakShareEventSender, WeakShareNetwork};
 use p2poolv2_lib::pool_difficulty::PoolDifficulty;
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::shares::merge_mining::MergeMiningCommitment;
 use p2poolv2_lib::shares::transaction_pool::ShareTransactionPool;
+use p2poolv2_lib::shares::weak_pool::WeakPool;
 use p2poolv2_lib::store::Store;
 use p2poolv2_lib::store::writer::{StoreHandle, StoreWriter, write_channel};
 use p2poolv2_lib::stratum::client_connections::start_connections_handler;
@@ -96,6 +99,9 @@ pub struct NodeHandles {
     pub template_rx: watch::Receiver<Option<Arc<PreparedNotifyParams>>>,
     /// Send a shutdown reason to trigger graceful node shutdown.
     pub shutdown_tx: watch::Sender<ShutdownReason>,
+    /// Bitcoin Cash P2Pool: where weak shares found here go to be checked,
+    /// pooled and relayed (`node::weak_share_worker`). `None` otherwise.
+    pub weak_share_tx: Option<WeakShareEventSender>,
 }
 
 /// Opaque runner returned by [`build_node`]. Call [`NodeRunner::run`] to start
@@ -219,10 +225,14 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 
     let genesis = p2poolv2_lib::shares::bch_genesis::genesis_for_stratum(&config.stratum)
         .expect("share genesis data is fixed");
+    // The script history index is an address index, kept only while this
+    // node serves Electrum, the one service that reads it.
     let store = Arc::new(
         Store::new(config.store.path.clone(), false)
             .unwrap()
-            .with_chain(config.stratum.chain),
+            .with_chain(config.stratum.chain)
+            .with_script_history(config.electrum.enabled)
+            .unwrap(),
     );
 
     let (write_tx, write_rx) = write_channel();
@@ -263,9 +273,9 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     };
     info!("Latest tip {} at height {}", tip, height);
 
-    // A Bitcoin Cash node mines only for BCHN on the configured network: the
-    // chain name is checked before waiting for the node to sync, and a block
-    // only Bitcoin Cash has once it has synced.
+    // A Bitcoin Cash node mines only for a Bitcoin Cash node on the
+    // configured network: the chain name is checked before waiting for the
+    // node to sync, and a block only Bitcoin Cash has once it has synced.
     if let Some(network) = bitcoin_cash_network
         && let Err(error) =
             preflight::verify_bitcoin_cash_chain_name(&config.bitcoinrpc, network).await
@@ -328,7 +338,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         ) {
             Ok(client) => client,
             Err(e) => {
-                error!("Failed to create the BCHN client for templates: {e}");
+                error!("Failed to create the RPC client for the node's templates: {e}");
                 return Err(ExitCode::FAILURE);
             }
         };
@@ -385,8 +395,8 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
 
     if stratum_config.chain == Chain::BitcoinCash {
         info!(
-            "Bitcoin Cash templates, share owners, and {:?} share chain genesis are selected for {:?}.",
-            stratum_config.bch_share_chain, stratum_config.bitcoin_cash_network
+            "Bitcoin Cash templates, share owners, and the share chain genesis are selected for {:?}.",
+            stratum_config.bitcoin_cash_network
         );
         // Only a P2Pool node builds each miner's jobs with their own donation.
         let miner_choice = if stratum_config.mode == PoolMode::P2poolv2 {
@@ -459,6 +469,20 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let notify_share_transaction_pool = share_transactions
         .as_ref()
         .map(|(share_transaction_pool, _)| share_transaction_pool.clone());
+    // Bitcoin Cash share chain nodes find, check, relay and carry weak
+    // shares; the pool and its worker's channel are shared by the notifier,
+    // stratum and the node.
+    let weak_shares = (stratum_config.chain == Chain::BitcoinCash
+        && stratum_config.mode == PoolMode::P2poolv2)
+        .then(|| {
+            let (pool, relay_rx) = WeakPool::new(chain_store_handle.clone());
+            WeakShareNetwork::new(pool, relay_rx)
+        });
+    let notify_weak_pool = weak_shares.as_ref().map(|network| network.pool.clone());
+    let stratum_weak_share_tx = weak_shares
+        .as_ref()
+        .map(|network| network.events_tx.clone());
+    let weak_share_tx_for_handles = stratum_weak_share_tx.clone();
     let exit_sender_notify = exit_sender.clone();
     let exit_receiver_notify = exit_sender.subscribe();
     let notify_transactions = pool_transactions.clone();
@@ -473,6 +497,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             pool_difficulty_for_notify,
             notify_transactions,
             notify_share_transaction_pool,
+            notify_weak_pool,
             tracker_handle_for_notify,
         )
         .await;
@@ -501,7 +526,24 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let emissions_tx_for_handles = emissions_tx.clone();
     let template_rx_for_handles = template_rx.clone();
 
-    let metrics_handle = match metrics::start_metrics(config.logging.stats_dir.clone()).await {
+    // Restore the block effort numerator from the confirmed chain before
+    // serving: work the pool already did must survive this restart. A store
+    // read failure must not block mining, so the effort starts at zero and
+    // self-heals from the chain on the next restart; the warning makes the
+    // stale value visible meanwhile.
+    let effort_seed = match metrics::work_since_last_block_from_chain(&chain_store_handle) {
+        Ok(work) => work,
+        Err(error) => {
+            warn!("Could not recompute work since last block, starting effort at zero: {error}");
+            0.0
+        }
+    };
+    let metrics_handle = match metrics::start_metrics_with_effort_seed(
+        config.logging.stats_dir.clone(),
+        effort_seed,
+    )
+    .await
+    {
         Ok(handle) => handle,
         Err(e) => {
             error!("Failed to start metrics: {e}");
@@ -574,7 +616,8 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
                     .map(PathBuf::from),
             )
             .sv2(sv2_listener)
-            .extra_submit_nodes(extra_submit_nodes);
+            .extra_submit_nodes(extra_submit_nodes)
+            .weak_share_tx(stratum_weak_share_tx);
         let mut stratum_server = match template_refresh_tx {
             Some(template_refresh_tx) => {
                 stratum_server_builder.template_refresh_tx(template_refresh_tx)
@@ -603,8 +646,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         info!("Stratum server stopped");
     });
 
-    let (monitoring_event_sender, _monitoring_event_receiver) =
-        p2poolv2_lib::monitoring_events::create_monitoring_event_channel();
+    let monitoring_event_sender = create_monitoring_event_channel();
 
     let (node_handle, stopping_rx) = match NodeHandle::new(
         config.clone(),
@@ -615,6 +657,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         notify_tx_for_node,
         shared_pplns_window,
         share_transactions,
+        weak_shares,
     )
     .await
     {
@@ -633,7 +676,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         metrics_handle.clone(),
         tracker_handle,
         node_handle.clone(),
-        monitoring_event_sender,
+        monitoring_event_sender.clone(),
         stratum_config.network,
         bch_share_network,
         stratum_config.pool_signature,
@@ -661,6 +704,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         Some(start_electrum_server(
             config.electrum.clone(),
             chain_store_handle.clone(),
+            monitoring_event_sender,
             electrum_shutdown.clone(),
         ))
     } else {
@@ -672,6 +716,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         emissions_tx: emissions_tx_for_handles,
         template_rx: template_rx_for_handles,
         shutdown_tx: exit_sender.clone(),
+        weak_share_tx: weak_share_tx_for_handles,
     };
 
     let runner = NodeRunner {

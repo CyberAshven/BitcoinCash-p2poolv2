@@ -37,8 +37,7 @@ static VALID_OK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"Share block ([0-9a-f]{64}) validated successfully").expect("valid regex")
 });
 static CONFIRMED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Promoted block ([0-9a-f]{64}) to confirmed height (Some\(\d+\)|None)")
-        .expect("valid regex")
+    Regex::new(r"Promoted block ([0-9a-f]{64}) to confirmed height (-?\d+):").expect("valid regex")
 });
 
 /// First time each share hash was seen, in log order.
@@ -114,7 +113,8 @@ impl NodeEvents {
             self.validated.record(&found[1], timestamp);
         }
         if let Some(found) = CONFIRMED.captures(&clean) {
-            if &found[2] == "None" {
+            // The node logs an uncle's height as -1.
+            if &found[2] == "-1" {
                 self.uncles.record(&found[1], timestamp);
             } else {
                 self.confirmed.record(&found[1], timestamp);

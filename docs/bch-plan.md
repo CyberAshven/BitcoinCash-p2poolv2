@@ -396,7 +396,8 @@ provider or a second node can then supply templates. Bitcoin and
 `template_source = "rpc"` configurations are unchanged.
 
 - **Connection.** `SetupConnection` for Template Distribution version 2,
-  then `CoinbaseOutputConstraints`. With
+  then `RequestExtensions` for large templates (below), then
+  `CoinbaseOutputConstraints`. With
   `template_provider_authority_public_key` the node runs the Noise NX
   handshake as initiator and accepts only a certificate that key signed. The
   key is required unless the provider is on a loopback address, because an
@@ -455,6 +456,29 @@ provider or a second node can then supply templates. Bitcoin and
   sibling, as happened on chipnet before PR #3. The node also remembers the
   block's height, so the successor needs no parent lookup over
   `[bitcoinrpc]`, whose node may not have the block yet.
+- **Large templates (2026-11-08).** One `RequestTransactionData.Success`
+  carries at most 65,535 transactions in one 16 MiB frame, below the 32 MB
+  floor of the block size limit. After `SetupConnection.Success` the node
+  asks for the BCH large templates extension `0x4C54`
+  ([architecture/sv2-large-templates-extension.md](architecture/sv2-large-templates-extension.md),
+  section 7) and waits for the answer before it sends
+  `CoinbaseOutputConstraints`: twice the `SetupConnection` round trip, at
+  least 250 ms and at most 10 s. A provider that does not answer in time
+  (bchn-sv2-bridge ignores the request) is not asked again while the node
+  runs, so it costs that one wait. A provider that grants it pushes
+  each template's transactions after its `NewTemplate`, so the node asks for
+  none: in full (pages of up to 65,535, then the core `Success`), or as a
+  delta on the last template pushed complete (a bitmap of the transactions
+  it keeps, then the added ones, sorted into CTOR). Only the block size
+  limit then bounds a template. Each list is checked against the template's
+  merkle path before it becomes the base for the next delta; a list that
+  fails, or a push out of order, ends the connection and the node
+  reconnects. A `NewTemplate` before the previous `Success` drops that
+  partial push and the base, and the next push is full. The node keeps the
+  base and the template being received, sharing the transactions between
+  them. A provider that refuses the extension or does not answer is asked
+  for each template's transactions as before. Knuth's provider is being
+  written to the same contract; the two have not yet run together.
 - **Tests.** 37 tests with the reference crates: the session state machine,
   the mapping against the BCHN regtest and chipnet fixtures, frame contents,
   plain and Noise connections to a stand-in provider over TCP, a provider
@@ -545,7 +569,7 @@ be written into a Bitcoin Cash coinbase.
 
 The share-chain `network` field still selects the Bitcoin genesis. On
 `bitcoin-cash`, genesis is a P2PKH share anchored at the published BCHN
-genesis block. `bch_share_chain` is `main` or `mini`. A configured
+genesis block, at the mini anchor (one share chain since 2026-11-09). A configured
 `miner_address` is a CashAddr share address (`p2pool`, `tp2pool`, or
 `rp2pool`) and the header stores that P2PKH hash. `sv2_port`, when set,
 opens a local unencrypted Stratum V2 listener beside SV1. Both Job

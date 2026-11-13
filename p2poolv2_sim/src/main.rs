@@ -89,6 +89,7 @@ async fn main() -> ExitCode {
         sim_cfg.network_hashrate.unwrap_or(0),
     );
     sim_overrides::init_propagation_delay(sim_cfg.propagation_delay_ms.unwrap_or(0));
+    sim_overrides::init_alter_weak_copy_every(sim_cfg.alter_weak_copy_every.unwrap_or(0));
     // The depths are compile-time sim constants. Each chain keeps its own
     // maturity: Bitcoin's is the sim's 20 shares, Bitcoin Cash's stays 100,
     // a share-chain rule the sim build does not change, and each chain's
@@ -128,6 +129,10 @@ async fn main() -> ExitCode {
         );
         match (resolved, rpc) {
             (Ok(identity), Ok(sim_rpc)) => {
+                if sim_cfg.carry_only_own_weak_shares {
+                    sim_overrides::init_carry_only_own_weak_shares(identity.share_owner);
+                    info!("Sim: carrying only this node's own weak shares");
+                }
                 let emitter = SimEmitter::new(
                     handles.emissions_tx.clone(),
                     handles.template_rx.clone(),
@@ -135,7 +140,8 @@ async fn main() -> ExitCode {
                     identity.share_owner,
                     sim_cfg,
                     sim_rpc,
-                );
+                )
+                .with_weak_share_sender(handles.weak_share_tx.clone());
                 let mut sim_exit_rx = handles.shutdown_tx.subscribe();
                 tokio::spawn(async move {
                     tokio::select! {

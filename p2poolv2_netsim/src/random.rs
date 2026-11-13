@@ -45,6 +45,14 @@ impl SimulationRandom {
         Self::from_seed(self.next_u64())
     }
 
+    /// An independent generator for an optional part of the model, keyed by
+    /// `stream`, that leaves this generator where it is: turning that part
+    /// on does not shift any number this generator gives.
+    pub fn branch(&self, stream: u64) -> Self {
+        let mut copy = self.clone();
+        Self::from_seed(copy.next_u64() ^ stream)
+    }
+
     /// The next 64 pseudo-random bits.
     pub fn next_u64(&mut self) -> u64 {
         let result = self.state[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);

@@ -27,6 +27,7 @@
   - [Share transactions](sharechain/transactions.md)
   - [Spending share outputs](sharechain/spending-outputs.md)
   - [Pool size limits](sharechain/pool-size.md)
+  - [Proposal: share chain redesign for payout variance and fees](sharechain/small-miners-design.md)
 - [Payouts](payouts/README.md)
   - [Coinbase payouts](payouts/coinbase.md)
   - [Selling shares](payouts/selling-shares.md)

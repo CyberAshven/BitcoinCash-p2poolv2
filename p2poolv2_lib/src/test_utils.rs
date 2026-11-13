@@ -31,6 +31,8 @@ use crate::shares::transactions::coinbase::build_sharechain_coinbase_transaction
 #[cfg(any(test, feature = "test-utils"))]
 use bitcoin::hashes::Hash;
 #[cfg(any(test, feature = "test-utils"))]
+use bitcoin::hashes::sha256d;
+#[cfg(any(test, feature = "test-utils"))]
 use bitcoin::{
     Address, Block, BlockHash, CompactTarget, CompressedPublicKey, Transaction, block::Header,
 };
@@ -46,6 +48,8 @@ use crate::accounting::OutputPair;
 use crate::accounting::payout::coinbase_budget::PayoutSplit;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::accounting::payout::payout_levels::PplnsWeights;
 #[cfg(test)]
 use crate::accounting::stats::metrics;
 #[cfg(any(test, feature = "test-utils"))]
@@ -81,6 +85,11 @@ use crate::stratum::block_submit::FoundBlockSubmitter;
 #[cfg(test)]
 use crate::stratum::emission::EmissionReceiver;
 #[cfg(test)]
+use crate::stratum::merge_disclosure::{
+    EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS, REQUEST_EXTENSIONS_SUCCESS, extensions_payload,
+    requested_extensions,
+};
+#[cfg(test)]
 use crate::stratum::messages::Notify;
 #[cfg(test)]
 use crate::stratum::messages::Response;
@@ -91,11 +100,13 @@ use crate::stratum::server::StratumContext;
 #[cfg(test)]
 use crate::stratum::session::{EXTRANONCE1_SIZE, EXTRANONCE2_SIZE};
 #[cfg(test)]
+use crate::stratum::sv2::large_templates::RequestTransactionDataTransactionsOwned;
+#[cfg(test)]
 use crate::stratum::sv2::payout_outputs::{
     RequestPayoutOutputs, RequestPayoutOutputsSuccess, VerifyPayoutOutputs,
 };
 #[cfg(test)]
-use crate::stratum::sv2::{Declaration, DeclaredJob, encode_message};
+use crate::stratum::sv2::{Declaration, DeclaredJob, encode_extension_frame, encode_message};
 #[cfg(test)]
 use crate::stratum::sv2::{NoiseTransport, Sv2Message, decode_plain_frames};
 #[cfg(any(test, feature = "test-utils"))]
@@ -378,7 +389,12 @@ impl TestSv2Server {
         message_type: u8,
         message: T,
     ) {
-        let frame = encode_message(message, message_type).unwrap();
+        self.send_frame(encode_message(message, message_type).unwrap())
+            .await;
+    }
+
+    /// Send one unencrypted frame, such as an extension's message.
+    pub(crate) async fn send_frame(&mut self, frame: Vec<u8>) {
         let wire = match self.noise.as_mut() {
             Some(noise) => noise.encrypt(frame).unwrap(),
             None => frame,
@@ -389,9 +405,41 @@ impl TestSv2Server {
             .unwrap();
     }
 
+    /// Answer the client's `RequestExtensions`, which must be its next
+    /// message, with a `RequestExtensions.Success` that grants `granted`.
+    /// Returns the extensions the client asked for.
+    pub(crate) async fn answer_extensions(&mut self, granted: &[u16]) -> Vec<u16> {
+        let request = self
+            .receive_extension(EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS)
+            .await;
+        let (request_id, asked) =
+            requested_extensions(&request).expect("malformed RequestExtensions");
+        self.send_frame(
+            encode_extension_frame(
+                EXTENSIONS_NEGOTIATION,
+                REQUEST_EXTENSIONS_SUCCESS,
+                false,
+                &extensions_payload(request_id, granted),
+            )
+            .unwrap(),
+        )
+        .await;
+        asked
+    }
+
     /// The payload of the client's next message, which must be of
     /// `expected_type`.
     pub(crate) async fn receive(&mut self, expected_type: u8) -> Vec<u8> {
+        self.receive_extension(0, expected_type).await
+    }
+
+    /// The payload of the client's next message, which must be extension
+    /// `extension_type`'s (0 for the base protocol) `expected_type`.
+    pub(crate) async fn receive_extension(
+        &mut self,
+        extension_type: u16,
+        expected_type: u8,
+    ) -> Vec<u8> {
         timeout(Duration::from_secs(5), async {
             let mut buffer = vec![0u8; 64 * 1024];
             while self.received.is_empty() {
@@ -407,7 +455,10 @@ impl TestSv2Server {
                 self.received.extend(messages);
             }
             let message = self.received.pop_front().unwrap();
-            assert_eq!(message.extension_type, 0, "unexpected SV2 extension");
+            assert_eq!(
+                message.extension_type, extension_type,
+                "unexpected SV2 extension"
+            );
             assert_eq!(
                 message.message_type, expected_type,
                 "unexpected SV2 message type"
@@ -485,6 +536,49 @@ pub(crate) fn test_tdp_transaction_data(
         excess_data: Vec::new().try_into().unwrap(),
         transaction_list: transactions.try_into().unwrap(),
     }
+}
+
+/// A large templates page (`RequestTransactionData.Transactions`) of
+/// `transactions` for `template_id`.
+#[cfg(test)]
+pub(crate) fn test_tdp_transactions_page(
+    template_id: u64,
+    transactions: &[bitcoin::Transaction],
+) -> RequestTransactionDataTransactionsOwned {
+    let transactions = transactions
+        .iter()
+        .map(|transaction| serialize(transaction).try_into().unwrap())
+        .collect::<Vec<_>>();
+    RequestTransactionDataTransactionsOwned {
+        template_id,
+        transaction_list: transactions.try_into().unwrap(),
+    }
+}
+
+/// `template` with `transactions`, in the order given, in place of its own:
+/// the template a provider builds when its mempool changes.
+#[cfg(test)]
+pub(crate) fn test_template_with_transactions(
+    template: &BlockTemplate,
+    transactions: &[bitcoin::Transaction],
+) -> BlockTemplate {
+    let mut changed = template.clone();
+    changed.transactions = transactions
+        .iter()
+        .map(|transaction| {
+            let txid = transaction.compute_txid().to_string();
+            TemplateTransaction {
+                data: hex::encode(serialize(transaction)),
+                txid: txid.clone(),
+                hash: txid,
+                depends: Vec::new(),
+                fee: 0,
+                sigops: 0,
+                weight: 0,
+            }
+        })
+        .collect();
+    changed
 }
 
 /// Well-known secp256k1 compressed public keys (multiples of the generator G).
@@ -777,7 +871,7 @@ fn test_bch_prepared_with_weights(
 /// given donation and fee, each an address and basis points, and
 /// merge-mining `merge_tokens` for every miner when given.
 #[cfg(any(test, feature = "test-utils"))]
-fn test_bch_prepared_with_weights_and_cuts(
+pub(crate) fn test_bch_prepared_with_weights_and_cuts(
     template: BlockTemplate,
     weights: HashMap<PayoutAddress, u128>,
     donation: (Option<PayoutAddress>, Option<u16>),
@@ -787,7 +881,7 @@ fn test_bch_prepared_with_weights_and_cuts(
     test_bch_prepared_on(
         BlockHash::from_byte_array([0x33; 32]),
         template,
-        weights,
+        PplnsWeights::without_levels(weights),
         donation,
         fee,
         merge_tokens,
@@ -800,7 +894,7 @@ fn test_bch_prepared_with_weights_and_cuts(
 #[cfg(test)]
 pub(crate) fn test_bch_prepared_anchored(
     anchor: BlockHash,
-    weights: HashMap<PayoutAddress, u128>,
+    weights: PplnsWeights,
 ) -> Arc<PreparedNotifyParams> {
     let template: BlockTemplate = serde_json::from_str(include_str!(
         "../../bitcoindrpc/test_data/bchn-regtest-template.json"
@@ -829,7 +923,7 @@ pub(crate) fn test_bch_prepared_on_anchor(anchor: BlockHash) -> Arc<PreparedNoti
 fn test_bch_prepared_on(
     anchor: BlockHash,
     template: BlockTemplate,
-    weights: HashMap<PayoutAddress, u128>,
+    weights: PplnsWeights,
     (donation_address, donation): (Option<PayoutAddress>, Option<u16>),
     (fee_address, fee): (Option<PayoutAddress>, Option<u16>),
     merge_tokens: Option<Arc<TokenSet>>,
@@ -1265,6 +1359,7 @@ pub(crate) async fn test_bch_stratum_context(
         cash_share: Some([0x22; 20]),
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
     (ctx, emissions_rx, [stats_dir, store_dir])
 }
@@ -1586,6 +1681,122 @@ pub const TEST_TIP_TIME: u32 = TEST_ANCHOR_TIME + 20;
 #[cfg(any(test, feature = "test-utils"))]
 pub const TEST_COINBASE_NSECS: u64 = 1_577_836_800_000_000_000;
 
+/// What a test weak share is mined on and pays (`build_test_weak_share`).
+#[cfg(test)]
+pub struct TestWeakShare<'a> {
+    /// The share it is mined on.
+    pub parent_hash: BlockHash,
+    /// Its share target.
+    pub bits: CompactTarget,
+    /// Its minimum, `bits` for a job at the minimum.
+    pub minimum: CompactTarget,
+    /// Its weak ratio, one step from its parent's.
+    pub weak_ratio: u32,
+    /// The PPLNS window its coinbase pays, as the validator's window gives it.
+    pub distribution: &'a HashMap<PayoutAddress, u128>,
+    /// Its share time.
+    pub time: u32,
+    /// The nonce of its Bitcoin Cash header, which varies its hash.
+    pub nonce: u32,
+}
+
+/// A Bitcoin Cash weak share (`shares::weak`) mined at `bits` on
+/// `parent_hash`, whose coinbase pays `distribution` of 50 BCH exactly as
+/// the validator rebuilds a no-token share's coinbase, and whose header's
+/// merkle root is that coinbase's txid, with an empty branch. Its miner is
+/// `CashP2pkh([0x33; 20])`, paid to the matching regtest P2PKH address. Its
+/// hash is whatever its fields give: a test picks targets it meets or misses
+/// whatever the hash.
+#[cfg(test)]
+pub fn build_test_weak_share(weak: TestWeakShare<'_>) -> crate::shares::weak::WeakShare {
+    build_test_weak_share_paying(weak, 5_000_000_000)
+}
+
+/// A weak share as [`build_test_weak_share`] builds it, whose coinbase pays
+/// `coinbase_value` satoshis instead of 50 BCH: one on another template of
+/// the same Bitcoin Cash block, with other fees.
+#[cfg(test)]
+pub fn build_test_weak_share_paying(
+    weak: TestWeakShare<'_>,
+    coinbase_value: u64,
+) -> crate::shares::weak::WeakShare {
+    let owner = [0x33; 20];
+    let payout: PayoutAddress = Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array(owner),
+        bitcoin::Network::Regtest,
+    )
+    .into();
+    let commitment = ShareCommitment {
+        prev_share_blockhash: weak.parent_hash,
+        uncles: Vec::new(),
+        miner_bitcoin_address: payout,
+        miner_address: ShareOwner::CashP2pkh(owner),
+        share_witness_root: compute_witness_root(&[]),
+        bits: weak.bits,
+        time: weak.time,
+        donation_address: None,
+        donation: None,
+        fee_address: None,
+        fee: None,
+        bch_coinbase: None,
+        pool_merge_mining: None,
+        share_version: crate::shares::share_version::ShareVersion::CURRENT,
+        asert_bits: weak.minimum,
+        wanted_bits: weak.bits,
+        band_cap: crate::shares::band::BAND_CAP_UNIT,
+        payout_level: 0,
+        weak_ratio: weak.weak_ratio,
+        weak_count: 0,
+        weak_root: crate::shares::weak::empty_weak_root(),
+    };
+    let mut header = ShareHeader::from_commitment_and_header(
+        commitment.clone(),
+        Header {
+            version: bitcoin::block::Version::TWO,
+            prev_blockhash: BlockHash::all_zeros(),
+            merkle_root: TxMerkleNode::all_zeros(),
+            time: weak.time,
+            bits: CompactTarget::from_consensus(0x1d00_ffff),
+            nonce: weak.nonce,
+        },
+        1,
+        CoinbaseProof::default(),
+    );
+    let payouts = build_pplns_outputs(
+        coinbase_value,
+        &PplnsWeights::without_levels(weak.distribution.clone()),
+        &None,
+        None,
+        &None,
+        None,
+        crate::accounting::payout::coinbase_budget::split_for_share(Chain::BitcoinCash, &header),
+    )
+    .expect("test weak share payouts");
+    let coinbase = crate::stratum::work::coinbase::build_coinbase(
+        bitcoin::transaction::Version::TWO,
+        &payouts.outputs,
+        header.bitcoin_height as i64,
+        PushBytesBuf::from(&[0u8]),
+        None,
+        b"P2Poolv2",
+        Some(commitment.hash()),
+        TEST_COINBASE_NSECS,
+        Some(&[0u8; 12]),
+        Some(header.merge_mining_commitment()),
+        payouts.tree_output().as_ref(),
+    )
+    .expect("test weak share coinbase");
+    header.coinbase_proof = CoinbaseProof::from_coinbase(&coinbase, compute_witness_root(&[]))
+        .expect("test weak share coinbase proof");
+    header.bitcoin_header.merkle_root = coinbase.compute_txid().into();
+    crate::shares::weak::WeakShare {
+        header,
+        coinbase_script_sig: coinbase.input[0].script_sig.clone(),
+        coinbase_value,
+        merkle_branch: Vec::new(),
+    }
+}
+
 /// Build a PoolDifficulty anchored on-schedule so that the target for a
 /// parent at height 1 and time TEST_TIP_TIME is the anchor target (0x1b4188f5).
 #[cfg(any(test, feature = "test-utils"))]
@@ -1781,6 +1992,13 @@ pub fn create_test_commitment() -> ShareCommitment {
         bch_coinbase: None,
         pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
+        asert_bits: CompactTarget::default(),
+        wanted_bits: CompactTarget::default(),
+        band_cap: 0,
+        payout_level: 0,
+        weak_ratio: 0,
+        weak_count: 0,
+        weak_root: crate::shares::weak::empty_weak_root(),
     }
 }
 
@@ -1914,6 +2132,8 @@ pub fn build_token_win_submit(
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         tracker,
     );
     let job = tracker.get_job(job_id).unwrap();
@@ -2022,6 +2242,13 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         bch_coinbase: None,
         pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
+        asert_bits: CompactTarget::default(),
+        wanted_bits: CompactTarget::default(),
+        band_cap: 0,
+        payout_level: 0,
+        weak_ratio: 0,
+        weak_count: 0,
+        weak_root: crate::shares::weak::empty_weak_root(),
     };
     let commitment_hash = share_commitment.hash();
 
@@ -2084,6 +2311,13 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         bch_coinbase: None,
         pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
+        asert_bits: CompactTarget::default(),
+        wanted_bits: CompactTarget::default(),
+        band_cap: 0,
+        payout_level: 0,
+        weak_ratio: 0,
+        weak_count: 0,
+        weak_root: crate::shares::weak::empty_weak_root(),
     };
 
     let template_merkle_branches = build_merkle_branches_for_template(&template)
@@ -2097,6 +2331,7 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         transactions: vec![ShareTransaction(share_coinbase)],
         template_merkle_branches,
         bitcoin_coinbase,
+        weak_shares: Vec::new(),
     }
 }
 
@@ -2114,6 +2349,53 @@ pub struct TestShareBlockBuilder {
     nonce: Option<u32>,
     bits: Option<CompactTarget>,
     time: Option<u32>,
+    cuts: TestShareCuts,
+    band: Option<TestShareBand>,
+    payout_level: u8,
+    weak_ratio: Option<u32>,
+    weak_shares: Vec<crate::shares::weak::WeakShare>,
+}
+
+/// The donation and fee a test share commits, in its header and in the
+/// share commitment its coinbase carries, as a mined share does.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, Default)]
+struct TestShareCuts {
+    donation_address: Option<PayoutAddress>,
+    donation: Option<u16>,
+    fee_address: Option<PayoutAddress>,
+    fee: Option<u16>,
+}
+
+/// The difficulty band a test share commits (`shares::band`): its minimum,
+/// the target its node wanted and its band cap.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, Copy)]
+struct TestShareBand {
+    asert_bits: CompactTarget,
+    wanted_bits: CompactTarget,
+    band_cap: u32,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl TestShareBand {
+    /// The band a share owned by `share_owner` at `share_bits` carries when
+    /// the test sets none: a Bitcoin Cash share at its minimum in a band of
+    /// one, and no band on Bitcoin.
+    fn default_for(share_owner: &ShareOwner, share_bits: CompactTarget) -> Self {
+        match share_owner {
+            ShareOwner::CashP2pkh(_) => Self {
+                asert_bits: share_bits,
+                wanted_bits: share_bits,
+                band_cap: crate::shares::band::BAND_CAP_UNIT,
+            },
+            _ => Self {
+                asert_bits: CompactTarget::default(),
+                wanted_bits: CompactTarget::default(),
+                band_cap: 0,
+            },
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -2182,9 +2464,64 @@ impl TestShareBlockBuilder {
         self
     }
 
+    /// Commit a donation of `basis_points` to `address`, as a share mined
+    /// with that donation does.
+    pub fn donation(mut self, address: PayoutAddress, basis_points: u16) -> Self {
+        self.cuts.donation_address = Some(address);
+        self.cuts.donation = Some(basis_points);
+        self
+    }
+
+    /// Commit a fee of `basis_points` to `address`, as a share mined on a
+    /// node taking that fee does.
+    pub fn fee(mut self, address: PayoutAddress, basis_points: u16) -> Self {
+        self.cuts.fee_address = Some(address);
+        self.cuts.fee = Some(basis_points);
+        self
+    }
+
     pub fn with_easy_target(self) -> Self {
         let easy_target = bitcoin::CompactTarget::from_consensus(0x2100ffff);
         self.bits(easy_target)
+    }
+
+    /// Commit this difficulty band (`shares::band`) instead of the default,
+    /// which puts a Bitcoin Cash share at its minimum in a band of one: a
+    /// share mined heavier, or one claiming another minimum or cap.
+    pub fn band(
+        mut self,
+        asert_bits: CompactTarget,
+        wanted_bits: CompactTarget,
+        band_cap: u32,
+    ) -> Self {
+        self.band = Some(TestShareBand {
+            asert_bits,
+            wanted_bits,
+            band_cap,
+        });
+        self
+    }
+
+    /// Commit payout level `payout_level` (`accounting::payout::payout_levels`)
+    /// instead of level 0. A Bitcoin share carries no level.
+    pub fn payout_level(mut self, payout_level: u8) -> Self {
+        self.payout_level = payout_level;
+        self
+    }
+
+    /// Commit this weak ratio (`shares::weak`) instead of the default, the
+    /// genesis ratio `R_MAX` on Bitcoin Cash, which stays where it is under a
+    /// parent carrying no weak shares.
+    pub fn weak_ratio(mut self, weak_ratio: u32) -> Self {
+        self.weak_ratio = Some(weak_ratio);
+        self
+    }
+
+    /// Carry these weak shares in the body, and commit their count and root
+    /// in the header, as a share built on a job carrying them does.
+    pub fn weak_shares(mut self, weak_shares: Vec<crate::shares::weak::WeakShare>) -> Self {
+        self.weak_shares = weak_shares;
+        self
     }
 
     pub fn build(self) -> ShareBlock {
@@ -2229,7 +2566,57 @@ impl TestShareBlockBuilder {
             self.nonce,
             self.bits,
             self.time,
+            self.cuts,
+            self.band,
+            self.payout_level,
+            TestShareWeak {
+                weak_ratio: self.weak_ratio,
+                weak_shares: self.weak_shares,
+            },
         )
+    }
+}
+
+/// A Bitcoin Cash weak share mined on `parent`, known by the proof-of-work
+/// hash `nonce` gives it, for tests that need only its identity and parent:
+/// its coinbase fields are placeholders no check would pass.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_weak_share_on(parent: BlockHash, nonce: u32) -> crate::shares::weak::WeakShare {
+    crate::shares::weak::WeakShare {
+        header: TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
+            .prev_share_blockhash(parent.to_string())
+            .nonce(nonce)
+            .build()
+            .header,
+        coinbase_script_sig: bitcoin::ScriptBuf::new(),
+        coinbase_value: 1,
+        merkle_branch: Vec::new(),
+    }
+}
+
+/// The weak shares a test share carries and the weak ratio it commits.
+#[cfg(any(test, feature = "test-utils"))]
+struct TestShareWeak {
+    weak_ratio: Option<u32>,
+    weak_shares: Vec<crate::shares::weak::WeakShare>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl TestShareWeak {
+    /// The weak ratio, count and root a share owned by `share_owner`
+    /// commits: the set ratio or the genesis ratio, and its carried weak
+    /// shares, on Bitcoin Cash; zero on Bitcoin, which carries none.
+    fn commitment_fields(&self, share_owner: &ShareOwner) -> (u32, u16, sha256d::Hash) {
+        match share_owner {
+            ShareOwner::CashP2pkh(_) => (
+                self.weak_ratio
+                    .unwrap_or(crate::shares::weak::GENESIS_WEAK_RATIO),
+                self.weak_shares.len() as u16,
+                crate::shares::weak::weak_root(&self.weak_shares),
+            ),
+            _ => (0, 0, crate::shares::weak::empty_weak_root()),
+        }
     }
 }
 
@@ -2265,6 +2652,7 @@ pub fn empty_share_block_from_header(header: ShareHeader) -> ShareBlock {
         transactions: Vec::new(),
         template_merkle_branches: vec![],
         bitcoin_coinbase: empty_bitcoin_coinbase(),
+        weak_shares: Vec::new(),
     }
 }
 
@@ -2278,6 +2666,7 @@ pub fn valid_share_block_from_fixture() -> ShareBlock {
         transactions: Vec::new(),
         template_merkle_branches: vec![],
         bitcoin_coinbase: empty_bitcoin_coinbase(),
+        weak_shares: Vec::new(),
     }
 }
 
@@ -2299,10 +2688,21 @@ fn test_share_block(
     nonce: Option<u32>,
     bits: Option<CompactTarget>,
     time: Option<u32>,
+    cuts: TestShareCuts,
+    band: Option<TestShareBand>,
+    payout_level: u8,
+    weak: TestShareWeak,
 ) -> ShareBlock {
+    //* A Bitcoin share carries no payout level.
+    let payout_level = match share_owner {
+        ShareOwner::CashP2pkh(_) => payout_level,
+        _ => 0,
+    };
     let share_bits = bits.unwrap_or(CompactTarget::from_consensus(
         0x01e0377ae * work.unwrap_or(1),
     ));
+    let share_band = band.unwrap_or_else(|| TestShareBand::default_for(share_owner, share_bits));
+    let (weak_ratio, weak_count, weak_root) = weak.commitment_fields(share_owner);
     let share_time = time.unwrap_or(1700000000u32);
     let prev_blockhash = BlockHash::from_str(prev_share_blockhash).unwrap();
 
@@ -2331,13 +2731,20 @@ fn test_share_block(
                 share_witness_root: compute_witness_root(&other_share_transactions),
                 bits: share_bits,
                 time: share_time,
-                donation_address: None,
-                donation: None,
-                fee_address: None,
-                fee: None,
+                donation_address: cuts.donation_address.clone(),
+                donation: cuts.donation,
+                fee_address: cuts.fee_address.clone(),
+                fee: cuts.fee,
                 bch_coinbase: None,
                 pool_merge_mining: None,
                 share_version: crate::shares::share_version::ShareVersion::CURRENT,
+                asert_bits: share_band.asert_bits,
+                wanted_bits: share_band.wanted_bits,
+                band_cap: share_band.band_cap,
+                payout_level,
+                weak_ratio,
+                weak_count,
+                weak_root,
             };
 
             let bitcoin_coinbase = build_bitcoin_coinbase_transaction(
@@ -2403,15 +2810,22 @@ fn test_share_block(
         bitcoin_header,
         time: share_time,
         bits: share_bits,
-        donation_address: None,
-        donation: None,
-        fee_address: None,
-        fee: None,
+        donation_address: cuts.donation_address,
+        donation: cuts.donation,
+        fee_address: cuts.fee_address,
+        fee: cuts.fee,
         bitcoin_height: 1,
         coinbase_proof,
         bch_coinbase: None,
         pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
+        asert_bits: share_band.asert_bits,
+        wanted_bits: share_band.wanted_bits,
+        band_cap: share_band.band_cap,
+        payout_level,
+        weak_ratio,
+        weak_count,
+        weak_root,
     };
 
     ShareBlock {
@@ -2419,6 +2833,7 @@ fn test_share_block(
         transactions,
         template_merkle_branches: vec![],
         bitcoin_coinbase,
+        weak_shares: weak.weak_shares,
     }
 }
 
@@ -2498,6 +2913,13 @@ impl TestShareHeaderBuilder {
             bch_coinbase: None,
             pool_merge_mining: None,
             share_version: crate::shares::share_version::ShareVersion::CURRENT,
+            asert_bits: CompactTarget::default(),
+            wanted_bits: CompactTarget::default(),
+            band_cap: 0,
+            payout_level: 0,
+            weak_ratio: 0,
+            weak_count: 0,
+            weak_root: crate::shares::weak::empty_weak_root(),
         }
     }
 }

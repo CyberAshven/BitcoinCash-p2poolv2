@@ -348,8 +348,9 @@ root.
 extensions negotiation (type `0x0001`, `RequestExtensions` `0x00`: `u16
 request_id | u16 n | n x u16`), after `SetupConnection`; the node answers
 `RequestExtensions.Success` (`0x01`) granting `0x4D4D` on a connection with
-mining channels, and no other extension. The connection then gets, on the
-channel bit:
+mining channels, beside any other extension it grants there
+([Miner options](miner-options.md#stratum-v2)). The connection then gets, on
+the channel bit:
 
 ```text
 JobLeaves (0x00):  channel u32 | job u32 | output 0 (53) | u16 n | CTMD (n)

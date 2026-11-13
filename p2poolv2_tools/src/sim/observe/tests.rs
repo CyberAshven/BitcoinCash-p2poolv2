@@ -40,8 +40,8 @@ fn scan_reads_the_last_promotion_and_errors() {
     std::fs::write(
         &path,
         concat!(
-            "t Promoted block 0123456789abcdef01 to confirmed height Some(4)\n",
-            "t Promoted block fedcba9876543210ff to confirmed height Some(5)\n",
+            "t Promoted block 0123456789abcdef01 to confirmed height 4: diff=1\n",
+            "t Promoted block fedcba9876543210ff to confirmed height 5: diff=1\n",
             "t ERROR something broke\n",
             "t error max_workbase exceeded\n",
             "t ERROR something broke\n",

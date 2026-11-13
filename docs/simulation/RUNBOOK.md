@@ -141,7 +141,7 @@ sleep 20
 grep "Promoted block" /tmp/sim-A.log | tail -5
 ```
 
-Expect heights climbing (`... to confirmed height Some(1)`, `Some(2)`, …) every
+Expect heights climbing (`... to confirmed height 1: diff=...`, `2: ...`, …) every
 few seconds. Cross-check via the API (port 7600 in the copied config):
 
 ```sh
@@ -494,11 +494,110 @@ below the prune target too.
 `shallow-fork-reorged` is the control: it reconnects at height 60, before any
 node prunes. The node must log no refusal and end up with node 0's confirmed
 hash, and the normal convergence check applies. Height 60 also keeps the fork
-within the sim PPLNS window cache (200 entries on Bitcoin Cash: maturity
-100, window 80, buffer 20), which bounds how deep a fork a node can pay out
+within the sim PPLNS window cache (231 entries on Bitcoin Cash: maturity
+100, window 80, buffer 51), which bounds how deep a fork a node can pay out
 for.
 
 The summary prints `fork verdict: PASS` or `FAIL (<reasons>)`.
+
+---
+
+## 9c. Test J — many miners, token shares and the payout tree
+
+Fills the window with hundreds of payees on a dozen nodes, so the level
+draw, the hybrid split and the payout tree run on real nodes. Three knobs
+make it:
+
+- `VIRTUAL_MINERS=100` makes every node model 100 miners, each with its own
+  payout address and share owner (`[sim] virtual_miners`).
+- `MERGE_TOKENS=<file>` makes every share a token share, whose coinbase
+  holds 79 payees and pays the others through the payout tree. The file is
+  the token list of `docs/bch-auxpow.md`; the example there will do, since
+  share validity never depends on the tokens.
+- The regtest chain's height sets the block reward: BCHN halves it every
+  150 regtest blocks, so at height 1,800 a block pays 1,220,703 satoshis and
+  1,200 miners' slices are a few hundred satoshis each, below the payout
+  levels.
+
+```sh
+bitcoin-cli -regtest -rpcwallet=p2pool generatetoaddress 1800 "$(bitcoin-cli -regtest -rpcwallet=p2pool getnewaddress)"
+IDEAL_BLOCK_TIME=3 SHARES_PER_BLOCK=20 HASHRATE=1e15 LATENCY_MS=50 LOG_LEVEL=info \
+WEAK_SHARES=1 VIRTUAL_MINERS=100 MERGE_TOKENS=/path/to/tokens.json \
+PAYOUT_LEVELS=5,5,5,5,3,3,3,3,0,0,0,0 \
+  cargo sim run-swarm 12
+```
+
+Leave `MERGE_TOKENS` out for the control: every payee then fits the
+coinbase and no tree is built.
+
+What to read afterwards:
+
+- every node's `/chain_info`: the same tip;
+- `weak shares: found=… carried=… expired=…` and `sim stats: … weak_ratio=…`
+  in each log, and `weak_shares_refused_total` in `/metrics`;
+- `Dropping inbound stream because we are at capacity` and `max sub-streams
+  reached` in each log;
+- `/payout_trees` and `/payout_tree?coinbase_txid=…` on a node, beside the
+  coinbase of each regtest block (`getblock <hash> 2`). A virtual miner's key
+  hash is `0x76`, its node's seed (index + 1, 8 bytes little endian) and its
+  own number, so a P2PKH script names the node it belongs to.
+
+Three runs on 2026-11-12, 12 nodes each: token shares with the smallest
+four nodes at level 0 (3 hours 23 minutes, 4,134 shares, 226 regtest
+blocks); the same without tokens (38 minutes, 797 shares, 50 blocks); and
+token shares with those four nodes at level 1 instead of 0 (41 minutes, 855
+shares, 55 blocks, of which the node still served the trees of the last
+22). The table below is of the first two.
+
+| What | Token shares, level 0 | No tokens, level 0 |
+|---|---|---|
+| Tips | all 12 nodes on the same tip at the end; in 48 samples of the first 25 minutes, equal in 30, within one share in 45, never more than 4 apart | all 12 on the same tip at the end |
+| Shares marked invalid, shares dropped as unresolvable, disconnects | 0, 0, 0 | 0, 0, 0 |
+| Full shares found, and on the chain | 4,309 and 4,134: 4.1% off the chain at 3-second shares and 50 ms | |
+| `R` (the logged `weak_ratio` over 1,024) | starts at 256, 105 after 10 minutes, 33.8 after 30 minutes, 34.1 at the end (the payout simulator settles at 34.7) | 103 after 10 minutes, 33.4 after 30 minutes, 34.1 at the end |
+| Weak shares in the first half hour | 42,188 expired: a new chain finds them 256 times as fast as shares, and a share carries 64 | 36,178 expired |
+| Weak shares after the first hour | 101,212 carried, none expired | |
+| Dropped request streams on the biggest node | 4,535 `at capacity` and 6,894 `max sub-streams reached`, all in the first 10 minutes; none in the 3 hours after | 4,720 and 6,021, all in the first minute |
+| Weak shares from peers, all nodes | | 719,915 taken, 7,122,362 refused as duplicates, 4,432 refused at the peer's rate |
+| Payout trees | 181 built, about 176 payees each at the full reward; 65 paid out on regtest by the nodes once 100 blocks deep | none |
+
+Each node sends every weak share whole to each peer but the one it came
+from, so in this mesh a node receives it from all 11 peers: ten duplicates
+for each one it takes. At the start of a chain, with `R` at 256 and the
+share difficulty still below the hashrate, that is more requests than a
+node's streams hold.
+
+What each node's miners were paid against their part of the hashrate
+(token shares: the 83 blocks at the full reward whose tree the node still
+served; no tokens: all 50 blocks):
+
+| Node | Part of the hashrate | Level | Paid over hashrate part, token shares | Paid over hashrate part, no tokens | Paid over hashrate part, token shares, level 1 in place of 0 |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 32.2% | 5 | 1.01 | 0.96 | 0.96 |
+| 1 | 16.1% | 5 | 1.05 | 1.02 | 1.04 |
+| 2 | 10.7% | 5 | 1.04 | 0.98 | 1.01 |
+| 3 | 8.1% | 5 | 1.03 | 0.98 | 0.99 |
+| 4 | 6.4% | 3 | 1.03 | 1.03 | 1.00 |
+| 5 | 5.4% | 3 | 1.03 | 1.02 | 1.02 |
+| 6 | 4.6% | 3 | 1.05 | 1.06 | 1.07 |
+| 7 | 4.0% | 3 | 1.04 | 1.04 | 1.05 |
+| 8 | 3.6% | 0 | 0.82 | 1.03 | 0.96 |
+| 9 | 3.2% | 0 | 0.80 | 1.05 | 0.99 |
+| 10 | 2.9% | 0 | 0.80 | 1.02 | 1.08 |
+| 11 | 2.7% | 0 | 0.79 | 1.02 | 0.97 |
+
+With level 1 in place of level 0 the four smallest nodes' miners were paid
+1.00 of their part together (1.03 in an earlier run of 16 blocks), and the
+tree's largest payee received 17,648 satoshis a block, one level 5 payment.
+
+The level 0 miners lose a fifth on token shares, and more as slices
+shrink: after the regtest halving to 610,351 satoshis they were paid 0.60
+to 0.67. A level 0 draw pays 546 satoshis, which in the payout tree is
+below dust once the tree's fee is taken, so the tree hands it to its
+largest payee. That payee received 44,978 satoshis a block on average,
+where its work earned about 3,900. Without tokens every payee fits the
+coinbase and is paid there. `docs/sharechain/small-miners-design.md`,
+"Still open", has the rule and the candidate fixes.
 
 ---
 
@@ -552,6 +651,11 @@ curl -s :7600/chain_info | jq            # tip/candidate heights (prefer logs fo
 | `MINER_ADDRESS`                      | `bchreg:qp63…vuwd` | payout address of a node without its own; a `bchreg:` CashAddr (the key with secret 1)                       |
 | `DISTINCT_ADDR`                      | 1               | each node gets its own payout address via the wallet                                                               |
 | `DIAL_FANOUT`                        | 3               | how many earlier peers each node dials                                                                             |
+| `PAYOUT_LEVELS`                      | unset           | each node's `[stratum] payout_level`, in node order, such as `5,7,7`; a node past the list keeps the default 5     |
+| `WEAK_SHARES`                        | 0               | `1` makes every node's miners send weak shares (`[sim] weak_shares`)                                               |
+| `VIRTUAL_MINERS`                     | unset           | miners each node models (`[sim] virtual_miners`), each with its own payout address, so a small swarm has many payees |
+| `MERGE_TOKENS`                       | unset           | a token file every node merge-mines (`[stratum] merge_mining_tokens`), which makes every share a token share      |
+| `LOG_LEVEL`                          | debug           | the nodes' log level; a long run with weak shares writes gigabytes at `debug`, so use `info`                        |
 | `PROFILE`                            | release         | `release` or `debug`                                                                                               |
 | `RUN_DIR`                            | /tmp/p2pool-sim | where configs/logs/stores go                                                                                       |
 | `BASE_P2P`/`BASE_STRATUM`/`BASE_API` | 7000/7300/7600  | first ports                                                                                                        |

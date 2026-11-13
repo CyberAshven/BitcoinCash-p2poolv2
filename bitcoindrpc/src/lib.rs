@@ -196,10 +196,24 @@ impl SubmitBlockOutcome {
     }
 }
 
+/// Capabilities a Bitcoin Cash template request sends: see
+/// [`BitcoindRpcClient::get_bch_block_template`].
+const BCH_TEMPLATE_CAPABILITIES: [&str; 3] = ["coinbasevalue", "coinbase/append", "workid"];
+
+/// `RPC_CLIENT_NOT_CONNECTED`: the node has no peers, so it gives no
+/// template.
+const RPC_CLIENT_NOT_CONNECTED: i32 = -9;
+
+/// `RPC_CLIENT_IN_INITIAL_DOWNLOAD`: the node is still downloading the
+/// chain, so it gives no template.
+const RPC_CLIENT_IN_INITIAL_DOWNLOAD: i32 = -10;
+
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct GetBlockchainInfo {
-    #[serde(rename = "initialblockdownload")]
-    pub initial_block_download: bool,
+    /// Whether the node is still in initial block download. `None` when the
+    /// node does not report it, as BCHD does not.
+    #[serde(rename = "initialblockdownload", default)]
+    pub initial_block_download: Option<bool>,
     /// The node's chain name: `main`, `test`, `test4`, `chip`, `scale` or
     /// `regtest` on BCHN. `None` when the node does not report one.
     #[serde(default)]
@@ -392,6 +406,38 @@ impl BitcoindRpcClient {
         self.request("getblockchaininfo", vec![]).await
     }
 
+    /// Whether the node is still downloading the chain, from
+    /// `getblockchaininfo`'s `initialblockdownload`.
+    ///
+    /// A node that does not report it, as BCHD does not, is asked for a
+    /// Bitcoin Cash template instead. Like BCHN, it refuses one with
+    /// `RPC_CLIENT_IN_INITIAL_DOWNLOAD` while it downloads the chain and with
+    /// `RPC_CLIENT_NOT_CONNECTED` while it has no peers; either counts as
+    /// still downloading.
+    pub async fn in_initial_block_download(&self) -> Result<bool, BitcoindRpcError> {
+        if let Some(in_initial_block_download) =
+            self.getblockchaininfo().await?.initial_block_download
+        {
+            return Ok(in_initial_block_download);
+        }
+        let template: Result<serde_json::Value, BitcoindRpcError> = self
+            .request(
+                "getblocktemplate",
+                vec![serde_json::json!({
+                    "capabilities": BCH_TEMPLATE_CAPABILITIES,
+                })],
+            )
+            .await;
+        match template {
+            Ok(_) => Ok(false),
+            Err(BitcoindRpcError::RpcError {
+                code: RPC_CLIENT_IN_INITIAL_DOWNLOAD | RPC_CLIENT_NOT_CONNECTED,
+                ..
+            }) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn getmininginfo(&self) -> Result<GetMiningInfo, BitcoindRpcError> {
         self.request("getmininginfo", vec![]).await
     }
@@ -451,6 +497,12 @@ impl BitcoindRpcClient {
     }
 
     /// Fetch a Bitcoin template, negotiating SegWit and Signet when required.
+    ///
+    /// Signet adds the signet rule. Every network declares the BIP 54
+    /// `consensuscleanup` rule: testnet5 marks it required (`!consensuscleanup`)
+    /// and refuses templates to clients that do not declare it, and the
+    /// coinbase we build already follows BIP 54. Nodes that do not know the
+    /// rule ignore it.
     pub async fn getblocktemplate(
         &self,
         network: bitcoin::Network,
@@ -459,23 +511,29 @@ impl BitcoindRpcClient {
             bitcoin::Network::Signet => {
                 vec![serde_json::json!({
                     "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-                    "rules": ["segwit", "signet"],
+                    "rules": ["segwit", "signet", "consensuscleanup"],
                 })]
             }
             _ => {
                 vec![serde_json::json!({
                     "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-                    "rules": ["segwit"],
+                    "rules": ["segwit", "consensuscleanup"],
                 })]
             }
         };
         self.request_block_template(params).await
     }
 
-    /// Fetch a BCHN template without requesting Bitcoin-only consensus rules.
+    /// Fetch a Bitcoin Cash template without requesting Bitcoin-only
+    /// consensus rules.
+    ///
+    /// The pool builds its own coinbase, so it asks for `coinbasevalue`
+    /// (BIP 22). A node that acts on the capabilities, as BCHD does, sends a
+    /// ready-made `coinbasetxn` and no `coinbasevalue` to a client that asks
+    /// for `coinbasetxn` alone. BCHN sends `coinbasevalue` either way.
     pub async fn get_bch_block_template(&self) -> Result<String, BitcoindRpcError> {
         self.request_block_template(vec![serde_json::json!({
-            "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
+            "capabilities": BCH_TEMPLATE_CAPABILITIES,
         })])
         .await
     }
@@ -490,7 +548,7 @@ impl BitcoindRpcClient {
             .request(
                 "getblocktemplatelight",
                 vec![serde_json::json!({
-                    "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
+                    "capabilities": BCH_TEMPLATE_CAPABILITIES,
                 })],
             )
             .await?;

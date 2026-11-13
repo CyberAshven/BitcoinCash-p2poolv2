@@ -13,7 +13,7 @@ use crate::stratum::work::tracker::start_tracker_actor;
 use crate::test_utils::{
     TEST_COINBASE_NSECS, build_pool_job_submit, build_token_win_submit, create_test_commitment,
     load_valid_stratum_work_components, setup_test_chain_store_handle, solve_job_submit,
-    test_bch_prepared_with_tree_payees, test_bch_stratum_context,
+    test_bch_prepared_with_tree_payees, test_bch_stratum_context, test_weak_share_on,
 };
 use bitcoin::{Address, BlockHash, Network, PubkeyHash};
 use bitcoindrpc::BitcoindRpcClient;
@@ -36,6 +36,8 @@ async fn a_found_tree_is_stored_with_the_submitted_coinbase_and_share() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         &ctx.tracker_handle,
     );
     let job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -70,6 +72,64 @@ async fn a_found_tree_is_stored_with_the_submitted_coinbase_and_share() {
     assert_eq!(stored[0].payees, job.payout_tree.unwrap().payees());
 }
 
+/// A share this node's miner finds on a job carrying weak shares counts them
+/// as carried by this node's shares, once the share goes to the share chain.
+/// The job's share target is set to regtest's block target, so the share
+/// the test solves meets it.
+#[tokio::test]
+async fn an_emitted_share_counts_its_jobs_weak_shares_as_carried_by_this_node() {
+    let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let prepared = test_bch_prepared_with_tree_payees(100);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    ));
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
+        &ctx.tracker_handle,
+    );
+    let mut job = ctx.tracker_handle.get_job(job_id).unwrap();
+    job.weak_shares = Arc::from(vec![
+        test_weak_share_on(BlockHash::from_byte_array([1; 32]), 1),
+        test_weak_share_on(BlockHash::from_byte_array([1; 32]), 2),
+        test_weak_share_on(BlockHash::from_byte_array([1; 32]), 3),
+    ]);
+    job.share_commitment.as_mut().unwrap().bits =
+        bitcoin::CompactTarget::from_consensus(0x207fffff);
+    let submit = solve_job_submit(job_id, &job, "01010101", "0000000000000001");
+    let found =
+        validate_bitcoin_difficulty(&job, &submit, "01010101", DEFAULT_VERSION_MASK).unwrap();
+    let pool_share = PoolShare {
+        job_id,
+        job: &job,
+        header: found.header,
+        block_hash: found.header.block_hash(),
+        coinbase: &found.coinbase,
+        share: SimplePplnsShare::new(
+            1,
+            1,
+            "payout".to_string(),
+            "worker".to_string(),
+            0,
+            job_id.0.to_string(),
+            "0000000000000001".to_string(),
+            "00000000".to_string(),
+        ),
+        meets_credited_difficulty: true,
+    };
+
+    let emitted = emit_pool_share(&ctx, pool_share).await.unwrap();
+
+    assert!(emitted);
+    let metrics = ctx.metrics.get_metrics().await;
+    assert_eq!(metrics.weak_shares_carried_by_node, 3);
+    assert_eq!(metrics.weak_shares_carried_on_chain, 0);
+}
+
 /// A job without a share commitment (solo or Hydrapool mode) has no share to
 /// name, and its tree is kept all the same.
 #[tokio::test]
@@ -84,6 +144,8 @@ async fn a_tree_job_without_a_share_commitment_is_kept_without_a_share() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         &ctx.tracker_handle,
     );
     let mut job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -117,6 +179,8 @@ async fn a_bchn_accepted_submission_records_the_actual_share_and_resets_effort_o
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         &context.tracker_handle,
     );
     let job = context.tracker_handle.get_job(job_id).unwrap();
@@ -191,6 +255,8 @@ async fn a_failed_tree_write_still_hands_the_block_off() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         &ctx.tracker_handle,
     );
     let job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -227,6 +293,8 @@ async fn sv1_keeps_a_found_tree_even_when_the_share_pipeline_rejects_it() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         &ctx.tracker_handle,
     );
     let job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -257,6 +325,8 @@ async fn a_private_declarators_tree_is_kept_before_waiting_for_its_broadcast() {
         &prepared,
         Some(&payout),
         Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
         &ctx.tracker_handle,
     );
     let mut job = ctx.tracker_handle.get_job(job_id).unwrap();
@@ -352,6 +422,7 @@ async fn test_handle_submit_meets_difficulty_should_submit() {
         cash_share: None,
         template_refresh_tx: Some(template_refresh_tx),
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -448,6 +519,7 @@ async fn test_handle_submit_a_meets_difficulty_should_submit() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let response = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -535,6 +607,7 @@ async fn test_handle_submit_with_version_rolling_meets_difficulty_should_submit(
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let response = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -632,6 +705,7 @@ async fn test_handle_submit_triggers_difficulty_adjustment() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -707,6 +781,7 @@ async fn test_handle_submit_with_stale_job_returns_error() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -777,6 +852,7 @@ async fn test_handle_submit_with_less_difficulty_than_session_is_rejected_but_em
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -849,6 +925,7 @@ async fn test_handle_submit_duplicate_share_is_rejected() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let message = handle_submit(submit.clone(), &mut session, ctx)
@@ -889,6 +966,7 @@ async fn test_handle_submit_duplicate_share_is_rejected() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let message2 = handle_submit(submit, &mut session, ctx2).await.unwrap();
@@ -959,6 +1037,7 @@ async fn test_handle_submit_accepts_low_difficulty_share_when_ignore_difficulty_
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let message = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1042,6 +1121,7 @@ async fn test_handle_submit_emits_coinbase_proof_of_share_coinbase() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1108,6 +1188,7 @@ async fn test_handle_submit_not_subscribed_returns_error() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1195,6 +1276,7 @@ async fn test_handle_submit_unknown_job_id_returns_invalid_jobid() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     // Verify the inserted job is properly registered
@@ -1300,6 +1382,7 @@ async fn test_handle_submit_validation_failure_returns_other_unknown_with_messag
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1389,6 +1472,7 @@ async fn test_handle_submit_bad_nonce_returns_error_not_panic() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1479,6 +1563,7 @@ async fn test_handle_submit_none_version_bits_returns_error_not_panic() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1547,6 +1632,7 @@ async fn test_handle_submit_unauthorized_returns_error() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1645,6 +1731,7 @@ async fn test_p2poolv2_mode_accepts_and_accounts_share_below_pool_difficulty_wit
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1737,6 +1824,7 @@ async fn test_hydrapool_mode_accepts_share_despite_hard_pool_difficulty() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1831,6 +1919,7 @@ async fn test_hydrapool_mode_does_not_store_share_below_session_difficulty() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -1921,6 +2010,7 @@ async fn test_hydrapool_mode_ignore_difficulty_does_not_store_share_below_sessio
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -2004,6 +2094,7 @@ async fn a_winning_share_sends_its_miner_the_token_proof() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: Some(MergeMiningLogs::from_logs(leaves, wins)),
+        weak_share_tx: None,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
@@ -2077,6 +2168,7 @@ async fn a_winning_share_without_the_disclosure_sends_nothing_new() {
         cash_share: None,
         template_refresh_tx: None,
         merge_mining_logs: None,
+        weak_share_tx: None,
     };
 
     let messages = handle_submit(submit, &mut session, ctx).await.unwrap();

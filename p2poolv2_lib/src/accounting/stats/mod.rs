@@ -4,7 +4,7 @@
 
 pub mod metrics;
 pub mod pool_local_stats;
-mod prom;
+pub mod prom;
 pub mod user;
 pub mod user_stats;
 pub mod worker;

@@ -35,6 +35,7 @@ pub async fn handle_stratum_share(
         bitcoin_coinbase,
         coinbase_proof,
         share_transactions: other_share_transactions,
+        weak_shares,
     } = emission;
 
     // The weak block hash is what makes this coinbase unique to this
@@ -62,6 +63,7 @@ pub async fn handle_stratum_share(
         transactions: share_transactions,
         template_merkle_branches,
         bitcoin_coinbase,
+        weak_shares: weak_shares.to_vec(),
     };
 
     debug!(
@@ -82,6 +84,7 @@ mod tests {
     use super::*;
     use crate::accounting::payout::coinbase_budget::PayoutSplit;
     use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+    use crate::accounting::payout::payout_levels::PplnsWeights;
     use crate::address::share_owner::ShareOwner;
     use crate::config::Chain;
     use crate::pool_difficulty::MockPoolDifficulty;
@@ -156,6 +159,7 @@ mod tests {
             bitcoin_coinbase: test_coinbase_transaction(1),
             coinbase_proof: CoinbaseProof::default(),
             share_transactions: Arc::from([]),
+            weak_shares: Arc::from([]),
         }
     }
 
@@ -322,6 +326,7 @@ mod tests {
             bitcoin_coinbase: test_coinbase_transaction(1),
             coinbase_proof: CoinbaseProof::default(),
             share_transactions: Arc::from([]),
+            weak_shares: Arc::from([]),
         };
 
         let result = handle_stratum_share(emission, &mock_chain_store).await;
@@ -349,7 +354,7 @@ mod tests {
         ));
         let outputs = build_pplns_outputs(
             template.coinbasevalue,
-            &HashMap::from([(payout.clone(), 1)]),
+            &PplnsWeights::without_levels(HashMap::from([(payout.clone(), 1)])),
             &None,
             None,
             &None,
@@ -385,7 +390,8 @@ mod tests {
         );
         let tracker = start_tracker_actor();
         let owner = ShareOwner::CashP2pkh([9; 20]);
-        let (job_id, _) = insert_miner_job(&prepared, Some(&payout), Some(owner), &tracker);
+        let (job_id, _) =
+            insert_miner_job(&prepared, Some(&payout), Some(owner), None, None, &tracker);
         let job = tracker.get_job(job_id).unwrap();
         let commitment = job.share_commitment.clone().unwrap();
         assert_eq!(
@@ -424,6 +430,7 @@ mod tests {
             coinbase_proof: CoinbaseProof::from_coinbase(&coinbase, commitment.share_witness_root)
                 .unwrap(),
             share_transactions: Arc::clone(&job.share_transactions),
+            weak_shares: Arc::clone(&job.weak_shares),
         };
         let mut mock_chain_store = ChainStoreHandle::default();
         mock_chain_store

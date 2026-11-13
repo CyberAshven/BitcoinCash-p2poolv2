@@ -17,6 +17,7 @@ pub mod request_response_handler;
 pub mod request_sender;
 pub mod response_worker;
 pub mod validation_worker;
+pub mod weak_share_worker;
 pub use crate::config::Config;
 pub mod actor;
 pub mod messages;
@@ -572,6 +573,8 @@ impl Node {
                     "Identified Peer {} on connection {} with protocol version {}",
                     peer_id, connection_id, info.protocol_version
                 );
+                self.connection_tracker
+                    .record_identified(&peer_id, info.agent_version.clone());
                 // Add the peer's routable advertised addresses to Kademlia
                 for addr in info.listen_addrs {
                     if address_filter::is_routable_multiaddr(&addr) {
@@ -641,6 +644,7 @@ impl Node {
         match event.result {
             Ok(rtt) => {
                 debug!("Ping to {} succeeded, rtt: {:?}", event.peer, rtt);
+                self.connection_tracker.record_ping_rtt(&event.peer, rtt);
                 self.connection_tracker
                     .clear_ping_failures(event.connection);
             }
@@ -822,7 +826,7 @@ mod tests {
         let (block_fetcher_tx, _block_fetcher_rx) = create_block_fetcher_channel();
         let (validation_tx, _validation_rx) = create_validation_channel();
         let (block_receiver_handle, _block_receiver_rx) = create_block_receiver_channel();
-        let (monitoring_tx, _monitoring_rx) = create_monitoring_event_channel();
+        let monitoring_tx = create_monitoring_event_channel();
         let (response_worker_tx, _response_worker_rx) = create_response_worker_channel();
         let mut node = Node::new(
             config.clone(),
@@ -940,7 +944,7 @@ mod tests {
         let (block_fetcher_tx, _block_fetcher_rx) = create_block_fetcher_channel();
         let (validation_tx, _validation_rx) = create_validation_channel();
         let (block_receiver_handle, _block_receiver_rx) = create_block_receiver_channel();
-        let (monitoring_tx, _monitoring_rx) = create_monitoring_event_channel();
+        let monitoring_tx = create_monitoring_event_channel();
         let (response_worker_tx, _response_worker_rx) = create_response_worker_channel();
         Node::new(
             config,

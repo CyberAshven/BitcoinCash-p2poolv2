@@ -15,28 +15,34 @@ use super::tracker::{JobDetails, JobId, JobTracker};
 use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, bch_split_for_commitment};
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
+use crate::accounting::payout::payout_levels::PplnsWeights;
 use crate::accounting::payout::payout_tree::PayoutTree;
+use crate::pool_difficulty::target_to_u512;
 use crate::shares::auxpow::{SplitSlot, TokenSplit};
+use crate::shares::band::{BAND_CAP_UNIT, JobBand, compact_at_or_above};
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::{ShareTransaction, encode_optional_address};
 use crate::shares::share_commitment::{
-    BCH_JOB_TOKEN_VERSION, ShareCommitment, append_pool_merge_mining, append_share_version,
-    build_commitment_prefix, build_commitment_suffix, commitment_digest,
+    BCH_JOB_TOKEN_VERSION, ShareCommitment, append_band, append_payout_level,
+    append_pool_merge_mining, append_share_version, append_weak_shares, build_commitment_prefix,
+    build_commitment_suffix, commitment_digest,
 };
 use crate::shares::share_version::ShareVersion;
 use crate::shares::transactions::coinbase::compute_witness_root;
 use crate::shares::validation::BLOCK_TXS_SIZE_LIMIT;
+use crate::shares::weak::{
+    GENESIS_WEAK_RATIO, WEAK_BYTES, WEAK_CAP, WeakShare, empty_weak_root, weak_root,
+};
 use crate::shares::witness_commitment::WitnessCommitment;
 use crate::stratum::parse_password::MINER_DONATION_STEP;
 use crate::stratum::util::{reverse_four_byte_chunks, to_be_hex};
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoin::consensus::Encodable;
-use bitcoin::hashes::{self, Hash};
+use bitcoin::hashes::{self, Hash, sha256d};
 use bitcoin::transaction::Version;
-use bitcoin::{BlockHash, CompactTarget, WitnessMerkleNode};
-use p2poolv2_config::MAX_BITCOIN_CASH_CUT;
+use bitcoin::{BlockHash, CompactTarget, Target, WitnessMerkleNode};
+use p2poolv2_config::{DEFAULT_PAYOUT_LEVEL, DEFAULT_SPEND_COST, MAX_BITCOIN_CASH_CUT};
 use p2poolv2_wallet::payout_address::PayoutAddress;
-use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 /// Hex characters per byte.
@@ -206,8 +212,9 @@ struct MinerDonations {
 /// params rebuilt at that donation instead ([`Self::for_miner_donation`]),
 /// shared by every miner who chose the same.
 pub struct PreparedNotifyParams {
-    /// Exact difficulty weights at this job's share-chain anchor.
-    pplns_weights: Option<Arc<HashMap<PayoutAddress, u128>>>,
+    /// Exact difficulty weights at this job's share-chain anchor, and on
+    /// Bitcoin Cash the payout level each payee is drawn at.
+    pplns_weights: Option<Arc<PplnsWeights>>,
     /// Set on a Bitcoin Cash P2Pool node's own params: how to rebuild them
     /// for a miner's own donation ([`Self::for_miner_donation`]).
     miner_donations: Option<Box<MinerDonations>>,
@@ -226,14 +233,58 @@ pub struct PreparedNotifyParams {
     /// prev_share_blockhash + uncles + bits
     commitment_prefix: Vec<u8>,
     /// Pre-serialized commitment fields after time (before miner address):
-    /// donation_address + donation + fee_address + fee
+    /// donation_address + donation + fee_address + fee, and on Bitcoin Cash
+    /// the share version, the band of a job at the minimum and the default
+    /// payout level
     commitment_suffix: Vec<u8>,
+    /// Where the band starts in `commitment_suffix`, on Bitcoin Cash: a
+    /// heavier job's own band, or a miner's own payout level, replaces the
+    /// rest from there ([`Self::commitment_suffix_for`]). `None` on Bitcoin,
+    /// which has no band and no levels.
+    commitment_band_offset: Option<usize>,
     /// Previous share block hash (for building ShareCommitment struct)
     prev_share_blockhash: BlockHash,
     /// Uncle block hashes (for building ShareCommitment struct)
     uncles: Vec<BlockHash>,
-    /// Share chain difficulty target (for building ShareCommitment struct)
+    /// Share chain difficulty target (for building ShareCommitment struct):
+    /// the minimum, `T_asert`, on Bitcoin Cash
     bits: CompactTarget,
+    /// The band cap every share on these params carries, one step from the
+    /// mining base's (`shares::band::next_band_cap`). Bitcoin Cash only.
+    band_cap: u32,
+    /// The share rate, in shares a second, above which a miner gets heavier
+    /// shares (`stratum::work::band_policy`). `None` without an estimate of
+    /// the pool's block rate, or on Bitcoin: every job is at the minimum.
+    share_rate_limit: Option<f64>,
+    /// The chain's target ceiling, the easiest the minimum can be: heavier
+    /// jobs go no further than the room the minimum has to ease before it
+    /// (`stratum::work::band_policy`). `None` leaves them uncapped by it.
+    target_ceiling: Option<CompactTarget>,
+    /// The pool's hashrate, in hashes a second, from its newest confirmed
+    /// shares, for the node's payout level policy
+    /// (`stratum::work::level_policy`). `None` without an estimate, or on
+    /// Bitcoin.
+    pool_hashrate: Option<f64>,
+    /// The payout level of a job whose miner chose none: the node's
+    /// `payout_level`. Committed only on Bitcoin Cash.
+    payout_level: u8,
+    /// What spending one payment costs, in satoshis: the node's
+    /// `spend_cost`, for a miner's `fee-tolerance=` and the level policy.
+    spend_cost: u64,
+    /// The weak ratio every share on these params carries, one step from the
+    /// mining base's (`shares::weak::next_weak_ratio`). Bitcoin Cash only.
+    weak_ratio: u32,
+    /// The weak shares every share on these params carries, taken from the
+    /// node's weak pool when the params were built; committed after the
+    /// payout level.
+    weak_shares: Arc<[WeakShare]>,
+    /// The merkle root of `weak_shares`' whole encodings
+    /// (`shares::weak::weak_root`).
+    weak_root: sha256d::Hash,
+    /// The weak target of the mining base (`shares::weak::parent_weak_target`):
+    /// a submission on a job at the minimum that meets it but not the share
+    /// target becomes a weak share. `None` on Bitcoin.
+    weak_target: Option<Target>,
     /// Donation address for developers
     donation_address: Option<PayoutAddress>,
     /// Donation in basis points
@@ -296,10 +347,27 @@ impl PreparedNotifyParams {
         self.prev_share_blockhash
     }
 
-    /// Exact difficulty weights at [`Self::prev_share_blockhash`], which
+    /// Exact difficulty weights at [`Self::prev_share_blockhash`], with the
+    /// payout levels the draw uses on Bitcoin Cash, which
     /// [`Self::declared_outputs`] splits; `None` without a PPLNS snapshot.
-    pub(crate) fn pplns_weights(&self) -> Option<&HashMap<PayoutAddress, u128>> {
+    pub(crate) fn pplns_weights(&self) -> Option<&PplnsWeights> {
         self.pplns_weights.as_deref()
+    }
+
+    /// The payout level of a job whose miner chose none: the node's own.
+    pub(crate) fn payout_level(&self) -> u8 {
+        self.payout_level
+    }
+
+    /// What spending one payment costs, in satoshis.
+    pub(crate) fn spend_cost(&self) -> u64 {
+        self.spend_cost
+    }
+
+    /// The pool's hashrate, in hashes a second, from its newest confirmed
+    /// shares; `None` without an estimate.
+    pub(crate) fn pool_hashrate(&self) -> Option<f64> {
+        self.pool_hashrate
     }
 
     /// The params a miner mines when their login chose a donation of
@@ -392,6 +460,14 @@ impl PreparedNotifyParams {
         .include_merge_mining(miner_donations.include_merge_mining)
         .merge_tokens(self.merge_tokens.clone())
         .share_version(self.share_version)
+        .band_cap(self.band_cap)
+        .share_rate_limit(self.share_rate_limit)
+        .target_ceiling(self.target_ceiling)
+        .pool_hashrate(self.pool_hashrate)
+        .payout_level(self.payout_level)
+        .spend_cost(self.spend_cost)
+        .weak_shares(self.weak_ratio, self.weak_shares.to_vec())
+        .weak_target(self.weak_target)
         .share_transactions(self.share_transactions.to_vec());
         builder.pplns_weights = Some(Arc::clone(weights));
         builder.build()
@@ -409,11 +485,27 @@ impl PreparedNotifyParams {
         Some(tokens.miner_job(address.script_pubkey().as_bytes(), self.merge_token_split))
     }
 
-    /// Versioned BCH job terms, preceded by an unpredictable connection nonce.
+    /// [`Self::mining_job_token_at_level`] at the node's own payout level.
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn mining_job_token(
         &self,
         nonce: [u8; 32],
         time: u32,
+    ) -> Result<Vec<u8>, WorkError> {
+        self.mining_job_token_at_level(nonce, time, self.payout_level)
+    }
+
+    /// Versioned BCH job terms, preceded by an unpredictable connection nonce.
+    ///
+    /// The terms are the template's own: a declared job's share is at the
+    /// minimum, its bits, carries the template's band cap and weak ratio,
+    /// and carries no weak shares. Its payout level is `payout_level`, the
+    /// one the token's identity chose or the node's own.
+    pub(crate) fn mining_job_token_at_level(
+        &self,
+        nonce: [u8; 32],
+        time: u32,
+        payout_level: u8,
     ) -> Result<Vec<u8>, WorkError> {
         let mut token = Vec::with_capacity(255);
         token.push(BCH_JOB_TOKEN_VERSION);
@@ -431,6 +523,13 @@ impl PreparedNotifyParams {
             .consensus_encode(&mut token)
             .expect("vector writer");
         self.share_version
+            .consensus_encode(&mut token)
+            .expect("vector writer");
+        self.band_cap
+            .consensus_encode(&mut token)
+            .expect("vector writer");
+        token.push(payout_level);
+        self.weak_ratio
             .consensus_encode(&mut token)
             .expect("vector writer");
         if token.len() > 255 {
@@ -479,9 +578,118 @@ impl PreparedNotifyParams {
         }
     }
 
-    /// The ASERT-computed pool target for shares built on these params.
+    /// The ASERT-computed pool target for shares built on these params: the
+    /// minimum on Bitcoin Cash, where a heavier job's shares are harder.
     pub fn bits(&self) -> bitcoin::CompactTarget {
         self.bits
+    }
+
+    /// The band cap every share on these params carries.
+    pub(crate) fn band_cap(&self) -> u32 {
+        self.band_cap
+    }
+
+    /// The share rate, in shares a second, above which a miner gets heavier
+    /// shares; `None` when every job is at the minimum.
+    pub(crate) fn share_rate_limit(&self) -> Option<f64> {
+        self.share_rate_limit
+    }
+
+    /// The chain's target ceiling, which bounds how heavy a job gets;
+    /// `None` when it does not.
+    pub(crate) fn target_ceiling(&self) -> Option<CompactTarget> {
+        self.target_ceiling
+    }
+
+    /// The band of a job at the minimum: its bits are the minimum, and it
+    /// wants nothing harder.
+    pub(crate) fn minimum_job_band(&self) -> JobBand {
+        JobBand {
+            bits: self.bits,
+            wanted_bits: self.bits,
+        }
+    }
+
+    /// `bits` as a share's band field holds it: itself on Bitcoin Cash, zero
+    /// on Bitcoin, whose shares carry no band.
+    fn band_bits(&self, bits: CompactTarget) -> CompactTarget {
+        if self.commitment_band_offset.is_some() {
+            bits
+        } else {
+            CompactTarget::default()
+        }
+    }
+
+    /// The band cap a share on these params commits: zero on Bitcoin.
+    fn commitment_band_cap(&self) -> u32 {
+        if self.commitment_band_offset.is_some() {
+            self.band_cap
+        } else {
+            0
+        }
+    }
+
+    /// The commitment suffix of a job whose shares carry `job_band` and
+    /// `payout_level`: the shared suffix up to its band, then that job's band
+    /// and level and the weak shares every job on these params carries.
+    /// `None` on Bitcoin, which has none of them.
+    fn commitment_suffix_for(&self, job_band: JobBand, payout_level: u8) -> Option<Vec<u8>> {
+        let band_offset = self.commitment_band_offset?;
+        let mut suffix = Vec::with_capacity(self.commitment_suffix.len());
+        suffix.extend_from_slice(&self.commitment_suffix[..band_offset]);
+        append_band(&mut suffix, job_band.wanted_bits, self.band_cap, self.bits);
+        append_payout_level(&mut suffix, payout_level);
+        append_weak_shares(
+            &mut suffix,
+            self.weak_ratio,
+            self.weak_shares.len() as u16,
+            self.weak_root,
+        );
+        Some(suffix)
+    }
+
+    /// The weak ratio, count and root a share on these params commits: zero
+    /// on Bitcoin, whose shares carry no weak shares.
+    fn commitment_weak_shares(&self) -> (u32, u16, sha256d::Hash) {
+        if self.commitment_band_offset.is_some() {
+            (
+                self.weak_ratio,
+                self.weak_shares.len() as u16,
+                self.weak_root,
+            )
+        } else {
+            (0, 0, empty_weak_root())
+        }
+    }
+
+    /// The weak ratio every share on these params carries. Read by the sim's
+    /// emitter for its stats.
+    #[cfg_attr(not(feature = "sim"), allow(dead_code))]
+    pub(crate) fn weak_ratio(&self) -> u32 {
+        self.weak_ratio
+    }
+
+    /// The weak target of the mining base: what a weak share on a job at the
+    /// minimum on these params must meet. `None` on Bitcoin. Read by the sim's
+    /// emitter; stratum reads it through each job (`JobDetails::weak_target`).
+    #[cfg_attr(not(feature = "sim"), allow(dead_code))]
+    pub(crate) fn weak_target(&self) -> Option<Target> {
+        self.weak_target
+    }
+
+    /// The target a session's difficulty ceiling follows for a job with
+    /// `job_band` on these params: a job at the minimum, which makes weak
+    /// shares, its weak target, rounded to the easiest compact form at least
+    /// that easy, so the miner submits every hash a weak share needs; any
+    /// other job its own bits (`share_difficulty_ceiling`).
+    pub(crate) fn session_ceiling_bits(&self, job_band: Option<JobBand>) -> CompactTarget {
+        let job_bits = job_band.map_or(self.bits, |band| band.bits);
+        match self.weak_target {
+            Some(weak_target) if job_bits == self.bits => {
+                compact_at_or_above(target_to_u512(weak_target))
+            }
+            _ => job_bits,
+        }
     }
 
     /// The share transactions shares built on these params carry.
@@ -584,7 +792,7 @@ fn build_json_template(
 /// params and use the miner address to build share commitment, thus
 /// the coinbase1 for each individual client.
 pub(crate) struct PreparedNotifyParamsBuilder {
-    pplns_weights: Option<Arc<HashMap<PayoutAddress, u128>>>,
+    pplns_weights: Option<Arc<PplnsWeights>>,
     miner_donation_address: Option<PayoutAddress>,
     payout_split: PayoutSplit,
     template: Arc<BlockTemplate>,
@@ -601,6 +809,15 @@ pub(crate) struct PreparedNotifyParamsBuilder {
     include_merge_mining: bool,
     merge_tokens: Option<Arc<TokenSet>>,
     share_version: ShareVersion,
+    band_cap: u32,
+    share_rate_limit: Option<f64>,
+    target_ceiling: Option<CompactTarget>,
+    pool_hashrate: Option<f64>,
+    payout_level: u8,
+    spend_cost: u64,
+    weak_ratio: u32,
+    weak_shares: Vec<WeakShare>,
+    weak_target: Option<Target>,
     share_transactions: Vec<ShareTransaction>,
 }
 
@@ -630,8 +847,38 @@ impl PreparedNotifyParamsBuilder {
             include_merge_mining: false,
             merge_tokens: None,
             share_version: ShareVersion::CURRENT,
+            band_cap: BAND_CAP_UNIT,
+            share_rate_limit: None,
+            target_ceiling: None,
+            pool_hashrate: None,
+            payout_level: DEFAULT_PAYOUT_LEVEL,
+            spend_cost: DEFAULT_SPEND_COST,
+            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_shares: Vec::new(),
+            weak_target: None,
             share_transactions: Vec::new(),
         }
+    }
+
+    /// The weak ratio every share on these params carries, one step from the
+    /// mining base's (`shares::weak::next_weak_ratio`), and the weak shares
+    /// they carry, from the node's weak pool. By default the genesis ratio,
+    /// which stays put under a mining base carrying none, and no weak shares.
+    /// `build` keeps them within `WEAK_CAP` and `WEAK_BYTES`. Committed only
+    /// on Bitcoin Cash (`include_merge_mining`).
+    pub fn weak_shares(mut self, weak_ratio: u32, weak_shares: Vec<WeakShare>) -> Self {
+        self.weak_ratio = weak_ratio;
+        self.weak_shares = weak_shares;
+        self
+    }
+
+    /// The mining base's weak target: a submission on a job at the minimum
+    /// that meets it but not the share target becomes a weak share, and the
+    /// session difficulty ceiling for such jobs follows it. `None`, the
+    /// default, makes no weak shares.
+    pub fn weak_target(mut self, weak_target: Option<Target>) -> Self {
+        self.weak_target = weak_target;
+        self
     }
 
     /// Share transactions for every share on these params to carry after its
@@ -649,8 +896,30 @@ impl PreparedNotifyParamsBuilder {
         self
     }
 
-    pub fn pplns_weights(mut self, weights: Option<HashMap<PayoutAddress, u128>>) -> Self {
+    pub fn pplns_weights(mut self, weights: Option<PplnsWeights>) -> Self {
         self.pplns_weights = weights.map(Arc::new);
+        self
+    }
+
+    /// The payout level of a job whose miner chose none: the node's
+    /// `payout_level`, [`DEFAULT_PAYOUT_LEVEL`] by default. Committed only on
+    /// Bitcoin Cash (`include_merge_mining`).
+    pub fn payout_level(mut self, payout_level: u8) -> Self {
+        self.payout_level = payout_level;
+        self
+    }
+
+    /// What spending one payment costs, in satoshis: the node's
+    /// `spend_cost`, [`DEFAULT_SPEND_COST`] by default.
+    pub fn spend_cost(mut self, spend_cost: u64) -> Self {
+        self.spend_cost = spend_cost;
+        self
+    }
+
+    /// The pool's hashrate, in hashes a second, for the node's payout level
+    /// policy; `None`, the default, leaves every miner at its chosen level.
+    pub fn pool_hashrate(mut self, pool_hashrate: Option<f64>) -> Self {
+        self.pool_hashrate = pool_hashrate;
         self
     }
 
@@ -697,6 +966,31 @@ impl PreparedNotifyParamsBuilder {
     /// current version by default.
     pub fn share_version(mut self, share_version: ShareVersion) -> Self {
         self.share_version = share_version;
+        self
+    }
+
+    /// The band cap every share on these params carries, one step from the
+    /// mining base's (`shares::band::next_band_cap`); a band of one by
+    /// default. Committed only on Bitcoin Cash (`include_merge_mining`).
+    pub fn band_cap(mut self, band_cap: u32) -> Self {
+        self.band_cap = band_cap;
+        self
+    }
+
+    /// The share rate, in shares a second, above which a miner gets heavier
+    /// shares (`stratum::work::band_policy`); `None`, the default, keeps
+    /// every job at the minimum.
+    pub fn share_rate_limit(mut self, share_rate_limit: Option<f64>) -> Self {
+        self.share_rate_limit = share_rate_limit;
+        self
+    }
+
+    /// The chain's target ceiling: a heavier job is at most as many times
+    /// the minimum's work as the minimum is times the ceiling's
+    /// (`stratum::work::band_policy`); `None`, the default, leaves heavier
+    /// jobs uncapped by it.
+    pub fn target_ceiling(mut self, target_ceiling: Option<CompactTarget>) -> Self {
+        self.target_ceiling = target_ceiling;
         self
     }
 
@@ -864,6 +1158,28 @@ impl PreparedNotifyParamsBuilder {
         if self.include_merge_mining {
             append_share_version(&mut commitment_suffix, self.share_version);
         }
+        //* The band of a job at the minimum and the node's payout level follow
+        //* the share version, and the weak shares follow the level; a heavier
+        //* job, or a miner at another level, replaces all three from the
+        //* band's offset.
+        let weak_shares = if self.include_merge_mining {
+            fit_weak_shares(self.weak_shares)
+        } else {
+            Vec::new()
+        };
+        let weak_root = weak_root(&weak_shares);
+        let commitment_band_offset = self.include_merge_mining.then(|| {
+            let band_offset = commitment_suffix.len();
+            append_band(&mut commitment_suffix, self.bits, self.band_cap, self.bits);
+            append_payout_level(&mut commitment_suffix, self.payout_level);
+            append_weak_shares(
+                &mut commitment_suffix,
+                self.weak_ratio,
+                weak_shares.len() as u16,
+                weak_root,
+            );
+            band_offset
+        });
 
         let miner_donations = self.miner_donation_address.map(|address| {
             Box::new(MinerDonations {
@@ -885,9 +1201,20 @@ impl PreparedNotifyParamsBuilder {
             coinbase2_placeholder_len,
             commitment_prefix,
             commitment_suffix,
+            commitment_band_offset,
             prev_share_blockhash: self.prev_share_blockhash,
             uncles: self.uncles,
             bits: self.bits,
+            band_cap: self.band_cap,
+            share_rate_limit: self.share_rate_limit,
+            target_ceiling: self.target_ceiling,
+            pool_hashrate: self.pool_hashrate,
+            payout_level: self.payout_level,
+            spend_cost: self.spend_cost,
+            weak_ratio: self.weak_ratio,
+            weak_shares: weak_shares.into(),
+            weak_root,
+            weak_target: self.weak_target.filter(|_| self.include_merge_mining),
             donation_address: self.donation_address,
             donation: self.donation,
             fee_address: self.fee_address,
@@ -934,6 +1261,23 @@ pub(crate) fn token_split(
         donation: slot(donation_address, donation)?,
         fee: slot(fee_address, fee)?,
     })
+}
+
+/// Keep the weak shares, in the order given, that fit one share's `WEAK_CAP`
+/// and `WEAK_BYTES`: the rest stay in the weak pool for a later share. A
+/// weak share too large to fit is skipped rather than ending the list, so a
+/// later smaller one can still be carried.
+fn fit_weak_shares(weak_shares: Vec<WeakShare>) -> Vec<WeakShare> {
+    let mut carried = Vec::with_capacity(weak_shares.len().min(WEAK_CAP));
+    let mut carried_bytes: usize = 0;
+    for weak_share in weak_shares {
+        let size = weak_share.encoded_size();
+        if carried.len() < WEAK_CAP && carried_bytes.saturating_add(size) <= WEAK_BYTES {
+            carried_bytes += size;
+            carried.push(weak_share);
+        }
+    }
+    carried
 }
 
 /// Bytes a miner's bitcoin coinbase may add to the one `build` sizes: the
@@ -1035,10 +1379,23 @@ fn build_per_miner_coinbase2(
 /// share commitment digests it, and the job keeps the leaves for the
 /// miner's disclosure and wins. A job without a payout address carries the
 /// empty commitment.
+///
+/// On Bitcoin Cash `job_band` gives a heavier miner's job its own target and
+/// wanted target inside the band (`stratum::work::band_policy`): the
+/// commitment then carries them, its digest is built from a prefix with
+/// those bits and a suffix with that band. `None`, and every Bitcoin job,
+/// mines at the minimum, `prepared.bits`.
+///
+/// On Bitcoin Cash `payout_level` is the miner's own payout level
+/// (`stratum::work::level_policy`), which the commitment carries after the
+/// band. `None` is the node's level, `prepared.payout_level()`. A Bitcoin
+/// job carries no level.
 pub(crate) fn insert_miner_job(
     prepared: &PreparedNotifyParams,
     miner_bitcoin_address: Option<&PayoutAddress>,
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
+    job_band: Option<JobBand>,
+    payout_level: Option<u8>,
     tracker_handle: &JobTracker,
 ) -> (JobId, String) {
     let fresh_time = SystemTimeProvider.seconds_since_epoch() as u32;
@@ -1050,6 +1407,29 @@ pub(crate) fn insert_miner_job(
         .map(Arc::new);
     let pool_merge_mining = merge_tokens.as_ref().map(|job| job.commitment);
 
+    let minimum_band = prepared.minimum_job_band();
+    let requested_band = job_band.unwrap_or(minimum_band);
+    let requested_level = payout_level.unwrap_or(prepared.payout_level);
+    //* A heavier job's band, or a miner's own level, replaces the template's
+    //* from the band's offset. Bitcoin has neither, so its suffix stays and
+    //* its jobs keep the minimum.
+    let own_suffix = (requested_band != minimum_band || requested_level != prepared.payout_level)
+        .then(|| prepared.commitment_suffix_for(requested_band, requested_level))
+        .flatten();
+    let (job_band, job_level) = if prepared.commitment_band_offset.is_some() {
+        (requested_band, requested_level)
+    } else {
+        (minimum_band, 0)
+    };
+    //* Only a job at the minimum makes weak shares (rule 1 of part 3),
+    //* including a heavier miner's that the band cap holds at the minimum.
+    let weak_target = if job_band.bits == prepared.bits {
+        prepared.weak_target
+    } else {
+        None
+    };
+    let (weak_ratio, weak_count, weak_root) = prepared.commitment_weak_shares();
+
     // Build ShareCommitment only when both addresses are available: the share
     // chain coinbase needs an owner and the bitcoin coinbase needs a payee.
     let share_commitment = match (miner_bitcoin_address, miner_address) {
@@ -1059,7 +1439,7 @@ pub(crate) fn insert_miner_job(
             miner_bitcoin_address: bitcoin_address.clone(),
             miner_address: share_address,
             share_witness_root: prepared.share_witness_root,
-            bits: prepared.bits,
+            bits: job_band.bits,
             time: fresh_time,
             donation_address: prepared.donation_address.clone(),
             donation: prepared.donation,
@@ -1068,21 +1448,39 @@ pub(crate) fn insert_miner_job(
             bch_coinbase: None,
             pool_merge_mining,
             share_version: prepared.share_version,
+            asert_bits: prepared.band_bits(prepared.bits),
+            wanted_bits: prepared.band_bits(job_band.wanted_bits),
+            band_cap: prepared.commitment_band_cap(),
+            payout_level: job_level,
+            weak_ratio,
+            weak_count,
+            weak_root,
         }),
         _ => None,
     };
 
+    //* A heavier job's own bits replace the template's minimum in the
+    //* digest's prefix.
+    let rebuilt_prefix = (job_band != minimum_band).then(|| {
+        build_commitment_prefix(
+            prepared.prev_share_blockhash,
+            &prepared.uncles,
+            job_band.bits,
+        )
+    });
     // The hash the miner embeds in its bitcoin coinbase must be the hash of the
     // commitment we store, so derive one from the other rather than building
     // the same digest twice. A miner's token root follows the shared suffix,
     // as `ShareCommitment::hash` digests it.
-    let miner_suffix = pool_merge_mining.map(|commitment| {
-        let mut suffix = prepared.commitment_suffix.clone();
-        append_pool_merge_mining(&mut suffix, &commitment);
-        suffix
-    });
+    let mut miner_suffix = own_suffix;
+    if let Some(commitment) = pool_merge_mining {
+        let suffix = miner_suffix.get_or_insert_with(|| prepared.commitment_suffix.clone());
+        append_pool_merge_mining(suffix, &commitment);
+    }
     let commitment_hash_hex = get_commitment_hex(
-        &prepared.commitment_prefix,
+        rebuilt_prefix
+            .as_deref()
+            .unwrap_or(&prepared.commitment_prefix),
         fresh_time,
         miner_suffix
             .as_deref()
@@ -1126,6 +1524,8 @@ pub(crate) fn insert_miner_job(
             share_transactions: Arc::clone(&prepared.share_transactions),
             merge_tokens,
             payout_tree: prepared.payout_tree.clone(),
+            weak_shares: Arc::clone(&prepared.weak_shares),
+            weak_target,
         },
     );
     (job_id, coinbase2)
@@ -1135,8 +1535,9 @@ pub(crate) fn insert_miner_job(
 ///
 /// Inserts the miner's job with [`insert_miner_job`] and overwrites the
 /// job id and coinbase2 placeholders in the pre-built JSON. The SV1 server
-/// uses [`build_notify_with_job_id`], which also gives the job's id.
-#[cfg(any(test, feature = "sim"))]
+/// uses [`build_notify_with_job_id`], which also gives the job's id. The job
+/// is at the minimum.
+#[cfg(test)]
 pub(crate) fn build_notify_from_prepared(
     prepared: &PreparedNotifyParams,
     miner_bitcoin_address: Option<&PayoutAddress>,
@@ -1147,23 +1548,31 @@ pub(crate) fn build_notify_from_prepared(
         prepared,
         miner_bitcoin_address,
         miner_address,
+        None,
+        None,
         tracker_handle,
     )
     .map(|(notify_json, _job_id)| notify_json)
 }
 
 /// [`build_notify_from_prepared`], also returning the id of the job it
-/// inserted, for what follows the notify (a miner's token leaves).
+/// inserted, for what follows the notify (a miner's token leaves). A heavier
+/// miner's `job_band` and a miner's own `payout_level` pass through to
+/// [`insert_miner_job`].
 pub(crate) fn build_notify_with_job_id(
     prepared: &PreparedNotifyParams,
     miner_bitcoin_address: Option<&PayoutAddress>,
     miner_address: Option<p2poolv2_wallet::share_owner::ShareOwner>,
+    job_band: Option<JobBand>,
+    payout_level: Option<u8>,
     tracker_handle: &JobTracker,
 ) -> Result<(String, JobId), WorkError> {
     let (job_id, coinbase2) = insert_miner_job(
         prepared,
         miner_bitcoin_address,
         miner_address,
+        job_band,
+        payout_level,
         tracker_handle,
     );
     let job_id_hex = format!("{job_id:016x}");

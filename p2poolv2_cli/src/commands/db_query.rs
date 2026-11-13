@@ -968,6 +968,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 200,
             bits: CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![UncleInfo {
                 blockhash: BlockHash::all_zeros(),
                 prev_blockhash: BlockHash::all_zeros(),
@@ -1112,6 +1113,7 @@ mod tests {
             miner_address: make_test_share_program(1).into(),
             timestamp: 1700000000,
             bits: CompactTarget::from_consensus(0x1d00ffff),
+            weak_count: 0,
             uncles: vec![p2poolv2_lib::store::dag_store::UncleInfo {
                 blockhash: BlockHash::from_str(
                     "00000000000000000000000000000000000000000000000000000000000000ff",

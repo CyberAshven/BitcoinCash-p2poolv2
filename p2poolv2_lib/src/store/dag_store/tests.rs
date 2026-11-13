@@ -3169,6 +3169,7 @@ fn test_share_info_serialization() {
         miner_address: make_test_share_program(1).into(),
         timestamp: 1_700_000_000,
         bits: CompactTarget::from_consensus(0x1b4188f5),
+        weak_count: 0,
         uncles: vec![],
     };
 
@@ -3207,6 +3208,7 @@ fn test_share_info_with_uncles_serialization() {
         miner_address: make_test_share_program(1).into(),
         timestamp: 1_700_000_020,
         bits: CompactTarget::from_consensus(0x1b4188f5),
+        weak_count: 0,
         uncles: vec![uncle],
     };
 
@@ -3404,6 +3406,133 @@ fn test_get_blockhashes_for_locator_matches_non_confirmed_block() {
     assert!(result.contains(&uncle.block_hash()));
     assert!(result.contains(&share_a.block_hash()));
     assert!(result.contains(&share_b.block_hash()));
+}
+
+/// Forty children of `parent`, stored off any chain.
+fn store_siblings(store: &Store, parent: &ShareBlock) -> Vec<ShareBlock> {
+    (0..40)
+        .map(|nonce| {
+            let sibling = TestShareBlockBuilder::new()
+                .prev_share_blockhash(parent.block_hash().to_string())
+                .nonce(1000 + nonce)
+                .build();
+            store.store_with_valid_metadata(&sibling);
+            sibling
+        })
+        .collect()
+}
+
+/// A child of `parent` on the confirmed chain whose blockhash sorts above
+/// at least MAX_BLOCKS_PER_HEIGHT of `siblings`, so that sorting by
+/// blockhash alone would leave it out.
+fn confirmed_child_sorting_late(parent: &ShareBlock, siblings: &[ShareBlock]) -> ShareBlock {
+    (0..u32::MAX)
+        .map(|nonce| {
+            TestShareBlockBuilder::new()
+                .prev_share_blockhash(parent.block_hash().to_string())
+                .work(2)
+                .nonce(nonce)
+                .build()
+        })
+        .find(|child| {
+            siblings
+                .iter()
+                .filter(|sibling| sibling.block_hash() < child.block_hash())
+                .count()
+                >= MAX_BLOCKS_PER_HEIGHT
+        })
+        .unwrap()
+}
+
+/// A height with more blocks than MAX_BLOCKS_PER_HEIGHT still sends its
+/// confirmed block. Before, the blocks were sorted by blockhash and cut at
+/// MAX_BLOCKS_PER_HEIGHT, so a confirmed block that sorted late was never
+/// sent, and a peer syncing from this node could not connect the headers
+/// above it (chipnet share height 37469, 2026-11-07).
+///
+/// Chain:
+///   genesis(h:0) -> confirmed_a(h:1) -> confirmed_b(h:2)
+///                \-> 40 siblings(h:1)
+#[test]
+fn test_dense_height_sends_the_confirmed_block() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+
+    let genesis = TestShareBlockBuilder::new().nonce(0xe9695791).build();
+    let mut batch = Store::get_write_batch();
+    store.setup_genesis(&genesis, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+
+    let siblings = store_siblings(&store, &genesis);
+    let confirmed_a = confirmed_child_sorting_late(&genesis, &siblings);
+    store.push_to_confirmed_chain(&confirmed_a).unwrap();
+    let confirmed_b = TestShareBlockBuilder::new()
+        .prev_share_blockhash(confirmed_a.block_hash().to_string())
+        .work(2)
+        .nonce(2)
+        .build();
+    store.push_to_confirmed_chain(&confirmed_b).unwrap();
+
+    let result = store
+        .get_blockhashes_for_locator(&[genesis.block_hash()], &BlockHash::all_zeros(), 600)
+        .unwrap();
+
+    assert!(result.contains(&confirmed_a.block_hash()));
+    assert!(result.contains(&confirmed_b.block_hash()));
+    let at_height_one = result
+        .iter()
+        .filter(|hash| **hash != confirmed_b.block_hash())
+        .count();
+    assert_eq!(at_height_one, MAX_BLOCKS_PER_HEIGHT);
+}
+
+/// At a dense height, an uncle the confirmed chain names is sent even when
+/// it sorts last, and a block whose parent was left out is left out too:
+/// its peer could not connect it.
+///
+/// Chain:
+///   genesis(h:0) -> confirmed_a(h:1) -> confirmed_b(h:2, uncle: named)
+///                \-> 40 siblings(h:1), among them named and left_out
+///                                      left_out -> orphan(h:2)
+#[test]
+fn test_dense_height_sends_named_uncles_and_drops_unconnectable_children() {
+    let temp_dir = tempdir().unwrap();
+    let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+
+    let genesis = TestShareBlockBuilder::new().nonce(0xe9695791).build();
+    let mut batch = Store::get_write_batch();
+    store.setup_genesis(&genesis, &mut batch).unwrap();
+    store.commit_batch(batch).unwrap();
+
+    let mut siblings = store_siblings(&store, &genesis);
+    let confirmed_a = confirmed_child_sorting_late(&genesis, &siblings);
+    store.push_to_confirmed_chain(&confirmed_a).unwrap();
+    siblings.sort_by_key(|sibling| sibling.block_hash());
+    let named = siblings.last().unwrap().clone();
+    let left_out = siblings[siblings.len() - 2].clone();
+
+    let confirmed_b = TestShareBlockBuilder::new()
+        .prev_share_blockhash(confirmed_a.block_hash().to_string())
+        .uncles(vec![named.block_hash()])
+        .work(2)
+        .nonce(2)
+        .build();
+    store.push_to_confirmed_chain(&confirmed_b).unwrap();
+    let orphan = TestShareBlockBuilder::new()
+        .prev_share_blockhash(left_out.block_hash().to_string())
+        .nonce(3)
+        .build();
+    store.store_with_valid_metadata(&orphan);
+
+    let result = store
+        .get_blockhashes_for_locator(&[genesis.block_hash()], &BlockHash::all_zeros(), 600)
+        .unwrap();
+
+    assert!(result.contains(&confirmed_a.block_hash()));
+    assert!(result.contains(&named.block_hash()));
+    assert!(result.contains(&confirmed_b.block_hash()));
+    assert!(!result.contains(&left_out.block_hash()));
+    assert!(!result.contains(&orphan.block_hash()));
 }
 
 /// first_known_for_locator returns the first known hash from the

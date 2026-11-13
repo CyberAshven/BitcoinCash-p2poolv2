@@ -8,7 +8,7 @@ use crate::config::{BitcoinCashNetwork, Chain};
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::stratum::parse_password::{
     donation_percent, extract_string_value, join_login_options, log_unknown_options,
-    resolve_miner_donation, split_user_identity,
+    resolve_miner_donation, resolve_miner_payout_level, split_user_identity,
 };
 use crate::stratum::{
     difficulty_adjuster::DifficultyAdjusterTrait,
@@ -238,6 +238,11 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
         Ok(donation) => donation,
         Err(reason) => return reject_authorize(session, message.id, reason),
     };
+    let payout_level =
+        match resolve_miner_payout_level(options.as_deref(), ctx.share_chain, ctx.mode) {
+            Ok(payout_level) => payout_level,
+            Err(reason) => return reject_authorize(session, message.id, reason),
+        };
 
     let (miner_address, share_owner) = match ctx.share_chain {
         Chain::Bitcoin => {
@@ -288,6 +293,7 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
     session.miner_address = miner_address;
     session.share_owner = share_owner;
     session.donation = donation;
+    session.payout_level = payout_level;
 
     // Register user in the store
     register_user(session, &parsed_username.user_key, ctx.chain_store_handle).await?;
@@ -395,6 +401,7 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         // Execute
@@ -493,6 +500,7 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         // Execute
@@ -632,6 +640,7 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         // Execute
@@ -736,6 +745,7 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         let messages = handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -801,6 +811,7 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         let messages = handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -868,6 +879,7 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         // Execute
@@ -939,6 +951,7 @@ mod tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         let result = handle_authorize(request, &mut session, ctx).await;
@@ -1019,6 +1032,7 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1073,6 +1087,7 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1125,6 +1140,7 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1181,6 +1197,7 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         let messages = handle_authorize(request, &mut session, ctx.clone())
@@ -1281,6 +1298,7 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1343,6 +1361,7 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         let messages = handle_authorize(request, &mut session, ctx).await.unwrap();
@@ -1417,6 +1436,7 @@ mod p2p_miner_address_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         let first = handle_authorize(

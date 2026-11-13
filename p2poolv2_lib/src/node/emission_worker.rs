@@ -138,6 +138,7 @@ mod tests {
             bitcoin_coinbase: test_coinbase_transaction(1),
             coinbase_proof: CoinbaseProof::default(),
             share_transactions: Arc::from([]),
+            weak_shares: Arc::from([]),
         }
     }
 

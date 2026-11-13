@@ -5,10 +5,13 @@
 use crate::accounting::stats::pool_local_stats::load_pool_local_stats;
 use crate::accounting::stats::user::User;
 use crate::accounting::{payout::simple_pplns::SimplePplnsShare, stats::pool_local_stats};
+use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::store::writer::StoreError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::time::SystemTime;
-use tokio::sync::{mpsc, oneshot};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::error;
 
 const METRICS_MESSAGE_BUFFER_SIZE: usize = 1000;
@@ -19,6 +22,10 @@ const METRICS_SAVE_INTERVAL: u64 = 5;
 const SUBMISSION_WINDOW_SECS: u64 = 600;
 /// Hashes a difficulty-1 share takes on average (2^32).
 const HASHES_PER_DIFFICULTY: f64 = 4_294_967_296.0;
+/// Confirmed share headers summed per store read when the block effort
+/// numerator is recomputed from the chain at startup, bounding the walk's
+/// peak memory on a long share chain.
+const EFFORT_SEED_WALK_CHUNK: u32 = 4096;
 
 /// One accepted share in the sliding window the local hashrate reads.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -56,9 +63,12 @@ pub struct PoolMetrics {
     pub pool_difficulty: f64,
     /// Confirmed sharechain pool difficulty since the last bitcoin block was
     /// found; reset to zero on each block find. Numerator of the block effort
-    /// metric (`work_since_last_block / network_difficulty`). Runtime-only (not
-    /// persisted), mainnet-relative units matching network_difficulty. Pool
-    /// hashrate is derived separately from confirmed-chain total work.
+    /// metric (`work_since_last_block / network_difficulty`). Seeded at
+    /// startup from the store by [`work_since_last_block_from_chain`] so work
+    /// already done survives a restart, then incremented live per confirmed
+    /// share. It is not written anywhere itself: the confirmed chain is the
+    /// source of truth. Mainnet-relative units matching network_difficulty.
+    /// Pool hashrate is derived separately from confirmed-chain total work.
     #[serde(default)]
     pub work_since_last_block: f64,
     /// Found blocks sent to BCHN nodes since the node started, by node label
@@ -77,6 +87,25 @@ pub struct PoolMetrics {
     /// reads as unknown until the first share arrives.
     #[serde(skip)]
     pub submission_window: VecDeque<WorkDatum>,
+    /// Weak shares carried by the shares this node's miners found, since the
+    /// node started. Runtime only, not persisted.
+    #[serde(skip)]
+    pub weak_shares_carried_by_node: u64,
+    /// Weak shares carried by the shares confirmed on the share chain while
+    /// it was current, whichever node found them, since the node started.
+    /// Runtime only, not persisted.
+    #[serde(skip)]
+    pub weak_shares_carried_on_chain: u64,
+}
+
+/// Whose share carried weak shares, for
+/// [`MetricsHandle::record_weak_shares_carried`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeakShareCarrier {
+    /// A share this node's miners found, as it goes to the share chain.
+    ThisNode,
+    /// A share confirmed on the share chain, found by any node.
+    Chain,
 }
 
 impl Default for PoolMetrics {
@@ -98,6 +127,8 @@ impl Default for PoolMetrics {
             found_block_submissions: BTreeMap::new(),
             found_block_submit_retries: BTreeMap::new(),
             submission_window: VecDeque::new(),
+            weak_shares_carried_by_node: 0,
+            weak_shares_carried_on_chain: 0,
         }
     }
 }
@@ -123,23 +154,52 @@ impl PoolMetrics {
     /// `None` with no shares in the window, or no time between the first
     /// kept share and `now` (the dash, not zero).
     pub fn local_submission_hashrate(&self, now: u64) -> Option<f64> {
-        let cutoff = now.saturating_sub(SUBMISSION_WINDOW_SECS);
-        let mut first: Option<u64> = None;
-        let mut work = 0.0;
-        for datum in &self.submission_window {
-            if datum.at < cutoff {
-                continue;
-            }
-            first = Some(first.map_or(datum.at, |earliest: u64| earliest.min(datum.at)));
-            work += datum.work;
-        }
-        let first = first?;
-        let span = now.saturating_sub(first).min(SUBMISSION_WINDOW_SECS);
-        if span == 0 {
-            return None;
-        }
-        Some(work / span as f64)
+        window_hashrate(&self.submission_window, now)
     }
+}
+
+/// Hashrate of `window` from its work in the trailing
+/// [`SUBMISSION_WINDOW_SECS`] seconds, in hashes per second: the work over
+/// the span from the first kept share to `now`, which is the full ten minutes
+/// once the window is that old. `None` with no work in the window, or no time
+/// between the first kept share and `now` (the dash, not zero). Based on Cash
+/// Dragon's alpha-vardiff-v2, which shares it between the pool and each miner.
+fn window_hashrate(window: &VecDeque<WorkDatum>, now: u64) -> Option<f64> {
+    let cutoff = now.saturating_sub(SUBMISSION_WINDOW_SECS);
+    let mut first: Option<u64> = None;
+    let mut work = 0.0;
+    for datum in window {
+        if datum.at < cutoff {
+            continue;
+        }
+        first = Some(first.map_or(datum.at, |earliest: u64| earliest.min(datum.at)));
+        work += datum.work;
+    }
+    let first = first?;
+    let span = now.saturating_sub(first).min(SUBMISSION_WINDOW_SECS);
+    if span == 0 {
+        return None;
+    }
+    Some(work / span as f64)
+}
+
+/// Each miner's hashrate, in hashes per second, by the payout address it
+/// authorized with: what the job builders size heavier Bitcoin Cash shares
+/// by (`stratum::work::band_policy`).
+pub type MinerHashrates = Arc<HashMap<String, f64>>;
+
+/// How often the actor publishes each miner's hashrate to the job builders.
+/// The ten-minute window moves on every accepted submission; a slow tick
+/// keeps the snapshot fresh enough for a job's target without rebuilding the
+/// map on every submission.
+pub const MINER_HASHRATE_PUBLISH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The current unix time in seconds, 0 before the epoch.
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 /// Messages that can be sent to the MetricsActor
@@ -156,7 +216,7 @@ pub enum MetricsMessage {
         response: oneshot::Sender<()>,
     },
     ResetBlockEffort {
-        response: oneshot::Sender<()>,
+        response: oneshot::Sender<f64>,
     },
     RecordConfirmedShare {
         difficulty: f64,
@@ -188,6 +248,11 @@ pub enum MetricsMessage {
         retries: u32,
         response: oneshot::Sender<()>,
     },
+    RecordWeakSharesCarried {
+        carrier: WeakShareCarrier,
+        count: u64,
+        response: oneshot::Sender<()>,
+    },
 }
 
 /// The actor that manages pool metrics state
@@ -195,16 +260,19 @@ pub struct MetricsActor {
     metrics: PoolMetrics,
     receiver: mpsc::Receiver<MetricsMessage>,
     worker_connections: HashMap<(String, String), usize>,
+    /// Accepted submissions in the trailing [`SUBMISSION_WINDOW_SECS`]
+    /// seconds per miner, by the payout address it authorized with. Runtime
+    /// only, pruned on the same cutoff as the pool-wide window.
+    miner_windows: HashMap<String, VecDeque<WorkDatum>>,
+    /// Publishes each miner's hashrate to the job builders, which read it
+    /// through [`MetricsHandle::miner_hashrate`].
+    miner_hashrates_tx: watch::Sender<MinerHashrates>,
 }
 
 impl MetricsActor {
     /// Create a new metrics actor with default metrics
     pub fn new(receiver: mpsc::Receiver<MetricsMessage>) -> Self {
-        Self {
-            metrics: PoolMetrics::default(),
-            receiver,
-            worker_connections: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
-        }
+        Self::with_metrics(PoolMetrics::default(), receiver)
     }
 
     /// Create a metrics actor with metrics loaded from the given log directory
@@ -213,18 +281,60 @@ impl MetricsActor {
         receiver: mpsc::Receiver<MetricsMessage>,
     ) -> Result<Self, std::io::Error> {
         let metrics = PoolMetrics::load_existing(log_dir)?;
-        Ok(Self {
+        Ok(Self::with_metrics(metrics, receiver))
+    }
+
+    fn with_metrics(metrics: PoolMetrics, receiver: mpsc::Receiver<MetricsMessage>) -> Self {
+        let (miner_hashrates_tx, _miner_hashrates_rx) =
+            watch::channel(Arc::new(HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY)));
+        Self {
             metrics,
             receiver,
             worker_connections: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
-        })
+            miner_windows: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
+            miner_hashrates_tx,
+        }
     }
 
-    /// Start the actor's message handling loop
+    /// The miner hashrates this actor publishes once it runs, for its
+    /// handle.
+    fn subscribe_miner_hashrates(&self) -> watch::Receiver<MinerHashrates> {
+        self.miner_hashrates_tx.subscribe()
+    }
+
+    /// Start the actor's message handling loop, publishing each miner's
+    /// hashrate every [`MINER_HASHRATE_PUBLISH_INTERVAL`] beside it.
     pub async fn run(mut self) {
-        while let Some(msg) = self.receiver.recv().await {
-            self.handle_message(msg).await;
+        let mut publish_interval = tokio::time::interval(MINER_HASHRATE_PUBLISH_INTERVAL);
+        let mut running = true;
+        while running {
+            tokio::select! {
+                message = self.receiver.recv() => match message {
+                    Some(message) => self.handle_message(message).await,
+                    None => running = false,
+                },
+                _ = publish_interval.tick() => self.publish_miner_hashrates(unix_seconds()),
+            }
         }
+    }
+
+    /// Publish each miner's hashrate at `now`, dropping the miners whose
+    /// window holds no submission any more.
+    fn publish_miner_hashrates(&mut self, now: u64) {
+        let cutoff = now.saturating_sub(SUBMISSION_WINDOW_SECS);
+        self.miner_windows.retain(|_, window| {
+            while window.front().is_some_and(|datum| datum.at < cutoff) {
+                window.pop_front();
+            }
+            !window.is_empty()
+        });
+        let mut hashrates = HashMap::with_capacity(self.miner_windows.len());
+        for (address, window) in &self.miner_windows {
+            if let Some(hashrate) = window_hashrate(window, now) {
+                hashrates.insert(address.clone(), hashrate);
+            }
+        }
+        self.miner_hashrates_tx.send_replace(Arc::new(hashrates));
     }
 
     async fn handle_message(&mut self, msg: MetricsMessage) {
@@ -244,8 +354,8 @@ impl MetricsActor {
                 let _ = response.send(());
             }
             MetricsMessage::ResetBlockEffort { response } => {
-                self.reset_block_effort();
-                let _ = response.send(());
+                let work = self.reset_block_effort();
+                let _ = response.send(work);
             }
             MetricsMessage::RecordConfirmedShare {
                 difficulty,
@@ -293,6 +403,22 @@ impl MetricsActor {
                 self.record_block_submission(node, outcome, retries);
                 let _ = response.send(());
             }
+            MetricsMessage::RecordWeakSharesCarried {
+                carrier,
+                count,
+                response,
+            } => {
+                self.record_weak_shares_carried(carrier, count);
+                let _ = response.send(());
+            }
+        }
+    }
+
+    /// Count `count` weak shares carried by a share of `carrier`'s.
+    fn record_weak_shares_carried(&mut self, carrier: WeakShareCarrier, count: u64) {
+        match carrier {
+            WeakShareCarrier::ThisNode => self.metrics.weak_shares_carried_by_node += count,
+            WeakShareCarrier::Chain => self.metrics.weak_shares_carried_on_chain += count,
         }
     }
 
@@ -337,10 +463,16 @@ impl MetricsActor {
         {
             self.metrics.submission_window.pop_front();
         }
-        self.metrics.submission_window.push_back(WorkDatum {
+        let datum = WorkDatum {
             at: current_unix_timestamp,
             work: difficulty as f64 * HASHES_PER_DIFFICULTY,
-        });
+        };
+        self.metrics.submission_window.push_back(datum);
+        let miner_window = self.miner_windows.entry(btcaddress.clone()).or_default();
+        while miner_window.front().is_some_and(|datum| datum.at < cutoff) {
+            miner_window.pop_front();
+        }
+        miner_window.push_back(datum);
         if let Some(user) = self.metrics.users.get_mut(&btcaddress) {
             user.record_share(&workername, difficulty, truediff, current_unix_timestamp);
         }
@@ -352,11 +484,15 @@ impl MetricsActor {
     }
 
     /// Reset the block effort accumulator after the pool finds a bitcoin
-    /// block, so work counts toward the next block.
+    /// block, so work counts toward the next block. Returns the work that
+    /// accumulated since the previous find: the caller keeps it as the
+    /// accepted block's effort snapshot.
     ///
     /// The found block itself is recorded in the store, not here.
-    fn reset_block_effort(&mut self) {
+    fn reset_block_effort(&mut self) -> f64 {
+        let work = self.metrics.work_since_last_block;
         self.metrics.work_since_last_block = 0.0;
+        work
     }
 
     /// Record the pool difficulty of a confirmed sharechain share for the
@@ -431,9 +567,32 @@ impl MetricsActor {
 #[derive(Clone)]
 pub struct MetricsHandle {
     sender: mpsc::Sender<MetricsMessage>,
+    /// The actor's latest snapshot of each miner's hashrate, read
+    /// synchronously by the job builders.
+    miner_hashrates: watch::Receiver<MinerHashrates>,
 }
 
 impl MetricsHandle {
+    /// A handle on the actor behind `sender`, reading the hashrates it
+    /// publishes through `miner_hashrates`.
+    fn new(
+        sender: mpsc::Sender<MetricsMessage>,
+        miner_hashrates: watch::Receiver<MinerHashrates>,
+    ) -> Self {
+        Self {
+            sender,
+            miner_hashrates,
+        }
+    }
+
+    /// The hashrate, in hashes per second, of the miner that authorized with
+    /// `btcaddress`, from its accepted submissions in the trailing ten
+    /// minutes as last published; `None` before its first one. Reads the
+    /// latest snapshot without waiting on the actor.
+    pub fn miner_hashrate(&self, btcaddress: &str) -> Option<f64> {
+        self.miner_hashrates.borrow().get(btcaddress).copied()
+    }
+
     /// Record an accepted share with the given difficulty
     pub async fn record_share_accepted(
         &self,
@@ -470,8 +629,9 @@ impl MetricsHandle {
     }
 
     /// Reset the block effort accumulator after the pool finds a bitcoin
-    /// block.
-    pub async fn reset_block_effort(&self) -> Result<(), tokio::sync::oneshot::error::RecvError> {
+    /// block, replying with the work that was reset so the caller can keep
+    /// it as the accepted block's effort snapshot.
+    pub async fn reset_block_effort(&self) -> Result<f64, tokio::sync::oneshot::error::RecvError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.sender
             .send(MetricsMessage::ResetBlockEffort {
@@ -584,6 +744,28 @@ impl MetricsHandle {
         response_rx.await
     }
 
+    /// Count `count` weak shares carried by a share of `carrier`'s: one this
+    /// node's miners found, or one confirmed on the share chain. A stopped
+    /// actor is an error, not a panic: no share waits on a metric.
+    pub async fn record_weak_shares_carried(
+        &self,
+        carrier: WeakShareCarrier,
+        count: u64,
+    ) -> Result<(), tokio::sync::oneshot::error::RecvError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        // A send to a stopped actor drops the message with its response
+        // sender, which `response_rx` reports as an error.
+        let _ = self
+            .sender
+            .send(MetricsMessage::RecordWeakSharesCarried {
+                carrier,
+                count,
+                response: response_tx,
+            })
+            .await;
+        response_rx.await
+    }
+
     /// Set last update time. Largely used for testing.
     pub async fn set_last_update(
         &self,
@@ -608,20 +790,111 @@ impl MetricsHandle {
 #[cfg(test)]
 pub(crate) fn spawn_test_metrics_handle() -> MetricsHandle {
     let (sender, receiver) = mpsc::channel(METRICS_MESSAGE_BUFFER_SIZE);
-    tokio::spawn(async move {
-        MetricsActor::new(receiver).run().await;
-    });
-    MetricsHandle { sender }
-}
-
-/// Construct a new metrics actor with existing metrics and return its handle
-pub async fn start_metrics(log_dir: String) -> Result<MetricsHandle, std::io::Error> {
-    let (sender, receiver) = mpsc::channel(METRICS_MESSAGE_BUFFER_SIZE);
-    let actor = MetricsActor::with_existing_metrics(&log_dir, receiver)?;
+    let actor = MetricsActor::new(receiver);
+    let miner_hashrates = actor.subscribe_miner_hashrates();
     tokio::spawn(async move {
         actor.run().await;
     });
-    let handle = MetricsHandle { sender };
+    MetricsHandle::new(sender, miner_hashrates)
+}
+
+/// The block effort numerator recomputed from the store: the summed
+/// difficulty of the confirmed sharechain shares above the last
+/// BCHN-accepted found block.
+///
+/// The window is the confirmed chain strictly above an anchor share: the
+/// accepted found block whose share sits at the greatest height, falling
+/// back to the genesis share when no block has been accepted yet, so the
+/// genesis share itself never counts and work counting toward an already
+/// found block never carries into the next round. Uncles are excluded,
+/// matching the live increment in the organise worker, which feeds only
+/// each confirmed share's own header difficulty. This is p2poolv1's
+/// approach: the share rows are the source of truth, and no counter is
+/// written for the metric.
+///
+/// Height metadata missing for the genesis share or an accepted found
+/// block is an error rather than a wider window: counting back past a
+/// found block would overstate effort, and the caller decides whether to
+/// fail or to start at zero.
+pub fn work_since_last_block_from_chain(
+    chain_store_handle: &ChainStoreHandle,
+) -> Result<f64, StoreError> {
+    let anchor_height = effort_anchor_height(chain_store_handle)?;
+    let tip_height = chain_store_handle
+        .get_tip_height()?
+        .ok_or_else(|| StoreError::NotFound("confirmed chain tip height".to_string()))?;
+    let mut work = 0.0;
+    let mut window_start = anchor_height + 1;
+    while window_start <= tip_height {
+        let window_end = (window_start + EFFORT_SEED_WALK_CHUNK - 1).min(tip_height);
+        let headers = chain_store_handle
+            .store_handle()
+            .store()
+            .query_share_headers(window_start, window_end)?;
+        work += headers
+            .iter()
+            .map(|header| bitcoin::Target::from_compact(header.bits).difficulty_float())
+            .sum::<f64>();
+        window_start = window_end + 1;
+    }
+    Ok(work)
+}
+
+/// The confirmed height of the share the effort window starts above: the
+/// accepted found block's share with the greatest height, or the genesis
+/// share when no block has been accepted yet.
+fn effort_anchor_height(chain_store_handle: &ChainStoreHandle) -> Result<u32, StoreError> {
+    let genesis_hash = chain_store_handle
+        .get_genesis_blockhash()
+        .ok_or_else(|| StoreError::NotFound("genesis share".to_string()))?;
+    let mut anchor_height = share_confirmed_height(chain_store_handle, &genesis_hash)?;
+    for found_block in chain_store_handle.get_found_blocks()? {
+        let found_height =
+            share_confirmed_height(chain_store_handle, &found_block.share_blockhash)?;
+        anchor_height = anchor_height.max(found_height);
+    }
+    Ok(anchor_height)
+}
+
+/// The confirmed height of `share_hash` from its stored metadata.
+fn share_confirmed_height(
+    chain_store_handle: &ChainStoreHandle,
+    share_hash: &bitcoin::BlockHash,
+) -> Result<u32, StoreError> {
+    chain_store_handle
+        .get_block_metadata(share_hash)?
+        .expected_height
+        .ok_or_else(|| StoreError::NotFound(format!("share height for {share_hash}")))
+}
+
+/// Construct a new metrics actor with existing metrics and return its handle.
+///
+/// The block effort numerator starts at zero: a caller with no share chain
+/// has no work to restore. The node starts the metrics with
+/// [`start_metrics_with_effort_seed`] instead.
+pub async fn start_metrics(log_dir: String) -> Result<MetricsHandle, std::io::Error> {
+    start_metrics_with_effort_seed(log_dir, 0.0).await
+}
+
+/// Construct a new metrics actor with existing metrics and return its
+/// handle, seeding the block effort numerator with `work_since_last_block`
+/// (from [`work_since_last_block_from_chain`]) so work the pool already did
+/// is not lost across a restart.
+///
+/// The seed is applied before the actor spawns, so no reader can observe
+/// zero effort once the handle is returned.
+pub async fn start_metrics_with_effort_seed(
+    log_dir: String,
+    work_since_last_block: f64,
+) -> Result<MetricsHandle, std::io::Error> {
+    let (sender, receiver) = mpsc::channel(METRICS_MESSAGE_BUFFER_SIZE);
+    let mut actor = MetricsActor::with_existing_metrics(&log_dir, receiver)?;
+    actor.metrics.work_since_last_block = work_since_last_block;
+    let miner_hashrates = actor.subscribe_miner_hashrates();
+    tokio::spawn(async move {
+        actor.run().await;
+    });
+    let handle = MetricsHandle::new(sender, miner_hashrates);
     match pool_local_stats::start_stats_saver(
         handle.clone(),
         METRICS_SAVE_INTERVAL,
@@ -642,6 +915,55 @@ pub async fn start_metrics(log_dir: String) -> Result<MetricsHandle, std::io::Er
 mod tests {
     use super::*;
     use crate::accounting::stats::pool_local_stats::save_pool_local_stats;
+    use crate::store::found_block::FoundBlock;
+    use crate::test_utils::{
+        TestShareBlockBuilder, build_confirmed_test_chain, confirm_test_block, genesis_for_tests,
+        setup_test_chain_store_handle, test_funding_transaction,
+    };
+    use bitcoin::TxMerkleNode;
+    use bitcoin::hashes::Hash;
+
+    #[tokio::test]
+    async fn weak_shares_carried_by_this_nodes_shares_are_counted_apart_from_the_chains() {
+        let handle = spawn_test_metrics_handle();
+
+        handle
+            .record_weak_shares_carried(WeakShareCarrier::ThisNode, 3)
+            .await
+            .unwrap();
+
+        let metrics = handle.get_metrics().await;
+        assert_eq!(metrics.weak_shares_carried_by_node, 3);
+        assert_eq!(metrics.weak_shares_carried_on_chain, 0);
+        assert!(
+            metrics
+                .get_exposition()
+                .contains("# TYPE weak_shares_carried_by_node_total counter\nweak_shares_carried_by_node_total 3\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn weak_shares_carried_on_the_chain_are_counted_apart_from_this_nodes() {
+        let handle = spawn_test_metrics_handle();
+
+        handle
+            .record_weak_shares_carried(WeakShareCarrier::Chain, 5)
+            .await
+            .unwrap();
+        handle
+            .record_weak_shares_carried(WeakShareCarrier::Chain, 2)
+            .await
+            .unwrap();
+
+        let metrics = handle.get_metrics().await;
+        assert_eq!(metrics.weak_shares_carried_on_chain, 7);
+        assert_eq!(metrics.weak_shares_carried_by_node, 0);
+        assert!(
+            metrics
+                .get_exposition()
+                .contains("# TYPE weak_shares_carried_on_chain_total counter\nweak_shares_carried_on_chain_total 7\n")
+        );
+    }
 
     /// A metrics with `work` pushed at `at` on its submission window.
     fn window_of(at: u64, work: f64) -> PoolMetrics {
@@ -713,6 +1035,49 @@ mod tests {
         let metrics = window_of(1_000, 2.0 * HASHES_PER_DIFFICULTY);
         let rate = metrics.local_submission_hashrate(1_010).unwrap();
         assert!((rate - 2.0 * HASHES_PER_DIFFICULTY / 10.0).abs() < 1.0);
+    }
+
+    /// Each miner's hashrate is published from its own accepted
+    /// submissions, under the address it authorized with.
+    #[test]
+    fn each_miner_hashrate_is_published_by_its_address() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let mut actor = MetricsActor::new(receiver);
+        let handle = MetricsHandle::new(mpsc::channel(1).0, actor.subscribe_miner_hashrates());
+        actor.record_share_accepted("big".into(), "worker".into(), 10, 10);
+        actor.record_share_accepted("small".into(), "worker".into(), 1, 1);
+        let now = actor.metrics.submission_window[0].at + 10;
+
+        actor.publish_miner_hashrates(now);
+
+        let big_span = (now - actor.miner_windows["big"][0].at) as f64;
+        let small_span = (now - actor.miner_windows["small"][0].at) as f64;
+        let big = handle.miner_hashrate("big").unwrap();
+        let small = handle.miner_hashrate("small").unwrap();
+        assert!(
+            (big - 10.0 * HASHES_PER_DIFFICULTY / big_span).abs() < 1.0,
+            "{big}"
+        );
+        assert!(
+            (small - HASHES_PER_DIFFICULTY / small_span).abs() < 1.0,
+            "{small}"
+        );
+        assert_eq!(handle.miner_hashrate("absent"), None);
+    }
+
+    /// A miner whose submissions all left the ten-minute window is dropped.
+    #[test]
+    fn a_miner_without_recent_submissions_is_dropped() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let mut actor = MetricsActor::new(receiver);
+        let handle = MetricsHandle::new(mpsc::channel(1).0, actor.subscribe_miner_hashrates());
+        actor.record_share_accepted("gone".into(), "worker".into(), 10, 10);
+        let now = actor.metrics.submission_window[0].at + SUBMISSION_WINDOW_SECS + 1;
+
+        actor.publish_miner_hashrates(now);
+
+        assert_eq!(handle.miner_hashrate("gone"), None);
+        assert!(actor.miner_windows.is_empty());
     }
 
     #[test]
@@ -827,11 +1192,148 @@ mod tests {
         let metrics = handle.get_metrics().await;
         assert_eq!(metrics.work_since_last_block, 750.0);
 
-        let _ = handle.reset_block_effort().await;
+        // The reset replies with the work it zeroed, for the effort snapshot.
+        let reset_work = handle.reset_block_effort().await.unwrap();
+        assert_eq!(reset_work, 750.0);
 
         let metrics = handle.get_metrics().await;
         // Finding a block resets effort toward the next block.
         assert_eq!(metrics.work_since_last_block, 0.0);
+    }
+
+    /// The seed given at start is the numerator the actor reports before
+    /// any share arrives.
+    #[tokio::test]
+    async fn test_start_metrics_seeds_work_since_last_block() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let handle =
+            start_metrics_with_effort_seed(log_dir.path().to_str().unwrap().to_string(), 42.0)
+                .await
+                .unwrap();
+
+        let metrics = handle.get_metrics().await;
+        assert_eq!(metrics.work_since_last_block, 42.0);
+    }
+
+    /// The seed sums every confirmed share above genesis: the genesis share
+    /// itself is never pool work.
+    #[tokio::test]
+    async fn test_effort_seed_sums_confirmed_shares_after_genesis() {
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+        let blocks = build_confirmed_test_chain(&chain_store_handle, 3).await;
+
+        let expected: f64 = blocks
+            .iter()
+            .skip(1)
+            .map(|block| bitcoin::Target::from_compact(block.header.bits).difficulty_float())
+            .sum();
+        let work = work_since_last_block_from_chain(&chain_store_handle).unwrap();
+
+        assert_eq!(work, expected);
+    }
+
+    /// An accepted found block anchors the window: work before it counted
+    /// toward the block it found and does not carry into the next round.
+    #[tokio::test]
+    async fn test_effort_seed_starts_after_accepted_found_block() {
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+        let blocks = build_confirmed_test_chain(&chain_store_handle, 4).await;
+        let found_block = FoundBlock {
+            bitcoin_height: 900_000,
+            bitcoin_blockhash: bitcoin::BlockHash::from_byte_array([1u8; 32]),
+            share_blockhash: blocks[2].block_hash(),
+            bitcoin_time: 1_700_000_002,
+            miner_bitcoin_address: "miner".to_string(),
+            effort: None,
+        };
+        let stored = chain_store_handle
+            .store_handle()
+            .store()
+            .record_accepted_found_block(&found_block)
+            .unwrap();
+        assert!(stored);
+
+        let expected: f64 = blocks
+            .iter()
+            .skip(3)
+            .map(|block| bitcoin::Target::from_compact(block.header.bits).difficulty_float())
+            .sum();
+        let work = work_since_last_block_from_chain(&chain_store_handle).unwrap();
+
+        assert_eq!(work, expected);
+    }
+
+    /// Only genesis is confirmed, so nothing lies above the anchor and the
+    /// numerator is zero rather than the genesis share's own difficulty.
+    #[tokio::test]
+    async fn test_effort_seed_is_zero_with_only_the_genesis_share() {
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+        chain_store_handle
+            .init_or_setup_genesis(genesis_for_tests())
+            .await
+            .unwrap();
+
+        let work = work_since_last_block_from_chain(&chain_store_handle).unwrap();
+
+        assert_eq!(work, 0.0);
+    }
+
+    /// An empty store has nothing to anchor to; the error keeps the caller
+    /// from silently widening the window.
+    #[tokio::test]
+    async fn test_effort_seed_errors_without_a_genesis_share() {
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+
+        let result = work_since_last_block_from_chain(&chain_store_handle);
+
+        assert!(result.is_err());
+    }
+
+    /// Uncle work never enters the numerator: only each confirmed share's
+    /// own difficulty counts, as the live increment counts it.
+    #[tokio::test]
+    async fn test_effort_seed_excludes_uncle_difficulty() {
+        let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+        let blocks = build_confirmed_test_chain(&chain_store_handle, 2).await;
+        let mut uncle = TestShareBlockBuilder::new()
+            .prev_share_blockhash(blocks[1].block_hash().to_string())
+            .time(1_700_000_050)
+            .add_transaction(test_funding_transaction(50))
+            .build();
+        uncle.template_merkle_branches = vec![TxMerkleNode::from_byte_array([50u8; 32])];
+        chain_store_handle
+            .add_share_block(uncle.clone())
+            .await
+            .unwrap();
+        chain_store_handle
+            .organise_header(uncle.header.clone())
+            .await
+            .unwrap();
+        chain_store_handle
+            .mark_block_valid(uncle.block_hash())
+            .await
+            .unwrap();
+
+        let mut extending_block = TestShareBlockBuilder::new()
+            .prev_share_blockhash(blocks[2].block_hash().to_string())
+            .time(1_700_000_003)
+            .add_transaction(test_funding_transaction(3))
+            .uncles(vec![uncle.block_hash()])
+            .build();
+        extending_block.template_merkle_branches = vec![TxMerkleNode::from_byte_array([3u8; 32])];
+        confirm_test_block(&chain_store_handle, &extending_block).await;
+
+        let mut expected: f64 = blocks
+            .iter()
+            .skip(1)
+            .map(|block| bitcoin::Target::from_compact(block.header.bits).difficulty_float())
+            .sum();
+        expected += bitcoin::Target::from_compact(extending_block.header.bits).difficulty_float();
+        let uncle_difficulty = bitcoin::Target::from_compact(uncle.header.bits).difficulty_float();
+        assert!(uncle_difficulty > 0.0);
+        let work = work_since_last_block_from_chain(&chain_store_handle).unwrap();
+
+        assert_eq!(work, expected);
     }
 
     #[tokio::test]

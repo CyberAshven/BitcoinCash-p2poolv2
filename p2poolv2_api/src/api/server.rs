@@ -17,9 +17,13 @@ use axum::{
 };
 use chrono::DateTime;
 use p2poolv2_lib::accounting::payout::sharechain_pplns::PplnsWindow;
+use p2poolv2_lib::accounting::stats::prom::escape_label_value;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::monitoring_events::MonitoringEventSender;
 use p2poolv2_lib::node::actor::NodeHandle;
+use p2poolv2_lib::shares::band::BAND_CAP_UNIT;
+use p2poolv2_lib::shares::share_block::ShareHeader;
+use p2poolv2_lib::shares::weak::WEAK_RATIO_UNIT;
 use p2poolv2_lib::stratum::work::tracker::{JobTracker, parse_coinbase};
 use p2poolv2_lib::{
     accounting::{payout::simple_pplns::SimplePplnsShare, stats::metrics::MetricsHandle},
@@ -36,7 +40,7 @@ use tokio::sync::oneshot;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::{info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -393,7 +397,7 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
 
     if let Some(network_difficulty) = state.tracker_handle.get_network_difficulty() {
         exposition.push_str(
-            "# HELP network_difficulty Current difficulty of the chain being mined (BCHN's on Bitcoin Cash)\n",
+            "# HELP network_difficulty Current difficulty of the chain being mined, from the node\n",
         );
         exposition.push_str("# TYPE network_difficulty gauge\n");
         exposition.push_str(&format!("network_difficulty {network_difficulty}\n"));
@@ -440,7 +444,43 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
         Err(_) => warn!("Timed out reading P2P health for /metrics"),
     }
 
+    if let Some(weak_pool_stats) = state.node_handle.weak_pool_stats() {
+        exposition.push_str(&weak_pool_stats.exposition());
+    }
+    match state.chain_store_handle.get_chain_tip_header() {
+        Ok(tip) => exposition.push_str(&tip_weak_ratio_and_band_cap_exposition(&tip)),
+        Err(error) => debug!("No share chain tip for the weak ratio and band cap: {error}"),
+    }
+
     exposition
+}
+
+/// Exposition for the weak ratio `R` and the band cap `C` of the confirmed
+/// tip share, each as a multiple of the share chain's minimum: the weak
+/// target is the minimum times `R`, and a share may be up to `C` times harder
+/// than the minimum. Empty for a tip without the band, a Bitcoin share.
+fn tip_weak_ratio_and_band_cap_exposition(tip: &ShareHeader) -> String {
+    if !tip.carries_band() {
+        return String::new();
+    }
+    let mut output = String::with_capacity(512);
+    output.push_str(
+        "# HELP sharechain_weak_ratio Weak ratio R of the confirmed tip share: its weak target over its minimum\n",
+    );
+    output.push_str("# TYPE sharechain_weak_ratio gauge\n");
+    output.push_str(&format!(
+        "sharechain_weak_ratio {}\n",
+        f64::from(tip.weak_ratio) / f64::from(WEAK_RATIO_UNIT)
+    ));
+    output.push_str(
+        "# HELP sharechain_band_cap Band cap C of the confirmed tip share: how many times harder than the minimum a share may be\n",
+    );
+    output.push_str("# TYPE sharechain_band_cap gauge\n");
+    output.push_str(&format!(
+        "sharechain_band_cap {}\n",
+        f64::from(tip.band_cap) / f64::from(BAND_CAP_UNIT)
+    ));
+    output
 }
 
 /// Exposition for the bitcoin blocks found by the pool.
@@ -451,6 +491,13 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
 /// explorer for that network. The network label uses bitcoin core's names
 /// (main, testnet4, signet, regtest). Entries are never deleted from the
 /// store, so the counter is monotonic.
+///
+/// A block whose acceptance kept an effort snapshot also gets a
+/// `found_block_effort` line: the work since the previous find over the
+/// difficulty of the header that claimed it, a ratio of about 1.0 at the
+/// expected effort so Grafana multiplies by 100 for a percent. Blocks
+/// accepted before snapshots were kept emit no line at all rather than a
+/// zero that would read as no effort spent.
 fn found_blocks_exposition(found_blocks: &[FoundBlock], network: bitcoin::Network) -> String {
     let mut output = String::with_capacity(256 + found_blocks.len() * 256);
     output.push_str("# HELP found_blocks_total Total number of blocks found by the pool\n");
@@ -460,16 +507,33 @@ fn found_blocks_exposition(found_blocks: &[FoundBlock], network: bitcoin::Networ
         "# HELP found_block_time_seconds Header time of a block found by the pool, labeled with blockhash, height, miner (payout address) and network\n",
     );
     output.push_str("# TYPE found_block_time_seconds gauge\n");
+    output.push_str(
+        "# HELP found_block_effort Pool work since the previous found block over the network difficulty of the header that claimed it, labeled like found_block_time_seconds; a block accepted without a snapshot emits no line\n",
+    );
+    output.push_str("# TYPE found_block_effort gauge\n");
     let network_name = network.to_core_arg();
     for found_block in found_blocks {
         output.push_str(&format!(
             "found_block_time_seconds{{blockhash=\"{}\",height=\"{}\",miner=\"{}\",network=\"{}\"}} {}\n",
             found_block.bitcoin_blockhash,
             found_block.bitcoin_height,
-            found_block.miner_bitcoin_address,
+            escape_label_value(&found_block.miner_bitcoin_address),
             network_name,
             found_block.bitcoin_time
         ));
+        if let Some(snapshot) = found_block.effort
+            && let Some(difficulty) = snapshot.network_difficulty
+            && difficulty > 0.0
+        {
+            output.push_str(&format!(
+                "found_block_effort{{blockhash=\"{}\",height=\"{}\",miner=\"{}\",network=\"{}\"}} {}\n",
+                found_block.bitcoin_blockhash,
+                found_block.bitcoin_height,
+                escape_label_value(&found_block.miner_bitcoin_address),
+                network_name,
+                snapshot.work / difficulty
+            ));
+        }
     }
     output
 }
@@ -488,7 +552,8 @@ fn work_to_f64(work: bitcoin::Work) -> f64 {
 use p2poolv2_lib::node::connection_tracker::PeerInfoResponse;
 
 /// Returns enriched info for all connected peers including IP, direction,
-/// and connection duration.
+/// connection duration, the p2pool version Identify reported and the latest
+/// ping round trip.
 async fn peers(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PeerInfoResponse>>, ApiError> {

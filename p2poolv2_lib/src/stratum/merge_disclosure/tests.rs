@@ -96,6 +96,16 @@ fn extension_requests_read_back() {
     assert_eq!(requested_extensions(&[4, 0]), None);
 }
 
+/// `RequestExtensions.Error` (0x0001): the request id, the unsupported
+/// types, then the required types, none, all little-endian.
+#[test]
+fn an_extensions_error_lists_the_unsupported_and_requires_none() {
+    assert_eq!(
+        extensions_error_payload(7, &[0x0003, MERGE_DISCLOSURE_EXTENSION]),
+        [7, 0, 2, 0, 0x03, 0x00, 0x4d, 0x4d, 0, 0]
+    );
+}
+
 /// The SV1 notifications' params: the job id, then hex as Pickaxe's
 /// adapter relays them.
 #[test]

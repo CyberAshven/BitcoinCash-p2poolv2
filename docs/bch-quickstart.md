@@ -34,6 +34,45 @@ BCHN fills templates only to `-percentblockmaxsize` of the block size limit
 with one output per miner in the PPLNS window, and a full template plus that
 coinbase could exceed the limit.
 
+### Or run BCHD
+
+P2Poolv2 takes templates from BCHD as well (checked with BCHD 0.22.4 on
+regtest and chipnet). BCHD has no ZMQ, so it hears new blocks on BCHD's P2P
+port: set `node_p2p_address` in `[stratum]`. BCHD serves RPC over TLS with a
+self-signed certificate it makes itself, `rpc.cert`. P2Poolv2's TLS refuses
+that certificate even when trusted, because it is a CA certificate used as
+the server's own (`CaUsedAsEndEntity`). So run BCHD on the same computer
+with TLS off; BCHD allows that only on localhost. In `bchd.conf`:
+
+```ini
+rpcuser=p2pool
+rpcpass=<your password>
+rpclisten=127.0.0.1:8334
+notls=1
+; Leave room for the pool's coinbase (see below).
+blockmaxsize=16000000
+```
+
+and in P2Poolv2's config:
+
+```toml
+[stratum]
+node_p2p_address = "127.0.0.1:8333"
+
+[bitcoinrpc]
+url = "http://127.0.0.1:8334"
+```
+
+`zmqpubhashblock` stays in the config; with no publisher on its address it
+stays silent. BCHD needs no `miningaddr`: the pool builds its own coinbase.
+BCHD fills a template up to 1,000 bytes below the block size limit unless
+`blockmaxsize` is set, and the pool's coinbase is often larger, so set
+`blockmaxsize` below the limit (16,000,000 is what BCHN's 50% gives at
+32 MB). BCHD does not report `initialblockdownload`: P2Poolv2 waits instead
+until BCHD gives a template, which BCHD refuses while it downloads the
+chain. On regtest BCHD gives templates without peers, and its `generate`
+needs `miningaddr`.
+
 ## 2. Get your share address
 
 A share is owned by a P2PKH key from your own wallet. Take a regular
@@ -61,7 +100,6 @@ set under `[stratum]`:
 ```toml
 chain = "bitcoin-cash"
 bitcoin_cash_network = "mainnet"   # or "chipnet", "scalenet", "regtest"
-bch_share_chain = "mini"           # "main" for large miners
 miner_address = "p2pool:q..."      # from step 2
 bootstrap_address = "bitcoincash:q..."
 ```
@@ -208,6 +246,13 @@ over RPC when the provider connection cannot take them. Keep `[bitcoinrpc]`:
 the node checks each template's parent there, validates shares against it,
 and falls back to it for blocks.
 
+The node asks each provider for the BCH large templates extension
+(`0x4C54`). A provider that grants it pushes every template's transactions,
+so only the block size limit bounds a template; the log says `granted the
+large templates extension`. Any other provider is asked for each template's
+transactions, and a template is then limited to 65,535 transactions in one
+16 MiB message.
+
 ## 4. Point miners at the node
 
 Every option (`p2p=`, `d=`, `th=` and the Stratum V2 identity) is in
@@ -240,6 +285,15 @@ Payouts appear in the miners' wallets in the coinbase of each block the pool
 finds and become spendable after 100 blocks, as for any Bitcoin Cash
 coinbase.
 
+If the node cannot get a template from BCHN for 60 seconds, it withdraws
+mining work and closes the miners' connections, so a miner with a backup
+pool fails over to it. The log says `Withdrawing mining work: no template
+for 60 seconds`, after `Error polling block template` lines that give the
+reason. Work comes back with the next template (`The node gives templates
+again`). With `template_source = "sv2"` the same happens 60 seconds after
+the last Template Provider connection that published a template ended,
+after `Template Provider connection to … ended` lines.
+
 ## 5. Check two nodes on chipnet
 
 This check passed on 2026-10-15 (see [bch-design.md](bch-design.md#chipnet-run-2026-10-15)).
@@ -247,15 +301,15 @@ It needs a machine that can reach BCH peers on port 48333.
 
 1. Run BCHN with `chipnet=1`, `server=1` and `zmqpubhashblock`, and let it
    sync (`bitcoin-cli -chipnet getblockchaininfo`).
-2. Start two P2Poolv2 nodes with `bitcoin_cash_network = "chipnet"`, the
-   same `bch_share_chain`, their own `store` paths and ports, and
+2. Start two P2Poolv2 nodes with `bitcoin_cash_network = "chipnet"`,
+   their own `store` paths and ports, and
    `dial_peers` on the second pointing at the first's `listen_address`.
    Both logs should show `Identified Peer ... /p2pool/test/<genesis>/1.0.0`
    with the same genesis id. On a new share chain the genesis share is old,
    so the first node never counts its chain as current: set
    `wait_for_chain_sync = false` there or its Stratum port never opens.
 3. Point a miner at the first node's Stratum port with a `bchtest:` username.
-   A share needs about 2e10 hashes on the mini chain (stratum difficulty
+   A share needs at least about 2e10 hashes (stratum difficulty
    about 4.7). A miner's difficulty never goes above the share difficulty
    of its job (4 here), and the sample's `minimum_difficulty` is 1, so
    vardiff can bring a CPU miner down to where it submits. 24 CPU threads

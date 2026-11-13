@@ -14,9 +14,7 @@
 //! block form they use now.
 
 use bitcoin::Network;
-use p2poolv2_config::{
-    BchShareChain, BitcoinCashNetwork, Chain, Config, DEFAULT_BITCOIN_CASH_DONATION,
-};
+use p2poolv2_config::{BitcoinCashNetwork, Chain, Config, DEFAULT_BITCOIN_CASH_DONATION};
 use p2poolv2_wallet::bch_share::BchShareAddress;
 
 struct App {
@@ -211,7 +209,6 @@ fn bch_p2pool_mines_on_the_bitcoin_cash_node_app_on_mainnet() {
         Some(BitcoinCashNetwork::Mainnet)
     );
     assert_eq!(config.stratum.network, Network::Bitcoin);
-    assert_eq!(config.stratum.bch_share_chain, BchShareChain::Mini);
     assert_eq!(config.bitcoinrpc.url, "http://10.21.21.50:8332");
     assert_eq!(config.bitcoinrpc.username, "umbrel");
     assert_eq!(config.bitcoinrpc.password, "derived-per-umbrel");
@@ -234,7 +231,6 @@ fn bch_p2pool_external_is_a_chipnet_node_until_bchn_is_set() {
         Some(BitcoinCashNetwork::Chipnet)
     );
     assert_eq!(config.stratum.network, Network::Testnet);
-    assert_eq!(config.stratum.bch_share_chain, BchShareChain::Mini);
     // bchn.example is reserved (RFC 2606) and never resolves, so an
     // unconfigured app stops with a lookup error naming it.
     assert_eq!(config.bitcoinrpc.url, "http://bchn.example:48332");
@@ -267,10 +263,10 @@ fn bch_p2pool_external_takes_bchn_from_its_settings() {
     assert_eq!(config.stratum.zmqpubhashblock, "tcp://192.0.2.10:28332");
 }
 
-/// Each network and share chain needs its own store: the node refuses a
-/// store holding another share chain.
+/// Each network needs its own store: the node refuses a store holding
+/// another share chain.
 #[test]
-fn umbrel_app_stores_are_named_after_network_and_share_chain() {
+fn umbrel_app_stores_are_named_after_their_network() {
     for app in &APPS {
         let config = load_defaults(app);
         let network = match config.stratum.bitcoin_cash_network {
@@ -278,13 +274,9 @@ fn umbrel_app_stores_are_named_after_network_and_share_chain() {
             Some(BitcoinCashNetwork::Chipnet) => "chipnet",
             other => panic!("{}: not a public network: {other:?}", app.id),
         };
-        let share_chain = match config.stratum.bch_share_chain {
-            BchShareChain::Main => "main",
-            BchShareChain::Mini => "mini",
-        };
         assert_eq!(
             config.store.path,
-            format!("/p2poolv2/data/{network}-{share_chain}"),
+            format!("/p2poolv2/data/{network}"),
             "{}",
             app.id
         );

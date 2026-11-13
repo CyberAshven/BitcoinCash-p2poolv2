@@ -6,14 +6,18 @@
 //!
 //! Bitcoin genesis files stay as they are. A Bitcoin Cash node anchors its
 //! share on the published BCHN genesis block for the selected network and
-//! pays the NUMS key with P2PKH. Main and mini differ by their anchor target,
-//! so the genesis hash differs and the chains do not reorg into each other.
+//! pays the NUMS key with P2PKH. Bitcoin Cash has one share chain per
+//! network: the main and mini chains merged on 2026-11-09 into one that keeps
+//! the mini chain's anchor, ceiling and genesis (`MINI_ANCHOR_TARGET`).
 
-use crate::config::{BchShareChain, BitcoinCashNetwork, Chain, StratumConfig};
+use crate::accounting::payout::payout_levels::GENESIS_PAYOUT_LEVEL;
+use crate::config::{BitcoinCashNetwork, Chain, StratumConfig};
+use crate::shares::band::GENESIS_BAND_CAP;
 use crate::shares::coinbase_proof::CoinbaseProof;
 use crate::shares::genesis;
 use crate::shares::share_block::{ShareBlock, ShareHeader, ShareTransaction};
 use crate::shares::transactions::coinbase::build_sharechain_coinbase_transaction;
+use crate::shares::weak::{GENESIS_WEAK_RATIO, empty_weak_root};
 use crate::sim_overrides;
 use bitcoin::constants::genesis_block;
 use bitcoin::hashes::Hash;
@@ -22,14 +26,11 @@ use p2poolv2_wallet::bch_share::BchShareNetwork;
 use p2poolv2_wallet::share_owner::ShareOwner;
 use std::error::Error;
 
-/// Anchor target of the main share chain. This is the production value of
-/// [`sim_overrides::anchor_target`] and is easier than [`crate::shares::share_block::MAX_POOL_TARGET`],
-/// which remains the ceiling for shares after genesis.
-pub const MAIN_ANCHOR_TARGET: u32 = 0x1b4188f5;
-
-/// Anchor and ceiling of the mini share chain. The compact exponent is one
-/// higher than [`crate::shares::share_block::MAX_POOL_TARGET`], which multiplies
-/// the target by 256.
+/// Anchor and ceiling of the Bitcoin Cash share chain, the former mini
+/// chain's. The compact exponent is one higher than
+/// [`crate::shares::share_block::MAX_POOL_TARGET`], Bitcoin's ceiling, which
+/// multiplies the target by 256: difficulty about 4.5, so a small pool still
+/// makes a share every 10 seconds.
 pub const MINI_ANCHOR_TARGET: u32 = 0x1c384bd7;
 
 /// Published BCHN chipnet (and testnet4) genesis hash.
@@ -55,16 +56,13 @@ pub fn genesis_for_stratum<State>(
             let bitcoin_cash_network = stratum
                 .bitcoin_cash_network
                 .ok_or("bitcoin_cash_network is required")?;
-            build(share_network(bitcoin_cash_network), stratum.bch_share_chain)
+            build(share_network(bitcoin_cash_network))
         }
     }
 }
 
-/// Share genesis for a Bitcoin Cash network and main or mini chain.
-pub fn build(
-    network: BchShareNetwork,
-    share_chain: BchShareChain,
-) -> Result<ShareBlock, Box<dyn Error + Send + Sync>> {
+/// Share genesis for a Bitcoin Cash network.
+pub fn build(network: BchShareNetwork) -> Result<ShareBlock, Box<dyn Error + Send + Sync>> {
     let anchor = anchor_block(network);
     let genesis_data = genesis::genesis_data(Network::Regtest)
         .map_err(|error| -> Box<dyn Error + Send + Sync> { error.to_string().into() })?;
@@ -75,6 +73,7 @@ pub fn build(
     let coinbase =
         build_sharechain_coinbase_transaction(&miner_address, anchor.header.block_hash(), &[]);
     let transactions = vec![ShareTransaction(coinbase)];
+    let anchor_bits = sim_overrides::bch_anchor_target();
     let header = ShareHeader {
         prev_share_blockhash: bitcoin::BlockHash::all_zeros(),
         uncles: vec![],
@@ -82,7 +81,7 @@ pub fn build(
         miner_address,
         bitcoin_header: anchor.header,
         time: sim_overrides::genesis_timestamp(&genesis_data),
-        bits: anchor_bits(share_chain),
+        bits: anchor_bits,
         donation_address: None,
         donation: None,
         fee_address: None,
@@ -94,6 +93,13 @@ pub fn build(
         bch_coinbase: None,
         pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
+        asert_bits: anchor_bits,
+        wanted_bits: anchor_bits,
+        band_cap: GENESIS_BAND_CAP,
+        payout_level: GENESIS_PAYOUT_LEVEL,
+        weak_ratio: GENESIS_WEAK_RATIO,
+        weak_count: 0,
+        weak_root: empty_weak_root(),
     };
     let bitcoin_coinbase = anchor
         .txdata
@@ -105,6 +111,7 @@ pub fn build(
         transactions,
         template_merkle_branches: vec![],
         bitcoin_coinbase,
+        weak_shares: Vec::new(),
     })
 }
 
@@ -123,8 +130,11 @@ pub fn anchor_block(network: BchShareNetwork) -> Block {
 
 /// Ceiling applied to share targets on the chain anchored at `anchor`.
 ///
-/// Mini keeps its own easier ceiling. Every other anchor, including Bitcoin
-/// and the Bitcoin Cash main chain, keeps [`crate::shares::share_block::MAX_POOL_TARGET`].
+/// The Bitcoin Cash chain, anchored at [`MINI_ANCHOR_TARGET`], keeps that
+/// easier ceiling. Every other anchor keeps
+/// [`crate::shares::share_block::MAX_POOL_TARGET`]: Bitcoin's, and the sim's
+/// Bitcoin Cash anchor at its network hashrate's steady difficulty
+/// ([`sim_overrides::bch_anchor_target`]).
 pub fn target_ceiling(anchor: CompactTarget) -> CompactTarget {
     if anchor.to_consensus() == MINI_ANCHOR_TARGET {
         CompactTarget::from_consensus(MINI_ANCHOR_TARGET)
@@ -150,13 +160,6 @@ fn scalenet_genesis_block() -> Block {
     block.header.bits = CompactTarget::from_consensus(0x1d00ffff);
     block.header.nonce = 2_727_663_012;
     block
-}
-
-fn anchor_bits(share_chain: BchShareChain) -> CompactTarget {
-    match share_chain {
-        BchShareChain::Main => sim_overrides::anchor_target(),
-        BchShareChain::Mini => CompactTarget::from_consensus(MINI_ANCHOR_TARGET),
-    }
 }
 
 fn payout_network(network: BchShareNetwork) -> Network {
@@ -223,25 +226,33 @@ mod tests {
     /// differs from chipnet's and the two never peer.
     #[test]
     fn scalenet_genesis_differs_from_chipnet_genesis() {
-        let scalenet = build(BchShareNetwork::Scalenet, BchShareChain::Main).unwrap();
-        let chipnet = build(BchShareNetwork::Chipnet, BchShareChain::Main).unwrap();
+        let scalenet = build(BchShareNetwork::Scalenet).unwrap();
+        let chipnet = build(BchShareNetwork::Chipnet).unwrap();
         assert_ne!(scalenet.block_hash(), chipnet.block_hash());
     }
 
+    /// The one Bitcoin Cash share chain starts at the mini chain's anchor.
     #[test]
-    fn bitcoin_cash_genesis_pays_p2pkh_and_mini_is_a_different_chain() {
-        let main = build(BchShareNetwork::Regtest, BchShareChain::Main).unwrap();
-        let mini = build(BchShareNetwork::Regtest, BchShareChain::Mini).unwrap();
+    fn bitcoin_cash_genesis_pays_p2pkh_at_the_mini_anchor() {
+        let genesis = build(BchShareNetwork::Regtest).unwrap();
         assert!(matches!(
-            main.header.miner_address,
+            genesis.header.miner_address,
             ShareOwner::CashP2pkh(_)
         ));
-        assert!(main.header.miner_bitcoin_address.script_pubkey().is_p2pkh());
-        assert_eq!(main.transactions[0].output.len(), 1);
-        assert!(main.transactions[0].input[0].witness.is_empty());
-        assert_ne!(main.block_hash(), mini.block_hash());
-        assert_eq!(mini.header.bits.to_consensus(), MINI_ANCHOR_TARGET);
-        assert_eq!(main.header.bits.to_consensus(), MAIN_ANCHOR_TARGET);
+        assert!(
+            genesis
+                .header
+                .miner_bitcoin_address
+                .script_pubkey()
+                .is_p2pkh()
+        );
+        assert_eq!(genesis.transactions[0].output.len(), 1);
+        assert!(genesis.transactions[0].input[0].witness.is_empty());
+        assert_eq!(genesis.header.bits.to_consensus(), MINI_ANCHOR_TARGET);
+        assert_eq!(
+            target_ceiling(genesis.header.bits).to_consensus(),
+            MINI_ANCHOR_TARGET
+        );
     }
 
     // The Bitcoin Cash genesis shares, pinned. Their hashes name the share
@@ -251,57 +262,35 @@ mod tests {
     // values were computed before and after the upstream sync through
     // `61810c56`, which moved the Bitcoin genesis blocks to `.dat` files.
 
-    #[test]
-    fn mainnet_main_genesis_hash_is_pinned() {
-        let genesis = build(BchShareNetwork::Mainnet, BchShareChain::Main).unwrap();
-        assert_eq!(
-            genesis.block_hash().to_string(),
-            "fb3cb844455afa62b8971c94af8927f23eb934c37709bdefb3cc2881001c98d5"
-        );
-    }
-
+    /// Pinned again on 2026-11-09: the header gained its band (`shares::band`),
+    /// its payout level (`accounting::payout::payout_levels`) and its weak
+    /// ratio and weak shares (`shares::weak`), each of which changed every
+    /// Bitcoin Cash genesis hash in a flag day. Pinned again on 2026-11-12:
+    /// the genesis weak ratio is `R_MAX`, which fell from 4096 to 256.
     #[test]
     fn mainnet_mini_genesis_hash_is_pinned() {
-        let genesis = build(BchShareNetwork::Mainnet, BchShareChain::Mini).unwrap();
+        let genesis = build(BchShareNetwork::Mainnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "ab4967c507cc16bb42e6041756690c173ad9227840f8037d1129824e4f533c78"
-        );
-    }
-
-    #[test]
-    fn chipnet_main_genesis_hash_is_pinned() {
-        let genesis = build(BchShareNetwork::Chipnet, BchShareChain::Main).unwrap();
-        assert_eq!(
-            genesis.block_hash().to_string(),
-            "2f2e457b8ef23012e9593db190914b87fda47817220e5e5f1fb7bc031fc663ed"
+            "2e5cd107c346f223978f89b5be97e11c898b25e2003333f434fef31a9d6127fb"
         );
     }
 
     #[test]
     fn chipnet_mini_genesis_hash_is_pinned() {
-        let genesis = build(BchShareNetwork::Chipnet, BchShareChain::Mini).unwrap();
+        let genesis = build(BchShareNetwork::Chipnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "6d6c2b7c38ee5caf040199adb831e31973d2e941578c0fe2833b3c26f3fe7cd0"
-        );
-    }
-
-    #[test]
-    fn regtest_main_genesis_hash_is_pinned() {
-        let genesis = build(BchShareNetwork::Regtest, BchShareChain::Main).unwrap();
-        assert_eq!(
-            genesis.block_hash().to_string(),
-            "ae37095edfbb29bfca6bff03565945ddb0188ba03761f454088ead6f841fc732"
+            "5ca4efdd91abb3d1dc0e942ece7bb3048bf8dbb6471c0e3219e8d3e3435fed00"
         );
     }
 
     #[test]
     fn regtest_mini_genesis_hash_is_pinned() {
-        let genesis = build(BchShareNetwork::Regtest, BchShareChain::Mini).unwrap();
+        let genesis = build(BchShareNetwork::Regtest).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "70249f9448079ca55b4842f6efa5dd888db2fcc7b12718ae73a9425d999bcc19"
+            "5be2a770f543374c27af95cda58a06829e67086bd66f986f7ff8c5fd13df17f3"
         );
     }
 

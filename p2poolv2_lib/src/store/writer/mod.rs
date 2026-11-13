@@ -19,7 +19,7 @@ use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
-use crate::store::found_block::FoundBlock;
+use crate::store::found_block::{EffortSnapshot, FoundBlock};
 use crate::store::hashrate_samples::HashrateSample;
 use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::PruneStats;
@@ -158,6 +158,14 @@ pub enum WriteCommand {
     RecordAcceptedFoundBlock {
         found_block: FoundBlock,
         reply: oneshot::Sender<Result<bool, StoreError>>,
+    },
+
+    /// Keep the effort snapshot a find took when it reset the block effort
+    /// metric, written after the accepted block it annotates.
+    SetAcceptedFoundBlockEffort {
+        bitcoin_blockhash: BlockHash,
+        snapshot: EffortSnapshot,
+        reply: oneshot::Sender<Result<(), StoreError>>,
     },
 
     /// Keep a found block's payout tree (idempotent).
@@ -356,6 +364,17 @@ impl StoreWriter {
             }
             WriteCommand::RecordAcceptedFoundBlock { found_block, reply } => {
                 let result = self.store.record_accepted_found_block(&found_block);
+                let _ = reply.send(result);
+            }
+
+            WriteCommand::SetAcceptedFoundBlockEffort {
+                bitcoin_blockhash,
+                snapshot,
+                reply,
+            } => {
+                let result = self
+                    .store
+                    .set_accepted_found_block_effort(&bitcoin_blockhash, snapshot);
                 let _ = reply.send(result);
             }
 

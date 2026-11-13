@@ -176,8 +176,8 @@
         Node (BCHN) and relays every share it finds to its peers. A share is
         a Bitcoin Cash block whose work meets the share chain's target. That
         target follows the share chain's own ASERT, which aims for a share
-        every ten seconds. Two share chains run: main, and mini, whose target
-        is 256 times easier for smaller miners.
+        every ten seconds. One share chain runs, whose easiest target
+        (difficulty about 4.5) suits smaller miners.
       </dd>
     </div>
     <div>
@@ -332,7 +332,6 @@ zmqpubhashblock=tcp://127.0.0.1:28332
 <span class="term-comment"># config.toml, under [stratum]</span>
 chain = "bitcoin-cash"
 bitcoin_cash_network = "mainnet"   <span class="term-comment"># or "chipnet", "regtest"</span>
-bch_share_chain = "mini"           <span class="term-comment"># "main" for large miners</span>
 miner_address = "p2pool:q..."
 zmqpubhashblock = "tcp://127.0.0.1:28332"
 

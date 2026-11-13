@@ -104,7 +104,7 @@ async fn test_three_nodes_connectivity() {
         .unwrap();
 
     // Start three nodes
-    let (monitoring_tx1, _monitoring_rx1) = create_monitoring_event_channel();
+    let monitoring_tx1 = create_monitoring_event_channel();
     let (notify_tx1, _notify_rx1) = tokio::sync::mpsc::channel::<NotifyCmd>(10);
     let (node1_handle, _stop_rx1) = NodeHandle::new(
         config1,
@@ -115,11 +115,12 @@ async fn test_three_nodes_connectivity() {
         notify_tx1,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
         None,
+        None,
     )
     .await
     .expect("Failed to create node 1");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let (monitoring_tx2, _monitoring_rx2) = create_monitoring_event_channel();
+    let monitoring_tx2 = create_monitoring_event_channel();
     let (notify_tx2, _notify_rx2) = tokio::sync::mpsc::channel::<NotifyCmd>(10);
     let (node2_handle, _stop_rx2) = NodeHandle::new(
         config2,
@@ -130,11 +131,12 @@ async fn test_three_nodes_connectivity() {
         notify_tx2,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
         None,
+        None,
     )
     .await
     .expect("Failed to create node 2");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let (monitoring_tx3, _monitoring_rx3) = create_monitoring_event_channel();
+    let monitoring_tx3 = create_monitoring_event_channel();
     let (notify_tx3, _notify_rx3) = tokio::sync::mpsc::channel::<NotifyCmd>(10);
     let (node3_handle, _stop_rx3) = NodeHandle::new(
         config3,
@@ -144,6 +146,7 @@ async fn test_three_nodes_connectivity() {
         monitoring_tx3,
         notify_tx3,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
+        None,
         None,
     )
     .await
@@ -239,7 +242,7 @@ async fn test_node_dials_peer_by_dns_name() {
         .await
         .unwrap();
 
-    let (monitoring_tx1, _monitoring_rx1) = create_monitoring_event_channel();
+    let monitoring_tx1 = create_monitoring_event_channel();
     let (notify_tx1, _notify_rx1) = tokio::sync::mpsc::channel::<NotifyCmd>(10);
     let (node1_handle, _stop_rx1) = NodeHandle::new(
         config1,
@@ -250,11 +253,12 @@ async fn test_node_dials_peer_by_dns_name() {
         notify_tx1,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
         None,
+        None,
     )
     .await
     .expect("Failed to create node 1");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let (monitoring_tx2, _monitoring_rx2) = create_monitoring_event_channel();
+    let monitoring_tx2 = create_monitoring_event_channel();
     let (notify_tx2, _notify_rx2) = tokio::sync::mpsc::channel::<NotifyCmd>(10);
     let (node2_handle, _stop_rx2) = NodeHandle::new(
         config2,
@@ -264,6 +268,7 @@ async fn test_node_dials_peer_by_dns_name() {
         monitoring_tx2,
         notify_tx2,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
+        None,
         None,
     )
     .await
@@ -436,7 +441,7 @@ async fn test_three_nodes_share_sync() {
         .unwrap();
 
     // Start node 1 (seeded with shares)
-    let (monitoring_tx1, _monitoring_rx1) = create_monitoring_event_channel();
+    let monitoring_tx1 = create_monitoring_event_channel();
     let (notify_tx1, _notify_rx1) = tokio::sync::mpsc::channel::<NotifyCmd>(10);
     let (node1_handle, _stop_rx1) = NodeHandle::new(
         config1,
@@ -447,13 +452,14 @@ async fn test_three_nodes_share_sync() {
         notify_tx1,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
         None,
+        None,
     )
     .await
     .expect("Failed to create node 1");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Start nodes 2 and 3 (they dial into node 1 and should sync)
-    let (monitoring_tx2, _monitoring_rx2) = create_monitoring_event_channel();
+    let monitoring_tx2 = create_monitoring_event_channel();
     let (notify_tx2, _notify_rx2) = tokio::sync::mpsc::channel::<NotifyCmd>(10);
     let (node2_handle, _stop_rx2) = NodeHandle::new(
         config2,
@@ -464,10 +470,11 @@ async fn test_three_nodes_share_sync() {
         notify_tx2,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
         None,
+        None,
     )
     .await
     .expect("Failed to create node 2");
-    let (monitoring_tx3, _monitoring_rx3) = create_monitoring_event_channel();
+    let monitoring_tx3 = create_monitoring_event_channel();
     let (notify_tx3, _notify_rx3) = tokio::sync::mpsc::channel::<NotifyCmd>(10);
     let (node3_handle, _stop_rx3) = NodeHandle::new(
         config3,
@@ -477,6 +484,7 @@ async fn test_three_nodes_share_sync() {
         monitoring_tx3,
         notify_tx3,
         Arc::new(RwLock::new(PplnsWindow::new(bitcoin::Network::Signet))),
+        None,
         None,
     )
     .await

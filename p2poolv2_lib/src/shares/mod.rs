@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 pub mod auxpow;
+pub mod band;
 pub mod bch_asert;
 pub mod bch_carried_headers;
 pub mod bch_coinbase;
@@ -26,4 +27,6 @@ pub mod share_version;
 pub mod transaction_pool;
 pub mod transactions;
 pub mod validation;
+pub mod weak;
+pub mod weak_pool;
 pub(crate) mod witness_commitment;

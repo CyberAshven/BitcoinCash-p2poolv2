@@ -11,6 +11,7 @@ use crate::store::writer::StoreError;
 use crate::test_utils::TestShareBlockBuilder;
 use bitcoin::CompactTarget;
 use bitcoin::hashes::Hash;
+use p2poolv2_wallet::share_owner::ShareOwner;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
@@ -1955,4 +1956,409 @@ async fn process_bch_block_with_prev(prev_known: bool) -> bool {
 async fn test_a_bch_block_is_stored_only_once_its_bch_prev_is_known() {
     assert!(!process_bch_block_with_prev(false).await);
     assert!(process_bch_block_with_prev(true).await);
+}
+
+/// Block receipt accepts a Bitcoin Cash share four times harder than its
+/// minimum, in the band of four its stored parent gives it
+/// (`shares::band`): the parent at its minimum with cap 4104 steps its child
+/// down to 4096.
+#[test]
+fn test_validate_asert_accepts_a_heavier_share_inside_the_band() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(1)
+        .build()
+        .header;
+    let child = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(parent.block_hash().to_string())
+        .bits(CompactTarget::from_consensus(0x1c10_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c08_0000),
+            4096,
+        )
+        .nonce(2)
+        .build();
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let stored_parent = parent.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_parent.clone()));
+    let asert_parent = parent.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent,
+                0,
+                asert_parent.time,
+            ))
+        });
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1c40_0000));
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _) = validation_worker::create_validation_channel();
+    let receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        chain_store_handle,
+        block_fetcher_handle,
+        validation_tx,
+    );
+
+    let result = receiver.validate_asert(&child);
+
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+}
+
+/// A share eight times harder than its minimum in a band of four is
+/// refused at block receipt.
+#[test]
+fn test_validate_asert_refuses_a_share_past_the_band_cap() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(1)
+        .build()
+        .header;
+    let child = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(parent.block_hash().to_string())
+        .bits(CompactTarget::from_consensus(0x1c08_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c08_0000),
+            4096,
+        )
+        .nonce(2)
+        .build();
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let stored_parent = parent.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_parent.clone()));
+    let asert_parent = parent.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent,
+                0,
+                asert_parent.time,
+            ))
+        });
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1c40_0000));
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _) = validation_worker::create_validation_channel();
+    let receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        chain_store_handle,
+        block_fetcher_handle,
+        validation_tx,
+    );
+
+    let error = receiver.validate_asert(&child).unwrap_err().to_string();
+
+    assert!(error.contains("outside the difficulty band"), "{error}");
+    assert!(
+        error.contains("more than 4096/1024 times harder than the minimum"),
+        "{error}"
+    );
+}
+
+/// A share easier than its minimum is refused at block receipt.
+#[test]
+fn test_validate_asert_refuses_a_share_easier_than_its_minimum() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(1)
+        .build()
+        .header;
+    let child = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(parent.block_hash().to_string())
+        .bits(CompactTarget::from_consensus(0x1c40_0001))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0001),
+            4096,
+        )
+        .nonce(2)
+        .build();
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let stored_parent = parent.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_parent.clone()));
+    let asert_parent = parent.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent,
+                0,
+                asert_parent.time,
+            ))
+        });
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1c40_0000));
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _) = validation_worker::create_validation_channel();
+    let receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        chain_store_handle,
+        block_fetcher_handle,
+        validation_tx,
+    );
+
+    let error = receiver.validate_asert(&child).unwrap_err().to_string();
+
+    assert!(error.contains("easier than the minimum"), "{error}");
+}
+
+/// A share whose band cap is not one step from its parent's is refused at
+/// block receipt.
+#[test]
+fn test_validate_asert_refuses_a_band_cap_off_its_step() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(1)
+        .build()
+        .header;
+    let child = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(parent.block_hash().to_string())
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(2)
+        .build();
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let stored_parent = parent.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_parent.clone()));
+    let asert_parent = parent.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent,
+                0,
+                asert_parent.time,
+            ))
+        });
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1c40_0000));
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _) = validation_worker::create_validation_channel();
+    let receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        chain_store_handle,
+        block_fetcher_handle,
+        validation_tx,
+    );
+
+    let error = receiver.validate_asert(&child).unwrap_err().to_string();
+
+    assert!(
+        error.contains("band cap 4104 is not one step from the parent's, which gives 4096"),
+        "{error}"
+    );
+}
+
+/// A share whose minimum is not the ASERT target from its parent is refused
+/// at block receipt, as a share with the wrong bits was before the band.
+#[test]
+fn test_validate_asert_refuses_a_minimum_other_than_the_asert_target() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(1)
+        .build()
+        .header;
+    let child = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(parent.block_hash().to_string())
+        .bits(CompactTarget::from_consensus(0x1c3f_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c3f_0000),
+            CompactTarget::from_consensus(0x1c3f_0000),
+            4096,
+        )
+        .nonce(2)
+        .build();
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let stored_parent = parent.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_parent.clone()));
+    let asert_parent = parent.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent,
+                0,
+                asert_parent.time,
+            ))
+        });
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1c40_0000));
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _) = validation_worker::create_validation_channel();
+    let receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        chain_store_handle,
+        block_fetcher_handle,
+        validation_tx,
+    );
+
+    let error = receiver.validate_asert(&child).unwrap_err().to_string();
+
+    assert!(error.contains("ASERT mismatch"), "{error}");
+    assert!(
+        error.contains("declared bits 0x1c3f0000, expected 0x1c400000"),
+        "{error}"
+    );
+}
+
+/// A share whose node wanted a target easier than its own is refused at
+/// block receipt.
+#[test]
+fn test_validate_asert_refuses_wanted_bits_easier_than_bits() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c40_0000),
+            4104,
+        )
+        .nonce(1)
+        .build()
+        .header;
+    let child = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(parent.block_hash().to_string())
+        .bits(CompactTarget::from_consensus(0x1c10_0000))
+        .band(
+            CompactTarget::from_consensus(0x1c40_0000),
+            CompactTarget::from_consensus(0x1c20_0000),
+            4096,
+        )
+        .nonce(2)
+        .build();
+    let mut chain_store_handle = ChainStoreHandle::default();
+    let stored_parent = parent.clone();
+    chain_store_handle
+        .expect_get_share_header()
+        .returning(move |_| Ok(stored_parent.clone()));
+    let asert_parent = parent.clone();
+    chain_store_handle
+        .expect_get_asert_parent()
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &asert_parent,
+                0,
+                asert_parent.time,
+            ))
+        });
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1c40_0000));
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _) = validation_worker::create_validation_channel();
+    let receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        chain_store_handle,
+        block_fetcher_handle,
+        validation_tx,
+    );
+
+    let error = receiver.validate_asert(&child).unwrap_err().to_string();
+
+    assert!(
+        error.contains("wanted bits 0x1c200000 are easier than the share's bits 0x1c100000"),
+        "{error}"
+    );
 }

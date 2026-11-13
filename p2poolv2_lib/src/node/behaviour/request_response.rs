@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use async_trait::async_trait;
 use bitcoin::consensus::{Decodable, Encodable};
 use bitcoin::hashes::{Hash, sha256d};
 use libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -10,14 +9,16 @@ use libp2p::request_response::{Codec, OutboundFailure};
 use std::io;
 
 use crate::accounting::payout::coinbase_budget::bch_payout_rule_tag;
+use crate::accounting::payout::payout_levels::BCH_PAYOUT_LEVELS_RULE_TAG;
 use crate::accounting::payout::sharechain_pplns::payout_rights::BCH_PAYOUT_HOLDER_RULE_TAG;
 use crate::accounting::payout::sharechain_pplns::pplns_window::{
-    BCH_COINBASE_MATURITY, BCH_PER_SHARE_CUTS_RULE_TAG, BCH_PPLNS_WINDOW_BLOCKS,
-    BCH_WORK_WEIGHT_RULE_TAG, bch_depth_rule_tag,
+    BCH_COINBASE_MATURITY, BCH_GENESIS_LAST_RESORT_RULE_TAG, BCH_PER_SHARE_CUTS_RULE_TAG,
+    BCH_PPLNS_WINDOW_BLOCKS, BCH_WORK_WEIGHT_RULE_TAG, bch_depth_rule_tag,
 };
 use crate::config::Chain;
 use crate::node::messages::{MAX_P2P_MESSAGE_SIZE, Message, RawMessage};
 use crate::pool_difficulty::BCH_ASERT_ANCHOR_TAG;
+use crate::shares::band::BCH_BAND_RULE_TAG;
 use crate::shares::bch_headers::BCH_CURRENT_CHAIN_RULE_TAG;
 use crate::shares::bch_script::BCH_SHARE_TRADE_RULE_TAG;
 use crate::shares::coinbase_proof::bch_merkle_rule_tag;
@@ -27,6 +28,7 @@ use crate::shares::validation::{
     BCH_NO_SEGWIT_RULE_TAG, BCH_PAYOUT_SCRIPT_RULE_TAG, BCH_SHARE_BODY_RULE_TAG,
     BCH_UNCLE_ONCE_RULE_TAG, bch_sig_checks_rule_tag,
 };
+use crate::shares::weak::BCH_WEAK_SHARE_RULE_TAG;
 use bitcoin::BlockHash;
 
 /// Hex characters of the share chain genesis hash carried in the protocol
@@ -106,11 +108,65 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// the alpha: it changes the share messages themselves, which now carry
 /// Bitcoin Cash headers a node before it cannot read, so it ships as a flag
 /// day with its own last segment. Later rule changes go through the vote.
+///
+/// Paying the genesis share only as the last resort
+/// (`BCH_GENESIS_LAST_RESORT_RULE_TAG`, 2026-11-05) is the owner's second
+/// exception, also a flag day with its own segment. It changes a coinbase
+/// only while genesis is in the window, in a new chain's first hours, and a
+/// vote cannot switch a chain before its parent is
+/// `SHARE_VERSION_VOTE_DEPTH` shares high, three days, by when genesis has
+/// left every window.
+///
+/// The difficulty band (`BCH_BAND_RULE_TAG`, 2026-11-09, issue #79 row 3) is
+/// the third flag day, shipped with the merge of the main and mini chains
+/// into one chain at the mini chain's genesis. A share may be up to `C_MAX`
+/// (64) times harder than the minimum, with its minimum, the target its node
+/// wanted and its band cap in its header (`shares::band`), and the next
+/// share's ASERT anchors at the minimum. A node before it cannot read the
+/// longer header and would refuse every heavier share, and the merged chain
+/// starts from a new genesis, so every node upgrades together on a fresh
+/// store rather than through the vote.
+///
+/// Payout levels (`BCH_PAYOUT_LEVELS_RULE_TAG`, 2026-11-09, issue #79 row 3,
+/// part 4) are the fourth flag day, on the same restart. Each share header
+/// carries its miner's payout level, and a slice of a found block below its
+/// payee's level `546 * 2^k` satoshis is paid by a draw among the slices at
+/// that level, seeded from the share's parent (`payout_levels`). A node
+/// before it cannot read the longer header and would rebuild another
+/// coinbase whenever a payee is below its level, and the header change gives
+/// the chain a new genesis, so every node upgrades together on a fresh store
+/// rather than through the vote.
+///
+/// Weak shares (`BCH_WEAK_SHARE_RULE_TAG`, 2026-11-09, issue #79 row 5) ship
+/// on the same flag day: a share carries up to `WEAK_CAP` (64) easier proofs
+/// of work on jobs at the minimum, each with its parent at most `WEAK_DEPTH`
+/// shares below it, and the PPLNS window credits every proof from a job
+/// at the minimum at the weak work, with `INCLUDER_CUT` (100 basis points) of
+/// each weak share's credit to the share carrying it (`shares::weak`). The
+/// share header carries a weak ratio and commits the carried weak shares,
+/// and weak shares travel in a new message, none of which a node before it
+/// can read, so it cannot go through the vote.
+///
+/// The segment became `weak2` on 2026-11-12, a flag day of its own: a
+/// share's weak root now commits each carried weak share's whole encoding
+/// rather than its proof-of-work hash alone (`shares::weak::weak_root`). The
+/// old root left a carried weak share's coinbase value, branch, scriptSig and
+/// coinbase proof free for a relaying peer to change, and the change made an
+/// honest share invalid after its body was stored. A node on `weak` computes
+/// another root for every share carrying weak shares and refuses it, so the
+/// two cannot share a chain, and the vote cannot carry a fix to what a body
+/// check binds while the old rule lets any peer split a node off.
+///
+/// Its numbers changed on 2026-11-12, another flag day (study #85):
+/// `INCLUDER_CUT` from 500 to 100 basis points, `WEAK_DEPTH` from 6 to 48 and
+/// `R_MAX` from 4096 to 256, now in the segment. Nodes on the two credit weak
+/// shares differently and start from different genesis shares, so they
+/// cannot share a chain.
 fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
         Chain::BitcoinCash => Some(format!(
-            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_PER_SHARE_CUTS_RULE_TAG}/{BCH_UNCLE_ONCE_RULE_TAG}/{BCH_SHARE_BODY_RULE_TAG}/{BCH_PAYOUT_SCRIPT_RULE_TAG}/{}/{}/{}/{BCH_NO_SEGWIT_RULE_TAG}/{BCH_WORK_WEIGHT_RULE_TAG}/{BCH_MERGE_MINING_RULE_TAG}/{BCH_SHARE_VERSION_RULE_TAG}/{BCH_CURRENT_CHAIN_RULE_TAG}",
+            "pplns-k{BCH_PPLNS_WINDOW_BLOCKS}-m{BCH_COINBASE_MATURITY}/{BCH_ASERT_ANCHOR_TAG}/{BCH_SHARE_TRADE_RULE_TAG}/{BCH_PAYOUT_HOLDER_RULE_TAG}/{}/{BCH_PER_SHARE_CUTS_RULE_TAG}/{BCH_UNCLE_ONCE_RULE_TAG}/{BCH_SHARE_BODY_RULE_TAG}/{BCH_PAYOUT_SCRIPT_RULE_TAG}/{}/{}/{}/{BCH_NO_SEGWIT_RULE_TAG}/{BCH_WORK_WEIGHT_RULE_TAG}/{BCH_MERGE_MINING_RULE_TAG}/{BCH_SHARE_VERSION_RULE_TAG}/{BCH_CURRENT_CHAIN_RULE_TAG}/{BCH_GENESIS_LAST_RESORT_RULE_TAG}/{BCH_BAND_RULE_TAG}/{BCH_PAYOUT_LEVELS_RULE_TAG}/{BCH_WEAK_SHARE_RULE_TAG}",
             bch_payout_rule_tag(),
             bch_merkle_rule_tag(),
             bch_depth_rule_tag(),
@@ -247,7 +303,6 @@ impl ConsensusCodec {
     }
 }
 
-#[async_trait]
 impl Codec for ConsensusCodec {
     type Protocol = P2PoolRequestResponseProtocol;
     type Request = Message;
@@ -313,7 +368,7 @@ pub enum RequestResponseError {
 #[cfg(test)]
 mod tests {
     use super::{GENESIS_TAG_LEN, kad_protocol_string, protocol_string};
-    use crate::config::{BchShareChain, Chain};
+    use crate::config::Chain;
     use crate::shares::bch_genesis;
     use crate::shares::share_block::ShareBlock;
     use p2poolv2_wallet::bch_share::BchShareNetwork;
@@ -376,7 +431,7 @@ mod tests {
     /// peer on another rule fails the handshake.
     #[test]
     fn test_bitcoin_cash_protocol_string_carries_the_payout_rule() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -384,7 +439,7 @@ mod tests {
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2/weak2-64-100-48-256/1.0.0"
             )
         );
     }
@@ -395,7 +450,7 @@ mod tests {
     /// and the two cannot negotiate.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_genesis_anchor_string() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -413,7 +468,7 @@ mod tests {
     /// differs and the two cannot negotiate.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_share_trading() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -432,7 +487,7 @@ mod tests {
     /// past the cap; the new string differs and the two cannot negotiate.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_the_coinbase_budget() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Mini)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -452,14 +507,125 @@ mod tests {
     /// cannot negotiate.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_the_current_chain_rule() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
-        let before = current.replace("/bch-prev-1off/", "/");
+        let before = current.replace(
+            "/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2/weak2-64-100-48-256/",
+            "/",
+        );
 
         assert_ne!(current, before);
         assert!(before.ends_with("/version-vote/1.0.0"), "{before}");
+    }
+
+    /// A chipnet node from before the genesis share became the payee of last
+    /// resort derived the string ending `.../bch-prev-1off/1.0.0`. It pays
+    /// genesis beside mined work while genesis is in the window, so the new
+    /// string differs and the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_genesis_last_resort() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current.replace(
+            "/genesis-last-resort/band-c64/levels-546x2/weak2-64-100-48-256/",
+            "/",
+        );
+
+        assert_ne!(current, before);
+        assert!(before.ends_with("/bch-prev-1off/1.0.0"), "{before}");
+    }
+
+    /// A chipnet node from before the difficulty band derived the string
+    /// ending `.../genesis-last-resort/1.0.0`. It cannot read a header with a
+    /// band and refuses every heavier share, so the new string differs and
+    /// the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_the_band() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current.replace("/band-c64/levels-546x2/weak2-64-100-48-256/", "/");
+
+        assert_ne!(current, before);
+        assert!(before.ends_with("/genesis-last-resort/1.0.0"), "{before}");
+    }
+
+    /// A chipnet node from before payout levels derived the string ending
+    /// `.../band-c64/1.0.0`. It cannot read a header with a payout level and
+    /// pays every payee its exact slice, so the new string differs and the
+    /// two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_payout_levels() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current.replace("/levels-546x2/weak2-64-100-48-256/", "/");
+
+        assert_ne!(current, before);
+        assert!(before.ends_with("/band-c64/1.0.0"), "{before}");
+    }
+
+    /// A chipnet node from before weak shares derived the string ending
+    /// `.../levels-546x2/1.0.0`. It cannot read a header with a weak ratio and
+    /// carried weak shares, nor the weak share message, and credits shares at
+    /// their own work, so the new string differs and the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_weak_shares() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current.replace("/weak2-64-100-48-256/", "/");
+
+        assert_ne!(current, before);
+        assert!(before.ends_with("/levels-546x2/1.0.0"), "{before}");
+    }
+
+    /// A chipnet node from before the weak root bound whole weak shares
+    /// derived the string ending `.../levels-546x2/weak-64-500-6/1.0.0`. Its
+    /// weak root covers only the carried weak shares' proof-of-work hashes,
+    /// so it refuses every share carrying weak shares under the new root:
+    /// the new string differs and the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_the_whole_weak_share_root()
+    {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current.replace("/weak2-64-100-48-256/", "/weak-64-500-6/");
+
+        assert_ne!(current, before);
+        assert!(
+            before.ends_with("/levels-546x2/weak-64-500-6/1.0.0"),
+            "{before}"
+        );
+    }
+
+    /// A chipnet node from before study #85's constants derived the string
+    /// ending `.../levels-546x2/weak2-64-500-6/1.0.0`. It takes a 5% includer
+    /// cut, lets weak shares wait 6 shares and starts from a genesis whose
+    /// weak ratio is 4096, so it credits weak shares differently and the two
+    /// cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_the_study_constants() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current.replace("/weak2-64-100-48-256/", "/weak2-64-500-6/");
+
+        assert_ne!(current, before);
+        assert!(
+            before.ends_with("/levels-546x2/weak2-64-500-6/1.0.0"),
+            "{before}"
+        );
     }
 
     /// A chipnet node from before the one-nephew uncle rule derived
@@ -468,7 +634,7 @@ mod tests {
     /// and the two cannot negotiate.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_uncle_once() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -488,7 +654,7 @@ mod tests {
     /// negotiate; the batch also starts a fresh share chain.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_the_rule_batch() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -507,7 +673,7 @@ mod tests {
     /// minutes before their parent, so the final tag differs from it.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_batch_before_its_review_fixes() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -526,7 +692,7 @@ mod tests {
     /// exchange shares the other would reject.
     #[test]
     fn test_bitcoin_cash_protocol_string_differs_from_the_fixed_window_string() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -542,7 +708,7 @@ mod tests {
     /// join a sized-window node's DHT either.
     #[test]
     fn test_bitcoin_cash_kad_protocol_string_carries_the_payout_rule() {
-        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet, BchShareChain::Main)
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
@@ -550,7 +716,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2/weak2-64-100-48-256/kad/1.0.0"
             )
         );
     }

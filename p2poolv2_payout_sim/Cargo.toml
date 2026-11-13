@@ -1,0 +1,32 @@
+[package]
+name = "p2poolv2_payout_sim"
+description = "Offline Monte Carlo of payout variance and fees under Bitcoin Cash share chain designs"
+version.workspace = true
+edition.workspace = true
+# New code for the Bitcoin Cash fork, which is distributed under AGPL-3.0
+# (docs/bch-plan.md, decision 13), like p2poolv2_netsim, whose seeded
+# generator and number formats it reuses.
+license = "AGPL-3.0-or-later"
+authors.workspace = true
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+keywords = ["bitcoin-cash", "mining", "pool", "simulation"]
+categories = ["simulation"]
+rust-version.workspace = true
+publish.workspace = true
+
+# Developer tooling only: never part of a release.
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+clap = { workspace = true }
+# SimulationRandom (seeded xoshiro256**), the share chain constants it
+# already copies from p2poolv2_lib, and its number formats. It links neither
+# RocksDB nor libp2p, so this crate stays quick to build.
+p2poolv2_netsim = { path = "../p2poolv2_netsim" }
+
+[[bin]]
+name = "payout-sim"
+path = "src/bin/payout_sim.rs"

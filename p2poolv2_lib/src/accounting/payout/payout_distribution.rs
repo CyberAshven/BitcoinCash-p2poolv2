@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::accounting::payout::coinbase_budget::{PayoutSplit, append_payout_split};
+use crate::accounting::payout::payout_levels::PplnsWeights;
 use crate::accounting::payout::payout_tree::PayoutTree;
 use crate::accounting::payout::sharechain_pplns::pplns_window::PayingBlock;
 use crate::accounting::{CoinbasePayouts, OutputPair};
@@ -34,8 +35,10 @@ pub trait PayoutDistribution {
         false
     }
 
-    /// Snapshot used by declared jobs to split a miner-selected fee revenue.
-    fn pplns_weights(&self) -> Option<HashMap<PayoutAddress, u128>> {
+    /// Snapshot used by declared jobs to split a miner-selected fee revenue:
+    /// the weights of the last distribution, with the payout levels the
+    /// draw used on Bitcoin Cash.
+    fn pplns_weights(&self) -> Option<PplnsWeights> {
         None
     }
 
@@ -141,9 +144,15 @@ pub trait PayoutDistribution {
 /// `weights`, their recipients payees like any other
 /// (`BCH_PER_SHARE_CUTS_RULE_TAG`), so the paying share's own settings never
 /// cut the coinbase.
+///
+/// On Bitcoin Cash a window's weights carry their payout levels, and the
+/// payees below their level are paid by the draw seeded from the window's
+/// anchor, the share's parent (`payout_levels`). Every caller passes the
+/// weights the window gave at that anchor, levels included, so the producer,
+/// every validator and a Job Declaration client build the same draw.
 pub fn build_pplns_outputs(
     value: u64,
-    weights: &HashMap<PayoutAddress, u128>,
+    weights: &PplnsWeights,
     donation_address: &Option<PayoutAddress>,
     donation: Option<u16>,
     fee_address: &Option<PayoutAddress>,
@@ -153,7 +162,7 @@ pub fn build_pplns_outputs(
     if weights.is_empty() {
         return Err("Can't build output from empty distribution. There should be at least one payout address".into());
     }
-    let mut outputs = Vec::with_capacity(weights.len() + 2);
+    let mut outputs = Vec::with_capacity(weights.weights.len() + 2);
     let remaining = match split {
         PayoutSplit::BchHybrid { .. } => Amount::from_sat(value),
         PayoutSplit::EveryPayee => {
@@ -278,7 +287,8 @@ mod tests {
     fn a_p2sh32_payee_is_paid_its_own_script() {
         let p2sh32 = PayoutAddress::p2sh32([0x31; 32], bitcoin::Network::Regtest);
         let p2pkh = parse_address_from_string("mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn");
-        let weights = HashMap::from([(p2sh32.clone(), 3), (p2pkh, 1)]);
+        let weights =
+            PplnsWeights::without_levels(HashMap::from([(p2sh32.clone(), 3), (p2pkh, 1)]));
         let payouts = build_pplns_outputs(
             100_000_000,
             &weights,

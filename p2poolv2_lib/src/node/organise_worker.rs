@@ -17,7 +17,7 @@ use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 #[cfg(not(test))]
 use crate::accounting::payout::sharechain_pplns::PplnsWindow;
 use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
-use crate::accounting::stats::metrics::MetricsHandle;
+use crate::accounting::stats::metrics::{MetricsHandle, WeakShareCarrier};
 use crate::monitoring_events::{MonitoringEvent, MonitoringEventSender};
 use crate::node::validation_worker::{ValidationEvent, ValidationSender};
 #[cfg(test)]
@@ -790,7 +790,8 @@ impl OrganiseWorker {
         }
     }
 
-    /// Record one newly confirmed share's work and emit its Share event.
+    /// Record one newly confirmed share's work and the weak shares it
+    /// carries, while the chain is current, and emit its Share event.
     /// BCH block acceptance is tracked separately from share confirmation.
     ///
     /// Reads are current: the writer commits the confirmation batch before
@@ -825,6 +826,15 @@ impl OrganiseWorker {
         if self.chain_store_handle.is_current() {
             let share_difficulty = bitcoin::Target::from_compact(header.bits).difficulty_float();
             let _ = self.metrics.record_confirmed_share(share_difficulty).await;
+            if header.weak_count > 0 {
+                let _ = self
+                    .metrics
+                    .record_weak_shares_carried(
+                        WeakShareCarrier::Chain,
+                        u64::from(header.weak_count),
+                    )
+                    .await;
+            }
         }
 
         self.emit_share_monitoring_event(&header, height);
@@ -955,6 +965,7 @@ impl OrganiseWorker {
             miner_address: header.miner_address,
             timestamp: header.time,
             bits: header.bits,
+            weak_count: header.weak_count,
             uncles: uncle_infos,
         };
         let event = MonitoringEvent::Share(share_info);

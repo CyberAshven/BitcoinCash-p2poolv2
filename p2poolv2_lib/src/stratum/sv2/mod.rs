@@ -27,6 +27,7 @@
 //! Provider and its blocks go back there (see `template_distribution`).
 
 mod custom_job;
+pub mod large_templates;
 #[cfg(all(test, not(feature = "sim")))]
 mod live_tests;
 mod mining;
@@ -43,7 +44,9 @@ pub(crate) use noise::NoiseTransport;
 pub use server::bind;
 pub(crate) use server::{Sv2Mining, serve};
 #[cfg(test)]
-pub(crate) use session::{Declaration, DeclaredJob, decode_plain_frames, encode_message};
+pub(crate) use session::{
+    Declaration, DeclaredJob, decode_plain_frames, encode_extension_frame, encode_message,
+};
 pub use session::{
     JobDeclarationMode, JobRegistry, PoolTransactionCache, Sv2Connection, Sv2Message,
 };
@@ -56,8 +59,11 @@ use bitcoin::hashes::Hash;
 ///
 /// Bitcoin Cash compares the transaction id the way it is shown, which is the
 /// reverse of the internal hash bytes. The coinbase is not part of this list.
+///
+/// Each transaction is hashed once: a key computed in every comparison
+/// hashed a declaration of 67,535 transactions about two million times.
 pub fn sort_ctor(transactions: &mut [Transaction]) {
-    transactions.sort_by_key(ctor_key);
+    transactions.sort_by_cached_key(ctor_key);
 }
 
 fn ctor_key(transaction: &Transaction) -> [u8; 32] {

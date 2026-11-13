@@ -5,6 +5,7 @@
 use crate::shares::coinbase_proof::CoinbaseProof;
 use crate::shares::share_block::ShareTransaction;
 use crate::shares::share_commitment::ShareCommitment;
+use crate::shares::weak::WeakShare;
 use crate::stratum::work::block_template::BlockTemplate;
 use bitcoin::Transaction;
 use bitcoin::block::Header;
@@ -32,7 +33,15 @@ pub struct Emission {
     /// The job's share transactions after the coinbase, the set the
     /// commitment's `share_witness_root` covers.
     pub share_transactions: Arc<[ShareTransaction]>,
+    /// The weak shares the job carries, the set the commitment's weak root
+    /// covers (`shares::weak`). Empty on Bitcoin.
+    pub weak_shares: Arc<[WeakShare]>,
 }
 
 pub type EmissionSender = mpsc::Sender<Emission>;
 pub type EmissionReceiver = mpsc::Receiver<Emission>;
+
+/// A weak share found by this node's miners (`shares::weak`), on its way
+/// to the node's weak pool, from where it is relayed and carried.
+pub type WeakShareSender = mpsc::Sender<WeakShare>;
+pub type WeakShareReceiver = mpsc::Receiver<WeakShare>;

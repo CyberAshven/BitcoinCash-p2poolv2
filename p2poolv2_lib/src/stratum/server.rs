@@ -8,6 +8,7 @@ use crate::accounting::stats::metrics;
 use crate::address::Address as P2PoolAddress;
 pub use crate::config::PoolMode;
 use crate::config::{Chain, Sv2Authority};
+use crate::node::weak_share_worker::WeakShareEventSender;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::stratum::block_submit::FoundBlockSubmitter;
@@ -32,7 +33,9 @@ use crate::stratum::messages::{
 use crate::stratum::session::Session;
 use crate::stratum::session_timeout::{self, check_session_timeouts};
 use crate::stratum::sv2::{self, PoolTransactionCache, Sv2Mining};
+use crate::stratum::work::band_policy::miner_job_band;
 use crate::stratum::work::error::WorkError;
+use crate::stratum::work::level_policy::session_payout_level;
 use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_with_job_id};
 use crate::stratum::work::tracker::JobTracker;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
@@ -84,6 +87,9 @@ pub struct StratumServer {
     /// The logs of the tokens this node merge-mines for its miners, beside
     /// its token file; `None` when it merge-mines none.
     merge_mining_logs: Option<MergeMiningLogs>,
+    /// Bitcoin Cash P2Pool: where the weak shares miners find go to be
+    /// checked, pooled and relayed (`node::weak_share_worker`).
+    weak_share_tx: Option<WeakShareEventSender>,
 }
 
 /// Local Stratum V2 listener served beside SV1 on the same host name.
@@ -137,9 +143,18 @@ pub struct StratumServerBuilder {
     template_refresh_tx: Option<mpsc::Sender<()>>,
     extra_submit_nodes: Vec<BitcoinRpcConfig>,
     merge_mining_tokens: Option<PathBuf>,
+    weak_share_tx: Option<WeakShareEventSender>,
 }
 
 impl StratumServerBuilder {
+    /// Where the weak shares miners find go (`node::weak_share_worker`): a
+    /// Bitcoin Cash P2Pool node's weak share worker. `None`, the default,
+    /// makes no weak shares.
+    pub fn weak_share_tx(mut self, weak_share_tx: Option<WeakShareEventSender>) -> Self {
+        self.weak_share_tx = weak_share_tx;
+        self
+    }
+
     /// The token file of a node that merge-mines tokens for its miners
     /// (`[stratum] merge_mining_tokens`): miners may then ask for their
     /// leaves and wins, and the node logs them beside the file.
@@ -323,6 +338,7 @@ impl StratumServerBuilder {
                 .merge_mining_tokens
                 .as_deref()
                 .map(MergeMiningLogs::start),
+            weak_share_tx: self.weak_share_tx,
         })
     }
 }
@@ -546,6 +562,7 @@ impl StratumServer {
             cash_share: self.cash_share,
             template_refresh_tx: self.template_refresh_tx.clone(),
             merge_mining_logs: self.merge_mining_logs.clone(),
+            weak_share_tx: self.weak_share_tx.clone(),
         }
     }
 }
@@ -670,6 +687,10 @@ pub(crate) struct StratumContext {
     /// leaves and wins (`stratum::merge_disclosure`), and standard-channel
     /// jobs and every win are logged here.
     pub merge_mining_logs: Option<MergeMiningLogs>,
+    /// Bitcoin Cash P2Pool: where a submission that meets its job's weak
+    /// target but not its share target goes, as a weak share
+    /// (`node::weak_share_worker`). `None` makes no weak shares.
+    pub weak_share_tx: Option<WeakShareEventSender>,
 }
 
 impl StratumContext {
@@ -737,7 +758,14 @@ where
             // Clone inside a block to ensure the watch Ref guard is dropped before await
             let prepared_template = { template_rx.borrow_and_update().clone() };
             if let Some(prepared) = prepared_template {
-                match job_lines(session, &prepared, is_hydrapool, &ctx.tracker_handle) {
+                let miner_hashrate = session_hashrate(session, &ctx);
+                match job_lines(
+                    session,
+                    &prepared,
+                    is_hydrapool,
+                    miner_hashrate,
+                    &ctx.tracker_handle,
+                ) {
                     Ok(job_lines) => {
                         debug!("Sending first notify after authorize");
                         if let Err(e) = writer.write_all(job_lines.as_bytes()).await {
@@ -780,7 +808,14 @@ where
                 } else if session.username.is_none() {
                     // Not yet authorized, skip building notify
                 } else if let Some(prepared) = prepared_template {
-                    match job_lines(session, &prepared, is_hydrapool, &ctx.tracker_handle) {
+                    let miner_hashrate = session_hashrate(session, &ctx);
+                    match job_lines(
+                        session,
+                        &prepared,
+                        is_hydrapool,
+                        miner_hashrate,
+                        &ctx.tracker_handle,
+                    ) {
                         Ok(job_lines) => {
                             debug!("Send notify in reponse to new template");
                             if let Err(e) = writer.write_all(job_lines.as_bytes()).await {
@@ -849,6 +884,19 @@ where
     Ok(())
 }
 
+/// The hashrate of the miner behind `session`, by the payout address it
+/// authorized with, as the metrics actor last published it: all of that
+/// miner's connections together, so each gets the same heavier target.
+fn session_hashrate<D: DifficultyAdjusterTrait>(
+    session: &Session<D>,
+    ctx: &StratumContext,
+) -> Option<f64> {
+    session
+        .btcaddress
+        .as_deref()
+        .and_then(|address| ctx.metrics.miner_hashrate(address))
+}
+
 /// The lines that send `prepared` to an SV1 miner: its `mining.notify`,
 /// preceded by a `mining.set_difficulty` when the session difficulty was
 /// above the job's share difficulty and had to come down to it.
@@ -864,28 +912,53 @@ where
 /// A miner who asked for `pickaxe-merge` in `mining.configure` gets each
 /// job's token leaves after its notify (`pickaxe.merge_leaves`), when the
 /// job commits a root.
+///
+/// On Bitcoin Cash a miner whose `miner_hashrate` would make too many shares
+/// at the minimum gets a heavier job inside the difficulty band
+/// (`band_policy::miner_job_band`); the ceiling then follows that job's own
+/// bits. Its job carries its payout level: the one its login chose, or the
+/// node's, lowered when it would expect fewer than 3 payments a month
+/// (`level_policy::session_payout_level`).
 fn job_lines<D: DifficultyAdjusterTrait>(
     session: &mut Session<D>,
     prepared: &PreparedNotifyParams,
     is_hydrapool: bool,
+    miner_hashrate: Option<f64>,
     tracker_handle: &JobTracker,
 ) -> Result<String, WorkError> {
     let miner_prepared = prepared.for_miner_donation(session.donation)?;
     let prepared = miner_prepared.as_deref().unwrap_or(prepared);
+    let (job_band, payout_level) = if is_hydrapool {
+        (None, None)
+    } else {
+        (
+            miner_job_band(prepared, miner_hashrate),
+            Some(session_payout_level(session, prepared, miner_hashrate)),
+        )
+    };
+    //* A job at the minimum makes weak shares, so its ceiling follows the
+    //* weak target (`PreparedNotifyParams::session_ceiling_bits`).
+    let ceiling_bits = prepared.session_ceiling_bits(job_band);
     let (commitment_address, share_address, ceiling) = if is_hydrapool {
         (None, None, None)
     } else {
         (
             session.parsed_address.as_ref(),
             session.share_owner,
-            share_difficulty_ceiling(prepared.bits()),
+            share_difficulty_ceiling(ceiling_bits),
         )
     };
     let lowered = session
         .difficulty_adjuster
         .set_share_difficulty_ceiling(ceiling);
-    let (notify_json, job_id) =
-        build_notify_with_job_id(prepared, commitment_address, share_address, tracker_handle)?;
+    let (notify_json, job_id) = build_notify_with_job_id(
+        prepared,
+        commitment_address,
+        share_address,
+        job_band,
+        payout_level,
+        tracker_handle,
+    )?;
     let mut lines = String::with_capacity(notify_json.len() + 1024);
     if let Some(difficulty) = lowered {
         lines.push_str(&serialize_line(&Message::SetDifficulty(
@@ -1148,6 +1221,7 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         // Run the handler
@@ -1278,6 +1352,7 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         // Run the handler
@@ -1369,6 +1444,7 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         // Run the handler
@@ -1458,6 +1534,7 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         // Run the handler
@@ -1566,6 +1643,7 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         // Spawn the handler in a separate task
@@ -1694,6 +1772,7 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         // Spawn the handler in a separate task
@@ -1812,6 +1891,7 @@ mod stratum_server_tests {
                 cash_share: None,
                 template_refresh_tx: None,
                 merge_mining_logs: None,
+                weak_share_tx: None,
             };
 
             // wait for subscribe/authorize messages
@@ -1902,6 +1982,7 @@ mod stratum_server_tests {
                 cash_share: None,
                 template_refresh_tx: None,
                 merge_mining_logs: None,
+                weak_share_tx: None,
             };
 
             let subscribe_message =
@@ -2048,6 +2129,7 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         // Pre-load a template before starting handle_connection
@@ -2184,6 +2266,7 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         // Start with no template - will send one after authorization
@@ -2330,6 +2413,7 @@ mod stratum_server_tests {
             cash_share: None,
             template_refresh_tx: None,
             merge_mining_logs: None,
+            weak_share_tx: None,
         };
 
         let (template_tx, template_rx) = watch::channel(None);
@@ -2513,7 +2597,7 @@ mod stratum_server_tests {
         let prepared = create_test_prepared_notify();
         let mut session = Session::<DifficultyAdjuster>::new(1000, 1, None, DEFAULT_VERSION_MASK);
 
-        let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+        let lines = job_lines(&mut session, &prepared, false, None, &tracker_handle).unwrap();
 
         let messages: Vec<serde_json::Value> = lines
             .lines()
@@ -2532,7 +2616,7 @@ mod stratum_server_tests {
         let prepared = create_test_prepared_notify();
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
 
-        let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+        let lines = job_lines(&mut session, &prepared, false, None, &tracker_handle).unwrap();
 
         assert_eq!(lines.lines().count(), 1);
         assert!(lines.contains("mining.notify"));
@@ -2545,7 +2629,7 @@ mod stratum_server_tests {
         let prepared = create_test_prepared_notify();
         let mut session = Session::<DifficultyAdjuster>::new(1000, 1, None, DEFAULT_VERSION_MASK);
 
-        let lines = job_lines(&mut session, &prepared, true, &tracker_handle).unwrap();
+        let lines = job_lines(&mut session, &prepared, true, None, &tracker_handle).unwrap();
 
         assert_eq!(lines.lines().count(), 1);
         assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 1000);
@@ -2558,7 +2642,7 @@ mod stratum_server_tests {
         let tracker_handle = start_tracker_actor();
         let prepared = create_test_prepared_notify();
         let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
-        job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+        job_lines(&mut session, &prepared, false, None, &tracker_handle).unwrap();
 
         let constrained = session
             .difficulty_adjuster
@@ -2586,7 +2670,7 @@ mod stratum_server_tests {
                 [0x22; 20],
             ));
             session.donation = donation;
-            let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+            let lines = job_lines(&mut session, &prepared, false, None, &tracker_handle).unwrap();
             let notify: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
             let job_id = u64::from_str_radix(notify["params"][0].as_str().unwrap(), 16).unwrap();
             tracker_handle
@@ -2628,7 +2712,7 @@ mod stratum_server_tests {
         ));
         session.merge_disclosure = true;
 
-        let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+        let lines = job_lines(&mut session, &prepared, false, None, &tracker_handle).unwrap();
 
         let messages: Vec<serde_json::Value> = lines
             .lines()
@@ -2677,7 +2761,7 @@ mod stratum_server_tests {
             [0x22; 20],
         ));
 
-        let lines = job_lines(&mut session, &prepared, false, &tracker_handle).unwrap();
+        let lines = job_lines(&mut session, &prepared, false, None, &tracker_handle).unwrap();
 
         assert_eq!(lines.lines().count(), 1);
     }

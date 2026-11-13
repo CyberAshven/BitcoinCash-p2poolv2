@@ -26,9 +26,13 @@ pub enum ColumnFamily {
     FoundBlocks,
     HashrateSamples,
     AcceptedFoundBlocks,
+    AcceptedBlockEffort,
     PayoutTrees,
     BchHeaders,
     BchBestChain,
+    WeakShares,
+    WeakSummaries,
+    ScriptHistory,
 }
 
 impl ColumnFamily {
@@ -55,9 +59,13 @@ impl ColumnFamily {
             ColumnFamily::FoundBlocks => "found_blocks",
             ColumnFamily::HashrateSamples => "hashrate_samples",
             ColumnFamily::AcceptedFoundBlocks => "accepted_found_blocks",
+            ColumnFamily::AcceptedBlockEffort => "accepted_block_effort",
             ColumnFamily::PayoutTrees => "payout_trees",
             ColumnFamily::BchHeaders => "bch_headers",
             ColumnFamily::BchBestChain => "bch_best_chain",
+            ColumnFamily::WeakShares => "weak_shares",
+            ColumnFamily::WeakSummaries => "weak_summaries",
+            ColumnFamily::ScriptHistory => "script_history",
         }
     }
 }

@@ -74,6 +74,23 @@ pub const DEFAULT_BITCOIN_CASH_FEE: u16 = 100;
 /// block it finds, while its shares still earn a slice of everyone else's.
 pub const MAX_BITCOIN_CASH_CUT: u16 = 1_000;
 
+/// The highest payout level `k` a Bitcoin Cash share may carry: level `k`
+/// pays slices below `546 * 2^k` satoshis by a draw
+/// (`docs/sharechain/small-miners-design.md`, part 4), so level 7 is 69,888
+/// satoshis, the cap that keeps large amounts out of any draw. A share-chain
+/// rule: a share header above it does not decode.
+pub const MAX_PAYOUT_LEVEL: u8 = 7;
+
+/// The payout level a Bitcoin Cash node gives a miner whose login chooses
+/// none, when `payout_level` is not set: level 5, 17,472 satoshis, about
+/// 0.85% of a payment spent at the default `spend_cost`. Node policy.
+pub const DEFAULT_PAYOUT_LEVEL: u8 = 5;
+
+/// What spending one payment costs, in satoshis, when `spend_cost` is not
+/// set: a P2PKH input of 148 bytes at 1 sat/byte. A miner's
+/// `fee-tolerance=` option is a share of a payment this cost may take.
+pub const DEFAULT_SPEND_COST: u64 = 148;
+
 /// [`BITCOIN_CASH_DONATION_ADDRESS`] under a network's CashAddr prefix, for
 /// logs and documentation. Each string decodes to
 /// [`bitcoin_cash_donation_address`] for that network.
@@ -206,7 +223,7 @@ pub enum Chain {
 /// same prefix for its other test networks, so the prefix does not
 /// distinguish chipnet from scalenet, testnet3 or testnet4. The RPC URL has
 /// to point at the network named here; the node checks at start that it does
-/// (`bchn_chain_name`, `bch_only_block`).
+/// (`node_chain_names`, `bch_only_block`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BitcoinCashNetwork {
@@ -224,20 +241,11 @@ pub enum BitcoinCashNetwork {
     Scalenet,
 }
 
-/// Which Bitcoin Cash share chain this node extends.
-///
-/// Main and mini are different genesis shares, so they do not reorg into
-/// each other. Mini's anchor target is 256 times easier than the main
-/// ceiling, which is the existing `MAX_POOL_TARGET`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum BchShareChain {
-    /// Share target ceiling `0x1b384bd7`, anchor `0x1b4188f5`.
-    #[default]
-    Main,
-    /// Share target ceiling and anchor `0x1c384bd7` (256 times easier).
-    Mini,
-}
+/// The `[stratum]` key that once chose the Bitcoin Cash main or mini share
+/// chain. The two merged into one share chain on 2026-11-09, which keeps the
+/// mini chain's anchor, ceiling and genesis, so [`Config::load`] refuses a
+/// config that still sets it.
+pub const REMOVED_BCH_SHARE_CHAIN_KEY: &str = "bch_share_chain";
 
 impl BitcoinCashNetwork {
     /// The network's name as `bitcoin_cash_network` spells it: "mainnet",
@@ -299,14 +307,16 @@ impl BitcoinCashNetwork {
         }
     }
 
-    /// The `chain` BCHN's `getblockchaininfo` reports on this network:
-    /// `CBaseChainParams` in BCHN's `src/chainparamsbase.cpp`.
-    pub fn bchn_chain_name(self) -> &'static str {
+    /// The `chain` names Bitcoin Cash nodes' `getblockchaininfo` reports on
+    /// this network: BCHN's first (`CBaseChainParams` in its
+    /// `src/chainparamsbase.cpp`), then BCHD's (`Name` in its
+    /// `chaincfg/params.go`). BCHD has no scalenet.
+    pub fn node_chain_names(self) -> &'static [&'static str] {
         match self {
-            BitcoinCashNetwork::Mainnet => "main",
-            BitcoinCashNetwork::Chipnet => "chip",
-            BitcoinCashNetwork::Regtest => "regtest",
-            BitcoinCashNetwork::Scalenet => "scale",
+            BitcoinCashNetwork::Mainnet => &["main", "mainnet"],
+            BitcoinCashNetwork::Chipnet => &["chip", "chipnet"],
+            BitcoinCashNetwork::Regtest => &["regtest"],
+            BitcoinCashNetwork::Scalenet => &["scale"],
         }
     }
 
@@ -419,10 +429,6 @@ pub struct StratumConfig<State = Raw> {
     /// `mainnet` (alias `main`), `chipnet`, and `regtest`.
     #[serde(default)]
     pub bitcoin_cash_network: Option<BitcoinCashNetwork>,
-    /// Main or mini Bitcoin Cash share chain. Ignored unless `chain` is
-    /// `bitcoin-cash`. `mini` on a Bitcoin node is rejected.
-    #[serde(default)]
-    pub bch_share_chain: BchShareChain,
     /// Stratum V2 listen port. Absent means the node does not open an SV2
     /// socket, which is what every existing configuration does.
     #[serde(default)]
@@ -496,6 +502,17 @@ pub struct StratumConfig<State = Raw> {
     /// the node merge-mines nothing. Bitcoin Cash in P2Pool mode only.
     #[serde(default)]
     pub merge_mining_tokens: Option<String>,
+    /// The payout level, 0 to [`MAX_PAYOUT_LEVEL`], a Bitcoin Cash node
+    /// gives a miner whose login sets neither `min-payout=` nor
+    /// `fee-tolerance=`. Parsing fills an unset value with
+    /// [`DEFAULT_PAYOUT_LEVEL`] and refuses one above the maximum.
+    #[serde(default)]
+    pub payout_level: Option<u8>,
+    /// What spending one payment costs, in satoshis, for a miner's
+    /// `fee-tolerance=` option and the node's level policy. Parsing fills an
+    /// unset value with [`DEFAULT_SPEND_COST`].
+    #[serde(default)]
+    pub spend_cost: Option<u64>,
 
     // Parsed addresses - only available when State = Parsed
     #[serde(skip)]
@@ -614,13 +631,6 @@ impl StratumConfig<Raw> {
             });
         }
 
-        if self.chain == Chain::Bitcoin && self.bch_share_chain == BchShareChain::Mini {
-            return Err(ConfigError {
-                message: "bch_share_chain = mini is only valid when chain is bitcoin-cash"
-                    .to_string(),
-            });
-        }
-
         if self.chain == Chain::BitcoinCash
             && let Some(solo_address) = &self.solo_address
         {
@@ -700,6 +710,15 @@ impl StratumConfig<Raw> {
 
         validate_cuts(self.chain, donation, fee)?;
         validate_light_templates(self.chain, self.template_source)?;
+        let payout_level = self.payout_level.unwrap_or(DEFAULT_PAYOUT_LEVEL);
+        if payout_level > MAX_PAYOUT_LEVEL {
+            return Err(ConfigError {
+                message: format!(
+                    "payout_level {payout_level} is above the highest payout level, \
+                     {MAX_PAYOUT_LEVEL}"
+                ),
+            });
+        }
 
         let sv2_authority = parse_sv2_authority(
             self.sv2_port,
@@ -737,7 +756,6 @@ impl StratumConfig<Raw> {
             network: self.network,
             chain: self.chain,
             bitcoin_cash_network: self.bitcoin_cash_network,
-            bch_share_chain: self.bch_share_chain,
             sv2_port: self.sv2_port,
             sv2_authority_public_key: self.sv2_authority_public_key,
             sv2_authority_secret_key: self.sv2_authority_secret_key,
@@ -753,6 +771,8 @@ impl StratumConfig<Raw> {
             wait_for_chain_sync: self.wait_for_chain_sync,
             mode: self.mode,
             merge_mining_tokens: self.merge_mining_tokens,
+            payout_level: Some(payout_level),
+            spend_cost: Some(self.spend_cost.unwrap_or(DEFAULT_SPEND_COST)),
             bootstrap_address_parsed: Some(bootstrap_address_parsed),
             donation_address_parsed,
             fee_address_parsed,
@@ -795,6 +815,18 @@ impl StratumConfig<Parsed> {
     /// Bitcoin Cash share address configured for this pool, if any.
     pub fn bch_miner_address(&self) -> Option<BchShareAddress> {
         self.bch_miner_address
+    }
+
+    /// The payout level of a miner whose login chooses none
+    /// ([`DEFAULT_PAYOUT_LEVEL`] unless `payout_level` is set).
+    pub fn payout_level(&self) -> u8 {
+        self.payout_level.unwrap_or(DEFAULT_PAYOUT_LEVEL)
+    }
+
+    /// What spending one payment costs, in satoshis
+    /// ([`DEFAULT_SPEND_COST`] unless `spend_cost` is set).
+    pub fn spend_cost(&self) -> u64 {
+        self.spend_cost.unwrap_or(DEFAULT_SPEND_COST)
     }
 
     /// Stratum V2 authority keys, when the operator configured them.
@@ -1171,7 +1203,6 @@ impl StratumConfig<Raw> {
             network: bitcoin::Network::Signet,
             chain: Chain::Bitcoin,
             bitcoin_cash_network: None,
-            bch_share_chain: BchShareChain::Main,
             sv2_port: None,
             sv2_authority_public_key: None,
             sv2_authority_secret_key: None,
@@ -1187,6 +1218,8 @@ impl StratumConfig<Raw> {
             wait_for_chain_sync: true,
             mode: PoolMode::default(),
             merge_mining_tokens: None,
+            payout_level: None,
+            spend_cost: None,
             bootstrap_address_parsed: None,
             donation_address_parsed: None,
             fee_address_parsed: None,
@@ -1511,6 +1544,44 @@ pub struct SimConfig {
     /// identical across nodes (ASERT consensus). Omit for the default 10s.
     #[serde(default)]
     pub ideal_block_time_secs: Option<u32>,
+    /// Bitcoin Cash: this node's miner wants shares this many times the
+    /// minimum's work, as a big miner's node gives it: it mines at that
+    /// multiple within the share's band cap and records the rest as its
+    /// wanted target. Omit to mine at the minimum.
+    #[serde(default)]
+    pub share_multiple: Option<u32>,
+    /// With `share_multiple`, mine at that multiple even past the band cap,
+    /// so peers can be seen refusing the shares.
+    #[serde(default)]
+    pub share_multiple_ignores_cap: bool,
+    /// Bitcoin Cash: on a job at the minimum, pace proofs by the job's weak
+    /// target and send those short of the share target to the node as weak
+    /// shares, as a real miner capped at the weak difficulty does. Off by
+    /// default, so other sim runs keep pacing by the share target.
+    #[serde(default)]
+    pub weak_shares: bool,
+    /// Bitcoin Cash: of the share blocks this node broadcasts that carry weak
+    /// shares, every this many goes out with its first weak share's coinbase
+    /// value one satoshi higher, as a peer serving an altered copy of an
+    /// honest share would. The node's store and its answers to block requests
+    /// stay honest. For the end-to-end check of the weak-share commitment;
+    /// omit to broadcast every share as stored.
+    #[serde(default)]
+    pub alter_weak_copy_every: Option<u64>,
+    /// Bitcoin Cash: carry only this node's own weak shares in the shares it
+    /// builds, as a node in a coalition refusing to carry others' weak shares
+    /// would. It still checks, stores and relays them. For the end-to-end
+    /// check of `WEAK_DEPTH` against a refusing coalition.
+    #[serde(default)]
+    pub carry_only_own_weak_shares: bool,
+    /// Bitcoin Cash: model this many miners on the node instead of one. Every
+    /// proof is found by one of them, picked at random, each with its own
+    /// payout address and share owner, so a small swarm fills the window with
+    /// hundreds of payees: for end-to-end runs of the level draw, the hybrid
+    /// split and the payout tree. Their keys do not exist, so what they are
+    /// paid on regtest cannot be spent. Omit for the node's one miner.
+    #[serde(default)]
+    pub virtual_miners: Option<u32>,
 }
 
 /// Config for p2poolv2 nodes
@@ -1553,6 +1624,12 @@ impl Config {
     ///
     /// `[[submit_nodes]]` with light templates is refused (see
     /// [`Config::validate_submit_nodes`]).
+    ///
+    /// A config that still sets `bch_share_chain`, in the file or as
+    /// `P2POOL_STRATUM__BCH_SHARE_CHAIN`, is refused: the main and mini
+    /// Bitcoin Cash share chains merged into one (see
+    /// [`REMOVED_BCH_SHARE_CHAIN_KEY`]), and neither value means what it
+    /// meant before.
     pub fn load(path: &str) -> Result<Self, config::ConfigError> {
         let built = config::Config::builder()
             .add_source(config::File::with_name(path))
@@ -1567,6 +1644,18 @@ impl Config {
             )
             .build()?;
         let network_given = built.get_string("stratum.network").is_ok();
+        if built
+            .get::<config::Value>(&format!("stratum.{REMOVED_BCH_SHARE_CHAIN_KEY}"))
+            .is_ok()
+        {
+            return Err(config::ConfigError::Message(format!(
+                "[stratum] {REMOVED_BCH_SHARE_CHAIN_KEY} is no longer a setting: the main and mini \
+                 Bitcoin Cash share chains merged into one share chain, which keeps the mini \
+                 chain's anchor, ceiling and genesis. Remove {REMOVED_BCH_SHARE_CHAIN_KEY} from \
+                 the config (and P2POOL_STRATUM__BCH_SHARE_CHAIN from the environment), and \
+                 start on a fresh store."
+            )));
+        }
         let loaded: Self = built.try_deserialize()?;
         if loaded.stratum.chain == Chain::Bitcoin && !network_given {
             return Err(config::ConfigError::Message(
@@ -2099,8 +2188,7 @@ mod tests {
             [
                 ("P2POOL_STRATUM__CHAIN", Some("bitcoin-cash")),
                 ("P2POOL_STRATUM__BITCOIN_CASH_NETWORK", Some("regtest")),
-                ("P2POOL_STRATUM__BCH_SHARE_CHAIN", Some("mini")),
-                ("P2POOL_STORE__PATH", Some("/p2poolv2/data/regtest-mini")),
+                ("P2POOL_STORE__PATH", Some("/p2poolv2/data/regtest")),
                 ("P2POOL_STRATUM__PORT", Some("3333")),
                 ("P2POOL_API__PORT", Some("46884")),
                 (
@@ -2115,9 +2203,8 @@ mod tests {
                     config.stratum.bitcoin_cash_network,
                     Some(BitcoinCashNetwork::Regtest)
                 );
-                assert_eq!(config.stratum.bch_share_chain, BchShareChain::Mini);
                 assert_eq!(config.stratum.network, Network::Regtest);
-                assert_eq!(config.store.path, "/p2poolv2/data/regtest-mini");
+                assert_eq!(config.store.path, "/p2poolv2/data/regtest");
                 assert_eq!(config.stratum.port, 3333);
                 assert_eq!(config.api.port, 46884);
                 assert_eq!(config.network.listen_address, "/ip4/0.0.0.0/tcp/6884");
@@ -2258,7 +2345,6 @@ mod tests {
             config.stratum.bitcoin_cash_network,
             Some(BitcoinCashNetwork::Regtest)
         );
-        assert_eq!(config.stratum.bch_share_chain, BchShareChain::Mini);
         assert!(!config.network.dns_seed);
     }
 
@@ -2273,10 +2359,16 @@ mod tests {
     }
 
     #[test]
-    fn bchn_chain_names_match_chainparamsbase() {
-        assert_eq!(BitcoinCashNetwork::Mainnet.bchn_chain_name(), "main");
-        assert_eq!(BitcoinCashNetwork::Chipnet.bchn_chain_name(), "chip");
-        assert_eq!(BitcoinCashNetwork::Regtest.bchn_chain_name(), "regtest");
+    fn node_chain_names_match_bchn_then_bchd() {
+        assert_eq!(
+            BitcoinCashNetwork::Mainnet.node_chain_names(),
+            ["main", "mainnet"]
+        );
+        assert_eq!(
+            BitcoinCashNetwork::Chipnet.node_chain_names(),
+            ["chip", "chipnet"]
+        );
+        assert_eq!(BitcoinCashNetwork::Regtest.node_chain_names(), ["regtest"]);
     }
 
     /// BCHN `src/chainparams.cpp`, `CMainParams` checkpoint "Axion
@@ -2321,7 +2413,7 @@ mod tests {
                 "00000000b711dc753130e5083888d106f99b920b1b8a492eb5ac41d40e482905"
             ))
         );
-        assert_eq!(BitcoinCashNetwork::Scalenet.bchn_chain_name(), "scale");
+        assert_eq!(BitcoinCashNetwork::Scalenet.node_chain_names(), ["scale"]);
     }
 
     /// Scalenet takes BCHN's test network address forms: the `bchtest`
@@ -2416,6 +2508,55 @@ mod tests {
             panic!("a Bitcoin config without network loaded");
         };
         assert!(error.to_string().contains("network is required"), "{error}");
+    }
+
+    /// The main and mini share chains merged, so a config still choosing one
+    /// is refused at start-up instead of being read as the merged chain.
+    #[test]
+    fn a_config_that_still_sets_bch_share_chain_is_refused() {
+        let sample = std::fs::read_to_string("../config.sample.toml")
+            .unwrap()
+            .replace("\r\n", "\n");
+        let with_share_chain = sample.replace(
+            "\nbitcoin_cash_network = \"chipnet\"\n",
+            "\nbitcoin_cash_network = \"chipnet\"\nbch_share_chain = \"main\"\n",
+        );
+        assert_ne!(with_share_chain, sample);
+        let path = std::env::temp_dir().join(format!(
+            "p2poolv2-config-with-bch-share-chain-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, with_share_chain).unwrap();
+
+        let result = Config::load(path.to_str().unwrap());
+        std::fs::remove_file(&path).unwrap();
+
+        let Err(error) = result else {
+            panic!("a config setting bch_share_chain loaded");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("main and mini Bitcoin Cash share chains merged into one"),
+            "{error}"
+        );
+    }
+
+    /// The compose stack once set the share chain from the environment; that
+    /// is refused the same way.
+    #[test]
+    fn a_bch_share_chain_environment_override_is_refused() {
+        temp_env::with_var("P2POOL_STRATUM__BCH_SHARE_CHAIN", Some("mini"), || {
+            let Err(error) = Config::load("../config.sample.toml") else {
+                panic!("P2POOL_STRATUM__BCH_SHARE_CHAIN was accepted");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("bch_share_chain is no longer a setting"),
+                "{error}"
+            );
+        });
     }
 
     #[test]
@@ -2769,21 +2910,6 @@ mod tests {
     }
 
     #[test]
-    fn bitcoin_rejects_a_mini_share_chain() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.bch_share_chain = BchShareChain::Mini;
-
-        let error = config.parse().unwrap_err();
-        assert!(
-            error
-                .message
-                .contains("bch_share_chain = mini is only valid when chain is bitcoin-cash"),
-            "unexpected message: {}",
-            error.message
-        );
-    }
-
-    #[test]
     fn bitcoin_cash_regtest_parses_on_the_regtest_network_whatever_network_says() {
         let mut config = StratumConfig::<Raw>::new_for_test_default();
         config.chain = Chain::BitcoinCash;
@@ -2816,18 +2942,6 @@ mod tests {
     fn bitcoin_keeps_its_configured_network() {
         let config = StratumConfig::<Raw>::new_for_test_default();
         assert_eq!(config.effective_network(), Network::Signet);
-    }
-
-    #[test]
-    fn bitcoin_cash_accepts_the_mini_share_chain() {
-        let mut config = StratumConfig::<Raw>::new_for_test_default();
-        config.chain = Chain::BitcoinCash;
-        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
-        config.bootstrap_address = "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t".to_string();
-        config.bch_share_chain = BchShareChain::Mini;
-
-        let parsed = config.parse().unwrap();
-        assert_eq!(parsed.bch_share_chain, BchShareChain::Mini);
     }
 }
 
@@ -3040,6 +3154,34 @@ mod bitcoin_cash_donation_tests {
             .unwrap();
         assert_eq!(parsed.donation, Some(MAX_BITCOIN_CASH_CUT));
         assert_eq!(parsed.fee, Some(MAX_BITCOIN_CASH_CUT));
+    }
+
+    /// Without `payout_level` and `spend_cost` a node gives miners level 5
+    /// and prices a payment's spend at 148 satoshis.
+    #[test]
+    fn an_unset_payout_level_and_spend_cost_take_their_defaults() {
+        let parsed = bitcoin_cash_config_with_cuts(0, 0).parse().unwrap();
+
+        assert_eq!(parsed.payout_level(), DEFAULT_PAYOUT_LEVEL);
+        assert_eq!(parsed.payout_level, Some(5));
+        assert_eq!(parsed.spend_cost(), 148);
+    }
+
+    #[test]
+    fn the_highest_payout_level_is_accepted() {
+        let mut config = bitcoin_cash_config_with_cuts(0, 0);
+        config.payout_level = Some(MAX_PAYOUT_LEVEL);
+
+        assert_eq!(config.parse().unwrap().payout_level(), 7);
+    }
+
+    #[test]
+    fn a_payout_level_above_seven_is_refused() {
+        let mut config = bitcoin_cash_config_with_cuts(0, 0);
+        config.payout_level = Some(8);
+
+        let error = config.parse().unwrap_err();
+        assert!(error.message.contains("payout_level 8"), "{error:?}");
     }
 
     #[test]

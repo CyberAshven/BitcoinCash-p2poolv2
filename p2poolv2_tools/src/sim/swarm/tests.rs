@@ -34,7 +34,82 @@ fn settings(node_count: usize) -> SwarmSettings {
         pool_signature_prefix: "P2Pool-sim-".to_string(),
         dial_fanout: 3,
         profile: "release".to_string(),
+        payout_levels: Vec::new(),
+        weak_shares: false,
+        virtual_miners: None,
+        merge_tokens: None,
+        log_level: "debug".to_string(),
     }
+}
+
+/// `PAYOUT_LEVELS=5,7` gives node 1 `payout_level = 7` under `[stratum]`.
+#[test]
+fn node_config_writes_the_nodes_payout_level() {
+    let mut swarm = settings(2);
+    swarm.payout_levels = vec![5, 7];
+    let shape = NodeShape {
+        hashrate: "5".to_string(),
+        latency_ms: 0,
+    };
+    let config = node_config(
+        &swarm,
+        &NodeIdentity {
+            index: 1,
+            payout_address: "bchreg:qpayout",
+            shape: &shape,
+        },
+    );
+    let parsed: toml::Table = config.parse().expect("config parses");
+
+    assert_eq!(
+        parsed
+            .get("stratum")
+            .and_then(|table| table.get("payout_level"))
+            .and_then(toml::Value::as_integer),
+        Some(7)
+    );
+}
+
+/// A node past `PAYOUT_LEVELS` gets no `payout_level`: the node's default.
+#[test]
+fn node_config_leaves_out_a_payout_level_past_the_list() {
+    let mut swarm = settings(2);
+    swarm.payout_levels = vec![5];
+    let shape = NodeShape {
+        hashrate: "5".to_string(),
+        latency_ms: 0,
+    };
+    let config = node_config(
+        &swarm,
+        &NodeIdentity {
+            index: 1,
+            payout_address: "bchreg:qpayout",
+            shape: &shape,
+        },
+    );
+    let parsed: toml::Table = config.parse().expect("config parses");
+
+    assert!(
+        parsed
+            .get("stratum")
+            .and_then(|table| table.get("payout_level"))
+            .is_none()
+    );
+}
+
+#[test]
+fn payout_levels_parse_as_a_comma_separated_list() {
+    assert_eq!(parse_payout_levels("5, 7,0").unwrap(), vec![5, 7, 0]);
+}
+
+#[test]
+fn an_empty_payout_levels_value_is_no_levels() {
+    assert!(parse_payout_levels("").unwrap().is_empty());
+}
+
+#[test]
+fn a_payout_level_above_seven_is_refused() {
+    assert!(parse_payout_levels("5,8").is_err());
 }
 
 #[test]
@@ -209,4 +284,51 @@ fn nodes_mine_bitcoin_cash_regtest() {
         "\nbootstrap_address = \"{DEFAULT_MINER_ADDRESS}\"\n"
     )));
     assert!(config.contains(&format!("\nshare_address = \"{}\"\n", share_address(2))));
+}
+
+/// `WEAK_SHARES`, `VIRTUAL_MINERS` and `MERGE_TOKENS` reach the node's
+/// config as `[sim]` and `[stratum]` keys, and a swarm without them writes
+/// none.
+#[test]
+fn the_optional_settings_reach_the_node_config() {
+    let shape = NodeShape {
+        hashrate: "5".to_string(),
+        latency_ms: 0,
+    };
+    let identity = NodeIdentity {
+        index: 0,
+        payout_address: DEFAULT_MINER_ADDRESS,
+        shape: &shape,
+    };
+    let plain = node_config(&settings(2), &identity);
+    let with_options = node_config(
+        &SwarmSettings {
+            weak_shares: true,
+            virtual_miners: Some(100),
+            merge_tokens: Some("D:\\run\\tokens.json".to_string()),
+            ..settings(2)
+        },
+        &identity,
+    );
+
+    assert!(!plain.contains("weak_shares"));
+    assert!(!plain.contains("virtual_miners"));
+    assert!(!plain.contains("merge_mining_tokens"));
+    let parsed: toml::Value = toml::from_str(&with_options).unwrap();
+    let sim = parsed.get("sim").unwrap();
+    assert_eq!(
+        sim.get("weak_shares").and_then(toml::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        sim.get("virtual_miners").and_then(toml::Value::as_integer),
+        Some(100)
+    );
+    assert_eq!(
+        parsed
+            .get("stratum")
+            .and_then(|table| table.get("merge_mining_tokens"))
+            .and_then(toml::Value::as_str),
+        Some("D:\\run\\tokens.json")
+    );
 }

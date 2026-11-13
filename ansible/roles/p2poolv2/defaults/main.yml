@@ -81,9 +81,6 @@ p2poolv2_minimum_difficulty: 100
 p2poolv2_chain: "bitcoin-cash"
 # "mainnet", "chipnet" or "regtest"
 p2poolv2_bitcoin_cash_network: "chipnet"
-# "main", or "mini" (share target 256 times easier, for small miners). Main
-# and mini are different chains: give each its own store path.
-p2poolv2_bch_share_chain: "main"
 
 # CashAddr for this network (bitcoincash:, bchtest: or bchreg:). Required by
 # the config; a share chain node never pays it.
