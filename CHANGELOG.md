@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Requests to the Bitcoin Cash node time out. The RPC client had no timeout
+at all, so a request on a connection that stopped carrying data, with no
+close or reset reaching the pool, waited for good. On chipnet that held the
+task that fetches block templates about 30 seconds after each start, from
+the pool PC's Windows reinstall on 2026-11-13: both nodes kept handing out
+work on a stale parent, and found blocks went in without a verdict. A
+request now fails after 30 seconds with nothing from the node (counted from
+the last byte read, so a large template still downloads) and opening a
+connection after 10; the next poll opens a new connection.
+
 The payout simulator has a `band-step` table, the last part of the small
 miners design that had no simulation: the band cap `C` from genesis at step
 divisors of 128, 512 and 2,048, and with 2% and 10% of the pool mining at
