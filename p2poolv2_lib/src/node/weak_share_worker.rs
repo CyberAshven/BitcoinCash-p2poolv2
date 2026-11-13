@@ -268,15 +268,16 @@ impl<C> WeakShareWorker<C> {
         let seen = self.pool.has_seen(&pow_hash);
         if !self.pool.admit(pow_hash, source) {
             // `admit` is false for a duplicate or for a peer over its rate.
-            // Seen was read first so a duplicate is not treated as the rate:
-            // only the rate must wait, or the next announcer would spend a
-            // second peer's allowance on the same hash.
-            if !seen && source.peer().is_some() {
-                self.fetch.rate_limited(pow_hash, now);
+            // Seen was read first so a duplicate is not treated as the rate.
+            // A body refused for the rate was not checked, so the next
+            // announcer is asked: its copy counts against its own rate.
+            let sends = if !seen && source.peer().is_some() {
+                self.fetch.rate_limited(pow_hash, now)
             } else {
                 self.fetch.settled(pow_hash);
-            }
-            self.dispatch_fetches(Vec::new()).await;
+                Vec::new()
+            };
+            self.dispatch_fetches(sends).await;
             return;
         }
         let parent = weak_share.header.prev_share_blockhash;
@@ -309,7 +310,7 @@ impl<C> WeakShareWorker<C> {
             WeakFetchEvent::Announced { peer, hashes } => {
                 for hash in hashes {
                     let seen = self.pool.has_seen(&hash);
-                    self.fetch.note(peer, hash, seen, now);
+                    self.fetch.note(peer, hash, seen);
                 }
                 self.dispatch_fetches(Vec::new()).await;
             }

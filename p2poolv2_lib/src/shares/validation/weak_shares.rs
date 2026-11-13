@@ -28,7 +28,8 @@ mod tests;
 
 use super::{
     ChainStoreHandle, DefaultShareValidator, MAX_UNCLES, PplnsWindow, ValidationError,
-    check_future_time_limit, check_median_time_past, stored_ancestor_times, window_error_verdict,
+    check_carried_weak_time, check_median_time_past, check_relayed_weak_time,
+    stored_ancestor_times, window_error_verdict,
 };
 use crate::accounting::CoinbasePayouts;
 use crate::accounting::payout::coinbase_budget::split_for_share;
@@ -319,6 +320,11 @@ impl DefaultShareValidator {
     ///
     /// A parent, ancestor or Bitcoin Cash prev not stored yet is
     /// `Recoverable`.
+    ///
+    /// The future limit of its time is not checked here, because it depends on
+    /// who asks: a relayed weak share is held to this node's clock
+    /// ([`Self::validate_relayed_weak_share`]) and a carried one to its
+    /// carrier's time ([`Self::validate_carried_weak_headers`]).
     pub fn validate_weak_share_header(
         &self,
         weak_share: &WeakShare,
@@ -363,7 +369,6 @@ impl DefaultShareValidator {
 
         self.validate_share_version(header, chain_store_handle)?;
         self.validate_bch_prev_known(header, chain_store_handle)?;
-        check_future_time_limit(header.time, self.time_provider.seconds_since_epoch())?;
         let ancestor_times = stored_ancestor_times(parent_hash, chain_store_handle)?;
         check_median_time_past(header.time, &ancestor_times)
     }
@@ -501,6 +506,10 @@ impl DefaultShareValidator {
         cache: &mut WeakPayoutCache,
     ) -> Result<(), ValidationError> {
         self.validate_weak_share_header(weak_share, chain_store_handle)?;
+        check_relayed_weak_time(
+            weak_share.header.time,
+            self.time_provider.seconds_since_epoch(),
+        )?;
         let mut window = pplns_window
             .write()
             .expect("PPLNS window lock poisoned on write");
@@ -634,6 +643,7 @@ impl DefaultShareValidator {
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError> {
         for weak_share in &share.weak_shares {
+            check_carried_weak_time(weak_share.header.time, share.header.time)?;
             self.validate_weak_share_header(weak_share, chain_store_handle)?;
         }
         self.validate_carried_weak_positions(share, chain_store_handle)

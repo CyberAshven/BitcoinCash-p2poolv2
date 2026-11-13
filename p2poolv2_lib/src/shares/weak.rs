@@ -103,7 +103,12 @@ pub const MAX_WEAK_SCRIPT_SIG_BYTES: usize = 100;
 /// basis points, the depth rose from 6 and `R_MAX` fell from 4096, and the
 /// tag gained `R_MAX`. Every share's weak credit and every genesis share
 /// (its weak ratio is `R_MAX`) changed: a flag day, with a fresh store.
-pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak2-64-100-48-256";
+///
+/// `weak3-64-100-48-256` since 2026-11-12: a weak share a share carries is
+/// held to its carrier's time, where `weak2` held it to each node's clock
+/// and so let two nodes disagree for good about one share. Nodes on the two
+/// do not accept the same shares: a flag day, with a fresh store.
+pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak3-64-100-48-256";
 
 /// The weak ratio of a share whose parent has `parent_weak_ratio` and
 /// carried `parent_weak_count` weak shares: one step from the parent's.
@@ -575,7 +580,7 @@ mod tests {
     fn the_rule_tag_names_the_cap_the_includer_cut_and_the_depth() {
         assert_eq!(
             BCH_WEAK_SHARE_RULE_TAG,
-            format!("weak2-{WEAK_CAP}-{INCLUDER_CUT}-{WEAK_DEPTH}-{WEAK_RATIO_MAX_MULTIPLE}")
+            format!("weak3-{WEAK_CAP}-{INCLUDER_CUT}-{WEAK_DEPTH}-{WEAK_RATIO_MAX_MULTIPLE}")
         );
     }
 
