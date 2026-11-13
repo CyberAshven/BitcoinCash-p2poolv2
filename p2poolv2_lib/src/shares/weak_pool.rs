@@ -723,7 +723,7 @@ impl WeakPool {
         let pow_hash = weak_share.pow_hash();
         {
             let mut state = self.lock();
-            if !state.mark_seen(pow_hash) {
+            if state.seen.contains(&pow_hash) {
                 state.counts.refused.count(WeakShareRefusal::Duplicate);
                 return;
             }
@@ -744,6 +744,7 @@ impl WeakPool {
                     }
                 }
             }
+            state.mark_seen(pow_hash);
             let sequence = state.next_sequence;
             state.next_sequence += 1;
             match source {
