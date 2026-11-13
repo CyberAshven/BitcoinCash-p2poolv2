@@ -389,6 +389,31 @@ async fn a_weak_share_the_relay_queue_refuses_is_not_counted_as_relayed() {
     assert_eq!(stats.pooled, 1);
 }
 
+/// A weak share a full pool refused for room is not remembered as seen, so
+/// the same weak share is pooled when it comes again and the pool can take it.
+#[tokio::test]
+async fn a_weak_share_refused_by_a_full_pool_may_come_again() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    for nonce in 0..MAX_POOL_WEAK_SHARES as u32 {
+        pool.insert(pool_weak_share(nonce), 3, WeakShareSource::Local);
+    }
+    let refused = pool_weak_share(MAX_POOL_WEAK_SHARES as u32);
+    pool.insert(refused.clone(), 3, WeakShareSource::Local);
+    assert!(
+        !pool.has_seen(&refused.pow_hash()),
+        "refused for room, so not seen"
+    );
+
+    //* On a newer parent it takes the place of the oldest pooled weak share.
+    pool.insert(refused.clone(), 4, WeakShareSource::Local);
+
+    let stats = pool.stats();
+    assert_eq!(stats.counts.refused.pool_full, 1, "refused once");
+    assert_eq!(stats.pooled, MAX_POOL_WEAK_SHARES, "the pool stays full");
+    assert!(pool.has_seen(&refused.pow_hash()), "pooled the second time");
+}
+
 /// A full pool keeps a weak share only in place of one on an older parent;
 /// one on a parent as old as the oldest pooled is refused.
 #[tokio::test]

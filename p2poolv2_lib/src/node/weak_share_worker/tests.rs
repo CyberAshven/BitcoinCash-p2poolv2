@@ -36,7 +36,7 @@ async fn a_weak_share_breaking_a_rule_is_counted_as_invalid() {
         .expect_get_tip_height()
         .returning(|| Ok(Some(5)));
     let (_events_tx, events_rx) = mpsc::channel(1);
-    let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
+    let (swarm_tx, mut swarm_rx) = mpsc::channel::<SwarmSend<()>>(1);
     let (_fetch_tx, fetch_rx) = mpsc::channel(1);
     let mut worker = WeakShareWorker::new(
         events_rx,
@@ -48,10 +48,11 @@ async fn a_weak_share_breaking_a_rule_is_counted_as_invalid() {
         swarm_tx,
     );
 
+    let peer = PeerId::random();
     worker
         .handle(WeakShareEvent {
             weak_share: test_weak_share_on(BlockHash::from_byte_array([1; 32]), 1),
-            source: WeakShareSource::Peer(PeerId::random()),
+            source: WeakShareSource::Peer(peer),
         })
         .await;
 
@@ -59,6 +60,10 @@ async fn a_weak_share_breaking_a_rule_is_counted_as_invalid() {
     assert_eq!(stats.counts.refused.invalid, 1);
     assert_eq!(stats.counts.refused.unchecked, 0);
     assert_eq!(stats.pooled, 0);
+    assert!(
+        matches!(swarm_rx.try_recv(), Ok(SwarmSend::Disconnect(dropped)) if dropped == peer),
+        "the peer that sent an invalid weak share is disconnected"
+    );
 }
 
 #[tokio::test]

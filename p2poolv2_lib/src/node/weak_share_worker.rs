@@ -460,6 +460,7 @@ impl<C> WeakShareWorker<C> {
                 FailureKind::Consensus => {
                     info!("Refused weak share {pow_hash} from {source:?}: {error}");
                     self.pool.refuse(WeakShareRefusal::Invalid);
+                    self.drop_peer_of_invalid_weak_share(source);
                     return self.fetch.invalid(pow_hash, Instant::now());
                 }
                 FailureKind::Recoverable => {
@@ -489,6 +490,18 @@ impl<C> WeakShareWorker<C> {
         self.pool.insert(weak_share, parent_height, source);
         self.fetch.settled(pow_hash);
         Vec::new()
+    }
+
+    /// Disconnect the peer that sent a weak share which failed a rule every
+    /// node checks before it relays one. An honest peer never relays such a
+    /// weak share, and a peer left connected can send the same bytes again
+    /// without end, each time costing this node a walk of the window.
+    fn drop_peer_of_invalid_weak_share(&self, source: WeakShareSource) {
+        if let Some(peer) = source.peer()
+            && self.swarm_tx.try_send(SwarmSend::Disconnect(peer)).is_err()
+        {
+            debug!("Swarm queue full, peer {peer} of an invalid weak share stays connected");
+        }
     }
 
     /// Forget holds the pool has dropped, then send `sends` and any further
