@@ -4421,6 +4421,7 @@ dependencies = [
  "p2poolv2_wallet",
  "serde",
  "temp-env",
+ "tempfile",
  "tokio-test",
 ]
 
