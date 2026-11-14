@@ -70,6 +70,7 @@ use binary_sv2::{B032, B064K, Deserialize, GetSize, Seq0255, Sv2Option, U256};
 use bitcoin::block::{Header, Version};
 use bitcoin::hashes::Hash;
 use bitcoin::{Block, BlockHash, CompactTarget, Network, Target, TxMerkleNode};
+use bitcoindrpc::BitcoindRpcError;
 use mining_sv2::{
     CloseChannel, ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED,
     ERROR_CODE_OPEN_MINING_CHANNEL_MAX_TARGET_OUT_OF_RANGE,
@@ -103,9 +104,19 @@ use tracing::{debug, error, info};
 /// Bytes of extranonce a miner rolls on an extended channel (SV1 enonce2).
 pub const EXTRANONCE_SIZE: u16 = 8;
 
-/// Jobs a channel remembers. Older ones are dropped; the tracker keeps a job
-/// for 15 minutes, far longer than this many templates take to arrive.
+/// The pool's own jobs a channel remembers; older ones are dropped. A
+/// channel gets one at every share-chain move, not only at a new template,
+/// so on a pool whose share chain moves every few seconds this many last
+/// about two minutes. The tracker keeps a job for 15 minutes.
 const MAX_CHANNEL_JOBS: usize = 32;
+
+/// Declared jobs (`SetCustomMiningJob`) a channel remembers, counted apart
+/// from the pool's own: a channel that mines a declared job still gets the
+/// pool's job at every share-chain move, and those must not push out the
+/// job its miner works on. A declared job stays until eight newer declared
+/// jobs, until its Bitcoin Cash parent is two blocks back
+/// ([`Channel::move_to_tip`]), or until the tracker drops it.
+const MAX_DECLARED_CHANNEL_JOBS: usize = 8;
 
 /// The most bytes `NewExtendedMiningJob` carries in its coinbase prefix and
 /// in its suffix: each is a `B0_64K` field in the SV2 specification.
@@ -185,6 +196,9 @@ struct ChannelJob {
     difficulty: u64,
     /// Parent and nbits the job builds on.
     tip: (BlockHash, u32),
+    /// The client declared the job (`SetCustomMiningJob`); the pool's own
+    /// jobs are not declared. Each kind has its own limit.
+    declared: bool,
 }
 
 struct Channel {
@@ -273,7 +287,13 @@ impl Channel {
         age != 0 && age <= u32::MAX / 2
     }
 
-    fn insert_job(&mut self, tracker_job_id: JobId, tip: (BlockHash, u32)) -> u32 {
+    /// Remember a job and return its id. `declared` says whether the client
+    /// declared it or it is the pool's own.
+    ///
+    /// The pool's own jobs are kept up to [`MAX_CHANNEL_JOBS`] and declared
+    /// ones up to [`MAX_DECLARED_CHANNEL_JOBS`]. Past its limit the oldest
+    /// job of the same kind goes, so neither kind pushes out the other.
+    fn insert_job(&mut self, tracker_job_id: JobId, tip: (BlockHash, u32), declared: bool) -> u32 {
         let job_id = self.next_job_id;
         self.next_job_id = self.next_job_id.wrapping_add(1);
         let target =
@@ -289,10 +309,22 @@ impl Channel {
                 target,
                 difficulty,
                 tip,
+                declared,
             },
         );
-        while self.jobs.len() > MAX_CHANNEL_JOBS {
-            self.jobs.pop_first();
+        let limit = if declared {
+            MAX_DECLARED_CHANNEL_JOBS
+        } else {
+            MAX_CHANNEL_JOBS
+        };
+        let same_kind: Vec<u32> = self
+            .jobs
+            .iter()
+            .filter(|(_, job)| job.declared == declared)
+            .map(|(job_id, _)| *job_id)
+            .collect();
+        for oldest in same_kind.iter().take(same_kind.len().saturating_sub(limit)) {
+            self.jobs.remove(oldest);
         }
         job_id
     }
@@ -322,6 +354,14 @@ impl MiningChannels {
     /// Validate and install a declared BCH job before acknowledging reward
     /// eligibility. Its token must carry the channel's own donation, and a
     /// nonempty token commitment must pass this network's ASERT header band.
+    ///
+    /// The node checks a Full-Template job's block as a proposal. Only its
+    /// own answer about the block, a reject reason or an error for a block
+    /// it cannot read, is `invalid-template`. A proposal
+    /// on a parent the node has left gets `stale-chain-tip`, the code of a
+    /// job whose parent is not the pool template's, and a check that times
+    /// out or whose request fails gets `template-unavailable`: neither says
+    /// the template is bad, and the client declares again.
     pub(crate) async fn install_custom_job(
         &mut self,
         request: &SetCustomMiningJob<'_>,
@@ -398,7 +438,28 @@ impl MiningChannels {
                 Ok(Ok(())) => (),
                 rejected => {
                     debug!("Rejected declared BCH template: {rejected:?}");
-                    return custom_job_error(request, "invalid-template");
+                    let code = match &rejected {
+                        // The node has left the declared parent, so it has
+                        // no verdict on the block: the client declares
+                        // again on the new tip.
+                        Ok(Err(error)) if error.is_proposal_off_best_block() => {
+                            ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP
+                        }
+                        // The node's verdict on the block: its reject
+                        // reason, or an RPC error for a block it cannot
+                        // read (`Block decode failed`).
+                        Ok(Err(BitcoindRpcError::ProposalRejected { .. })) => "invalid-template",
+                        Ok(Err(error @ BitcoindRpcError::RpcError { .. }))
+                            if !error.is_transient() =>
+                        {
+                            "invalid-template"
+                        }
+                        // No answer about the block: the check timed out,
+                        // the request failed, or the node is still
+                        // starting. The client asks again.
+                        _ => "template-unavailable",
+                    };
+                    return custom_job_error(request, code);
                 }
             }
         }
@@ -410,7 +471,7 @@ impl MiningChannels {
         self.ctx
             .tracker_handle
             .insert_job_details(tracker_job_id, job);
-        let job_id = channel.insert_job(tracker_job_id, tip);
+        let job_id = channel.insert_job(tracker_job_id, tip, true);
         Ok(vec![encode_frame(
             SetCustomMiningJobSuccess {
                 channel_id: request.channel_id,
@@ -1091,7 +1152,7 @@ impl MiningChannels {
         let nbits = u32::from_str_radix(&template.bits, 16).map_err(|error| error.to_string())?;
         let version = template.version as u32;
         let new_prev_hash = channel.move_to_tip((prev_hash, nbits));
-        let channel_job_id = channel.insert_job(tracker_job_id, (prev_hash, nbits));
+        let channel_job_id = channel.insert_job(tracker_job_id, (prev_hash, nbits), false);
         let min_ntime = if new_prev_hash {
             Sv2Option::new(None)
         } else {
