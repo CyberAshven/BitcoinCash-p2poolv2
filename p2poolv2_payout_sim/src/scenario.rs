@@ -11,6 +11,7 @@
 //! every class's expected credit and the window, and then simulates the
 //! tracked miners' payments month by month.
 
+use crate::asks::{AskClass, AskQueueInputs, WeakAsks, simulate_ask_queue};
 use crate::constants::{
     BCH_BLOCK_INTERVAL_SECONDS, BCH_BLOCKS_PER_MONTH, BCH_NETWORK_HASHRATE, BLOCK_REWARD_SATOSHIS,
     DEFAULT_BAND_CAP, DEFAULT_LEVEL, DONATION_FRACTION, HASHES_PER_DIFFICULTY, INCLUDER_CUT,
@@ -264,6 +265,11 @@ pub struct Scenario {
     pub seed: u64,
     /// Chain shares the weak queue is measured over.
     pub weak_queue_shares: usize,
+    /// Weak shares that ask for an easier weak target, as section 6 of the
+    /// design page proposes, or `None` for the rules as they are. With asks
+    /// the run uses the proposal's own fill, cap and ratio limits instead
+    /// of `weak_cap`, `weak_fill` and `weak_ratio_max`.
+    pub weak_asks: Option<WeakAsks>,
 }
 
 impl Default for Scenario {
@@ -296,6 +302,7 @@ impl Default for Scenario {
             months: 1_000,
             seed: 1,
             weak_queue_shares: 400_000,
+            weak_asks: None,
         }
     }
 }
@@ -897,14 +904,69 @@ impl Scenario {
         }
     }
 
+    /// The ask queue's inputs for a chain in its steady state: every class at
+    /// the minimum, split into the part whose nodes follow the node default,
+    /// the part that always asks and the part that never does.
+    ///
+    /// A miner of hashrate `h` finds `h * month * R / (D_asert * 2^32)` weak
+    /// shares a month at weak ratio `R`, so its node asks while `R` is below
+    /// the ratio at which that is `asks.weak_shares_per_month`.
+    fn ask_queue_inputs(
+        &self,
+        chain: &Chain,
+        difficulty: &ChainDifficulty,
+        asks: &WeakAsks,
+    ) -> AskQueueInputs {
+        let follows_default = (1.0 - asks.always_asking - asks.never_asking).max(0.0);
+        let classes = chain
+            .classes
+            .iter()
+            .zip(&difficulty.class_difficulty)
+            .zip(&difficulty.class_at_minimum)
+            .filter(|(_, at_minimum)| **at_minimum)
+            .flat_map(|((class, class_difficulty), _)| {
+                let shares_per_period =
+                    class.count * found_share_rate(class, *class_difficulty) * self.period_seconds;
+                let asks_below_ratio = asks.weak_shares_per_month
+                    * difficulty.asert_difficulty
+                    * HASHES_PER_DIFFICULTY
+                    / (class.hashrate * MONTH_SECONDS);
+                [
+                    (follows_default, asks_below_ratio),
+                    (asks.always_asking, f64::INFINITY),
+                    (asks.never_asking, 0.0),
+                ]
+                .map(|(part, asks_below_ratio)| AskClass {
+                    minimum_shares_per_period: shares_per_period * part,
+                    asks_below_ratio,
+                })
+            })
+            .filter(|class| class.minimum_shares_per_period > 0.0)
+            .collect();
+        AskQueueInputs {
+            classes,
+            rule: asks.rule,
+            weak_depth: self.weak_depth,
+            ceiling_ratio: difficulty.asert_difficulty / chain.ceiling,
+            censoring_share_fraction: asks.censoring_shares,
+            shares: self.weak_queue_shares,
+            warmup_shares: 20_000,
+        }
+    }
+
     /// Run the weak share queue of a chain in its steady state, with share
-    /// races when the scenario simulates them.
+    /// races when the scenario simulates them, or under the proposed asks
+    /// when the scenario has them.
     fn weak_queue(
         &self,
         chain: &Chain,
         difficulty: &ChainDifficulty,
         random: &mut SimulationRandom,
     ) -> (WeakQueueOutcome, Option<RaceOutcome>) {
+        if let Some(asks) = &self.weak_asks {
+            let inputs = self.ask_queue_inputs(chain, difficulty, asks);
+            return (simulate_ask_queue(&inputs, random), None);
+        }
         let inputs = self.weak_queue_inputs(chain, difficulty);
         match self.share_races {
             None => (simulate_weak_queue(&inputs, random), None),

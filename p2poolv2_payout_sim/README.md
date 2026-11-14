@@ -31,10 +31,12 @@ are `designs`, `hashrate`, `pool`, `weak-credit`, `band-cap`,
 `weak-constants`, `includer-cut`, `levels`, `period`, `attack-minimum`,
 `attack-carriers` and `attack-spam`, and study #85's `refusing-races`,
 `mixes`, `arrivals`, `tiny-pool`, `floods`, `draw-steering`, `losses`,
-`weak-depth`, `r-max` and `r-max-mixes`, and `scale` and `band-step`. Every run is a pure function of its
-inputs and
-seed (default 1), drawn from `p2poolv2_netsim`'s seeded xoshiro256**
-generator, so the tables below come out the same on any machine. The whole
+`weak-depth`, `r-max` and `r-max-mixes`, and `scale`, `scale-levers` and
+`band-step`, and the proposal's `weak-asks`, `weak-asks-mixes`,
+`weak-asks-constants` and `weak-asks-attacks`. Every run is a pure function
+of its inputs and seed (default 1), drawn from `p2poolv2_netsim`'s seeded
+xoshiro256** generator, so the tables below come out the same on any
+machine. The whole
 default run, 1,000 simulated months per scenario, took 26 seconds on the
 32-thread machine it was run on.
 
@@ -580,14 +582,162 @@ What it shows:
    later.** At ten times today's hashrate a Bitaxe is paid 4.7 times a month
    at 10% of Bitcoin Cash (9% of months empty) and under once a month at
    90%. At 270 times, Bitcoin's hashrate, it is paid once every three months
-   to once every two years. A 100 TH/s miner at 270 times is still paid 26
-   times a month at 10%, 8.8 at 30%, 5.2 at 50% (19% of months empty) and 3.0
-   at 90% (40% empty).
+   to once every two years. A 100 TH/s miner at 270 times is still paid 7.5
+   times a month at 10%, 7.2 at 30% (7% of months empty), 5.2 at 50% (19%
+   empty) and 3.0 at 90% (40% empty).
 5. **The lever is weak shares a second.** More weak shares a share, or a
-   shorter share period, gives small miners more, smaller credits. The
-   limits study in `docs/simulation/network-sim.md` prices that: each weak
-   share is a coinbase build on every node, 3.8 ms at 10,000 miners and 45 ms
-   at 100,000.
+   shorter share period, gives small miners more, smaller credits. The next
+   section compares the two.
+
+## Scale levers: a shorter share period against more weak shares a share
+
+`cargo payout-sim --scenario scale-levers` asks when section 5 of the design
+page, the dynamic share period, is needed, and whether it is the right
+lever. It runs the scale table's pools at 10 and 30% of Bitcoin Cash and at
+1, 10, 100 and 270 times today's hashrate, each seven ways:
+
+- the rules as they are: 10-second shares, `WEAK_FILL` 32;
+- a share period of 5, 2 and 1 seconds, each share carrying as many weak
+  shares as today, at the stale rate the network simulation measured for
+  that period;
+- 10-second shares carrying 2, 5 and 10 times the weak shares (`WEAK_CAP`,
+  `WEAK_FILL` and `R_MAX` times that), which is as many weak shares a second
+  as the 5, 2 and 1-second periods give.
+
+The table is at the end of this file. What it shows:
+
+1. **Today the share period changes nothing for a small miner.** At today's
+   hashrate a Bitaxe is paid 24 to 25 times a month at every period and
+   every weak share rate, with no empty month. Weak shares already credit it
+   38.6 times a month in a pool at 10% of Bitcoin Cash and 9.4 times at 30%.
+2. **More credit is first needed when the pool itself is about as large as
+   all of Bitcoin Cash is today.** A pool makes 3.45 weak shares a second
+   whatever its size, split among its miners at the minimum. The smallest
+   miner that still finds three a month is about 0.33 TH/s for each EH/s of
+   pool hashrate when half of it is home miners. That reaches a Bitaxe's 1.2
+   TH/s at 3.7 EH/s of pool hashrate, for example 10% of a Bitcoin Cash ten
+   times today's, and a 100 TH/s miner's at about 300 EH/s, 30% of a Bitcoin
+   Cash at Bitcoin's hashrate.
+3. **Past that point both levers help, and equally.** At ten times today's
+   hashrate in a pool at 30%, a Bitaxe has 41% of its months empty. Twice
+   the weak shares a second leave 19%, five times 4 to 6% and ten times 2%,
+   whether they come from a shorter period or from more weak shares a share:
+   the two columns of payments, empty months and swing agree within the
+   noise of the months simulated in every row.
+4. **The shorter period pays for it in stale shares, more weak shares a
+   share do not.** The 5, 2 and 1-second periods run at 3.8%, 8.7% and 15.9%
+   stale shares; the 10-second period stays at 2.1% whatever its shares
+   carry. Both relay the same weak shares, 6.9, 17 and 35 a second.
+5. **Neither lever saves a 1.2 TH/s miner at Bitcoin's hashrate.** At 270
+   times today's hashrate its fair income is 1,605 satoshis a month, under
+   two payments at the lowest level. With ten times the weak shares a
+   second it still has about 45% of its months empty in a pool at 10% and
+   about 70% at 30%. A 100 TH/s miner there is paid 7 to 8 times a month by
+   today's rules; its 7% of empty months at 30% go below 1.5% with twice
+   the weak shares a second.
+6. **On 1,000 nodes the network simulation says the same.** The stale
+   rates above are its 100-node figures. A day of shares on 1,000 nodes
+   (`cargo netsim run --nodes 1000 --share-interval S --weak-shares N
+   --weak-share-carriage gossip-only`, 8,640 share intervals each):
+
+   | Share period | Weak shares a share | Weak shares a second | Stale | Upload a node, mean (Mbit/s) |
+   |---|---:|---:|---:|---:|
+   | 10 s | 32 | 3.2 | 4.23% | 0.38 |
+   | 5 s | 32 | 6.4 | 7.84% | 0.76 |
+   | 2 s | 32 | 16 | 17.77% | 1.91 |
+   | 1 s | 32 | 32 | 30.69% | 3.78 |
+   | 10 s | 64 | 6.4 | 4.23% | 0.56 |
+
+   Twice the weak shares a second cost 0.18 Mbit/s of upload and no stale
+   share when a 10-second share carries them, and 0.38 Mbit/s and 3.6 points
+   of stale shares when a 5-second period brings them. That is with weak
+   shares travelling beside the shares. A share's body carries them whole
+   today, and so 32 of them a share already put the stale rate at 5.35%
+   (`--weak-share-carriage whole`): a node that has a weak share from gossip
+   downloads it again inside the share.
+
+So the dynamic share period is not the lever to build. What the design may
+need, once a pool passes about 3.7 EH/s, is more weak shares a share: a
+larger `WEAK_FILL` and `WEAK_CAP`, or the budget issue #79 describes that
+grows while its slots stay full, under a ceiling in bytes a second. The page
+has `WEAK_FILL` fixed at 32.
+
+## Proposal: weak shares that follow the asks
+
+Section 6 of the design page proposes how the number of weak shares should
+grow: a weak share asks for an easier weak target when its node wanted one
+for its miner, and while more than one in `WEAK_ASK_DIVISOR` (64) of the
+weak shares a share carried ask, the weak ratio rises instead of steering
+towards `WEAK_FILL`, until a share carries more than `WEAK_FILL_MAX` (320).
+It is not a rule of the chain. Four tables test it, at the end of this file:
+
+```sh
+cargo payout-sim --scenario weak-asks            # where the count settles
+cargo payout-sim --scenario weak-asks-mixes      # every miner mix
+cargo payout-sim --scenario weak-asks-constants  # the divisor, the node default, the ceiling
+cargo payout-sim --scenario weak-asks-attacks    # false asks, silence, censoring nodes
+cargo payout-sim run --asks --hashrate-multiple 10 --pool-fraction 0.3
+```
+
+### The model
+
+`src/asks.rs` runs the weak share queue share by share, as `src/weak.rs`
+does, with the proposed step. Only counts are simulated. A class of miners
+at the minimum asks while the weak ratio in force is below the ratio at
+which one of its miners finds the node default's 16 weak shares a month,
+`16 * D_asert * 2^32 / (hashrate * month)`, and never at or above the ratio
+that puts the weak target at the chain's ceiling. A share carries up to 640
+weak shares, the oldest first, those that ask and those that do not in
+proportion. An attack splits each class: a part that asks whatever its
+miners find, a part that never asks, or a part of the chain's shares from
+nodes that carry no weak share that asks. Each row then pays the Bitaxe and
+the ASIC block by block, as every other table does, with every class at the
+payout level a node would leave it at. "fill 320" is the rules as they are
+with `WEAK_FILL` 320, `WEAK_CAP` 640 and `R_MAX` 2,560.
+
+### What the tables show
+
+1. **The count follows the need.** At today's hashrate a pool at 10% of
+   Bitcoin Cash stays at the floor and one at 30% opens to 57 weak shares a
+   share, where a Bitaxe finds 16 a month. At ten times today's hashrate a
+   pool at 10% settles at 189 and one at 30% at the ceiling, 344.
+2. **It pays as `WEAK_FILL` 320 does where the ceiling is reached, and
+   relays less where it is not.** At ten times today's hashrate in a pool at
+   10%, a Bitaxe has 1.4% of its months empty at 15 KB/s of relay; with
+   `WEAK_FILL` 320 it has 1.3% at 28 KB/s; by today's rules, 9.3% at 2.9
+   KB/s. At today's hashrate the asks relay 3.8 to 4.7 KB/s against 28.
+3. **Without asks the mean is 46 weak shares a share, not 34.5.** The step
+   holds the median at `WEAK_FILL`; with a cap of 640 a share found after a
+   long wait carries every weak share found on its parent.
+4. **Every mix opens.** At ten times today's hashrate the count settles at
+   115 to 345 a share in the home, 50% and 90% industrial, Zipf and medium
+   mixes. In the 99% industrial mix the home miners are 1% of the hashrate
+   at the minimum, under one in 64, and open it to 82.
+5. **The divisor matters only in a spread of sizes.** With half the
+   hashrate on home miners of one size, 16, 64 and 256 give the same count.
+   In the Zipf mix they give 220, 299 and 312 a share.
+6. **The node default sets where the count stops.** Asking below 4 weak
+   shares a month leaves 142 a share (50% industrial) and a Bitaxe with 6.3%
+   of its months empty; below 16, the ceiling and 2.7%; below 64, the same.
+7. **The ceiling sets what the smallest miners get.** `WEAK_FILL_MAX` 64,
+   160 and 320 leave a Bitaxe in a pool at 30% of ten times today's Bitcoin
+   Cash with 17.5%, 5.2% and 2.7% of its months empty.
+8. **Attacks reach the ceiling or the floor, no further.** In a pool that
+   needs no more, 1% of the hashrate at the minimum asking whatever it finds
+   raises the count from 46 to 82 a share, 2% to 221 and 5% to 316. In a
+   pool that needs more, it takes 97% of that hashrate never asking to bring
+   the count from 344 to 143, and 99% to bring it to 57. Nodes that carry no
+   asking weak share lower it with their part of the shares: 250, 168, 107
+   and 83 a share at 25, 50, 75 and 90%.
+
+### Not modelled
+
+- The step from one count to another. The ratio moves by 1/256 a share, so
+  ten times the count takes about 590 shares, 1.6 hours at 10-second shares.
+- The band's own reading of `wanted_bits`, which the proposal leaves as it
+  is.
+- What a node pays to check and store the weak shares; the design page
+  takes those from the network simulation.
 
 ## Code
 
@@ -598,12 +748,13 @@ What it shows:
 | Steady-state difficulties: uniform, band, ABLA settle, vardiff | `src/difficulty.rs` |
 | The window sized by work | `src/window.rs` |
 | The weak share queue and the weak ratio | `src/weak.rs` |
+| The weak share queue under the proposed asks | `src/asks.rs` |
 | Payout levels and the draw | `src/levels.rs` |
 | Tracked miners' payouts block by block | `src/payouts.rs` |
 | Scenarios, credit, reports | `src/scenario.rs` |
 | Share races, fork choice and siblings of light tips (study) | `src/races.rs` |
 | A big miner joining or leaving, and genesis, share by share (study) | `src/transition.rs` |
-| The tables | `src/tables.rs`, `src/study.rs`, `src/report.rs` |
+| The tables | `src/tables.rs`, `src/study.rs`, `src/ask_study.rs`, `src/report.rs` |
 | Command line | `src/bin/payout_sim.rs` |
 
 The crate is new code for the Bitcoin Cash fork, under AGPL-3.0-or-later
@@ -1484,3 +1635,181 @@ difficulty, to push the cap up.
    step:** 0.78 to 0.89 of fair in the first six hours, 0.99 to 1.01 in the
    last day. That is the weak ratio settling from `R_MAX`, where weak shares
    are found faster than shares can carry them, not the cap.
+
+## Scale levers: a shorter share period against more weak shares a share (band-weak-levels, weak work, 50% industrial)
+
+| BCH hashrate | Pool | Period | WEAK_FILL | Stale | Weak/s | KB/s | R | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe level | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC level | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| x1 | 10% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 36.8 | 0.091 | 5 | 38.6 | 24.7 | 0.00% | 0.25 | 0.99 | 5 | 3,209 | 431 | 0.00% | 0.05 | 1.00 |
+| x1 | 10% | 5 s | 32 | 3.80% | 6.90 | 5.73 | 50.2 | 0.030 | 5 | 116 | 24.9 | 0.00% | 0.22 | 1.01 | 5 | 9,652 | 432 | 0.00% | 0.05 | 1.00 |
+| x1 | 10% | 2 s | 32 | 8.70% | 17.3 | 14.4 | 36.9 | 0.012 | 5 | 291 | 25.0 | 0.00% | 0.20 | 1.01 | 5 | 24,154 | 433 | 0.00% | 0.05 | 1.01 |
+| x1 | 10% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 31.7 | 6.0e-3 | 5 | 578 | 25.1 | 0.00% | 0.20 | 1.01 | 5 | 48,154 | 432 | 0.00% | 0.05 | 1.01 |
+| x1 | 10% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 72.9 | 0.046 | 5 | 77.4 | 24.8 | 0.00% | 0.23 | 1.00 | 5 | 6,442 | 432 | 0.00% | 0.05 | 1.00 |
+| x1 | 10% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 181 | 0.018 | 5 | 194 | 24.8 | 0.00% | 0.22 | 1.00 | 5 | 16,153 | 433 | 0.00% | 0.05 | 1.00 |
+| x1 | 10% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 361 | 9.3e-3 | 5 | 388 | 25.2 | 0.00% | 0.21 | 1.01 | 5 | 32,299 | 433 | 0.00% | 0.05 | 1.00 |
+| x1 | 30% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 0.363 | 5 | 9.40 | 24.0 | 0.00% | 0.38 | 0.98 | 5 | 804 | 1,041 | 0.00% | 0.05 | 1.00 |
+| x1 | 30% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 0.181 | 5 | 19.4 | 24.7 | 0.00% | 0.31 | 1.00 | 5 | 1,609 | 1,171 | 0.00% | 0.04 | 1.00 |
+| x1 | 30% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 36.2 | 0.054 | 5 | 64.8 | 24.7 | 0.00% | 0.24 | 0.99 | 5 | 5,387 | 1,276 | 0.00% | 0.03 | 1.00 |
+| x1 | 30% | 1 s | 32 | 15.90% | 34.4 | 28.7 | 31.4 | 0.027 | 5 | 129 | 25.0 | 0.00% | 0.21 | 1.01 | 5 | 10,726 | 1,293 | 0.00% | 0.03 | 1.00 |
+| x1 | 30% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 0.183 | 5 | 19.4 | 24.6 | 0.00% | 0.30 | 0.99 | 5 | 1,615 | 1,168 | 0.00% | 0.04 | 1.00 |
+| x1 | 30% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 0.074 | 5 | 48.4 | 24.7 | 0.00% | 0.24 | 1.00 | 5 | 4,034 | 1,263 | 0.00% | 0.03 | 1.00 |
+| x1 | 30% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 0.037 | 5 | 96.6 | 24.7 | 0.00% | 0.22 | 0.99 | 5 | 8,053 | 1,288 | 0.00% | 0.03 | 1.00 |
+| x10 | 10% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 1.21 | 4 | 2.76 | 4.73 | 9.30% | 0.76 | 0.96 | 5 | 242 | 355 | 0.00% | 0.09 | 1.00 |
+| x10 | 10% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 0.603 | 4 | 5.60 | 4.65 | 3.90% | 0.60 | 0.94 | 5 | 483 | 418 | 0.00% | 0.07 | 1.00 |
+| x10 | 10% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 36.4 | 0.181 | 4 | 19.3 | 5.02 | 1.40% | 0.52 | 1.01 | 5 | 1,608 | 432 | 0.00% | 0.06 | 1.00 |
+| x10 | 10% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 31.5 | 0.091 | 4 | 38.6 | 5.08 | 1.10% | 0.47 | 1.02 | 5 | 3,208 | 431 | 0.00% | 0.05 | 1.00 |
+| x10 | 10% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 0.610 | 4 | 5.62 | 4.74 | 4.10% | 0.60 | 0.96 | 5 | 485 | 417 | 0.00% | 0.07 | 1.00 |
+| x10 | 10% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 0.246 | 4 | 14.4 | 4.87 | 1.30% | 0.53 | 0.98 | 5 | 1,211 | 431 | 0.00% | 0.06 | 1.00 |
+| x10 | 10% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 0.124 | 4 | 29.0 | 4.96 | 1.30% | 0.47 | 1.00 | 5 | 2,417 | 431 | 0.00% | 0.05 | 1.00 |
+| x10 | 30% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 3.63 | 4 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 5 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| x10 | 30% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 1.81 | 4 | 1.86 | 4.76 | 18.80% | 0.88 | 0.97 | 5 | 162 | 204 | 0.00% | 0.11 | 1.00 |
+| x10 | 30% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 32.5 | 0.722 | 4 | 4.63 | 4.78 | 4.20% | 0.63 | 0.96 | 5 | 403 | 207 | 0.00% | 0.08 | 1.00 |
+| x10 | 30% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 30.0 | 0.360 | 4 | 9.41 | 4.74 | 2.10% | 0.56 | 0.95 | 5 | 805 | 206 | 0.00% | 0.08 | 1.00 |
+| x10 | 30% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 1.83 | 4 | 1.86 | 4.74 | 19.40% | 0.88 | 0.96 | 5 | 162 | 204 | 0.00% | 0.11 | 1.00 |
+| x10 | 30% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 0.739 | 4 | 4.64 | 4.73 | 5.60% | 0.64 | 0.95 | 5 | 404 | 206 | 0.00% | 0.08 | 1.00 |
+| x10 | 30% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 0.371 | 4 | 9.42 | 4.82 | 2.40% | 0.58 | 0.97 | 5 | 806 | 205 | 0.00% | 0.08 | 1.00 |
+| x100 | 10% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 12.1 | 1 | 0.284 | 0.846 | 75.60% | 2.10 | 0.95 | 5 | 24.2 | 20.9 | 0.00% | 0.30 | 1.01 |
+| x100 | 10% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 6.03 | 1 | 0.573 | 1.73 | 57.70% | 1.54 | 0.97 | 5 | 48.4 | 20.8 | 0.00% | 0.26 | 1.01 |
+| x100 | 10% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 32.5 | 2.41 | 1 | 1.41 | 3.72 | 26.60% | 1.00 | 0.95 | 5 | 121 | 20.6 | 0.00% | 0.24 | 1.00 |
+| x100 | 10% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 30.0 | 1.20 | 1 | 2.76 | 3.76 | 12.50% | 0.76 | 0.95 | 5 | 242 | 20.9 | 0.00% | 0.22 | 1.01 |
+| x100 | 10% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 6.10 | 1 | 0.576 | 1.70 | 57.00% | 1.51 | 0.96 | 5 | 48.5 | 20.8 | 0.00% | 0.26 | 1.00 |
+| x100 | 10% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 2.46 | 1 | 1.42 | 3.88 | 28.40% | 1.04 | 0.99 | 5 | 121 | 20.6 | 0.00% | 0.24 | 1.00 |
+| x100 | 10% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 1.24 | 1 | 2.76 | 3.59 | 14.30% | 0.83 | 0.91 | 5 | 242 | 20.6 | 0.00% | 0.24 | 1.00 |
+| x100 | 30% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 36.3 | 1 | 0.089 | 0.259 | 91.20% | 3.78 | 0.87 | 5 | 7.81 | 19.7 | 0.20% | 0.43 | 0.97 |
+| x100 | 30% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 18.1 | 1 | 0.177 | 0.537 | 84.60% | 2.76 | 0.90 | 5 | 16.0 | 20.7 | 0.00% | 0.33 | 1.00 |
+| x100 | 30% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 32.5 | 7.22 | 1 | 0.488 | 1.56 | 62.30% | 1.64 | 1.05 | 5 | 40.4 | 20.6 | 0.00% | 0.26 | 1.00 |
+| x100 | 30% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 30.0 | 3.60 | 1 | 0.962 | 3.01 | 39.60% | 1.15 | 1.00 | 5 | 80.7 | 20.5 | 0.00% | 0.25 | 0.99 |
+| x100 | 30% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 18.3 | 1 | 0.181 | 0.580 | 83.20% | 2.62 | 0.99 | 5 | 16.0 | 20.7 | 0.00% | 0.33 | 1.00 |
+| x100 | 30% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 7.39 | 1 | 0.485 | 1.46 | 62.10% | 1.68 | 1.01 | 5 | 40.4 | 20.7 | 0.00% | 0.27 | 1.00 |
+| x100 | 30% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 3.71 | 1 | 0.964 | 2.91 | 39.70% | 1.20 | 1.01 | 5 | 80.6 | 20.6 | 0.00% | 0.24 | 1.00 |
+| x270 | 10% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 32.6 | 1 | 0.097 | 0.304 | 90.70% | 3.64 | 0.92 | 5 | 8.68 | 7.48 | 0.30% | 0.48 | 0.98 |
+| x270 | 10% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 16.3 | 1 | 0.207 | 0.638 | 80.80% | 2.42 | 0.96 | 5 | 17.9 | 7.63 | 0.30% | 0.44 | 1.00 |
+| x270 | 10% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 32.5 | 6.50 | 1 | 0.532 | 1.48 | 59.60% | 1.58 | 1.01 | 5 | 44.9 | 7.63 | 0.00% | 0.38 | 1.00 |
+| x270 | 10% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 30.0 | 3.24 | 1 | 1.07 | 1.44 | 45.90% | 1.32 | 0.98 | 5 | 89.6 | 7.72 | 0.00% | 0.36 | 1.01 |
+| x270 | 10% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 16.5 | 1 | 0.209 | 0.643 | 81.20% | 2.45 | 0.99 | 5 | 17.9 | 7.79 | 0.20% | 0.42 | 1.02 |
+| x270 | 10% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 6.65 | 1 | 0.535 | 1.47 | 60.20% | 1.58 | 1.02 | 5 | 44.8 | 7.68 | 0.10% | 0.39 | 1.00 |
+| x270 | 10% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 3.34 | 1 | 1.06 | 1.51 | 45.30% | 1.29 | 1.04 | 5 | 89.5 | 7.61 | 0.00% | 0.38 | 0.99 |
+| x270 | 30% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 97.9 | 1 | 0.028 | 0.091 | 97.00% | 6.42 | 0.84 | 5 | 2.83 | 7.22 | 7.20% | 0.69 | 0.95 |
+| x270 | 30% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 48.8 | 1 | 0.065 | 0.197 | 93.90% | 4.57 | 0.91 | 5 | 5.79 | 7.51 | 0.60% | 0.56 | 0.98 |
+| x270 | 30% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 32.5 | 19.5 | 1 | 0.169 | 0.496 | 84.50% | 2.74 | 0.90 | 5 | 14.7 | 7.56 | 0.60% | 0.45 | 0.99 |
+| x270 | 30% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 30.0 | 9.72 | 1 | 0.360 | 1.07 | 70.40% | 1.89 | 0.97 | 5 | 29.9 | 7.58 | 0.00% | 0.39 | 0.99 |
+| x270 | 30% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 49.4 | 1 | 0.062 | 0.187 | 94.00% | 4.50 | 0.86 | 5 | 5.79 | 7.35 | 1.30% | 0.53 | 0.96 |
+| x270 | 30% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 19.9 | 1 | 0.162 | 0.533 | 85.10% | 2.74 | 1.00 | 5 | 14.7 | 7.51 | 0.10% | 0.46 | 0.98 |
+| x270 | 30% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 10.0 | 1 | 0.353 | 1.02 | 71.70% | 1.93 | 0.96 | 5 | 29.8 | 7.48 | 0.10% | 0.41 | 0.98 |
+
+
+
+## Proposal: weak shares that follow the asks, where they settle (band-weak-levels, weak work, 50% industrial)
+
+| BCH hashrate | Pool | Rule | Weak a share | R | Asking | Weak/s | KB/s | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| x1 | 10% | today | 34.5 | 36.8 | 0.00% | 3.45 | 2.86 | 0.091 | 38.6 | 24.7 | 0.00% | 0.25 | 0.99 | 3,209 | 431 | 0.00% | 0.05 | 1.00 |
+| x1 | 10% | asks | 46.3 | 49.3 | 0.00% | 4.63 | 3.81 | 0.068 | 52.0 | 25.1 | 0.00% | 0.25 | 1.01 | 4,327 | 433 | 0.00% | 0.05 | 1.00 |
+| x1 | 10% | fill 320 | 346 | 361 | 0.00% | 34.6 | 27.8 | 9.3e-3 | 388 | 25.2 | 0.00% | 0.21 | 1.01 | 32,299 | 433 | 0.00% | 0.05 | 1.00 |
+| x1 | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 0.363 | 9.40 | 24.0 | 0.00% | 0.38 | 0.98 | 804 | 1,041 | 0.00% | 0.05 | 1.00 |
+| x1 | 30% | asks | 56.8 | 56.6 | 6.00% | 5.68 | 4.65 | 0.222 | 15.7 | 24.6 | 0.00% | 0.32 | 0.99 | 1,327 | 1,151 | 0.00% | 0.04 | 1.00 |
+| x1 | 30% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 0.037 | 96.6 | 24.7 | 0.00% | 0.22 | 0.99 | 8,053 | 1,288 | 0.00% | 0.03 | 1.00 |
+| x10 | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.73 | 9.30% | 0.76 | 0.96 | 242 | 355 | 0.00% | 0.09 | 1.00 |
+| x10 | 10% | asks | 189 | 186 | 26.62% | 18.9 | 15.3 | 0.225 | 15.7 | 4.87 | 1.40% | 0.51 | 0.98 | 1,325 | 431 | 0.00% | 0.06 | 1.00 |
+| x10 | 10% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 0.124 | 29.0 | 4.96 | 1.30% | 0.47 | 1.00 | 2,417 | 431 | 0.00% | 0.05 | 1.00 |
+| x10 | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| x10 | 30% | asks | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| x10 | 30% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 0.371 | 9.42 | 4.82 | 2.40% | 0.58 | 0.97 | 806 | 205 | 0.00% | 0.08 | 1.00 |
+| x100 | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 12.1 | 0.284 | 0.846 | 75.60% | 2.10 | 0.95 | 24.2 | 20.9 | 0.00% | 0.30 | 1.01 |
+| x100 | 10% | asks | 344 | 338 | 49.99% | 34.4 | 27.6 | 1.24 | 2.75 | 3.75 | 12.90% | 0.81 | 0.95 | 241 | 20.8 | 0.00% | 0.22 | 1.00 |
+| x100 | 10% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 1.24 | 2.76 | 3.59 | 14.30% | 0.83 | 0.91 | 242 | 20.6 | 0.00% | 0.24 | 1.00 |
+| x100 | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 36.3 | 0.089 | 0.259 | 91.20% | 3.78 | 0.87 | 7.81 | 19.7 | 0.20% | 0.43 | 0.97 |
+| x100 | 30% | asks | 344 | 338 | 50.00% | 34.4 | 27.6 | 3.72 | 0.959 | 2.86 | 40.00% | 1.23 | 0.99 | 80.5 | 20.7 | 0.00% | 0.24 | 1.00 |
+| x100 | 30% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 3.71 | 0.964 | 2.91 | 39.70% | 1.20 | 1.01 | 80.6 | 20.6 | 0.00% | 0.24 | 1.00 |
+| x270 | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 32.6 | 0.097 | 0.304 | 90.70% | 3.64 | 0.92 | 8.68 | 7.48 | 0.30% | 0.48 | 0.98 |
+| x270 | 10% | asks | 344 | 338 | 49.99% | 34.4 | 27.6 | 3.35 | 1.06 | 1.48 | 44.70% | 1.34 | 1.02 | 89.2 | 7.59 | 0.00% | 0.37 | 0.99 |
+| x270 | 10% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 3.34 | 1.06 | 1.51 | 45.30% | 1.29 | 1.04 | 89.5 | 7.61 | 0.00% | 0.38 | 0.99 |
+| x270 | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 97.9 | 0.028 | 0.091 | 97.00% | 6.42 | 0.84 | 2.83 | 7.22 | 7.20% | 0.69 | 0.95 |
+| x270 | 30% | asks | 344 | 337 | 50.00% | 34.4 | 27.6 | 10.1 | 0.351 | 1.05 | 72.00% | 2.04 | 0.99 | 29.7 | 7.60 | 0.00% | 0.41 | 0.99 |
+| x270 | 30% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 10.0 | 0.353 | 1.02 | 71.70% | 1.93 | 0.96 | 29.8 | 7.48 | 0.10% | 0.41 | 0.98 |
+
+
+
+## Proposal: the asks in every miner mix, at ten times today's hashrate (band-weak-levels, weak work)
+
+| Mix | Pool | Rule | Weak a share | R | Asking | Weak/s | KB/s | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| home | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.62 | 10.30% | 0.75 | 0.93 | 242 | 355 | 0.00% | 0.09 | 1.00 |
+| home | 10% | asks | 189 | 186 | 52.82% | 18.9 | 15.2 | 0.225 | 15.7 | 4.79 | 1.50% | 0.52 | 0.97 | 1,326 | 431 | 0.00% | 0.06 | 1.00 |
+| home | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 226 | 0.00% | 0.13 | 1.00 |
+| home | 30% | asks | 345 | 338 | 100.00% | 34.5 | 27.7 | 0.372 | 9.39 | 4.87 | 2.10% | 0.55 | 0.98 | 804 | 1,094 | 0.00% | 0.05 | 1.00 |
+| 50% industrial | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.73 | 9.30% | 0.76 | 0.96 | 242 | 355 | 0.00% | 0.09 | 1.00 |
+| 50% industrial | 10% | asks | 189 | 186 | 26.62% | 18.9 | 15.3 | 0.225 | 15.7 | 4.87 | 1.40% | 0.51 | 0.98 | 1,325 | 431 | 0.00% | 0.06 | 1.00 |
+| 50% industrial | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| 50% industrial | 30% | asks | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 90% industrial | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.72 | 9.80% | 0.74 | 0.95 | 242 | 355 | 0.00% | 0.09 | 1.00 |
+| 90% industrial | 10% | asks | 189 | 186 | 5.34% | 18.9 | 15.2 | 0.225 | 15.7 | 4.82 | 1.40% | 0.53 | 0.97 | 1,325 | 431 | 0.00% | 0.06 | 1.00 |
+| 90% industrial | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 190 | 0.00% | 0.13 | 1.00 |
+| 90% industrial | 30% | asks | 334 | 327 | 10.00% | 33.4 | 26.8 | 0.385 | 9.11 | 4.91 | 2.80% | 0.58 | 0.99 | 778 | 207 | 0.00% | 0.08 | 1.00 |
+| 99% industrial | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.78 | 9.00% | 0.74 | 0.97 | 242 | 355 | 0.00% | 0.09 | 1.00 |
+| 99% industrial | 10% | asks | 81.7 | 81.1 | 1.00% | 8.17 | 6.64 | 0.517 | 6.74 | 4.97 | 2.60% | 0.57 | 1.00 | 573 | 424 | 0.00% | 0.07 | 1.00 |
+| 99% industrial | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| 99% industrial | 30% | asks | 81.5 | 80.7 | 1.00% | 8.15 | 6.62 | 1.56 | 2.20 | 4.67 | 14.00% | 0.79 | 0.95 | 190 | 205 | 0.00% | 0.10 | 1.00 |
+| zipf | 10% | today | 34.5 | 38.1 | 0.00% | 3.45 | 2.86 | 0.907 | 3.70 | 4.68 | 6.60% | 0.69 | 0.95 | 322 | 202 | 0.00% | 0.09 | 1.00 |
+| zipf | 10% | asks | 115 | 126 | 1.42% | 11.5 | 9.34 | 0.275 | 12.8 | 4.86 | 2.30% | 0.56 | 0.98 | 1,081 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 30% | today | 34.5 | 36.8 | 0.00% | 3.45 | 2.86 | 3.15 | 1.10 | 3.39 | 33.90% | 1.07 | 0.99 | 92.7 | 193 | 0.00% | 0.13 | 1.00 |
+| zipf | 30% | asks | 299 | 312 | 3.93% | 29.9 | 24.0 | 0.372 | 9.39 | 4.86 | 2.40% | 0.56 | 0.98 | 803 | 207 | 0.00% | 0.08 | 1.00 |
+| medium | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.72 | 9.80% | 0.74 | 0.95 | 242 | 197 | 0.00% | 0.10 | 1.00 |
+| medium | 10% | asks | 190 | 186 | 5.36% | 19.0 | 15.3 | 0.225 | 15.7 | 4.88 | 1.40% | 0.51 | 0.98 | 1,325 | 206 | 0.00% | 0.08 | 1.00 |
+| medium | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| medium | 30% | asks | 334 | 328 | 10.00% | 33.4 | 26.8 | 0.384 | 9.12 | 4.93 | 1.60% | 0.56 | 0.99 | 779 | 207 | 0.00% | 0.08 | 1.00 |
+| medium, few big | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.72 | 9.80% | 0.74 | 0.95 | 242 | 197 | 0.00% | 0.10 | 1.00 |
+| medium, few big | 10% | asks | 189 | 186 | 5.33% | 18.9 | 15.2 | 0.225 | 15.7 | 4.84 | 1.60% | 0.53 | 0.98 | 1,325 | 206 | 0.00% | 0.07 | 1.00 |
+| medium, few big | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| medium, few big | 30% | asks | 334 | 329 | 10.00% | 33.4 | 26.8 | 0.383 | 9.15 | 4.93 | 2.70% | 0.56 | 0.99 | 782 | 207 | 0.00% | 0.08 | 1.00 |
+
+
+
+## Proposal: the asks' constants, each varied alone (pool 30% of ten times today's hashrate)
+
+| Mix | WEAK_ASK_DIVISOR | Node default (weak shares a month) | WEAK_FILL_MAX | Weak a share | R | Asking | Weak/s | KB/s | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 50% industrial | 16 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 64 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 256 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 64 | 4 | 320 | 142 | 140 | 21.42% | 14.2 | 11.4 | 0.899 | 3.81 | 4.67 | 6.30% | 0.66 | 0.94 | 332 | 207 | 0.00% | 0.09 | 1.00 |
+| 50% industrial | 64 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 64 | 64 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 64 | 16 | 64 | 69.3 | 68.8 | 50.00% | 6.93 | 5.65 | 1.83 | 1.86 | 4.70 | 17.50% | 0.85 | 0.95 | 162 | 203 | 0.00% | 0.11 | 1.00 |
+| 50% industrial | 64 | 16 | 160 | 173 | 171 | 49.99% | 17.3 | 14.0 | 0.738 | 4.64 | 4.74 | 5.20% | 0.64 | 0.95 | 405 | 206 | 0.00% | 0.09 | 1.00 |
+| 50% industrial | 64 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| zipf | 16 | 16 | 320 | 220 | 230 | 7.02% | 22.0 | 17.7 | 0.504 | 6.95 | 4.73 | 3.30% | 0.60 | 0.95 | 592 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 64 | 16 | 320 | 299 | 312 | 3.93% | 29.9 | 24.0 | 0.372 | 9.39 | 4.86 | 2.40% | 0.56 | 0.98 | 803 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 256 | 16 | 320 | 312 | 326 | 3.80% | 31.2 | 25.1 | 0.356 | 9.83 | 4.72 | 1.50% | 0.55 | 0.95 | 839 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 64 | 4 | 320 | 108 | 114 | 1.22% | 10.8 | 8.78 | 1.02 | 3.35 | 4.85 | 7.60% | 0.71 | 0.98 | 292 | 206 | 0.00% | 0.09 | 1.00 |
+| zipf | 64 | 16 | 320 | 299 | 312 | 3.93% | 29.9 | 24.0 | 0.372 | 9.39 | 4.86 | 2.40% | 0.56 | 0.98 | 803 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 64 | 64 | 320 | 338 | 352 | 14.71% | 33.8 | 27.1 | 0.330 | 10.6 | 4.88 | 1.30% | 0.54 | 0.98 | 908 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 64 | 16 | 64 | 69.3 | 72.9 | 16.31% | 6.93 | 5.65 | 1.59 | 2.15 | 4.75 | 15.50% | 0.82 | 0.96 | 186 | 205 | 0.00% | 0.10 | 1.00 |
+| zipf | 64 | 16 | 160 | 172 | 180 | 8.82% | 17.2 | 13.9 | 0.644 | 5.34 | 4.81 | 4.60% | 0.65 | 0.97 | 464 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 64 | 16 | 320 | 299 | 312 | 3.93% | 29.9 | 24.0 | 0.372 | 9.39 | 4.86 | 2.40% | 0.56 | 0.98 | 803 | 207 | 0.00% | 0.08 | 1.00 |
+
+
+
+## Proposal: attacks on the asks (band-weak-levels, weak work, 50% industrial)
+
+| Attack | Its part | BCH hashrate, pool | Weak a share | R | Asking | Weak/s | KB/s | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| asks whatever it finds | 0.00% | x1, 10% | 46.3 | 49.3 | 0.00% | 4.63 | 3.81 | 0.068 | 52.0 | 25.1 | 0.00% | 0.25 | 1.01 | 4,327 | 433 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 1.00% | x1, 10% | 82.1 | 86.5 | 1.00% | 8.21 | 6.67 | 0.039 | 92.0 | 24.8 | 0.00% | 0.23 | 1.00 | 7,661 | 432 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 2.00% | x1, 10% | 221 | 232 | 2.00% | 22.1 | 17.8 | 0.014 | 249 | 25.0 | 0.00% | 0.21 | 1.01 | 20,720 | 432 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 5.00% | x1, 10% | 316 | 330 | 5.00% | 31.6 | 25.4 | 0.010 | 355 | 24.8 | 0.00% | 0.21 | 1.00 | 29,517 | 431 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 25.00% | x1, 10% | 341 | 357 | 25.00% | 34.1 | 27.4 | 9.4e-3 | 383 | 24.9 | 0.00% | 0.21 | 1.00 | 31,878 | 432 | 0.00% | 0.05 | 1.00 |
+| none, today's rule | - | x10, 30% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| none | - | x10, 30% | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| never asks | 50.00% | x10, 30% | 341 | 334 | 25.00% | 34.1 | 27.4 | 0.377 | 9.29 | 4.75 | 2.70% | 0.56 | 0.96 | 795 | 206 | 0.00% | 0.08 | 1.00 |
+| never asks | 90.00% | x10, 30% | 316 | 311 | 5.00% | 31.6 | 25.4 | 0.404 | 8.64 | 4.75 | 2.10% | 0.56 | 0.96 | 740 | 206 | 0.00% | 0.08 | 1.00 |
+| never asks | 97.00% | x10, 30% | 143 | 140 | 1.50% | 14.3 | 11.5 | 0.895 | 3.83 | 4.81 | 7.10% | 0.70 | 0.97 | 333 | 206 | 0.00% | 0.09 | 1.00 |
+| never asks | 99.00% | x10, 30% | 57.3 | 57.0 | 0.50% | 5.73 | 4.69 | 2.20 | 1.56 | 4.68 | 22.10% | 0.95 | 0.96 | 134 | 202 | 0.00% | 0.11 | 1.00 |
+| industrial miners at the minimum | today | x10, 30% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| industrial miners at the minimum | asks | x10, 30% | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| carries no asking weak share | 25.00% | x10, 30% | 250 | 246 | 50.00% | 25.0 | 20.1 | 0.511 | 6.87 | 4.75 | 3.00% | 0.58 | 0.96 | 585 | 206 | 0.00% | 0.08 | 1.00 |
+| carries no asking weak share | 50.00% | x10, 30% | 168 | 165 | 50.00% | 16.8 | 13.5 | 0.762 | 4.50 | 4.71 | 5.80% | 0.67 | 0.95 | 392 | 207 | 0.00% | 0.09 | 1.00 |
+| carries no asking weak share | 75.00% | x10, 30% | 107 | 106 | 50.01% | 10.7 | 8.66 | 1.19 | 2.87 | 4.73 | 11.10% | 0.73 | 0.96 | 251 | 205 | 0.00% | 0.10 | 1.00 |
+| carries no asking weak share | 90.00% | x10, 30% | 83.1 | 83.1 | 49.42% | 8.41 | 6.83 | 1.51 | 2.23 | 4.71 | 14.80% | 0.83 | 0.95 | 194 | 206 | 0.00% | 0.10 | 1.00 |
+
+

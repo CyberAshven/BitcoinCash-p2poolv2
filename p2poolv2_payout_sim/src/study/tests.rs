@@ -147,3 +147,55 @@ fn without_node_levels_every_class_is_at_the_default() {
     });
     assert_eq!(classes.len(), 5, "every class of the half-industrial pool");
 }
+
+#[test]
+fn a_shorter_period_lever_takes_the_stale_rate_of_its_period() {
+    let today = scale_scenario(&Scenario::default(), 10.0, 0.3);
+    let scenario = lever_scenario(&Scenario::default(), 10.0, 0.3, ScaleLever::Period(2.0));
+    assert_eq!(scenario.period_seconds, 2.0);
+    assert_eq!(scenario.stale_rate, stale_rate_for_period(2.0));
+    assert!(scenario.stale_rate > today.stale_rate);
+    assert_eq!(scenario.weak_cap, today.weak_cap);
+    assert_eq!(scenario.weak_fill, today.weak_fill);
+    assert_eq!(scenario.weak_ratio_max, today.weak_ratio_max);
+}
+
+#[test]
+fn a_weak_shares_lever_keeps_the_period_and_raises_cap_fill_and_ratio_maximum_together() {
+    let today = scale_scenario(&Scenario::default(), 10.0, 0.3);
+    let scenario = lever_scenario(&Scenario::default(), 10.0, 0.3, ScaleLever::WeakShares(5));
+    assert_eq!(scenario.period_seconds, today.period_seconds);
+    assert_eq!(scenario.stale_rate, today.stale_rate);
+    assert_eq!(scenario.weak_cap, 5 * today.weak_cap);
+    assert_eq!(scenario.weak_fill, 5 * today.weak_fill);
+    assert_eq!(scenario.weak_ratio_max, 5 * today.weak_ratio_max);
+}
+
+/// The study's finding at the model's own level: five times the weak shares
+/// a share give the Bitaxe the weak shares a share period a fifth as long
+/// gives it, without that period's stale shares.
+#[test]
+fn more_weak_shares_a_share_credit_a_home_miner_as_a_shorter_period_does() {
+    let base = Scenario {
+        months: 1,
+        ..Scenario::default()
+    };
+    let reports = run_scenarios(&[
+        lever_scenario(&base, 10.0, 0.3, ScaleLever::Period(10.0)),
+        lever_scenario(&base, 10.0, 0.3, ScaleLever::Period(2.0)),
+        lever_scenario(&base, 10.0, 0.3, ScaleLever::WeakShares(5)),
+    ]);
+    let weak_per_month = |report: &Report| report.miners[0].weak_shares_per_month;
+    let today = weak_per_month(&reports[0]);
+    let shorter = weak_per_month(&reports[1]);
+    let more = weak_per_month(&reports[2]);
+    assert!(
+        shorter > 4.0 * today,
+        "a period a fifth as long gives {shorter} weak shares a month against {today}"
+    );
+    assert!(
+        (more / shorter - 1.0).abs() < 0.1,
+        "five times the weak shares a share give {more} a month, the shorter period {shorter}"
+    );
+    assert!(reports[2].scenario.stale_rate < reports[1].scenario.stale_rate);
+}

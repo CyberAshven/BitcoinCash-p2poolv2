@@ -503,6 +503,7 @@ fn summarise(tally: &RaceTally) -> RaceOutcome {
             found_non_carrying,
         ),
         full_share_fraction: ratio_or_zero(tally.full_shares as f64, shares),
+        asking_fraction: 0.0,
     };
     let stale_fraction = tally
         .chain_shares
