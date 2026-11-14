@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The small miners design page has a section 6, a proposal that is not built:
+weak shares that follow the asks. A weak share would ask for an easier weak
+target when its node wanted one for its miner, and while more than one in 64
+of the weak shares a share carried ask, the weak ratio would rise instead of
+steering towards 32 weak shares a share, up to 320. Without asks the rule is
+today's. The payout simulator runs it share by share in four tables
+(`weak-asks`, `weak-asks-mixes`, `weak-asks-constants`,
+`weak-asks-attacks`): a pool whose small miners find enough weak shares
+stays near today's count, and one at 30% of a Bitcoin Cash ten times today's
+opens to the ceiling, where a Bitaxe's months without a payment go from 41%
+to 2.7%. An attacker can hold the count at the ceiling or at the floor, no
+further. The section lists what the ceiling costs a node and what has to be
+built first.
+
+The payout simulator has a `scale-levers` table for part 5 of the small
+miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
+Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,
+2 and 1 seconds and with 10-second shares that carry 2, 5 and 10 times the
+weak shares. Both pay a small miner the same, and only the shorter period
+adds stale shares: 7.8%, 17.8% and 30.7% on 1,000 nodes against 4.2%. A
+Bitaxe first needs more weak shares when the pool itself holds about 3.7
+EH/s, as much as all of Bitcoin Cash has today. Section 5 of the design page
+records it and stays an outline.
+
 A Stratum V2 Job Declaration client stays on the pool while the share chain
 moves every few seconds. On the live pool it moves about every 4 seconds,
 and four things made a client there lose its job, its connection or its

@@ -2,20 +2,21 @@
 
 Status: parts 1 and 2 implemented on branch feat/one-chain-band; part 4
 implemented on branch feat/payout-levels, on top of it (store format 4);
-part 3 on branch feat/weak-shares, on top of both (store format 5); part 5
-is a proposal. Tracked in
+part 3 on branch feat/weak-shares, on top of both (store format 5); parts 5
+and 6 are proposals. Tracked in
 [issue #79](https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues/79).
 Values marked *(sim)* are first proposals that the simulation in row 2 of the
 issue confirms or replaces.
 
 This page gives the exact rules for four changes to the Bitcoin Cash share
-chain and the outline of a fifth:
+chain, the outline of a fifth and the proposal of a sixth:
 
 1. one share chain instead of main and mini;
 2. a difficulty band with a dynamic cap;
 3. weak shares;
 4. payout levels, a payout threshold paid by a draw;
-5. a dynamic share period (outline only).
+5. a dynamic share period (outline only);
+6. weak shares that follow the asks (a proposal, not built).
 
 Parts 1 to 4 change share-chain rules. None of them changes Bitcoin Cash's
 own rules: the blocks P2Pool finds stay ordinary Bitcoin Cash blocks, and
@@ -570,6 +571,34 @@ propagation instead of capping it"). Below that, weak shares carry the extra
 credit instead: gossiped beside shares they never race, so they add credit
 without adding stale shares.
 
+### What the payout simulation shows
+
+The payout simulator ran pools at 10 and 30% of Bitcoin Cash, at 1, 10, 100
+and 270 times today's hashrate, with share periods of 5, 2 and 1 seconds
+and with 10-second shares that carry 2, 5 and 10 times the weak shares
+(`cargo payout-sim --scenario scale-levers`; its README has the table and
+the 1,000-node network runs).
+
+- At today's hashrate the share period changes nothing for a small miner: a
+  Bitaxe is paid 24 to 25 times a month at every period.
+- A small miner first needs more credit when the pool itself holds about
+  3.7 EH/s, as much as all of Bitcoin Cash has today. Until then a Bitaxe
+  finds about three weak shares a month or more at the 10-second period.
+- Past that size a shorter period helps, and more weak shares a share help
+  exactly as much: a Bitaxe in a pool at 30% of a Bitcoin Cash ten times
+  today's has 41% of its months without a payment by today's rules and 2%
+  with ten times the weak shares a second, from either.
+- Only the shorter period costs stale shares: 7.8%, 17.8% and 30.7% at 5, 2
+  and 1 seconds on 1,000 nodes, against 4.2% at 10 seconds whatever number
+  of weak shares travels beside the shares.
+- At Bitcoin's hashrate neither saves a 1.2 TH/s miner, whose fair income is
+  1,605 satoshis a month.
+
+So a dynamic share period would buy small miners nothing that more weak
+shares a share do not buy without the stale shares. This part stays an
+outline. Section 6 proposes how the number of weak shares should grow with
+a pool.
+
 ## 6. Weak shares that follow the asks (proposal)
 
 This section proposes a rule and gives its simulation. It is not a rule of
@@ -796,7 +825,8 @@ and store format 10, because the header gains `weak_asking`.
 | 2 Band | `band-c64` | 3 | same flag day |
 | 3 Weak shares | `weak-64-500-6`, then `weak2-64-500-6`, then `weak2-64-100-48-256`, then `weak3-64-100-48-256` | 5, then 6, then 7, then 9 | same flag day; old nodes cannot read the new header or the weak share message; the weak root's leaves then became whole encodings, a second flag day, and study #85's cut, depth and `R_MAX` a third |
 | 4 Payout levels | `levels-546x2`, then `levels-546x2-k1` | 4, then 8 | same flag day; old nodes cannot read the longer header |
-| 5 Share period | none; share version 2 | 3 | share-version vote |
+| 5 Share period | none; share version 2 | 3 | share-version vote; not planned (section 5) |
+| 6 Weak shares that follow the asks (proposal) | a new weak share segment | 10 | flag day, if adopted: the header gains `weak_asking` |
 
 A part that changes what a stored share holds raises the store format when
 it merges, so the numbers follow the merge order: part 4 raised it to 4
