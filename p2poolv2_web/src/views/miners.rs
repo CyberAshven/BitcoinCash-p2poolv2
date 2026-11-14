@@ -416,6 +416,52 @@ pub fn MinerPage(address: String, page: usize) -> impl IntoView {
                                     .into_any()
                             }
                         }}
+                        {report
+                            .payout_level
+                            .zip(report.payout_level_satoshis)
+                            .map(|(level, satoshis)| {
+                                stat(
+                                    "Payout level",
+                                    view! {
+                                        {format!("{level} ({satoshis} satoshis)")}
+                                        <br />
+                                        <small>"smaller slices are paid by a draw"</small>
+                                    }
+                                    .into_any(),
+                                )
+                            })}
+                        {report.expected_income_a_month.map(|income| {
+                            stat(
+                                "Expected income a month",
+                                view! {
+                                    {format!("{income:.0} satoshis")}
+                                    <br />
+                                    <small>"from the pool's recent block rate"</small>
+                                }
+                                .into_any(),
+                            )
+                        })}
+                        {report
+                            .expected_payments_a_month
+                            .map(|payments| {
+                                stat(
+                                    "Expected payments a month",
+                                    view! { {format!("{payments:.1}")} }.into_any(),
+                                )
+                            })}
+                        {report.monthly_swing.map(|swing| {
+                            stat(
+                                "Monthly swing",
+                                view! {
+                                    {percent(swing)}
+                                    <br />
+                                    <small>
+                                        "how far a month's income typically strays from the expected"
+                                    </small>
+                                }
+                                .into_any(),
+                            )
+                        })}
                         {stat("Hashrate", view! { {hashrate} }.into_any())}
                         {stat(
                             "Mining on",

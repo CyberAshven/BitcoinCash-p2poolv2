@@ -317,6 +317,26 @@ pub struct Miner {
     pub weak_share_count: usize,
     pub share_fraction: f64,
     pub payout_fraction: f64,
+    /// The payout level `k` of this address's newest credited entry in the
+    /// window, `None` with nothing in the window or on a node that predates
+    /// it (rendered without the tile, as the node's page does).
+    #[serde(default)]
+    pub payout_level: Option<u8>,
+    /// The smallest payment at `payout_level`, `546 * 2^k` satoshis.
+    #[serde(default)]
+    pub payout_level_satoshis: Option<u64>,
+    /// Payments a month this address can expect at `payout_level`, `None`
+    /// without a level, a template or a pool hashrate.
+    #[serde(default)]
+    pub expected_payments_a_month: Option<f64>,
+    /// Satoshis a month this address can expect, `None` without a template
+    /// or a pool hashrate.
+    #[serde(default)]
+    pub expected_income_a_month: Option<f64>,
+    /// How far a month's income strays from its mean, as a fraction of it,
+    /// `None` without credits, a window span, a template or a pool hashrate.
+    #[serde(default)]
+    pub monthly_swing: Option<f64>,
     pub shares: Vec<MinerShare>,
 }
 
@@ -531,6 +551,49 @@ mod tests {
         let miners: Miners = serde_json::from_str(body).unwrap();
         assert_eq!(miners.accepted_shares_total, 0);
         assert_eq!(miners.rejected_shares_total, 0);
+    }
+
+    #[test]
+    fn test_miner_report_parses_its_income_tiles() {
+        let body = r#"{"address":"bchtest:q","address_type":"payout","anchor":"aa",
+            "anchor_height":30,"window":{"share_count":30},"share_count":7,
+            "uncle_count":1,"share_fraction":0.1,"payout_fraction":0.01,
+            "payout_level":5,"payout_level_satoshis":17472,
+            "expected_payments_a_month":17.17,"expected_income_a_month":300000.0,
+            "monthly_swing":0.308,"shares":[]}"#;
+        let report: Miner = serde_json::from_str(body).unwrap();
+        assert_eq!(report.payout_level, Some(5));
+        assert_eq!(report.payout_level_satoshis, Some(17_472));
+        assert_eq!(report.expected_payments_a_month, Some(17.17));
+        assert_eq!(report.expected_income_a_month, Some(300_000.0));
+        assert_eq!(report.monthly_swing, Some(0.308));
+    }
+
+    #[test]
+    fn test_miner_report_parses_without_the_income_tiles() {
+        // A node that predates them (or has nothing to estimate from)
+        // still answers the WASM app.
+        let body = r#"{"address":"bchtest:q","address_type":"payout","anchor":"aa",
+            "anchor_height":30,"window":{"share_count":30},"share_count":0,
+            "uncle_count":0,"share_fraction":0.0,"payout_fraction":0.0,
+            "payout_level":null,"payout_level_satoshis":null,
+            "expected_payments_a_month":null,"expected_income_a_month":null,
+            "monthly_swing":null,"shares":[]}"#;
+        let report: Miner = serde_json::from_str(body).unwrap();
+        assert_eq!(report.payout_level, None);
+        assert_eq!(report.expected_income_a_month, None);
+        assert_eq!(report.monthly_swing, None);
+
+        let older = r#"{"address":"bchtest:q","address_type":"payout","anchor":"aa",
+            "anchor_height":30,"window":{"share_count":30},"share_count":0,
+            "uncle_count":0,"share_fraction":0.0,"payout_fraction":0.0,
+            "shares":[]}"#;
+        let report: Miner = serde_json::from_str(older).unwrap();
+        assert_eq!(report.payout_level, None);
+        assert_eq!(report.payout_level_satoshis, None);
+        assert_eq!(report.expected_payments_a_month, None);
+        assert_eq!(report.expected_income_a_month, None);
+        assert_eq!(report.monthly_swing, None);
     }
 
     #[test]
