@@ -842,14 +842,21 @@ pub fn HashrateChart(
                         );
                         // Pool, Node then Network; a hidden series leaves no
                         // row, and a row other than the last ends in <br/>.
+                        // The space between the key and the value is an
+                        // explicit {" "}: view! drops whitespace written
+                        // bare between two elements, and without it the
+                        // tip reads "Pool433GH/s" where the node's page
+                        // (a formatted string) keeps the space.
                         let pool_row = zone.pool_nearest.map(|(_, value)| view! {
-                            <span class="key pool">"Pool"</span> <b>{fmt_hashrate(value)}</b>
+                            <span class="key pool">"Pool"</span> {" "} <b>{fmt_hashrate(value)}</b>
                         });
                         let local_row = zone.local_nearest.map(|(_, value)| view! {
-                            <span class="key local">"Node"</span> <b>{fmt_hashrate(value)}</b>
+                            <span class="key local">"Node"</span> {" "} <b>{fmt_hashrate(value)}</b>
                         });
                         let network_row = zone.network_nearest.map(|(_, value)| view! {
-                            <span class="key network">"Network"</span> <b>{fmt_hashrate(value)}</b>
+                            <span class="key network">"Network"</span> {" "} <b>{fmt_hashrate(
+                                value,
+                            )}</b>
                         });
                         // Blocks whose marker this strip reaches: after
                         // Network, one row each (two nearby blocks then
@@ -860,7 +867,7 @@ pub fn HashrateChart(
                             .iter()
                             .map(|height| {
                                 view! {
-                                    <span class="key blocks">"Block"</span> <b>{height.to_string()}</b>
+                                    <span class="key blocks">"Block"</span> {" "} <b>{height.to_string()}</b>
                                 }
                             })
                             .collect::<Vec<_>>();
