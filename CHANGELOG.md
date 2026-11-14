@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The payout simulator has a `scale-levers` table for part 5 of the small
+miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
+Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,
+2 and 1 seconds and with 10-second shares that carry 2, 5 and 10 times the
+weak shares. Both pay a small miner the same, and only the shorter period
+adds stale shares: 7.8%, 17.8% and 30.7% on 1,000 nodes against 4.2%. A
+Bitaxe first needs more weak shares when the pool itself holds about 3.7
+EH/s, as much as all of Bitcoin Cash has today. Section 5 of the design page
+records it and stays an outline.
+
 A Stratum V2 Job Declaration client stays on the pool while the share chain
 moves every few seconds. On the live pool it moves about every 4 seconds,
 and four things made a client there lose its job, its connection or its

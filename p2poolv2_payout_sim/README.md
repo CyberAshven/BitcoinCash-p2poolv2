@@ -32,8 +32,9 @@ are `designs`, `hashrate`, `pool`, `weak-credit`, `band-cap`,
 `attack-carriers` and `attack-spam`, and study #85's `refusing-races`,
 `mixes`, `arrivals`, `tiny-pool`, `floods`, `draw-steering`, `losses`,
 `weak-depth`, `r-max` and `r-max-mixes`, and `scale`, `scale-levers` and
-`band-step`. Every run is a pure function of its inputs and seed (default 1), drawn from `p2poolv2_netsim`'s seeded xoshiro256**
-generator, so the tables below come out the same on any machine. The whole
+`band-step`. Every run is a pure function of its inputs and seed (default
+1), drawn from `p2poolv2_netsim`'s seeded xoshiro256** generator, so the
+tables below come out the same on any machine. The whole
 default run, 1,000 simulated months per scenario, took 26 seconds on the
 32-thread machine it was run on.
 
@@ -629,9 +630,29 @@ The table is at the end of this file. What it shows:
    times today's hashrate its fair income is 1,605 satoshis a month, under
    two payments at the lowest level. With ten times the weak shares a
    second it still has about 45% of its months empty in a pool at 10% and
-   about 70% at 30%. A 100 TH/s miner there is paid 7 to 8 times a month by today's
-   rules; its 7% of empty months at 30% go below 1.5% with twice the weak
-   shares a second.
+   about 70% at 30%. A 100 TH/s miner there is paid 7 to 8 times a month by
+   today's rules; its 7% of empty months at 30% go below 1.5% with twice
+   the weak shares a second.
+6. **On 1,000 nodes the network simulation says the same.** The stale
+   rates above are its 100-node figures. A day of shares on 1,000 nodes
+   (`cargo netsim run --nodes 1000 --share-interval S --weak-shares N
+   --weak-share-carriage gossip-only`, 8,640 share intervals each):
+
+   | Share period | Weak shares a share | Weak shares a second | Stale | Upload a node, mean (Mbit/s) |
+   |---|---:|---:|---:|---:|
+   | 10 s | 32 | 3.2 | 4.23% | 0.38 |
+   | 5 s | 32 | 6.4 | 7.84% | 0.76 |
+   | 2 s | 32 | 16 | 17.77% | 1.91 |
+   | 1 s | 32 | 32 | 30.69% | 3.78 |
+   | 10 s | 64 | 6.4 | 4.23% | 0.56 |
+
+   Twice the weak shares a second cost 0.18 Mbit/s of upload and no stale
+   share when a 10-second share carries them, and 0.38 Mbit/s and 3.6 points
+   of stale shares when a 5-second period brings them. That is with weak
+   shares travelling beside the shares. A share's body carries them whole
+   today, and so 32 of them a share already put the stale rate at 5.35%
+   (`--weak-share-carriage whole`): a node that has a weak share from gossip
+   downloads it again inside the share.
 
 So the dynamic share period is not the lever to build. What the design may
 need, once a pool passes about 3.7 EH/s, is more weak shares a share: a
