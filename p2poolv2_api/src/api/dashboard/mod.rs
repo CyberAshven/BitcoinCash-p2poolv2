@@ -551,29 +551,21 @@ struct MinerPageQuery {
     page: Option<usize>,
 }
 
-/// Each payout address's hashrate over the window behind the miners page's
-/// Hashrate column, aligned with `addresses`: the work of its shares in the
-/// window over the window's time span.
-///
-/// The window is the confirmed shares within [`MAX_SHARE_GAP_SECS`] of the
-/// newest one, falling back to the two newest shares as the KPI hashrates do,
-/// out of the newest [`MINER_HASHRATE_SHARES`] confirmed shares. The window's
-/// oldest share only opens the span: its work was done before it. `None` per
-/// address with no share of its work in the window, rendered as a dash, and
-/// `None` throughout where the window has no time span. The column does not
-/// decay as the chain grows stale: it is anchored to chain activity, not to
-/// the wall clock.
-fn miner_hashrates(state: &AppState, addresses: &[String]) -> Vec<Option<f64>> {
-    let mut rates: Vec<Option<f64>> = vec![None; addresses.len()];
-    let shares = newest_shares(state, MINER_HASHRATE_SHARES);
+/// The window behind the miners page's Hashrate column, oldest first, with
+/// the span it covers in seconds: the shares within [`MAX_SHARE_GAP_SECS`] of
+/// the newest one, falling back to the two newest shares as the KPI
+/// hashrates do, so a stale seed (e.g. the genesis share at a fixed past
+/// time) cannot stretch the span. The window's oldest share only opens the
+/// span: its work was done before it. `None` where `shares` holds fewer than
+/// two or the window has no time span. Callers hand over the newest
+/// [`MINER_HASHRATE_SHARES`] confirmed shares.
+fn miner_hashrate_window(shares: &[ShareInfo]) -> Option<(Vec<&ShareInfo>, u32)> {
     if shares.len() < 2 {
-        return rates;
+        return None;
     }
     let mut window: Vec<&ShareInfo> = shares.iter().collect();
     window.sort_by_key(|share| share.timestamp);
-    let Some(newest) = window.last().map(|share| share.timestamp) else {
-        return rates;
-    };
+    let newest = window.last()?.timestamp;
     let mut kept: Vec<&ShareInfo> = window
         .iter()
         .copied()
@@ -582,10 +574,22 @@ fn miner_hashrates(state: &AppState, addresses: &[String]) -> Vec<Option<f64>> {
     if kept.len() < 2 {
         kept = window[window.len() - 2..].to_vec();
     }
-    let Some(span) = newest
+    let span = newest
         .checked_sub(kept[0].timestamp)
-        .filter(|span| *span > 0)
-    else {
+        .filter(|span| *span > 0)?;
+    Some((kept, span))
+}
+
+/// Each payout address's hashrate over [`miner_hashrate_window`]'s window,
+/// aligned with `addresses`: the work of its shares in the window over the
+/// window's time span. `None` per address with no share of its work in the
+/// window, rendered as a dash, and `None` throughout where the window has no
+/// time span. The column does not decay as the chain grows stale: it is
+/// anchored to chain activity, not to the wall clock.
+fn miner_hashrates(state: &AppState, addresses: &[String]) -> Vec<Option<f64>> {
+    let mut rates: Vec<Option<f64>> = vec![None; addresses.len()];
+    let shares = newest_shares(state, MINER_HASHRATE_SHARES);
+    let Some((kept, span)) = miner_hashrate_window(&shares) else {
         return rates;
     };
     let mut work = vec![0.0_f64; addresses.len()];
@@ -612,28 +616,28 @@ fn miner_hashrates(state: &AppState, addresses: &[String]) -> Vec<Option<f64>> {
     rates
 }
 
-/// A miner's hashrate from its share of the work in the newest shares: its
-/// shares' work over the time those shares span, with how many shares and
-/// seconds that was.
+/// A miner's hashrate over [`miner_hashrate_window`]'s window -- the figure
+/// the miners page's Hashrate column shows for `address` -- with how many
+/// shares and seconds the window covers. `None` where the window has no time
+/// span or the miner has no share of its work in it, as the column renders
+/// a dash.
 fn miner_hashrate(state: &AppState, address: &str) -> Option<(f64, usize, u32)> {
     let shares = newest_shares(state, MINER_HASHRATE_SHARES);
-    let oldest = shares.first()?.timestamp;
-    let newest = shares.last()?.timestamp;
-    let span = newest.checked_sub(oldest).filter(|span| *span > 0)?;
-    let work: f64 = shares
-        .iter()
-        .skip(1)
-        .filter(|share| {
-            let display = ShareInfoDisplay::from_share_info(
-                share,
-                Some(state.app_config.network),
-                state.app_config.cash_network,
-            );
-            display.miner_bitcoin_address == address || display.miner_address == address
-        })
-        .map(|share| work_from_bits(share.bits))
-        .sum();
-    Some((work / f64::from(span), shares.len(), span))
+    let (kept, span) = miner_hashrate_window(&shares)?;
+    let mut work = 0.0_f64;
+    let mut matched = false;
+    for share in kept.iter().skip(1) {
+        let display = ShareInfoDisplay::from_share_info(
+            share,
+            Some(state.app_config.network),
+            state.app_config.cash_network,
+        );
+        if display.miner_bitcoin_address == address || display.miner_address == address {
+            matched = true;
+            work += work_from_bits(share.bits);
+        }
+    }
+    matched.then(|| (work / f64::from(span), kept.len(), span))
 }
 
 async fn miner(

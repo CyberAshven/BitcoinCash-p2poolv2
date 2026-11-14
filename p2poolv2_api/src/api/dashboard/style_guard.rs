@@ -503,6 +503,8 @@ fn miner_report(shares: Vec<MinerShare>) -> MinerResponse {
 }
 
 fn miner_share(nephew: Option<String>) -> MinerShare {
+    // Only the share row can carry weak shares; an uncle never does.
+    let carries_weak = nephew.is_none();
     MinerShare {
         blockhash: "ef".repeat(32),
         height: 3,
@@ -510,6 +512,8 @@ fn miner_share(nephew: Option<String>) -> MinerShare {
         difficulty: "4".to_string(),
         weight: "10".to_string(),
         payout_address: "bchtest:qpayout".to_string(),
+        weak_count: u16::from(carries_weak),
+        weak_shares: 0,
     }
 }
 

@@ -15,7 +15,7 @@
 use super::assets;
 use super::chart::{ChartBlock, Series, line_chart};
 use super::history::Sample;
-use crate::api::endpoints::miner::MinerResponse;
+use crate::api::endpoints::miner::{MinerResponse, MinerShare};
 use crate::api::endpoints::share::ShareLookupOutput;
 use bitcoin::{BlockHash, CompactTarget, Target};
 use maud::{DOCTYPE, Markup, html};
@@ -345,9 +345,11 @@ pub(crate) struct MinerView {
     pub(crate) site: Site,
     pub(crate) now: u64,
     pub(crate) report: MinerResponse,
-    /// The miner's hashrate over the recent shares, if it has any there.
+    /// The miner's hashrate over the window behind the miners page's
+    /// Hashrate column, if it has any there.
     pub(crate) hashrate: Option<f64>,
-    /// How many recent shares, and over how many seconds, it was taken from.
+    /// The window `hashrate` was taken from: how many shares, over how many
+    /// seconds.
     pub(crate) recent_window: Option<(usize, u32)>,
     /// Its workers, when it mines on this node.
     pub(crate) workers: Vec<WorkerRow>,
@@ -623,6 +625,25 @@ fn kpi_card(
 /// One item of a details list.
 fn stat(key: &str, value: Markup) -> Markup {
     html! { div.stat-item { div.k { (key) } div.v { (value) } } }
+}
+
+/// The carried and credited weak-share totals for the Uncles credited
+/// tile, or nothing when both are 0 so the tile stays what `stat()`
+/// emits. The carried side sums the whole report, not the paged slice.
+fn weak_summary(report: &MinerResponse) -> Option<(usize, usize)> {
+    let carried = report
+        .shares
+        .iter()
+        .map(|share| usize::from(share.weak_count))
+        .sum();
+    let credited = report.weak_share_count;
+    (carried > 0 || credited > 0).then_some((carried, credited))
+}
+
+/// A window row crediting a weak share: an uncle whose nephew is itself,
+/// which is how the weak credit marks the credited row.
+fn is_weak_share(share: &MinerShare) -> bool {
+    share.nephew.as_deref() == Some(share.blockhash.as_str())
 }
 
 /// The hashrate chart's Hour/Day/Week/Month buttons, plain links with no
@@ -1283,7 +1304,16 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
                 (stat("Shares in the window", html! {
                     (report.share_count) " of " (report.window.share_count) " (" (percent(report.share_fraction)) ")"
                 }))
-                (stat("Uncles credited", html! { (report.uncle_count) }))
+                @if let Some(weak) = weak_summary(report) {
+                    div.stat-item {
+                        div.k { "Uncles credited" }
+                        div.v { (report.uncle_count) }
+                        div.k { "Weak shares" }
+                        small { (weak.0) " carried, " (weak.1) " credited" }
+                    }
+                } @else {
+                    (stat("Uncles credited", html! { (report.uncle_count) }))
+                }
                 @if let (Some(level), Some(satoshis)) = (report.payout_level, report.payout_level_satoshis) {
                     (stat("Payout level", html! {
                         (level) " (" (satoshis) " satoshis)"
@@ -1341,7 +1371,12 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
                                 tr.uncle-row[share.nephew.is_some()] {
                                     td { (share.height) }
                                     td { (share_link(&share.blockhash)) }
-                                    td { @if share.nephew.is_some() { "uncle" } @else { "share" } }
+                                    td {
+                                        @if is_weak_share(share) { "weak" }
+                                        @else if share.nephew.is_some() { "uncle" }
+                                        @else { "share" }
+                                        @if share.weak_count > 0 { " " span.badge-weak { (share.weak_count) " weak" } }
+                                    }
                                     td.mono { (share.difficulty) }
                                     td.mono { (share.weight) }
                                 }
@@ -2568,5 +2603,128 @@ mod tests {
 
         assert!(!page.contains("Expected income a month"));
         assert!(!page.contains("Monthly swing"));
+        assert!(!page.contains("Weak shares"));
+        assert!(!page.contains("badge-weak"));
+    }
+
+    /// A miner view with a carrying share, a weak credit row and an uncle,
+    /// the rows the weak markup distinguishes.
+    fn weak_miner_view() -> MinerView {
+        let carrying = MinerShare {
+            blockhash: "ab".repeat(32),
+            height: 10,
+            nephew: None,
+            difficulty: "4".to_string(),
+            weight: "10".to_string(),
+            payout_address: "bchtest:qpayout".to_string(),
+            weak_count: 2,
+            weak_shares: 0,
+        };
+        // A weak credit names the carrying share as both its blockhash and
+        // its nephew, which is how the row is told apart.
+        let weak = MinerShare {
+            blockhash: "ab".repeat(32),
+            height: 10,
+            nephew: Some("ab".repeat(32)),
+            difficulty: "1".to_string(),
+            weight: "3".to_string(),
+            payout_address: "bchtest:qpayout".to_string(),
+            weak_count: 0,
+            weak_shares: 4,
+        };
+        let uncle = MinerShare {
+            blockhash: "cd".repeat(32),
+            height: 9,
+            nephew: Some("ab".repeat(32)),
+            difficulty: "4".to_string(),
+            weight: "5".to_string(),
+            payout_address: "bchtest:qpayout".to_string(),
+            weak_count: 0,
+            weak_shares: 0,
+        };
+        // A plain share with no weak fields: it must render as before.
+        let plain = MinerShare {
+            blockhash: "ef".repeat(32),
+            height: 8,
+            nephew: None,
+            difficulty: "4".to_string(),
+            weight: "7".to_string(),
+            payout_address: "bchtest:qpayout".to_string(),
+            weak_count: 0,
+            weak_shares: 0,
+        };
+        MinerView {
+            site: site(),
+            now: 1_000,
+            report: MinerResponse {
+                address: "bchtest:qpayout".to_string(),
+                address_type: "payout",
+                anchor: "cd".repeat(32),
+                anchor_height: 30,
+                window: WindowSummary {
+                    newest_height: Some(29),
+                    oldest_height: Some(0),
+                    share_count: 30,
+                    weight: "300".to_string(),
+                },
+                share_count: 4,
+                uncle_count: 1,
+                weak_share_count: 4,
+                weight: "25".to_string(),
+                share_fraction: 0.1,
+                payout_fraction: 0.2,
+                payout_level: None,
+                payout_level_satoshis: None,
+                expected_payments_a_month: None,
+                expected_income_a_month: None,
+                monthly_swing: None,
+                shares: vec![carrying, weak, uncle, plain],
+            },
+            hashrate: None,
+            recent_window: None,
+            workers: Vec::new(),
+            paging: Paging { page: 1, pages: 1 },
+        }
+    }
+
+    #[test]
+    fn the_miner_page_reports_weak_shares_under_the_uncles_tile() {
+        let page = miner(&weak_miner_view()).into_string();
+
+        // The heading sits beside the values, not inside .v, so it keeps
+        // the same .k style as "Uncles credited".
+        assert!(page.contains(
+            "<div class=\"k\">Uncles credited</div><div class=\"v\">1</div>\
+             <div class=\"k\">Weak shares</div><small>2 carried, 4 credited</small>"
+        ));
+        assert!(page.contains("<span class=\"badge-weak\">2 weak</span>"));
+    }
+
+    #[test]
+    fn the_miner_page_labels_weak_rows_and_keeps_uncle_rows() {
+        let page = miner(&weak_miner_view()).into_string();
+
+        // The weak credit relabels its Kind to "weak" and keeps the uncle
+        // row class; a plain uncle stays "uncle".
+        assert!(page.contains(">weak</td>"));
+        assert!(page.contains(">uncle</td>"));
+        assert!(page.contains(">share</td>"));
+        assert_eq!(page.matches("class=\"uncle-row\"").count(), 2);
+    }
+
+    #[test]
+    fn the_miner_page_leaves_the_uncles_tile_alone_without_weak_shares() {
+        let mut view = weak_miner_view();
+        view.report.weak_share_count = 0;
+        for share in &mut view.report.shares {
+            share.weak_count = 0;
+            share.weak_shares = 0;
+        }
+        view.report.shares.truncate(1);
+        let page = miner(&view).into_string();
+
+        assert!(!page.contains("Weak shares"));
+        assert!(!page.contains("carried"));
+        assert!(page.contains("<div class=\"k\">Uncles credited</div><div class=\"v\">1</div>"));
     }
 }
