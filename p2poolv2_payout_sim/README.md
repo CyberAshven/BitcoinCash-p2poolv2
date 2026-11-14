@@ -31,10 +31,10 @@ are `designs`, `hashrate`, `pool`, `weak-credit`, `band-cap`,
 `weak-constants`, `includer-cut`, `levels`, `period`, `attack-minimum`,
 `attack-carriers` and `attack-spam`, and study #85's `refusing-races`,
 `mixes`, `arrivals`, `tiny-pool`, `floods`, `draw-steering`, `losses`,
-`weak-depth`, `r-max` and `r-max-mixes`, and `scale` and `band-step`. Every run is a pure function of its
-inputs and
-seed (default 1), drawn from `p2poolv2_netsim`'s seeded xoshiro256**
-generator, so the tables below come out the same on any machine. The whole
+`weak-depth`, `r-max` and `r-max-mixes`, and `scale`, `scale-levers` and
+`band-step`. Every run is a pure function of its inputs and seed (default
+1), drawn from `p2poolv2_netsim`'s seeded xoshiro256** generator, so the
+tables below come out the same on any machine. The whole
 default run, 1,000 simulated months per scenario, took 26 seconds on the
 32-thread machine it was run on.
 
@@ -580,14 +580,85 @@ What it shows:
    later.** At ten times today's hashrate a Bitaxe is paid 4.7 times a month
    at 10% of Bitcoin Cash (9% of months empty) and under once a month at
    90%. At 270 times, Bitcoin's hashrate, it is paid once every three months
-   to once every two years. A 100 TH/s miner at 270 times is still paid 26
-   times a month at 10%, 8.8 at 30%, 5.2 at 50% (19% of months empty) and 3.0
-   at 90% (40% empty).
+   to once every two years. A 100 TH/s miner at 270 times is still paid 7.5
+   times a month at 10%, 7.2 at 30% (7% of months empty), 5.2 at 50% (19%
+   empty) and 3.0 at 90% (40% empty).
 5. **The lever is weak shares a second.** More weak shares a share, or a
-   shorter share period, gives small miners more, smaller credits. The
-   limits study in `docs/simulation/network-sim.md` prices that: each weak
-   share is a coinbase build on every node, 3.8 ms at 10,000 miners and 45 ms
-   at 100,000.
+   shorter share period, gives small miners more, smaller credits. The next
+   section compares the two.
+
+## Scale levers: a shorter share period against more weak shares a share
+
+`cargo payout-sim --scenario scale-levers` asks when section 5 of the design
+page, the dynamic share period, is needed, and whether it is the right
+lever. It runs the scale table's pools at 10 and 30% of Bitcoin Cash and at
+1, 10, 100 and 270 times today's hashrate, each seven ways:
+
+- the rules as they are: 10-second shares, `WEAK_FILL` 32;
+- a share period of 5, 2 and 1 seconds, each share carrying as many weak
+  shares as today, at the stale rate the network simulation measured for
+  that period;
+- 10-second shares carrying 2, 5 and 10 times the weak shares (`WEAK_CAP`,
+  `WEAK_FILL` and `R_MAX` times that), which is as many weak shares a second
+  as the 5, 2 and 1-second periods give.
+
+The table is at the end of this file. What it shows:
+
+1. **Today the share period changes nothing for a small miner.** At today's
+   hashrate a Bitaxe is paid 24 to 25 times a month at every period and
+   every weak share rate, with no empty month. Weak shares already credit it
+   38.6 times a month in a pool at 10% of Bitcoin Cash and 9.4 times at 30%.
+2. **More credit is first needed when the pool itself is about as large as
+   all of Bitcoin Cash is today.** A pool makes 3.45 weak shares a second
+   whatever its size, split among its miners at the minimum. The smallest
+   miner that still finds three a month is about 0.33 TH/s for each EH/s of
+   pool hashrate when half of it is home miners. That reaches a Bitaxe's 1.2
+   TH/s at 3.7 EH/s of pool hashrate, for example 10% of a Bitcoin Cash ten
+   times today's, and a 100 TH/s miner's at about 300 EH/s, 30% of a Bitcoin
+   Cash at Bitcoin's hashrate.
+3. **Past that point both levers help, and equally.** At ten times today's
+   hashrate in a pool at 30%, a Bitaxe has 41% of its months empty. Twice
+   the weak shares a second leave 19%, five times 4 to 6% and ten times 2%,
+   whether they come from a shorter period or from more weak shares a share:
+   the two columns of payments, empty months and swing agree within the
+   noise of the months simulated in every row.
+4. **The shorter period pays for it in stale shares, more weak shares a
+   share do not.** The 5, 2 and 1-second periods run at 3.8%, 8.7% and 15.9%
+   stale shares; the 10-second period stays at 2.1% whatever its shares
+   carry. Both relay the same weak shares, 6.9, 17 and 35 a second.
+5. **Neither lever saves a 1.2 TH/s miner at Bitcoin's hashrate.** At 270
+   times today's hashrate its fair income is 1,605 satoshis a month, under
+   two payments at the lowest level. With ten times the weak shares a
+   second it still has about 45% of its months empty in a pool at 10% and
+   about 70% at 30%. A 100 TH/s miner there is paid 7 to 8 times a month by
+   today's rules; its 7% of empty months at 30% go below 1.5% with twice
+   the weak shares a second.
+6. **On 1,000 nodes the network simulation says the same.** The stale
+   rates above are its 100-node figures. A day of shares on 1,000 nodes
+   (`cargo netsim run --nodes 1000 --share-interval S --weak-shares N
+   --weak-share-carriage gossip-only`, 8,640 share intervals each):
+
+   | Share period | Weak shares a share | Weak shares a second | Stale | Upload a node, mean (Mbit/s) |
+   |---|---:|---:|---:|---:|
+   | 10 s | 32 | 3.2 | 4.23% | 0.38 |
+   | 5 s | 32 | 6.4 | 7.84% | 0.76 |
+   | 2 s | 32 | 16 | 17.77% | 1.91 |
+   | 1 s | 32 | 32 | 30.69% | 3.78 |
+   | 10 s | 64 | 6.4 | 4.23% | 0.56 |
+
+   Twice the weak shares a second cost 0.18 Mbit/s of upload and no stale
+   share when a 10-second share carries them, and 0.38 Mbit/s and 3.6 points
+   of stale shares when a 5-second period brings them. That is with weak
+   shares travelling beside the shares. A share's body carries them whole
+   today, and so 32 of them a share already put the stale rate at 5.35%
+   (`--weak-share-carriage whole`): a node that has a weak share from gossip
+   downloads it again inside the share.
+
+So the dynamic share period is not the lever to build. What the design may
+need, once a pool passes about 3.7 EH/s, is more weak shares a share: a
+larger `WEAK_FILL` and `WEAK_CAP`, or the budget issue #79 describes that
+grows while its slots stay full, under a ceiling in bytes a second. The page
+has `WEAK_FILL` fixed at 32.
 
 ## Code
 
@@ -1484,3 +1555,66 @@ difficulty, to push the cap up.
    step:** 0.78 to 0.89 of fair in the first six hours, 0.99 to 1.01 in the
    last day. That is the weak ratio settling from `R_MAX`, where weak shares
    are found faster than shares can carry them, not the cap.
+
+## Scale levers: a shorter share period against more weak shares a share (band-weak-levels, weak work, 50% industrial)
+
+| BCH hashrate | Pool | Period | WEAK_FILL | Stale | Weak/s | KB/s | R | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe level | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC level | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| x1 | 10% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 36.8 | 0.091 | 5 | 38.6 | 24.7 | 0.00% | 0.25 | 0.99 | 5 | 3,209 | 431 | 0.00% | 0.05 | 1.00 |
+| x1 | 10% | 5 s | 32 | 3.80% | 6.90 | 5.73 | 50.2 | 0.030 | 5 | 116 | 24.9 | 0.00% | 0.22 | 1.01 | 5 | 9,652 | 432 | 0.00% | 0.05 | 1.00 |
+| x1 | 10% | 2 s | 32 | 8.70% | 17.3 | 14.4 | 36.9 | 0.012 | 5 | 291 | 25.0 | 0.00% | 0.20 | 1.01 | 5 | 24,154 | 433 | 0.00% | 0.05 | 1.01 |
+| x1 | 10% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 31.7 | 6.0e-3 | 5 | 578 | 25.1 | 0.00% | 0.20 | 1.01 | 5 | 48,154 | 432 | 0.00% | 0.05 | 1.01 |
+| x1 | 10% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 72.9 | 0.046 | 5 | 77.4 | 24.8 | 0.00% | 0.23 | 1.00 | 5 | 6,442 | 432 | 0.00% | 0.05 | 1.00 |
+| x1 | 10% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 181 | 0.018 | 5 | 194 | 24.8 | 0.00% | 0.22 | 1.00 | 5 | 16,153 | 433 | 0.00% | 0.05 | 1.00 |
+| x1 | 10% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 361 | 9.3e-3 | 5 | 388 | 25.2 | 0.00% | 0.21 | 1.01 | 5 | 32,299 | 433 | 0.00% | 0.05 | 1.00 |
+| x1 | 30% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 0.363 | 5 | 9.40 | 24.0 | 0.00% | 0.38 | 0.98 | 5 | 804 | 1,041 | 0.00% | 0.05 | 1.00 |
+| x1 | 30% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 0.181 | 5 | 19.4 | 24.7 | 0.00% | 0.31 | 1.00 | 5 | 1,609 | 1,171 | 0.00% | 0.04 | 1.00 |
+| x1 | 30% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 36.2 | 0.054 | 5 | 64.8 | 24.7 | 0.00% | 0.24 | 0.99 | 5 | 5,387 | 1,276 | 0.00% | 0.03 | 1.00 |
+| x1 | 30% | 1 s | 32 | 15.90% | 34.4 | 28.7 | 31.4 | 0.027 | 5 | 129 | 25.0 | 0.00% | 0.21 | 1.01 | 5 | 10,726 | 1,293 | 0.00% | 0.03 | 1.00 |
+| x1 | 30% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 0.183 | 5 | 19.4 | 24.6 | 0.00% | 0.30 | 0.99 | 5 | 1,615 | 1,168 | 0.00% | 0.04 | 1.00 |
+| x1 | 30% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 0.074 | 5 | 48.4 | 24.7 | 0.00% | 0.24 | 1.00 | 5 | 4,034 | 1,263 | 0.00% | 0.03 | 1.00 |
+| x1 | 30% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 0.037 | 5 | 96.6 | 24.7 | 0.00% | 0.22 | 0.99 | 5 | 8,053 | 1,288 | 0.00% | 0.03 | 1.00 |
+| x10 | 10% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 1.21 | 4 | 2.76 | 4.73 | 9.30% | 0.76 | 0.96 | 5 | 242 | 355 | 0.00% | 0.09 | 1.00 |
+| x10 | 10% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 0.603 | 4 | 5.60 | 4.65 | 3.90% | 0.60 | 0.94 | 5 | 483 | 418 | 0.00% | 0.07 | 1.00 |
+| x10 | 10% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 36.4 | 0.181 | 4 | 19.3 | 5.02 | 1.40% | 0.52 | 1.01 | 5 | 1,608 | 432 | 0.00% | 0.06 | 1.00 |
+| x10 | 10% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 31.5 | 0.091 | 4 | 38.6 | 5.08 | 1.10% | 0.47 | 1.02 | 5 | 3,208 | 431 | 0.00% | 0.05 | 1.00 |
+| x10 | 10% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 0.610 | 4 | 5.62 | 4.74 | 4.10% | 0.60 | 0.96 | 5 | 485 | 417 | 0.00% | 0.07 | 1.00 |
+| x10 | 10% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 0.246 | 4 | 14.4 | 4.87 | 1.30% | 0.53 | 0.98 | 5 | 1,211 | 431 | 0.00% | 0.06 | 1.00 |
+| x10 | 10% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 0.124 | 4 | 29.0 | 4.96 | 1.30% | 0.47 | 1.00 | 5 | 2,417 | 431 | 0.00% | 0.05 | 1.00 |
+| x10 | 30% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 3.63 | 4 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 5 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| x10 | 30% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 1.81 | 4 | 1.86 | 4.76 | 18.80% | 0.88 | 0.97 | 5 | 162 | 204 | 0.00% | 0.11 | 1.00 |
+| x10 | 30% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 32.5 | 0.722 | 4 | 4.63 | 4.78 | 4.20% | 0.63 | 0.96 | 5 | 403 | 207 | 0.00% | 0.08 | 1.00 |
+| x10 | 30% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 30.0 | 0.360 | 4 | 9.41 | 4.74 | 2.10% | 0.56 | 0.95 | 5 | 805 | 206 | 0.00% | 0.08 | 1.00 |
+| x10 | 30% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 1.83 | 4 | 1.86 | 4.74 | 19.40% | 0.88 | 0.96 | 5 | 162 | 204 | 0.00% | 0.11 | 1.00 |
+| x10 | 30% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 0.739 | 4 | 4.64 | 4.73 | 5.60% | 0.64 | 0.95 | 5 | 404 | 206 | 0.00% | 0.08 | 1.00 |
+| x10 | 30% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 0.371 | 4 | 9.42 | 4.82 | 2.40% | 0.58 | 0.97 | 5 | 806 | 205 | 0.00% | 0.08 | 1.00 |
+| x100 | 10% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 12.1 | 1 | 0.284 | 0.846 | 75.60% | 2.10 | 0.95 | 5 | 24.2 | 20.9 | 0.00% | 0.30 | 1.01 |
+| x100 | 10% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 6.03 | 1 | 0.573 | 1.73 | 57.70% | 1.54 | 0.97 | 5 | 48.4 | 20.8 | 0.00% | 0.26 | 1.01 |
+| x100 | 10% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 32.5 | 2.41 | 1 | 1.41 | 3.72 | 26.60% | 1.00 | 0.95 | 5 | 121 | 20.6 | 0.00% | 0.24 | 1.00 |
+| x100 | 10% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 30.0 | 1.20 | 1 | 2.76 | 3.76 | 12.50% | 0.76 | 0.95 | 5 | 242 | 20.9 | 0.00% | 0.22 | 1.01 |
+| x100 | 10% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 6.10 | 1 | 0.576 | 1.70 | 57.00% | 1.51 | 0.96 | 5 | 48.5 | 20.8 | 0.00% | 0.26 | 1.00 |
+| x100 | 10% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 2.46 | 1 | 1.42 | 3.88 | 28.40% | 1.04 | 0.99 | 5 | 121 | 20.6 | 0.00% | 0.24 | 1.00 |
+| x100 | 10% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 1.24 | 1 | 2.76 | 3.59 | 14.30% | 0.83 | 0.91 | 5 | 242 | 20.6 | 0.00% | 0.24 | 1.00 |
+| x100 | 30% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 36.3 | 1 | 0.089 | 0.259 | 91.20% | 3.78 | 0.87 | 5 | 7.81 | 19.7 | 0.20% | 0.43 | 0.97 |
+| x100 | 30% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 18.1 | 1 | 0.177 | 0.537 | 84.60% | 2.76 | 0.90 | 5 | 16.0 | 20.7 | 0.00% | 0.33 | 1.00 |
+| x100 | 30% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 32.5 | 7.22 | 1 | 0.488 | 1.56 | 62.30% | 1.64 | 1.05 | 5 | 40.4 | 20.6 | 0.00% | 0.26 | 1.00 |
+| x100 | 30% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 30.0 | 3.60 | 1 | 0.962 | 3.01 | 39.60% | 1.15 | 1.00 | 5 | 80.7 | 20.5 | 0.00% | 0.25 | 0.99 |
+| x100 | 30% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 18.3 | 1 | 0.181 | 0.580 | 83.20% | 2.62 | 0.99 | 5 | 16.0 | 20.7 | 0.00% | 0.33 | 1.00 |
+| x100 | 30% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 7.39 | 1 | 0.485 | 1.46 | 62.10% | 1.68 | 1.01 | 5 | 40.4 | 20.7 | 0.00% | 0.27 | 1.00 |
+| x100 | 30% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 3.71 | 1 | 0.964 | 2.91 | 39.70% | 1.20 | 1.01 | 5 | 80.6 | 20.6 | 0.00% | 0.24 | 1.00 |
+| x270 | 10% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 32.6 | 1 | 0.097 | 0.304 | 90.70% | 3.64 | 0.92 | 5 | 8.68 | 7.48 | 0.30% | 0.48 | 0.98 |
+| x270 | 10% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 16.3 | 1 | 0.207 | 0.638 | 80.80% | 2.42 | 0.96 | 5 | 17.9 | 7.63 | 0.30% | 0.44 | 1.00 |
+| x270 | 10% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 32.5 | 6.50 | 1 | 0.532 | 1.48 | 59.60% | 1.58 | 1.01 | 5 | 44.9 | 7.63 | 0.00% | 0.38 | 1.00 |
+| x270 | 10% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 30.0 | 3.24 | 1 | 1.07 | 1.44 | 45.90% | 1.32 | 0.98 | 5 | 89.6 | 7.72 | 0.00% | 0.36 | 1.01 |
+| x270 | 10% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 16.5 | 1 | 0.209 | 0.643 | 81.20% | 2.45 | 0.99 | 5 | 17.9 | 7.79 | 0.20% | 0.42 | 1.02 |
+| x270 | 10% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 6.65 | 1 | 0.535 | 1.47 | 60.20% | 1.58 | 1.02 | 5 | 44.8 | 7.68 | 0.10% | 0.39 | 1.00 |
+| x270 | 10% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 3.34 | 1 | 1.06 | 1.51 | 45.30% | 1.29 | 1.04 | 5 | 89.5 | 7.61 | 0.00% | 0.38 | 0.99 |
+| x270 | 30% | 10 s | 32 | 2.10% | 3.45 | 2.86 | 34.7 | 97.9 | 1 | 0.028 | 0.091 | 97.00% | 6.42 | 0.84 | 5 | 2.83 | 7.22 | 7.20% | 0.69 | 0.95 |
+| x270 | 30% | 5 s | 32 | 3.80% | 6.89 | 5.72 | 34.2 | 48.8 | 1 | 0.065 | 0.197 | 93.90% | 4.57 | 0.91 | 5 | 5.79 | 7.51 | 0.60% | 0.56 | 0.98 |
+| x270 | 30% | 2 s | 32 | 8.70% | 17.2 | 14.3 | 32.5 | 19.5 | 1 | 0.169 | 0.496 | 84.50% | 2.74 | 0.90 | 5 | 14.7 | 7.56 | 0.60% | 0.45 | 0.99 |
+| x270 | 30% | 1 s | 32 | 15.90% | 34.5 | 28.8 | 30.0 | 9.72 | 1 | 0.360 | 1.07 | 70.40% | 1.89 | 0.97 | 5 | 29.9 | 7.58 | 0.00% | 0.39 | 0.99 |
+| x270 | 30% | 10 s | 64 | 2.10% | 6.91 | 5.63 | 68.7 | 49.4 | 1 | 0.062 | 0.187 | 94.00% | 4.50 | 0.86 | 5 | 5.79 | 7.35 | 1.30% | 0.53 | 0.96 |
+| x270 | 30% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 19.9 | 1 | 0.162 | 0.533 | 85.10% | 2.74 | 1.00 | 5 | 14.7 | 7.51 | 0.10% | 0.46 | 0.98 |
+| x270 | 30% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 10.0 | 1 | 0.353 | 1.02 | 71.70% | 1.93 | 0.96 | 5 | 29.8 | 7.48 | 0.10% | 0.41 | 0.98 |
+
+

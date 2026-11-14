@@ -570,6 +570,34 @@ propagation instead of capping it"). Below that, weak shares carry the extra
 credit instead: gossiped beside shares they never race, so they add credit
 without adding stale shares.
 
+### What the payout simulation shows
+
+The payout simulator ran pools at 10 and 30% of Bitcoin Cash, at 1, 10, 100
+and 270 times today's hashrate, with share periods of 5, 2 and 1 seconds
+and with 10-second shares that carry 2, 5 and 10 times the weak shares
+(`cargo payout-sim --scenario scale-levers`; its README has the table and
+the 1,000-node network runs).
+
+- At today's hashrate the share period changes nothing for a small miner: a
+  Bitaxe is paid 24 to 25 times a month at every period.
+- A small miner first needs more credit when the pool itself holds about
+  3.7 EH/s, as much as all of Bitcoin Cash has today. Until then a Bitaxe
+  finds about three weak shares a month or more at the 10-second period.
+- Past that size a shorter period helps, and more weak shares a share help
+  exactly as much: a Bitaxe in a pool at 30% of a Bitcoin Cash ten times
+  today's has 41% of its months without a payment by today's rules and 2%
+  with ten times the weak shares a second, from either.
+- Only the shorter period costs stale shares: 7.8%, 17.8% and 30.7% at 5, 2
+  and 1 seconds on 1,000 nodes, against 4.2% at 10 seconds whatever number
+  of weak shares travels beside the shares.
+- At Bitcoin's hashrate neither saves a 1.2 TH/s miner, whose fair income is
+  1,605 satoshis a month.
+
+So a dynamic share period would buy small miners nothing that more weak
+shares a share do not buy without the stale shares. This part stays an
+outline. How the number of weak shares should grow with a pool is not
+settled here.
+
 ## Rollout
 
 | Part | Protocol tag segment | Store format | How it ships |
