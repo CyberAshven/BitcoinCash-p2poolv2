@@ -2,8 +2,9 @@
 
 Status: parts 1 and 2 implemented on branch feat/one-chain-band; part 4
 implemented on branch feat/payout-levels, on top of it (store format 4);
-part 3 on branch feat/weak-shares, on top of both (store format 5); parts 5
-and 6 are proposals. Tracked in
+part 3 on branch feat/weak-shares, on top of both (store format 5); part 5
+is an outline that is not planned, and part 6 is agreed and not built.
+Tracked in
 [issue #79](https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues/79).
 Values marked *(sim)* are first proposals that the simulation in row 2 of the
 issue confirms or replaces.
@@ -16,7 +17,7 @@ chain, the outline of a fifth and the proposal of a sixth:
 3. weak shares;
 4. payout levels, a payout threshold paid by a draw;
 5. a dynamic share period (outline only);
-6. weak shares that follow the asks (a proposal, not built).
+6. weak shares that follow the asks (agreed, not built).
 
 Parts 1 to 4 change share-chain rules. None of them changes Bitcoin Cash's
 own rules: the blocks P2Pool finds stay ordinary Bitcoin Cash blocks, and
@@ -599,11 +600,11 @@ shares a share do not buy without the stale shares. This part stays an
 outline. Section 6 proposes how the number of weak shares should grow with
 a pool.
 
-## 6. Weak shares that follow the asks (proposal)
+## 6. Weak shares that follow the asks (agreed, not built)
 
-This section proposes a rule and gives its simulation. It is not a rule of
-the chain and nothing in it is built; the maintainer decides whether it
-becomes one.
+This section gives a rule and its simulation. The maintainer chose it on
+2026-11-14, with the constants below, over raising `WEAK_FILL` once. It is
+not yet a rule of the chain: nothing in it is built.
 
 ### Why
 
@@ -798,24 +799,38 @@ Neither is a share-chain rule, and each helps under today's rule too.
 
 1. **Shares list the weak shares they carry by hash on the wire.** Today a
    share's body carries them whole, and a node that already has them from
-   gossip downloads them again inside the share.
+   gossip downloads them again inside the share. On 1,000 nodes at
+   10-second shares (`cargo netsim run --nodes 1000 --duration 10800
+   --weak-shares N --weak-share-carriage gossip-only`, or `whole`):
+
+   | Weak shares a share | Beside the shares: stale | Upload a node, mean | Whole in the share: share bytes | Stale | Upload a node, mean |
+   |---:|---:|---:|---:|---:|---:|
+   | 32 | 4.20% | 0.39 Mbit/s | 62,703 | 5.27% | 0.54 Mbit/s |
+   | 160 | 4.20% | 1.09 Mbit/s | 167,903 | 8.66% | 1.86 Mbit/s |
+   | 320 | 4.20% | 1.98 Mbit/s | | | |
+
+   Beside the shares, ten times the weak shares cost 1.6 Mbit/s of upload
+   and no stale share. Whole in the share, five times already double the
+   stale rate. (The run at 320 whole had not finished when this was
+   written.)
 2. **Weak share checks leave the single validation queue**, so a node with
    several cores checks several at once, or the check gets cheap enough
    that 35 a second fit one core with 100,000 miners in the window. Until
    then `WEAK_FILL_MAX` 320 is safe for pools paying tens of thousands of
    miners, not 100,000.
 
-### What the maintainer decides
+### What was decided
 
-1. Whether weak shares follow the asks (this section), or `WEAK_FILL` is
-   raised once (simpler, and every node pays the ceiling's relay and storage
-   from the first day, whatever the pool's size), or neither for now.
-2. The constants marked *(sim)*, above all `WEAK_FILL_MAX`.
-3. Whether section 5, the dynamic share period, is dropped. The simulation
-   says a shorter period buys nothing that more weak shares a share do not.
+The choice was between weak shares that follow the asks, `WEAK_FILL` raised
+once (simpler, and every node pays the ceiling's relay and storage from the
+first day, whatever the pool's size), and neither for now. The maintainer
+chose the asks on 2026-11-14, with `WEAK_FILL_MAX` 320, `WEAK_ASK_DIVISOR`
+64, `R_ASK_MAX` 4,096 and the node default of 16 weak shares a month.
+Section 5, the dynamic share period, is not planned: a shorter period buys
+nothing that more weak shares a share do not.
 
-It would ship on a flag day: a new weak share segment in the protocol tag
-and store format 10, because the header gains `weak_asking`.
+It ships on a flag day: a new weak share segment in the protocol tag and
+store format 10, because the header gains `weak_asking`.
 
 ## Rollout
 
@@ -826,7 +841,7 @@ and store format 10, because the header gains `weak_asking`.
 | 3 Weak shares | `weak-64-500-6`, then `weak2-64-500-6`, then `weak2-64-100-48-256`, then `weak3-64-100-48-256` | 5, then 6, then 7, then 9 | same flag day; old nodes cannot read the new header or the weak share message; the weak root's leaves then became whole encodings, a second flag day, and study #85's cut, depth and `R_MAX` a third |
 | 4 Payout levels | `levels-546x2`, then `levels-546x2-k1` | 4, then 8 | same flag day; old nodes cannot read the longer header |
 | 5 Share period | none; share version 2 | 3 | share-version vote; not planned (section 5) |
-| 6 Weak shares that follow the asks (proposal) | a new weak share segment | 10 | flag day, if adopted: the header gains `weak_asking` |
+| 6 Weak shares that follow the asks (agreed, not built) | a new weak share segment | 10 | flag day: the header gains `weak_asking` |
 
 A part that changes what a stored share holds raises the store format when
 it merges, so the numbers follow the merge order: part 4 raised it to 4
