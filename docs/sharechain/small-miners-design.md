@@ -570,6 +570,224 @@ propagation instead of capping it"). Below that, weak shares carry the extra
 credit instead: gossiped beside shares they never race, so they add credit
 without adding stale shares.
 
+## 6. Weak shares that follow the asks (proposal)
+
+This section proposes a rule and gives its simulation. It is not a rule of
+the chain and nothing in it is built; the maintainer decides whether it
+becomes one.
+
+### Why
+
+Part 3 holds the weak shares a share carries at `WEAK_FILL`, 32, whatever
+the pool's size: about 3.5 a second, split among the miners at the minimum
+by hashrate. A miner's weak shares a month therefore fall as the pool's
+hashrate grows. The smallest miner that still finds three a month is about
+0.33 TH/s for each EH/s of pool hashrate: 0.09 TH/s in a pool at 10% of
+today's Bitcoin Cash, a Bitaxe's 1.2 TH/s once the pool holds 3.7 EH/s, as
+much as all of Bitcoin Cash has today, and 98 TH/s in a pool at 30% of a
+Bitcoin Cash with Bitcoin's hashrate.
+
+More weak shares a second fix that, and they can come from a shorter share
+period (section 5) or from more weak shares a share. The payout simulator
+finds the two pay a small miner the same, and that only the shorter period
+adds stale shares (its README, "Scale levers"). So this proposal keeps the
+10-second period and lets a share carry more weak shares, but only while the
+miners that need them ask: every weak share costs every node relay,
+validation and storage (below), and a pool whose small miners already find
+enough should not pay for more.
+
+Issue #79 described a budget that grows while its slots stay full. The slots
+cannot be the signal: the weak ratio holds them at the fill whatever the
+demand. The proposal takes the signal from the miners, the way the band
+takes its cap from `wanted_bits`.
+
+### The rule
+
+Three changes to part 3.
+
+1. **`wanted_bits` may be easier than `bits`.** Today it must be at least as
+   hard as `bits`, and harder says how heavy a share the node wanted. Easier
+   than the weak target, it says the node wanted an easier weak target for
+   this miner. It stays a signal only. The band reads it as today: a share
+   whose `wanted_bits` is not harder than the cap allows did not want more.
+2. **A weak share asks** when its `wanted_bits` is easier than the weak
+   target it met, `T_weak` of its parent. A share header commits, after the
+   count of the weak shares it carries, how many of them ask: `weak_asking`,
+   2 bytes under tag `0x26`. A share whose `weak_asking` is not the number of
+   asking weak shares in its body is invalid.
+3. **The weak ratio's step reads the asks:**
+
+```text
+asked = parent.weak_count <= WEAK_FILL_MAX
+        and parent.weak_asking * WEAK_ASK_DIVISOR > parent.weak_count
+
+if asked:
+weak_ratio(child) = parent.weak_ratio + parent.weak_ratio / 256
+                        at most R_ASK_MAX * 1024
+otherwise, as today:
+weak_ratio(child) = parent.weak_ratio - parent.weak_ratio / 256
+                        if the parent carried more than WEAK_FILL weak shares,
+                        or its ratio is above R_MAX * 1024
+weak_ratio(child) = parent.weak_ratio + parent.weak_ratio / 256
+                        if it carried fewer, at most R_MAX * 1024
+weak_ratio(child) = parent.weak_ratio   if exactly WEAK_FILL
+never below 1024
+```
+
+| Constant | Value |
+|---|---|
+| `WEAK_FILL` | 32, unchanged: the count the ratio steers towards without asks |
+| `WEAK_FILL_MAX` | 320 *(sim)*: asks stop counting once a share carries more |
+| `WEAK_CAP` | 640, twice `WEAK_FILL_MAX` (64 today) |
+| `WEAK_ASK_DIVISOR` | 64 *(sim)*: more than one carried weak share in 64 must ask |
+| `R_MAX` | 256, unchanged: the largest ratio without asks |
+| `R_ASK_MAX` | 4,096 *(sim)*: the largest ratio asks may reach |
+
+In words: without asks the ratio moves as it does today, towards 32 weak
+shares a share and within `R_MAX`. While more than one in 64 of the weak
+shares a share carried ask, the ratio rises instead, so weak shares get
+easier and more of them are found, until fewer ask or a share carries more
+than 320. The count then sits between 32 and 320 where the asks put it.
+Today's rule is the floor, and 320 a share is what every node must be able
+to carry. A ratio that asks left above `R_MAX` comes back down once nobody
+asks.
+
+One thing differs from today even when nobody asks. A share may carry up to
+640 weak shares, so a share found after a long wait carries all the weak
+shares found on its parent, where today it leaves some to the next shares.
+The step holds the median at 32, and the simulator measures a mean of 46
+weak shares a share without asks against 34.5 today.
+
+### Node default (policy, not a rule)
+
+A node asks for a miner at the minimum while that miner would find fewer
+than 16 weak shares a month at the weak target of its job: it sets
+`wanted_bits` to the target at which the miner would find 16 a month, from
+the miner's hashrate as the band default measures it. It does not ask for a
+target easier than the chain's ceiling, and a miner on a heavier band target
+makes no weak shares, so it never asks.
+
+Why 16: past about that many weak shares a month, more of them barely
+change what a small miner is paid. At ten times today's hashrate a Bitaxe
+with 2.8 weak shares a month has 9% of its months without a payment, with
+5.6 it has 4%, and with 14 to 29 it has 1.3%.
+
+A miner's weak shares are in proportion to its hashrate, so the asks are
+counted by hashrate at the minimum, and the miners that need more weak
+shares are the ones that find the fewest. That is why the divisor is large:
+one weak share in 64 asking is enough.
+
+### What it does
+
+The payout simulator (`cargo payout-sim --scenario weak-asks`, and
+`weak-asks-mixes`, `weak-asks-constants`, `weak-asks-attacks`; its README
+has every table) runs the rule share by share. Half the pool's hashrate is
+industrial; "fill 320" is today's rule with `WEAK_FILL` raised to 320, the
+simpler way to the same credit.
+
+| Bitcoin Cash hashrate, pool | Rule | Weak shares a share | Relay, KB/s | Bitaxe weak shares a month | Bitaxe months without a payment |
+|---|---|---:|---:|---:|---:|
+| today's, 10% | today | 34.5 | 2.9 | 39 | 0% |
+| | asks | 46 | 3.8 | 52 | 0% |
+| | fill 320 | 346 | 27.8 | 388 | 0% |
+| today's, 30% | today | 34.5 | 2.9 | 9.4 | 0% |
+| | asks | 57 | 4.7 | 15.7 | 0% |
+| | fill 320 | 346 | 27.8 | 97 | 0% |
+| 10 times, 10% | today | 34.5 | 2.9 | 2.8 | 9.3% |
+| | asks | 189 | 15.3 | 15.7 | 1.4% |
+| | fill 320 | 346 | 27.8 | 29 | 1.3% |
+| 10 times, 30% | today | 34.5 | 2.9 | 0.96 | 41% |
+| | asks | 344 | 27.6 | 9.4 | 2.7% |
+| | fill 320 | 346 | 27.8 | 9.4 | 2.4% |
+| 100 times, 10% | today | 34.5 | 2.9 | 0.28 | 76% |
+| | asks | 344 | 27.6 | 2.8 | 13% |
+| | fill 320 | 346 | 27.8 | 2.8 | 14% |
+| Bitcoin's (270 times), 10% | today | 34.5 | 2.9 | 0.10 | 91% |
+| | asks | 344 | 27.6 | 1.1 | 45% |
+| | fill 320 | 346 | 27.8 | 1.1 | 45% |
+
+- **A pool whose small miners have enough stays near today's count.** At
+  today's hashrate the asks leave a pool at 10% of Bitcoin Cash at the
+  floor, and open one at 30% to 57 a share, where a Bitaxe finds its 16 a
+  month.
+- **A pool whose small miners need more opens as far as they need.** At ten
+  times today's hashrate a pool at 10% settles at 189 a share and a pool at
+  30% at the ceiling. A Bitaxe's months without a payment go from 9.3% to
+  1.4% and from 41% to 2.7%.
+- **At the ceiling the asks pay as `WEAK_FILL` 320 does**, and below it they
+  relay fewer weak shares for the same months without a payment.
+- **Every miner's income stays within the noise of its fair part**, as it
+  does under today's rule.
+- **No count saves a 1.2 TH/s miner at Bitcoin's hashrate.** Its fair income
+  there is 1,605 satoshis a month, under two payments at the lowest level.
+- **Miner mixes.** At ten times today's hashrate the asks open the count in
+  every mix tested: all home miners, 50% and 90% industrial, a Zipf spread
+  and the medium mixes (115 to 345 a share; a Bitaxe has 1.4 to 2.8% of its
+  months without a payment, against 7 to 41% today). In the 99% industrial
+  mix the home miners are 1% of the hashrate, under one weak share in 64, so
+  they open it only part of the way: 82 a share, and 2.6% and 14% of months
+  without a payment against 9% and 41%.
+
+### Attacks
+
+| Attack | Result |
+|---|---|
+| Hashrate that asks whatever its miners find, in a pool that needs no more (10% of today's Bitcoin Cash) | 1% of the hashrate at the minimum raises the count from 46 to 82 a share, 2% to 221 and 5% to 316. It costs nothing to do. It can cost the pool no more than the ceiling, which every node must carry anyway, and it pays the asker nothing: a miner's credit does not depend on the count. |
+| Hashrate that never asks, in a pool that needs more (30% of ten times today's Bitcoin Cash) | With half the hashrate at the minimum never asking the count stays at the ceiling, with 90% at 316 a share. It takes 97% to bring it to 143 and 99% to 57. The floor is today's rule. |
+| Industrial miners mining at the minimum, same pool | No change: 344 a share with them or without. |
+| Nodes that carry no weak share that asks, same pool | The count falls with their part of the shares: 250 a share at 25%, 168 at 50%, 107 at 75%, 83 at 90% (a Bitaxe's months without a payment: 3%, 6%, 11%, 15%, against 41% under today's rule). The weak shares they drop are carried by other nodes, and they give up the includer cut on them. |
+
+So the worst an attacker can do is hold the count at one of its two ends:
+the ceiling, which nodes are sized for, or the floor, which is today's rule.
+
+### What it costs a node
+
+At the ceiling, against today's count:
+
+| | Today (32 a share) | At the ceiling (320 a share) |
+|---|---:|---:|
+| Weak shares a second | 3.5 | 35 |
+| Relay of weak shares, at 0.8 KB each | 2.8 KB/s | 28 KB/s |
+| Stored until the body is pruned (242,486 shares, 28 days) | 6.7 GB | 67 GB |
+| Weak pool, at most (4 x `WEAK_CAP` x `WEAK_DEPTH`) | 12,288 weak shares | 122,880 |
+
+Validation is the real ceiling, not bandwidth. A weak share costs a node
+one coinbase build the first time it sees the weak share's parent and
+template: 0.3 ms with 1,000 miners in the window, 3.8 ms with 10,000 and
+45 ms with 100,000 ([Network simulation](../simulation/network-sim.md),
+"Share period and each node's load"). That study ran ten times the weak
+shares a second as its 1-second rows. Taking out what the shares themselves
+cost there, with a template a node, checking weak shares keeps a node about
+1% busy with 1,000 miners and 12% with 10,000; with 100,000 it takes 1.3
+times what a node can do, so the node falls behind, unless the pool's nodes
+build one template (16%). The node checks one share or weak share at a time
+today.
+
+### What has to come first
+
+Neither is a share-chain rule, and each helps under today's rule too.
+
+1. **Shares list the weak shares they carry by hash on the wire.** Today a
+   share's body carries them whole, and a node that already has them from
+   gossip downloads them again inside the share.
+2. **Weak share checks leave the single validation queue**, so a node with
+   several cores checks several at once, or the check gets cheap enough
+   that 35 a second fit one core with 100,000 miners in the window. Until
+   then `WEAK_FILL_MAX` 320 is safe for pools paying tens of thousands of
+   miners, not 100,000.
+
+### What the maintainer decides
+
+1. Whether weak shares follow the asks (this section), or `WEAK_FILL` is
+   raised once (simpler, and every node pays the ceiling's relay and storage
+   from the first day, whatever the pool's size), or neither for now.
+2. The constants marked *(sim)*, above all `WEAK_FILL_MAX`.
+3. Whether section 5, the dynamic share period, is dropped. The simulation
+   says a shorter period buys nothing that more weak shares a share do not.
+
+It would ship on a flag day: a new weak share segment in the protocol tag
+and store format 10, because the header gains `weak_asking`.
+
 ## Rollout
 
 | Part | Protocol tag segment | Store format | How it ships |
