@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The small miners design page has a section 6, a proposal that is not built:
+weak shares that follow the asks. A weak share would ask for an easier weak
+target when its node wanted one for its miner, and while more than one in 64
+of the weak shares a share carried ask, the weak ratio would rise instead of
+steering towards 32 weak shares a share, up to 320. Without asks the rule is
+today's. The payout simulator runs it share by share in four tables
+(`weak-asks`, `weak-asks-mixes`, `weak-asks-constants`,
+`weak-asks-attacks`): a pool whose small miners find enough weak shares
+stays near today's count, and one at 30% of a Bitcoin Cash ten times today's
+opens to the ceiling, where a Bitaxe's months without a payment go from 41%
+to 2.7%. An attacker can hold the count at the ceiling or at the floor, no
+further. The section lists what the ceiling costs a node and what has to be
+built first.
+
 The payout simulator has a `window-cap` table and a `storage` table. The
 first runs pools at 0.01 to 1% of Bitcoin Cash with the PPLNS window capped
 at 14, 30 and 60 days: the cap binds only under about 0.15%, and a longer
