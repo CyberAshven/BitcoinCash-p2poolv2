@@ -32,7 +32,10 @@
 //! Part of mining on the current chain (V16,
 //! `docs/sharechain/current-chain.md`).
 
-use crate::shares::bch_asert::{BCH_BLOCK_SPACING, BCH_FAST_BLOCK_SPACING, FastBlocks};
+use crate::shares::bch_asert::{
+    BCH_BLOCK_SPACING, IntervalSwitch, ReportedTicks, TickSchedule, activation_height_from_times,
+    learn_switch, switch_from_report,
+};
 use crate::shares::bch_headers::KnownBchHeader;
 #[cfg(test)]
 #[mockall_double::double]
@@ -64,10 +67,9 @@ pub const INITIAL_HEADERS: usize = 8_400;
 /// one-minute blocks (CHIP-2025-03).
 pub const INITIAL_HEADER_TICKS: i64 = INITIAL_HEADERS as i64 * BCH_BLOCK_SPACING;
 
-/// The most best-chain index entries one update rewrites: a reorg deeper
-/// than BCHN allows (10 blocks), or a first index over the whole store,
-/// which is at most [`INITIAL_HEADER_TICKS`] of one-minute blocks.
-const MAX_INDEX_REWRITE: usize = (INITIAL_HEADER_TICKS / BCH_FAST_BLOCK_SPACING) as usize + 1;
+/// The most known headers the feeder walks back to find an announced
+/// switch from block times: about a week of one-minute blocks.
+const MAX_ACTIVATION_SEARCH: usize = 10_000;
 
 /// How long a node waits for its first round of BCHN's headers before it
 /// syncs shares anyway. A new store's walk of [`INITIAL_HEADERS`] took about
@@ -89,21 +91,21 @@ pub(crate) struct BchHeaderFeeder {
     initial_header_ticks: i64,
     /// The network's move to one-minute blocks, which sets how many
     /// headers `initial_header_ticks` is.
-    fast_blocks: FastBlocks,
+    tick_schedule: TickSchedule,
 }
 
 impl BchHeaderFeeder {
     pub(crate) fn new(
         client: BitcoindRpcClient,
         store: ChainStoreHandle,
-        fast_blocks: FastBlocks,
+        tick_schedule: TickSchedule,
     ) -> Self {
         Self {
             client,
             store,
             initial_headers: INITIAL_HEADERS,
             initial_header_ticks: INITIAL_HEADER_TICKS,
-            fast_blocks,
+            tick_schedule,
         }
     }
 
@@ -153,6 +155,11 @@ impl BchHeaderFeeder {
             BlockHash::from_str(&best).map_err(|error| format!("best block hash: {error}"))?;
         let added = self.learn_from(best).await?;
         self.index_best_chain(best).await?;
+        if added > 0
+            && let Err(error) = self.follow_schedule(best).await
+        {
+            warn!("Cannot follow the node's block interval: {error}");
+        }
         Ok(added)
     }
 
@@ -185,7 +192,7 @@ impl BchHeaderFeeder {
                     .map_err(|_| format!("height {} is too high", summary.height))?;
                 let tip_height = height.saturating_add(walked.len() as u32 - 1);
                 let wanted = self
-                    .fast_blocks
+                    .tick_schedule
                     .blocks_spanning(tip_height, self.initial_header_ticks)
                     .max(self.initial_headers);
                 if walked.len() >= wanted || height == 0 {
@@ -230,9 +237,17 @@ impl BchHeaderFeeder {
         let tip = self
             .known(&tip)?
             .ok_or_else(|| format!("best block {tip} is not known"))?;
+        // The most entries one update rewrites: a reorg deeper than BCHN
+        // allows (10 blocks), or a first index over the whole store, which
+        // spans at most the initial ticks at this tip.
+        let max_rewrite = self
+            .tick_schedule
+            .blocks_spanning(tip.height, self.initial_header_ticks)
+            .max(self.initial_headers)
+            + 1;
         let mut updates = Vec::new();
         let mut current = tip;
-        while updates.len() < MAX_INDEX_REWRITE {
+        while updates.len() < max_rewrite {
             let indexed = self
                 .store
                 .get_bch_best_hash(current.height)
@@ -260,6 +275,82 @@ impl BchHeaderFeeder {
             .map_err(|error| format!("writing the best-chain index: {error}"))
     }
 
+    /// Follow the node's block intervals (CHIP-2025-03): learn the switch
+    /// its report on `tip` shows (`switch_from_report`), or, from a node
+    /// that reports no ticks, the activation block of an announced switch
+    /// from the median time past of the known headers. A learned switch
+    /// reaches every schedule of the network (`learn_switch`).
+    async fn follow_schedule(&self, tip: BlockHash) -> Result<(), String> {
+        let Some(network) = self.tick_schedule.network() else {
+            return Ok(());
+        };
+        let summary = self
+            .client
+            .get_block_header_summary(&tip.to_string())
+            .await
+            .map_err(|error| format!("getblockheader {tip}: {error}"))?;
+        let report = ReportedTicks {
+            height: u32::try_from(summary.height)
+                .map_err(|_| format!("height {} is too high", summary.height))?,
+            ticks: summary.ticks,
+            interval: summary.target_time,
+            next_interval: summary.next_target_time,
+        };
+        let reports_ticks =
+            report.ticks.is_some() || report.interval.is_some() || report.next_interval.is_some();
+        let switch = if reports_ticks {
+            switch_from_report(&self.tick_schedule, report)?
+        } else {
+            self.announced_switch_from_times(tip)?
+        };
+        let Some(switch) = switch else {
+            return Ok(());
+        };
+        if learn_switch(network, switch)
+            .map_err(|error| format!("the node's switch {switch:?}: {error}"))?
+        {
+            info!(
+                "Following the node's block interval: {} ticks for every block after height {}",
+                switch.interval, switch.height
+            );
+        }
+        Ok(())
+    }
+
+    /// The activation block of the network's announced switch, from the
+    /// known headers below `tip`, once `tip` is dated past the activation
+    /// time. Walks back at most [`MAX_ACTIVATION_SEARCH`] headers.
+    fn announced_switch_from_times(
+        &self,
+        tip: BlockHash,
+    ) -> Result<Option<IntervalSwitch>, String> {
+        let Some(announced) = self.tick_schedule.announced() else {
+            return Ok(None);
+        };
+        let mut times = Vec::new();
+        let mut current = self.known(&tip)?;
+        if current
+            .as_ref()
+            .is_none_or(|header| i64::from(header.header.time) < announced.activation_time)
+        {
+            return Ok(None);
+        }
+        while let Some(header) = current {
+            times.push((header.height, header.header.time));
+            if times.len() == MAX_ACTIVATION_SEARCH || header.height == 0 {
+                break;
+            }
+            current = self.known(&header.header.prev_blockhash)?;
+        }
+        times.reverse();
+        Ok(
+            activation_height_from_times(announced, &times).map(|height| IntervalSwitch {
+                height,
+                interval: announced.interval,
+            }),
+        )
+    }
+
     fn known(&self, hash: &BlockHash) -> Result<Option<KnownBchHeader>, String> {
         self.store
             .get_bch_header(hash)
@@ -278,11 +369,11 @@ impl BchHeaderFeeder {
 pub async fn relay_templates_learning_prevs(
     client: BitcoindRpcClient,
     store: ChainStoreHandle,
-    fast_blocks: FastBlocks,
+    tick_schedule: TickSchedule,
     mut input: NotifyReceiver,
     output: NotifySender,
 ) {
-    let feeder = BchHeaderFeeder::new(client, store, fast_blocks);
+    let feeder = BchHeaderFeeder::new(client, store, tick_schedule);
     let mut learned: Option<BlockHash> = None;
     while let Some(command) = input.recv().await {
         if let NotifyCmd::SendToAll { template } = &command

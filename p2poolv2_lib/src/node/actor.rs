@@ -42,7 +42,7 @@ use crate::node::weak_share_worker::{WeakShareNetwork, WeakShareWorker};
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
-use crate::shares::bch_asert::FastBlocks;
+use crate::shares::bch_asert::TickSchedule;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -135,7 +135,7 @@ impl NodeHandle {
             BchHeaderFeeder::new(
                 client,
                 chain_store_handle.clone(),
-                bitcoin_cash_fast_blocks(&config),
+                bitcoin_cash_tick_schedule(&config),
             )
             .first_sync(FIRST_SYNC_LIMIT)
             .await;
@@ -614,7 +614,7 @@ fn start_payout_tree_executor(
     };
     let (sink, found) = payout_tree_channel();
     let executor = PayoutTreeExecutor::new(client, chain_store_handle.clone(), found)
-        .with_fast_blocks(bitcoin_cash_fast_blocks(config));
+        .with_tick_schedule(bitcoin_cash_tick_schedule(config));
     tokio::spawn(executor.run());
     Some(sink)
 }
@@ -708,7 +708,7 @@ impl NodeActor {
                 Some(BchHeaderFeeder::new(
                     client,
                     chain_store_handle.clone(),
-                    bitcoin_cash_fast_blocks(&config),
+                    bitcoin_cash_tick_schedule(&config),
                 )),
             )
         } else {
@@ -1293,9 +1293,9 @@ mod tests;
 
 /// The configured Bitcoin Cash network's move to one-minute blocks, or
 /// mainnet's when the node runs no Bitcoin Cash network.
-pub(crate) fn bitcoin_cash_fast_blocks(config: &Config) -> FastBlocks {
+pub(crate) fn bitcoin_cash_tick_schedule(config: &Config) -> TickSchedule {
     config
         .stratum
         .bitcoin_cash_network
-        .map_or(FastBlocks::MAINNET, FastBlocks::for_network)
+        .map_or(TickSchedule::TEN_MINUTES, TickSchedule::for_network)
 }

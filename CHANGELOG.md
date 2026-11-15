@@ -21,8 +21,13 @@ coinbase maturity, 1,000 one-minute blocks, before it spends a coinbase. A
 Template Provider's block size floor shrinks to a tenth for a one-minute
 block. `p2poolv2_cli bch-trade refund` prints the first block a Bitcoin
 Cash refund is valid in, since a lock height now counts ten-minute units.
-Mainnet activates on 2027-05-15 and is not pinned yet: until it is, every
-mainnet block counts as a ten-minute block. No share-chain rule changes.
+The intervals are a schedule of switches, as the CHIP defines them, not a
+fixed 60: each new tip, a node reads its Bitcoin Cash node's `ticks`,
+`target_time` and `next_target_time` and learns any switch they show, so
+mainnet's switch on 2027-05-15, and a later one to 30 seconds say, need no
+new release. A node that reports none of them gets mainnet's announced
+switch from its blocks' median time past. A new node learns 58 days of
+headers in ticks, 84,000 one-minute blocks. No share-chain rule changes.
 
 The payout simulator has a `scale-levers` table for part 5 of the small
 miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin

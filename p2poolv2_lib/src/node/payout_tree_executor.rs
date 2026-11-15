@@ -14,7 +14,7 @@
 //! - waits until the coinbase output can be spent in the next block: 100
 //!   confirmations before one-minute blocks, 1,000 one-minute blocks after
 //!   (BCH's coinbase maturity, 60,000 ticks under CHIP-2025-03,
-//!   `FastBlocks::coinbase_spendable_in_next_block`);
+//!   `TickSchedule::coinbase_spendable_in_next_block`);
 //! - broadcasts the tree's node transactions at
 //!   `BCH_TREE_EXECUTION_FEE_RATE`, 1 satoshi per byte, root first and each
 //!   node before its children, and the child nodes of the other accepted
@@ -33,7 +33,7 @@
 //! node-local task, not a share-chain rule.
 
 use crate::accounting::payout::payout_tree::{BCH_TREE_EXECUTION_FEE_RATE, BCH_TREE_FEE_RATES};
-use crate::shares::bch_asert::FastBlocks;
+use crate::shares::bch_asert::TickSchedule;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -224,7 +224,7 @@ pub struct PayoutTreeExecutor<N: TreeExecutionNode> {
     settled_tips: HashMap<Txid, u32>,
     /// The network's move to one-minute blocks, which sets how many blocks
     /// a coinbase takes to mature.
-    fast_blocks: FastBlocks,
+    tick_schedule: TickSchedule,
 }
 
 impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
@@ -241,15 +241,15 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
             found_rx,
             last_tip: None,
             settled_tips: HashMap::new(),
-            fast_blocks: FastBlocks::MAINNET,
+            tick_schedule: TickSchedule::TEN_MINUTES,
         }
     }
 
     /// The executor for a network that moves to one-minute blocks as
-    /// `fast_blocks` says. Without it, every block is a ten-minute block
+    /// `tick_schedule` says. Without it, every block is a ten-minute block
     /// until mainnet's activation time.
-    pub fn with_fast_blocks(mut self, fast_blocks: FastBlocks) -> Self {
-        self.fast_blocks = fast_blocks;
+    pub fn with_tick_schedule(mut self, tick_schedule: TickSchedule) -> Self {
+        self.tick_schedule = tick_schedule;
         self
     }
 
@@ -321,7 +321,7 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
         {
             Ok(Some(depth))
                 if self
-                    .fast_blocks
+                    .tick_schedule
                     .coinbase_spendable_in_next_block(depth.height, depth.confirmations) => {}
             Ok(None) => {
                 self.settled_tips.remove(&stored.coinbase_txid);

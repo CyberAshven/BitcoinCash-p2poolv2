@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::accounting::payout::payout_tree::{PayoutTree, TreePayee};
+use crate::config::BitcoinCashNetwork;
 use bitcoin::hashes::Hash;
 use bitcoin::{PubkeyHash, ScriptBuf};
 use std::sync::{Arc, Mutex};
@@ -149,7 +150,7 @@ async fn after_one_minute_blocks_a_tree_waits_a_thousand_blocks() {
             store_with(stored_tree(3)),
             payout_tree_channel().1,
         )
-        .with_fast_blocks(FastBlocks::CHIPNET);
+        .with_tick_schedule(TickSchedule::for_network(BitcoinCashNetwork::Chipnet));
 
         executor.execute_round().await;
 

@@ -528,12 +528,15 @@ fn header_check_refuses_heights_below_the_anchor_and_invalid_bits() {
     assert_eq!(BchAsert::for_network(BitcoinCashNetwork::Regtest), None);
     assert_eq!(
         BchAsert::for_network(BitcoinCashNetwork::Chipnet),
-        Some(BchAsert::CHIPNET)
+        Some(BchAsert {
+            tick_schedule: TickSchedule::for_network(BitcoinCashNetwork::Chipnet),
+            ..BchAsert::CHIPNET
+        })
     );
     // Testnet4 shares chipnet's anchor, not its activation.
     assert_eq!(
         BchAsert {
-            fast_blocks: FastBlocks::CHIPNET,
+            tick_schedule: BchAsert::CHIPNET.tick_schedule,
             ..BchAsert::TESTNET4
         },
         BchAsert::CHIPNET
@@ -665,53 +668,88 @@ fn every_chip_asert_wrapper_row_matches() {
     }
 }
 
-/// The CHIP's tick vectors for the schedules a Bitcoin Cash chain can
-/// have: none, or one switch to 60 ticks. Heights past `u32` and the
-/// reverse mapping are not used here.
+/// A schedule from a CHIP vector's entries, or the error that refuses it.
+/// A height past `u32` is refused as well: no Bitcoin Cash height gets
+/// there.
+fn chip_schedule(entries: &[serde_json::Value]) -> Option<TickSchedule> {
+    entries
+        .iter()
+        .try_fold(TickSchedule::TEN_MINUTES, |schedule, entry| {
+            let height =
+                maybe_number(&entry["height"]).and_then(|height| u32::try_from(height).ok())?;
+            let interval = maybe_number(&entry["tau"])?;
+            schedule
+                .with_switch(IntervalSwitch { height, interval })
+                .ok()
+        })
+}
+
+/// Every CHIP tick vector, for every schedule, including several switches
+/// (to 300, back to 600, to 60 and to 600 again): ticks from a height, the
+/// height from ticks, and each block's interval. Values past `u32` heights
+/// are not used here.
 #[test]
-fn chip_tick_vectors_match_for_a_single_switch() {
+fn every_chip_tick_vector_matches() {
     let vectors: serde_json::Value = serde_json::from_str(CHIP_TICK_VECTORS).unwrap();
     let mut checked = 0;
     for schedule in vectors["schedules"].as_array().unwrap() {
         let name = schedule["name"].as_str().unwrap();
-        let entries = schedule["schedule"].as_array().unwrap();
-        let activation_height = match entries.as_slice() {
-            [] => None,
-            [entry] if number(&entry["tau"]) == BCH_FAST_BLOCK_SPACING => {
-                Some(u32::try_from(number(&entry["height"])).unwrap())
-            }
-            _ => continue,
-        };
-        let fast_blocks = FastBlocks {
-            activation_time: 0,
-            activation_height,
-        };
+        let ticks = chip_schedule(schedule["schedule"].as_array().unwrap())
+            .unwrap_or_else(|| panic!("{name} was refused"));
         for query in schedule["queries"].as_array().into_iter().flatten() {
-            let (Some(height), Some(expected)) = (
-                maybe_number(&query["arg"]).and_then(|arg| u32::try_from(arg).ok()),
+            let (Some(arg), Some(expected)) = (
+                maybe_number(&query["arg"]),
                 maybe_number(&query["expected"]),
             ) else {
                 continue;
             };
-            let actual = match query["op"].as_str().unwrap() {
-                "HeightToTick" => fast_blocks.ticks(height),
-                "GetNextBlockIntervalTime" => fast_blocks.interval_after(height),
-                // Genesis has no interval of its own and reports 600.
-                "GetBlockIntervalTime" if height == 0 => BCH_BLOCK_SPACING,
-                "GetBlockIntervalTime" => fast_blocks.interval_after(height - 1),
+            let height = u32::try_from(arg);
+            let actual = match (query["op"].as_str().unwrap(), height) {
+                ("HeightToTick", Ok(height)) => ticks.ticks(height),
+                ("GetBlockIntervalTime", Ok(height)) => ticks.interval_of(height),
+                ("GetNextBlockIntervalTime", Ok(height)) => ticks.interval_after(height),
+                ("TickToHeight", _) if u32::try_from(expected).is_ok() => {
+                    i64::from(ticks.height_at_or_below(arg))
+                }
                 _ => continue,
             };
             assert_eq!(actual, expected, "{name}: {query}");
             checked += 1;
         }
     }
-    assert_eq!(checked, 19, "tick queries checked");
+    assert!(checked > 60, "only {checked} tick queries checked");
+}
+
+/// The CHIP's schedule validation: intervals that do not divide 600, out
+/// of order or on a height off the 600-tick grid are refused, the rest
+/// accepted.
+#[test]
+fn chip_schedule_validation_matches() {
+    let vectors: serde_json::Value = serde_json::from_str(CHIP_TICK_VECTORS).unwrap();
+    let rows = vectors["validation"].as_array().unwrap();
+    assert!(rows.len() >= 10);
+    let mut past_u32 = 0;
+    for row in rows {
+        let name = row["name"].as_str().unwrap();
+        // Heights past `u32`, which no Bitcoin Cash chain reaches, are
+        // outside this schedule's range whatever the CHIP says of them.
+        let entries = row["schedule"].as_array().unwrap();
+        if entries.iter().any(|entry| {
+            maybe_number(&entry["height"]).is_none_or(|height| u32::try_from(height).is_err())
+        }) {
+            past_u32 += 1;
+            continue;
+        }
+        let accepted = chip_schedule(row["schedule"].as_array().unwrap()).is_some();
+        assert_eq!(accepted, row["accept"].as_bool().unwrap(), "{name}");
+    }
+    assert_eq!(past_u32, 5);
 }
 
 /// Chipnet's ticks and intervals around its activation block, 332,450.
 #[test]
 fn chipnet_switches_to_sixty_tick_blocks_after_block_332450() {
-    let chipnet = FastBlocks::CHIPNET;
+    let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
     assert_eq!(chipnet.ticks(332_450), 332_450 * 600);
     assert_eq!(chipnet.ticks(332_451), 332_450 * 600 + 60);
     assert_eq!(chipnet.interval_after(332_449), 600);
@@ -719,8 +757,14 @@ fn chipnet_switches_to_sixty_tick_blocks_after_block_332450() {
     assert_eq!(BchAsert::CHIPNET.min_difficulty_gap(332_449), 1_200);
     assert_eq!(BchAsert::CHIPNET.min_difficulty_gap(332_450), 120);
     // Mainnet has not activated: every block is a 600-tick block.
-    assert_eq!(FastBlocks::MAINNET.ticks(950_000), 950_000 * 600);
-    assert_eq!(FastBlocks::MAINNET.interval_after(950_000), 600);
+    assert_eq!(
+        TickSchedule::for_network(BitcoinCashNetwork::Mainnet).ticks(950_000),
+        950_000 * 600
+    );
+    assert_eq!(
+        TickSchedule::for_network(BitcoinCashNetwork::Mainnet).interval_after(950_000),
+        600
+    );
 }
 
 /// On schedule across the switch, the first one-minute block's target is
@@ -731,7 +775,7 @@ fn the_first_one_minute_block_is_ten_times_easier_on_schedule() {
     let last_slow = 332_449u32;
     // A parent dated exactly on the ASERT schedule keeps the anchor target.
     let on_schedule = |height: u32| {
-        (chipnet.anchor_parent_time + chipnet.fast_blocks.ticks(height)
+        (chipnet.anchor_parent_time + chipnet.tick_schedule.ticks(height)
             - i64::from(chipnet.anchor_height) * BCH_BLOCK_SPACING
             + BCH_BLOCK_SPACING) as u32
     };
@@ -822,8 +866,8 @@ fn real_chipnet_blocks_around_the_activation_carry_the_bits_computed_for_them() 
     }
     assert_eq!(minimum_difficulty, [332_441, 332_445, 332_451, 332_454]);
     // Knuth's own ticks for the activation block and the next.
-    assert_eq!(chipnet.fast_blocks.ticks(332_450), 199_470_000);
-    assert_eq!(chipnet.fast_blocks.ticks(332_460), 199_470_600);
+    assert_eq!(chipnet.tick_schedule.ticks(332_450), 199_470_000);
+    assert_eq!(chipnet.tick_schedule.ticks(332_460), 199_470_600);
 }
 
 /// A Bitcoin Cash lock height counts ten-minute units: on chipnet a lock
@@ -831,7 +875,7 @@ fn real_chipnet_blocks_around_the_activation_carry_the_bits_computed_for_them() 
 /// one-minute blocks per unit later. Mainnet has not activated.
 #[test]
 fn a_lock_height_opens_ten_one_minute_blocks_per_unit_after_activation() {
-    let chipnet = FastBlocks::CHIPNET;
+    let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
     assert_eq!(chipnet.first_block_after_lock_height(332_000), 332_001);
     assert_eq!(chipnet.first_block_after_lock_height(332_449), 332_450);
     assert_eq!(chipnet.first_block_after_lock_height(332_450), 332_451);
@@ -844,7 +888,8 @@ fn a_lock_height_opens_ten_one_minute_blocks_per_unit_after_activation() {
         assert!(chipnet.ticks(first - 1) <= 600 * i64::from(lock), "{lock}");
     }
     assert_eq!(
-        FastBlocks::MAINNET.first_block_after_lock_height(950_000),
+        TickSchedule::for_network(BitcoinCashNetwork::Mainnet)
+            .first_block_after_lock_height(950_000),
         950_001
     );
 }
@@ -854,13 +899,217 @@ fn a_lock_height_opens_ten_one_minute_blocks_per_unit_after_activation() {
 #[test]
 fn fifty_eight_days_of_blocks_before_and_after_the_switch() {
     let span = 8_400 * 600;
-    assert_eq!(FastBlocks::MAINNET.blocks_spanning(950_000, span), 8_400);
-    let chipnet = FastBlocks::CHIPNET;
+    assert_eq!(
+        TickSchedule::for_network(BitcoinCashNetwork::Mainnet).blocks_spanning(950_000, span),
+        8_400
+    );
+    let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
     assert_eq!(chipnet.blocks_spanning(332_450, span), 8_400);
     // 150 one-minute blocks are 9,000 ticks; 8,385 ten-minute blocks the
     // rest.
     assert_eq!(chipnet.blocks_spanning(332_600, span), 150 + 8_385);
     assert_eq!(chipnet.blocks_spanning(332_450 + 100_000, span), 84_000);
     // A chain shorter than the span gives what it has.
-    assert_eq!(FastBlocks::MAINNET.blocks_spanning(100, span), 100);
+    assert_eq!(
+        TickSchedule::for_network(BitcoinCashNetwork::Mainnet).blocks_spanning(100, span),
+        100
+    );
+}
+
+/// What Knuth on the upgraded chipnet reported (2026-11-15): at the
+/// activation block 332,450 a next interval of 60, and at 332,460 an
+/// interval of 60 and 199,470,600 ticks. A schedule without the switch
+/// learns it from either, and the pinned chipnet schedule agrees.
+#[test]
+fn a_switch_is_learned_from_the_nodes_report() {
+    let report_at = |height, ticks, interval, next_interval| ReportedTicks {
+        height,
+        ticks: Some(ticks),
+        interval: Some(interval),
+        next_interval: Some(next_interval),
+    };
+    let chipnet_switch = IntervalSwitch {
+        height: 332_450,
+        interval: 60,
+    };
+    let unpinned = TickSchedule::TEN_MINUTES;
+    assert_eq!(
+        switch_from_report(&unpinned, report_at(332_450, 199_470_000, 600, 60)),
+        Ok(Some(chipnet_switch))
+    );
+    assert_eq!(
+        switch_from_report(&unpinned, report_at(332_460, 199_470_600, 60, 60)),
+        Ok(Some(chipnet_switch))
+    );
+    let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
+    assert_eq!(
+        switch_from_report(&chipnet, report_at(332_460, 199_470_600, 60, 60)),
+        Ok(None)
+    );
+    // A node that reports only the next interval still shows a switch
+    // right after its tip.
+    assert_eq!(
+        switch_from_report(
+            &unpinned,
+            ReportedTicks {
+                height: 332_450,
+                ticks: None,
+                interval: None,
+                next_interval: Some(60),
+            }
+        ),
+        Ok(Some(chipnet_switch))
+    );
+}
+
+/// A later switch to 30-second blocks, at height 380,000 on chipnet, is
+/// followed from the node's report alone: no new code for a new interval.
+#[test]
+fn a_later_switch_to_thirty_seconds_is_followed_from_the_report() {
+    let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
+    let at_switch = chipnet.ticks(380_000);
+    assert_eq!(at_switch % 600, 0);
+    let report = ReportedTicks {
+        height: 400_000,
+        ticks: Some(at_switch + 20_000 * 30),
+        interval: Some(30),
+        next_interval: Some(30),
+    };
+    let switch = IntervalSwitch {
+        height: 380_000,
+        interval: 30,
+    };
+    assert_eq!(switch_from_report(&chipnet, report), Ok(Some(switch)));
+    let followed = chipnet.with_switch(switch).unwrap();
+    assert_eq!(followed.ticks(400_000), report.ticks.unwrap());
+    assert_eq!(followed.interval_after(400_000), 30);
+    // ASERT makes a 30-second block 20 times easier than the anchor's
+    // interval: twice the one-minute target.
+    let reference = set_compact(0x1804_dafe).unwrap();
+    let one_minute = calculate_asert(
+        reference,
+        600 * 1_001,
+        600 * 1_000,
+        600,
+        60,
+        172_800,
+        bch_pow_limit(),
+    )
+    .unwrap();
+    let thirty_seconds = calculate_asert(
+        reference,
+        600 * 1_001,
+        600 * 1_000,
+        600,
+        30,
+        172_800,
+        bch_pow_limit(),
+    )
+    .unwrap();
+    assert_eq!(thirty_seconds, one_minute * U256::from(2u64));
+    // Coinbase maturity stays 60,000 ticks: 2,000 thirty-second blocks.
+    assert!(!followed.coinbase_spendable_in_next_block(400_000, 1_999));
+    assert!(followed.coinbase_spendable_in_next_block(400_000, 2_000));
+}
+
+/// Reports no single allowed switch explains are refused, not followed.
+#[test]
+fn a_report_no_switch_explains_is_refused() {
+    let unpinned = TickSchedule::TEN_MINUTES;
+    // Ticks that put the switch at no whole height.
+    let off = ReportedTicks {
+        height: 332_460,
+        ticks: Some(199_470_601),
+        interval: Some(60),
+        next_interval: Some(60),
+    };
+    assert!(switch_from_report(&unpinned, off).is_err());
+    // An interval the CHIP does not allow.
+    let seven = ReportedTicks {
+        height: 332_450,
+        ticks: Some(199_470_000),
+        interval: Some(600),
+        next_interval: Some(7),
+    };
+    assert!(switch_from_report(&unpinned, seven).is_err());
+    // A different interval with no ticks to place the switch.
+    let unplaced = ReportedTicks {
+        height: 332_460,
+        ticks: None,
+        interval: Some(60),
+        next_interval: Some(60),
+    };
+    assert!(switch_from_report(&unpinned, unplaced).is_err());
+}
+
+/// From block times alone, chipnet's activation block is 332,450: the
+/// first whose median time past reaches 2026-11-15 12:00 UTC.
+#[test]
+fn chipnets_activation_block_is_found_from_block_times() {
+    let ancestors: [(u32, u32); 10] = [
+        (332_429, 1_794_735_255),
+        (332_430, 1_794_736_345),
+        (332_431, 1_794_736_878),
+        (332_432, 1_794_737_463),
+        (332_433, 1_794_737_555),
+        (332_434, 1_794_738_496),
+        (332_435, 1_794_738_670),
+        (332_436, 1_794_739_872),
+        (332_437, 1_794_739_926),
+        (332_438, 1_794_740_624),
+    ];
+    let times: Vec<(u32, u32)> = ancestors
+        .into_iter()
+        .chain(
+            CHIPNET_AROUND_ACTIVATION
+                .iter()
+                .map(|(height, time, _)| (*height, *time)),
+        )
+        .collect();
+    let announced = AnnouncedSwitch {
+        activation_time: 1_794_744_000,
+        interval: 60,
+    };
+    assert_eq!(
+        activation_height_from_times(announced, &times),
+        Some(332_450)
+    );
+    // Starting after the crossing, the search cannot tell where it was.
+    assert_eq!(activation_height_from_times(announced, &times[12..]), None);
+}
+
+/// A switch learned for mainnet reaches every mainnet schedule, the ASERT
+/// parameters built from it included, and settles the announcement.
+#[test]
+fn a_learned_switch_reaches_every_schedule_of_its_network() {
+    let switch = IntervalSwitch {
+        height: 1_000_000,
+        interval: 60,
+    };
+    let asert = BchAsert::for_network(BitcoinCashNetwork::Mainnet).unwrap();
+    assert_eq!(asert.tick_schedule.interval_after(1_000_000), 600);
+    assert!(asert.tick_schedule.announced().is_some());
+    assert_eq!(learn_switch(BitcoinCashNetwork::Mainnet, switch), Ok(true));
+    assert_eq!(learn_switch(BitcoinCashNetwork::Mainnet, switch), Ok(false));
+    assert_eq!(asert.tick_schedule.interval_after(1_000_000), 60);
+    assert_eq!(asert.tick_schedule.announced(), None);
+    assert_eq!(
+        TickSchedule::for_network(BitcoinCashNetwork::Mainnet).ticks(1_000_001),
+        600_000_060
+    );
+    // Other networks do not see it, and the CHIP's rules still hold.
+    assert_eq!(
+        TickSchedule::for_network(BitcoinCashNetwork::Chipnet).interval_after(1_000_000),
+        60
+    );
+    assert!(
+        learn_switch(
+            BitcoinCashNetwork::Mainnet,
+            IntervalSwitch {
+                height: 1_100_000,
+                interval: 7,
+            }
+        )
+        .is_err()
+    );
 }

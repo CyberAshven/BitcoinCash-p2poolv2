@@ -26,7 +26,7 @@ use bitcoin::{
 use clap::{Args, Subcommand, ValueEnum};
 use p2poolv2_lib::address::bch_share::{self, encode_p2sh32_cashaddr};
 use p2poolv2_lib::config::{BitcoinCashNetwork, Chain, parse_payout_address};
-use p2poolv2_lib::shares::bch_asert::FastBlocks;
+use p2poolv2_lib::shares::bch_asert::TickSchedule;
 use p2poolv2_lib::shares::bch_htlc::{HtlcContract, SECRET_LENGTH, secret_hash};
 use p2poolv2_lib::shares::bch_script::dust_threshold;
 use p2poolv2_lib::shares::bch_trade::{
@@ -401,7 +401,7 @@ fn refund(
     // blocks (CHIP-2025-03); a share height is a share height.
     let valid_from_height = match chain.chain {
         TradeChain::Share => contract.refund_height.saturating_add(1),
-        TradeChain::Bch => FastBlocks::for_network(chain.network)
+        TradeChain::Bch => TickSchedule::for_network(chain.network)
             .first_block_after_lock_height(contract.refund_height),
     };
     summary["valid_from_height"] = json!(valid_from_height);

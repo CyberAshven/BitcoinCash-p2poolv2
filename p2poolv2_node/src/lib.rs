@@ -31,7 +31,7 @@ use p2poolv2_lib::node::actor::NodeHandle;
 use p2poolv2_lib::node::bch_header_feeder::relay_templates_learning_prevs;
 use p2poolv2_lib::node::weak_share_worker::{WeakShareEventSender, WeakShareNetwork};
 use p2poolv2_lib::pool_difficulty::PoolDifficulty;
-use p2poolv2_lib::shares::bch_asert::FastBlocks;
+use p2poolv2_lib::shares::bch_asert::TickSchedule;
 use p2poolv2_lib::shares::chain::chain_store_handle::ChainStoreHandle;
 use p2poolv2_lib::shares::merge_mining::MergeMiningCommitment;
 use p2poolv2_lib::shares::transaction_pool::ShareTransactionPool;
@@ -347,7 +347,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         tokio::spawn(relay_templates_learning_prevs(
             client,
             chain_store_handle.clone(),
-            bitcoin_cash_network.map_or(FastBlocks::MAINNET, FastBlocks::for_network),
+            bitcoin_cash_network.map_or(TickSchedule::TEN_MINUTES, TickSchedule::for_network),
             learning_rx,
             notify_tx.clone(),
         ));

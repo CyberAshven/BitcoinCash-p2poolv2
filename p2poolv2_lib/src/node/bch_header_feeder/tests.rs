@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::*;
+use crate::shares::bch_asert::IntervalSwitch;
 use crate::shares::bch_asert::tests::{MAINNET_PAIRS, header};
 use bitcoin::block::Version;
 use bitcoin::consensus::serialize;
@@ -124,7 +125,7 @@ fn feeder(server: &MockServer, held: &Arc<Mutex<Held>>) -> BchHeaderFeeder {
     BchHeaderFeeder::new(
         BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap(),
         store_holding(Arc::clone(held)),
-        FastBlocks::MAINNET,
+        TickSchedule::TEN_MINUTES,
     )
 }
 
@@ -327,7 +328,7 @@ async fn the_template_relay_learns_a_new_templates_parent_first() {
     let relay = tokio::spawn(relay_templates_learning_prevs(
         BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap(),
         store_holding(Arc::clone(&held)),
-        FastBlocks::MAINNET,
+        TickSchedule::TEN_MINUTES,
         input_rx,
         output_tx,
     ));
@@ -419,7 +420,7 @@ async fn the_first_sync_gives_up_on_a_slow_or_absent_bchn() {
     let absent = BchHeaderFeeder::new(
         BitcoindRpcClient::new("http://127.0.0.1:9", "user", "pass").unwrap(),
         store_holding(Arc::clone(&held)),
-        FastBlocks::MAINNET,
+        TickSchedule::TEN_MINUTES,
     );
     absent.first_sync(Duration::from_secs(10)).await;
 
@@ -433,15 +434,17 @@ async fn the_first_sync_gives_up_on_a_slow_or_absent_bchn() {
 #[tokio::test]
 async fn an_empty_store_on_one_minute_blocks_learns_until_the_span_is_covered() {
     let chain = chain_from_first_block(6, 0);
-    for (fast_blocks, learned) in [
+    for (tick_schedule, learned) in [
         (
-            FastBlocks {
-                activation_time: 0,
-                activation_height: Some(0),
-            },
+            TickSchedule::TEN_MINUTES
+                .with_switch(IntervalSwitch {
+                    height: 0,
+                    interval: 60,
+                })
+                .unwrap(),
             3,
         ),
-        (FastBlocks::MAINNET, 2),
+        (TickSchedule::TEN_MINUTES, 2),
     ] {
         let server = bchn(&chain[5], &chain[1..]).await;
         for height in [3usize, 4] {
@@ -459,16 +462,16 @@ async fn an_empty_store_on_one_minute_blocks_learns_until_the_span_is_covered() 
         let mut feeder = feeder(&server, &held);
         feeder.initial_headers = 2;
         feeder.initial_header_ticks = 180;
-        feeder.fast_blocks = fast_blocks;
+        feeder.tick_schedule = tick_schedule;
 
-        assert_eq!(feeder.sync_once().await, Ok(learned), "{fast_blocks:?}");
+        assert_eq!(feeder.sync_once().await, Ok(learned), "{tick_schedule:?}");
 
         let held = held.lock().unwrap();
         for (height, header) in chain.iter().enumerate().skip(6 - learned) {
             assert_eq!(
                 held.headers[&header.block_hash()],
                 known(height as u32, *header),
-                "{fast_blocks:?}"
+                "{tick_schedule:?}"
             );
         }
     }

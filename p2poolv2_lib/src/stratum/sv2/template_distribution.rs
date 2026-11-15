@@ -70,7 +70,7 @@ use super::large_templates::{
 use super::noise::NoiseTransport;
 use super::session::{Sv2Message, decode_plain_frames, encode_extension_frame, encode_frame};
 use crate::config::{BitcoinCashNetwork, TemplateProvider};
-use crate::shares::bch_asert::{BCH_BLOCK_SPACING, FastBlocks};
+use crate::shares::bch_asert::{BCH_BLOCK_SPACING, TickSchedule};
 use crate::stratum::block_submit::submit_block;
 use crate::stratum::merge_disclosure::{
     EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS, REQUEST_EXTENSIONS_ERROR,
@@ -774,7 +774,7 @@ fn block_size_floor(network: BitcoinCashNetwork, height: u64) -> u64 {
         .checked_sub(1)
         .and_then(|parent| u32::try_from(parent).ok())
         .map_or(BCH_BLOCK_SPACING, |parent| {
-            FastBlocks::for_network(network).interval_after(parent)
+            TickSchedule::for_network(network).interval_after(parent)
         });
     ten_minute_floor * interval as u64 / BCH_BLOCK_SPACING as u64
 }
