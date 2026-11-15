@@ -177,15 +177,26 @@ fn asking_job_band(prepared: &PreparedNotifyParams, hashrate: f64) -> Option<Job
     if weak_shares_per_month >= ASK_WEAK_SHARES_PER_MONTH {
         return None;
     }
-    let wanted_bits = easier_target(
+    asking_band(
+        prepared.bits(),
         weak_target,
         ASK_WEAK_SHARES_PER_MONTH / weak_shares_per_month,
         ceiling,
-    );
-    (Target::from_compact(wanted_bits) > weak_target).then(|| JobBand {
-        bits: prepared.bits(),
-        wanted_bits,
-    })
+    )
+}
+
+/// The band of a job at the minimum `bits` that asks for a weak target
+/// `multiple` times easier than `weak_target`, never easier than `ceiling`
+/// ([`easier_target`]). `None` when the wanted target is not easier than the
+/// weak target, as at the ceiling: such a job asks for nothing.
+pub(crate) fn asking_band(
+    bits: CompactTarget,
+    weak_target: Target,
+    multiple: f64,
+    ceiling: CompactTarget,
+) -> Option<JobBand> {
+    let wanted_bits = easier_target(weak_target, multiple, ceiling);
+    (Target::from_compact(wanted_bits) > weak_target).then_some(JobBand { bits, wanted_bits })
 }
 
 /// The target `multiple` times easier than `target`, at most `ceiling`,

@@ -675,6 +675,14 @@ impl PreparedNotifyParams {
         self.weak_ratio
     }
 
+    /// How many weak shares every share on these params carries, and how many
+    /// of those ask for an easier weak target. Read by the sim's emitter for
+    /// its stats.
+    #[cfg_attr(not(feature = "sim"), allow(dead_code))]
+    pub(crate) fn weak_counts(&self) -> (usize, u16) {
+        (self.weak_shares.len(), self.weak_asking)
+    }
+
     /// The weak target of the mining base: what a weak share on a job at the
     /// minimum on these params must meet. `None` on Bitcoin. Read by the
     /// node's default that asks for an easier one
