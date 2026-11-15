@@ -11,6 +11,7 @@
 //! ```
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use p2poolv2_payout_sim::asks::WeakAsks;
 use p2poolv2_payout_sim::levels::require_payout_level;
 use p2poolv2_payout_sim::miners::MinerMix;
 use p2poolv2_payout_sim::report::{
@@ -134,6 +135,10 @@ struct RunArgs {
     /// Spam hashrate at the minimum as a multiple of the home hashrate.
     #[arg(long, default_value_t = 0.0)]
     spam: f64,
+    /// Weak shares ask for an easier weak target (section 6 of the design
+    /// page, a proposal), with the proposed constants and node default.
+    #[arg(long)]
+    asks: bool,
 }
 
 fn design(argument: DesignArg) -> Design {
@@ -192,6 +197,7 @@ fn scenario_from(arguments: &RunArgs, months: usize, seed: u64) -> Result<Scenar
         big_node_at_minimum: arguments.big_node_at_minimum,
         non_carrying_fraction: arguments.non_carrying,
         spam_multiple: arguments.spam,
+        weak_asks: arguments.asks.then(WeakAsks::default),
         ..base
     };
     scenario.tracked[0].level = arguments.bitaxe_level;

@@ -51,6 +51,35 @@ and `weak_shares_filled_from_pool_total`, `weak_shares_prefilled_total`,
 `weak_shares_fetched_for_shares_total` and
 `weak_share_fills_fetched_whole_total`.
 
+The small miners design page has a section 6, a proposal that is not built:
+weak shares that follow the asks. A weak share would ask for an easier weak
+target when its node wanted one for its miner, and while more than one in 64
+of the weak shares a share carried ask, the weak ratio would rise instead of
+steering towards 32 weak shares a share, up to 320. Without asks the rule is
+today's. The payout simulator runs it share by share in four tables
+(`weak-asks`, `weak-asks-mixes`, `weak-asks-constants`,
+`weak-asks-attacks`): a pool whose small miners find enough weak shares
+stays near today's count, and one at 30% of a Bitcoin Cash ten times today's
+opens to the ceiling, where a Bitaxe's months without a payment go from 41%
+to 2.7%. An attacker can hold the count at the ceiling or at the floor, no
+further. The section lists what the ceiling costs a node and what has to be
+built first.
+
+The payout simulator has a `window-cap` table and a `storage` table. The
+first runs pools at 0.01 to 1% of Bitcoin Cash with the PPLNS window capped
+at 14, 30 and 60 days: the cap binds only under about 0.15%, and a longer
+one leaves a miner that keeps mining as often without a payment (63%, 66%
+and 65% of its months at 0.01%), since each block pays it its part of the
+window's work; it only lets more single shares be paid, at the cost of a
+longer payout depth and twice the bodies kept. The 14-day cap stays. The
+second is arithmetic of what a node keeps: the payout level bounds a
+coinbase (17,885 outputs, 608 KB, at the default level, with 100,000 payees
+or 1,000,000); coinbases are most of the store, 8.3 GB for 28 days at 1,000
+payees up to 242 GB when every one is a full 1 MB; stored without their
+payouts they take 0.09 GB; weak shares take 6.2 GB at 32 a share and 62 GB
+at 320, half that kept for one payout depth; headers take 3.15 GB a year.
+`Scenario` gains `window_cap_seconds`, 14 days everywhere else.
+
 The payout simulator has a `scale-levers` table for part 5 of the small
 miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
 Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,
@@ -1143,6 +1172,26 @@ earlier; they leave the window as the chain grows. The sync changes no
 share-chain rule: Bitcoin Cash genesis shares, protocol strings, the band,
 payout levels, weak shares, per-share cuts, the hybrid payout, the genesis
 last-resort rule and store format 5 are as they were.
+
+Synced with upstream P2Poolv2 through `fdbf85df` (its v0.18.0 and the
+Whatsminer change after it). The fork keeps version `0.0.1-alpha`. Taken
+from upstream: host names in `dial_peers` through upstream's DNS transport,
+which replaces the fork's own: only host names listed in `dial_peers` are
+resolved and dialed, never a `/dns` address learned from a peer; a name
+that resolves to an address in `blocked_ips`, or one blocked through the
+API, is not dialed; and a host with no usable resolver configuration warns
+and keeps `/ip4` and `/ip6` peers, where the node used to refuse to start.
+The first dial of a `dial_peers` peer now goes through the reconnector,
+which does not redial while a dial is pending and backs off after a dial
+that fails later. A `d=` or `th=` difficulty in the login is no longer
+overridden by the miner's own `mining.suggest_difficulty`, which Whatsminer
+firmware sends right after authorizing; on Bitcoin Cash the session
+difficulty still never goes above the job's share difficulty. Debug logs
+carry each notify sent and the address of a stratum timeout. Left out:
+testnet5's new genesis, as testnet5 is not here. The sync changes no
+share-chain rule: Bitcoin Cash genesis shares, protocol strings, the band,
+payout levels, weak shares, per-share cuts, the hybrid payout, the genesis
+last-resort rule and store format 9 are as they were.
 
 ### Added
 

@@ -66,6 +66,10 @@ pub struct WeakQueueOutcome {
     pub non_carrying_expired_fraction: f64,
     /// Fraction of chain shares that carry `WEAK_CAP` weak shares.
     pub full_share_fraction: f64,
+    /// Fraction of the carried weak shares that asked for an easier weak
+    /// target: zero under the rules as they are, which have no asks
+    /// (`crate::asks`).
+    pub asking_fraction: f64,
 }
 
 impl Default for WeakQueueOutcome {
@@ -79,6 +83,7 @@ impl Default for WeakQueueOutcome {
             carrying_expired_fraction: 0.0,
             non_carrying_expired_fraction: 0.0,
             full_share_fraction: 0.0,
+            asking_fraction: 0.0,
         }
     }
 }
@@ -324,6 +329,7 @@ fn summarise(tally: &Tally) -> WeakQueueOutcome {
             tally.found_non_carrying as f64,
         ),
         full_share_fraction: ratio_or_zero(tally.full_shares as f64, shares),
+        asking_fraction: 0.0,
     }
 }
 
