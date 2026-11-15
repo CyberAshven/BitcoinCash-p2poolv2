@@ -70,6 +70,7 @@ use super::large_templates::{
 use super::noise::NoiseTransport;
 use super::session::{Sv2Message, decode_plain_frames, encode_extension_frame, encode_frame};
 use crate::config::{BitcoinCashNetwork, TemplateProvider};
+use crate::shares::bch_asert::{BCH_BLOCK_SPACING, FastBlocks};
 use crate::stratum::block_submit::submit_block;
 use crate::stratum::merge_disclosure::{
     EXTENSIONS_NEGOTIATION, REQUEST_EXTENSIONS, REQUEST_EXTENSIONS_ERROR,
@@ -756,27 +757,37 @@ fn gives_merkle_path(transactions: &[Arc<Transaction>], merkle_path: &[[u8; 32]]
         .eq(merkle_path.iter().copied())
 }
 
-/// The floor of the network's adaptive block size limit (ABLA): 32 MB on
-/// mainnet and regtest, 2 MB on chipnet, 256 MB on scalenet
-/// (`nDefaultConsensusBlockSize` in BCHN's `src/chainparams.cpp`). The limit
-/// never goes below it, so a block within the floor is never too large.
-fn block_size_floor(network: BitcoinCashNetwork) -> u64 {
-    match network {
+/// The floor of the network's adaptive block size limit (ABLA) for a block
+/// at `height`: 32 MB on mainnet and regtest, 2 MB on chipnet, 256 MB on
+/// scalenet (`nDefaultConsensusBlockSize` in BCHN's `src/chainparams.cpp`)
+/// for a ten-minute block. CHIP-2025-03 scales the limit, floor included,
+/// by the block's interval: a one-minute block's floor is a tenth. The
+/// limit never goes below it, so a block within the floor is never too
+/// large.
+fn block_size_floor(network: BitcoinCashNetwork, height: u64) -> u64 {
+    let ten_minute_floor: u64 = match network {
         BitcoinCashNetwork::Mainnet | BitcoinCashNetwork::Regtest => 32_000_000,
         BitcoinCashNetwork::Chipnet => 2_000_000,
         BitcoinCashNetwork::Scalenet => 256_000_000,
-    }
+    };
+    let interval = height
+        .checked_sub(1)
+        .and_then(|parent| u32::try_from(parent).ok())
+        .map_or(BCH_BLOCK_SPACING, |parent| {
+            FastBlocks::for_network(network).interval_after(parent)
+        });
+    ten_minute_floor * interval as u64 / BCH_BLOCK_SPACING as u64
 }
 
-/// Block size limit a provided template is checked against.
+/// Block size limit a provided template at `height` is checked against.
 ///
 /// `reported` is the latest limit BCHN reported for a block on a template's
 /// parent (`ablastate.nextblocksizelimit`), the same limit its own
 /// `getblocktemplate` reports as `sizelimit`. BCHN manages the limit, so it is
 /// used whatever its size. Only while BCHN has reported none, because it is
 /// unreachable or keeps no ABLA state, does the network's floor stand in.
-fn template_size_limit(reported: Option<u64>, network: BitcoinCashNetwork) -> u64 {
-    reported.unwrap_or_else(|| block_size_floor(network))
+fn template_size_limit(reported: Option<u64>, network: BitcoinCashNetwork, height: u64) -> u64 {
+    reported.unwrap_or_else(|| block_size_floor(network, height))
 }
 
 /// The scriptSig start of every coinbase this pool builds at `height`: the
@@ -1513,7 +1524,8 @@ impl ProviderConnection<'_> {
         if reported.is_some() {
             self.reported_size_limit = reported;
         }
-        let size_limit = template_size_limit(self.reported_size_limit, self.provider.network);
+        let size_limit =
+            template_size_limit(self.reported_size_limit, self.provider.network, height);
         if self.reported_size_limit.is_none() {
             warn!(
                 "The node reported no block size limit for parent {hash}; checking its templates against the network's {size_limit}-byte floor"

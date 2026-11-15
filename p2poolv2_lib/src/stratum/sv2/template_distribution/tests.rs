@@ -393,7 +393,7 @@ fn a_chipnet_template_round_trips_through_template_distribution() {
     let template = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Chipnet),
+        block_size_floor(BitcoinCashNetwork::Chipnet, u64::from(fixture.height)),
         fixture.curtime,
         solutions,
     )
@@ -444,7 +444,7 @@ fn a_regtest_template_is_checked_against_the_regtest_block_size() {
     let template = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Regtest),
+        block_size_floor(BitcoinCashNetwork::Regtest, u64::from(fixture.height)),
         fixture.curtime,
         solutions,
     )
@@ -459,20 +459,25 @@ fn a_regtest_template_is_checked_against_the_regtest_block_size() {
 #[test]
 fn the_size_limit_is_the_one_bchn_reports_and_the_floor_only_without_one() {
     assert_eq!(
-        template_size_limit(Some(5_000_000_000), BitcoinCashNetwork::Mainnet),
+        template_size_limit(Some(5_000_000_000), BitcoinCashNetwork::Mainnet, 950_000),
         5_000_000_000
     );
     assert_eq!(
-        template_size_limit(Some(3_000_000), BitcoinCashNetwork::Chipnet),
+        template_size_limit(Some(3_000_000), BitcoinCashNetwork::Chipnet, 340_000),
         3_000_000
     );
     assert_eq!(
-        template_size_limit(None, BitcoinCashNetwork::Mainnet),
+        template_size_limit(None, BitcoinCashNetwork::Mainnet, 950_000),
         32_000_000
     );
     assert_eq!(
-        template_size_limit(None, BitcoinCashNetwork::Chipnet),
+        template_size_limit(None, BitcoinCashNetwork::Chipnet, 332_450),
         2_000_000
+    );
+    // After chipnet's one-minute activation the floor is a tenth.
+    assert_eq!(
+        template_size_limit(None, BitcoinCashNetwork::Chipnet, 332_451),
+        200_000
     );
 }
 
@@ -480,7 +485,7 @@ fn the_size_limit_is_the_one_bchn_reports_and_the_floor_only_without_one() {
 #[test]
 fn the_scalenet_floor_is_256_mb() {
     assert_eq!(
-        template_size_limit(None, BitcoinCashNetwork::Scalenet),
+        template_size_limit(None, BitcoinCashNetwork::Scalenet, 10_000),
         256_000_000
     );
 }
@@ -573,7 +578,7 @@ fn a_provided_template_sends_its_solution_back_to_its_connection() {
     let template = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Regtest),
+        block_size_floor(BitcoinCashNetwork::Regtest, 1),
         fixture.curtime,
         solutions,
     )
@@ -620,7 +625,7 @@ fn a_bridge_form_coinbase_prefix_is_accepted() {
         provided_block_template(
             ready,
             u64::from(fixture.height),
-            block_size_floor(BitcoinCashNetwork::Regtest),
+            block_size_floor(BitcoinCashNetwork::Regtest, 1),
             fixture.curtime,
             solutions,
         )
@@ -650,7 +655,7 @@ fn a_coinbase_prefix_for_another_height_is_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Regtest),
+        block_size_floor(BitcoinCashNetwork::Regtest, 1),
         fixture.curtime,
         solutions,
     )
@@ -685,7 +690,7 @@ fn a_coinbase_prefix_with_more_than_the_height_push_is_refused() {
         provided_block_template(
             ready,
             u64::from(fixture.height),
-            block_size_floor(BitcoinCashNetwork::Regtest),
+            block_size_floor(BitcoinCashNetwork::Regtest, 1),
             fixture.curtime,
             solutions,
         )
@@ -722,7 +727,7 @@ fn required_coinbase_outputs_are_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Regtest),
+        block_size_floor(BitcoinCashNetwork::Regtest, 1),
         fixture.curtime,
         solutions,
     )
@@ -764,7 +769,7 @@ fn a_merkle_path_that_does_not_match_the_transactions_is_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Chipnet),
+        block_size_floor(BitcoinCashNetwork::Chipnet, 1),
         fixture.curtime,
         solutions,
     )
@@ -806,7 +811,7 @@ fn transactions_out_of_ctor_order_are_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Chipnet),
+        block_size_floor(BitcoinCashNetwork::Chipnet, 1),
         fixture.curtime,
         solutions,
     )
@@ -838,7 +843,7 @@ fn a_target_that_disagrees_with_the_bits_is_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Regtest),
+        block_size_floor(BitcoinCashNetwork::Regtest, 1),
         fixture.curtime,
         solutions,
     )
@@ -869,7 +874,7 @@ fn a_template_after_its_set_new_prev_hash_takes_the_current_time() {
     let template = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Regtest),
+        block_size_floor(BitcoinCashNetwork::Regtest, 1),
         fixture.curtime + 30,
         solutions,
     )

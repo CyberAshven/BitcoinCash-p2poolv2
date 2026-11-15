@@ -58,7 +58,9 @@ fn every_specification_vector_matches() {
             let target = calculate_asert(
                 reference,
                 time - anchor_parent_time,
-                i64::try_from(height - anchor_height).unwrap(),
+                i64::try_from(height - anchor_height).unwrap() * BCH_BLOCK_SPACING,
+                BCH_BLOCK_SPACING,
+                BCH_BLOCK_SPACING,
                 SPECIFICATION_HALF_LIFE,
                 bch_pow_limit(),
             )
@@ -526,7 +528,15 @@ fn header_check_refuses_heights_below_the_anchor_and_invalid_bits() {
     assert_eq!(BchAsert::for_network(BitcoinCashNetwork::Regtest), None);
     assert_eq!(
         BchAsert::for_network(BitcoinCashNetwork::Chipnet),
-        Some(BchAsert::TESTNET4)
+        Some(BchAsert::CHIPNET)
+    );
+    // Testnet4 shares chipnet's anchor, not its activation.
+    assert_eq!(
+        BchAsert {
+            fast_blocks: FastBlocks::CHIPNET,
+            ..BchAsert::TESTNET4
+        },
+        BchAsert::CHIPNET
     );
 }
 
@@ -563,4 +573,278 @@ fn bip34_heights_parse_as_bchn_writes_them() {
     assert_eq!(bip34_height(&[0x03, 0x15, 0xf9]), None);
     assert_eq!(bip34_height(&[0x00]), None);
     assert_eq!(bip34_height(&[]), None);
+}
+
+/// CHIP-2025-03's ASERT vectors (`chip202503/README.md`).
+const CHIP_ASERT_VECTORS: &str = include_str!("chip202503/asert.json");
+
+/// CHIP-2025-03's tick vectors.
+const CHIP_TICK_VECTORS: &str = include_str!("chip202503/ticks.json");
+
+fn hex_target(value: &serde_json::Value) -> U256 {
+    U256::from_str_radix(value.as_str().unwrap(), 16).unwrap()
+}
+
+fn chip_bits(value: &serde_json::Value) -> u32 {
+    parse_bits(value.as_str().unwrap())
+}
+
+fn maybe_number(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+}
+
+fn number(value: &serde_json::Value) -> i64 {
+    maybe_number(value).unwrap()
+}
+
+/// Every CHIP ASERT vector, the 600-tick golden ones, their 60-tick
+/// siblings ten times easier, and the interval-ratio guard: the target
+/// and the nBits match exactly.
+#[test]
+fn every_chip_asert_vector_matches() {
+    let vectors: serde_json::Value = serde_json::from_str(CHIP_ASERT_VECTORS).unwrap();
+    let pow_limit = hex_target(&vectors["powLimit"]);
+    assert_eq!(pow_limit, bch_pow_limit());
+    let rows = vectors["vectors"].as_array().unwrap();
+    assert_eq!(rows.len(), 45);
+    for row in rows {
+        let name = row["name"].as_str().unwrap();
+        let target = calculate_asert(
+            hex_target(&row["refTarget"]),
+            number(&row["nTimeDiff"]),
+            number(&row["tickDelta"]),
+            number(&row["anchorIdealBlockTime"]),
+            number(&row["nextIdealBlockTime"]),
+            number(&row["nHalfLife"]),
+            pow_limit,
+        )
+        .unwrap_or_else(|| panic!("{name} has no target"));
+        assert_eq!(target, hex_target(&row["expectedTarget"]), "{name}");
+        assert_eq!(
+            get_compact(target).to_consensus(),
+            chip_bits(&row["expectednBits"]),
+            "{name}"
+        );
+    }
+}
+
+/// The CHIP's end-to-end rows: the test networks' minimum-difficulty rule
+/// at more than twice the new block's interval (1,200 s before
+/// activation, 120 s after), and the tick difference from the anchor's
+/// own ticks.
+#[test]
+fn every_chip_asert_wrapper_row_matches() {
+    let vectors: serde_json::Value = serde_json::from_str(CHIP_ASERT_VECTORS).unwrap();
+    let rows = vectors["wrapper"].as_array().unwrap();
+    assert_eq!(rows.len(), 10);
+    for row in rows {
+        let name = row["name"].as_str().unwrap();
+        let anchor = &row["anchor"];
+        let next_interval = number(&row["nextIdealBlockTime"]);
+        let prev_time = number(&row["nPrevBlockTime"]);
+        let bits = if row["fPowAllowMinDifficultyBlocks"].as_bool().unwrap()
+            && number(&row["nNextBlockTime"]) > prev_time + 2 * next_interval
+        {
+            BCH_POW_LIMIT_BITS
+        } else {
+            let target = calculate_asert(
+                set_compact(chip_bits(&anchor["nBits"])).unwrap(),
+                prev_time - number(&anchor["nPrevBlockTime"]),
+                number(&row["nPrevTick"]) - number(&anchor["nTick"]),
+                number(&anchor["nBlockIntervalTime"]),
+                next_interval,
+                number(&row["nASERTHalfLife"]),
+                bch_pow_limit(),
+            )
+            .unwrap_or_else(|| panic!("{name} has no target"));
+            get_compact(target).to_consensus()
+        };
+        assert_eq!(bits, chip_bits(&row["expectednBits"]), "{name}");
+    }
+}
+
+/// The CHIP's tick vectors for the schedules a Bitcoin Cash chain can
+/// have: none, or one switch to 60 ticks. Heights past `u32` and the
+/// reverse mapping are not used here.
+#[test]
+fn chip_tick_vectors_match_for_a_single_switch() {
+    let vectors: serde_json::Value = serde_json::from_str(CHIP_TICK_VECTORS).unwrap();
+    let mut checked = 0;
+    for schedule in vectors["schedules"].as_array().unwrap() {
+        let name = schedule["name"].as_str().unwrap();
+        let entries = schedule["schedule"].as_array().unwrap();
+        let activation_height = match entries.as_slice() {
+            [] => None,
+            [entry] if number(&entry["tau"]) == BCH_FAST_BLOCK_SPACING => {
+                Some(u32::try_from(number(&entry["height"])).unwrap())
+            }
+            _ => continue,
+        };
+        let fast_blocks = FastBlocks {
+            activation_time: 0,
+            activation_height,
+        };
+        for query in schedule["queries"].as_array().into_iter().flatten() {
+            let (Some(height), Some(expected)) = (
+                maybe_number(&query["arg"]).and_then(|arg| u32::try_from(arg).ok()),
+                maybe_number(&query["expected"]),
+            ) else {
+                continue;
+            };
+            let actual = match query["op"].as_str().unwrap() {
+                "HeightToTick" => fast_blocks.ticks(height),
+                "GetNextBlockIntervalTime" => fast_blocks.interval_after(height),
+                // Genesis has no interval of its own and reports 600.
+                "GetBlockIntervalTime" if height == 0 => BCH_BLOCK_SPACING,
+                "GetBlockIntervalTime" => fast_blocks.interval_after(height - 1),
+                _ => continue,
+            };
+            assert_eq!(actual, expected, "{name}: {query}");
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 19, "tick queries checked");
+}
+
+/// Chipnet's ticks and intervals around its activation block, 332,450.
+#[test]
+fn chipnet_switches_to_sixty_tick_blocks_after_block_332450() {
+    let chipnet = FastBlocks::CHIPNET;
+    assert_eq!(chipnet.ticks(332_450), 332_450 * 600);
+    assert_eq!(chipnet.ticks(332_451), 332_450 * 600 + 60);
+    assert_eq!(chipnet.interval_after(332_449), 600);
+    assert_eq!(chipnet.interval_after(332_450), 60);
+    assert_eq!(BchAsert::CHIPNET.min_difficulty_gap(332_449), 1_200);
+    assert_eq!(BchAsert::CHIPNET.min_difficulty_gap(332_450), 120);
+    // Mainnet has not activated: every block is a 600-tick block.
+    assert_eq!(FastBlocks::MAINNET.ticks(950_000), 950_000 * 600);
+    assert_eq!(FastBlocks::MAINNET.interval_after(950_000), 600);
+}
+
+/// On schedule across the switch, the first one-minute block's target is
+/// ten times the last ten-minute block's: the same work per second.
+#[test]
+fn the_first_one_minute_block_is_ten_times_easier_on_schedule() {
+    let chipnet = BchAsert::CHIPNET;
+    let last_slow = 332_449u32;
+    // A parent dated exactly on the ASERT schedule keeps the anchor target.
+    let on_schedule = |height: u32| {
+        (chipnet.anchor_parent_time + chipnet.fast_blocks.ticks(height)
+            - i64::from(chipnet.anchor_height) * BCH_BLOCK_SPACING
+            + BCH_BLOCK_SPACING) as u32
+    };
+    let slow = chipnet
+        .next_target(last_slow, on_schedule(last_slow))
+        .unwrap();
+    let fast = chipnet
+        .next_target(last_slow + 1, on_schedule(last_slow + 1))
+        .unwrap();
+    assert_eq!(slow, set_compact(chipnet.anchor_bits).unwrap());
+    assert_eq!(fast, bch_pow_limit());
+    // The anchor is the limit on chipnet, so compare below it on mainnet's
+    // numbers too: ten times, exactly, before the clamp.
+    let reference = set_compact(0x1804_dafe).unwrap();
+    let slow = calculate_asert(
+        reference,
+        600 * 1_001,
+        600 * 1_000,
+        600,
+        600,
+        172_800,
+        bch_pow_limit(),
+    );
+    let fast = calculate_asert(
+        reference,
+        600 * 1_001,
+        600 * 1_000,
+        600,
+        60,
+        172_800,
+        bch_pow_limit(),
+    );
+    assert_eq!(fast.unwrap(), slow.unwrap() * U256::from(10u64));
+}
+
+/// Real chipnet blocks around the one-minute activation, read from a Knuth
+/// node that follows the upgraded chain (2026-11-15): height, nTime and
+/// nBits. Block 332,450 is the last ten-minute block: its median time past,
+/// 1,794,744,504, is the first at or after 1,794,744,000.
+const CHIPNET_AROUND_ACTIVATION: [(u32, u32, u32); 22] = [
+    (332_439, 1_794_740_864, 0x1a21_8c7e),
+    (332_440, 1_794_741_541, 0x1a1f_4cf0),
+    (332_441, 1_794_742_743, 0x1d00_ffff),
+    (332_442, 1_794_742_920, 0x1a23_ac7c),
+    (332_443, 1_794_743_094, 0x1a20_e1df),
+    (332_444, 1_794_743_302, 0x1a1e_4b31),
+    (332_445, 1_794_744_504, 0x1d00_ffff),
+    (332_446, 1_794_744_756, 0x1a1f_8ac0),
+    (332_447, 1_794_745_241, 0x1a1d_8002),
+    (332_448, 1_794_745_658, 0x1a1c_dab3),
+    (332_449, 1_794_745_967, 0x1a1b_dac4),
+    (332_450, 1_794_745_996, 0x1a1a_55f5),
+    (332_451, 1_794_746_156, 0x1d00_ffff),
+    (332_452, 1_794_746_219, 0x1b00_f080),
+    (332_453, 1_794_746_263, 0x1b00_f0a4),
+    (332_454, 1_794_746_387, 0x1d00_ffff),
+    (332_455, 1_794_746_301, 0x1b00_f2e0),
+    (332_456, 1_794_746_372, 0x1b00_ec23),
+    (332_457, 1_794_746_406, 0x1b00_eca3),
+    (332_458, 1_794_746_447, 0x1b00_eb75),
+    (332_459, 1_794_746_537, 0x1b00_ea99),
+    (332_460, 1_794_746_573, 0x1b00_ebf4),
+];
+
+/// Every chipnet block around the activation carries the nBits P2Pool
+/// computes from its parent: ASERT ten times easier from block 332,451 on,
+/// and the proof-of-work limit after a gap of more than 20 minutes before
+/// it (332,441 and 332,445) and of more than 2 minutes after it (332,451
+/// and 332,454).
+#[test]
+fn real_chipnet_blocks_around_the_activation_carry_the_bits_computed_for_them() {
+    let chipnet = BchAsert::CHIPNET;
+    let mut minimum_difficulty = Vec::with_capacity(4);
+    for pair in CHIPNET_AROUND_ACTIVATION.windows(2) {
+        let [(parent_height, parent_time, _), (height, time, bits)] = pair else {
+            unreachable!()
+        };
+        let expected = if *time > parent_time + chipnet.min_difficulty_gap(*parent_height) {
+            minimum_difficulty.push(*height);
+            BCH_POW_LIMIT_BITS
+        } else {
+            chipnet
+                .next_bits(*parent_height, *parent_time)
+                .unwrap()
+                .to_consensus()
+        };
+        assert_eq!(expected, *bits, "block {height}");
+    }
+    assert_eq!(minimum_difficulty, [332_441, 332_445, 332_451, 332_454]);
+    // Knuth's own ticks for the activation block and the next.
+    assert_eq!(chipnet.fast_blocks.ticks(332_450), 199_470_000);
+    assert_eq!(chipnet.fast_blocks.ticks(332_460), 199_470_600);
+}
+
+/// A Bitcoin Cash lock height counts ten-minute units: on chipnet a lock
+/// below the activation block opens at the next block, and one past it ten
+/// one-minute blocks per unit later. Mainnet has not activated.
+#[test]
+fn a_lock_height_opens_ten_one_minute_blocks_per_unit_after_activation() {
+    let chipnet = FastBlocks::CHIPNET;
+    assert_eq!(chipnet.first_block_after_lock_height(332_000), 332_001);
+    assert_eq!(chipnet.first_block_after_lock_height(332_449), 332_450);
+    assert_eq!(chipnet.first_block_after_lock_height(332_450), 332_451);
+    assert_eq!(chipnet.first_block_after_lock_height(332_451), 332_461);
+    assert_eq!(chipnet.first_block_after_lock_height(332_594), 333_891);
+    // The block it names is the first whose ticks pass 600 times the lock.
+    for lock in [332_449u32, 332_450, 332_451, 332_594] {
+        let first = chipnet.first_block_after_lock_height(lock);
+        assert!(chipnet.ticks(first) > 600 * i64::from(lock), "{lock}");
+        assert!(chipnet.ticks(first - 1) <= 600 * i64::from(lock), "{lock}");
+    }
+    assert_eq!(
+        FastBlocks::MAINNET.first_block_after_lock_height(950_000),
+        950_001
+    );
 }

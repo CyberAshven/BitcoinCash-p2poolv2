@@ -8,6 +8,10 @@ use bitcoin::hashes::Hash;
 use bitcoin::{PubkeyHash, ScriptBuf};
 use std::sync::{Arc, Mutex};
 
+/// The height the stand-in node reports for every block: a chipnet block
+/// after its one-minute activation, where it matters.
+const FAKE_BLOCK_HEIGHT: u32 = 340_000;
+
 /// BCHN as the executor sees it, scripted by each test.
 #[derive(Clone)]
 struct FakeNode {
@@ -54,10 +58,20 @@ impl TreeExecutionNode for FakeNode {
         Ok(*self.initial_block_download.lock().unwrap())
     }
 
-    async fn block_confirmations(&self, _blockhash: BlockHash) -> Result<Option<i64>, String> {
+    async fn block_confirmations(
+        &self,
+        _blockhash: BlockHash,
+    ) -> Result<Option<BlockDepth>, String> {
         match self.confirmation_error.lock().unwrap().clone() {
             Some(error) => Err(error),
-            None => Ok(*self.confirmations.lock().unwrap()),
+            None => Ok(self
+                .confirmations
+                .lock()
+                .unwrap()
+                .map(|confirmations| BlockDepth {
+                    height: FAKE_BLOCK_HEIGHT,
+                    confirmations,
+                })),
         }
     }
 
@@ -121,6 +135,30 @@ async fn an_immature_tree_is_not_broadcast() {
     executor.execute_round().await;
 
     assert!(node.sent().is_empty());
+}
+
+/// After chipnet's one-minute activation a coinbase matures in 60,000
+/// ticks, 1,000 one-minute blocks: 100 confirmations are not enough, and
+/// the tree waits until the next block is 1,000 blocks past it.
+#[tokio::test]
+async fn after_one_minute_blocks_a_tree_waits_a_thousand_blocks() {
+    for (confirmations, broadcast) in [(100, false), (999, false), (1_000, true)] {
+        let node = FakeNode::new(confirmations);
+        let mut executor = PayoutTreeExecutor::new(
+            node.clone(),
+            store_with(stored_tree(3)),
+            payout_tree_channel().1,
+        )
+        .with_fast_blocks(FastBlocks::CHIPNET);
+
+        executor.execute_round().await;
+
+        assert_eq!(
+            !node.sent().is_empty(),
+            broadcast,
+            "{confirmations} confirmations"
+        );
+    }
 }
 
 /// At 100 confirmations the root goes first, then its children, at

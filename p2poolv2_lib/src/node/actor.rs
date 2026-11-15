@@ -42,6 +42,7 @@ use crate::node::weak_share_worker::{WeakShareNetwork, WeakShareWorker};
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
+use crate::shares::bch_asert::FastBlocks;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -608,7 +609,13 @@ fn start_payout_tree_executor(
         }
     };
     let (sink, found) = payout_tree_channel();
-    let executor = PayoutTreeExecutor::new(client, chain_store_handle.clone(), found);
+    let executor = PayoutTreeExecutor::new(client, chain_store_handle.clone(), found)
+        .with_fast_blocks(
+            config
+                .stratum
+                .bitcoin_cash_network
+                .map_or(FastBlocks::MAINNET, FastBlocks::for_network),
+        );
     tokio::spawn(executor.run());
     Some(sink)
 }

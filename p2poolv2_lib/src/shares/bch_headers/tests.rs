@@ -42,7 +42,7 @@ fn real_chipnet_children_pass_the_exact_check_including_a_minimum_difficulty_blo
         let child = header(child_hex);
         // The anchor-era blocks are at the limit by ASERT itself; count the
         // ones the 20-minute rule puts there.
-        if child.time > parent.header.time + MIN_DIFFICULTY_GAP {
+        if child.time > parent.header.time + BchAsert::CHIPNET.min_difficulty_gap(parent_height) {
             assert_eq!(child.bits.to_consensus(), BCH_POW_LIMIT_BITS);
             minimum_difficulty += 1;
         }
@@ -72,7 +72,7 @@ fn a_test_network_block_within_twenty_minutes_may_not_use_the_limit() {
     let (parent_height, parent_hex, child_hex) = CHIPNET_PAIRS[2];
     let parent = known(parent_height, parent_hex);
     let mut child = header(child_hex);
-    assert!(child.time <= parent.header.time + MIN_DIFFICULTY_GAP);
+    assert!(child.time <= parent.header.time + BchAsert::CHIPNET.min_difficulty_gap(parent_height));
     child.bits = CompactTarget::from_consensus(BCH_POW_LIMIT_BITS);
     let error = rules.check(&child, &parent, now_for(&child)).unwrap_err();
     assert!(matches!(error, BchHeaderError::Bits { .. }), "{error}");
@@ -157,7 +157,7 @@ fn sizing_bits_are_the_asert_bits_whatever_the_paying_blocks_time() {
             .unwrap()
             .next_bits(parent_height, parent.header.time);
         assert_eq!(chipnet.sizing_bits(&parent), asert);
-        if child.time > parent.header.time + MIN_DIFFICULTY_GAP {
+        if child.time > parent.header.time + BchAsert::CHIPNET.min_difficulty_gap(parent_height) {
             assert_ne!(chipnet.sizing_bits(&parent), Some(child.bits));
             late += 1;
         } else {

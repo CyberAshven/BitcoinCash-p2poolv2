@@ -47,13 +47,6 @@ pub const BCH_CURRENT_CHAIN_RULE_TAG: &str = "bch-prev-1off";
 /// ahead of the node's clock.
 pub const MAX_FUTURE_BLOCK_TIME: u32 = 2 * 60 * 60;
 
-/// BCHN's `nPowTargetSpacing`, ten minutes.
-const TARGET_SPACING: u32 = 10 * 60;
-
-/// A test network block dated more than this after its parent may use the
-/// proof-of-work limit: `2 * nPowTargetSpacing`, 20 minutes.
-const MIN_DIFFICULTY_GAP: u32 = 2 * TARGET_SPACING;
-
 /// A Bitcoin Cash block header this node knows, with its height.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KnownBchHeader {
@@ -159,7 +152,11 @@ impl BchHeaderRules {
         match self.bits {
             BitsRule::Asert(asert) => {
                 if asert.allow_pow_limit
-                    && header_time > parent.header.time.saturating_add(MIN_DIFFICULTY_GAP)
+                    && header_time
+                        > parent
+                            .header
+                            .time
+                            .saturating_add(asert.min_difficulty_gap(parent.height))
                 {
                     return Some(CompactTarget::from_consensus(BCH_POW_LIMIT_BITS));
                 }

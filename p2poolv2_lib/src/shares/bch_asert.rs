@@ -36,8 +36,120 @@ mod u256 {
 }
 pub use u256::U256;
 
-/// Every Bitcoin Cash network's block spacing, `nPowTargetSpacing`: 600 s.
+/// The interval of every Bitcoin Cash block up to and including a network's
+/// one-minute activation block, in ticks (seconds of target time), and the
+/// interval of the ASERT anchor block on every network: 600.
 pub const BCH_BLOCK_SPACING: i64 = 600;
+
+/// The interval of every block after a network's activation block under
+/// CHIP-2025-03 "Faster Blocks for Bitcoin Cash": 60 ticks.
+pub const BCH_FAST_BLOCK_SPACING: i64 = 60;
+
+/// When a network moves to one-minute blocks (CHIP-2025-03).
+///
+/// A block's ticks are the sum of the target intervals of the blocks up to
+/// it: 600 for every block up to and including the activation block, 60 for
+/// every block after it. The activation block is the first block whose
+/// median time past is at or after `activation_time`; its child is the first
+/// one-minute block. Before activation a block's ticks are exactly `600 *
+/// height`, so every rule counted in ticks is the old rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FastBlocks {
+    /// Median time past at which the network activates one-minute blocks.
+    pub activation_time: i64,
+    /// Height of the activation block, the last 600-tick block, once the
+    /// network has activated and that block can no longer be reorganized.
+    /// The CHIP fixes it in node code the same way. `None` before that:
+    /// every block is then a 600-tick block, which holds only while the
+    /// network has not activated.
+    pub activation_height: Option<u32>,
+}
+
+impl FastBlocks {
+    /// Mainnet's activation, 2027-05-15 12:00 UTC (also testnet3,
+    /// testnet4, scalenet and regtest), not yet reached.
+    pub const MAINNET: Self = Self {
+        activation_time: 1_810_382_400,
+        activation_height: None,
+    };
+
+    /// Chipnet's activation, 2026-11-15 12:00 UTC. Block 332,450 is the
+    /// last 600-tick block and 332,451 the first one-minute block.
+    pub const CHIPNET: Self = Self {
+        activation_time: 1_794_744_000,
+        activation_height: Some(332_450),
+    };
+
+    /// The ticks of the block at `height`: `600 * height` up to the
+    /// activation block, then 60 more per block.
+    pub fn ticks(&self, height: u32) -> i64 {
+        let height = i64::from(height);
+        match self.activation_height.map(i64::from) {
+            Some(activation) if height > activation => {
+                activation * BCH_BLOCK_SPACING + (height - activation) * BCH_FAST_BLOCK_SPACING
+            }
+            _ => height * BCH_BLOCK_SPACING,
+        }
+    }
+
+    /// The target interval, in ticks, of the block after the one at
+    /// `height`: 60 from the activation block on, 600 before it.
+    pub fn interval_after(&self, height: u32) -> i64 {
+        match self.activation_height {
+            Some(activation) if height >= activation => BCH_FAST_BLOCK_SPACING,
+            _ => BCH_BLOCK_SPACING,
+        }
+    }
+
+    /// The activation of `network`. Regtest and scalenet use mainnet's
+    /// time, as in BCHN.
+    pub fn for_network(network: BitcoinCashNetwork) -> Self {
+        match network {
+            BitcoinCashNetwork::Chipnet => Self::CHIPNET,
+            BitcoinCashNetwork::Mainnet
+            | BitcoinCashNetwork::Regtest
+            | BitcoinCashNetwork::Scalenet => Self::MAINNET,
+        }
+    }
+
+    /// Whether the coinbase of the block at `height`, with `confirmations`
+    /// on the node's chain, can be spent in the next block: that block's
+    /// ticks are at least [`BCH_COINBASE_MATURITY_TICKS`] past the
+    /// coinbase's. That is 100 confirmations before activation and 1,000
+    /// one-minute blocks after it.
+    pub fn coinbase_spendable_in_next_block(&self, height: u32, confirmations: i64) -> bool {
+        let Some(next) = i64::from(height)
+            .checked_add(confirmations)
+            .and_then(|next| u32::try_from(next).ok())
+        else {
+            return false;
+        };
+        confirmations > 0 && self.ticks(next) - self.ticks(height) >= BCH_COINBASE_MATURITY_TICKS
+    }
+
+    /// The first block height at which a transaction locked to height
+    /// `lock_height` (`nLockTime`, or `OP_CHECKLOCKTIMEVERIFY`'s operand) is
+    /// final.
+    ///
+    /// CHIP-2025-03 keeps a lock height in ten-minute units: it is final in
+    /// a block whose ticks are past `600 * lock_height`. That is block
+    /// `lock_height + 1` while blocks are ten minutes, and ten blocks per
+    /// unit after the activation block.
+    pub fn first_block_after_lock_height(&self, lock_height: u32) -> u32 {
+        match self.activation_height {
+            Some(activation) if lock_height >= activation => {
+                let units = u64::from(lock_height - activation);
+                let height = u64::from(activation) + units * 10 + 1;
+                u32::try_from(height).unwrap_or(u32::MAX)
+            }
+            _ => lock_height.saturating_add(1),
+        }
+    }
+}
+
+/// Bitcoin Cash coinbase maturity in ticks, CHIP-2025-03: 60,000, which is
+/// 100 ten-minute blocks or 1,000 one-minute blocks.
+pub const BCH_COINBASE_MATURITY_TICKS: i64 = 60_000;
 
 /// The proof-of-work limit of mainnet, testnet3, testnet4, chipnet and
 /// scalenet: `00000000ffff...ff`, 2^224 - 1. Its compact form is
@@ -90,6 +202,8 @@ pub struct BchAsert {
     pub easy_numerator: u32,
     /// See [`Self::easy_numerator`].
     pub easy_denominator: u32,
+    /// The network's move to one-minute blocks.
+    pub fast_blocks: FastBlocks,
 }
 
 impl BchAsert {
@@ -104,6 +218,7 @@ impl BchAsert {
         hard_divisor: MAINNET_HARD_DIVISOR,
         easy_numerator: MAINNET_EASY.0,
         easy_denominator: MAINNET_EASY.1,
+        fast_blocks: FastBlocks::MAINNET,
     };
 
     /// Chipnet (`CChipNetParams`), which shares testnet4's anchor
@@ -118,10 +233,15 @@ impl BchAsert {
         hard_divisor: TEST_NETWORK_HARD_DIVISOR,
         easy_numerator: TEST_NETWORK_EASY.0,
         easy_denominator: TEST_NETWORK_EASY.1,
+        fast_blocks: FastBlocks::CHIPNET,
     };
 
-    /// Testnet4: the same anchor and half-life as chipnet.
-    pub const TESTNET4: Self = Self::CHIPNET;
+    /// Testnet4: the same anchor and half-life as chipnet, and mainnet's
+    /// activation time.
+    pub const TESTNET4: Self = Self {
+        fast_blocks: FastBlocks::MAINNET,
+        ..Self::CHIPNET
+    };
 
     /// The parameters for a network P2Pool runs on. Regtest has no anchor in
     /// BCHN (nor does scalenet), so it has none here and its headers are not
@@ -138,17 +258,34 @@ impl BchAsert {
     /// and `parent_time`, as `GetNextASERTWorkRequired` computes it (before
     /// a test network's minimum-difficulty rule). `None` below the anchor,
     /// where ASERT does not govern.
+    ///
+    /// The parent's ticks and the new block's interval come from the
+    /// network's activation ([`FastBlocks`]): after it the target is ten
+    /// times easier, for a block ten times as frequent.
     pub fn next_target(&self, parent_height: u32, parent_time: u32) -> Option<U256> {
-        let height_diff = i64::from(parent_height.checked_sub(self.anchor_height)?);
+        if parent_height < self.anchor_height {
+            return None;
+        }
+        let tick_delta = self.fast_blocks.ticks(parent_height)
+            - i64::from(self.anchor_height) * BCH_BLOCK_SPACING;
         let time_diff = i64::from(parent_time) - self.anchor_parent_time;
         let reference = set_compact(self.anchor_bits)?;
         calculate_asert(
             reference,
             time_diff,
-            height_diff,
+            tick_delta,
+            BCH_BLOCK_SPACING,
+            self.fast_blocks.interval_after(parent_height),
             self.half_life,
             bch_pow_limit(),
         )
+    }
+
+    /// How long after its parent a test network block may take the
+    /// proof-of-work limit: more than twice the new block's interval, 20
+    /// minutes before activation and 2 minutes after.
+    pub fn min_difficulty_gap(&self, parent_height: u32) -> u32 {
+        (2 * self.fast_blocks.interval_after(parent_height)) as u32
     }
 
     /// [`Self::next_target`] in compact form: the nBits BCHN requires.
@@ -226,22 +363,40 @@ impl BchAsert {
     }
 }
 
-/// BCHN's `CalculateASERT`: `reference * 2^((time_diff - 600 *
-/// (height_diff + 1)) / half_life)` in 16.16 fixed point, clamped to
+/// BCHN's `CalculateASERT` with CHIP-2025-03's ticks: `reference *
+/// 2^((time_diff - (tick_delta + anchor_interval)) / half_life) *
+/// anchor_interval / next_interval` in 16.16 fixed point, clamped to
 /// `pow_limit` and to at least 1.
 ///
+/// `tick_delta` is the parent's ticks less the anchor's, `600 *
+/// height_diff` on a chain that has not activated one-minute blocks.
+/// `anchor_interval` is the anchor block's interval in ticks, 600 on every
+/// Bitcoin Cash network ([`BCH_BLOCK_SPACING`]), and `next_interval` the new
+/// block's, 600 or 60. Scaling by the ratio of the two can pass 2^256; the
+/// CHIP's reference then returns the limit, not the wrapped value, and so
+/// does this.
+///
 /// `None` where BCHN asserts instead: a zero reference or one above the
-/// limit, a negative height difference, a non-positive half-life, or a time
-/// so far off schedule that the fixed-point exponent would overflow
-/// (`|time_diff - 600 * height_diff| >= 2^47`).
+/// limit, a negative tick difference, a non-positive half-life, an
+/// interval that does not divide 600, or a time so far off schedule that
+/// the fixed-point exponent would overflow (`|time_diff - tick_delta| >=
+/// 2^47`).
 pub fn calculate_asert(
     reference: U256,
     time_diff: i64,
-    height_diff: i64,
+    tick_delta: i64,
+    anchor_interval: i64,
+    next_interval: i64,
     half_life: i64,
     pow_limit: U256,
 ) -> Option<U256> {
-    if reference.is_zero() || reference > pow_limit || height_diff < 0 || half_life <= 0 {
+    if reference.is_zero() || reference > pow_limit || tick_delta < 0 || half_life <= 0 {
+        return None;
+    }
+    let divides_600 = |interval: i64| {
+        (1..=BCH_BLOCK_SPACING).contains(&interval) && BCH_BLOCK_SPACING % interval == 0
+    };
+    if !divides_600(anchor_interval) || !divides_600(next_interval) {
         return None;
     }
     // BCHN needs leading zero bits in the limit to detect overflow; every
@@ -249,12 +404,12 @@ pub fn calculate_asert(
     if !(pow_limit >> 224).is_zero() {
         return None;
     }
-    let span = time_diff.checked_sub(BCH_BLOCK_SPACING.checked_mul(height_diff)?)?;
+    let span = time_diff.checked_sub(tick_delta)?;
     if span.unsigned_abs() >= 1 << (63 - 16) {
         return None;
     }
     // C++ and Rust both truncate toward zero in integer division.
-    let exponent = (span - BCH_BLOCK_SPACING) * 65_536 / half_life;
+    let exponent = (span - anchor_interval) * 65_536 / half_life;
     // `>>` on a negative i64 is arithmetic in both: it floors, so the
     // fraction below is always in 0..65536.
     let mut shifts = exponent >> 16;
@@ -283,6 +438,15 @@ pub fn calculate_asert(
     } else {
         next <<= shifts as usize;
     }
+    // The interval ratio, a whole number from 1 to 600 either way. A
+    // product past 2^256 is the limit (the CHIP's `ratio_guard_wrap_low`
+    // vector).
+    next = if anchor_interval >= next_interval {
+        next.checked_mul(U256::from((anchor_interval / next_interval) as u64))
+            .unwrap_or(pow_limit)
+    } else {
+        next / U256::from((next_interval / anchor_interval) as u64)
+    };
     if next.is_zero() {
         next = U256::one();
     } else if next > pow_limit {

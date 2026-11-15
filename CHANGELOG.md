@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+P2Pool follows Bitcoin Cash's one-minute blocks (CHIP-2025-03), which
+chipnet activated on 2026-11-15: block 332,450 is its last ten-minute
+block. A block's "ticks" are the sum of the target intervals up to it, 600
+per block up to the activation block and 60 after. ASERT counts ticks
+from its anchor and makes a one-minute block's target ten times easier, and
+a test network block may take the proof-of-work limit after twice its own
+interval, 2 minutes instead of 20. The header check on peers' Bitcoin Cash
+headers, the PPLNS window's sizing nBits and the merge-mining header band
+all use it, and the CHIP's ASERT and tick vectors and real chipnet headers
+on both sides of the switch pass. The payout tree waits for 60,000 ticks of
+coinbase maturity, 1,000 one-minute blocks, before it spends a coinbase. A
+Template Provider's block size floor shrinks to a tenth for a one-minute
+block. `p2poolv2_cli bch-trade refund` prints the first block a Bitcoin
+Cash refund is valid in, since a lock height now counts ten-minute units.
+Mainnet activates on 2027-05-15 and is not pinned yet: until it is, every
+mainnet block counts as a ten-minute block. No share-chain rule changes.
+
 The payout simulator has a `scale-levers` table for part 5 of the small
 miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
 Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,
