@@ -303,6 +303,9 @@ the simulation count nothing.
 | Metric | Type | Source |
 |---|---|---|
 | `p2p_connected_peers` | gauge | live read of node connection tracker |
+| `p2p_outgoing_peers` | gauge | live read of node outgoing peer target |
+| `p2p_incoming_peers` | gauge | connected peers less outgoing peers |
+| `p2p_outgoing_target_dials_total` | counter | node outgoing peer target |
 | `p2p_connections_total` | counter | node connection tracker |
 | `p2p_ping_failures_total` | counter | node connection tracker |
 | `p2p_connections_closed_unresponsive_total` | counter | node connection tracker |
@@ -325,10 +328,20 @@ unbounded and churn.
 `PING_FAILURE_THRESHOLD` consecutive ping failures -- a connection that
 negotiated but could not exchange messages (the 2026-09-17 fork).
 
+`p2p_outgoing_peers` counts connected peers with at least one outgoing
+connection and `p2p_incoming_peers` the rest of `p2p_connected_peers`.
+`p2p_outgoing_target_dials_total` counts dials started because the node had
+fewer outgoing peers than `[network] target_outgoing_peers`
+(`node/outgoing_peer_target.rs`; see `docs/p2p-network.md`).
+
 **Grafana / alerting:**
 - *P2P is up but broken* -- the signature of the 2026-09-17 incident:
   `rate(p2p_outbound_failures_total[5m]) > 0 and p2p_connected_peers > 0`
   sustained for 10 minutes.
+- *Below the outgoing target*: `p2p_outgoing_peers` under
+  `target_outgoing_peers` for an hour while
+  `rate(p2p_outgoing_target_dials_total[5m]) > 0`: the node knows peers but
+  reaches too few of them.
 - *Unresponsive connections*: `increase(p2p_connections_closed_unresponsive_total[1h])`
   as a stat; occasional closes are recovery working, a steady rate means a
   flaky link.

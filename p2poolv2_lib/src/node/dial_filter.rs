@@ -126,7 +126,7 @@ fn has_dns_component(address: &Multiaddr) -> bool {
     })
 }
 
-fn without_p2p_suffix(mut address: Multiaddr) -> Multiaddr {
+pub(crate) fn without_p2p_suffix(mut address: Multiaddr) -> Multiaddr {
     if matches!(address.iter().last(), Some(Protocol::P2p(_))) {
         address.pop();
     }

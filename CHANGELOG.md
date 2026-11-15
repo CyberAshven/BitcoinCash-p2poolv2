@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A node keeps at least 16 outgoing peers (`[network] target_outgoing_peers`,
+0 turns it off). Before, it kept whatever its `dial_peers` and Kademlia's
+queries left connected. While it has fewer, it dials one known peer a
+second from a book of up to 1,000 peers that Kademlia and Identify reported
+at public IPv4 or IPv6 addresses, chosen at random by network group and
+never in an IPv4 /16 or IPv6 /32 where it already has an outgoing peer
+(`dial_peers` hold no group), as Bitcoin Cash Node and P2Pool v1 do. It
+never goes past `max_established_outgoing`, leaves half of
+`max_pending_outgoing` to `dial_peers` and Kademlia, skips blocked IPs, and
+backs a peer off 60 seconds after each dial, doubled after each failure (a
+connection closed within 60 seconds counts as one) and forgotten after five.
+`/metrics` adds `p2p_outgoing_peers`, `p2p_incoming_peers` and
+`p2p_outgoing_target_dials_total`. Which peers a share is relayed to, and
+how, is unchanged, and no share-chain rule changes. In the network
+simulation, 16 peers instead of 8, with shares sent without their payouts
+and relayed after the header check, let 1,000 nodes carry a share every
+4.21 seconds instead of 5.01 and cut stale shares at 10-second shares from
+2.32% to 1.99% (`docs/p2p-network.md`, "Outgoing peers").
+
 The payout simulator has a `scale-levers` table for part 5 of the small
 miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
 Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,

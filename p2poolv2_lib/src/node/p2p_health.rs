@@ -21,6 +21,12 @@ use std::fmt::Write;
 pub struct P2pHealth {
     /// Peers with at least one open connection.
     pub connected_peers: u64,
+    /// Connected peers with at least one outgoing connection.
+    pub outgoing_peers: u64,
+    /// Connected peers with incoming connections only.
+    pub incoming_peers: u64,
+    /// Dials started toward `target_outgoing_peers` since start.
+    pub outgoing_target_dials_total: u64,
     /// Connections accepted since start.
     pub connections_total: u64,
     /// Ping failures reported by libp2p since start.
@@ -40,12 +46,30 @@ pub struct P2pHealth {
 impl P2pHealth {
     /// Render as Prometheus exposition text.
     pub fn exposition(&self) -> String {
-        let series: [(&str, &str, &str, u64); 8] = [
+        let series: [(&str, &str, &str, u64); 11] = [
             (
                 "p2p_connected_peers",
                 "gauge",
                 "Peers with at least one open connection",
                 self.connected_peers,
+            ),
+            (
+                "p2p_outgoing_peers",
+                "gauge",
+                "Connected peers with at least one outgoing connection",
+                self.outgoing_peers,
+            ),
+            (
+                "p2p_incoming_peers",
+                "gauge",
+                "Connected peers with incoming connections only",
+                self.incoming_peers,
+            ),
+            (
+                "p2p_outgoing_target_dials_total",
+                "counter",
+                "Dials started toward target_outgoing_peers since start",
+                self.outgoing_target_dials_total,
             ),
             (
                 "p2p_connections_total",
@@ -109,6 +133,9 @@ mod tests {
     fn test_exposition_renders_each_series_with_type_and_value() {
         let health = P2pHealth {
             connected_peers: 2,
+            outgoing_peers: 1,
+            incoming_peers: 1,
+            outgoing_target_dials_total: 8,
             connections_total: 5,
             ping_failures_total: 7,
             connections_closed_unresponsive_total: 1,
@@ -121,6 +148,11 @@ mod tests {
         let exposition = health.exposition();
 
         assert!(exposition.contains("# TYPE p2p_connected_peers gauge\np2p_connected_peers 2\n"));
+        assert!(exposition.contains("# TYPE p2p_outgoing_peers gauge\np2p_outgoing_peers 1\n"));
+        assert!(exposition.contains("# TYPE p2p_incoming_peers gauge\np2p_incoming_peers 1\n"));
+        assert!(exposition.contains(
+            "# TYPE p2p_outgoing_target_dials_total counter\np2p_outgoing_target_dials_total 8\n"
+        ));
         assert!(exposition.contains(
             "# TYPE p2p_connections_closed_unresponsive_total counter\np2p_connections_closed_unresponsive_total 1\n"
         ));

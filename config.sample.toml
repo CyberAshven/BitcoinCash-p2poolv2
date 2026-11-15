@@ -17,6 +17,13 @@ max_pending_incoming = 10
 max_pending_outgoing = 10
 max_established_incoming = 50
 max_established_outgoing = 50
+# Outgoing peers to keep, 16 unless set. While the node has fewer, it dials
+# a peer that its peers told it of (Kademlia and Identify) once a second,
+# never past max_established_outgoing and never in an IPv4 /16 or IPv6 /32
+# where it already has an outgoing peer (dial_peers do not count). It only
+# dials public IP addresses, so list peers on a LAN or on this machine in
+# dial_peers. 0 turns it off.
+# target_outgoing_peers = 16
 # Two, not one: room for an inbound and an outbound connection when two
 # nodes dial each other at once. More only duplicates traffic -- libp2p
 # multiplexes every protocol over a single connection.
