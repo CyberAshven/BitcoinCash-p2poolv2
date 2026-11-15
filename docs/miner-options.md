@@ -207,7 +207,7 @@ password: x
 | Method | What the node does |
 |---|---|
 | `mining.configure` with `version-rolling` | Answers with the node's `version_mask` (default `1fffe000`, BIP 320's general purpose bits). The node keeps only the submitted version bits inside the mask, so a miner that rolls others submits headers that do not meet its difficulty. |
-| `mining.suggest_difficulty` | Like `d=`: kept within the node's minimum and maximum and at or below the share difficulty, then vardiff. |
+| `mining.suggest_difficulty` | Like `d=`: kept within the node's minimum and maximum and at or below the share difficulty, then vardiff. When the login already set `d=` or `th=`, the suggestion is recorded but that difficulty stays and is sent again: some firmware, Whatsminer's among it, suggests one right after authorizing. |
 | `mining.extranonce.subscribe` | Acknowledged. The node never changes a session's extranonce. |
 | `mining.authorize` before `mining.subscribe` | Accepted, as some firmware sends it. |
 
