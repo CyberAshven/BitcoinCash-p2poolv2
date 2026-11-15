@@ -49,7 +49,8 @@ computes, up to its band cap `C`, never easier
   units of the minimum's, at least 1 and at most 64; down by `C / 512`
   otherwise; between 1 and 64);
 - `wanted_bits`, the target the share's node wanted for its miner before the
-  cap: it must be at least as hard as the share's own target.
+  cap. It is a signal: a share is never refused for it. When it is easier
+  than the weak target a weak share met, that weak share asks (below).
 
 The share's own target `T`, its `bits`, must then satisfy
 `T_asert / C <= T <= T_asert`, compared exactly on the 256-bit targets the
@@ -62,10 +63,18 @@ carry no band, and their target must equal the computed one.
 
 Since 2026-11-09 each Bitcoin Cash share header also carries its weak ratio
 `weak_ratio`, `R` in units of 1/1024, which must equal one step from the
-parent's (`next_weak_ratio` in `shares/weak.rs`: down by `R / 256` when the
-parent carried more than 32 weak shares, up by `R / 256` when it carried
-fewer, the same at exactly 32; between 1 and 256; 256 at genesis). Full
-validation, header sync and block receipt check it with the band.
+parent's (`next_weak_ratio` in `shares/weak.rs`; 256 at genesis). Since
+2026-11-15 the step follows the parent's asking weak shares:
+
+- when the parent carried at most 320 weak shares (`WEAK_FILL_MAX`) and more
+  than one in 64 of them ask (`weak_asking` × `WEAK_ASK_DIVISOR` > count), up
+  by `R / 256`, to at most 4096 (`R_ASK_MAX`);
+- otherwise as before: down by `R / 256` when the parent carried more than
+  32 weak shares (`WEAK_FILL`) or `R` is above 256 (`R_MAX`), up by `R / 256`
+  to at most 256 when it carried fewer, the same at exactly 32;
+- never below 1.
+
+Full validation, header sync and block receipt check it with the band.
 ### The payout level (Bitcoin Cash)
 
 Since 2026-11-09 a Bitcoin Cash share header also carries `payout_level`,
@@ -202,8 +211,9 @@ its proof-of-work hash. It is valid when:
    A full share with that hash would have the same header, whose bits the
    hash misses, so the carried-once rule below covers it.
 
-A share carries at most 64 weak shares (`WEAK_CAP`) in 96 KiB (`WEAK_BYTES`).
-Its header commits to them under tag `0x26`: its weak ratio, their count and
+A share carries at most 640 weak shares (`WEAK_CAP`) in 960 KiB (`WEAK_BYTES`).
+Its header commits to them under tag `0x26`: its weak ratio, their count, how
+many of them ask (`weak_asking`, never more than the count) and
 the merkle root of their whole encodings, each leaf the SHA-256d of one weak
 share as sent (share header with its coinbase proof, scriptSig, total value,
 branch), so the proof of work fixes every byte of them. The body check

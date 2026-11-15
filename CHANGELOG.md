@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Weak shares follow the asks (issue #79, part 6), a flag day: protocol
+segment `weak4-640-100-48-256-320-64-4096`, store format 10 and new genesis
+shares. A weak share asks when its `wanted_bits` is easier than the weak
+target it met; each Bitcoin Cash share header counts the asking weak shares
+it carries (`weak_asking`, under tag `0x26`, never more than the count). While
+a share carries at most 320 weak shares and more than one in 64 of them ask,
+the weak ratio rises, up to 4096; otherwise it steps as before. A share may
+carry 640 weak shares in 960 KiB, and the P2P message limit is 2,144 KiB. A
+node asks for a miner that would find fewer than 16 weak shares a month. The
+sim build's `[sim] weak_asks` and the swarm's `WEAK_ASKS` make chosen nodes
+ask, and the sim stats line shows how many weak shares a share carries and
+how many of them ask. `wanted_bits` easier than `bits` no longer makes a share
+invalid.
+
 The small miners design page has a section 6, a proposal that is not built:
 weak shares that follow the asks. A weak share would ask for an easier weak
 target when its node wanted one for its miner, and while more than one in 64

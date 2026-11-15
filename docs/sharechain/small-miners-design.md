@@ -3,7 +3,7 @@
 Status: parts 1 and 2 implemented on branch feat/one-chain-band; part 4
 implemented on branch feat/payout-levels, on top of it (store format 4);
 part 3 on branch feat/weak-shares, on top of both (store format 5); part 5
-is an outline that is not planned, and part 6 is agreed and not built.
+is an outline that is not planned, and part 6 is built (PR #118, a flag day).
 Tracked in
 [issue #79](https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues/79).
 Values marked *(sim)* are first proposals that the simulation in row 2 of the
@@ -17,7 +17,7 @@ chain, the outline of a fifth and the proposal of a sixth:
 3. weak shares;
 4. payout levels, a payout threshold paid by a draw;
 5. a dynamic share period (outline only);
-6. weak shares that follow the asks (agreed, not built).
+6. weak shares that follow the asks (built, PR #118).
 
 Parts 1 to 4 change share-chain rules. None of them changes Bitcoin Cash's
 own rules: the blocks P2Pool finds stay ordinary Bitcoin Cash blocks, and
@@ -112,8 +112,11 @@ Each Bitcoin Cash share header gains three fields:
 
 All three are committed in the share commitment after the share version (tag
 byte `0x24`, then the 4-byte compact `wanted_bits`, the 4-byte `band_cap` and
-the 4-byte compact `asert_bits`), so the proof of work fixes them. `wanted_bits` must be at least as hard as `bits`; it
-is a signal only and never makes a share valid or invalid beyond that. Carrying
+the 4-byte compact `asert_bits`), so the proof of work fixes them. `wanted_bits`
+is a signal only and never makes a share valid or invalid. It may be easier
+than `bits`: a weak share whose `wanted_bits` is easier than the weak target
+it met asks (section 6), and until the asks it had to be at least as hard as
+`bits`. Carrying
 `band_cap` in the header lets a node check it from the parent's header alone,
 during header sync as well as full validation, with no walk back to genesis.
 In the rule above, `C(parent)` is therefore read as the share's own `band_cap`,
@@ -285,16 +288,19 @@ already at the ceiling, weak shares are simply never needed.
 | Constant | Value |
 |---|---|
 | `R_MAX` | 256 (4096 until study #85) |
-| `WEAK_CAP` | 64 weak shares per share *(sim)* |
-| `WEAK_FILL` | 32, half the cap *(sim)* |
-| `WEAK_BYTES` | 96 KiB of weak shares per share *(sim)* |
+| `WEAK_CAP` | 640 weak shares per share, twice `WEAK_FILL_MAX` (64 until part 6) |
+| `WEAK_FILL` | 32: the weak ratio steps towards it while nobody asks |
+| `WEAK_BYTES` | 960 KiB of weak shares per share (96 KiB until part 6) |
+| `WEAK_FILL_MAX`, `WEAK_ASK_DIVISOR`, `R_ASK_MAX` | 320, 64 and 4096: the asks (section 6) |
 | `WEAK_DEPTH` | 48: a weak share's parent at most 48 shares below the share that carries it, 8 minutes at 10-second shares (6 until study #85) |
 | `INCLUDER_CUT` | 100 basis points (1%; 500 until study #85): at `WEAK_DEPTH` 48, refusing to carry others' weak shares gains a coalition of 90% of the hashrate at most 0.06%, and costs a half-hashrate coalition 0.2 to 0.3% of its income and a lone refusing node 0.2 to 0.9% |
 
 `WEAK_DEPTH` 48 costs a node memory and some reading. Its weak pool holds at
-most 4 × 64 × 48 = 12,288 weak shares, about 18 MB at the 1.5 KiB average
-`WEAK_BYTES` allows, and at most 3,072 (4.5 MiB) waiting for parents it does
-not have; a share's carried-once check reads the weak shares of up to 47
+most 4 × 640 × 48 = 122,880 weak shares, about 180 MB at the 1.5 KiB average
+`WEAK_BYTES` allows, and at most 30,720 (45 MiB) waiting for parents it does
+not have (12,288 and 3,072 with 64 a share, before part 6); it starts with
+room for the 12,288 and grows only while the asks open the count. A share's
+carried-once check reads the weak shares of up to 47
 ancestors. In steady state the next share carries almost every weak share,
 so the pool holds far fewer. A weak share, like a share, needs only a known
 Bitcoin Cash prev, so waiting does not make it stale.
@@ -600,7 +606,7 @@ shares a share do not buy without the stale shares. This part stays an
 outline. Section 6 proposes how the number of weak shares should grow with
 a pool.
 
-## 6. Weak shares that follow the asks (agreed, not built)
+## 6. Weak shares that follow the asks
 
 This section gives a rule and its simulation. The maintainer chose it on
 2026-11-14, with the constants below, over raising `WEAK_FILL` once. It is
@@ -841,7 +847,7 @@ store format 10, because the header gains `weak_asking`.
 | 3 Weak shares | `weak-64-500-6`, then `weak2-64-500-6`, then `weak2-64-100-48-256`, then `weak3-64-100-48-256` | 5, then 6, then 7, then 9 | same flag day; old nodes cannot read the new header or the weak share message; the weak root's leaves then became whole encodings, a second flag day, and study #85's cut, depth and `R_MAX` a third |
 | 4 Payout levels | `levels-546x2`, then `levels-546x2-k1` | 4, then 8 | same flag day; old nodes cannot read the longer header |
 | 5 Share period | none; share version 2 | 3 | share-version vote; not planned (section 5) |
-| 6 Weak shares that follow the asks (agreed, not built) | a new weak share segment | 10 | flag day: the header gains `weak_asking` |
+| 6 Weak shares that follow the asks | `weak4-640-100-48-256-320-64-4096` | 10 | flag day: the header gains `weak_asking` and a new genesis |
 
 A part that changes what a stored share holds raises the store format when
 it merges, so the numbers follow the merge order: part 4 raised it to 4
