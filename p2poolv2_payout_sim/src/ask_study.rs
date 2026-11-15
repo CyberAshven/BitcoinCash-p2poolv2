@@ -32,7 +32,7 @@ const ASK_HASHRATE_MULTIPLES: [f64; 4] = [1.0, 10.0, 100.0, 270.0];
 const ASK_STUDY_MULTIPLE: f64 = 10.0;
 
 /// The miner mixes of the mixes table, in table order.
-const ASK_MIXES: [MinerMix; 7] = [
+pub(crate) const ASK_MIXES: [MinerMix; 7] = [
     MinerMix::Home,
     MinerMix::HalfIndustrial,
     MinerMix::MostlyIndustrial,
@@ -65,7 +65,7 @@ const CENSORING_SHARES: [f64; 4] = [0.25, 0.5, 0.75, 0.9];
 
 /// How a row's weak shares are steered.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum WeakRule {
+pub(crate) enum WeakRule {
     /// The rules as they are: `WEAK_FILL` weak shares a share.
     Today,
     /// The proposal.
@@ -87,7 +87,12 @@ impl WeakRule {
 
 /// The scale table's scenario at `multiple` and `fraction`, its weak shares
 /// steered by `rule`.
-fn ruled_scenario(base: &Scenario, multiple: f64, fraction: f64, rule: WeakRule) -> Scenario {
+pub(crate) fn ruled_scenario(
+    base: &Scenario,
+    multiple: f64,
+    fraction: f64,
+    rule: WeakRule,
+) -> Scenario {
     match rule {
         WeakRule::Today => scale_scenario(base, multiple, fraction),
         WeakRule::Asks(asks) => Scenario {
@@ -104,7 +109,7 @@ fn ruled_scenario(base: &Scenario, multiple: f64, fraction: f64, rule: WeakRule)
 
 /// The cells every ask table ends with: what the chain's weak shares settle
 /// at, what relaying them costs, and what the Bitaxe and the ASIC get.
-fn outcome_cells(report: &Report) -> Vec<String> {
+pub(crate) fn outcome_cells(report: &Report) -> Vec<String> {
     let chain = report.home_chain();
     let weak = chain.weak.unwrap_or_default();
     let weak_difficulty = (chain.asert_difficulty / weak.mean_ratio).max(MINI_CEILING_DIFFICULTY);
@@ -129,7 +134,7 @@ fn outcome_cells(report: &Report) -> Vec<String> {
 }
 
 /// The headers of `outcome_cells`, after the `leading` ones.
-fn outcome_headers(leading: &[&str]) -> Vec<String> {
+pub(crate) fn outcome_headers(leading: &[&str]) -> Vec<String> {
     let mut headers: Vec<String> = leading.iter().map(|cell| cell.to_string()).collect();
     headers.extend(
         [
@@ -154,7 +159,7 @@ fn outcome_headers(leading: &[&str]) -> Vec<String> {
 }
 
 /// A table of `rows`, each a scenario with its leading cells.
-fn ask_table(leading: &[&str], rows: Vec<(Vec<String>, Scenario)>) -> String {
+pub(crate) fn ask_table(leading: &[&str], rows: Vec<(Vec<String>, Scenario)>) -> String {
     let (labels, scenarios): (Vec<Vec<String>>, Vec<Scenario>) = rows.into_iter().unzip();
     let reports = run_scenarios(&scenarios);
     let rows: Vec<Vec<String>> = labels
