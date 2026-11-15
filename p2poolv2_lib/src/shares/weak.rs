@@ -19,6 +19,16 @@
 //! shares carry more than [`WEAK_FILL`] weak shares and rising when they
 //! carry fewer, so the weak difficulty follows the home miners who use it.
 //!
+//! A weak share asks for an easier weak target when its `wanted_bits` is
+//! easier than the weak target it met ([`weak_share_asks`]), and a share
+//! header counts the asking weak shares it carries as `weak_asking`. While
+//! more than one in [`WEAK_ASK_DIVISOR`] of the weak shares a share carried
+//! ask, `R` rises instead, past `R_MAX` as far as `R_ASK_MAX`, until fewer
+//! ask or a share carries more than [`WEAK_FILL_MAX`] (part 6 of the design
+//! page). The number of weak shares a share carries then sits between
+//! [`WEAK_FILL`] and [`WEAK_FILL_MAX`], where the miners that need more put
+//! it.
+//!
 //! Every proof of work from a job at the minimum, a full share, an uncle or
 //! a weak share, is credited in the PPLNS window at the weak work
 //! `2^256 / (T_weak(parent) + 1)` ([`weak_work`]); a share heavier than the
@@ -45,29 +55,47 @@ use serde::{Deserialize, Serialize};
 /// `weak_ratio` of a ratio of one, `R = 1`: the weak target is the minimum.
 pub const WEAK_RATIO_UNIT: u32 = 1024;
 
-/// `R_MAX`: a weak share is at most 256 times easier than the minimum
-/// (4096 until 2026-11-12, study #85).
+/// `R_MAX`: without asks a weak share is at most 256 times easier than the
+/// minimum (4096 until 2026-11-12, study #85).
 pub const WEAK_RATIO_MAX_MULTIPLE: u32 = 256;
 
-/// The largest `weak_ratio`, `R_MAX` in units of 1/1024.
+/// The largest `weak_ratio` without asks, `R_MAX` in units of 1/1024.
 pub const WEAK_RATIO_MAX: u32 = WEAK_RATIO_MAX_MULTIPLE * WEAK_RATIO_UNIT;
 
-/// The genesis share's `weak_ratio`: the easiest weak target, so a young
-/// chain's first weak shares are easy and `R` falls as the slots fill.
+/// `R_ASK_MAX`: while weak shares ask, a weak share is at most 4096 times
+/// easier than the minimum.
+pub const WEAK_RATIO_ASK_MAX_MULTIPLE: u32 = 4096;
+
+/// The largest `weak_ratio` asks may reach, `R_ASK_MAX` in units of 1/1024.
+pub const WEAK_RATIO_ASK_MAX: u32 = WEAK_RATIO_ASK_MAX_MULTIPLE * WEAK_RATIO_UNIT;
+
+/// The genesis share's `weak_ratio`: the easiest weak target without asks,
+/// so a young chain's first weak shares are easy and `R` falls as the slots
+/// fill.
 pub const GENESIS_WEAK_RATIO: u32 = WEAK_RATIO_MAX;
 
 /// One step of the weak ratio is `1 / WEAK_RATIO_STEP_DIVISOR` of the ratio.
 pub const WEAK_RATIO_STEP_DIVISOR: u32 = 256;
 
-/// `WEAK_CAP`: the most weak shares one share may carry.
-pub const WEAK_CAP: usize = 64;
+/// `WEAK_CAP`: the most weak shares one share may carry, twice
+/// [`WEAK_FILL_MAX`] (64 until 2026-11-15, twice [`WEAK_FILL`]).
+pub const WEAK_CAP: usize = 640;
 
-/// `WEAK_FILL`: the number of carried weak shares that keeps `R` where it
-/// is, half the cap. More lower `R`, fewer raise it.
+/// `WEAK_FILL`: the number of carried weak shares `R` steers towards while
+/// none ask. More lower `R`, fewer raise it.
 pub const WEAK_FILL: u16 = 32;
 
-/// `WEAK_BYTES`: the most bytes of weak shares one share may carry, 96 KiB.
-pub const WEAK_BYTES: usize = 96 * 1024;
+/// `WEAK_FILL_MAX`: asks stop counting once a share carries more weak shares
+/// than this, so asks steer `R` towards it at most.
+pub const WEAK_FILL_MAX: u16 = 320;
+
+/// `WEAK_ASK_DIVISOR`: a share was asked when more than one in this many of
+/// the weak shares it carried ask.
+pub const WEAK_ASK_DIVISOR: u32 = 64;
+
+/// `WEAK_BYTES`: the most bytes of weak shares one share may carry, 960 KiB
+/// (96 KiB until 2026-11-15, with [`WEAK_CAP`]).
+pub const WEAK_BYTES: usize = 960 * 1024;
 
 /// `WEAK_DEPTH`: a carried weak share's parent is at most this many shares
 /// below the share that carries it, 8 minutes at
@@ -88,9 +116,11 @@ const BASIS_POINTS: u128 = 10_000;
 pub const MAX_WEAK_SCRIPT_SIG_BYTES: usize = 100;
 
 /// Name of the weak-share rule in Bitcoin Cash protocol strings: at most
-/// [`WEAK_CAP`] (64) weak shares a share, an includer cut of
-/// [`INCLUDER_CUT`] (100) basis points, a depth of [`WEAK_DEPTH`] (48) and an
-/// `R_MAX` of [`WEAK_RATIO_MAX_MULTIPLE`] (256).
+/// [`WEAK_CAP`] (640) weak shares a share, an includer cut of
+/// [`INCLUDER_CUT`] (100) basis points, a depth of [`WEAK_DEPTH`] (48), an
+/// `R_MAX` of [`WEAK_RATIO_MAX_MULTIPLE`] (256), and for the asks a
+/// [`WEAK_FILL_MAX`] of 320, a [`WEAK_ASK_DIVISOR`] of 64 and an `R_ASK_MAX`
+/// of [`WEAK_RATIO_ASK_MAX_MULTIPLE`] (4096).
 ///
 /// `weak2` since 2026-11-12: a share's weak root commits each carried weak
 /// share's whole encoding ([`WeakShare::committed_hash`]), where `weak`
@@ -108,29 +138,75 @@ pub const MAX_WEAK_SCRIPT_SIG_BYTES: usize = 100;
 /// held to its carrier's time, where `weak2` held it to each node's clock
 /// and so let two nodes disagree for good about one share. Nodes on the two
 /// do not accept the same shares: a flag day, with a fresh store.
-pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak3-64-100-48-256";
+///
+/// `weak4-640-100-48-256-320-64-4096` since 2026-11-15 (part 6 of the design
+/// page): the weak ratio follows the weak shares that ask
+/// ([`next_weak_ratio`]). A share header counts the asking weak shares it
+/// carries as `weak_asking`, `wanted_bits` may be easier than `bits`, a
+/// share may carry 640 weak shares in 960 KiB where it carried 64 in 96 KiB,
+/// and the tag gained `WEAK_FILL_MAX`, `WEAK_ASK_DIVISOR` and `R_ASK_MAX`. A
+/// node on `weak3` cannot read the longer header and steps the weak ratio
+/// without the asks, and the header change gives the chain a new genesis: a
+/// flag day, with a fresh store.
+pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak4-640-100-48-256-320-64-4096";
 
-/// The weak ratio of a share whose parent has `parent_weak_ratio` and
-/// carried `parent_weak_count` weak shares: one step from the parent's.
+/// The weak ratio of a share whose parent has `parent_weak_ratio`, carried
+/// `parent_weak_count` weak shares and counted `parent_weak_asking` of them
+/// asking ([`weak_share_asks`]): one step from the parent's.
 ///
 /// ```text
-/// weak_ratio(child) = parent.weak_ratio - parent.weak_ratio / 256   if the parent carried more than WEAK_FILL
-/// weak_ratio(child) = parent.weak_ratio + parent.weak_ratio / 256   if it carried fewer
+/// asked = parent.weak_count <= WEAK_FILL_MAX
+///         and parent.weak_asking * WEAK_ASK_DIVISOR > parent.weak_count
+///
+/// if asked:
+/// weak_ratio(child) = parent.weak_ratio + parent.weak_ratio / 256   at most R_ASK_MAX * 1024
+/// otherwise:
+/// weak_ratio(child) = parent.weak_ratio - parent.weak_ratio / 256   if the parent carried more than WEAK_FILL,
+///                                                                  or its ratio is above R_MAX * 1024
+/// weak_ratio(child) = parent.weak_ratio + parent.weak_ratio / 256   if it carried fewer, at most R_MAX * 1024
 /// weak_ratio(child) = parent.weak_ratio                            if exactly WEAK_FILL
-/// then clamped to 1024 .. R_MAX * 1024
+/// never below 1024
 /// ```
 ///
+/// Without asks the ratio moves towards [`WEAK_FILL`] weak shares a share,
+/// within `R_MAX`. While more than one in [`WEAK_ASK_DIVISOR`] of the weak
+/// shares a share carried ask, it rises instead, so weak shares get easier,
+/// until fewer ask or a share carries more than [`WEAK_FILL_MAX`]. A ratio
+/// the asks left above `R_MAX` comes back down once nobody asks.
+///
 /// Integer arithmetic only, so every node computes the same ratio.
-pub fn next_weak_ratio(parent_weak_ratio: u32, parent_weak_count: u16) -> u32 {
+pub fn next_weak_ratio(
+    parent_weak_ratio: u32,
+    parent_weak_count: u16,
+    parent_weak_asking: u16,
+) -> u32 {
     let weak_ratio = u64::from(parent_weak_ratio);
     let step = weak_ratio / u64::from(WEAK_RATIO_STEP_DIVISOR);
-    let next = match parent_weak_count.cmp(&WEAK_FILL) {
-        std::cmp::Ordering::Greater => weak_ratio - step,
-        std::cmp::Ordering::Less => weak_ratio + step,
-        std::cmp::Ordering::Equal => weak_ratio,
+    let idle_max = u64::from(WEAK_RATIO_MAX);
+    let asked = parent_weak_count <= WEAK_FILL_MAX
+        && u32::from(parent_weak_asking) * WEAK_ASK_DIVISOR > u32::from(parent_weak_count);
+    let next = if asked {
+        (weak_ratio + step).min(u64::from(WEAK_RATIO_ASK_MAX))
+    } else if parent_weak_count > WEAK_FILL || weak_ratio > idle_max {
+        weak_ratio - step
+    } else if parent_weak_count < WEAK_FILL {
+        (weak_ratio + step).min(idle_max)
+    } else {
+        weak_ratio
     };
-    //* The clamp keeps the result within u32.
-    next.clamp(u64::from(WEAK_RATIO_UNIT), u64::from(WEAK_RATIO_MAX)) as u32
+    //* No branch passes the larger of the parent's ratio and R_ASK_MAX, so
+    //* the result stays within u32.
+    next.max(u64::from(WEAK_RATIO_UNIT)) as u32
+}
+
+/// Whether a weak share with `header` asks for an easier weak target: its
+/// `wanted_bits` is easier than `weak_target`, the weak target it met, its
+/// parent's ([`parent_weak_target`]). The comparison is on the exact 256-bit
+/// targets. A share header counts the asking weak shares it carries as
+/// `weak_asking`, which moves the next share's weak ratio
+/// ([`next_weak_ratio`]).
+pub fn weak_share_asks(header: &ShareHeader, weak_target: Target) -> bool {
+    Target::from_compact(header.wanted_bits) > weak_target
 }
 
 /// The weak target of a share with minimum `minimum` and weak ratio
@@ -141,10 +217,10 @@ pub fn next_weak_ratio(parent_weak_ratio: u32, parent_weak_count: u16) -> u32 {
 /// 256-bit targets, and never harder than the minimum itself: on a real
 /// chain the minimum is never easier than the ceiling, so that bound only
 /// matters for a share easier than the ceiling, whose weak target is then
-/// its own minimum. A ratio outside `1024 .. R_MAX * 1024` is read clamped,
-/// as a header that carries none reads zero.
+/// its own minimum. A ratio outside `1024 .. R_ASK_MAX * 1024` is read
+/// clamped, as a header that carries none reads zero.
 pub fn weak_target(minimum: CompactTarget, weak_ratio: u32, ceiling: CompactTarget) -> Target {
-    let ratio = weak_ratio.clamp(WEAK_RATIO_UNIT, WEAK_RATIO_MAX);
+    let ratio = weak_ratio.clamp(WEAK_RATIO_UNIT, WEAK_RATIO_ASK_MAX);
     let minimum_wide = target_to_u512(Target::from_compact(minimum));
     let scaled = minimum_wide * U512::from(ratio) / U512::from(WEAK_RATIO_UNIT);
     let ceiling_wide = target_to_u512(Target::from_compact(ceiling));
@@ -577,49 +653,149 @@ mod tests {
     }
 
     #[test]
-    fn the_rule_tag_names_the_cap_the_includer_cut_and_the_depth() {
+    fn the_rule_tag_names_the_cap_the_includer_cut_the_depth_and_the_asks() {
         assert_eq!(
             BCH_WEAK_SHARE_RULE_TAG,
-            format!("weak3-{WEAK_CAP}-{INCLUDER_CUT}-{WEAK_DEPTH}-{WEAK_RATIO_MAX_MULTIPLE}")
+            format!(
+                "weak4-{WEAK_CAP}-{INCLUDER_CUT}-{WEAK_DEPTH}-{WEAK_RATIO_MAX_MULTIPLE}-{WEAK_FILL_MAX}-{WEAK_ASK_DIVISOR}-{WEAK_RATIO_ASK_MAX_MULTIPLE}"
+            )
         );
+    }
+
+    /// The numbers part 6 of the design page gives: the cap is twice the most
+    /// asks steer towards, in ten times the bytes it had at 64.
+    #[test]
+    fn the_cap_is_twice_the_most_asks_steer_towards() {
+        assert_eq!(WEAK_CAP, 2 * usize::from(WEAK_FILL_MAX));
+        assert_eq!(WEAK_CAP, 640);
+        assert_eq!(WEAK_BYTES, 960 * 1024);
     }
 
     #[test]
     fn a_parent_carrying_more_than_the_fill_lowers_the_ratio_one_step() {
-        assert_eq!(next_weak_ratio(256_000, WEAK_FILL + 1), 256_000 - 1_000);
+        assert_eq!(next_weak_ratio(256_000, WEAK_FILL + 1, 0), 256_000 - 1_000);
     }
 
     #[test]
     fn a_parent_carrying_fewer_than_the_fill_raises_the_ratio_one_step() {
-        assert_eq!(next_weak_ratio(256_000, WEAK_FILL - 1), 256_000 + 1_000);
+        assert_eq!(next_weak_ratio(256_000, WEAK_FILL - 1, 0), 256_000 + 1_000);
     }
 
     #[test]
     fn a_parent_carrying_exactly_the_fill_keeps_the_ratio() {
-        assert_eq!(next_weak_ratio(256_000, WEAK_FILL), 256_000);
+        assert_eq!(next_weak_ratio(256_000, WEAK_FILL, 0), 256_000);
     }
 
     #[test]
     fn a_genesis_parent_keeps_the_easiest_ratio() {
-        assert_eq!(next_weak_ratio(GENESIS_WEAK_RATIO, 0), WEAK_RATIO_MAX);
+        assert_eq!(next_weak_ratio(GENESIS_WEAK_RATIO, 0, 0), WEAK_RATIO_MAX);
     }
 
     #[test]
-    fn the_ratio_never_rises_past_r_max() {
-        assert_eq!(next_weak_ratio(WEAK_RATIO_MAX - 1, 0), WEAK_RATIO_MAX);
+    fn without_asks_the_ratio_never_rises_past_r_max() {
+        assert_eq!(next_weak_ratio(WEAK_RATIO_MAX - 1, 0, 0), WEAK_RATIO_MAX);
     }
 
     #[test]
     fn the_ratio_never_falls_below_one() {
         assert_eq!(
-            next_weak_ratio(WEAK_RATIO_UNIT, WEAK_CAP as u16),
+            next_weak_ratio(WEAK_RATIO_UNIT, WEAK_CAP as u16, 0),
             WEAK_RATIO_UNIT
         );
     }
 
     #[test]
     fn a_ratio_below_one_from_a_parent_without_one_steps_to_one() {
-        assert_eq!(next_weak_ratio(0, 0), WEAK_RATIO_UNIT);
+        assert_eq!(next_weak_ratio(0, 0, 0), WEAK_RATIO_UNIT);
+    }
+
+    //* The cases of the payout simulator's `next_weak_ratio_with_asks`
+    //* (`p2poolv2_payout_sim/src/asks/tests.rs`), with the same numbers, so
+    //* the chain's step and the simulated one agree.
+
+    #[test]
+    fn asked_the_ratio_rises_past_r_max() {
+        assert_eq!(
+            next_weak_ratio(WEAK_RATIO_MAX, 40, 1),
+            WEAK_RATIO_MAX + 1_024
+        );
+    }
+
+    #[test]
+    fn asked_the_ratio_stops_at_the_ask_maximum() {
+        assert_eq!(
+            next_weak_ratio(WEAK_RATIO_ASK_MAX, 40, 40),
+            WEAK_RATIO_ASK_MAX
+        );
+        assert_eq!(
+            next_weak_ratio(WEAK_RATIO_ASK_MAX - 1, 40, 40),
+            WEAK_RATIO_ASK_MAX
+        );
+    }
+
+    #[test]
+    fn asks_do_not_lift_the_ratio_once_a_share_carries_more_than_the_fill_maximum() {
+        assert_eq!(
+            next_weak_ratio(102_400, WEAK_FILL_MAX, WEAK_FILL_MAX),
+            102_400 + 400
+        );
+        assert_eq!(
+            next_weak_ratio(102_400, WEAK_FILL_MAX + 1, WEAK_FILL_MAX + 1),
+            102_400 - 400
+        );
+    }
+
+    #[test]
+    fn asks_of_one_weak_share_in_the_divisor_do_not_count_and_one_more_does() {
+        assert_eq!(next_weak_ratio(102_400, 128, 2), 102_400 - 400);
+        assert_eq!(next_weak_ratio(102_400, 128, 3), 102_400 + 400);
+    }
+
+    #[test]
+    fn asked_below_the_fill_the_ratio_rises_as_it_would_without_asks() {
+        assert_eq!(next_weak_ratio(102_400, 8, 1), 102_400 + 400);
+    }
+
+    #[test]
+    fn a_ratio_above_r_max_comes_down_once_nobody_asks() {
+        let above = 300 * WEAK_RATIO_UNIT;
+
+        assert_eq!(next_weak_ratio(above, 0, 0), above - above / 256);
+        assert_eq!(next_weak_ratio(above, WEAK_FILL, 0), above - above / 256);
+    }
+
+    /// The weak target follows a ratio the asks lifted above `R_MAX`, as far
+    /// as `R_ASK_MAX`.
+    #[test]
+    fn the_weak_target_follows_a_ratio_above_r_max() {
+        let ceiling = CompactTarget::from_consensus(0x2000_ffff);
+        let minimum = CompactTarget::from_consensus(MINIMUM);
+        let at_ask_maximum = weak_target(minimum, WEAK_RATIO_ASK_MAX, ceiling);
+
+        assert_eq!(
+            at_ask_maximum,
+            Target::from_compact(CompactTarget::from_consensus(0x1e04_0000))
+        );
+        assert_eq!(weak_target(minimum, u32::MAX, ceiling), at_ask_maximum);
+        assert!(at_ask_maximum > weak_target(minimum, WEAK_RATIO_MAX, ceiling));
+    }
+
+    /// A weak share asks when its wanted bits are easier than the weak target
+    /// it met, compared exactly: the target itself does not ask.
+    #[test]
+    fn a_weak_share_asks_when_its_wanted_bits_are_easier_than_the_weak_target() {
+        let weak_target = Target::from_compact(CompactTarget::from_consensus(0x1d01_0000));
+        let mut header = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+            .build()
+            .header;
+
+        header.wanted_bits = CompactTarget::from_consensus(0x1d01_0001);
+        assert!(weak_share_asks(&header, weak_target));
+        header.wanted_bits = CompactTarget::from_consensus(0x1d01_0000);
+        assert!(!weak_share_asks(&header, weak_target));
+        header.wanted_bits = CompactTarget::from_consensus(MINIMUM);
+        assert!(!weak_share_asks(&header, weak_target));
     }
 
     #[test]

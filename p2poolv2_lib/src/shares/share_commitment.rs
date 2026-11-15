@@ -101,6 +101,9 @@ pub struct ShareCommitment {
     pub weak_ratio: u32,
     /// How many weak shares the share carries (`ShareHeader::weak_count`).
     pub weak_count: u16,
+    /// How many of the carried weak shares ask for an easier weak target
+    /// (`ShareHeader::weak_asking`).
+    pub weak_asking: u16,
     /// The merkle root of the carried weak shares' whole encodings
     /// (`ShareHeader::weak_root`, `shares::weak::weak_root`).
     pub weak_root: sha256d::Hash,
@@ -199,15 +202,17 @@ pub(crate) fn append_payout_level(suffix: &mut Vec<u8>, payout_level: u8) {
 
 /// Append a share's weak shares to a commitment suffix, right after its
 /// payout level: [`WEAK_SHARES_TAG`], the 4-byte `weak_ratio`, the 2-byte
-/// count and the 32-byte merkle root of the carried weak shares' whole
-/// encodings (`shares::weak::weak_root`). [`ShareCommitment::hash`] appends
-/// it for a Bitcoin Cash share owner; the notify path appends the template's
-/// after the payout level, since every miner on a template carries the same
-/// weak shares.
+/// count, the 2-byte `weak_asking`, how many of them ask, and the 32-byte
+/// merkle root of the carried weak shares' whole encodings
+/// (`shares::weak::weak_root`). [`ShareCommitment::hash`] appends it for a
+/// Bitcoin Cash share owner; the notify path appends the template's after the
+/// payout level, since every miner on a template carries the same weak
+/// shares.
 pub(crate) fn append_weak_shares(
     suffix: &mut Vec<u8>,
     weak_ratio: u32,
     weak_count: u16,
+    weak_asking: u16,
     weak_root: sha256d::Hash,
 ) {
     suffix.push(WEAK_SHARES_TAG);
@@ -217,6 +222,9 @@ pub(crate) fn append_weak_shares(
     weak_count
         .consensus_encode(suffix)
         .expect("encoding the weak share count should never fail");
+    weak_asking
+        .consensus_encode(suffix)
+        .expect("encoding the asking weak share count should never fail");
     weak_root
         .consensus_encode(suffix)
         .expect("encoding the weak share root should never fail");
@@ -370,8 +378,8 @@ struct JobTokenTerms {
 /// donation address and amount, optional fee address and amount, the share
 /// version, the band cap, the payout level and the weak ratio. Its share
 /// bits are the minimum, so a declared share's minimum and wanted bits are
-/// its bits, and a declared share carries no weak shares. At most 255
-/// bytes. More than [`MAX_UNCLES`] uncles, a payout level above 7
+/// its bits, and a declared share carries no weak shares, so none ask. At
+/// most 255 bytes. More than [`MAX_UNCLES`] uncles, a payout level above 7
 /// (`MAX_PAYOUT_LEVEL`) or below the lowest (`MIN_PAYOUT_LEVEL`), or bytes
 /// left over, is not a token.
 fn decode_job_token_terms(
@@ -465,6 +473,7 @@ impl ShareCommitment {
             payout_level: terms.payout_level,
             weak_ratio: terms.weak_ratio,
             weak_count: 0,
+            weak_asking: 0,
             weak_root: crate::shares::weak::empty_weak_root(),
         })
     }
@@ -518,6 +527,7 @@ impl ShareCommitment {
                 &mut suffix,
                 self.weak_ratio,
                 self.weak_count,
+                self.weak_asking,
                 self.weak_root,
             );
         }
@@ -588,6 +598,7 @@ impl ShareCommitment {
             payout_level: header.payout_level,
             weak_ratio: header.weak_ratio,
             weak_count: header.weak_count,
+            weak_asking: header.weak_asking,
             weak_root: header.weak_root,
         }
     }
@@ -724,24 +735,28 @@ mod tests {
         assert_ne!(cash.hash(), easier.hash());
     }
 
-    /// The proof of work fixes how many weak shares a share carries and
-    /// which: another count or another root is another commitment.
+    /// The proof of work fixes how many weak shares a share carries, how
+    /// many of them ask and which they are: another count, another number
+    /// asking or another root is another commitment.
     #[test]
     fn bitcoin_cash_commitment_binds_the_carried_weak_shares() {
         let mut cash = create_test_commitment();
         cash.miner_address = p2poolv2_wallet::share_owner::ShareOwner::CashP2pkh([0x22; 20]);
         let mut counted = cash.clone();
         counted.weak_count = 1;
+        let mut asking = counted.clone();
+        asking.weak_asking = 1;
         let mut rooted = cash.clone();
         rooted.weak_root = sha256d::Hash::from_byte_array([0x55; 32]);
 
         assert_ne!(cash.hash(), counted.hash());
+        assert_ne!(counted.hash(), asking.hash());
         assert_ne!(cash.hash(), rooted.hash());
     }
 
     /// The weak shares have a tag byte of their own, after the band's: tag,
-    /// then 4 + 2 + 32 bytes, and read under the band's tag they are another
-    /// digest.
+    /// then 4 + 2 + 2 + 32 bytes, the number asking right after the count,
+    /// and read under the band's tag they are another digest.
     #[test]
     fn the_weak_shares_have_their_own_commitment_tag() {
         let mut suffix = Vec::with_capacity(64);
@@ -756,13 +771,18 @@ mod tests {
             &mut suffix,
             crate::shares::weak::WEAK_RATIO_MAX,
             3,
+            2,
             sha256d::Hash::from_byte_array([0x55; 32]),
         );
         let mut read_as_band = suffix.clone();
         read_as_band[band_length] = BAND_TAG;
 
         assert_eq!(suffix[band_length], WEAK_SHARES_TAG);
-        assert_eq!(suffix.len(), band_length + 1 + 4 + 2 + 32);
+        assert_eq!(suffix.len(), band_length + 1 + 4 + 2 + 2 + 32);
+        assert_eq!(
+            suffix[band_length + 5..band_length + 9],
+            [0x03, 0x00, 0x02, 0x00]
+        );
         assert_ne!(WEAK_SHARES_TAG, BAND_TAG);
         assert_ne!(WEAK_SHARES_TAG, SHARE_VERSION_TAG);
         assert_ne!(WEAK_SHARES_TAG, POOL_MERGE_MINING_TAG);
@@ -782,6 +802,7 @@ mod tests {
         let mut weak = bitcoin.clone();
         weak.weak_ratio = crate::shares::weak::WEAK_RATIO_MAX;
         weak.weak_count = 2;
+        weak.weak_asking = 1;
 
         assert_eq!(bitcoin.hash(), weak.hash());
     }
@@ -933,6 +954,7 @@ mod tests {
             &mut suffix,
             rooted.weak_ratio,
             rooted.weak_count,
+            rooted.weak_asking,
             rooted.weak_root,
         );
         append_pool_merge_mining(&mut suffix, &root);

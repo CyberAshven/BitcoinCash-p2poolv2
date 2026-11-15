@@ -24,16 +24,22 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_version::{ShareVersion, next_share_version};
 use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::tally_share_version_votes;
-use crate::shares::weak::{WeakShare, next_weak_ratio, parent_weak_target};
+use crate::shares::weak::{
+    WEAK_DEPTH, WeakShare, next_weak_ratio, parent_weak_target, weak_share_asks,
+};
 use crate::shares::weak_pool::WeakPool;
+use crate::store::writer::StoreError;
 use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::work::band_policy::{
     POOL_HASHRATE_SHARES, recent_pool_hashrate, share_rate_limit,
 };
 use crate::stratum::work::merge_tokens::{TokenFile, TokenSet};
-use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
+use crate::stratum::work::prepared_notify::{
+    PreparedNotifyParams, PreparedNotifyParamsBuilder, fit_weak_shares,
+};
 use crate::stratum::work::tracker::JobTracker;
 use p2poolv2_wallet::payout_address::PayoutAddress;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, warn};
@@ -168,8 +174,8 @@ fn build_prepared_notify(
     } else {
         (ShareVersion::CURRENT, BAND_CAP_UNIT, None, None)
     };
-    let (weak_ratio, weak_shares, weak_target) =
-        weak.unwrap_or((crate::shares::weak::GENESIS_WEAK_RATIO, Vec::new(), None));
+    let (weak_ratio, weak_shares, weak_asking, weak_target) =
+        weak.unwrap_or((crate::shares::weak::GENESIS_WEAK_RATIO, Vec::new(), 0, None));
     let share_rate_limit =
         pool_hashrate.and_then(|pool_hashrate| bch_share_rate_limit(template, pool_hashrate));
 
@@ -217,7 +223,7 @@ fn build_prepared_notify(
     .band_cap(band_cap)
     .share_rate_limit(share_rate_limit)
     .target_ceiling(Some(context.pool_difficulty.target_ceiling()))
-    .weak_shares(weak_ratio, weak_shares)
+    .weak_shares(weak_ratio, weak_shares, weak_asking)
     .weak_target(weak_target)
     .pool_hashrate(pool_hashrate)
     .payout_level(context.config.payout_level())
@@ -229,28 +235,86 @@ fn build_prepared_notify(
 /// The weak shares of a Bitcoin Cash template on `mining_base` (`tip`, at
 /// `mining_base_height`): the weak ratio its shares carry, one step from the
 /// mining base's; the weak shares they carry, from the node's weak pool,
-/// oldest parent first; and the mining base's weak target, which jobs at the
-/// minimum turn submissions into weak shares at. Without a weak pool the
-/// shares carry none.
+/// oldest parent first, as many as fit one share
+/// (`prepared_notify::fit_weak_shares`); how many of those ask for an easier
+/// weak target ([`count_asking_weak_shares`]); and the mining base's weak
+/// target, which jobs at the minimum turn submissions into weak shares at.
+/// Without a weak pool the shares carry none.
+///
+/// A share commits how many of its weak shares ask, so when that cannot be
+/// counted, a parent's header failing to read, the shares carry none, which
+/// is always valid.
 fn template_weak_shares(
     mining_base: &crate::shares::share_block::ShareHeader,
     tip: bitcoin::BlockHash,
     mining_base_height: u32,
     context: &NotifyContext,
-) -> (u32, Vec<WeakShare>, Option<bitcoin::Target>) {
-    let weak_shares = context
-        .weak_pool
-        .as_ref()
-        .map(|pool| pool.select_for_share(tip, mining_base_height))
-        .unwrap_or_default();
+) -> (u32, Vec<WeakShare>, u16, Option<bitcoin::Target>) {
+    let ceiling = context.pool_difficulty.target_ceiling();
+    let weak_target = parent_weak_target(mining_base, ceiling);
+    let weak_shares = fit_weak_shares(
+        context
+            .weak_pool
+            .as_ref()
+            .map(|pool| pool.select_for_share(tip, mining_base_height))
+            .unwrap_or_default(),
+    );
+    let (weak_shares, weak_asking) = match count_asking_weak_shares(
+        &weak_shares,
+        (tip, weak_target),
+        ceiling,
+        &context.chain_store_handle,
+    ) {
+        Ok(weak_asking) => (weak_shares, weak_asking),
+        Err(error) => {
+            debug!("No weak shares for a share on {tip}: cannot count the ones asking: {error}");
+            (Vec::new(), 0)
+        }
+    };
     (
-        next_weak_ratio(mining_base.weak_ratio, mining_base.weak_count),
+        next_weak_ratio(
+            mining_base.weak_ratio,
+            mining_base.weak_count,
+            mining_base.weak_asking,
+        ),
         weak_shares,
-        Some(parent_weak_target(
-            mining_base,
-            context.pool_difficulty.target_ceiling(),
-        )),
+        weak_asking,
+        Some(weak_target),
     )
+}
+
+/// How many of `weak_shares` ask for an easier weak target
+/// (`shares::weak::weak_share_asks`): those whose `wanted_bits` is easier
+/// than the weak target each met, its own parent's. The number a share
+/// carrying them commits as `weak_asking`, exactly as every node counts it
+/// when it validates that share.
+///
+/// `mining_base` is the mining base's hash and its weak target, already in
+/// hand; the header of each other parent is read once, at most `WEAK_DEPTH`
+/// of them.
+fn count_asking_weak_shares(
+    weak_shares: &[WeakShare],
+    mining_base: (bitcoin::BlockHash, bitcoin::Target),
+    ceiling: bitcoin::CompactTarget,
+    chain_store_handle: &ChainStoreHandle,
+) -> Result<u16, StoreError> {
+    let mut weak_targets = HashMap::with_capacity(WEAK_DEPTH as usize);
+    weak_targets.insert(mining_base.0, mining_base.1);
+    let mut asking: u16 = 0;
+    for weak_share in weak_shares {
+        let parent = weak_share.header.prev_share_blockhash;
+        let weak_target = match weak_targets.get(&parent) {
+            Some(weak_target) => *weak_target,
+            None => {
+                let parent_header = chain_store_handle.get_share_header(&parent)?;
+                let weak_target = parent_weak_target(&parent_header, ceiling);
+                weak_targets.insert(parent, weak_target);
+                weak_target
+            }
+        };
+        asking += u16::from(weak_share_asks(&weak_share.header, weak_target));
+    }
+    Ok(asking)
 }
 
 /// The Bitcoin Cash pool's hashrate from the newest

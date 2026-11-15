@@ -99,6 +99,7 @@ pub fn build(network: BchShareNetwork) -> Result<ShareBlock, Box<dyn Error + Sen
         payout_level: GENESIS_PAYOUT_LEVEL,
         weak_ratio: GENESIS_WEAK_RATIO,
         weak_count: 0,
+        weak_asking: 0,
         weak_root: empty_weak_root(),
     };
     let bitcoin_coinbase = anchor
@@ -266,13 +267,15 @@ mod tests {
     /// its payout level (`accounting::payout::payout_levels`) and its weak
     /// ratio and weak shares (`shares::weak`), each of which changed every
     /// Bitcoin Cash genesis hash in a flag day. Pinned again on 2026-11-12:
-    /// the genesis weak ratio is `R_MAX`, which fell from 4096 to 256.
+    /// the genesis weak ratio is `R_MAX`, which fell from 4096 to 256. Pinned
+    /// again on 2026-11-15: the header gained `weak_asking`, how many of the
+    /// weak shares a share carries ask (`shares::weak`), none at genesis.
     #[test]
     fn mainnet_mini_genesis_hash_is_pinned() {
         let genesis = build(BchShareNetwork::Mainnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "df703cef47857216d5bf1257ce357a57b72f02fa887842142f17f754f8932e6d"
+            "5a278a988ed58030314763c10c53615e521178fc60bec02e78a29c77b7881ec3"
         );
     }
 
@@ -281,7 +284,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Chipnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "0962cfac33968f9cd9eba335b2c935fc934a419e226586ea1455f68eea7a90f2"
+            "eb1cdd1ee6289cd72c97e0206c3a9891bf952cc07625193b71c0763633a2e3ab"
         );
     }
 
@@ -290,7 +293,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Regtest).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "4471f7ad680fc0c740a86a19e33f27a3a581ea48822f992a1780efbea0a5611a"
+            "2e20e7e95dc3b894d6a023286d5f169789c6df9d53d27061e1c45882ec154002"
         );
     }
 

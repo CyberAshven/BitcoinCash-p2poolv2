@@ -3,24 +3,41 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::*;
+use crate::shares::share_block::ShareHeader;
 use crate::test_utils::{TestShareBlockBuilder, setup_test_chain_store_handle, test_weak_share_on};
 use bitcoin::ScriptBuf;
 use bitcoin::hashes::Hash;
 use p2poolv2_wallet::share_owner::ShareOwner;
+use std::sync::OnceLock;
 
 /// A weak share known by the hash `nonce` gives it; the pool reads nothing
-/// else of it.
+/// else of it. One header is built and each weak share is a copy of it with
+/// its own nonce, so a test can fill the pool to its bounds, over a hundred
+/// thousand weak shares, in a moment.
 fn pool_weak_share(nonce: u32) -> WeakShare {
+    static HEADER: OnceLock<ShareHeader> = OnceLock::new();
+    let mut header = HEADER
+        .get_or_init(|| {
+            TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
+                .build()
+                .header
+        })
+        .clone();
+    header.bitcoin_header.nonce = nonce;
     WeakShare {
-        header: TestShareBlockBuilder::new()
-            .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
-            .nonce(nonce)
-            .build()
-            .header,
+        header,
         coinbase_script_sig: ScriptBuf::new(),
         coinbase_value: 1,
         merkle_branch: Vec::new(),
     }
+}
+
+/// [`pool_weak_share`] mined on `parent`, a share this node may not have.
+fn pool_weak_share_on(parent: BlockHash, nonce: u32) -> WeakShare {
+    let mut weak_share = pool_weak_share(nonce);
+    weak_share.header.prev_share_blockhash = parent;
+    weak_share
 }
 
 #[tokio::test]
@@ -109,6 +126,38 @@ async fn a_weak_share_held_again_for_a_retry_keeps_its_first_hold_time() {
 
     assert_eq!(pool.held_len(), 1);
     assert_eq!(pool.counts().refused.unknown_parent, 1);
+}
+
+/// The pool looks for expired held weak shares only once the earliest could
+/// have expired. After that one is dropped the next still expires at its own
+/// time, not before and not later.
+#[tokio::test]
+async fn each_held_weak_share_expires_at_its_own_time() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let parent = BlockHash::from_byte_array([1; 32]);
+    pool.lock().hold(
+        test_weak_share_on(parent, 1),
+        WeakShareSource::Local,
+        1_000,
+        None,
+    );
+    pool.lock().hold(
+        test_weak_share_on(parent, 2),
+        WeakShareSource::Local,
+        5_000,
+        None,
+    );
+
+    pool.lock().expire_held(1_000 + max_held_millis());
+    assert_eq!(pool.held_len(), 2, "neither has waited longer than allowed");
+    pool.lock().expire_held(1_000 + max_held_millis() + 1);
+    assert_eq!(pool.held_len(), 1, "the first held has expired");
+    pool.lock().expire_held(5_000 + max_held_millis());
+    assert_eq!(pool.held_len(), 1, "the second has not yet");
+    pool.lock().expire_held(5_000 + max_held_millis() + 1);
+    assert_eq!(pool.held_len(), 0, "the second has expired");
+    assert_eq!(pool.counts().refused.unknown_parent, 2);
 }
 
 #[tokio::test]
@@ -592,7 +641,7 @@ async fn a_flood_of_weak_shares_on_unknown_parents_stays_within_the_bounds() {
         let mut parent = [0; 32];
         parent[..4].copy_from_slice(&nonce.to_le_bytes());
         pool.hold(
-            test_weak_share_on(BlockHash::from_byte_array(parent), nonce),
+            pool_weak_share_on(BlockHash::from_byte_array(parent), nonce),
             WeakShareSource::Peer(PeerId::random()),
         );
     }
@@ -626,11 +675,11 @@ async fn a_peer_flooding_the_held_weak_shares_pushes_out_only_its_own() {
     let flooder = WeakShareSource::Peer(PeerId::random());
     let honest_count = 5;
     for nonce in 0..honest_count {
-        pool.hold(test_weak_share_on(unknown_parent(nonce), nonce), honest);
+        pool.hold(pool_weak_share_on(unknown_parent(nonce), nonce), honest);
     }
     let flood = MAX_HELD_WEAK_SHARES as u32 + 50;
     for nonce in honest_count..honest_count + flood {
-        pool.hold(test_weak_share_on(unknown_parent(nonce), nonce), flooder);
+        pool.hold(pool_weak_share_on(unknown_parent(nonce), nonce), flooder);
     }
 
     let state = pool.lock();

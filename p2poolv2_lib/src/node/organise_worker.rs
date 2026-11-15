@@ -49,10 +49,11 @@ use pending_buffer::{BufferLimits, BufferOutcome, PendingBuffer};
 ///
 /// Both this channel and the pending buffer hold whole `ShareBlock`s, which
 /// `handle_share_block` bounds at `BLOCK_TXS_SIZE_LIMIT` (200 KB) each on
-/// Bitcoin and at `BCH_SHARE_BODY_SIZE_LIMIT` (1.2 MB) on Bitcoin Cash. By
-/// count alone, 512 of the largest Bitcoin Cash shares, which have passed
-/// validation and so carry valid proof of work, would be about 620 MB, so
-/// the channel is bounded in bytes too (`ORGANISE_CHANNEL_BYTES`).
+/// Bitcoin and at `BCH_SHARE_BODY_SIZE_LIMIT` (1.2 MB) on Bitcoin Cash,
+/// beside up to `WEAK_BYTES` (960 KiB) of weak shares. By count alone, 512
+/// of the largest Bitcoin Cash shares, which have passed validation and so
+/// carry valid proof of work, would be about 1.1 GB, so the channel is
+/// bounded in bytes too (`ORGANISE_CHANNEL_BYTES`).
 ///
 /// Both bounds are kept small deliberately: this channel is pure
 /// backpressure between the parallel validation tasks and the serial
@@ -69,11 +70,12 @@ const ORGANISE_CHANNEL_CAPACITY: usize = 512;
 ///
 /// Honest shares meet the count bound first: 512 shares of up to 128 KiB
 /// fit, and a Bitcoin Cash share paying 1,000 miners directly is about
-/// 35 KB. The budget still holds at least 51 of the largest shares a peer
-/// can send (`MAX_P2P_MESSAGE_SIZE`, 1.25 MiB, above the 1,204,800-byte
-/// Bitcoin Cash body limit) and over 300 of the largest Bitcoin ones
-/// (200 KiB), more than one round of the parallel validation tasks on an
-/// ordinary machine. The worst case falls from about 620 MB to 64 MiB.
+/// 35 KB. The budget still holds at least 30 of the largest shares a peer
+/// can send (`MAX_P2P_MESSAGE_SIZE`, 2,144 KiB, above the 1,204,800-byte
+/// Bitcoin Cash body limit and the 960 KiB of weak shares beside it) and
+/// over 300 of the largest Bitcoin ones (200 KiB), more than one round of
+/// the parallel validation tasks on an ordinary machine. The worst case
+/// falls from about 1.1 GB to 64 MiB.
 pub const ORGANISE_CHANNEL_BYTES: usize = 64 * 1024 * 1024;
 
 /// Maximum number of blocks buffered while waiting for ancestor
@@ -89,9 +91,9 @@ const PENDING_BLOCKS_CAPACITY: usize = 2 * ORGANISE_CHANNEL_CAPACITY;
 
 /// Most bytes, by consensus encoding, the pending buffer holds: 128 MiB,
 /// twice the channel's budget for the same reason the count is twice the
-/// channel's. It holds at least 102 of the largest shares a peer can send;
+/// channel's. It holds at least 61 of the largest shares a peer can send;
 /// by count alone, 1,024 of the largest Bitcoin Cash shares would be about
-/// 1.2 GB.
+/// 2.2 GB.
 pub const PENDING_BLOCKS_BYTES: usize = 2 * ORGANISE_CHANNEL_BYTES;
 
 /// Upper bound on how many stranded blocks the startup re-validation seed

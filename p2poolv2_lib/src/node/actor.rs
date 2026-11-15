@@ -429,9 +429,9 @@ const MAX_PENDING_WEAK_ANNOUNCEMENTS: usize = MAX_POOL_WEAK_SHARES;
 
 /// How often pending weak-share hashes are announced.
 ///
-/// One inventory carries [`WEAK_CAP`] hashes. At 200ms that is 320 hashes
-/// a second per peer, enough for a chain finding weak shares 256 times as
-/// fast as shares.
+/// One inventory carries [`WEAK_CAP`] hashes. At 200ms that is 3,200 hashes
+/// a second per peer, enough for a chain finding weak shares 4,096 times as
+/// fast as shares, the most the asks allow (`R_ASK_MAX`).
 const WEAK_ANNOUNCE_INTERVAL: Duration = Duration::from_millis(200);
 
 struct PendingWeakAnnouncement {

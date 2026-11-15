@@ -66,7 +66,12 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 /// - 9 (2026-11-12): a weak share a share carries is held to its carrier's
 ///   time (`BCH_WEAK_SHARE_RULE_TAG`, `weak3-64-100-48-256`). A stored chain
 ///   was validated against each node's clock; the chain starts again.
-pub const STORE_FORMAT_VERSION: u32 = 9;
+/// - 10 (2026-11-15): Bitcoin Cash share headers count the weak shares they
+///   carry that ask for an easier weak target, and the weak ratio follows
+///   those asks (`BCH_WEAK_SHARE_RULE_TAG`,
+///   `weak4-640-100-48-256-320-64-4096`). A stored header has no such count
+///   and would not decode, and the chain starts from a new genesis.
+pub const STORE_FORMAT_VERSION: u32 = 10;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -621,8 +626,9 @@ impl Store {
              the genesis share only as the last resort, and Bitcoin Cash has one share chain \
              (the main and mini chains merged) whose headers carry a difficulty band, a \
              payout level and weak shares, with payees below their level paid by a draw and \
-             every proof from a job at the minimum paid at the weak work, and whose weak root \
-             commits each carried weak share's whole encoding. Delete the store directory and \
+             every proof from a job at the minimum paid at the weak work, whose weak root \
+             commits each carried weak share's whole encoding, and whose weak ratio follows \
+             the weak shares that ask for an easier weak target. Delete the store directory and \
              restart to resync the share chain from peers.",
             self.path
         )))
@@ -1062,6 +1068,33 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
         assert!(error.to_string().contains("has format 7"), "{error}");
+    }
+
+    /// A store from before the weak ratio followed the asks, format 9, is
+    /// refused: its headers do not count their asking weak shares.
+    #[test]
+    fn test_store_from_before_the_weak_asks_is_refused() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        store
+            .db
+            .put_cf(&metadata_cf, STORE_FORMAT_KEY, 9u32.to_le_bytes())
+            .unwrap();
+
+        let error = store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap_err();
+        assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
+        assert!(error.to_string().contains("has format 9"), "{error}");
+        assert!(
+            error.to_string().contains("weak shares that ask"),
+            "{error}"
+        );
     }
 
     #[test_log::test]

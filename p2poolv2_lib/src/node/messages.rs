@@ -25,13 +25,17 @@ use std::fmt::Display;
 /// 5 MB block-relay limit. The largest legitimate messages are a Bitcoin Cash
 /// `ShareBlock`, whose body holds a 1,000,000-byte coinbase and 200 KiB of
 /// share transactions (`BCH_SHARE_BODY_SIZE_LIMIT`, 1,204,800 bytes) and up
-/// to `WEAK_BYTES` (96 KiB) of weak shares beside its header and coinbase
+/// to `WEAK_BYTES` (960 KiB) of weak shares beside its header and coinbase
 /// merkle branch, and a `ShareHeaders` batch of `MAX_HEADERS_IN_RESPONSE`
 /// plus up to one height of overshoot (~1 MB of worst-case headers and
-/// branches). 1.25 MiB holds either, the share with a few KB to spare;
+/// branches). 2,144 KiB holds either, the share with a few KB to spare;
 /// `test_full_share_headers_response_fits_max_message_size` and
 /// `test_largest_bch_share_block_fits_max_message_size` guard the margin.
-pub const MAX_P2P_MESSAGE_SIZE: usize = 1_280 * 1024;
+///
+/// 1,280 KiB until 2026-11-15, when `WEAK_BYTES` rose from 96 KiB with the
+/// weak shares a share may carry (`BCH_WEAK_SHARE_RULE_TAG`): the limit rose
+/// by the same 864 KiB, so the share keeps the room it had.
+pub const MAX_P2P_MESSAGE_SIZE: usize = 2_144 * 1024;
 
 /// Most headers, and most distinct branches, a `ShareHeaderBatch` may carry:
 /// a full response plus the one dense height the sender completes past it.

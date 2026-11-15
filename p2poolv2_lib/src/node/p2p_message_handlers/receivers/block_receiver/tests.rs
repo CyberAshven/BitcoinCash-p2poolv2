@@ -2295,10 +2295,11 @@ fn test_validate_asert_refuses_a_minimum_other_than_the_asert_target() {
     );
 }
 
-/// A share whose node wanted a target easier than its own is refused at
-/// block receipt.
+/// A share whose node wanted a target easier than its own is accepted at
+/// block receipt: `wanted_bits` is a signal only, and easier it asks for an
+/// easier weak target (`shares::weak::weak_share_asks`).
 #[test]
-fn test_validate_asert_refuses_wanted_bits_easier_than_bits() {
+fn test_validate_asert_accepts_wanted_bits_easier_than_bits() {
     let parent = TestShareBlockBuilder::new()
         .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
         .bits(CompactTarget::from_consensus(0x1c40_0000))
@@ -2355,10 +2356,7 @@ fn test_validate_asert_refuses_wanted_bits_easier_than_bits() {
         validation_tx,
     );
 
-    let error = receiver.validate_asert(&child).unwrap_err().to_string();
+    let result = receiver.validate_asert(&child);
 
-    assert!(
-        error.contains("wanted bits 0x1c200000 are easier than the share's bits 0x1c100000"),
-        "{error}"
-    );
+    assert!(result.is_ok(), "{}", result.unwrap_err());
 }

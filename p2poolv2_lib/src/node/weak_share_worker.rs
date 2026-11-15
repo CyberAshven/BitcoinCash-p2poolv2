@@ -41,7 +41,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::validation::{FailureKind, ShareValidator, WeakPayoutCache};
-use crate::shares::weak::WeakShare;
+use crate::shares::weak::{WEAK_CAP, WeakShare};
 use crate::shares::weak_pool::{
     HoldOutcome, WeakPool, WeakRelayReceiver, WeakShareRefusal, WeakShareSource, can_be_carried,
     now_millis,
@@ -55,8 +55,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-/// Weak shares waiting for their checks.
-pub const WEAK_SHARE_EVENT_CHANNEL_CAPACITY: usize = 1024;
+/// Weak shares waiting for their checks: sixteen full shares' worth. A weak
+/// share one of this node's miners found is dropped, and its credit lost,
+/// when the channel is full, so its depth follows the most a share carries.
+pub const WEAK_SHARE_EVENT_CHANNEL_CAPACITY: usize = 16 * WEAK_CAP;
 
 /// Inventories and fetch responses waiting for the weak-share worker.
 ///
