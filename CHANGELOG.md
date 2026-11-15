@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Upstream P2Poolv2 is merged through fdbf85df (its 0.18.0 and two commits
+after it). A node now dials only the host names listed in `dial_peers`, never
+a `/dns` address learned from a peer, and checks `blocked_ips` after it
+resolves a name; a dial that fails later backs off by connection. A
+`d=` difficulty in the password is no longer overridden by the miner's own
+`mining.suggest_difficulty`, as Whatsminer firmware sends right after
+authorizing. Debug logs carry each notify and the address of a stratum
+timeout. Testnet5's new genesis is not taken, as testnet5 is not, and the
+fork stays at 0.0.1-alpha.
+
 The payout simulator has a `scale-levers` table for part 5 of the small
 miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
 Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,
