@@ -1415,5 +1415,150 @@ pub fn scale(base: &Scenario) -> String {
     table_from(&headers, &rows)
 }
 
+/// Pool sizes of the scale levers table, as parts of Bitcoin Cash's hashrate.
+const LEVER_POOL_FRACTIONS: [f64; 2] = [0.10, 0.30];
+
+/// Bitcoin Cash hashrate multiples of the scale levers table: today's 3.7
+/// EH/s up to Bitcoin's, about 270 times it.
+const LEVER_HASHRATE_MULTIPLES: [f64; 4] = [1.0, 10.0, 100.0, 270.0];
+
+/// A way to give the miners at the minimum more weak shares a second.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ScaleLever {
+    /// A share period of this many seconds, each share carrying as many weak
+    /// shares as today. 10 seconds is the rules as they are.
+    Period(f64),
+    /// The 10-second share period, each share carrying this many times
+    /// today's weak shares: `WEAK_CAP`, `WEAK_FILL` and `R_MAX` times it.
+    WeakShares(u64),
+}
+
+/// The levers of the scale levers table: the rules as they are, three
+/// shorter share periods, and the same three weak share rates reached at the
+/// 10-second period with more weak shares a share.
+const SCALE_LEVERS: [ScaleLever; 7] = [
+    ScaleLever::Period(10.0),
+    ScaleLever::Period(5.0),
+    ScaleLever::Period(2.0),
+    ScaleLever::Period(1.0),
+    ScaleLever::WeakShares(2),
+    ScaleLever::WeakShares(5),
+    ScaleLever::WeakShares(10),
+];
+
+/// One row of the scale levers table: the scale table's scenario at
+/// `multiple` and `fraction`, with `lever` applied. A shorter period takes
+/// the network simulation's stale rate at that period. More weak shares a
+/// share raise `R_MAX` by the same factor, so the weak ratio can still reach
+/// the fill.
+pub(crate) fn lever_scenario(
+    base: &Scenario,
+    multiple: f64,
+    fraction: f64,
+    lever: ScaleLever,
+) -> Scenario {
+    let scenario = scale_scenario(base, multiple, fraction);
+    match lever {
+        ScaleLever::Period(seconds) => Scenario {
+            period_seconds: seconds,
+            stale_rate: stale_rate_for_period(seconds),
+            ..scenario
+        },
+        ScaleLever::WeakShares(times) => Scenario {
+            weak_cap: scenario.weak_cap * times,
+            weak_fill: scenario.weak_fill * times,
+            weak_ratio_max: scenario.weak_ratio_max * times,
+            ..scenario
+        },
+    }
+}
+
+/// What gives small miners more credit as the hashrate grows: a shorter
+/// share period (section 5 of the design page) against more weak shares a
+/// share at the 10-second period. The adopted design at 10 and 30% of
+/// Bitcoin Cash and 1 to 270 times today's hashrate, 50% industrial, levels
+/// as a node sets them. Each row gives the stale rate the chain pays for the
+/// lever, the weak shares and bytes a second every node relays, the smallest
+/// miner that still finds three weak shares a month, and what the Bitaxe and
+/// the ASIC get.
+pub fn scale_levers(base: &Scenario) -> String {
+    let scenarios: Vec<Scenario> = LEVER_HASHRATE_MULTIPLES
+        .into_iter()
+        .flat_map(|multiple| {
+            LEVER_POOL_FRACTIONS.into_iter().flat_map(move |fraction| {
+                SCALE_LEVERS
+                    .into_iter()
+                    .map(move |lever| lever_scenario(base, multiple, fraction, lever))
+            })
+        })
+        .collect();
+    let reports = run_scenarios(&scenarios);
+    let rows: Vec<Vec<String>> = reports
+        .iter()
+        .map(|report| {
+            let chain = report.home_chain();
+            let weak_difficulty = chain.weak.map_or(chain.asert_difficulty, |outcome| {
+                (chain.asert_difficulty / outcome.mean_ratio).max(MINI_CEILING_DIFFICULTY)
+            });
+            let mut row = vec![
+                format!("x{}", report.scenario.hashrate_multiple),
+                pool_percent(report.scenario.pool_fraction),
+                format!("{} s", report.scenario.period_seconds),
+                report.scenario.weak_fill.to_string(),
+                percent(report.scenario.stale_rate),
+                rounded(report.weak_shares_per_second()),
+                rounded(report.bytes_per_second() / 1_000.0),
+                weak_ratio(report),
+                rounded(smallest_regular_miner(weak_difficulty) / 1.0e12),
+            ];
+            report
+                .scenario
+                .tracked
+                .iter()
+                .zip(&report.miners)
+                .for_each(|(tracked, miner)| {
+                    row.extend([
+                        tracked.level.to_string(),
+                        rounded(miner.weak_shares_per_month),
+                        rounded(miner.payments_per_month),
+                        percent(miner.months_without_payment),
+                        optional(miner.swing, two_decimals),
+                        income_ratio(miner),
+                    ]);
+                });
+            row
+        })
+        .collect();
+    let mut headers: Vec<String> = [
+        "BCH hashrate",
+        "Pool",
+        "Period",
+        "WEAK_FILL",
+        "Stale",
+        "Weak/s",
+        "KB/s",
+        "R",
+        "Smallest miner with 3 weak shares a month (TH/s)",
+    ]
+    .iter()
+    .map(|cell| cell.to_string())
+    .collect();
+    ["Bitaxe", "ASIC"].iter().for_each(|name| {
+        headers.extend(
+            [
+                "level",
+                "weak/mo",
+                "pay/mo",
+                "empty months",
+                "swing",
+                "vs fair",
+            ]
+            .iter()
+            .map(|column| format!("{name} {column}")),
+        );
+    });
+    table_from(&headers, &rows)
+}
+
 #[cfg(test)]
 mod tests;

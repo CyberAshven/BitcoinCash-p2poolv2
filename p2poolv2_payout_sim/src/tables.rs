@@ -128,11 +128,14 @@ pub enum Table {
     BandStep,
     /// Bigger pools on a bigger Bitcoin Cash, levels as a node sets them.
     Scale,
+    /// A shorter share period against more weak shares a share, as the
+    /// hashrate grows.
+    ScaleLevers,
 }
 
 impl Table {
     /// Every table, in the order of the default run.
-    pub const ALL: [Table; 24] = [
+    pub const ALL: [Table; 25] = [
         Table::Designs,
         Table::Hashrate,
         Table::Pool,
@@ -157,6 +160,7 @@ impl Table {
         Table::RatioMaxMixes,
         Table::BandStep,
         Table::Scale,
+        Table::ScaleLevers,
     ];
 
     /// Name on the command line.
@@ -186,6 +190,7 @@ impl Table {
             Table::RatioMaxMixes => "r-max-mixes",
             Table::BandStep => "band-step",
             Table::Scale => "scale",
+            Table::ScaleLevers => "scale-levers",
         }
     }
 
@@ -253,6 +258,9 @@ impl Table {
             Table::Scale => {
                 "Scale: bigger pools on a bigger Bitcoin Cash, levels as a node sets them (band-weak-levels, weak work, 50% industrial)"
             }
+            Table::ScaleLevers => {
+                "Scale levers: a shorter share period against more weak shares a share (band-weak-levels, weak work, 50% industrial)"
+            }
         }
     }
 
@@ -284,6 +292,7 @@ impl Table {
             Table::RatioMaxMixes => study::ratio_max_mixes(base),
             Table::BandStep => study::band_step(base),
             Table::Scale => study::scale(base),
+            Table::ScaleLevers => study::scale_levers(base),
         };
         format!("## {}\n\n{body}", self.title())
     }
