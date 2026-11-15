@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The payout simulator has a `window-cap` table and a `storage` table. The
+first runs pools at 0.01 to 1% of Bitcoin Cash with the PPLNS window capped
+at 14, 30 and 60 days: the cap binds only under about 0.15%, and a longer
+one leaves a miner that keeps mining as often without a payment (63%, 66%
+and 65% of its months at 0.01%), since each block pays it its part of the
+window's work; it only lets more single shares be paid, at the cost of a
+longer payout depth and twice the bodies kept. The 14-day cap stays. The
+second is arithmetic of what a node keeps: the payout level bounds a
+coinbase (17,885 outputs, 608 KB, at the default level, with 100,000 payees
+or 1,000,000); coinbases are most of the store, 8.3 GB for 28 days at 1,000
+payees up to 242 GB when every one is a full 1 MB; stored without their
+payouts they take 0.09 GB; weak shares take 6.2 GB at 32 a share and 62 GB
+at 320, half that kept for one payout depth; headers take 3.15 GB a year.
+`Scenario` gains `window_cap_seconds`, 14 days everywhere else.
+
 The payout simulator has a `scale-levers` table for part 5 of the small
 miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
 Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,

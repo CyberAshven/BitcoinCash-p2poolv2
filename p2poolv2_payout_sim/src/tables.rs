@@ -131,11 +131,15 @@ pub enum Table {
     /// A shorter share period against more weak shares a share, as the
     /// hashrate grows.
     ScaleLevers,
+    /// The PPLNS window's cap, 14 days against 30 and 60, in small pools.
+    WindowCap,
+    /// What a node stores, by payees, payout level and window cap.
+    Storage,
 }
 
 impl Table {
     /// Every table, in the order of the default run.
-    pub const ALL: [Table; 25] = [
+    pub const ALL: [Table; 27] = [
         Table::Designs,
         Table::Hashrate,
         Table::Pool,
@@ -161,6 +165,8 @@ impl Table {
         Table::BandStep,
         Table::Scale,
         Table::ScaleLevers,
+        Table::WindowCap,
+        Table::Storage,
     ];
 
     /// Name on the command line.
@@ -191,6 +197,8 @@ impl Table {
             Table::BandStep => "band-step",
             Table::Scale => "scale",
             Table::ScaleLevers => "scale-levers",
+            Table::WindowCap => "window-cap",
+            Table::Storage => "storage",
         }
     }
 
@@ -261,6 +269,12 @@ impl Table {
             Table::ScaleLevers => {
                 "Scale levers: a shorter share period against more weak shares a share (band-weak-levels, weak work, 50% industrial)"
             }
+            Table::WindowCap => {
+                "Window cap: 14 days against 30 and 60 in small pools (band-weak-levels, weak work, medium miners, levels as a node sets them)"
+            }
+            Table::Storage => {
+                "Storage: what a node keeps, by payees, payout level and window cap (arithmetic, no fees)"
+            }
         }
     }
 
@@ -293,6 +307,8 @@ impl Table {
             Table::BandStep => study::band_step(base),
             Table::Scale => study::scale(base),
             Table::ScaleLevers => study::scale_levers(base),
+            Table::WindowCap => study::window_cap(base),
+            Table::Storage => crate::storage::storage(),
         };
         format!("## {}\n\n{body}", self.title())
     }
