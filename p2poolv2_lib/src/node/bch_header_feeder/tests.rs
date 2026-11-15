@@ -124,6 +124,7 @@ fn feeder(server: &MockServer, held: &Arc<Mutex<Held>>) -> BchHeaderFeeder {
     BchHeaderFeeder::new(
         BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap(),
         store_holding(Arc::clone(held)),
+        FastBlocks::MAINNET,
     )
 }
 
@@ -207,6 +208,7 @@ async fn an_empty_store_learns_a_bounded_stretch_anchored_on_bchns_height() {
     let held = Arc::new(Mutex::new(Held::default()));
     let mut feeder = feeder(&server, &held);
     feeder.initial_headers = 2;
+    feeder.initial_header_ticks = 2 * 600;
 
     assert_eq!(feeder.sync_once().await, Ok(2));
 
@@ -325,6 +327,7 @@ async fn the_template_relay_learns_a_new_templates_parent_first() {
     let relay = tokio::spawn(relay_templates_learning_prevs(
         BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap(),
         store_holding(Arc::clone(&held)),
+        FastBlocks::MAINNET,
         input_rx,
         output_tx,
     ));
@@ -416,8 +419,57 @@ async fn the_first_sync_gives_up_on_a_slow_or_absent_bchn() {
     let absent = BchHeaderFeeder::new(
         BitcoindRpcClient::new("http://127.0.0.1:9", "user", "pass").unwrap(),
         store_holding(Arc::clone(&held)),
+        FastBlocks::MAINNET,
     );
     absent.first_sync(Duration::from_secs(10)).await;
 
     assert!(held.lock().unwrap().headers.is_empty());
+}
+
+/// On a one-minute chain a store with nothing to link to learns past its
+/// first header count, until the headers span the ticks it needs: here 3
+/// one-minute blocks for 180 ticks where two headers were the first limit.
+/// Before activation two ten-minute headers already span them.
+#[tokio::test]
+async fn an_empty_store_on_one_minute_blocks_learns_until_the_span_is_covered() {
+    let chain = chain_from_first_block(6, 0);
+    for (fast_blocks, learned) in [
+        (
+            FastBlocks {
+                activation_time: 0,
+                activation_height: Some(0),
+            },
+            3,
+        ),
+        (FastBlocks::MAINNET, 2),
+    ] {
+        let server = bchn(&chain[5], &chain[1..]).await;
+        for height in [3usize, 4] {
+            answer(
+                &server,
+                serde_json::json!({
+                    "method": "getblockheader",
+                    "params": [chain[height].block_hash().to_string(), true]
+                }),
+                serde_json::json!({ "height": height }),
+            )
+            .await;
+        }
+        let held = Arc::new(Mutex::new(Held::default()));
+        let mut feeder = feeder(&server, &held);
+        feeder.initial_headers = 2;
+        feeder.initial_header_ticks = 180;
+        feeder.fast_blocks = fast_blocks;
+
+        assert_eq!(feeder.sync_once().await, Ok(learned), "{fast_blocks:?}");
+
+        let held = held.lock().unwrap();
+        for (height, header) in chain.iter().enumerate().skip(6 - learned) {
+            assert_eq!(
+                held.headers[&header.block_hash()],
+                known(height as u32, *header),
+                "{fast_blocks:?}"
+            );
+        }
+    }
 }

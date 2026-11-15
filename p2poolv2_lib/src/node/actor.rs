@@ -132,9 +132,13 @@ impl NodeHandle {
                 &config.bitcoinrpc.username,
                 &config.bitcoinrpc.password,
             )?;
-            BchHeaderFeeder::new(client, chain_store_handle.clone())
-                .first_sync(FIRST_SYNC_LIMIT)
-                .await;
+            BchHeaderFeeder::new(
+                client,
+                chain_store_handle.clone(),
+                bitcoin_cash_fast_blocks(&config),
+            )
+            .first_sync(FIRST_SYNC_LIMIT)
+            .await;
         }
         let (node_actor, stopping_rx) = NodeActor::new(
             config,
@@ -610,12 +614,7 @@ fn start_payout_tree_executor(
     };
     let (sink, found) = payout_tree_channel();
     let executor = PayoutTreeExecutor::new(client, chain_store_handle.clone(), found)
-        .with_fast_blocks(
-            config
-                .stratum
-                .bitcoin_cash_network
-                .map_or(FastBlocks::MAINNET, FastBlocks::for_network),
-        );
+        .with_fast_blocks(bitcoin_cash_fast_blocks(config));
     tokio::spawn(executor.run());
     Some(sink)
 }
@@ -706,7 +705,11 @@ impl NodeActor {
                     metrics.clone(),
                 )),
                 // Follows BCHN's headers for mining on the current chain.
-                Some(BchHeaderFeeder::new(client, chain_store_handle.clone())),
+                Some(BchHeaderFeeder::new(
+                    client,
+                    chain_store_handle.clone(),
+                    bitcoin_cash_fast_blocks(&config),
+                )),
             )
         } else {
             (None, None)
@@ -1287,3 +1290,12 @@ fn confirmed_tip_progressed(last_seen: Option<BlockHash>, current: BlockHash) ->
 
 #[cfg(test)]
 mod tests;
+
+/// The configured Bitcoin Cash network's move to one-minute blocks, or
+/// mainnet's when the node runs no Bitcoin Cash network.
+pub(crate) fn bitcoin_cash_fast_blocks(config: &Config) -> FastBlocks {
+    config
+        .stratum
+        .bitcoin_cash_network
+        .map_or(FastBlocks::MAINNET, FastBlocks::for_network)
+}

@@ -32,6 +32,7 @@
 //! Part of mining on the current chain (V16,
 //! `docs/sharechain/current-chain.md`).
 
+use crate::shares::bch_asert::{BCH_BLOCK_SPACING, BCH_FAST_BLOCK_SPACING, FastBlocks};
 use crate::shares::bch_headers::KnownBchHeader;
 #[cfg(test)]
 #[mockall_double::double]
@@ -52,14 +53,21 @@ use tracing::{debug, info, warn};
 /// How often the feeder asks BCHN for its best block.
 const FEED_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Headers a node first learns back from BCHN's tip: about 58 days, enough
-/// for the payout window (about 14.7 days with its maturity skip), the
-/// depth shares are validated to (about 29.4 days) and room besides.
+/// The fewest headers a node first learns back from BCHN's tip: 8,400
+/// ten-minute blocks, [`INITIAL_HEADER_TICKS`].
 pub const INITIAL_HEADERS: usize = 8_400;
 
+/// How far back a node first learns BCHN's headers, in ticks (seconds of
+/// target time): about 58 days, enough for the payout window (about 14.7
+/// days with its maturity skip), the depth shares are validated to (about
+/// 29.4 days) and room besides. That is 8,400 ten-minute blocks or 84,000
+/// one-minute blocks (CHIP-2025-03).
+pub const INITIAL_HEADER_TICKS: i64 = INITIAL_HEADERS as i64 * BCH_BLOCK_SPACING;
+
 /// The most best-chain index entries one update rewrites: a reorg deeper
-/// than BCHN allows (10 blocks), or a first index over the whole store.
-const MAX_INDEX_REWRITE: usize = INITIAL_HEADERS + 1;
+/// than BCHN allows (10 blocks), or a first index over the whole store,
+/// which is at most [`INITIAL_HEADER_TICKS`] of one-minute blocks.
+const MAX_INDEX_REWRITE: usize = (INITIAL_HEADER_TICKS / BCH_FAST_BLOCK_SPACING) as usize + 1;
 
 /// How long a node waits for its first round of BCHN's headers before it
 /// syncs shares anyway. A new store's walk of [`INITIAL_HEADERS`] took about
@@ -76,14 +84,26 @@ pub(crate) struct BchHeaderFeeder {
     client: BitcoindRpcClient,
     store: ChainStoreHandle,
     initial_headers: usize,
+    /// How far back, in ticks, a store with nothing to link to learns:
+    /// [`INITIAL_HEADER_TICKS`].
+    initial_header_ticks: i64,
+    /// The network's move to one-minute blocks, which sets how many
+    /// headers `initial_header_ticks` is.
+    fast_blocks: FastBlocks,
 }
 
 impl BchHeaderFeeder {
-    pub(crate) fn new(client: BitcoindRpcClient, store: ChainStoreHandle) -> Self {
+    pub(crate) fn new(
+        client: BitcoindRpcClient,
+        store: ChainStoreHandle,
+        fast_blocks: FastBlocks,
+    ) -> Self {
         Self {
             client,
             store,
             initial_headers: INITIAL_HEADERS,
+            initial_header_ticks: INITIAL_HEADER_TICKS,
+            fast_blocks,
         }
     }
 
@@ -142,6 +162,7 @@ impl BchHeaderFeeder {
         let _walk = WALK.lock().await;
         let mut hash = hash;
         let mut walked: Vec<Header> = Vec::new();
+        let mut limit = self.initial_headers;
         let oldest_height = loop {
             if let Some(known) = self.known(&hash)? {
                 if walked.is_empty() {
@@ -149,9 +170,11 @@ impl BchHeaderFeeder {
                 }
                 break known.height + 1;
             }
-            if walked.len() == self.initial_headers {
+            if walked.len() == limit {
                 // A store with nothing to link to: anchor the walk on the
-                // height BCHN gives its oldest header.
+                // height BCHN gives its oldest header, once the walk spans
+                // `INITIAL_HEADER_TICKS`. One-minute blocks need more
+                // headers than the first limit for that span.
                 let oldest = walked.last().expect("walked is not empty");
                 let summary = self
                     .client
@@ -160,11 +183,19 @@ impl BchHeaderFeeder {
                     .map_err(|error| format!("getblockheader {}: {error}", oldest.block_hash()))?;
                 let height = u32::try_from(summary.height)
                     .map_err(|_| format!("height {} is too high", summary.height))?;
-                info!(
-                    "Learning {} Bitcoin Cash headers back from the node's tip to height {height}",
-                    walked.len()
-                );
-                break height;
+                let tip_height = height.saturating_add(walked.len() as u32 - 1);
+                let wanted = self
+                    .fast_blocks
+                    .blocks_spanning(tip_height, self.initial_header_ticks)
+                    .max(self.initial_headers);
+                if walked.len() >= wanted || height == 0 {
+                    info!(
+                        "Learning {} Bitcoin Cash headers back from the node's tip to height {height}",
+                        walked.len()
+                    );
+                    break height;
+                }
+                limit = wanted;
             }
             let header = self
                 .client
@@ -247,10 +278,11 @@ impl BchHeaderFeeder {
 pub async fn relay_templates_learning_prevs(
     client: BitcoindRpcClient,
     store: ChainStoreHandle,
+    fast_blocks: FastBlocks,
     mut input: NotifyReceiver,
     output: NotifySender,
 ) {
-    let feeder = BchHeaderFeeder::new(client, store);
+    let feeder = BchHeaderFeeder::new(client, store, fast_blocks);
     let mut learned: Option<BlockHash> = None;
     while let Some(command) = input.recv().await {
         if let NotifyCmd::SendToAll { template } = &command

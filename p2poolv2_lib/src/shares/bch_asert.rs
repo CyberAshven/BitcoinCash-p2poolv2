@@ -145,6 +145,27 @@ impl FastBlocks {
             _ => lock_height.saturating_add(1),
         }
     }
+
+    /// The highest block height whose ticks are at most `ticks`.
+    fn height_at_or_below(&self, ticks: i64) -> u32 {
+        let ticks = ticks.max(0);
+        let height = match self.activation_height.map(i64::from) {
+            Some(activation) if ticks > activation * BCH_BLOCK_SPACING => {
+                activation + (ticks - activation * BCH_BLOCK_SPACING) / BCH_FAST_BLOCK_SPACING
+            }
+            _ => ticks / BCH_BLOCK_SPACING,
+        };
+        u32::try_from(height).unwrap_or(u32::MAX)
+    }
+
+    /// How many blocks back from the block at `tip` span at least `span`
+    /// ticks: the fewest `n` with `ticks(tip) - ticks(tip - n) >= span`, or
+    /// `tip` when the chain is shorter. 8,400 ten-minute blocks hold the
+    /// span 84,000 one-minute blocks do.
+    pub fn blocks_spanning(&self, tip: u32, span: i64) -> usize {
+        let start = self.height_at_or_below(self.ticks(tip) - span).min(tip);
+        (tip - start) as usize
+    }
 }
 
 /// Bitcoin Cash coinbase maturity in ticks, CHIP-2025-03: 60,000, which is

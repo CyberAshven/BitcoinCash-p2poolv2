@@ -848,3 +848,19 @@ fn a_lock_height_opens_ten_one_minute_blocks_per_unit_after_activation() {
         950_001
     );
 }
+
+/// The headers a new node learns span 58 days: 8,400 ten-minute blocks,
+/// 84,000 one-minute blocks long after the switch, and the mix in between.
+#[test]
+fn fifty_eight_days_of_blocks_before_and_after_the_switch() {
+    let span = 8_400 * 600;
+    assert_eq!(FastBlocks::MAINNET.blocks_spanning(950_000, span), 8_400);
+    let chipnet = FastBlocks::CHIPNET;
+    assert_eq!(chipnet.blocks_spanning(332_450, span), 8_400);
+    // 150 one-minute blocks are 9,000 ticks; 8,385 ten-minute blocks the
+    // rest.
+    assert_eq!(chipnet.blocks_spanning(332_600, span), 150 + 8_385);
+    assert_eq!(chipnet.blocks_spanning(332_450 + 100_000, span), 84_000);
+    // A chain shorter than the span gives what it has.
+    assert_eq!(FastBlocks::MAINNET.blocks_spanning(100, span), 100);
+}
