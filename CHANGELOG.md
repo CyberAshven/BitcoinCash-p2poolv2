@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+P2Poolv2 takes templates from a node that serves no long polling, such as
+Knuth. Every Knuth template failed to parse ("missing field `longpollid`"),
+so the pool gave its miners no work. BIP 22 makes `longpollid` part of long
+polling, which Knuth does not serve, and the pool never long-polls, so a
+template without it now reads as one with an empty id. No share-chain rule
+changes.
+
 A new share is relayed with the weak shares it carries listed by hash, not
 whole (protocol segment `weak-by-hash`). Weak shares already travel ahead of
 the share that carries them: a node pushes the ones its miners find to every
