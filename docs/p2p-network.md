@@ -32,10 +32,12 @@ Mainnet and chipnet run the same rules; only the network setting differs.
 
 Nodes only talk to nodes on the same chain and rules. Every libp2p protocol
 string carries the Bitcoin Cash network, the share chain's genesis and, on
-Bitcoin Cash, a tag for each share-chain rule (`protocol_string` in
+Bitcoin Cash, a tag for each share-chain rule and last a tag for the P2P
+messages, `weak-by-hash` today (`protocol_string` in
 `p2poolv2_lib/src/node/behaviour/request_response.rs`). A node on another
 chain or rule fails the handshake instead of exchanging shares the other
-side would reject.
+side would reject, and a node speaking other messages fails it instead of
+reading the other's messages as malformed.
 
 ## Gossip
 
@@ -63,6 +65,31 @@ Links idle at this moment: C-E, C-F, D-E, E-F
 
 Each receiving node validates the share and passes it on to its own peers
 that have not seen it, so every share reaches every node.
+
+On Bitcoin Cash a share also carries weak shares, which travel ahead of it
+on their own: a node pushes the ones its miners find to every peer, and
+announces the ones it takes from peers by hash, each fetched once. So a node
+relays a new share with its weak shares listed by proof-of-work hash
+(`ShareWithWeakHashes`), not whole. The receiver fills them from its weak
+pool and asks the sender for the ones it lacks (`GetCarriedWeakShares`),
+then checks the rebuilt share exactly as a share sent whole, weak root
+included. A share it cannot fill within ten seconds, or whose listed weak
+shares do not rebuild the weak root, is not complete yet, never invalid: it
+is fetched whole, from another peer that relayed it if one did. A peer
+catching up still gets old shares with their weak shares whole: it was never
+sent them on their own.
+
+| Weak shares a share | Carried whole: stale shares on 1,000 nodes | Gossiped only |
+|---:|---:|---:|
+| 32 | 5.27% | 4.20% |
+| 160 | 8.66% | 4.20% |
+| 320 | 14.11% | 4.20% |
+
+The [network simulation](simulation/network-sim.md) gave these at
+10-second shares (`cargo netsim run --nodes 1000 --duration 10800
+--weak-shares N --weak-share-carriage whole`, or `gossip-only`; the runs are
+recorded with the weak share proposal, #117). Listing a share's weak shares
+by hash costs it 32 bytes each, against about 800 whole.
 
 ## One view of the shares
 

@@ -1105,13 +1105,14 @@ impl NodeActor {
                     .node
                     .request_response_handler
                     .peer_block_knowledge_mut();
-                send_share_block_broadcast(
+                let sent = send_share_block_broadcast(
                     share_block,
                     bch_headers,
                     &connected_peers,
                     peer_knowledge,
                     &mut self.node.swarm,
                 );
+                self.node.request_response_handler.record_share_relay(sent);
             }
             SwarmSend::Disconnect(peer_id) => {
                 if self.node.swarm.disconnect_peer_id(peer_id).is_err() {

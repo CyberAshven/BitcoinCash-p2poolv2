@@ -574,7 +574,11 @@ they have today at 10-second shares.
   as the shares, and answered with an Ack. Weak shares never extend a chain
   and are never named as uncles. Two cases: gossip only, and gossip with
   every share also carrying its weak shares whole in its body, as the design
-  has it (each share carries the average count; 64 add 51,200 bytes).
+  has it (each share carries the average count; 64 add 51,200 bytes). Since
+  2026-11-15 the node relays a new share with its weak shares listed by
+  hash (`ShareWithWeakHashes`): `gossip-only` plus 32 bytes a weak share in
+  the share message, and a fetch for any weak share a peer lacks; `whole` is
+  the node before it.
 - **2. Compact coinbase:** shares sent without the payout outputs, as in
   "Sending shares without their payouts" above: 1,429 bytes on the wire at
   32 MB blocks, the design's "about 1 KB" plus an 18-hash merkle branch.

@@ -12,6 +12,7 @@ use crate::node::SwarmSend;
 use crate::node::behaviour::request_response::RequestResponseEvent;
 use crate::node::messages::{GetData, InventoryMessage, Message};
 use crate::node::p2p_message_handlers::receivers::block_receiver::BlockReceiverHandle;
+use crate::node::p2p_message_handlers::senders::share_block::ShareRelayBytes;
 use crate::node::request_sender::RequestSender;
 use crate::node::response_worker::{ResponseWorkerEvent, ResponseWorkerSender};
 use crate::node::validation_worker::ValidationSender;
@@ -71,6 +72,9 @@ pub struct RequestResponseHandler<C: Send + Sync> {
     inbound_failures_total: u64,
     /// Responses dropped on a full or closed worker queue, for P2P health metrics.
     responses_dropped_total: u64,
+    /// Share messages this node relayed and their bytes, for P2P health
+    /// metrics.
+    share_relay: ShareRelayBytes,
     /// Bitcoin Cash: the pool relayed share transactions go to. `None` on
     /// Bitcoin, which ignores them.
     share_transaction_pool: Option<ShareTransactionPool>,
@@ -110,6 +114,7 @@ impl RequestResponseHandler<ResponseChannel<Message>> {
             outbound_failures_total: 0,
             inbound_failures_total: 0,
             responses_dropped_total: 0,
+            share_relay: ShareRelayBytes::default(),
             share_transaction_pool,
             weak_share_tx: None,
         }
@@ -243,6 +248,16 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
         self.responses_dropped_total
     }
 
+    /// Add what one share broadcast sent to the totals since start.
+    pub fn record_share_relay(&mut self, sent: ShareRelayBytes) {
+        self.share_relay += sent;
+    }
+
+    /// Share messages relayed and their bytes, since start.
+    pub fn share_relay(&self) -> ShareRelayBytes {
+        self.share_relay
+    }
+
     /// Responses waiting in the response worker queue.
     pub fn response_queue_depth(&self) -> u64 {
         (self.response_worker_handle.max_capacity() - self.response_worker_handle.capacity()) as u64
@@ -289,6 +304,10 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
             Message::ShareBlock(block, _) => {
                 self.peer_block_knowledge
                     .record_block_known(peer, block.block_hash());
+            }
+            Message::ShareWithWeakHashes(share, _) => {
+                self.peer_block_knowledge
+                    .record_block_known(peer, share.block_hash());
             }
             _ => {}
         }
@@ -394,6 +413,18 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
         response: Message,
     ) -> Result<(), Box<dyn Error>> {
         self.record_peer_knowledge(&peer, &response);
+
+        // The weak shares a share relayed by hash lacked go to the share
+        // waiting for them, not to the response worker.
+        let response = match (response, self.weak_share_tx.as_ref()) {
+            (Message::CarriedWeakShares(share_hash, weak_shares), Some(sender)) => {
+                if !sender.fill().answer(peer, share_hash, weak_shares) {
+                    debug!("No share waits for weak shares of {share_hash} from {peer}");
+                }
+                return Ok(());
+            }
+            (response, _) => response,
+        };
 
         // A weak-share fetch is a queue send, not a header walk, so it does
         // not go to the response worker. A node with no weak pool leaves the

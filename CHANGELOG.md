@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A new share is relayed with the weak shares it carries listed by hash, not
+whole (protocol segment `weak-by-hash`). Weak shares already travel ahead of
+the share that carries them: a node pushes the ones its miners find to every
+peer and announces the ones it takes by hash, each fetched once. The share
+message still carried every one of them whole, so a node downloaded each
+weak share twice and the share message grew with every weak share in it. On
+1,000 nodes at 10-second shares the network simulation put stale shares at
+5.27% with 32 weak shares a share carried whole, 8.66% with 160 and 14.11%
+with 320, against 4.20% when they travel only beside the shares; the weak
+shares that follow the asks (#117, #118) let a share carry 320. A share
+carrying weak shares now goes as `ShareWithWeakHashes`, 32 bytes a weak
+share. The receiver fills the list from its weak pool's checked weak shares,
+asks the sender for the rest (`GetCarriedWeakShares`, answered from the
+sender's store with `CarriedWeakShares`), and checks the rebuilt share
+exactly as a share sent whole, weak root included. A share still missing a
+weak share after 10 seconds, or whose listed hashes do not rebuild its weak
+root, is never stored or validated: the block fetcher fetches it whole, from
+another peer that relayed it meanwhile if one did. A list that does not hold
+exactly the weak shares the header counts, each once, is refused as a bad
+copy is. Header sync and block requests still send weak shares whole: a
+node catching up was never sent old weak shares. No share-chain rule
+changes and no store change; nodes before it cannot read the new messages,
+so the two derive different protocol strings and fail the handshake, and
+every node restarts on the new binary. New series:
+`p2p_share_relay_messages_total`, `p2p_share_relay_bytes_total` and
+`p2p_share_relay_whole_bytes_total` (what the same messages would have taken
+with every weak share whole), and `weak_shares_filled_from_pool_total`,
+`weak_shares_fetched_for_shares_total` and
+`weak_share_fills_fetched_whole_total`.
+
 The payout simulator has a `scale-levers` table for part 5 of the small
 miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
 Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,

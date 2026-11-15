@@ -247,6 +247,15 @@ pub struct WeakPoolCounts {
     /// Weak shares the pool did not take, by reason. A weak share dropped
     /// on a full worker queue, before the pool sees it, is not counted.
     pub refused: WeakShareRefusals,
+    /// Weak shares of shares relayed by hash (`ShareWithWeakHashes`) that
+    /// this node filled from the pool.
+    pub filled_from_pool: u64,
+    /// Weak shares of shares relayed by hash that the pool lacked and the
+    /// sender sent.
+    pub fetched_for_shares: u64,
+    /// Shares relayed by hash whose weak shares could not all be filled,
+    /// asked for whole instead.
+    pub fills_fetched_whole: u64,
 }
 
 /// What the pool has done since the node started and what it holds now:
@@ -266,7 +275,7 @@ impl WeakPoolStats {
     /// set, so the series stay bounded.
     pub fn exposition(&self) -> String {
         let counts = &self.counts;
-        let series: [(&str, &str, &str, u64); 6] = [
+        let series: [(&str, &str, &str, u64); 9] = [
             (
                 "weak_shares_found_total",
                 "counter",
@@ -290,6 +299,24 @@ impl WeakPoolStats {
                 "counter",
                 "Weak shares dropped from the pool because no share could carry them any more",
                 counts.expired,
+            ),
+            (
+                "weak_shares_filled_from_pool_total",
+                "counter",
+                "Weak shares of shares relayed by hash that this node filled from its weak pool",
+                counts.filled_from_pool,
+            ),
+            (
+                "weak_shares_fetched_for_shares_total",
+                "counter",
+                "Weak shares of shares relayed by hash that this node fetched from the sender",
+                counts.fetched_for_shares,
+            ),
+            (
+                "weak_share_fills_fetched_whole_total",
+                "counter",
+                "Shares relayed by hash whose weak shares could not all be filled, asked for whole instead",
+                counts.fills_fetched_whole,
             ),
             (
                 "weak_pool_size",
@@ -961,6 +988,37 @@ impl WeakPool {
             .pooled
             .get(pow_hash)
             .map(|pooled| pooled.weak_share.clone())
+    }
+
+    /// The weak shares still in the pool under `pow_hashes`, in that order,
+    /// `None` for each the pool does not hold, read under one lock: what a
+    /// share relayed by hash is filled from. Only pooled weak shares, which
+    /// passed their checks, fill a share; one that is only held is fetched
+    /// from the sender, so the body is the one the miner committed.
+    pub fn pooled_weak_shares(&self, pow_hashes: &[BlockHash]) -> Vec<Option<WeakShare>> {
+        let state = self.lock();
+        pow_hashes
+            .iter()
+            .map(|pow_hash| {
+                state
+                    .pooled
+                    .get(pow_hash)
+                    .map(|pooled| pooled.weak_share.clone())
+            })
+            .collect()
+    }
+
+    /// Count `from_pool` weak shares of a share relayed by hash filled from
+    /// the pool, and `fetched` the sender sent.
+    pub fn count_fill(&self, from_pool: usize, fetched: usize) {
+        let mut state = self.lock();
+        state.counts.filled_from_pool += from_pool as u64;
+        state.counts.fetched_for_shares += fetched as u64;
+    }
+
+    /// Count a share relayed by hash that was asked for whole instead.
+    pub fn count_fill_fetched_whole(&self) {
+        self.lock().counts.fills_fetched_whole += 1;
     }
 
     /// Whether a weak share with `pow_hash` is held, waiting for its parent

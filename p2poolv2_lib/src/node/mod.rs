@@ -18,6 +18,7 @@ pub mod request_sender;
 pub mod response_worker;
 pub mod validation_worker;
 mod weak_share_fetch;
+mod weak_share_fill;
 pub mod weak_share_worker;
 pub use crate::config::Config;
 pub mod actor;
@@ -377,6 +378,7 @@ impl Node {
             inbound_failures_total: self.request_response_handler.inbound_failures_total(),
             responses_dropped_total: self.request_response_handler.responses_dropped_total(),
             response_queue_depth: self.request_response_handler.response_queue_depth(),
+            share_relay: self.request_response_handler.share_relay(),
         }
     }
 
