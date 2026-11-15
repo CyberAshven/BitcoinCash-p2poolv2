@@ -28,6 +28,7 @@ pub mod races;
 pub mod report;
 pub mod sampling;
 pub mod scenario;
+pub mod storage;
 pub mod study;
 pub mod tables;
 pub mod transition;

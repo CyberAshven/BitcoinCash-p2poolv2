@@ -31,12 +31,12 @@ are `designs`, `hashrate`, `pool`, `weak-credit`, `band-cap`,
 `weak-constants`, `includer-cut`, `levels`, `period`, `attack-minimum`,
 `attack-carriers` and `attack-spam`, and study #85's `refusing-races`,
 `mixes`, `arrivals`, `tiny-pool`, `floods`, `draw-steering`, `losses`,
-`weak-depth`, `r-max` and `r-max-mixes`, and `scale`, `scale-levers` and
-`band-step`, and the proposal's `weak-asks`, `weak-asks-mixes`,
-`weak-asks-constants` and `weak-asks-attacks`. Every run is a pure function
-of its inputs and seed (default 1), drawn from `p2poolv2_netsim`'s seeded
-xoshiro256** generator, so the tables below come out the same on any
-machine. The whole
+`weak-depth`, `r-max` and `r-max-mixes`, and `scale`, `scale-levers`,
+`band-step`, `window-cap` and `storage`, and the proposal's `weak-asks`,
+`weak-asks-mixes`, `weak-asks-constants` and `weak-asks-attacks`. Every run
+is a pure function of its inputs and seed (default 1), drawn from
+`p2poolv2_netsim`'s seeded xoshiro256** generator, so the tables below come
+out the same on any machine. The whole
 default run, 1,000 simulated months per scenario, took 26 seconds on the
 32-thread machine it was run on.
 
@@ -738,6 +738,71 @@ with `WEAK_FILL` 320, `WEAK_CAP` 640 and `R_MAX` 2,560.
   is.
 - What a node pays to check and store the weak shares; the design page
   takes those from the network simulation.
+
+## Window cap and storage
+
+`cargo payout-sim --scenario window-cap` asks whether the PPLNS window's cap
+should be longer than 14 days. On Bitcoin Cash the window holds three blocks
+of the pool's work, at most 120,960 shares; a pool that finds fewer than
+three blocks in 14 days reaches the cap. The table runs pools of medium
+miners at 0.01 to 1% of today's Bitcoin Cash, levels as a node sets them,
+with the cap at 14, 30 and 60 days. `cargo payout-sim --scenario storage`
+is arithmetic, no simulation: what a node keeps, by payees in the window,
+payout level and cap. Both tables are at the end of this file.
+
+What the window cap table shows:
+
+1. **The cap binds only in pools under about 0.15% of Bitcoin Cash**, 5.5
+   PH/s today, which find fewer than three blocks in 14 days. From 0.2% up
+   the window holds three blocks well inside 14 days (10.4 days at 0.2%,
+   2.1 at 1%), and every cap gives the same row.
+2. **A longer cap does not help a miner that keeps mining.** In a pool at
+   0.01% (370 TH/s, a block about every 70 days) the Bitaxe has 63%, 66%
+   and 65% of its months without a payment at 14, 30 and 60 days; at 0.02%
+   40%, 39% and 42%; at 0.05% 11%, 10% and 11%. Each block pays a steady
+   miner its part of the window's work, whatever the window's length, so
+   its income follows the blocks the pool finds. Pay stays fair in every row
+   (0.99 to 1.08).
+3. **What it changes is the single share.** At 0.05% a share is paid by 1.0
+   block on average with 14 days and 2.2 with 30, so 36% of shares against
+   12% are paid by none. That matters to a miner that mines a few days and
+   leaves, and its expected pay is fair either way.
+4. **It costs every node.** The cap sets the payout depth, and with it the
+   reorg limit, the expiry of share chain outputs and the bodies a node
+   keeps: 60 days of them instead of 28 with a 30-day cap. A miner that
+   stops is paid for up to 30 days.
+
+So the 14-day cap stays.
+
+What the storage table shows:
+
+1. **The payout level, not the payees, bounds a coinbase.** Below its level
+   a payee's part is drawn in whole levels, so a block pays at most the
+   reward over the level: 17,885 outputs at the default level 5 (608 KB),
+   with 100,000 payees or 1,000,000. Only at level 1 (1,092 satoshis) does
+   a block with 100,000 or more payees fill Bitcoin Cash's 1,000,000-byte
+   transaction limit and pay the rest through its payout tree: 70,600 tree
+   payees (3.2 MB kept for ever) with 100,000 payees, 256,772 (11.6 MB) with
+   1,000,000. A pool at 30% of Bitcoin Cash finds about 1,300 blocks a
+   month, so with a million payees all at level 1 it would keep about 15 GB
+   of trees a month.
+2. **The coinbase is most of what a node keeps:** 8.3 GB for 28 days with
+   1,000 payees, 82.5 GB with 10,000, 148 GB at the default level's ceiling
+   and 242 GB when every coinbase is a full 1 MB. A 30-day cap doubles each.
+   Never pruned, they would grow by 108 GB to 3.2 TB a year.
+3. **Stored without its payouts it takes 367 bytes,** 0.09 GB for 28 days.
+   Every node can rebuild the payouts from the chain, as it already does to
+   check a share.
+4. **Weak shares take 6.2 GB for 28 days at 32 a share and 62 GB at part
+   6's ceiling of 320.** Kept for one payout depth instead of two, which
+   they allow because they hold no share chain outputs, 3.1 and 31 GB.
+5. **Headers, kept for ever, take 3.15 GB a year.**
+
+With coinbases stored without their payouts and weak shares kept for one
+payout depth, a node at part 6's ceiling with a million payees keeps about
+31 GB and 3 GB more a year, against 62 GB of weak shares and 148 to 242 GB
+of coinbases now. Fees are left out: at level 5 each 1 BCH of fees adds
+about 5,700 outputs.
 
 ## Code
 
@@ -1697,7 +1762,55 @@ difficulty, to push the cap up.
 | x270 | 30% | 10 s | 160 | 2.10% | 17.3 | 13.9 | 170 | 19.9 | 1 | 0.162 | 0.533 | 85.10% | 2.74 | 1.00 | 5 | 14.7 | 7.51 | 0.10% | 0.46 | 0.98 |
 | x270 | 30% | 10 s | 320 | 2.10% | 34.6 | 27.8 | 339 | 10.0 | 1 | 0.353 | 1.02 | 71.70% | 1.93 | 0.96 | 5 | 29.8 | 7.48 | 0.10% | 0.41 | 0.98 |
 
+## Window cap: 14 days against 30 and 60 in small pools (band-weak-levels, weak work, medium miners, levels as a node sets them)
 
+| Pool | PH/s | Blocks a month | Cap | Window | Blocks a share is paid by | Shares paid by no block | Paid after stopping, at most | Bitaxe level | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC level | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.01% | 0.370 | 0.432 | 14 days | 14.0 days | 0.20 | 81.74% | 14.0 days | 1 | 0.451 | 63.00% | 1.46 | 1.04 | 1 | 0.451 | 63.00% | 1.46 | 1.04 |
+| 0.01% | 0.370 | 0.432 | 30 days | 30.0 days | 0.43 | 64.92% | 30.0 days | 1 | 0.427 | 66.30% | 1.59 | 0.99 | 1 | 0.427 | 66.30% | 1.59 | 0.99 |
+| 0.01% | 0.370 | 0.432 | 60 days | 60.0 days | 0.86 | 42.15% | 60.0 days | 1 | 0.440 | 64.80% | 1.53 | 1.02 | 1 | 0.440 | 64.80% | 1.53 | 1.02 |
+| 0.02% | 0.740 | 0.864 | 14 days | 14.0 days | 0.40 | 66.82% | 14.0 days | 1 | 0.935 | 39.60% | 1.02 | 1.08 | 1 | 0.935 | 39.60% | 1.02 | 1.08 |
+| 0.02% | 0.740 | 0.864 | 30 days | 30.0 days | 0.86 | 42.15% | 30.0 days | 1 | 0.901 | 38.80% | 0.99 | 1.04 | 1 | 0.901 | 38.80% | 0.99 | 1.04 |
+| 0.02% | 0.740 | 0.864 | 60 days | 60.0 days | 1.73 | 17.76% | 60.0 days | 1 | 0.861 | 41.60% | 1.05 | 1.00 | 1 | 0.861 | 41.60% | 1.05 | 1.00 |
+| 0.05% | 1.85 | 2.16 | 14 days | 14.0 days | 1.01 | 36.49% | 14.0 days | 1 | 2.19 | 11.20% | 0.68 | 1.02 | 1 | 2.19 | 11.20% | 0.68 | 1.01 |
+| 0.05% | 1.85 | 2.16 | 30 days | 30.0 days | 2.16 | 11.53% | 30.0 days | 1 | 2.20 | 10.00% | 0.66 | 1.02 | 1 | 2.20 | 10.00% | 0.66 | 1.02 |
+| 0.05% | 1.85 | 2.16 | 60 days | 41.7 days | 3.00 | 4.98% | 41.7 days | 1 | 2.17 | 11.10% | 0.67 | 1.00 | 1 | 2.17 | 11.10% | 0.68 | 1.00 |
+| 0.10% | 3.70 | 4.32 | 14 days | 14.0 days | 2.02 | 13.32% | 14.0 days | 5 | 4.36 | 0.80% | 0.48 | 1.02 | 5 | 4.36 | 0.80% | 0.48 | 1.01 |
+| 0.10% | 3.70 | 4.32 | 30 days | 20.8 days | 3.00 | 4.98% | 20.8 days | 5 | 4.35 | 0.90% | 0.48 | 1.01 | 5 | 4.35 | 0.90% | 0.47 | 1.01 |
+| 0.10% | 3.70 | 4.32 | 60 days | 20.8 days | 3.00 | 4.98% | 20.8 days | 5 | 4.35 | 0.90% | 0.48 | 1.01 | 5 | 4.35 | 0.90% | 0.47 | 1.01 |
+| 0.20% | 7.40 | 8.64 | 14 days | 10.4 days | 3.00 | 4.98% | 10.4 days | 5 | 8.62 | 0.00% | 0.34 | 1.01 | 5 | 8.62 | 0.00% | 0.34 | 1.00 |
+| 0.20% | 7.40 | 8.64 | 30 days | 10.4 days | 3.00 | 4.98% | 10.4 days | 5 | 8.62 | 0.00% | 0.34 | 1.01 | 5 | 8.62 | 0.00% | 0.34 | 1.00 |
+| 0.20% | 7.40 | 8.64 | 60 days | 10.4 days | 3.00 | 4.98% | 10.4 days | 5 | 8.62 | 0.00% | 0.34 | 1.01 | 5 | 8.62 | 0.00% | 0.34 | 1.00 |
+| 0.50% | 18.5 | 21.6 | 14 days | 4.2 days | 3.00 | 4.98% | 4.2 days | 5 | 21.6 | 0.00% | 0.21 | 1.01 | 5 | 21.6 | 0.00% | 0.22 | 0.99 |
+| 0.50% | 18.5 | 21.6 | 30 days | 4.2 days | 3.00 | 4.98% | 4.2 days | 5 | 21.6 | 0.00% | 0.21 | 1.01 | 5 | 21.6 | 0.00% | 0.22 | 0.99 |
+| 0.50% | 18.5 | 21.6 | 60 days | 4.2 days | 3.00 | 4.98% | 4.2 days | 5 | 21.6 | 0.00% | 0.21 | 1.01 | 5 | 21.6 | 0.00% | 0.22 | 0.99 |
+| 1% | 37.0 | 43.2 | 14 days | 2.1 days | 3.00 | 4.98% | 2.1 days | 5 | 24.9 | 0.00% | 0.19 | 1.00 | 5 | 43.2 | 0.00% | 0.15 | 1.00 |
+| 1% | 37.0 | 43.2 | 30 days | 2.1 days | 3.00 | 4.98% | 2.1 days | 5 | 24.9 | 0.00% | 0.19 | 1.00 | 5 | 43.2 | 0.00% | 0.15 | 1.00 |
+| 1% | 37.0 | 43.2 | 60 days | 2.1 days | 3.00 | 4.98% | 2.1 days | 5 | 24.9 | 0.00% | 0.19 | 1.00 | 5 | 43.2 | 0.00% | 0.15 | 1.00 |
+
+## Storage: what a node keeps, by payees, payout level and window cap (arithmetic, no fees)
+
+| Payees in the window | Payout level | Coinbase outputs | In the payout tree | Coinbase KB | GB kept, 14-day cap (28 days) | GB kept, 30-day cap (60 days) | GB a year if never pruned | Payout tree MB a found block, kept for ever |
+|---|---|---|---|---|---|---|---|---|
+| 10 | 5 (17,472 sat) | 10 | 0 | 0.707 | 0.171 | 0.367 | 2.23 | 0 |
+| 10 | 1 (1,092 sat) | 10 | 0 | 0.707 | 0.171 | 0.367 | 2.23 | 0 |
+| 100 | 5 (17,472 sat) | 100 | 0 | 3.77 | 0.913 | 1.95 | 11.9 | 0 |
+| 100 | 1 (1,092 sat) | 100 | 0 | 3.77 | 0.913 | 1.95 | 11.9 | 0 |
+| 1,000 | 5 (17,472 sat) | 1,000 | 0 | 34.4 | 8.33 | 17.8 | 108 | 0 |
+| 1,000 | 1 (1,092 sat) | 1,000 | 0 | 34.4 | 8.33 | 17.8 | 108 | 0 |
+| 10,000 | 5 (17,472 sat) | 10,000 | 0 | 340 | 82.5 | 177 | 1,073 | 0 |
+| 10,000 | 1 (1,092 sat) | 10,000 | 0 | 340 | 82.5 | 177 | 1,073 | 0 |
+| 100,000 | 5 (17,472 sat) | 17,885 | 0 | 608 | 148 | 316 | 1,919 | 0 |
+| 100,000 | 1 (1,092 sat) | 100,000 | 70,600 | 1,000 | 242 | 519 | 3,153 | 3.18 |
+| 1,000,000 | 5 (17,472 sat) | 17,885 | 0 | 608 | 148 | 316 | 1,919 | 0 |
+| 1,000,000 | 1 (1,092 sat) | 286,172 | 256,772 | 1,000 | 242 | 519 | 3,153 | 11.6 |
+
+| Stored | GB for two payout depths, 14-day cap | GB for two payout depths, 30-day cap | GB for one payout depth, 14-day cap | GB for one payout depth, 30-day cap | GB a year |
+|---|---|---|---|---|---|
+| 32 weak shares a share | 6.21 | 13.3 | 3.10 | 6.64 | 80.7 |
+| 320 weak shares a share | 62.1 | 133 | 31.0 | 66.4 | 807 |
+| A coinbase stored without its payouts | 0.089 | 0.190 | 0.044 | 0.095 | 1.16 |
+| Share headers, kept for ever | - | - | - | - | 3.15 |
 
 ## Proposal: weak shares that follow the asks, where they settle (band-weak-levels, weak work, 50% industrial)
 

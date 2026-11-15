@@ -140,11 +140,15 @@ pub enum Table {
     WeakAsksConstants,
     /// Proposal: attacks on the asks.
     WeakAsksAttacks,
+    /// The PPLNS window's cap, 14 days against 30 and 60, in small pools.
+    WindowCap,
+    /// What a node stores, by payees, payout level and window cap.
+    Storage,
 }
 
 impl Table {
     /// Every table, in the order of the default run.
-    pub const ALL: [Table; 29] = [
+    pub const ALL: [Table; 31] = [
         Table::Designs,
         Table::Hashrate,
         Table::Pool,
@@ -174,6 +178,8 @@ impl Table {
         Table::WeakAsksMixes,
         Table::WeakAsksConstants,
         Table::WeakAsksAttacks,
+        Table::WindowCap,
+        Table::Storage,
     ];
 
     /// Name on the command line.
@@ -208,6 +214,8 @@ impl Table {
             Table::WeakAsksMixes => "weak-asks-mixes",
             Table::WeakAsksConstants => "weak-asks-constants",
             Table::WeakAsksAttacks => "weak-asks-attacks",
+            Table::WindowCap => "window-cap",
+            Table::Storage => "storage",
         }
     }
 
@@ -290,6 +298,12 @@ impl Table {
             Table::WeakAsksAttacks => {
                 "Proposal: attacks on the asks (band-weak-levels, weak work, 50% industrial)"
             }
+            Table::WindowCap => {
+                "Window cap: 14 days against 30 and 60 in small pools (band-weak-levels, weak work, medium miners, levels as a node sets them)"
+            }
+            Table::Storage => {
+                "Storage: what a node keeps, by payees, payout level and window cap (arithmetic, no fees)"
+            }
         }
     }
 
@@ -326,6 +340,8 @@ impl Table {
             Table::WeakAsksMixes => ask_study::weak_asks_mixes(base),
             Table::WeakAsksConstants => ask_study::weak_asks_constants(base),
             Table::WeakAsksAttacks => ask_study::weak_asks_attacks(base),
+            Table::WindowCap => study::window_cap(base),
+            Table::Storage => crate::storage::storage(),
         };
         format!("## {}\n\n{body}", self.title())
     }
