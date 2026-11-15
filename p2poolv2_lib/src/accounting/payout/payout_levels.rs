@@ -6,12 +6,16 @@
 //! (`docs/sharechain/small-miners-design.md`, part 4).
 //!
 //! A payout level is the smallest payment a miner wants. Each Bitcoin Cash
-//! share header carries one, `k` from 0 to [`MAX_PAYOUT_LEVEL`], which
-//! stands for
+//! share header carries one, `k` from [`MIN_PAYOUT_LEVEL`] to
+//! [`MAX_PAYOUT_LEVEL`], which stands for
 //!
 //! ```text
 //! L_k = 546 * 2^k satoshis = 546, 1,092, 2,184, 4,368, 8,736, 17,472, 34,944, 69,888
 //! ```
+//!
+//! Level 0, 546 satoshis, is not a level a share may carry: it is below dust
+//! once the payout tree's fee is taken. `level_amount` still defines it, so
+//! the shift stays `546 * 2^k`.
 //!
 //! A payee's level in a block is the level of its newest credited entry in
 //! the PPLNS window (`PplnsWindow`). After the window's weights, cuts and
@@ -28,30 +32,48 @@ use bitcoin::hashes::{Hash, HashEngine, sha256};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use std::collections::HashMap;
 
-pub use p2poolv2_config::MAX_PAYOUT_LEVEL;
+pub use p2poolv2_config::{MAX_PAYOUT_LEVEL, MIN_PAYOUT_LEVEL};
 
-/// `L_0`, the lowest level: Bitcoin Cash's dust limit for a P2PKH output,
+/// `L_0`, the shift's floor: Bitcoin Cash's dust limit for a P2PKH output,
 /// 546 satoshis (BCHN `GetDustThreshold` at its 3 sat/byte dust relay fee).
+/// A share may not carry level 0; [`MIN_PAYOUT_LEVEL`] is the lowest level.
 pub const PAYOUT_LEVEL_FLOOR: u64 = 546;
 
 /// Protocol tag segment for payout levels: levels of 546 satoshis times
 /// powers of two, each payee below its level paid by a draw within the
 /// block. A node without it pays every payee its exact slice and builds
 /// another coinbase whenever a payee is below its level.
-pub const BCH_PAYOUT_LEVELS_RULE_TAG: &str = "levels-546x2";
+///
+/// From 2026-11-12 the segment is `levels-546x2-k1`. Level 0 is not valid:
+/// it paid 546 satoshis, which is below dust once the payout tree's fee is
+/// taken, so a level 0 win that landed in the tree went to the tree's
+/// largest payee. A node on `levels-546x2` still accepts that level, so the
+/// two cannot share a chain.
+pub const BCH_PAYOUT_LEVELS_RULE_TAG: &str = "levels-546x2-k1";
 
-/// The genesis share's payout level: the lowest. Genesis is paid only when
-/// nothing else in the window is (`BCH_GENESIS_LAST_RESORT_RULE_TAG`), and
-/// then it is paid the whole coinbase, so its level never draws.
-pub const GENESIS_PAYOUT_LEVEL: u8 = 0;
+/// The genesis share's payout level: the lowest a share may carry. Genesis
+/// is paid only when nothing else in the window is
+/// (`BCH_GENESIS_LAST_RESORT_RULE_TAG`), and then it is paid the whole
+/// coinbase, so its level never draws. A stored genesis is read by the same
+/// decode as any other header, which refuses a level below
+/// [`MIN_PAYOUT_LEVEL`].
+pub const GENESIS_PAYOUT_LEVEL: u8 = MIN_PAYOUT_LEVEL;
 
 /// The bytes the draw's seed hashes before the parent share hash.
 const DRAW_SEED_DOMAIN: &[u8] = b"p2pool-payout-level";
 
 /// `L_k`, the smallest payment at payout level `level`: `546 * 2^level`
 /// satoshis. A level above [`MAX_PAYOUT_LEVEL`] reads as the maximum.
+/// Level 0 still reads as [`PAYOUT_LEVEL_FLOOR`]; a share may not carry it.
 pub fn level_amount(level: u8) -> u64 {
     PAYOUT_LEVEL_FLOOR << level.min(MAX_PAYOUT_LEVEL)
+}
+
+/// Why `level` is not a Bitcoin Cash payout level: it is below
+/// [`MIN_PAYOUT_LEVEL`]. The message names `level`, the lowest level and
+/// that level's amount.
+pub(crate) fn payout_level_too_low(level: u8) -> String {
+    p2poolv2_config::payout_level_below_minimum(level)
 }
 
 /// The weights a PPLNS window pays at one anchor and, on Bitcoin Cash, the
@@ -228,7 +250,22 @@ mod tests {
 
     #[test]
     fn the_rule_tag_names_the_floor_and_the_doubling() {
-        assert_eq!(BCH_PAYOUT_LEVELS_RULE_TAG, "levels-546x2");
+        assert_eq!(BCH_PAYOUT_LEVELS_RULE_TAG, "levels-546x2-k1");
+    }
+
+    /// Level 0 is named, with the lowest level and that level's amount.
+    #[test]
+    fn a_level_below_the_lowest_names_the_level_the_floor_and_its_amount() {
+        assert_eq!(
+            payout_level_too_low(0),
+            format!(
+                "payout level 0 is below the lowest payout level \
+                 {MIN_PAYOUT_LEVEL} ({} satoshis)",
+                level_amount(MIN_PAYOUT_LEVEL)
+            ),
+            "level 0 refusal"
+        );
+        assert_eq!(level_amount(MIN_PAYOUT_LEVEL), 1_092, "lowest level amount");
     }
 
     /// The seed is the first 8 bytes, little-endian, of the domain, the

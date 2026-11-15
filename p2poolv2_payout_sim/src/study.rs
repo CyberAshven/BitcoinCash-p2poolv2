@@ -11,9 +11,10 @@
 //! at the minimum credited at the weak work, and `INCLUDER_CUT` at 5%.
 
 use crate::constants::{
-    ASIC_HASHRATE, BCH_BLOCK_INTERVAL_SECONDS, BCH_BLOCKS_PER_MONTH, BCH_NETWORK_HASHRATE,
-    DEFAULT_BAND_CAP, DEFAULT_LEVEL, HASHES_PER_DIFFICULTY, HOME_MINER_HASHRATE,
-    MINI_CEILING_DIFFICULTY, MONTH_SECONDS, PAGE_INCLUDER_CUT, WEAK_SHARE_MESSAGE_BYTES,
+    ASIC_HASHRATE, BAND_CAP_STEP_DIVISOR, BCH_BLOCK_INTERVAL_SECONDS, BCH_BLOCKS_PER_MONTH,
+    BCH_NETWORK_HASHRATE, DEFAULT_BAND_CAP, DEFAULT_LEVEL, HASHES_PER_DIFFICULTY,
+    HOME_MINER_HASHRATE, MINI_CEILING_DIFFICULTY, MONTH_SECONDS, PAGE_INCLUDER_CUT,
+    SMALL_FARM_HASHRATE, WEAK_SHARE_MESSAGE_BYTES,
 };
 use crate::levels::{NODE_MIN_PAYMENTS_PER_MONTH, node_level};
 use crate::miners::{MinerClass, MinerKind, MinerMix, TrackedMiner};
@@ -486,6 +487,8 @@ impl TransitionCase {
             stale_rate: base.stale_rate,
             ceiling_difficulty: MINI_CEILING_DIFFICULTY,
             cap_max: DEFAULT_BAND_CAP as u64,
+            band_step_divisor: BAND_CAP_STEP_DIVISOR as u64,
+            overstating: None,
             weak_cap: base.weak_cap,
             weak_fill: base.weak_fill,
             weak_depth: base.weak_depth,
@@ -672,6 +675,8 @@ fn genesis_inputs(base: &Scenario, pool_fraction: f64, ratio_max: u64) -> Transi
         stale_rate: base.stale_rate,
         ceiling_difficulty: MINI_CEILING_DIFFICULTY,
         cap_max: DEFAULT_BAND_CAP as u64,
+        band_step_divisor: BAND_CAP_STEP_DIVISOR as u64,
+        overstating: None,
         weak_cap: base.weak_cap,
         weak_fill: base.weak_fill,
         weak_depth: base.weak_depth,
@@ -743,6 +748,130 @@ pub fn ratio_max(base: &Scenario) -> String {
         "Weak found/s, first hour",
         "Weak KB/s, first hour",
         "Weak expired, first hour",
+    ];
+    markdown_table(&headers, &rows)
+}
+
+/// Step divisors of the band cap's sweep: the page's 512, a quarter of it and
+/// four times it.
+const BAND_STEP_DIVISORS: [u64; 3] = [128, 512, 2_048];
+
+/// Parts of the pool's hashrate that overstate what they want, at the page's
+/// divisor.
+const OVERSTATING_FRACTIONS: [f64; 2] = [0.02, 0.10];
+
+/// Hours at the start of a genesis run that show what the cap's catching up
+/// costs home miners.
+const BAND_STEP_FIRST_HOURS: usize = 6;
+
+/// A chain from genesis at `pool_fraction` whose band cap steps by
+/// `divisor`. `overstating` of the pool's hashrate mines at the minimum and
+/// records the largest wanted difficulty in every share it finds; the other
+/// classes keep their mix and shrink to make room for it.
+fn band_step_inputs(
+    base: &Scenario,
+    pool_fraction: f64,
+    divisor: u64,
+    overstating: f64,
+) -> TransitionInputs {
+    let mut inputs = genesis_inputs(base, pool_fraction, RATIO_MAXIMA[0]);
+    inputs.band_step_divisor = divisor;
+    if overstating > 0.0 {
+        let pool_hashrate = base.network_hashrate() * pool_fraction;
+        inputs
+            .classes
+            .iter_mut()
+            .for_each(|class| class.count *= 1.0 - overstating);
+        inputs.overstating = Some(inputs.classes.len());
+        inputs.classes.push(MinerClass {
+            name: "overstating".to_string(),
+            kind: MinerKind::Industrial,
+            hashrate: SMALL_FARM_HASHRATE,
+            count: pool_hashrate * overstating / SMALL_FARM_HASHRATE,
+            follows_node_default: false,
+            on_carrying_node: true,
+            level: DEFAULT_LEVEL,
+        });
+    }
+    inputs
+}
+
+/// Home miners' income over their fair income in `sample`.
+fn home_pay_over_fair(sample: &HourSample) -> f64 {
+    sample.home_income / sample.home_fair_income
+}
+
+/// Constants: the band cap's step. From genesis for two days, 50%
+/// industrial: where `C` settles, the first hour it gets within 10% of it,
+/// and what home miners are paid against fair while it catches up and once
+/// it has, for three step divisors, and at the page's divisor with part of
+/// the pool mining at the minimum while every share it finds records the
+/// largest wanted difficulty.
+pub fn band_step(base: &Scenario) -> String {
+    let cases: Vec<(f64, u64, f64)> = [0.01, 0.10]
+        .into_iter()
+        .flat_map(|fraction| {
+            BAND_STEP_DIVISORS
+                .into_iter()
+                .map(move |divisor| (fraction, divisor, 0.0))
+                .chain(
+                    OVERSTATING_FRACTIONS
+                        .into_iter()
+                        .map(move |part| (fraction, BAND_CAP_STEP_DIVISOR as u64, part)),
+                )
+        })
+        .collect();
+    let mut seeder = SimulationRandom::from_seed(base.seed);
+    let jobs: Vec<(TransitionInputs, u64)> = cases
+        .iter()
+        .flat_map(|(fraction, divisor, overstating)| {
+            let inputs = band_step_inputs(base, *fraction, *divisor, *overstating);
+            (0..TRANSITION_SEEDS)
+                .map(|_| (inputs.clone(), seeder.next_u64()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let runs = parallel_map(&jobs, |(inputs, seed)| {
+        simulate_transition(inputs, &mut SimulationRandom::from_seed(*seed))
+    });
+    let rows: Vec<Vec<String>> = cases
+        .iter()
+        .zip(runs.chunks(TRANSITION_SEEDS))
+        .map(|((fraction, divisor, overstating), seeds)| {
+            let mut hours = vec![HourSample::default(); seeds[0].len()];
+            seeds.iter().for_each(|run| {
+                hours
+                    .iter_mut()
+                    .zip(run)
+                    .for_each(|(sum, hour)| sum.add(hour));
+            });
+            let from_genesis = &hours[HOURS_BEFORE_EVENT..];
+            let settled = hours_sum(&hours, hours.len() - GENESIS_SETTLED_HOURS, hours.len());
+            let first = hours_sum(
+                &hours,
+                HOURS_BEFORE_EVENT,
+                HOURS_BEFORE_EVENT + BAND_STEP_FIRST_HOURS,
+            );
+            let caps: Vec<f64> = from_genesis.iter().map(HourSample::band_cap).collect();
+            vec![
+                pool_percent(*fraction),
+                divisor.to_string(),
+                percent(*overstating),
+                two_decimals(settled.band_cap()),
+                settle_cell(&caps, settled.band_cap()),
+                two_decimals(home_pay_over_fair(&first)),
+                two_decimals(home_pay_over_fair(&settled)),
+            ]
+        })
+        .collect();
+    let headers = [
+        "Pool",
+        "Step divisor",
+        "Hashrate overstating",
+        "C settles at",
+        "C gets within 10%",
+        "Home pay over fair, first 6 hours",
+        "Home pay over fair, last day",
     ];
     markdown_table(&headers, &rows)
 }
@@ -1283,6 +1412,151 @@ pub fn scale(base: &Scenario) -> String {
     .map(|cell| cell.to_string())
     .collect();
     headers.extend(both_miner_headers());
+    table_from(&headers, &rows)
+}
+
+/// Pool sizes of the scale levers table, as parts of Bitcoin Cash's hashrate.
+const LEVER_POOL_FRACTIONS: [f64; 2] = [0.10, 0.30];
+
+/// Bitcoin Cash hashrate multiples of the scale levers table: today's 3.7
+/// EH/s up to Bitcoin's, about 270 times it.
+const LEVER_HASHRATE_MULTIPLES: [f64; 4] = [1.0, 10.0, 100.0, 270.0];
+
+/// A way to give the miners at the minimum more weak shares a second.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ScaleLever {
+    /// A share period of this many seconds, each share carrying as many weak
+    /// shares as today. 10 seconds is the rules as they are.
+    Period(f64),
+    /// The 10-second share period, each share carrying this many times
+    /// today's weak shares: `WEAK_CAP`, `WEAK_FILL` and `R_MAX` times it.
+    WeakShares(u64),
+}
+
+/// The levers of the scale levers table: the rules as they are, three
+/// shorter share periods, and the same three weak share rates reached at the
+/// 10-second period with more weak shares a share.
+const SCALE_LEVERS: [ScaleLever; 7] = [
+    ScaleLever::Period(10.0),
+    ScaleLever::Period(5.0),
+    ScaleLever::Period(2.0),
+    ScaleLever::Period(1.0),
+    ScaleLever::WeakShares(2),
+    ScaleLever::WeakShares(5),
+    ScaleLever::WeakShares(10),
+];
+
+/// One row of the scale levers table: the scale table's scenario at
+/// `multiple` and `fraction`, with `lever` applied. A shorter period takes
+/// the network simulation's stale rate at that period. More weak shares a
+/// share raise `R_MAX` by the same factor, so the weak ratio can still reach
+/// the fill.
+pub(crate) fn lever_scenario(
+    base: &Scenario,
+    multiple: f64,
+    fraction: f64,
+    lever: ScaleLever,
+) -> Scenario {
+    let scenario = scale_scenario(base, multiple, fraction);
+    match lever {
+        ScaleLever::Period(seconds) => Scenario {
+            period_seconds: seconds,
+            stale_rate: stale_rate_for_period(seconds),
+            ..scenario
+        },
+        ScaleLever::WeakShares(times) => Scenario {
+            weak_cap: scenario.weak_cap * times,
+            weak_fill: scenario.weak_fill * times,
+            weak_ratio_max: scenario.weak_ratio_max * times,
+            ..scenario
+        },
+    }
+}
+
+/// What gives small miners more credit as the hashrate grows: a shorter
+/// share period (section 5 of the design page) against more weak shares a
+/// share at the 10-second period. The adopted design at 10 and 30% of
+/// Bitcoin Cash and 1 to 270 times today's hashrate, 50% industrial, levels
+/// as a node sets them. Each row gives the stale rate the chain pays for the
+/// lever, the weak shares and bytes a second every node relays, the smallest
+/// miner that still finds three weak shares a month, and what the Bitaxe and
+/// the ASIC get.
+pub fn scale_levers(base: &Scenario) -> String {
+    let scenarios: Vec<Scenario> = LEVER_HASHRATE_MULTIPLES
+        .into_iter()
+        .flat_map(|multiple| {
+            LEVER_POOL_FRACTIONS.into_iter().flat_map(move |fraction| {
+                SCALE_LEVERS
+                    .into_iter()
+                    .map(move |lever| lever_scenario(base, multiple, fraction, lever))
+            })
+        })
+        .collect();
+    let reports = run_scenarios(&scenarios);
+    let rows: Vec<Vec<String>> = reports
+        .iter()
+        .map(|report| {
+            let chain = report.home_chain();
+            let weak_difficulty = chain.weak.map_or(chain.asert_difficulty, |outcome| {
+                (chain.asert_difficulty / outcome.mean_ratio).max(MINI_CEILING_DIFFICULTY)
+            });
+            let mut row = vec![
+                format!("x{}", report.scenario.hashrate_multiple),
+                pool_percent(report.scenario.pool_fraction),
+                format!("{} s", report.scenario.period_seconds),
+                report.scenario.weak_fill.to_string(),
+                percent(report.scenario.stale_rate),
+                rounded(report.weak_shares_per_second()),
+                rounded(report.bytes_per_second() / 1_000.0),
+                weak_ratio(report),
+                rounded(smallest_regular_miner(weak_difficulty) / 1.0e12),
+            ];
+            report
+                .scenario
+                .tracked
+                .iter()
+                .zip(&report.miners)
+                .for_each(|(tracked, miner)| {
+                    row.extend([
+                        tracked.level.to_string(),
+                        rounded(miner.weak_shares_per_month),
+                        rounded(miner.payments_per_month),
+                        percent(miner.months_without_payment),
+                        optional(miner.swing, two_decimals),
+                        income_ratio(miner),
+                    ]);
+                });
+            row
+        })
+        .collect();
+    let mut headers: Vec<String> = [
+        "BCH hashrate",
+        "Pool",
+        "Period",
+        "WEAK_FILL",
+        "Stale",
+        "Weak/s",
+        "KB/s",
+        "R",
+        "Smallest miner with 3 weak shares a month (TH/s)",
+    ]
+    .iter()
+    .map(|cell| cell.to_string())
+    .collect();
+    ["Bitaxe", "ASIC"].iter().for_each(|name| {
+        headers.extend(
+            [
+                "level",
+                "weak/mo",
+                "pay/mo",
+                "empty months",
+                "swing",
+                "vs fair",
+            ]
+            .iter()
+            .map(|column| format!("{name} {column}")),
+        );
+    });
     table_from(&headers, &rows)
 }
 

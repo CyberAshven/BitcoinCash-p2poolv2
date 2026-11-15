@@ -66,12 +66,16 @@ mod message_discriminants {
 mod inventory_discriminants {
     pub const BLOCK_HASHES: u8 = 0;
     pub const TRANSACTION_HASHES: u8 = 1;
+    /// Proof-of-work hashes of weak shares the sender has pooled.
+    pub const WEAK_SHARE_HASHES: u8 = 2;
 }
 
 /// GetData discriminants to determine the type of get data message
 mod getdata_discriminants {
     pub const BLOCK: u8 = 0;
     pub const TXID: u8 = 1;
+    /// Ask for the weak share with this proof-of-work hash.
+    pub const WEAK_SHARE: u8 = 2;
 }
 
 /// P2P network messages, encoded using bitcoin consensus_encode
@@ -591,6 +595,9 @@ impl Decodable for RawMessage {
 pub enum InventoryMessage {
     BlockHashes(Vec<BlockHash>),
     TransactionHashes(Txids),
+    /// Proof-of-work hashes of weak shares the sender has in its pool.
+    /// A peer fetches each one it does not already have, once.
+    WeakShareHashes(Vec<BlockHash>),
 }
 
 impl Encodable for InventoryMessage {
@@ -605,6 +612,11 @@ impl Encodable for InventoryMessage {
             InventoryMessage::TransactionHashes(txids) => {
                 let mut len = TRANSACTION_HASHES.consensus_encode(w)?;
                 len += txids.consensus_encode(w)?;
+                Ok(len)
+            }
+            InventoryMessage::WeakShareHashes(hashes) => {
+                let mut len = WEAK_SHARE_HASHES.consensus_encode(w)?;
+                len += hashes.consensus_encode(w)?;
                 Ok(len)
             }
         }
@@ -622,6 +634,9 @@ impl Decodable for InventoryMessage {
             TRANSACTION_HASHES => Ok(InventoryMessage::TransactionHashes(
                 Txids::consensus_decode(r)?,
             )),
+            WEAK_SHARE_HASHES => Ok(InventoryMessage::WeakShareHashes(
+                Vec::<BlockHash>::consensus_decode(r)?,
+            )),
             _ => Err(encode::Error::ParseFailed(
                 "Invalid InventoryMessage discriminant",
             )),
@@ -634,6 +649,8 @@ impl Decodable for InventoryMessage {
 pub enum GetData {
     Block(BlockHash),
     Txid(Txid),
+    /// The weak share whose proof-of-work hash is this.
+    WeakShare(BlockHash),
 }
 
 impl Encodable for GetData {
@@ -650,6 +667,11 @@ impl Encodable for GetData {
                 len += txid.consensus_encode(w)?;
                 Ok(len)
             }
+            GetData::WeakShare(hash) => {
+                let mut len = WEAK_SHARE.consensus_encode(w)?;
+                len += hash.consensus_encode(w)?;
+                Ok(len)
+            }
         }
     }
 }
@@ -661,6 +683,7 @@ impl Decodable for GetData {
         match disc {
             BLOCK => Ok(GetData::Block(BlockHash::consensus_decode(r)?)),
             TXID => Ok(GetData::Txid(Txid::consensus_decode(r)?)),
+            WEAK_SHARE => Ok(GetData::WeakShare(BlockHash::consensus_decode(r)?)),
             _ => Err(encode::Error::ParseFailed("Invalid GetData discriminant")),
         }
     }

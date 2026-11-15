@@ -117,7 +117,16 @@ jobs:
           docker exec bchn-chipnet-check bcli getblockchaininfo | grep -q '"chain": "chip"'
           first=$(secret)
           [ "${#first}" -eq 64 ]
-          [ "$(docker exec bchn-chipnet-check stat -c %a /run/bchn-rpc/password-chipnet)" = 600 ]
+          # Readable by BCHN's user and the bchn-rpc group (gid 2001), which
+          # P2Poolv2's user is in, and by no one else.
+          [ "$(docker exec bchn-chipnet-check stat -c '%a %g' /run/bchn-rpc/password-chipnet)" = "640 2001" ]
+          # P2Poolv2's image, as its own unprivileged user, reads it ...
+          [ "$(docker run --rm --entrypoint cat -v "$volume":/run/bchn-rpc:ro p2poolv2:latest /run/bchn-rpc/password-chipnet)" = "$first" ]
+          # ... and a user outside the group cannot.
+          if docker run --rm --user 4242:4242 --entrypoint cat -v "$volume":/run/bchn-rpc:ro p2poolv2:latest /run/bchn-rpc/password-chipnet > /dev/null 2>&1; then
+            echo "A user outside bchn-rpc read the BCHN RPC password" >&2
+            exit 1
+          fi
           if docker logs bchn-chipnet-check 2>&1 | grep -qF "$first"; then
             echo "The BCHN RPC password appeared in the log" >&2
             exit 1

@@ -29,7 +29,7 @@ share transaction root (`ShareCommitment::hash` in
   `0x24`, then its wanted bits, band cap and minimum, four bytes each
   ([Share validation](validation.md#the-difficulty-band-bitcoin-cash));
 - on Bitcoin Cash, right after the band, the share's payout level: tag
-  `0x25`, then the one-byte level `k`, 0 to 7
+  `0x25`, then the one-byte level `k`, 1 to 7
   ([Coinbase payouts](../payouts/coinbase.md#payout-levels));
 - on Bitcoin Cash, after the payout level, the share's weak shares: tag
   `0x26`, then its 4-byte weak ratio, the 2-byte count of the weak shares

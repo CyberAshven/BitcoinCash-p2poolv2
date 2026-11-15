@@ -40,6 +40,44 @@ async fn test_bitcoin_client() {
     assert_eq!(result, "test response");
 }
 
+/// A request the node stops answering fails after the read timeout instead
+/// of holding its caller for good, as a template request on a connection
+/// that stopped carrying data held the template task on chipnet.
+#[tokio::test]
+async fn a_request_the_node_does_not_answer_fails_after_the_read_timeout() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({
+                    "result": "too late",
+                    "error": null,
+                    "id": 0
+                }))
+                .set_delay(std::time::Duration::from_secs(3)),
+        )
+        .mount(&mock_server)
+        .await;
+    let client = BitcoindRpcClient::with_read_timeout(
+        &mock_server.uri(),
+        "user",
+        "pass",
+        std::time::Duration::from_millis(200),
+    )
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let result: Result<String, BitcoindRpcError> =
+        client.request("getblocktemplate", Vec::new()).await;
+
+    assert!(result.is_err(), "the late answer was taken: {result:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "the request waited {:?}",
+        started.elapsed()
+    );
+}
+
 #[tokio::test]
 async fn test_bitcoin_client_with_invalid_credentials() {
     let mock_server = MockServer::start().await;
@@ -719,6 +757,39 @@ async fn block_proposal_preserves_node_rejection_reason() {
             .to_string()
             .contains("bad-cb-amount")
     );
+}
+
+/// A proposal on a parent the node has left is told apart from the node's
+/// verdict on a block: BCHN and BCHD both answer
+/// `inconclusive-not-best-prevblk` for it.
+#[tokio::test]
+async fn block_proposal_off_the_best_block_is_told_apart_from_a_verdict() {
+    let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let mut answers = Vec::with_capacity(2);
+    for reason in ["inconclusive-not-best-prevblk", "bad-cb-amount"] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"result": reason, "error": null, "id": 0})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap();
+        answers.push(client.validate_block_proposal(&block).await.unwrap_err());
+    }
+    assert!(matches!(
+        &answers[0],
+        BitcoindRpcError::ProposalRejected { reason } if reason == "inconclusive-not-best-prevblk"
+    ));
+    assert!(answers[0].is_proposal_off_best_block());
+    assert!(matches!(
+        &answers[1],
+        BitcoindRpcError::ProposalRejected { reason } if reason == "bad-cb-amount"
+    ));
+    assert!(!answers[1].is_proposal_off_best_block());
+    assert!(answers.iter().all(|answer| !answer.is_transient()));
 }
 
 #[tokio::test]

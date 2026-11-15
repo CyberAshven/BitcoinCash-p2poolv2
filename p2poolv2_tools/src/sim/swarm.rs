@@ -30,6 +30,7 @@ use crate::seeded::SeededSequence;
 use crate::sim::RunDir;
 use crate::sim::addresses::{DEFAULT_MINER_ADDRESS, check_payout_address, share_address};
 use crate::sim::bitcoind::{Bitcoind, CallOutcome, RpcSettings, WALLET};
+use p2poolv2_config::{MAX_PAYOUT_LEVEL, MIN_PAYOUT_LEVEL, payout_level_below_minimum};
 use serde_json::Value;
 use std::fmt::Write as _;
 use std::fs::File;
@@ -93,27 +94,39 @@ pub struct SwarmSettings {
     pub log_level: String,
 }
 
-/// The levels of a `PAYOUT_LEVELS` value: comma-separated levels from 0 to
-/// 7, empty for none.
+/// The levels of a `PAYOUT_LEVELS` value: comma-separated levels from
+/// [`MIN_PAYOUT_LEVEL`] to [`MAX_PAYOUT_LEVEL`], empty for none.
 pub fn parse_payout_levels(value: &str) -> ToolResult<Vec<u8>> {
     if value.trim().is_empty() {
         return Ok(Vec::new());
     }
     value
         .split(',')
-        .map(|level| {
-            level
-                .trim()
-                .parse::<u8>()
-                .ok()
-                .filter(|level| *level <= 7)
-                .ok_or_else(|| {
-                    ToolError::message(format!(
-                        "PAYOUT_LEVELS={value:?}: {level:?} is not a payout level from 0 to 7"
-                    ))
-                })
-        })
+        .map(|token| parse_one_payout_level(value, token.trim()))
         .collect()
+}
+
+/// One `PAYOUT_LEVELS` token, or why it is not a Bitcoin Cash payout level.
+fn parse_one_payout_level(value: &str, token: &str) -> ToolResult<u8> {
+    let level: u8 = token.parse().map_err(|_| {
+        ToolError::message(format!(
+            "PAYOUT_LEVELS={value:?}: {token:?} is not a payout level from \
+             {MIN_PAYOUT_LEVEL} to {MAX_PAYOUT_LEVEL}"
+        ))
+    })?;
+    if level < MIN_PAYOUT_LEVEL {
+        return Err(ToolError::message(format!(
+            "PAYOUT_LEVELS={value:?}: {}",
+            payout_level_below_minimum(level)
+        )));
+    }
+    if level > MAX_PAYOUT_LEVEL {
+        return Err(ToolError::message(format!(
+            "PAYOUT_LEVELS={value:?}: {token:?} is not a payout level from \
+             {MIN_PAYOUT_LEVEL} to {MAX_PAYOUT_LEVEL}"
+        )));
+    }
+    Ok(level)
 }
 
 impl SwarmSettings {

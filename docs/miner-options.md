@@ -138,7 +138,7 @@ miner chooses that fraction for themselves, on any P2Pool node:
 
 ### Payout level
 
-Each share you earn records your payout level `k`, from 0 to 7, the smallest
+Each share you earn records your payout level `k`, from 1 to 7, the smallest
 payment you want: `546 * 2^k` satoshis.
 
 | Level | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
@@ -163,7 +163,7 @@ average you are paid what you earned
 - The node lowers your level when you would expect fewer than 3 payments a
   month at it, from your hashrate, the pool's and the block reward, and
   logs a warning once per connection. This is the node's choice, not a
-  share-chain rule; any level from 0 to 7 is valid.
+  share-chain rule; any level from 1 to 7 is valid.
 - An empty, signed, fractional or otherwise unreadable `min-payout=`, or a
   `fee-tolerance=` above 100 or with more than two decimals, is refused at
   authorize with a message saying why. The same value given twice is
@@ -311,7 +311,7 @@ Set by the operator under `[stratum]` (see `config.sample.toml`):
 | `wait_for_chain_sync` | When true, Stratum opens only once the share chain is current. |
 | `donation` | The donation of miners whose login chooses none: 1% by default. It never replaces a miner's own `donation=`. |
 | `fee_address`, `fee` | The operator's fee, taken from what the donation leaves before the PPLNS window: 1% once `fee_address` is set, unless `fee` says otherwise; at most 10%. |
-| `payout_level` | The payout level of miners whose login chooses none, 0 to 7: level 5 (17,472 satoshis) by default. |
+| `payout_level` | The payout level of miners whose login chooses none, 1 to 7: level 5 (17,472 satoshis) by default. |
 | `spend_cost` | What spending one payment costs, in satoshis, for `fee-tolerance=` and the node's level policy: 148 by default. |
 
 Each block's coinbase pays the miners in the PPLNS window directly. The

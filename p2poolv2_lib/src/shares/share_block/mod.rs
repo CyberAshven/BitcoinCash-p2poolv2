@@ -6,7 +6,9 @@ pub mod share_transaction;
 pub mod short_ids;
 
 use super::transactions;
-use crate::accounting::payout::payout_levels::MAX_PAYOUT_LEVEL;
+use crate::accounting::payout::payout_levels::{
+    MAX_PAYOUT_LEVEL, MIN_PAYOUT_LEVEL, payout_level_too_low,
+};
 use crate::address::Address as P2PoolAddress;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::coinbase_proof::{
@@ -16,6 +18,7 @@ use crate::shares::genesis;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::shares::share_version::ShareVersion;
+use crate::shares::validation::MAX_UNCLES;
 use crate::shares::weak::{WEAK_CAP, WeakShare};
 use crate::sim_overrides;
 use bitcoin::consensus::encode::Error::ParseFailed;
@@ -35,6 +38,7 @@ pub use share_transaction::{
     DuplicatePrevoutError, ShareTransaction, SpendingPrevouts, extract_spending_prevouts,
 };
 use std::error::Error;
+use std::sync::OnceLock;
 
 /// The maximum target a share needs to have to be a valid share.
 pub const MAX_POOL_TARGET: u32 = 0x1b384bd7;
@@ -157,13 +161,13 @@ pub struct ShareHeader {
     /// one step from its parent's (`shares::band::next_band_cap`).
     #[serde(default)]
     pub band_cap: u32,
-    /// The payout level `k` of this share's miner, 0 to
+    /// The payout level `k` of this share's miner, [`MIN_PAYOUT_LEVEL`] to
     /// [`MAX_PAYOUT_LEVEL`]: a slice of a found block below `546 * 2^k`
     /// satoshis paying the address this share credits is paid by a draw
     /// (`accounting::payout::payout_levels`). Encoded after the band, and
     /// committed after it under its own tag, for Bitcoin Cash share owners
-    /// only; Bitcoin shares carry none and read as 0. A header above
-    /// [`MAX_PAYOUT_LEVEL`] does not decode.
+    /// only; Bitcoin shares carry none and read as 0. A header below
+    /// [`MIN_PAYOUT_LEVEL`] or above [`MAX_PAYOUT_LEVEL`] does not decode.
     #[serde(default)]
     pub payout_level: u8,
     /// This share's weak ratio `R` in units of 1/1024, one step from its
@@ -446,7 +450,17 @@ impl ShareHeader {
         include_bitcoin_merkle_root: bool,
     ) -> Result<Self, bitcoin::consensus::encode::Error> {
         let prev_share_blockhash = BlockHash::consensus_decode(r)?;
-        let uncles = Vec::<BlockHash>::consensus_decode(r)?;
+        // The count is checked before the hashes are read, so a header cannot
+        // make a node hold more uncle hashes than a share may name.
+        let uncle_count = VarInt::consensus_decode(r)?.0;
+        if uncle_count > MAX_UNCLES as u64 {
+            return Err(ParseFailed(
+                "share header names more uncles than a share may",
+            ));
+        }
+        let uncles = (0..uncle_count)
+            .map(|_| BlockHash::consensus_decode(r))
+            .collect::<Result<Vec<_>, _>>()?;
         let miner_bitcoin_address = decode_address(r)?;
         let owner_tag = u8::consensus_decode(r)?;
         let declared_bch = owner_tag == DECLARED_BCH_HEADER_TAG;
@@ -569,17 +583,33 @@ impl ShareHeader {
     }
 }
 
-/// Decode a Bitcoin Cash header's payout level, refusing one above
-/// [`MAX_PAYOUT_LEVEL`]: a share-chain rule, so header sync, block receipt
-/// and the store all refuse such a header the same way.
+/// Decode a Bitcoin Cash header's payout level, refusing one below
+/// [`MIN_PAYOUT_LEVEL`] or above [`MAX_PAYOUT_LEVEL`]: a share-chain rule,
+/// so header sync, block receipt, the store and a job token all refuse such
+/// a header the same way.
 pub(crate) fn decode_payout_level<R: bitcoin::io::Read + ?Sized>(
     reader: &mut R,
 ) -> Result<u8, bitcoin::consensus::encode::Error> {
-    let payout_level = u8::consensus_decode(reader)?;
-    if payout_level > MAX_PAYOUT_LEVEL {
+    checked_payout_level(u8::consensus_decode(reader)?)
+}
+
+/// A Bitcoin Cash payout level, or why `level` is not one. A weak share's
+/// credit group carries the same byte and refuses it the same way.
+pub(crate) fn checked_payout_level(level: u8) -> Result<u8, bitcoin::consensus::encode::Error> {
+    if level > MAX_PAYOUT_LEVEL {
         return Err(ParseFailed("payout level above 7"));
     }
-    Ok(payout_level)
+    if level < MIN_PAYOUT_LEVEL {
+        return Err(ParseFailed(payout_level_below_minimum(level)));
+    }
+    Ok(level)
+}
+
+/// The refusal of a level below [`MIN_PAYOUT_LEVEL`], as the `&'static str`
+/// `ParseFailed` keeps. The only such byte is 0, so one message covers it.
+fn payout_level_below_minimum(level: u8) -> &'static str {
+    static MESSAGE: OnceLock<String> = OnceLock::new();
+    MESSAGE.get_or_init(|| payout_level_too_low(level)).as_str()
 }
 
 impl Encodable for ShareHeader {
@@ -968,6 +998,7 @@ mod tests {
     use crate::accounting::payout::payout_distribution::{
         append_proportional_distribution, include_address_and_cut,
     };
+    use crate::accounting::payout::payout_levels::MIN_PAYOUT_LEVEL;
     use crate::accounting::payout::sharechain_pplns::pplns_window::{
         COINBASE_MATURITY, PPLNS_WINDOW_SHARES,
     };
@@ -1168,7 +1199,7 @@ mod tests {
             .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
             .payout_level(6)
             .build();
-        let level_zero = TestShareBlockBuilder::new()
+        let defaulted = TestShareBlockBuilder::new()
             .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
             .build();
 
@@ -1178,7 +1209,7 @@ mod tests {
         assert_eq!(decoded.payout_level, 6);
         assert_eq!(
             serialize(&share.header).len(),
-            serialize(&level_zero.header).len()
+            serialize(&defaulted.header).len()
         );
         CoinbaseProof::verify(&share.header, &share.template_merkle_branches).unwrap();
     }
@@ -1229,8 +1260,39 @@ mod tests {
         assert_eq!(decoded.payout_level, 7);
     }
 
+    /// A Bitcoin Cash header at level 0 does not decode: that level paid 546
+    /// satoshis, below dust once the payout tree's fee is taken. The lowest
+    /// level does decode.
+    #[test]
+    fn a_bitcoin_cash_header_below_the_lowest_level_does_not_decode() {
+        use crate::accounting::payout::payout_levels::{MIN_PAYOUT_LEVEL, payout_level_too_low};
+
+        let header = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .payout_level(0)
+            .build()
+            .header;
+        let error = deserialize::<ShareHeader>(&serialize(&header)).unwrap_err();
+
+        assert!(
+            error.to_string().contains(&payout_level_too_low(0)),
+            "level 0 refused: {error}"
+        );
+
+        let lowest = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .payout_level(MIN_PAYOUT_LEVEL)
+            .build()
+            .header;
+        let decoded: ShareHeader = deserialize(&serialize(&lowest)).unwrap();
+        assert_eq!(
+            decoded.payout_level, MIN_PAYOUT_LEVEL,
+            "lowest level accepted"
+        );
+    }
+
     /// A Bitcoin header carries no payout level: it is not encoded, and
-    /// decodes as 0.
+    /// decodes as 0. Level 0 stays valid because the header never carried one.
     #[test]
     fn bitcoin_header_carries_no_payout_level() {
         let bitcoin = TestShareBlockBuilder::new().build().header;
@@ -1239,7 +1301,37 @@ mod tests {
 
         assert_eq!(serialize(&leveled), serialize(&bitcoin));
         let decoded: ShareHeader = deserialize(&serialize(&leveled)).unwrap();
-        assert_eq!(decoded.payout_level, 0);
+        assert_eq!(decoded.payout_level, 0, "bitcoin header decodes as 0");
+    }
+
+    /// A header naming more uncles than a share may does not decode, so a
+    /// peer cannot make a node hold thousands of uncle hashes before any rule
+    /// is checked. The most a share may name still decodes.
+    #[test]
+    fn a_header_naming_too_many_uncles_does_not_decode() {
+        let mut header = TestShareBlockBuilder::new().build().header;
+        header.uncles = vec![BlockHash::from_byte_array([0x33; 32]); MAX_UNCLES + 1];
+        let error = deserialize::<ShareHeader>(&serialize(&header)).unwrap_err();
+
+        assert!(
+            error.to_string().contains("more uncles than a share may"),
+            "{} uncles: {error}",
+            MAX_UNCLES + 1
+        );
+
+        header.uncles = vec![BlockHash::from_byte_array([0x33; 32]); MAX_UNCLES];
+        let decoded: ShareHeader = deserialize(&serialize(&header)).unwrap();
+        assert_eq!(decoded.uncles.len(), MAX_UNCLES, "{MAX_UNCLES} uncles");
+    }
+
+    /// A Bitcoin header built at level 0 is still accepted: Bitcoin shares
+    /// carry no payout level, so the decoded 0 is not a Bitcoin Cash level.
+    #[test]
+    fn a_bitcoin_header_at_level_zero_is_accepted() {
+        let header = TestShareBlockBuilder::new().payout_level(0).build().header;
+        let decoded: ShareHeader = deserialize(&serialize(&header)).unwrap();
+
+        assert_eq!(decoded.payout_level, 0, "bitcoin level 0");
     }
 
     /// A share is a token share exactly when its commitment is not the
@@ -1292,6 +1384,7 @@ mod tests {
     fn a_pool_built_token_root_round_trips_in_its_canonical_form() {
         let mut header = TestShareBlockBuilder::new().build().header;
         header.miner_address = ShareOwner::CashP2pkh([0x22; 20]);
+        header.payout_level = MIN_PAYOUT_LEVEL;
         let without = header.block_hash();
         header.pool_merge_mining = Some(MergeMiningCommitment {
             root: [0x44; 32],
@@ -1333,6 +1426,7 @@ mod tests {
     fn bch_share_block_and_stored_branch_round_trip_32_levels() {
         let mut share = TestShareBlockBuilder::new().build();
         share.header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
+        share.header.payout_level = MIN_PAYOUT_LEVEL;
         share.template_merkle_branches = vec![TxMerkleNode::all_zeros(); 32];
         let decoded: ShareBlock = deserialize(&serialize(&share)).unwrap();
         assert_eq!(decoded, share);

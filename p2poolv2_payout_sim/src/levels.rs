@@ -13,7 +13,8 @@
 //! payee for the whole pot. The pot is never changed, only how it is split.
 
 use crate::constants::{
-    BCH_BLOCKS_PER_MONTH, BLOCK_REWARD_SATOSHIS, DEFAULT_LEVEL, DUST_LEVEL_SATOSHIS,
+    BCH_BLOCKS_PER_MONTH, BLOCK_REWARD_SATOSHIS, DEFAULT_LEVEL, DUST_LEVEL_SATOSHIS, LEVEL_COUNT,
+    MIN_PAYOUT_LEVEL,
 };
 
 /// Fewest payments a month a node leaves a miner expecting:
@@ -25,20 +26,43 @@ pub fn level_amount(level: u32) -> u64 {
     DUST_LEVEL_SATOSHIS << level
 }
 
+/// Why `level` is not a payout level: it is below [`MIN_PAYOUT_LEVEL`]. The
+/// message names `level`, the lowest level and that level's amount.
+pub fn payout_level_too_low(level: u32) -> String {
+    format!(
+        "payout level {level} is below the lowest payout level {MIN_PAYOUT_LEVEL} ({} satoshis)",
+        level_amount(MIN_PAYOUT_LEVEL)
+    )
+}
+
+/// `level` when it is a payout level a miner may carry, or why it is not.
+pub fn require_payout_level(level: u32) -> Result<u32, String> {
+    if level < MIN_PAYOUT_LEVEL {
+        return Err(payout_level_too_low(level));
+    }
+    if level >= LEVEL_COUNT {
+        return Err(format!(
+            "payout levels run from {MIN_PAYOUT_LEVEL} to {}",
+            LEVEL_COUNT - 1
+        ));
+    }
+    Ok(level)
+}
+
 /// The payout level a node leaves a miner of `hashrate` at in a pool finding
 /// `pool_blocks_per_month` blocks: the highest at or below the default at
-/// which it expects `NODE_MIN_PAYMENTS_PER_MONTH` payments a month, or 0
-/// (`affordable_payout_level` in `p2poolv2_lib`).
+/// which it expects `NODE_MIN_PAYMENTS_PER_MONTH` payments a month, or the
+/// lowest level when none does (`affordable_payout_level` in `p2poolv2_lib`).
 pub(crate) fn node_level(hashrate: f64, network_hashrate: f64, pool_blocks_per_month: f64) -> u32 {
     let fair_per_month = hashrate / network_hashrate * BCH_BLOCKS_PER_MONTH * BLOCK_REWARD_SATOSHIS;
     let per_block = fair_per_month / pool_blocks_per_month;
-    (0..=DEFAULT_LEVEL)
+    (MIN_PAYOUT_LEVEL..=DEFAULT_LEVEL)
         .rev()
         .find(|level| {
             let won_per_block = (per_block / level_amount(*level) as f64).min(1.0);
             pool_blocks_per_month * won_per_block >= NODE_MIN_PAYMENTS_PER_MONTH
         })
-        .unwrap_or(0)
+        .unwrap_or(MIN_PAYOUT_LEVEL)
 }
 
 /// The draw over one level group. `amounts` are the payees' amounts in their

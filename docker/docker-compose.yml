@@ -72,11 +72,14 @@ services:
         condition: service_healthy
 
   # Regtest profile: takes a payout address and a share-owner key from BCHN's
-  # wallet "miner" and writes the miner's Stratum user and password.
+  # wallet "miner" and writes the miner's Stratum user and password. It runs
+  # as root: it writes to the new regtest_miner volume, whose directory is
+  # root's, and then exits. The node itself runs as p2pool.
   miner-setup:
     profiles: [regtest]
     image: p2poolv2:latest
     pull_policy: never
+    user: root
     depends_on:
       bchn:
         condition: service_healthy

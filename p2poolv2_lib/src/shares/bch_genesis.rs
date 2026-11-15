@@ -272,7 +272,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Mainnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "2e5cd107c346f223978f89b5be97e11c898b25e2003333f434fef31a9d6127fb"
+            "df703cef47857216d5bf1257ce357a57b72f02fa887842142f17f754f8932e6d"
         );
     }
 
@@ -281,7 +281,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Chipnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "5ca4efdd91abb3d1dc0e942ece7bb3048bf8dbb6471c0e3219e8d3e3435fed00"
+            "0962cfac33968f9cd9eba335b2c935fc934a419e226586ea1455f68eea7a90f2"
         );
     }
 
@@ -290,7 +290,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Regtest).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "5be2a770f543374c27af95cda58a06829e67086bd66f986f7ff8c5fd13df17f3"
+            "4471f7ad680fc0c740a86a19e33f27a3a581ea48822f992a1780efbea0a5611a"
         );
     }
 

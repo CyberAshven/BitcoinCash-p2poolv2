@@ -119,10 +119,18 @@ pub const INCLUDER_CUT: f64 = 0.01;
 pub const VARDIFF_PRESENCE_SHARES: f64 = 3.0;
 
 /// Smallest payout level, Bitcoin Cash's P2PKH dust limit in satoshis
-/// (design page, section 4, "Levels"): level `k` is `546 * 2^k`.
+/// (design page, section 4, "Levels"): level `k` is `546 * 2^k`. Level 0
+/// pays this and is not a level a miner may carry.
 pub const DUST_LEVEL_SATOSHIS: u64 = 546;
 
-/// Number of payout levels, `k` = 0 to 7.
+/// The lowest payout level a miner may carry. Level 0 paid 546 satoshis,
+/// which is below dust once the payout tree's fee is taken, so a level 0
+/// win that landed in the tree went to the tree's largest payee. `u32`,
+/// like [`DEFAULT_LEVEL`]: this simulator does not link `p2poolv2_lib`.
+pub const MIN_PAYOUT_LEVEL: u32 = 1;
+
+/// Number of payout level slots, `k` = 0 to 7. A miner may not carry level
+/// 0; the shift still has a slot for it so `546 * 2^k` stays the same.
 pub const LEVEL_COUNT: u32 = 8;
 
 /// The node's default payout level, 5: 17,472 satoshis.

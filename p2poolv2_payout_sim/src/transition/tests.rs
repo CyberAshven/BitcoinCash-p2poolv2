@@ -8,33 +8,39 @@ use crate::miners::MinerMix;
 #[test]
 fn the_band_cap_rises_by_the_whole_wanted_multiple_when_the_parent_wanted_more() {
     // C = 2, the node wanted 10.5 times the minimum: u = 10.
-    assert_eq!(next_band_cap(2_048, 10.5, 64), 2_048 + 2_048 * 10 / 512);
+    assert_eq!(
+        next_band_cap(2_048, 10.5, 64, 512),
+        2_048 + 2_048 * 10 / 512
+    );
 }
 
 #[test]
 fn the_band_cap_step_takes_at_most_c_max_as_the_wanted_multiple() {
-    assert_eq!(next_band_cap(2_048, 1_000.0, 64), 2_048 + 2_048 * 64 / 512);
+    assert_eq!(
+        next_band_cap(2_048, 1_000.0, 64, 512),
+        2_048 + 2_048 * 64 / 512
+    );
 }
 
 #[test]
 fn a_parent_wanting_exactly_its_cap_pulls_the_band_cap_down() {
     // Wanted more means wanted harder than the cap allowed.
-    assert_eq!(next_band_cap(2_048, 2.0, 64), 2_048 - 4);
+    assert_eq!(next_band_cap(2_048, 2.0, 64, 512), 2_048 - 4);
 }
 
 #[test]
 fn a_wanted_multiple_between_one_and_two_pushes_by_one() {
-    assert_eq!(next_band_cap(1_024, 1.5, 64), 1_024 + 2);
+    assert_eq!(next_band_cap(1_024, 1.5, 64, 512), 1_024 + 2);
 }
 
 #[test]
 fn the_band_cap_never_falls_below_one() {
-    assert_eq!(next_band_cap(1_024, 1.0, 64), 1_024);
+    assert_eq!(next_band_cap(1_024, 1.0, 64, 512), 1_024);
 }
 
 #[test]
 fn the_band_cap_never_rises_above_c_max() {
-    assert_eq!(next_band_cap(64 * 1_024, 1_000.0, 64), 64 * 1_024);
+    assert_eq!(next_band_cap(64 * 1_024, 1_000.0, 64, 512), 64 * 1_024);
 }
 
 #[test]
@@ -162,6 +168,8 @@ fn without_any_change_home_miners_are_paid_fairly() {
         stale_rate: 0.021,
         ceiling_difficulty: 4.55,
         cap_max: 64,
+        band_step_divisor: 512,
+        overstating: None,
         weak_cap: 64,
         weak_fill: 32,
         weak_depth: 6,
@@ -206,6 +214,8 @@ fn a_big_miner_joining_pays_home_miners_more_until_the_window_turns_over() {
         stale_rate: 0.021,
         ceiling_difficulty: 4.55,
         cap_max: 64,
+        band_step_divisor: 512,
+        overstating: None,
         weak_cap: 64,
         weak_fill: 32,
         weak_depth: 6,
@@ -249,6 +259,8 @@ fn a_big_miner_at_the_minimum_raises_the_minimum_when_it_joins() {
         stale_rate: 0.021,
         ceiling_difficulty: 4.55,
         cap_max: 64,
+        band_step_divisor: 512,
+        overstating: None,
         weak_cap: 64,
         weak_fill: 32,
         weak_depth: 6,

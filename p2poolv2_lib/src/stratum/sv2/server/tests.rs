@@ -1750,6 +1750,88 @@ async fn an_unresolvable_verify_identity_is_invalid_request() {
     assert_eq!(error.error_code.as_utf8_or_hex(), INVALID_REQUEST);
 }
 
+/// A Job Declaration connection that ends takes its tokens with it. A custom
+/// job that then names one gets the ordinary `invalid-mining-job-token`
+/// error, as a used token does, and the Mining connection stays up. The
+/// token of a declarator that is still connected is found: with no channel
+/// open, its job gets `invalid-channel-id`.
+#[tokio::test]
+async fn a_custom_job_on_a_token_of_a_closed_declarator_gets_an_error_reply() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let prepared = test_bch_prepared();
+    let cache = PoolTransactionCache::new();
+    cache.set_prepared(Arc::clone(&prepared));
+    let registry = Arc::new(Mutex::new(JobRegistry::new(
+        cache,
+        Some(MergeMiningCommitment::empty()),
+    )));
+    let declarator_with_token = || {
+        let mut declarator = Sv2Connection::new(Arc::clone(&registry));
+        let mut setup =
+            binary_sv2::to_bytes(test_sv2_setup(Protocol::JobDeclarationProtocol, 0)).unwrap();
+        declarator
+            .handle_message(MESSAGE_TYPE_SETUP_CONNECTION, &mut setup)
+            .unwrap();
+        let allocated = declarator.on_allocate(1, "miner", None).unwrap();
+        let mut payload = SerializedFrame::<Vec<u8>>::from_bytes(allocated[0].clone())
+            .unwrap()
+            .payload()
+            .to_vec();
+        let token = AllocateMiningJobTokenSuccess::from_bytes(&mut payload)
+            .unwrap()
+            .mining_job_token
+            .as_bytes()
+            .to_vec();
+        (declarator, token)
+    };
+    let (closed, closed_token) = declarator_with_token();
+    let (_connected, connected_token) = declarator_with_token();
+    let mut mining = Sv2Connection::new(Arc::clone(&registry));
+    let mut setup = binary_sv2::to_bytes(test_sv2_setup(Protocol::MiningProtocol, 2)).unwrap();
+    mining
+        .handle_message(MESSAGE_TYPE_SETUP_CONNECTION, &mut setup)
+        .unwrap();
+    let custom_job = |token: Vec<u8>| Sv2Message {
+        extension_type: 0,
+        message_type: MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
+        payload: test_bch_custom_job(
+            Arc::clone(&prepared),
+            token,
+            vec![],
+            false,
+            prepared.template().coinbasevalue,
+        )
+        .0,
+    };
+
+    drop(closed);
+    let frames = handle_messages(
+        &mut mining,
+        Some(&mut channels),
+        None,
+        None,
+        vec![custom_job(closed_token), custom_job(connected_token)],
+    )
+    .await
+    .unwrap();
+
+    let error_code = |frame: &Vec<u8>| {
+        assert_eq!(frame[2], MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR);
+        let mut payload = SerializedFrame::<Vec<u8>>::from_bytes(frame.clone())
+            .unwrap()
+            .payload()
+            .to_vec();
+        SetCustomMiningJobError::from_bytes(&mut payload)
+            .unwrap()
+            .error_code
+            .as_utf8_or_hex()
+    };
+    assert_eq!(frames.len(), 2);
+    assert_eq!(error_code(&frames[0]), "invalid-mining-job-token");
+    assert_eq!(error_code(&frames[1]), "invalid-channel-id");
+}
+
 #[tokio::test]
 async fn bind_resolves_a_host_name() {
     let listener = bind("localhost", 0).await.unwrap();

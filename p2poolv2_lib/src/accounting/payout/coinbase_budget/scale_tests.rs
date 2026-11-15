@@ -5,6 +5,7 @@
 //! Invariants of the hybrid payout split at many sizes.
 
 use super::*;
+use crate::accounting::payout::payout_levels::MIN_PAYOUT_LEVEL;
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, BlockHash, Network, PubkeyHash};
 use std::collections::HashSet;
@@ -25,8 +26,8 @@ const TOKEN: PayoutSplit = PayoutSplit::BchHybrid {
 /// Window sizes around the token-share boundary and up to five thousand.
 const SIZES: [u32; 9] = [1, 2, 79, 80, 81, 500, 501, 1_000, 5_000];
 
-/// No draw, then the dust level, level 5 and the highest level.
-const LEVELS: [Option<u8>; 4] = [None, Some(0), Some(5), Some(7)];
+/// No draw, then the lowest level, level 5 and the highest level.
+const LEVELS: [Option<u8>; 4] = [None, Some(MIN_PAYOUT_LEVEL), Some(5), Some(7)];
 
 /// P2PKH on regtest. The first four bytes are `number`, so each payee is a
 /// different address.

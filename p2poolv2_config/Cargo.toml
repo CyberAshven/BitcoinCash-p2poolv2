@@ -26,6 +26,7 @@ ipnet = { workspace = true }
 
 [dev-dependencies]
 temp-env = { workspace = true }
+tempfile = { workspace = true }
 tokio-test = { workspace = true }
 
 [lib]

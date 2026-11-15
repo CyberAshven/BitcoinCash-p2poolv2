@@ -111,8 +111,9 @@ jobs:
       # reported commit is checked out as files only. Nothing in it runs:
       # plugins are off and search is disabled below. The repository check
       # repeats the resolve step's, where the scanner can see it: only this
-      # repository's own branches are checked out.
-      - name: Check out reported commit
+      # repository's own branches are checked out. Semgrep's rule against
+      # checking out a workflow_run's code is answered by all of the above.
+      - name: Check out reported commit # nosemgrep: yaml.github-actions.security.workflow-run-target-code-checkout.workflow-run-target-code-checkout
         if: >-
           steps.resolve.outputs.upload == 'true' &&
           github.event.workflow_run.head_repository.full_name == github.repository

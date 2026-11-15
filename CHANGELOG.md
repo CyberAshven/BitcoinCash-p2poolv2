@@ -7,6 +7,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The payout simulator has a `scale-levers` table for part 5 of the small
+miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
+Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,
+2 and 1 seconds and with 10-second shares that carry 2, 5 and 10 times the
+weak shares. Both pay a small miner the same, and only the shorter period
+adds stale shares: 7.8%, 17.8% and 30.7% on 1,000 nodes against 4.2%. A
+Bitaxe first needs more weak shares when the pool itself holds about 3.7
+EH/s, as much as all of Bitcoin Cash has today. Section 5 of the design page
+records it and stays an outline.
+
+A Stratum V2 Job Declaration client stays on the pool while the share chain
+moves every few seconds. On the live pool it moves about every 4 seconds,
+and four things made a client there lose its job, its connection or its
+place on the pool. A mining channel kept its last 32 jobs of any kind, and
+the node sends every channel its own job at each share-chain move, so a
+declared job was pushed out after about 100 seconds and its next share got
+`stale-share`. A channel now keeps its last eight declared jobs apart from
+the node's own 32, until their Bitcoin Cash parent is two blocks back. The
+node held 64 job tokens for all connections together. A client that
+allocates a token ahead of each job leaves one unused at each share-chain
+move, so two clients filled the 64 and the next allocation closed a
+connection. The 64 are now each connection's own: one more allocation drops
+that connection's oldest open token, or its oldest of any state when none is
+open, and is answered as usual. A connection that closes takes its tokens
+with it, and the node holds at most 4,096 for all connections. At a Bitcoin
+Cash tip change a Full-Template job got `invalid-template` when the node had
+already left the block's parent, or was slow to answer the proposal check,
+and the client took that for a refusal and left the pool for minutes. Such a
+job now gets `stale-chain-tip` when the node answers
+`inconclusive-not-best-prevblk`, and `template-unavailable` when the check
+times out or the request fails; `invalid-template` is left for the node's
+own reason. Last, the `0x5052` text
+(`docs/architecture/sv2-payout-extension.md`, section 7.4) called a repeated
+`stale-payout-outputs` on a new token a refusal. It now says what that
+answer means: the client's node and the pool's node differ on the Bitcoin
+Cash tip or its bits for a moment. The client keeps asking every few
+seconds and mines its last installed job meanwhile. No share-chain rule
+changes.
+
+Two more limits on the weak share path, node behaviour only. When the weak
+shares held for an unknown parent pass their bounds, the source holding the
+most bytes loses its oldest, so a peer that floods them pushes out only its
+own; before, the oldest of all went first, whoever sent it. And a peer is
+asked for the headers of unknown parents at most once a second, however many
+weak shares on new parents it sends: the request is the same headers request
+from this node's tip either way, and before it went out once a new parent.
+
+Requests to the Bitcoin Cash node time out. The RPC client had no timeout
+at all, so a request on a connection that stopped carrying data, with no
+close or reset reaching the pool, waited for good. On chipnet that held the
+task that fetches block templates about 30 seconds after each start, from
+the pool PC's Windows reinstall on 2026-11-13: both nodes kept handing out
+work on a stale parent, and found blocks went in without a verdict. A
+request now fails after 30 seconds with nothing from the node (counted from
+the last byte read, so a large template still downloads) and opening a
+connection after 10; the next poll opens a new connection.
+
+The dashboard is tested the way a visitor meets it. A test serves it over a
+small share chain and has headless Chrome load the overview and one page of
+each kind it links to; it follows every link a visitor could follow from
+there and fails on a page that does not answer, a stylesheet that does not
+load, or a link that leads nowhere. It is written in Rust and starts the
+browser itself: `CHROME` names it, else Chrome, Chromium or Edge in its
+usual place; without one the test is skipped on a developer's machine and
+fails in CI. CI also keeps a picture of each page as the
+`dashboard-screenshots` artifact. Its first run found a dead link, now
+fixed: the genesis share's page linked its all-zero parent hash as a share.
+
+The payout simulator has a `band-step` table, the last part of the small
+miners design that had no simulation: the band cap `C` from genesis at step
+divisors of 128, 512 and 2,048, and with 2% and 10% of the pool mining at
+the minimum while recording the largest wanted difficulty. Where `C` settles
+does not depend on the step, only how fast it gets there (1, 3 and 5 to 8
+hours); overstating takes `C` to its maximum and changes nothing home miners
+are paid.
+
+The Docker image runs the node as `p2pool` (uid 1000), not as root. The user
+owns `/p2poolv2` and is in the `bchn-rpc` group (gid 2001), which BCHN's
+image now lets read the RPC password it keeps in the `bchn_rpc` volume; the
+file was BCHN's user's alone, and the node read it only because it ran as
+root. A `p2poolv2_data` volume made by an earlier image belongs to root:
+remove it or give it to uid 1000 (`docker/README.adoc`). The Umbrel package
+already ran the image as 1000:1000.
+
+Share-chain rule change on Bitcoin Cash, a flag day: a weak share a share
+carries is held to its carrier's time, not to each node's clock (protocol
+segment `weak3-64-100-48-256`, store format 9). The 120-second future limit
+of a carried weak share was checked against the validating node's own clock,
+and a failure marked the carrying share invalid for good, so a miner who
+stamped a weak share two minutes ahead could leave nodes whose clocks
+differed by a second on two sides of one share for ever. A carried weak
+share's time is now at most 120 seconds after its carrier's
+(`check_carried_weak_time`), two numbers every node reads the same. A weak
+share relayed alone is still held to the local clock, but one ahead of it
+is held and checked again, never refused as invalid.
+
+Share-chain rule change on Bitcoin Cash, a flag day: payout level 0 is no
+longer valid (protocol segment `levels-546x2-k1`, store format 8, every
+genesis share re-pinned). A level 0 win pays 546 satoshis, which in the
+payout tree is below dust once the tree's fee is taken, so the tree gave it
+to its largest payee: on a 12-node swarm with 1,200 miners the miners at
+level 0 were paid 0.79 to 0.82 of their part of the hashrate on token
+shares, and 1.00 with level 1 in their place. A share's level is now 1 to 7
+(`MIN_PAYOUT_LEVEL`) and the smallest level payment 1,092 satoshis. A
+header, a weak share credit or a job token at level 0 does not decode,
+`[stratum] payout_level = 0` is refused, and a node never lowers a miner
+below level 1. A miner too small for three payments a month at level 1 is
+paid half as often as it was at level 0, and twice as much each time.
+
 A limits study runs upstream's five practical objections to the scaling
 ideas against what checking a share really costs a node
 (`docs/simulation/network-sim.md`, "Limits study"). An ignored timing test

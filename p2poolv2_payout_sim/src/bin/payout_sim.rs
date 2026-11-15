@@ -11,6 +11,7 @@
 //! ```
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use p2poolv2_payout_sim::levels::require_payout_level;
 use p2poolv2_payout_sim::miners::MinerMix;
 use p2poolv2_payout_sim::report::{
     hours, optional, percent, pool_percent, rounded, satoshis, two_decimals,
@@ -113,13 +114,13 @@ struct RunArgs {
     /// INCLUDER_CUT as a fraction (0.01 is 1%).
     #[arg(long, default_value_t = 0.01)]
     includer_cut: f64,
-    /// Payout level of every untracked miner (0 to 7).
+    /// Payout level of every untracked miner, from the lowest to 7.
     #[arg(long, default_value_t = 5)]
     level: u32,
-    /// Payout level of the tracked Bitaxe.
+    /// Payout level of the tracked Bitaxe, from the lowest to 7.
     #[arg(long, default_value_t = 5)]
     bitaxe_level: u32,
-    /// Payout level of the tracked 100 TH/s ASIC.
+    /// Payout level of the tracked 100 TH/s ASIC, from the lowest to 7.
     #[arg(long, default_value_t = 5)]
     asic_level: u32,
     #[arg(long, value_enum, default_value_t = CreditArg::Page)]
@@ -159,13 +160,12 @@ fn mix(argument: MixArg) -> MinerMix {
 }
 
 fn scenario_from(arguments: &RunArgs, months: usize, seed: u64) -> Result<Scenario, String> {
-    let levels = [
+    for level in [
         arguments.level,
         arguments.bitaxe_level,
         arguments.asic_level,
-    ];
-    if levels.iter().any(|level| *level > 7) {
-        return Err("payout levels run from 0 to 7".to_string());
+    ] {
+        require_payout_level(level)?;
     }
     let base = base_scenario(months, seed);
     let mut scenario = Scenario {

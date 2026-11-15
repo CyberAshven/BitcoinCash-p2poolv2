@@ -28,7 +28,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
           tool: cargo-deny
 
@@ -48,8 +48,67 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
           tool: cargo-deny
 
       - run: cargo deny check advisories
+
+  # Semgrep community rules for Rust, committed secrets, these workflows and
+  # the Dockerfiles: a second static check beside CodeQL, with rules CodeQL
+  # does not have. A finding fails the job and goes to the repository's code
+  # scanning alerts. A finding that is accepted is marked where it is, with a
+  # nosemgrep comment and the reason beside it.
+  #
+  # One rule is left out: rust.lang.security.args.args flags every read of
+  # the command line. This workspace reads it only to parse a tool's
+  # options, never to decide what to trust.
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    container:
+      image: semgrep/semgrep:1.185.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Scan
+        run: >-
+          semgrep scan --metrics=off --error
+          --config p/rust --config p/secrets
+          --config p/github-actions --config p/dockerfile
+          --exclude-rule rust.lang.security.args.args
+          --sarif --output semgrep.sarif
+
+      # The same scan for the job log. It leaves out the SARIF file the scan
+      # above wrote, which would otherwise be scanned as a source file.
+      - name: Findings
+        if: failure()
+        run: >-
+          semgrep scan --metrics=off
+          --config p/rust --config p/secrets
+          --config p/github-actions --config p/dockerfile
+          --exclude-rule rust.lang.security.args.args
+          --exclude semgrep.sarif
+          || true
+
+      # Semgrep's SARIF keeps each finding a nosemgrep comment accepts, marked
+      # as suppressed, and code scanning would still open an alert for it.
+      # Those are left out of the upload: the comment in the code is the
+      # record of why it is accepted.
+      - name: Leave out accepted findings
+        if: always()
+        run: >-
+          jq '.runs[].results |= ((. // []) | map(select((.suppressions // []) | length == 0)))'
+          semgrep.sarif > semgrep-open.sarif
+
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        if: always()
+        with:
+          sarif_file: semgrep-open.sarif
+          category: semgrep

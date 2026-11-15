@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::*;
+use p2poolv2_config::{MIN_PAYOUT_LEVEL, payout_level_below_minimum};
 
 fn settings(node_count: usize) -> SwarmSettings {
     SwarmSettings {
@@ -99,7 +100,25 @@ fn node_config_leaves_out_a_payout_level_past_the_list() {
 
 #[test]
 fn payout_levels_parse_as_a_comma_separated_list() {
-    assert_eq!(parse_payout_levels("5, 7,0").unwrap(), vec![5, 7, 0]);
+    assert_eq!(
+        parse_payout_levels("5, 7,1").unwrap(),
+        vec![5, 7, MIN_PAYOUT_LEVEL],
+        "comma separated payout levels"
+    );
+}
+
+#[test]
+fn a_payout_level_of_zero_is_refused() {
+    let error = parse_payout_levels("5,0").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "PAYOUT_LEVELS={:?}: {}",
+            "5,0",
+            payout_level_below_minimum(0)
+        ),
+        "PAYOUT_LEVELS level 0"
+    );
 }
 
 #[test]

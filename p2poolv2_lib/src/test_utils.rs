@@ -49,7 +49,7 @@ use crate::accounting::payout::coinbase_budget::PayoutSplit;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
 #[cfg(any(test, feature = "test-utils"))]
-use crate::accounting::payout::payout_levels::PplnsWeights;
+use crate::accounting::payout::payout_levels::{MIN_PAYOUT_LEVEL, PplnsWeights};
 #[cfg(test)]
 use crate::accounting::stats::metrics;
 #[cfg(any(test, feature = "test-utils"))]
@@ -1744,7 +1744,7 @@ pub fn build_test_weak_share_paying(
         asert_bits: weak.minimum,
         wanted_bits: weak.bits,
         band_cap: crate::shares::band::BAND_CAP_UNIT,
-        payout_level: 0,
+        payout_level: MIN_PAYOUT_LEVEL,
         weak_ratio: weak.weak_ratio,
         weak_count: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
@@ -2401,7 +2401,10 @@ impl TestShareBand {
 #[cfg(any(test, feature = "test-utils"))]
 impl TestShareBlockBuilder {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            payout_level: MIN_PAYOUT_LEVEL,
+            ..Self::default()
+        }
     }
 
     pub fn bitcoin_header(mut self, bitcoin_block: Block) -> Self {
@@ -2503,7 +2506,8 @@ impl TestShareBlockBuilder {
     }
 
     /// Commit payout level `payout_level` (`accounting::payout::payout_levels`)
-    /// instead of level 0. A Bitcoin share carries no level.
+    /// instead of the lowest a Bitcoin Cash share may carry. A Bitcoin share
+    /// carries no level.
     pub fn payout_level(mut self, payout_level: u8) -> Self {
         self.payout_level = payout_level;
         self
