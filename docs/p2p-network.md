@@ -50,6 +50,8 @@ peer in `[network] dial_peers`, given by IP address (`/ip4/`, `/ip6/`) or
 host name (`/dns4/`, `/dns6/`, `/dns/`), and listens on port 6884 by default
 ([Requirements](requirements.md#ports)). The transport resolves a host name
 through the system's DNS configuration on every dial, reconnects included.
+Only host names listed in `dial_peers` are dialed, never a `/dns` address
+learned from a peer, and `blocked_ips` is checked after a name resolves.
 
 Take seven nodes, A to G, connected in a mesh. Several links carry shares
 at once, because more than one node can find a share at the same time:

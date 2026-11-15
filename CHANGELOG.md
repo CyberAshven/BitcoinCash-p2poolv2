@@ -1115,6 +1115,26 @@ share-chain rule: Bitcoin Cash genesis shares, protocol strings, the band,
 payout levels, weak shares, per-share cuts, the hybrid payout, the genesis
 last-resort rule and store format 5 are as they were.
 
+Synced with upstream P2Poolv2 through `fdbf85df` (its v0.18.0 and the
+Whatsminer change after it). The fork keeps version `0.0.1-alpha`. Taken
+from upstream: host names in `dial_peers` through upstream's DNS transport,
+which replaces the fork's own: only host names listed in `dial_peers` are
+resolved and dialed, never a `/dns` address learned from a peer; a name
+that resolves to an address in `blocked_ips`, or one blocked through the
+API, is not dialed; and a host with no usable resolver configuration warns
+and keeps `/ip4` and `/ip6` peers, where the node used to refuse to start.
+The first dial of a `dial_peers` peer now goes through the reconnector,
+which does not redial while a dial is pending and backs off after a dial
+that fails later. A `d=` or `th=` difficulty in the login is no longer
+overridden by the miner's own `mining.suggest_difficulty`, which Whatsminer
+firmware sends right after authorizing; on Bitcoin Cash the session
+difficulty still never goes above the job's share difficulty. Debug logs
+carry each notify sent and the address of a stratum timeout. Left out:
+testnet5's new genesis, as testnet5 is not here. The sync changes no
+share-chain rule: Bitcoin Cash genesis shares, protocol strings, the band,
+payout levels, weak shares, per-share cuts, the hybrid payout, the genesis
+last-resort rule and store format 9 are as they were.
+
 ### Added
 
 - Merge-mined tokens on a public node (owner's decision, 2026-10-24): the
