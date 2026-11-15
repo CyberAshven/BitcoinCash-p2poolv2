@@ -5,6 +5,7 @@
 //! The named tables of the default run: which scenarios each runs and how
 //! it prints them.
 
+use crate::ask_study;
 use crate::constants::{HASHES_PER_DIFFICULTY, SHARE_INTERVAL_SECONDS};
 use crate::levels::level_amount;
 use crate::miners::{MinerMix, TrackedMiner};
@@ -131,11 +132,23 @@ pub enum Table {
     /// A shorter share period against more weak shares a share, as the
     /// hashrate grows.
     ScaleLevers,
+    /// Proposal: weak shares that follow the asks, where they settle.
+    WeakAsks,
+    /// Proposal: the asks in every miner mix.
+    WeakAsksMixes,
+    /// Proposal: the asks' constants.
+    WeakAsksConstants,
+    /// Proposal: attacks on the asks.
+    WeakAsksAttacks,
+    /// The PPLNS window's cap, 14 days against 30 and 60, in small pools.
+    WindowCap,
+    /// What a node stores, by payees, payout level and window cap.
+    Storage,
 }
 
 impl Table {
     /// Every table, in the order of the default run.
-    pub const ALL: [Table; 25] = [
+    pub const ALL: [Table; 31] = [
         Table::Designs,
         Table::Hashrate,
         Table::Pool,
@@ -161,6 +174,12 @@ impl Table {
         Table::BandStep,
         Table::Scale,
         Table::ScaleLevers,
+        Table::WeakAsks,
+        Table::WeakAsksMixes,
+        Table::WeakAsksConstants,
+        Table::WeakAsksAttacks,
+        Table::WindowCap,
+        Table::Storage,
     ];
 
     /// Name on the command line.
@@ -191,6 +210,12 @@ impl Table {
             Table::BandStep => "band-step",
             Table::Scale => "scale",
             Table::ScaleLevers => "scale-levers",
+            Table::WeakAsks => "weak-asks",
+            Table::WeakAsksMixes => "weak-asks-mixes",
+            Table::WeakAsksConstants => "weak-asks-constants",
+            Table::WeakAsksAttacks => "weak-asks-attacks",
+            Table::WindowCap => "window-cap",
+            Table::Storage => "storage",
         }
     }
 
@@ -261,6 +286,24 @@ impl Table {
             Table::ScaleLevers => {
                 "Scale levers: a shorter share period against more weak shares a share (band-weak-levels, weak work, 50% industrial)"
             }
+            Table::WeakAsks => {
+                "Proposal: weak shares that follow the asks, where they settle (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::WeakAsksMixes => {
+                "Proposal: the asks in every miner mix, at ten times today's hashrate (band-weak-levels, weak work)"
+            }
+            Table::WeakAsksConstants => {
+                "Proposal: the asks' constants, each varied alone (pool 30% of ten times today's hashrate)"
+            }
+            Table::WeakAsksAttacks => {
+                "Proposal: attacks on the asks (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::WindowCap => {
+                "Window cap: 14 days against 30 and 60 in small pools (band-weak-levels, weak work, medium miners, levels as a node sets them)"
+            }
+            Table::Storage => {
+                "Storage: what a node keeps, by payees, payout level and window cap (arithmetic, no fees)"
+            }
         }
     }
 
@@ -293,6 +336,12 @@ impl Table {
             Table::BandStep => study::band_step(base),
             Table::Scale => study::scale(base),
             Table::ScaleLevers => study::scale_levers(base),
+            Table::WeakAsks => ask_study::weak_asks(base),
+            Table::WeakAsksMixes => ask_study::weak_asks_mixes(base),
+            Table::WeakAsksConstants => ask_study::weak_asks_constants(base),
+            Table::WeakAsksAttacks => ask_study::weak_asks_attacks(base),
+            Table::WindowCap => study::window_cap(base),
+            Table::Storage => crate::storage::storage(),
         };
         format!("## {}\n\n{body}", self.title())
     }

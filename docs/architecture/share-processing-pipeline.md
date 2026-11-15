@@ -154,6 +154,34 @@ ancestry, and an uncle's `expected_height` may be absent. Until a re-delivery
 arrives, such a block stalls, and in the PPLNS zone a stalled candidate stops
 confirmation at its height.
 
+### Shares relayed with their weak shares by hash
+
+`send_share_block_broadcast` relays a new Bitcoin Cash share that carries
+weak shares as `Message::ShareWithWeakHashes`: the share with its weak
+shares listed by proof-of-work hash, which the peer has from the weak share
+gossip, and whole beside the list the ones it may not have yet
+(`weak_shares_to_prefill`: those the weak pool took less than
+`PREFILL_WEAK_SHARE_MILLIS`, 400 ms, ago, or does not hold).
+`handle_share_with_weak_hashes` (`receivers/share_with_weak_hashes.rs`)
+hands a stored share, or one failing the header or coinbase proof check, to
+`handle_share_block` as it came. Any other share must list exactly
+`weak_count` hashes, each once, and prefill only listed ones, each once, or
+the peer is refused as for a bad copy. The handler fills the list from the
+weak pool's checked weak shares (`WeakPool::pooled_weak_shares`), then from
+the prefilled ones, and asks the sender for the rest with
+`GetCarriedWeakShares`, which the sender answers from its store with
+`CarriedWeakShares`. Prefilled and fetched weak shares that fill a gap also
+go to the weak share worker as weak shares the sender relayed. The share then
+waits in the fill book
+(`node/weak_share_fill.rs`, one wait a share, 64 in all, 8 a peer) for up to
+`WEAK_FILL_TIMEOUT` (10 s), in a task of its own so the peer's request
+service is not held. Rebuilt, the share must match its header's weak root
+(`check_weak_shares_match_header`) and then goes to `handle_share_block`
+exactly as a share sent whole. One that cannot be rebuilt in time or does
+not match is never stored or validated: the block fetcher fetches it whole,
+from another peer that relayed it meanwhile if there is one. Header sync and
+`GetData::Block` still send weak shares whole.
+
 ### BlockReceiver ancestry gate
 
 `process_share_block` holds a block in `pending` until its parent and every
@@ -852,6 +880,8 @@ recursive over the DAG and needs its own bounding; it is not implemented.
 - `p2poolv2_lib/src/node/actor.rs`
 - `p2poolv2_lib/src/node/request_response_handler/block_fetcher.rs` (BlockFetcher)
 - `p2poolv2_lib/src/node/p2p_message_handlers/receivers/share_blocks.rs` (handle_share_block, dependency fetching)
+- `p2poolv2_lib/src/node/p2p_message_handlers/receivers/share_with_weak_hashes.rs` (shares relayed with weak shares by hash, and the answer to `GetCarriedWeakShares`)
+- `p2poolv2_lib/src/node/weak_share_fill.rs` (shares waiting for the weak shares their sender was asked for)
 - `p2poolv2_lib/src/shares/handle_stratum_share.rs`
 - `p2poolv2_lib/src/shares/validation/mod.rs` (validate_share_block, validate_uncles, validate_bitcoin_payout)
 - `p2poolv2_lib/src/accounting/payout/sharechain_pplns/pplns_window.rs` (PplnsWindow, get_distribution_from_start_hash, prev-anchored payout walk)

@@ -14,6 +14,79 @@ polling, which Knuth does not serve, and the pool never long-polls, so a
 template without it now reads as one with an empty id. No share-chain rule
 changes.
 
+A new share is relayed with the weak shares it carries listed by hash, not
+whole (protocol segment `weak-by-hash`). Weak shares already travel ahead of
+the share that carries them: a node pushes the ones its miners find to every
+peer and announces the ones it takes by hash, each fetched once. The share
+message still carried every one of them whole, so a node downloaded each
+weak share twice and the share message grew with every weak share in it. On
+1,000 nodes at 10-second shares the network simulation put stale shares at
+5.27% with 32 weak shares a share carried whole, 8.66% with 160 and 14.11%
+with 320, against 4.20% when they travel only beside the shares; the weak
+shares that follow the asks (#117, #118) let a share carry 320. A share
+carrying weak shares now goes as `ShareWithWeakHashes`: every weak share it
+carries listed by proof-of-work hash, 32 bytes each, and the ones its peers
+probably lack also sent whole beside the list, as BIP152 prefills
+transactions. Those are the weak shares this node's weak pool took less
+than 400 ms ago, two of the weak share announce intervals (one for this
+node's announcement to go out, one for a peer's fetch and check), and those
+it does not hold at all. The receiver fills the list from its weak pool's
+checked weak shares, then from the prefilled ones, asks the sender for the
+rest (`GetCarriedWeakShares`, answered from the sender's store with
+`CarriedWeakShares`), and checks the rebuilt share exactly as a share sent
+whole, weak root included. A prefilled or fetched weak share that filled a
+gap also goes to the weak share worker, checked as any relayed weak share,
+so the gossip does not fetch it again. A share still missing a weak share
+after 10 seconds, or whose weak shares do not rebuild its weak root, is
+never stored or validated: the block fetcher fetches it whole, from another
+peer that relayed it meanwhile if one did. A list that does not hold
+exactly the weak shares the header counts, each once, or that prefills a
+weak share it does not list or one twice, is refused as a bad copy is.
+Header sync and block requests still send weak shares whole: a node
+catching up was never sent old weak shares. On a 12-node swarm before the
+prefilling, a relayed share message fell from 23.4 KB to 4.7 KB and 2.4% of
+the weak shares were fetched, but the round trip for them took shares that
+did not make the chain from 9.69% to 12.37%. No share-chain rule changes
+and no store change; nodes before it cannot read the new messages, so the
+two derive different protocol strings and fail the handshake, and every
+node restarts on the new binary. New series:
+`p2p_share_relay_messages_total`, `p2p_share_relay_bytes_total`,
+`p2p_share_relay_whole_bytes_total` (what the same messages would have taken
+with every weak share whole) and `p2p_share_relay_prefilled_weak_shares_total`,
+and `weak_shares_filled_from_pool_total`, `weak_shares_prefilled_total`,
+`weak_shares_prefilled_unused_total` (prefilled ones the pool already had),
+`weak_shares_fetched_for_shares_total` and
+`weak_share_fills_fetched_whole_total`.
+
+The small miners design page has a section 6, a proposal that is not built:
+weak shares that follow the asks. A weak share would ask for an easier weak
+target when its node wanted one for its miner, and while more than one in 64
+of the weak shares a share carried ask, the weak ratio would rise instead of
+steering towards 32 weak shares a share, up to 320. Without asks the rule is
+today's. The payout simulator runs it share by share in four tables
+(`weak-asks`, `weak-asks-mixes`, `weak-asks-constants`,
+`weak-asks-attacks`): a pool whose small miners find enough weak shares
+stays near today's count, and one at 30% of a Bitcoin Cash ten times today's
+opens to the ceiling, where a Bitaxe's months without a payment go from 41%
+to 2.7%. An attacker can hold the count at the ceiling or at the floor, no
+further. The section lists what the ceiling costs a node and what has to be
+built first.
+
+The payout simulator has a `window-cap` table and a `storage` table. The
+first runs pools at 0.01 to 1% of Bitcoin Cash with the PPLNS window capped
+at 14, 30 and 60 days: the cap binds only under about 0.15%, and a longer
+one leaves a miner that keeps mining as often without a payment (63%, 66%
+and 65% of its months at 0.01%), since each block pays it its part of the
+window's work; it only lets more single shares be paid, at the cost of a
+longer payout depth and twice the bodies kept. The 14-day cap stays. The
+second is arithmetic of what a node keeps: the payout level bounds a
+coinbase (17,885 outputs, 608 KB, at the default level, with 100,000 payees
+or 1,000,000); coinbases are most of the store, 8.3 GB for 28 days at 1,000
+payees up to 242 GB when every one is a full 1 MB; stored without their
+payouts they take 0.09 GB; weak shares take 6.2 GB at 32 a share and 62 GB
+at 320, half that kept for one payout depth; headers take 3.15 GB a year.
+`Scenario` gains `window_cap_seconds`, 14 days everywhere else.
+
 The payout simulator has a `scale-levers` table for part 5 of the small
 miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
 Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,
