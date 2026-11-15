@@ -253,6 +253,9 @@ pub struct ShareDetail {
     pub bitcoin_header: BitcoinHeader,
     /// How many weak shares this share carries, from its header.
     pub weak_count: u16,
+    /// How many of the carried weak shares ask for an easier weak target,
+    /// from its header.
+    pub weak_asking: u16,
     /// This share's weak ratio `R`: its weak target over the minimum, in
     /// 1024 parts (`p2poolv2_lib::shares::weak::WEAK_RATIO_UNIT`).
     pub weak_ratio: u32,

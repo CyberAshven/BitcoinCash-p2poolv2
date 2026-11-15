@@ -69,6 +69,9 @@ pub struct ShareLookupOutput {
     /// How many weak shares this share carries, from its header
     /// (`ShareHeader::weak_count`).
     pub weak_count: u16,
+    /// How many of the carried weak shares ask for an easier weak target,
+    /// from its header (`ShareHeader::weak_asking`).
+    pub weak_asking: u16,
     /// This share's weak ratio R (`ShareHeader::weak_ratio`): its weak
     /// target over its minimum, in `WEAK_RATIO_UNIT` (1024) parts.
     pub weak_ratio: u32,
@@ -219,6 +222,7 @@ pub(crate) fn build_share_output(
         transactions: transaction_ids,
         pruned,
         weak_count: share_header.weak_count,
+        weak_asking: share_header.weak_asking,
         weak_ratio: share_header.weak_ratio,
         weak_root: share_header.weak_root.to_string(),
         weak_shares,
@@ -493,6 +497,7 @@ mod tests {
             .time(1_700_000_001)
             .share_owner(ShareOwner::CashP2pkh([0x44; 20]))
             .weak_shares(vec![weak_share.clone()])
+            .weak_asking(1)
             .build();
         confirm_test_block(&state.chain_store_handle, &carrier).await;
 
@@ -509,6 +514,7 @@ mod tests {
 
         let output = &result.0[0];
         assert_eq!(output.weak_count, 1);
+        assert_eq!(output.weak_asking, 1);
         assert_eq!(output.weak_ratio, GENESIS_WEAK_RATIO);
         assert_eq!(output.weak_root, weak_share.committed_hash().to_string());
         assert_eq!(output.weak_shares.len(), 1);
@@ -561,6 +567,7 @@ mod tests {
 
         let output = &result.0[0];
         assert_eq!(output.weak_count, 0);
+        assert_eq!(output.weak_asking, 0);
         assert_eq!(output.weak_root, empty_weak_root().to_string());
         assert!(output.weak_shares.is_empty());
     }
