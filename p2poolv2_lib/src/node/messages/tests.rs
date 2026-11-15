@@ -664,9 +664,10 @@ fn test_share_with_weak_hashes_round_trips_and_lists_weak_shares_by_hash() {
         assert_eq!(decoded, message);
 
         //* Besides the hashes, the message keeps the share's empty weak list
-        //* (one byte) and always writes the header count, which a whole share
-        //* without carried headers leaves out (one more).
-        let overhead = if bch_headers.is_empty() { 2 } else { 1 };
+        //* and an empty prefilled list (a byte each) and always writes the
+        //* header count, which a whole share without carried headers leaves
+        //* out (one more).
+        let overhead = if bch_headers.is_empty() { 3 } else { 2 };
         let whole = Message::ShareBlock(share.clone(), bch_headers);
         let weak_bytes: usize = share.weak_shares.iter().map(WeakShare::encoded_size).sum();
         assert_eq!(
@@ -695,6 +696,48 @@ fn test_share_with_weak_hashes_decode_refuses_whole_weak_shares_and_too_many_has
     bytes.extend(encode::serialize(&VarInt::from(WEAK_CAP + 1)));
     bytes.extend(vec![0u8; 32 * (WEAK_CAP + 1)]);
     assert!(encode::deserialize::<Message>(&bytes).is_err());
+
+    //* More prefilled weak shares than a share may carry are refused
+    //* before any is read.
+    let mut bytes = vec![SHARE_WITH_WEAK_HASHES, 0];
+    bytes.extend(encode::serialize(&share_carrying_weak_shares(0)));
+    bytes.extend(encode::serialize(&VarInt::from(0usize)));
+    bytes.extend(encode::serialize(&VarInt::from(WEAK_CAP + 1)));
+    assert!(matches!(
+        encode::deserialize::<Message>(&bytes),
+        Err(encode::Error::ParseFailed(_))
+    ));
+}
+
+/// A share with weak hashes round-trips with prefilled weak shares, which
+/// go whole beside the full list in the order carried; filled, it is the
+/// share again.
+#[test]
+fn test_share_with_weak_hashes_round_trips_with_prefilled_weak_shares() {
+    let share = share_carrying_weak_shares(3);
+    let young = [
+        share.weak_shares[0].pow_hash(),
+        share.weak_shares[2].pow_hash(),
+    ];
+    let relayed = ShareWithWeakHashes::prefilling(share.clone(), |weak_share| {
+        young.contains(&weak_share.pow_hash())
+    });
+    assert_eq!(relayed.weak_hashes().len(), 3);
+    assert_eq!(
+        relayed.prefilled(),
+        [share.weak_shares[0].clone(), share.weak_shares[2].clone()]
+    );
+
+    let message = Message::ShareWithWeakHashes(relayed.clone(), Vec::new());
+    let decoded: Message = encode::deserialize(&encode::serialize(&message)).unwrap();
+    assert_eq!(decoded, message);
+    let listed_only =
+        Message::ShareWithWeakHashes(ShareWithWeakHashes::new(share.clone()), Vec::new());
+    assert_eq!(
+        message.encoded_size() - listed_only.encoded_size(),
+        share.weak_shares[0].encoded_size() + share.weak_shares[2].encoded_size()
+    );
+    assert_eq!(relayed.with_weak_shares(share.weak_shares.clone()), share);
 }
 
 /// The request for carried weak shares and its answer round-trip through

@@ -71,6 +71,9 @@ fn store_without_the_share() -> ChainStoreHandle {
 struct Receiver {
     _temp_dir: tempfile::TempDir,
     weak_share_tx: WeakShareEventSender,
+    /// The weak share worker's queue: weak shares a relayed share brought
+    /// arrive here to be checked.
+    weak_share_rx: crate::node::weak_share_worker::WeakShareEventReceiver,
     pool: WeakPool,
     validation_tx: ValidationSender,
     validation_rx: ValidationReceiver,
@@ -100,6 +103,7 @@ impl Receiver {
         Self {
             _temp_dir: temp_dir,
             weak_share_tx: network.events_tx,
+            weak_share_rx: network.events_rx,
             pool,
             validation_tx,
             validation_rx,
@@ -227,7 +231,7 @@ async fn a_missing_weak_share_is_fetched_from_the_sender() {
         receiver
             .weak_share_tx
             .fill()
-            .answer(sender, block_hash, vec![missing])
+            .answer(sender, block_hash, vec![missing.clone()])
     );
 
     assert_eq!(accepted.await.unwrap(), honest);
@@ -235,6 +239,12 @@ async fn a_missing_weak_share_is_fetched_from_the_sender() {
     assert_eq!(counts.filled_from_pool, 1);
     assert_eq!(counts.fetched_for_shares, 1);
     assert_eq!(counts.fills_fetched_whole, 0);
+    let checked = receiver.weak_share_rx.try_recv().unwrap();
+    assert_eq!(
+        (checked.weak_share, checked.source),
+        (missing, WeakShareSource::Peer(sender)),
+        "the fetched weak share is checked as one the sender relayed"
+    );
 }
 
 /// A sender listing the share's weak shares in another order lists hashes
@@ -439,5 +449,133 @@ async fn a_share_asked_for_in_sync_is_sent_with_its_weak_shares_whole() {
             assert_eq!(share_block, honest);
         }
         other => panic!("Expected the share whole, got {other:?}"),
+    }
+}
+
+/// `honest` relayed with its second weak share prefilled.
+fn with_second_prefilled(honest: &ShareBlock) -> ShareWithWeakHashes {
+    let second = honest.weak_shares[1].pow_hash();
+    ShareWithWeakHashes::prefilling(honest.clone(), |weak_share| weak_share.pow_hash() == second)
+}
+
+/// `honest` listed by hash, with `prefilled` sent whole beside the list as
+/// they are, whatever the list says: what a bad sender could put on the
+/// wire.
+fn decoded_with_prefilled(honest: &ShareBlock, prefilled: &[WeakShare]) -> ShareWithWeakHashes {
+    use bitcoin::consensus::encode;
+    let mut bytes = encode::serialize(&ShareWithWeakHashes::new(honest.clone()));
+    assert_eq!(bytes.pop(), Some(0), "the empty prefilled list is last");
+    bytes.extend(encode::serialize(&bitcoin::VarInt::from(prefilled.len())));
+    for weak_share in prefilled {
+        bytes.extend(encode::serialize(weak_share));
+    }
+    encode::deserialize(&bytes).unwrap()
+}
+
+/// A weak share the pool lacks that the sender prefilled fills the share at
+/// once: nothing is asked of the sender, the share is handed on whole, and
+/// the prefilled weak share goes to the weak share worker to be checked as
+/// one the sender relayed.
+#[tokio::test]
+async fn a_prefilled_weak_share_fills_the_share_without_asking_the_sender() {
+    let honest = honest_share();
+    let mut receiver = Receiver::with_pooled(&honest.weak_shares[..1]).await;
+    let accepted = receiver.accept_next_share();
+    let sender = PeerId::random();
+
+    let result = receiver.relay(with_second_prefilled(&honest), sender).await;
+
+    assert!(result.is_ok(), "{}", result.unwrap_err());
+    assert_eq!(accepted.await.unwrap(), honest);
+    assert!(
+        receiver.swarm_rx.try_recv().is_err(),
+        "nothing is asked of the sender"
+    );
+    let counts = receiver.pool.counts();
+    assert_eq!(counts.filled_from_pool, 1);
+    assert_eq!(counts.prefilled_for_shares, 1);
+    assert_eq!(counts.prefilled_unused, 0);
+    assert_eq!(counts.fetched_for_shares, 0);
+    let checked = receiver.weak_share_rx.try_recv().unwrap();
+    assert_eq!(
+        (checked.weak_share, checked.source),
+        (honest.weak_shares[1].clone(), WeakShareSource::Peer(sender))
+    );
+}
+
+/// A prefilled weak share the pool already has is not used: the pool's
+/// checked copy fills the share, and the prefilled one is counted unused
+/// and not checked again.
+#[tokio::test]
+async fn a_prefilled_weak_share_the_pool_has_is_counted_unused() {
+    let honest = honest_share();
+    let mut receiver = Receiver::with_pooled(&honest.weak_shares).await;
+    let accepted = receiver.accept_next_share();
+
+    receiver
+        .relay(with_second_prefilled(&honest), PeerId::random())
+        .await
+        .unwrap();
+
+    assert_eq!(accepted.await.unwrap(), honest);
+    let counts = receiver.pool.counts();
+    assert_eq!(counts.filled_from_pool, 2);
+    assert_eq!(counts.prefilled_for_shares, 0);
+    assert_eq!(counts.prefilled_unused, 1);
+    assert!(receiver.weak_share_rx.try_recv().is_err());
+}
+
+/// An altered prefilled weak share -- its proof-of-work hash kept, its
+/// coinbase value one satoshi higher -- does not rebuild the weak root: the
+/// share is asked for whole and never validated.
+#[tokio::test]
+async fn an_altered_prefilled_weak_share_gets_the_share_asked_for_whole() {
+    let honest = honest_share();
+    let block_hash = honest.block_hash();
+    let mut altered = honest.weak_shares[1].clone();
+    altered.coinbase_value += 1;
+    let mut receiver = Receiver::with_pooled(&honest.weak_shares[..1]).await;
+    let sender = PeerId::random();
+
+    let result = receiver
+        .relay(decoded_with_prefilled(&honest, &[altered]), sender)
+        .await;
+
+    assert!(result.is_ok(), "{}", result.unwrap_err());
+    assert_eq!(
+        fetched_whole(&mut receiver.block_fetcher_rx),
+        (vec![block_hash], sender, true)
+    );
+    assert!(receiver.block_receiver_rx.try_recv().is_err());
+    assert!(receiver.validation_rx.try_recv().is_err());
+    assert!(receiver.swarm_rx.try_recv().is_err());
+}
+
+/// A sender may prefill only weak shares it lists, each once. A prefilled
+/// weak share the share does not carry, or one sent twice, is refused as a
+/// bad list, and nothing is fetched or handed on.
+#[tokio::test]
+async fn a_prefilled_weak_share_not_listed_or_sent_twice_is_refused() {
+    let honest = honest_share();
+    let listed = honest.weak_shares[1].clone();
+    for (prefilled, expected) in [
+        (vec![carried_weak_share(9)], "it does not list"),
+        (vec![listed.clone(), listed], "more than once"),
+    ] {
+        let mut receiver = Receiver::with_pooled(&honest.weak_shares[..1]).await;
+
+        let result = receiver
+            .relay(
+                decoded_with_prefilled(&honest, &prefilled),
+                PeerId::random(),
+            )
+            .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+        assert!(receiver.swarm_rx.try_recv().is_err());
+        assert!(receiver.block_fetcher_rx.try_recv().is_err());
+        assert!(receiver.block_receiver_rx.try_recv().is_err());
+        assert!(receiver.weak_share_rx.try_recv().is_err());
     }
 }

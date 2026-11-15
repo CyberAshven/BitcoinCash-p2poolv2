@@ -201,11 +201,12 @@ fn share_chain_rule_tag(chain: Chain) -> Option<String> {
 /// restarts on the new binary.
 ///
 /// `weak-by-hash` since 2026-11-15: a new share relayed to peers lists the
-/// weak shares it carries by proof-of-work hash (`ShareWithWeakHashes`)
-/// rather than sending them whole, and a peer whose weak pool lacks some
-/// asks the sender for them (`GetCarriedWeakShares`, answered with
-/// `CarriedWeakShares`). A node before it cannot read any of the three.
-/// Sync still sends weak shares whole.
+/// weak shares it carries by proof-of-work hash (`ShareWithWeakHashes`),
+/// sending whole beside the list only the ones its peers probably lack, and
+/// a peer whose weak pool still lacks some asks the sender for them
+/// (`GetCarriedWeakShares`, answered with `CarriedWeakShares`). A node
+/// before it cannot read any of the three. Sync still sends weak shares
+/// whole.
 const BCH_MESSAGES_TAG: &str = "weak-by-hash";
 
 /// The share chain part of every protocol string: the genesis tag, followed

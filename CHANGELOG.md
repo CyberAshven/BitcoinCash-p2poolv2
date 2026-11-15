@@ -17,23 +17,37 @@ weak share twice and the share message grew with every weak share in it. On
 5.27% with 32 weak shares a share carried whole, 8.66% with 160 and 14.11%
 with 320, against 4.20% when they travel only beside the shares; the weak
 shares that follow the asks (#117, #118) let a share carry 320. A share
-carrying weak shares now goes as `ShareWithWeakHashes`, 32 bytes a weak
-share. The receiver fills the list from its weak pool's checked weak shares,
-asks the sender for the rest (`GetCarriedWeakShares`, answered from the
-sender's store with `CarriedWeakShares`), and checks the rebuilt share
-exactly as a share sent whole, weak root included. A share still missing a
-weak share after 10 seconds, or whose listed hashes do not rebuild its weak
-root, is never stored or validated: the block fetcher fetches it whole, from
-another peer that relayed it meanwhile if one did. A list that does not hold
-exactly the weak shares the header counts, each once, is refused as a bad
-copy is. Header sync and block requests still send weak shares whole: a
-node catching up was never sent old weak shares. No share-chain rule
-changes and no store change; nodes before it cannot read the new messages,
-so the two derive different protocol strings and fail the handshake, and
-every node restarts on the new binary. New series:
-`p2p_share_relay_messages_total`, `p2p_share_relay_bytes_total` and
+carrying weak shares now goes as `ShareWithWeakHashes`: every weak share it
+carries listed by proof-of-work hash, 32 bytes each, and the ones its peers
+probably lack also sent whole beside the list, as BIP152 prefills
+transactions. Those are the weak shares this node's weak pool took less
+than 400 ms ago, two of the weak share announce intervals (one for this
+node's announcement to go out, one for a peer's fetch and check), and those
+it does not hold at all. The receiver fills the list from its weak pool's
+checked weak shares, then from the prefilled ones, asks the sender for the
+rest (`GetCarriedWeakShares`, answered from the sender's store with
+`CarriedWeakShares`), and checks the rebuilt share exactly as a share sent
+whole, weak root included. A prefilled or fetched weak share that filled a
+gap also goes to the weak share worker, checked as any relayed weak share,
+so the gossip does not fetch it again. A share still missing a weak share
+after 10 seconds, or whose weak shares do not rebuild its weak root, is
+never stored or validated: the block fetcher fetches it whole, from another
+peer that relayed it meanwhile if one did. A list that does not hold
+exactly the weak shares the header counts, each once, or that prefills a
+weak share it does not list or one twice, is refused as a bad copy is.
+Header sync and block requests still send weak shares whole: a node
+catching up was never sent old weak shares. On a 12-node swarm before the
+prefilling, a relayed share message fell from 23.4 KB to 4.7 KB and 2.4% of
+the weak shares were fetched, but the round trip for them took shares that
+did not make the chain from 9.69% to 12.37%. No share-chain rule changes
+and no store change; nodes before it cannot read the new messages, so the
+two derive different protocol strings and fail the handshake, and every
+node restarts on the new binary. New series:
+`p2p_share_relay_messages_total`, `p2p_share_relay_bytes_total`,
 `p2p_share_relay_whole_bytes_total` (what the same messages would have taken
-with every weak share whole), and `weak_shares_filled_from_pool_total`,
+with every weak share whole) and `p2p_share_relay_prefilled_weak_shares_total`,
+and `weak_shares_filled_from_pool_total`, `weak_shares_prefilled_total`,
+`weak_shares_prefilled_unused_total` (prefilled ones the pool already had),
 `weak_shares_fetched_for_shares_total` and
 `weak_share_fills_fetched_whole_total`.
 

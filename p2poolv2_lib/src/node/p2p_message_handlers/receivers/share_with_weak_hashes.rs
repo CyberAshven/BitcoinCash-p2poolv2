@@ -6,9 +6,12 @@
 //! (`Message::ShareWithWeakHashes`), and the answer to a peer that asks for
 //! the ones it lacks (`Message::GetCarriedWeakShares`).
 //!
-//! The receiver fills each listed hash from its weak pool, asks the sender
-//! for the rest, and hands the rebuilt share to `handle_share_block`, which
-//! checks it as it checks a share sent whole, the weak root included. A
+//! The receiver fills each listed hash from its weak pool, then from the
+//! weak shares the sender prefilled, asks the sender for the rest, and hands
+//! the rebuilt share to `handle_share_block`, which checks it as it checks a
+//! share sent whole, the weak root included. The prefilled and fetched weak
+//! shares that filled a gap also go to the weak share worker, checked as
+//! any relayed weak share, so the gossip does not fetch them again. A
 //! share whose weak shares cannot all be filled -- the sender does not
 //! answer within `WEAK_FILL_TIMEOUT`, answers without some of them, or lists
 //! hashes that do not rebuild the header's weak root -- is not complete yet,
@@ -23,7 +26,7 @@ use crate::node::p2p_message_handlers::receivers::share_blocks::handle_share_blo
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::validation_worker::ValidationSender;
 use crate::node::weak_share_fill::{FillStart, WEAK_FILL_TIMEOUT};
-use crate::node::weak_share_worker::WeakShareEventSender;
+use crate::node::weak_share_worker::{WeakShareEvent, WeakShareEventSender};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -31,7 +34,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::validation::{ShareValidator, check_weak_shares_match_header};
 use crate::shares::weak::WeakShare;
-use crate::shares::weak_pool::WeakPool;
+use crate::shares::weak_pool::{WeakPool, WeakShareSource};
 use bitcoin::BlockHash;
 use libp2p::PeerId;
 use std::collections::{HashMap, HashSet};
@@ -46,14 +49,15 @@ use tracing::{debug, error, warn};
 /// coinbase proof check is refused before anything is fetched for it: both
 /// go to `handle_share_block` as they came, which then reads only the
 /// share's hash and header, as for a share sent whole. A new share must list
-/// exactly the weak shares its header counts, each once; an honest sender
-/// lists the body it validated, so another list is refused as from a bad
-/// peer. Its weak shares are then filled from the weak pool. A share the
-/// pool fills is handed on here; one it does not waits, in a task of its
-/// own, for the sender to send the rest.
+/// exactly the weak shares its header counts, each once, and prefill only
+/// listed ones, each once; an honest sender lists the body it validated, so
+/// another list is refused as from a bad peer. Its weak shares are then
+/// filled from the weak pool and the prefilled ones. A share those fill is
+/// handed on here; one they do not waits, in a task of its own, for the
+/// sender to send the rest.
 #[allow(clippy::too_many_arguments)] // handler wiring: each parameter is a distinct collaborator, as for handle_share_block, a params struct would only move the list
 pub async fn handle_share_with_weak_hashes<C: Send + Sync + 'static>(
-    share: ShareWithWeakHashes,
+    mut share: ShareWithWeakHashes,
     peer: PeerId,
     chain_store_handle: &ChainStoreHandle,
     validation_tx: ValidationSender,
@@ -71,9 +75,8 @@ pub async fn handle_share_with_weak_hashes<C: Send + Sync + 'static>(
             .validate_coinbase_proof(header, &share.share_block().template_merkle_branches)
             .is_err()
     {
-        let (share_block, _) = share.into_parts();
         return handle_share_block(
-            share_block,
+            share.into_unfilled(),
             chain_store_handle,
             validation_tx,
             block_receiver_handle,
@@ -89,6 +92,12 @@ pub async fn handle_share_with_weak_hashes<C: Send + Sync + 'static>(
         Some(pool) => pool.pooled_weak_shares(share.weak_hashes()),
         None => vec![None; share.weak_hashes().len()],
     };
+    let from_pool = slots.iter().flatten().count();
+    // A prefilled weak share fills only a slot the pool left empty: the
+    // pool's copy passed its checks.
+    let prefilled = share.take_prefilled();
+    let prefilled_count = prefilled.len();
+    let prefilled = fill_slots(share.weak_hashes(), &mut slots, prefilled);
     let missing: Vec<BlockHash> = share
         .weak_hashes()
         .iter()
@@ -96,12 +105,16 @@ pub async fn handle_share_with_weak_hashes<C: Send + Sync + 'static>(
         .filter(|(_, slot)| slot.is_none())
         .map(|(hash, _)| *hash)
         .collect();
-    // Counted only for a fill that goes on, not for a relay of a share
-    // that already waits.
-    let from_pool = slots.len() - missing.len();
+    // Counted, and the prefilled weak shares checked, only for a fill that
+    // goes on, not for a relay of a share that already waits.
+    let count_and_check_prefilled = |pool: &WeakPool| {
+        pool.count_fill(from_pool, 0);
+        pool.count_prefilled(prefilled.len(), prefilled_count - prefilled.len());
+        check_as_relayed(weak_share_tx, peer, prefilled.iter().cloned());
+    };
     if missing.is_empty() {
         if let Some(pool) = &pool {
-            pool.count_fill(from_pool, 0);
+            count_and_check_prefilled(pool);
         }
         return complete_share(
             share,
@@ -135,9 +148,10 @@ pub async fn handle_share_with_weak_hashes<C: Send + Sync + 'static>(
             return Ok(());
         }
     };
-    pool.count_fill(from_pool, 0);
+    count_and_check_prefilled(&pool);
     debug!(
-        "Share {block_hash} from {peer}: {from_pool} weak shares from the pool, asking for {}",
+        "Share {block_hash} from {peer}: {from_pool} weak shares from the pool, {} prefilled, asking for {}",
+        prefilled.len(),
         missing.len()
     );
     if let Err(error) = swarm_tx
@@ -157,17 +171,19 @@ pub async fn handle_share_with_weak_hashes<C: Send + Sync + 'static>(
     let block_receiver_handle = block_receiver_handle.clone();
     let block_fetcher_handle = block_fetcher_handle.clone();
     let share_validator = share_validator.clone();
+    let weak_share_tx = weak_share_tx.clone();
     tokio::spawn(async move {
         let answered = tokio::time::timeout(WEAK_FILL_TIMEOUT, answer).await;
         let others = fill.finish(block_hash);
         let fetched = match answered {
-            Ok(Ok(weak_shares)) => fill_from_answer(share.weak_hashes(), &mut slots, weak_shares),
+            Ok(Ok(weak_shares)) => fill_slots(share.weak_hashes(), &mut slots, weak_shares),
             _ => {
                 debug!("Peer {peer} did not send the weak shares of share {block_hash} in time");
-                0
+                Vec::new()
             }
         };
-        pool.count_fill(0, fetched);
+        pool.count_fill(0, fetched.len());
+        check_as_relayed(Some(&weak_share_tx), peer, fetched);
         // Another peer that relayed the share is asked for it whole first:
         // this one was slow, or sent what does not complete it.
         let whole_from = others.first().copied().unwrap_or(peer);
@@ -234,7 +250,8 @@ pub async fn handle_get_carried_weak_shares<C: Send + Sync>(
     Ok(())
 }
 
-/// A share must list exactly the weak shares its header counts, each once.
+/// A share must list exactly the weak shares its header counts, each once,
+/// and prefill only weak shares it lists, each once.
 fn check_weak_hashes_listed(
     share: &ShareWithWeakHashes,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -254,31 +271,74 @@ fn check_weak_hashes_listed(
             format!("Share {block_hash} lists weak share {repeated} more than once").into(),
         );
     }
+    let mut prefilled = HashSet::with_capacity(share.prefilled().len());
+    for pow_hash in share.prefilled().iter().map(WeakShare::pow_hash) {
+        if !seen.contains(&pow_hash) {
+            return Err(format!(
+                "Share {block_hash} prefills weak share {pow_hash} it does not list"
+            )
+            .into());
+        }
+        if !prefilled.insert(pow_hash) {
+            return Err(format!(
+                "Share {block_hash} prefills weak share {pow_hash} more than once"
+            )
+            .into());
+        }
+    }
     Ok(())
 }
 
-/// Put the weak shares a sender answered with into the empty slots their
-/// proof-of-work hashes name, and return how many it filled. A weak share
-/// nobody asked for, or one for a slot already filled, is left out.
-fn fill_from_answer(
+/// Put weak shares the sender sent, prefilled or in answer to a request,
+/// into the empty slots their proof-of-work hashes name, and return a copy
+/// of each one that filled a slot. A weak share for no slot, or for one
+/// already filled, is left out.
+fn fill_slots(
     weak_hashes: &[BlockHash],
     slots: &mut [Option<WeakShare>],
     weak_shares: Vec<WeakShare>,
-) -> usize {
-    let mut answered: HashMap<BlockHash, WeakShare> = weak_shares
+) -> Vec<WeakShare> {
+    let mut sent: HashMap<BlockHash, WeakShare> = weak_shares
         .into_iter()
         .map(|weak_share| (weak_share.pow_hash(), weak_share))
         .collect();
-    let mut filled = 0;
+    let mut filled = Vec::new();
     for (hash, slot) in weak_hashes.iter().zip(slots.iter_mut()) {
         if slot.is_none()
-            && let Some(weak_share) = answered.remove(hash)
+            && let Some(weak_share) = sent.remove(hash)
         {
+            filled.push(weak_share.clone());
             *slot = Some(weak_share);
-            filled += 1;
         }
     }
     filled
+}
+
+/// Hand weak shares a relayed share brought, which the weak pool lacked, to
+/// the weak share worker as weak shares `peer` relayed: checked as any
+/// relayed weak share, and pooled if they pass, so the weak share gossip
+/// does not fetch them again. A full worker queue drops them; the share
+/// that carries them is checked either way.
+fn check_as_relayed(
+    weak_share_tx: Option<&WeakShareEventSender>,
+    peer: PeerId,
+    weak_shares: impl IntoIterator<Item = WeakShare>,
+) {
+    let Some(weak_share_tx) = weak_share_tx else {
+        return;
+    };
+    for weak_share in weak_shares {
+        let pow_hash = weak_share.pow_hash();
+        if weak_share_tx
+            .try_send(WeakShareEvent {
+                weak_share,
+                source: WeakShareSource::Peer(peer),
+            })
+            .is_err()
+        {
+            debug!("Weak share queue full, not checking weak share {pow_hash} from {peer}");
+        }
+    }
 }
 
 /// Hand a share on once its weak shares are filled: rebuilt, it goes to

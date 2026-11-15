@@ -70,14 +70,16 @@ On Bitcoin Cash a share also carries weak shares, which travel ahead of it
 on their own: a node pushes the ones its miners find to every peer, and
 announces the ones it takes from peers by hash, each fetched once. So a node
 relays a new share with its weak shares listed by proof-of-work hash
-(`ShareWithWeakHashes`), not whole. The receiver fills them from its weak
-pool and asks the sender for the ones it lacks (`GetCarriedWeakShares`),
-then checks the rebuilt share exactly as a share sent whole, weak root
-included. A share it cannot fill within ten seconds, or whose listed weak
-shares do not rebuild the weak root, is not complete yet, never invalid: it
-is fetched whole, from another peer that relayed it if one did. A peer
-catching up still gets old shares with their weak shares whole: it was never
-sent them on their own.
+(`ShareWithWeakHashes`), not whole, except the ones still spreading: those
+its weak pool took less than 400 ms ago, or does not hold, go whole beside
+the list (prefilled, as in BIP152), so a peer rarely has to ask. The
+receiver fills the list from its weak pool and the prefilled ones and asks
+the sender for any it still lacks (`GetCarriedWeakShares`), then checks the
+rebuilt share exactly as a share sent whole, weak root included. A share it
+cannot fill within ten seconds, or whose weak shares do not rebuild the weak
+root, is not complete yet, never invalid: it is fetched whole, from another
+peer that relayed it if one did. A peer catching up still gets old shares
+with their weak shares whole: it was never sent them on their own.
 
 | Weak shares a share | Carried whole: stale shares on 1,000 nodes | Gossiped only |
 |---:|---:|---:|
@@ -89,7 +91,11 @@ The [network simulation](simulation/network-sim.md) gave these at
 10-second shares (`cargo netsim run --nodes 1000 --duration 10800
 --weak-shares N --weak-share-carriage whole`, or `gossip-only`; the runs are
 recorded with the weak share proposal, #117). Listing a share's weak shares
-by hash costs it 32 bytes each, against about 800 whole.
+by hash costs it 32 bytes each, against about 800 whole. On a 12-node swarm
+listing alone cut a relayed share message from 23.4 KB to 4.7 KB, but the
+2.4% of weak shares a receiver then asked for added a round trip and raised
+the shares that did not make the chain from 9.69% to 12.37%; the 400 ms of
+prefilled weak shares are there to take that round trip out.
 
 ## One view of the shares
 

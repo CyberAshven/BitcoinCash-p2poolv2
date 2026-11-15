@@ -256,6 +256,11 @@ pub struct WeakPoolCounts {
     /// Shares relayed by hash whose weak shares could not all be filled,
     /// asked for whole instead.
     pub fills_fetched_whole: u64,
+    /// Weak shares the sender of a share relayed by hash sent whole
+    /// (prefilled) that filled a weak share the pool lacked.
+    pub prefilled_for_shares: u64,
+    /// Prefilled weak shares the pool already had, sent for nothing.
+    pub prefilled_unused: u64,
 }
 
 /// What the pool has done since the node started and what it holds now:
@@ -275,7 +280,7 @@ impl WeakPoolStats {
     /// set, so the series stay bounded.
     pub fn exposition(&self) -> String {
         let counts = &self.counts;
-        let series: [(&str, &str, &str, u64); 9] = [
+        let series: [(&str, &str, &str, u64); 11] = [
             (
                 "weak_shares_found_total",
                 "counter",
@@ -317,6 +322,18 @@ impl WeakPoolStats {
                 "counter",
                 "Shares relayed by hash whose weak shares could not all be filled, asked for whole instead",
                 counts.fills_fetched_whole,
+            ),
+            (
+                "weak_shares_prefilled_total",
+                "counter",
+                "Weak shares a sender prefilled in a share relayed by hash that filled one the weak pool lacked",
+                counts.prefilled_for_shares,
+            ),
+            (
+                "weak_shares_prefilled_unused_total",
+                "counter",
+                "Weak shares a sender prefilled in a share relayed by hash that the weak pool already had",
+                counts.prefilled_unused,
             ),
             (
                 "weak_pool_size",
@@ -363,6 +380,10 @@ struct PooledWeakShare {
     parent_height: u32,
     /// Arrival order, which breaks ties between equal parent heights.
     sequence: u64,
+    /// When it was pooled, in milliseconds since the epoch: the first this
+    /// node could relay or announce it. A share relayed soon after sends it
+    /// whole, as its peers may not have it yet.
+    pooled_at_millis: u64,
     /// Whether the best chain carried it when a share was last built: it is
     /// then not offered, but kept, in case the share carrying it becomes an
     /// uncle and it must be carried again.
@@ -788,6 +809,18 @@ impl WeakPool {
     /// pool keeps it only in place of a weak share on an older parent, which
     /// would expire first.
     pub fn insert(&self, weak_share: WeakShare, parent_height: u32, source: WeakShareSource) {
+        self.insert_at(weak_share, parent_height, source, now_millis());
+    }
+
+    /// [`Self::insert`] at `now_millis`, milliseconds since the epoch, the
+    /// time it is remembered as pooled at.
+    pub(crate) fn insert_at(
+        &self,
+        weak_share: WeakShare,
+        parent_height: u32,
+        source: WeakShareSource,
+        now_millis: u64,
+    ) {
         let pow_hash = weak_share.pow_hash();
         {
             let mut state = self.lock();
@@ -825,6 +858,7 @@ impl WeakPool {
                     weak_share: weak_share.clone(),
                     parent_height,
                     sequence,
+                    pooled_at_millis: now_millis,
                     carried_on_best_chain: false,
                 },
             );
@@ -1008,12 +1042,36 @@ impl WeakPool {
             .collect()
     }
 
+    /// When the pool took each of `pow_hashes`, in milliseconds since the
+    /// epoch, in that order, `None` for each it does not hold: a share about
+    /// to be relayed sends the young ones and the missing ones whole.
+    pub fn pooled_at_millis(&self, pow_hashes: &[BlockHash]) -> Vec<Option<u64>> {
+        let state = self.lock();
+        pow_hashes
+            .iter()
+            .map(|pow_hash| {
+                state
+                    .pooled
+                    .get(pow_hash)
+                    .map(|pooled| pooled.pooled_at_millis)
+            })
+            .collect()
+    }
+
     /// Count `from_pool` weak shares of a share relayed by hash filled from
     /// the pool, and `fetched` the sender sent.
     pub fn count_fill(&self, from_pool: usize, fetched: usize) {
         let mut state = self.lock();
         state.counts.filled_from_pool += from_pool as u64;
         state.counts.fetched_for_shares += fetched as u64;
+    }
+
+    /// Count `used` prefilled weak shares that filled a share relayed by
+    /// hash, and `unused` the pool already had.
+    pub fn count_prefilled(&self, used: usize, unused: usize) {
+        let mut state = self.lock();
+        state.counts.prefilled_for_shares += used as u64;
+        state.counts.prefilled_unused += unused as u64;
     }
 
     /// Count a share relayed by hash that was asked for whole instead.

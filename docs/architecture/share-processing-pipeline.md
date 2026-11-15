@@ -159,14 +159,20 @@ confirmation at its height.
 `send_share_block_broadcast` relays a new Bitcoin Cash share that carries
 weak shares as `Message::ShareWithWeakHashes`: the share with its weak
 shares listed by proof-of-work hash, which the peer has from the weak share
-gossip. `handle_share_with_weak_hashes`
-(`receivers/share_with_weak_hashes.rs`) hands a stored share, or one failing
-the header or coinbase proof check, to `handle_share_block` as it came. Any
-other share must list exactly `weak_count` hashes, each once, or the peer is
-refused as for a bad copy. The handler fills the list from the weak pool's
-checked weak shares (`WeakPool::pooled_weak_shares`) and asks the sender for
-the rest with `GetCarriedWeakShares`, which the sender answers from its
-store with `CarriedWeakShares`. The share then waits in the fill book
+gossip, and whole beside the list the ones it may not have yet
+(`weak_shares_to_prefill`: those the weak pool took less than
+`PREFILL_WEAK_SHARE_MILLIS`, 400 ms, ago, or does not hold).
+`handle_share_with_weak_hashes` (`receivers/share_with_weak_hashes.rs`)
+hands a stored share, or one failing the header or coinbase proof check, to
+`handle_share_block` as it came. Any other share must list exactly
+`weak_count` hashes, each once, and prefill only listed ones, each once, or
+the peer is refused as for a bad copy. The handler fills the list from the
+weak pool's checked weak shares (`WeakPool::pooled_weak_shares`), then from
+the prefilled ones, and asks the sender for the rest with
+`GetCarriedWeakShares`, which the sender answers from its store with
+`CarriedWeakShares`. Prefilled and fetched weak shares that fill a gap also
+go to the weak share worker as weak shares the sender relayed. The share then
+waits in the fill book
 (`node/weak_share_fill.rs`, one wait a share, 64 in all, 8 a peer) for up to
 `WEAK_FILL_TIMEOUT` (10 s), in a task of its own so the peer's request
 service is not held. Rebuilt, the share must match its header's weak root

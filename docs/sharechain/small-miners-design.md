@@ -365,9 +365,12 @@ On the wire a weak share travels once. Its finder's node pushes it to every
 peer, and a node that takes one from a peer announces its hash and is asked
 for it once. A new share is then relayed with the weak shares it carries
 listed by proof-of-work hash (`ShareWithWeakHashes`), 32 bytes each, not
-whole: the receiver fills them from its weak pool, asks the sender for the
-ones it lacks, and checks the rebuilt body exactly as a body sent whole,
-weak root included. A share whose weak shares cannot be filled in time, or
+whole, but for the ones still spreading, which go whole beside the list
+(prefilled): those the sender's pool took less than 400 ms ago, two weak
+share announce intervals, or does not hold. The receiver fills the list from
+its weak pool and the prefilled ones, asks the sender for any it still
+lacks, and checks the rebuilt body exactly as a body sent whole, weak root
+included. A share whose weak shares cannot be filled in time, or
 whose listed hashes do not rebuild the weak root, is not complete yet and is
 fetched whole; it is never judged on a body its miner did not commit. Sync
 still sends weak shares whole, as a node catching up was never sent them. A

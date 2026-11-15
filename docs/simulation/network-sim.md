@@ -577,7 +577,8 @@ they have today at 10-second shares.
   has it (each share carries the average count; 64 add 51,200 bytes). Since
   2026-11-15 the node relays a new share with its weak shares listed by
   hash (`ShareWithWeakHashes`): `gossip-only` plus 32 bytes a weak share in
-  the share message, and a fetch for any weak share a peer lacks; `whole` is
+  the share message, the weak shares its pool took in the last 400 ms whole
+  beside them, and a fetch for any other weak share a peer lacks; `whole` is
   the node before it.
 - **2. Compact coinbase:** shares sent without the payout outputs, as in
   "Sending shares without their payouts" above: 1,429 bytes on the wire at

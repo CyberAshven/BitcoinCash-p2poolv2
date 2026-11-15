@@ -108,9 +108,10 @@ pub enum Message {
     /// peer but the one it came from; answered with `Ack`.
     WeakShare(WeakShare),
     /// A new share relayed to peers with the weak shares it carries listed
-    /// by proof-of-work hash, and the Bitcoin Cash headers it carries;
-    /// answered with `Ack`. The peer fills the weak shares from its weak
-    /// pool and asks for the rest with `GetCarriedWeakShares`.
+    /// by proof-of-work hash, the ones the peer probably lacks also sent
+    /// whole, and the Bitcoin Cash headers it carries; answered with `Ack`.
+    /// The peer fills the weak shares from its weak pool and the whole ones,
+    /// and asks for the rest with `GetCarriedWeakShares`.
     ShareWithWeakHashes(ShareWithWeakHashes, Vec<Header>),
     /// Ask the peer that relayed the share with this hash for the weak
     /// shares it carries with these proof-of-work hashes.
@@ -425,25 +426,39 @@ impl Decodable for ShareHeaderBatch {
 ///
 /// Its peers have most of those weak shares already, from the weak share
 /// gossip, so the share message no longer grows with every weak share it
-/// carries. A P2P message, not a share-chain rule: the share, its header and
-/// its weak root are the same, and the receiver rebuilds the body and checks
-/// it exactly as a share sent whole.
+/// carries. The few a peer probably lacks, the ones still spreading, also go
+/// whole beside the list (`prefilled`, as BIP152's prefilled transactions),
+/// so the peer need not ask for them. A P2P message, not a share-chain rule:
+/// the share, its header and its weak root are the same, and the receiver
+/// rebuilds the body and checks it exactly as a share sent whole.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareWithWeakHashes {
     /// The share, with no weak shares in its body.
     share_block: ShareBlock,
     /// The proof-of-work hashes of the weak shares it carries, in the order
-    /// carried.
+    /// carried, prefilled ones included.
     weak_hashes: Vec<BlockHash>,
+    /// Some of those weak shares whole, in the order carried: the ones the
+    /// sender judged its peers likely to lack.
+    prefilled: Vec<WeakShare>,
 }
 
 impl ShareWithWeakHashes {
-    /// `share_block` with its weak shares listed by proof-of-work hash.
-    pub fn new(mut share_block: ShareBlock) -> Self {
+    /// `share_block` with its weak shares listed by proof-of-work hash, none
+    /// of them prefilled.
+    pub fn new(share_block: ShareBlock) -> Self {
+        Self::prefilling(share_block, |_| false)
+    }
+
+    /// `share_block` with its weak shares listed by proof-of-work hash, and
+    /// those `prefill` picks also sent whole.
+    pub fn prefilling(mut share_block: ShareBlock, prefill: impl Fn(&WeakShare) -> bool) -> Self {
         let weak_shares = std::mem::take(&mut share_block.weak_shares);
+        let weak_hashes = weak_shares.iter().map(WeakShare::pow_hash).collect();
         Self {
             share_block,
-            weak_hashes: weak_shares.iter().map(WeakShare::pow_hash).collect(),
+            weak_hashes,
+            prefilled: weak_shares.into_iter().filter(prefill).collect(),
         }
     }
 
@@ -462,6 +477,16 @@ impl ShareWithWeakHashes {
         &self.weak_hashes
     }
 
+    /// The weak shares sent whole beside the list.
+    pub fn prefilled(&self) -> &[WeakShare] {
+        &self.prefilled
+    }
+
+    /// Take the weak shares sent whole, leaving none.
+    pub fn take_prefilled(&mut self) -> Vec<WeakShare> {
+        std::mem::take(&mut self.prefilled)
+    }
+
     /// The share with `weak_shares` in its body, which the caller filled in
     /// the order of [`Self::weak_hashes`].
     pub fn with_weak_shares(self, weak_shares: Vec<WeakShare>) -> ShareBlock {
@@ -471,9 +496,9 @@ impl ShareWithWeakHashes {
         }
     }
 
-    /// The share with no weak shares in its body, and the hashes.
-    pub fn into_parts(self) -> (ShareBlock, Vec<BlockHash>) {
-        (self.share_block, self.weak_hashes)
+    /// The share with no weak shares in its body.
+    pub fn into_unfilled(self) -> ShareBlock {
+        self.share_block
     }
 }
 
@@ -481,6 +506,10 @@ impl Encodable for ShareWithWeakHashes {
     fn consensus_encode<W: Write + ?Sized>(&self, w: &mut W) -> Result<usize, bitcoin::io::Error> {
         let mut len = self.share_block.consensus_encode(w)?;
         len += encode_weak_hashes(&self.weak_hashes, w)?;
+        len += VarInt::from(self.prefilled.len()).consensus_encode(w)?;
+        for weak_share in &self.prefilled {
+            len += weak_share.consensus_encode(w)?;
+        }
         Ok(len)
     }
 }
@@ -490,12 +519,13 @@ impl Decodable for ShareWithWeakHashes {
         let share_block = ShareBlock::consensus_decode(r)?;
         if !share_block.weak_shares.is_empty() {
             return Err(encode::Error::ParseFailed(
-                "A share with weak hashes carries weak shares whole",
+                "A share with weak hashes carries weak shares in its body",
             ));
         }
         Ok(Self {
             share_block,
             weak_hashes: decode_weak_hashes(r)?,
+            prefilled: decode_whole_weak_shares(r)?,
         })
     }
 }
@@ -574,11 +604,10 @@ fn decode_optional_bch_headers<R: Read + ?Sized>(r: &mut R) -> Result<Vec<Header
     Ok(headers)
 }
 
-/// Read the weak shares a `CarriedWeakShares` answer holds, refusing more
-/// than one share may carry (`WEAK_CAP`) before allocating.
-fn decode_carried_weak_shares<R: Read + ?Sized>(
-    r: &mut R,
-) -> Result<Vec<WeakShare>, encode::Error> {
+/// Read whole weak shares, the prefilled ones of a share with weak hashes or
+/// a `CarriedWeakShares` answer, refusing more than one share may carry
+/// (`WEAK_CAP`) before allocating.
+fn decode_whole_weak_shares<R: Read + ?Sized>(r: &mut R) -> Result<Vec<WeakShare>, encode::Error> {
     let count = VarInt::consensus_decode(r)?.0 as usize;
     if count > WEAK_CAP {
         return Err(encode::Error::ParseFailed(
@@ -747,7 +776,7 @@ impl Decodable for Message {
             )),
             CARRIED_WEAK_SHARES => Ok(Message::CarriedWeakShares(
                 BlockHash::consensus_decode(r)?,
-                decode_carried_weak_shares(r)?,
+                decode_whole_weak_shares(r)?,
             )),
             ACK => Ok(Message::Ack),
             _ => Err(encode::Error::ParseFailed("Invalid Message discriminant")),

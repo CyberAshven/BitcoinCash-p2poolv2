@@ -45,7 +45,7 @@ pub struct P2pHealth {
 impl P2pHealth {
     /// Render as Prometheus exposition text.
     pub fn exposition(&self) -> String {
-        let series: [(&str, &str, &str, u64); 11] = [
+        let series: [(&str, &str, &str, u64); 12] = [
             (
                 "p2p_connected_peers",
                 "gauge",
@@ -112,6 +112,12 @@ impl P2pHealth {
                 "Payload bytes the share messages this node relayed would have taken with every weak share whole",
                 self.share_relay.whole_bytes,
             ),
+            (
+                "p2p_share_relay_prefilled_weak_shares_total",
+                "counter",
+                "Weak shares the share messages this node relayed sent whole beside their hashes, for peers likely to lack them",
+                self.share_relay.prefilled,
+            ),
         ];
         let mut exposition = String::with_capacity(series.len() * 160);
         for (name, kind, help, value) in series {
@@ -143,6 +149,7 @@ mod tests {
                 messages: 10,
                 bytes: 11,
                 whole_bytes: 12,
+                prefilled: 13,
             },
         };
 
@@ -163,5 +170,6 @@ mod tests {
         ));
         assert!(exposition.contains("p2p_share_relay_bytes_total 11\n"));
         assert!(exposition.contains("p2p_share_relay_whole_bytes_total 12\n"));
+        assert!(exposition.contains("p2p_share_relay_prefilled_weak_shares_total 13\n"));
     }
 }

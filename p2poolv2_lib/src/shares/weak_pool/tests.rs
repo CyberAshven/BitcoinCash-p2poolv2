@@ -452,6 +452,23 @@ async fn pooled_weak_shares_fill_in_order_and_leave_held_ones_out() {
     );
 }
 
+/// The pool remembers when it took each weak share, for a relay to tell the
+/// young ones its peers may lack; one it only holds has no such time.
+#[tokio::test]
+async fn the_pool_remembers_when_it_took_each_weak_share() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let pooled = test_weak_share_on(BlockHash::from_byte_array([1; 32]), 1);
+    let held = test_weak_share_on(BlockHash::from_byte_array([2; 32]), 2);
+    pool.insert_at(pooled.clone(), 3, WeakShareSource::Local, 12_345);
+    pool.hold(held.clone(), WeakShareSource::Local);
+
+    assert_eq!(
+        pool.pooled_at_millis(&[held.pow_hash(), pooled.pow_hash()]),
+        vec![None, Some(12_345)]
+    );
+}
+
 #[test]
 fn the_weak_pool_exposition_lists_each_series_and_every_refusal_reason() {
     let stats = WeakPoolStats {
@@ -473,6 +490,8 @@ fn the_weak_pool_exposition_lists_each_series_and_every_refusal_reason() {
             filled_from_pool: 16,
             fetched_for_shares: 17,
             fills_fetched_whole: 18,
+            prefilled_for_shares: 19,
+            prefilled_unused: 20,
         },
         pooled: 12,
         held: 15,
@@ -489,6 +508,8 @@ fn the_weak_pool_exposition_lists_each_series_and_every_refusal_reason() {
     assert!(exposition.contains("weak_shares_filled_from_pool_total 16\n"));
     assert!(exposition.contains("weak_shares_fetched_for_shares_total 17\n"));
     assert!(exposition.contains("weak_share_fills_fetched_whole_total 18\n"));
+    assert!(exposition.contains("weak_shares_prefilled_total 19\n"));
+    assert!(exposition.contains("weak_shares_prefilled_unused_total 20\n"));
     assert!(exposition.contains("# TYPE weak_pool_size gauge\nweak_pool_size 12\n"));
     assert!(
         exposition.contains(

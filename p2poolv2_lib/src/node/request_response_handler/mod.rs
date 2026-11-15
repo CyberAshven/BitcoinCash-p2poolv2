@@ -28,6 +28,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::ShareValidator;
+use crate::shares::weak_pool::WeakPool;
 use crate::utils::time_provider::SystemTimeProvider;
 use libp2p::PeerId;
 use libp2p::request_response::ResponseChannel;
@@ -256,6 +257,13 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
     /// Share messages relayed and their bytes, since start.
     pub fn share_relay(&self) -> ShareRelayBytes {
         self.share_relay
+    }
+
+    /// The weak pool relayed weak shares go to, which a share about to be
+    /// relayed asks how long it has held each weak share. `None` on Bitcoin
+    /// and in Hydrapool mode.
+    pub fn weak_pool(&self) -> Option<WeakPool> {
+        self.weak_share_tx.as_ref().map(WeakShareEventSender::pool)
     }
 
     /// Responses waiting in the response worker queue.
