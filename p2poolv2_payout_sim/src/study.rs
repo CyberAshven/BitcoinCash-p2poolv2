@@ -496,12 +496,13 @@ impl TransitionCase {
             includer_cut: PAGE_INCLUDER_CUT,
             event_seconds: TRANSITION_EVENT_SECONDS,
             after_seconds: TRANSITION_AFTER_SECONDS,
+            asks: None,
         }
     }
 }
 
 /// The sum of `hours[start..end]`.
-fn hours_sum(hours: &[HourSample], start: usize, end: usize) -> HourSample {
+pub(crate) fn hours_sum(hours: &[HourSample], start: usize, end: usize) -> HourSample {
     let mut sum = HourSample::default();
     hours[start..end.min(hours.len())]
         .iter()
@@ -684,6 +685,7 @@ fn genesis_inputs(base: &Scenario, pool_fraction: f64, ratio_max: u64) -> Transi
         includer_cut: PAGE_INCLUDER_CUT,
         event_seconds: 0.0,
         after_seconds: GENESIS_SECONDS,
+        asks: None,
     }
 }
 

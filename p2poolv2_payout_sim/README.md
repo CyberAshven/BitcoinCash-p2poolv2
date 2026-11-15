@@ -33,11 +33,13 @@ are `designs`, `hashrate`, `pool`, `weak-credit`, `band-cap`,
 `mixes`, `arrivals`, `tiny-pool`, `floods`, `draw-steering`, `losses`,
 `weak-depth`, `r-max` and `r-max-mixes`, and `scale`, `scale-levers`,
 `band-step`, `window-cap` and `storage`, and the proposal's `weak-asks`,
-`weak-asks-mixes`, `weak-asks-constants` and `weak-asks-attacks`. Every run
-is a pure function of its inputs and seed (default 1), drawn from
+`weak-asks-mixes`, `weak-asks-constants` and `weak-asks-attacks`, and the
+study of its path, `weak-asks-genesis`, `weak-asks-big-miner`,
+`weak-asks-rules`, `weak-asks-rule-mixes` and `weak-asks-rule-attacks`.
+Every run is a pure function of its inputs and seed (default 1), drawn from
 `p2poolv2_netsim`'s seeded xoshiro256** generator, so the tables below come
 out the same on any machine. The whole
-default run, 1,000 simulated months per scenario, took 26 seconds on the
+default run, 1,000 simulated months per scenario, took 27 seconds on the
 32-thread machine it was run on.
 
 Since 2026-11-12 the model runs with study #85's constants, which became
@@ -734,10 +736,162 @@ with `WEAK_FILL` 320, `WEAK_CAP` 640 and `R_MAX` 2,560.
 
 - The step from one count to another. The ratio moves by 1/256 a share, so
   ten times the count takes about 590 shares, 1.6 hours at 10-second shares.
+  The next section runs it.
 - The band's own reading of `wanted_bits`, which the proposal leaves as it
   is.
 - What a node pays to check and store the weak shares; the design page
   takes those from the network simulation.
+
+## Study: the weak ratio's path from genesis and after a big miner, with the asks
+
+PR #118 builds section 6 with a `WEAK_CAP` of 640. A 12-node swarm on that
+branch ran out of memory: from genesis, at a weak ratio of 256, every share
+carried 640 weak shares, while alpha's cap of 64 bounded the same start and
+the ratio settled near 32 after about 500 shares. The tables above measured
+steady states, not the path to them. Five tables run the path share by
+share, and each candidate fix in steady state and under the attacks again:
+
+```sh
+cargo payout-sim --scenario weak-asks-genesis       # from genesis
+cargo payout-sim --scenario weak-asks-big-miner     # a big miner joins or leaves at the minimum
+cargo payout-sim --scenario weak-asks-rules         # where each rule settles
+cargo payout-sim --scenario weak-asks-rule-mixes    # every miner mix
+cargo payout-sim --scenario weak-asks-rule-attacks  # the attacks under each rule
+```
+
+The rules:
+
+| Rule | What changes from section 6 as written |
+|---|---|
+| today | Alpha: `WEAK_CAP` 64, no asks |
+| v0 as written | Nothing: PR #118 |
+| v1 down to R/2 (R/4) | A share that was not asked and carried more than 32 takes the next ratio to `R * 32 / count` at once, never below `R / 2` (`R / 4`) |
+| v2 cap follows asks | A share may carry more than 64 weak shares only when more than one in 64 of those it carries ask |
+| v3 genesis 32 | The genesis share's weak ratio is 32, not 256 |
+| v4 = v2 + v3 | Both |
+| v5 = v4, one ask opens | v4, but one asking weak share is enough for more than 64 |
+
+### The model
+
+`src/transition.rs` runs the chain share by share with ASERT, the band cap
+and the weak ratio moving as the rules move them. It now runs the asks too:
+each class at the minimum asks while the ratio in force is below the ratio
+at which one of its miners finds 16 weak shares a month at the minimum of
+the moment, and a share carries what `carry_plan` in `src/asks.rs` lets it,
+the oldest first. Under v2, v4 and v5 a share whose weak shares ask too
+seldom leaves its newest silent ones waiting until it is down to 64 or
+enough of what it carries ask; they expire if no later share takes them
+within `WEAK_DEPTH`. Each case is eight runs of the 50% industrial mix,
+averaged: two days from genesis, or a big miner with as much hashrate as
+the pool, at the minimum, joining or leaving a day after genesis and two
+days after that. A run makes about 2,100 shares in six hours. "Count stays
+within 25%" is the first hour from which every hourly count is within 25%
+of the last day's. The test network pool is 10 GH/s of 10 MH/s miners on a
+3.7 TH/s network, so small that the chain's ceiling holds the weak ratio in
+force near 5; its big miner is 1 TH/s, and its last rows add 1% of the
+hashrate at the minimum asking whatever it finds. The steady-state tables
+run the queue of `src/asks.rs` under each rule and pay the Bitaxe and the
+ASIC as the tables above do. The earlier tables come out byte for byte as
+before.
+
+### What the tables show
+
+1. **The flaw is the start, and the model finds it.** From genesis in a pool
+   at 10% of today's Bitcoin Cash, where nobody needs to ask, the rule as
+   written carries 132 weak shares a share in the first hour against
+   today's 64; 769 of a run's first 2,100 shares carry more than 64 and 41
+   more than 320, the largest 640, and the count stays within 25% of where
+   it settles only after 3 hours. The model has no checking cost, so it
+   does not reproduce the swarm's slowdown, in which shares came slower
+   under the load and so carried still more; for the rule as written its
+   counts are a lower bound.
+2. **A big miner brings the flaw back only where the ceiling held the
+   ratio.** A share carries `R - 1` times the part of the chain's shares
+   from jobs at the minimum, whatever the hashrate, so a big miner arriving
+   at the minimum changes the count little: 46.6 a share before, 49.6 at
+   the peak after, in the pool at 10% of today's. At ten times today's
+   hashrate it doubles the minimum, the home miners ask again and the count
+   opens from 175 to 190 a share to 335 to 342 within an hour under every
+   rule with asks but v1, as it should. On the test network the ratio in force sits near 5 while the
+   ratio itself climbs to 256; when 1 TH/s joins, the rule as written
+   carries more than 64 in 860 of the next 2,100 shares and more than 320
+   in 51, and a genesis ratio of 32 changes nothing (870 and 53).
+3. **v1 breaks the steady state.** It settles at 10.7 weak shares a share in
+   the pool at 10% of today's (46 as written), and at 54 in both pools at
+   ten times today's hashrate (189 and 344); with R/4 at 10 to 40. A Bitaxe
+   in a pool at 30% of ten times today's Bitcoin Cash has 25.4% of its
+   months without a payment (34.3% with R/4), against 2.7% as written. One
+   share's count is a noisy draw, the weak shares found in an exponential
+   wait, so a rule that falls to `R * 32 / count` on one share and rises by
+   1/256 holds the median far below 32. The attacks get much worse: with 90%
+   of the hashrate never asking a Bitaxe has 66.5% of its months empty
+   (2.1% as written), with 25% of the shares from nodes that carry no asking
+   weak share 57.7% (3.0%).
+4. **v2 bounds every start where nobody asks, and keeps the asks.** From
+   genesis in the pool at 10% of today's no share carries more than 64, but
+   12.7% of the weak shares found in the first six hours expire (13.1%
+   today). On the test network no share carries more than 64. In steady
+   state the pool at 10% of today's settles at today's 34.5 a share, not
+   46: the 12 more were shares after a long wait carrying all the weak
+   shares found on their parent, which nobody asked for, and the Bitaxe has
+   no month without a payment either way. At ten times today's hashrate the
+   pools settle at 187 and 344 (189 and 344 as written).
+5. **v3 fixes genesis only.** Its start peaks at 48, near the steady 46, but
+   471 shares in six hours still carry more than 64: that is the rule as
+   written in its steady state, where 22% of the shares carry more than 64.
+   On the test network it does what v0 does (point 2).
+6. **v4 fixes both and costs nothing at genesis.** From genesis in the pool
+   at 10% of today's it peaks at 36, no share carries more than 64 and no
+   weak share expires; on the test network no share carries more than 64.
+   In the pool at 30% of ten times today's the count takes two hours to open
+   from 32 to 344, the one cost of the low start.
+7. **Where fewer than one weak share in 64 asks, v2 and v4 open less than
+   v0.** (After genesis v4 is v2.) In the 99% industrial mix at ten times
+   today's hashrate v4 settles at 49.5 and 49.7 a share in pools at 10 and
+   30% instead of 82, and a Bitaxe has 7.7% and 25.3% of its months without
+   a payment instead of 2.6% and 14.0% (9.0% and 41% today). Every other mix
+   settles within three shares of the rule as written. The attacks that
+   dilute the asks bite harder under v2: with 97% and 99% of the hashrate
+   never asking the count falls to 95 and 39 instead of 143 and 57, and
+   with 25, 50, 75 and 90% of the shares from nodes that carry no asking
+   weak share to 231, 139, 86 and 68 instead of 250, 168, 107 and 83. None
+   goes below today's rule. Hashrate that asks whatever it finds is no
+   stronger: 241 and 317 a share at 2% and 5% (221 and 316 as written).
+8. **When the asks stop, v4 cuts at once and loses a little.** When the big
+   miner leaves the pool at 10% of ten times today's, the home miners stop
+   asking; the rule as written comes down from 343 to 190 within the hour,
+   v4 carries 64 until the ratio falls and 7.1% of the weak shares found in
+   the next six hours expire. Share by share, with the asks going on and
+   off, that pool settles at 175 under v4 with 1.5% of its weak shares
+   expiring, against 190 and none. Home miners' pay over fair is the same
+   under every rule (0.94 on the first day, the window turning over).
+9. **v5 wins back half of point 7 and gives the start to an asker.** In the
+   99% industrial mix it settles at 66 a share (a Bitaxe has 3.2% and 19.5%
+   of its months empty). But on the test network with 1% of the hashrate
+   asking whatever it finds, 66 shares in six hours after the join carry
+   more than 320 under v5, against 7 under v4 and 122 as written.
+
+So v4 is the variant that fixes the flaw: where nobody asks, no start
+carries more than today's 64 and the count is today's, at genesis no weak
+share is lost, and where more than one weak share in 64 asks every steady
+state of section 6 holds, the Bitaxe's and the ASIC's pay with it.
+It gives up part of section 6's gain where the askers are fewer than one in
+64 (point 7) and loses 1.5% of the weak shares where the asks switch on and
+off (point 8), never falling below today's rule, and opens no attack that
+section 6 did not have. v1 fails in steady state and under every attack;
+v3 alone and v0 leave the test network's start open; v5 trades a little of
+point 7 back for a start that 1% of the hashrate can open. The cap of v4 is
+checked from the header alone: a share with more than 64 weak shares is
+valid only if `weak_asking * 64 > weak_count`.
+
+### Not modelled
+
+- What checking the weak shares costs a node, and the slower shares that
+  load brings; the swarm has it.
+- Gossip: every node sees every weak share at once.
+- A node that, under v2, v4 or v5, picks newer asking weak shares over older
+  silent ones to carry more; the model keeps the oldest first and leaves the
+  newest silent ones.
 
 ## Window cap and storage
 
@@ -813,13 +967,13 @@ about 5,700 outputs.
 | Steady-state difficulties: uniform, band, ABLA settle, vardiff | `src/difficulty.rs` |
 | The window sized by work | `src/window.rs` |
 | The weak share queue and the weak ratio | `src/weak.rs` |
-| The weak share queue under the proposed asks | `src/asks.rs` |
+| The weak share queue under the proposed asks and its variants | `src/asks.rs` |
 | Payout levels and the draw | `src/levels.rs` |
 | Tracked miners' payouts block by block | `src/payouts.rs` |
 | Scenarios, credit, reports | `src/scenario.rs` |
 | Share races, fork choice and siblings of light tips (study) | `src/races.rs` |
-| A big miner joining or leaving, and genesis, share by share (study) | `src/transition.rs` |
-| The tables | `src/tables.rs`, `src/study.rs`, `src/ask_study.rs`, `src/report.rs` |
+| A big miner joining or leaving, and genesis, share by share, with or without the asks (study) | `src/transition.rs` |
+| The tables | `src/tables.rs`, `src/study.rs`, `src/ask_study.rs`, `src/ask_paths.rs`, `src/report.rs` |
 | Command line | `src/bin/payout_sim.rs` |
 
 The crate is new code for the Bitcoin Cash fork, under AGPL-3.0-or-later
@@ -1924,5 +2078,281 @@ difficulty, to push the cap up.
 | carries no asking weak share | 50.00% | x10, 30% | 168 | 165 | 50.00% | 16.8 | 13.5 | 0.762 | 4.50 | 4.71 | 5.80% | 0.67 | 0.95 | 392 | 207 | 0.00% | 0.09 | 1.00 |
 | carries no asking weak share | 75.00% | x10, 30% | 107 | 106 | 50.01% | 10.7 | 8.66 | 1.19 | 2.87 | 4.73 | 11.10% | 0.73 | 0.96 | 251 | 205 | 0.00% | 0.10 | 1.00 |
 | carries no asking weak share | 90.00% | x10, 30% | 83.1 | 83.1 | 49.42% | 8.41 | 6.83 | 1.51 | 2.23 | 4.71 | 14.80% | 0.83 | 0.95 | 194 | 206 | 0.00% | 0.10 | 1.00 |
+
+
+
+## Study: the weak ratio's path from genesis, by rule (band-weak-levels, weak work, 50% industrial)
+
+| BCH hashrate, pool | Rule | Peak weak a share (hourly) | Largest share | Shares above 64, first 6 h | Shares above 320, first 6 h | Count stays within 25% | Weak expired, first 6 h | Weak a share, last day | Weak expired, last day |
+|---|---|---|---|---|---|---|---|---|---|
+| x1, 10% | today | 64.0 | 64.0 | 0 | 0 | 1 h | 13.10% | 34.6 | 0.00% |
+| x1, 10% | v0 as written | 132 | 640 | 769 | 40.9 | 3 h | 0.00% | 46.5 | 0.00% |
+| x1, 10% | v1 down to R/2 | 13.0 | 543 | 13.9 | 0.625 | < 1 h | 0.00% | 10.9 | 0.00% |
+| x1, 10% | v1 down to R/4 | 11.1 | 640 | 11.6 | 0.625 | < 1 h | 0.00% | 10.5 | 0.00% |
+| x1, 10% | v2 cap follows asks | 63.9 | 64.0 | 0 | 0 | 1 h | 12.66% | 34.5 | 0.00% |
+| x1, 10% | v3 genesis 32 | 48.4 | 556 | 471 | 1.88 | 1 h | 0.00% | 46.4 | 0.00% |
+| x1, 10% | v4 = v2 + v3 | 36.3 | 64.0 | 0 | 0 | < 1 h | 0.00% | 34.6 | 0.00% |
+| x1, 10% | v5 = v4, one ask opens | 35.7 | 64.0 | 0 | 0 | < 1 h | 0.00% | 34.4 | 0.00% |
+| x10, 10% | today | 64.0 | 64.0 | 0 | 0 | 2 h | 21.99% | 34.4 | 0.00% |
+| x10, 10% | v0 as written | 200 | 640 | 1,562 | 435 | < 1 h | 0.00% | 190 | 0.00% |
+| x10, 10% | v1 down to R/2 | 58.9 | 640 | 624 | 13.0 | < 1 h | 0.00% | 54.4 | 0.00% |
+| x10, 10% | v1 down to R/4 | 44.6 | 640 | 377 | 7.00 | < 1 h | 0.00% | 39.6 | 0.00% |
+| x10, 10% | v2 cap follows asks | 181 | 640 | 1,038 | 380 | < 1 h | 3.98% | 175 | 1.58% |
+| x10, 10% | v3 genesis 32 | 195 | 640 | 1,420 | 349 | 1 h | 0.00% | 190 | 0.00% |
+| x10, 10% | v4 = v2 + v3 | 181 | 640 | 1,050 | 324 | 1 h | 1.45% | 175 | 1.54% |
+| x10, 10% | v5 = v4, one ask opens | 183 | 640 | 1,055 | 326 | 1 h | 1.11% | 175 | 1.63% |
+| x10, 30% | today | 64.0 | 64.0 | 0 | 0 | 2 h | 22.15% | 34.5 | 0.00% |
+| x10, 30% | v0 as written | 352 | 640 | 1,861 | 1,033 | < 1 h | 0.00% | 344 | 0.00% |
+| x10, 30% | v1 down to R/2 | 59.9 | 640 | 660 | 14.2 | < 1 h | 0.00% | 53.8 | 0.00% |
+| x10, 30% | v1 down to R/4 | 48.5 | 640 | 391 | 7.62 | < 1 h | 0.00% | 38.9 | 0.00% |
+| x10, 30% | v2 cap follows asks | 353 | 640 | 1,854 | 1,035 | < 1 h | 0.00% | 344 | 0.00% |
+| x10, 30% | v3 genesis 32 | 353 | 640 | 1,623 | 769 | 2 h | 0.00% | 344 | 0.00% |
+| x10, 30% | v4 = v2 + v3 | 354 | 640 | 1,627 | 770 | 2 h | 0.00% | 344 | 0.00% |
+| x10, 30% | v5 = v4, one ask opens | 354 | 640 | 1,642 | 770 | 2 h | 0.00% | 345 | 0.00% |
+
+
+
+## Study: a big miner joining or leaving at the minimum, by rule (band-weak-levels, weak work)
+
+| BCH hashrate, pool | Big miner | Rule | Weak a share, 6 h before | Peak weak a share (hourly) | Largest share | Shares above 64, 6 h after | Shares above 320, 6 h after | Count stays within 25% | Weak expired, 6 h after | Weak a share, last day | Weak expired, last day | Home pay over fair, first day |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| x1, 10% | joins | today | 34.3 | 36.7 | 64.0 | 0 | 0 | < 1 h | 0.00% | 34.5 | 0.00% | 1.07 |
+| x1, 10% | joins | v0 as written | 46.6 | 49.6 | 546 | 578 | 2.88 | < 1 h | 0.00% | 46.6 | 0.00% | 1.06 |
+| x1, 10% | joins | v1 down to R/2 | 11.0 | 26.5 | 345 | 178 | 0.125 | < 1 h | 0.00% | 24.6 | 0.00% | 1.07 |
+| x1, 10% | joins | v1 down to R/4 | 10.5 | 24.9 | 364 | 146 | 0 | < 1 h | 0.00% | 21.3 | 0.00% | 1.07 |
+| x1, 10% | joins | v2 cap follows asks | 34.4 | 38.8 | 361 | 40.2 | 0 | < 1 h | 0.00% | 37.9 | 0.00% | 1.06 |
+| x1, 10% | joins | v3 genesis 32 | 46.4 | 50.6 | 546 | 591 | 4.38 | < 1 h | 0.00% | 46.4 | 0.00% | 1.06 |
+| x1, 10% | joins | v4 = v2 + v3 | 34.6 | 38.6 | 425 | 38.5 | 0.125 | < 1 h | 0.00% | 37.9 | 0.00% | 1.07 |
+| x1, 10% | joins | v5 = v4, one ask opens | 34.5 | 39.0 | 365 | 37.6 | 0 | < 1 h | 0.00% | 37.9 | 0.00% | 1.06 |
+| x1, 10% | leaves | today | 34.3 | 35.5 | 64.0 | 0 | 0 | < 1 h | 0.00% | 34.5 | 0.00% | 0.94 |
+| x1, 10% | leaves | v0 as written | 45.7 | 48.3 | 640 | 498 | 2.12 | < 1 h | 0.00% | 46.3 | 0.00% | 0.94 |
+| x1, 10% | leaves | v1 down to R/2 | 24.5 | 13.4 | 139 | 11.9 | 0 | < 1 h | 0.00% | 11.0 | 0.00% | 0.94 |
+| x1, 10% | leaves | v1 down to R/4 | 20.1 | 11.8 | 167 | 11.6 | 0 | < 1 h | 0.00% | 10.6 | 0.00% | 0.95 |
+| x1, 10% | leaves | v2 cap follows asks | 37.9 | 35.8 | 64.0 | 0 | 0 | < 1 h | 0.00% | 34.5 | 0.00% | 0.94 |
+| x1, 10% | leaves | v3 genesis 32 | 46.5 | 48.7 | 519 | 500 | 0.875 | < 1 h | 0.00% | 46.4 | 0.00% | 0.94 |
+| x1, 10% | leaves | v4 = v2 + v3 | 37.8 | 35.7 | 64.0 | 0 | 0 | < 1 h | 0.00% | 34.5 | 0.00% | 0.94 |
+| x1, 10% | leaves | v5 = v4, one ask opens | 37.8 | 35.7 | 64.0 | 0 | 0 | < 1 h | 0.00% | 34.4 | 0.00% | 0.95 |
+| x10, 10% | joins | today | 34.4 | 35.9 | 64.0 | 0 | 0 | < 1 h | 0.00% | 34.6 | 0.00% | 1.06 |
+| x10, 10% | joins | v0 as written | 190 | 350 | 640 | 1,898 | 1,017 | < 1 h | 0.00% | 342 | 0.00% | 1.06 |
+| x10, 10% | joins | v1 down to R/2 | 53.6 | 58.9 | 640 | 642 | 12.4 | < 1 h | 0.00% | 53.7 | 0.00% | 1.06 |
+| x10, 10% | joins | v1 down to R/4 | 38.6 | 48.9 | 640 | 401 | 6.25 | < 1 h | 0.00% | 41.2 | 0.00% | 1.06 |
+| x10, 10% | joins | v2 cap follows asks | 175 | 345 | 640 | 1,851 | 974 | 1 h | 0.05% | 336 | 0.02% | 1.06 |
+| x10, 10% | joins | v3 genesis 32 | 190 | 350 | 640 | 1,887 | 1,013 | < 1 h | 0.00% | 341 | 0.00% | 1.06 |
+| x10, 10% | joins | v4 = v2 + v3 | 175 | 345 | 640 | 1,860 | 976 | 1 h | 0.09% | 335 | 0.14% | 1.06 |
+| x10, 10% | joins | v5 = v4, one ask opens | 177 | 350 | 640 | 1,868 | 998 | < 1 h | 0.00% | 336 | 0.07% | 1.06 |
+| x10, 10% | leaves | today | 34.3 | 35.8 | 64.0 | 0 | 0 | < 1 h | 0.00% | 34.5 | 0.00% | 0.94 |
+| x10, 10% | leaves | v0 as written | 343 | 241 | 640 | 1,529 | 447 | 1 h | 0.00% | 190 | 0.00% | 0.94 |
+| x10, 10% | leaves | v1 down to R/2 | 53.8 | 61.1 | 640 | 613 | 11.4 | < 1 h | 0.00% | 53.4 | 0.00% | 0.94 |
+| x10, 10% | leaves | v1 down to R/4 | 39.1 | 47.1 | 640 | 380 | 5.62 | < 1 h | 0.00% | 40.2 | 0.00% | 0.94 |
+| x10, 10% | leaves | v2 cap follows asks | 334 | 181 | 640 | 1,006 | 381 | < 1 h | 5.74% | 175 | 1.69% | 0.94 |
+| x10, 10% | leaves | v3 genesis 32 | 339 | 244 | 640 | 1,523 | 449 | 1 h | 0.00% | 190 | 0.00% | 0.94 |
+| x10, 10% | leaves | v4 = v2 + v3 | 337 | 184 | 640 | 991 | 365 | < 1 h | 7.14% | 175 | 1.53% | 0.94 |
+| x10, 10% | leaves | v5 = v4, one ask opens | 338 | 185 | 640 | 987 | 367 | < 1 h | 7.50% | 175 | 1.64% | 0.94 |
+| x10, 30% | joins | today | 34.7 | 35.9 | 64.0 | 0 | 0 | < 1 h | 0.00% | 34.5 | 0.00% | 1.03 |
+| x10, 30% | joins | v0 as written | 345 | 353 | 640 | 1,916 | 1,087 | < 1 h | 0.00% | 340 | 0.00% | 1.03 |
+| x10, 30% | joins | v1 down to R/2 | 54.0 | 59.3 | 640 | 639 | 12.5 | < 1 h | 0.00% | 53.8 | 0.00% | 1.03 |
+| x10, 30% | joins | v1 down to R/4 | 42.3 | 44.2 | 640 | 410 | 6.38 | < 1 h | 0.00% | 40.0 | 0.00% | 1.03 |
+| x10, 30% | joins | v2 cap follows asks | 344 | 350 | 640 | 1,924 | 1,084 | < 1 h | 0.00% | 341 | 0.00% | 1.03 |
+| x10, 30% | joins | v3 genesis 32 | 344 | 352 | 640 | 1,927 | 1,089 | < 1 h | 0.00% | 342 | 0.00% | 1.03 |
+| x10, 30% | joins | v4 = v2 + v3 | 343 | 360 | 640 | 1,925 | 1,091 | < 1 h | 0.00% | 342 | 0.00% | 1.03 |
+| x10, 30% | joins | v5 = v4, one ask opens | 344 | 351 | 640 | 1,925 | 1,088 | < 1 h | 0.00% | 340 | 0.00% | 1.03 |
+| x10, 30% | leaves | today | 34.5 | 35.6 | 64.0 | 0 | 0 | < 1 h | 0.00% | 34.5 | 0.00% | 0.98 |
+| x10, 30% | leaves | v0 as written | 342 | 351 | 640 | 1,815 | 1,035 | < 1 h | 0.00% | 343 | 0.00% | 0.98 |
+| x10, 30% | leaves | v1 down to R/2 | 55.5 | 59.5 | 640 | 612 | 11.6 | < 1 h | 0.00% | 53.7 | 0.00% | 0.98 |
+| x10, 30% | leaves | v1 down to R/4 | 38.9 | 48.2 | 640 | 407 | 5.75 | < 1 h | 0.00% | 40.8 | 0.00% | 0.98 |
+| x10, 30% | leaves | v2 cap follows asks | 343 | 354 | 640 | 1,825 | 1,040 | < 1 h | 0.00% | 343 | 0.00% | 0.98 |
+| x10, 30% | leaves | v3 genesis 32 | 341 | 357 | 640 | 1,818 | 1,038 | < 1 h | 0.00% | 344 | 0.00% | 0.98 |
+| x10, 30% | leaves | v4 = v2 + v3 | 342 | 357 | 640 | 1,810 | 1,041 | < 1 h | 0.00% | 342 | 0.00% | 0.98 |
+| x10, 30% | leaves | v5 = v4, one ask opens | 342 | 353 | 640 | 1,818 | 1,038 | < 1 h | 0.00% | 345 | 0.00% | 0.98 |
+| test network, 10 GH/s | joins | today | 3.95 | 49.8 | 64.0 | 0 | 0 | 1 h | 10.09% | 34.5 | 0.00% | 4.50 |
+| test network, 10 GH/s | joins | v0 as written | 3.82 | 93.4 | 640 | 860 | 50.9 | 2 h | 0.00% | 46.5 | 0.00% | 3.87 |
+| test network, 10 GH/s | joins | v1 down to R/2 | 3.91 | 7.89 | 142 | 3.00 | 0 | < 1 h | 0.00% | 7.13 | 0.00% | 3.87 |
+| test network, 10 GH/s | joins | v1 down to R/4 | 3.87 | 7.84 | 112 | 2.88 | 0 | < 1 h | 0.00% | 6.99 | 0.00% | 3.83 |
+| test network, 10 GH/s | joins | v2 cap follows asks | 4.03 | 49.8 | 64.0 | 0 | 0 | 1 h | 10.36% | 34.5 | 0.00% | 4.50 |
+| test network, 10 GH/s | joins | v3 genesis 32 | 3.87 | 94.9 | 640 | 870 | 53.4 | 2 h | 0.00% | 46.6 | 0.00% | 3.88 |
+| test network, 10 GH/s | joins | v4 = v2 + v3 | 3.86 | 49.4 | 64.0 | 0 | 0 | 1 h | 10.25% | 34.5 | 0.00% | 4.48 |
+| test network, 10 GH/s | joins | v5 = v4, one ask opens | 3.91 | 49.5 | 64.0 | 0 | 0 | 1 h | 10.22% | 34.5 | 0.00% | 4.47 |
+| test network, 10 GH/s | leaves | today | 34.6 | 23.3 | 64.0 | 0 | 0 | 2 h | 0.00% | 3.94 | 0.00% | 0.07 |
+| test network, 10 GH/s | leaves | v0 as written | 45.4 | 25.9 | 250 | 2.62 | 0 | 2 h | 0.00% | 3.88 | 0.00% | 0.07 |
+| test network, 10 GH/s | leaves | v1 down to R/2 | 7.21 | 7.00 | 58.0 | 0 | 0 | 2 h | 0.00% | 3.84 | 0.00% | 0.07 |
+| test network, 10 GH/s | leaves | v1 down to R/4 | 7.07 | 6.76 | 75.0 | 0.125 | 0 | 2 h | 0.00% | 3.93 | 0.00% | 0.07 |
+| test network, 10 GH/s | leaves | v2 cap follows asks | 34.4 | 21.3 | 64.0 | 0 | 0 | 2 h | 0.00% | 3.90 | 0.00% | 0.07 |
+| test network, 10 GH/s | leaves | v3 genesis 32 | 46.8 | 25.5 | 252 | 3.75 | 0 | 2 h | 0.00% | 3.93 | 0.00% | 0.07 |
+| test network, 10 GH/s | leaves | v4 = v2 + v3 | 34.4 | 23.1 | 64.0 | 0 | 0 | 2 h | 0.00% | 3.92 | 0.00% | 0.07 |
+| test network, 10 GH/s | leaves | v5 = v4, one ask opens | 34.4 | 25.3 | 64.0 | 0 | 0 | 2 h | 0.00% | 3.86 | 0.00% | 0.07 |
+| test network, 10 GH/s, 1% always asks | joins | today | 3.93 | 49.9 | 64.0 | 0 | 0 | 1 h | 10.71% | 34.5 | 0.00% | 4.53 |
+| test network, 10 GH/s, 1% always asks | joins | v0 as written | 3.88 | 110 | 640 | 1,245 | 122 | 2 h | 0.00% | 82.5 | 0.00% | 3.86 |
+| test network, 10 GH/s, 1% always asks | joins | v1 down to R/2 | 3.99 | 8.69 | 130 | 3.50 | 0 | < 1 h | 0.00% | 7.84 | 0.00% | 3.87 |
+| test network, 10 GH/s, 1% always asks | joins | v1 down to R/4 | 3.84 | 8.60 | 134 | 4.12 | 0 | < 1 h | 0.00% | 7.78 | 0.00% | 3.87 |
+| test network, 10 GH/s, 1% always asks | joins | v2 cap follows asks | 3.83 | 63.5 | 640 | 259 | 5.12 | 1 h | 4.89% | 49.5 | 0.00% | 4.33 |
+| test network, 10 GH/s, 1% always asks | joins | v3 genesis 32 | 3.93 | 112 | 640 | 1,271 | 130 | 2 h | 0.00% | 82.0 | 0.00% | 3.86 |
+| test network, 10 GH/s, 1% always asks | joins | v4 = v2 + v3 | 3.90 | 67.0 | 640 | 253 | 6.75 | 1 h | 5.81% | 49.8 | 0.00% | 4.38 |
+| test network, 10 GH/s, 1% always asks | joins | v5 = v4, one ask opens | 3.90 | 85.5 | 640 | 695 | 66.0 | 2 h | 1.02% | 66.0 | 0.00% | 3.95 |
+| test network, 10 GH/s, 1% always asks | leaves | today | 34.7 | 22.9 | 64.0 | 0 | 0 | 2 h | 0.00% | 3.95 | 0.00% | 0.07 |
+| test network, 10 GH/s, 1% always asks | leaves | v0 as written | 80.7 | 31.8 | 427 | 4.38 | 0.375 | 2 h | 0.00% | 3.86 | 0.00% | 0.07 |
+| test network, 10 GH/s, 1% always asks | leaves | v1 down to R/2 | 7.81 | 7.61 | 64.0 | 0 | 0 | 2 h | 0.00% | 3.94 | 0.00% | 0.07 |
+| test network, 10 GH/s, 1% always asks | leaves | v1 down to R/4 | 7.56 | 6.67 | 77.0 | 0.125 | 0 | 2 h | 0.00% | 3.97 | 0.00% | 0.07 |
+| test network, 10 GH/s, 1% always asks | leaves | v2 cap follows asks | 49.4 | 25.8 | 127 | 0.500 | 0 | 2 h | 0.00% | 3.95 | 0.00% | 0.07 |
+| test network, 10 GH/s, 1% always asks | leaves | v3 genesis 32 | 83.8 | 29.8 | 320 | 4.62 | 0 | 2 h | 0.00% | 3.90 | 0.00% | 0.07 |
+| test network, 10 GH/s, 1% always asks | leaves | v4 = v2 + v3 | 49.0 | 25.4 | 127 | 0.500 | 0 | 2 h | 0.00% | 3.95 | 0.00% | 0.07 |
+| test network, 10 GH/s, 1% always asks | leaves | v5 = v4, one ask opens | 67.1 | 33.5 | 294 | 1.88 | 0 | 2 h | 0.00% | 3.93 | 0.00% | 0.07 |
+
+
+
+## Study: where each rule settles (band-weak-levels, weak work, 50% industrial)
+
+| BCH hashrate, pool | Rule | Weak expired | Weak a share | R | Asking | Weak/s | KB/s | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| x1, 10% | today | 0.00% | 34.5 | 36.8 | 0.00% | 3.45 | 2.86 | 0.091 | 38.6 | 24.7 | 0.00% | 0.25 | 0.99 | 3,209 | 431 | 0.00% | 0.05 | 1.00 |
+| x1, 10% | v0 as written | 0.00% | 46.3 | 49.3 | 0.00% | 4.63 | 3.81 | 0.068 | 52.0 | 25.1 | 0.00% | 0.25 | 1.01 | 4,327 | 433 | 0.00% | 0.05 | 1.00 |
+| x1, 10% | v1 down to R/2 | 0.00% | 10.7 | 12.2 | 56.53% | 1.07 | 0.961 | 0.275 | 11.9 | 24.1 | 0.00% | 0.34 | 0.99 | 1,000 | 431 | 0.00% | 0.06 | 1.00 |
+| x1, 10% | v1 down to R/4 | 0.00% | 10.3 | 11.8 | 56.91% | 1.03 | 0.929 | 0.284 | 11.5 | 24.1 | 0.00% | 0.33 | 0.99 | 966 | 430 | 0.00% | 0.06 | 1.00 |
+| x1, 10% | v2 cap follows asks | 0.00% | 34.5 | 36.9 | 0.00% | 3.45 | 2.86 | 0.091 | 38.7 | 24.7 | 0.00% | 0.26 | 1.00 | 3,219 | 431 | 0.00% | 0.05 | 1.00 |
+| x1, 10% | v3 genesis 32 | 0.00% | 46.3 | 49.3 | 0.00% | 4.63 | 3.81 | 0.068 | 52.0 | 24.9 | 0.00% | 0.25 | 1.00 | 4,330 | 433 | 0.00% | 0.05 | 1.00 |
+| x1, 10% | v4 = v2 + v3 | 0.00% | 34.5 | 36.9 | 0.00% | 3.45 | 2.86 | 0.091 | 38.7 | 24.9 | 0.00% | 0.25 | 1.00 | 3,218 | 431 | 0.00% | 0.05 | 1.00 |
+| x1, 10% | v5 = v4, one ask opens | 0.00% | 34.5 | 36.9 | 0.00% | 3.45 | 2.86 | 0.091 | 38.7 | 24.9 | 0.00% | 0.25 | 1.00 | 3,218 | 431 | 0.00% | 0.05 | 1.00 |
+| x10, 10% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.73 | 9.30% | 0.76 | 0.96 | 242 | 355 | 0.00% | 0.09 | 1.00 |
+| x10, 10% | v0 as written | 0.00% | 189 | 186 | 26.62% | 18.9 | 15.3 | 0.225 | 15.7 | 4.87 | 1.40% | 0.51 | 0.98 | 1,325 | 431 | 0.00% | 0.06 | 1.00 |
+| x10, 10% | v1 down to R/2 | 0.00% | 54.1 | 53.9 | 50.01% | 5.41 | 4.43 | 0.778 | 4.35 | 4.74 | 5.20% | 0.63 | 0.96 | 379 | 402 | 0.00% | 0.08 | 1.00 |
+| x10, 10% | v1 down to R/4 | 0.00% | 38.9 | 39.1 | 50.01% | 3.89 | 3.21 | 1.07 | 3.13 | 4.79 | 7.60% | 0.72 | 0.97 | 273 | 369 | 0.00% | 0.08 | 1.00 |
+| x10, 10% | v2 cap follows asks | 0.00% | 187 | 184 | 38.32% | 18.7 | 15.1 | 0.228 | 15.5 | 4.92 | 1.50% | 0.53 | 0.99 | 1,310 | 431 | 0.00% | 0.06 | 1.00 |
+| x10, 10% | v3 genesis 32 | 0.00% | 190 | 186 | 26.61% | 19.0 | 15.3 | 0.225 | 15.7 | 4.86 | 1.10% | 0.53 | 0.98 | 1,325 | 431 | 0.00% | 0.06 | 1.00 |
+| x10, 10% | v4 = v2 + v3 | 0.00% | 187 | 184 | 38.38% | 18.7 | 15.1 | 0.228 | 15.5 | 4.99 | 0.80% | 0.51 | 1.01 | 1,309 | 431 | 0.00% | 0.06 | 1.00 |
+| x10, 10% | v5 = v4, one ask opens | 0.00% | 187 | 184 | 38.24% | 18.7 | 15.1 | 0.228 | 15.5 | 4.87 | 1.20% | 0.50 | 0.98 | 1,310 | 431 | 0.00% | 0.06 | 1.00 |
+| x10, 30% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| x10, 30% | v0 as written | 0.00% | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| x10, 30% | v1 down to R/2 | 0.00% | 53.9 | 53.6 | 50.02% | 5.39 | 4.41 | 2.35 | 1.47 | 4.45 | 25.40% | 0.95 | 0.97 | 126 | 201 | 0.00% | 0.12 | 1.00 |
+| x10, 30% | v1 down to R/4 | 0.00% | 39.9 | 40.0 | 50.01% | 3.99 | 3.30 | 3.15 | 1.11 | 3.44 | 34.30% | 1.10 | 1.01 | 93.1 | 193 | 0.00% | 0.12 | 1.00 |
+| x10, 30% | v2 cap follows asks | 0.00% | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| x10, 30% | v3 genesis 32 | 0.00% | 343 | 337 | 50.00% | 34.3 | 27.6 | 0.373 | 9.37 | 4.89 | 1.80% | 0.56 | 0.99 | 801 | 205 | 0.00% | 0.08 | 1.00 |
+| x10, 30% | v4 = v2 + v3 | 0.00% | 343 | 337 | 50.00% | 34.3 | 27.6 | 0.373 | 9.37 | 4.89 | 1.80% | 0.56 | 0.99 | 801 | 205 | 0.00% | 0.08 | 1.00 |
+| x10, 30% | v5 = v4, one ask opens | 0.00% | 343 | 337 | 50.00% | 34.3 | 27.6 | 0.373 | 9.37 | 4.89 | 1.80% | 0.56 | 0.99 | 801 | 205 | 0.00% | 0.08 | 1.00 |
+
+
+
+## Study: the rules that bound the start in every miner mix, at ten times today's hashrate (band-weak-levels, weak work)
+
+| Mix | Pool | Rule | Weak expired | Weak a share | R | Asking | Weak/s | KB/s | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| home | 10% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.62 | 10.30% | 0.75 | 0.93 | 242 | 355 | 0.00% | 0.09 | 1.00 |
+| home | 10% | v0 as written | 0.00% | 189 | 186 | 52.82% | 18.9 | 15.2 | 0.225 | 15.7 | 4.79 | 1.50% | 0.52 | 0.97 | 1,326 | 431 | 0.00% | 0.06 | 1.00 |
+| home | 10% | v4 = v2 + v3 | 0.00% | 187 | 184 | 76.39% | 18.7 | 15.0 | 0.228 | 15.5 | 4.94 | 1.20% | 0.51 | 1.00 | 1,310 | 431 | 0.00% | 0.06 | 1.00 |
+| home | 10% | v5 = v4, one ask opens | 0.00% | 187 | 184 | 76.59% | 18.7 | 15.1 | 0.228 | 15.5 | 4.96 | 1.40% | 0.52 | 1.00 | 1,310 | 431 | 0.00% | 0.06 | 1.00 |
+| home | 30% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 226 | 0.00% | 0.13 | 1.00 |
+| home | 30% | v0 as written | 0.00% | 345 | 338 | 100.00% | 34.5 | 27.7 | 0.372 | 9.39 | 4.87 | 2.10% | 0.55 | 0.98 | 804 | 1,094 | 0.00% | 0.05 | 1.00 |
+| home | 30% | v4 = v2 + v3 | 0.00% | 345 | 339 | 100.00% | 34.5 | 27.7 | 0.371 | 9.42 | 4.77 | 1.70% | 0.54 | 0.96 | 806 | 1,095 | 0.00% | 0.05 | 1.00 |
+| home | 30% | v5 = v4, one ask opens | 0.00% | 345 | 339 | 100.00% | 34.5 | 27.7 | 0.371 | 9.42 | 4.77 | 1.70% | 0.54 | 0.96 | 806 | 1,095 | 0.00% | 0.05 | 1.00 |
+| 50% industrial | 10% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.73 | 9.30% | 0.76 | 0.96 | 242 | 355 | 0.00% | 0.09 | 1.00 |
+| 50% industrial | 10% | v0 as written | 0.00% | 189 | 186 | 26.62% | 18.9 | 15.3 | 0.225 | 15.7 | 4.87 | 1.40% | 0.51 | 0.98 | 1,325 | 431 | 0.00% | 0.06 | 1.00 |
+| 50% industrial | 10% | v4 = v2 + v3 | 0.00% | 187 | 184 | 38.38% | 18.7 | 15.1 | 0.228 | 15.5 | 4.99 | 0.80% | 0.51 | 1.01 | 1,309 | 431 | 0.00% | 0.06 | 1.00 |
+| 50% industrial | 10% | v5 = v4, one ask opens | 0.00% | 187 | 184 | 38.24% | 18.7 | 15.1 | 0.228 | 15.5 | 4.87 | 1.20% | 0.50 | 0.98 | 1,310 | 431 | 0.00% | 0.06 | 1.00 |
+| 50% industrial | 30% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| 50% industrial | 30% | v0 as written | 0.00% | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 30% | v4 = v2 + v3 | 0.00% | 343 | 337 | 50.00% | 34.3 | 27.6 | 0.373 | 9.37 | 4.89 | 1.80% | 0.56 | 0.99 | 801 | 205 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 30% | v5 = v4, one ask opens | 0.00% | 343 | 337 | 50.00% | 34.3 | 27.6 | 0.373 | 9.37 | 4.89 | 1.80% | 0.56 | 0.99 | 801 | 205 | 0.00% | 0.08 | 1.00 |
+| 90% industrial | 10% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.72 | 9.80% | 0.74 | 0.95 | 242 | 355 | 0.00% | 0.09 | 1.00 |
+| 90% industrial | 10% | v0 as written | 0.00% | 189 | 186 | 5.34% | 18.9 | 15.2 | 0.225 | 15.7 | 4.82 | 1.40% | 0.53 | 0.97 | 1,325 | 431 | 0.00% | 0.06 | 1.00 |
+| 90% industrial | 10% | v4 = v2 + v3 | 0.00% | 187 | 184 | 7.71% | 18.7 | 15.1 | 0.228 | 15.5 | 4.99 | 1.90% | 0.52 | 1.01 | 1,310 | 431 | 0.00% | 0.06 | 1.00 |
+| 90% industrial | 10% | v5 = v4, one ask opens | 0.00% | 186 | 184 | 7.68% | 18.6 | 15.0 | 0.228 | 15.5 | 4.96 | 1.30% | 0.52 | 1.00 | 1,310 | 431 | 0.00% | 0.06 | 1.00 |
+| 90% industrial | 30% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 190 | 0.00% | 0.13 | 1.00 |
+| 90% industrial | 30% | v0 as written | 0.00% | 334 | 327 | 10.00% | 33.4 | 26.8 | 0.385 | 9.11 | 4.91 | 2.80% | 0.58 | 0.99 | 778 | 207 | 0.00% | 0.08 | 1.00 |
+| 90% industrial | 30% | v4 = v2 + v3 | 0.00% | 334 | 329 | 10.00% | 33.4 | 26.8 | 0.383 | 9.15 | 4.76 | 2.10% | 0.55 | 0.96 | 782 | 206 | 0.00% | 0.08 | 1.00 |
+| 90% industrial | 30% | v5 = v4, one ask opens | 0.00% | 334 | 328 | 10.00% | 33.4 | 26.8 | 0.383 | 9.14 | 4.89 | 2.20% | 0.57 | 0.99 | 781 | 207 | 0.00% | 0.08 | 1.00 |
+| 99% industrial | 10% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.78 | 9.00% | 0.74 | 0.97 | 242 | 355 | 0.00% | 0.09 | 1.00 |
+| 99% industrial | 10% | v0 as written | 0.00% | 81.7 | 81.1 | 1.00% | 8.17 | 6.64 | 0.517 | 6.74 | 4.97 | 2.60% | 0.57 | 1.00 | 573 | 424 | 0.00% | 0.07 | 1.00 |
+| 99% industrial | 10% | v4 = v2 + v3 | 0.00% | 49.5 | 49.4 | 1.00% | 4.95 | 4.06 | 0.849 | 3.97 | 4.78 | 7.70% | 0.67 | 0.96 | 347 | 395 | 0.00% | 0.08 | 1.00 |
+| 99% industrial | 10% | v5 = v4, one ask opens | 0.00% | 66.8 | 66.4 | 1.00% | 6.68 | 5.44 | 0.631 | 5.41 | 4.82 | 3.20% | 0.60 | 0.97 | 468 | 416 | 0.00% | 0.07 | 1.00 |
+| 99% industrial | 30% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| 99% industrial | 30% | v0 as written | 0.00% | 81.5 | 80.7 | 1.00% | 8.15 | 6.62 | 1.56 | 2.20 | 4.67 | 14.00% | 0.79 | 0.95 | 190 | 205 | 0.00% | 0.10 | 1.00 |
+| 99% industrial | 30% | v4 = v2 + v3 | 0.00% | 49.7 | 49.6 | 1.00% | 4.97 | 4.08 | 2.53 | 1.37 | 4.10 | 25.30% | 0.93 | 0.96 | 116 | 197 | 0.00% | 0.12 | 1.00 |
+| 99% industrial | 30% | v5 = v4, one ask opens | 0.00% | 66.2 | 65.9 | 1.00% | 6.62 | 5.40 | 1.91 | 1.78 | 4.67 | 19.50% | 0.87 | 0.95 | 155 | 204 | 0.00% | 0.11 | 1.00 |
+| zipf | 10% | today | 0.00% | 34.5 | 38.1 | 0.00% | 3.45 | 2.86 | 0.907 | 3.70 | 4.68 | 6.60% | 0.69 | 0.95 | 322 | 202 | 0.00% | 0.09 | 1.00 |
+| zipf | 10% | v0 as written | 0.00% | 115 | 126 | 1.42% | 11.5 | 9.34 | 0.275 | 12.8 | 4.86 | 2.30% | 0.56 | 0.98 | 1,081 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 10% | v4 = v2 + v3 | 0.00% | 114 | 124 | 1.95% | 11.4 | 9.24 | 0.279 | 12.6 | 4.88 | 1.40% | 0.51 | 0.99 | 1,066 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 10% | v5 = v4, one ask opens | 0.00% | 115 | 125 | 1.61% | 11.5 | 9.29 | 0.277 | 12.7 | 4.86 | 2.30% | 0.53 | 0.98 | 1,073 | 206 | 0.00% | 0.08 | 1.00 |
+| zipf | 30% | today | 0.00% | 34.5 | 36.8 | 0.00% | 3.45 | 2.86 | 3.15 | 1.10 | 3.39 | 33.90% | 1.07 | 0.99 | 92.7 | 193 | 0.00% | 0.13 | 1.00 |
+| zipf | 30% | v0 as written | 0.00% | 299 | 312 | 3.93% | 29.9 | 24.0 | 0.372 | 9.39 | 4.86 | 2.40% | 0.56 | 0.98 | 803 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 30% | v4 = v2 + v3 | 0.00% | 302 | 315 | 3.89% | 30.2 | 24.3 | 0.368 | 9.49 | 4.83 | 2.40% | 0.55 | 0.97 | 812 | 206 | 0.00% | 0.08 | 1.00 |
+| zipf | 30% | v5 = v4, one ask opens | 0.00% | 299 | 311 | 3.94% | 29.9 | 24.0 | 0.374 | 9.36 | 4.65 | 2.20% | 0.55 | 0.94 | 800 | 206 | 0.00% | 0.08 | 1.00 |
+| medium | 10% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.72 | 9.80% | 0.74 | 0.95 | 242 | 197 | 0.00% | 0.10 | 1.00 |
+| medium | 10% | v0 as written | 0.00% | 190 | 186 | 5.36% | 19.0 | 15.3 | 0.225 | 15.7 | 4.88 | 1.40% | 0.51 | 0.98 | 1,325 | 206 | 0.00% | 0.08 | 1.00 |
+| medium | 10% | v4 = v2 + v3 | 0.00% | 187 | 184 | 7.72% | 18.7 | 15.0 | 0.228 | 15.5 | 4.89 | 1.30% | 0.52 | 0.99 | 1,310 | 207 | 0.00% | 0.08 | 1.00 |
+| medium | 10% | v5 = v4, one ask opens | 0.00% | 187 | 184 | 7.71% | 18.7 | 15.1 | 0.228 | 15.5 | 4.94 | 1.40% | 0.50 | 1.00 | 1,310 | 207 | 0.00% | 0.08 | 1.00 |
+| medium | 30% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| medium | 30% | v0 as written | 0.00% | 334 | 328 | 10.00% | 33.4 | 26.8 | 0.384 | 9.12 | 4.93 | 1.60% | 0.56 | 0.99 | 779 | 207 | 0.00% | 0.08 | 1.00 |
+| medium | 30% | v4 = v2 + v3 | 0.00% | 334 | 328 | 10.00% | 33.4 | 26.8 | 0.384 | 9.13 | 4.76 | 2.20% | 0.56 | 0.96 | 780 | 206 | 0.00% | 0.08 | 1.00 |
+| medium | 30% | v5 = v4, one ask opens | 0.00% | 334 | 327 | 10.00% | 33.4 | 26.8 | 0.385 | 9.10 | 4.85 | 3.10% | 0.55 | 0.98 | 777 | 206 | 0.00% | 0.08 | 1.00 |
+| medium, few big | 10% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.72 | 9.80% | 0.74 | 0.95 | 242 | 197 | 0.00% | 0.10 | 1.00 |
+| medium, few big | 10% | v0 as written | 0.00% | 189 | 186 | 5.33% | 18.9 | 15.2 | 0.225 | 15.7 | 4.84 | 1.60% | 0.53 | 0.98 | 1,325 | 206 | 0.00% | 0.07 | 1.00 |
+| medium, few big | 10% | v4 = v2 + v3 | 0.00% | 187 | 184 | 7.71% | 18.7 | 15.0 | 0.228 | 15.5 | 4.81 | 1.40% | 0.54 | 0.97 | 1,310 | 207 | 0.00% | 0.08 | 1.00 |
+| medium, few big | 10% | v5 = v4, one ask opens | 0.00% | 186 | 184 | 7.70% | 18.6 | 15.0 | 0.228 | 15.5 | 4.99 | 1.40% | 0.53 | 1.01 | 1,310 | 206 | 0.00% | 0.08 | 1.00 |
+| medium, few big | 30% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| medium, few big | 30% | v0 as written | 0.00% | 334 | 329 | 10.00% | 33.4 | 26.8 | 0.383 | 9.15 | 4.93 | 2.70% | 0.56 | 0.99 | 782 | 207 | 0.00% | 0.08 | 1.00 |
+| medium, few big | 30% | v4 = v2 + v3 | 0.00% | 334 | 328 | 10.00% | 33.4 | 26.8 | 0.384 | 9.12 | 4.80 | 3.10% | 0.60 | 0.97 | 779 | 207 | 0.00% | 0.08 | 1.00 |
+| medium, few big | 30% | v5 = v4, one ask opens | 0.00% | 334 | 327 | 10.00% | 33.4 | 26.8 | 0.384 | 9.12 | 4.81 | 2.50% | 0.58 | 0.97 | 779 | 206 | 0.00% | 0.08 | 1.00 |
+
+
+
+## Study: the attacks on the asks under each rule (band-weak-levels, weak work, 50% industrial)
+
+| Attack | Its part | BCH hashrate, pool | Rule | Weak expired | Weak a share | R | Asking | Weak/s | KB/s | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| asks whatever it finds | 0.00% | x1, 10% | v0 as written | 0.00% | 46.3 | 49.3 | 0.00% | 4.63 | 3.81 | 0.068 | 52.0 | 25.1 | 0.00% | 0.25 | 1.01 | 4,327 | 433 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 0.00% | x1, 10% | v1 down to R/2 | 0.00% | 10.7 | 12.2 | 56.53% | 1.07 | 0.961 | 0.275 | 11.9 | 24.1 | 0.00% | 0.34 | 0.99 | 1,000 | 431 | 0.00% | 0.06 | 1.00 |
+| asks whatever it finds | 0.00% | x1, 10% | v2 cap follows asks | 0.00% | 34.5 | 36.9 | 0.00% | 3.45 | 2.86 | 0.091 | 38.7 | 24.7 | 0.00% | 0.26 | 1.00 | 3,219 | 431 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 0.00% | x1, 10% | v5 = v4, one ask opens | 0.00% | 34.5 | 36.9 | 0.00% | 3.45 | 2.86 | 0.091 | 38.7 | 24.9 | 0.00% | 0.25 | 1.00 | 3,218 | 431 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 1.00% | x1, 10% | v0 as written | 0.00% | 82.1 | 86.5 | 1.00% | 8.21 | 6.67 | 0.039 | 92.0 | 24.8 | 0.00% | 0.23 | 1.00 | 7,661 | 432 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 1.00% | x1, 10% | v1 down to R/2 | 0.00% | 11.0 | 12.5 | 52.66% | 1.10 | 0.983 | 0.268 | 12.2 | 24.1 | 0.00% | 0.35 | 0.99 | 1,027 | 431 | 0.00% | 0.06 | 1.00 |
+| asks whatever it finds | 1.00% | x1, 10% | v2 cap follows asks | 0.00% | 49.5 | 52.5 | 1.00% | 4.95 | 4.06 | 0.064 | 55.4 | 25.1 | 0.00% | 0.24 | 1.01 | 4,612 | 432 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 1.00% | x1, 10% | v5 = v4, one ask opens | 0.00% | 66.7 | 70.5 | 1.00% | 6.67 | 5.44 | 0.047 | 74.8 | 24.8 | 0.00% | 0.23 | 1.00 | 6,224 | 432 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 2.00% | x1, 10% | v0 as written | 0.00% | 221 | 232 | 2.00% | 22.1 | 17.8 | 0.014 | 249 | 25.0 | 0.00% | 0.21 | 1.01 | 20,720 | 432 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 2.00% | x1, 10% | v1 down to R/2 | 0.00% | 11.5 | 12.9 | 47.39% | 1.15 | 1.02 | 0.259 | 12.7 | 23.9 | 0.00% | 0.35 | 0.98 | 1,068 | 431 | 0.00% | 0.06 | 1.00 |
+| asks whatever it finds | 2.00% | x1, 10% | v2 cap follows asks | 0.00% | 241 | 252 | 2.00% | 24.1 | 19.4 | 0.013 | 270 | 24.9 | 0.00% | 0.20 | 1.01 | 22,485 | 432 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 2.00% | x1, 10% | v5 = v4, one ask opens | 0.00% | 217 | 227 | 2.00% | 21.7 | 17.5 | 0.015 | 244 | 24.7 | 0.00% | 0.21 | 0.99 | 20,260 | 433 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 5.00% | x1, 10% | v0 as written | 0.00% | 316 | 330 | 5.00% | 31.6 | 25.4 | 0.010 | 355 | 24.8 | 0.00% | 0.21 | 1.00 | 29,517 | 431 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 5.00% | x1, 10% | v1 down to R/2 | 0.00% | 15.7 | 17.3 | 20.04% | 1.57 | 1.35 | 0.194 | 17.6 | 24.7 | 0.00% | 0.32 | 1.00 | 1,456 | 432 | 0.00% | 0.06 | 1.00 |
+| asks whatever it finds | 5.00% | x1, 10% | v2 cap follows asks | 0.00% | 317 | 331 | 5.00% | 31.7 | 25.4 | 0.010 | 355 | 24.7 | 0.00% | 0.20 | 1.00 | 29,545 | 431 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 5.00% | x1, 10% | v5 = v4, one ask opens | 0.00% | 316 | 330 | 5.00% | 31.6 | 25.4 | 0.010 | 354 | 25.2 | 0.00% | 0.20 | 1.02 | 29,480 | 432 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 25.00% | x1, 10% | v0 as written | 0.00% | 341 | 357 | 25.00% | 34.1 | 27.4 | 9.4e-3 | 383 | 24.9 | 0.00% | 0.21 | 1.00 | 31,878 | 432 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 25.00% | x1, 10% | v1 down to R/2 | 0.00% | 53.6 | 56.8 | 24.98% | 5.36 | 4.39 | 0.059 | 59.9 | 24.6 | 0.00% | 0.24 | 0.99 | 5,000 | 431 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 25.00% | x1, 10% | v2 cap follows asks | 0.00% | 341 | 357 | 25.00% | 34.1 | 27.4 | 9.4e-3 | 383 | 24.9 | 0.00% | 0.21 | 1.00 | 31,878 | 432 | 0.00% | 0.05 | 1.00 |
+| asks whatever it finds | 25.00% | x1, 10% | v5 = v4, one ask opens | 0.00% | 341 | 356 | 25.00% | 34.1 | 27.4 | 9.4e-3 | 383 | 24.9 | 0.00% | 0.20 | 1.01 | 31,841 | 432 | 0.00% | 0.05 | 1.00 |
+| never asks | 50.00% | x10, 30% | v0 as written | 0.00% | 341 | 334 | 25.00% | 34.1 | 27.4 | 0.377 | 9.29 | 4.75 | 2.70% | 0.56 | 0.96 | 795 | 206 | 0.00% | 0.08 | 1.00 |
+| never asks | 50.00% | x10, 30% | v1 down to R/2 | 0.00% | 53.7 | 53.4 | 25.02% | 5.37 | 4.40 | 2.35 | 1.47 | 4.48 | 24.30% | 0.90 | 0.98 | 125 | 200 | 0.00% | 0.11 | 1.00 |
+| never asks | 50.00% | x10, 30% | v2 cap follows asks | 0.00% | 341 | 334 | 25.00% | 34.1 | 27.4 | 0.377 | 9.29 | 4.75 | 2.70% | 0.56 | 0.96 | 795 | 206 | 0.00% | 0.08 | 1.00 |
+| never asks | 50.00% | x10, 30% | v5 = v4, one ask opens | 0.00% | 342 | 336 | 25.00% | 34.2 | 27.4 | 0.375 | 9.34 | 4.71 | 3.80% | 0.58 | 0.95 | 799 | 205 | 0.00% | 0.08 | 1.00 |
+| never asks | 90.00% | x10, 30% | v0 as written | 0.00% | 316 | 311 | 5.00% | 31.6 | 25.4 | 0.404 | 8.64 | 4.75 | 2.10% | 0.56 | 0.96 | 740 | 206 | 0.00% | 0.08 | 1.00 |
+| never asks | 90.00% | x10, 30% | v1 down to R/2 | 0.00% | 14.7 | 15.4 | 5.00% | 1.47 | 1.28 | 8.18 | 0.409 | 1.30 | 66.50% | 1.74 | 0.99 | 34.6 | 106 | 0.00% | 0.19 | 1.00 |
+| never asks | 90.00% | x10, 30% | v2 cap follows asks | 0.00% | 317 | 311 | 5.00% | 31.7 | 25.5 | 0.404 | 8.64 | 4.78 | 2.30% | 0.56 | 0.96 | 741 | 205 | 0.00% | 0.08 | 1.00 |
+| never asks | 90.00% | x10, 30% | v5 = v4, one ask opens | 0.00% | 316 | 310 | 5.00% | 31.6 | 25.3 | 0.406 | 8.59 | 4.76 | 2.90% | 0.57 | 0.96 | 736 | 206 | 0.00% | 0.08 | 1.00 |
+| never asks | 97.00% | x10, 30% | v0 as written | 0.00% | 143 | 140 | 1.50% | 14.3 | 11.5 | 0.895 | 3.83 | 4.81 | 7.10% | 0.70 | 0.97 | 333 | 206 | 0.00% | 0.09 | 1.00 |
+| never asks | 97.00% | x10, 30% | v1 down to R/2 | 0.00% | 8.29 | 9.13 | 1.49% | 0.829 | 0.766 | 13.8 | 0.239 | 0.813 | 77.70% | 2.22 | 1.05 | 19.6 | 63.8 | 0.00% | 0.24 | 1.00 |
+| never asks | 97.00% | x10, 30% | v2 cap follows asks | 0.00% | 95.1 | 94.2 | 1.50% | 9.51 | 7.71 | 1.34 | 2.55 | 4.62 | 12.30% | 0.77 | 0.94 | 223 | 206 | 0.00% | 0.10 | 1.00 |
+| never asks | 97.00% | x10, 30% | v5 = v4, one ask opens | 0.00% | 127 | 125 | 1.50% | 12.7 | 10.3 | 1.00 | 3.41 | 4.67 | 7.50% | 0.70 | 0.94 | 297 | 207 | 0.00% | 0.09 | 1.00 |
+| never asks | 99.00% | x10, 30% | v0 as written | 0.00% | 57.3 | 57.0 | 0.50% | 5.73 | 4.69 | 2.20 | 1.56 | 4.68 | 22.10% | 0.95 | 0.96 | 134 | 202 | 0.00% | 0.11 | 1.00 |
+| never asks | 99.00% | x10, 30% | v1 down to R/2 | 0.00% | 7.44 | 8.29 | 0.50% | 0.744 | 0.698 | 15.2 | 0.214 | 0.688 | 79.80% | 2.43 | 0.97 | 17.6 | 58.8 | 0.00% | 0.26 | 1.01 |
+| never asks | 99.00% | x10, 30% | v2 cap follows asks | 0.00% | 39.1 | 39.2 | 0.50% | 3.91 | 3.23 | 3.21 | 1.09 | 3.38 | 36.20% | 1.16 | 1.00 | 91.3 | 193 | 0.00% | 0.12 | 1.00 |
+| never asks | 99.00% | x10, 30% | v5 = v4, one ask opens | 0.00% | 44.9 | 44.8 | 0.50% | 4.49 | 3.69 | 2.81 | 1.22 | 3.62 | 30.80% | 1.01 | 0.94 | 105 | 195 | 0.00% | 0.12 | 1.00 |
+| industrial miners at the minimum | - | x10, 30% | today | 0.00% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
+| industrial miners at the minimum | - | x10, 30% | v0 as written | 0.00% | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| industrial miners at the minimum | - | x10, 30% | v1 down to R/2 | 0.00% | 53.9 | 53.6 | 50.02% | 5.39 | 4.41 | 2.35 | 1.47 | 4.45 | 25.40% | 0.95 | 0.97 | 126 | 201 | 0.00% | 0.12 | 1.00 |
+| industrial miners at the minimum | - | x10, 30% | v2 cap follows asks | 0.00% | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| industrial miners at the minimum | - | x10, 30% | v5 = v4, one ask opens | 0.00% | 343 | 337 | 50.00% | 34.3 | 27.6 | 0.373 | 9.37 | 4.89 | 1.80% | 0.56 | 0.99 | 801 | 205 | 0.00% | 0.08 | 1.00 |
+| carries no asking weak share | 25.00% | x10, 30% | v0 as written | 0.00% | 250 | 246 | 50.00% | 25.0 | 20.1 | 0.511 | 6.87 | 4.75 | 3.00% | 0.58 | 0.96 | 585 | 206 | 0.00% | 0.08 | 1.00 |
+| carries no asking weak share | 25.00% | x10, 30% | v1 down to R/2 | 0.00% | 20.5 | 21.1 | 49.99% | 2.05 | 1.74 | 5.97 | 0.571 | 1.79 | 57.70% | 1.52 | 0.99 | 48.1 | 143 | 0.00% | 0.17 | 1.00 |
+| carries no asking weak share | 25.00% | x10, 30% | v2 cap follows asks | 0.00% | 231 | 227 | 50.01% | 23.1 | 18.6 | 0.554 | 6.30 | 4.76 | 3.70% | 0.63 | 0.96 | 539 | 205 | 0.00% | 0.08 | 1.00 |
+| carries no asking weak share | 25.00% | x10, 30% | v5 = v4, one ask opens | 0.00% | 231 | 227 | 50.01% | 23.1 | 18.5 | 0.555 | 6.29 | 4.72 | 4.00% | 0.61 | 0.95 | 538 | 206 | 0.00% | 0.08 | 1.00 |
+| carries no asking weak share | 50.00% | x10, 30% | v0 as written | 0.00% | 168 | 165 | 50.00% | 16.8 | 13.5 | 0.762 | 4.50 | 4.71 | 5.80% | 0.67 | 0.95 | 392 | 207 | 0.00% | 0.09 | 1.00 |
+| carries no asking weak share | 50.00% | x10, 30% | v1 down to R/2 | 0.00% | 16.8 | 17.4 | 50.02% | 1.68 | 1.45 | 7.21 | 0.476 | 1.51 | 61.30% | 1.61 | 1.01 | 39.3 | 119 | 0.00% | 0.18 | 1.00 |
+| carries no asking weak share | 50.00% | x10, 30% | v2 cap follows asks | 0.00% | 139 | 137 | 50.00% | 13.9 | 11.2 | 0.917 | 3.73 | 4.69 | 7.00% | 0.70 | 0.95 | 325 | 206 | 0.00% | 0.09 | 1.00 |
+| carries no asking weak share | 50.00% | x10, 30% | v5 = v4, one ask opens | 0.00% | 140 | 138 | 49.99% | 14.0 | 11.3 | 0.913 | 3.75 | 4.79 | 6.10% | 0.70 | 0.97 | 327 | 207 | 0.00% | 0.09 | 1.00 |
+| carries no asking weak share | 75.00% | x10, 30% | v0 as written | 0.00% | 107 | 106 | 50.01% | 10.7 | 8.66 | 1.19 | 2.87 | 4.73 | 11.10% | 0.73 | 0.96 | 251 | 205 | 0.00% | 0.10 | 1.00 |
+| carries no asking weak share | 75.00% | x10, 30% | v1 down to R/2 | 0.00% | 15.3 | 15.9 | 50.00% | 1.53 | 1.33 | 7.89 | 0.432 | 1.39 | 65.60% | 1.79 | 1.01 | 35.9 | 110 | 0.00% | 0.19 | 1.00 |
+| carries no asking weak share | 75.00% | x10, 30% | v2 cap follows asks | 0.00% | 85.8 | 85.0 | 50.00% | 8.58 | 6.96 | 1.48 | 2.29 | 4.57 | 13.40% | 0.81 | 0.93 | 201 | 206 | 0.00% | 0.10 | 1.00 |
+| carries no asking weak share | 75.00% | x10, 30% | v5 = v4, one ask opens | 0.00% | 85.9 | 85.1 | 50.01% | 8.59 | 6.97 | 1.48 | 2.30 | 4.74 | 14.30% | 0.81 | 0.96 | 201 | 206 | 0.00% | 0.10 | 1.00 |
+| carries no asking weak share | 90.00% | x10, 30% | v0 as written | 1.15% | 83.1 | 83.1 | 49.42% | 8.41 | 6.83 | 1.51 | 2.23 | 4.71 | 14.80% | 0.83 | 0.95 | 194 | 206 | 0.00% | 0.10 | 1.00 |
+| carries no asking weak share | 90.00% | x10, 30% | v1 down to R/2 | 0.36% | 13.6 | 14.3 | 49.79% | 1.36 | 1.19 | 8.79 | 0.380 | 1.18 | 68.70% | 1.86 | 0.96 | 31.9 | 98.7 | 0.00% | 0.20 | 1.00 |
+| carries no asking weak share | 90.00% | x10, 30% | v2 cap follows asks | 0.59% | 67.8 | 67.8 | 49.71% | 6.82 | 5.56 | 1.85 | 1.83 | 4.81 | 17.40% | 0.84 | 0.98 | 159 | 204 | 0.00% | 0.10 | 1.00 |
+| carries no asking weak share | 90.00% | x10, 30% | v5 = v4, one ask opens | 0.58% | 67.9 | 67.8 | 49.72% | 6.83 | 5.56 | 1.85 | 1.83 | 4.66 | 18.90% | 0.85 | 0.95 | 159 | 204 | 0.00% | 0.10 | 1.00 |
 
 

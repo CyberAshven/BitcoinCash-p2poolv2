@@ -58,6 +58,24 @@ and `weak_shares_filled_from_pool_total`, `weak_shares_prefilled_total`,
 `weak_shares_fetched_for_shares_total` and
 `weak_share_fills_fetched_whole_total`.
 
+The payout simulator runs the weak ratio's path under the weak shares that
+ask, share by share, in five tables (`weak-asks-genesis`,
+`weak-asks-big-miner`, `weak-asks-rules`, `weak-asks-rule-mixes`,
+`weak-asks-rule-attacks`), for the rule as #118 builds it and five
+variants; its transition model gains the asks. From genesis in a pool at
+10% of today's Bitcoin Cash, where nobody asks, the rule as written carries
+132 weak shares a share in the first hour and more than 64 in 769 of the
+first 2,100 shares, where today's cap holds 64; a 1 TH/s miner joining a
+10 GH/s test network pool, whose ratio the ceiling held, does the same. A
+faster way down (to `R * 32 / count`) settles far below the asks in every
+pool and makes every attack worse; a genesis ratio of 32 fixes only
+genesis. A cap that follows the asks (more than 64 weak shares only when
+more than one in 64 of them ask) with a genesis ratio of 32 keeps every
+start at or under 64 where nobody asks, loses no weak share at genesis and
+keeps section 6's steady states where the asks open the count; where fewer
+than one weak share in 64 asks (the 99% industrial mix) it opens less, 50 a
+share instead of 82. No node code changes.
+
 The small miners design page has a section 6, a proposal that is not built:
 weak shares that follow the asks. A weak share would ask for an easier weak
 target when its node wanted one for its miner, and while more than one in 64
