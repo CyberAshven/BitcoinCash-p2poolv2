@@ -807,12 +807,11 @@ Neither is a share-chain rule, and each helps under today's rule too.
    |---:|---:|---:|---:|---:|---:|
    | 32 | 4.20% | 0.39 Mbit/s | 62,703 | 5.27% | 0.54 Mbit/s |
    | 160 | 4.20% | 1.09 Mbit/s | 167,903 | 8.66% | 1.86 Mbit/s |
-   | 320 | 4.20% | 1.98 Mbit/s | | | |
+   | 320 | 4.20% | 1.98 Mbit/s | 299,423 | 14.11% | 3.52 Mbit/s |
 
    Beside the shares, ten times the weak shares cost 1.6 Mbit/s of upload
-   and no stale share. Whole in the share, five times already double the
-   stale rate. (The run at 320 whole had not finished when this was
-   written.)
+   and no stale share. Whole in the share, five times double the stale rate
+   and ten times more than triple it.
 2. **Weak share checks leave the single validation queue**, so a node with
    several cores checks several at once, or the check gets cheap enough
    that 35 a second fit one core with 100,000 miners in the window. Until
