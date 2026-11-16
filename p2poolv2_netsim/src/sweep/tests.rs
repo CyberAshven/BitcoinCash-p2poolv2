@@ -44,7 +44,9 @@ fn the_pool_size_sweep_uses_a_million_miners() {
 fn the_block_size_sweep_runs_from_chipnet_to_the_bchn_guard() {
     let scenarios = Sweep::BlockSize.scenarios(&Scenario::default());
     assert_eq!(scenarios.len(), 10);
-    assert_eq!(scenarios[0].block_bytes, 2_000_000);
+    assert_eq!(scenarios[0].block_bytes, BCH_CHIPNET_ABLA_FLOOR_BYTES);
+    assert_eq!(scenarios[0].label, "200 kB blocks, mixed links");
+    assert_eq!(scenarios[1].label, "3.2 MB blocks, mixed links");
     assert_eq!(scenarios[4].block_bytes, 2_000_000_000);
     assert_eq!(scenarios[9].upload_megabits, Distribution::fixed(1_000.0));
 }
