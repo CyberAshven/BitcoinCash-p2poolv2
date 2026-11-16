@@ -18,7 +18,7 @@ use super::chain::ChainRpc;
 use super::config::{Config, RpcConfig, VaultPoint};
 use super::files::{Journal, PendingClaim};
 use super::wins::{Win, build_win_claim, parse_win};
-use crate::{Vault, create_covenant};
+use crate::{Covenant, Vault, covenant_from_redeem_script};
 
 pub(super) const CATEGORY: &str =
     "1e642d4ed9a0a44b3153a3f1fda841906eb1c9a2ce9daa2f85641ddd3e8700fe";
@@ -28,6 +28,22 @@ pub(super) const GENESIS: &str = "8c5ecd6d4ce039490c233c9399cc1e591720218fd9712d
 pub(super) const CLAIM_TXID: &str =
     "e30dc911a420cae10ba767c4eaf22ee720f56400d8099cfcd943050631d6a47f";
 pub(super) const NEXT_STATE: &str = "030000001f090500fd3f021dd2872d1a";
+
+/// The covenant the chipnet tSAFA vaults were created with on 2026-10-29,
+/// read back from its recorded redeem script. The live wins were mined for
+/// its `lock_hash`, so the fixtures replay them against it.
+pub(super) fn deployed_covenant() -> Covenant {
+    let record: Value = serde_json::from_str(include_str!(
+        "../../test_data/tsafa-chipnet-deployed-2026-10-29.json"
+    ))
+    .unwrap();
+    covenant_from_redeem_script(
+        "chipnet",
+        4,
+        84_000_000_000,
+        hex::decode(record["params"]["redeem_script"].as_str().unwrap()).unwrap(),
+    )
+}
 
 pub(super) struct ExpectedCall {
     pub method: &'static str,
@@ -108,7 +124,7 @@ pub(super) fn runtime_fixture(client: FakeRpc, dry_run: bool) -> RuntimeFixture 
     };
     let deployment = json!({"network":"chipnet", "threads":4,
         "virtual_sats":"84000000000", "category":CATEGORY});
-    let covenant = create_covenant("chipnet", 4, 84_000_000_000).unwrap();
+    let covenant = deployed_covenant();
     let vault = Vault {
         category: hex::decode(CATEGORY).unwrap(),
         value: 2_000_000,
@@ -122,6 +138,7 @@ pub(super) fn runtime_fixture(client: FakeRpc, dry_run: bool) -> RuntimeFixture 
     .unwrap()
     .unwrap();
     let built = build_win_claim(
+        &covenant,
         &deployment,
         &win,
         &origin,

@@ -7,7 +7,10 @@ mod test_utils;
 
 use libauth::{Input, NonFungibleTokenCapability, Output, Token};
 use p2poolv2_safa::{self as safa, Outpoint, Shares, State, Vault};
-use test_utils::{headers::MAINNET_PAIRS, *};
+use test_utils::{
+    headers::{CHIPNET_AROUND_ACTIVATION, MAINNET_PAIRS},
+    *,
+};
 
 #[test]
 fn claim_without_split_pays_whole_reward() {
@@ -413,6 +416,87 @@ fn chipnet_minimum_difficulty_is_allowed() {
         .claim,
     );
 }
+/// A claim on one of the real chipnet blocks around the one-minute
+/// activation, with its height, time and nBits.
+fn chipnet_block_claim(covenant: safa::Covenant, height: u32) -> ScenarioOptions {
+    let (height, time, bits) = CHIPNET_AROUND_ACTIVATION
+        .into_iter()
+        .find(|block| block.0 == height)
+        .unwrap();
+    let mut options = ScenarioOptions {
+        covenant,
+        height,
+        time,
+        bits,
+        ..Default::default()
+    };
+    options.state.height = height - 10;
+    options
+}
+macro_rules! chipnet_claim {
+    ($name:ident,$covenant:expr,$height:expr,$accepted:expr) => {
+        #[test]
+        fn $name() {
+            let claim = scenario(chipnet_block_claim($covenant, $height))
+                .unwrap()
+                .claim;
+            if $accepted {
+                accepts(&claim);
+            } else {
+                refuses(&claim);
+            }
+        }
+    };
+}
+// A whole claim on the last ten-minute chipnet block and on one-minute
+// blocks that carry ASERT's own nBits: the band counts the parent's ticks,
+// so they pass.
+chipnet_claim!(
+    claim_on_the_last_ten_minute_chipnet_block_passes,
+    covenant(),
+    332_450,
+    true
+);
+chipnet_claim!(
+    claim_on_the_first_asert_one_minute_chipnet_block_passes,
+    covenant(),
+    332_452,
+    true
+);
+chipnet_claim!(
+    claim_on_a_later_one_minute_chipnet_block_passes,
+    covenant(),
+    332_460,
+    true
+);
+// The covenant deployed on chipnet on 2026-10-29 counts every block as ten
+// minutes: it takes a claim on the last ten-minute block and on a
+// minimum-difficulty block after it, and refuses one on blocks 332,452 and
+// 332,460, whose nBits it finds more than eight times too easy.
+chipnet_claim!(
+    deployed_covenant_takes_a_claim_on_the_last_ten_minute_block,
+    deployed_covenant(),
+    332_450,
+    true
+);
+chipnet_claim!(
+    deployed_covenant_takes_a_minimum_difficulty_claim_after_the_switch,
+    deployed_covenant(),
+    332_451,
+    true
+);
+chipnet_claim!(
+    deployed_covenant_refuses_a_claim_on_the_first_asert_one_minute_block,
+    deployed_covenant(),
+    332_452,
+    false
+);
+chipnet_claim!(
+    deployed_covenant_refuses_a_claim_on_a_later_one_minute_block,
+    deployed_covenant(),
+    332_460,
+    false
+);
 macro_rules! fallback_claim {
     ($name:ident,$delta:expr,$bits:expr,$reference:expr,$accepted:expr) => {
         #[test]
@@ -854,7 +938,7 @@ fn full_10000_byte_unlock_passes() {
     );
     // The largest coinbase a claim carries at the deepest branches.
     let proof = safa::decode_proof(&scenario.proof).unwrap();
-    assert_eq!(proof.head.len() + 53 + proof.tail.len(), 7173);
+    assert_eq!(proof.head.len() + 53 + proof.tail.len(), 7139);
     accepts(&scenario.claim);
 }
 #[test]
@@ -869,7 +953,7 @@ fn metrics_empty_branches() {
         ..Default::default()
     })
     .unwrap();
-    metrics(&scenario.claim, (1595, 121_745, 1_308_800, 40, 818));
+    metrics(&scenario.claim, (1629, 124_341, 1_336_000, 40, 835));
     assert!(scenario.covenant.redeem_script.len() < 1500);
 }
 #[test]
@@ -882,7 +966,7 @@ fn metrics_split() {
         })
         .unwrap()
         .claim,
-        (1729, 136_035, 1_416_000, 53, 885),
+        (1763, 138_632, 1_443_200, 53, 902),
     );
 }
 #[test]
@@ -896,7 +980,7 @@ fn metrics_deepest() {
         })
         .unwrap()
         .claim,
-        (2977, 257_638, 2_414_400, 153, 1509),
+        (3011, 260_234, 2_441_600, 153, 1526),
     );
 }
 #[test]
@@ -912,13 +996,13 @@ fn metrics_deepest_fallback() {
     options.state.ref_bits = 0x1b04_04cb;
     metrics(
         &scenario(options).unwrap().claim,
-        (2977, 267_247, 2_414_400, 153, 1509),
+        (3011, 269_844, 2_441_600, 153, 1526),
     );
 }
 #[test]
 fn metrics_full_unlock() {
     metrics(
         &full_unlock(10000).unwrap().claim,
-        (10000, 370_058, 8_032_800, 263, 5020),
+        (10000, 372_022, 8_032_800, 262, 5020),
     );
 }

@@ -140,7 +140,7 @@ fn rebuilt_pickaxe_tsafa_claim_reproduces_verified_transaction() {
     assert_eq!(output, expected["result"]);
     assert_eq!(
         output["txid"],
-        "89771ec35e517ee27478de8a4639c8847dffbcff5a44db0c5156d180e1274c09"
+        "d4483ae6ae5afe5a3e294aedd14e2a152cfd1a4855475ccc6e482788bcca3407"
     );
 }
 

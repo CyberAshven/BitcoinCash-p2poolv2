@@ -373,6 +373,7 @@ impl<Rpc: ChainRpc> Claimer<Rpc> {
 
     fn build(&self, win: &Win, vault: &Vault) -> Result<Value, ClaimError> {
         build_win_claim(
+            &self.covenant,
             &self.deployment,
             win,
             &self.journal.vault,

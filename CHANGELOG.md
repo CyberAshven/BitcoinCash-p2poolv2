@@ -73,17 +73,35 @@ switch at median time past 1810382400 (2027-05-15 12:00 UTC), as in BCHN.
   reports it as `block_interval_secs`; `p2poolv2_cli bch-trade refund`
   prints the first block a Bitcoin Cash refund is valid in, since a lock
   height counts ten-minute units.
-- Open before any token deployment: the SAFA covenant (`p2poolv2_safa`, not
-  deployed) still computes ASERT by height with ten-minute blocks, so after
-  a network's switch it computes a target ten times harder than P2Pool's
-  token band, and a token share P2Pool accepts would fail the covenant. The
-  covenant is not changed here. Mainnet's activation block is not pinned
-  yet, so until a release pins it the header gate refuses mainnet token
-  shares after the switch. Pinning it changes the gate's verdicts, so it is
-  a share-chain rule change of its own, with a new protocol segment. Token
-  jobs (also Stratum V2 custom jobs) and token wins are offered only when
-  the header passes both bands peers check: the pins' and the known BCH
-  prev's.
+- The SAFA covenant (`p2poolv2_safa`) counts the ticks the header gate
+  counts without a known parent. It is compiled with the network's pinned
+  switch (chipnet's, after block 332,450; none for mainnet yet), takes the
+  parent's ticks and the header's interval from it and makes a one-minute
+  header's target ten times easier, so a token share the gate accepts
+  passes the covenant's band. Before, it counted every block as ten
+  minutes and computed a target ten times too hard after a switch, harder
+  still with every block. P2Pool's tests run the compiled covenant in the
+  BCH 2026 VM against the gate: around both edges of both bands, on the
+  real chipnet blocks 332,439 to 332,460 and on a mainnet with a switch
+  pinned in both; the CHIP's ASERT vectors pass in the covenant too. The
+  covenant's bytes changed (chipnet: a 1,398-byte redeem script, K 1,978,
+  another address). The tSAFA deployment made on chipnet on 2026-10-29
+  keeps the earlier covenant, which since block 332,451 accepts only
+  minimum-difficulty blocks; chipnet needs a new deployment, and the
+  fixtures recorded from the old one are replayed against its recorded
+  bytes until then (`p2poolv2_safa/README.md`).
+- Open before any token deployment: the covenant's claim still locks to
+  the coinbase's block height. A Bitcoin Cash lock height counts
+  ten-minute units, so after a switch a claim waits nine more blocks for
+  every block past it; and the token's rules counted in blocks (easing,
+  fallback, one claim per thread per block) run ten times faster. Neither
+  is changed here. Mainnet's activation block is not pinned yet, in the
+  gate or the covenant, so until a release pins it the header gate refuses
+  mainnet token shares after the switch. Pinning it changes the gate's
+  verdicts, so it is a share-chain rule change of its own, with a new
+  protocol segment, and a new covenant with the same pin. Token jobs (also
+  Stratum V2 custom jobs) and token wins are offered only when the header
+  passes both bands peers check: the pins' and the known BCH prev's.
 
 The CHIP's ASERT and tick vectors pass, and real chipnet headers 332,429 to
 332,460 fed through the header path get the ticks and next intervals Knuth

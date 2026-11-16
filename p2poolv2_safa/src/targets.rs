@@ -6,7 +6,10 @@
 
 use libauth::big_int_to_vm_number;
 
-use crate::{BigInt, EASE_CAP, FALLBACK_DELTA, MAX_THREADS, network_parameters};
+use crate::{
+    BCH_BLOCK_SPACING, BigInt, EASE_CAP, FALLBACK_DELTA, MAX_THREADS, NetworkParameters,
+    network_parameters,
+};
 
 pub const POW_LIMIT_BITS: u32 = 0x1d00ffff;
 
@@ -84,18 +87,34 @@ pub fn decode_header_bits(bits: u32) -> Option<BigInt> {
     set_compact(bits).filter(|target| !target.cmp(&pow_limit()).is_gt())
 }
 
-/// BCHN CalculateASERT, including truncating division and flooring shifts.
+/// BCHN CalculateASERT with CHIP-2025-03's ticks, including truncating
+/// division and flooring shifts: `reference * 2^((time_diff - (tick_delta +
+/// anchor_interval)) / half_life) * anchor_interval / next_interval`, clamped
+/// to the proof-of-work limit and to at least 1.
 ///
-/// `half_life` must be positive. Deployment parameters enforce this invariant.
+/// `tick_delta` is the parent's ticks less the anchor's, `600 * height_diff`
+/// while every block is ten minutes. `anchor_interval` is the anchor block's
+/// interval in ticks and `next_interval` the new block's. These numbers do
+/// not wrap at 256 bits, so a product past 2^256 is clamped to the limit,
+/// which is what the CHIP's reference returns there.
+///
+/// `half_life` must be positive and `next_interval` must divide
+/// `anchor_interval`. Deployment parameters enforce these invariants.
 pub fn calculate_asert(
     reference: &BigInt,
     time_diff: i64,
-    height_diff: i64,
+    tick_delta: i64,
+    anchor_interval: i64,
+    next_interval: i64,
     half_life: i64,
 ) -> BigInt {
     assert!(half_life > 0, "ASERT half-life must be positive");
-    let span = i128::from(time_diff) - 600 * i128::from(height_diff);
-    let exponent = ((span - 600) * 65_536) / i128::from(half_life);
+    assert!(
+        next_interval > 0 && anchor_interval % next_interval == 0,
+        "the new block's interval must divide the anchor block's"
+    );
+    let span = i128::from(time_diff) - i128::from(tick_delta);
+    let exponent = ((span - i128::from(anchor_interval)) * 65_536) / i128::from(half_life);
     let shifts = exponent >> 16;
     let fraction = (exponent - shifts * 65_536) as u128;
     let factor = 65_536
@@ -111,6 +130,7 @@ pub fn calculate_asert(
     } else {
         next.shl(shift.min(256) as u64)
     };
+    let next = next.mul(&BigInt::from_u64((anchor_interval / next_interval) as u64));
     if next.is_zero() {
         BigInt::from_u64(1)
     } else if next.cmp(&pow_limit()).is_gt() {
@@ -120,32 +140,72 @@ pub fn calculate_asert(
     }
 }
 
+/// The ticks of the block at `parent_height`, counted from the ASERT
+/// anchor's, and the interval of a block built on it, by the deployment's
+/// pinned switch: 600 ticks a block up to the switch block and the switch's
+/// interval after it. P2Pool's header gate reads the same two numbers from
+/// its pins (`TickSchedule::tick_info` in `p2poolv2_lib`).
+pub fn tick_delta_and_interval(parameters: &NetworkParameters, parent_height: i64) -> (i64, i64) {
+    let switch = parameters.switch_constants();
+    let spacing = i64::from(BCH_BLOCK_SPACING);
+    let before_switch = parent_height.min(i64::from(switch.height));
+    let tick_delta = spacing * (before_switch - i64::from(parameters.anchor_height))
+        + i64::from(switch.interval) * (parent_height - before_switch);
+    let next_interval = if before_switch == i64::from(switch.height) {
+        i64::from(switch.interval)
+    } else {
+        spacing
+    };
+    (tick_delta, next_interval)
+}
+
 /// Compute the deployment's ASERT target for the claimed height and time.
 pub fn asert_target(network: &str, height: u32, time: u32) -> Result<Option<BigInt>, String> {
-    let parameters = network_parameters(network)?;
-    let height_diff = i64::from(height) - 1 - i64::from(parameters.anchor_height);
-    if height_diff < 0 {
+    asert_target_for(&network_parameters(network)?, height, time)
+}
+
+/// [`asert_target`] for `parameters`, such as a network's with another
+/// pinned switch. `None` at or below the anchor, where ASERT does not govern.
+pub fn asert_target_for(
+    parameters: &NetworkParameters,
+    height: u32,
+    time: u32,
+) -> Result<Option<BigInt>, String> {
+    let (tick_delta, next_interval) = tick_delta_and_interval(parameters, i64::from(height) - 1);
+    if tick_delta < 0 {
         return Ok(None);
     }
     let reference = set_compact(parameters.anchor_bits).ok_or("invalid ASERT anchor")?;
     Ok(Some(calculate_asert(
         &reference,
         i64::from(time) - i64::from(parameters.anchor_parent_time),
-        height_diff,
+        tick_delta,
+        i64::from(BCH_BLOCK_SPACING),
+        next_interval,
         i64::from(parameters.half_life),
     )))
 }
 
 /// Check the agreed mainnet /2..x1.05 or chipnet /8..x8 ASERT band.
 pub fn asert_band_ok(network: &str, bits: u32, time: u32, height: u32) -> Result<bool, String> {
-    let parameters = network_parameters(network)?;
+    asert_band_ok_for(&network_parameters(network)?, bits, time, height)
+}
+
+/// [`asert_band_ok`] for `parameters`, such as a network's with another
+/// pinned switch.
+pub fn asert_band_ok_for(
+    parameters: &NetworkParameters,
+    bits: u32,
+    time: u32,
+    height: u32,
+) -> Result<bool, String> {
     let Some(target) = decode_header_bits(bits) else {
         return Ok(false);
     };
     if parameters.allow_pow_limit && bits == POW_LIMIT_BITS {
         return Ok(true);
     }
-    let Some(computed) = asert_target(network, height, time)? else {
+    let Some(computed) = asert_target_for(parameters, height, time)? else {
         return Ok(false);
     };
     Ok(!target

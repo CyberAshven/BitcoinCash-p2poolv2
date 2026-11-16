@@ -9,8 +9,9 @@
 //   thread (u32 LE) | state_height (u32 LE) | target_bits (u32 LE) | ref_bits (u32 LE)
 //
 // Double-brace placeholders are deployment parameters that covenant.rs fills in
-// before compiling: the network's ASERT anchor and band, the thread count,
-// the AMM's virtual satoshis and the fee constant K.
+// before compiling: the network's ASERT anchor and band, its pinned switch to
+// shorter blocks (CHIP-2025-03), the thread count, the AMM's virtual satoshis
+// and the fee constant K.
 //
 // The functions are the covenant's building blocks; the tests run each one
 // alone against the format's golden vectors. Stack effects are written
@@ -90,14 +91,19 @@
     OP_DUP <{{POW_LIMIT}}> OP_LESSTHANOREQUAL OP_VERIFY
 > <5> OP_DEFINE
 
-// Function 6: BCHN's CalculateASERT, integer for integer: a truncating
-// division for the exponent, a flooring shift for its integer part, the
-// cubic for the fraction, then the clamps to [1, powLimit].
-// [reference time_diff height_diff half_life] -> [target]
+// Function 6: BCHN's CalculateASERT with CHIP-2025-03's ticks, integer for
+// integer: a truncating division for the exponent, a flooring shift for its
+// integer part, the cubic for the fraction, the ratio of the anchor block's
+// interval to the new block's, then the clamps to [1, powLimit]. tick_delta
+// is the parent's ticks less the anchor's. next_interval divides
+// anchor_interval, as the CHIP's schedule keeps it. Numbers here do not wrap
+// at 256 bits, so a product past 2^256 is clamped to powLimit, which is what
+// the CHIP's reference returns there.
+// [reference time_diff tick_delta half_life anchor_interval next_interval] -> [target]
 <
-    OP_TOALTSTACK
-    <600> OP_MUL OP_SUB
-    <600> OP_SUB <65536> OP_MUL
+    OP_OVER OP_SWAP OP_DIV OP_TOALTSTACK
+    OP_SWAP OP_TOALTSTACK
+    OP_ADD OP_SUB <65536> OP_MUL
     OP_FROMALTSTACK OP_DIV
     OP_DUP <16> OP_RSHIFTNUM
     OP_TUCK <65536> OP_MUL OP_SUB
@@ -113,6 +119,7 @@
     OP_ELSE
         <256> OP_MIN OP_LSHIFTNUM
     OP_ENDIF
+    OP_FROMALTSTACK OP_MUL
     OP_1 OP_MAX <{{POW_LIMIT}}> OP_MIN
 > <6> OP_DEFINE
 
@@ -120,6 +127,11 @@
 // standing in for its parent's: computed / HARD_DIVISOR <= target <=
 // computed * EASY_NUMERATOR / EASY_DENOMINATOR: mainnet /2 to x1.05,
 // test networks /8 to x8, or (test networks) nBits exactly powLimit's.
+// The parent's ticks and the header's interval follow the pinned switch, as
+// P2Pool's header gate counts them: a block has 600 ticks up to
+// SWITCH_HEIGHT and SWITCH_INTERVAL after it, and the header's interval is
+// SWITCH_INTERVAL once its parent is at SWITCH_HEIGHT or above. A network
+// without a pinned switch has SWITCH_INTERVAL 600.
 // [nbits4 time4 height] -> [ok]
 <
     OP_ROT
@@ -128,11 +140,17 @@
     OP_SWAP OP_IF
         OP_DROP OP_2DROP OP_1
     OP_ELSE
-        OP_ROT OP_ROT
-        OP_1SUB <{{ANCHOR_HEIGHT}}> OP_SUB
+        OP_ROT <0x00> OP_CAT OP_BIN2NUM <{{ANCHOR_PARENT_TIME}}> OP_SUB
+        <{{ANCHOR_TARGET}}> OP_SWAP
+        <3> OP_ROLL
+        // target reference time_diff height: the parent's ticks from the anchor's.
+        OP_1SUB OP_DUP <{{SWITCH_HEIGHT}}> OP_MIN
+        OP_TUCK OP_SUB <{{SWITCH_INTERVAL}}> OP_MUL
+        OP_OVER <{{ANCHOR_HEIGHT}}> OP_SUB <{{ANCHOR_INTERVAL}}> OP_MUL OP_ADD
         OP_DUP OP_0 OP_GREATERTHANOREQUAL OP_VERIFY
-        OP_SWAP <0x00> OP_CAT OP_BIN2NUM <{{ANCHOR_PARENT_TIME}}> OP_SUB
-        <{{ANCHOR_TARGET}}> OP_SWAP OP_ROT <{{HALF_LIFE}}>
+        OP_SWAP <{{SWITCH_HEIGHT}}> OP_NUMEQUAL
+        OP_IF <{{SWITCH_INTERVAL}}> OP_ELSE <{{ANCHOR_INTERVAL}}> OP_ENDIF
+        <{{HALF_LIFE}}> <{{ANCHOR_INTERVAL}}> OP_ROT
         <6> OP_INVOKE
         OP_2DUP <{{HARD_DIVISOR}}> OP_DIV OP_GREATERTHANOREQUAL
         OP_ROT <{{EASY_DENOMINATOR}}> OP_MUL OP_ROT <{{EASY_NUMERATOR}}> OP_MUL OP_LESSTHANOREQUAL OP_BOOLAND

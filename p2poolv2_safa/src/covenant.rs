@@ -7,16 +7,35 @@
 use std::collections::BTreeMap;
 
 use libauth::{
-    BytecodeGenerationResult, CompilationData, CompilerConfiguration, create_compiler_bch,
-    create_virtual_machine_bch_2026, locking_bytecode_to_cash_address,
+    AuthenticationProgramCommon, BytecodeGenerationResult, CompilationData, CompilerConfiguration,
+    big_int_to_vm_number, create_compiler_bch, create_virtual_machine_bch_2026, encode_data_push,
+    locking_bytecode_to_cash_address,
 };
 
 use crate::{
-    CLAIM_FIXED_BYTES, MAX_THREADS, MIN_THREADS, hash256, max_token_target, pow_limit, set_compact,
+    BigInt, CLAIM_FIXED_BYTES, Input, MAX_THREADS, MIN_THREADS, Output, TransactionCommon, hash256,
+    max_token_target, pow_limit, set_compact,
 };
 
 pub const SOURCE: &str = include_str!("../safa.cash");
 const MAIN_MARKER: &str = "// == main ==";
+/// `OP_INVOKE`, which runs a function `OP_DEFINE` stored (BCH 2026).
+const OP_INVOKE: u8 = 0x8a;
+
+/// The interval, in ticks (seconds of target time), of every Bitcoin Cash
+/// block before a network's first interval switch, and of the ASERT anchor
+/// block on every network: 600 (CHIP-2025-03).
+pub const BCH_BLOCK_SPACING: u32 = 600;
+
+/// A switch of a network's block interval pinned to a block (CHIP-2025-03):
+/// every block after `height` has `interval` ticks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntervalSwitch {
+    /// The last block with the old interval.
+    pub height: u32,
+    /// The interval, in ticks, of every block after it.
+    pub interval: u32,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkParameters {
@@ -28,12 +47,32 @@ pub struct NetworkParameters {
     pub hard_divisor: u32,
     pub easy_numerator: u32,
     pub easy_denominator: u32,
+    /// The network's switch from ten-minute blocks, pinned to the block it
+    /// follows as P2Pool's header gate pins it (`TickSchedule` in
+    /// `p2poolv2_lib`). `None` until the network has switched and a release
+    /// pins the block: every block then counts 600 ticks.
+    pub interval_switch: Option<IntervalSwitch>,
     pub cash_address_prefix: &'static str,
+}
+
+impl NetworkParameters {
+    /// The switch the covenant is compiled with. Without a pinned switch it
+    /// is the anchor block with an interval of 600, which counts every block
+    /// as ten minutes.
+    pub fn switch_constants(&self) -> IntervalSwitch {
+        self.interval_switch.unwrap_or(IntervalSwitch {
+            height: self.anchor_height,
+            interval: BCH_BLOCK_SPACING,
+        })
+    }
 }
 
 /// Per-network parameters fixed in the covenant's source template.
 pub fn network_parameters(network: &str) -> Result<NetworkParameters, String> {
     match network {
+        // One-minute blocks from median time past 1,810,382,400 (2027-05-15
+        // 12:00 UTC). The block that reaches it is not known yet, so it is
+        // not pinned.
         "mainnet" => Ok(NetworkParameters {
             anchor_height: 661_647,
             anchor_bits: 0x1804dafe,
@@ -43,8 +82,11 @@ pub fn network_parameters(network: &str) -> Result<NetworkParameters, String> {
             hard_divisor: 2,
             easy_numerator: 105,
             easy_denominator: 100,
+            interval_switch: None,
             cash_address_prefix: "bitcoincash",
         }),
+        // One-minute blocks after block 332,450, whose median time past was
+        // the first at or after 1,794,744,000 (2026-11-15 12:00 UTC).
         "chipnet" => Ok(NetworkParameters {
             anchor_height: 16_844,
             anchor_bits: 0x1d00ffff,
@@ -54,6 +96,10 @@ pub fn network_parameters(network: &str) -> Result<NetworkParameters, String> {
             hard_divisor: 8,
             easy_numerator: 8,
             easy_denominator: 1,
+            interval_switch: Some(IntervalSwitch {
+                height: 332_450,
+                interval: 60,
+            }),
             cash_address_prefix: "bchtest",
         }),
         _ => Err(format!("unknown network {network}: mainnet or chipnet")),
@@ -97,8 +143,17 @@ fn substitute(text: &str, values: &[(&str, String)]) -> Result<String, String> {
     Ok(replaced)
 }
 
-fn library_source(network: &str) -> Result<String, String> {
-    let parameters = network_parameters(network)?;
+fn library_source(parameters: &NetworkParameters) -> Result<String, String> {
+    let switch = parameters.switch_constants();
+    // CHIP-2025-03 allows intervals from 1 to 600 ticks that divide 600, so
+    // the anchor block's 600 is a whole multiple of every block's interval.
+    // 600 is no multiple of 0.
+    if !BCH_BLOCK_SPACING.is_multiple_of(switch.interval) {
+        return Err(format!(
+            "block interval {} does not divide {BCH_BLOCK_SPACING}",
+            switch.interval
+        ));
+    }
     let (library, _) = SOURCE
         .split_once(MAIN_MARKER)
         .ok_or("safa.cash has no main marker")?;
@@ -122,6 +177,9 @@ fn library_source(network: &str) -> Result<String, String> {
                     .to_string(),
             ),
             ("HALF_LIFE", parameters.half_life.to_string()),
+            ("ANCHOR_INTERVAL", BCH_BLOCK_SPACING.to_string()),
+            ("SWITCH_HEIGHT", switch.height.to_string()),
+            ("SWITCH_INTERVAL", switch.interval.to_string()),
             ("HARD_DIVISOR", parameters.hard_divisor.to_string()),
             ("EASY_NUMERATOR", parameters.easy_numerator.to_string()),
             ("EASY_DENOMINATOR", parameters.easy_denominator.to_string()),
@@ -131,7 +189,63 @@ fn library_source(network: &str) -> Result<String, String> {
 
 /// Compile the covenant's reusable functions followed by a CashASM body.
 pub fn compile_library(network: &str, body: &str) -> Result<Vec<u8>, String> {
-    compile_cash_asm(&format!("{}\n{body}", library_source(network)?))
+    compile_library_for(&network_parameters(network)?, body)
+}
+
+/// [`compile_library`] for `parameters`, such as a network's with another
+/// pinned switch.
+pub fn compile_library_for(parameters: &NetworkParameters, body: &str) -> Result<Vec<u8>, String> {
+    compile_cash_asm(&format!("{}\n{body}", library_source(parameters)?))
+}
+
+/// Run one of the covenant's functions alone in the BCH 2026 VM: the
+/// `library` ([`compile_library`] with an empty body), then `arguments`
+/// pushed in order and function `identifier` invoked. Returns the stack the
+/// function leaves, or the VM's error when it fails.
+pub fn evaluate_function(
+    library: &[u8],
+    identifier: u64,
+    arguments: &[Vec<u8>],
+) -> Result<Vec<Vec<u8>>, String> {
+    let mut script = library.to_vec();
+    for argument in arguments {
+        script.extend(encode_data_push(argument));
+    }
+    script.extend(encode_data_push(&big_int_to_vm_number(&BigInt::from_u64(
+        identifier,
+    ))));
+    script.push(OP_INVOKE);
+    let state = create_virtual_machine_bch_2026(Some(false)).evaluate(
+        &AuthenticationProgramCommon {
+            input_index: 0,
+            transaction: TransactionCommon {
+                version: 2,
+                locktime: 0,
+                inputs: vec![Input {
+                    outpoint_transaction_hash: vec![0; 32],
+                    outpoint_index: 0,
+                    sequence_number: 0,
+                    unlocking_bytecode: Vec::new(),
+                }],
+                outputs: vec![Output {
+                    locking_bytecode: [&[0x6a][..], &[0; 29]].concat(),
+                    value_satoshis: 0,
+                    token: None,
+                }],
+            },
+            source_outputs: vec![Output {
+                locking_bytecode: script,
+                value_satoshis: 0,
+                token: None,
+            }],
+        },
+        None,
+    );
+    match state.error {
+        // A function may leave several items; only a whole spend must leave one.
+        Some(error) if !error.contains("unexpected number of items on the stack") => Err(error),
+        _ => Ok(state.stack),
+    }
 }
 
 fn push_prefix_length(length: usize) -> usize {
@@ -145,7 +259,7 @@ fn push_prefix_length(length: usize) -> usize {
 
 /// Compile a deployment, iterating until its size-dependent fee constant settles.
 pub fn create_covenant(network: &str, threads: u32, virtual_sats: u64) -> Result<Covenant, String> {
-    let library = library_source(network)?;
+    let library = library_source(&network_parameters(network)?)?;
     if !(MIN_THREADS..=MAX_THREADS).contains(&threads) {
         return Err(format!(
             "threads must be an integer from {MIN_THREADS} to {MAX_THREADS}"
@@ -169,26 +283,49 @@ pub fn create_covenant(network: &str, threads: u32, virtual_sats: u64) -> Result
             ],
         )?;
         let redeem_script = compile_cash_asm(&format!("{library}\n{main}"))?;
-        let next =
-            CLAIM_FIXED_BYTES + push_prefix_length(redeem_script.len()) + redeem_script.len();
+        let next = fee_constant(&redeem_script);
         if next == fee_k {
-            let mut locking_bytecode = Vec::with_capacity(35);
-            locking_bytecode.extend_from_slice(&[0xaa, 0x20]);
-            locking_bytecode.extend_from_slice(&hash256(&redeem_script));
-            locking_bytecode.push(0x87);
-            return Ok(Covenant {
-                network: network.into(),
+            return Ok(covenant_from_redeem_script(
+                network,
                 threads,
                 virtual_sats,
-                fee_k,
                 redeem_script,
-                lock_hash: hash256(&locking_bytecode),
-                locking_bytecode,
-            });
+            ));
         }
         fee_k = next;
     }
     Err("the fee constant did not converge".into())
+}
+
+/// The fee constant K a redeem script was compiled with: the claim's fixed
+/// bytes, the script and its push.
+fn fee_constant(redeem_script: &[u8]) -> usize {
+    CLAIM_FIXED_BYTES + push_prefix_length(redeem_script.len()) + redeem_script.len()
+}
+
+/// The covenant of a deployment from its redeem script, as
+/// [`create_covenant`] compiled it for these parameters. Vaults on chain stay
+/// locked to the script they were created with, whatever `safa.cash` says
+/// later, so a recorded deployment is read back this way.
+pub fn covenant_from_redeem_script(
+    network: &str,
+    threads: u32,
+    virtual_sats: u64,
+    redeem_script: Vec<u8>,
+) -> Covenant {
+    let mut locking_bytecode = Vec::with_capacity(35);
+    locking_bytecode.extend_from_slice(&[0xaa, 0x20]);
+    locking_bytecode.extend_from_slice(&hash256(&redeem_script));
+    locking_bytecode.push(0x87);
+    Covenant {
+        network: network.into(),
+        threads,
+        virtual_sats,
+        fee_k: fee_constant(&redeem_script),
+        redeem_script,
+        lock_hash: hash256(&locking_bytecode),
+        locking_bytecode,
+    }
 }
 
 /// Encode the token-aware P2SH32 vault address for this deployment.
