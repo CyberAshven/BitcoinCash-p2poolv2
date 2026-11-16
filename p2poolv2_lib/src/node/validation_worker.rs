@@ -7,8 +7,11 @@
 //! Receives `ValidationEvent` values containing blockhash to validate. It reads the
 //! corresponding share block from the chain store, validates them using
 //! `shares::validation::validate_share_block`, and on success emits
-//! `OrganiseEvent::Block` and `SwarmSend::BroadcastBlock` events. Runs in a dedicated
-//! tokio task, decoupled from the P2P message handler hot path.
+//! `OrganiseEvent::Block` and, for a share this node mined,
+//! `SwarmSend::BroadcastBlock` events. A share from a peer was relayed by the
+//! block receiver once its header checked out, before it reached this worker.
+//! Runs in a dedicated tokio task, decoupled from the P2P message handler hot
+//! path.
 //!
 //! A share is checked once at a time. Peers relay a share to every peer, and
 //! a share stored but not yet confirmed is sent here again on each delivery
@@ -26,6 +29,7 @@ use crate::config::{BitcoinCashNetwork, Chain};
 use crate::node::SwarmSend;
 use crate::node::messages::Message;
 use crate::node::organise_worker::{OrganiseEvent, OrganiseSender};
+use crate::node::p2p_message_handlers::senders::share_block::queue_share_block_broadcast;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::pool_difficulty::PoolDifficulty;
@@ -222,8 +226,8 @@ impl Drop for FinishedNotice {
 ///
 /// Receives `ValidationEvent` values containing block hashes, reads
 /// the share block from the chain store, validates it, and on success
-/// emits `OrganiseEvent::Block` for confirmed promotion and
-/// `SwarmSend::BroadcastBlock` for block relay to peers.
+/// emits `OrganiseEvent::Block` for confirmed promotion and, for a share
+/// this node mined, `SwarmSend::BroadcastBlock` for block relay to peers.
 ///
 /// After successful validation, the organise worker handles PPLNS
 /// updates and dependent scheduling.
@@ -400,9 +404,11 @@ impl ValidationWorker {
 /// reads the block from the chain store by hash.
 ///
 /// Sends `OrganiseEvent::Block` for chain promotion. Locally mined
-/// blocks (prefetched) are always broadcast to peers. Blocks received
-/// from peers are only broadcast when the chain is current,
-/// suppressing relay of historic blocks during initial sync or catchup.
+/// blocks (prefetched) are always broadcast to peers, once validated.
+/// Blocks received from peers are not: the block receiver relayed each
+/// one when its header checked out, before its body reached this
+/// validation, and only while the chain was current, suppressing relay of
+/// historic blocks during initial sync or catchup.
 ///
 /// Duplicate validation of already-confirmed blocks is handled by
 /// `validate_share_block` which returns Ok immediately for blocks
@@ -505,24 +511,15 @@ async fn validate_and_emit(
     // Always broadcast locally mined blocks. For blocks received from
     // peers, only broadcast when the chain is current to avoid relaying
     // historic blocks during initial sync or catchup.
-    if locally_mined || chain_store_handle.is_current() {
-        #[cfg(not(feature = "sim"))]
-        {
-            let bch_headers =
-                chain_store_handle.carried_bch_headers(std::slice::from_ref(&share_block.header));
-            if let Err(send_error) = swarm_tx
-                .send(SwarmSend::BroadcastBlock(share_block, bch_headers))
-                .await
-            {
-                error!("Failed to send broadcast for validated block {block_hash}: {send_error}");
-            }
-        }
-        #[cfg(feature = "sim")]
-        {
-            crate::sim_overrides::spawn_delayed_broadcast(swarm_tx, share_block);
-        }
+    // A block received from a peer was relayed by the BlockReceiver when its
+    // header checked out, before this validation and only while the chain
+    // was current (`BlockReceiver::should_relay`), so it is not sent again.
+    if locally_mined {
+        queue_share_block_broadcast(share_block, &chain_store_handle, &swarm_tx).await;
     } else {
-        debug!("Skipping broadcast for {block_hash} - chain not current");
+        debug!(
+            "Not broadcasting {block_hash} from a peer: relaying it was decided at its header check"
+        );
     }
     CheckOutcome::Settled
 }
@@ -617,8 +614,11 @@ mod tests {
         worker_handle.abort();
     }
 
+    /// A block from a peer was relayed by the block receiver once its header
+    /// checked out, before its body reached this worker, so its successful
+    /// validation does not broadcast it again, even with the chain current.
     #[tokio::test]
-    async fn test_validation_worker_sends_broadcast_on_success() {
+    async fn test_validation_worker_does_not_broadcast_a_peer_block_again() {
         let (validation_tx, validation_rx) = create_validation_channel();
         let mut mock_chain_handle = MockChainStoreHandle::new();
         mock_chain_handle
@@ -648,7 +648,7 @@ mod tests {
             .expect_clone()
             .return_once(move || mock_clone);
 
-        let (organise_tx, _organise_rx) = organise_worker::create_organise_channel();
+        let (organise_tx, mut organise_rx) = organise_worker::create_organise_channel();
         let (swarm_tx, mut swarm_rx) = mpsc::channel(32);
 
         let worker = ValidationWorker::new(
@@ -666,14 +666,25 @@ mod tests {
             .await
             .unwrap();
 
-        let swarm_event = tokio::time::timeout(Duration::from_secs(2), swarm_rx.recv()).await;
-        if let Ok(Some(SwarmSend::BroadcastBlock(broadcast_block, _))) = swarm_event {
-            assert_eq!(broadcast_block.block_hash(), block_hash);
+        let organise_event = tokio::time::timeout(Duration::from_secs(2), organise_rx.recv()).await;
+        if let Ok(Some(OrganiseEvent::Block {
+            share_block: received_block,
+            ..
+        })) = organise_event
+        {
+            assert_eq!(received_block.block_hash(), block_hash);
         } else {
-            panic!("Expected SwarmSend::BroadcastBlock after successful validation");
+            panic!("Expected OrganiseEvent::Block after successful validation");
         }
 
+        // With the worker stopped and its validation task done, every sender
+        // is gone: recv() gives a broadcast if one was sent, None if not.
         worker_handle.abort();
+        let _ = worker_handle.await;
+        assert!(
+            swarm_rx.recv().await.is_none(),
+            "a peer block is relayed once, at its header check"
+        );
     }
 
     #[tokio::test]
