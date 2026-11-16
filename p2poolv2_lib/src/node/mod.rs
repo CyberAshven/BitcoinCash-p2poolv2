@@ -99,8 +99,9 @@ pub enum SwarmSend<C> {
     /// Broadcast a full ShareBlock to connected peers, filtering by
     /// peer_block_knowledge. The actor records each recipient so that
     /// subsequent broadcasts of the same block are suppressed.
-    /// A validated share block to relay, with the Bitcoin Cash headers it
-    /// carries.
+    /// A share block to relay, with the Bitcoin Cash headers it carries: one
+    /// this node mined, once validated, or one a peer sent, once its header
+    /// checked out and before its body is validated.
     BroadcastBlock(ShareBlock, Vec<bitcoin::block::Header>),
     Disconnect(PeerId),
     /// Dial an address once, without reconnect tracking. Used for
