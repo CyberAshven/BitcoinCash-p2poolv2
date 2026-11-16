@@ -625,8 +625,11 @@ present. Its start is held in memory; after a restart it begins at the body
 prune target, below which no body is left.
 
 **Setting.** `store.keep_whole_weak_shares = true`, for an explorer or an
-archive, keeps them whole until the body is pruned. Every node, pruned or
-not, serves every body a syncing peer asks for.
+archive, keeps them whole until the body is pruned. It keeps what it
+receives: an archive that syncs late gets the weak shares of shares more
+than one payout depth deep whole only from a peer that still holds them,
+and otherwise their leaf root and summary. Every node, pruned or not,
+serves every body a syncing peer asks for.
 
 ### Reorg Depth Limit
 
