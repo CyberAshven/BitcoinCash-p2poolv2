@@ -146,7 +146,10 @@ handler serves both peer broadcasts and `GetData` responses. Nothing else does:
 a candidate reorg never re-validates, and the block fetcher will not re-request
 the body since `share_block_exists` is true. The retry is therefore
 opportunistic -- it depends on a peer sending the block again, which this node
-does not solicit.
+does not solicit. A delivery that arrives while the block is still being
+checked starts no second check; the validation worker notes it and, when the
+check ends without a verdict, queues the block once more, as the delivery
+would have.
 
 The BlockReceiver's ancestry gate (below) makes the common causes unreachable,
 but not all of them: `collect_recent_ancestry` walks `MAX_UNCLES_DEPTH` of
@@ -327,7 +330,10 @@ witness root bound, it follows from the header. See
 - Matches on event type:
   - `Block(share_block)`: gated on its parent's validation state before any
     chain-context validation runs (see "Parent-gated block processing" under
-    Organisation Logic)
+    Organisation Logic). A block already `BlockValid`, delivered again or
+    drained again from the buffer, goes to promotion without its checks
+    running again, as `validate_share_block` already skips it in the
+    validation worker
   - `InvalidBlock(blockhash)`: marks the block `Invalid` and advances the
     confirmed chain; no validation or promotion runs for it
 - Error handling reacts to the validation failure kind (`FailureKind`):
@@ -571,6 +577,15 @@ Within a single `WriteBatch`, reads from the DB return pre-batch (committed) sta
 - Receives `ValidationEvent::ValidateBlockHash(BlockHash)` (peer blocks) or
   `ValidationEvent::ValidateShareBlock(ShareBlock)` (locally mined, already in
   hand) via bounded mpsc channel (capacity 8192)
+- Checks each block once at a time (`CheckQueue`): a block is queued once, in
+  the order it first arrived, in a queue bounded like the channel (a full
+  queue stops the worker receiving, so the channel fills and its senders wait
+  as before). A delivery of a block already queued keeps its place; a
+  delivery of one being checked is only noted, and queues it once more if
+  that check ends `Recoverable`, on a store failure or without reading the
+  block. A delivery after the check ended is checked again. Peers relay a
+  share to every peer, so a node used to check the same share once per
+  delivery that arrived before it was confirmed
 - Spawns capped concurrent validation tasks (semaphore sized to available CPUs)
 - Each task:
   1. Reads the share block from the chain store, unless the event carried it
@@ -598,8 +613,9 @@ is not yet `BlockValid` in `pending_blocks`, draining them by height as
 confirmation advances.
 
 There is no cascade back through the validation channel: a block that reaches
-the validation worker and fails is not re-enqueued by anything (see "Retrying a
-block that failed without a verdict").
+the validation worker and fails is not re-enqueued by anything but a delivery
+of it (see "Retrying a block that failed without a verdict"), counting one
+that arrived while it was being checked.
 
 ### PPLNS zone tiering
 
