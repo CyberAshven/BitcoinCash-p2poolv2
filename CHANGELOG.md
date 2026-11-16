@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Both Umbrel apps run Prometheus and Grafana beside the node, as upstream's
+Umbrel app does (`dbf8ae48`), on the repository's Bitcoin Cash dashboards.
+Grafana is on port 3342 (`bch-p2pool`) or 3343 (the external node app),
+open to view, with the admin password the app's Umbrel password. Both
+images are pinned by version and digest; a test keeps each app's copy of the
+dashboards equal to `prometheus/grafana`.
+
 The Umbrel apps' dashboards move from ports 46890 and 46891 to 36890 and
 36891. umbrelOS 2.0 keeps host ports 40000 to 49999 for Umbrel Machines'
 port forwards, and upstream's Umbrel app left 46884 for 36884 for the same
