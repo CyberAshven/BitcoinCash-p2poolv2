@@ -42,8 +42,9 @@ out the same on any machine. With one-minute blocks a simulated month holds
 ten times the blocks it did, and a tracked miner paid in every block keeps
 every payment for its median, so one scenario can hold a few hundred
 megabytes: the whole default run, 1,000 simulated months per scenario, took
-RUNTIME on the 32-thread machine it was run on (27 seconds with ten-minute
-blocks), and needs several gigabytes of memory.
+about 10 minutes on the 32-thread machine it was run on, one table at a
+time (27 seconds with ten-minute blocks), and needs several gigabytes of
+memory.
 
 Since 2026-11-15 the model runs on one-minute Bitcoin Cash blocks
 (CHIP-2025-03): a block every minute, paying a tenth of a ten-minute
@@ -51,8 +52,11 @@ block. A month's reward and a miner's fair income are unchanged; the window
 is a tenth as long, the pool finds ten times the blocks, and the node
 default aims a heavy miner at ten times the shares a month. The tables and
 the prose under "What the tables show", "What the study tables show",
-"Scale" and "Scale levers" are from that model; the ten-minute tables are
-in this file at commit 05de7fa5. Since 2026-11-12 the model runs with study
+"Scale", "Scale levers", "Proposal: weak shares that follow the asks" and
+"Window cap and storage" are from that model; the ten-minute tables are in
+this file at commit 2972cfd2. The study of the weak ratio's path with the
+asks (`weak-asks-genesis` to `weak-asks-rule-attacks`), its tables and its
+prose are still the ten-minute runs. Since 2026-11-12 the model runs with study
 #85's constants, which became the share-chain rules that day: `WEAK_DEPTH`
 48, `INCLUDER_CUT` 1% and `R_MAX` 256. "Recommended constants" keeps the
 first study's reasoning, from ten-minute blocks and the first constants
@@ -773,34 +777,49 @@ with `WEAK_FILL` 320, `WEAK_CAP` 640 and `R_MAX` 2,560.
 
 ### What the tables show
 
+These are the one-minute block runs. The asks count weak shares a month,
+not blocks, so the counts where they settle are those of the ten-minute
+runs within a few shares, and every conclusion below holds as it did. Two
+things moved. At today's hashrate in a pool at 10%, a Bitaxe finds 29 weak
+shares a month by today's rules and 39 with the asks, not 39 and 52: the
+node default no longer gives the farms of a pool at 10% heavier shares, so
+the weak shares are split over all of the pool's hashrate ("Scale"). And
+the Zipf mix, whose largest miners now mine at the minimum too, settles a
+little higher with the asks. The months without a payment move by under a
+point.
+
 1. **The count follows the need.** At today's hashrate a pool at 10% of
    Bitcoin Cash stays at the floor and one at 30% opens to 57 weak shares a
    share, where a Bitaxe finds 16 a month. At ten times today's hashrate a
    pool at 10% settles at 189 and one at 30% at the ceiling, 344.
 2. **It pays as `WEAK_FILL` 320 does where the ceiling is reached, and
    relays less where it is not.** At ten times today's hashrate in a pool at
-   10%, a Bitaxe has 1.4% of its months empty at 15 KB/s of relay; with
-   `WEAK_FILL` 320 it has 1.3% at 28 KB/s; by today's rules, 9.3% at 2.9
-   KB/s. At today's hashrate the asks relay 3.8 to 4.7 KB/s against 28.
+   10%, a Bitaxe has 1.6% of its months empty at 15 KB/s of relay; with
+   `WEAK_FILL` 320 it has 1.3% at 28 KB/s; by today's rules, 10% at 2.9
+   KB/s (1.4%, 1.3% and 9.3% with ten-minute blocks). At today's hashrate
+   the asks relay 3.8 to 4.7 KB/s against 28.
 3. **Without asks the mean is 46 weak shares a share, not 34.5.** The step
    holds the median at `WEAK_FILL`; with a cap of 640 a share found after a
    long wait carries every weak share found on its parent.
 4. **Every mix opens.** At ten times today's hashrate the count settles at
-   115 to 345 a share in the home, 50% and 90% industrial, Zipf and medium
-   mixes. In the 99% industrial mix the home miners are 1% of the hashrate
-   at the minimum, under one in 64, and open it to 82.
+   141 to 345 a share in the home, 50% and 90% industrial, Zipf and medium
+   mixes (115 to 345 with ten-minute blocks). In the 99% industrial mix the
+   home miners are 1% of the hashrate at the minimum, under one in 64, and
+   open it to 82.
 5. **The divisor matters only in a spread of sizes.** With half the
    hashrate on home miners of one size, 16, 64 and 256 give the same count.
-   In the Zipf mix they give 220, 299 and 312 a share.
+   In the Zipf mix they give 209, 309 and 316 a share (220, 299 and 312
+   with ten-minute blocks).
 6. **The node default sets where the count stops.** Asking below 4 weak
    shares a month leaves 142 a share (50% industrial) and a Bitaxe with 6.3%
-   of its months empty; below 16, the ceiling and 2.7%; below 64, the same.
+   of its months empty; below 16, the ceiling and 2.8%; below 64, the same.
 7. **The ceiling sets what the smallest miners get.** `WEAK_FILL_MAX` 64,
    160 and 320 leave a Bitaxe in a pool at 30% of ten times today's Bitcoin
-   Cash with 17.5%, 5.2% and 2.7% of its months empty.
+   Cash with 17.3%, 4.6% and 2.8% of its months empty (17.5%, 5.2% and 2.7%
+   with ten-minute blocks).
 8. **Attacks reach the ceiling or the floor, no further.** In a pool that
    needs no more, 1% of the hashrate at the minimum asking whatever it finds
-   raises the count from 46 to 82 a share, 2% to 221 and 5% to 316. In a
+   raises the count from 46 to 82 a share, 2% to 222 and 5% to 315. In a
    pool that needs more, it takes 97% of that hashrate never asking to bring
    the count from 344 to 143, and 99% to bring it to 57. Nodes that carry no
    asking weak share lower it with their part of the shares: 250, 168, 107
@@ -978,46 +997,59 @@ with the cap at 14, 30 and 60 days. `cargo payout-sim --scenario storage`
 is arithmetic, no simulation: what a node keeps, by payees in the window,
 payout level and cap. Both tables are at the end of this file.
 
+These are the one-minute block runs. A one-minute block finds ten times as
+often and pays a tenth of the reward, so both tables moved from the
+ten-minute ones (in this file at commit 2972cfd2), and so did two of their
+conclusions: the cap now binds only in the smallest pool of the table, and
+no payout level fills a coinbase from the reward alone.
+
 What the window cap table shows:
 
-1. **The cap binds only in pools under about 0.15% of Bitcoin Cash**, 5.5
-   PH/s today, which find fewer than three blocks in 14 days. From 0.2% up
-   the window holds three blocks well inside 14 days (10.4 days at 0.2%,
-   2.1 at 1%), and every cap gives the same row.
+1. **The cap binds only in pools under about 0.015% of Bitcoin Cash**, 0.55
+   PH/s today, which find fewer than three blocks in 14 days (under 0.15%,
+   5.5 PH/s, with ten-minute blocks). From 0.02% up the window holds three
+   blocks inside 14 days (10.4 days at 0.02%, 0.2 at 1%), and every cap
+   gives the same row. Of the table's pools, only the one at 0.01% reaches
+   the cap.
 2. **A longer cap does not help a miner that keeps mining.** In a pool at
-   0.01% (370 TH/s, a block about every 70 days) the Bitaxe has 63%, 66%
-   and 65% of its months without a payment at 14, 30 and 60 days; at 0.02%
-   40%, 39% and 42%; at 0.05% 11%, 10% and 11%. Each block pays a steady
-   miner its part of the window's work, whatever the window's length, so
-   its income follows the blocks the pool finds. Pay stays fair in every row
-   (0.99 to 1.08).
-3. **What it changes is the single share.** At 0.05% a share is paid by 1.0
-   block on average with 14 days and 2.2 with 30, so 36% of shares against
-   12% are paid by none. That matters to a miner that mines a few days and
-   leaves, and its expected pay is fair either way.
+   0.01% (370 TH/s, a block about every 7 days) the Bitaxe has 0.9% of its
+   months without a payment at 14, 30 and 60 days alike, and none in the
+   larger pools (with ten-minute blocks, 63%, 66% and 65% at 0.01%). Each
+   block pays a steady miner its part of the window's work, whatever the
+   window's length, so its income follows the blocks the pool finds. Pay
+   stays fair in every row (0.99 to 1.03).
+3. **What it changes is the single share.** At 0.01% a share is paid by 2.0
+   blocks on average with 14 days and 3.0 with 30, so 13% of shares against
+   5% are paid by none (at 0.05% with ten-minute blocks, 36% against 12%).
+   That matters to a miner that mines a few days and leaves, and its
+   expected pay is fair either way.
 4. **It costs every node.** The cap sets the payout depth, and with it the
    reorg limit, the expiry of share chain outputs and the bodies a node
    keeps: 60 days of them instead of 28 with a 30-day cap. A miner that
    stops is paid for up to 30 days.
 
-So the 14-day cap stays.
+So the 14-day cap stays, with less reason to question it than with
+ten-minute blocks.
 
 What the storage table shows:
 
 1. **The payout level, not the payees, bounds a coinbase.** Below its level
    a payee's part is drawn in whole levels, so a block pays at most the
-   reward over the level: 17,885 outputs at the default level 5 (608 KB),
-   with 100,000 payees or 1,000,000. Only at level 1 (1,092 satoshis) does
-   a block with 100,000 or more payees fill Bitcoin Cash's 1,000,000-byte
-   transaction limit and pay the rest through its payout tree: 70,600 tree
-   payees (3.2 MB kept for ever) with 100,000 payees, 256,772 (11.6 MB) with
-   1,000,000. A pool at 30% of Bitcoin Cash finds about 1,300 blocks a
-   month, so with a million payees all at level 1 it would keep about 15 GB
-   of trees a month.
+   reward over the level: 1,788 outputs at the default level 5 (61 KB),
+   with 10,000 payees, 100,000 or 1,000,000 (17,885 outputs, 608 KB, with
+   ten-minute blocks). Even at level 1 (1,092 satoshis) a block pays at
+   most 28,617 outputs, 973 KB, inside Bitcoin Cash's 1,000,000-byte
+   transaction limit, so the reward alone never reaches the payout tree.
+   With ten-minute blocks it did at level 1 with 100,000 or more payees:
+   70,600 tree payees with 100,000 payees and 256,772 with 1,000,000. Fees
+   can still: at level 1 a block holds about 0.0086 BCH of fees before its
+   coinbase is full, and the rest of its payees go to the tree.
 2. **The coinbase is most of what a node keeps:** 8.3 GB for 28 days with
-   1,000 payees, 82.5 GB with 10,000, 148 GB at the default level's ceiling
-   and 242 GB when every coinbase is a full 1 MB. A 30-day cap doubles each.
-   Never pruned, they would grow by 108 GB to 3.2 TB a year.
+   1,000 payees; 14.8 GB at the default level's ceiling, reached from about
+   1,800 payees; 82.5 GB with 10,000 payees at level 1, and 236 GB at level
+   1's ceiling (82.5 GB with 10,000 payees, 148 GB at the default level's
+   ceiling and 242 GB at the full 1 MB with ten-minute blocks). A 30-day cap
+   doubles each. Never pruned, they would grow by 108 GB to 3.1 TB a year.
 3. **Stored without its payouts it takes 367 bytes,** 0.09 GB for 28 days.
    Every node can rebuild the payouts from the chain, as it already does to
    check a share.
@@ -1026,11 +1058,12 @@ What the storage table shows:
    they allow because they hold no share chain outputs, 3.1 and 31 GB.
 5. **Headers, kept for ever, take 3.15 GB a year.**
 
-With coinbases stored without their payouts and weak shares kept for one
-payout depth, a node at part 6's ceiling with a million payees keeps about
-31 GB and 3 GB more a year, against 62 GB of weak shares and 148 to 242 GB
-of coinbases now. Fees are left out: at level 5 each 1 BCH of fees adds
-about 5,700 outputs.
+The last three do not depend on the block interval: they count shares,
+whose period stays 10 seconds. With coinbases stored without their payouts
+and weak shares kept for one payout depth, a node at part 6's ceiling with
+a million payees keeps about 31 GB and 3 GB more a year, against 62 GB of
+weak shares and 15 to 236 GB of coinbases now. Fees are left out: at level
+5 each 1 BCH of fees adds about 5,700 outputs.
 
 ## Code
 
@@ -1995,27 +2028,27 @@ difficulty, to push the cap up.
 
 | Pool | PH/s | Blocks a month | Cap | Window | Blocks a share is paid by | Shares paid by no block | Paid after stopping, at most | Bitaxe level | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC level | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 0.01% | 0.370 | 0.432 | 14 days | 14.0 days | 0.20 | 81.74% | 14.0 days | 1 | 0.451 | 63.00% | 1.46 | 1.04 | 1 | 0.451 | 63.00% | 1.46 | 1.04 |
-| 0.01% | 0.370 | 0.432 | 30 days | 30.0 days | 0.43 | 64.92% | 30.0 days | 1 | 0.427 | 66.30% | 1.59 | 0.99 | 1 | 0.427 | 66.30% | 1.59 | 0.99 |
-| 0.01% | 0.370 | 0.432 | 60 days | 60.0 days | 0.86 | 42.15% | 60.0 days | 1 | 0.440 | 64.80% | 1.53 | 1.02 | 1 | 0.440 | 64.80% | 1.53 | 1.02 |
-| 0.02% | 0.740 | 0.864 | 14 days | 14.0 days | 0.40 | 66.82% | 14.0 days | 1 | 0.935 | 39.60% | 1.02 | 1.08 | 1 | 0.935 | 39.60% | 1.02 | 1.08 |
-| 0.02% | 0.740 | 0.864 | 30 days | 30.0 days | 0.86 | 42.15% | 30.0 days | 1 | 0.901 | 38.80% | 0.99 | 1.04 | 1 | 0.901 | 38.80% | 0.99 | 1.04 |
-| 0.02% | 0.740 | 0.864 | 60 days | 60.0 days | 1.73 | 17.76% | 60.0 days | 1 | 0.861 | 41.60% | 1.05 | 1.00 | 1 | 0.861 | 41.60% | 1.05 | 1.00 |
-| 0.05% | 1.85 | 2.16 | 14 days | 14.0 days | 1.01 | 36.49% | 14.0 days | 1 | 2.19 | 11.20% | 0.68 | 1.02 | 1 | 2.19 | 11.20% | 0.68 | 1.01 |
-| 0.05% | 1.85 | 2.16 | 30 days | 30.0 days | 2.16 | 11.53% | 30.0 days | 1 | 2.20 | 10.00% | 0.66 | 1.02 | 1 | 2.20 | 10.00% | 0.66 | 1.02 |
-| 0.05% | 1.85 | 2.16 | 60 days | 41.7 days | 3.00 | 4.98% | 41.7 days | 1 | 2.17 | 11.10% | 0.67 | 1.00 | 1 | 2.17 | 11.10% | 0.68 | 1.00 |
-| 0.10% | 3.70 | 4.32 | 14 days | 14.0 days | 2.02 | 13.32% | 14.0 days | 5 | 4.36 | 0.80% | 0.48 | 1.02 | 5 | 4.36 | 0.80% | 0.48 | 1.01 |
-| 0.10% | 3.70 | 4.32 | 30 days | 20.8 days | 3.00 | 4.98% | 20.8 days | 5 | 4.35 | 0.90% | 0.48 | 1.01 | 5 | 4.35 | 0.90% | 0.47 | 1.01 |
-| 0.10% | 3.70 | 4.32 | 60 days | 20.8 days | 3.00 | 4.98% | 20.8 days | 5 | 4.35 | 0.90% | 0.48 | 1.01 | 5 | 4.35 | 0.90% | 0.47 | 1.01 |
-| 0.20% | 7.40 | 8.64 | 14 days | 10.4 days | 3.00 | 4.98% | 10.4 days | 5 | 8.62 | 0.00% | 0.34 | 1.01 | 5 | 8.62 | 0.00% | 0.34 | 1.00 |
-| 0.20% | 7.40 | 8.64 | 30 days | 10.4 days | 3.00 | 4.98% | 10.4 days | 5 | 8.62 | 0.00% | 0.34 | 1.01 | 5 | 8.62 | 0.00% | 0.34 | 1.00 |
-| 0.20% | 7.40 | 8.64 | 60 days | 10.4 days | 3.00 | 4.98% | 10.4 days | 5 | 8.62 | 0.00% | 0.34 | 1.01 | 5 | 8.62 | 0.00% | 0.34 | 1.00 |
-| 0.50% | 18.5 | 21.6 | 14 days | 4.2 days | 3.00 | 4.98% | 4.2 days | 5 | 21.6 | 0.00% | 0.21 | 1.01 | 5 | 21.6 | 0.00% | 0.22 | 0.99 |
-| 0.50% | 18.5 | 21.6 | 30 days | 4.2 days | 3.00 | 4.98% | 4.2 days | 5 | 21.6 | 0.00% | 0.21 | 1.01 | 5 | 21.6 | 0.00% | 0.22 | 0.99 |
-| 0.50% | 18.5 | 21.6 | 60 days | 4.2 days | 3.00 | 4.98% | 4.2 days | 5 | 21.6 | 0.00% | 0.21 | 1.01 | 5 | 21.6 | 0.00% | 0.22 | 0.99 |
-| 1% | 37.0 | 43.2 | 14 days | 2.1 days | 3.00 | 4.98% | 2.1 days | 5 | 24.9 | 0.00% | 0.19 | 1.00 | 5 | 43.2 | 0.00% | 0.15 | 1.00 |
-| 1% | 37.0 | 43.2 | 30 days | 2.1 days | 3.00 | 4.98% | 2.1 days | 5 | 24.9 | 0.00% | 0.19 | 1.00 | 5 | 43.2 | 0.00% | 0.15 | 1.00 |
-| 1% | 37.0 | 43.2 | 60 days | 2.1 days | 3.00 | 4.98% | 2.1 days | 5 | 24.9 | 0.00% | 0.19 | 1.00 | 5 | 43.2 | 0.00% | 0.15 | 1.00 |
+| 0.01% | 0.370 | 4.32 | 14 days | 14.0 days | 2.02 | 13.32% | 14.0 days | 5 | 4.36 | 0.90% | 0.49 | 1.01 | 5 | 4.36 | 0.90% | 0.49 | 1.01 |
+| 0.01% | 0.370 | 4.32 | 30 days | 20.8 days | 3.00 | 4.98% | 20.8 days | 5 | 4.36 | 0.90% | 0.48 | 1.01 | 5 | 4.36 | 0.90% | 0.48 | 1.01 |
+| 0.01% | 0.370 | 4.32 | 60 days | 20.8 days | 3.00 | 4.98% | 20.8 days | 5 | 4.36 | 0.90% | 0.48 | 1.01 | 5 | 4.36 | 0.90% | 0.48 | 1.01 |
+| 0.02% | 0.740 | 8.64 | 14 days | 10.4 days | 3.00 | 4.98% | 10.4 days | 5 | 8.64 | 0.00% | 0.34 | 1.00 | 5 | 8.64 | 0.00% | 0.34 | 1.00 |
+| 0.02% | 0.740 | 8.64 | 30 days | 10.4 days | 3.00 | 4.98% | 10.4 days | 5 | 8.64 | 0.00% | 0.34 | 1.00 | 5 | 8.64 | 0.00% | 0.34 | 1.00 |
+| 0.02% | 0.740 | 8.64 | 60 days | 10.4 days | 3.00 | 4.98% | 10.4 days | 5 | 8.64 | 0.00% | 0.34 | 1.00 | 5 | 8.64 | 0.00% | 0.34 | 1.00 |
+| 0.05% | 1.85 | 21.6 | 14 days | 4.2 days | 3.00 | 4.98% | 4.2 days | 5 | 21.1 | 0.00% | 0.23 | 1.00 | 5 | 21.7 | 0.00% | 0.21 | 1.00 |
+| 0.05% | 1.85 | 21.6 | 30 days | 4.2 days | 3.00 | 4.98% | 4.2 days | 5 | 21.1 | 0.00% | 0.23 | 1.00 | 5 | 21.7 | 0.00% | 0.21 | 1.00 |
+| 0.05% | 1.85 | 21.6 | 60 days | 4.2 days | 3.00 | 4.98% | 4.2 days | 5 | 21.1 | 0.00% | 0.23 | 1.00 | 5 | 21.7 | 0.00% | 0.21 | 1.00 |
+| 0.10% | 3.70 | 43.2 | 14 days | 2.1 days | 3.00 | 4.98% | 2.1 days | 5 | 24.9 | 0.00% | 0.21 | 1.01 | 5 | 43.0 | 0.00% | 0.16 | 0.99 |
+| 0.10% | 3.70 | 43.2 | 30 days | 2.1 days | 3.00 | 4.98% | 2.1 days | 5 | 24.9 | 0.00% | 0.21 | 1.01 | 5 | 43.0 | 0.00% | 0.16 | 0.99 |
+| 0.10% | 3.70 | 43.2 | 60 days | 2.1 days | 3.00 | 4.98% | 2.1 days | 5 | 24.9 | 0.00% | 0.21 | 1.01 | 5 | 43.0 | 0.00% | 0.16 | 0.99 |
+| 0.20% | 7.40 | 86.4 | 14 days | 1.0 days | 3.00 | 4.98% | 1.1 days | 5 | 25.5 | 0.00% | 0.20 | 1.03 | 5 | 86.9 | 0.00% | 0.12 | 1.00 |
+| 0.20% | 7.40 | 86.4 | 30 days | 1.0 days | 3.00 | 4.98% | 1.1 days | 5 | 25.5 | 0.00% | 0.20 | 1.03 | 5 | 86.9 | 0.00% | 0.12 | 1.00 |
+| 0.20% | 7.40 | 86.4 | 60 days | 1.0 days | 3.00 | 4.98% | 1.1 days | 5 | 25.5 | 0.00% | 0.20 | 1.03 | 5 | 86.9 | 0.00% | 0.12 | 1.00 |
+| 0.50% | 18.5 | 216 | 14 days | 0.4 days | 3.00 | 4.98% | 0.4 days | 5 | 24.7 | 0.00% | 0.20 | 1.00 | 5 | 216 | 0.00% | 0.08 | 0.99 |
+| 0.50% | 18.5 | 216 | 30 days | 0.4 days | 3.00 | 4.98% | 0.4 days | 5 | 24.7 | 0.00% | 0.20 | 1.00 | 5 | 216 | 0.00% | 0.08 | 0.99 |
+| 0.50% | 18.5 | 216 | 60 days | 0.4 days | 3.00 | 4.98% | 0.4 days | 5 | 24.7 | 0.00% | 0.20 | 1.00 | 5 | 216 | 0.00% | 0.08 | 0.99 |
+| 1% | 37.0 | 432 | 14 days | 0.2 days | 3.00 | 4.98% | 0.2 days | 5 | 24.6 | 0.00% | 0.20 | 0.99 | 5 | 432 | 0.00% | 0.05 | 1.00 |
+| 1% | 37.0 | 432 | 30 days | 0.2 days | 3.00 | 4.98% | 0.2 days | 5 | 24.6 | 0.00% | 0.20 | 0.99 | 5 | 432 | 0.00% | 0.05 | 1.00 |
+| 1% | 37.0 | 432 | 60 days | 0.2 days | 3.00 | 4.98% | 0.2 days | 5 | 24.6 | 0.00% | 0.20 | 0.99 | 5 | 432 | 0.00% | 0.05 | 1.00 |
 
 ## Storage: what a node keeps, by payees, payout level and window cap (arithmetic, no fees)
 
@@ -2027,12 +2060,12 @@ difficulty, to push the cap up.
 | 100 | 1 (1,092 sat) | 100 | 0 | 3.77 | 0.913 | 1.95 | 11.9 | 0 |
 | 1,000 | 5 (17,472 sat) | 1,000 | 0 | 34.4 | 8.33 | 17.8 | 108 | 0 |
 | 1,000 | 1 (1,092 sat) | 1,000 | 0 | 34.4 | 8.33 | 17.8 | 108 | 0 |
-| 10,000 | 5 (17,472 sat) | 10,000 | 0 | 340 | 82.5 | 177 | 1,073 | 0 |
+| 10,000 | 5 (17,472 sat) | 1,788 | 0 | 61.2 | 14.8 | 31.7 | 193 | 0 |
 | 10,000 | 1 (1,092 sat) | 10,000 | 0 | 340 | 82.5 | 177 | 1,073 | 0 |
-| 100,000 | 5 (17,472 sat) | 17,885 | 0 | 608 | 148 | 316 | 1,919 | 0 |
-| 100,000 | 1 (1,092 sat) | 100,000 | 70,600 | 1,000 | 242 | 519 | 3,153 | 3.18 |
-| 1,000,000 | 5 (17,472 sat) | 17,885 | 0 | 608 | 148 | 316 | 1,919 | 0 |
-| 1,000,000 | 1 (1,092 sat) | 286,172 | 256,772 | 1,000 | 242 | 519 | 3,153 | 11.6 |
+| 100,000 | 5 (17,472 sat) | 1,788 | 0 | 61.2 | 14.8 | 31.7 | 193 | 0 |
+| 100,000 | 1 (1,092 sat) | 28,617 | 0 | 973 | 236 | 505 | 3,070 | 0 |
+| 1,000,000 | 5 (17,472 sat) | 1,788 | 0 | 61.2 | 14.8 | 31.7 | 193 | 0 |
+| 1,000,000 | 1 (1,092 sat) | 28,617 | 0 | 973 | 236 | 505 | 3,070 | 0 |
 
 | Stored | GB for two payout depths, 14-day cap | GB for two payout depths, 30-day cap | GB for one payout depth, 14-day cap | GB for one payout depth, 30-day cap | GB a year |
 |---|---|---|---|---|---|
@@ -2045,30 +2078,30 @@ difficulty, to push the cap up.
 
 | BCH hashrate | Pool | Rule | Weak a share | R | Asking | Weak/s | KB/s | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| x1 | 10% | today | 34.5 | 36.8 | 0.00% | 3.45 | 2.86 | 0.091 | 38.6 | 24.7 | 0.00% | 0.25 | 0.99 | 3,209 | 431 | 0.00% | 0.05 | 1.00 |
-| x1 | 10% | asks | 46.3 | 49.3 | 0.00% | 4.63 | 3.81 | 0.068 | 52.0 | 25.1 | 0.00% | 0.25 | 1.01 | 4,327 | 433 | 0.00% | 0.05 | 1.00 |
-| x1 | 10% | fill 320 | 346 | 361 | 0.00% | 34.6 | 27.8 | 9.3e-3 | 388 | 25.2 | 0.00% | 0.21 | 1.01 | 32,299 | 433 | 0.00% | 0.05 | 1.00 |
-| x1 | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 0.363 | 9.40 | 24.0 | 0.00% | 0.38 | 0.98 | 804 | 1,041 | 0.00% | 0.05 | 1.00 |
-| x1 | 30% | asks | 56.8 | 56.6 | 6.00% | 5.68 | 4.65 | 0.222 | 15.7 | 24.6 | 0.00% | 0.32 | 0.99 | 1,327 | 1,151 | 0.00% | 0.04 | 1.00 |
-| x1 | 30% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 0.037 | 96.6 | 24.7 | 0.00% | 0.22 | 0.99 | 8,053 | 1,288 | 0.00% | 0.03 | 1.00 |
-| x10 | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.73 | 9.30% | 0.76 | 0.96 | 242 | 355 | 0.00% | 0.09 | 1.00 |
-| x10 | 10% | asks | 189 | 186 | 26.62% | 18.9 | 15.3 | 0.225 | 15.7 | 4.87 | 1.40% | 0.51 | 0.98 | 1,325 | 431 | 0.00% | 0.06 | 1.00 |
-| x10 | 10% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 0.124 | 29.0 | 4.96 | 1.30% | 0.47 | 1.00 | 2,417 | 431 | 0.00% | 0.05 | 1.00 |
-| x10 | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
-| x10 | 30% | asks | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
-| x10 | 30% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 0.371 | 9.42 | 4.82 | 2.40% | 0.58 | 0.97 | 806 | 205 | 0.00% | 0.08 | 1.00 |
-| x100 | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 12.1 | 0.284 | 0.846 | 75.60% | 2.10 | 0.95 | 24.2 | 20.9 | 0.00% | 0.30 | 1.01 |
-| x100 | 10% | asks | 344 | 338 | 49.99% | 34.4 | 27.6 | 1.24 | 2.75 | 3.75 | 12.90% | 0.81 | 0.95 | 241 | 20.8 | 0.00% | 0.22 | 1.00 |
-| x100 | 10% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 1.24 | 2.76 | 3.59 | 14.30% | 0.83 | 0.91 | 242 | 20.6 | 0.00% | 0.24 | 1.00 |
-| x100 | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 36.3 | 0.089 | 0.259 | 91.20% | 3.78 | 0.87 | 7.81 | 19.7 | 0.20% | 0.43 | 0.97 |
-| x100 | 30% | asks | 344 | 338 | 50.00% | 34.4 | 27.6 | 3.72 | 0.959 | 2.86 | 40.00% | 1.23 | 0.99 | 80.5 | 20.7 | 0.00% | 0.24 | 1.00 |
-| x100 | 30% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 3.71 | 0.964 | 2.91 | 39.70% | 1.20 | 1.01 | 80.6 | 20.6 | 0.00% | 0.24 | 1.00 |
-| x270 | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 32.6 | 0.097 | 0.304 | 90.70% | 3.64 | 0.92 | 8.68 | 7.48 | 0.30% | 0.48 | 0.98 |
-| x270 | 10% | asks | 344 | 338 | 49.99% | 34.4 | 27.6 | 3.35 | 1.06 | 1.48 | 44.70% | 1.34 | 1.02 | 89.2 | 7.59 | 0.00% | 0.37 | 0.99 |
-| x270 | 10% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 3.34 | 1.06 | 1.51 | 45.30% | 1.29 | 1.04 | 89.5 | 7.61 | 0.00% | 0.38 | 0.99 |
-| x270 | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 97.9 | 0.028 | 0.091 | 97.00% | 6.42 | 0.84 | 2.83 | 7.22 | 7.20% | 0.69 | 0.95 |
-| x270 | 30% | asks | 344 | 337 | 50.00% | 34.4 | 27.6 | 10.1 | 0.351 | 1.05 | 72.00% | 2.04 | 0.99 | 29.7 | 7.60 | 0.00% | 0.41 | 0.99 |
-| x270 | 30% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 10.0 | 0.353 | 1.02 | 71.70% | 1.93 | 0.96 | 29.8 | 7.48 | 0.10% | 0.41 | 0.98 |
+| x1 | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 0.121 | 29.0 | 24.8 | 0.00% | 0.27 | 1.00 | 2,410 | 1,967 | 0.00% | 0.03 | 1.00 |
+| x1 | 10% | asks | 46.3 | 46.4 | 0.00% | 4.63 | 3.81 | 0.090 | 39.0 | 24.8 | 0.00% | 0.26 | 1.00 | 3,244 | 2,013 | 0.00% | 0.03 | 1.00 |
+| x1 | 10% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 0.012 | 291 | 24.8 | 0.00% | 0.21 | 1.00 | 24,175 | 2,067 | 0.00% | 0.02 | 1.00 |
+| x1 | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 0.363 | 9.40 | 24.0 | 0.00% | 0.39 | 0.97 | 804 | 1,906 | 0.00% | 0.04 | 1.00 |
+| x1 | 30% | asks | 56.8 | 56.6 | 6.00% | 5.68 | 4.65 | 0.222 | 15.7 | 24.4 | 0.00% | 0.32 | 0.99 | 1,327 | 2,026 | 0.00% | 0.04 | 1.00 |
+| x1 | 30% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 0.037 | 96.6 | 25.0 | 0.00% | 0.22 | 1.01 | 8,053 | 2,066 | 0.00% | 0.02 | 1.00 |
+| x10 | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.74 | 10.00% | 0.75 | 0.96 | 242 | 206 | 0.00% | 0.09 | 1.00 |
+| x10 | 10% | asks | 189 | 186 | 26.62% | 18.9 | 15.3 | 0.225 | 15.7 | 4.89 | 1.60% | 0.53 | 0.99 | 1,325 | 206 | 0.00% | 0.07 | 1.00 |
+| x10 | 10% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 0.124 | 29.0 | 4.97 | 1.30% | 0.49 | 1.00 | 2,417 | 207 | 0.00% | 0.07 | 1.00 |
+| x10 | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.96 | 40.50% | 1.18 | 0.99 | 80.6 | 204 | 0.00% | 0.13 | 1.00 |
+| x10 | 30% | asks | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.84 | 2.80% | 0.56 | 0.98 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| x10 | 30% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 0.371 | 9.42 | 4.78 | 2.60% | 0.59 | 0.96 | 806 | 207 | 0.00% | 0.08 | 1.00 |
+| x100 | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 12.1 | 0.284 | 0.877 | 75.40% | 2.06 | 0.98 | 24.2 | 20.9 | 0.00% | 0.30 | 1.01 |
+| x100 | 10% | asks | 344 | 338 | 49.99% | 34.4 | 27.6 | 1.24 | 2.75 | 3.77 | 14.00% | 0.83 | 0.96 | 241 | 20.5 | 0.00% | 0.24 | 0.99 |
+| x100 | 10% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 1.24 | 2.76 | 3.71 | 12.30% | 0.78 | 0.94 | 242 | 20.8 | 0.00% | 0.24 | 1.01 |
+| x100 | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 36.3 | 0.089 | 0.285 | 91.10% | 3.74 | 0.97 | 7.81 | 19.7 | 0.20% | 0.43 | 0.96 |
+| x100 | 30% | asks | 344 | 338 | 50.00% | 34.4 | 27.6 | 3.72 | 0.959 | 2.88 | 41.20% | 1.24 | 1.00 | 80.5 | 20.6 | 0.00% | 0.25 | 1.00 |
+| x100 | 30% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 3.71 | 0.964 | 2.95 | 39.10% | 1.15 | 1.02 | 80.6 | 20.6 | 0.00% | 0.24 | 1.00 |
+| x270 | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 32.6 | 0.097 | 0.309 | 90.70% | 3.55 | 0.94 | 8.68 | 7.58 | 0.50% | 0.49 | 0.99 |
+| x270 | 10% | asks | 344 | 338 | 49.99% | 34.4 | 27.6 | 3.35 | 1.06 | 1.40 | 45.80% | 1.33 | 0.96 | 89.2 | 7.66 | 0.20% | 0.38 | 1.00 |
+| x270 | 10% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 3.34 | 1.06 | 1.47 | 44.90% | 1.32 | 1.01 | 89.5 | 7.67 | 0.00% | 0.38 | 1.00 |
+| x270 | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 97.9 | 0.028 | 0.114 | 97.00% | 6.18 | 1.04 | 2.83 | 7.31 | 6.90% | 0.70 | 0.96 |
+| x270 | 30% | asks | 344 | 337 | 50.00% | 34.4 | 27.6 | 10.1 | 0.351 | 1.03 | 71.80% | 2.08 | 0.98 | 29.7 | 7.65 | 0.00% | 0.41 | 1.00 |
+| x270 | 30% | fill 320 | 346 | 339 | 0.00% | 34.6 | 27.8 | 10.0 | 0.353 | 1.11 | 70.80% | 2.03 | 1.04 | 29.8 | 7.59 | 0.00% | 0.41 | 0.99 |
 
 
 
@@ -2076,34 +2109,34 @@ difficulty, to push the cap up.
 
 | Mix | Pool | Rule | Weak a share | R | Asking | Weak/s | KB/s | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| home | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.62 | 10.30% | 0.75 | 0.93 | 242 | 355 | 0.00% | 0.09 | 1.00 |
-| home | 10% | asks | 189 | 186 | 52.82% | 18.9 | 15.2 | 0.225 | 15.7 | 4.79 | 1.50% | 0.52 | 0.97 | 1,326 | 431 | 0.00% | 0.06 | 1.00 |
-| home | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 226 | 0.00% | 0.13 | 1.00 |
-| home | 30% | asks | 345 | 338 | 100.00% | 34.5 | 27.7 | 0.372 | 9.39 | 4.87 | 2.10% | 0.55 | 0.98 | 804 | 1,094 | 0.00% | 0.05 | 1.00 |
-| 50% industrial | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.73 | 9.30% | 0.76 | 0.96 | 242 | 355 | 0.00% | 0.09 | 1.00 |
-| 50% industrial | 10% | asks | 189 | 186 | 26.62% | 18.9 | 15.3 | 0.225 | 15.7 | 4.87 | 1.40% | 0.51 | 0.98 | 1,325 | 431 | 0.00% | 0.06 | 1.00 |
-| 50% industrial | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
-| 50% industrial | 30% | asks | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
-| 90% industrial | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.72 | 9.80% | 0.74 | 0.95 | 242 | 355 | 0.00% | 0.09 | 1.00 |
-| 90% industrial | 10% | asks | 189 | 186 | 5.34% | 18.9 | 15.2 | 0.225 | 15.7 | 4.82 | 1.40% | 0.53 | 0.97 | 1,325 | 431 | 0.00% | 0.06 | 1.00 |
-| 90% industrial | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 190 | 0.00% | 0.13 | 1.00 |
-| 90% industrial | 30% | asks | 334 | 327 | 10.00% | 33.4 | 26.8 | 0.385 | 9.11 | 4.91 | 2.80% | 0.58 | 0.99 | 778 | 207 | 0.00% | 0.08 | 1.00 |
-| 99% industrial | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.78 | 9.00% | 0.74 | 0.97 | 242 | 355 | 0.00% | 0.09 | 1.00 |
-| 99% industrial | 10% | asks | 81.7 | 81.1 | 1.00% | 8.17 | 6.64 | 0.517 | 6.74 | 4.97 | 2.60% | 0.57 | 1.00 | 573 | 424 | 0.00% | 0.07 | 1.00 |
-| 99% industrial | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
-| 99% industrial | 30% | asks | 81.5 | 80.7 | 1.00% | 8.15 | 6.62 | 1.56 | 2.20 | 4.67 | 14.00% | 0.79 | 0.95 | 190 | 205 | 0.00% | 0.10 | 1.00 |
-| zipf | 10% | today | 34.5 | 38.1 | 0.00% | 3.45 | 2.86 | 0.907 | 3.70 | 4.68 | 6.60% | 0.69 | 0.95 | 322 | 202 | 0.00% | 0.09 | 1.00 |
-| zipf | 10% | asks | 115 | 126 | 1.42% | 11.5 | 9.34 | 0.275 | 12.8 | 4.86 | 2.30% | 0.56 | 0.98 | 1,081 | 207 | 0.00% | 0.08 | 1.00 |
-| zipf | 30% | today | 34.5 | 36.8 | 0.00% | 3.45 | 2.86 | 3.15 | 1.10 | 3.39 | 33.90% | 1.07 | 0.99 | 92.7 | 193 | 0.00% | 0.13 | 1.00 |
-| zipf | 30% | asks | 299 | 312 | 3.93% | 29.9 | 24.0 | 0.372 | 9.39 | 4.86 | 2.40% | 0.56 | 0.98 | 803 | 207 | 0.00% | 0.08 | 1.00 |
-| medium | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.72 | 9.80% | 0.74 | 0.95 | 242 | 197 | 0.00% | 0.10 | 1.00 |
-| medium | 10% | asks | 190 | 186 | 5.36% | 19.0 | 15.3 | 0.225 | 15.7 | 4.88 | 1.40% | 0.51 | 0.98 | 1,325 | 206 | 0.00% | 0.08 | 1.00 |
-| medium | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
-| medium | 30% | asks | 334 | 328 | 10.00% | 33.4 | 26.8 | 0.384 | 9.12 | 4.93 | 1.60% | 0.56 | 0.99 | 779 | 207 | 0.00% | 0.08 | 1.00 |
-| medium, few big | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.72 | 9.80% | 0.74 | 0.95 | 242 | 197 | 0.00% | 0.10 | 1.00 |
-| medium, few big | 10% | asks | 189 | 186 | 5.33% | 18.9 | 15.2 | 0.225 | 15.7 | 4.84 | 1.60% | 0.53 | 0.98 | 1,325 | 206 | 0.00% | 0.07 | 1.00 |
-| medium, few big | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
-| medium, few big | 30% | asks | 334 | 329 | 10.00% | 33.4 | 26.8 | 0.383 | 9.15 | 4.93 | 2.70% | 0.56 | 0.99 | 782 | 207 | 0.00% | 0.08 | 1.00 |
+| home | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.62 | 11.00% | 0.76 | 0.93 | 242 | 685 | 0.00% | 0.07 | 1.00 |
+| home | 10% | asks | 189 | 186 | 52.82% | 18.9 | 15.2 | 0.225 | 15.7 | 4.82 | 1.10% | 0.52 | 0.97 | 1,326 | 2,606 | 0.00% | 0.04 | 1.00 |
+| home | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.96 | 40.50% | 1.18 | 0.99 | 80.6 | 246 | 0.00% | 0.13 | 1.00 |
+| home | 30% | asks | 345 | 338 | 100.00% | 34.5 | 27.7 | 0.372 | 9.40 | 4.86 | 1.90% | 0.56 | 0.98 | 804 | 2,206 | 0.00% | 0.04 | 1.00 |
+| 50% industrial | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.74 | 10.00% | 0.75 | 0.96 | 242 | 206 | 0.00% | 0.09 | 1.00 |
+| 50% industrial | 10% | asks | 189 | 186 | 26.62% | 18.9 | 15.3 | 0.225 | 15.7 | 4.89 | 1.60% | 0.53 | 0.99 | 1,325 | 206 | 0.00% | 0.07 | 1.00 |
+| 50% industrial | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.96 | 40.50% | 1.18 | 0.99 | 80.6 | 204 | 0.00% | 0.13 | 1.00 |
+| 50% industrial | 30% | asks | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.84 | 2.80% | 0.56 | 0.98 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 90% industrial | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.65 | 9.90% | 0.76 | 0.94 | 242 | 207 | 0.00% | 0.09 | 1.00 |
+| 90% industrial | 10% | asks | 189 | 186 | 5.34% | 18.9 | 15.2 | 0.225 | 15.7 | 4.84 | 1.20% | 0.52 | 0.98 | 1,325 | 206 | 0.00% | 0.08 | 0.99 |
+| 90% industrial | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.96 | 40.50% | 1.18 | 0.99 | 80.6 | 204 | 0.00% | 0.13 | 1.00 |
+| 90% industrial | 30% | asks | 334 | 327 | 10.00% | 33.4 | 26.8 | 0.385 | 9.11 | 4.86 | 1.90% | 0.57 | 0.98 | 778 | 206 | 0.00% | 0.08 | 1.00 |
+| 99% industrial | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.64 | 9.60% | 0.76 | 0.95 | 242 | 206 | 0.00% | 0.09 | 1.00 |
+| 99% industrial | 10% | asks | 81.7 | 81.1 | 1.00% | 8.17 | 6.64 | 0.517 | 6.74 | 4.76 | 3.20% | 0.61 | 0.98 | 573 | 207 | 0.00% | 0.08 | 1.00 |
+| 99% industrial | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.96 | 40.50% | 1.18 | 0.99 | 80.6 | 205 | 0.00% | 0.13 | 1.00 |
+| 99% industrial | 30% | asks | 81.5 | 80.7 | 1.00% | 8.15 | 6.62 | 1.56 | 2.20 | 4.74 | 14.00% | 0.80 | 0.97 | 190 | 207 | 0.00% | 0.10 | 1.00 |
+| zipf | 10% | today | 34.5 | 37.2 | 0.00% | 3.45 | 2.86 | 1.11 | 3.00 | 4.68 | 8.40% | 0.72 | 0.96 | 263 | 207 | 0.00% | 0.09 | 1.00 |
+| zipf | 10% | asks | 141 | 148 | 1.62% | 14.1 | 11.4 | 0.279 | 12.6 | 4.78 | 1.60% | 0.52 | 0.97 | 1,067 | 206 | 0.00% | 0.07 | 1.00 |
+| zipf | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.96 | 40.50% | 1.18 | 0.99 | 80.6 | 204 | 0.00% | 0.13 | 1.00 |
+| zipf | 30% | asks | 309 | 304 | 4.57% | 30.9 | 24.9 | 0.414 | 8.44 | 4.73 | 2.40% | 0.58 | 0.96 | 723 | 207 | 0.00% | 0.08 | 1.00 |
+| medium | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.65 | 9.90% | 0.76 | 0.94 | 242 | 207 | 0.00% | 0.09 | 1.00 |
+| medium | 10% | asks | 190 | 186 | 5.36% | 19.0 | 15.3 | 0.225 | 15.7 | 4.87 | 0.90% | 0.52 | 0.98 | 1,325 | 206 | 0.00% | 0.08 | 1.00 |
+| medium | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.96 | 40.50% | 1.18 | 0.99 | 80.6 | 204 | 0.00% | 0.13 | 1.00 |
+| medium | 30% | asks | 334 | 328 | 10.00% | 33.4 | 26.8 | 0.384 | 9.12 | 4.78 | 2.90% | 0.58 | 0.96 | 779 | 208 | 0.00% | 0.08 | 1.01 |
+| medium, few big | 10% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 1.21 | 2.76 | 4.65 | 9.90% | 0.76 | 0.94 | 242 | 207 | 0.00% | 0.09 | 1.00 |
+| medium, few big | 10% | asks | 189 | 186 | 5.33% | 18.9 | 15.2 | 0.225 | 15.7 | 4.79 | 1.50% | 0.52 | 0.97 | 1,325 | 207 | 0.00% | 0.08 | 1.00 |
+| medium, few big | 30% | today | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.96 | 40.50% | 1.18 | 0.99 | 80.6 | 204 | 0.00% | 0.13 | 1.00 |
+| medium, few big | 30% | asks | 334 | 329 | 10.00% | 33.4 | 26.8 | 0.383 | 9.15 | 4.83 | 2.80% | 0.59 | 0.98 | 782 | 207 | 0.00% | 0.08 | 1.00 |
 
 
 
@@ -2111,24 +2144,24 @@ difficulty, to push the cap up.
 
 | Mix | WEAK_ASK_DIVISOR | Node default (weak shares a month) | WEAK_FILL_MAX | Weak a share | R | Asking | Weak/s | KB/s | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 50% industrial | 16 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
-| 50% industrial | 64 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
-| 50% industrial | 256 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
-| 50% industrial | 64 | 4 | 320 | 142 | 140 | 21.42% | 14.2 | 11.4 | 0.899 | 3.81 | 4.67 | 6.30% | 0.66 | 0.94 | 332 | 207 | 0.00% | 0.09 | 1.00 |
-| 50% industrial | 64 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
-| 50% industrial | 64 | 64 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
-| 50% industrial | 64 | 16 | 64 | 69.3 | 68.8 | 50.00% | 6.93 | 5.65 | 1.83 | 1.86 | 4.70 | 17.50% | 0.85 | 0.95 | 162 | 203 | 0.00% | 0.11 | 1.00 |
-| 50% industrial | 64 | 16 | 160 | 173 | 171 | 49.99% | 17.3 | 14.0 | 0.738 | 4.64 | 4.74 | 5.20% | 0.64 | 0.95 | 405 | 206 | 0.00% | 0.09 | 1.00 |
-| 50% industrial | 64 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
-| zipf | 16 | 16 | 320 | 220 | 230 | 7.02% | 22.0 | 17.7 | 0.504 | 6.95 | 4.73 | 3.30% | 0.60 | 0.95 | 592 | 207 | 0.00% | 0.08 | 1.00 |
-| zipf | 64 | 16 | 320 | 299 | 312 | 3.93% | 29.9 | 24.0 | 0.372 | 9.39 | 4.86 | 2.40% | 0.56 | 0.98 | 803 | 207 | 0.00% | 0.08 | 1.00 |
-| zipf | 256 | 16 | 320 | 312 | 326 | 3.80% | 31.2 | 25.1 | 0.356 | 9.83 | 4.72 | 1.50% | 0.55 | 0.95 | 839 | 207 | 0.00% | 0.08 | 1.00 |
-| zipf | 64 | 4 | 320 | 108 | 114 | 1.22% | 10.8 | 8.78 | 1.02 | 3.35 | 4.85 | 7.60% | 0.71 | 0.98 | 292 | 206 | 0.00% | 0.09 | 1.00 |
-| zipf | 64 | 16 | 320 | 299 | 312 | 3.93% | 29.9 | 24.0 | 0.372 | 9.39 | 4.86 | 2.40% | 0.56 | 0.98 | 803 | 207 | 0.00% | 0.08 | 1.00 |
-| zipf | 64 | 64 | 320 | 338 | 352 | 14.71% | 33.8 | 27.1 | 0.330 | 10.6 | 4.88 | 1.30% | 0.54 | 0.98 | 908 | 207 | 0.00% | 0.08 | 1.00 |
-| zipf | 64 | 16 | 64 | 69.3 | 72.9 | 16.31% | 6.93 | 5.65 | 1.59 | 2.15 | 4.75 | 15.50% | 0.82 | 0.96 | 186 | 205 | 0.00% | 0.10 | 1.00 |
-| zipf | 64 | 16 | 160 | 172 | 180 | 8.82% | 17.2 | 13.9 | 0.644 | 5.34 | 4.81 | 4.60% | 0.65 | 0.97 | 464 | 207 | 0.00% | 0.08 | 1.00 |
-| zipf | 64 | 16 | 320 | 299 | 312 | 3.93% | 29.9 | 24.0 | 0.372 | 9.39 | 4.86 | 2.40% | 0.56 | 0.98 | 803 | 207 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 16 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.84 | 2.80% | 0.56 | 0.98 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 64 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.84 | 2.80% | 0.56 | 0.98 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 256 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.84 | 2.80% | 0.56 | 0.98 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 64 | 4 | 320 | 142 | 140 | 21.42% | 14.2 | 11.4 | 0.899 | 3.81 | 4.84 | 6.30% | 0.69 | 0.98 | 332 | 206 | 0.00% | 0.09 | 1.00 |
+| 50% industrial | 64 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.84 | 2.80% | 0.56 | 0.98 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 64 | 64 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.84 | 2.80% | 0.56 | 0.98 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| 50% industrial | 64 | 16 | 64 | 69.3 | 68.8 | 50.00% | 6.93 | 5.65 | 1.83 | 1.86 | 4.65 | 17.30% | 0.86 | 0.94 | 162 | 207 | 0.00% | 0.11 | 1.00 |
+| 50% industrial | 64 | 16 | 160 | 173 | 171 | 49.99% | 17.3 | 14.0 | 0.738 | 4.64 | 4.69 | 4.60% | 0.68 | 0.95 | 405 | 206 | 0.00% | 0.09 | 1.00 |
+| 50% industrial | 64 | 16 | 320 | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.84 | 2.80% | 0.56 | 0.98 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| zipf | 16 | 16 | 320 | 209 | 205 | 6.87% | 20.9 | 16.8 | 0.613 | 5.63 | 4.74 | 3.30% | 0.62 | 0.97 | 488 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 64 | 16 | 320 | 309 | 304 | 4.57% | 30.9 | 24.9 | 0.414 | 8.44 | 4.73 | 2.40% | 0.58 | 0.96 | 723 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 256 | 16 | 320 | 316 | 311 | 4.30% | 31.6 | 25.4 | 0.405 | 8.62 | 4.63 | 2.60% | 0.55 | 0.94 | 739 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 64 | 4 | 320 | 124 | 122 | 1.33% | 12.4 | 10.0 | 1.03 | 3.33 | 10.0 | 5.10% | 0.64 | 0.95 | 290 | 206 | 0.00% | 0.09 | 0.99 |
+| zipf | 64 | 16 | 320 | 309 | 304 | 4.57% | 30.9 | 24.9 | 0.414 | 8.44 | 4.73 | 2.40% | 0.58 | 0.96 | 723 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 64 | 64 | 320 | 338 | 331 | 13.67% | 33.8 | 27.1 | 0.380 | 9.21 | 4.94 | 2.60% | 0.56 | 1.00 | 788 | 208 | 0.00% | 0.08 | 1.00 |
+| zipf | 64 | 16 | 64 | 69.3 | 69.2 | 14.78% | 6.93 | 5.65 | 1.82 | 1.87 | 4.66 | 18.60% | 0.84 | 0.95 | 163 | 206 | 0.00% | 0.10 | 1.00 |
+| zipf | 64 | 16 | 160 | 172 | 170 | 8.36% | 17.2 | 13.9 | 0.741 | 4.63 | 14.0 | 1.50% | 0.53 | 0.96 | 403 | 207 | 0.00% | 0.08 | 1.00 |
+| zipf | 64 | 16 | 320 | 309 | 304 | 4.57% | 30.9 | 24.9 | 0.414 | 8.44 | 4.73 | 2.40% | 0.58 | 0.96 | 723 | 207 | 0.00% | 0.08 | 1.00 |
 
 
 
@@ -2136,23 +2169,23 @@ difficulty, to push the cap up.
 
 | Attack | Its part | BCH hashrate, pool | Weak a share | R | Asking | Weak/s | KB/s | Smallest miner with 3 weak shares a month (TH/s) | Bitaxe weak/mo | Bitaxe pay/mo | Bitaxe empty months | Bitaxe swing | Bitaxe vs fair | ASIC weak/mo | ASIC pay/mo | ASIC empty months | ASIC swing | ASIC vs fair |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| asks whatever it finds | 0.00% | x1, 10% | 46.3 | 49.3 | 0.00% | 4.63 | 3.81 | 0.068 | 52.0 | 25.1 | 0.00% | 0.25 | 1.01 | 4,327 | 433 | 0.00% | 0.05 | 1.00 |
-| asks whatever it finds | 1.00% | x1, 10% | 82.1 | 86.5 | 1.00% | 8.21 | 6.67 | 0.039 | 92.0 | 24.8 | 0.00% | 0.23 | 1.00 | 7,661 | 432 | 0.00% | 0.05 | 1.00 |
-| asks whatever it finds | 2.00% | x1, 10% | 221 | 232 | 2.00% | 22.1 | 17.8 | 0.014 | 249 | 25.0 | 0.00% | 0.21 | 1.01 | 20,720 | 432 | 0.00% | 0.05 | 1.00 |
-| asks whatever it finds | 5.00% | x1, 10% | 316 | 330 | 5.00% | 31.6 | 25.4 | 0.010 | 355 | 24.8 | 0.00% | 0.21 | 1.00 | 29,517 | 431 | 0.00% | 0.05 | 1.00 |
-| asks whatever it finds | 25.00% | x1, 10% | 341 | 357 | 25.00% | 34.1 | 27.4 | 9.4e-3 | 383 | 24.9 | 0.00% | 0.21 | 1.00 | 31,878 | 432 | 0.00% | 0.05 | 1.00 |
-| none, today's rule | - | x10, 30% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
-| none | - | x10, 30% | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
-| never asks | 50.00% | x10, 30% | 341 | 334 | 25.00% | 34.1 | 27.4 | 0.377 | 9.29 | 4.75 | 2.70% | 0.56 | 0.96 | 795 | 206 | 0.00% | 0.08 | 1.00 |
-| never asks | 90.00% | x10, 30% | 316 | 311 | 5.00% | 31.6 | 25.4 | 0.404 | 8.64 | 4.75 | 2.10% | 0.56 | 0.96 | 740 | 206 | 0.00% | 0.08 | 1.00 |
-| never asks | 97.00% | x10, 30% | 143 | 140 | 1.50% | 14.3 | 11.5 | 0.895 | 3.83 | 4.81 | 7.10% | 0.70 | 0.97 | 333 | 206 | 0.00% | 0.09 | 1.00 |
-| never asks | 99.00% | x10, 30% | 57.3 | 57.0 | 0.50% | 5.73 | 4.69 | 2.20 | 1.56 | 4.68 | 22.10% | 0.95 | 0.96 | 134 | 202 | 0.00% | 0.11 | 1.00 |
-| industrial miners at the minimum | today | x10, 30% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.95 | 41.00% | 1.18 | 0.99 | 80.6 | 191 | 0.00% | 0.13 | 1.00 |
-| industrial miners at the minimum | asks | x10, 30% | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.91 | 2.70% | 0.56 | 0.99 | 802 | 206 | 0.00% | 0.08 | 1.00 |
-| carries no asking weak share | 25.00% | x10, 30% | 250 | 246 | 50.00% | 25.0 | 20.1 | 0.511 | 6.87 | 4.75 | 3.00% | 0.58 | 0.96 | 585 | 206 | 0.00% | 0.08 | 1.00 |
-| carries no asking weak share | 50.00% | x10, 30% | 168 | 165 | 50.00% | 16.8 | 13.5 | 0.762 | 4.50 | 4.71 | 5.80% | 0.67 | 0.95 | 392 | 207 | 0.00% | 0.09 | 1.00 |
-| carries no asking weak share | 75.00% | x10, 30% | 107 | 106 | 50.01% | 10.7 | 8.66 | 1.19 | 2.87 | 4.73 | 11.10% | 0.73 | 0.96 | 251 | 205 | 0.00% | 0.10 | 1.00 |
-| carries no asking weak share | 90.00% | x10, 30% | 83.1 | 83.1 | 49.42% | 8.41 | 6.83 | 1.51 | 2.23 | 4.71 | 14.80% | 0.83 | 0.95 | 194 | 206 | 0.00% | 0.10 | 1.00 |
+| asks whatever it finds | 0.00% | x1, 10% | 46.3 | 46.4 | 0.00% | 4.63 | 3.81 | 0.090 | 39.0 | 24.8 | 0.00% | 0.26 | 1.00 | 3,244 | 2,013 | 0.00% | 0.03 | 1.00 |
+| asks whatever it finds | 1.00% | x1, 10% | 82.1 | 81.3 | 1.00% | 8.21 | 6.67 | 0.052 | 69.1 | 24.7 | 0.00% | 0.23 | 1.00 | 5,742 | 2,050 | 0.00% | 0.03 | 1.00 |
+| asks whatever it finds | 2.00% | x1, 10% | 222 | 220 | 2.00% | 22.2 | 17.9 | 0.019 | 188 | 25.0 | 0.00% | 0.21 | 1.01 | 15,647 | 2,068 | 0.00% | 0.02 | 1.00 |
+| asks whatever it finds | 5.00% | x1, 10% | 315 | 310 | 5.00% | 31.5 | 25.3 | 0.014 | 265 | 24.9 | 0.00% | 0.20 | 1.00 | 22,077 | 2,069 | 0.00% | 0.02 | 1.00 |
+| asks whatever it finds | 25.00% | x1, 10% | 342 | 336 | 24.99% | 34.2 | 27.4 | 0.012 | 288 | 24.7 | 0.00% | 0.21 | 0.99 | 23,961 | 2,066 | 0.00% | 0.02 | 1.00 |
+| none, today's rule | - | x10, 30% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.96 | 40.50% | 1.18 | 0.99 | 80.6 | 204 | 0.00% | 0.13 | 1.00 |
+| none | - | x10, 30% | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.84 | 2.80% | 0.56 | 0.98 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| never asks | 50.00% | x10, 30% | 341 | 334 | 25.00% | 34.1 | 27.4 | 0.377 | 9.29 | 4.88 | 2.40% | 0.55 | 0.98 | 795 | 207 | 0.00% | 0.08 | 1.00 |
+| never asks | 90.00% | x10, 30% | 316 | 311 | 5.00% | 31.6 | 25.4 | 0.404 | 8.64 | 4.73 | 3.00% | 0.57 | 0.95 | 740 | 207 | 0.00% | 0.08 | 1.00 |
+| never asks | 97.00% | x10, 30% | 143 | 140 | 1.50% | 14.3 | 11.5 | 0.895 | 3.83 | 4.71 | 6.00% | 0.70 | 0.95 | 333 | 207 | 0.00% | 0.09 | 1.00 |
+| never asks | 99.00% | x10, 30% | 57.3 | 57.0 | 0.50% | 5.73 | 4.69 | 2.20 | 1.56 | 4.73 | 21.90% | 0.92 | 0.96 | 134 | 206 | 0.00% | 0.11 | 1.00 |
+| industrial miners at the minimum | today | x10, 30% | 34.5 | 34.7 | 0.00% | 3.45 | 2.86 | 3.63 | 0.962 | 2.96 | 40.50% | 1.18 | 0.99 | 80.6 | 204 | 0.00% | 0.13 | 1.00 |
+| industrial miners at the minimum | asks | x10, 30% | 344 | 337 | 49.99% | 34.4 | 27.6 | 0.373 | 9.38 | 4.84 | 2.80% | 0.56 | 0.98 | 802 | 206 | 0.00% | 0.08 | 1.00 |
+| carries no asking weak share | 25.00% | x10, 30% | 250 | 246 | 50.00% | 25.0 | 20.1 | 0.511 | 6.87 | 4.88 | 2.90% | 0.59 | 0.98 | 585 | 207 | 0.00% | 0.08 | 1.00 |
+| carries no asking weak share | 50.00% | x10, 30% | 168 | 165 | 50.00% | 16.8 | 13.5 | 0.762 | 4.50 | 4.69 | 6.10% | 0.65 | 0.95 | 392 | 207 | 0.00% | 0.09 | 1.00 |
+| carries no asking weak share | 75.00% | x10, 30% | 107 | 106 | 50.01% | 10.7 | 8.66 | 1.19 | 2.87 | 4.73 | 11.50% | 0.74 | 0.95 | 251 | 207 | 0.00% | 0.10 | 1.00 |
+| carries no asking weak share | 90.00% | x10, 30% | 83.1 | 83.1 | 49.42% | 8.41 | 6.83 | 1.51 | 2.23 | 4.74 | 14.60% | 0.80 | 0.96 | 194 | 206 | 0.00% | 0.10 | 1.00 |
 
 
 

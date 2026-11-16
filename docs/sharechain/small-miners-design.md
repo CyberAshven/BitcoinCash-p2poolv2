@@ -390,10 +390,11 @@ fetched whole; it is never judged on a body its miner did not commit. Sync
 still sends weak shares whole, as a node catching up was never sent them. A
 P2P message, not a rule: the header, the weak root and what is stored are
 unchanged, and the protocol string's message segment, `weak-by-hash`, keeps
-nodes that cannot read it apart. On 1,000 nodes at 10-second shares the
-network simulation put stale shares at 5.27%, 8.66% and 14.11% with 32, 160
-and 320 weak shares carried whole in each share, against 4.20% when they
-travel only beside the shares.
+nodes that cannot read it apart. On 1,000 nodes at 10-second shares and
+one-minute blocks the network simulation put stale shares at 5.53%, 9.99%
+and 14.99% with 32, 160 and 320 weak shares carried whole in each share,
+against 4.91% when they travel only beside the shares (5.27%, 8.66% and
+14.11% against 4.20% with ten-minute blocks).
 
 ### How weak shares are paid
 
@@ -649,7 +650,7 @@ Part 3 holds the weak shares a share carries at `WEAK_FILL`, 32, whatever
 the pool's size: about 3.5 a second, split among the miners at the minimum
 by hashrate. A miner's weak shares a month therefore fall as the pool's
 hashrate grows. The smallest miner that still finds three a month is about
-0.33 TH/s for each EH/s of pool hashrate: 0.09 TH/s in a pool at 10% of
+0.33 TH/s for each EH/s of pool hashrate: 0.12 TH/s in a pool at 10% of
 today's Bitcoin Cash, a Bitaxe's 1.2 TH/s once the pool holds 3.7 EH/s, as
 much as all of Bitcoin Cash has today, and 98 TH/s in a pool at 30% of a
 Bitcoin Cash with Bitcoin's hashrate.
@@ -737,7 +738,9 @@ makes no weak shares, so it never asks.
 Why 16: past about that many weak shares a month, more of them barely
 change what a small miner is paid. At ten times today's hashrate a Bitaxe
 with 2.8 weak shares a month has 9% of its months without a payment, with
-5.6 it has 4%, and with 14 to 29 it has 1.3%.
+5.6 it has 4%, and with 14 to 29 it has 1.1 to 1.4% (the same with
+ten-minute and one-minute blocks: what counts is the weak shares a month,
+not the blocks).
 
 A miner's weak shares are in proportion to its hashrate, so the asks are
 counted by hashrate at the minimum, and the miners that need more weak
@@ -748,30 +751,36 @@ one weak share in 64 asking is enough.
 
 The payout simulator (`cargo payout-sim --scenario weak-asks`, and
 `weak-asks-mixes`, `weak-asks-constants`, `weak-asks-attacks`; its README
-has every table) runs the rule share by share. Half the pool's hashrate is
-industrial; "fill 320" is today's rule with `WEAK_FILL` raised to 320, the
-simpler way to the same credit.
+has every table) runs the rule share by share, with one-minute blocks.
+Half the pool's hashrate is industrial; "fill 320" is today's rule with
+`WEAK_FILL` raised to 320, the simpler way to the same credit.
 
 | Bitcoin Cash hashrate, pool | Rule | Weak shares a share | Relay, KB/s | Bitaxe weak shares a month | Bitaxe months without a payment |
 |---|---|---:|---:|---:|---:|
-| today's, 10% | today | 34.5 | 2.9 | 39 | 0% |
-| | asks | 46 | 3.8 | 52 | 0% |
-| | fill 320 | 346 | 27.8 | 388 | 0% |
+| today's, 10% | today | 34.5 | 2.9 | 29 | 0% |
+| | asks | 46 | 3.8 | 39 | 0% |
+| | fill 320 | 346 | 27.8 | 291 | 0% |
 | today's, 30% | today | 34.5 | 2.9 | 9.4 | 0% |
 | | asks | 57 | 4.7 | 15.7 | 0% |
 | | fill 320 | 346 | 27.8 | 97 | 0% |
-| 10 times, 10% | today | 34.5 | 2.9 | 2.8 | 9.3% |
-| | asks | 189 | 15.3 | 15.7 | 1.4% |
+| 10 times, 10% | today | 34.5 | 2.9 | 2.8 | 10% |
+| | asks | 189 | 15.3 | 15.7 | 1.6% |
 | | fill 320 | 346 | 27.8 | 29 | 1.3% |
-| 10 times, 30% | today | 34.5 | 2.9 | 0.96 | 41% |
-| | asks | 344 | 27.6 | 9.4 | 2.7% |
-| | fill 320 | 346 | 27.8 | 9.4 | 2.4% |
-| 100 times, 10% | today | 34.5 | 2.9 | 0.28 | 76% |
-| | asks | 344 | 27.6 | 2.8 | 13% |
-| | fill 320 | 346 | 27.8 | 2.8 | 14% |
+| 10 times, 30% | today | 34.5 | 2.9 | 0.96 | 40.5% |
+| | asks | 344 | 27.6 | 9.4 | 2.8% |
+| | fill 320 | 346 | 27.8 | 9.4 | 2.6% |
+| 100 times, 10% | today | 34.5 | 2.9 | 0.28 | 75% |
+| | asks | 344 | 27.6 | 2.8 | 14% |
+| | fill 320 | 346 | 27.8 | 2.8 | 12% |
 | Bitcoin's (270 times), 10% | today | 34.5 | 2.9 | 0.10 | 91% |
-| | asks | 344 | 27.6 | 1.1 | 45% |
+| | asks | 344 | 27.6 | 1.1 | 46% |
 | | fill 320 | 346 | 27.8 | 1.1 | 45% |
+
+The counts are those of the ten-minute runs: the asks count weak shares a
+month, not blocks. The months without a payment moved by under a point.
+At today's hashrate in a pool at 10% a Bitaxe finds 29 and 39 weak shares
+a month, not 39 and 52, because the node default no longer gives that
+pool's farms heavier shares, so they make weak shares too.
 
 - **A pool whose small miners have enough stays near today's count.** At
   today's hashrate the asks leave a pool at 10% of Bitcoin Cash at the
@@ -779,8 +788,9 @@ simpler way to the same credit.
   month.
 - **A pool whose small miners need more opens as far as they need.** At ten
   times today's hashrate a pool at 10% settles at 189 a share and a pool at
-  30% at the ceiling. A Bitaxe's months without a payment go from 9.3% to
-  1.4% and from 41% to 2.7%.
+  30% at the ceiling. A Bitaxe's months without a payment go from 10% to
+  1.6% and from 40.5% to 2.8% (9.3% to 1.4% and 41% to 2.7% with ten-minute
+  blocks).
 - **At the ceiling the asks pay as `WEAK_FILL` 320 does**, and below it they
   relay fewer weak shares for the same months without a payment.
 - **Every miner's income stays within the noise of its fair part**, as it
@@ -789,20 +799,22 @@ simpler way to the same credit.
   there is 1,605 satoshis a month, under two payments at the lowest level.
 - **Miner mixes.** At ten times today's hashrate the asks open the count in
   every mix tested: all home miners, 50% and 90% industrial, a Zipf spread
-  and the medium mixes (115 to 345 a share; a Bitaxe has 1.4 to 2.8% of its
-  months without a payment, against 7 to 41% today). In the 99% industrial
-  mix the home miners are 1% of the hashrate, under one weak share in 64, so
-  they open it only part of the way: 82 a share, and 2.6% and 14% of months
-  without a payment against 9% and 41%.
+  and the medium mixes (141 to 345 a share; a Bitaxe has 0.9 to 2.9% of its
+  months without a payment, against 8 to 41% today; with ten-minute blocks
+  115 to 345, 1.4 to 2.8% and 7 to 41%, the Zipf mix's largest miners then
+  mining heavier shares). In the 99% industrial mix the home miners are 1%
+  of the hashrate, under one weak share in 64, so they open it only part of
+  the way: 82 a share, and 3.2% and 14% of months without a payment against
+  10% and 40.5% (2.6% and 14% against 9% and 41%).
 
 ### Attacks
 
 | Attack | Result |
 |---|---|
-| Hashrate that asks whatever its miners find, in a pool that needs no more (10% of today's Bitcoin Cash) | 1% of the hashrate at the minimum raises the count from 46 to 82 a share, 2% to 221 and 5% to 316. It costs nothing to do. It can cost the pool no more than the ceiling, which every node must carry anyway, and it pays the asker nothing: a miner's credit does not depend on the count. |
+| Hashrate that asks whatever its miners find, in a pool that needs no more (10% of today's Bitcoin Cash) | 1% of the hashrate at the minimum raises the count from 46 to 82 a share, 2% to 222 and 5% to 315. It costs nothing to do. It can cost the pool no more than the ceiling, which every node must carry anyway, and it pays the asker nothing: a miner's credit does not depend on the count. |
 | Hashrate that never asks, in a pool that needs more (30% of ten times today's Bitcoin Cash) | With half the hashrate at the minimum never asking the count stays at the ceiling, with 90% at 316 a share. It takes 97% to bring it to 143 and 99% to 57. The floor is today's rule. |
 | Industrial miners mining at the minimum, same pool | No change: 344 a share with them or without. |
-| Nodes that carry no weak share that asks, same pool | The count falls with their part of the shares: 250 a share at 25%, 168 at 50%, 107 at 75%, 83 at 90% (a Bitaxe's months without a payment: 3%, 6%, 11%, 15%, against 41% under today's rule). The weak shares they drop are carried by other nodes, and they give up the includer cut on them. |
+| Nodes that carry no weak share that asks, same pool | The count falls with their part of the shares: 250 a share at 25%, 168 at 50%, 107 at 75%, 83 at 90% (a Bitaxe's months without a payment: 3%, 6%, 12%, 15%, against 40.5% under today's rule). The weak shares they drop are carried by other nodes, and they give up the includer cut on them. |
 
 So the worst an attacker can do is hold the count at one of its two ends:
 the ceiling, which nodes are sized for, or the floor, which is today's rule.
@@ -828,7 +840,12 @@ cost there, with a template a node, checking weak shares keeps a node about
 1% busy with 1,000 miners and 12% with 10,000; with 100,000 it takes 1.3
 times what a node can do, so the node falls behind, unless the pool's nodes
 build one template (16%). The node checks one share or weak share at a time
-today.
+today. These costs were measured with ten-minute blocks. A one-minute
+block's coinbase pays at most about 1,790 outputs at the default level, a
+tenth of the 17,885 measured with 100,000 miners, and the window of any
+pool above 0.015% of Bitcoin Cash holds fewer shares than the 120,960
+measured, so they overstate the check until the timing tests are run again
+for one-minute blocks.
 
 ### What has to come first
 
@@ -837,18 +854,21 @@ Neither is a share-chain rule, and each helps under today's rule too.
 1. **Shares list the weak shares they carry by hash on the wire.** Today a
    share's body carries them whole, and a node that already has them from
    gossip downloads them again inside the share. On 1,000 nodes at
-   10-second shares (`cargo netsim run --nodes 1000 --duration 10800
-   --weak-shares N --weak-share-carriage gossip-only`, or `whole`):
+   10-second shares and one-minute blocks (`cargo netsim run --nodes 1000
+   --duration 10800 --weak-shares N --weak-share-carriage gossip-only`, or
+   `whole`):
 
    | Weak shares a share | Beside the shares: stale | Upload a node, mean | Whole in the share: share bytes | Stale | Upload a node, mean |
    |---:|---:|---:|---:|---:|---:|
-   | 32 | 4.20% | 0.39 Mbit/s | 62,703 | 5.27% | 0.54 Mbit/s |
-   | 160 | 4.20% | 1.09 Mbit/s | 167,903 | 8.66% | 1.86 Mbit/s |
-   | 320 | 4.20% | 1.98 Mbit/s | 299,423 | 14.11% | 3.52 Mbit/s |
+   | 32 | 4.91% | 0.35 Mbit/s | 56,805 | 5.53% | 0.51 Mbit/s |
+   | 160 | 4.91% | 1.06 Mbit/s | 162,045 | 9.99% | 1.83 Mbit/s |
+   | 320 | 4.91% | 1.95 Mbit/s | 293,525 | 14.99% | 3.49 Mbit/s |
 
    Beside the shares, ten times the weak shares cost 1.6 Mbit/s of upload
    and no stale share. Whole in the share, five times double the stale rate
-   and ten times more than triple it.
+   and ten times triple it. With ten-minute blocks the rows were 4.20%
+   beside the shares and 5.27%, 8.66% and 14.11% whole: a BCH block every
+   minute adds stale shares either way, and the conclusion stands.
 2. **Weak share checks leave the single validation queue**, so a node with
    several cores checks several at once, or the check gets cheap enough
    that 35 a second fit one core with 100,000 miners in the window. Until

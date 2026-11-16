@@ -18,7 +18,7 @@ The model runs on one-minute Bitcoin Cash blocks (CHIP-2025-03, on chipnet
 since 2026-11-15 and on mainnet from 2027-05-15): a block every minute, a
 tenth of the ten-minute reward and of the ABLA floors (3.2 MB on mainnet,
 200 kB on chipnet, 25.6 MB to start on scalenet). Every number below comes
-from that model. The ten-minute tables are in this file at commit 05de7fa5;
+from that model. The ten-minute tables are in this file at commit 2972cfd2;
 where a conclusion changed, the text says so.
 
 ## The short answer

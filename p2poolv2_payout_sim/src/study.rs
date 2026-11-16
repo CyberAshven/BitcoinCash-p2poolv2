@@ -1565,9 +1565,11 @@ pub fn scale_levers(base: &Scenario) -> String {
 }
 
 /// Pools of the window cap table, as parts of today's Bitcoin Cash: from
-/// 370 TH/s, which finds a block about every 70 days, to 37 PH/s, about
-/// 43 blocks a month. Above about 0.15% the window holds three blocks of
-/// work well inside 14 days and the cap never binds.
+/// 370 TH/s, which finds a one-minute block about every 7 days, to 37 PH/s,
+/// about 432 blocks a month (a block every 70 days to 43 a month with
+/// ten-minute blocks). Above about 0.015% the window holds three blocks of
+/// work inside 14 days and the cap never binds (0.15% with ten-minute
+/// blocks), so with one-minute blocks only the smallest row reaches it.
 const WINDOW_CAP_POOL_FRACTIONS: [f64; 7] = [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01];
 
 /// Window caps of the window cap table, in days: today's 14 (120,960
