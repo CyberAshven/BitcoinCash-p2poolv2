@@ -108,6 +108,23 @@ pub const WEAK_FILL: u64 = 32;
 /// `WEAK_DEPTH` = 48, the rule since study #85 (6 before).
 pub const WEAK_DEPTH: usize = 48;
 
+/// `WEAK_FILL_MAX` as section 6 of the design page proposes it: the most
+/// weak shares a share that asks may steer the weak ratio towards, ten times
+/// `WEAK_FILL` *(sim)*. Not a rule of the chain.
+pub const WEAK_FILL_MAX: u64 = 320;
+
+/// `WEAK_ASK_DIVISOR` as section 6 proposes it: a share was asked when more
+/// than one in 64 of the weak shares it carried ask *(sim)*.
+pub const WEAK_ASK_DIVISOR: u64 = 64;
+
+/// `R_ASK_MAX` as section 6 proposes it: the largest weak ratio asks may
+/// reach, 4,096 *(sim)*. Without asks the ratio stays within `R_MAX`.
+pub const WEAK_RATIO_ASK_MAX: u64 = 4_096;
+
+/// The node default section 6 proposes (policy, not a rule): a miner's node
+/// asks while the miner expects fewer than this many weak shares a month.
+pub const ASK_WEAK_SHARES_PER_MONTH: f64 = 16.0;
+
 /// Share of a weak share's work that goes to the share carrying it:
 /// `INCLUDER_CUT` = 1%, the rule since study #85 (the page first proposed
 /// 2%, then set 5%).

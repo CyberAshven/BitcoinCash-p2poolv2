@@ -816,7 +816,8 @@ where
                         miner_hashrate,
                         &ctx.tracker_handle,
                     ) {
-                        Ok(job_lines) => {                            debug!("Tx {addr} notify for new template {job_lines:?}");
+                        Ok(job_lines) => {
+                            debug!("Tx {addr} notify for new template {job_lines:?}");
                             if let Err(e) = writer.write_all(job_lines.as_bytes()).await {
                                 error!("Failed to write notify to {addr}: {e}");
                                 break;
