@@ -65,6 +65,13 @@ const RPC_IN_WARMUP: i32 = -28;
 /// `RPC_METHOD_NOT_FOUND`: the node has no RPC of that name.
 const RPC_METHOD_NOT_FOUND: i32 = -32601;
 
+/// What a node answers a block proposal whose parent is not its best block.
+/// It has no verdict on such a block: it only checks one built on its tip.
+/// BCHN (`getblocktemplatecommon` in `src/rpc/mining.cpp`), BCHD
+/// (`handleGetBlockTemplateProposal` in `rpcserver.go`) and Bitcoin Core
+/// all answer this string.
+const PROPOSAL_NOT_BEST_PREVBLK: &str = "inconclusive-not-best-prevblk";
+
 /// How long an idle connection to the node is kept for reuse. BCHN and
 /// Bitcoin Core close an RPC connection idle for `-rpcservertimeout`, 30 s by
 /// default. A connection kept that long can be reused just as the node
@@ -104,6 +111,12 @@ pub enum BitcoindRpcError {
     Transport {
         message: String,
     },
+    /// The node answered a block proposal with a reason instead of `null`
+    /// ([`BitcoindRpcClient::validate_block_proposal`]): its reject reason,
+    /// such as `bad-cb-amount`.
+    ProposalRejected {
+        reason: String,
+    },
     Other(String),
 }
 
@@ -118,7 +131,7 @@ impl BitcoindRpcError {
             BitcoindRpcError::Transport { .. } | BitcoindRpcError::ParseError { .. } => true,
             BitcoindRpcError::HttpError { status_code, .. } => *status_code >= 500,
             BitcoindRpcError::RpcError { code, .. } => *code == RPC_IN_WARMUP,
-            BitcoindRpcError::Other(_) => false,
+            BitcoindRpcError::ProposalRejected { .. } | BitcoindRpcError::Other(_) => false,
         }
     }
 
@@ -127,6 +140,14 @@ impl BitcoindRpcError {
     /// (Knuth) does.
     pub fn is_method_not_found(&self) -> bool {
         matches!(self, BitcoindRpcError::RpcError { code, .. } if *code == RPC_METHOD_NOT_FOUND)
+    }
+
+    /// Whether the node refused a block proposal only because the block does
+    /// not build on the node's best block (`inconclusive-not-best-prevblk`).
+    /// The proposal was on the tip the node has just left, or on one it has
+    /// not reached yet; the node says nothing about the block itself.
+    pub fn is_proposal_off_best_block(&self) -> bool {
+        matches!(self, BitcoindRpcError::ProposalRejected { reason } if reason == PROPOSAL_NOT_BEST_PREVBLK)
     }
 }
 
@@ -137,6 +158,7 @@ impl Error for BitcoindRpcError {
             BitcoindRpcError::ParseError { message } => message,
             BitcoindRpcError::RpcError { message, .. } => message,
             BitcoindRpcError::Transport { message } => message,
+            BitcoindRpcError::ProposalRejected { reason } => reason,
             BitcoindRpcError::Other(msg) => msg,
         }
     }
@@ -158,6 +180,9 @@ impl fmt::Display for BitcoindRpcError {
             }
             BitcoindRpcError::Transport { message } => {
                 write!(f, "HTTP request failed: {message}")
+            }
+            BitcoindRpcError::ProposalRejected { reason } => {
+                write!(f, "Block proposal rejected: {reason}")
             }
             BitcoindRpcError::Other(msg) => write!(f, "{msg}"),
         }
@@ -666,6 +691,12 @@ impl BitcoindRpcClient {
     }
 
     /// Validate a miner's complete template against the local node without PoW.
+    ///
+    /// `Ok` only for the node's `null`. Any other answer is the node's
+    /// reason, in [`BitcoindRpcError::ProposalRejected`]; see
+    /// [`BitcoindRpcError::is_proposal_off_best_block`] for the one that is
+    /// no verdict on the block. Every other error means the node gave no
+    /// answer about the block.
     pub async fn validate_block_proposal(
         &self,
         block: &bitcoin::Block,
@@ -678,12 +709,12 @@ impl BitcoindRpcClient {
                 })],
             )
             .await?;
-        if result.is_null() {
-            Ok(())
-        } else {
-            Err(BitcoindRpcError::Other(format!(
-                "Block proposal rejected: {result}"
-            )))
+        match result {
+            serde_json::Value::Null => Ok(()),
+            serde_json::Value::String(reason) => Err(BitcoindRpcError::ProposalRejected { reason }),
+            other => Err(BitcoindRpcError::ProposalRejected {
+                reason: other.to_string(),
+            }),
         }
     }
 

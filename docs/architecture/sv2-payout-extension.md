@@ -326,12 +326,25 @@ byte. The message type is the only difference.
   client allocates a new token and asks again. A request or job on a stale
   token may get `stale-payout-outputs`, which is an honest race, not a
   refusal: the client asks again with a new token, as 0x0003 treats its own
-  stale code. Only `stale-payout-outputs` for a token allocated after the
-  last `PayoutOutputsStale`, again and again, counts as a refusal.
+  stale code.
+- **A stale answer on a new token.** `stale-payout-outputs` for a token
+  allocated after the last `PayoutOutputsStale`, even again and again, is
+  not a refusal either. It means the client's node and the pool's node
+  differ on the chain tip or its bits, which on a live pool is ordinary:
+  for a moment after each block the two nodes are on different tips. The
+  client keeps asking, no faster than once every few seconds. Meanwhile it
+  keeps mining its last installed job, or the pool's own jobs. It does not
+  fail over for this alone.
+- **A job on a parent the pool has left.** The same race can show at the
+  job itself. A `SetCustomMiningJob` whose block builds on a parent the
+  pool's node no longer has as its best block gets the base protocol's
+  `stale-chain-tip`, and the client declares again on the new tip.
+  `template-unavailable` means the pool could not check the job just now,
+  and the client asks again. Neither says the template is bad.
 - **Errors.** `invalid-mining-job-token`, `stale-payout-outputs` (the token
   or the template no longer matches what the pool can pay),
   `invalid-request`, `payout-outputs-too-large` and
-  `payout-outputs-unavailable`. Apart from the stale race above, every
+  `payout-outputs-unavailable`. Apart from `stale-payout-outputs`, every
   refusal is an ordinary SV2 error, and the client fails over to its next
   pool, ending in solo mining. `VerifyPayoutOutputs` uses those codes and
   the ones in section 7.9. `unknown-anchor` and `verify-rate-limited` are
@@ -357,7 +370,37 @@ byte. The message type is the only difference.
   Other connections get the payout scripts alone, as before.
 - **Staleness.** The node sends `PayoutOutputsStale` whenever the share it
   anchors new tokens on, or the BCH block its template builds on, changes:
-  about every 10 seconds.
+  every few seconds on a live pool. It answers `stale-payout-outputs` for
+  a token anchored on an earlier share, and for a request whose height,
+  previous block or bits are not those of the token's template. The second
+  case lasts as long as the client's node and the pool's node are on
+  different Bitcoin Cash tips, or disagree on the bits, and ends by itself.
+- **Token count.** A Job Declaration connection holds at most 64 tokens.
+  One more allocation is answered as usual and drops the connection's
+  oldest open token, one that is allocated and neither declared nor used.
+  When none is open, its oldest token of any state goes. The connection is
+  never closed for holding too many. A token also ends 120 seconds after
+  its allocation, when a mining connection presents it in
+  `SetCustomMiningJob`, and when its Job Declaration connection closes. A
+  message that names a token that is gone gets `invalid-mining-job-token`,
+  and so do the transactions of a declaration whose token the count
+  dropped. The node holds 4,096 tokens for all connections together; an
+  allocation past that closes its connection.
+- **Installed jobs.** A mining channel keeps its last eight declared jobs,
+  counted apart from the 32 of the node's own jobs it keeps. The node still
+  sends the channel its own job at every share-chain move, and those no
+  longer push a declared job out. A declared job stays until eight newer
+  declared jobs are installed, until its Bitcoin Cash parent is two blocks
+  back, or until the node's job tracker drops it, which keeps a job for at
+  least 15 minutes. A share on a job that is gone gets `stale-share`.
+- **A job at a tip change.** A Full-Template job's block is checked by the
+  node as a block proposal. When the node has already left the block's
+  parent, it has no verdict on the block
+  (`inconclusive-not-best-prevblk`), and the job gets `stale-chain-tip`,
+  as a job on another parent than the pool's own template does. When the
+  check gets no answer within 10 seconds, or the request to the node
+  fails, the job gets `template-unavailable`. Only the node's own reason
+  for refusing the block gets `invalid-template`.
 - **Anyone can check it.** The outputs are a function of the share chain,
   the request and the identity. Section 7.8 is the check a client does
   itself, on the commitment output. Section 7.9 is the check a second node
