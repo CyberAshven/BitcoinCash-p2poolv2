@@ -262,8 +262,31 @@ pub struct ShareDetail {
     /// The root committing the carried weak shares, hex.
     pub weak_root: String,
     /// The carried weak shares' bodies: empty when the share carries none
-    /// or the body was pruned, then `weak_count` alone reports the count.
+    /// or they were pruned, then `weak_summary` sums them up while the body
+    /// is kept and `weak_count` alone reports the count after.
     pub weak_shares: Vec<WeakShareDetail>,
+    /// The summary of the carried weak shares, reported once their whole
+    /// bodies were pruned one payout depth below the tip.
+    #[serde(default)]
+    pub weak_summary: Option<WeakSummaryDetail>,
+}
+
+/// The summary of a share's pruned weak shares, as `/share?hash=` reports
+/// it: who their credit goes to.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct WeakSummaryDetail {
+    pub groups: Vec<WeakCreditGroupDetail>,
+}
+
+/// Weak shares of one share that pay one payee alike.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct WeakCreditGroupDetail {
+    /// The miner they pay out to.
+    pub miner_bitcoin_address: String,
+    /// Their payout level.
+    pub payout_level: u8,
+    /// How many of the carried weak shares the group holds.
+    pub count: u32,
 }
 
 /// One weak share a share's body carries, as `/share?hash=` reports it.

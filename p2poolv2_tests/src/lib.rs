@@ -30,3 +30,5 @@ mod share_transaction_relay_test;
 mod stratum_server_test;
 #[cfg(test)]
 mod test_api_server_health_check;
+#[cfg(test)]
+mod weak_share_pruning_test;

@@ -79,8 +79,35 @@ pub struct ShareLookupOutput {
     /// (`ShareHeader::weak_root`), hex.
     pub weak_root: String,
     /// The carried weak shares' bodies, empty when the share carries none
-    /// or the body was pruned: then `weak_count` alone reports the count.
+    /// or they were pruned: then `weak_summary` sums them up while the body
+    /// is kept, and `weak_count` alone reports the count after.
     pub weak_shares: Vec<WeakShareOutput>,
+    /// The summary of the carried weak shares the payouts read, when their
+    /// whole bodies were pruned, one payout depth below the tip on a node
+    /// that does not keep them (`store.keep_whole_weak_shares`). Only
+    /// serialized then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weak_summary: Option<WeakSummaryOutput>,
+}
+
+/// JSON output for the summary of a share's pruned weak shares: their
+/// proof-of-work hashes and who their credit goes to.
+#[derive(Serialize)]
+pub struct WeakSummaryOutput {
+    pub pow_hashes: Vec<String>,
+    pub groups: Vec<WeakCreditGroupOutput>,
+}
+
+/// JSON output for weak shares of one share that pay one payee alike.
+#[derive(Serialize)]
+pub struct WeakCreditGroupOutput {
+    /// The share they were mined on.
+    pub parent: String,
+    pub miner_bitcoin_address: String,
+    pub miner_address: String,
+    pub payout_level: u8,
+    /// How many of the carried weak shares the group holds.
+    pub count: u32,
 }
 
 /// JSON output for one weak share a share carries: its identity, the
@@ -158,6 +185,38 @@ pub(crate) fn build_share_output(
     let carried_weak_shares = store
         .get_weak_shares(blockhash)
         .map_err(|error| ApiError::ServerError(format!("Store error: {error}")))?;
+    //* Whole weak shares go one payout depth below the tip; their summary
+    //* stays with the body.
+    let weak_summary = if carried_weak_shares.is_empty() && share_header.weak_count > 0 {
+        store
+            .get_pruned_weak_shares(blockhash)
+            .map_err(|error| ApiError::ServerError(format!("Store error: {error}")))?
+            .map(|pruned_weak_shares| WeakSummaryOutput {
+                pow_hashes: pruned_weak_shares
+                    .summary
+                    .pow_hashes
+                    .iter()
+                    .map(BlockHash::to_string)
+                    .collect(),
+                groups: pruned_weak_shares
+                    .summary
+                    .groups
+                    .iter()
+                    .map(|group| WeakCreditGroupOutput {
+                        parent: group.parent.to_string(),
+                        miner_bitcoin_address: payout_address_string(
+                            &group.payout_address,
+                            cash_network,
+                        ),
+                        miner_address: to_address_string(&group.share_owner, network, cash_network),
+                        payout_level: group.payout_level,
+                        count: group.count,
+                    })
+                    .collect(),
+            })
+    } else {
+        None
+    };
     let weak_shares = carried_weak_shares
         .iter()
         .map(|weak_share| WeakShareOutput {
@@ -226,6 +285,7 @@ pub(crate) fn build_share_output(
         weak_ratio: share_header.weak_ratio,
         weak_root: share_header.weak_root.to_string(),
         weak_shares,
+        weak_summary,
     })
 }
 
@@ -353,7 +413,7 @@ mod tests {
     };
     use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
     use p2poolv2_lib::node::actor::NodeHandle;
-    use p2poolv2_lib::shares::weak::{WEAK_RATIO_MAX, empty_weak_root};
+    use p2poolv2_lib::shares::weak::{WEAK_RATIO_MAX, empty_weak_root, weak_root};
     use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
     use p2poolv2_lib::test_utils::{
         TestShareBlockBuilder, build_confirmed_test_chain, confirm_test_block, genesis_for_tests,
@@ -516,7 +576,10 @@ mod tests {
         assert_eq!(output.weak_count, 1);
         assert_eq!(output.weak_asking, 1);
         assert_eq!(output.weak_ratio, WEAK_RATIO_MAX);
-        assert_eq!(output.weak_root, weak_share.committed_hash().to_string());
+        assert_eq!(
+            output.weak_root,
+            weak_root(std::slice::from_ref(&weak_share)).to_string()
+        );
         assert_eq!(output.weak_shares.len(), 1);
         let weak_output = &output.weak_shares[0];
         assert_eq!(weak_output.pow_hash, weak_share.pow_hash().to_string());

@@ -75,7 +75,43 @@ fn share_view(share: ShareDetail, is_block: bool) -> impl IntoView {
         .into_any()
     });
     let weak_panel = carries_weak.then(|| {
-        let body = if share.weak_shares.is_empty() {
+        let body = if let Some(summary) = share
+            .weak_summary
+            .as_ref()
+            .filter(|_| share.weak_shares.is_empty())
+        {
+            let rows = summary
+                .groups
+                .iter()
+                .map(|group| {
+                    view! {
+                        <tr>
+                            <td>{miner_link(&group.miner_bitcoin_address)}</td>
+                            <td>{group.count.to_string()}</td>
+                            <td>{group.payout_level.to_string()}</td>
+                        </tr>
+                    }
+                })
+                .collect_view();
+            view! {
+                <p class="empty-state">
+                    "The whole weak shares were pruned one payout depth below the tip. Their summary, which the payouts read, is kept:"
+                </p>
+                <div class="table-x">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>"Miner"</th>
+                                <th>"Weak shares"</th>
+                                <th>"Level"</th>
+                            </tr>
+                        </thead>
+                        <tbody>{rows}</tbody>
+                    </table>
+                </div>
+            }
+            .into_any()
+        } else if share.weak_shares.is_empty() {
             view! {
                 <p class="empty-state">
                     {format!(

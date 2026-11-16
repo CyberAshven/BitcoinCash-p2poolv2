@@ -71,7 +71,14 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 ///   those asks (`BCH_WEAK_SHARE_RULE_TAG`,
 ///   `weak4-640-100-48-256-320-64-4096-64-32`). A stored header has no such count
 ///   and would not decode, and the chain starts from a new genesis.
-pub const STORE_FORMAT_VERSION: u32 = 10;
+/// - 11 (2026-11-16): a Bitcoin Cash share's weak root also commits the
+///   summary of the weak shares it carries (`BCH_WEAK_SHARE_RULE_TAG`,
+///   `-summary`), the `WeakSummaries` column family keeps their leaf root
+///   beside the summary (`PrunedWeakShares`), and whole weak shares are
+///   pruned one payout depth below the confirmed tip. A stored share
+///   carrying weak shares commits the old root, which every node now
+///   refuses, and a stored summary has no leaf root; the chain starts again.
+pub const STORE_FORMAT_VERSION: u32 = 11;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -118,6 +125,10 @@ pub struct Store {
     /// when it holds every height, `u32::MAX` while it writes none
     /// (`with_script_history`). Loaded from `Metadata` when the store opens.
     script_history_from: AtomicU32,
+    /// Whether whole weak shares are kept until their share's body is
+    /// pruned, as an explorer or archive wants, instead of one payout depth
+    /// (`with_whole_weak_shares_kept`, `store.keep_whole_weak_shares`).
+    keep_whole_weak_shares: bool,
 }
 
 /// Merge operator for appending BlockHashes to a Vec<BlockHash>.
@@ -361,6 +372,7 @@ impl Store {
             refused_reorgs: Mutex::new(HashMap::new()),
             script_history_gc_threshold,
             script_history_from: AtomicU32::new(0),
+            keep_whole_weak_shares: false,
         };
         store.load_script_history_from()?;
         Ok(store)
@@ -377,6 +389,17 @@ impl Store {
     /// The share-chain depths this store prunes and reorgs by.
     pub fn depths(&self) -> ChainDepths {
         self.depths
+    }
+
+    /// Keep whole weak shares until their share's body is pruned, two payout
+    /// depths below the tip, when `keep` is set (`store.keep_whole_weak_shares`,
+    /// for an explorer or an archive). By default they are pruned one payout
+    /// depth below the confirmed tip, and their leaf root and summary stay with
+    /// the body (`Store::weak_share_prune_target`). Either way the node serves
+    /// every body a syncing peer asks for.
+    pub fn with_whole_weak_shares_kept(mut self, keep: bool) -> Self {
+        self.keep_whole_weak_shares = keep;
+        self
     }
 
     /// The chain a stored share chain belongs to, read from its genesis
@@ -627,8 +650,8 @@ impl Store {
              (the main and mini chains merged) whose headers carry a difficulty band, a \
              payout level and weak shares, with payees below their level paid by a draw and \
              every proof from a job at the minimum paid at the weak work, whose weak root \
-             commits each carried weak share's whole encoding, and whose weak ratio follows \
-             the weak shares that ask for an easier weak target. Delete the store directory and \
+             commits each carried weak share's whole encoding and their summary, and whose weak \
+             ratio follows the weak shares that ask for an easier weak target. Delete the store directory and \
              restart to resync the share chain from peers.",
             self.path
         )))

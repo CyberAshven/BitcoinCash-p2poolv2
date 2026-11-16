@@ -1402,7 +1402,23 @@ pub(crate) fn share(view: &ShareView) -> Markup {
         @if share.weak_count > 0 {
             div.panel {
                 h2 { "Weak shares" span.panel-note { (share.weak_count) " carried" } }
-                @if share.weak_shares.is_empty() {
+                @if let Some(summary) = share.weak_summary.as_ref().filter(|_| share.weak_shares.is_empty()) {
+                    p.empty-state { "The whole weak shares were pruned one payout depth below the tip. Their summary, which the payouts read, is kept:" }
+                    div.table-x {
+                        table.table {
+                            thead { tr { th { "Miner" } th { "Weak shares" } th { "Level" } } }
+                            tbody {
+                                @for group in &summary.groups {
+                                    tr {
+                                        td { (miner_link(&group.miner_bitcoin_address)) }
+                                        td { (group.count) }
+                                        td { (group.payout_level) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } @else if share.weak_shares.is_empty() {
                     p.empty-state { "The carried weak share bodies were pruned. Only the count of " (share.weak_count) " is kept." }
                 } @else {
                     div.table-x {
@@ -1608,7 +1624,9 @@ pub(crate) fn error(site: &Site, message: &str) -> Markup {
 mod tests {
     use super::*;
     use crate::api::endpoints::miner::WindowSummary;
-    use crate::api::endpoints::share::{BitcoinHeaderOutput, WeakShareOutput};
+    use crate::api::endpoints::share::{
+        BitcoinHeaderOutput, WeakCreditGroupOutput, WeakShareOutput, WeakSummaryOutput,
+    };
 
     fn site() -> Site {
         Site {
@@ -1659,6 +1677,7 @@ mod tests {
                 weak_root: "f61d3df0eef9c5d70dbc861965b0905d037e774e6a43ea3f4a8518fa41913343"
                     .to_string(),
                 weak_shares,
+                weak_summary: None,
             },
             is_block: false,
         }
@@ -2485,6 +2504,28 @@ mod tests {
         );
         assert!(!page.contains("<th>PoW hash</th>"));
         assert!(page.contains("<span class=\"badge-weak\">2 weak</span>"));
+    }
+
+    /// One payout depth below the tip the whole weak shares are pruned and
+    /// their summary is kept: the page shows who their credit goes to.
+    #[test]
+    fn the_share_page_shows_the_summary_of_pruned_weak_shares() {
+        let mut view = share_view(2, 262_144, Vec::new());
+        view.share.weak_summary = Some(WeakSummaryOutput {
+            pow_hashes: vec!["11".repeat(32), "22".repeat(32)],
+            groups: vec![WeakCreditGroupOutput {
+                parent: "00".repeat(32),
+                miner_bitcoin_address: "bchtest:qweakpayee".to_string(),
+                miner_address: "tp2pool:qweakowner".to_string(),
+                payout_level: 5,
+                count: 2,
+            }],
+        });
+        let page = share(&view).into_string();
+        assert!(page.contains("Their summary, which the payouts read, is kept"));
+        assert!(page.contains("bchtest:qweakpayee"));
+        assert!(page.contains("<th>Weak shares</th>"));
+        assert!(!page.contains("Only the count of 2 is kept"));
     }
 
     #[test]

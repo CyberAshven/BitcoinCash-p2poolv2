@@ -65,6 +65,24 @@ pub fn prune_target_for_tip(depths: ChainDepths, confirmed_tip_height: u32) -> u
     confirmed_tip_height.saturating_sub((depths.prune_depth() + PRUNE_INTERVAL) as u32)
 }
 
+/// Height below which the whole weak shares a share carries are deleted, for
+/// a confirmed tip: one payout depth and one `PRUNE_INTERVAL` below it, half
+/// the body prune depth. Their leaf root and summary stay with the body until
+/// `prune_target_for_tip` (`shares::weak::PrunedWeakShares`).
+///
+/// Counted in shares of this chain, like every pruning bound: the payout
+/// depth is the maturity skip, the window's share cap and an uncle's depth
+/// (`BCH_PAYOUT_DEPTH`), so however difficulty moves, no window reaches
+/// further. Whole weak shares are read only to check a share fully, and a
+/// node checks fully only shares within the payout depth of its tip, or on a
+/// branch forking at most `max_reorg_depth`, the same depth, below its
+/// confirmed tip; to serve them whole to a peer whose tip is up to
+/// `PRUNE_INTERVAL` behind; and to show them. The summaries, which payouts
+/// down to two payout depths read, are not touched here.
+pub fn weak_share_prune_target_for_tip(depths: ChainDepths, confirmed_tip_height: u32) -> u32 {
+    confirmed_tip_height.saturating_sub((depths.payout_depth + PRUNE_INTERVAL) as u32)
+}
+
 /// Deepest fork, counted below the confirmed tip, that the candidate chain
 /// reorgs onto: the chain's payout depth (`ChainDepths::max_reorg_depth`).
 /// This constant is Bitcoin's, `PAYOUT_DEPTH`; Bitcoin Cash's is
@@ -150,6 +168,28 @@ impl Store {
                 Ok(reorg_floor_for_tip(self.depths(), confirmed_tip_height))
             }
             Err(StoreError::NotFound(_)) => Ok(0),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The weak share prune target for the current confirmed tip
+    /// (`weak_share_prune_target_for_tip`): whole weak shares below it are
+    /// deleted and never stored again, their leaf root and summary kept.
+    /// `None` when this store keeps them until the body is pruned
+    /// (`Store::with_whole_weak_shares_kept`).
+    ///
+    /// Returns `Some(0)` when there is no confirmed tip yet. Store read errors
+    /// are propagated.
+    pub fn weak_share_prune_target(&self) -> Result<Option<u32>, StoreError> {
+        if self.keep_whole_weak_shares {
+            return Ok(None);
+        }
+        match self.get_top_confirmed_height() {
+            Ok(confirmed_tip_height) => Ok(Some(weak_share_prune_target_for_tip(
+                self.depths(),
+                confirmed_tip_height,
+            ))),
+            Err(StoreError::NotFound(_)) => Ok(Some(0)),
             Err(error) => Err(error),
         }
     }
@@ -243,6 +283,44 @@ impl Store {
             blocks: bodies.len(),
             transactions: deletable_txids.len(),
         })
+    }
+
+    /// Delete the whole weak shares of every block at heights `[from, to)`,
+    /// forks and uncles included, into `batch`, keeping their leaf root and
+    /// summary (`WeakSummaries`) with the body. Returns how many blocks lost
+    /// theirs.
+    ///
+    /// Only keys present are deleted, so a rerun or a range of blocks
+    /// carrying none writes no tombstones. A body stored at these heights
+    /// later stores its weak shares pruned (`Store::add_share_block`).
+    pub(crate) fn prune_weak_shares_chunk(
+        &self,
+        from: u32,
+        to: u32,
+        batch: &mut rocksdb::WriteBatch,
+    ) -> Result<usize, StoreError> {
+        let from = from.max(FIRST_PRUNABLE_HEIGHT);
+        if from >= to {
+            return Ok(0);
+        }
+        let blockhashes: Vec<BlockHash> = self
+            .get_blockhashes_for_height_range(from, to - 1)
+            .into_iter()
+            .flat_map(|(_height, blockhashes)| blockhashes)
+            .collect();
+        let weak_shares_cf = self.db.cf_handle(&ColumnFamily::WeakShares).unwrap();
+        let keys: Vec<Vec<u8>> = blockhashes.iter().map(consensus::serialize).collect();
+        let results = self
+            .db
+            .multi_get_cf(keys.iter().map(|key| (&weak_shares_cf, key)));
+        let mut pruned = 0;
+        for (key, result) in keys.iter().zip(results) {
+            if result?.is_some() {
+                batch.delete_cf(&weak_shares_cf, key);
+                pruned += 1;
+            }
+        }
+        Ok(pruned)
     }
 
     /// The sharechain txids of each block in `blockhashes` that has a body,
@@ -353,7 +431,7 @@ impl Store {
     }
 
     /// Delete a block's txid lists, bitcoin coinbase, and the weak shares it
-    /// carries with their summary.
+    /// carries, whole if they were kept, with their leaf root and summary.
     ///
     /// Nothing writes the `BitcoinTxids` CF yet; its key is deleted anyway so
     /// a future writer cannot leak data. A pruned block is below every
@@ -510,6 +588,70 @@ mod tests {
             .with_chain(crate::config::Chain::BitcoinCash);
         assert_eq!(store.depths(), BITCOIN_CASH);
         assert_eq!(store.stored_chain(), None);
+    }
+
+    /// Whole weak shares go one payout depth and one prune interval below
+    /// the confirmed tip, counted in shares: 1,000,000 - 121,063 - 360, half
+    /// the body prune depth. A window for the next share, at its 120,960-share
+    /// cap behind the 100-share maturity skip with an uncle 3 below its
+    /// deepest share, reads only shares above that: their whole weak shares
+    /// are kept. The deepest fork the node follows branches at the reorg
+    /// floor, and a share on it reads down to just above the body prune
+    /// target and the prune height, where the summaries are still kept.
+    #[test]
+    #[cfg(not(feature = "sim"))]
+    fn test_whole_weak_shares_go_one_payout_depth_below_the_confirmed_tip() {
+        let tip: u32 = 1_000_000;
+        let weak_share_target = weak_share_prune_target_for_tip(BITCOIN_CASH, tip);
+        assert_eq!(weak_share_target, 878_577);
+
+        let next_share = tip + 1;
+        let deepest_read_at_the_tip = next_share - BCH_PAYOUT_DEPTH as u32;
+        assert_eq!(deepest_read_at_the_tip, 878_938);
+        assert!(deepest_read_at_the_tip > weak_share_target);
+
+        let first_share_on_the_deepest_fork = reorg_floor_for_tip(BITCOIN_CASH, tip) + 1;
+        let deepest_read_on_the_fork = first_share_on_the_deepest_fork - BCH_PAYOUT_DEPTH as u32;
+        assert_eq!(deepest_read_on_the_fork, 757_875);
+        assert!(deepest_read_on_the_fork < weak_share_target);
+        assert!(deepest_read_on_the_fork > prune_height_for_tip(BITCOIN_CASH, tip));
+        assert!(deepest_read_on_the_fork > prune_target_for_tip(BITCOIN_CASH, tip));
+    }
+
+    /// The same bounds in every build, the sim's short depths included: the
+    /// whole weak shares outlive every share a payout at the tip reads, and
+    /// the summaries every share a payout on the deepest fork reads.
+    #[test]
+    fn test_weak_share_bounds_hold_for_every_payout_a_node_checks() {
+        let tip = 3 * BCH_PRUNE_DEPTH as u32;
+        let weak_share_target = weak_share_prune_target_for_tip(BITCOIN_CASH, tip);
+        assert_eq!(
+            tip - weak_share_target,
+            (BCH_PAYOUT_DEPTH + PRUNE_INTERVAL) as u32
+        );
+        assert!(tip + 1 - BCH_PAYOUT_DEPTH as u32 > weak_share_target);
+        let deepest_read_on_the_fork =
+            reorg_floor_for_tip(BITCOIN_CASH, tip) + 1 - BCH_PAYOUT_DEPTH as u32;
+        assert!(deepest_read_on_the_fork > prune_target_for_tip(BITCOIN_CASH, tip));
+        assert!(deepest_read_on_the_fork > prune_height_for_tip(BITCOIN_CASH, tip));
+    }
+
+    /// A store keeping whole weak shares, for an explorer or an archive, has
+    /// no weak share prune target; a pruning store has one from its tip.
+    #[test]
+    fn test_only_a_pruning_store_has_a_weak_share_prune_target() {
+        let archive_dir = tempdir().unwrap();
+        let archive = Store::new(archive_dir.path().to_str().unwrap().to_string(), false)
+            .unwrap()
+            .with_chain(crate::config::Chain::BitcoinCash)
+            .with_whole_weak_shares_kept(true);
+        let pruning_dir = tempdir().unwrap();
+        let pruning = Store::new(pruning_dir.path().to_str().unwrap().to_string(), false)
+            .unwrap()
+            .with_chain(crate::config::Chain::BitcoinCash);
+
+        assert_eq!(archive.weak_share_prune_target().unwrap(), None);
+        assert_eq!(pruning.weak_share_prune_target().unwrap(), Some(0));
     }
 
     #[test]

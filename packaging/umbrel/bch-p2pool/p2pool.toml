@@ -42,6 +42,12 @@ dial_timeout_secs = 30
 # chain, or one written under older share-chain rules.
 path = "/p2poolv2/data/mainnet"
 pplns_ttl_days = 7
+# Keep the whole weak shares a Bitcoin Cash share carries until its body is
+# pruned, two payout depths (242,486 shares), for an explorer or an archive.
+# By default they are pruned one payout depth (121,423 shares) below the tip
+# and only their summary, which the payouts read, stays with the body. Every
+# node serves every body a syncing peer asks for either way.
+# keep_whole_weak_shares = false
 
 [stratum]
 hostname = "0.0.0.0"

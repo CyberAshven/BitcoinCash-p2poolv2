@@ -45,8 +45,8 @@ use crate::shares::share_block::{
     encode_optional_address,
 };
 use bitcoin::consensus::encode::Error::ParseFailed;
-use bitcoin::consensus::{Decodable, Encodable};
-use bitcoin::hashes::{Hash, sha256d};
+use bitcoin::consensus::{Decodable, Encodable, serialize};
+use bitcoin::hashes::{Hash, HashEngine, sha256d};
 use bitcoin::{BlockHash, CompactTarget, ScriptBuf, Target, TxMerkleNode, VarInt};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::{self, ShareOwner};
@@ -168,7 +168,14 @@ pub const MAX_WEAK_SCRIPT_SIG_BYTES: usize = 100;
 /// more than 64 weak shares only while more than one in 64 of them ask, and
 /// the genesis ratio is 32, where `R_MAX` let a young chain's shares carry
 /// 640 each (the payout simulator's `weak-asks-rules`, rule v4).
-pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak4-640-100-48-256-320-64-4096-64-32";
+///
+/// `-summary` since 2026-11-16, before any node ran `weak4`: the weak root
+/// also commits the summary the PPLNS window and the carried-once rule read
+/// ([`weak_root`]), so a share whose whole weak shares a node has pruned can
+/// be served with that summary instead ([`PrunedWeakShares`]) and checked
+/// against its header. Every share carrying weak shares has a different root
+/// under the two: a flag day, with a fresh store.
+pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak4-640-100-48-256-320-64-4096-64-32-summary";
 
 /// Whether a share may carry `weak_count` weak shares of which
 /// `weak_asking` ask ([`weak_share_asks`]):
@@ -454,10 +461,10 @@ impl Decodable for WeakShare {
     }
 }
 
-/// The root a share header commits for the weak shares it carries: the
-/// merkle root of their committed hashes ([`WeakShare::committed_hash`], the
-/// SHA-256d of each one's whole encoding), in the order carried, or all zeros
-/// for none.
+/// The merkle root of the committed hashes of the weak shares a share
+/// carries ([`WeakShare::committed_hash`], the SHA-256d of each one's whole
+/// encoding), in the order carried, or all zeros for none: the first half of
+/// what the weak root commits ([`weak_root`]).
 ///
 /// Every byte of a carried weak share is in its leaf, so a body whose weak
 /// shares differ in any field from the ones the miner carried fails the body
@@ -471,9 +478,99 @@ impl Decodable for WeakShare {
 /// last weak share would keep the root (CVE-2012-2459); the body check
 /// refuses a list that repeats a proof-of-work hash before it compares the
 /// root.
-pub fn weak_root<'a>(weak_shares: impl IntoIterator<Item = &'a WeakShare>) -> sha256d::Hash {
+pub fn weak_leaf_root<'a>(weak_shares: impl IntoIterator<Item = &'a WeakShare>) -> sha256d::Hash {
     bitcoin::merkle_tree::calculate_root(weak_shares.into_iter().map(WeakShare::committed_hash))
         .unwrap_or_else(sha256d::Hash::all_zeros)
+}
+
+/// The root a share header commits for the weak shares it carries, all
+/// zeros for none, and otherwise:
+///
+/// ```text
+/// weak_root = SHA-256d(weak_leaf_root || SHA-256d(summary))
+/// ```
+///
+/// `weak_leaf_root` binds every byte of every carried weak share
+/// ([`weak_leaf_root`]), and `summary` is the consensus encoding of their
+/// [`WeakSummary`], which the PPLNS window and the carried-once rule read. A
+/// whole body is checked by computing both from its weak shares. A body
+/// served after its weak shares were pruned carries the leaf root and the
+/// summary instead ([`PrunedWeakShares`]), and is checked by this root alone,
+/// so a peer syncing it gets a summary the miner's proof of work fixes. Until
+/// 2026-11-16 the root was the leaf root alone, and a summary could be
+/// checked only by the whole weak shares it came from.
+pub fn weak_root(weak_shares: &[WeakShare]) -> sha256d::Hash {
+    if weak_shares.is_empty() {
+        return empty_weak_root();
+    }
+    weak_root_of(&weak_leaf_root(weak_shares), &WeakSummary::of(weak_shares))
+}
+
+/// The weak root ([`weak_root`]) of carried weak shares with the leaf root
+/// `leaf_root` and the summary `summary`.
+pub fn weak_root_of(leaf_root: &sha256d::Hash, summary: &WeakSummary) -> sha256d::Hash {
+    let summary_hash = sha256d::Hash::hash(&serialize(summary));
+    let mut engine = sha256d::Hash::engine();
+    engine.input(leaf_root.as_byte_array());
+    engine.input(summary_hash.as_byte_array());
+    sha256d::Hash::from_engine(engine)
+}
+
+/// The weak shares of a share after its node pruned them: their leaf root
+/// ([`weak_leaf_root`]) and their summary, what the weak root commits besides
+/// them ([`weak_root_of`]). A node keeps this beside every share body that
+/// carries weak shares, until the body itself is pruned, and serves a body
+/// whose whole weak shares it pruned with this in their place.
+///
+/// Whole weak shares are read only to check a share inside the payout depth
+/// and to show them, so a node prunes them one payout depth below its
+/// confirmed tip (`store::prune_blocks::weak_share_prune_target_for_tip`). A
+/// peer syncing a share between that depth and the body prune depth checks
+/// this against the header and stores the summary, which its payouts at the
+/// bottom of the full-validation zone read.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PrunedWeakShares {
+    /// The merkle root of the weak shares' committed hashes.
+    pub leaf_root: sha256d::Hash,
+    /// Their summary: proof-of-work hashes and credit groups.
+    pub summary: WeakSummary,
+}
+
+impl PrunedWeakShares {
+    /// The pruned form of the weak shares a share carries.
+    pub fn of(weak_shares: &[WeakShare]) -> Self {
+        Self {
+            leaf_root: weak_leaf_root(weak_shares),
+            summary: WeakSummary::of(weak_shares),
+        }
+    }
+
+    /// The weak root these commit to ([`weak_root_of`]).
+    pub fn weak_root(&self) -> sha256d::Hash {
+        weak_root_of(&self.leaf_root, &self.summary)
+    }
+}
+
+impl Encodable for PrunedWeakShares {
+    fn consensus_encode<W: bitcoin::io::Write + ?Sized>(
+        &self,
+        writer: &mut W,
+    ) -> Result<usize, bitcoin::io::Error> {
+        let mut length = self.leaf_root.consensus_encode(writer)?;
+        length += self.summary.consensus_encode(writer)?;
+        Ok(length)
+    }
+}
+
+impl Decodable for PrunedWeakShares {
+    fn consensus_decode<R: bitcoin::io::Read + ?Sized>(
+        reader: &mut R,
+    ) -> Result<Self, bitcoin::consensus::encode::Error> {
+        Ok(Self {
+            leaf_root: sha256d::Hash::consensus_decode(reader)?,
+            summary: WeakSummary::consensus_decode(reader)?,
+        })
+    }
 }
 
 /// The root a header carrying no weak shares commits: all zeros.
@@ -734,7 +831,7 @@ mod tests {
         assert_eq!(
             BCH_WEAK_SHARE_RULE_TAG,
             format!(
-                "weak4-{WEAK_CAP}-{INCLUDER_CUT}-{WEAK_DEPTH}-{WEAK_RATIO_MAX_MULTIPLE}-{WEAK_FILL_MAX}-{WEAK_ASK_DIVISOR}-{WEAK_RATIO_ASK_MAX_MULTIPLE}-{WEAK_IDLE_CAP}-{GENESIS_WEAK_RATIO_MULTIPLE}"
+                "weak4-{WEAK_CAP}-{INCLUDER_CUT}-{WEAK_DEPTH}-{WEAK_RATIO_MAX_MULTIPLE}-{WEAK_FILL_MAX}-{WEAK_ASK_DIVISOR}-{WEAK_RATIO_ASK_MAX_MULTIPLE}-{WEAK_IDLE_CAP}-{GENESIS_WEAK_RATIO_MULTIPLE}-summary"
             )
         );
     }
@@ -1111,8 +1208,58 @@ mod tests {
             merkle_branch: Vec::new(),
         };
 
-        assert_ne!(weak_root([&first, &second]), weak_root([&second, &first]));
-        assert_eq!(weak_root([&first]), sha256d::Hash::hash(&serialize(&first)));
+        assert_ne!(
+            weak_root(&[first.clone(), second.clone()]),
+            weak_root(&[second.clone(), first.clone()])
+        );
+        assert_eq!(
+            weak_leaf_root([&first]),
+            sha256d::Hash::hash(&serialize(&first))
+        );
+    }
+
+    /// The weak root commits the leaf root and the summary together, so the
+    /// pruned form of a share's weak shares gives the root the whole ones
+    /// give, and a summary changed under the same leaf root does not.
+    #[test]
+    fn the_weak_root_commits_the_summary_beside_the_leaf_root() {
+        let weak_shares = vec![
+            WeakShare {
+                header: TestShareBlockBuilder::new()
+                    .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+                    .nonce(1)
+                    .build()
+                    .header,
+                coinbase_script_sig: ScriptBuf::new(),
+                coinbase_value: 1,
+                merkle_branch: Vec::new(),
+            },
+            WeakShare {
+                header: TestShareBlockBuilder::new()
+                    .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+                    .nonce(2)
+                    .build()
+                    .header,
+                coinbase_script_sig: ScriptBuf::new(),
+                coinbase_value: 1,
+                merkle_branch: Vec::new(),
+            },
+        ];
+        let pruned = PrunedWeakShares::of(&weak_shares);
+        assert_eq!(pruned.weak_root(), weak_root(&weak_shares));
+        assert_ne!(
+            pruned.weak_root(),
+            pruned.leaf_root,
+            "the summary is in the root"
+        );
+
+        let mut tampered = pruned.clone();
+        tampered.summary.groups[1].count += 1;
+        assert_eq!(tampered.leaf_root, pruned.leaf_root);
+        assert_ne!(tampered.weak_root(), weak_root(&weak_shares));
+
+        let decoded: PrunedWeakShares = deserialize(&serialize(&pruned)).unwrap();
+        assert_eq!(decoded, pruned);
     }
 
     //* Each field a weak share check reads moves the root, while the
@@ -1133,7 +1280,10 @@ mod tests {
         altered.coinbase_value += 1;
 
         assert_eq!(altered.pow_hash(), honest.pow_hash());
-        assert_ne!(weak_root([&altered]), weak_root([&honest]));
+        assert_ne!(
+            weak_root(std::slice::from_ref(&altered)),
+            weak_root(std::slice::from_ref(&honest))
+        );
     }
 
     #[test]
@@ -1151,7 +1301,10 @@ mod tests {
         altered.merkle_branch = vec![TxMerkleNode::from_byte_array([0x34; 32])];
 
         assert_eq!(altered.pow_hash(), honest.pow_hash());
-        assert_ne!(weak_root([&altered]), weak_root([&honest]));
+        assert_ne!(
+            weak_root(std::slice::from_ref(&altered)),
+            weak_root(std::slice::from_ref(&honest))
+        );
     }
 
     #[test]
@@ -1169,7 +1322,10 @@ mod tests {
         altered.coinbase_script_sig = ScriptBuf::from_bytes(vec![0x52; 40]);
 
         assert_eq!(altered.pow_hash(), honest.pow_hash());
-        assert_ne!(weak_root([&altered]), weak_root([&honest]));
+        assert_ne!(
+            weak_root(std::slice::from_ref(&altered)),
+            weak_root(std::slice::from_ref(&honest))
+        );
     }
 
     #[test]
@@ -1187,7 +1343,10 @@ mod tests {
         altered.header.coinbase_proof.midstate[0] ^= 0x01;
 
         assert_eq!(altered.pow_hash(), honest.pow_hash());
-        assert_ne!(weak_root([&altered]), weak_root([&honest]));
+        assert_ne!(
+            weak_root(std::slice::from_ref(&altered)),
+            weak_root(std::slice::from_ref(&honest))
+        );
     }
 
     #[test]
@@ -1205,6 +1364,9 @@ mod tests {
         altered.header.time += 1;
 
         assert_eq!(altered.pow_hash(), honest.pow_hash());
-        assert_ne!(weak_root([&altered]), weak_root([&honest]));
+        assert_ne!(
+            weak_root(std::slice::from_ref(&altered)),
+            weak_root(std::slice::from_ref(&honest))
+        );
     }
 }

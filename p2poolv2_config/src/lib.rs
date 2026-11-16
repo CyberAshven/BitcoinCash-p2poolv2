@@ -1362,6 +1362,13 @@ pub struct StoreConfig {
     /// Time-to-live for PPLNS shares (in days)
     #[serde(default = "default_pplns_ttl_days")]
     pub pplns_ttl_days: u64,
+    /// Keep the whole weak shares a Bitcoin Cash share carries until its body
+    /// is pruned, two payout depths below the tip, as an explorer or an
+    /// archive wants. By default (false) they are pruned one payout depth
+    /// below the tip, and their leaf root and summary stay with the body;
+    /// either way the node serves every body a syncing peer asks for.
+    #[serde(default)]
+    pub keep_whole_weak_shares: bool,
 }
 
 fn default_wait_for_chain_sync() -> bool {
@@ -2009,6 +2016,19 @@ mod tests {
             .with_pplns_ttl_days(9);
 
         assert_eq!(config.store.pplns_ttl_days, 9);
+    }
+
+    /// A node prunes whole weak shares at one payout depth unless its config
+    /// keeps them, as an explorer or an archive does.
+    #[test]
+    fn whole_weak_shares_are_pruned_unless_the_store_keeps_them() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(!config.store.keep_whole_weak_shares, "sample default");
+
+        with_var("P2POOL_STORE__KEEP_WHOLE_WEAK_SHARES", Some("true"), || {
+            let config = Config::load("../config.sample.toml").unwrap();
+            assert!(config.store.keep_whole_weak_shares, "archive setting");
+        });
     }
 
     /// Characterisation tests for environment-variable overrides.

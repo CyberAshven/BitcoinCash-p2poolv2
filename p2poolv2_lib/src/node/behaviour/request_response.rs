@@ -190,6 +190,14 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// steps the weak ratio without the asks, and the header change gives the
 /// chain a new genesis, so every node upgrades together on a fresh store
 /// rather than through the vote.
+///
+/// The weak segment gained `-summary` on 2026-11-16, before any node ran
+/// `weak4`, another flag day: a share's weak root also commits the summary
+/// of the weak shares it carries, so a node that pruned them one payout
+/// depth below its tip serves the body with their leaf root and summary, and
+/// a syncing peer checks those against the header. Every share carrying
+/// weak shares has another root under the two, and a node without it cannot
+/// read a body served that way.
 fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
@@ -496,7 +504,7 @@ mod tests {
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/weak-by-hash/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/1.0.0"
             )
         );
     }
@@ -517,11 +525,11 @@ mod tests {
 
         assert_ne!(current, before, "weak shares by hash change the messages");
         assert!(
-            current.ends_with("/weak4-640-100-48-256-320-64-4096-64-32/weak-by-hash/1.0.0"),
+            current.ends_with("/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/1.0.0"),
             "{current}"
         );
         assert!(
-            before.ends_with("/weak4-640-100-48-256-320-64-4096-64-32/1.0.0"),
+            before.ends_with("/weak4-640-100-48-256-320-64-4096-64-32-summary/1.0.0"),
             "{before}"
         );
         let kad = kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
@@ -618,7 +626,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/",
             "/",
         );
 
@@ -641,7 +649,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/",
             "/",
         );
 
@@ -664,7 +672,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/",
             "/",
         );
 
@@ -687,7 +695,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/",
             "/",
         );
 
@@ -710,7 +718,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/",
             "/levels-546x2/",
         );
 
@@ -735,7 +743,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/",
             "/levels-546x2/weak-64-500-6/",
         );
 
@@ -762,7 +770,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/",
             "/levels-546x2/weak2-64-500-6/",
         );
 
@@ -787,13 +795,14 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/weak4-640-100-48-256-320-64-4096-64-32-summary/",
             "/weak2-64-100-48-256/",
         );
 
         assert_ne!(current, before, "carried weak time flag day");
         assert!(
-            current.ends_with("/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/1.0.0"),
+            current
+                .ends_with("/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/1.0.0"),
             "{current}"
         );
     }
@@ -815,13 +824,40 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/weak4-640-100-48-256-320-64-4096-64-32-summary/",
             "/weak3-64-100-48-256/",
         );
 
         assert_ne!(current, before, "weak asks flag day");
         assert!(
             before.ends_with("/levels-546x2-k1/weak3-64-100-48-256/1.0.0"),
+            "{before}"
+        );
+    }
+
+    /// A node from before the weak root committed the weak shares' summary
+    /// derived the string ending `.../weak4-640-100-48-256-320-64-4096-64-32/1.0.0`.
+    /// It computes another root for every share carrying weak shares and
+    /// cannot read a body served with its weak shares pruned, so the new
+    /// string differs and the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_differs_from_the_string_before_the_weak_summary() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = rules_only(protocol_string(
+            bitcoin::Network::Testnet,
+            Chain::BitcoinCash,
+            genesis_hash,
+        ));
+        let before = current.replace(
+            "/weak4-640-100-48-256-320-64-4096-64-32-summary/",
+            "/weak4-640-100-48-256-320-64-4096-64-32/",
+        );
+
+        assert_ne!(current, before, "weak summary flag day");
+        assert!(
+            before.ends_with("/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/1.0.0"),
             "{before}"
         );
     }
@@ -847,7 +883,7 @@ mod tests {
             "protocol string holds levels-546x2-k1: {current}"
         );
         assert!(
-            before.ends_with("/levels-546x2/weak4-640-100-48-256-320-64-4096-64-32/1.0.0"),
+            before.ends_with("/levels-546x2/weak4-640-100-48-256-320-64-4096-64-32-summary/1.0.0"),
             "{before}"
         );
     }
@@ -940,7 +976,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/weak-by-hash/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/kad/1.0.0"
             )
         );
     }

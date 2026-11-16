@@ -1227,6 +1227,15 @@ impl PplnsWindow {
         self
     }
 
+    /// Override the window's share cap, `PPLNS_WINDOW_SHARES`, for tests
+    /// that need a capped window on a short chain, such as the weak share
+    /// pruning depths (`p2poolv2_tests`). Consensus code never calls it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_max_window_shares(mut self, max_window_shares: usize) -> Self {
+        self.max_window_shares = max_window_shares;
+        self
+    }
+
     /// Test-only constructor with an injectable maturity depth and window
     /// size, so the eviction path can be driven without building a
     /// `PAYOUT_DEPTH`-sized fixture.
