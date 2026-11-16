@@ -745,8 +745,8 @@ share by share and five fixes (its rule v4 is this one). With both:
   the low start;
 - where fewer than one in 64 asks, as in the 99% industrial mix at ten times
   today's hashrate, the count settles at about 50 a share instead of 82 and
-  a Bitaxe in a pool at 30% has 25.3% of its months without a payment
-  instead of 14% (41% under today's rule);
+  a Bitaxe in a pool at 30% has 25.2% of its months without a payment
+  instead of 14% (40.5% under today's rule);
 - when the asks stop, a share carries 64 at once: after a big miner leaves
   a pool at a tenth of ten times today's, 7.1% of the weak shares found in
   the next six hours expire until the ratio has fallen, and where the asks
