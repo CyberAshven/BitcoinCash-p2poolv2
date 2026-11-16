@@ -369,6 +369,26 @@ expire, up to the cap. It relays a weak share once it has checked it, and
 forgets it once its parent is more than `WEAK_DEPTH` below the tip or once the
 best chain carries it.
 
+On the wire a weak share travels once. Its finder's node pushes it to every
+peer, and a node that takes one from a peer announces its hash and is asked
+for it once. A new share is then relayed with the weak shares it carries
+listed by proof-of-work hash (`ShareWithWeakHashes`), 32 bytes each, not
+whole, but for the ones still spreading, which go whole beside the list
+(prefilled): those the sender's pool took less than 400 ms ago, two weak
+share announce intervals, or does not hold. The receiver fills the list from
+its weak pool and the prefilled ones, asks the sender for any it still
+lacks, and checks the rebuilt body exactly as a body sent whole, weak root
+included. A share whose weak shares cannot be filled in time, or
+whose listed hashes do not rebuild the weak root, is not complete yet and is
+fetched whole; it is never judged on a body its miner did not commit. Sync
+still sends weak shares whole, as a node catching up was never sent them. A
+P2P message, not a rule: the header, the weak root and what is stored are
+unchanged, and the protocol string's message segment, `weak-by-hash`, keeps
+nodes that cannot read it apart. On 1,000 nodes at 10-second shares the
+network simulation put stale shares at 5.27%, 8.66% and 14.11% with 32, 160
+and 320 weak shares carried whole in each share, against 4.20% when they
+travel only beside the shares.
+
 ### How weak shares are paid
 
 Every proof of work from a job at the minimum is credited at the weak work,
@@ -813,12 +833,11 @@ Neither is a share-chain rule, and each helps under today's rule too.
    |---:|---:|---:|---:|---:|---:|
    | 32 | 4.20% | 0.39 Mbit/s | 62,703 | 5.27% | 0.54 Mbit/s |
    | 160 | 4.20% | 1.09 Mbit/s | 167,903 | 8.66% | 1.86 Mbit/s |
-   | 320 | 4.20% | 1.98 Mbit/s | | | |
+   | 320 | 4.20% | 1.98 Mbit/s | 299,423 | 14.11% | 3.52 Mbit/s |
 
    Beside the shares, ten times the weak shares cost 1.6 Mbit/s of upload
-   and no stale share. Whole in the share, five times already double the
-   stale rate. (The run at 320 whole had not finished when this was
-   written.)
+   and no stale share. Whole in the share, five times double the stale rate
+   and ten times more than triple it.
 2. **Weak share checks leave the single validation queue**, so a node with
    several cores checks several at once, or the check gets cheap enough
    that 35 a second fit one core with 100,000 miners in the window. Until

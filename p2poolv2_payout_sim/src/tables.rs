@@ -5,6 +5,7 @@
 //! The named tables of the default run: which scenarios each runs and how
 //! it prints them.
 
+use crate::ask_paths;
 use crate::ask_study;
 use crate::constants::{HASHES_PER_DIFFICULTY, SHARE_INTERVAL_SECONDS};
 use crate::levels::level_amount;
@@ -140,11 +141,25 @@ pub enum Table {
     WeakAsksConstants,
     /// Proposal: attacks on the asks.
     WeakAsksAttacks,
+    /// Study: the weak ratio's path from genesis under each rule.
+    WeakAsksGenesis,
+    /// Study: a big miner joining or leaving at the minimum under each rule.
+    WeakAsksBigMiner,
+    /// Study: where each rule settles.
+    WeakAsksRules,
+    /// Study: where the rules that bound the start settle in every mix.
+    WeakAsksRuleMixes,
+    /// Study: the attacks on the asks under each rule.
+    WeakAsksRuleAttacks,
+    /// The PPLNS window's cap, 14 days against 30 and 60, in small pools.
+    WindowCap,
+    /// What a node stores, by payees, payout level and window cap.
+    Storage,
 }
 
 impl Table {
     /// Every table, in the order of the default run.
-    pub const ALL: [Table; 29] = [
+    pub const ALL: [Table; 36] = [
         Table::Designs,
         Table::Hashrate,
         Table::Pool,
@@ -174,6 +189,13 @@ impl Table {
         Table::WeakAsksMixes,
         Table::WeakAsksConstants,
         Table::WeakAsksAttacks,
+        Table::WindowCap,
+        Table::Storage,
+        Table::WeakAsksGenesis,
+        Table::WeakAsksBigMiner,
+        Table::WeakAsksRules,
+        Table::WeakAsksRuleMixes,
+        Table::WeakAsksRuleAttacks,
     ];
 
     /// Name on the command line.
@@ -208,6 +230,13 @@ impl Table {
             Table::WeakAsksMixes => "weak-asks-mixes",
             Table::WeakAsksConstants => "weak-asks-constants",
             Table::WeakAsksAttacks => "weak-asks-attacks",
+            Table::WeakAsksGenesis => "weak-asks-genesis",
+            Table::WeakAsksBigMiner => "weak-asks-big-miner",
+            Table::WeakAsksRules => "weak-asks-rules",
+            Table::WeakAsksRuleMixes => "weak-asks-rule-mixes",
+            Table::WeakAsksRuleAttacks => "weak-asks-rule-attacks",
+            Table::WindowCap => "window-cap",
+            Table::Storage => "storage",
         }
     }
 
@@ -290,6 +319,27 @@ impl Table {
             Table::WeakAsksAttacks => {
                 "Proposal: attacks on the asks (band-weak-levels, weak work, 50% industrial)"
             }
+            Table::WeakAsksGenesis => {
+                "Study: the weak ratio's path from genesis, by rule (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::WeakAsksBigMiner => {
+                "Study: a big miner joining or leaving at the minimum, by rule (band-weak-levels, weak work)"
+            }
+            Table::WeakAsksRules => {
+                "Study: where each rule settles (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::WeakAsksRuleMixes => {
+                "Study: the rules that bound the start in every miner mix, at ten times today's hashrate (band-weak-levels, weak work)"
+            }
+            Table::WeakAsksRuleAttacks => {
+                "Study: the attacks on the asks under each rule (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::WindowCap => {
+                "Window cap: 14 days against 30 and 60 in small pools (band-weak-levels, weak work, medium miners, levels as a node sets them)"
+            }
+            Table::Storage => {
+                "Storage: what a node keeps, by payees, payout level and window cap (arithmetic, no fees)"
+            }
         }
     }
 
@@ -326,6 +376,13 @@ impl Table {
             Table::WeakAsksMixes => ask_study::weak_asks_mixes(base),
             Table::WeakAsksConstants => ask_study::weak_asks_constants(base),
             Table::WeakAsksAttacks => ask_study::weak_asks_attacks(base),
+            Table::WeakAsksGenesis => ask_paths::genesis(base),
+            Table::WeakAsksBigMiner => ask_paths::big_miner(base),
+            Table::WeakAsksRules => ask_paths::steady(base),
+            Table::WeakAsksRuleMixes => ask_paths::mixes(base),
+            Table::WeakAsksRuleAttacks => ask_paths::attacks(base),
+            Table::WindowCap => study::window_cap(base),
+            Table::Storage => crate::storage::storage(),
         };
         format!("## {}\n\n{body}", self.title())
     }

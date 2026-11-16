@@ -18,7 +18,7 @@ use crate::constants::{
     LEVEL_COUNT, MAIN_CEILING_DIFFICULTY, MINI_CEILING_DIFFICULTY, MINI_THRESHOLD_HASHRATE,
     MONTH_SECONDS, SHARE_INTERVAL_SECONDS, SHARE_MESSAGE_BYTES, SPEND_COST_SATOSHIS,
     STALE_RATE_BY_PERIOD, UNCLE_PAID_FRACTION, WEAK_CAP, WEAK_DEPTH, WEAK_FILL, WEAK_RATIO_MAX,
-    WEAK_SHARE_MESSAGE_BYTES,
+    WEAK_SHARE_MESSAGE_BYTES, WINDOW_CAP_SECONDS,
 };
 use crate::difficulty::{
     ChainDifficulty, ChainParameters, DifficultyRule, chain_hashrate, found_share_rate,
@@ -34,7 +34,7 @@ use crate::races::{
 };
 use crate::sampling::poisson;
 use crate::weak::{WeakQueueInputs, WeakQueueOutcome, simulate_weak_queue};
-use crate::window::{WindowGeometry, size_window};
+use crate::window::{WindowGeometry, size_window_capped};
 use p2poolv2_netsim::random::SimulationRandom;
 
 /// Samples per class when estimating the other payees' pot in a level group.
@@ -270,6 +270,9 @@ pub struct Scenario {
     /// the run uses the proposal's own fill, cap and ratio limits instead
     /// of `weak_cap`, `weak_fill` and `weak_ratio_max`.
     pub weak_asks: Option<WeakAsks>,
+    /// The PPLNS window's cap, in seconds of shares: `WINDOW_CAP_SECONDS`,
+    /// 14 days, in every table but the window cap study's.
+    pub window_cap_seconds: f64,
 }
 
 impl Default for Scenario {
@@ -303,6 +306,7 @@ impl Default for Scenario {
             seed: 1,
             weak_queue_shares: 400_000,
             weak_asks: None,
+            window_cap_seconds: WINDOW_CAP_SECONDS,
         }
     }
 }
@@ -651,11 +655,12 @@ impl Scenario {
             .zip(&credits)
             .map(|(class, credit)| class.count * credit.credited_rate)
             .sum();
-        let window = size_window(
+        let window = size_window_capped(
             total_credited,
             difficulty.chain_share_rate,
             network,
             self.period_seconds,
+            self.window_cap_seconds,
         );
         let hashrate = chain_hashrate(&chain.classes);
         let block_rate = hashrate / network / BCH_BLOCK_INTERVAL_SECONDS;

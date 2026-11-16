@@ -17,14 +17,49 @@
 //! while the weak ratio in force is below the ratio at which one of its
 //! miners finds the node default's weak shares a month, so the asking part
 //! of the weak shares found follows the ratio share by share.
+//!
+//! [`AskRule`] also holds the variants `crate::ask_paths` compares for the
+//! path from genesis: a faster way down ([`RatioDescent`]), a cap that
+//! follows the asks ([`CapRule`]) and the genesis share's ratio.
 
 use crate::constants::{
     ASK_WEAK_SHARES_PER_MONTH, FIXED_POINT_ONE, WEAK_ASK_DIVISOR, WEAK_FILL, WEAK_FILL_MAX,
     WEAK_RATIO_ASK_MAX, WEAK_RATIO_MAX, WEAK_RATIO_STEP_DIVISOR,
 };
 use crate::sampling::poisson;
-use crate::weak::{WaitingWeakShares, WeakQueueOutcome};
+use crate::weak::{Carried, WaitingWeakShares, WeakQueueOutcome};
 use p2poolv2_netsim::random::SimulationRandom;
+
+/// How the ratio comes down after a share that was not asked and carried
+/// more than `WEAK_FILL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RatioDescent {
+    /// One step of `1/256` of the ratio, as on the way up: the rule as
+    /// section 6 writes it (PR #118).
+    Step,
+    /// At once to `R * WEAK_FILL / count`, but never below `R / bound`.
+    Proportional {
+        /// The most the ratio may fall in one share: to `1/bound` of itself.
+        bound: u64,
+    },
+}
+
+/// How many weak shares one share may carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapRule {
+    /// Always twice `WEAK_FILL_MAX`, 640: the rule as section 6 writes it
+    /// (PR #118).
+    Fixed,
+    /// Twice `WEAK_FILL`, today's `WEAK_CAP` of 64, unless more than one in
+    /// `divisor` of the weak shares the share carries ask; then twice
+    /// `WEAK_FILL_MAX`. With `divisor` at `WEAK_ASK_DIVISOR` the cap opens
+    /// as the ratio's step counts a share asked; at twice `WEAK_FILL_MAX`
+    /// one asking weak share opens it.
+    FollowsAsks {
+        /// More than one in this many carried weak shares must ask.
+        divisor: u64,
+    },
+}
 
 /// The proposed rule's constants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +76,13 @@ pub struct AskRule {
     pub ratio_max: u64,
     /// `R_ASK_MAX`: the largest ratio asks may reach.
     pub ratio_ask_max: u64,
+    /// The genesis share's weak ratio, a whole multiple: `R_MAX` in the
+    /// rule as written.
+    pub genesis_ratio: u64,
+    /// How the ratio comes down without asks.
+    pub descent: RatioDescent,
+    /// How many weak shares a share may carry.
+    pub cap: CapRule,
 }
 
 impl AskRule {
@@ -48,6 +90,12 @@ impl AskRule {
     /// `WEAK_CAP` is twice `WEAK_FILL` today.
     pub fn weak_cap(&self) -> u64 {
         2 * self.weak_fill_max
+    }
+
+    /// The most weak shares a share may carry when too few of them ask,
+    /// under [`CapRule::FollowsAsks`]: twice `WEAK_FILL`, today's `WEAK_CAP`.
+    pub fn idle_cap(&self) -> u64 {
+        2 * self.weak_fill
     }
 }
 
@@ -60,6 +108,9 @@ impl Default for AskRule {
             ask_divisor: WEAK_ASK_DIVISOR,
             ratio_max: WEAK_RATIO_MAX,
             ratio_ask_max: WEAK_RATIO_ASK_MAX,
+            genesis_ratio: WEAK_RATIO_MAX,
+            descent: RatioDescent::Step,
+            cap: CapRule::Fixed,
         }
     }
 }
@@ -102,7 +153,10 @@ impl Default for WeakAsks {
 ///
 /// Asked, the ratio rises one step, up to `R_ASK_MAX`. Not asked, it moves
 /// as today: down above `WEAK_FILL`, up below it as far as `R_MAX`. A ratio
-/// that asks left above `R_MAX` comes back down once nobody asks.
+/// that asks left above `R_MAX` comes back down once nobody asks. Under
+/// [`RatioDescent::Proportional`] a share that was not asked and carried
+/// more than `WEAK_FILL` takes the ratio down to `R * WEAK_FILL / count` at
+/// once, at most to `R / bound`.
 pub fn next_weak_ratio_with_asks(
     parent_ratio: u64,
     parent_carried: u64,
@@ -115,7 +169,14 @@ pub fn next_weak_ratio_with_asks(
         parent_carried <= rule.weak_fill_max && parent_asking * rule.ask_divisor > parent_carried;
     let moved = if asked {
         (parent_ratio + step).min(rule.ratio_ask_max * FIXED_POINT_ONE)
-    } else if parent_carried > rule.weak_fill || parent_ratio > idle_max {
+    } else if parent_carried > rule.weak_fill {
+        match rule.descent {
+            RatioDescent::Step => parent_ratio - step,
+            RatioDescent::Proportional { bound } => {
+                (parent_ratio * rule.weak_fill / parent_carried).max(parent_ratio / bound)
+            }
+        }
+    } else if parent_ratio > idle_max {
         parent_ratio - step
     } else if parent_carried < rule.weak_fill {
         (parent_ratio + step).min(idle_max)
@@ -123,6 +184,84 @@ pub fn next_weak_ratio_with_asks(
         parent_ratio
     };
     moved.max(FIXED_POINT_ONE)
+}
+
+/// How many weak shares of each kind one share takes at each depth under
+/// `rule`, from the `asking` and `silent` weak shares waiting (index `d`
+/// holds those whose parent is `d + 1` shares below the share): the oldest
+/// first, the two kinds in proportion at each depth, up to the cap. A share
+/// from a censoring node takes silent ones only, and so under
+/// [`CapRule::FollowsAsks`] at most the idle cap. Under
+/// [`CapRule::FollowsAsks`] a share whose weak shares ask too seldom to
+/// carry more than the idle cap leaves its newest silent ones waiting, until
+/// more than one in the rule's divisor of what it carries ask or it is down
+/// to the idle cap.
+pub(crate) fn carry_plan(
+    asking: &[u64],
+    silent: &[u64],
+    rule: &AskRule,
+    censoring: bool,
+) -> Vec<Carried> {
+    let mut plan = vec![Carried::default(); asking.len()];
+    if censoring {
+        let cap = match rule.cap {
+            CapRule::Fixed => rule.weak_cap(),
+            CapRule::FollowsAsks { .. } => rule.idle_cap(),
+        };
+        let mut taken_total = 0;
+        (0..silent.len()).rev().for_each(|depth| {
+            let taken = (cap - taken_total).min(silent[depth]);
+            plan[depth].non_carrying = taken;
+            taken_total += taken;
+        });
+        return plan;
+    }
+    let cap = rule.weak_cap();
+    let mut total = 0;
+    let mut asking_total = 0;
+    (0..asking.len()).rev().for_each(|depth| {
+        let waiting = asking[depth] + silent[depth];
+        let taken = (cap - total).min(waiting);
+        if taken > 0 {
+            let asking_taken = ((taken * asking[depth] + waiting / 2) / waiting)
+                .min(asking[depth])
+                .max(taken.saturating_sub(silent[depth]));
+            plan[depth] = Carried {
+                carrying: asking_taken,
+                non_carrying: taken - asking_taken,
+            };
+            total += taken;
+            asking_total += asking_taken;
+        }
+    });
+    //* The asking weak shares times the divisor: the share may carry fewer
+    //* than that, or the idle cap.
+    let opening = match rule.cap {
+        CapRule::Fixed => None,
+        CapRule::FollowsAsks { divisor } => Some(asking_total * divisor),
+    };
+    if let Some(opening) = opening.filter(|opening| *opening <= total && total > rule.idle_cap()) {
+        let allowed = rule.idle_cap().max(opening.saturating_sub(1));
+        let mut excess = total - allowed;
+        plan.iter_mut().for_each(|depth| {
+            let left = excess.min(depth.non_carrying);
+            depth.non_carrying -= left;
+            excess -= left;
+        });
+    }
+    plan
+}
+
+/// Take `plan` (from [`carry_plan`]) out of `waiting`.
+fn take_plan(waiting: &mut WaitingWeakShares, plan: &[Carried]) -> Carried {
+    let mut carried = Carried::default();
+    plan.iter().enumerate().for_each(|(depth, taken)| {
+        waiting.carrying[depth] -= taken.carrying;
+        waiting.non_carrying[depth] -= taken.non_carrying;
+        carried.carrying += taken.carrying;
+        carried.non_carrying += taken.non_carrying;
+    });
+    carried
 }
 
 /// One class of miners at the minimum, as the ask queue sees it.
@@ -190,7 +329,7 @@ pub fn simulate_ask_queue(
 ) -> WeakQueueOutcome {
     let cap = inputs.rule.weak_cap();
     let mut waiting = WaitingWeakShares::new(inputs.weak_depth);
-    let mut tip_ratio = inputs.rule.ratio_max * FIXED_POINT_ONE;
+    let mut tip_ratio = inputs.rule.genesis_ratio * FIXED_POINT_ONE;
     let mut tip_carried = 0;
     let mut tip_asking = 0;
     let mut tally = Tally::default();
@@ -219,11 +358,14 @@ pub fn simulate_ask_queue(
         let child_ratio =
             next_weak_ratio_with_asks(tip_ratio, tip_carried, tip_asking, &inputs.rule);
         let (expired_asking, expired_silent) = waiting.deepen(found_asking, found_silent);
-        let carried = if random.next_bool(inputs.censoring_share_fraction) {
-            waiting.carry_own(cap)
-        } else {
-            waiting.carry_all(cap)
-        };
+        let censoring = random.next_bool(inputs.censoring_share_fraction);
+        let plan = carry_plan(
+            &waiting.carrying,
+            &waiting.non_carrying,
+            &inputs.rule,
+            censoring,
+        );
+        let carried = take_plan(&mut waiting, &plan);
         tip_ratio = child_ratio;
         tip_carried = carried.total();
         tip_asking = carried.carrying;

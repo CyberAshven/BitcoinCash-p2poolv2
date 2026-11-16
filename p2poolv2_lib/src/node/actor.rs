@@ -27,6 +27,7 @@ use crate::node::p2p_message_handlers::receivers::block_receiver::{
 };
 use crate::node::p2p_message_handlers::senders::build_getheaders_message;
 use crate::node::p2p_message_handlers::senders::send_share_block_broadcast;
+use crate::node::p2p_message_handlers::senders::share_block::weak_shares_to_prefill;
 use crate::node::payout_tree_executor::{
     PayoutTreeExecutor, PayoutTreeSender, payout_tree_channel,
 };
@@ -54,7 +55,7 @@ use crate::shares::transaction_pool::{
 use crate::shares::validation::{DefaultShareValidator, ShareValidator};
 use crate::shares::weak::{WEAK_CAP, WeakShare};
 use crate::shares::weak_pool::{
-    MAX_POOL_WEAK_SHARES, RelayWeakShare, WeakPool, WeakPoolStats, WeakRelayReceiver,
+    MAX_POOL_WEAK_SHARES, RelayWeakShare, WeakPool, WeakPoolStats, WeakRelayReceiver, now_millis,
 };
 use crate::stratum::emission::EmissionReceiver;
 use crate::stratum::work::notify::NotifySender;
@@ -432,7 +433,7 @@ const MAX_PENDING_WEAK_ANNOUNCEMENTS: usize = MAX_POOL_WEAK_SHARES;
 /// One inventory carries [`WEAK_CAP`] hashes. At 200ms that is 3,200 hashes
 /// a second per peer, enough for a chain finding weak shares 4,096 times as
 /// fast as shares, the most the asks allow (`R_ASK_MAX`).
-const WEAK_ANNOUNCE_INTERVAL: Duration = Duration::from_millis(200);
+pub(crate) const WEAK_ANNOUNCE_INTERVAL: Duration = Duration::from_millis(200);
 
 struct PendingWeakAnnouncement {
     hash: BlockHash,
@@ -1101,17 +1102,24 @@ impl NodeActor {
             }
             SwarmSend::BroadcastBlock(share_block, bch_headers) => {
                 let connected_peers = self.node.connected_peers();
+                let prefill = weak_shares_to_prefill(
+                    &share_block,
+                    self.node.request_response_handler.weak_pool().as_ref(),
+                    now_millis(),
+                );
                 let peer_knowledge = self
                     .node
                     .request_response_handler
                     .peer_block_knowledge_mut();
-                send_share_block_broadcast(
+                let sent = send_share_block_broadcast(
                     share_block,
                     bch_headers,
+                    &prefill,
                     &connected_peers,
                     peer_knowledge,
                     &mut self.node.swarm,
                 );
+                self.node.request_response_handler.record_share_relay(sent);
             }
             SwarmSend::Disconnect(peer_id) => {
                 if self.node.swarm.disconnect_peer_id(peer_id).is_err() {
