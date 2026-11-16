@@ -487,7 +487,7 @@ impl DefaultShareValidator {
 
     /// The Bitcoin Cash coinbase `header` implies when it pays the PPLNS
     /// window anchored at its parent: the scriptSig of `carried_coinbase`,
-    /// whose outputs are not read, the window's payouts for
+    /// which needs no outputs, the window's payouts for
     /// `coinbase_value`, the header's merge-mining output, payout tree,
     /// padding and commitment, and the locktime from its height, within the
     /// coinbase limit of its split. Rule 3 of a weak share checks this
