@@ -15,8 +15,8 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::ShareBlock;
 use crate::shares::weak::WeakShare;
 use crate::shares::weak_pool::WeakPool;
-use bitcoin::BlockHash;
 use bitcoin::block::Header;
+use bitcoin::{BlockHash, Transaction, TxOut};
 use libp2p::PeerId;
 use libp2p::request_response::ResponseChannel;
 use std::collections::HashSet;
@@ -39,6 +39,28 @@ use tracing::debug;
 /// sent whole: about 1.4 a share at chipnet's 3.5 weak shares a second, and
 /// 14 at the 35 a second of 320 weak shares a share.
 pub const PREFILL_WEAK_SHARE_MILLIS: u64 = 2 * WEAK_ANNOUNCE_INTERVAL.as_millis() as u64;
+
+/// The bytes of Bitcoin Cash coinbase outputs from which a new share is
+/// relayed without them (`ShareWithoutPayouts`); a share with fewer goes
+/// whole, its weak shares still listed by hash.
+///
+/// Leaving the outputs out saves their bytes on each push and costs a
+/// rebuild at each peer, at every hop:
+///
+/// - Saved: a node pushes a new share to its peers through one upload, so
+///   the last of them gets it `peers x bytes / upload` after the first byte
+///   leaves. On the network simulation's links, 8 peers at 100 Mbit/s, each
+///   byte left out saves 8 x 8 bits / 100 Mbit/s = 0.64 us.
+/// - Spent: about 0.02 us a byte of outputs in a release build (0.55 ms at
+///   34 KB, 20 ms at 1 MB), plus what does not shrink with the outputs:
+///   walking the window and waiting for its lock, which took 22 to 32 ms a
+///   rebuild on the 12-node swarm of PR #131 (run 43884878686, four cores
+///   for twelve nodes). Taken as 30 ms.
+///
+/// The two meet at 30 ms / (0.64 - 0.02) us = 48,387 bytes, about 1,400
+/// P2PKH payees at 34 bytes each: 50,000. Slower uploads or more peers favour
+/// leaving them out sooner; this errs toward the whole share.
+pub const RELAY_WITHOUT_PAYOUTS_MIN_BYTES: usize = 50_000;
 
 /// Share messages a node relayed to peers, their payload bytes, the bytes
 /// they would have taken sent whole (every weak share and every coinbase
@@ -126,15 +148,18 @@ pub async fn queue_share_block_broadcast(
 
 /// Broadcast a new ShareBlock to all connected peers.
 ///
-/// A Bitcoin Cash share goes as `ShareWithoutPayouts`: its Bitcoin Cash
-/// coinbase without its outputs, which every peer rebuilds from its PPLNS
-/// window as validation does, and its weak shares listed by proof-of-work
-/// hash, which its peers have mostly from the weak share gossip and fill
-/// from their weak pools. The ones in `prefill` (`weak_shares_to_prefill`)
-/// go whole beside the list. A Bitcoin share goes as `ShareBlock`, as
-/// before. Sync still sends shares whole (`GetData::Block`,
-/// `GetShareBlocks`): a peer catching up checks each body against its
-/// coinbase txid, and its window does not reach that deep.
+/// A Bitcoin Cash share whose coinbase outputs take at least
+/// `RELAY_WITHOUT_PAYOUTS_MIN_BYTES` goes as `ShareWithoutPayouts`: its
+/// Bitcoin Cash coinbase without its outputs, which every peer rebuilds from
+/// its PPLNS window as validation does. One with fewer goes whole, as
+/// `ShareWithWeakHashes` when it carries weak shares and `ShareBlock`
+/// otherwise. Weak shares are listed by proof-of-work hash, which its peers
+/// have mostly from the weak share gossip and fill from their weak pools,
+/// and the ones in `prefill` (`weak_shares_to_prefill`) go whole beside the
+/// list. A Bitcoin share goes as `ShareBlock`, as before. Sync still sends
+/// shares whole (`GetData::Block`, `GetShareBlocks`): a peer catching up
+/// checks each body against its coinbase txid, and its window does not reach
+/// that deep.
 ///
 /// Peers that are already known to have the block (tracked in
 /// `peer_block_knowledge`) are skipped. Each recipient is recorded
@@ -158,6 +183,7 @@ pub fn send_share_block_broadcast(
     let message = relay_message(whole, prefill);
     let bytes = message.encoded_size() as u64;
     let prefilled = match &message {
+        Message::ShareWithWeakHashes(share, _) => share.prefilled().len() as u64,
         Message::ShareWithoutPayouts(share, _) => share.prefilled().len() as u64,
         _ => 0,
     };
@@ -182,26 +208,41 @@ pub fn send_share_block_broadcast(
     sent
 }
 
-/// The message a new share is relayed in: on Bitcoin Cash
-/// `ShareWithoutPayouts`, its coinbase without outputs and its weak shares
-/// listed by hash, those in `prefill` also whole; `ShareBlock` as it was
-/// otherwise.
+/// The message a new share is relayed in. A Bitcoin Cash share whose
+/// coinbase outputs take at least `RELAY_WITHOUT_PAYOUTS_MIN_BYTES` goes as
+/// `ShareWithoutPayouts`, its coinbase without outputs; one with fewer goes
+/// as `ShareWithWeakHashes` when it carries weak shares. Either lists the
+/// weak shares by hash, those in `prefill` also whole. Any other share goes
+/// as `ShareBlock`, as it was.
 fn relay_message(whole: Message, prefill: &HashSet<BlockHash>) -> Message {
     match whole {
         Message::ShareBlock(share_block, bch_headers)
             if share_block.header.carries_band()
                 && crate::sim_overrides::relays_weak_shares_by_hash(&share_block) =>
         {
-            Message::ShareWithoutPayouts(
-                ShareWithoutPayouts::new(ShareWithWeakHashes::prefilling(
-                    share_block,
-                    |weak_share| prefill.contains(&weak_share.pow_hash()),
-                )),
-                bch_headers,
-            )
+            let without_payouts = coinbase_output_bytes(&share_block.bitcoin_coinbase)
+                >= RELAY_WITHOUT_PAYOUTS_MIN_BYTES;
+            if !without_payouts && share_block.weak_shares.is_empty() {
+                Message::ShareBlock(share_block, bch_headers)
+            } else {
+                let share = ShareWithWeakHashes::prefilling(share_block, |weak_share| {
+                    prefill.contains(&weak_share.pow_hash())
+                });
+                if without_payouts {
+                    Message::ShareWithoutPayouts(ShareWithoutPayouts::new(share), bch_headers)
+                } else {
+                    Message::ShareWithWeakHashes(share, bch_headers)
+                }
+            }
         }
         other => other,
     }
+}
+
+/// The bytes the outputs of `coinbase` take in it, which a share relayed
+/// without them leaves out.
+fn coinbase_output_bytes(coinbase: &Transaction) -> usize {
+    coinbase.output.iter().map(TxOut::size).sum()
 }
 
 #[cfg(test)]
@@ -322,18 +363,100 @@ mod tests {
             .build()
     }
 
-    /// A new Bitcoin Cash share is relayed without its coinbase's outputs and
-    /// with its weak shares listed by hash, and the broadcast reports the
-    /// bytes it sent beside the bytes the whole share would have taken.
+    /// `share_block` with one coinbase output taking `bytes` bytes, in place
+    /// of the outputs it had.
+    fn with_output_bytes(mut share_block: ShareBlock, bytes: usize) -> ShareBlock {
+        //* An output is its 8-byte value, a 3-byte script length past 252,
+        //* and its script.
+        share_block.bitcoin_coinbase.output = vec![TxOut {
+            value: bitcoin::Amount::from_sat(312_500_000),
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51; bytes - 11]),
+        }];
+        assert_eq!(coinbase_output_bytes(&share_block.bitcoin_coinbase), bytes);
+        share_block
+    }
+
+    /// The message `share_block` goes out in to one peer.
+    fn relayed_to_one_peer(share_block: ShareBlock) -> Message {
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let recorded = sent.clone();
+        let mut mock_sender = MockRequestSender::new();
+        mock_sender
+            .expect_send_request()
+            .times(1)
+            .returning(move |_, message| *recorded.lock().unwrap() = Some(message));
+        send_share_block_broadcast(
+            share_block,
+            Vec::new(),
+            &HashSet::new(),
+            &[PeerId::random()],
+            &mut PeerBlockKnowledge::default(),
+            &mut mock_sender,
+        );
+        let message = sent.lock().unwrap().take();
+        message.expect("one message sent")
+    }
+
+    /// A share whose coinbase outputs take the threshold goes without them,
+    /// its weak shares listed by hash; one byte fewer and it goes whole, its
+    /// weak shares still listed by hash.
     #[test]
-    fn test_broadcast_sends_a_bitcoin_cash_share_without_payouts() {
+    fn test_broadcast_leaves_out_coinbase_outputs_from_the_threshold() {
+        let at = with_output_bytes(
+            share_carrying_weak_shares(),
+            RELAY_WITHOUT_PAYOUTS_MIN_BYTES,
+        );
+        let below = with_output_bytes(
+            share_carrying_weak_shares(),
+            RELAY_WITHOUT_PAYOUTS_MIN_BYTES - 1,
+        );
+
+        assert_eq!(
+            relayed_to_one_peer(at.clone()),
+            Message::ShareWithoutPayouts(
+                ShareWithoutPayouts::new(ShareWithWeakHashes::new(at)),
+                Vec::new()
+            )
+        );
+        assert_eq!(
+            relayed_to_one_peer(below.clone()),
+            Message::ShareWithWeakHashes(ShareWithWeakHashes::new(below), Vec::new())
+        );
+    }
+
+    /// A Bitcoin Cash share carrying no weak shares goes whole as
+    /// `ShareBlock` below the threshold, and without its coinbase outputs
+    /// from it.
+    #[test]
+    fn test_broadcast_sends_a_share_without_weak_shares_whole_below_the_threshold() {
+        let share_block = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build();
+        let large = with_output_bytes(share_block.clone(), RELAY_WITHOUT_PAYOUTS_MIN_BYTES);
+
+        assert_eq!(
+            relayed_to_one_peer(share_block.clone()),
+            Message::ShareBlock(share_block, Vec::new())
+        );
+        assert_eq!(
+            relayed_to_one_peer(large.clone()),
+            Message::ShareWithoutPayouts(
+                ShareWithoutPayouts::new(ShareWithWeakHashes::new(large)),
+                Vec::new()
+            )
+        );
+    }
+
+    /// A new Bitcoin Cash share with small payouts is relayed whole, its
+    /// weak shares listed by hash, and the broadcast reports the bytes it
+    /// sent beside the bytes the whole share would have taken.
+    #[test]
+    fn test_broadcast_lists_carried_weak_shares_by_hash() {
         let peer_a = PeerId::random();
         let peer_b = PeerId::random();
         let share_block = share_carrying_weak_shares();
-        let relayed = Message::ShareWithoutPayouts(
-            ShareWithoutPayouts::new(ShareWithWeakHashes::new(share_block.clone())),
-            Vec::new(),
-        );
+        let relayed =
+            Message::ShareWithWeakHashes(ShareWithWeakHashes::new(share_block.clone()), Vec::new());
         let whole_bytes =
             Message::ShareBlock(share_block.clone(), Vec::new()).encoded_size() as u64;
         let bytes = relayed.encoded_size() as u64;
@@ -466,7 +589,7 @@ mod tests {
         });
         assert_eq!(expected.prefilled(), [prefilled]);
         assert_eq!(expected.weak_hashes().len(), 2);
-        let relayed = Message::ShareWithoutPayouts(ShareWithoutPayouts::new(expected), Vec::new());
+        let relayed = Message::ShareWithWeakHashes(expected, Vec::new());
         let bytes = relayed.encoded_size() as u64;
         let mut knowledge = PeerBlockKnowledge::default();
 

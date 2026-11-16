@@ -47,12 +47,12 @@ receives one validates it before relaying it further (see
 Kademlia for peer discovery, Identify, Ping, and a request-response protocol
 for share announcements, headers, blocks and share transactions.
 
-A new Bitcoin Cash share is relayed without the outputs of its Bitcoin Cash
-coinbase (`ShareWithoutPayouts`): one output per payee, most of a share's
-bytes. Every node rebuilds them from its own PPLNS window at the share's
-parent to validate the share anyway, so the receiver rebuilds them first and
-goes on only with a coinbase whose txid is the one the header's coinbase
-proof gives. A share it cannot rebuild that way, its parent or window not
+A new Bitcoin Cash share whose coinbase outputs take at least 50,000 bytes,
+about 1,400 payees, is relayed without them (`ShareWithoutPayouts`); a
+smaller one goes whole. Every node rebuilds the outputs from its own PPLNS
+window at the share's parent to validate the share anyway, so the receiver
+rebuilds them first and goes on only with a coinbase whose txid is the one
+the header's coinbase proof gives. A share it cannot rebuild that way, its parent or window not
 here yet, is fetched whole, never refused. Sync and block requests still
 send shares whole.
 

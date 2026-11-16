@@ -358,6 +358,7 @@ fn test_message_discriminants_unique() {
         SHARE_HEADERS_WITH_BCH,
         SHARE_BLOCK_WITH_BCH,
         WEAK_SHARE,
+        SHARE_WITH_WEAK_HASHES,
         GET_CARRIED_WEAK_SHARES,
         CARRIED_WEAK_SHARES,
         SHARE_WITHOUT_PAYOUTS,
@@ -634,6 +635,49 @@ fn share_carrying_weak_shares(count: u32) -> ShareBlock {
         .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
         .weak_shares(weak_shares)
         .build()
+}
+
+/// A share relayed with weak hashes round-trips, with and without carried
+/// Bitcoin Cash headers, and lists its weak shares by proof-of-work hash in
+/// the order carried: 32 bytes each instead of the whole weak share. Filled
+/// in that order it is the share again.
+#[test]
+fn test_share_with_weak_hashes_round_trips_and_lists_weak_shares_by_hash() {
+    use message_discriminants::*;
+    let share = share_carrying_weak_shares(3);
+    let relayed = ShareWithWeakHashes::new(share.clone());
+    assert_eq!(
+        relayed.weak_hashes(),
+        share
+            .weak_shares
+            .iter()
+            .map(WeakShare::pow_hash)
+            .collect::<Vec<_>>()
+    );
+    assert!(relayed.share_block().weak_shares.is_empty());
+
+    for bch_headers in [Vec::new(), carried()] {
+        let message = Message::ShareWithWeakHashes(relayed.clone(), bch_headers.clone());
+        let bytes = encode::serialize(&message);
+        assert_eq!(bytes[0], SHARE_WITH_WEAK_HASHES);
+        assert_eq!(bytes.len(), message.encoded_size());
+        let decoded: Message = encode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, message);
+
+        //* Besides the hashes, the message keeps the share's empty weak list
+        //* and an empty prefilled list (a byte each) and always writes the
+        //* header count, which a whole share without carried headers leaves
+        //* out (one more).
+        let overhead = if bch_headers.is_empty() { 3 } else { 2 };
+        let whole = Message::ShareBlock(share.clone(), bch_headers);
+        let weak_bytes: usize = share.weak_shares.iter().map(WeakShare::encoded_size).sum();
+        assert_eq!(
+            whole.encoded_size() - message.encoded_size(),
+            weak_bytes - 3 * 32 - overhead,
+            "the share message is smaller by the weak shares less their hashes"
+        );
+    }
+    assert_eq!(relayed.with_weak_shares(share.weak_shares.clone()), share);
 }
 
 /// A share relayed without payouts round-trips, with and without carried

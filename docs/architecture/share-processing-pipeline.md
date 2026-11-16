@@ -161,10 +161,13 @@ confirmation at its height.
 
 ### Shares relayed without their payouts
 
-`send_share_block_broadcast` relays a new Bitcoin Cash share as
+`send_share_block_broadcast` relays a new Bitcoin Cash share whose coinbase
+outputs take at least `RELAY_WITHOUT_PAYOUTS_MIN_BYTES` (50,000) as
 `Message::ShareWithoutPayouts`: its Bitcoin Cash coinbase keeps its input
-and loses every output, and the message carries the outputs' total.
-`handle_share_without_payouts` (`receivers/share_without_payouts.rs`) hands
+and loses every output, and the message carries the outputs' total. Below
+that the bytes saved do not pay for a rebuild at each hop (the arithmetic is
+on the constant), and the share goes whole, as `ShareWithWeakHashes` or
+`ShareBlock`. `handle_share_without_payouts` (`receivers/share_without_payouts.rs`) hands
 a stored share, or one failing the header or coinbase proof check, to
 `handle_share_block` as it came. For any other it rebuilds the outputs from
 the PPLNS window at the share's parent and the header, through the same
@@ -180,13 +183,14 @@ and `GetData::Block` still send the coinbase whole.
 
 ### Shares relayed with their weak shares by hash
 
-Inside `ShareWithoutPayouts`, a share's weak shares are listed by
-proof-of-work hash (`ShareWithWeakHashes`), which the peer has from the weak
-share gossip, and whole beside the list the ones it may not have yet
+A relayed share's weak shares are listed by proof-of-work hash
+(`ShareWithWeakHashes`, also inside `ShareWithoutPayouts`), which the peer
+has from the weak share gossip, and whole beside the list the ones it may
+not have yet
 (`weak_shares_to_prefill`: those the weak pool took less than
 `PREFILL_WEAK_SHARE_MILLIS`, 400 ms, ago, or does not hold).
 `handle_share_with_weak_hashes` (`receivers/share_with_weak_hashes.rs`),
-handed the share once its coinbase is rebuilt, hands a stored share, or one
+handed a `ShareWithoutPayouts` once its coinbase is rebuilt, hands a stored share, or one
 failing the header or coinbase proof check, to
 `handle_share_block` as it came. Any other share must list exactly
 `weak_count` hashes, each once, and prefill only listed ones, each once, or

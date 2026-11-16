@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! A new share relayed with the weak shares it carries listed by hash
-//! (`ShareWithWeakHashes`, inside `Message::ShareWithoutPayouts` once its
-//! coinbase is rebuilt), and the answer to a peer that asks for the ones it
-//! lacks (`Message::GetCarriedWeakShares`).
+//! (`Message::ShareWithWeakHashes`, or `Message::ShareWithoutPayouts` once
+//! its coinbase is rebuilt), and the answer to a peer that asks for the ones
+//! it lacks (`Message::GetCarriedWeakShares`).
 //!
 //! The receiver fills each listed hash from its weak pool, then from the
 //! weak shares the sender prefilled, asks the sender for the rest, and hands

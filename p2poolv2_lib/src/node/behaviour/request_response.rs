@@ -208,12 +208,13 @@ fn share_chain_rule_tag(chain: Chain) -> Option<String> {
 /// before it cannot read any of the three. Sync still sends weak shares
 /// whole.
 ///
-/// `without-payouts` since 2026-11-16: a new share is relayed without the
-/// outputs of its Bitcoin Cash coinbase (`ShareWithoutPayouts`, which also
-/// lists the weak shares by hash and takes over from `weak-by-hash`'s share
-/// message), and the receiver rebuilds them from its PPLNS window as
-/// validation does. A node before it cannot read the new message, nor send
-/// the one it replaced to a node after it. Sync still sends shares whole.
+/// `without-payouts` since 2026-11-16: a new share whose coinbase outputs
+/// are large (`RELAY_WITHOUT_PAYOUTS_MIN_BYTES`) is relayed without them
+/// (`ShareWithoutPayouts`, which also lists the weak shares by hash), and the
+/// receiver rebuilds them from its PPLNS window as validation does. A
+/// smaller share still goes whole, as `ShareWithWeakHashes` or `ShareBlock`.
+/// A node before it cannot read the new message. Sync still sends shares
+/// whole.
 const BCH_MESSAGES_TAG: &str = "weak-by-hash/without-payouts";
 
 /// The share chain part of every protocol string: the genesis tag, followed

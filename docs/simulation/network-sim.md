@@ -586,8 +586,10 @@ they have today at 10-second shares.
   Validation still costs the whole share, since the receiver rebuilds the
   payouts. Compared with whole shares carrying a 3 KB coinbase (tokens,
   1,000 payees), today's 34 KB one and a 200 KiB one (6,010 payees).
-  Since 2026-11-16 the node relays a new share this way
-  (`ShareWithoutPayouts`): the coinbase keeps its input, the message its
+  Since 2026-11-16 the node relays a new share this way when its outputs
+  take 50,000 bytes or more (`ShareWithoutPayouts`; the model's rebuild cost
+  has no part fixed per rebuild, the swarm's had 22 to 32 ms of window walk
+  and lock waits): the coinbase keeps its input, the message its
   outputs' total, and the receiver rebuilds every output from its window
   before it checks the share, or fetches the share whole ("Shares relayed
   without their payouts" in `docs/architecture/share-processing-pipeline.md`).

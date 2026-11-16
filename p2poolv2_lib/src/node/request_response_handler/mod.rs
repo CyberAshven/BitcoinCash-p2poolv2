@@ -335,6 +335,10 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
                 self.peer_block_knowledge
                     .record_block_known(peer, block.block_hash());
             }
+            Message::ShareWithWeakHashes(share, _) => {
+                self.peer_block_knowledge
+                    .record_block_known(peer, share.block_hash());
+            }
             Message::ShareWithoutPayouts(share, _) => {
                 self.peer_block_knowledge
                     .record_block_known(peer, share.block_hash());

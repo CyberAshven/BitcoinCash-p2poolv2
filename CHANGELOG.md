@@ -7,10 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-A new share is relayed without its Bitcoin Cash coinbase's outputs, which
-each peer rebuilds from its PPLNS window as validation does, and fetches
-whole when it cannot (protocol segment `without-payouts`). Sync still sends
-shares whole. No share-chain rule or store change.
+A new share whose coinbase outputs take 50,000 bytes or more is relayed without
+them; peers rebuild them from their PPLNS window or fetch the share whole
+(protocol segment `without-payouts`). No share-chain rule or store change.
 
 A share a peer sent is relayed once its header checks out, before its body
 is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).

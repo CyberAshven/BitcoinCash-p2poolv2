@@ -60,6 +60,10 @@ mod message_discriminants {
     /// A Bitcoin Cash weak share (`shares::weak`), pushed to every peer
     /// once checked.
     pub const WEAK_SHARE: u8 = 12;
+    /// A new share relayed with the weak shares it carries listed by
+    /// proof-of-work hash (`ShareWithWeakHashes`), preceded by the Bitcoin
+    /// Cash headers it carries, which may be none.
+    pub const SHARE_WITH_WEAK_HASHES: u8 = 13;
     /// Ask for weak shares a share carries, by the share's hash and their
     /// proof-of-work hashes.
     pub const GET_CARRIED_WEAK_SHARES: u8 = 14;
@@ -68,8 +72,7 @@ mod message_discriminants {
     /// A new Bitcoin Cash share relayed without the outputs of its Bitcoin
     /// Cash coinbase and with the weak shares it carries listed by
     /// proof-of-work hash (`ShareWithoutPayouts`), preceded by the Bitcoin
-    /// Cash headers it carries, which may be none. It took over from 13, the
-    /// share with its weak shares listed by hash alone, on 2026-11-16.
+    /// Cash headers it carries, which may be none.
     pub const SHARE_WITHOUT_PAYOUTS: u8 = 16;
 }
 
@@ -109,13 +112,17 @@ pub enum Message {
     /// A checked Bitcoin Cash weak share (`shares::weak`), relayed to every
     /// peer but the one it came from; answered with `Ack`.
     WeakShare(WeakShare),
-    /// A new Bitcoin Cash share relayed to peers without the outputs of its
-    /// Bitcoin Cash coinbase, with the weak shares it carries listed by
-    /// proof-of-work hash, the ones the peer probably lacks also sent whole,
-    /// and the Bitcoin Cash headers it carries; answered with `Ack`. The
-    /// peer rebuilds the outputs from its PPLNS window, fills the weak shares
-    /// from its weak pool and the whole ones, and asks for the rest with
-    /// `GetCarriedWeakShares`.
+    /// A new share relayed to peers with the weak shares it carries listed
+    /// by proof-of-work hash, the ones the peer probably lacks also sent
+    /// whole, and the Bitcoin Cash headers it carries; answered with `Ack`.
+    /// The peer fills the weak shares from its weak pool and the whole ones,
+    /// and asks for the rest with `GetCarriedWeakShares`.
+    ShareWithWeakHashes(ShareWithWeakHashes, Vec<Header>),
+    /// `ShareWithWeakHashes` with no outputs in the share's Bitcoin Cash
+    /// coinbase, for a share whose outputs are large enough that leaving
+    /// them out pays for a rebuild (`RELAY_WITHOUT_PAYOUTS_MIN_BYTES`);
+    /// answered with `Ack`. The peer rebuilds the outputs from its PPLNS
+    /// window, then fills the weak shares as for `ShareWithWeakHashes`.
     ShareWithoutPayouts(ShareWithoutPayouts, Vec<Header>),
     /// Ask the peer that relayed the share with this hash for the weak
     /// shares it carries with these proof-of-work hashes.
@@ -209,6 +216,7 @@ impl Message {
             Message::Transaction(_) => "Transaction",
             Message::Handshake(_) => "Handshake",
             Message::WeakShare(_) => "WeakShare",
+            Message::ShareWithWeakHashes(..) => "ShareWithWeakHashes",
             Message::ShareWithoutPayouts(..) => "ShareWithoutPayouts",
             Message::GetCarriedWeakShares(..) => "GetCarriedWeakShares",
             Message::CarriedWeakShares(..) => "CarriedWeakShares",
@@ -425,8 +433,9 @@ impl Decodable for ShareHeaderBatch {
 }
 
 /// A share block whose carried weak shares are listed by proof-of-work hash
-/// instead of sent whole: how a node relays a new share's weak shares,
-/// inside [`ShareWithoutPayouts`].
+/// instead of sent whole: how a node relays a new Bitcoin Cash share's weak
+/// shares (`Message::ShareWithWeakHashes`, and inside
+/// [`ShareWithoutPayouts`] for a share with large payouts).
 ///
 /// Its peers have most of those weak shares already, from the weak share
 /// gossip, so the share message no longer grows with every weak share it
@@ -535,14 +544,15 @@ impl Decodable for ShareWithWeakHashes {
 }
 
 /// A Bitcoin Cash share relayed without the outputs of its Bitcoin Cash
-/// coinbase: how a node relays a new share (`Message::ShareWithoutPayouts`).
+/// coinbase: how a node relays a new share whose outputs take at least
+/// `RELAY_WITHOUT_PAYOUTS_MIN_BYTES` (`Message::ShareWithoutPayouts`).
 ///
 /// Every node rebuilds a share's coinbase from its own PPLNS window to
 /// validate it, so a relayed share can leave the outputs out: output 0 comes
 /// from the header's merge-mining fields, the payouts and the payout tree
 /// from the window anchored at the share's parent, and the commitment and
 /// locktime from the header. The payouts are one output per payee and most
-/// of a share's bytes, so the message no longer grows with the payees. The
+/// of a large share's bytes, so the message no longer grows with them. The
 /// coinbase keeps its input, whose scriptSig holds what the header cannot
 /// give (aux flags, extranonce, nanosecond timestamp and pool signature),
 /// and the message keeps the outputs' total, which the payouts divide: what
@@ -805,6 +815,12 @@ impl Encodable for Message {
                 len += weak_share.consensus_encode(w)?;
                 Ok(len)
             }
+            Message::ShareWithWeakHashes(share, bch_headers) => {
+                let mut len = SHARE_WITH_WEAK_HASHES.consensus_encode(w)?;
+                len += encode_bch_headers(bch_headers, w)?;
+                len += share.consensus_encode(w)?;
+                Ok(len)
+            }
             Message::ShareWithoutPayouts(share, bch_headers) => {
                 let mut len = SHARE_WITHOUT_PAYOUTS.consensus_encode(w)?;
                 len += encode_bch_headers(bch_headers, w)?;
@@ -878,6 +894,13 @@ impl Decodable for Message {
                 tip_hash: BlockHash::consensus_decode(r)?,
             })),
             WEAK_SHARE => Ok(Message::WeakShare(WeakShare::consensus_decode(r)?)),
+            SHARE_WITH_WEAK_HASHES => {
+                let bch_headers = decode_optional_bch_headers(r)?;
+                Ok(Message::ShareWithWeakHashes(
+                    ShareWithWeakHashes::consensus_decode(r)?,
+                    bch_headers,
+                ))
+            }
             SHARE_WITHOUT_PAYOUTS => {
                 let bch_headers = decode_optional_bch_headers(r)?;
                 Ok(Message::ShareWithoutPayouts(
