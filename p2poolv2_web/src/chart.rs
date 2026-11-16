@@ -593,7 +593,7 @@ fn sharechain_dot_title(label: &str, class: &str, value: f64, time: u64) -> Stri
 }
 
 /// One sharechain series: the gridlines for this chart sit at the tick
-/// values `tight_log_ticks` gives, drawn as a log grid. No area fill.
+/// values `tight_log_ticks` gives, drawn as a log grid.
 fn sharechain_grid_lines(log_floor: f64, log_top: f64, frame: &TightFrame) -> Vec<impl IntoView> {
     tight_log_ticks(log_floor, log_top)
         .into_iter()
@@ -619,6 +619,131 @@ fn sharechain_grid_lines(log_floor: f64, log_top: f64, frame: &TightFrame) -> Ve
             }
         })
         .collect()
+}
+
+/// Closed path along a sharechain series down to the plot floor, for
+/// its area fill.
+fn area_path_sharechain(points: &[(u64, f64)], frame: &TightFrame) -> String {
+    let baseline = PAD_TOP + (HEIGHT - PAD_TOP - PAD_BOTTOM);
+    let coords = polyline_points_sharechain(points, frame);
+    let first_x = frame.x(points.first().map(|(time, _)| *time as f64).unwrap_or(0.0));
+    let last_x = frame.x(points.last().map(|(time, _)| *time as f64).unwrap_or(0.0));
+    format!("M {coords} {last_x:.1},{baseline:.1} {first_x:.1},{baseline:.1} Z")
+}
+
+/// Gradient definition for one sharechain series' area fill.
+fn area_gradient_sharechain(class: &str, frame: &TightFrame) -> impl IntoView {
+    let id = format!("fill-{class}");
+    let color = area_color(class);
+    view! {
+        <defs>
+            <linearGradient
+                id=id
+                gradientUnits="userSpaceOnUse"
+                x1="0"
+                y1=PAD_TOP
+                x2="0"
+                y2=frame.y(0.0)
+            >
+                <stop offset="0" stop-color=color stop-opacity="0.35" />
+                <stop offset="1" stop-color=color stop-opacity="0" />
+            </linearGradient>
+        </defs>
+    }
+}
+
+/// The height series' gradient and area fill, drawn under the grid as
+/// on the hashrate chart: the grid lines show through the translucent
+/// fill, and the path's baseline sits on the plot floor where a
+/// zero-count series rests. The other series mirror this with their
+/// own literal class, as the hashrate fills do.
+fn height_area<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoView + use<'a> {
+    let gradient = area_gradient_sharechain("height", frame);
+    let area = (!points.is_empty()).then(|| {
+        view! {
+            <path
+                class="area height"
+                d=area_path_sharechain(points, frame)
+                fill="url(#fill-height)"
+            />
+        }
+    });
+    view! {
+        {gradient}
+        {area}
+    }
+}
+
+/// The min-difficulty series' gradient and area fill, under the grid.
+fn dmin_area<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoView + use<'a> {
+    let gradient = area_gradient_sharechain("dmin", frame);
+    let area = (!points.is_empty()).then(|| {
+        view! {
+            <path
+                class="area dmin"
+                d=area_path_sharechain(points, frame)
+                fill="url(#fill-dmin)"
+            />
+        }
+    });
+    view! {
+        {gradient}
+        {area}
+    }
+}
+
+/// The max-difficulty series' gradient and area fill, under the grid.
+fn dmax_area<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoView + use<'a> {
+    let gradient = area_gradient_sharechain("dmax", frame);
+    let area = (!points.is_empty()).then(|| {
+        view! {
+            <path
+                class="area dmax"
+                d=area_path_sharechain(points, frame)
+                fill="url(#fill-dmax)"
+            />
+        }
+    });
+    view! {
+        {gradient}
+        {area}
+    }
+}
+
+/// The uncle series' gradient and area fill, under the grid.
+fn uncles_area<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoView + use<'a> {
+    let gradient = area_gradient_sharechain("uncles", frame);
+    let area = (!points.is_empty()).then(|| {
+        view! {
+            <path
+                class="area uncles"
+                d=area_path_sharechain(points, frame)
+                fill="url(#fill-uncles)"
+            />
+        }
+    });
+    view! {
+        {gradient}
+        {area}
+    }
+}
+
+/// The weak-share series' gradient and area fill, under the grid.
+fn weak_area<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoView + use<'a> {
+    let gradient = area_gradient_sharechain("weak", frame);
+    let area = (!points.is_empty()).then(|| {
+        view! {
+            <path
+                class="area weak"
+                d=area_path_sharechain(points, frame)
+                fill="url(#fill-weak)"
+            />
+        }
+    });
+    view! {
+        {gradient}
+        {area}
+    }
 }
 
 /// The height line: a polyline and dots drawn over the grid.
@@ -1067,6 +1192,11 @@ pub fn SharechainChart(
                     role="img"
                     aria-label=label
                 >
+                    {h_on.then(|| height_area(&height, &frame))}
+                    {dlo_on.then(|| dmin_area(&diff_min, &frame))}
+                    {dhi_on.then(|| dmax_area(&diff_max, &frame))}
+                    {un_on.then(|| uncles_area(&uncles, &frame))}
+                    {wk_on.then(|| weak_area(&weak, &frame))}
                     {grid}
                     {axes}
                     {h_on.then(|| height_line(&height, &frame))}
@@ -1310,6 +1440,11 @@ fn area_color(class: &str) -> &'static str {
     match class {
         "local" => "#22d3ee",
         "network" => "#8b5cf6",
+        "height" => "#ffffff",
+        "dmin" => "#06b6d4",
+        "dmax" => "#a78bfa",
+        "uncles" => "#f43f5e",
+        "weak" => "#f59e0b",
         _ => "#0ac18e",
     }
 }

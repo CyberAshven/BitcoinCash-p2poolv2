@@ -197,6 +197,15 @@ tr.uncle-row {
   box-shadow: none;
   font: inherit;
   cursor: pointer;
+  /* Pico's button reset spells text-transform:none, which would drop the
+     heading's uppercase; inherit keeps the titles exactly as .panel h2
+     renders them, on both dashboards. */
+  text-transform: inherit;
+  /* Chromium's UA sheet forces letter-spacing:normal on buttons; Pico
+     restores inherit for inputs but not buttons. The server's <a>
+     titles inherit .panel h2's tracking, so the wasm buttons must
+     too or their titles set tighter. */
+  letter-spacing: inherit;
   /* Same weight as the range buttons beside it, not Pico's bold h2. */
   --pico-font-weight: 400;
 }
@@ -266,6 +275,24 @@ tr.uncle-row {
   background: var(--ms-green);
   border-radius: 1px;
   transform: rotate(45deg);
+}
+/* Sharechain chips: the server dashboard paints these dots with inline
+   styles, the wasm one with these classes; the colours are the series
+   colours of .chart-wrap .line.* below, so chip, line and tracer agree. */
+.series-toggles .legend-dot.height {
+  background: #ffffff;
+}
+.series-toggles .legend-dot.uncles {
+  background: #f43f5e;
+}
+.series-toggles .legend-dot.weak {
+  background: #f59e0b;
+}
+.series-toggles .legend-dot.dmin {
+  background: #06b6d4;
+}
+.series-toggles .legend-dot.dmax {
+  background: #a78bfa;
 }
 .series-toggles .legend-chip.off {
   opacity: 0.45;
