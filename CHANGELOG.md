@@ -14,12 +14,20 @@ Bitcoin Cash share's weak root now commits the summary of the weak shares it
 carries, `SHA-256d(leaf root || SHA-256d(summary))`, so a node keeps them
 whole for 121,423 shares (`BCH_PAYOUT_DEPTH` and the pruner's lag) and only
 their leaf root and summary, which the payouts read, until the body goes at
-242,486 shares. A body asked for below that depth is served with the leaf
-root and summary in their place, and a syncing node checks them against the
-header. At 32 weak shares a share a node keeps 4.3 GB of them instead of 7.4
-GB, and 43 GB instead of 74 GB at 320. `store.keep_whole_weak_shares = true`
-keeps them whole to the body prune depth, for an explorer or an archive. The
-Bitcoin Cash node sees no change.
+242,534 shares. A body asked for more than one payout depth deep is served
+with the leaf root and summary in their place, and a syncing node checks
+them against the header. At 32 weak shares a share a node keeps 4.3 GB of
+them instead of 7.4 GB, and 43 GB instead of 74 GB at 320.
+`store.keep_whole_weak_shares = true` keeps them whole to the body prune
+depth, for an explorer or an archive. The Bitcoin Cash node sees no change.
+
+The Bitcoin Cash body prune depth gains `WEAK_DEPTH`, 48 shares:
+`BCH_PRUNE_DEPTH` is 242,174 (414 in the sim build). A weak share carried
+by the deepest share a syncing node fully checks is paid from a window that
+reads up to 46 shares below two payout depths; the node never fetched those
+bodies, credited them without their weak shares and could mark an honest
+share invalid. No share-chain rule changes: a node fetches and keeps 48
+more bodies.
 
 Weak shares follow the asks (issue #79, part 6), a flag day: protocol
 segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10 and new

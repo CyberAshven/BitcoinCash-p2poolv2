@@ -941,8 +941,8 @@ What the storage table shows:
    month, so with a million payees all at level 1 it would keep about 15 GB
    of trees a month.
 2. **The coinbase is most of what a node keeps:** 8.3 GB for 28 days with
-   1,000 payees, 82.5 GB with 10,000, 148 GB at the default level's ceiling
-   and 242 GB when every coinbase is a full 1 MB. A 30-day cap doubles each.
+   1,000 payees, 82.6 GB with 10,000, 148 GB at the default level's ceiling
+   and 243 GB when every coinbase is a full 1 MB. A 30-day cap doubles each.
    Never pruned, they would grow by 108 GB to 3.2 TB a year.
 3. **A coinbase cannot be stored without its payouts.** A node serves every
    body a syncing peer asks for, down to two payout depths, and the peer
@@ -955,18 +955,19 @@ What the storage table shows:
    6's ceiling of 320.** A node keeps them whole for one payout depth and
    the pruner's lag, 121,423 shares, then only their leaf root and summary,
    at most 156 bytes a weak share, with the body: 3.1 GB whole and 1.2 GB of
-   summaries at 32 a share. Payouts read the summaries down to two payout
-   depths: a syncing node's deepest fully checked share, one payout depth
-   below the tip, pays shares down to two. Since the weak root commits the
-   summary, a node serves those shares with the summary in place of the
-   whole weak shares and the peer checks it against the header. A node set
-   to keep them whole (`store.keep_whole_weak_shares`, for an explorer or an
-   archive) keeps 7.4 and 74 GB.
+   summaries at 32 a share. Payouts read the summaries down to the body prune
+   depth: a syncing node's deepest fully checked share, one payout depth
+   below the tip, pays shares down to two, and a weak share it carries is
+   paid from a window up to 48 shares (`WEAK_DEPTH`) lower. Since the weak
+   root commits the summary, a node serves those shares with the summary in
+   place of the whole weak shares and the peer checks it against the header.
+   A node set to keep them whole (`store.keep_whole_weak_shares`, for an
+   explorer or an archive) keeps 7.4 and 74 GB.
 5. **Headers, kept for ever, take 3.15 GB a year.**
 
 With weak shares kept whole for one payout depth, a node at part 6's
 ceiling with a million payees keeps about 43 GB of weak shares and 148 to
-242 GB of coinbases for 28 days, and 3 GB more of headers a year. Fees are
+243 GB of coinbases for 28 days, and 3 GB more of headers a year. Fees are
 left out: at level 5 each 1 BCH of fees adds about 5,700 outputs.
 
 ## Code
@@ -1959,16 +1960,16 @@ difficulty, to push the cap up.
 |---|---|---|---|---|---|---|---|---|
 | 10 | 5 (17,472 sat) | 10 | 0 | 0.707 | 0.171 | 0.367 | 2.23 | 0 |
 | 10 | 1 (1,092 sat) | 10 | 0 | 0.707 | 0.171 | 0.367 | 2.23 | 0 |
-| 100 | 5 (17,472 sat) | 100 | 0 | 3.77 | 0.913 | 1.95 | 11.9 | 0 |
-| 100 | 1 (1,092 sat) | 100 | 0 | 3.77 | 0.913 | 1.95 | 11.9 | 0 |
-| 1,000 | 5 (17,472 sat) | 1,000 | 0 | 34.4 | 8.33 | 17.8 | 108 | 0 |
-| 1,000 | 1 (1,092 sat) | 1,000 | 0 | 34.4 | 8.33 | 17.8 | 108 | 0 |
-| 10,000 | 5 (17,472 sat) | 10,000 | 0 | 340 | 82.5 | 177 | 1,073 | 0 |
-| 10,000 | 1 (1,092 sat) | 10,000 | 0 | 340 | 82.5 | 177 | 1,073 | 0 |
+| 100 | 5 (17,472 sat) | 100 | 0 | 3.77 | 0.914 | 1.96 | 11.9 | 0 |
+| 100 | 1 (1,092 sat) | 100 | 0 | 3.77 | 0.914 | 1.96 | 11.9 | 0 |
+| 1,000 | 5 (17,472 sat) | 1,000 | 0 | 34.4 | 8.34 | 17.8 | 108 | 0 |
+| 1,000 | 1 (1,092 sat) | 1,000 | 0 | 34.4 | 8.34 | 17.8 | 108 | 0 |
+| 10,000 | 5 (17,472 sat) | 10,000 | 0 | 340 | 82.6 | 177 | 1,073 | 0 |
+| 10,000 | 1 (1,092 sat) | 10,000 | 0 | 340 | 82.6 | 177 | 1,073 | 0 |
 | 100,000 | 5 (17,472 sat) | 17,885 | 0 | 608 | 148 | 316 | 1,919 | 0 |
-| 100,000 | 1 (1,092 sat) | 100,000 | 70,600 | 1,000 | 242 | 519 | 3,153 | 3.18 |
+| 100,000 | 1 (1,092 sat) | 100,000 | 70,600 | 1,000 | 243 | 519 | 3,153 | 3.18 |
 | 1,000,000 | 5 (17,472 sat) | 17,885 | 0 | 608 | 148 | 316 | 1,919 | 0 |
-| 1,000,000 | 1 (1,092 sat) | 286,172 | 256,772 | 1,000 | 242 | 519 | 3,153 | 11.6 |
+| 1,000,000 | 1 (1,092 sat) | 286,172 | 256,772 | 1,000 | 243 | 519 | 3,153 | 11.6 |
 
 | Stored | GB kept: whole one payout depth, summary two, 14-day cap | GB kept: whole one payout depth, summary two, 30-day cap | GB kept with keep_whole_weak_shares: both two payout depths, 14-day cap | GB kept with keep_whole_weak_shares: both two payout depths, 30-day cap | GB a year if never pruned |
 |---|---|---|---|---|---|

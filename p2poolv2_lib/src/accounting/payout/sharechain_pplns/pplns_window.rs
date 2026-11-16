@@ -221,6 +221,11 @@ pub struct ChainDepths {
     /// Depth of the deepest share a coinbase can pay; see `PAYOUT_DEPTH` and
     /// `BCH_PAYOUT_DEPTH`.
     pub payout_depth: usize,
+    /// How far below the share carrying it a carried weak share's parent may
+    /// be: `WEAK_DEPTH` on Bitcoin Cash, none on Bitcoin. A weak share is paid
+    /// from a window anchored at its parent, so checking a share at the bottom
+    /// of the full-validation zone reads that much below its own window.
+    pub weak_anchor_depth: usize,
 }
 
 impl ChainDepths {
@@ -228,12 +233,14 @@ impl ChainDepths {
     pub const BITCOIN: Self = Self {
         coinbase_maturity: COINBASE_MATURITY,
         payout_depth: PAYOUT_DEPTH,
+        weak_anchor_depth: 0,
     };
 
     /// Bitcoin Cash's depths, from its 100-share maturity.
     pub const BITCOIN_CASH: Self = Self {
         coinbase_maturity: BCH_COINBASE_MATURITY,
         payout_depth: BCH_PAYOUT_DEPTH,
+        weak_anchor_depth: crate::shares::weak::WEAK_DEPTH as usize,
     };
 
     /// The depths a chain's rules use.
@@ -246,9 +253,13 @@ impl ChainDepths {
 
     /// Blocks from the tip whose bodies a node keeps: two payout depths, one
     /// fully validated and one below it holding the outputs a spend at the
-    /// bottom of the first may still use.
+    /// bottom of the first may still use and the shares its coinbase pays,
+    /// and on Bitcoin Cash `weak_anchor_depth` more: a weak share carried by a
+    /// share at the bottom of the zone is paid from a window anchored up to
+    /// that much lower, which reads the weak share summaries of the shares it
+    /// pays. A syncing node fetches bodies only this deep.
     pub const fn prune_depth(self) -> usize {
-        2 * self.payout_depth
+        2 * self.payout_depth + self.weak_anchor_depth
     }
 
     /// Deepest fork below the confirmed tip the candidate chain reorgs onto:
@@ -265,8 +276,10 @@ impl ChainDepths {
 }
 
 // Each chain's depths: the payout walk, its uncles and its spendable outputs
-// fit the full-validation zone, and the deepest followed fork with its uncles
-// stays above the prune target, where deletion stops.
+// fit the full-validation zone, the deepest followed fork with its uncles
+// stays above the prune target, where deletion stops, and a payout for a
+// weak share carried at the bottom of the zone, anchored at its parent,
+// reads no share below the prune depth.
 const _: () = {
     let depths = [ChainDepths::BITCOIN, ChainDepths::BITCOIN_CASH];
     let mut index = 0;
@@ -276,6 +289,10 @@ const _: () = {
         assert!(
             chain.max_reorg_depth() + MAX_UNCLES_DEPTH as usize
                 <= chain.prune_depth() + PRUNE_INTERVAL
+        );
+        assert!(
+            chain.payout_depth + chain.weak_anchor_depth + chain.payout_depth
+                <= chain.prune_depth()
         );
         index += 1;
     }
@@ -353,8 +370,12 @@ const _: () = assert!(window_buffer(PPLNS_WINDOW_SHARES) >= WEAK_ANCHOR_REACH);
 pub const PRUNE_DEPTH: usize = ChainDepths::BITCOIN.prune_depth();
 
 /// Bitcoin Cash: blocks from the chain tip whose bodies each node retains,
-/// 2x `BCH_PAYOUT_DEPTH`: 242,126 shares, about 28 days at 10 s, against
-/// Bitcoin's 254,016.
+/// 2x `BCH_PAYOUT_DEPTH` and `WEAK_DEPTH`: 242,174 shares, about 28 days at
+/// 10 s, against Bitcoin's 254,016. The 48 shares of `WEAK_DEPTH` hold the
+/// summaries a payout for a weak share carried at the bottom of the
+/// full-validation zone reads (`ChainDepths::weak_anchor_depth`); until
+/// 2026-11-16 a syncing node did not fetch them, credited those shares
+/// without their weak shares and could mark an honest share invalid.
 pub const BCH_PRUNE_DEPTH: usize = ChainDepths::BITCOIN_CASH.prune_depth();
 
 /// The gap between the prune height and the prune target, and the size of

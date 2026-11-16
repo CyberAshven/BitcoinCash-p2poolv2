@@ -7,7 +7,8 @@
 //! A node keeps every share header for ever, about 1 KB with its template
 //! merkle branch (`docs/architecture/pruning.md`, "Header Sync"). It keeps
 //! a share's body, the Bitcoin Cash coinbase among it, for two payout depths
-//! and then prunes it (`ChainDepths::prune_depth`): 242,486 shares, 28 days
+//! and `WEAK_DEPTH` and then prunes it (`ChainDepths::prune_depth`): 242,534
+//! shares with the pruner's lag, 28 days
 //! at 10-second shares, with today's 14-day window cap. The weak shares a
 //! share carries it keeps whole for one payout depth and the pruner's lag,
 //! 121,423 shares, and their summary, which the payouts read, with the body
@@ -64,6 +65,10 @@ const MATURITY_SHARES: f64 = 100.0;
 /// Shares the pruner may lag behind its target (`PRUNE_INTERVAL`).
 const PRUNE_INTERVAL_SHARES: f64 = 360.0;
 
+/// Shares below its carrier a carried weak share's parent may be
+/// (`WEAK_DEPTH`), which the body prune depth adds to two payout depths.
+const WEAK_DEPTH_SHARES: f64 = 48.0;
+
 /// Seconds in a day and in a year.
 const DAY_SECONDS: f64 = 86_400.0;
 const YEAR_SECONDS: f64 = 365.0 * DAY_SECONDS;
@@ -88,10 +93,10 @@ pub fn payout_depth_shares(cap_days: f64) -> f64 {
     MATURITY_SHARES + cap_days * DAY_SECONDS / SHARE_INTERVAL_SECONDS + MAX_UNCLES_DEPTH as f64
 }
 
-/// Shares whose bodies a node keeps: two payout depths and the pruner's lag
-/// (242,486 at 14 days).
+/// Shares whose bodies a node keeps: two payout depths, `WEAK_DEPTH` and the
+/// pruner's lag (242,534 at 14 days).
 pub fn kept_body_shares(cap_days: f64) -> f64 {
-    2.0 * payout_depth_shares(cap_days) + PRUNE_INTERVAL_SHARES
+    2.0 * payout_depth_shares(cap_days) + WEAK_DEPTH_SHARES + PRUNE_INTERVAL_SHARES
 }
 
 /// Shares whose whole weak shares a node keeps by default: one payout depth

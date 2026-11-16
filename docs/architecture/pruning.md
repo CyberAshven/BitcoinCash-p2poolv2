@@ -66,9 +66,9 @@ batch of 2026-10-24 (audit A12), Bitcoin Cash derives its own from its
 | `PPLNS_WINDOW_SHARES` | 120,960 | the window cap, unchanged |
 | `MAX_UNCLES_DEPTH` | 3 | an uncle of the deepest window share |
 | `BCH_PAYOUT_DEPTH` | 121,063 | 100 + 120,960 + 3: the deepest share a coinbase pays |
-| `BCH_PRUNE_DEPTH` | 242,126 | 2 x `BCH_PAYOUT_DEPTH` |
+| `BCH_PRUNE_DEPTH` | 242,174 | 2 x `BCH_PAYOUT_DEPTH` + `WEAK_DEPTH` (48): the deepest share a payout for a weak share carried at the bottom of the zone reads |
 | `PRUNE_INTERVAL` | 360 | unchanged |
-| Block bodies kept below the confirmed tip | 242,486 | `BCH_PRUNE_DEPTH + PRUNE_INTERVAL` |
+| Block bodies kept below the confirmed tip | 242,534 | `BCH_PRUNE_DEPTH + PRUNE_INTERVAL` |
 | Whole weak shares kept below the confirmed tip | 121,423 | `BCH_PAYOUT_DEPTH + PRUNE_INTERVAL`; their summary stays with the body ("Weak Shares") |
 
 - `BCH_PAYOUT_DEPTH` is a share-chain rule: a Bitcoin Cash share coinbase
@@ -78,15 +78,23 @@ batch of 2026-10-24 (audit A12), Bitcoin Cash derives its own from its
   ("Reorg Depth Limit"), 121,063 shares below the confirmed tip.
 - Doubled, it is the prune depth, for the same reason as on Bitcoin: a
   spend at the bottom of the zone may use outputs down to two payout depths
-  below the tip, exactly the prune height.
+  below the tip. Bitcoin Cash adds `WEAK_DEPTH` (48 shares,
+  `ChainDepths::weak_anchor_depth`): a weak share carried by a share at the
+  bottom of the zone may have its parent that much lower, and is paid from a
+  window anchored there.
 - The window walk reads headers (`PplnsWindow` caches confirmed headers and
   their uncles), which are never pruned, and on Bitcoin Cash the summary of
   the weak shares each share carries (`WeakSummaries`), which is body data.
   A payout reads at most one payout depth below the share it pays for, and
   the deepest share a node fully checks, at the bottom of a syncing node's
   zone or on the deepest fork it follows, sits one payout depth below the
-  tip: payouts read summaries down to two payout depths, which the body
-  keeps, so pruning cannot remove anything a payout needs. A confirmed share
+  tip: payouts read summaries down to two payout depths, and a weak share
+  carried at the bottom of the zone `WEAK_DEPTH` lower, to the prune height.
+  The body keeps them, so pruning cannot remove anything a payout needs.
+  Until 2026-11-16 the prune depth was two payout depths alone: a syncing
+  node never fetched the bodies the weak share payouts read up to 46 shares
+  below it, credited those shares without their weak shares, and could mark
+  an honest share invalid (the alpha side of run 43851198602 did). A confirmed share
   whose summary is missing is credited without its weak shares, which is
   right only for a share confirmed from its header below the prune height.
 - Every chain's depths are asserted at compile time: the walk plus its
@@ -96,7 +104,7 @@ batch of 2026-10-24 (audit A12), Bitcoin Cash derives its own from its
   the node's chain's depths (`Store::with_chain`, `ChainDepths::for_chain`).
 - The sim build shortens the window to 80 shares; Bitcoin Cash's maturity
   stays 100 there, so the sim's `BCH_PAYOUT_DEPTH` is 183 and its prune
-  depth 366.
+  depth 414 (2 x 183 + 48).
 - Bitcoin Cash nodes relay share transactions and mine them in their shares
   (since 2026-10-22, `shares/transaction_pool.rs`, `handle_stratum_share.rs`),
   so a block may spend an output this node never fetched. Both rules that
@@ -364,7 +372,7 @@ Relevant code:
 | `Uncles` | kept | Small, and derived from headers |
 | `BlockTxids`, `BitcoinTxids`, `BitcoinCoinbase` | deleted below the prune target | Body data. Nothing writes `BitcoinTxids` yet; its key is deleted anyway so a future writer cannot leak data |
 | `WeakShares` | deleted below the weak share prune target, one payout depth and one `PRUNE_INTERVAL` below the confirmed tip, unless `store.keep_whole_weak_shares`; then below the prune target | The weak shares a Bitcoin Cash share carries, whole. Read only to check a share inside the payout depth, to serve them to a peer whose zone holds that share, and to show them ("Weak Shares") |
-| `WeakSummaries` | deleted below the prune target | Body data: the leaf root and summary of a share's weak shares (`PrunedWeakShares`), their hashes and credit, which the PPLNS window and the carried-once rule read. Payouts read them down to two payout depths; a pruned block is below every window, so nothing reads its summary again |
+| `WeakSummaries` | deleted below the prune target | Body data: the leaf root and summary of a share's weak shares (`PrunedWeakShares`), their hashes and credit, which the PPLNS window and the carried-once rule read. Payouts read them down to the prune height, two payout depths and `WEAK_DEPTH`; a pruned block is below every window, so nothing reads its summary again |
 | `Tx`, `Inputs`, `Outputs`, `TxidsBlocks`, `SpendsIndex` | deleted below the prune target, unless a kept block still includes the txid | Body data that can be shared between blocks |
 | candidate `BlockHeight` entries | deleted at every height below the prune target | Far below the confirmed tip they duplicate the confirmed entries |
 
@@ -573,7 +581,7 @@ go with the body at the prune target.
 
 | Reader | Reads | Deepest it reads |
 |---|---|---|
-| PPLNS window: payouts and the coinbase check (`weak_credit.rs`) | summaries | One payout depth below the share paid for. The deepest share a node fully checks, at the bottom of a syncing node's zone or on a branch forking at the reorg floor, sits one payout depth below the tip, so two payout depths |
+| PPLNS window: payouts and the coinbase check (`weak_credit.rs`) | summaries | One payout depth below the share paid for. The deepest share a node fully checks, at the bottom of a syncing node's zone or on a branch forking at the reorg floor, sits one payout depth below the tip, so two payout depths; a weak share it carries is paid from up to `WEAK_DEPTH` lower, the prune height |
 | Carried-once rule (`weak_shares_carried_by_ancestors`), weak pool (`carried_by_chain`) | summary proof-of-work hashes | `WEAK_DEPTH - 1` shares |
 | Body check (`check_weak_shares_match_header`) | the weak shares the body carries, or their leaf root and summary | every body received |
 | Full validation (`validate_carried_weak_headers`, `validate_carried_weak_coinbases`) | whole weak shares | a share within the payout depth of the candidate tip, or on a branch forking at most `MAX_REORG_DEPTH` below the confirmed tip |
@@ -594,8 +602,8 @@ days at 10-second shares and 1.4 days at 1-second shares, and the window's
 cap is the same 120,960 shares in both.
 
 **Why the summary is committed.** A syncing node fetches bodies down to its
-prune height, two payout depths below the tip, and pays from summaries down
-there. Under `weak4` alone a summary could be checked only by the whole weak
+prune height, two payout depths and `WEAK_DEPTH` below the tip, and pays
+from summaries down there. Under `weak4` alone a summary could be checked only by the whole weak
 shares it came from, so every node would have had to keep them two payout
 depths. Since `-summary` (`BCH_WEAK_SHARE_RULE_TAG`) the weak root is
 `SHA-256d(leaf root || SHA-256d(summary))`, so a body served with the leaf
@@ -951,13 +959,13 @@ take 32 bytes; P2SH32 outputs take 44. The 367-byte allowance includes a
 tree output and all other fields at their largest sizes. There is no BCH
 witness commitment. See `accounting/payout/coinbase_budget.rs`.
 
-| No-token P2PKH payees | Coinbase budget | GB per year if kept | GB for 242,126 retained coinbases |
+| No-token P2PKH payees | Coinbase budget | GB per year if kept | GB for 242,174 retained coinbases |
 |---|---|---|---|
 | 10 | 707 B | 2.23 | 0.17 |
 | 100 | 3,767 B | 11.88 | 0.91 |
 | 1,000 | 34,367 B | 108.38 | 8.32 |
 
-`BCH_PRUNE_DEPTH` is 242,126 shares, about 28 days at this rate. Token
+`BCH_PRUNE_DEPTH` is 242,174 shares, about 28 days at this rate. Token
 shares cap their coinbase at 3,072 bytes and use a payout tree as needed.
 No-token coinbases may reach the 1,000,000-byte
 [BCH transaction maximum](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/master/src/consensus/consensus.h).
