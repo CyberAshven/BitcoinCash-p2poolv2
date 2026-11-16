@@ -22,7 +22,7 @@
 //! double-click resets.
 
 use crate::api::{FoundBlock, HashratePoint};
-use crate::format::{fmt_day_time, fmt_hashrate};
+use crate::format::{fmt_day_time, fmt_difficulty, fmt_hashrate};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -139,6 +139,51 @@ impl Frame {
     }
 }
 
+/// Like [`Frame`], but the value axis spans a continuous log10 band
+/// computed by [`tight_domain`] instead of integer decades, so narrow data
+/// (a sliver of a decade) is not flattened. `floor` pins the bottom to a
+/// fixed value in log10 space; values at or below it are drawn at the
+/// floor line, as on the node's chart.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TightFrame {
+    pub start: f64,
+    pub end: f64,
+    /// Continuous log10 floor, e.g. 2.3; not clamped to an integer.
+    pub log_floor: f64,
+    /// Continuous log10 top, e.g. 5.7.
+    pub log_top: f64,
+}
+
+impl TightFrame {
+    fn span(&self) -> f64 {
+        (self.end - self.start).max(1.0)
+    }
+
+    pub fn x(&self, time: f64) -> f64 {
+        PAD_LEFT + (time - self.start) / self.span() * (WIDTH - PAD_LEFT - PAD_RIGHT)
+    }
+
+    /// Log10 position: decades from the floor. Values at or below zero
+    /// clamp onto the floor, so a zero-count uncle/weak minute sits on
+    /// the floor line instead of the difficulty band, as on the node.
+    pub fn y(&self, value: f64) -> f64 {
+        let plot_height = HEIGHT - PAD_TOP - PAD_BOTTOM;
+        let (floor, top) = (self.log_floor, self.log_top);
+        let decade = if value > 0.0 {
+            value.log10().clamp(floor, top)
+        } else {
+            floor
+        };
+        PAD_TOP + plot_height - (decade - floor) / (top - floor) * plot_height
+    }
+
+    /// Time at a horizontal fraction (0..1) of the rendered width.
+    pub fn time_at_fraction(&self, fraction: f64) -> f64 {
+        let plot = (fraction * WIDTH - PAD_LEFT) / (WIDTH - PAD_LEFT - PAD_RIGHT);
+        self.start + plot.clamp(0.0, 1.0) * self.span()
+    }
+}
+
 /// A found block drawn as a diamond: its height for the `<title>`, its
 /// time (seconds) clamped into the frame, and the marker's centre in
 /// viewBox units. Blocks outside the drawn window are dropped rather
@@ -216,6 +261,143 @@ fn series(
     downsample(&visible, MAX_POINTS)
 }
 
+/// Minimum log10 span before the tight-domain rule switches from linear
+/// ticks (a narrow data band within a decade) to 1/2/5 x 10^k gridlines
+/// (the band spans at least half a decade), as on the node's chart.
+const TIGHT_MIN_SPAN: f64 = 0.5;
+
+/// The nearest 1/2/5 x 10^k at or above the value (when `up` is true) or
+/// at or below it (when `up` is false), so a data-tight domain's edges
+/// are round numbers, as on the node's chart.
+fn round125(value: f64, up: bool) -> f64 {
+    let exp = value.log10().floor();
+    let mut best = if up { f64::INFINITY } else { f64::NEG_INFINITY };
+    for exponent in [exp, exp + 1.0] {
+        for step in [1.0_f64, 2.0, 5.0] {
+            let candidate = step * 10.0_f64.powf(exponent);
+            let fits = if up {
+                candidate >= value * (1.0 - 1e-12)
+            } else {
+                candidate <= value * (1.0 + 1e-12)
+            };
+            if fits {
+                if up {
+                    best = best.min(candidate);
+                } else {
+                    best = best.max(candidate);
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Round tick step and bounds: a 1/2/5 x 10^k step near the range over
+/// `target` intervals, the data floored/ceiled onto it, padded one step so
+/// the line never sits on the plot's edge, as on the node's chart.
+fn nice_linear_ticks(v_lo: f64, v_hi: f64, target: usize) -> (f64, f64, Vec<f64>) {
+    let mut span = v_hi - v_lo;
+    if span <= 0.0 {
+        span = if v_hi > 0.0 { v_hi } else { 1.0 };
+    }
+    let raw = span / target as f64;
+    let exp = raw.log10().floor();
+    let frac = raw / 10.0_f64.powf(exp);
+    let step = (if frac < 1.5 {
+        1.0
+    } else if frac < 3.5 {
+        2.0
+    } else if frac < 7.5 {
+        5.0
+    } else {
+        10.0
+    }) * 10.0_f64.powf(exp);
+    let mut lo = (v_lo / step).floor() * step - step;
+    let hi = (v_hi / step).ceil() * step + step;
+    if lo <= 0.0 {
+        lo = (v_lo / step).floor() * step;
+    }
+    if lo <= 0.0 {
+        lo = step;
+    }
+    let count = ((hi - lo) / step).round() as usize;
+    let ticks: Vec<f64> = (0..=count).map(|i| lo + i as f64 * step).collect();
+    (lo, hi, ticks)
+}
+
+/// Every 1/2/5 x 10^k value inside a log10 band, band edges included, as
+/// on the node's chart.
+fn tight_log_ticks(log_floor: f64, log_top: f64) -> Vec<f64> {
+    let mut ticks = Vec::new();
+    for decade in (log_floor.floor() as i32)..=(log_top.ceil() as i32) {
+        for step in [1.0_f64, 2.0, 5.0] {
+            let value = step * 10.0_f64.powi(decade);
+            let log_val = value.log10();
+            if log_floor - 1e-9 <= log_val && log_val <= log_top + 1e-9 {
+                ticks.push(value);
+            }
+        }
+    }
+    if ticks.is_empty() {
+        ticks.push(10.0_f64.powf(log_floor));
+    }
+    ticks
+}
+
+/// The drawn data's own log10 range instead of the hashrate chart's
+/// whole-decade rule, so a figure spanning a sliver of a decade does not
+/// flatten. A band of at least `TIGHT_MIN_SPAN` rounds out to the
+/// 1/2/5 x 10^k grid at each edge; a thinner band takes nice linear
+/// ticks across the data itself. `floor` pins the bottom to a fixed value
+/// (e.g. 1.0 for uncle/weak count series); values at or below it are
+/// drawn at the floor line, as on the node's chart.
+fn tight_domain(values: &[f64], floor: Option<f64>) -> (f64, f64, Vec<f64>) {
+    let mut positives: Vec<f64> = values.iter().copied().filter(|v| *v > 0.0).collect();
+    if let Some(fixed) = floor
+        && fixed > 0.0
+    {
+        positives.push(fixed);
+    }
+    if positives.is_empty() {
+        return (0.0, 1.0, vec![1.0, 10.0]);
+    }
+    let v_lo = positives.iter().cloned().reduce(f64::min).unwrap();
+    let v_hi = positives.iter().cloned().reduce(f64::max).unwrap();
+    let lo_log = v_lo.log10();
+    let hi_log = v_hi.log10();
+    if hi_log - lo_log >= TIGHT_MIN_SPAN {
+        let mut dom_lo = round125(v_lo, false).log10();
+        let mut dom_hi = round125(v_hi, true).log10();
+        if let Some(fixed) = floor
+            && fixed > 0.0
+        {
+            dom_lo = dom_lo.max(fixed.log10());
+            if dom_hi <= dom_lo {
+                dom_hi = dom_lo + 1.0;
+            }
+        }
+        if dom_hi - dom_lo > MAX_DECADES as f64 {
+            dom_lo = dom_hi - MAX_DECADES as f64;
+        }
+        (dom_lo, dom_hi, tight_log_ticks(dom_lo, dom_hi))
+    } else {
+        let (lo, hi, ticks) = nice_linear_ticks(v_lo, v_hi, 4);
+        if let Some(fixed) = floor
+            && fixed > 0.0
+        {
+            let fixed_log = fixed.log10();
+            let lo_log_final = lo.log10().max(fixed_log);
+            let hi_log_final = hi.log10().max(fixed_log + 1.0);
+            return (
+                lo_log_final,
+                hi_log_final,
+                tight_log_ticks(lo_log_final, hi_log_final),
+            );
+        }
+        (lo.log10(), hi.log10(), ticks)
+    }
+}
+
 /// The whole-decade log10 domain `[floor, top]` covering `values`, exactly
 /// as the node's chart computes it: rounded out to whole decades, at least
 /// two and at most [`MAX_DECADES`] wide, non-positive values ignored.
@@ -286,6 +468,810 @@ pub fn draw(
         network,
         blocks,
     })
+}
+
+/// What one sharechain chart render draws: the five series (height, diff
+/// min, diff max, uncles, weak), the tight-domain frame around them, and
+/// found blocks marked on the height line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharechainDrawn {
+    pub frame: TightFrame,
+    pub height: Vec<(u64, f64)>,
+    pub diff_min: Vec<(u64, f64)>,
+    pub diff_max: Vec<(u64, f64)>,
+    pub uncles: Vec<(u64, f64)>,
+    pub weak: Vec<(u64, f64)>,
+    pub blocks: Vec<PlottedBlock>,
+}
+
+/// Names of all five sharechain series, for tip rows and tracers. Order
+/// matches the replica: Height, Min diff, Max diff, Uncle, Weak.
+const SHARECHAIN_TAGS: [(&str, &str); 5] = [
+    ("height", "Height"),
+    ("dmin", "Min diff"),
+    ("dmax", "Max diff"),
+    ("uncles", "Uncle"),
+    ("weak", "Weak"),
+];
+
+/// Classes whose values are whole numbers: `uncles` and `weak`. Their
+/// tooltips print integers, as on the node's chart.
+const SHARECHAIN_INTEGER_CLASSES: [&str; 2] = ["uncles", "weak"];
+
+/// The sharechain chart: the five series built from the JSON endpoint,
+/// each downsampled to at most [`MAX_POINTS`] points, zoomed to `range`
+/// (all of it when `None`). The value axis uses [`tight_domain`] with
+/// `floor=0.0` so zero-count uncle/weak minutes sit on the floor line, as
+/// on the node's chart. Blocks snap to the height line.
+#[allow(clippy::too_many_arguments)]
+pub fn sharechain_draw(
+    height: &[(u64, f64)],
+    diff_min: &[(u64, f64)],
+    diff_max: &[(u64, f64)],
+    uncles: &[(u64, f64)],
+    weak: &[(u64, f64)],
+    blocks: &[FoundBlock],
+    range: Option<(f64, f64)>,
+    height_on: bool,
+    dmin_on: bool,
+    dmax_on: bool,
+    uncles_on: bool,
+    weak_on: bool,
+) -> Option<SharechainDrawn> {
+    let filtered = |series: &[(u64, f64)], on: bool| -> Vec<(u64, f64)> {
+        if !on {
+            return Vec::new();
+        }
+        let visible: Vec<(u64, f64)> = series
+            .iter()
+            .copied()
+            .filter(|(time, _)| {
+                range.is_none_or(|(start, end)| (*time as f64) >= start && (*time as f64) <= end)
+            })
+            .collect();
+        downsample(&visible, MAX_POINTS)
+    };
+    let h = filtered(height, height_on);
+    let dlo = filtered(diff_min, dmin_on);
+    let dhi = filtered(diff_max, dmax_on);
+    let un = filtered(uncles, uncles_on);
+    let wk = filtered(weak, weak_on);
+    let all = || h.iter().chain(&dlo).chain(&dhi).chain(&un).chain(&wk);
+    let first = all().map(|(time, _)| *time).min()?;
+    let last = all().map(|(time, _)| *time).max()?;
+    let (start, end) = range.unwrap_or((first as f64, last as f64));
+    let values: Vec<f64> = all().map(|(_, value)| *value).collect();
+    let (log_floor, log_top, _ticks) = tight_domain(&values, Some(1.0));
+    let frame = TightFrame {
+        start,
+        end,
+        log_floor,
+        log_top,
+    };
+    // Blocks snap to the height line at their time.
+    let plotted = if !h.is_empty() {
+        blocks
+            .iter()
+            .filter_map(|block| {
+                let time = block.bitcoin_time as f64;
+                if !(frame.start..=frame.end).contains(&time) {
+                    return None;
+                }
+                let (_, value) = nearest(&h, time)?;
+                Some(PlottedBlock {
+                    height: block.bitcoin_height,
+                    time,
+                    cx: frame.x(time),
+                    cy: frame.y(value),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Some(SharechainDrawn {
+        frame,
+        height: h,
+        diff_min: dlo,
+        diff_max: dhi,
+        uncles: un,
+        weak: wk,
+        blocks: plotted,
+    })
+}
+
+/// A native `<title>` tooltip for one sharechain dot, with the series
+/// label and integer formatting for `uncles`/`weak` (both count whole
+/// items), decimals otherwise.
+fn sharechain_dot_title(label: &str, class: &str, value: f64, time: u64) -> String {
+    let formatted = if SHARECHAIN_INTEGER_CLASSES.contains(&class) {
+        format!("{}", value.round() as i64)
+    } else {
+        fmt_difficulty(value)
+    };
+    format!("{label}: {formatted} at {}", fmt_day_time(time))
+}
+
+/// One sharechain series: the gridlines for this chart sit at the tick
+/// values `tight_log_ticks` gives, drawn as a log grid. No area fill.
+fn sharechain_grid_lines(log_floor: f64, log_top: f64, frame: &TightFrame) -> Vec<impl IntoView> {
+    tight_log_ticks(log_floor, log_top)
+        .into_iter()
+        .map(|value| {
+            let line_y = format!("{:.1}", frame.y(value));
+            view! {
+                <line
+                    class="grid"
+                    x1=PAD_LEFT
+                    x2=WIDTH - PAD_RIGHT
+                    y1=line_y.clone()
+                    y2=line_y.clone()
+                />
+                <text
+                    class="axis"
+                    x=PAD_LEFT - 6.0
+                    y=line_y
+                    text-anchor="end"
+                    dominant-baseline="middle"
+                >
+                    {fmt_difficulty(value)}
+                </text>
+            }
+        })
+        .collect()
+}
+
+/// The height line: a polyline and dots drawn over the grid.
+fn height_line<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoView + use<'a> {
+    let dots = points
+        .iter()
+        .zip(
+            points
+                .iter()
+                .map(|(time, value)| {
+                    (
+                        format!("{:.1}", frame.x(*time as f64)),
+                        format!("{:.1}", frame.y(*value)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map(move |((time, value), (x, y))| {
+            let title = sharechain_dot_title("Height", "height", *value, *time);
+            view! { <circle class="dot height" cx=x cy=y r="0.5">{title}</circle> }
+        })
+        .collect_view();
+    let poly = polyline_points_sharechain(points, frame);
+    view! {
+        <polyline class="line height" points=poly />
+        {dots}
+    }
+}
+
+/// The min-difficulty line: a polyline and dots drawn over the grid.
+fn dmin_line<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoView + use<'a> {
+    let dots = points
+        .iter()
+        .zip(
+            points
+                .iter()
+                .map(|(time, value)| {
+                    (
+                        format!("{:.1}", frame.x(*time as f64)),
+                        format!("{:.1}", frame.y(*value)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map(move |((time, value), (x, y))| {
+            let title = sharechain_dot_title("Min diff", "dmin", *value, *time);
+            view! { <circle class="dot dmin" cx=x cy=y r="0.5">{title}</circle> }
+        })
+        .collect_view();
+    let poly = polyline_points_sharechain(points, frame);
+    view! {
+        <polyline class="line dmin" points=poly />
+        {dots}
+    }
+}
+
+/// The max-difficulty line: a polyline and dots drawn over the grid.
+fn dmax_line<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoView + use<'a> {
+    let dots = points
+        .iter()
+        .zip(
+            points
+                .iter()
+                .map(|(time, value)| {
+                    (
+                        format!("{:.1}", frame.x(*time as f64)),
+                        format!("{:.1}", frame.y(*value)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map(move |((time, value), (x, y))| {
+            let title = sharechain_dot_title("Max diff", "dmax", *value, *time);
+            view! { <circle class="dot dmax" cx=x cy=y r="0.5">{title}</circle> }
+        })
+        .collect_view();
+    let poly = polyline_points_sharechain(points, frame);
+    view! {
+        <polyline class="line dmax" points=poly />
+        {dots}
+    }
+}
+
+/// The uncles line: a polyline and dots drawn over the grid. Uncle counts
+/// are whole numbers.
+fn uncles_line<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoView + use<'a> {
+    let dots = points
+        .iter()
+        .zip(
+            points
+                .iter()
+                .map(|(time, value)| {
+                    (
+                        format!("{:.1}", frame.x(*time as f64)),
+                        format!("{:.1}", frame.y(*value)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map(move |((time, value), (x, y))| {
+            let title = sharechain_dot_title("Uncle", "uncles", *value, *time);
+            view! { <circle class="dot uncles" cx=x cy=y r="0.5">{title}</circle> }
+        })
+        .collect_view();
+    let poly = polyline_points_sharechain(points, frame);
+    view! {
+        <polyline class="line uncles" points=poly />
+        {dots}
+    }
+}
+
+/// The weak-blocks line: a polyline and dots drawn over the grid. Weak
+/// counts are whole numbers.
+fn weak_line<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoView + use<'a> {
+    let dots = points
+        .iter()
+        .zip(
+            points
+                .iter()
+                .map(|(time, value)| {
+                    (
+                        format!("{:.1}", frame.x(*time as f64)),
+                        format!("{:.1}", frame.y(*value)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map(move |((time, value), (x, y))| {
+            let title = sharechain_dot_title("Weak", "weak", *value, *time);
+            view! { <circle class="dot weak" cx=x cy=y r="0.5">{title}</circle> }
+        })
+        .collect_view();
+    let poly = polyline_points_sharechain(points, frame);
+    view! {
+        <polyline class="line weak" points=poly />
+        {dots}
+    }
+}
+
+/// `x,y x,y` for an SVG polyline from a sharechain series, using
+/// [`TightFrame`].
+fn polyline_points_sharechain(points: &[(u64, f64)], frame: &TightFrame) -> String {
+    points
+        .iter()
+        .map(|(time, value)| format!("{:.1},{:.1}", frame.x(*time as f64), frame.y(*value)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One `.chart-hit` zone for the sharechain chart: a strip of the plot
+/// whose `.chart-tip` names the nearest sample of each tagged series.
+struct SharechainHitZone {
+    at_class: &'static str,
+    zone: usize,
+    nearests: Vec<(&'static str, Option<(u64, f64)>)>,
+    blocks: Vec<u64>,
+}
+
+/// The hit zones tiling the plot, one per `STEP_PX` step of `fx`.
+fn sharechain_hit_zones(
+    height: &[(u64, f64)],
+    diff_min: &[(u64, f64)],
+    diff_max: &[(u64, f64)],
+    uncles: &[(u64, f64)],
+    weak: &[(u64, f64)],
+    window_blocks: &[PlottedBlock],
+    frame: &TightFrame,
+) -> Vec<SharechainHitZone> {
+    let plot_width = WIDTH - PAD_LEFT - PAD_RIGHT;
+    let count = (plot_width / STEP_PX).floor() as usize + 1;
+    let mut zones = Vec::with_capacity(count);
+    let by_class: [(&str, &[(u64, f64)]); 5] = [
+        ("height", height),
+        ("dmin", diff_min),
+        ("dmax", diff_max),
+        ("uncles", uncles),
+        ("weak", weak),
+    ];
+    for index in 0..count {
+        let fx = (PAD_LEFT + index as f64 * STEP_PX).min(WIDTH - PAD_RIGHT);
+        let time_at = frame.start + ((fx - PAD_LEFT) / plot_width) * frame.span();
+        let at_class = if fx > WIDTH / 2.0 {
+            "at-left"
+        } else {
+            "at-right"
+        };
+        let nearests: Vec<(&str, Option<(u64, f64)>)> = SHARECHAIN_TAGS
+            .iter()
+            .map(|(class, _label)| {
+                let points = by_class
+                    .iter()
+                    .find(|(c, _)| *c == *class)
+                    .map(|(_, pts)| *pts);
+                let nearest = points.and_then(|pts| nearest(pts, time_at));
+                (*class, nearest)
+            })
+            .collect();
+        let blocks: Vec<u64> = window_blocks
+            .iter()
+            .filter(|block| (block.cx - fx).abs() <= STEP_PX / 2.0 + CUBE_HALF_DIAG)
+            .map(|block| block.height)
+            .collect();
+        zones.push(SharechainHitZone {
+            at_class,
+            zone: index + 2,
+            nearests,
+            blocks,
+        });
+    }
+    zones
+}
+
+/// The sharechain chart over the five series from `/sharechain`. `label`
+/// names it for screen readers. `range` is the zoomed window; `None`
+/// shows everything. Blocks snap to the height line; the Blocks chip
+/// turns them off.
+#[allow(clippy::too_many_arguments)]
+#[component]
+pub fn SharechainChart(
+    #[prop(into)] height: Signal<Vec<(u64, f64)>>,
+    #[prop(into)] diff_min: Signal<Vec<(u64, f64)>>,
+    #[prop(into)] diff_max: Signal<Vec<(u64, f64)>>,
+    #[prop(into)] uncles: Signal<Vec<(u64, f64)>>,
+    #[prop(into)] weak: Signal<Vec<(u64, f64)>>,
+    #[prop(into)] blocks: Signal<Vec<FoundBlock>>,
+    range: RwSignal<Option<(f64, f64)>>,
+    label: &'static str,
+    #[prop(into)] height_visible: Signal<bool>,
+    #[prop(into)] dmin_visible: Signal<bool>,
+    #[prop(into)] dmax_visible: Signal<bool>,
+    #[prop(into)] uncles_visible: Signal<bool>,
+    #[prop(into)] weak_visible: Signal<bool>,
+    #[prop(into)] blocks_visible: Signal<bool>,
+) -> impl IntoView {
+    let hover = RwSignal::new(None::<f64>);
+    let drag_start = RwSignal::new(None::<f64>);
+
+    let drawn = Memo::new(move |_| {
+        let (h_on, dlo_on, dhi_on, un_on, wk_on) = (
+            height_visible.get(),
+            dmin_visible.get(),
+            dmax_visible.get(),
+            uncles_visible.get(),
+            weak_visible.get(),
+        );
+        height.with(|h| {
+            diff_min.with(|dlo| {
+                diff_max.with(|dhi| {
+                    uncles.with(|un| {
+                        weak.with(|wk| {
+                            blocks.with(|found| {
+                                sharechain_draw(
+                                    h,
+                                    dlo,
+                                    dhi,
+                                    un,
+                                    wk,
+                                    found,
+                                    range.get(),
+                                    h_on,
+                                    dlo_on,
+                                    dhi_on,
+                                    un_on,
+                                    wk_on,
+                                )
+                            })
+                        })
+                    })
+                })
+            })
+        })
+    });
+    let bounds = move || {
+        height.with_untracked(|h| match (h.first(), h.last()) {
+            (Some(first), Some(last)) => Some((first.0 as f64, last.0 as f64)),
+            _ => None,
+        })
+    };
+    let time_at = move |event: &web_sys::MouseEvent| {
+        let frame = drawn.with_untracked(|drawn| drawn.as_ref().map(|drawn| drawn.frame))?;
+        event_fraction(event).map(|fraction| frame.time_at_fraction(fraction))
+    };
+
+    let on_wheel = move |event: web_sys::WheelEvent| {
+        event.prevent_default();
+        let frame = drawn.with_untracked(|drawn| drawn.as_ref().map(|drawn| drawn.frame));
+        if let (Some(frame), Some(bounds), Some(center)) = (frame, bounds(), time_at(&event)) {
+            let factor = if event.delta_y() < 0.0 { 0.8 } else { 1.25 };
+            range.set(Some(zoom((frame.start, frame.end), center, factor, bounds)));
+        }
+    };
+    let on_down = move |event: web_sys::MouseEvent| drag_start.set(time_at(&event));
+    let on_move = move |event: web_sys::MouseEvent| hover.set(time_at(&event));
+    let on_up = move |_| {
+        if let (Some(start), Some(end)) = (drag_start.get_untracked(), hover.get_untracked())
+            && (end - start).abs() >= MIN_SPAN
+        {
+            range.set(Some((start.min(end), start.max(end))));
+        }
+        drag_start.set(None);
+    };
+    let on_leave = move |_| {
+        hover.set(None);
+        drag_start.set(None);
+    };
+
+    move || {
+        // All read unconditionally so a toggle always re-renders.
+        let (h_on, dlo_on, dhi_on, un_on, wk_on) = (
+            height_visible.get(),
+            dmin_visible.get(),
+            dmax_visible.get(),
+            uncles_visible.get(),
+            weak_visible.get(),
+        );
+        if !h_on && !dlo_on && !dhi_on && !un_on && !wk_on {
+            return view! {
+                <p class="empty">
+                    "All series hidden. Click a legend chip to show one."
+                </p>
+            }
+            .into_any();
+        }
+        let Some(SharechainDrawn {
+            frame,
+            height,
+            diff_min,
+            diff_max,
+            uncles,
+            weak,
+            blocks,
+        }) = drawn.get()
+        else {
+            return view! {
+                <p class="empty">
+                    "Collecting data: the first points appear a minute or two after the node starts."
+                </p>
+            }
+            .into_any();
+        };
+        let blocks = if blocks_visible.get() {
+            blocks
+        } else {
+            Vec::new()
+        };
+        // Gridlines at 1/2/5 x 10^k values inside the tight domain.
+        let grid = sharechain_grid_lines(frame.log_floor, frame.log_top, &frame);
+        let selection = move || {
+            let (start, end) = (drag_start.get()?, hover.get()?);
+            let (left, right) = (frame.x(start.min(end)), frame.x(start.max(end)));
+            Some(view! {
+                <rect
+                    class="selection"
+                    x=format!("{left:.1}")
+                    y=PAD_TOP
+                    width=format!("{:.1}", right - left)
+                    height=HEIGHT - PAD_TOP - PAD_BOTTOM
+                />
+            })
+        };
+        let (start, end) = (frame.start as u64, frame.end as u64);
+        let tick_step = nice_time_step(frame.span());
+        let first_tick = (start / tick_step + 1) * tick_step;
+        let ticks = (first_tick..end)
+            .step_by(tick_step as usize)
+            .map(|tick| {
+                let tick_x = frame.x(tick as f64);
+                let in_middle = tick_x - PAD_LEFT >= TICK_LABEL_WIDTH
+                    && WIDTH - PAD_RIGHT - tick_x >= TICK_LABEL_WIDTH;
+                in_middle.then(|| {
+                    view! {
+                        <text
+                            class="axis"
+                            x=format!("{:.1}", tick_x)
+                            y=HEIGHT - 6.0
+                            text-anchor="middle"
+                        >
+                            {fmt_hour_tick(tick)}
+                        </text>
+                    }
+                })
+            })
+            .collect_view();
+        let axes = view! {
+            <text class="axis" x=PAD_LEFT y=HEIGHT - 6.0 text-anchor="start">
+                {fmt_hour_edge(start)}
+            </text>
+            <text class="axis" x=WIDTH - PAD_RIGHT y=HEIGHT - 6.0 text-anchor="end">
+                {fmt_hour_edge(end)}
+            </text>
+            {ticks}
+        };
+        let zones = sharechain_hit_zones(
+            &height, &diff_min, &diff_max, &uncles, &weak, &blocks, &frame,
+        );
+        // Found-block diamonds on the height line, tagged with zone
+        // numbers whose strips reach them.
+        let cubes = blocks
+            .iter()
+            .map(|block| {
+                let tagged: Vec<usize> = zones
+                    .iter()
+                    .filter(|zone| zone.blocks.contains(&block.height))
+                    .map(|zone| zone.zone)
+                    .collect();
+                let data_zone = (!tagged.is_empty()).then(|| {
+                    tagged
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                });
+                let title = format!(
+                    "Block {} \u{b7} {}",
+                    block.height,
+                    fmt_day_time(block.time as u64)
+                );
+                view! {
+                    <rect
+                        class="cube"
+                        data-zone=data_zone
+                        x=format!("{:.1}", block.cx - CUBE_SIZE / 2.0)
+                        y=format!("{:.1}", block.cy - CUBE_SIZE / 2.0)
+                        width=format!("{CUBE_SIZE:.1}")
+                        height=format!("{CUBE_SIZE:.1}")
+                        transform=format!("rotate(45 {:.1} {:.1})", block.cx, block.cy)
+                    >
+                        {title}
+                    </rect>
+                }
+            })
+            .collect_view();
+        view! {
+            <figure
+                class="chart"
+                on:wheel=on_wheel
+                on:mousedown=on_down
+                on:mousemove=on_move
+                on:mouseup=on_up
+                on:mouseleave=on_leave
+                on:dblclick=move |_| range.set(None)
+            >
+                <svg
+                    class="zoomable"
+                    viewBox=format!("0 0 {WIDTH} {HEIGHT}")
+                    role="img"
+                    aria-label=label
+                >
+                    {grid}
+                    {axes}
+                    {h_on.then(|| height_line(&height, &frame))}
+                    {dlo_on.then(|| dmin_line(&diff_min, &frame))}
+                    {dhi_on.then(|| dmax_line(&diff_max, &frame))}
+                    {un_on.then(|| uncles_line(&uncles, &frame))}
+                    {wk_on.then(|| weak_line(&weak, &frame))}
+                    {cubes}
+                    {selection}
+                    {zones
+                        .iter()
+                        .map(|zone| {
+                            let tracers = SHARECHAIN_TAGS.iter().filter_map(|(class, _label)| {
+                                let nearest = zone
+                                    .nearests
+                                    .iter()
+                                    .find(|(c, _)| *c == *class)
+                                    .and_then(|(_, nearest)| *nearest);
+                                nearest.map(|(time, value)| {
+                                    let x = frame.x(time as f64);
+                                    let y = frame.y(value);
+                                    match *class {
+                                        "height" => {
+                                            view! {
+                                                <circle
+                                                    class="tracer height"
+                                                    data-zone=zone.zone
+                                                    cx=format!("{x:.1}")
+                                                    cy=format!("{y:.1}")
+                                                    r="1.5"
+                                                />
+                                            }
+                                        }
+                                        "dmin" => {
+                                            view! {
+                                                <circle
+                                                    class="tracer dmin"
+                                                    data-zone=zone.zone
+                                                    cx=format!("{x:.1}")
+                                                    cy=format!("{y:.1}")
+                                                    r="1.5"
+                                                />
+                                            }
+                                        }
+                                        "dmax" => {
+                                            view! {
+                                                <circle
+                                                    class="tracer dmax"
+                                                    data-zone=zone.zone
+                                                    cx=format!("{x:.1}")
+                                                    cy=format!("{y:.1}")
+                                                    r="1.5"
+                                                />
+                                            }
+                                        }
+                                        "uncles" => {
+                                            view! {
+                                                <circle
+                                                    class="tracer uncles"
+                                                    data-zone=zone.zone
+                                                    cx=format!("{x:.1}")
+                                                    cy=format!("{y:.1}")
+                                                    r="1.5"
+                                                />
+                                            }
+                                        }
+                                        "weak" => {
+                                            view! {
+                                                <circle
+                                                    class="tracer weak"
+                                                    data-zone=zone.zone
+                                                    cx=format!("{x:.1}")
+                                                    cy=format!("{y:.1}")
+                                                    r="1.5"
+                                                />
+                                            }
+                                        }
+                                        _ => {
+                                            view! {
+                                                <circle
+                                                    class="tracer"
+                                                    data-zone=zone.zone
+                                                    cx=format!("{x:.1}")
+                                                    cy=format!("{y:.1}")
+                                                    r="1.5"
+                                                />
+                                            }
+                                        }
+                                    }
+                                })
+                            });
+                            tracers.collect_view()
+                        })
+                        .collect_view()}
+                </svg>
+                {zones
+                    .iter()
+                    .map(|zone| {
+                        let header_time = zone
+                            .nearests
+                            .iter()
+                            .find_map(|(_, nearest)| nearest.map(|(time, _)| time))
+                            .unwrap_or(frame.start as u64);
+                        let header = fmt_day_time(header_time);
+                        let height_row = zone
+                            .nearests
+                            .iter()
+                            .find(|(c, _)| *c == "height")
+                            .and_then(|(_, nearest)| nearest.map(|(_, value)| {
+                                let formatted = fmt_difficulty(value);
+                                view! {
+                                    <span class="key height">"Height"</span> {" "} <b>{formatted}</b>
+                                }
+                            }));
+                        let dmin_row = zone
+                            .nearests
+                            .iter()
+                            .find(|(c, _)| *c == "dmin")
+                            .and_then(|(_, nearest)| nearest.map(|(_, value)| {
+                                let formatted = fmt_difficulty(value);
+                                view! {
+                                    <span class="key dmin">"Min diff"</span> {" "} <b>{formatted}</b>
+                                }
+                            }));
+                        let dmax_row = zone
+                            .nearests
+                            .iter()
+                            .find(|(c, _)| *c == "dmax")
+                            .and_then(|(_, nearest)| nearest.map(|(_, value)| {
+                                let formatted = fmt_difficulty(value);
+                                view! {
+                                    <span class="key dmax">"Max diff"</span> {" "} <b>{formatted}</b>
+                                }
+                            }));
+                        let uncles_row = zone
+                            .nearests
+                            .iter()
+                            .find(|(c, _)| *c == "uncles")
+                            .and_then(|(_, nearest)| nearest.map(|(_, value)| {
+                                let formatted = format!("{}", value.round() as i64);
+                                view! {
+                                    <span class="key uncles">"Uncle"</span> {" "} <b>{formatted}</b>
+                                }
+                            }));
+                        let weak_row = zone
+                            .nearests
+                            .iter()
+                            .find(|(c, _)| *c == "weak")
+                            .and_then(|(_, nearest)| nearest.map(|(_, value)| {
+                                let formatted = format!("{}", value.round() as i64);
+                                view! {
+                                    <span class="key weak">"Weak"</span> {" "} <b>{formatted}</b>
+                                }
+                            }));
+                        let block_rows: Vec<_> = zone
+                            .blocks
+                            .iter()
+                            .map(|height| {
+                                view! {
+                                    <span class="key blocks">"Block"</span> {" "} <b>{height.to_string()}</b>
+                                }
+                            })
+                            .collect();
+                        let all_rows: Vec<_> = [
+                            height_row, dmin_row, dmax_row, uncles_row, weak_row,
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .chain(block_rows)
+                        .collect();
+                        let row_count = all_rows.len();
+                        let body = (0..row_count)
+                            .map(|index| {
+                                let row = all_rows[index].clone();
+                                let br =
+                                    (index + 1 < row_count).then(|| view! { <br /> });
+                                view! { {row} {br} }
+                            })
+                            .collect_view();
+                        let tip = view! {
+                            <b>{header}</b>
+                            <br />
+                            {body}
+                        };
+                        if zone.at_class == "at-right" {
+                            view! {
+                                <span class="chart-hit">
+                                    <span class="chart-tip at-right">{tip}</span>
+                                </span>
+                            }
+                            .into_any()
+                        } else {
+                            view! {
+                                <span class="chart-hit">
+                                    <span class="chart-tip at-left">{tip}</span>
+                                </span>
+                            }
+                            .into_any()
+                        }
+                    })
+                    .collect_view()}
+            </figure>
+        }
+        .into_any()
+    }
 }
 
 /// Zoom `range` by `factor` (<1 zooms in) around time `center`, kept inside

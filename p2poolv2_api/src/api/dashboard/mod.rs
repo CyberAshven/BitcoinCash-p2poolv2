@@ -251,18 +251,18 @@ const SHARE_SERIES_MAX: u32 = 3000;
 /// count. Sorted oldest first.
 #[derive(Clone)]
 pub(crate) struct ShareSeriesItem {
-    time: u32,
-    height: u32,
-    difficulty: f64,
-    uncle_times: Vec<u32>,
-    weak_count: u16,
+    pub(crate) time: u32,
+    pub(crate) height: u32,
+    pub(crate) difficulty: f64,
+    pub(crate) uncle_times: Vec<u32>,
+    pub(crate) weak_count: u16,
 }
 
 /// Shares behind the Sharechain tab, oldest first: pages backwards from the
 /// tip through `query_shares` until the oldest share reaches back past the
 /// given window plus the trailing hour the difficulty / uncle / weak windows
 /// need (or the chain runs out / the max count fills).
-fn share_series(state: &AppState, window_secs: u64) -> Vec<ShareSeriesItem> {
+pub(crate) fn share_series(state: &AppState, window_secs: u64) -> Vec<ShareSeriesItem> {
     let tip = match state.chain_store_handle.get_tip_height().ok().flatten() {
         Some(tip) => tip,
         None => return Vec::new(),

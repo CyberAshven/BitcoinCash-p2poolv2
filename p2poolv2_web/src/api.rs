@@ -147,6 +147,23 @@ pub struct HashratePoint {
     pub network_hashrate: Option<f64>,
 }
 
+/// `/sharechain?window=`.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct SharechainSeries {
+    pub height: Vec<SharechainPoint>,
+    pub diff_min: Vec<SharechainPoint>,
+    pub diff_max: Vec<SharechainPoint>,
+    pub uncles: Vec<SharechainPoint>,
+    pub weak: Vec<SharechainPoint>,
+}
+
+/// One point of a sharechain series.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct SharechainPoint {
+    pub time: u64,
+    pub value: f64,
+}
+
 /// `/hashrate?window=`.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Hashrate {

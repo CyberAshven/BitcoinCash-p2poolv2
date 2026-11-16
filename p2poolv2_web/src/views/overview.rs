@@ -7,9 +7,11 @@
 //! live, from `/ws`; the shares page has the whole chain.
 
 use super::blocks::{NO_BLOCKS_YET, blocks_table};
-use crate::api::{ChainInfo, FoundBlock, Hashrate, HashratePoint, Miners, Peer, Share};
+use crate::api::{
+    ChainInfo, FoundBlock, Hashrate, HashratePoint, Miners, Peer, Share, SharechainSeries,
+};
 use crate::app::{Ctx, ctx, polled};
-use crate::chart::HashrateChart;
+use crate::chart::{HashrateChart, SharechainChart};
 use crate::format::{
     UNKNOWN, agent_version, difficulty_from_bits, difficulty_from_network_hashrate, fmt_ago,
     fmt_difficulty, fmt_duration, fmt_effort, fmt_hashrate, fmt_latency, optional,
@@ -242,6 +244,34 @@ pub fn OverviewPage() -> impl IntoView {
     // The found-block diamonds, on by default like the pool and node
     // series: [stored_flag] reads only `"0"` as off.
     let blocks_visible = RwSignal::new(crate::app::stored_flag("p2pool.blocks-visible"));
+    // Sharechain chart tab: "sharechain" shows the sharechain chart;
+    // anything else shows the hashrate chart. Persisted in localStorage.
+    let chart_tab = RwSignal::new(
+        match crate::app::stored(crate::app::local_storage(), "p2pool.chart").as_deref() {
+            Some("sharechain") => "sharechain",
+            _ => "hashrate",
+        },
+    );
+    let switch_to_hashrate = {
+        let tab = chart_tab;
+        move |_| {
+            tab.set("hashrate");
+            crate::app::store(crate::app::local_storage(), "p2pool.chart", "hashrate");
+        }
+    };
+    let switch_to_sharechain = {
+        let tab = chart_tab;
+        move |_| {
+            tab.set("sharechain");
+            crate::app::store(crate::app::local_storage(), "p2pool.chart", "sharechain");
+        }
+    };
+    // Sharechain series visibility, persisted like the hashrate chips.
+    let height_visible = RwSignal::new(crate::app::stored_flag("p2pool.height-visible"));
+    let dmin_visible = RwSignal::new(crate::app::stored_flag("p2pool.dmin-visible"));
+    let dmax_visible = RwSignal::new(crate::app::stored_flag("p2pool.dmax-visible"));
+    let uncles_visible = RwSignal::new(crate::app::stored_flag("p2pool.uncles-visible"));
+    let weak_visible = RwSignal::new(crate::app::stored_flag("p2pool.weak-visible"));
     // The chips write the flip back so the next visit keeps it. `"1"`/`"0"`
     // suits both flags: [stored_flag] reads only `"0"` as off, and
     // [stored_opt_in_flag] reads only `"1"` as on.
@@ -254,6 +284,8 @@ pub fn OverviewPage() -> impl IntoView {
         }
     };
     let hashrate = polled::<Hashrate>(move || format!("/hashrate?window={}", window.get()));
+    let sharechain =
+        polled::<SharechainSeries>(move || format!("/sharechain?window={}", window.get()));
     let chain = polled::<ChainInfo>(|| "/chain_info".into());
     let blocks = polled::<Vec<FoundBlock>>(|| "/found_blocks".into());
     let miners = polled::<Miners>(|| "/miners".into());
@@ -314,6 +346,23 @@ pub fn OverviewPage() -> impl IntoView {
         })
         .unwrap_or_default()
     });
+    // Sharechain series for the chart: `SharechainPoint` tuples mapped
+    // to `(u64, f64)` so the drawing code is generic.
+    let to_points = |series: &[crate::api::SharechainPoint]| -> Vec<(u64, f64)> {
+        series.iter().map(|p| (p.time, p.value)).collect()
+    };
+    let sc_height =
+        Memo::new(move |_| loaded(&sharechain, |data| to_points(&data.height)).unwrap_or_default());
+    let sc_dmin = Memo::new(move |_| {
+        loaded(&sharechain, |data| to_points(&data.diff_min)).unwrap_or_default()
+    });
+    let sc_dmax = Memo::new(move |_| {
+        loaded(&sharechain, |data| to_points(&data.diff_max)).unwrap_or_default()
+    });
+    let sc_uncles =
+        Memo::new(move |_| loaded(&sharechain, |data| to_points(&data.uncles)).unwrap_or_default());
+    let sc_weak =
+        Memo::new(move |_| loaded(&sharechain, |data| to_points(&data.weak)).unwrap_or_default());
     // Harmonize the KPI cards: fall back to the newest non-null history
     // sample when the live read is unknown, so all three cards show a value
     // (or all show the dash) together.
@@ -485,63 +534,155 @@ pub fn OverviewPage() -> impl IntoView {
             .iter()
             .find(|(window_seconds, ..)| *window_seconds == seconds)
             .map_or(WINDOWS[0].3, |(.., label)| label);
-        view! {
-            <HashrateChart
-                history=history
-                blocks=chart_blocks
-                range=zoom
-                label=label
-                pool_visible=pool_visible
-                local_visible=local_visible
-                network_visible=network_visible
-                blocks_visible=blocks_visible
-            />
+        if chart_tab.get() == "sharechain" {
+            view! {
+                <SharechainChart
+                    height=sc_height
+                    diff_min=sc_dmin
+                    diff_max=sc_dmax
+                    uncles=sc_uncles
+                    weak=sc_weak
+                    blocks=chart_blocks
+                    range=zoom
+                    label=label
+                    height_visible=height_visible
+                    dmin_visible=dmin_visible
+                    dmax_visible=dmax_visible
+                    uncles_visible=uncles_visible
+                    weak_visible=weak_visible
+                    blocks_visible=blocks_visible
+                />
+            }
+            .into_any()
+        } else {
+            view! {
+                <HashrateChart
+                    history=history
+                    blocks=chart_blocks
+                    range=zoom
+                    label=label
+                    pool_visible=pool_visible
+                    local_visible=local_visible
+                    network_visible=network_visible
+                    blocks_visible=blocks_visible
+                />
+            }
+            .into_any()
         }
     };
     let series_toggles = move || {
-        view! {
-            <span class="series-toggles" role="group" aria-label="Chart series">
-                <button
-                    class="legend-chip"
-                    class:off=move || !pool_visible.get()
-                    type="button"
-                    aria-pressed=move || pool_visible.get().to_string()
-                    on:click=flip(pool_visible, "p2pool.pool-visible")
-                >
-                    <span class="legend-dot pool"></span>
-                    "Pool"
-                </button>
-                <button
-                    class="legend-chip"
-                    class:off=move || !local_visible.get()
-                    type="button"
-                    aria-pressed=move || local_visible.get().to_string()
-                    on:click=flip(local_visible, "p2pool.local-visible")
-                >
-                    <span class="legend-dot local"></span>
-                    "Node"
-                </button>
-                <button
-                    class="legend-chip"
-                    class:off=move || !network_visible.get()
-                    type="button"
-                    aria-pressed=move || network_visible.get().to_string()
-                    on:click=flip(network_visible, "p2pool.network-visible")
-                >
-                    <span class="legend-dot network"></span>
-                    "Network"
-                </button>
-                <button
-                    class="legend-chip"
-                    class:off=move || !blocks_visible.get()
-                    type="button"
-                    aria-pressed=move || blocks_visible.get().to_string()
-                    on:click=flip(blocks_visible, "p2pool.blocks-visible")
-                >
-                    <span class="legend-dot blocks"></span>
-                    "Blocks"
-                </button>
-            </span>
+        if chart_tab.get() == "sharechain" {
+            view! {
+                <span class="series-toggles" role="group" aria-label="Chart series">
+                    <button
+                        class="legend-chip"
+                        class:off=move || !height_visible.get()
+                        type="button"
+                        aria-pressed=move || height_visible.get().to_string()
+                        on:click=flip(height_visible, "p2pool.height-visible")
+                    >
+                        <span class="legend-dot height"></span>
+                        "Height"
+                    </button>
+                    <button
+                        class="legend-chip"
+                        class:off=move || !uncles_visible.get()
+                        type="button"
+                        aria-pressed=move || uncles_visible.get().to_string()
+                        on:click=flip(uncles_visible, "p2pool.uncles-visible")
+                    >
+                        <span class="legend-dot uncles"></span>
+                        "Uncle"
+                    </button>
+                    <button
+                        class="legend-chip"
+                        class:off=move || !weak_visible.get()
+                        type="button"
+                        aria-pressed=move || weak_visible.get().to_string()
+                        on:click=flip(weak_visible, "p2pool.weak-visible")
+                    >
+                        <span class="legend-dot weak"></span>
+                        "Weak"
+                    </button>
+                    <button
+                        class="legend-chip"
+                        class:off=move || !dmin_visible.get()
+                        type="button"
+                        aria-pressed=move || dmin_visible.get().to_string()
+                        on:click=flip(dmin_visible, "p2pool.dmin-visible")
+                    >
+                        <span class="legend-dot dmin"></span>
+                        "Min diff"
+                    </button>
+                    <button
+                        class="legend-chip"
+                        class:off=move || !dmax_visible.get()
+                        type="button"
+                        aria-pressed=move || dmax_visible.get().to_string()
+                        on:click=flip(dmax_visible, "p2pool.dmax-visible")
+                    >
+                        <span class="legend-dot dmax"></span>
+                        "Max diff"
+                    </button>
+                    <button
+                        class="legend-chip"
+                        class:off=move || !blocks_visible.get()
+                        type="button"
+                        aria-pressed=move || blocks_visible.get().to_string()
+                        on:click=flip(blocks_visible, "p2pool.blocks-visible")
+                    >
+                        <span class="legend-dot blocks"></span>
+                        "Blocks"
+                    </button>
+                </span>
+            }
+            .into_any()
+        } else {
+            view! {
+                <span class="series-toggles" role="group" aria-label="Chart series">
+                    <button
+                        class="legend-chip"
+                        class:off=move || !pool_visible.get()
+                        type="button"
+                        aria-pressed=move || pool_visible.get().to_string()
+                        on:click=flip(pool_visible, "p2pool.pool-visible")
+                    >
+                        <span class="legend-dot pool"></span>
+                        "Pool"
+                    </button>
+                    <button
+                        class="legend-chip"
+                        class:off=move || !local_visible.get()
+                        type="button"
+                        aria-pressed=move || local_visible.get().to_string()
+                        on:click=flip(local_visible, "p2pool.local-visible")
+                    >
+                        <span class="legend-dot local"></span>
+                        "Node"
+                    </button>
+                    <button
+                        class="legend-chip"
+                        class:off=move || !network_visible.get()
+                        type="button"
+                        aria-pressed=move || network_visible.get().to_string()
+                        on:click=flip(network_visible, "p2pool.network-visible")
+                    >
+                        <span class="legend-dot network"></span>
+                        "Network"
+                    </button>
+                    <button
+                        class="legend-chip"
+                        class:off=move || !blocks_visible.get()
+                        type="button"
+                        aria-pressed=move || blocks_visible.get().to_string()
+                        on:click=flip(blocks_visible, "p2pool.blocks-visible")
+                    >
+                        <span class="legend-dot blocks"></span>
+                        "Blocks"
+                    </button>
+                </span>
+            }
+            .into_any()
         }
     };
     let reset_zoom = move || {
@@ -693,7 +834,24 @@ pub fn OverviewPage() -> impl IntoView {
         </div>
         <div class="panel">
             <h2 class="hashrate-head">
-                "Hashrate"
+                <button
+                    class="head-switch"
+                    class:dim=move || chart_tab.get() != "hashrate"
+                    aria-current=move || (chart_tab.get() == "hashrate").then_some("true")
+                    type="button"
+                    on:click=switch_to_hashrate
+                >
+                    "Hashrate"
+                </button>
+                <button
+                    class="head-switch"
+                    class:dim=move || chart_tab.get() != "sharechain"
+                    aria-current=move || (chart_tab.get() == "sharechain").then_some("true")
+                    type="button"
+                    on:click=switch_to_sharechain
+                >
+                    "Sharechain"
+                </button>
                 <span class="range-group" aria-label="Chart time range">
                     {reset_zoom}
                     {range_buttons}

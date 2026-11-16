@@ -182,10 +182,23 @@ tr.uncle-row {
 }
 
 /* The heading's chart-tab switch: both names side by side, the active one
-   underlined in full colour, the inactive one muted and without underline. */
+   underlined in full colour, the inactive one muted and without underline.
+   The server dashboard renders it as an <a> and the wasm one as a <button>;
+   these declarations flatten Pico's button chrome so both read as plain
+   heading text. */
 .hashrate-head .head-switch {
+  appearance: none;
   color: inherit;
   text-decoration: none;
+  background: none;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  box-shadow: none;
+  font: inherit;
+  cursor: pointer;
+  /* Same weight as the range buttons beside it, not Pico's bold h2. */
+  --pico-font-weight: 400;
 }
 .hashrate-head .head-switch[aria-current] {
   text-decoration: underline;

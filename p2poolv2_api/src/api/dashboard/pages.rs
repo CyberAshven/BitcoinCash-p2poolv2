@@ -894,7 +894,7 @@ fn chart_switch(
 /// step-hold; line_chart's floor=1.0 draws their zero minutes at the floor
 /// line rather than clamping them onto the difficulty band.
 #[allow(clippy::type_complexity)] // five (time, value) series in the replica's order: height, dmin, dmax, uncles, weak
-fn sharechain_series(
+pub(crate) fn sharechain_series(
     shares: &[ShareSeriesItem],
     samples: &[Sample],
 ) -> (
