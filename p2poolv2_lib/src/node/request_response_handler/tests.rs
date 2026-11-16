@@ -78,6 +78,7 @@ fn build_test_handler_parts(
         outbound_failures_total: 0,
         inbound_failures_total: 0,
         responses_dropped_total: 0,
+        share_relay: Default::default(),
         share_transaction_pool: None,
         weak_share_tx: None,
     };
@@ -255,6 +256,45 @@ async fn test_dispatch_response_enqueues_to_worker() {
         .expect("response handed to the worker, not processed on the driver");
     assert_eq!(event.peer, peer_id);
     assert!(matches!(event.response, Message::NotFound(_)));
+}
+
+/// The weak shares a relayed share lacked go to the share waiting for them,
+/// not to the response worker; an answer no share waits for is dropped.
+#[tokio::test]
+async fn test_dispatch_response_hands_carried_weak_shares_to_the_waiting_share() {
+    use crate::node::weak_share_fill::FillStart;
+    let (swarm_tx, _swarm_rx) = mpsc::channel(32);
+    let (mut handler, mut response_worker_rx) = build_test_handler_parts(
+        ChainStoreHandle::default(),
+        swarm_tx,
+        Arc::new(MockDefaultShareValidator::default()),
+    );
+    let (pool_store, _temp_dir) = crate::test_utils::setup_test_chain_store_handle(true).await;
+    let (pool, relay_rx) = crate::shares::weak_pool::WeakPool::new(pool_store);
+    let network = crate::node::weak_share_worker::WeakShareNetwork::new(pool, relay_rx);
+    let fill = network.events_tx.fill();
+    handler.weak_share_tx = Some(network.events_tx);
+    let peer_id = libp2p::PeerId::random();
+    let share_hash = BlockHash::from_byte_array([7; 32]);
+    let FillStart::Started(answer) = fill.start(share_hash, peer_id) else {
+        panic!("the share starts waiting");
+    };
+
+    for response_share in [share_hash, BlockHash::from_byte_array([8; 32])] {
+        handler
+            .dispatch_response(
+                peer_id,
+                ConnectionId::new_unchecked(1),
+                Message::CarriedWeakShares(response_share, Vec::new()),
+            )
+            .unwrap();
+    }
+
+    assert_eq!(answer.await.unwrap(), Vec::new());
+    assert!(
+        response_worker_rx.try_recv().is_err(),
+        "carried weak shares never reach the response worker"
+    );
 }
 
 #[tokio::test]

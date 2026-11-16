@@ -9,7 +9,8 @@ mod weak_shares;
 
 use crate::shares::weak::WeakShare;
 pub use weak_shares::WeakPayoutCache;
-use weak_shares::{check_weak_shares_match_header, check_weak_shares_size};
+pub(crate) use weak_shares::check_weak_shares_match_header;
+use weak_shares::check_weak_shares_size;
 
 use super::share_block::{MAX_POOL_TARGET, ShareHeader};
 use crate::accounting::CoinbasePayouts;

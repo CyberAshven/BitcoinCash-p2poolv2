@@ -574,7 +574,12 @@ they have today at 10-second shares.
   as the shares, and answered with an Ack. Weak shares never extend a chain
   and are never named as uncles. Two cases: gossip only, and gossip with
   every share also carrying its weak shares whole in its body, as the design
-  has it (each share carries the average count; 64 add 51,200 bytes).
+  has it (each share carries the average count; 64 add 51,200 bytes). Since
+  2026-11-15 the node relays a new share with its weak shares listed by
+  hash (`ShareWithWeakHashes`): `gossip-only` plus 32 bytes a weak share in
+  the share message, the weak shares its pool took in the last 400 ms whole
+  beside them, and a fetch for any other weak share a peer lacks; `whole` is
+  the node before it.
 - **2. Compact coinbase:** shares sent without the payout outputs, as in
   "Sending shares without their payouts" above: 1,429 bytes on the wire at
   32 MB blocks, the design's "about 1 KB" plus an 18-hash merkle branch.
@@ -585,6 +590,11 @@ they have today at 10-second shares.
   proof of work and header check out (1 ms, an estimate), which needs the
   parent's and uncles' headers checked there, and validates the body after.
   It mines on, and names as an uncle, only a share it has fully validated.
+  Since 2026-11-16 the node does this for a share a peer sent: it relays the
+  share once it passes the checks made before storing it, with the parent and
+  uncles stored, and still validates a share its own miners found before
+  sending it ("Relay after the header check" in
+  `docs/architecture/share-processing-pipeline.md`).
 - **4. Fewer hops:** 16, 32 or 64 peers per node instead of 8, in the same
   small-world graph. A push to `k` peers still shares the node's upload, so
   more peers mean fewer hops but longer pushes.

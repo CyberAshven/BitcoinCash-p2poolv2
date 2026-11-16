@@ -781,7 +781,7 @@ where
                     &ctx.tracker_handle,
                 ) {
                     Ok(job_lines) => {
-                        debug!("Sending first notify after authorize");
+                        debug!("Tx {addr} first notify after authorize {job_lines:?}");
                         if let Err(e) = writer.write_all(job_lines.as_bytes()).await {
                             error!("Failed to write first notify to {addr}: {e}");
                             break;
@@ -831,7 +831,7 @@ where
                         &ctx.tracker_handle,
                     ) {
                         Ok(job_lines) => {
-                            debug!("Send notify in reponse to new template");
+                            debug!("Tx {addr} notify for new template {job_lines:?}");
                             if let Err(e) = writer.write_all(job_lines.as_bytes()).await {
                                 error!("Failed to write notify to {addr}: {e}");
                                 break;
@@ -874,7 +874,7 @@ where
                 }
             }
             _ = monitor.tick() => {
-                match check_session_timeouts::<T>(session, time_provider) {
+                match check_session_timeouts::<T>(session, time_provider, addr) {
                     Ok(()) => {}
                     Err(Error::TimeoutError) => {
                         debug!("{addr} inactive, disconnecting...");

@@ -32,6 +32,9 @@ use receivers::inventory::handle_inventory;
 use receivers::request_missing_blocks::request_headers_for_missing_blocks;
 use receivers::share_blocks::handle_share_block;
 use receivers::share_headers::handle_share_headers;
+use receivers::share_with_weak_hashes::{
+    handle_get_carried_weak_shares, handle_share_with_weak_hashes,
+};
 use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -50,7 +53,7 @@ use tracing::{debug, error};
 pub(crate) const MAX_HEADERS_IN_RESPONSE: usize = 600;
 
 /// The Tower service that processes inbound P2P requests.
-pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
+pub async fn handle_request<C: Send + Sync + 'static, T: TimeProvider + Send + Sync>(
     ctx: RequestContext<C, T>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     debug!("Received request {} from peer: {}", ctx.request, ctx.peer);
@@ -188,6 +191,58 @@ pub async fn handle_request<C: Send + Sync, T: TimeProvider + Send + Sync>(
                 &ancestors,
                 ctx.peer,
                 ctx.chain_store_handle,
+                ctx.swarm_tx,
+            )
+            .await
+        }
+        Message::ShareWithWeakHashes(share, bch_headers) => {
+            if let Err(err) = ctx
+                .swarm_tx
+                .send(SwarmSend::Response(ctx.response_channel, Message::Ack))
+                .await
+            {
+                error!(
+                    "Failed to send ShareWithWeakHashes ack to peer {}: {err}",
+                    ctx.peer
+                );
+                return Err(format!("Failed to send ShareWithWeakHashes ack: {err}").into());
+            }
+            learn_carried_bch_headers(
+                &bch_headers,
+                &ctx.chain_store_handle,
+                ctx.share_validator.as_ref(),
+            )
+            .await?;
+            let header = &share.share_block().header;
+            let ancestors: Vec<BlockHash> = std::iter::once(header.prev_share_blockhash)
+                .chain(header.uncles.iter().copied())
+                .collect();
+            handle_share_with_weak_hashes(
+                share,
+                ctx.peer,
+                &ctx.chain_store_handle,
+                ctx.validation_tx,
+                &ctx.block_receiver_handle,
+                &ctx.block_fetcher_handle,
+                &ctx.share_validator,
+                ctx.weak_share_tx.as_ref(),
+                ctx.swarm_tx.clone(),
+            )
+            .await?;
+            request_headers_for_missing_blocks(
+                &ancestors,
+                ctx.peer,
+                ctx.chain_store_handle,
+                ctx.swarm_tx,
+            )
+            .await
+        }
+        Message::GetCarriedWeakShares(share_hash, weak_hashes) => {
+            handle_get_carried_weak_shares(
+                share_hash,
+                weak_hashes,
+                ctx.chain_store_handle,
+                ctx.response_channel,
                 ctx.swarm_tx,
             )
             .await
