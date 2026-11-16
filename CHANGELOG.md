@@ -23,8 +23,14 @@ before: a share failing the header check closes the sender's connection,
 and a body that fails full validation closes none, since its sender may only
 have forwarded it. The network simulation put this alone at 3.99% stale
 against 4.23% on 1,000 nodes at 10-second shares, and as one of three pieces
-with shares sent without payouts and more peers. No share-chain rule changes,
-no message changes and no store change; old and new nodes peer as before.
+with shares sent without payouts and more peers. On a 12-node swarm, four
+runs a side, every node ended on one tip, no peer was disconnected, and the
+shares that missed the chain stayed within the runs' spread (11.0% before,
+9.9% after); the swarm is nearly a full mesh, so propagation did not change,
+while about 6% more share messages crossed and the copies that reach a node
+before it confirms the share added about one validation a share and node to
+the six it already makes. No share-chain rule changes, no message changes
+and no store change; old and new nodes peer as before.
 
 P2Poolv2 takes templates from a node that serves no long polling, such as
 Knuth. Every Knuth template failed to parse ("missing field `longpollid`"),
