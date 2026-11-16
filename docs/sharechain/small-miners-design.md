@@ -169,6 +169,16 @@ span, against the Bitcoin Cash difficulty of the template; each miner's
 hashrate is its accepted submissions over the last ten minutes, all its
 connections together (`stratum/work/band_policy.rs`).
 
+With one-minute blocks (CHIP-2025-03) the template's difficulty is a tenth
+of a ten-minute block's, so the pool's block rate, and with it the 4 shares
+a pool block, is ten times what it was: 4 a block pass 300 a month from
+0.17% of Bitcoin Cash (1.7% with ten-minute blocks), 1,728 a month at 1%
+and 17,280 at 10%. A heavy miner then wants a tenth of the multiple it
+wanted before: in the payout simulator a 100 TH/s ASIC at 1% of Bitcoin
+Cash with 90% industrial wants 3.4 times the minimum instead of about 21,
+and from 10% of Bitcoin Cash no miner of the simulated mixes gets heavier
+shares, so the band changes nothing there.
+
 Heavier shares are there so ASERT can ease the minimum, and the minimum
 cannot ease past the chain's ceiling. So no miner gets more than the room
 left, the minimum's work over the ceiling's, and that bound is also what the
@@ -176,8 +186,10 @@ node wants: `wanted_bits` does not ask for more, so the band cap does not grow
 for nothing. At the ceiling the room is one and every miner is at the
 minimum. A pool too small for 10-second shares at the ceiling then keeps
 every share it can make; without the bound its node default gave every miner
-64 times the ceiling's work and cut its shares from 0.051 to 0.0008 a second
-(study #85, payout simulator, tiny pool). The room shrinks smoothly as a
+64 times the ceiling's work with ten-minute blocks and cut its shares from
+0.051 to 0.0008 a second, and with one-minute blocks gives the small and the
+large miner 7.1 and 21.3 times and cuts them to 0.0036 a second (study #85,
+payout simulator, tiny pool). The room shrinks smoothly as a
 growing pool's minimum nears the ceiling, so ASERT settles on one minimum
 rather than switching heavier jobs on and off around it.
 
@@ -575,19 +587,24 @@ interval on 100 nodes:
 
 | Share interval | Stale, 3 KB coinbase | Orphaned | Stale, 200 KiB coinbase | Orphaned |
 |---|---|---|---|---|
-| 1 s | 15.9% | 0.1% | 45.8% | 9.8% |
-| 2 s | 8.7% | 0.0% | 29.5% | 1.1% |
-| 5 s | 3.8% | 0.0% | 14.1% | 0.1% |
-| 10 s | 2.1% | 0.0% | 7.8% | 0.0% |
-| 30 s | 0.5% | 0.0% | 2.7% | 0.0% |
+| 1 s | 16.0% | 0.1% | 45.8% | 9.7% |
+| 2 s | 8.9% | 0.0% | 29.8% | 1.1% |
+| 5 s | 3.5% | 0.0% | 14.0% | 0.1% |
+| 10 s | 2.1% | 0.0% | 7.6% | 0.0% |
+| 30 s | 0.9% | 0.0% | 2.9% | 0.0% |
+
+These are the one-minute block runs; the ten-minute ones differed by at
+most 0.4 points, about the seed-to-seed noise.
 
 The live 2.95% at 10 seconds sits where the simulation puts it. So by lost
 work alone the share period's lower bound is set by the coinbase size: about 1
 second for small coinbases (0.1% orphaned there), about 5 for large ones (1.1%
 at 2 seconds). No simulated share ever had a fourth uncle to name, so the
 three-uncle limit loses nothing. Holding the stale rate at today's on 1,000
-nodes is stricter: 8.9 seconds today, 5.0 to 3.5 with the scaling ideas
-combined ([Network simulation](../simulation/network-sim.md), "Scaling
+nodes is stricter: 10 seconds today, 5.3 to 4.0 with the scaling ideas
+combined (8.9, and 5.0 to 3.5, with ten-minute blocks; with one-minute
+blocks a shorter share period also widens the window in shares and so the
+coinbase) ([Network simulation](../simulation/network-sim.md), "Scaling
 propagation instead of capping it"). Below that, weak shares carry the extra
 credit instead: gossiped beside shares they never race, so they add credit
 without adding stale shares.
@@ -609,8 +626,8 @@ the 1,000-node network runs).
   exactly as much: a Bitaxe in a pool at 30% of a Bitcoin Cash ten times
   today's has 41% of its months without a payment by today's rules and 2%
   with ten times the weak shares a second, from either.
-- Only the shorter period costs stale shares: 7.8%, 17.8% and 30.7% at 5, 2
-  and 1 seconds on 1,000 nodes, against 4.2% at 10 seconds whatever number
+- Only the shorter period costs stale shares: 8.0%, 17.9% and 30.4% at 5, 2
+  and 1 seconds on 1,000 nodes, against 3.8% at 10 seconds whatever number
   of weak shares travels beside the shares.
 - At Bitcoin's hashrate neither saves a 1.2 TH/s miner, whose fair income is
   1,605 satoshis a month.
@@ -904,19 +921,24 @@ It sets `C_MAX`, the band step, `R_MAX`, `WEAK_CAP`, `WEAK_FILL`,
 
 ### What it found
 
-A Bitaxe (1.2 TH/s) in a pool where half the hashrate is industrial. Each cell
-is monthly swing / payments a month / fee loss:
+A Bitaxe (1.2 TH/s) in a pool where half the hashrate is industrial, with
+one-minute blocks. Each cell is monthly swing / payments a month / fee loss:
 
 | Design | Pool at 1% of BCH | 10% | 30% |
 |---|---|---|---|
-| Main and mini today | 0.34 / 19.7 / 0.67% | 0.91 / 4.9 / 0.17% | 1.58 / 1.6 / 0.06% |
-| One chain, no band | 0.41 / 19.5 / 0.67% | 1.31 / 2.4 / 0.09% | 2.39 / 0.76 / 0.03% |
-| Band | 0.32 / 29.8 / 1.02% | 1.09 / 3.2 / 0.11% | 2.39 / 0.76 / 0.03% |
-| Cash Dragon's vardiff chain | 0.31 / 30.1 / 1.03% | 0.90 / 4.8 / 0.17% | 1.61 / 1.6 / 0.06% |
-| Band, weak shares and payout levels | 0.20 / 24.9 / 0.85% | 0.25 / 24.6 / 0.85% | 0.39 / 23.6 / 0.83% |
+| Main and mini today | 0.29 / 45.8 / 1.57% | 0.92 / 4.7 / 0.18% | 1.57 / 1.5 / 0.06% |
+| One chain, no band | 0.39 / 24.9 / 0.86% | 1.28 / 2.4 / 0.09% | 2.28 / 0.80 / 0.03% |
+| Band | 0.30 / 45.1 / 1.55% | 1.28 / 2.4 / 0.09% | 2.28 / 0.80 / 0.03% |
+| Cash Dragon's vardiff chain | 0.30 / 48.2 / 1.66% | 0.89 / 4.9 / 0.18% | 1.55 / 1.6 / 0.06% |
+| Band, weak shares and payout levels | 0.20 / 25.2 / 0.85% | 0.27 / 24.8 / 0.85% | 0.39 / 24.0 / 0.84% |
 
 The last row credits every minimum proof at the weak work, as above. The
-simulation found the double credit that rule removes.
+simulation found the double credit that rule removes. Against the
+ten-minute run the last row moved within noise; the designs without weak
+shares pay small miners more often at 1% (a share now stays in a window a
+tenth as long, so a miner's shares share a block less often), and the band
+alone no longer changes anything at 10% of Bitcoin Cash, where the node
+default now wants no heavier shares.
 
 Attacks:
 
@@ -924,15 +946,16 @@ Attacks:
   Bitaxe falls back to the one-chain numbers. With weak shares and the
   weak-work credit, nobody's income changes.
 - **Nodes that never carry others' weak shares.** At the first constants
-  (`WEAK_DEPTH` 6, a 5% cut), with half the hashrate refusing, 4.8% of honest
-  weak shares expired and the Bitaxe got 0.97 of its fair pay; with 90%
-  refusing, 56% expired and it got 0.48, and no tested cut stopped that
-  coalition. Study #85 found that a deeper `WEAK_DEPTH` does: at 48, with a 1%
-  cut, 1.4% expire with 90% refusing, the Bitaxe gets 0.99 of its fair pay,
-  and the coalition gains at most 0.06%. Those became the rules on
-  2026-11-12 (`weak2-64-100-48-256`, store format 7).
+  (`WEAK_DEPTH` 6, a 5% cut, ten-minute blocks), with half the hashrate
+  refusing, 4.8% of honest weak shares expired and the Bitaxe got 0.97 of
+  its fair pay; with 90% refusing, 56% expired and it got 0.48, and no tested
+  cut stopped that coalition. Study #85 found that a deeper `WEAK_DEPTH`
+  does: at 48, with a 1% cut, 1.2 to 1.5% are lost with 90% refusing, the
+  Bitaxe gets 0.99 of its fair pay, and the coalition gains at most 0.09%
+  (one-minute blocks). Those became the rules on 2026-11-12
+  (`weak2-64-100-48-256`, store format 7).
 - **Weak-share spam at 10 times the honest home hashrate.** The Bitaxe's weak
-  shares fall from 581 to 53 a month, but its payments stay at about 25 a
+  shares fall from 579 to 51 a month, but its payments stay at about 25 a
   month and its swing only goes from 0.20 to 0.23.
 
 Measured at scale (2026-11-12; `docs/simulation/network-sim.md`, "Limits
@@ -941,7 +964,11 @@ study", and the payout simulator's `scale` table):
 - **Checking a share** at a 120,960 share window and the default level costs
   a node 6.4 ms with 1,000 miners in the window, 38 ms with 10,000 and 362
   ms with 100,000; a weak share 0.3, 3.8 and 45 ms. At 10-second shares
-  100,000 miners keep a node 18% busy.
+  100,000 miners keep a node 18% busy. These were measured with a
+  ten-minute block's 3.125 BCH; a one-minute block pays at most about 1,790
+  level-5 outputs instead of 17,886, and only a pool under 0.015% of Bitcoin
+  Cash still has a 120,960 share window, so the 100,000-miner costs are an
+  upper bound until the timing tests are run again.
 - **A window full of weak shares** costs little more to walk: 14 ms for
   1,800 shares carrying 32 weak shares each with 5,100 payees, 174 ms with
   50,100 payees, and 160 ms at the cap of 120,960 shares with 6,000 payees.
@@ -950,8 +977,8 @@ study", and the payout simulator's `scale` table):
 - **How often a small miner is paid** falls with the number of home miners
   in a pool, not with its hashrate: a pool makes 3.2 weak shares a second,
   whatever its size. A bigger pool also pays in bigger pieces, because its
-  window is shorter: one weak share is worth 24,009 satoshis a block at 50%
-  of Bitcoin Cash.
+  window is shorter: one weak share is worth about 24,000 satoshis a block
+  at 50% of Bitcoin Cash, with ten-minute blocks or one-minute ones.
 
 Still open:
 
@@ -992,11 +1019,12 @@ Still open:
   itself when it is full. Node behaviour.
 - **The band step is simulated** (`payout-sim --scenario band-step`). Where
   `C` settles does not depend on its step, only how fast it gets there: 1
-  hour at a divisor of 128, 3 hours at the rule's 512, 5 to 8 at 2,048.
-  Hashrate that mines at the minimum while recording the largest wanted
-  difficulty moves `C` to its maximum with 2% of the pool, and changes
-  nothing home miners are paid: the cap only bounds how heavy a job a node
-  may give.
+  hour at a divisor of 128, 4 hours at the rule's 512, 12 at 2,048 (with
+  one-minute blocks; 1, 3 and 5 to 8 hours with ten-minute ones). Hashrate
+  that mines at the minimum while recording the largest wanted difficulty
+  moves `C` to 48 to 61 with 2% of the pool and to its maximum with 10%, and
+  changes nothing home miners are paid: the cap only bounds how heavy a job
+  a node may give.
 
 ## References
 

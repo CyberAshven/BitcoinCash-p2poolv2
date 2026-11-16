@@ -1360,8 +1360,10 @@ pub(crate) fn scale_scenario(base: &Scenario, multiple: f64, fraction: f64) -> S
 /// Bitcoin Cash and 1 to 1,000 times today's hashrate, 50% industrial, with
 /// every class at the payout level a node would leave its machine, including
 /// the tracked Bitaxe and the tracked ASIC. Each row gives Bitcoin Cash's
-/// difficulty at that hashrate (Bitcoin's is about the x270 rows') and the
-/// smallest miner that still finds three weak shares a month.
+/// difficulty at that hashrate for its `BCH_BLOCK_INTERVAL_SECONDS` blocks
+/// (Bitcoin's, at about the x270 rows' hashrate but with ten-minute blocks,
+/// is ten times the x270 rows' for one-minute blocks) and the smallest miner
+/// that still finds three weak shares a month.
 pub fn scale(base: &Scenario) -> String {
     let scenarios: Vec<Scenario> = SCALE_HASHRATE_MULTIPLES
         .into_iter()
