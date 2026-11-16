@@ -10,8 +10,9 @@
 //! 120,960 shares (`docs/architecture/payout-distribution.md`, rule 4). A
 //! share's work for this is its own, its uncles' and, with weak shares, its
 //! weak shares'. A Bitcoin Cash block's work is the network's hashrate times
-//! 600 seconds, so in steady state the window holds a fixed number of chain
-//! shares and spans a fixed time.
+//! its interval (`BCH_BLOCK_INTERVAL_SECONDS`, a minute), so in steady state
+//! the window holds a fixed number of chain shares and spans a fixed time:
+//! `K` block intervals over the pool's part of Bitcoin Cash's hashrate.
 
 use crate::constants::{
     BCH_BLOCK_INTERVAL_SECONDS, BCH_PPLNS_WINDOW_BLOCKS, MATURITY_SKIP_SHARES, WINDOW_CAP_SECONDS,

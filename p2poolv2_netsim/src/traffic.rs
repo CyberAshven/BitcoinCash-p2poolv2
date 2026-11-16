@@ -165,7 +165,7 @@ pub fn coinbase_relay_seconds(coinbase_bytes: u64, bytes_per_second: f64, hops: 
 }
 
 /// Chance a block is orphaned because it reached the other miners
-/// `delay_seconds` later, with BCH blocks every ten minutes.
+/// `delay_seconds` later, with BCH blocks every minute.
 pub fn orphan_risk(delay_seconds: f64) -> f64 {
     1.0 - (-delay_seconds / BCH_BLOCK_INTERVAL_SECONDS).exp()
 }
