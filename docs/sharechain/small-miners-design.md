@@ -836,7 +836,7 @@ Neither is a share-chain rule, and each helps under today's rule too.
 2. **Weak share checks leave the single validation queue**, so a node with
    several cores checks several at once, or the check gets cheap enough
    that 35 a second fit one core with 100,000 miners in the window. Built
-   for the weak shares a share carries (2026-11-16): a node checks them on
+   for the weak shares a share carries (PR #127): a node checks them on
    its own thread and on helper threads, one fewer than its CPUs across the
    node (`utils/parallel.rs`), and holds the PPLNS window only while their
    payouts are taken, not while their coinbases are rebuilt and hashed. The
